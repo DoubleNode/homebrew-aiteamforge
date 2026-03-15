@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>LCARS Router</title>
+    <script>
+        // Load lcars-target.js with cache busting and proper onload handling
+        window.LCARS_TARGET_LOADED = false;
+        const script = document.createElement('script');
+        script.src = 'lcars-target.js?' + Date.now();
+        script.onload = function() {
+            window.LCARS_TARGET_LOADED = true;
+            console.log('[Router] lcars-target.js loaded, team:', window.LCARS_TARGET_TEAM);
+        };
+        script.onerror = function() {
+            console.log('[Router] Failed to load lcars-target.js');
+            window.LCARS_TARGET_LOADED = true; // Continue anyway
+        };
+        document.head.appendChild(script);
+    </script>
+    <style>
+        body {
+            background: #000;
+            color: #ff9900;
+            font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .container {
+            text-align: center;
+        }
+        h1 {
+            font-size: 36px;
+            letter-spacing: 4px;
+            margin-bottom: 20px;
+        }
+        .status {
+            color: #cc9966;
+            font-size: 18px;
+        }
+        .ports {
+            margin-top: 30px;
+        }
+        .port-btn {
+            display: inline-block;
+            background: #ff9900;
+            color: #000;
+            padding: 15px 30px;
+            margin: 10px;
+            border-radius: 25px;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 16px;
+            letter-spacing: 2px;
+        }
+        .port-btn:hover {
+            background: #ffcc99;
+        }
+        .port-btn.active {
+            background: #99ff99;
+        }
+        .scanning {
+            animation: pulse 1s ease-in-out infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>LCARS ROUTER</h1>
+        <p class="status scanning" id="status">Scanning for active LCARS servers...</p>
+        <div class="ports" id="ports"></div>
+    </div>
+
+    <script>
+        // Force reload if page was loaded from cache (bfcache)
+        window.addEventListener('pageshow', function(event) {
+            if (event.persisted) {
+                window.location.reload();
+            }
+        });
+
+        // Also reload on focus to catch tab switches
+        let hasScanned = false;
+        window.addEventListener('focus', function() {
+            if (hasScanned) {
+                window.location.reload();
+            }
+        });
+
+        // Wait for lcars-target.js to load, then start scanning
+        let waitAttempts = 0;
+        const MAX_WAIT_ATTEMPTS = 40; // 40 * 50ms = 2 seconds max wait
+
+        function waitForTargetAndStart() {
+            waitAttempts++;
+            if (window.LCARS_TARGET_LOADED || waitAttempts >= MAX_WAIT_ATTEMPTS) {
+                if (!window.LCARS_TARGET_LOADED) {
+                    console.log('[Router] Timeout waiting for lcars-target.js, proceeding anyway');
+                }
+                hasScanned = true;
+                startRouter();
+            } else {
+                setTimeout(waitForTargetAndStart, 50);
+            }
+        }
+        // Start checking after a brief delay
+        setTimeout(waitForTargetAndStart, 50);
+
+        function startRouter() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const targetTeam = urlParams.get('team') || window.LCARS_TARGET_TEAM;
+            // Session name for precise matching (e.g., freelance-doublenode-starwords-lcars vs workstats)
+            const targetSession = urlParams.get('session') || window.LCARS_TARGET_SESSION;
+
+            if (targetSession) {
+                // Extract project name from session (e.g., "starwords" from "freelance-doublenode-starwords-lcars")
+                const parts = targetSession.split('-');
+                const projectName = parts.length >= 3 ? parts[2].toUpperCase() : targetSession.toUpperCase();
+                document.getElementById('status').textContent = `Scanning for ${projectName} LCARS server...`;
+            } else if (targetTeam) {
+                document.getElementById('status').textContent = `Scanning for ${targetTeam.toUpperCase()} LCARS server...`;
+            }
+
+            const PORT_START = 8080, PORT_END = 8979;
+            const foundServers = [];
+            let scansComplete = 0, redirected = false;
+            const BATCH_SIZE = 50, TIMEOUT_MS = 500;  // Increased timeout for reliability
+
+            async function checkPort(port) {
+                if (redirected) return;
+                try {
+                    const ctrl = new AbortController();
+                    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+                    const res = await fetch(`http://localhost:${port}/api/status`, { signal: ctrl.signal });
+                    clearTimeout(t);
+                    if (res.ok) {
+                        const data = await res.json();
+                        foundServers.push({ port, data });
+                        // Prefer session_name match (precise) over team match (generic)
+                        const sessionMatch = targetSession && data.session_name === targetSession;
+                        const teamMatch = targetTeam && data.team === targetTeam && !targetSession;
+                        if ((sessionMatch || teamMatch) && !redirected) {
+                            redirected = true;
+                            const displayName = targetSession
+                                ? targetSession.split('-').slice(1, 3).join('-').toUpperCase()
+                                : targetTeam.toUpperCase();
+                            document.getElementById('status').textContent = `Found ${displayName} on port ${port}. Redirecting...`;
+                            document.getElementById('status').classList.remove('scanning');
+                            setTimeout(() => { window.location.href = `http://localhost:${port}`; }, 300);
+                        }
+                    }
+                } catch (e) {}
+                scansComplete++;
+            }
+
+            function showResults() {
+                if (redirected) return;
+                const statusEl = document.getElementById('status');
+                const portsEl = document.getElementById('ports');
+                statusEl.classList.remove('scanning');
+
+                // Prefer session match over team match
+                if (targetSession) {
+                    const match = foundServers.find(s => s.data.session_name === targetSession);
+                    if (match) {
+                        const displayName = targetSession.split('-').slice(1, 3).join('-').toUpperCase();
+                        statusEl.textContent = `Found ${displayName} on port ${match.port}. Redirecting...`;
+                        setTimeout(() => { window.location.href = `http://localhost:${match.port}`; }, 300);
+                        return;
+                    }
+                } else if (targetTeam) {
+                    const match = foundServers.find(s => s.data.team === targetTeam);
+                    if (match) {
+                        statusEl.textContent = `Found ${targetTeam.toUpperCase()} on port ${match.port}. Redirecting...`;
+                        setTimeout(() => { window.location.href = `http://localhost:${match.port}`; }, 300);
+                        return;
+                    }
+                }
+
+                if (foundServers.length === 0) {
+                    statusEl.textContent = 'No LCARS servers found.';
+                    portsEl.innerHTML = '<p style="color:#cc9966;margin-top:20px;">Run: <code style="background:#333;padding:5px 10px;border-radius:5px;">kb-ui</code></p>';
+                } else if (foundServers.length === 1 && !targetTeam && !targetSession) {
+                    const s = foundServers[0];
+                    statusEl.textContent = `Found ${(s.data.team||'unknown').toUpperCase()} on port ${s.port}. Redirecting...`;
+                    setTimeout(() => { window.location.href = `http://localhost:${s.port}`; }, 300);
+                } else {
+                    const notFoundMsg = targetSession
+                        ? `${targetSession.split('-').slice(1, 3).join('-').toUpperCase()} not found. Available servers:`
+                        : targetTeam
+                            ? `${targetTeam.toUpperCase()} not found. Available servers:`
+                            : `Found ${foundServers.length} LCARS servers:`;
+                    statusEl.textContent = notFoundMsg;
+                    portsEl.innerHTML = foundServers.map(s =>
+                        `<a href="http://localhost:${s.port}" class="port-btn">${(s.data.team||'unknown').toUpperCase()} :${s.port}</a>`
+                    ).join('');
+                }
+            }
+
+            async function scan() {
+                const ports = [];
+                for (let p = PORT_START; p <= PORT_END; p++) ports.push(p);
+
+                for (let i = 0; i < ports.length; i += BATCH_SIZE) {
+                    if (redirected) return;
+                    const pct = Math.round((i / ports.length) * 100);
+                    document.getElementById('status').textContent = targetTeam
+                        ? `Scanning for ${targetTeam.toUpperCase()}... ${pct}%`
+                        : `Scanning... ${pct}%`;
+
+                    await Promise.all(ports.slice(i, i + BATCH_SIZE).map(checkPort));
+
+                    if (redirected) return;
+                    // Early exit if we found our target (session match takes priority)
+                    if (targetSession && foundServers.find(s => s.data.session_name === targetSession)) {
+                        showResults();
+                        return;
+                    }
+                    if (targetTeam && !targetSession && foundServers.find(s => s.data.team === targetTeam)) {
+                        showResults();
+                        return;
+                    }
+                    if (!targetTeam && !targetSession && foundServers.length > 0 && i > ports.length / 3) {
+                        showResults();
+                        return;
+                    }
+                }
+                showResults();
+            }
+
+            scan();
+        }
+    </script>
+</body>
+</html>

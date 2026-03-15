@@ -1,0 +1,23 @@
+{
+  "mode": "{{FLEET_MODE}}",
+  "serverUrl": "{{FLEET_SERVER_URL}}",
+  "machineId": "{{MACHINE_ID}}",
+  "hostname": "{{HOSTNAME}}",
+  "nickname": "{{NICKNAME}}",
+  "refreshInterval": 60000,
+  "heartbeatInterval": 60000,
+  "network": {
+    "tailscaleEnabled": {{TAILSCALE_ENABLED}},
+    "localPort": {{LOCAL_PORT}},
+    "publicPort": {{PUBLIC_PORT}}
+  },
+  "monitoring": {
+    "trackSessions": true,
+    "trackMachineStatus": true,
+    "reportBackups": true
+  },
+  "display": {
+    "showAgentPanels": {{SHOW_AGENT_PANELS}},
+    "itermIntegration": {{ITERM_INTEGRATION}}
+  }
+}

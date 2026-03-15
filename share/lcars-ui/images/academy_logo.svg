@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Starfleet Academy -->
+  <defs>
+    <linearGradient id="acadgrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#99ff99"/>
+      <stop offset="100%" style="stop-color:#99ccff"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#99ff99" stroke-width="4"/>
+  <circle cx="100" cy="100" r="82" fill="none" stroke="#99ccff" stroke-width="2"/>
+  <!-- Shield shape -->
+  <path d="M100 30 L155 60 L155 120 L100 170 L45 120 L45 60 Z" fill="#1a1a2e" stroke="url(#acadgrad)" stroke-width="3"/>
+  <!-- Inner delta -->
+  <path d="M100 50 L130 110 L100 95 L70 110 Z" fill="url(#acadgrad)"/>
+  <!-- Book/learning symbol -->
+  <rect x="85" y="115" width="30" height="25" rx="2" fill="none" stroke="#99ff99" stroke-width="2"/>
+  <line x1="100" y1="115" x2="100" y2="140" stroke="#99ff99" stroke-width="2"/>
+</svg>

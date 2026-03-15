@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Starfleet Command -->
+  <defs>
+    <linearGradient id="cmdgrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#ff9900"/>
+      <stop offset="100%" style="stop-color:#cc9966"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring with laurel suggestion -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#ff9900" stroke-width="4"/>
+  <circle cx="100" cy="100" r="85" fill="none" stroke="#cc9966" stroke-width="1"/>
+  <circle cx="100" cy="100" r="78" fill="none" stroke="#ff9900" stroke-width="2"/>
+  <!-- UFP style emblem -->
+  <ellipse cx="100" cy="100" rx="55" ry="55" fill="#1a1a2e" stroke="url(#cmdgrad)" stroke-width="3"/>
+  <!-- Starfleet delta in center -->
+  <path d="M100 50 L130 130 L100 115 L70 130 Z" fill="url(#cmdgrad)" stroke="#ffcc99" stroke-width="1"/>
+  <path d="M100 65 L120 118 L100 108 L80 118 Z" fill="#1a1a2e"/>
+  <!-- Stars around -->
+  <circle cx="60" cy="60" r="3" fill="#ffcc99"/>
+  <circle cx="140" cy="60" r="3" fill="#ffcc99"/>
+  <circle cx="60" cy="140" r="3" fill="#ffcc99"/>
+  <circle cx="140" cy="140" r="3" fill="#ffcc99"/>
+</svg>

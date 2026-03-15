@@ -1,0 +1,20 @@
+{
+  "team": "{{TEAM_ID}}",
+  "teamName": "{{TEAM_NAME}}",
+  "subtitle": "{{TEAM_SUBTITLE}}",
+  "ship": "{{TEAM_SHIP}}",
+  "series": "{{TEAM_SERIES}}",
+  "organization": "{{TEAM_ORG}}",
+  "orgColor": "{{TEAM_ORG_COLOR}}",
+  "kanbanDir": "{{KANBAN_DIR}}",
+  "lastUpdated": "{{CREATED_DATE}}",
+  "nextId": 1,
+  "nextEpicId": 1,
+  "nextReleaseId": 1,
+  "fleetMonitorUrl": "",
+  "terminals": {},
+  "activeWindows": [],
+  "backlog": [],
+  "epics": [],
+  "releases": []
+}

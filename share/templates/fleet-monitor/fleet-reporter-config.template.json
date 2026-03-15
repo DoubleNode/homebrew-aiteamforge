@@ -1,0 +1,16 @@
+{
+  "mode": "{{FLEET_MODE}}",
+  "centralServer": {
+    "enabled": {{CENTRAL_ENABLED}},
+    "apiEndpoint": "{{CENTRAL_API_ENDPOINT}}",
+    "authToken": ""
+  },
+  "localServer": {
+    "enabled": {{LOCAL_ENABLED}},
+    "port": {{LOCAL_PORT}}
+  },
+  "reporting": {
+    "interval": 60
+  },
+  "dashboardGroup": "{{DASHBOARD_GROUP}}"
+}

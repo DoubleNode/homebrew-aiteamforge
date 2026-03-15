@@ -1,0 +1,116 @@
+{
+  "description": "Maps old manual installation paths to new Homebrew-managed paths",
+  "version": "1.1.0",
+  "mappings": {
+    "framework": {
+      "description": "Framework files (scripts, libraries)",
+      "old": "~/aiteamforge/",
+      "new": "/opt/homebrew/Cellar/aiteamforge/<VERSION>/libexec/"
+    },
+    "user_data": {
+      "description": "Persistent user data (kanban boards, configs)",
+      "old": "~/aiteamforge/kanban/",
+      "new": "~/.aiteamforge/kanban/"
+    },
+    "config": {
+      "description": "User configuration files",
+      "old": "~/aiteamforge/config/",
+      "new": "~/.aiteamforge/config/"
+    },
+    "claude_agents": {
+      "description": "Claude Code agent configurations",
+      "old": "~/aiteamforge/claude/",
+      "new": "~/.aiteamforge/claude/"
+    },
+    "team_data": {
+      "description": "Team-specific data directories",
+      "old": "~/aiteamforge/{team}/",
+      "new": "~/.aiteamforge/teams/{team}/"
+    },
+    "backups": {
+      "description": "Kanban backup data",
+      "old": "~/aiteamforge/kanban-backups/",
+      "new": "~/.aiteamforge/kanban-backups/"
+    },
+    "fleet_monitor": {
+      "description": "Fleet Monitor data",
+      "old": "~/aiteamforge/fleet-monitor/",
+      "new": "~/.aiteamforge/fleet-monitor/"
+    },
+    "lcars_data": {
+      "description": "LCARS persistent data (NOT the UI code)",
+      "old": "~/aiteamforge/lcars-ui/data/",
+      "new": "~/.aiteamforge/lcars-data/"
+    }
+  },
+  "preserve": {
+    "description": "Files and directories that must be preserved during migration",
+    "critical_data": [
+      "kanban/*-board.json",
+      "kanban/*.md",
+      "kanban/config/",
+      "kanban/releases/",
+      "kanban-backups/",
+      "config/secrets.env",
+      "config/machine.json",
+      "config/teams.json",
+      "config/remote-hosts.json",
+      "claude/settings.json",
+      "claude/agents/",
+      "fleet-monitor/data/"
+    ],
+    "user_customizations": [
+      "home-scripts/.zshrc_*",
+      "scripts/*.sh (user-created)",
+      "config/*.json (user-created)"
+    ],
+    "git_metadata": [
+      ".git/",
+      ".gitignore"
+    ]
+  },
+  "skip_migration": {
+    "description": "Files that should NOT be migrated (will be replaced by Homebrew)",
+    "framework_files": [
+      "*-startup.sh",
+      "*-shutdown.sh",
+      "kanban-helpers.sh",
+      "worktree-helpers.sh",
+      "claude_agent_aliases.sh",
+      "claude_code_cc_aliases.sh",
+      "cleanup.sh",
+      "startup.sh",
+      "iterm2_window_manager.py",
+      "kanban-backup.py",
+      "lcars-health-check.sh",
+      "lcars-ui/*.html",
+      "lcars-ui/*.py",
+      "lcars-ui/css/",
+      "lcars-ui/js/"
+    ],
+    "generated_files": [
+      "*.pyc",
+      "__pycache__/",
+      ".DS_Store",
+      "*.log"
+    ]
+  },
+  "launchagents": {
+    "description": "LaunchAgents that need path updates",
+    "files": [
+      "~/Library/LaunchAgents/com.devteam.kanban-backup.plist",
+      "~/Library/LaunchAgents/com.devteam.lcars-health.plist",
+      "~/Library/LaunchAgents/com.devteam.fleet-monitor.plist"
+    ]
+  },
+  "shell_integration": {
+    "description": "Shell configuration that needs updating",
+    "files": [
+      "~/.zshrc",
+      "~/.zprofile",
+      "~/.bashrc"
+    ],
+    "old_source_pattern": "source ~/aiteamforge/",
+    "new_source_pattern": "source ~/.aiteamforge/shell-init.sh"
+  }
+}

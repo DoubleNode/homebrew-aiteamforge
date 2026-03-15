@@ -1,0 +1,23 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Test artifacts
+*.bottle.tar.gz
+*.bottle.json
+
+# Homebrew cache
+*.tar.gz
+*.zip
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Temporary files
+*.tmp
+*.log

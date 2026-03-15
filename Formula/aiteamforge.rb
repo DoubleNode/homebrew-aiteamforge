@@ -1,65 +1,66 @@
 class Aiteamforge < Formula
-  desc "AITeamForge - Modular Agent Framework for composable AI development teams"
-  homepage "https://aiteamforge.dev"
-  url "https://github.com/DoubleNode/aiteamforge.git",
-      tag: "v0.1.0"
+  desc "Starfleet Development Environment - AI-powered multi-team development infrastructure"
+  homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
+  url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
+      tag: "v1.1.0"
   license "MIT"
-  version "0.1.0"
+  version "1.1.0"
 
-  # Core dependencies
-  depends_on "yq"          # YAML processing engine
-  depends_on "jq"          # JSON processing
-  depends_on "tmux"        # Terminal multiplexing
-  depends_on "gh"          # GitHub CLI
-  depends_on "git"         # Version control
+  # Core dependencies required for aiteamforge to function
+  depends_on "python@3"
+  depends_on "node"
+  depends_on "jq"
+  depends_on "gh"
+  depends_on "git"
+  depends_on :macos => :big_sur # iTerm2 and macOS-specific features
+
+  # Optional dependencies for advanced features
+  uses_from_macos "rsync" # For sync scripts
 
   def install
-    # Install framework to libexec (read-only, Homebrew-managed)
-    libexec.install Dir["libexec/*"]
+    # Install all core files to libexec (framework location)
+    libexec.install Dir["*"]
 
     # Create bin stubs for main commands
-    (bin/"forge").write <<~EOS
+    (bin/"aiteamforge").write <<~EOS
       #!/bin/bash
       # AITeamForge CLI dispatcher
-      FORGE_HOME="#{libexec}"
-      export FORGE_HOME
-      exec "#{libexec}/bin/forge-cli.sh" "$@"
+      AITEAMFORGE_HOME="#{libexec}"
+      export AITEAMFORGE_HOME
+      exec "#{libexec}/bin/aiteamforge-cli.sh" "$@"
     EOS
 
-    (bin/"forge-setup").write <<~EOS
+    (bin/"aiteamforge-setup").write <<~EOS
       #!/bin/bash
-      # AITeamForge setup wizard
-      FORGE_HOME="#{libexec}"
-      export FORGE_HOME
-      exec "#{libexec}/bin/forge-setup.sh" "$@"
+      # AITeamForge interactive setup wizard
+      AITEAMFORGE_HOME="#{libexec}"
+      export AITEAMFORGE_HOME
+      exec "#{libexec}/bin/aiteamforge-setup.sh" "$@"
     EOS
 
-    (bin/"forge-doctor").write <<~EOS
+    (bin/"aiteamforge-doctor").write <<~EOS
       #!/bin/bash
-      # AITeamForge health check
-      FORGE_HOME="#{libexec}"
-      export FORGE_HOME
-      exec "#{libexec}/bin/forge-doctor.sh" "$@"
+      # AITeamForge health check and diagnostics
+      AITEAMFORGE_HOME="#{libexec}"
+      export AITEAMFORGE_HOME
+      exec "#{libexec}/bin/aiteamforge-doctor.sh" "$@"
     EOS
 
-    chmod 0755, bin/"forge"
-    chmod 0755, bin/"forge-setup"
-    chmod 0755, bin/"forge-doctor"
-
-    # Make all scripts executable
-    Dir["#{libexec}/bin/*.sh"].each { |f| chmod 0755, f }
-    Dir["#{libexec}/lib/*.sh"].each { |f| chmod 0755, f }
+    chmod 0755, bin/"aiteamforge"
+    chmod 0755, bin/"aiteamforge-setup"
+    chmod 0755, bin/"aiteamforge-doctor"
   end
 
   def post_install
-    # Create installation marker
+    # Create installation marker (delete first to allow reinstall/upgrade)
     marker = HOMEBREW_PREFIX/"var/aiteamforge/.installed"
     (HOMEBREW_PREFIX/"var/aiteamforge").mkpath
     marker.delete if marker.exist?
     marker.write "#{version}\n#{Time.now}"
 
-    ohai "AITeamForge installed successfully!"
-    ohai "Run 'forge setup' to configure your environment"
+    # Suggest running setup
+    ohai "AITeamForge framework installed successfully"
+    ohai "Run 'aiteamforge setup' to configure your environment"
   end
 
   def caveats
@@ -68,41 +69,50 @@ class Aiteamforge < Formula
         #{libexec}
 
       Available commands:
-        forge setup                Create your first crew
-        forge create <name>        Create a new crew
-        forge theme list           Browse available themes
-        forge theme swap           Swap crew themes
-        forge doctor               Health check
+        aiteamforge setup     - Interactive setup wizard
+        aiteamforge doctor    - Health check and diagnostics
+        aiteamforge status    - Show current environment status
+        aiteamforge upgrade   - Upgrade components
+        aiteamforge help      - Show help information
 
       To get started:
-        1. Run: forge setup
-        2. Follow the wizard to create your first crew
-        3. Choose a purpose (iOS, web, etc.) and theme (TNG, House MD, etc.)
+        1. Run: aiteamforge setup
+        2. Follow the interactive wizard to:
+           - Install iTerm2 (if needed)
+           - Install Claude Code (if needed)
+           - Select teams to configure
+           - Set up LCARS Kanban system
+           - Configure terminal environment
 
-      Working directory: ~/aiteamforge/
-      Extensions: ~/.aiteamforge/
+      The setup wizard will guide you through creating your
+      team environment in ~/aiteamforge (or custom location).
 
       IMPORTANT: The formula installs the FRAMEWORK only.
-      Run 'forge setup' to create your working environment.
+      Run 'aiteamforge setup' to create your working environment.
 
-      Documentation: https://aiteamforge.dev/docs
+      For troubleshooting: aiteamforge doctor
+      For documentation: #{libexec}/docs/
     EOS
   end
 
   test do
-    assert_predicate bin/"forge", :exist?
-    assert_predicate bin/"forge-setup", :exist?
-    assert_predicate bin/"forge-doctor", :exist?
+    # Verify main commands exist and are executable
+    assert_predicate bin/"aiteamforge", :exist?
+    assert_predicate bin/"aiteamforge-setup", :exist?
 
-    # Verify core structure
-    assert_predicate libexec/"bin/forge-cli.sh", :exist?
-    assert_predicate libexec/"lib/common.sh", :exist?
-    assert_predicate libexec/"lib/compiler.sh", :exist?
-    assert_predicate libexec/"registry/specialties", :exist?
-    assert_predicate libexec/"registry/themes", :exist?
-    assert_predicate libexec/"registry/purposes", :exist?
+    # Verify core directories exist (libexec/ subdir mirrors repo structure)
+    assert_predicate libexec/"libexec/commands", :exist?
+    assert_predicate libexec/"libexec/installers", :exist?
+    assert_predicate libexec/"libexec/lib", :exist?
+    assert_predicate libexec/"share/templates", :exist?
+    assert_predicate libexec/"share/teams", :exist?
 
-    # Test version output
-    assert_match "AITeamForge", shell_output("#{bin}/forge version")
+    # Verify library files exist
+    assert_predicate libexec/"libexec/lib/common.sh", :exist?
+    assert_predicate libexec/"libexec/lib/config.sh", :exist?
+    assert_predicate libexec/"libexec/lib/wizard-ui.sh", :exist?
+
+    # Test that setup wizard shows version
+    system "#{bin}/aiteamforge-setup", "--help"
   end
 end

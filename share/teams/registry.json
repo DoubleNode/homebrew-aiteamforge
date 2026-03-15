@@ -1,0 +1,131 @@
+{
+  "version": "1.1.0",
+  "teams": [
+    {
+      "id": "academy",
+      "name": "Starfleet Academy",
+      "category": "infrastructure",
+      "description": "AI team development infrastructure and tooling",
+      "color": "#0099CC",
+      "theme": "Starfleet Academy",
+      "icon": "🎓",
+      "order": 1,
+      "recommended": true
+    },
+    {
+      "id": "android",
+      "name": "Star Trek: TOS - Android",
+      "category": "platform",
+      "description": "Android app development with Kotlin",
+      "color": "#3DDC84",
+      "theme": "Star Trek: The Original Series",
+      "icon": "🤖",
+      "order": 2,
+      "recommended": true
+    },
+    {
+      "id": "command",
+      "name": "Starfleet Command",
+      "category": "strategic",
+      "description": "Strategic planning and cross-team coordination",
+      "color": "#FF0000",
+      "theme": "Starfleet Command",
+      "icon": "⭐",
+      "order": 3,
+      "recommended": false
+    },
+    {
+      "id": "firebase",
+      "name": "Star Trek: DS9 - Firebase",
+      "category": "platform",
+      "description": "Firebase backend and cloud functions",
+      "color": "#FFCA28",
+      "theme": "Star Trek: Deep Space Nine",
+      "icon": "☁️",
+      "order": 4,
+      "recommended": true
+    },
+    {
+      "id": "freelance",
+      "name": "Star Trek: Enterprise - Full Stack Team",
+      "category": "project",
+      "description": "Full-stack freelance project development (iOS, Android, Firebase)",
+      "color": "#FF6699",
+      "theme": "Star Trek: Enterprise",
+      "icon": "💼",
+      "order": 5,
+      "recommended": false
+    },
+    {
+      "id": "ios",
+      "name": "Star Trek: TNG - iOS",
+      "category": "platform",
+      "description": "iOS app development with Swift/SwiftUI",
+      "color": "#FF9500",
+      "theme": "Star Trek: The Next Generation",
+      "icon": "📱",
+      "order": 6,
+      "recommended": true
+    },
+    {
+      "id": "legal",
+      "name": "Boston Legal",
+      "category": "strategic",
+      "description": "Legal research and documentation support",
+      "color": "#FFFF00",
+      "theme": "Boston Legal",
+      "icon": "⚖️",
+      "order": 7,
+      "recommended": false
+    },
+    {
+      "id": "medical",
+      "name": "House MD",
+      "category": "strategic",
+      "description": "Medical documentation and research support",
+      "color": "#00FFFF",
+      "theme": "House MD",
+      "icon": "🏥",
+      "order": 8,
+      "recommended": false
+    },
+    {
+      "id": "finance",
+      "name": "Ferengi Commerce Authority",
+      "category": "personal",
+      "description": "Personal finance management and automation",
+      "color": "#FFD700",
+      "theme": "Star Trek: Deep Space Nine - Ferengi",
+      "icon": "💰",
+      "order": 9,
+      "recommended": false
+    }
+  ],
+  "categories": {
+    "platform": {
+      "name": "Platform Development",
+      "description": "iOS, Android, and Firebase platform teams",
+      "order": 1
+    },
+    "infrastructure": {
+      "name": "Infrastructure",
+      "description": "Dev-team infrastructure and shared frameworks",
+      "order": 2
+    },
+    "project": {
+      "name": "Project-Based",
+      "description": "Full-stack project teams",
+      "order": 3
+    },
+    "strategic": {
+      "name": "Strategic",
+      "description": "Planning, legal, and research teams",
+      "order": 4
+    },
+    "personal": {
+      "name": "Personal",
+      "description": "Personal productivity and life management teams",
+      "order": 5
+    }
+  }
+}

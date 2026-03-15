@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Web/Globe Logo -->
+  <defs>
+    <linearGradient id="webgrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#66cccc"/>
+      <stop offset="100%" style="stop-color:#3399cc"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#3399cc" stroke-width="4"/>
+  <circle cx="100" cy="100" r="82" fill="none" stroke="#66cccc" stroke-width="2"/>
+  <!-- Globe circle -->
+  <circle cx="100" cy="100" r="55" fill="url(#webgrad)" stroke="#99dddd" stroke-width="2"/>
+  <!-- Horizontal lines (latitude) -->
+  <ellipse cx="100" cy="100" rx="55" ry="20" fill="none" stroke="#1a1a2e" stroke-width="2"/>
+  <ellipse cx="100" cy="100" rx="55" ry="40" fill="none" stroke="#1a1a2e" stroke-width="1.5"/>
+  <!-- Vertical line (longitude) -->
+  <ellipse cx="100" cy="100" rx="20" ry="55" fill="none" stroke="#1a1a2e" stroke-width="2"/>
+  <ellipse cx="100" cy="100" rx="40" ry="55" fill="none" stroke="#1a1a2e" stroke-width="1.5"/>
+  <!-- Center vertical line -->
+  <line x1="100" y1="45" x2="100" y2="155" stroke="#1a1a2e" stroke-width="1.5"/>
+  <!-- Center horizontal line -->
+  <line x1="45" y1="100" x2="155" y2="100" stroke="#1a1a2e" stroke-width="1.5"/>
+</svg>

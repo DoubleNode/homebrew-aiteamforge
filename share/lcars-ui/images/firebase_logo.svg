@@ -1,0 +1,44 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Firebase Flame -->
+  <defs>
+    <linearGradient id="firegrad1" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#FFA000"/>
+      <stop offset="100%" style="stop-color:#F57C00"/>
+    </linearGradient>
+    <linearGradient id="firegrad2" x1="0%" y1="100%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#FFCA28"/>
+      <stop offset="100%" style="stop-color:#FFA000"/>
+    </linearGradient>
+    <linearGradient id="firegrad3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#FFCA28"/>
+      <stop offset="100%" style="stop-color:#FF8F00"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#FFCA28" stroke-width="4"/>
+  <circle cx="100" cy="100" r="82" fill="none" stroke="#FFA000" stroke-width="2"/>
+  <!-- Firebase flame - back layer -->
+  <path d="M65 145
+           L75 85
+           L90 110
+           L100 45
+           L135 145
+           Z"
+        fill="url(#firegrad1)" stroke="#F57C00" stroke-width="1"/>
+  <!-- Firebase flame - middle layer -->
+  <path d="M75 145
+           L85 100
+           L100 120
+           L115 80
+           L125 145
+           Z"
+        fill="url(#firegrad2)" stroke="#FFA000" stroke-width="1"/>
+  <!-- Firebase flame - front highlight -->
+  <path d="M85 145
+           L95 115
+           L100 125
+           L105 110
+           L115 145
+           Z"
+        fill="url(#firegrad3)"/>
+</svg>

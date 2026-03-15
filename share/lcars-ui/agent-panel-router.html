@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <title>Agent Panel Router</title>
+    <script>
+        // Load lcars-target.js with cache busting
+        window.LCARS_TARGET_LOADED = false;
+        const script = document.createElement('script');
+        script.src = 'lcars-target.js?' + Date.now();
+        script.onload = function() {
+            window.LCARS_TARGET_LOADED = true;
+        };
+        script.onerror = function() {
+            window.LCARS_TARGET_LOADED = true;
+        };
+        document.head.appendChild(script);
+    </script>
+    <style>
+        :root { --theme-color: #b8860b; }
+        body {
+            background: #0a0a0f;
+            color: var(--theme-color);
+            font-family: -apple-system, 'Helvetica Neue', sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .status {
+            text-align: center;
+            font-size: 14px;
+            color: #888;
+        }
+        .pulse {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--theme-color);
+            animation: pulse 2s infinite;
+            margin-bottom: 12px;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 0.3; transform: scale(0.8); }
+            50% { opacity: 1; transform: scale(1.2); }
+        }
+    </style>
+</head>
+<body>
+    <div class="status">
+        <div class="pulse"></div>
+        <div id="status">Scanning for LCARS server...</div>
+    </div>
+    <script>
+        // Wait for lcars-target.js, then scan for server
+        let waitAttempts = 0;
+        function waitAndStart() {
+            waitAttempts++;
+            if (window.LCARS_TARGET_LOADED || waitAttempts >= 40) {
+                startRouter();
+            } else {
+                setTimeout(waitAndStart, 50);
+            }
+        }
+        setTimeout(waitAndStart, 50);
+
+        function startRouter() {
+            const targetTeam = window.LCARS_TARGET_TEAM;
+            const PORT_START = 8080, PORT_END = 8979;
+            const BATCH_SIZE = 50, TIMEOUT_MS = 500;
+            let redirected = false;
+            const foundServers = [];
+
+            async function checkPort(port) {
+                if (redirected) return;
+                try {
+                    const ctrl = new AbortController();
+                    const t = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+                    const res = await fetch(`http://localhost:${port}/api/status`, { signal: ctrl.signal });
+                    clearTimeout(t);
+                    if (res.ok) {
+                        const data = await res.json();
+                        foundServers.push({ port, data });
+                        if (targetTeam && data.team === targetTeam && !redirected) {
+                            redirected = true;
+                            window.location.href = `http://localhost:${port}/agent-panel.html`;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            async function scan() {
+                const ports = [];
+                for (let p = PORT_START; p <= PORT_END; p++) ports.push(p);
+                for (let i = 0; i < ports.length; i += BATCH_SIZE) {
+                    if (redirected) return;
+                    await Promise.all(ports.slice(i, i + BATCH_SIZE).map(checkPort));
+                    if (redirected) return;
+                    if (targetTeam && foundServers.find(s => s.data.team === targetTeam)) return;
+                }
+                // Fallback: redirect to first found server
+                if (!redirected && foundServers.length > 0) {
+                    window.location.href = `http://localhost:${foundServers[0].port}/agent-panel.html`;
+                } else if (!redirected) {
+                    document.getElementById('status').textContent = 'No LCARS server found. Start a team first.';
+                }
+            }
+            scan();
+        }
+    </script>
+</body>
+</html>

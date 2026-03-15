@@ -1,0 +1,18 @@
+{
+  "machineId": "{{MACHINE_ID}}",
+  "hostname": "{{HOSTNAME}}",
+  "nickname": "{{NICKNAME}}",
+  "firstSeen": "{{TIMESTAMP}}",
+  "role": "{{MACHINE_ROLE}}",
+  "organization": "{{ORGANIZATION}}",
+  "capabilities": {
+    "canHostServer": {{CAN_HOST_SERVER}},
+    "tailscaleEnabled": {{TAILSCALE_ENABLED}},
+    "itermAvailable": {{ITERM_AVAILABLE}}
+  },
+  "network": {
+    "localIp": "{{LOCAL_IP}}",
+    "tailscaleIp": "{{TAILSCALE_IP}}",
+    "hostname": "{{TAILSCALE_HOSTNAME}}"
+  }
+}

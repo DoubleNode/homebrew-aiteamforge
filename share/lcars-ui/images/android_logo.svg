@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Android Robot for Android -->
+  <defs>
+    <linearGradient id="droidgrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#a4c639"/>
+      <stop offset="100%" style="stop-color:#7cb342"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#a4c639" stroke-width="4"/>
+  <circle cx="100" cy="100" r="82" fill="none" stroke="#7cb342" stroke-width="2"/>
+  <!-- Android head -->
+  <path d="M55 95
+           A45 45 0 0 1 145 95
+           L145 105
+           L55 105
+           Z"
+        fill="url(#droidgrad)" stroke="#7cb342" stroke-width="2"/>
+  <!-- Eyes -->
+  <circle cx="75" cy="75" r="6" fill="#1a1a2e"/>
+  <circle cx="125" cy="75" r="6" fill="#1a1a2e"/>
+  <!-- Antennae -->
+  <line x1="70" y1="50" x2="60" y2="35" stroke="#a4c639" stroke-width="4" stroke-linecap="round"/>
+  <line x1="130" y1="50" x2="140" y2="35" stroke="#a4c639" stroke-width="4" stroke-linecap="round"/>
+  <!-- Body -->
+  <rect x="55" y="110" width="90" height="55" rx="8" fill="url(#droidgrad)" stroke="#7cb342" stroke-width="2"/>
+  <!-- Arms -->
+  <rect x="35" y="115" width="15" height="40" rx="7" fill="url(#droidgrad)" stroke="#7cb342" stroke-width="2"/>
+  <rect x="150" y="115" width="15" height="40" rx="7" fill="url(#droidgrad)" stroke="#7cb342" stroke-width="2"/>
+</svg>
