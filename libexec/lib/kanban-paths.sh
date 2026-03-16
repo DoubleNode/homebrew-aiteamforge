@@ -55,55 +55,37 @@ _KANBAN_PATHS_LOADED=1
 get_kanban_dir() {
     local team="$1"
 
-    case "$team" in
-        academy)
-            echo "${HOME}/aiteamforge/kanban"
-            ;;
-        ios)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"
-            ;;
-        android)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"
-            ;;
-        firebase)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"
-            ;;
-        command)
-            echo "/Users/Shared/Development/Main Event/aiteamforge/kanban"
-            ;;
-        dns)
-            echo "/Users/Shared/Development/DNSFramework/kanban"
-            ;;
-        freelance-doublenode-starwords)
-            echo "/Users/Shared/Development/DoubleNode/Starwords/kanban"
-            ;;
-        freelance-doublenode-appplanning)
-            echo "/Users/Shared/Development/DoubleNode/appPlanning/kanban"
-            ;;
-        freelance-doublenode-workstats)
-            echo "/Users/Shared/Development/DoubleNode/WorkStats/kanban"
-            ;;
-        freelance-doublenode-lifeboard)
-            echo "/Users/Shared/Development/DoubleNode/LifeBoard/kanban"
-            ;;
-        freelance-*)
-            # Generic fallback for unknown freelance projects: derive path from
-            # the team suffix (everything after "freelance-").
-            local project="${team#freelance-}"
-            echo "/Users/Shared/Development/DoubleNode/${project}/kanban"
-            ;;
-        legal-*)
-            local project="${team#legal-}"
-            echo "${HOME}/legal/${project}/kanban"
-            ;;
-        medical-*)
-            local project="${team#medical-}"
-            echo "${HOME}/medical/${project}/kanban"
-            ;;
-        *)
-            # Unknown team — return nothing and signal failure so callers can
-            # decide how to handle it (warn, default, or abort).
-            return 1
-            ;;
-    esac
+    # Strategy: check the .aiteamforge-config file first (authoritative for this
+    # install), then fall back to the default kanban directory.
+    #
+    # The config file records team_paths with working_dir for each team.
+    # Board files live at <working_dir>/kanban/ or <install_dir>/kanban/.
+
+    # 1. Try .aiteamforge-config (written by setup wizard)
+    local config_file="${HOME}/aiteamforge/.aiteamforge-config"
+    if [ -f "$config_file" ] && command -v jq &>/dev/null; then
+        local working_dir
+        working_dir=$(jq -r ".team_paths.\"${team}\".working_dir // empty" "$config_file" 2>/dev/null)
+        if [ -n "$working_dir" ]; then
+            echo "${working_dir}/kanban"
+            return 0
+        fi
+    fi
+
+    # 2. Default: boards live under the install dir's kanban/ directory
+    local install_dir="${HOME}/aiteamforge"
+    if [ -f "$config_file" ] && command -v jq &>/dev/null; then
+        local cfg_dir
+        cfg_dir=$(jq -r '.install_dir // empty' "$config_file" 2>/dev/null)
+        [ -n "$cfg_dir" ] && install_dir="$cfg_dir"
+    fi
+
+    # Check if board exists at install_dir/kanban/
+    if [ -d "${install_dir}/kanban" ]; then
+        echo "${install_dir}/kanban"
+        return 0
+    fi
+
+    # 3. Nothing found — signal failure
+    return 1
 }
