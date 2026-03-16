@@ -23,7 +23,7 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="1.2.1"
+VERSION="1.3.0"
 
 # Banner
 show_banner() {
@@ -45,7 +45,7 @@ show_banner() {
 ║    ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝                        ║
 ║                                                                      ║
 ║          AI-Powered Team Development Infrastructure                  ║
-║                        Version 1.2.0                                 ║
+║                        Version 1.3.0                                 ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 EOF

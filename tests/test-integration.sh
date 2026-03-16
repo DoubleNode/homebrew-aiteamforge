@@ -48,7 +48,7 @@ test_start "Integration: Create minimal working config"
 mkdir -p "$AITEAMFORGE_DIR/.aiteamforge"
 cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
 {
-  "version": "1.2.0",
+  "version": "1.3.0",
   "machine": {
     "name": "test-machine",
     "hostname": "localhost",

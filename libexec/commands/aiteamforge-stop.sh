@@ -13,7 +13,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="1.2.1"
+VERSION="1.3.0"
 
 # Options
 PERSIST_AGENTS=false
