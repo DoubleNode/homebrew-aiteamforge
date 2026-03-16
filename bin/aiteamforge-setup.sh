@@ -23,7 +23,7 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="1.3.4"
+VERSION="1.3.5"
 
 # Banner
 show_banner() {
@@ -992,18 +992,27 @@ if command -v tailscale &>/dev/null; then
       read -p "    Start Tailscale now? (yes/no) [yes]: " start_ts
       start_ts="${start_ts:-yes}"
       if [ "$start_ts" = "yes" ]; then
-        echo -e "    Starting Tailscale service..."
-        brew services start tailscale 2>/dev/null || sudo brew services start tailscale 2>/dev/null
-        sleep 2
-        # Check if it needs authentication
+        echo -e "    Starting Tailscale..."
+        if [ -d "/Applications/Tailscale.app" ]; then
+          open /Applications/Tailscale.app
+          echo -e "    Opened Tailscale app. Sign in via the menu bar icon."
+          sleep 5
+        else
+          echo -e "    ${YELLOW}Tailscale GUI app not found.${NC}"
+          echo -e "    The CLI-only package cannot run the daemon on macOS."
+          echo -e "    Installing the full app..."
+          brew uninstall tailscale 2>/dev/null || true
+          brew install --cask tailscale 2>&1 | tail -3
+          open /Applications/Tailscale.app 2>/dev/null
+          echo -e "    Opened Tailscale app. Sign in via the menu bar icon."
+          sleep 5
+        fi
+        # Check if connected after app launch
         ts_status2=$(tailscale status 2>&1 || true)
         if echo "$ts_status2" | grep -q "NeedsLogin\|not logged in\|failed to connect"; then
           echo ""
-          echo -e "    ${CYAN}Tailscale needs authentication.${NC}"
-          echo -e "    Running ${CYAN}tailscale up${NC} — this will open a browser for login."
-          echo ""
-          tailscale up 2>&1 || true
-          sleep 2
+          echo -e "    ${CYAN}Sign in to Tailscale via the menu bar icon, then press Enter.${NC}"
+          read -p "    Press Enter when signed in... "
         fi
         # Verify
         ts_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
@@ -1015,11 +1024,11 @@ if command -v tailscale &>/dev/null; then
           CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
         fi
       else
-        echo -e "    Run later: ${CYAN}brew services start tailscale && tailscale up${NC}"
+        echo -e "    Run later: ${CYAN}open /Applications/Tailscale.app${NC}"
         CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
       fi
     else
-      echo -e "    Start with: ${CYAN}brew services start tailscale && tailscale up${NC}"
+      echo -e "    Start with: ${CYAN}open /Applications/Tailscale.app${NC}"
       CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
     fi
   elif echo "$ts_status" | grep -q "NeedsLogin\|not logged in"; then
@@ -1052,28 +1061,26 @@ else
     read -p "    Install Tailscale now? (yes/no) [no]: " install_ts
     install_ts="${install_ts:-no}"
     if [ "$install_ts" = "yes" ]; then
-      echo -e "    Installing Tailscale..."
-      brew install tailscale 2>&1 | tail -3
-      echo -e "    Starting Tailscale..."
-      brew services start tailscale 2>/dev/null
-      sleep 2
-      echo -e "    Running ${CYAN}tailscale up${NC} — this will open a browser for login."
-      tailscale up 2>&1 || true
-      sleep 2
+      echo -e "    Installing Tailscale (GUI app)..."
+      brew install --cask tailscale 2>&1 | tail -3
+      echo -e "    Opening Tailscale app..."
+      open /Applications/Tailscale.app 2>/dev/null
+      sleep 5
+      echo -e "    ${CYAN}Sign in to Tailscale via the menu bar icon, then press Enter.${NC}"
+      read -p "    Press Enter when signed in... "
       ts_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
       if [ -n "$ts_ip" ]; then
         echo -e "  ${GREEN}✓${NC} Tailscale installed and connected"
       else
-        echo -e "  ${YELLOW}⚠${NC} Tailscale installed but needs authentication"
-        echo -e "    Run: ${CYAN}tailscale up${NC}"
+        echo -e "  ${YELLOW}⚠${NC} Tailscale installed — sign in via the menu bar icon"
         CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
       fi
     else
-      echo -e "    Install later: ${CYAN}brew install tailscale${NC}"
+      echo -e "    Install later: ${CYAN}brew install --cask tailscale${NC}"
       CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
     fi
   else
-    echo -e "    Install: ${CYAN}brew install tailscale${NC}"
+    echo -e "    Install: ${CYAN}brew install --cask tailscale${NC}"
     CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
   fi
 fi
