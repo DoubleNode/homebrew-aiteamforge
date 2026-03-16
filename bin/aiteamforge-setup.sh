@@ -23,7 +23,7 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="1.3.2"
+VERSION="1.3.3"
 
 # Banner
 show_banner() {
