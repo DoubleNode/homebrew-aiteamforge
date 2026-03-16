@@ -25,7 +25,7 @@ fi
 # Get user's aiteamforge working directory (where actual configs/data live)
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
-VERSION="1.2.0"
+VERSION="1.2.1"
 
 # Usage information
 usage() {
