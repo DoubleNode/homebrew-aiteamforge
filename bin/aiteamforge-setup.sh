@@ -23,7 +23,7 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="1.3.5"
+VERSION="1.3.6"
 
 # Banner
 show_banner() {
@@ -981,9 +981,23 @@ if command -v gh &>/dev/null; then
 fi
 
 # Tailscale setup (for Fleet Monitor remote access)
+# Resolve tailscale CLI path (cask puts it inside the app bundle)
+TAILSCALE_CLI=""
 if command -v tailscale &>/dev/null; then
+  TAILSCALE_CLI="tailscale"
+elif [ -x "/Applications/Tailscale.app/Contents/MacOS/Tailscale" ]; then
+  TAILSCALE_CLI="/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+  # Create symlink so 'tailscale' works everywhere
+  if [ ! -e "/usr/local/bin/tailscale" ]; then
+    echo -e "  ${CYAN}Creating tailscale CLI symlink...${NC}"
+    sudo mkdir -p /usr/local/bin 2>/dev/null || true
+    sudo ln -sf "$TAILSCALE_CLI" /usr/local/bin/tailscale 2>/dev/null && TAILSCALE_CLI="tailscale" || true
+  fi
+fi
+
+if [ -n "$TAILSCALE_CLI" ]; then
   # Tailscale installed — check if running and authenticated
-  ts_status=$(tailscale status 2>&1 || true)
+  ts_status=$($TAILSCALE_CLI status 2>&1 || true)
   if echo "$ts_status" | grep -q "failed to connect\|stopped"; then
     echo -e "  ${YELLOW}○${NC} Tailscale installed but not running"
     if [ "$MODE" != "non-interactive" ]; then
@@ -1008,16 +1022,16 @@ if command -v tailscale &>/dev/null; then
           sleep 5
         fi
         # Check if connected after app launch
-        ts_status2=$(tailscale status 2>&1 || true)
+        ts_status2=$($TAILSCALE_CLI status 2>&1 || true)
         if echo "$ts_status2" | grep -q "NeedsLogin\|not logged in\|failed to connect"; then
           echo ""
           echo -e "    ${CYAN}Sign in to Tailscale via the menu bar icon, then press Enter.${NC}"
           read -p "    Press Enter when signed in... "
         fi
         # Verify
-        ts_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+        ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
         if [ -n "$ts_ip" ]; then
-          ts_hostname=$((tailscale status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
+          ts_hostname=$(($TAILSCALE_CLI status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
           echo -e "  ${GREEN}✓${NC} Tailscale connected: ${ts_hostname:-$ts_ip}"
         else
           echo -e "  ${YELLOW}⚠${NC} Tailscale started but not yet connected"
@@ -1037,9 +1051,9 @@ if command -v tailscale &>/dev/null; then
       echo ""
       echo -e "    Running ${CYAN}tailscale up${NC} — this will open a browser for login."
       echo ""
-      tailscale up 2>&1 || true
+      $TAILSCALE_CLI up 2>&1 || true
       sleep 2
-      ts_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+      ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
       if [ -n "$ts_ip" ]; then
         echo -e "  ${GREEN}✓${NC} Tailscale authenticated"
       else
@@ -1051,8 +1065,8 @@ if command -v tailscale &>/dev/null; then
       CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
     fi
   else
-    ts_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
-    ts_hostname=$((tailscale status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
+    ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
+    ts_hostname=$(($TAILSCALE_CLI status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
     echo -e "  ${GREEN}✓${NC} Tailscale connected: ${ts_hostname:-$ts_ip}"
   fi
 else
@@ -1068,7 +1082,7 @@ else
       sleep 5
       echo -e "    ${CYAN}Sign in to Tailscale via the menu bar icon, then press Enter.${NC}"
       read -p "    Press Enter when signed in... "
-      ts_ip=$(tailscale ip -4 2>/dev/null | head -n1 || true)
+      ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
       if [ -n "$ts_ip" ]; then
         echo -e "  ${GREEN}✓${NC} Tailscale installed and connected"
       else
