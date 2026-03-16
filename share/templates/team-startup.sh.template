@@ -4,15 +4,25 @@
 # Launches tmux sessions and iTerm2 tabs for the {{TEAM_NAME}} team
 
 # ============================================================================
-# Cleanup orphaned processes from previous crashed sessions
+# Configuration (must be before pre-flight checks)
 # ============================================================================
-cleanup_orphans() {
-    local orphans=$(ps -eo pid,ppid,tty,comm | grep zsh | grep "??" | awk '$2 == 1 {print $1}')
-    if [[ -n "$orphans" ]]; then
-        echo "  Cleaning up orphaned processes..."
-        echo "$orphans" | xargs kill 2>/dev/null
-    fi
-}
+TEAM_ID="{{TEAM_ID}}"
+TEAM_NAME="{{TEAM_NAME}}"
+TEAM_THEME="{{TEAM_THEME}}"
+AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
+TEAM_WORKING_DIR="{{TEAM_WORKING_DIR}}"
+TMUX_SOCKET="{{TEAM_TMUX_SOCKET}}"
+LCARS_PORT="{{TEAM_LCARS_PORT}}"
+ITERM_WINDOW_NAME="${TEAM_NAME}"
+ITERM_STARTUP_LOG="/tmp/${TEAM_ID}-startup-iterm2-$(date +%Y%m%d-%H%M%S).log"
+TERMINALS=(lcars {{TEAM_TERMINAL_LIST}})
+
+# Resolve kanban dir (project-based teams use working dir)
+if [[ -n "$TEAM_WORKING_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR/$TEAM_ID" ]]; then
+    KANBAN_DIR="${TEAM_WORKING_DIR}/kanban"
+else
+    KANBAN_DIR="${AITEAMFORGE_DIR}/kanban"
+fi
 
 # Warn about unexpected arguments
 if [[ $# -gt 0 ]]; then
@@ -39,90 +49,58 @@ preflight_check() {
 
 preflight_check "tmux" "tmux" "brew install tmux"
 preflight_check "python3" "python3" "brew install python@3"
-preflight_check "curl" "curl" "should be pre-installed on macOS"
 
-# Check iTerm2
 if [[ ! -d "/Applications/iTerm.app" ]]; then
-    echo "  ✗ iTerm2 not found (tab management requires iTerm2)"
+    echo "  ✗ iTerm2 not found"
     echo "    Fix: brew install --cask iterm2"
     PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
 fi
 
-# Check iTerm2 Python API
 if [[ -d "/Applications/iTerm.app" ]]; then
-    api_enabled=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || true)
-    if [[ "$api_enabled" != "1" ]]; then
+    _api=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || true)
+    if [[ "$_api" != "1" ]]; then
         echo "  ✗ iTerm2 Python API not enabled"
-        echo "    Fix: defaults write com.googlecode.iterm2 EnableAPIServer -bool true"
-        echo "    Then restart iTerm2"
+        echo "    Fix: defaults write com.googlecode.iterm2 EnableAPIServer -bool true && restart iTerm2"
         PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
     fi
 fi
 
-# Check window manager script
 if [[ ! -f "$AITEAMFORGE_DIR/iterm2_window_manager.py" ]]; then
-    echo "  ✗ Window manager script not found: $AITEAMFORGE_DIR/iterm2_window_manager.py"
-    echo "    Fix: aiteamforge setup --upgrade"
+    echo "  ✗ Window manager not found"
+    echo "    Fix: aiteamforge setup"
     PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
-fi
-
-# Check Python iterm2 module
-if ! python3 -c "import iterm2" 2>/dev/null; then
-    if [[ -f "$AITEAMFORGE_DIR/.venv/bin/python3" ]]; then
-        # venv exists but system python can't import — that's OK, window manager has fallback
-        true
-    else
-        echo "  ⚠ Python iterm2 module not available"
-        echo "    Fix: python3 -m venv $AITEAMFORGE_DIR/.venv && $AITEAMFORGE_DIR/.venv/bin/pip install iterm2"
-    fi
 fi
 
 if [[ $PREFLIGHT_ERRORS -gt 0 ]]; then
     echo ""
-    echo "  $PREFLIGHT_ERRORS pre-flight check(s) failed. Startup may not work correctly."
-    echo "  Fix the issues above and try again."
-    echo ""
-    read -p "  Continue anyway? (y/N): " continue_anyway
-    [[ "$continue_anyway" != [Yy]* ]] && exit 1
+    echo "  $PREFLIGHT_ERRORS pre-flight check(s) failed."
+    read -p "  Continue anyway? (y/N): " _continue
+    [[ "$_continue" != [Yy]* ]] && exit 1
 fi
 
+# ============================================================================
+# Helper function
+# ============================================================================
+cleanup_orphans() {
+    local orphans=$(ps -eo pid,ppid,tty,comm | grep zsh | grep "??" | awk '$2 == 1 {print $1}')
+    if [[ -n "$orphans" ]]; then
+        echo "  Cleaning up orphaned processes..."
+        echo "$orphans" | xargs kill 2>/dev/null
+    fi
+}
+
+# ============================================================================
+# Start
+# ============================================================================
 clear
 
-# ============================================================================
-# Configuration
-# ============================================================================
-TEAM_ID="{{TEAM_ID}}"
-TEAM_NAME="{{TEAM_NAME}}"
-TEAM_THEME="{{TEAM_THEME}}"
-AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
-TEAM_WORKING_DIR="{{TEAM_WORKING_DIR}}"
-TMUX_SOCKET="{{TEAM_TMUX_SOCKET}}"
-LCARS_PORT="{{TEAM_LCARS_PORT}}"
-ITERM_WINDOW_NAME="{{TEAM_NAME}}"
-ITERM_STARTUP_LOG="/tmp/${TEAM_ID}-startup-iterm2-$(date +%Y%m%d-%H%M%S).log"
-
-# Resolve kanban dir (project-based teams use working dir)
-if [[ -n "$TEAM_WORKING_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR/$TEAM_ID" ]]; then
-    KANBAN_DIR="${TEAM_WORKING_DIR}/kanban"
-else
-    KANBAN_DIR="${AITEAMFORGE_DIR}/kanban"
-fi
-
-# Agent terminals (lcars is always first)
-TERMINALS=(lcars {{TEAM_TERMINAL_LIST}})
-
-# ============================================================================
 # Capture iTerm2 window
-# ============================================================================
 if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
     echo "🔒 Capturing current window..."
     python3 "$AITEAMFORGE_DIR/iterm2_window_manager.py" \
         --action init-team-window \
         --window-title "$ITERM_WINDOW_NAME" \
         2>>"$ITERM_STARTUP_LOG"
-    if [[ $? -ne 0 ]]; then
-        echo "  ⚠️  Window capture failed (see $ITERM_STARTUP_LOG)"
-    fi
 fi
 
 echo "🚀 ${TEAM_NAME}"
@@ -144,24 +122,8 @@ echo "📡 Creating tmux sessions..."
 for terminal in "${TERMINALS[@]}"; do
     session_name="${TEAM_ID}-${terminal}"
     echo "  Initializing $session_name..."
-
-    # Kill existing session if present
     tmux -L "$TMUX_SOCKET" kill-session -t "$session_name" 2>/dev/null
-
-    # Create new detached session
-    if [[ "$terminal" == "lcars" ]]; then
-        # LCARS tab just needs a shell
-        tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -x 200 -y 50 2>/dev/null
-    else
-        # Agent terminal — source the team zshrc if it exists
-        local zshrc_file="$AITEAMFORGE_DIR/home-scripts/zshrc_${TEAM_ID}_${terminal}"
-        if [[ -f "$zshrc_file" ]]; then
-            tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -x 200 -y 50 \
-                "ZDOTDIR=/tmp zsh -c 'source \"$zshrc_file\" 2>/dev/null; exec zsh'" 2>/dev/null
-        else
-            tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -x 200 -y 50 2>/dev/null
-        fi
-    fi
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" -x 200 -y 50 2>/dev/null
 done
 
 echo ""
@@ -175,71 +137,57 @@ echo ""
 echo "⭐ Creating terminal tabs..."
 
 if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+
+    # Start LCARS server first
+    echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js"
+    echo "  Starting ${TEAM_NAME} LCARS server on port $LCARS_PORT..."
+    pkill -f "server.py.*$LCARS_PORT" 2>/dev/null
+    (cd "$AITEAMFORGE_DIR/lcars-ui" && \
+        LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
+        python3 server.py "$LCARS_PORT" > /dev/null 2>&1 &)
+
+    for i in {1..10}; do
+        curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1 && break
+        sleep 0.5
+    done
+    echo "  ✅ Server ready on port $LCARS_PORT"
+
+    # Create tabs — LCARS first, then agents
     for terminal in "${TERMINALS[@]}"; do
         session_name="${TEAM_ID}-${terminal}"
-        label="$terminal"
-        [[ "$terminal" == "lcars" ]] && label="LCARS"
 
-        echo "  Opening tab: $session_name ($label)"
-
-        # Start LCARS server for the first tab
         if [[ "$terminal" == "lcars" ]]; then
-            echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js"
-            echo "    Starting ${TEAM_NAME} LCARS server on port $LCARS_PORT..."
-            pkill -f "server.py.*$LCARS_PORT" 2>/dev/null
-            cd "$AITEAMFORGE_DIR/lcars-ui" && \
-                LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="$session_name" \
-                python3 server.py "$LCARS_PORT" > /dev/null 2>&1 &
-
-            # Wait for server
-            for i in {1..10}; do
-                if curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1; then
-                    echo "    ✅ Server ready on port $LCARS_PORT"
-                    break
-                fi
-                sleep 0.5
-            done
-        fi
-
-        # Select profile (use LCARS Web if it exists, otherwise Default)
-        local profile="Default"
-        if [[ "$terminal" == "lcars" ]]; then
-            # Check if LCARS Web profile exists in iTerm2
-            if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep -q "LCARS Web" 2>/dev/null; then
-                profile="LCARS Web"
-            fi
-        fi
-
-        # Build the command for this tab
-        local tab_command
-        if [[ "$terminal" == "lcars" ]]; then
-            # LCARS tab: open the web dashboard in browser
-            tab_command="open http://localhost:$LCARS_PORT; echo ''; echo '🖥  LCARS Dashboard: http://localhost:$LCARS_PORT'; echo ''; echo 'Kanban board is open in your browser.'; echo 'This tab can be used for kanban commands:'; echo '  kb-list, kb-add, kb-status'; echo ''; exec zsh"
+            tab_label="LCARS"
+            tab_profile="Default"
+            # Check if LCARS Web profile exists
+            defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep -q "LCARS Web" 2>/dev/null && tab_profile="LCARS Web"
+            # LCARS tab: show dashboard URL and provide a useful shell
+            tab_cmd="echo '🖥  LCARS Dashboard: http://localhost:$LCARS_PORT'; echo ''; echo 'Kanban board: http://localhost:$LCARS_PORT'; echo ''; echo 'Available commands: kb-list, kb-add, kb-status'; exec zsh"
         else
-            # Agent tab: attach to tmux session
-            tab_command="export ITERM_TAB_TITLE='$label' && tmux -L $TMUX_SOCKET attach -t $session_name"
+            tab_label="$terminal"
+            tab_profile="Default"
+            tab_cmd="export ITERM_TAB_TITLE='$terminal' && tmux -L $TMUX_SOCKET attach -t $session_name"
         fi
 
-        # Create tab with retry
-        local tab_created=false
+        echo "  Opening tab: $session_name ($tab_label)"
+
+        tab_ok=false
         for attempt in 1 2 3; do
             python3 "$AITEAMFORGE_DIR/iterm2_window_manager.py" \
                 --action create-tab \
                 --window-title "$ITERM_WINDOW_NAME" \
-                --profile "$profile" \
-                --tab-name "$label" \
-                --command "$tab_command" \
+                --profile "$tab_profile" \
+                --tab-name "$tab_label" \
+                --command "$tab_cmd" \
                 2>>"$ITERM_STARTUP_LOG"
             if [[ $? -eq 0 ]]; then
-                tab_created=true
+                tab_ok=true
                 break
             fi
-            echo "    ⚠️  Tab creation attempt $attempt failed, retrying..." >&2
+            echo "    ⚠️  Attempt $attempt failed, retrying..." >&2
             sleep 1
         done
-        if [[ "$tab_created" != "true" ]]; then
-            echo "    ❌ Failed to create tab: $label (see $ITERM_STARTUP_LOG)"
-        fi
+        [[ "$tab_ok" != "true" ]] && echo "    ❌ Failed to create tab: $tab_label"
 
         sleep 0.3
     done
@@ -271,9 +219,9 @@ else
     # Terminal.app fallback
     for terminal in "${TERMINALS[@]}"; do
         session_name="${TEAM_ID}-${terminal}"
-        label="$terminal"
-        [[ "$terminal" == "lcars" ]] && label="LCARS"
-        echo "  Opening tab: $session_name ($label)"
+        tab_label="$terminal"
+        [[ "$terminal" == "lcars" ]] && tab_label="LCARS"
+        echo "  Opening tab: $session_name ($tab_label)"
 
         osascript <<APPLESCRIPT
 tell application "Terminal"
@@ -284,7 +232,7 @@ tell application "Terminal"
         end tell
     end tell
     delay 0.5
-    do script "printf '\\\\033]0;$label\\\\007' && tmux -L $TMUX_SOCKET attach -t $session_name" in front window
+    do script "printf '\\\\033]0;$tab_label\\\\007' && tmux -L $TMUX_SOCKET attach -t $session_name" in front window
 end tell
 APPLESCRIPT
         sleep 0.5
@@ -298,7 +246,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "✅ All ${TEAM_NAME} terminals launched!"
 echo ""
 echo "📚 Terminal Guide:"
-echo "  * LCARS  - Kanban Overview (Port $LCARS_PORT)"
+echo "  * LCARS  - Kanban Overview (http://localhost:$LCARS_PORT)"
 for terminal in "${TERMINALS[@]}"; do
     [[ "$terminal" == "lcars" ]] && continue
     echo "  • $terminal"
