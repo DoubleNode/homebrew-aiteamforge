@@ -980,12 +980,99 @@ if command -v gh &>/dev/null; then
   fi
 fi
 
-# Tailscale (if Fleet Monitor was selected)
-if [ "$INSTALL_FLEET" = "yes" ] || [ "$INSTALL_FLEET" = "skip" ]; then
-  if command -v tailscale &>/dev/null; then
-    echo -e "  ${GREEN}✓${NC} Tailscale installed"
+# Tailscale setup (for Fleet Monitor remote access)
+if command -v tailscale &>/dev/null; then
+  # Tailscale installed — check if running and authenticated
+  ts_status=$(tailscale status 2>&1)
+  if echo "$ts_status" | grep -q "failed to connect\|stopped"; then
+    echo -e "  ${YELLOW}○${NC} Tailscale installed but not running"
+    if [ "$MODE" != "non-interactive" ]; then
+      echo ""
+      echo -e "    Tailscale enables remote access to your Fleet Monitor and LCARS dashboards."
+      read -p "    Start Tailscale now? (yes/no) [yes]: " start_ts
+      start_ts="${start_ts:-yes}"
+      if [ "$start_ts" = "yes" ]; then
+        echo -e "    Starting Tailscale service..."
+        brew services start tailscale 2>/dev/null || sudo brew services start tailscale 2>/dev/null
+        sleep 2
+        # Check if it needs authentication
+        ts_status2=$(tailscale status 2>&1)
+        if echo "$ts_status2" | grep -q "NeedsLogin\|not logged in\|failed to connect"; then
+          echo ""
+          echo -e "    ${CYAN}Tailscale needs authentication.${NC}"
+          echo -e "    Running ${CYAN}tailscale up${NC} — this will open a browser for login."
+          echo ""
+          tailscale up 2>&1
+          sleep 2
+        fi
+        # Verify
+        ts_ip=$(tailscale ip -4 2>/dev/null | head -n1)
+        if [ -n "$ts_ip" ]; then
+          ts_hostname=$(tailscale status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
+          echo -e "  ${GREEN}✓${NC} Tailscale connected: ${ts_hostname:-$ts_ip}"
+        else
+          echo -e "  ${YELLOW}⚠${NC} Tailscale started but not yet connected"
+          CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+        fi
+      else
+        echo -e "    Run later: ${CYAN}brew services start tailscale && tailscale up${NC}"
+        CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+      fi
+    else
+      echo -e "    Start with: ${CYAN}brew services start tailscale && tailscale up${NC}"
+      CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+    fi
+  elif echo "$ts_status" | grep -q "NeedsLogin\|not logged in"; then
+    echo -e "  ${YELLOW}○${NC} Tailscale running but not authenticated"
+    if [ "$MODE" != "non-interactive" ]; then
+      echo ""
+      echo -e "    Running ${CYAN}tailscale up${NC} — this will open a browser for login."
+      echo ""
+      tailscale up 2>&1
+      sleep 2
+      ts_ip=$(tailscale ip -4 2>/dev/null | head -n1)
+      if [ -n "$ts_ip" ]; then
+        echo -e "  ${GREEN}✓${NC} Tailscale authenticated"
+      else
+        echo -e "  ${YELLOW}⚠${NC} Tailscale authentication incomplete"
+        CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+      fi
+    else
+      echo -e "    Authenticate: ${CYAN}tailscale up${NC}"
+      CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+    fi
   else
-    echo -e "  ${YELLOW}○${NC} Tailscale not installed (optional — needed for remote Fleet Monitor access)"
+    ts_ip=$(tailscale ip -4 2>/dev/null | head -n1)
+    ts_hostname=$(tailscale status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
+    echo -e "  ${GREEN}✓${NC} Tailscale connected: ${ts_hostname:-$ts_ip}"
+  fi
+else
+  echo -e "  ${YELLOW}○${NC} Tailscale not installed (optional — needed for remote access)"
+  if [ "$MODE" != "non-interactive" ]; then
+    read -p "    Install Tailscale now? (yes/no) [no]: " install_ts
+    install_ts="${install_ts:-no}"
+    if [ "$install_ts" = "yes" ]; then
+      echo -e "    Installing Tailscale..."
+      brew install tailscale 2>&1 | tail -3
+      echo -e "    Starting Tailscale..."
+      brew services start tailscale 2>/dev/null
+      sleep 2
+      echo -e "    Running ${CYAN}tailscale up${NC} — this will open a browser for login."
+      tailscale up 2>&1
+      sleep 2
+      ts_ip=$(tailscale ip -4 2>/dev/null | head -n1)
+      if [ -n "$ts_ip" ]; then
+        echo -e "  ${GREEN}✓${NC} Tailscale installed and connected"
+      else
+        echo -e "  ${YELLOW}⚠${NC} Tailscale installed but needs authentication"
+        echo -e "    Run: ${CYAN}tailscale up${NC}"
+        CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+      fi
+    else
+      echo -e "    Install later: ${CYAN}brew install tailscale${NC}"
+      CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+    fi
+  else
     echo -e "    Install: ${CYAN}brew install tailscale${NC}"
     CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
   fi
