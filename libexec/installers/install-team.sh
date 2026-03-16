@@ -277,7 +277,7 @@ if [[ ! -f "$TEAM_BOARD" ]]; then
 {
   "team": "$TEAM_ID",
   "teamName": "$TEAM_NAME",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "items": {},
   "metadata": {
     "created": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",

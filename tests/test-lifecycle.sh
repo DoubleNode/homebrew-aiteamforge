@@ -16,7 +16,7 @@ mkdir -p "$AITEAMFORGE_DIR"
 create_test_config() {
   cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
 {
-  "version": "1.1.0",
+  "version": "1.2.0",
   "machine": {
     "name": "test-machine",
     "hostname": "localhost",
