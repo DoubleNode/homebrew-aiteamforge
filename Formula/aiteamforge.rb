@@ -12,6 +12,7 @@ class Aiteamforge < Formula
   depends_on "jq"
   depends_on "gh"
   depends_on "git"
+  depends_on "tmux"
   depends_on :macos => :big_sur # iTerm2 and macOS-specific features
 
   # Optional dependencies for advanced features

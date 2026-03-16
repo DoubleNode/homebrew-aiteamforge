@@ -239,6 +239,7 @@ check_dep "node" "Node.js" "brew install node"
 check_dep "jq" "jq" "brew install jq"
 check_dep "gh" "GitHub CLI" "brew install gh"
 check_dep "git" "Git" "xcode-select --install"
+check_dep "tmux" "tmux" "brew install tmux"
 
 # Check for iTerm2 (application, not command)
 if [ -d "/Applications/iTerm.app" ]; then
@@ -680,11 +681,14 @@ mkdir -p "${INSTALL_DIR}/teams"
 [ -d "${AITEAMFORGE_HOME}/docs" ] && cp -r "${AITEAMFORGE_HOME}/docs"/* "${INSTALL_DIR}/docs/" 2>/dev/null && echo -e "${GREEN}✓${NC} Documentation"
 [ -d "${AITEAMFORGE_HOME}/share/teams" ] && cp -r "${AITEAMFORGE_HOME}/share/teams"/* "${INSTALL_DIR}/teams/" 2>/dev/null && echo -e "${GREEN}✓${NC} Team configurations"
 
-# Copy iTerm2 window manager script
-if [ -f "${AITEAMFORGE_HOME}/share/scripts/iterm2_window_manager.py" ]; then
-  cp "${AITEAMFORGE_HOME}/share/scripts/iterm2_window_manager.py" "${INSTALL_DIR}/iterm2_window_manager.py"
-  chmod +x "${INSTALL_DIR}/iterm2_window_manager.py"
-  echo -e "${GREEN}✓${NC} iTerm2 window manager"
+# Copy scripts (window manager, agent panel display, helpers)
+if [ -d "${AITEAMFORGE_HOME}/share/scripts" ]; then
+  mkdir -p "${INSTALL_DIR}/scripts"
+  cp "${AITEAMFORGE_HOME}/share/scripts/"* "${INSTALL_DIR}/scripts/" 2>/dev/null
+  chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/"*.py 2>/dev/null
+  # Also copy window manager to root for backward compat with startup templates
+  cp "${INSTALL_DIR}/scripts/iterm2_window_manager.py" "${INSTALL_DIR}/iterm2_window_manager.py" 2>/dev/null
+  echo -e "${GREEN}✓${NC} Scripts (window manager, agent panel, helpers)"
 fi
 
 # Create Python venv with iterm2 package (required for tab management)

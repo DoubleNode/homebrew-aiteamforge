@@ -121,9 +121,14 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             done
         fi
 
-        # Select profile
+        # Select profile (use LCARS Web if it exists, otherwise Default)
         local profile="Default"
-        [[ "$terminal" == "lcars" ]] && profile="LCARS Web"
+        if [[ "$terminal" == "lcars" ]]; then
+            # Check if LCARS Web profile exists in iTerm2
+            if defaults read com.googlecode.iterm2 "New Bookmarks" 2>/dev/null | grep -q "LCARS Web" 2>/dev/null; then
+                profile="LCARS Web"
+            fi
+        fi
 
         # Create tab with retry
         local tab_created=false
