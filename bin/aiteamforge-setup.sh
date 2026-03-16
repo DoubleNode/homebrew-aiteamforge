@@ -23,7 +23,7 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="1.3.6"
+VERSION="1.3.7"
 
 # Banner
 show_banner() {
@@ -1031,7 +1031,7 @@ if [ -n "$TAILSCALE_CLI" ]; then
         # Verify
         ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
         if [ -n "$ts_ip" ]; then
-          ts_hostname=$(($TAILSCALE_CLI status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
+          ts_hostname=$( ($TAILSCALE_CLI status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
           echo -e "  ${GREEN}✓${NC} Tailscale connected: ${ts_hostname:-$ts_ip}"
         else
           echo -e "  ${YELLOW}⚠${NC} Tailscale started but not yet connected"
@@ -1066,7 +1066,7 @@ if [ -n "$TAILSCALE_CLI" ]; then
     fi
   else
     ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
-    ts_hostname=$(($TAILSCALE_CLI status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
+    ts_hostname=$( ($TAILSCALE_CLI status --json 2>/dev/null || true) | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4)
     echo -e "  ${GREEN}✓${NC} Tailscale connected: ${ts_hostname:-$ts_ip}"
   fi
 else

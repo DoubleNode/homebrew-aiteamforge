@@ -20,7 +20,7 @@ CONFIG_DIR="${HOME}/.aiteamforge"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 
 # Version
-VERSION="1.3.6"
+VERSION="1.3.7"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Source UI Library
