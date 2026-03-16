@@ -21,6 +21,71 @@ if [[ $# -gt 0 ]]; then
     echo ""
 fi
 
+# ============================================================================
+# Pre-flight checks
+# ============================================================================
+PREFLIGHT_ERRORS=0
+
+preflight_check() {
+    local name="$1" cmd="$2" fix="$3"
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "  ✗ $name not found"
+        echo "    Fix: $fix"
+        PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+        return 1
+    fi
+    return 0
+}
+
+preflight_check "tmux" "tmux" "brew install tmux"
+preflight_check "python3" "python3" "brew install python@3"
+preflight_check "curl" "curl" "should be pre-installed on macOS"
+
+# Check iTerm2
+if [[ ! -d "/Applications/iTerm.app" ]]; then
+    echo "  ✗ iTerm2 not found (tab management requires iTerm2)"
+    echo "    Fix: brew install --cask iterm2"
+    PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+fi
+
+# Check iTerm2 Python API
+if [[ -d "/Applications/iTerm.app" ]]; then
+    api_enabled=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || true)
+    if [[ "$api_enabled" != "1" ]]; then
+        echo "  ✗ iTerm2 Python API not enabled"
+        echo "    Fix: defaults write com.googlecode.iterm2 EnableAPIServer -bool true"
+        echo "    Then restart iTerm2"
+        PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+    fi
+fi
+
+# Check window manager script
+if [[ ! -f "$AITEAMFORGE_DIR/iterm2_window_manager.py" ]]; then
+    echo "  ✗ Window manager script not found: $AITEAMFORGE_DIR/iterm2_window_manager.py"
+    echo "    Fix: aiteamforge setup --upgrade"
+    PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+fi
+
+# Check Python iterm2 module
+if ! python3 -c "import iterm2" 2>/dev/null; then
+    if [[ -f "$AITEAMFORGE_DIR/.venv/bin/python3" ]]; then
+        # venv exists but system python can't import — that's OK, window manager has fallback
+        true
+    else
+        echo "  ⚠ Python iterm2 module not available"
+        echo "    Fix: python3 -m venv $AITEAMFORGE_DIR/.venv && $AITEAMFORGE_DIR/.venv/bin/pip install iterm2"
+    fi
+fi
+
+if [[ $PREFLIGHT_ERRORS -gt 0 ]]; then
+    echo ""
+    echo "  $PREFLIGHT_ERRORS pre-flight check(s) failed. Startup may not work correctly."
+    echo "  Fix the issues above and try again."
+    echo ""
+    read -p "  Continue anyway? (y/N): " continue_anyway
+    [[ "$continue_anyway" != [Yy]* ]] && exit 1
+fi
+
 clear
 
 # ============================================================================
@@ -145,6 +210,16 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             fi
         fi
 
+        # Build the command for this tab
+        local tab_command
+        if [[ "$terminal" == "lcars" ]]; then
+            # LCARS tab: open the web dashboard in browser
+            tab_command="open http://localhost:$LCARS_PORT; echo ''; echo '🖥  LCARS Dashboard: http://localhost:$LCARS_PORT'; echo ''; echo 'Kanban board is open in your browser.'; echo 'This tab can be used for kanban commands:'; echo '  kb-list, kb-add, kb-status'; echo ''; exec zsh"
+        else
+            # Agent tab: attach to tmux session
+            tab_command="export ITERM_TAB_TITLE='$label' && tmux -L $TMUX_SOCKET attach -t $session_name"
+        fi
+
         # Create tab with retry
         local tab_created=false
         for attempt in 1 2 3; do
@@ -153,7 +228,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
                 --window-title "$ITERM_WINDOW_NAME" \
                 --profile "$profile" \
                 --tab-name "$label" \
-                --command "export ITERM_TAB_TITLE='$label' && tmux -L $TMUX_SOCKET attach -t $session_name" \
+                --command "$tab_command" \
                 2>>"$ITERM_STARTUP_LOG"
             if [[ $? -eq 0 ]]; then
                 tab_created=true
