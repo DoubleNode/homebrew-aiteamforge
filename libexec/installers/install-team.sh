@@ -266,7 +266,12 @@ fi
 
 echo "📋 Setting up team kanban board..."
 
-KANBAN_DIR="$AITEAMFORGE_DIR/kanban"
+# Use team working dir if set (project-based teams), otherwise central kanban dir
+if [[ -n "${TEAM_WORKING_DIR:-}" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR/$TEAM_ID" ]]; then
+    KANBAN_DIR="${TEAM_WORKING_DIR}/kanban"
+else
+    KANBAN_DIR="$AITEAMFORGE_DIR/kanban"
+fi
 mkdir -p "$KANBAN_DIR"
 
 TEAM_BOARD="$KANBAN_DIR/${TEAM_ID}-board.json"
