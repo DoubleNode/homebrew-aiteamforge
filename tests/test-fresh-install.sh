@@ -1,6 +1,6 @@
 #!/bin/bash
 # ═══════════════════════════════════════════════════════════════════════════
-# Dev-Team Fresh Install Verification Script
+# AITeamForge Fresh Install Verification Script
 # ═══════════════════════════════════════════════════════════════════════════
 # Run this AFTER 'brew install aiteamforge && aiteamforge setup' to verify
 # everything installed correctly. Safe to run multiple times.
@@ -374,9 +374,9 @@ done
 [ "$lcars_running" -eq 0 ] && warn "No LCARS servers running (start a team to launch one)"
 
 # ─────────────────────────────────────────────────────────────────────────
-# 14. Dev-Team Doctor (cross-check)
+# 14. AITeamForge Doctor (cross-check)
 # ─────────────────────────────────────────────────────────────────────────
-section "Dev-Team Doctor"
+section "AITeamForge Doctor"
 
 if command -v aiteamforge &>/dev/null; then
     doctor_output=$(aiteamforge doctor 2>&1)

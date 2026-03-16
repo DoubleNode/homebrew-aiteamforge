@@ -1,5 +1,5 @@
 #!/bin/bash
-# Dev-Team Doctor - Health check and diagnostics
+# AITeamForge Doctor - Health check and diagnostics
 # Verifies installation and identifies issues
 
 set -eo pipefail
@@ -31,7 +31,7 @@ VERSION="1.1.0"
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Doctor v${VERSION}
+AITeamForge Doctor v${VERSION}
 Health check and diagnostics for aiteamforge installation
 
 Usage: aiteamforge doctor [options]
@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -v|--version)
-      echo "Dev-Team Doctor v${VERSION}"
+      echo "AITeamForge Doctor v${VERSION}"
       exit 0
       ;;
     -h|--help)
@@ -130,7 +130,7 @@ check_result() {
 # Banner
 echo ""
 echo -e "${BOLD}╔════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${BOLD}║           Dev-Team Doctor - Health Check                  ║${NC}"
+echo -e "${BOLD}║           AITeamForge Doctor - Health Check                  ║${NC}"
 echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
 

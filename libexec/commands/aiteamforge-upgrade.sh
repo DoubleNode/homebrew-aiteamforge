@@ -22,7 +22,7 @@ FORCE=false
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Upgrade v${VERSION}
+AITeamForge Upgrade v${VERSION}
 Update aiteamforge components to latest version
 
 Usage: aiteamforge upgrade [options]
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -v|--version)
-      echo "Dev-Team Upgrade v${VERSION}"
+      echo "AITeamForge Upgrade v${VERSION}"
       exit 0
       ;;
     -h|--help)
@@ -99,7 +99,7 @@ CURRENT_VERSION=$(get_installed_version)
 
 # Banner
 clear
-print_header "DEV-TEAM UPGRADE"
+print_header "AITEAMFORGE UPGRADE"
 
 echo "Current version: ${CURRENT_VERSION:-unknown}"
 echo "Framework: ${FRAMEWORK_DIR}"

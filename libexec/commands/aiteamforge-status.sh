@@ -22,7 +22,7 @@ BRIEF=false
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Status v${VERSION}
+AITeamForge Status v${VERSION}
 Display current environment status
 
 Usage: aiteamforge status [options]
@@ -67,7 +67,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -v|--version)
-      echo "Dev-Team Status v${VERSION}"
+      echo "AITeamForge Status v${VERSION}"
       exit 0
       ;;
     -h|--help)
@@ -260,7 +260,7 @@ output_brief() {
     status="WARN"
   fi
 
-  echo "Dev-Team ${INSTALLED_VERSION} | ${MACHINE_NAME} | ${IN_PROGRESS_ITEMS}/${TOTAL_ITEMS} tasks | Status: ${status}"
+  echo "AITeamForge ${INSTALLED_VERSION} | ${MACHINE_NAME} | ${IN_PROGRESS_ITEMS}/${TOTAL_ITEMS} tasks | Status: ${status}"
 }
 
 # Output full LCARS-styled format

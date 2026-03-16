@@ -45,7 +45,7 @@ MIGRATION_LOG="${HOME}/.aiteamforge/migration.log"
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Migration v${VERSION}
+AITeamForge Migration v${VERSION}
 Migrate existing manual installation to Homebrew-managed structure
 
 Usage: aiteamforge migrate [options]
@@ -559,7 +559,7 @@ update_shell_integration() {
   # Add new sourcing line (if not already present)
   if ! grep -q "source ~/.aiteamforge/shell-init.sh" "${ZSHRC}"; then
     echo "" >> "${ZSHRC}"
-    echo "# Dev-Team Shell Integration (Homebrew)" >> "${ZSHRC}"
+    echo "# AITeamForge Shell Integration (Homebrew)" >> "${ZSHRC}"
     echo "if [[ -f ~/.aiteamforge/shell-init.sh ]]; then" >> "${ZSHRC}"
     echo "  source ~/.aiteamforge/shell-init.sh" >> "${ZSHRC}"
     echo "fi" >> "${ZSHRC}"
@@ -652,7 +652,7 @@ main() {
   fi
 
   # Show banner
-  section "Dev-Team Migration to Homebrew"
+  section "AITeamForge Migration to Homebrew"
 
   if [[ "${DRY_RUN}" == "true" ]]; then
     warning "DRY RUN MODE - No changes will be made"

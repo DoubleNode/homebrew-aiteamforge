@@ -104,7 +104,7 @@ WORKING_DIR=$(get_working_dir)
 
 # Banner
 clear
-print_header "DEV-TEAM UNINSTALL"
+print_header "AITEAMFORGE UNINSTALL"
 
 if [ "$PURGE" = true ]; then
   print_warning "PURGE MODE - Everything will be removed!"

@@ -1,7 +1,7 @@
 #!/usr/bin/env zsh
 
 # aiteamforge-setup.sh
-# Interactive setup wizard for Starfleet Development Environment
+# Interactive setup wizard for AITeamForge
 # Guides new users through machine setup and configuration
 
 set -euo pipefail
@@ -706,7 +706,7 @@ main() {
         ;;
       --help)
         cat <<EOF
-aiteamforge-setup - Starfleet Development Environment Setup Wizard
+aiteamforge-setup - AITeamForge Setup Wizard
 
 USAGE:
   aiteamforge-setup [OPTIONS]

@@ -8,7 +8,7 @@
 
 ## Overview
 
-The aiteamforge setup wizard (`aiteamforge-setup`) is an interactive CLI tool that guides new users through setting up the Starfleet Development Environment on their machine. It runs after `brew install aiteamforge` and handles all configuration and installation tasks.
+The aiteamforge setup wizard (`aiteamforge-setup`) is an interactive CLI tool that guides new users through setting up the AITeamForge on their machine. It runs after `brew install aiteamforge` and handles all configuration and installation tasks.
 
 ## Features
 
@@ -347,7 +347,7 @@ The wizard is designed to work with Homebrew Tap installation:
 ### Homebrew Formula (Phase 2)
 ```ruby
 class Aiteamforge < Formula
-  desc "Starfleet Development Environment"
+  desc "AITeamForge"
   homepage "https://github.com/YOUR_ORG/aiteamforge"
   url "https://github.com/YOUR_ORG/aiteamforge/archive/v1.0.0.tar.gz"
 

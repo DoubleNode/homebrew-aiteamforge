@@ -22,7 +22,7 @@ SERVICE="${1:-all}"
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Start v${VERSION}
+AITeamForge Start v${VERSION}
 Start aiteamforge services
 
 Usage: aiteamforge start [service] [options]
@@ -60,7 +60,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -v|--version)
-      echo "Dev-Team Start v${VERSION}"
+      echo "AITeamForge Start v${VERSION}"
       exit 0
       ;;
     -h|--help)
@@ -91,7 +91,7 @@ WORKING_DIR=$(get_working_dir)
 
 # Banner
 clear
-print_header "DEV-TEAM START"
+print_header "AITEAMFORGE START"
 
 # Validate kanban boards for all configured teams
 # Runs first so any board issues can be resolved before agents start.

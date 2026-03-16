@@ -28,7 +28,7 @@ INFO_ITEMS=0
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Migration Check v${VERSION}
+AITeamForge Migration Check v${VERSION}
 Pre-migration analysis for existing installations
 
 Usage: aiteamforge migrate --check [options]
@@ -85,7 +85,7 @@ if [[ ! -d "${INSTALL_DIR}" ]]; then
   exit 3
 fi
 
-section "Dev-Team Migration Check"
+section "AITeamForge Migration Check"
 echo "Analyzing installation at: ${INSTALL_DIR}"
 echo ""
 

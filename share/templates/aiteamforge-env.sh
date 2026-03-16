@@ -2,7 +2,7 @@
 # AITeamForge Environment Loader
 # Sources team-specific configurations, aliases, and secrets
 
-# Dev-Team installation directory
+# AITeamForge installation directory
 # This will be substituted during installation
 export AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 

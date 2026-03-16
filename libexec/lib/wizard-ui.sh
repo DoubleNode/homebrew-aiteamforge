@@ -86,7 +86,7 @@ print_section() {
 print_welcome_banner() {
   print_header "STARFLEET DEVELOPMENT ENVIRONMENT - SETUP WIZARD"
 
-  print_color "${COLOR_AMBER}" "Welcome to the Dev-Team environment installer."
+  print_color "${COLOR_AMBER}" "Welcome to the AITeamForge environment installer."
   echo ""
   print_color "${COLOR_BLUE}" "This wizard will guide you through setting up:"
   echo "  • Machine identity configuration"
@@ -103,7 +103,7 @@ print_welcome_banner() {
 print_completion_banner() {
   print_header "SETUP COMPLETE"
 
-  print_success "Dev-Team environment has been successfully installed!"
+  print_success "AITeamForge environment has been successfully installed!"
   echo ""
 }
 
@@ -369,7 +369,7 @@ press_any_key() {
 # Clear screen and show header
 clear_screen() {
   clear
-  print_header "DEV-TEAM SETUP WIZARD"
+  print_header "AITEAMFORGE SETUP WIZARD"
 }
 
 # Display error and exit

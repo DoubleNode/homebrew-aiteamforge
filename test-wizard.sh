@@ -6,7 +6,7 @@
 set -euo pipefail
 
 echo "═══════════════════════════════════════════════════════════════════════════"
-echo "  DEV-TEAM SETUP WIZARD - TEST SCRIPT"
+echo "  AITEAMFORGE SETUP WIZARD - TEST SCRIPT"
 echo "═══════════════════════════════════════════════════════════════════════════"
 echo ""
 

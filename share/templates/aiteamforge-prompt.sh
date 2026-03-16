@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Dev-Team LCARS-Inspired Prompt
+# AITeamForge LCARS-Inspired Prompt
 # Customizable prompt showing team, branch, and kanban status
 
 # Skip if already running a team-specific prompt

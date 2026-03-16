@@ -22,7 +22,7 @@ SERVICE="${1:-all}"
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Stop v${VERSION}
+AITeamForge Stop v${VERSION}
 Stop aiteamforge services
 
 Usage: aiteamforge stop [service] [options]
@@ -60,7 +60,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -v|--version)
-      echo "Dev-Team Stop v${VERSION}"
+      echo "AITeamForge Stop v${VERSION}"
       exit 0
       ;;
     -h|--help)
@@ -88,7 +88,7 @@ fi
 
 # Banner
 clear
-print_header "DEV-TEAM STOP"
+print_header "AITEAMFORGE STOP"
 
 # Stop LCARS server
 stop_lcars() {

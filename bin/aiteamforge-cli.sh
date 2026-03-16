@@ -31,7 +31,7 @@ VERSION="1.1.0"
 usage() {
   cat <<EOF
 AITeamForge CLI v${VERSION}
-Starfleet Development Environment
+AITeamForge
 
 Usage: aiteamforge <command> [options]
 

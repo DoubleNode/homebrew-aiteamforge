@@ -1,5 +1,5 @@
 class Aiteamforge < Formula
-  desc "Starfleet Development Environment - AI-powered multi-team development infrastructure"
+  desc "AITeamForge - AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
       tag: "v1.1.0"

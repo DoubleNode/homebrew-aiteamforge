@@ -175,7 +175,7 @@ claude-status() {
 
 claude-help() {
     echo ""
-    echo "🚀 Dev-Team Claude Code Agent Aliases"
+    echo "🚀 AITeamForge Claude Code Agent Aliases"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "iOS (TNG):       claude-geordi, claude-data, claude-worf, claude-wesley"

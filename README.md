@@ -5,7 +5,7 @@
 ![Version](https://img.shields.io/badge/version-1.0.0-green)
 ![macOS](https://img.shields.io/badge/macOS-Big_Sur+-blue)
 
-**Starfleet Development Environment** - AI-powered multi-team development infrastructure
+**AITeamForge** - AI-powered multi-team development infrastructure
 
 > This Homebrew tap provides the `aiteamforge` formula for installing and managing the AITeamForge environment on macOS - a comprehensive AI-assisted development platform with specialized teams, visual kanban management, and multi-machine coordination.
 

@@ -29,7 +29,7 @@ CHECK_COMPONENT="all"
 # Usage
 usage() {
   cat <<EOF
-Dev-Team Doctor v${VERSION}
+AITeamForge Doctor v${VERSION}
 Comprehensive health check and diagnostics
 
 Usage: aiteamforge doctor [options]
@@ -81,7 +81,7 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -v|--version)
-      echo "Dev-Team Doctor v${VERSION}"
+      echo "AITeamForge Doctor v${VERSION}"
       exit 0
       ;;
     -h|--help)
