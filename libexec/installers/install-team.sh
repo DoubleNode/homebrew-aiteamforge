@@ -177,6 +177,7 @@ if [[ -f "$STARTUP_TEMPLATE" ]]; then
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
         -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
+        -e "s|{{TEAM_WORKING_DIR}}|${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$STARTUP_TEMPLATE" > "$STARTUP_SCRIPT"
     chmod +x "$STARTUP_SCRIPT"
@@ -205,6 +206,7 @@ if [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+        -e "s|{{TEAM_WORKING_DIR}}|${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$SHUTDOWN_TEMPLATE" > "$SHUTDOWN_SCRIPT"
     chmod +x "$SHUTDOWN_SCRIPT"

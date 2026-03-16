@@ -14,6 +14,13 @@ cleanup_orphans() {
     fi
 }
 
+# Warn about unexpected arguments
+if [[ $# -gt 0 ]]; then
+    echo "Note: This startup script takes no arguments (got: $*)"
+    echo "      Configuration is built-in from aiteamforge setup."
+    echo ""
+fi
+
 clear
 
 # ============================================================================
@@ -23,10 +30,18 @@ TEAM_ID="{{TEAM_ID}}"
 TEAM_NAME="{{TEAM_NAME}}"
 TEAM_THEME="{{TEAM_THEME}}"
 AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
+TEAM_WORKING_DIR="{{TEAM_WORKING_DIR}}"
 TMUX_SOCKET="{{TEAM_TMUX_SOCKET}}"
 LCARS_PORT="{{TEAM_LCARS_PORT}}"
 ITERM_WINDOW_NAME="{{TEAM_NAME}}"
 ITERM_STARTUP_LOG="/tmp/${TEAM_ID}-startup-iterm2-$(date +%Y%m%d-%H%M%S).log"
+
+# Resolve kanban dir (project-based teams use working dir)
+if [[ -n "$TEAM_WORKING_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR/$TEAM_ID" ]]; then
+    KANBAN_DIR="${TEAM_WORKING_DIR}/kanban"
+else
+    KANBAN_DIR="${AITEAMFORGE_DIR}/kanban"
+fi
 
 # Agent terminals (lcars is always first)
 TERMINALS=(lcars {{TEAM_TERMINAL_LIST}})
