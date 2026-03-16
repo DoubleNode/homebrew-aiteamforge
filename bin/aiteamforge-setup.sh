@@ -870,6 +870,34 @@ if [ "$INSTALL_FLEET" = "yes" ]; then
   echo ""
 fi
 
+# -----------------------------------------------------------------------
+# Load LaunchAgents (must run at TOP LEVEL, not in subshells)
+# launchctl fails silently when run inside pipes or subshells
+# -----------------------------------------------------------------------
+echo -e "${BOLD}Loading LaunchAgents...${NC}"
+_loaded_agents=0
+for _plist in \
+    "$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist" \
+    "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist" \
+    "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist" \
+    "$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist" \
+    "$HOME/Library/LaunchAgents/com.aiteamforge.fleet-monitor.plist"; do
+    if [ -f "$_plist" ]; then
+        _name=$(basename "$_plist" .plist)
+        launchctl unload "$_plist" 2>/dev/null || true
+        if launchctl load "$_plist" 2>/dev/null; then
+            echo -e "  ${GREEN}✓${NC} ${_name}"
+            _loaded_agents=$((_loaded_agents + 1))
+        else
+            echo -e "  ${YELLOW}⚠${NC} ${_name} (failed to load)"
+        fi
+    fi
+done
+if [ "$_loaded_agents" -eq 0 ]; then
+    echo -e "  ${YELLOW}⚠${NC} No LaunchAgents found to load"
+fi
+echo ""
+
 # ═══════════════════════════════════════════════════════════════════════════
 # WRITE CONFIGURATION FILE
 # ═══════════════════════════════════════════════════════════════════════════
