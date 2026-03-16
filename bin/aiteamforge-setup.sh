@@ -921,10 +921,82 @@ echo "  Machine:    ${MACHINE_NAME}"
 echo "  Directory:  ${INSTALL_DIR}"
 echo "  Teams:      ${SELECTED_TEAMS[*]}"
 echo ""
-echo "Next steps:"
-echo "  1. Restart your terminal:  source ~/.zshrc"
-echo "  2. Run health check:       aiteamforge doctor"
-echo "  3. Start your environment: aiteamforge start"
+
+# -----------------------------------------------------------------------
+# Post-install checklist: detect what still needs attention
+# -----------------------------------------------------------------------
+echo -e "${BOLD}Post-Install Checklist${NC}"
 echo ""
-echo "For help: aiteamforge help"
+
+CHECKLIST_ITEMS=0
+
+# GitHub CLI authentication
+if command -v gh &>/dev/null; then
+  if gh auth status &>/dev/null 2>&1; then
+    echo -e "  ${GREEN}✓${NC} GitHub CLI authenticated"
+  else
+    echo -e "  ${YELLOW}○${NC} GitHub CLI not authenticated"
+    echo -e "    Run: ${CYAN}gh auth login${NC}"
+    CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+  fi
+fi
+
+# Tailscale (if Fleet Monitor was selected)
+if [ "$INSTALL_FLEET" = "yes" ] || [ "$INSTALL_FLEET" = "skip" ]; then
+  if command -v tailscale &>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Tailscale installed"
+  else
+    echo -e "  ${YELLOW}○${NC} Tailscale not installed (optional — needed for remote Fleet Monitor access)"
+    echo -e "    Install: ${CYAN}brew install tailscale${NC}"
+    CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+  fi
+fi
+
+# iTerm2 Python API
+if [ -d "/Applications/iTerm.app" ]; then
+  api_enabled=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || true)
+  if [ "$api_enabled" = "1" ]; then
+    echo -e "  ${GREEN}✓${NC} iTerm2 Python API enabled"
+  else
+    echo -e "  ${YELLOW}○${NC} iTerm2 Python API not enabled (needed for automatic tab creation)"
+    echo -e "    Fix: ${CYAN}defaults write com.googlecode.iterm2 EnableAPIServer -bool true${NC}"
+    echo -e "    Then restart iTerm2"
+    CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+  fi
+fi
+
+# Shell integration
+if [ -f "$HOME/.zshrc" ] && grep -q "aiteamforge" "$HOME/.zshrc" 2>/dev/null; then
+  echo -e "  ${GREEN}✓${NC} Shell integration in .zshrc"
+else
+  echo -e "  ${YELLOW}○${NC} Shell not yet reloaded"
+  echo -e "    Run: ${CYAN}source ~/.zshrc${NC}"
+  CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+fi
+
+echo ""
+
+if [ "$CHECKLIST_ITEMS" -eq 0 ]; then
+  echo -e "  ${GREEN}All set! No additional steps needed.${NC}"
+else
+  echo -e "  ${YELLOW}${CHECKLIST_ITEMS} item(s) above will enhance your setup (all optional).${NC}"
+fi
+
+echo ""
+echo -e "${BOLD}Getting Started${NC}"
+echo ""
+echo "  Launch a team:"
+for team_id in "${SELECTED_TEAMS[@]}"; do
+  [ -z "$team_id" ] && continue
+  echo -e "    ${CYAN}${INSTALL_DIR}/${team_id}-startup.sh${NC}"
+  break  # Just show the first one as example
+done
+if [ ${#SELECTED_TEAMS[@]} -gt 1 ]; then
+  echo "    (${#SELECTED_TEAMS[@]} teams available)"
+fi
+echo ""
+echo "  Other commands:"
+echo -e "    ${CYAN}aiteamforge doctor${NC}    Health check & diagnostics"
+echo -e "    ${CYAN}aiteamforge status${NC}    Show environment status"
+echo -e "    ${CYAN}aiteamforge help${NC}      All available commands"
 echo ""
