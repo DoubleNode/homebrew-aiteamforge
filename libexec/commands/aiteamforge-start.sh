@@ -13,7 +13,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="1.3.7"
+VERSION="1.3.8"
 
 # Options
 OPEN_BROWSER=false
