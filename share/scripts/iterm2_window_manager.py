@@ -13,7 +13,7 @@ Usage:
     python3 iterm2_window_manager.py --window-title "Team Name" --action set-title
 
 Note: Requires the 'iterm2' Python package. On Python 3.12+ (PEP 668), use a venv:
-    python3 -m venv ~/dev-team/.venv && ~/dev-team/.venv/bin/pip install iterm2
+    python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2
 """
 
 import argparse
@@ -26,11 +26,11 @@ import sys
 try:
     import iterm2
 except ImportError:
-    venv_python = os.path.expanduser("~/dev-team/.venv/bin/python3")
+    venv_python = os.path.expanduser("~/aiteamforge/.venv/bin/python3")
     if os.path.isfile(venv_python) and sys.executable != venv_python:
         os.execv(venv_python, [venv_python] + sys.argv)
     print("Error: iterm2 module not installed.", file=sys.stderr)
-    print("Fix with: python3 -m venv ~/dev-team/.venv && ~/dev-team/.venv/bin/pip install iterm2", file=sys.stderr)
+    print("Fix with: python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2", file=sys.stderr)
     sys.exit(1)
 
 

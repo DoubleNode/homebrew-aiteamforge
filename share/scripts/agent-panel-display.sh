@@ -155,7 +155,7 @@ get_board_file() {
         "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" \
         "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" \
         "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" \
-        "/Users/Shared/Development/Main Event/dev-team/kanban" \
+        "/Users/Shared/Development/Main Event/aiteamforge/kanban" \
         "/Users/Shared/Development/DNSFramework/kanban" \
         "/Users/Shared/Development/DoubleNode/Starwords/kanban" \
         "/Users/Shared/Development/DoubleNode/appPlanning/kanban" \
