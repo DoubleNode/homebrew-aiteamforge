@@ -10,7 +10,7 @@ set -euo pipefail
 # Source shared utilities (will be sourced by setup wizard)
 # shellcheck disable=SC2034
 INSTALLER_NAME="Claude Code Configuration"
-INSTALLER_VERSION="1.3.9"
+INSTALLER_VERSION="1.4.0"
 
 # Default paths (will be overridden by setup wizard config)
 # CLAUDE_CONFIG_DIR: Where Claude Code config lives.

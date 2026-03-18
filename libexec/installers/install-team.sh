@@ -75,6 +75,12 @@ echo ""
 # Source the team configuration
 source "$TEAM_CONF"
 
+# Save the base working dir from conf (before env override)
+# For project-based teams, this is the parent dir (e.g., ~/medical)
+# while TEAM_WORKING_DIR from env includes the project (e.g., ~/medical/ehlers.darren)
+TEAM_BASE_WORKING_DIR="${TEAM_WORKING_DIR}"
+TEAM_BASE_WORKING_DIR="${TEAM_BASE_WORKING_DIR/\$HOME/$HOME}"
+
 echo "Team Name: $TEAM_NAME"
 echo "Category: $TEAM_CATEGORY"
 echo "Description: $TEAM_DESCRIPTION"
@@ -158,10 +164,22 @@ SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 # Build space-separated terminal list from agents (for template substitution)
 TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]}"
 
-# Check for team-specific template first, then generic template
+# Determine if this is a project-based team
+IS_PROJECT_TEAM="false"
+REQUIRES_CLIENT="false"
+if [[ -f "$TEAM_CONF" ]]; then
+    grep -q 'TEAM_HAS_PROJECTS="true"' "$TEAM_CONF" && IS_PROJECT_TEAM="true"
+    grep -q 'TEAM_REQUIRES_CLIENT_ID="true"' "$TEAM_CONF" && REQUIRES_CLIENT="true"
+fi
+
+# Check for team-specific template first, then generic/project template
 STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_STARTUP_SCRIPT.template"
 if [[ ! -f "$STARTUP_TEMPLATE" ]]; then
-    STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-startup.sh.template"
+    if [[ "$IS_PROJECT_TEAM" == "true" ]]; then
+        STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-project-startup.sh.template"
+    else
+        STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-startup.sh.template"
+    fi
 fi
 
 SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_SHUTDOWN_SCRIPT.template"
@@ -177,7 +195,8 @@ if [[ -f "$STARTUP_TEMPLATE" ]]; then
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
         -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
-        -e "s|{{TEAM_WORKING_DIR}}|${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}|g" \
+        -e "s|{{TEAM_WORKING_DIR}}|$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_BASE_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)|g" \
+        -e "s|{{TEAM_REQUIRES_CLIENT}}|${REQUIRES_CLIENT}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$STARTUP_TEMPLATE" > "$STARTUP_SCRIPT"
     chmod +x "$STARTUP_SCRIPT"
