@@ -184,6 +184,13 @@ fi
 # ============================================================================
 # Start
 # ============================================================================
+
+# Ensure LCARS Web profile exists in iTerm2
+LCARS_PROFILE_SCRIPT="$AITEAMFORGE_DIR/scripts/create-lcars-profile.py"
+if [[ -f "$LCARS_PROFILE_SCRIPT" ]]; then
+    python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
+fi
+
 clear
 
 echo "🚀 ${TEAM_NAME} — ${DISPLAY_NAME}"
@@ -232,14 +239,14 @@ echo "⭐ Creating terminal tabs..."
 
 if pgrep -f "iTerm.app" > /dev/null; then
 
-    # LCARS tab
+    # LCARS tab — inline web view of kanban dashboard
     echo "  Opening tab: LCARS"
     python3 "$WM" \
         --action create-tab \
         --window-title "$ITERM_WINDOW_NAME" \
-        --profile "Default" \
+        --profile "LCARS Web" \
         --tab-name "LCARS" \
-        --command "echo '🖥  LCARS Dashboard: http://localhost:$LCARS_PORT'; echo ''; echo 'Open in browser: open http://localhost:$LCARS_PORT'; echo ''; echo 'Kanban: kb-list | kb-add | kb-status'; exec zsh" \
+        --command "http://localhost:$LCARS_PORT" \
         2>>"$ITERM_STARTUP_LOG"
     sleep 0.3
 

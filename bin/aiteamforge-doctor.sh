@@ -26,7 +26,7 @@ fi
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
-VERSION="1.4.1"
+VERSION="1.4.2"
 
 # Usage
 usage() {
