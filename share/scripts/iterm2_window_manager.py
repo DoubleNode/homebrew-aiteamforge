@@ -13,7 +13,7 @@ Usage:
     python3 iterm2_window_manager.py --window-title "Team Name" --action set-title
 
 Note: Requires the 'iterm2' Python package. On Python 3.12+ (PEP 668), use a venv:
-    python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2
+    python3 -m venv ~/dev-team/.venv && ~/dev-team/.venv/bin/pip install iterm2
 """
 
 import argparse
@@ -22,15 +22,15 @@ import os
 import subprocess
 import sys
 
-# If iterm2 is not available, try re-executing via the aiteamforge venv
+# If iterm2 is not available, try re-executing via the dev-team venv
 try:
     import iterm2
 except ImportError:
-    venv_python = os.path.expanduser("~/aiteamforge/.venv/bin/python3")
+    venv_python = os.path.expanduser("~/dev-team/.venv/bin/python3")
     if os.path.isfile(venv_python) and sys.executable != venv_python:
         os.execv(venv_python, [venv_python] + sys.argv)
     print("Error: iterm2 module not installed.", file=sys.stderr)
-    print("Fix with: python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2", file=sys.stderr)
+    print("Fix with: python3 -m venv ~/dev-team/.venv && ~/dev-team/.venv/bin/pip install iterm2", file=sys.stderr)
     sys.exit(1)
 
 
@@ -420,17 +420,73 @@ async def resize_pane_by_env(connection, target_cols=30):
         for tab in window.tabs:
             for session in tab.sessions:
                 if session.session_id == session_uuid:
+                    current_width = session.grid_size.width
+                    if current_width == target_cols:
+                        return True  # already correct
+
+                    # Calculate the other pane's size from the current
+                    # total so the window size doesn't change.
+                    total_cols = sum(
+                        s.grid_size.width for s in tab.sessions
+                    )
+                    other_cols = max(total_cols - target_cols, 80)
                     session.preferred_size = iterm2.util.Size(target_cols, 50)
-                    # Also set the other pane to fill remaining space
                     for other in tab.sessions:
                         if other.session_id != session.session_id:
-                            other.preferred_size = iterm2.util.Size(170, 50)
+                            other.preferred_size = iterm2.util.Size(other_cols, 50)
                     await tab.async_update_layout()
-                    print(f"Resized pane {session.session_id} to {target_cols} cols")
+                    print(f"Resized pane {session.session_id}: "
+                          f"{current_width} -> {target_cols} cols")
                     return True
     print(f"Session not found: {env_session_id} (uuid: {session_uuid})", file=sys.stderr)
     return False
 
+
+
+async def reset_all_agent_panels(connection, target_cols=30):
+    """Reset ALL agent panel panes across all windows to the target width.
+
+    Iterates through every tab in every window. For tabs with exactly 2 panes,
+    sets the narrower pane (the agent panel) to target_cols and the wider pane
+    to the remainder. Processes one tab at a time to avoid cascading.
+    """
+    import asyncio
+    app = await iterm2.async_get_app(connection)
+    fixed = 0
+    skipped = 0
+
+    for window in app.windows:
+        for tab in window.tabs:
+            sessions = tab.sessions
+            if len(sessions) != 2:
+                continue  # skip tabs without a 2-pane split
+
+            # Identify the agent panel (narrower pane) vs main terminal
+            s0, s1 = sessions[0], sessions[1]
+            w0, w1 = s0.grid_size.width, s1.grid_size.width
+            if w0 <= w1:
+                agent, main = s0, s1
+                agent_w, main_w = w0, w1
+            else:
+                agent, main = s1, s0
+                agent_w, main_w = w1, w0
+
+            if agent_w == target_cols:
+                skipped += 1
+                continue
+
+            total = agent_w + main_w
+            agent.preferred_size = iterm2.util.Size(target_cols, 50)
+            main.preferred_size = iterm2.util.Size(
+                max(total - target_cols, 80), 50
+            )
+            await tab.async_update_layout()
+            fixed += 1
+
+            # Small delay between tabs to let iTerm2 settle
+            await asyncio.sleep(0.1)
+
+    print(f"Reset {fixed} panels, {skipped} already correct")
 
 
 async def set_session_font(connection, font_spec):
@@ -523,6 +579,10 @@ async def main_async(args):
         font_name = args.font or "JetBrainsMonoNF-Light 9"
         await set_session_font(connection, font_name)
 
+    elif args.action == "reset-panels":
+        target = int(args.target_cols) if args.target_cols else 30
+        await reset_all_agent_panels(connection, target)
+
     elif args.action == "list-windows":
         app = await iterm2.async_get_app(connection)
         print("Windows:")
@@ -548,7 +608,7 @@ def main():
     parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'JetBrainsMonoNF-Light 9')")
     parser.add_argument(
         "--action", "-a",
-        choices=["create-window", "init-team-window", "create-tab", "set-title", "select-tab", "split-agent-panel", "resize-pane", "set-font", "list-windows"],
+        choices=["create-window", "init-team-window", "create-tab", "set-title", "select-tab", "split-agent-panel", "resize-pane", "reset-panels", "set-font", "list-windows"],
         default="create-window",
         help="Action to perform (init-team-window should be called FIRST in startup scripts, select-tab after all tabs created)"
     )
