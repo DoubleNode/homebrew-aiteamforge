@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Panel</title>
+<style>
+    :root {
+        --theme-color: #b8860b;
+        --theme-highlight: #daa520;
+        --bg-color: #0a0a0f;
+        --text-primary: #e8e8e8;
+        --text-secondary: #888;
+        --border-color: #333;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        background: var(--bg-color);
+        color: var(--text-primary);
+        font-family: -apple-system, 'Helvetica Neue', sans-serif;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        padding: 16px;
+        overflow-x: hidden;
+    }
+    .avatar-frame {
+        width: 180px;
+        height: 180px;
+        border-radius: 30px;
+        overflow: hidden;
+        border: 2px solid var(--theme-color);
+        margin-bottom: 12px;
+        box-shadow: 0 0 20px rgba(var(--theme-rgb, 184,134,11), 0.3);
+        transition: border-color 0.3s;
+    }
+    .avatar-frame img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        border-radius: 30px;
+    }
+    .developer-name {
+        font-size: 16px;
+        font-weight: 700;
+        color: var(--text-primary);
+        text-align: center;
+        margin-bottom: 2px;
+    }
+    .role {
+        font-size: 12px;
+        color: var(--theme-highlight);
+        text-align: center;
+        margin-bottom: 12px;
+        text-transform: uppercase;
+        letter-spacing: 1px;
+    }
+    .amb-section {
+        text-align: center;
+        margin-bottom: 8px;
+    }
+    .amb-handle {
+        font-size: 11px;
+        color: var(--text-secondary);
+        font-family: 'SF Mono', 'Menlo', monospace;
+        margin-bottom: 4px;
+    }
+    .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        margin-bottom: 4px;
+    }
+    .badge-item img {
+        width: 20px;
+        height: 20px;
+    }
+    .badge-names {
+        text-align: center;
+        margin-top: 4px;
+    }
+    .badge-names div {
+        font-size: 9px;
+        color: var(--text-secondary);
+        line-height: 1.4;
+    }
+    .terminal-badge {
+        display: inline-block;
+        background: var(--theme-color);
+        color: var(--bg-color);
+        font-size: 11px;
+        font-weight: 700;
+        padding: 3px 10px;
+        border-radius: 4px;
+        margin-bottom: 12px;
+    }
+    .waiting {
+        text-align: center;
+        color: var(--text-secondary);
+        margin-top: 40px;
+        font-size: 14px;
+    }
+    .waiting .pulse {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        border-radius: 50%;
+        background: var(--theme-color);
+        animation: pulse 2s infinite;
+        margin-bottom: 12px;
+    }
+    @keyframes pulse {
+        0%, 100% { opacity: 0.3; transform: scale(0.8); }
+        50% { opacity: 1; transform: scale(1.2); }
+    }
+
+    /* Theme colors */
+    body.theme-command { --theme-color: #c0392b; --theme-highlight: #e74c3c; }
+    body.theme-operations { --theme-color: #b8860b; --theme-highlight: #daa520; }
+    body.theme-sciences { --theme-color: #1a5276; --theme-highlight: #2980b9; }
+    body.theme-science { --theme-color: #1a7a6a; --theme-highlight: #2ecc71; }
+    body.theme-engineering { --theme-color: #a04000; --theme-highlight: #d35400; }
+    body.theme-communications { --theme-color: #b8860b; --theme-highlight: #daa520; }
+</style>
+</head>
+<body>
+    <div id="content" style="display:none; width:100%; display:flex; flex-direction:column; align-items:center;">
+        <div class="avatar-frame">
+            <img id="avatar" src="" alt="Agent Avatar">
+        </div>
+        <div class="developer-name" id="developer"></div>
+        <div class="role" id="role"></div>
+        <div class="amb-section" id="amb-section" style="display:none;">
+            <div class="amb-handle" id="amb-handle"></div>
+            <div class="badge-row" id="badges"></div>
+            <div class="badge-names" id="badge-names"></div>
+        </div>
+        <span class="terminal-badge" id="terminal-badge"></span>
+    </div>
+    <div id="waiting" class="waiting">
+        <div class="pulse"></div>
+        <div>Awaiting agent data...</div>
+    </div>
+<script>
+    const params = new URLSearchParams(window.location.search);
+    let currentDataStr = '';
+
+    // Sanitize text for defense-in-depth against XSS if values ever enter innerHTML
+    function sanitizeText(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
+
+    function applyData(data) {
+        document.getElementById('waiting').style.display = 'none';
+        document.getElementById('content').style.display = 'flex';
+
+        // Apply theme
+        document.body.className = '';
+        if (data.theme) document.body.classList.add('theme-' + data.theme.toLowerCase());
+
+        document.title = (data.developer || 'Agent') + ' - ' + (data.team || '').charAt(0).toUpperCase() + (data.team || '').slice(1);
+        document.getElementById('developer').textContent = data.developer || '';
+        document.getElementById('role').textContent = data.role || '';
+
+        // AMB badges (optional — only shows for registered agents)
+        const ambSection = document.getElementById('amb-section');
+        const ambHandle = document.getElementById('amb-handle');
+        const badgesEl = document.getElementById('badges');
+        const badgeNamesEl = document.getElementById('badge-names');
+        if (data.amb_handle) {
+            ambHandle.textContent = '@' + data.amb_handle;
+            if (data.badges && data.badges.length > 0) {
+                badgesEl.textContent = '';
+                badgeNamesEl.textContent = '';
+                data.badges.slice(0, 8).forEach(b => {
+                    const safeEmoji = sanitizeText(b.emoji || '');
+                    const safeName = sanitizeText(b.name || '');
+                    const cp = [...(b.emoji || '')].map(c => {
+                        const hex = c.codePointAt(0).toString(16);
+                        return hex;
+                    }).filter(h => h !== 'fe0f').join('-');
+                    const img = document.createElement('img');
+                    img.className = 'badge-item';
+                    img.src = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/' + cp + '.png';
+                    img.alt = safeEmoji;
+                    img.title = safeName;
+                    badgesEl.appendChild(img);
+                    if (b.name) {
+                        const nameDiv = document.createElement('div');
+                        nameDiv.textContent = safeName;
+                        badgeNamesEl.appendChild(nameDiv);
+                    }
+                });
+            } else {
+                badgesEl.textContent = '';
+                badgeNamesEl.textContent = '';
+            }
+            ambSection.style.display = 'block';
+        } else {
+            ambSection.style.display = 'none';
+            ambHandle.textContent = '';
+            badgesEl.textContent = '';
+            badgeNamesEl.textContent = '';
+        }
+
+        document.getElementById('terminal-badge').textContent = data.terminal || '';
+
+        if (data.avatar && data.team) {
+            const img = document.getElementById('avatar');
+            const newSrc = '/images/' + data.team + '_' + data.avatar + '_avatar.png';
+            if (img.src !== newSrc && !img.src.endsWith(newSrc)) {
+                img.src = newSrc;
+                img.onerror = function() {
+                    this.src = '/images/' + data.team + '_' + data.avatar + '_avatar_thumb.png';
+                    this.onerror = null;
+                };
+            }
+        }
+    }
+
+    // If URL has params, use them immediately
+    if (params.get('team') && params.get('developer')) {
+        const data = {
+            team: params.get('team'),
+            developer: params.get('developer'),
+            role: params.get('role'),
+            terminal: params.get('terminal'),
+            theme: params.get('theme'),
+            avatar: params.get('avatar'),
+            amb_handle: params.get('amb_handle')
+        };
+        currentDataStr = JSON.stringify(data);
+        applyData(data);
+    }
+
+    // Poll for updates from the server
+    // Uses /api/agent-panel?session=X for per-session (per-terminal-tab) data
+    const sessionParam = params.get('session') || '';
+    const pollUrl = '/api/agent-panel' + (sessionParam ? '?session=' + encodeURIComponent(sessionParam) : '');
+    setInterval(async () => {
+        try {
+            const resp = await fetch(pollUrl);
+            if (resp.ok) {
+                const data = await resp.json();
+                if (data && data.developer) {
+                    const dataStr = JSON.stringify(data);
+                    if (dataStr !== currentDataStr) {
+                        currentDataStr = dataStr;
+                        applyData(data);
+                    }
+                }
+            }
+        } catch (e) { /* server not available, ignore */ }
+    }, 2000);
+</script>
+</body>
+</html>

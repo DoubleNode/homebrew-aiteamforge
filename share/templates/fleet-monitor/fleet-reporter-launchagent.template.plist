@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.devteam.fleet-reporter</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/bash</string>
+        <string>{{REPORTER_SCRIPT_PATH}}</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>WorkingDirectory</key>
+    <string>{{DEV_TEAM_DIR}}</string>
+    <key>StandardOutPath</key>
+    <string>{{DEV_TEAM_DIR}}/logs/fleet-reporter.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{DEV_TEAM_DIR}}/logs/fleet-reporter.error.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>{{USER_HOME}}</string>
+    </dict>
+    <key>KeepAlive</key>
+    <false/>
+    <key>Nice</key>
+    <integer>10</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

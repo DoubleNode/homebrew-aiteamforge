@@ -1,0 +1,152 @@
+name: Test Homebrew Formula
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/tests.yml'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'Formula/**'
+      - '.github/workflows/tests.yml'
+  workflow_dispatch:
+
+jobs:
+  test-formula:
+    name: Test Formula on macOS
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        os: [macos-13, macos-14]  # Intel and ARM
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Caches/pip
+          key: ${{ runner.os }}-homebrew-${{ hashFiles('Formula/dev-team.rb') }}
+          restore-keys: |
+            ${{ runner.os }}-homebrew-
+
+      - name: Install formula dependencies
+        run: |
+          brew install python@3.13 node jq gh git
+
+      - name: Tap local repository
+        run: |
+          mkdir -p $(brew --repository)/Library/Taps/doublenode
+          ln -s $PWD $(brew --repository)/Library/Taps/doublenode/homebrew-dev-team
+
+      - name: Audit formula
+        run: |
+          brew audit --strict --online Formula/dev-team.rb
+
+      - name: Install formula
+        run: |
+          brew install --verbose --build-from-source dev-team
+
+      - name: Test formula
+        run: |
+          brew test dev-team
+
+      - name: Verify installation
+        run: |
+          # Check main commands exist
+          which dev-team
+          which dev-team-setup
+          which dev-team-doctor
+
+          # Check they're executable
+          dev-team --version
+          dev-team-setup --help
+          dev-team-doctor --version
+
+          # Verify core files installed
+          test -d $(brew --prefix)/opt/dev-team/libexec/scripts
+          test -d $(brew --prefix)/opt/dev-team/libexec/config/templates
+          test -d $(brew --prefix)/opt/dev-team/libexec/docs
+          test -f $(brew --prefix)/opt/dev-team/libexec/kanban-helpers.sh
+
+      - name: Test setup wizard (dry run)
+        run: |
+          # Test help output
+          dev-team setup --help
+
+      - name: Test doctor (without config)
+        run: |
+          # Should report not configured but not crash
+          dev-team doctor --check dependencies || true
+          dev-team doctor --check framework
+
+      - name: Uninstall formula
+        run: |
+          brew uninstall dev-team
+
+      - name: Verify clean uninstall
+        run: |
+          # Commands should not exist
+          ! which dev-team || exit 1
+          ! which dev-team-setup || exit 1
+          ! which dev-team-doctor || exit 1
+
+  lint-formula:
+    name: Lint Formula
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Lint formula with brew style
+        run: |
+          brew style Formula/dev-team.rb
+
+      - name: Lint formula with RuboCop
+        run: |
+          brew install --quiet rubocop
+          rubocop Formula/dev-team.rb
+
+  test-scripts:
+    name: Test Core Scripts
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          brew install python@3.13 node jq
+
+      - name: Check script syntax
+        run: |
+          # Check bash scripts
+          bash -n bin/dev-team-cli.sh
+          bash -n bin/dev-team-setup.sh
+          bash -n bin/dev-team-doctor.sh
+
+      - name: Run ShellCheck on scripts
+        run: |
+          brew install shellcheck
+          shellcheck bin/*.sh || true  # Allow warnings for now
+
+      - name: Test script permissions
+        run: |
+          # Scripts should be executable
+          test -x bin/dev-team-cli.sh
+          test -x bin/dev-team-setup.sh
+          test -x bin/dev-team-doctor.sh

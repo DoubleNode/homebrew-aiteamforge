@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "kanban-integration": {
+      "command": "node",
+      "args": [
+        "{{AITEAMFORGE_DIR}}/mcp-servers/kanban-integration/dist/index.js"
+      ],
+      "env": {
+        "KANBAN_BOARD_PATH": "{{AITEAMFORGE_DIR}}/kanban"
+      }
+    }
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf /*:*)",
+      "Bash(rm -rf ~/*:*)",
+      "Bash(sudo rm -rf:*)",
+      "Bash(mkfs:*)",
+      "Bash(dd if=* of=/dev/*:*)"
+    ],
+    "ask": [
+      "Bash(git push --force:*)",
+      "Bash(git reset --hard:*)"
+    ]
+  },
+  "model": "opus",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/kanban-session-start.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run {{CLAUDE_CONFIG_DIR}}/hooks/damage-control/bash-tool-damage-control.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run {{CLAUDE_CONFIG_DIR}}/hooks/damage-control/edit-tool-damage-control.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "uv run {{CLAUDE_CONFIG_DIR}}/hooks/damage-control/write-tool-damage-control.py",
+            "timeout": 5
+          }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py start",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/kanban-hook.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Task",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py stop",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/kanban-stop.py"
+          },
+          {
+            "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py cleanup",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "{{CLAUDE_CONFIG_DIR}}/statusline-command.sh"
+  },
+  "enabledPlugins": {
+    "frontend-design@claude-plugins-official": true,
+    "atlassian@claude-plugins-official": true,
+    "firebase@claude-plugins-official": true,
+    "swift-lsp@claude-plugins-official": true,
+    "kanban-integration@local": true
+  },
+  "alwaysThinkingEnabled": true,
+  "mcpServers": {},
+  "skipDangerousModePermissionPrompt": true
+}

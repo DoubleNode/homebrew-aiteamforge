@@ -1,0 +1,977 @@
+# Default Claude Code Guidelines
+
+## 🔐 Git Workflow Rules
+
+### **CRITICAL: Protected Branch Rules**
+
+**Protected Branches:**
+- `develop` - Main development branch (ALL PRs target this)
+- `master` - Production-only (App Store releases ONLY)
+
+### **✅ Direct Commit Exception for `develop`**
+When **ALL** of the following conditions are met, you MAY commit directly to `develop`:
+1. You are currently on the `develop` branch
+2. You are **NOT** in a git worktree (main repo only)
+3. Changes are minor (docs, config, RELNOTES, small fixes)
+
+**How to check if you can commit directly:**
+```bash
+# Check current branch
+git branch --show-current  # Must be "develop"
+
+# Check if in worktree (if this returns ".git", you're in main repo)
+git rev-parse --git-dir 2>/dev/null
+# OR if path contains "worktrees/", you're in a worktree - use PR workflow
+```
+
+**If in a worktree:** Always use the PR workflow, even for minor changes. **Do NOT checkout `develop`, do NOT create/modify files on `develop`, do NOT commit to `develop`. See the ABSOLUTE PROHIBITION section below.**
+
+### **⚠️ IMPORTANT: Branch Strategy**
+- **`develop`** = Active development, all PRs merge here
+- **`master`** = Production releases ONLY (App Store builds)
+- **NEVER create PRs targeting `master`** unless doing a production release
+- **ALWAYS target `develop`** for feature/bugfix/refactor PRs
+
+### **🌳 CRITICAL: Git Worktree Rules**
+When working in a **git worktree** (created by `kb-run` or `git worktree add`):
+- **ALWAYS use the existing worktree branch** - Do NOT create new branches
+- The worktree branch (e.g., `feature/xaca-0015`) is the correct branch for all work
+- Check current branch with `git branch --show-current` before making changes
+- Commit all work directly to the worktree's branch
+- **NEVER** create a "more descriptive" branch - the worktree branch IS the working branch
+
+**How to detect if you're in a worktree:**
+```bash
+# If this returns a path, you're in a worktree
+git rev-parse --git-common-dir 2>/dev/null | grep -v "^\.git$"
+# OR check if path contains "worktrees/"
+pwd | grep -q "worktrees/"
+```
+
+### **🚨🚨🚨 ABSOLUTE PROHIBITION: Worktree Agents MUST NOT Touch `develop` 🚨🚨🚨**
+
+> **THIS IS THE #1 MOST VIOLATED RULE. READ THIS CAREFULLY.**
+
+**If you are running inside a git worktree, you are FORBIDDEN from:**
+- ❌ **Checking out `develop`** (`git checkout develop` — NEVER do this in a worktree)
+- ❌ **Creating or modifying files on `develop`** — not even "minor" or "config" changes
+- ❌ **Committing to `develop`** — ALL commits go to YOUR WORKTREE BRANCH ONLY
+- ❌ **Running `git checkout` to ANY branch other than your worktree branch**
+- ❌ **Switching branches at all** — worktrees are locked to their branch
+
+**Why this is dangerous:**
+When a worktree agent modifies `develop`, those changes affect **EVERY other worktree and the main repo**. This causes merge conflicts, lost work, broken builds, and corrupted state across ALL agents. One careless checkout can destroy hours of parallel work.
+
+**⚠️ MANDATORY: Pre-Work Verification**
+
+**Before creating, editing, or writing ANY file**, agents in a worktree MUST verify they are on the correct branch:
+
+```bash
+# STEP 1: Am I in a worktree?
+GIT_COMMON=$(git rev-parse --git-common-dir 2>/dev/null)
+if [ "$GIT_COMMON" != ".git" ]; then
+  echo "⚠️  IN WORKTREE — branch switching is FORBIDDEN"
+fi
+
+# STEP 2: Confirm I am on my worktree branch (NOT develop, NOT master)
+CURRENT_BRANCH=$(git branch --show-current)
+if [ "$CURRENT_BRANCH" = "develop" ] || [ "$CURRENT_BRANCH" = "master" ]; then
+  echo "🚨 STOP: On protected branch '$CURRENT_BRANCH' inside a worktree!"
+  echo "🚨 DO NOT create, edit, or commit ANY files."
+  echo "🚨 Your worktree branch should be something like 'feature/xxx' or 'bugfix/xxx'."
+  exit 1
+fi
+echo "✅ On branch: $CURRENT_BRANCH — safe to proceed"
+```
+
+**Run this check at the START of every task, not just before commits.**
+
+**If the check fails (you find yourself on `develop` in a worktree):**
+1. **STOP ALL WORK IMMEDIATELY** — do not create, edit, or write any files
+2. **Do NOT attempt to fix it yourself** (no `git checkout`, no `git stash`)
+3. **Report to the user** that you are on `develop` inside a worktree and need guidance
+4. **WAIT for explicit user instructions** before proceeding
+
+**There are ZERO exceptions to this rule. No change is minor enough to justify touching `develop` from a worktree.**
+
+### **🤖 CRITICAL: Subagent Worktree Awareness**
+
+When launching subagents (via the Task tool) from within a worktree, you **MUST** ensure all subagent work stays in the current worktree:
+
+1. **Always pass the worktree path** in the subagent prompt — tell the subagent the exact directory to work in (e.g., `"Work in /path/to/worktrees/feature-branch/"`)
+2. **Explicitly state the branch** — include the worktree branch name so the subagent knows which branch it's on and does NOT attempt to switch branches
+3. **Inherit all worktree rules** — subagents are bound by the same worktree rules as the parent agent (no branch switching, no touching `develop`, no creating new branches)
+4. **Never assume subagents know the context** — subagents start fresh; they do not inherit your working directory or git state unless you tell them
+
+**Example subagent prompt from a worktree:**
+```
+Work in /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature/xios-0042.
+You are on branch feature/xios-0042 in a git worktree.
+Do NOT switch branches. Do NOT checkout develop. All file changes must be in this directory.
+<your actual task description>
+```
+
+**Why this matters:**
+Subagents that don't know they're in a worktree may default to the main repo directory or attempt to checkout `develop`, which corrupts shared state across all agents. Every subagent must be explicitly anchored to the worktree.
+
+### **🧹 MANDATORY: Subagent Self-Removal from Crew Tracking**
+
+When spawning subagents (via the Task tool), you **MUST** include a self-removal instruction in every subagent prompt. This removes the subagent's crew avatar from the LCARS agent panel when it completes.
+
+**Why this is required:**
+Background subagents (`run_in_background: true`) do not trigger a PostToolUse hook on completion — only on launch. Without self-removal, their crew avatars persist indefinitely in the panel after the agent finishes.
+
+**MANDATORY final instruction for ALL subagent prompts:**
+```
+MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
+python3 /Users/darrenehlers/aiteamforge/kanban-hooks/subagent-track.py remove <AGENT_TYPE> < /dev/null
+```
+
+Replace `<AGENT_TYPE>` with the subagent_type you passed to the Task tool (e.g., `reno`, `nahla`, `worf`, etc.).
+
+**Example subagent prompt with self-removal:**
+```
+Investigate the crash in PaymentManager.swift and suggest a fix.
+
+MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
+python3 /Users/darrenehlers/aiteamforge/kanban-hooks/subagent-track.py remove worf < /dev/null
+```
+
+**Rules:**
+1. **Every subagent prompt MUST include the removal instruction** — no exceptions
+2. **Place it at the END of the prompt** — so the subagent runs it as its final action
+3. **Use the exact subagent_type** — must match what was passed to the Task tool
+4. **Frame it as mandatory infrastructure cleanup** — prevents role-boundary-conscious agents from refusing
+
+### **Standard Development Workflow**
+
+#### 1. Start New Feature/Fix
+```bash
+# Always start from develop
+git checkout develop
+git pull origin develop
+
+# Create feature branch with descriptive name
+git checkout -b feature/descriptive-name
+# OR
+git checkout -b bugfix/issue-description
+# OR
+git checkout -b refactor/area-being-refactored
+```
+
+**Branch Naming Conventions:**
+- `feature/` - New features
+- `bugfix/` - Bug fixes
+- `refactor/` - Code refactoring
+- `hotfix/` - Urgent production fixes
+- `chore/` - Maintenance tasks
+
+#### 2. Make Changes & Commit
+```bash
+# Stage changes
+git add <files>
+
+# Commit with descriptive message
+git commit -m "Description of changes
+
+- Bullet point details
+- Impact and reasoning
+- Related tickets/issues
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+```
+
+#### 3. Push Branch
+```bash
+git push -u origin feature/descriptive-name
+```
+
+#### 4. Create Pull Request
+```bash
+# ALWAYS target develop (NOT master!)
+gh pr create \
+  --base develop \
+  --title "Feature: Clear descriptive title" \
+  --body "Detailed PR description" \
+  --assignee ehlersd
+```
+
+**Post-PR Creation Steps:**
+1. Update kanban status: `kb-pr` (moves item to "In Review")
+2. Generate the **Review Handoff Prompt** (see step 5 below)
+3. Begin the **PR Approval Monitoring Loop** (see step 5 below)
+
+#### 5. PR Review Handoff & Monitoring
+
+Since all agents author PRs under the same GitHub account (`ehlersd`), agents **cannot** use `gh pr review` to approve their own PRs. Instead, use the `gh-bot-review` tool (via the `ds9-security-review-bot` GitHub App) to submit formal reviews from another terminal.
+
+**A. Generate Review Handoff Prompt**
+
+After creating the PR, generate a concise prompt block the user can copy/paste into a reviewer agent's terminal. Use this template (fill in actual values):
+
+```
+═══════════════════════════════════════════════════════════════════════════════
+ PR REVIEW REQUEST - Paste this into a reviewer agent terminal
+═══════════════════════════════════════════════════════════════════════════════
+
+ PR #<number>: <title>
+ URL: <pr_url>
+ Repo: <repo_path>
+ Kanban Item: <ITEM-ID>
+
+ Summary: <2-3 sentence description of what changed and why>
+
+ Files changed: <count>  |  Lines: +<additions> -<deletions>
+
+ Quick Start:
+   cd <repo_path>
+   gh pr checkout <number>
+   gh pr diff <number>
+
+ Review using the standard checklist (Security, Architecture,
+ Code Quality, Performance, Testing), then submit your review:
+
+   # To approve:
+   gh-bot-review --pr <number> --event APPROVE --body "LGTM - <summary>"
+
+   # To request changes:
+   gh-bot-review --pr <number> --event REQUEST_CHANGES --body "<feedback>"
+
+   # For long reviews, use --body-file:
+   # Write feedback to /tmp/review-<number>.md first, then:
+   gh-bot-review --pr <number> --event REQUEST_CHANGES --body-file /tmp/review-<number>.md
+
+   # For non-blocking suggestions, create kanban subitems (NOT PR comments):
+   source ~/aiteamforge/kanban-helpers.sh
+   kb-backlog sub add <ITEM-ID> "[Review] <suggestion> (PR #<number>)"
+
+   # After submitting REQUEST_CHANGES, enter the reviewer monitoring loop
+   # (see "After Requesting Changes: Reviewer Monitoring Loop" in CLAUDE.md)
+
+ ⚠️  DO NOT MERGE — the creating agent monitors and merges after approval.
+═══════════════════════════════════════════════════════════════════════════════
+```
+
+**B. PR Approval Monitoring Loop**
+
+After generating the handoff prompt, the creating agent polls for approval.
+
+> **IMPORTANT:** Do NOT check `reviewDecision` — GitHub does not count GitHub App bot reviews
+> toward `required_approving_review_count` on the Team plan. `reviewDecision` will always show
+> `"REVIEW_REQUIRED"` even after bot approval. Instead, check the reviews list directly for
+> bot approval and merge with `--admin`.
+
+```bash
+# Set LAST_PROCESSED_AT before (re-)entering the loop to track the last review
+# we already handled. This prevents re-triggering on stale CHANGES_REQUESTED reviews.
+LAST_PROCESSED_AT=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+  --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | .submitted_at // empty')
+
+POLL_COUNT=0
+while true; do
+  STATE=$(gh pr view <number> --json state --jq '.state')
+
+  if [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ]; then
+    echo "PR is $STATE — exiting monitor."
+    break
+  fi
+
+  # Status heartbeat every 5 polls (~5 min)
+  POLL_COUNT=$((POLL_COUNT + 1))
+  if [ $((POLL_COUNT % 5)) -eq 0 ]; then
+    echo "Still watching PR #<number>... (poll $POLL_COUNT)"
+  fi
+
+  # Check latest bot review — single API call, pipe-delimited output split via bash param expansion
+  # (NEVER echo "$VAR" | jq — control chars break parsing; NEVER two calls when one will do)
+  LATEST_REVIEW=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+    --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+  LATEST_AT="${LATEST_REVIEW%|*}"
+  LATEST_STATE="${LATEST_REVIEW#*|}"
+
+  # Skip reviews we already processed (stale review detection)
+  if [ "$LATEST_AT" = "$LAST_PROCESSED_AT" ] || [ -z "$LATEST_STATE" ]; then
+    sleep 60
+    continue
+  fi
+
+  if [ "$LATEST_STATE" = "CHANGES_REQUESTED" ]; then
+    echo "Changes requested by bot — pausing monitor."
+    LAST_PROCESSED_AT="$LATEST_AT"
+    gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+      --jq '[.[] | select(.user.type == "Bot" and .state == "CHANGES_REQUESTED")] | last | .body'
+    # Address feedback, push fixes, then re-run the pre-loop LAST_PROCESSED_AT line and re-enter
+    break
+  fi
+
+  if [ "$LATEST_STATE" = "APPROVED" ]; then
+    echo "Bot approved! Merging with admin flag..."
+    gh pr merge <number> --squash --delete-branch --admin
+    kb-done  # Update kanban status
+    break
+  fi
+
+  sleep 60
+done
+```
+
+**Monitoring Behavior:**
+- Check bot reviews directly via `repos/{owner}/{repo}/pulls/{number}/reviews` API every **60 seconds**
+- Filter by `user.type == "Bot"` to find bot-specific reviews
+- Tracks `LAST_PROCESSED_AT` timestamp to skip already-processed reviews (stale review detection)
+- On latest bot review `APPROVED` → merge with `gh pr merge <N> --squash --delete-branch --admin`, then run `kb-done`
+- On latest bot review `CHANGES_REQUESTED` → notify user with review feedback, pause monitoring, address feedback, push fixes, then re-run `LAST_PROCESSED_AT` capture and re-enter loop
+- On `state: "CLOSED"` or `state: "MERGED"` → notify user and exit monitoring
+- Show a brief status message every **5 polls (~5 min)** so the user knows the agent is still watching
+- Uses `--admin` flag because GitHub Team plan does not count bot reviews for branch protection (see handoff doc)
+- Do **NOT** merge without bot approval — the monitoring loop handles merge automatically
+- **NEVER** use `echo "$VAR" | jq` — always use `gh api --jq` to avoid control character breakage
+
+---
+
+## 🔒 CRITICAL: Git Repository Boundaries
+
+### **Modify ONLY Your Own Team's Repository**
+
+Each Claude agent is assigned to a specific team. You must **ONLY** modify files and code within your team's designated git repository.
+
+### **🏗️ Two Team Models**
+
+We operate with two distinct team organizational models:
+
+#### **Main Event Teams (Platform-Separated)**
+Main Event uses **platform-based separation** where each platform has its own dedicated team:
+
+| Team | Repository Scope |
+|------|------------------|
+| `iOS` | iOS app codebase only |
+| `Android` | Android app codebase only |
+| `Firebase` | Firebase functions and backend only |
+| `MainEvent` | Main Event cross-platform coordination |
+
+**Cross-team boundaries are STRICTLY enforced** for Main Event teams. An iOS agent cannot modify Firebase code, and vice versa.
+
+#### **Freelance Teams (Project-Based)**
+Freelance uses **project-based organization** where each project has ONE team that owns the entire stack:
+
+| Team | Repository Scope |
+|------|------------------|
+| `Freelance` | **Full stack** for assigned freelance project(s) |
+
+**Freelance agents CAN modify iOS, Android, AND Firebase code** within their assigned project. There is no platform separation - one team owns the complete project.
+
+#### **Infrastructure & Strategic Teams**
+These teams operate across all projects with specific scopes:
+
+| Team | Repository Scope |
+|------|------------------|
+| `Academy` | Academy infrastructure, scripts, and kanban system |
+| `Command` | Strategic/planning documents only (no direct code) |
+| `DNS` | DNS infrastructure only |
+
+### **⛔ STOP Protocol for Cross-Repository Access**
+
+**For Main Event Teams:**
+If you are asked to modify files in **another platform's repository**:
+
+1. **STOP immediately** - Do not begin any work
+2. **Inform the user** with this message:
+   > "This file/code belongs to the [OTHER_PLATFORM] team's repository, but I'm assigned to the [MY_PLATFORM] team. I cannot modify code in other platform's repositories. Please either:
+   > - Assign this to a [OTHER_PLATFORM] team agent, or
+   > - Provide explicit cross-team authorization for this specific change."
+3. **Wait for user direction** before proceeding
+
+**For Freelance Teams:**
+- You MAY modify any platform code (iOS/Android/Firebase) within your assigned project
+- You must STILL follow the STOP protocol if asked to work on a **different freelance project** than your assignment
+
+### **🔍 Reading Cross-Repository Files**
+
+All teams **MAY** read files from other repositories for reference or context, but **MUST NOT** modify them (except as permitted by team model above).
+
+**Examples:**
+> Main Event iOS team reading Firebase function code to understand API contracts → ✅ ALLOWED
+> Main Event iOS team modifying Firebase function code → ⛔ NOT ALLOWED
+> Freelance team reading their project's iOS AND Firebase code → ✅ ALLOWED
+> Freelance team modifying their project's iOS AND Firebase code → ✅ ALLOWED
+> Freelance team modifying a DIFFERENT freelance project's code → ⛔ NOT ALLOWED
+
+### **🚫 NEVER Create Files in Other Teams' Directories**
+
+**CRITICAL RULE:** Agents must **NEVER** create, write, or modify files in another team's directories.
+
+**This includes:**
+- Plan documents (`docs/kanban/*.md`)
+- Configuration files
+- Source code files
+- Any other files
+
+**Directory Ownership by Team:**
+| Team | Owned Directories |
+|------|-------------------|
+| `Academy` | `~/aiteamforge/` |
+| `iOS` | `/Users/Shared/Development/Main Event/MainEventApp-iOS/` |
+| `Android` | `/Users/Shared/Development/Main Event/MainEventApp-Android/` |
+| `Firebase` | `/Users/Shared/Development/Main Event/MainEventApp-Functions/` |
+| `Command` | `{{AITEAMFORGE_DIR}}/` |
+| `DNS` | `/Users/Shared/Development/DNSFramework/` |
+
+**⚠️ Academy Team Exception:**
+The Academy team is the **ONLY** team permitted to create or modify files across all team directories. This is because Academy:
+- Maintains shared infrastructure (LCARS, kanban system)
+- May need to create template files or fix configuration issues
+- Provides cross-team tooling and automation
+
+**If you need a file created in another team's directory:**
+1. Ask the user to switch to that team's agent, OR
+2. Ask the user to switch to an Academy agent
+
+**Examples:**
+> iOS agent creating `~/aiteamforge/docs/kanban/XIOS-0001_plan.md` → ⛔ WRONG (Academy directory)
+> iOS agent creating `/Users/Shared/.../MainEventApp-iOS/.../XIOS-0001_plan.md` → ✅ CORRECT
+> Academy agent creating files in iOS directory → ✅ ALLOWED (Academy exception)
+> Firebase agent creating files in Android directory → ⛔ NOT ALLOWED
+
+---
+
+## 🚨 CRITICAL: Kanban Team Boundaries
+
+### **Work ONLY on Your Own Team's Items**
+
+Each Claude agent is assigned to a specific team. You must **ONLY** work on kanban items that belong to your assigned team.
+
+### **🏗️ Two Kanban Models**
+
+Kanban boundaries follow the same team models as repository boundaries:
+
+#### **Main Event Teams (Platform-Separated Boards)**
+Each platform has its own kanban board with strict boundaries:
+
+- `iOS` - iOS app development items only
+- `Android` - Android app development items only
+- `Firebase` - Firebase/backend function items only
+- `MainEvent` - Cross-platform coordination items
+
+**Main Event agents work ONLY on their platform's board items.**
+
+#### **Freelance Teams (Project-Based Boards)**
+Each freelance project has ONE board covering all platforms:
+
+- `Freelance` - Full-stack items for assigned freelance project(s)
+
+**Freelance agents work on ANY platform item** (iOS, Android, Firebase) within their project's board. There is no platform separation.
+
+#### **Infrastructure & Strategic Teams**
+- `Academy` - AI team development infrastructure
+- `Command` - Strategic leadership
+- `DNS` - DNS infrastructure
+
+### **⛔ STOP Protocol for Cross-Team Requests**
+
+**For Main Event Teams:**
+If you are asked to work on a kanban item from **another platform's board**:
+
+1. **STOP immediately** - Do not begin any work
+2. **Inform the user** with this message:
+   > "This kanban item belongs to the [OTHER_PLATFORM] team board, but I'm assigned to the [MY_PLATFORM] team. I cannot work on items from other platform boards. Please either:
+   > - Assign this to a [OTHER_PLATFORM] team agent, or
+   > - Transfer this item to the [MY_PLATFORM] board if it should be our responsibility."
+3. **Wait for user direction** before proceeding
+
+**For Freelance Teams:**
+- You MAY work on any platform items (iOS/Android/Firebase) within your assigned project's board
+- You must STILL follow the STOP protocol if asked to work on a **different freelance project's board**
+
+### **🚫 Kanban Data Modification Rules**
+
+**CRITICAL: NO team (except Academy) may directly modify kanban board data or scripts.**
+
+All kanban operations **MUST** be performed through the official API:
+
+**Allowed Methods:**
+- ✅ `kb-*` shell functions (kb-add, kb-update, kb-move, kb-list, etc.)
+- ✅ Kanban MCP server API calls
+- ✅ `/kanban` skill commands
+
+**Prohibited Actions:**
+- ❌ Direct modification of `kanban-board.json` or any kanban data files
+- ❌ Direct modification of kanban scripts or infrastructure code
+- ❌ Manual editing of board state files
+- ❌ Bypassing the API for "quick fixes"
+- ❌ **Deleting or removing kanban items or subitems** — NEVER delete work history
+
+**⚠️ CRITICAL: Never Delete Items or Subitems**
+Items and subitems must **NEVER** be deleted or removed from a kanban board. If work is no longer needed, mark the item/subitem as **`cancelled`** instead. Cancelled items preserve the decision history, time invested, and reasoning — deleting them destroys institutional knowledge. Use `kb-update` to set `status: cancelled` with a `cancelledReason`.
+
+**Why This Matters:**
+The kanban system maintains data integrity, logs changes, and coordinates across teams. Bypassing the API can cause data corruption, lost work, and cross-team conflicts.
+
+### **🔧 Academy Team Exception (Kanban Developer & Oversight)**
+
+The **Academy team** is the **developer and maintainer** of the kanban system and has special privileges:
+
+**What Academy CAN Do:**
+- ✅ Develop and maintain kanban infrastructure code
+- ✅ Modify kanban scripts, data structures, and APIs
+- ✅ Diagnose issues with any team's kanban board
+- ✅ Investigate board configuration problems
+- ✅ Troubleshoot kanban system issues
+- ✅ Implement kanban system improvements
+- ✅ Provide oversight for kanban operations across all teams
+
+**What Academy CANNOT Do:**
+- ❌ Work on actual implementation items from other team's boards
+- ❌ Implement features/fixes that belong to other teams
+- ❌ Use oversight role to bypass normal team boundaries for non-kanban work
+
+**Example of Acceptable Academy Work:**
+> "The iOS board isn't displaying correctly" → Academy CAN investigate and fix
+> "Add new kanban field for priority scoring" → Academy CAN implement
+> "Fix this iOS crash bug on the iOS board" → Academy CANNOT do this work
+
+### **How to Verify Team Assignment**
+
+Before starting work on any kanban item:
+1. Check which team the item belongs to
+2. Confirm it matches your assigned team
+3. If mismatch, invoke the STOP Protocol above
+
+---
+
+## 📝 Commit Message Guidelines
+
+### **Format:**
+```
+<type>: <short summary> (max 72 characters)
+
+<detailed description>
+- What changed
+- Why it changed
+- Any side effects or considerations
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>
+```
+
+### **Types:**
+- `feat:` - New feature
+- `fix:` - Bug fix
+- `refactor:` - Code refactoring (no functional changes)
+- `perf:` - Performance improvements
+- `test:` - Adding or updating tests
+- `docs:` - Documentation updates
+- `chore:` - Maintenance tasks
+- `style:` - Code style changes (formatting, etc.)
+
+### **Examples:**
+```bash
+# Good
+git commit -m "feat: Add FunCard reload error handling
+
+- Added guard statement to prevent crash when no card selected
+- Implemented proper error reporting with DNSError
+- Added user-facing error popup
+- Fixes critical payment flow crash
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Co-Authored-By: Claude <noreply@anthropic.com>"
+
+# Bad
+git commit -m "fixed stuff"
+git commit -m "updates"
+```
+
+---
+
+## 🎯 Pull Request Guidelines
+
+### **PR Title Format:**
+```
+<Type>: <Clear descriptive title>
+```
+
+Examples:
+- `Feature: Add dictionary access force unwrap fixes`
+- `Bugfix: Fix crash in FunCard reload when no card selected`
+- `Refactor: Eliminate force unwraps in booking interactors`
+
+### **PR Description Required Sections:**
+Summary, Changes Made (per-file), Impact (files/lines changed), Risk Assessment (HIGH/MEDIUM/LOW), Testing Recommendations (manual + regression), Breaking Changes, Checklist (compiles, no lint warnings, follows standards, self-reviewed).
+
+---
+
+## 🚫 What NOT to Do
+
+### **NEVER:**
+1. ❌ Push directly to `master` (or `develop` when in a worktree)
+2. ❌ Create PRs targeting `master` (unless production release)
+3. ❌ Commit without descriptive messages
+4. ❌ Create PRs without proper descriptions
+5. ❌ Merge your own PRs without approval
+6. ❌ Force push (`git push -f`) to shared branches
+7. ❌ Commit sensitive data (credentials, tokens, etc.)
+8. ❌ Skip testing before creating PR
+9. ❌ Ignore SwiftLint warnings
+10. ❌ Leave commented-out code
+11. ❌ Create massive PRs (>500 lines changed)
+12. ❌ **Run `git checkout develop` or `git checkout master` from inside a worktree**
+13. ❌ **Create, edit, or write files while on `develop` inside a worktree**
+14. ❌ **Switch branches inside a worktree for ANY reason** — worktrees are branch-locked
+
+### **ALWAYS:**
+1. ✅ Create feature branches from `develop` (when in worktrees or for larger changes)
+2. ✅ Target `develop` for all PRs (NOT `master`)
+3. ✅ For direct commits to `develop`: verify you're NOT in a worktree first
+4. ✅ **Run the Pre-Work Verification check at the START of every task** (see Worktree Rules above)
+5. ✅ **Confirm your current branch is your worktree branch before ANY file operations**
+6. ✅ Write clear commit messages
+7. ✅ Include PR descriptions with context
+8. ✅ Wait for review before merging (for PRs)
+9. ✅ Test your changes locally
+10. ✅ Keep PRs focused and reasonably sized
+11. ✅ Update documentation when needed
+12. ✅ Follow existing code patterns
+13. ✅ Run SwiftLint before committing
+14. ✅ Use the TodoWrite tool to track progress
+
+---
+
+## 🎨 Code Quality Standards
+
+### **Swift Safety Rules**
+- **No force unwraps** (`!`) — use `guard let` / `if let` / `??` with `DNSError` reporting
+- **No force casts** (`as!`) — use `guard let x = obj as? Type` with `DNSError.DataObjects.invalidCast`
+- **No unsafe array access** (`array[0]`) — use `array.first` with optional handling
+- **No `try!`** — use `do/catch` with `DNSCore.reportError(error)`
+- **Error pattern:** `guard let` → create `DNSError` → `DNSCore.reportError()` → `return`
+
+---
+
+## 🔨 iOS/Xcode Build Tools
+
+### **⚠️ CRITICAL: XcodeGen Rules**
+
+**XcodeGen** (`xcodegen`) generates Xcode project files from a `project.yml` specification.
+
+**ONLY run `xcodegen` when:**
+- ✅ Initially creating a new Xcode project
+- ✅ Explicitly requested by the user to regenerate the project
+
+**NEVER run `xcodegen` during normal development because:**
+- ❌ It **overwrites** the existing `.xcodeproj` file completely
+- ❌ It **loses** manual Xcode configuration changes (build settings, schemes, etc.)
+- ❌ It **destroys** file references and group organization not in `project.yml`
+- ❌ It **removes** manually added frameworks, resources, and capabilities
+
+**If you think the project needs regeneration:**
+1. **STOP** - Do not run xcodegen
+2. **ASK the user** if they want to regenerate the Xcode project
+3. **WARN** that this will overwrite existing project configuration
+4. **Only proceed** with explicit user confirmation
+
+```bash
+# ❌ NEVER do this without explicit user request
+xcodegen generate
+
+# ✅ If user explicitly requests project regeneration
+# First warn about consequences, then proceed only with confirmation
+```
+
+---
+
+## 🧪 Testing Guidelines
+
+### **Before Creating PR:**
+1. Build succeeds without errors
+2. **⚠️ REQUIRED: Run lint validation** (see platform-specific commands below)
+3. **Confirm zero new lint warnings/errors introduced**
+4. **⚠️ REQUIRED: Run unit tests** (when appropriate - see guidelines below)
+5. **Confirm all unit tests pass**
+6. App launches successfully
+7. Test affected features manually
+8. Check for console errors/warnings
+
+### **Platform-Specific Commands:**
+```bash
+# iOS/Swift
+swiftlint                    # Lint
+# Cmd+U in Xcode             # Unit tests
+
+# Android/Kotlin
+./gradlew ktlintCheck        # Lint
+./gradlew lint               # Android Lint
+./gradlew test               # Unit tests
+
+# Firebase/TypeScript
+npm run lint                 # Lint
+npm test                     # Unit tests
+
+# JavaScript/Node
+npm run lint                 # Lint
+npx eslint .                 # Alternative lint
+npm test                     # Unit tests
+```
+
+### **When to Write Unit Tests:**
+- New business logic or utility functions
+- Bug fixes (regression tests prevent recurrence)
+- Data processing or validation changes
+- API/service layer modifications
+- Complex conditional logic
+
+### **When Unit Tests May Be Skipped:**
+- Pure UI/layout changes (visual only)
+- Configuration file updates
+- Documentation changes
+- Simple string/copy updates
+
+**⚠️ IMPORTANT:** PRs will NOT be opened until:
+- Lint validation passes with no new warnings
+- All unit tests pass (when tests are appropriate)
+
+---
+
+## 👀 PR Review Workflow (Reviewer's Guide)
+
+**CRITICAL:** All agents share the same GitHub account (`ehlersd`), so `gh pr review` cannot approve your own PRs. Use `gh-bot-review` instead.
+
+### **Review Process**
+1. **Triage:** `gh pr view <N>` and `gh pr diff <N> --stat` — check title format, description, size (<500 lines), target branch (`develop`)
+2. **Checkout:** `gh pr checkout <N>`
+3. **Review checklist:** Security (no secrets/injection), Architecture (follows patterns, DRY), Code Quality (no force unwraps, proper error handling), Performance (`[weak self]`, no main thread blocking), Testing (edge cases, error paths)
+4. **Submit review via `gh-bot-review`** (NOT `gh pr review`):
+```bash
+gh-bot-review --pr <N> --event APPROVE --body "LGTM - <summary>"
+gh-bot-review --pr <N> --event REQUEST_CHANGES --body "<feedback>"
+# For long reviews: write to /tmp/review-<N>.md, then use --body-file
+```
+
+### **Critical Rules**
+- **USE `gh-bot-review`** — `gh pr review` cannot approve same-account PRs
+- **DO NOT MERGE** — creating agent's monitoring loop handles merge after bot approval
+- Use `--body-file` for detailed reviews (write to `/tmp/review-<N>.md` first)
+- `ds9-security-review-bot` GitHub App installed on `MainEventEntertainment` and `DoubleNode` orgs
+
+### **Approval Criteria**
+- **Required:** CI passes, no security issues, no unjustified force unwraps, code follows patterns, PR description adequate
+- **Blocking (Request Changes):** Security vulnerabilities, data loss potential, breaking changes without migration, missing error handling
+- **Non-Blocking (Kanban Subitems):** Style preferences, future improvement suggestions, docs/test coverage — see below
+
+### **After Requesting Changes: Reviewer Monitoring Loop**
+
+After submitting `REQUEST_CHANGES` via `gh-bot-review`, do NOT exit — enter the
+reviewer monitoring loop to detect when the author pushes fixes:
+
+```bash
+# Record current HEAD SHA after submitting REQUEST_CHANGES
+LAST_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+
+while true; do
+  STATE=$(gh pr view <N> --json state --jq '.state')
+  [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ] && echo "PR $STATE — exiting." && break
+
+  CURRENT_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+  if [ "$CURRENT_SHA" != "$LAST_SHA" ]; then
+    sleep 30  # Stabilization: wait for rapid successive pushes to settle
+    LAST_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+    gh pr checkout <N> && gh pr diff <N>
+    # Re-review: (1) verify each requested change was addressed,
+    # (2) check new code in fix commits for new issues.
+    # Then submit: gh-bot-review --pr <N> --event APPROVE or REQUEST_CHANGES
+  fi
+
+  sleep 60
+done
+```
+
+**Re-review scope:** Primarily verify all requested changes are addressed. Secondarily
+check new code in fix commits. Skip code that was already reviewed. Use `gh pr diff <N>`
+focused on files mentioned in your original `REQUEST_CHANGES` body.
+
+**Edge cases:**
+- PR closed/merged while waiting: loop exits automatically
+- Rapid pushes: 30-second stabilization prevents re-review of intermediate commits
+- Context exhaustion: note current SHA, start fresh terminal, resume with that SHA as LAST_SHA
+
+### **Non-Blocking Suggestions: Capture as Kanban Subitems**
+
+Non-blocking suggestions must NOT be left only as PR comments — they get lost when PRs close.
+Instead, create a kanban subitem for each non-blocking suggestion that has merit.
+
+**Discover the parent kanban item ID** (in priority order):
+1. From the Review Handoff Prompt — look for `Kanban Item: <ID>`
+2. From the branch name: `gh pr view <N> --json headRefName --jq '.headRefName' | grep -oE '[A-Z]+-[0-9]+' | head -1`
+3. From the PR description body
+4. Fallback: if ID cannot be found, add as a PR comment instead
+
+**Create one subitem per suggestion:**
+```bash
+source ~/aiteamforge/kanban-helpers.sh
+kb-backlog sub add <ITEM-ID> "[Review] <actionable description> (PR #<N>)"
+```
+
+Rules:
+- Title MUST start with `[Review]`
+- One subitem per suggestion — do not batch
+- Non-blocking subitems do NOT need to be addressed before merge
+
+### **Merge**
+- **Creating agent** merges after bot approval via monitoring loop (PREFERRED)
+- Squash merge: `gh pr merge <N> --squash --delete-branch`
+- Post-merge: verify `develop` builds, update kanban items
+
+---
+
+## 🤖 Claude-Specific Guidelines
+
+### **Implementation Plan Requirements:**
+All plans MUST include lint validation and unit test steps before PR creation. See Testing Guidelines section for platform-specific commands and when tests are appropriate. Lint and tests **MUST pass** before opening a PR — do NOT ignore failures without explicit user approval.
+
+### **🎯 Planning Mode Behavior**
+
+**THE GOLDEN RULE: PLANNING ≠ EXECUTION. Plan approval is NOT permission to execute.**
+
+For any project requiring kanban items and subitems, use `/plan-project`. This skill enforces the plan-and-delegate workflow: research → create kanban item → create subitems → create plan document → **STOP** with handoff options → **NEVER** auto-start implementation.
+
+**Manual workflow** (if not using `/plan-project`): Complete plan → ExitPlanMode → STOP → present handoff options (DELEGATE / START NOW / TRACK ONLY / MODIFY PLAN) → WAIT for explicit user choice.
+
+**STOP signals:** "plan this", "create kanban items for", "break this down", "delegate", just created a plan document.
+**GO signals:** "plan AND implement", user chooses "START NOW", "go ahead" after seeing plan, trivial single-file fix.
+
+### **TodoWrite Tool Usage:**
+- Use for complex multi-step tasks
+- Mark tasks `in_progress` before starting
+- Mark `completed` immediately after finishing
+- Keep descriptions clear and actionable
+
+### **When to Create PRs:**
+After completing:
+- Multiple related fixes (batched)
+- Single large feature
+- Critical bug fix (can be standalone)
+
+### **Communication:**
+- Provide clear summaries of changes
+- Explain reasoning for architectural decisions
+- Flag potential risks or concerns
+- Suggest testing approaches
+
+---
+
+## 📚 Resources
+
+- `README.md` - Project overview | `DOCS/` - Additional docs | `.swiftlint.yml` - SwiftLint config
+- Key gh CLI: `gh pr create --base develop`, `gh pr list`, `gh pr view <N>`, `gh pr diff <N>`
+
+---
+
+## 🆘 Troubleshooting
+
+- **Forgot feature branch:** `git checkout -b feature/my-work` from current state
+- **Update from develop:** `git checkout feature/my-work && git merge develop`
+- **Accidentally committed to develop:** `git reset --soft HEAD~1`, then create feature branch and recommit
+- **PR conflicts:** merge develop into your feature branch, resolve conflicts, push
+- **Bot review not detected:** Check directly: `gh api repos/{owner}/{repo}/pulls/<N>/reviews --jq '.[] | select(.user.type == "Bot")'`
+- **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check reviews list directly, never `reviewDecision`.
+- **NEVER** store `gh api` JSON in shell variables then pipe through `echo | jq` — control characters break parsing. Always use `gh api --jq` instead.
+- **Manual merge after bot approval:** Verify bot APPROVED review exists, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`
+- **`gh-bot-review` errors:** If alias not loaded, call directly: `bash ~/.config/gh-review-bot/gh-bot-review.sh --pr <N> --event APPROVE --body "text"`. Ref: `MainEventApp-Functions/docs/github-review-bot-handoff.md`
+
+---
+
+**Last Updated:** 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
+**Maintained By:** Claude Code
+
+---
+
+## 📝 Release Notes Workflow
+
+### **RELNOTES Files Structure**
+
+**Three Files with Specific Purposes:**
+1. **RELNOTES_DEV.md** - Active development notes (update as work completes)
+2. **RELNOTES_QA.md** - QA build notes (copied from DEV when preparing test builds)
+3. **RELNOTES_PROD.md** - Production notes (copied from QA for App Store releases)
+
+### **Standard Format (DEV & QA):**
+```markdown
+## DEV - 1.0.0
+
+**Release Type**
+-   FEATURE | BUGFIX | HOTFIX | MAINTENANCE
+
+**Issues Resolved**
+-   Issue descriptions or NONE
+
+**New Features**
+-   Feature descriptions or NONE
+
+**Technical Improvements**
+-   Technical changes or NONE
+
+**Known Problems**
+-   Problems or "None identified in this release"
+```
+
+### **PROD Format (Additional AppStore Sections):**
+```markdown
+## PROD - 1.0.0
+
+**AppStore Promo (en)**
+[Marketing promo text in English]
+
+**AppStore What's New (en)**
+-   User-facing change descriptions in English
+
+**AppStore Promo (es-419)**
+[Marketing promo text in Spanish]
+
+**AppStore What's New (es-419)**
+-   User-facing change descriptions in Spanish
+
+[Same sections as DEV/QA follow]
+```
+
+### **⚠️ CRITICAL Rules:**
+
+1. **Update RELNOTES_DEV.md as work completes**
+   - Add entries when features/fixes are merged to develop
+   - Keep it current with latest development
+
+2. **Copy DEV → QA when preparing test builds**
+   - Copy content from RELNOTES_DEV.md to RELNOTES_QA.md
+   - Change header from "DEV" to "QA"
+   - Use for TestFlight/internal testing builds
+
+3. **Copy QA → PROD when preparing App Store release**
+   - Copy content from RELNOTES_QA.md to RELNOTES_PROD.md
+   - Change header from "QA" to "PROD"
+   - **PRESERVE existing AppStore sections** (en & es-419)
+   - Update AppStore sections with new marketing copy
+
+4. **NEVER modify previous release entries**
+   - Previous releases in all RELNOTES files are historical record
+   - Only add new releases at the top
+
+5. **NEVER remove AppStore sections from RELNOTES_PROD.md**
+   - The 4 AppStore sections are required and must be preserved
+   - Only update them with new content, never delete
+
+---
+
+## 🔧 Additional Notes
+
+- always warn about the context remaining and before starting a new task make sure the left over context is enough for the task or not.  If not, ask the user to use compact
+- We shouldn't commit *Info.plist files that ONLY change the CFBundleVersion
+- When we commit changes and the *info.plist files contain the only change in CFBundleVersion, let's discard that change
+- This command from the Skill, doesn't actually run all the reports....and there should be FOUR reports (not 3)!!# The One Command to Rule Them All
+
+```
+"Generate weekly stakeholder update for week of Nov 6"
+```
+
+**Result:** Creates all three reports simultaneously ✅

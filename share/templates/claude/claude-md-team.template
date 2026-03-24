@@ -1,0 +1,62 @@
+# Team-Specific Claude Code Instructions: {{TEAM_NAME}}
+
+This file contains team-specific overrides and additions to the global CLAUDE.md guidelines.
+
+**Global guidelines:** See `{{CLAUDE_CONFIG_DIR}}/CLAUDE.md` for core workflow rules.
+
+---
+
+## Team Repository
+
+**Primary Repository:**
+- Path: `{{AITEAMFORGE_DIR}}/[team-repo-path]`
+- Team: {{TEAM_NAME}}
+
+---
+
+## Team-Specific Conventions
+
+### Code Standards
+- Follow the global code quality standards in `CLAUDE.md`
+- Team-specific linting rules: [Add team-specific rules if any]
+- Testing requirements: [Add team-specific testing requirements]
+
+### Workflow Customizations
+- Branch naming: Follow global conventions (feature/, bugfix/, etc.)
+- PR process: Follow global PR workflow
+- Review requirements: [Add team-specific review requirements]
+
+---
+
+## Team Kanban Board
+
+**Board:** `{{TEAM_NAME}}`
+
+Access via:
+```bash
+kb-list {{TEAM_NAME}}
+kb-board {{TEAM_NAME}}
+```
+
+---
+
+## Agent Personas
+
+This team has the following agent personas configured:
+
+- See individual persona files in this directory for details
+- Each persona has specific expertise and communication style
+- Switch agents with: `claude --agent <persona-name>`
+
+---
+
+## Team Resources
+
+- **Documentation:** `{{AITEAMFORGE_DIR}}/[team-slug]/docs/`
+- **Scripts:** `{{AITEAMFORGE_DIR}}/[team-slug]/scripts/`
+- **Personas:** `{{AITEAMFORGE_DIR}}/[team-slug]/personas/`
+- **Terminal Configs:** `{{AITEAMFORGE_DIR}}/[team-slug]/terminals/`
+
+---
+
+**Note:** This is a template file. Team-specific details should be filled in during installation.

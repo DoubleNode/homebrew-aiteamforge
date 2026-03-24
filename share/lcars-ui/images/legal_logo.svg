@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Legal Team - Scales of Justice -->
+  <defs>
+    <linearGradient id="legalgrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#99ff99"/>
+      <stop offset="100%" style="stop-color:#66cc66"/>
+    </linearGradient>
+  </defs>
+  <!-- Outer ring -->
+  <circle cx="100" cy="100" r="90" fill="none" stroke="#99ff99" stroke-width="4"/>
+  <circle cx="100" cy="100" r="85" fill="none" stroke="#66cc66" stroke-width="1"/>
+  <circle cx="100" cy="100" r="78" fill="none" stroke="#99ff99" stroke-width="2"/>
+  <!-- Inner circle -->
+  <ellipse cx="100" cy="100" rx="55" ry="55" fill="#1a1a2e" stroke="url(#legalgrad)" stroke-width="3"/>
+  <!-- Scales of Justice -->
+  <!-- Center pillar -->
+  <rect x="97" y="55" width="6" height="75" fill="url(#legalgrad)" rx="2"/>
+  <!-- Base -->
+  <rect x="80" y="128" width="40" height="6" fill="url(#legalgrad)" rx="3"/>
+  <!-- Balance beam -->
+  <line x1="60" y1="72" x2="140" y2="72" stroke="url(#legalgrad)" stroke-width="4" stroke-linecap="round"/>
+  <!-- Left pan chain -->
+  <line x1="70" y1="72" x2="62" y2="95" stroke="#99ff99" stroke-width="2"/>
+  <line x1="70" y1="72" x2="78" y2="95" stroke="#99ff99" stroke-width="2"/>
+  <!-- Left pan -->
+  <path d="M56 95 Q70 105 84 95" fill="none" stroke="url(#legalgrad)" stroke-width="3" stroke-linecap="round"/>
+  <!-- Right pan chain -->
+  <line x1="130" y1="72" x2="122" y2="95" stroke="#99ff99" stroke-width="2"/>
+  <line x1="130" y1="72" x2="138" y2="95" stroke="#99ff99" stroke-width="2"/>
+  <!-- Right pan -->
+  <path d="M116 95 Q130 105 144 95" fill="none" stroke="url(#legalgrad)" stroke-width="3" stroke-linecap="round"/>
+  <!-- Top finial -->
+  <circle cx="100" cy="55" r="5" fill="url(#legalgrad)"/>
+  <!-- Corner stars -->
+  <circle cx="60" cy="55" r="2" fill="#99ff99"/>
+  <circle cx="140" cy="55" r="2" fill="#99ff99"/>
+  <circle cx="60" cy="145" r="2" fill="#99ff99"/>
+  <circle cx="140" cy="145" r="2" fill="#99ff99"/>
+</svg>

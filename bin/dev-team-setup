@@ -1,0 +1,11 @@
+#!/usr/bin/env zsh
+
+# dev-team-setup wrapper
+# Launches the interactive setup wizard
+
+# Determine where the script is located
+SCRIPT_DIR="${0:A:h}"
+LIBEXEC_DIR="${SCRIPT_DIR}/../libexec"
+
+# Execute the setup wizard
+exec "${LIBEXEC_DIR}/dev-team-setup.sh" "$@"

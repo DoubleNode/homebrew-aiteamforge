@@ -1,0 +1,1348 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LCARS - Kanban Workflow Monitor</title>
+    <!-- Ensure trailing slash for path-based routing (Tailscale funnel) -->
+    <script>
+        (function() {
+            var paths = ['/academy', '/firebase', '/dns', '/freelance', '/freelance-workstats', '/freelance-starwords', '/freelance-appplanning', '/command', '/ios', '/android', '/mainevent', '/legal', '/legal-coparenting'];
+            var path = window.location.pathname;
+            for (var i = 0; i < paths.length; i++) {
+                if (path === paths[i]) {
+                    window.location.replace(path + '/');
+                    return;
+                }
+            }
+        })();
+    </script>
+    <!-- Antonio Font (required for LCARS) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <!-- LCARS Fleet Monitor CSS (canonical styling) -->
+    <link rel="stylesheet" href="css/lcars-fleet.css">
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css">
+    <!-- KanBan-specific overrides (Division/Org color coordination) -->
+    <link rel="stylesheet" href="css/lcars.css?v=31.0">
+    <!-- Chart.js: Data visualization library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <!-- LCARS Chart Theming Module -->
+    <script src="js/lcars-charts.js"></script>
+</head>
+<body>
+    <div class="lcars-container">
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- TOP FRAME: Thin bar with upward swoop                              -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <header class="lcars-top-frame">
+            <div class="top-sidebar">
+                <div class="top-sidebar-content">
+                    <span class="stardate" id="stardate">2025.362</span>
+                    <span class="top-divider">•</span>
+                    <span class="lcars-version">LCARS 02-047</span>
+                    <span class="top-divider">•</span>
+                    <span class="team-name" id="team-name">--</span>
+                    <span class="group-id" id="group-id">--</span>
+                </div>
+            </div>
+            <div class="top-bar"></div>
+            <div class="lcars-title" id="lcars-title">
+                <span class="title-full">--</span>
+                <span class="title-medium">--</span>
+                <span class="title-short">STATUS</span>
+            </div>
+            <img class="header-team-logo" id="header-team-logo" alt="">
+        </header>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- MAIN CONTENT AREA                                                   -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <main class="lcars-main">
+            <!-- Sidebar -->
+            <nav class="lcars-sidebar">
+                <div class="sidebar-label">WORKFLOW STATUS</div>
+                <div class="sidebar-button active" data-section="home">
+                    <span>HOME</span>
+                </div>
+                <div class="sidebar-button" data-section="workflow">
+                    <span>WORKFLOW</span>
+                </div>
+                <div class="sidebar-button" data-section="details">
+                    <span>DETAILS</span>
+                </div>
+                <div class="sidebar-button" data-section="queue">
+                    <span>QUEUE</span>
+                </div>
+                <div class="sidebar-button" data-section="releases">
+                    <span>RELEASES</span>
+                </div>
+                <div class="sidebar-button" data-section="epics">
+                    <span>EPICS</span>
+                </div>
+                <div class="sidebar-button" data-section="calendar">
+                    <span>CALENDAR</span>
+                </div>
+                <div class="sidebar-button" data-section="todos">
+                    <span>TODOS</span>
+                </div>
+                <div class="sidebar-button has-submenu" id="settings-button">
+                    <span>SETTINGS</span>
+                    <div class="sidebar-submenu">
+                        <div class="sidebar-submenu-hbar"></div>
+                        <div class="sidebar-submenu-vbar">
+                            <div class="sidebar-submenu-spine"></div>
+                            <div class="sidebar-submenu-curve"></div>
+                        </div>
+                        <div class="sidebar-submenu-items">
+                            <div class="sidebar-submenu-item" data-section="integrations">INTEGRATIONS</div>
+                            <div class="sidebar-submenu-item" onclick="openCalendarSettingsModal()">CALENDAR SYNC</div>
+                            <div class="sidebar-submenu-item" data-section="backups">BACKUPS</div>
+                            <div class="sidebar-submenu-item" data-section="commands">COMMANDS</div>
+                        </div>
+                    </div>
+                </div>
+                <div class="sidebar-spacer"></div>
+                <div class="sidebar-info stacked">
+                    <div class="info-row">
+                        <span class="info-label">VESSEL</span>
+                        <span class="info-value" id="ship-name">Enterprise NX-01</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">UPDATED</span>
+                        <span class="info-value" id="last-update">--:--:--</span>
+                    </div>
+                </div>
+                <div class="sidebar-spacer"></div>
+                <div class="sidebar-button refresh-btn" onclick="refreshData()">
+                    <span>REFRESH</span>
+                </div>
+            </nav>
+
+            <!-- Content -->
+            <div class="lcars-content">
+                <!-- Persistent watermark behind all content -->
+                <div class="content-watermark">
+                    <img class="watermark-logo" id="content-watermark-logo" src="" alt="">
+                </div>
+
+                <!-- LCARS Data Display Bar -->
+                <section class="status-legend">
+                    <div class="legend-pill candy-1" id="candy-1">00000</div>
+                    <div class="legend-pill candy-2" id="candy-2">0000</div>
+                    <div class="legend-pill candy-3" id="candy-3">000.00</div>
+                    <div class="legend-pill candy-4" id="candy-4">0000</div>
+                    <div class="legend-pill candy-5" id="candy-5">00-000</div>
+                    <div class="legend-pill candy-6" id="candy-6">0000</div>
+                </section>
+
+                <!-- Startup Splash Screen -->
+                <section class="startup-section active">
+                    <div class="startup-container">
+                        <!-- Team Logo -->
+                        <div class="startup-logo-container">
+                            <img class="startup-logo" src="" alt="Team Logo" id="startup-team-logo">
+                        </div>
+
+                        <!-- Initialization Text & Data Scroll -->
+                        <div class="startup-status">
+                            <div class="startup-init-text" id="startup-init-text">INITIALIZING LCARS INTERFACE</div>
+                            <div class="startup-data-scroll" id="startup-data-scroll"></div>
+                            <div class="startup-progress">
+                                <div class="startup-progress-bar" id="startup-progress-bar"></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: HOME - Team Analytics Dashboard (4-panel carousel)        -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="home-section">
+
+                    <!-- Carousel Viewport -->
+                    <div class="carousel-viewport">
+                        <div class="carousel-track">
+
+                            <!-- Panel 0: MISSION STATUS (metrics only, 2×2 grid) -->
+                            <div class="carousel-panel" data-panel-index="0">
+                                <div class="section-header cyan">
+                                    <span class="section-title">MISSION STATUS</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-summary-metrics" class="home-metrics-grid">
+                                    <!-- Populated by JS: 4 metric cards in 2×2 layout -->
+                                </div>
+                            </div>
+
+                            <!-- Panel 1: MISSION CHARTS (doughnut + bar) -->
+                            <div class="carousel-panel" data-panel-index="1">
+                                <div class="section-header cyan">
+                                    <span class="section-title">MISSION CHARTS</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-charts-container" class="home-charts-grid">
+                                    <div class="home-chart-card">
+                                        <div class="chart-title" style="color: #FFCC99; font-family: 'Antonio', sans-serif; font-size: 14px; margin-bottom: 8px;">STATUS DISTRIBUTION</div>
+                                        <div style="position: relative; flex: 1; min-height: 150px;">
+                                            <canvas id="home-status-doughnut"></canvas>
+                                        </div>
+                                    </div>
+                                    <div class="home-chart-card">
+                                        <div class="chart-title" style="color: #FFCC99; font-family: 'Antonio', sans-serif; font-size: 14px; margin-bottom: 8px;">COMPLETION RATE</div>
+                                        <div id="home-completion-bars" style="flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 12px; padding: 10px 0;"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Panel 2: EPIC PROGRESS -->
+                            <div class="carousel-panel" data-panel-index="2">
+                                <div class="section-header purple">
+                                    <span class="section-title">EPIC PROGRESS</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-epic-progress" style="display: flex; flex-direction: column; gap: 10px; margin-top: 15px; overflow-y: auto; flex: 1;">
+                                    <!-- Epic progress bars populated by JS -->
+                                </div>
+                            </div>
+
+                            <!-- Panel 3: SUBITEM INTELLIGENCE -->
+                            <div class="carousel-panel" data-panel-index="3">
+                                <div class="section-header green">
+                                    <span class="section-title">SUBITEM INTELLIGENCE</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-subitem-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 15px; flex: 1; min-height: 0;">
+                                    <div class="home-chart-card">
+                                        <div style="position: relative; flex: 1; min-height: 150px;">
+                                            <canvas id="home-subitem-doughnut" width="400" height="300"></canvas>
+                                        </div>
+                                    </div>
+                                    <div id="home-subitem-metrics" style="display: flex; flex-direction: column; gap: 8px; justify-content: center;">
+                                        <!-- Populated by JS -->
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Panel 4: KNOWLEDGE BASE -->
+                            <div class="carousel-panel" data-panel-index="4">
+                                <div class="section-header gold">
+                                    <span class="section-title">KNOWLEDGE BASE</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-knowledge-stats" class="home-charts-grid">
+                                    <div class="home-chart-card">
+                                        <div class="chart-title knowledge-chart-title">FILES BY TYPE</div>
+                                        <div style="position: relative; flex: 1; min-height: 150px;">
+                                            <canvas id="home-knowledge-doughnut"></canvas>
+                                        </div>
+                                    </div>
+                                    <div id="home-knowledge-metrics" class="knowledge-metrics-panel">
+                                        <!-- Populated by JS: memory file stats -->
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Panel 5: RETROSPECTIVE COVERAGE -->
+                            <div class="carousel-panel" data-panel-index="5">
+                                <div class="section-header gold">
+                                    <span class="section-title">RETROSPECTIVE COVERAGE</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-knowledge-adoption" class="knowledge-adoption-panel">
+                                    <!-- Populated by JS: retrospective adoption metrics -->
+                                </div>
+                            </div>
+
+                        </div><!-- /.carousel-track -->
+                    </div><!-- /.carousel-viewport -->
+
+                    <!-- Carousel Navigation -->
+                    <div class="carousel-nav">
+                        <button class="carousel-arrow" id="carousel-prev" aria-label="Previous panel">&#9664;</button>
+                        <div class="carousel-dots">
+                            <span class="carousel-dot active" data-panel="0"></span>
+                            <span class="carousel-dot" data-panel="1"></span>
+                            <span class="carousel-dot" data-panel="2"></span>
+                            <span class="carousel-dot" data-panel="3"></span>
+                            <span class="carousel-dot" data-panel="4"></span>
+                            <span class="carousel-dot" data-panel="5"></span>
+                        </div>
+                        <button class="carousel-arrow" id="carousel-next" aria-label="Next panel">&#9654;</button>
+                        <button class="carousel-viewscreen" id="carousel-fullscreen">VIEWSCREEN</button>
+                    </div>
+
+                </section>
+
+                <!-- Kanban Board -->
+                <section class="kanban-section">
+                    <div class="section-header crimson">
+                        <span class="section-title">ACTIVE ASSIGNMENTS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="kanban-board">
+                        <div class="kanban-column" data-status="paused">
+                            <div class="column-header paused">PAUSED</div>
+                            <div class="column-content" id="col-paused"></div>
+                        </div>
+                        <div class="kanban-column" data-status="ready">
+                            <div class="column-header ready">READY</div>
+                            <div class="column-content" id="col-ready"></div>
+                        </div>
+                        <div class="kanban-column" data-status="planning">
+                            <div class="column-header planning">PLAN</div>
+                            <div class="column-content" id="col-planning"></div>
+                        </div>
+                        <div class="kanban-column" data-status="coding">
+                            <div class="column-header coding">CODE</div>
+                            <div class="column-content" id="col-coding"></div>
+                        </div>
+                        <div class="kanban-column" data-status="testing">
+                            <div class="column-header testing">TEST</div>
+                            <div class="column-content" id="col-testing"></div>
+                        </div>
+                        <div class="kanban-column" data-status="commit">
+                            <div class="column-header commit">COMMIT</div>
+                            <div class="column-content" id="col-commit"></div>
+                        </div>
+                        <div class="kanban-column" data-status="pr_review">
+                            <div class="column-header pr_review">PR REVIEW</div>
+                            <div class="column-content" id="col-pr_review"></div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Terminal Details -->
+                <section class="details-section">
+                    <div class="section-header blue">
+                        <span class="section-title">TERMINAL STATUS MATRIX</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="details-grid" id="terminal-details">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                </section>
+
+                <!-- Mission Queue -->
+                <section class="queue-section">
+                    <div class="section-header purple">
+                        <span class="section-title">MISSION QUEUE</span>
+                        <span class="section-count" id="queue-count">0 PENDING</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="queue-filter-bar" id="queue-filter-bar">
+                        <div class="filter-row filter-row-status">
+                            <div class="filter-pill active" data-filter="all">ALL</div>
+                            <div class="filter-pill" data-filter="in_progress">ACTIVE</div>
+                            <div class="filter-pill" data-filter="paused">PAUSED</div>
+                            <div class="filter-pill" data-filter="blocked">BLOCKED</div>
+                            <div class="filter-pill" data-filter="completed">COMPLETED / CANCELLED</div>
+                        </div>
+                        <div class="filter-row filter-row-dates">
+                            <div class="filter-pill" data-filter="past_due">PAST DUE</div>
+                            <div class="filter-pill" data-filter="no_due_date">NO DUE</div>
+                        </div>
+                        <div class="filter-row filter-row-controls">
+                            <div class="sort-toggle" id="sort-toggle" title="Click to toggle sort order">
+                                <span class="sort-label">SORT:</span>
+                                <span class="sort-value" id="sort-value">PRIORITY</span>
+                            </div>
+                            <div class="os-filter-dropdown" id="os-filter-dropdown">
+                                <span class="os-filter-label">OS:</span>
+                                <div class="os-filter-trigger" id="os-filter-trigger" title="Filter by platform">
+                                    <span class="os-filter-icon" id="os-filter-icon">ALL</span>
+                                    <span class="os-filter-value" id="os-filter-value">ALL</span>
+                                </div>
+                            </div>
+                            <div class="release-filter-dropdown" id="release-filter-dropdown">
+                                <span class="release-filter-label">REL:</span>
+                                <select id="release-filter-select" class="release-filter-select">
+                                    <option value="all">ALL</option>
+                                    <option value="assigned">ASSIGNED</option>
+                                    <option value="unassigned">UNASSIGNED</option>
+                                </select>
+                            </div>
+                            <div class="epic-filter-dropdown" id="epic-filter-dropdown">
+                                <span class="epic-filter-label">EPIC:</span>
+                                <select id="epic-filter-select" class="epic-filter-select">
+                                    <option value="all">ALL</option>
+                                    <option value="assigned">ASSIGNED</option>
+                                    <option value="unassigned">UNASSIGNED</option>
+                                </select>
+                            </div>
+                            <div class="category-filter-dropdown" id="category-filter-dropdown">
+                                <span class="category-filter-label">CAT:</span>
+                                <select id="category-filter-select" class="category-filter-select">
+                                    <option value="all">ALL</option>
+                                    <option value="none">NO CATEGORY</option>
+                                    <option value="feature">FEATURE</option>
+                                    <option value="bugfix">BUGFIX</option>
+                                    <option value="technical">TECHNICAL</option>
+                                    <option value="testing">TESTING</option>
+                                    <option value="security">SECURITY</option>
+                                    <option value="performance">PERFORMANCE</option>
+                                    <option value="documentation">DOCUMENTATION</option>
+                                    <option value="refactor">REFACTOR</option>
+                                    <option value="operations">OPERATIONS</option>
+                                    <option value="release">RELEASE</option>
+                                    <option value="epic">EPIC</option>
+                                    <option value="chore">CHORE</option>
+                                </select>
+                            </div>
+                            <div class="filter-search-container">
+                                <input type="text" id="queue-filter-text" class="filter-search-input" placeholder="SEARCH..." autocomplete="off" spellcheck="false">
+                                <button id="queue-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
+                            </div>
+                            <button class="import-action-btn" id="queue-import-btn" onclick="showImportModal()" title="Import external issue">
+                                ↓ IMPORT
+                            </button>
+                            <button class="view-toggle-btn" id="view-toggle-btn" title="Toggle between Tags and Tracking view">
+                                <span class="view-toggle-label">VIEW:</span>
+                                <span class="view-toggle-value" id="view-toggle-value">TAGS</span>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="queue-list" id="mission-queue">
+                        <div class="queue-empty">No pending missions in queue</div>
+                    </div>
+                </section>
+
+                <!-- Release Command -->
+                <section class="releases-section">
+                    <div class="section-header green">
+                        <span class="section-title">RELEASE COMMAND</span>
+                        <span class="section-action" id="release-new-btn" title="Create New Release">+ NEW</span>
+                        <!-- XACA-0056: Status filter toggle -->
+                        <span class="releases-status-toggle">
+                            <button class="status-toggle-btn active" id="releases-active-btn" onclick="toggleReleasesStatusFilter('active')" title="Show Active Releases">ACTIVE</button>
+                            <button class="status-toggle-btn" id="releases-archived-btn" onclick="toggleReleasesStatusFilter('archived')" title="Show Archived Releases">ARCHIVED</button>
+                        </span>
+                        <span class="section-action" id="release-configure-flow-btn" title="Configure Release Flow">⚙ FLOW</span>
+                        <span class="current-flow-display" id="current-flow-display"></span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="releases-dashboard" id="releases-dashboard">
+                        <div class="releases-loading">Loading releases...</div>
+                    </div>
+                </section>
+
+                <!-- Epics Management -->
+                <section class="epics-section">
+                    <div class="section-header purple">
+                        <span class="section-title">EPIC MANAGEMENT</span>
+                        <span class="section-action" id="epic-new-btn" title="Create New Epic">+ NEW</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="epics-dashboard" id="epics-dashboard">
+                        <div class="epics-loading">Loading epics...</div>
+                    </div>
+                </section>
+
+                <!-- Calendar -->
+                <section class="calendar-section">
+                    <div class="section-header amber">
+                        <span class="section-title">CALENDAR</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div id="calendar-content">
+                        <!-- Calendar controls will go here -->
+                        <div id="calendar-controls"></div>
+                        <!-- Calendar grid will go here -->
+                        <div id="calendar-grid"></div>
+                    </div>
+                </section>
+
+                <!-- Command Interface -->
+                <section class="commands-section">
+                    <div class="section-header crimson">
+                        <span class="section-title">COMMAND INTERFACE</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="command-section-bar" id="command-section-bar">
+                        <div class="command-section-pill active" data-command-section="miscellaneous">MISCELLANEOUS</div>
+                        <div class="command-section-pill" data-command-section="kanban">KANBAN</div>
+                        <div class="command-section-pill" data-command-section="worktree">WORKTREE</div>
+                    </div>
+                    <div class="commands-grid" id="commands-grid">
+                        <!-- Populated by JavaScript -->
+                    </div>
+                    <div class="command-detail" id="command-detail">
+                        <div class="detail-placeholder">Select a command to see details</div>
+                    </div>
+                </section>
+
+                <!-- Backup Status -->
+                <section class="backups-section">
+                    <div class="section-header amber">
+                        <span class="section-title">BACKUP SYSTEM STATUS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="backups-status" id="backups-status">
+                        <div class="backup-overview">
+                            <div class="backup-stat">
+                                <span class="stat-label">STATUS</span>
+                                <span class="stat-value" id="backup-system-status">CHECKING...</span>
+                            </div>
+                            <div class="backup-stat">
+                                <span class="stat-label">LAST RUN</span>
+                                <span class="stat-value" id="backup-last-run">--</span>
+                            </div>
+                            <div class="backup-stat">
+                                <span class="stat-label">TOTAL BACKUPS</span>
+                                <span class="stat-value" id="backup-total-count">--</span>
+                            </div>
+                            <div class="backup-stat">
+                                <span class="stat-label">STORAGE USED</span>
+                                <span class="stat-value" id="backup-storage">--</span>
+                            </div>
+                        </div>
+                        <div class="backup-boards" id="backup-boards">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+
+                    <!-- Backup Files List -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">BACKUP FILES</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <!-- Retention Summary -->
+                    <div class="backup-retention-summary" id="backup-retention-summary">
+                        <!-- Populated by JavaScript -->
+                    </div>
+
+                    <div class="backup-files-controls">
+                        <div class="backup-filter">
+                            <span class="backup-team-label">TEAM:</span>
+                            <select id="backup-team-filter" class="lcars-select">
+                                <option value="">ALL TEAMS</option>
+                            </select>
+                        </div>
+                        <div class="backup-sort">
+                            <label for="backup-sort-toggle">SORT:</label>
+                            <button id="backup-sort-toggle" class="lcars-button" data-sort="desc">
+                                NEWEST FIRST
+                            </button>
+                        </div>
+                    </div>
+                    <div class="backup-files-container" id="backup-files-container">
+                        <div class="backup-files-list" id="backup-files-list">
+                            <!-- Populated by JavaScript -->
+                            <div class="backup-loading">Loading backup files...</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Integrations -->
+                <section class="integrations-section">
+                    <div class="section-header green">
+                        <span class="section-title">EXTERNAL INTEGRATIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="integrations-overview" id="integrations-overview">
+                        <div class="integration-stat">
+                            <span class="stat-label">STATUS</span>
+                            <span class="stat-value" id="integration-system-status">LOADING...</span>
+                        </div>
+                        <div class="integration-stat">
+                            <span class="stat-label">ACTIVE</span>
+                            <span class="stat-value" id="integration-active-count">--</span>
+                        </div>
+                        <div class="integration-stat">
+                            <span class="stat-label">AVAILABLE</span>
+                            <span class="stat-value" id="integration-available-count">--</span>
+                        </div>
+                    </div>
+
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">CONFIGURED INTEGRATIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="integrations-list" id="integrations-list">
+                        <div class="integrations-loading">Loading integrations...</div>
+                    </div>
+
+                    <div class="integration-actions">
+                        <button class="lcars-button integration-add-btn" id="add-integration-btn">
+                            + ADD INTEGRATION
+                        </button>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: TODOS - Team Quick Todo List (XACA-0101)                  -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="todos-section">
+                    <div class="section-header orange">
+                        <span class="section-title">TEAM TODO LIST</span>
+                        <div class="todo-header-controls">
+                            <div class="todo-tabs">
+                                <button class="todo-tab active" data-filter="todo" onclick="filterTodos('todo')">ACTIVE</button>
+                                <button class="todo-tab" data-filter="completed" onclick="filterTodos('completed')">COMPLETED</button>
+                            </div>
+                            <button class="lcars-btn lcars-btn-primary todo-add-btn" onclick="openTodoModal()">+ ADD TODO</button>
+                        </div>
+                        <div class="section-bar"></div>
+                    </div>
+
+                    <!-- Todo list container -->
+                    <div id="todo-list" class="todo-list">
+                        <!-- Dynamically populated by renderTodos() -->
+                    </div>
+
+                    <!-- Empty state -->
+                    <div id="todo-empty" class="todo-empty" style="display: none;">
+                        <p>No items to display.</p>
+                    </div>
+
+                    <!-- Loading state -->
+                    <div id="todo-loading" class="todo-loading">
+                        <p>LOADING...</p>
+                    </div>
+                </section>
+
+            </div>
+        </main>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- MOBILE TAB BAR: Bottom navigation for narrow screens               -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <nav class="mobile-tabbar">
+            <div class="tabbar-button active" data-section="home">
+                <span class="tabbar-label">HOME</span>
+            </div>
+            <div class="tabbar-button" data-section="workflow">
+                <span class="tabbar-label">WORKFLOW</span>
+            </div>
+            <div class="tabbar-button" data-section="details">
+                <span class="tabbar-label">DETAILS</span>
+            </div>
+            <div class="tabbar-button" data-section="queue">
+                <span class="tabbar-label">QUEUE</span>
+            </div>
+            <div class="tabbar-button" data-section="releases">
+                <span class="tabbar-label">RELEASES</span>
+            </div>
+            <div class="tabbar-button" data-section="epics">
+                <span class="tabbar-label">EPICS</span>
+            </div>
+            <div class="tabbar-button" data-section="calendar">
+                <span class="tabbar-label">CALENDAR</span>
+            </div>
+            <div class="tabbar-button" data-section="todos">
+                <span class="tabbar-label">TODOS</span>
+            </div>
+            <div class="tabbar-button" data-section="integrations">
+                <span class="tabbar-label">INTEGR</span>
+            </div>
+            <div class="tabbar-button" data-section="backups">
+                <span class="tabbar-label">BACKUPS</span>
+            </div>
+            <div class="tabbar-button" data-section="commands">
+                <span class="tabbar-label">COMMANDS</span>
+            </div>
+            <div class="tabbar-button refresh-btn" onclick="refreshData()">
+                <span class="tabbar-label">⟳</span>
+            </div>
+        </nav>
+
+    </div>
+
+<!-- ═══════════════════════════════════════════════════════════════════ -->
+    <!-- MODALS                                                               -->
+    <!-- ═══════════════════════════════════════════════════════════════════ -->
+
+    <!-- Integration Modal -->
+    <div id="integration-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeIntegrationModal()"></div>
+        <div class="lcars-modal-content">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title" id="integration-modal-title">ADD INTEGRATION</span>
+                <button class="lcars-modal-close" onclick="closeIntegrationModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <form id="integration-form" onsubmit="saveIntegration(event)">
+                    <input type="hidden" id="integration-id" value="">
+
+                    <div class="form-group">
+                        <label for="integration-type">Type</label>
+                        <select id="integration-type" onchange="onIntegrationTypeChange()" required>
+                            <option value="">Select type...</option>
+                            <option value="jira">JIRA</option>
+                            <option value="github">GitHub</option>
+                            <option value="linear">Linear</option>
+                            <option value="monday">Monday.com</option>
+                            <option value="custom">Custom</option>
+                        </select>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="integration-name">Display Name</label>
+                        <input type="text" id="integration-name" placeholder="e.g., My JIRA" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="integration-base-url">Base URL</label>
+                        <input type="url" id="integration-base-url" placeholder="e.g., https://company.atlassian.net" required>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="integration-browse-url">Browse URL Pattern</label>
+                        <input type="text" id="integration-browse-url" placeholder="e.g., https://company.atlassian.net/browse/{ticketId}">
+                        <small class="form-hint">Use {ticketId} as placeholder</small>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="integration-projects">Default Projects (comma-separated)</label>
+                        <input type="text" id="integration-projects" placeholder="e.g., PROJ, APP, WEB">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="integration-pattern">Ticket ID Pattern (regex)</label>
+                        <input type="text" id="integration-pattern" placeholder="e.g., ^[A-Z]{1,10}-[0-9]+$">
+                    </div>
+
+                    <div class="form-group">
+                        <label>
+                            <input type="checkbox" id="integration-enabled" checked>
+                            Enabled
+                        </label>
+                    </div>
+
+                    <div class="form-section-header">Credentials (Environment Variables)</div>
+
+                    <div class="form-group credentials-info">
+                        <label for="integration-user-env">Username Env Var</label>
+                        <input type="text" id="integration-user-env" placeholder="e.g., JIRA_USER">
+                    </div>
+
+                    <div class="form-group credentials-info">
+                        <label for="integration-token-env">Token Env Var</label>
+                        <input type="text" id="integration-token-env" placeholder="e.g., JIRA_API_TOKEN">
+                    </div>
+
+                    <div class="credentials-note">
+                        Set these environment variables before starting the server.
+                    </div>
+                </form>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button" class="lcars-btn lcars-btn-danger" id="integration-delete-btn" onclick="deleteIntegration()" style="display: none;">Delete</button>
+                <div class="modal-footer-spacer"></div>
+                <button type="button" class="lcars-btn lcars-btn-secondary" onclick="testIntegrationFromModal()">Test Connection</button>
+                <button type="submit" class="lcars-btn lcars-btn-primary" form="integration-form">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Calendar Settings Modal -->
+    <div id="calendar-settings-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeCalendarSettingsModal()"></div>
+        <div class="lcars-modal-content calendar-settings-modal">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">CALENDAR SETTINGS</span>
+                <button class="lcars-modal-close" onclick="closeCalendarSettingsModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <!-- Apple Calendar Configuration -->
+                <div class="calendar-provider-section">
+                    <div class="form-section-header apple">
+                        <span class="provider-icon">🍎</span>
+                        <span>APPLE CALENDAR</span>
+                    </div>
+
+                    <div class="provider-status" id="apple-status">
+                        <span class="status-label">STATUS:</span>
+                        <span class="status-value" id="apple-status-value">NOT CONNECTED</span>
+                    </div>
+
+                    <div class="calendar-credential-form" id="apple-credential-form">
+                        <div class="form-group">
+                            <label for="apple-email">iCloud Email</label>
+                            <input type="text" id="apple-email" placeholder="icloud@example.com" />
+                        </div>
+                        <div class="form-group">
+                            <label for="apple-app-password">App-Specific Password</label>
+                            <input type="password" id="apple-app-password" placeholder="xxxx-xxxx-xxxx-xxxx" />
+                        </div>
+                        <div class="credential-help-text">
+                            Generate an app-specific password at <a href="https://appleid.apple.com" target="_blank">appleid.apple.com</a>
+                        </div>
+                    </div>
+
+                    <div class="provider-info" id="apple-info" style="display: none;">
+                        <div class="info-row">
+                            <span class="info-label">Account:</span>
+                            <span class="info-value" id="apple-account-name">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Calendar:</span>
+                            <span class="info-value" id="apple-calendar-name">--</span>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="apple-calendar-select-group" style="display: none;">
+                        <label for="apple-calendar-select">Select Calendar</label>
+                        <select id="apple-calendar-select" class="provider-select">
+                            <option value="">Loading calendars...</option>
+                        </select>
+                    </div>
+
+                    <div class="provider-actions">
+                        <button type="button" class="lcars-btn lcars-btn-primary" id="apple-connect-btn" onclick="connectAppleCalendar()">
+                            Connect Apple Calendar
+                        </button>
+                        <button type="button" class="lcars-btn lcars-btn-danger" id="apple-disconnect-btn" onclick="disconnectAppleCalendar()" style="display: none;">
+                            Disconnect
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Google Calendar Configuration -->
+                <div class="calendar-provider-section">
+                    <div class="form-section-header google">
+                        <span class="provider-icon">📅</span>
+                        <span>GOOGLE CALENDAR</span>
+                    </div>
+
+                    <div class="provider-status" id="google-status">
+                        <span class="status-label">STATUS:</span>
+                        <span class="status-value" id="google-status-value">NOT CONNECTED</span>
+                    </div>
+
+                    <div class="calendar-credential-form" id="google-credential-form">
+                        <div class="form-group">
+                            <label for="google-client-id">Client ID</label>
+                            <input type="text" id="google-client-id" placeholder="your-client-id.apps.googleusercontent.com" />
+                        </div>
+                        <div class="form-group">
+                            <label for="google-client-secret">Client Secret</label>
+                            <input type="password" id="google-client-secret" placeholder="Client Secret" />
+                        </div>
+                        <div class="form-group">
+                            <label for="google-refresh-token">Refresh Token</label>
+                            <input type="text" id="google-refresh-token" placeholder="Refresh Token" />
+                        </div>
+                        <div class="credential-help-text">
+                            Create credentials in Google Cloud Console → APIs &amp; Services → Credentials
+                        </div>
+                    </div>
+
+                    <div class="provider-info" id="google-info" style="display: none;">
+                        <div class="info-row">
+                            <span class="info-label">Account:</span>
+                            <span class="info-value" id="google-account-name">--</span>
+                        </div>
+                        <div class="info-row">
+                            <span class="info-label">Calendar:</span>
+                            <span class="info-value" id="google-calendar-name">--</span>
+                        </div>
+                    </div>
+
+                    <div class="form-group" id="google-calendar-select-group" style="display: none;">
+                        <label for="google-calendar-select">Select Calendar</label>
+                        <select id="google-calendar-select" class="provider-select">
+                            <option value="">Loading calendars...</option>
+                        </select>
+                    </div>
+
+                    <div class="provider-actions">
+                        <button type="button" class="lcars-btn lcars-btn-primary" id="google-connect-btn" onclick="connectGoogleCalendar()">
+                            Connect Google Calendar
+                        </button>
+                        <button type="button" class="lcars-btn lcars-btn-danger" id="google-disconnect-btn" onclick="disconnectGoogleCalendar()" style="display: none;">
+                            Disconnect
+                        </button>
+                    </div>
+                </div>
+
+                <div class="calendar-settings-note">
+                    Calendar configuration is stored per-team. Each team can connect their own calendar accounts.
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button" class="lcars-btn lcars-btn-secondary" onclick="closeCalendarSettingsModal()">Close</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Release Assignment Modal -->
+    <div class="lcars-modal-overlay" id="release-assign-modal" style="display: none;">
+        <div class="lcars-modal">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">ASSIGN TO RELEASE</span>
+                <button class="lcars-modal-close" onclick="hideReleaseAssignModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <div class="modal-item-info" id="modal-item-info">
+                    <span class="modal-item-id">--</span>
+                    <span class="modal-item-title">--</span>
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">RELEASE</label>
+                    <select class="modal-select" id="release-select">
+                        <option value="">Select a release...</option>
+                    </select>
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">PLATFORM</label>
+                    <select class="modal-select" id="platform-select">
+                        <option value="">Select platform...</option>
+                        <option value="ios">iOS</option>
+                        <option value="android">Android</option>
+                        <option value="firebase">Firebase</option>
+                        <option value="web">Web</option>
+                    </select>
+                </div>
+                <div class="modal-error" id="release-assign-error" style="display: none;"></div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-danger" id="release-unassign-btn" onclick="submitReleaseUnassignment()" style="display: none;">UNASSIGN</button>
+                <div class="modal-footer-spacer"></div>
+                <button class="modal-btn modal-btn-cancel" onclick="hideReleaseAssignModal()">CANCEL</button>
+                <button class="modal-btn modal-btn-confirm" onclick="submitReleaseAssignment()">ASSIGN</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Create Release Modal -->
+    <div class="lcars-modal-overlay" id="release-create-modal" style="display: none;">
+        <div class="lcars-modal lcars-modal-wide">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">CREATE NEW RELEASE</span>
+                <button class="lcars-modal-close" onclick="hideCreateReleaseModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <div class="modal-field">
+                    <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in QUEUE tab</span></label>
+                    <input type="text" class="modal-input" id="new-release-short-title" name="release_short_x7q" placeholder="e.g., Q1 Features" maxlength="20" autocomplete="one-time-code" data-lpignore="true" data-form-type="other" data-1p-ignore="true" aria-autocomplete="none">
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">RELEASE TITLE</label>
+                    <input type="search" class="modal-input" id="new-release-title" name="release_title_x7q" placeholder="e.g., Q1 2026 Feature Release" autocomplete="off" data-lpignore="true" data-form-type="other" data-1p-ignore="true" aria-autocomplete="none">
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">TYPE</label>
+                    <select class="modal-select" id="new-release-type">
+                        <option value="feature">FEATURE</option>
+                        <option value="bugfix">BUGFIX</option>
+                        <option value="hotfix">HOTFIX</option>
+                        <option value="maintenance">MAINTENANCE</option>
+                    </select>
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">PLATFORMS</label>
+                    <div class="modal-checkbox-group" id="new-release-platforms">
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="ios" checked> iOS
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="android" checked> Android
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="firebase" checked> Firebase
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="web"> Web
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="other"> Other
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">TARGET DATE (OPTIONAL)</label>
+                    <input type="date" class="modal-input" id="new-release-target-date">
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">DESCRIPTION (OPTIONAL)</label>
+                    <textarea class="modal-textarea" id="new-release-description" placeholder="Brief description of this release..."></textarea>
+                </div>
+                <div class="modal-error" id="release-create-error" style="display: none;"></div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="hideCreateReleaseModal()">CANCEL</button>
+                <button class="modal-btn modal-btn-confirm" onclick="submitCreateRelease()">CREATE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Flow Config Modal (XACA-0027) -->
+    <div class="lcars-modal-overlay" id="flow-config-modal" style="display: none;">
+        <div class="lcars-modal lcars-modal-wide">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">CONFIGURE RELEASE FLOW</span>
+                <button class="lcars-modal-close" onclick="hideFlowConfigModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <div class="flow-config-description">
+                    Configure which stages are included in your release flow. DEV and PROD are required stages and cannot be disabled.
+                </div>
+
+                <!-- Flow Preview -->
+                <div class="flow-preview-container">
+                    <div class="flow-preview-label">CURRENT FLOW:</div>
+                    <div class="flow-preview" id="flow-preview">
+                        <!-- Dynamically populated -->
+                    </div>
+                </div>
+
+                <!-- Stage Toggles -->
+                <div class="flow-stages-config">
+                    <div class="flow-stage-item required">
+                        <span class="stage-name">DEV</span>
+                        <span class="stage-status required-badge">REQUIRED</span>
+                    </div>
+                    <div class="flow-stage-item">
+                        <span class="stage-name">QA</span>
+                        <label class="stage-toggle">
+                            <input type="checkbox" id="flow-stage-qa" checked onchange="updateFlowPreview()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="flow-stage-item">
+                        <span class="stage-name">ALPHA</span>
+                        <label class="stage-toggle">
+                            <input type="checkbox" id="flow-stage-alpha" checked onchange="updateFlowPreview()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="flow-stage-item">
+                        <span class="stage-name">BETA</span>
+                        <label class="stage-toggle">
+                            <input type="checkbox" id="flow-stage-beta" checked onchange="updateFlowPreview()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="flow-stage-item">
+                        <span class="stage-name">GAMMA</span>
+                        <label class="stage-toggle">
+                            <input type="checkbox" id="flow-stage-gamma" checked onchange="updateFlowPreview()">
+                            <span class="toggle-slider"></span>
+                        </label>
+                    </div>
+                    <div class="flow-stage-item required">
+                        <span class="stage-name">PROD</span>
+                        <span class="stage-status required-badge">REQUIRED</span>
+                    </div>
+                </div>
+
+                <div class="modal-error" id="flow-config-error" style="display: none;"></div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="hideFlowConfigModal()">CANCEL</button>
+                <button class="modal-btn modal-btn-confirm" onclick="saveFlowConfig()">SAVE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Promote Release Modal (XACA-0026) -->
+    <div class="lcars-modal-overlay" id="promote-modal" style="display: none;">
+        <div class="lcars-modal lcars-modal-wide promote-modal">
+            <div class="lcars-modal-header promote-header">
+                <span class="lcars-modal-title">PROMOTE RELEASE</span>
+                <button class="lcars-modal-close" onclick="hidePromoteModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <!-- Step indicator -->
+                <div class="promote-steps">
+                    <div class="promote-step active" data-step="1">
+                        <span class="step-number">1</span>
+                        <span class="step-label">SELECT</span>
+                    </div>
+                    <div class="promote-step-connector"></div>
+                    <div class="promote-step" data-step="2">
+                        <span class="step-number">2</span>
+                        <span class="step-label">REVIEW</span>
+                    </div>
+                    <div class="promote-step-connector"></div>
+                    <div class="promote-step" data-step="3">
+                        <span class="step-number">3</span>
+                        <span class="step-label">CONFIRM</span>
+                    </div>
+                </div>
+
+                <!-- Step 1: Platform Selection -->
+                <div class="promote-content" id="promote-step-1">
+                    <div class="promote-release-info" id="promote-release-info">
+                        <span class="release-name">--</span>
+                        <span class="release-id">--</span>
+                    </div>
+                    <p class="promote-instruction">Select platforms to promote to the next environment:</p>
+                    <div class="platform-checkboxes" id="promote-platforms">
+                        <!-- Populated dynamically -->
+                    </div>
+                    <div class="modal-error" id="promote-error-1" style="display: none;"></div>
+                </div>
+
+                <!-- Step 2: Validation & Review -->
+                <div class="promote-content" id="promote-step-2" style="display: none;">
+                    <h3 class="promote-section-title">PROMOTION PREVIEW</h3>
+                    <div class="promote-preview-list" id="promote-preview">
+                        <!-- Populated dynamically -->
+                    </div>
+                    <div class="promote-warnings" id="promote-warnings" style="display: none;">
+                        <h4 class="warning-title">WARNINGS</h4>
+                        <ul class="warning-list" id="warning-list"></ul>
+                    </div>
+                    <div class="modal-error" id="promote-error-2" style="display: none;"></div>
+                </div>
+
+                <!-- Step 3: Confirmation & Execute -->
+                <div class="promote-content" id="promote-step-3" style="display: none;">
+                    <h3 class="promote-section-title">CONFIRM PROMOTION</h3>
+                    <div class="promote-summary" id="promote-summary">
+                        <!-- Populated dynamically -->
+                    </div>
+                    <div class="promote-progress" id="promote-progress" style="display: none;">
+                        <div class="progress-message" id="progress-message">Promoting...</div>
+                        <div class="progress-bar-container">
+                            <div class="progress-bar" id="promote-progress-bar"></div>
+                        </div>
+                    </div>
+                    <div class="promote-results" id="promote-results" style="display: none;"></div>
+                    <div class="modal-error" id="promote-error-3" style="display: none;"></div>
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel" id="promote-cancel-btn" onclick="hidePromoteModal()">CANCEL</button>
+                <div class="modal-footer-spacer"></div>
+                <button class="modal-btn modal-btn-secondary" id="promote-back-btn" onclick="promoteStepBack()" style="display: none;">BACK</button>
+                <button class="modal-btn modal-btn-confirm" id="promote-next-btn" onclick="promoteStepNext()">NEXT</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Release Notes Modal (XACA-0026) -->
+    <div class="lcars-modal-overlay" id="relnotes-modal" style="display: none;">
+        <div class="lcars-modal lcars-modal-wide relnotes-modal">
+            <div class="lcars-modal-header relnotes-header">
+                <span class="lcars-modal-title">RELEASE NOTES</span>
+                <button class="lcars-modal-close" onclick="hideRelnotesModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <div class="relnotes-release-info" id="relnotes-release-info">
+                    <span class="release-name">--</span>
+                    <span class="release-id">--</span>
+                </div>
+                <div class="relnotes-tabs">
+                    <button class="relnotes-tab active" data-tab="generated" onclick="switchRelnotesTab('generated')">GENERATED</button>
+                    <!-- XACA-0056: Hide editor tab for archived releases -->
+                    <button class="relnotes-tab" id="relnotes-editor-tab" data-tab="editor" onclick="switchRelnotesTab('editor')">EDITOR</button>
+                </div>
+                <div class="relnotes-content" id="relnotes-generated">
+                    <div class="relnotes-loading" id="relnotes-loading">Generating release notes...</div>
+                    <div class="relnotes-output" id="relnotes-output"></div>
+                </div>
+                <div class="relnotes-content" id="relnotes-editor" style="display: none;">
+                    <textarea class="relnotes-textarea" id="relnotes-textarea" placeholder="Edit release notes here..."></textarea>
+                </div>
+                <div class="modal-error" id="relnotes-error" style="display: none;"></div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="hideRelnotesModal()">CLOSE</button>
+                <div class="modal-footer-spacer"></div>
+                <button class="modal-btn modal-btn-secondary" onclick="copyRelnotesToClipboard()">COPY</button>
+                <!-- XACA-0056: Hide regenerate for archived releases -->
+                <button class="modal-btn modal-btn-confirm" id="relnotes-regenerate-btn" onclick="regenerateRelnotes()">REGENERATE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Release Modal -->
+    <div class="lcars-modal-overlay" id="release-edit-modal" style="display: none;">
+        <div class="lcars-modal lcars-modal-wide">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">EDIT RELEASE</span>
+                <button class="lcars-modal-close" onclick="hideEditReleaseModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <input type="hidden" id="edit-release-id">
+                <div class="modal-field">
+                    <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in QUEUE tab</span></label>
+                    <input type="text" class="modal-input" id="edit-release-short-title" name="release_short_edit_x7q" placeholder="e.g., Q1 Features" maxlength="20" autocomplete="one-time-code" data-lpignore="true" data-form-type="other" data-1p-ignore="true" aria-autocomplete="none">
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">RELEASE TITLE</label>
+                    <input type="search" class="modal-input" id="edit-release-title" name="release_title_edit_x7q" placeholder="e.g., Q1 2026 Feature Release" autocomplete="off" data-lpignore="true" data-form-type="other" data-1p-ignore="true" aria-autocomplete="none">
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">TYPE</label>
+                    <select class="modal-select" id="edit-release-type">
+                        <option value="feature">FEATURE</option>
+                        <option value="bugfix">BUGFIX</option>
+                        <option value="hotfix">HOTFIX</option>
+                        <option value="maintenance">MAINTENANCE</option>
+                    </select>
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">PLATFORMS <span class="modal-label-hint">(can add, cannot remove)</span></label>
+                    <div class="modal-checkbox-group" id="edit-release-platforms">
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="ios"> iOS
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="android"> Android
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="firebase"> Firebase
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="web"> Web
+                        </label>
+                        <label class="modal-checkbox-label">
+                            <input type="checkbox" value="other"> Other
+                        </label>
+                    </div>
+                </div>
+                <div class="modal-field">
+                    <label class="modal-label">TARGET DATE (OPTIONAL)</label>
+                    <input type="date" class="modal-input" id="edit-release-target-date">
+                </div>
+                <div class="modal-error" id="release-edit-error" style="display: none;"></div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="hideEditReleaseModal()">CANCEL</button>
+                <button class="modal-btn modal-btn-confirm" onclick="submitEditRelease()">SAVE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Import External Issue Modal (XACA-0031) -->
+    <div class="lcars-modal-overlay" id="import-modal" style="display: none;">
+        <div class="lcars-modal lcars-modal-wide">
+            <div class="lcars-modal-header import-header">
+                <span class="lcars-modal-title">IMPORT EXTERNAL ISSUE</span>
+                <button class="lcars-modal-close" onclick="hideImportModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <!-- Input Section -->
+                <div class="import-input-section">
+                    <div class="modal-field">
+                        <label class="modal-label">INTEGRATION</label>
+                        <select class="modal-select" id="import-provider" onchange="updateImportPlaceholder()">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <div class="modal-field">
+                        <label class="modal-label">TICKET ID</label>
+                        <div class="import-input-row">
+                            <input type="text" class="modal-input" id="import-ticket-id" placeholder="e.g., ME-123" autocomplete="off">
+                            <button class="modal-btn modal-btn-fetch" onclick="fetchImportPreview()">FETCH</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Loading State -->
+                <div class="import-loading" id="import-loading" style="display: none;">
+                    <div class="loading-spinner"></div>
+                    <span>Fetching issue...</span>
+                </div>
+
+                <!-- Error State -->
+                <div class="modal-error" id="import-error" style="display: none;"></div>
+
+                <!-- Preview Section -->
+                <div class="import-preview-section" id="import-preview" style="display: none;">
+                    <div class="import-source-info">
+                        <span class="source-label">SOURCE:</span>
+                        <span id="import-source-name">--</span>
+                        <span class="source-ticket" id="import-source-ticket">--</span>
+                    </div>
+
+                    <div class="import-issue-details">
+                        <div class="issue-title" id="import-issue-title">--</div>
+                        <div class="issue-meta">
+                            <span class="issue-type" id="import-issue-type">--</span>
+                            <span class="issue-status" id="import-issue-status">--</span>
+                            <span class="issue-priority" id="import-issue-priority">--</span>
+                        </div>
+                        <div class="issue-description" id="import-issue-description"></div>
+                    </div>
+
+                    <div class="import-children-section" id="import-children" style="display: none;">
+                        <div class="children-header">
+                            <span class="children-label">SUBTASKS</span>
+                            <span class="children-count" id="import-children-count">0</span>
+                        </div>
+                        <div class="children-list" id="import-children-list"></div>
+                    </div>
+
+                    <div class="import-target-section">
+                        <div class="modal-field">
+                            <label class="modal-label">IMPORT TO TEAM</label>
+                            <select class="modal-select" id="import-target-team">
+                                <option value="academy">Academy</option>
+                                <option value="ios">iOS</option>
+                                <option value="android">Android</option>
+                                <option value="firebase">Firebase</option>
+                                <option value="freelance">Freelance</option>
+                                <option value="mainevent">MainEvent</option>
+                            </select>
+                        </div>
+                        <div class="modal-field">
+                            <label class="modal-checkbox-label">
+                                <input type="checkbox" id="import-include-children" checked> Include subtasks as subitems
+                            </label>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel" onclick="hideImportModal()">CANCEL</button>
+                <div class="modal-footer-spacer"></div>
+                <button class="modal-btn modal-btn-confirm" id="import-execute-btn" onclick="executeImport()" disabled>IMPORT</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <!-- TODO ADD/EDIT MODAL (XACA-0101)                                        -->
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="todo-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeTodoModal()"></div>
+        <div class="lcars-modal-content">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title" id="todo-modal-title">ADD TODO</span>
+                <button class="lcars-modal-close" onclick="closeTodoModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <!-- Hidden field for edit mode -->
+                <input type="hidden" id="todo-edit-id" value="">
+
+                <div class="form-group">
+                    <label for="todo-text">ITEM TEXT</label>
+                    <textarea id="todo-text" class="lcars-textarea" rows="3" placeholder="What needs to be done?" maxlength="500"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="todo-priority">PRIORITY</label>
+                    <select id="todo-priority">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="todo-required-by">REQUIRED BY (OPTIONAL)</label>
+                    <input type="date" id="todo-required-by">
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button" class="lcars-btn lcars-btn-danger" id="todo-delete-btn" onclick="deleteTodo()" style="display: none;">DELETE</button>
+                <div class="modal-footer-spacer"></div>
+                <button type="button" class="lcars-btn lcars-btn-secondary" onclick="closeTodoModal()">CANCEL</button>
+                <button type="button" class="lcars-btn lcars-btn-primary" onclick="saveTodo()">SAVE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scan line animation overlay -->
+    <div class="scanline"></div>
+
+<script src="js/lcars.js?v=3.16"></script>
+</body>
+</html>

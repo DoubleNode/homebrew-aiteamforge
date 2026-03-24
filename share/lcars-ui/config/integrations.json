@@ -1,0 +1,209 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LCARS Integration Configuration",
+  "description": "Configuration for external ticket tracking system integrations",
+  "version": "1.3.0",
+  "integrations": [],
+  "_schema": {
+    "integration": {
+      "id": {
+        "type": "string",
+        "description": "Unique identifier for this integration instance",
+        "required": true
+      },
+      "type": {
+        "type": "string",
+        "enum": [
+          "jira",
+          "monday",
+          "github",
+          "linear",
+          "asana",
+          "trello",
+          "custom"
+        ],
+        "description": "The type of integration provider",
+        "required": true
+      },
+      "name": {
+        "type": "string",
+        "description": "Human-readable display name",
+        "required": true
+      },
+      "enabled": {
+        "type": "boolean",
+        "description": "Whether this integration is active",
+        "default": true
+      },
+      "baseUrl": {
+        "type": "string",
+        "description": "Base URL for the service API",
+        "required": true
+      },
+      "browseUrl": {
+        "type": "string",
+        "description": "URL template for viewing tickets. Use {ticketId} as placeholder",
+        "required": true
+      },
+      "apiVersion": {
+        "type": "string",
+        "description": "API version to use (provider-specific)"
+      },
+      "auth": {
+        "type": "object",
+        "description": "Authentication configuration",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "basic",
+              "bearer",
+              "oauth2",
+              "api-key"
+            ],
+            "description": "Authentication method"
+          },
+          "userEnvVar": {
+            "type": "string",
+            "description": "Environment variable name for username/email"
+          },
+          "tokenEnvVar": {
+            "type": "string",
+            "description": "Environment variable name for API token/password"
+          },
+          "headerName": {
+            "type": "string",
+            "description": "Custom header name for API key auth"
+          }
+        }
+      },
+      "ticketPattern": {
+        "type": "string",
+        "description": "Regex pattern for validating ticket IDs"
+      },
+      "defaultProjects": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "List of project prefixes to filter/prioritize in search"
+      },
+      "searchFields": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Fields to return from search API"
+      },
+      "icon": {
+        "type": "string",
+        "description": "Icon identifier for UI display"
+      },
+      "teams": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "description": "Optional: Limit this integration to specific teams. Empty = all teams"
+      }
+    },
+    "ticketLink": {
+      "description": "Data model for linking kanban items to external tickets",
+      "integrationId": {
+        "type": "string",
+        "description": "Reference to integration.id"
+      },
+      "ticketId": {
+        "type": "string",
+        "description": "The external ticket ID (e.g., 'ME-123')"
+      },
+      "ticketUrl": {
+        "type": "string",
+        "description": "Cached/computed URL for the ticket"
+      },
+      "summary": {
+        "type": "string",
+        "description": "Cached ticket summary/title"
+      },
+      "status": {
+        "type": "string",
+        "description": "Cached ticket status"
+      },
+      "linkedAt": {
+        "type": "string",
+        "format": "date-time",
+        "description": "When this link was created"
+      },
+      "linkedBy": {
+        "type": "string",
+        "description": "Who created this link"
+      }
+    }
+  },
+  "_examples": {
+    "multipleIntegrations": [
+      {
+        "id": "jira-mainevent",
+        "type": "jira",
+        "name": "Main Event Jira",
+        "enabled": true,
+        "baseUrl": "https://mainevent.atlassian.net",
+        "browseUrl": "https://mainevent.atlassian.net/browse/{ticketId}"
+      },
+      {
+        "id": "github-mainevent",
+        "type": "github",
+        "name": "Main Event GitHub",
+        "enabled": true,
+        "baseUrl": "https://api.github.com",
+        "browseUrl": "https://github.com/{owner}/{repo}/issues/{ticketId}",
+        "auth": {
+          "type": "bearer",
+          "tokenEnvVar": "GITHUB_TOKEN"
+        },
+        "ticketPattern": "^[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+#[0-9]+$"
+      },
+      {
+        "id": "linear-team",
+        "type": "linear",
+        "name": "Linear",
+        "enabled": false,
+        "baseUrl": "https://api.linear.app",
+        "browseUrl": "https://linear.app/team/issue/{ticketId}",
+        "auth": {
+          "type": "bearer",
+          "tokenEnvVar": "LINEAR_API_KEY"
+        },
+        "ticketPattern": "^[A-Z]+-[0-9]+$"
+      }
+    ],
+    "ticketLinksArray": {
+      "description": "How ticketLinks replaces single jiraId on kanban items",
+      "before": {
+        "id": "XACA-0016",
+        "title": "Multi-Platform Integration",
+        "jiraId": "ME-456"
+      },
+      "after": {
+        "id": "XACA-0016",
+        "title": "Multi-Platform Integration",
+        "ticketLinks": [
+          {
+            "integrationId": "jira-mainevent",
+            "ticketId": "ME-456",
+            "ticketUrl": "https://mainevent.atlassian.net/browse/ME-456",
+            "summary": "Multi-Platform Integration System",
+            "linkedAt": "2026-01-17T10:30:00Z"
+          },
+          {
+            "integrationId": "github-mainevent",
+            "ticketId": "lcars-ui#42",
+            "ticketUrl": "https://github.com/mainevent/lcars-ui/issues/42",
+            "summary": "Add multi-integration support",
+            "linkedAt": "2026-01-17T10:35:00Z"
+          }
+        ]
+      }
+    }
+  }
+}
