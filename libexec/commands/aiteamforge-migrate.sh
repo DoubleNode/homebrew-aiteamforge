@@ -25,7 +25,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="0.5.1"
+VERSION="0.5.2"
 
 # Default values
 OLD_INSTALL_DIR="${HOME}/aiteamforge"

@@ -239,31 +239,35 @@ echo "⭐ Creating terminal tabs..."
 
 if pgrep -f "iTerm.app" > /dev/null; then
 
-    # LCARS tab — inline web view of kanban dashboard
-    echo "  Opening tab: LCARS"
-    _lcars_tab_ok=false
-    python3 "$WM" \
-        --action create-tab \
-        --window-title "$ITERM_WINDOW_NAME" \
-        --profile "LCARS Web" \
-        --tab-name "LCARS" \
-        --command "http://localhost:$LCARS_PORT" \
-        2>>"$ITERM_STARTUP_LOG" && _lcars_tab_ok=true
-    if [[ "$_lcars_tab_ok" != "true" ]]; then
-        # LCARS Web profile not available — open in system browser instead
-        echo "  ⚠️  LCARS Web profile not loaded — opening in browser"
-        open "http://localhost:$LCARS_PORT" 2>/dev/null
-    fi
+    # LCARS kanban dashboard — open in browser (inline browser profile
+    # requires iTerm2 restart after profile creation, so browser is more reliable)
+    echo "  Opening LCARS kanban in browser..."
+    open "http://localhost:$LCARS_PORT" 2>/dev/null
     sleep 0.3
 
-    # Agent tabs
+    # Agent tabs — write a small init script per agent so the command
+    # text isn't echoed visibly by async_send_text.
+    _AGENT_INIT_DIR="${PROJECT_DIR}/.agent-init"
+    mkdir -p "$_AGENT_INIT_DIR"
     for agent in "${AGENTS[@]}"; do
         echo "  Opening tab: $agent"
+        cat > "${_AGENT_INIT_DIR}/${agent}.sh" <<AGENTEOF
+#!/bin/zsh
+clear
+echo '🤖 ${TEAM_NAME} — ${DISPLAY_NAME}'
+echo '   Agent: ${agent}'
+echo '   Project: ${PROJECT_DIR}'
+echo ''
+echo '   Start Claude: claude'
+echo ''
+cd '${PROJECT_DIR}' 2>/dev/null
+AGENTEOF
+        chmod +x "${_AGENT_INIT_DIR}/${agent}.sh"
         python3 "$WM" \
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
             --tab-name "$agent" \
-            --command "echo '🤖 ${TEAM_NAME} — ${DISPLAY_NAME}'; echo '   Agent: ${agent}'; echo '   Project: ${PROJECT_DIR}'; echo ''; echo '   Start Claude: claude'; echo ''; cd '${PROJECT_DIR}' 2>/dev/null; exec zsh" \
+            --command "source '${_AGENT_INIT_DIR}/${agent}.sh'" \
             2>>"$ITERM_STARTUP_LOG"
         sleep 0.3
     done
@@ -284,13 +288,13 @@ if pgrep -f "iTerm.app" > /dev/null; then
         sleep 0.3
     done
 
-    # Switch to LCARS tab
+    # Switch to the first agent tab
     echo ""
-    echo "🎯 Switching to LCARS tab..."
+    echo "🎯 Switching to ${AGENTS[0]} tab..."
     python3 "$WM" \
         --action select-tab \
         --window-title "$ITERM_WINDOW_NAME" \
-        --tab-name "LCARS" \
+        --tab-name "${AGENTS[0]}" \
         2>>"$ITERM_STARTUP_LOG"
 else
     echo "  iTerm2 not running — open tabs manually"

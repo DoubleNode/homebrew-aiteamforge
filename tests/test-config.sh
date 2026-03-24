@@ -23,7 +23,7 @@ create_test_config() {
   local config_file="$AITEAMFORGE_DIR/.aiteamforge-config"
   cat > "$config_file" <<'EOF'
 {
-  "version": "0.5.1",
+  "version": "0.5.2",
   "machine": {
     "name": "test-machine",
     "hostname": "localhost",
@@ -43,7 +43,7 @@ create_invalid_json_config() {
   local config_file="$AITEAMFORGE_DIR/.aiteamforge-config"
   cat > "$config_file" <<'EOF'
 {
-  "version": "0.5.1",
+  "version": "0.5.2",
   "invalid json here
 EOF
 }
@@ -86,7 +86,7 @@ test_pass
 test_start "get_config_value reads top-level values"
 create_test_config
 value=$(get_config_value "version")
-assert_equal "0.5.1" "$value"
+assert_equal "0.5.2" "$value"
 test_pass
 
 test_start "get_config_value reads nested values"
@@ -110,7 +110,7 @@ test_pass
 test_start "get_installed_version returns correct version"
 create_test_config
 version=$(get_installed_version)
-assert_equal "0.5.1" "$version"
+assert_equal "0.5.2" "$version"
 test_pass
 
 test_start "get_configured_teams returns space-separated team list"
