@@ -168,14 +168,29 @@ async def create_tab_in_window(connection, window_title, profile=None, tab_name=
                 return None
 
     # ALWAYS create a new tab (never reuse the startup tab)
-    try:
-        if profile:
-            tab = await window.async_create_tab(profile=profile)
-        else:
-            tab = await window.async_create_tab()
-    except Exception as e:
-        print(f"Failed to create tab in window '{window_title}': {e}", file=sys.stderr)
-        return None
+    # Try with specified profile first, fall back to no-profile (system default)
+    # if the profile doesn't exist (INVALID_PROFILE_NAME) or returns None
+    # (profile in plist but not loaded by running iTerm2 instance).
+    tab = None
+    for attempt_profile in ([profile, None] if profile else [None]):
+        try:
+            if attempt_profile:
+                tab = await window.async_create_tab(profile=attempt_profile)
+            else:
+                tab = await window.async_create_tab()
+        except Exception as e:
+            err_msg = str(e)
+            if "INVALID_PROFILE_NAME" in err_msg and attempt_profile and profile:
+                print(f"Profile '{attempt_profile}' not found, retrying with system default", file=sys.stderr)
+                continue
+            print(f"Failed to create tab in window '{window_title}': {e}", file=sys.stderr)
+            return None
+        if tab is not None:
+            break
+        # tab is None with a profile — profile may exist in plist but not
+        # loaded by the running iTerm2 instance; retry without profile
+        if attempt_profile and profile:
+            print(f"Profile '{attempt_profile}' returned None, retrying with system default", file=sys.stderr)
 
     if not tab:
         print(f"Failed to create tab in window '{window_title}': async_create_tab returned None", file=sys.stderr)
@@ -551,13 +566,15 @@ async def main_async(args):
         await init_team_window(connection, args.window_title)
 
     elif args.action == "create-tab":
-        await create_tab_in_window(
+        result = await create_tab_in_window(
             connection,
             args.window_title,
             args.profile,
             args.tab_name,
             args.command
         )
+        if result is None:
+            sys.exit(1)
 
     elif args.action == "set-title":
         if args.window_id:

@@ -241,13 +241,19 @@ if pgrep -f "iTerm.app" > /dev/null; then
 
     # LCARS tab — inline web view of kanban dashboard
     echo "  Opening tab: LCARS"
+    _lcars_tab_ok=false
     python3 "$WM" \
         --action create-tab \
         --window-title "$ITERM_WINDOW_NAME" \
         --profile "LCARS Web" \
         --tab-name "LCARS" \
         --command "http://localhost:$LCARS_PORT" \
-        2>>"$ITERM_STARTUP_LOG"
+        2>>"$ITERM_STARTUP_LOG" && _lcars_tab_ok=true
+    if [[ "$_lcars_tab_ok" != "true" ]]; then
+        # LCARS Web profile not available — open in system browser instead
+        echo "  ⚠️  LCARS Web profile not loaded — opening in browser"
+        open "http://localhost:$LCARS_PORT" 2>/dev/null
+    fi
     sleep 0.3
 
     # Agent tabs
@@ -256,7 +262,6 @@ if pgrep -f "iTerm.app" > /dev/null; then
         python3 "$WM" \
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
-            --profile "Default" \
             --tab-name "$agent" \
             --command "echo '🤖 ${TEAM_NAME} — ${DISPLAY_NAME}'; echo '   Agent: ${agent}'; echo '   Project: ${PROJECT_DIR}'; echo ''; echo '   Start Claude: claude'; echo ''; cd '${PROJECT_DIR}' 2>/dev/null; exec zsh" \
             2>>"$ITERM_STARTUP_LOG"

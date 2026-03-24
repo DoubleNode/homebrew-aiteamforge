@@ -23,7 +23,7 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="0.5.0"
+VERSION="1.4.2"
 
 # Banner
 show_banner() {
@@ -45,7 +45,7 @@ show_banner() {
 ║    ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝                        ║
 ║                                                                      ║
 ║          AI-Powered Team Development Infrastructure                  ║
-║                        Version 0.5.0                                 ║
+║                        Version 1.3.0                                 ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 EOF
@@ -703,6 +703,18 @@ if [ ! -d "${INSTALL_DIR}/.venv" ]; then
   fi
 else
   echo -e "${GREEN}✓${NC} Python venv (already exists)"
+fi
+
+# Create LCARS Web profile in iTerm2 (before iTerm2 is started with team scripts)
+# This profile uses iTerm2's built-in browser mode for inline kanban display.
+# Must be created before the user launches team startup scripts.
+if [ -d "/Applications/iTerm.app" ]; then
+  LCARS_PROFILE_SCRIPT="${INSTALL_DIR}/scripts/create-lcars-profile.py"
+  if [ -f "$LCARS_PROFILE_SCRIPT" ]; then
+    python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:8080" 2>/dev/null && \
+      echo -e "${GREEN}✓${NC} LCARS Web profile (iTerm2 inline browser)" || \
+      echo -e "${YELLOW}⚠${NC} Could not create LCARS Web profile"
+  fi
 fi
 
 # Copy skills (Claude Code slash commands)

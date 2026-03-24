@@ -2,7 +2,7 @@
 
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
-![Version](https://img.shields.io/badge/version-0.5.0-green)
+![Version](https://img.shields.io/badge/version-0.5.1-green)
 ![macOS](https://img.shields.io/badge/macOS-Big_Sur+-blue)
 
 **AITeamForge** - AI-powered multi-team development infrastructure

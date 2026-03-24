@@ -42,12 +42,10 @@ def create_profile(name="LCARS Web", url="http://localhost:8080"):
     data = plistlib.loads(result.stdout)
     bookmarks = data.get("New Bookmarks", [])
 
-    # Use Default profile as base if available
+    # Use the first available profile as base (may not be named "Default" on clean installs)
     base = {}
-    for bookmark in bookmarks:
-        if bookmark.get("Name") == "Default":
-            base = dict(bookmark)
-            break
+    if bookmarks:
+        base = dict(bookmarks[0])
 
     # Override with LCARS Web settings
     base["Name"] = name
