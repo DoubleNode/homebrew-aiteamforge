@@ -560,9 +560,9 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       read -p "  Project ID [${default_project}]: " project_id
       project_id="${project_id:-$default_project}"
     fi
-    declare -g "_PROJECT_${team_id}=${project_id}"
-    declare -g "_CLIENT_${team_id}=${client_id}"
-    declare -g "_WORKDIR_${team_id}=${working_dir}/${client_id}/${project_id}"
+    eval "_PROJECT_${team_id}=\"${project_id}\""
+    eval "_CLIENT_${team_id}=\"${client_id}\""
+    eval "_WORKDIR_${team_id}=\"${working_dir}/${client_id}/${project_id}\""
     echo -e "  ${GREEN}✓${NC} ${team_id}: ${working_dir}/${client_id}/${project_id}"
 
   elif [ "$has_projects" = "true" ]; then
@@ -577,12 +577,12 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       read -p "  Project ID [${default_project}]: " project_id
       project_id="${project_id:-$default_project}"
     fi
-    declare -g "_PROJECT_${team_id}=${project_id}"
-    declare -g "_WORKDIR_${team_id}=${working_dir}/${project_id}"
+    eval "_PROJECT_${team_id}=\"${project_id}\""
+    eval "_WORKDIR_${team_id}=\"${working_dir}/${project_id}\""
     echo -e "  ${GREEN}✓${NC} ${team_id}: ${working_dir}/${project_id}"
 
   else
-    declare -g "_WORKDIR_${team_id}=${working_dir}"
+    eval "_WORKDIR_${team_id}=\"${working_dir}\""
   fi
 done
 
