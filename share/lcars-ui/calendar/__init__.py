@@ -14,8 +14,9 @@ import importlib.util
 # Find and load stdlib calendar by explicit file path.
 # Python 3.14+ uses @global_enum in calendar.py which requires the module
 # to be registered in sys.modules under its __module__ name during import.
-# We register it as "_stdlib_calendar" before exec_module so the enum
-# decorator can find it via sys.modules[cls.__module__].
+# We must register it as "_stdlib_calendar" AND ensure the enum decorator
+# can find it. The safest approach: temporarily register under "calendar"
+# in sys.modules during load, then stash it.
 _stdlib_calendar = None
 for _path in sys.path:
     _candidate = os.path.join(_path, 'calendar.py')
@@ -24,6 +25,8 @@ for _path in sys.path:
             _spec = importlib.util.spec_from_file_location("_stdlib_calendar", _candidate)
             if _spec and _spec.loader:
                 _stdlib_calendar = importlib.util.module_from_spec(_spec)
+                # Temporarily register so @global_enum can find it via __module__
+                _saved_calendar = sys.modules.get('_stdlib_calendar')
                 sys.modules['_stdlib_calendar'] = _stdlib_calendar
                 _spec.loader.exec_module(_stdlib_calendar)
                 break

@@ -30,6 +30,24 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
 
+# Import kanban utilities for team-specific tmp directory resolution
+try:
+    import sys as _sys
+    _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
+    if _KANBAN_HOOKS_DIR not in _sys.path:
+        _sys.path.insert(0, _KANBAN_HOOKS_DIR)
+    from kanban_utils import log_activity, read_activity_log, get_lcars_tmp_dir
+    LOG_ACTIVITY_AVAILABLE = True
+except ImportError as e:
+    LOG_ACTIVITY_AVAILABLE = False
+    def log_activity(*args, **kwargs):
+        pass
+    def read_activity_log(*args, **kwargs):
+        return {"entries": [], "itemId": kwargs.get("item_id", "")}
+    def get_lcars_tmp_dir(session_name: str) -> str:
+        return "/tmp/"
+    print(f"[LCARS] Warning: kanban_utils not available, activity logging disabled: {e}")
+
 # Import integration providers
 try:
     from integrations import get_manager, IntegrationManager
@@ -60,13 +78,14 @@ DEFAULT_PORT = 8080
 BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 
 # Distributed kanban directories - each team has their own
-TEAM_KANBAN_DIRS = {
+# These defaults are used when ~/.aiteamforge-config is not present (backward compatibility)
+_TEAM_KANBAN_DIRS_DEFAULT = {
     # Main Event Teams
-    "academy": Path.home() / "aiteamforge" / "kanban",
+    "academy": Path.home() / "aiteamforge" / "academy" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/aiteamforge/kanban"),
+    "command": Path.home() / "aiteamforge" / "command" / "kanban",
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
 
     # Freelance Projects
@@ -74,6 +93,12 @@ TEAM_KANBAN_DIRS = {
     "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
     "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
     "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+    "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+    "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+
+    # Liquidstyle Freelance Projects
+    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
+    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
 
     # Legal Projects
     "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
@@ -85,8 +110,66 @@ TEAM_KANBAN_DIRS = {
     "finance-personal": Path.home() / "finance" / "personal" / "kanban",
 }
 
-# Legacy fallback for backwards compatibility
-KANBAN_DIR = Path.home() / "aiteamforge" / "kanban"
+def _load_team_kanban_dirs_from_config() -> dict:
+    """Try to load team kanban dirs from ~/.aiteamforge-config (JSON).
+
+    The config file lives at ${AITEAMFORGE_DIR:-~/aiteamforge}/.aiteamforge-config
+    and is written by aiteamforge-setup.sh.
+
+    Expected structure:
+      {
+        "install_dir": "/Users/name/aiteamforge",
+        "team_paths": {
+          "academy": {"working_dir": "/Users/name/aiteamforge/academy", ...},
+          "ios":     {"working_dir": "/path/to/ios", ...},
+          ...
+        }
+      }
+
+    Each team's kanban directory is working_dir + "/kanban".
+
+    Falls back to hardcoded defaults if the config file is missing, unreadable,
+    or missing the team_paths key.
+    """
+    aiteamforge_dir = os.environ.get("AITEAMFORGE_DIR", str(Path.home() / "aiteamforge"))
+    config_path = Path(aiteamforge_dir) / ".aiteamforge-config"
+
+    if not config_path.exists():
+        print(f"[LCARS] TEAM_KANBAN_DIRS: config not found at {config_path} — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[LCARS] TEAM_KANBAN_DIRS: failed to read {config_path} ({e}) — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    team_paths = config.get("team_paths")
+    if not team_paths or not isinstance(team_paths, dict):
+        print(f"[LCARS] TEAM_KANBAN_DIRS: no 'team_paths' in config — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    dirs = {}
+    for team_id, team_info in team_paths.items():
+        if not isinstance(team_info, dict):
+            continue
+        working_dir = team_info.get("working_dir")
+        if not working_dir:
+            continue
+        dirs[team_id] = Path(working_dir) / "kanban"
+
+    if not dirs:
+        print(f"[LCARS] TEAM_KANBAN_DIRS: config has empty team_paths — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    print(f"[LCARS] TEAM_KANBAN_DIRS: loaded {len(dirs)} team(s) from {config_path}")
+    return dirs
+
+TEAM_KANBAN_DIRS = _load_team_kanban_dirs_from_config()
+
+# Legacy fallback for backwards compatibility (academy install location)
+KANBAN_DIR = Path.home() / "aiteamforge" / "academy" / "kanban"
 
 def get_board_file(team: str) -> Path:
     """Get the board file path for a team using distributed directories."""
@@ -97,6 +180,9 @@ UI_DIR = Path(__file__).parent
 CONFIG_DIR = Path.home() / "aiteamforge" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
+# Team-specific tmp directory — resolved from SESSION_NAME via kanban_utils.
+# Falls back to /tmp/ for unknown sessions.
+LCARS_TMP_DIR = Path(get_lcars_tmp_dir(SESSION_NAME))
 
 # Team-specific configuration directories (distributed into each team's kanban/config/)
 # Releases, integrations, and calendar configs live alongside board data for self-containment.
@@ -160,6 +246,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
+    # Compiled pattern for valid resource IDs: alphanumeric, hyphens, underscores only.
+    # Max 128 chars to prevent abuse. No path traversal characters permitted.
+    _RESOURCE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+
+    @classmethod
+    def _validate_resource_id(cls, value, name='id'):
+        """Validate a release_id or epic_id extracted from a URL path segment.
+
+        Returns None if valid, or an error string describing the problem.
+        Rejects any value containing path traversal sequences or characters
+        outside the alphanumeric/hyphen/underscore set.
+        """
+        if not value:
+            return f"Missing {name}"
+        # Explicit traversal guard (belt-and-suspenders before the regex check)
+        for bad in ('..', '/', '\\'):
+            if bad in value:
+                return f"Invalid {name}: contains disallowed characters"
+        if not cls._RESOURCE_ID_RE.match(value):
+            return f"Invalid {name}: must be alphanumeric with hyphens/underscores, max 128 chars"
+        return None
+
     def do_OPTIONS(self):
         """Handle CORS preflight requests"""
         self.send_response(200)
@@ -215,9 +323,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_create_release()
         elif path.startswith('/api/releases/') and path.endswith('/items'):
             release_id = path.replace('/api/releases/', '').replace('/items', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_assign_item_to_release(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_promote_release(release_id)
         elif path == '/api/releases/flow-config':
             self.handle_update_flow_config()
@@ -228,6 +344,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_create_epic()
         elif path.startswith('/api/epics/') and path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '').replace('/items', '')
+            err = self._validate_resource_id(epic_id, 'epic_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_assign_item_to_epic(epic_id)
         # Todo API endpoints
         elif path == '/api/todos':
@@ -265,10 +385,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_update_release(release_id)
         # Epic API endpoints
         elif path.startswith('/api/epics/') and not path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '')
+            err = self._validate_resource_id(epic_id, 'epic_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_update_epic(epic_id)
         # Todo API endpoints
         elif path == '/api/todos':
@@ -290,6 +418,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if path.startswith('/api/releases/') and path.endswith('/archive'):
             release_id = path.replace('/api/releases/', '').replace('/archive', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_toggle_release_archive(release_id)
         else:
             self.send_error(404, f"Unknown PATCH endpoint: {path}")
@@ -311,11 +443,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             parts = path.replace('/api/releases/', '').split('/items/')
             if len(parts) == 2:
                 release_id, item_id = parts
+                err = self._validate_resource_id(release_id, 'release_id')
+                if err:
+                    self.send_error(400, err)
+                    return
+                err = self._validate_resource_id(item_id, 'item_id')
+                if err:
+                    self.send_error(400, err)
+                    return
                 self.handle_remove_item_from_release(release_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
         elif path.startswith('/api/releases/'):
             release_id = path.replace('/api/releases/', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_archive_release(release_id)
         # Epic API endpoints
         elif path.startswith('/api/epics/') and '/items/' in path:
@@ -323,11 +467,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             parts = path.replace('/api/epics/', '').split('/items/')
             if len(parts) == 2:
                 epic_id, item_id = parts
+                err = self._validate_resource_id(epic_id, 'epic_id')
+                if err:
+                    self.send_error(400, err)
+                    return
+                err = self._validate_resource_id(item_id, 'item_id')
+                if err:
+                    self.send_error(400, err)
+                    return
                 self.handle_remove_item_from_epic(epic_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
         elif path.startswith('/api/epics/'):
             epic_id = path.replace('/api/epics/', '')
+            err = self._validate_resource_id(epic_id, 'epic_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_delete_epic(epic_id)
         # Todo API endpoints
         elif path == '/api/todos':
@@ -1664,7 +1820,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         import fcntl
         board_file = self._get_board_file(team)
         # Debug logging to file
-        with open('/tmp/lcars-flow-debug.log', 'a') as log:
+        with open(LCARS_TMP_DIR / 'lcars-flow-debug.log', 'a') as log:
             log.write(f"[LCARS] _save_releases_config - team: {team}, board_file: {board_file}\n")
 
         if not board_file.exists():
@@ -1760,14 +1916,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         main_event_base = Path("/Users/Shared/Development/Main Event")
 
-        # Static team base paths (Main Event platform teams and infrastructure)
+        # Static team base paths fallback (used only when team not found in TEAM_KANBAN_DIRS)
         team_base_paths = {
-            'academy': Path.home() / "aiteamforge" / "kanban",
-            'ios': main_event_base / "MainEventApp-iOS" / "DEV" / "aiteamforge" / "kanban",
-            'android': main_event_base / "MainEventApp-Android" / "develop" / "aiteamforge" / "kanban",
-            'firebase': main_event_base / "MainEventApp-Functions" / "develop" / "aiteamforge" / "kanban",
-            'command': main_event_base / "aiteamforge" / "kanban",
-            'dns': Path("/Users/Shared/Development/DNSFramework") / "aiteamforge" / "kanban",
+            'academy': Path.home() / "aiteamforge" / "academy" / "kanban",
+            'ios': main_event_base / "MainEventApp-iOS" / "kanban",
+            'android': main_event_base / "MainEventApp-Android" / "kanban",
+            'firebase': main_event_base / "MainEventApp-Functions" / "kanban",
+            'command': Path.home() / "aiteamforge" / "command" / "kanban",
+            'dns': Path("/Users/Shared/Development/DNSFramework") / "kanban",
         }
 
         # PRIORITY 1: Use canonical TEAM_KANBAN_DIRS mapping (source of truth)
@@ -2730,7 +2886,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             stages = post_data['stages']
             team = post_data.get('team')  # Optional team parameter for cross-team support
             # Debug logging to file (terminal output may be redirected)
-            with open('/tmp/lcars-flow-debug.log', 'a') as log:
+            with open(LCARS_TMP_DIR / 'lcars-flow-debug.log', 'a') as log:
                 log.write(f"[{self._get_timestamp()}] Flow config update - team from request: {team}\n")
                 log.write(f"[{self._get_timestamp()}] Flow config update - stages: {stages}\n")
 
@@ -5345,21 +5501,22 @@ end tell
         """Serve agent panel data from temp file written by banner scripts.
 
         Supports per-session data via ?session=X query parameter.
-        Files are written by display_agent_avatar as /tmp/lcars-agent-{session_code}.json
+        Files are written by display_agent_avatar as <kanban/tmp>/lcars-agent-{session_code}.json
         where session_code matches the tmux session name (e.g., 'academy-chancellor').
+        The tmp directory is team-specific (LCARS_TMP_DIR), resolved from SESSION_NAME at startup.
         """
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         session = query.get('session', [None])[0]
 
-        # Use /tmp directly - banner scripts write to /tmp/lcars-agent-*.json
-        # (tempfile.gettempdir() returns /var/folders/... on macOS, which is wrong)
-        tmp_dir = Path('/tmp')
+        # Use team-specific kanban/tmp/ directory — banner scripts write to this location.
+        # LCARS_TMP_DIR is resolved from SESSION_NAME at startup via get_lcars_tmp_dir().
+        tmp_dir = LCARS_TMP_DIR
         agent_file = None
 
         if session:
             # Check for per-window file first (supports multi-agent terminals)
-            # The active window index is written by a tmux hook to /tmp/lcars-active-window-{session}
+            # The active window index is written by a tmux hook to <kanban/tmp>/lcars-active-window-{session}
             active_window_file = tmp_dir / f"lcars-active-window-{session}"
             if active_window_file.exists():
                 try:

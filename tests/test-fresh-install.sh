@@ -123,6 +123,30 @@ if [ -f "$INSTALL_DIR/.aiteamforge-config" ]; then
         TEAMS=$(jq -r '.teams[]' "$INSTALL_DIR/.aiteamforge-config" 2>/dev/null)
         TEAM_COUNT=$(echo "$TEAMS" | wc -l | tr -d ' ')
         pass "$TEAM_COUNT team(s) configured: $(echo $TEAMS | tr '\n' ' ')"
+
+        # Check team_paths field
+        if jq -e '.team_paths' "$INSTALL_DIR/.aiteamforge-config" &>/dev/null; then
+            pass "team_paths field present in config"
+        else
+            warn "team_paths field missing from config (run: aiteamforge setup --upgrade)"
+        fi
+
+        # Check installed_features field
+        FEATURE_COUNT=$(jq '.installed_features | length // 0' "$INSTALL_DIR/.aiteamforge-config" 2>/dev/null || echo "0")
+        if [ "$FEATURE_COUNT" -gt 0 ] 2>/dev/null; then
+            FEATURES=$(jq -r '.installed_features[]' "$INSTALL_DIR/.aiteamforge-config" 2>/dev/null | tr '\n' ' ')
+            pass "installed_features field present (${FEATURE_COUNT} feature(s): ${FEATURES})"
+        else
+            warn "installed_features field missing or empty (run: aiteamforge setup --upgrade)"
+        fi
+
+        # Check fleet_registration_status field
+        FLEET_REG=$(jq -r '.fleet_registration_status // "missing"' "$INSTALL_DIR/.aiteamforge-config" 2>/dev/null)
+        if [ "$FLEET_REG" != "missing" ]; then
+            pass "fleet_registration_status: ${FLEET_REG}"
+        else
+            warn "fleet_registration_status field missing from config (run: aiteamforge setup --upgrade)"
+        fi
     else
         fail ".aiteamforge-config is invalid JSON"
     fi
@@ -302,11 +326,30 @@ fi
 # ─────────────────────────────────────────────────────────────────────────
 section "Shell Environment"
 
-if [ -f "$INSTALL_DIR/claude_agent_aliases.sh" ]; then
-    alias_count=$(grep -c "^alias " "$INSTALL_DIR/claude_agent_aliases.sh" 2>/dev/null || echo "0")
-    pass "Agent aliases file ($alias_count aliases)"
+if [ -f "$INSTALL_DIR/share/aliases/agent-aliases.sh" ]; then
+    fn_count=$(grep -c "^claude-" "$INSTALL_DIR/share/aliases/agent-aliases.sh" 2>/dev/null || echo "0")
+    pass "Agent aliases (agent-aliases.sh, $fn_count claude-* functions)"
 else
-    warn "claude_agent_aliases.sh missing"
+    warn "share/aliases/agent-aliases.sh missing"
+fi
+
+if [ -f "$INSTALL_DIR/share/aliases/cc-aliases.sh" ]; then
+    cc_count=$(grep -c "^cc-" "$INSTALL_DIR/share/aliases/cc-aliases.sh" 2>/dev/null || echo "0")
+    pass "CC aliases (cc-aliases.sh, $cc_count cc-* functions)"
+else
+    warn "share/aliases/cc-aliases.sh missing"
+fi
+
+if [ -f "$INSTALL_DIR/share/aliases/worktree-aliases.sh" ]; then
+    pass "Worktree aliases (worktree-aliases.sh)"
+else
+    warn "share/aliases/worktree-aliases.sh missing"
+fi
+
+if [ -f "$INSTALL_DIR/update_claude_agent.sh" ]; then
+    pass "Agent switcher script (update_claude_agent.sh)"
+else
+    warn "update_claude_agent.sh missing"
 fi
 
 # Check if zshrc has aiteamforge integration (only for default install location)

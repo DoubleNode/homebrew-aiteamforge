@@ -14,15 +14,15 @@ claude_agent() {
 
     if [ -z "$agent" ]; then
         echo "Usage: claude_agent <agent-name>"
-        echo "See claude-status for available agents"
+        echo "See claude-help for available agents"
         return 1
     fi
 
-    # Check if update script exists
+    # Check if update script exists in AITEAMFORGE_DIR
     if [ -f "$AITEAMFORGE_DIR/update_claude_agent.sh" ]; then
         "$AITEAMFORGE_DIR/update_claude_agent.sh" "$agent"
     else
-        echo "⚠️  Agent switcher not installed"
+        echo "Agent switcher not installed at: $AITEAMFORGE_DIR/update_claude_agent.sh"
         echo "Run: aiteamforge-setup to install team configurations"
         return 1
     fi

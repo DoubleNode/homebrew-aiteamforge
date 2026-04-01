@@ -2,9 +2,9 @@ class Aiteamforge < Formula
   desc "AITeamForge - AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
-      tag: "v0.5.2"
+      tag: "v0.5.3"
   license "MIT"
-  version "0.5.2"
+  version "0.5.3"
 
   # Core dependencies required for aiteamforge to function
   depends_on "python@3"
@@ -112,6 +112,11 @@ class Aiteamforge < Formula
     assert_predicate libexec/"libexec/lib/common.sh", :exist?
     assert_predicate libexec/"libexec/lib/config.sh", :exist?
     assert_predicate libexec/"libexec/lib/wizard-ui.sh", :exist?
+
+    # Verify alias templates exist (must ship in released package for install-shell.sh)
+    assert_predicate libexec/"share/templates/aliases/agent-aliases.sh", :exist?
+    assert_predicate libexec/"share/templates/aliases/cc-aliases.sh", :exist?
+    assert_predicate libexec/"share/templates/aliases/worktree-aliases.sh", :exist?
 
     # Test that setup wizard shows version
     system "#{bin}/aiteamforge-setup", "--help"

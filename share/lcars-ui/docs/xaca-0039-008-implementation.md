@@ -152,15 +152,15 @@ The UI expects the following backend API endpoints to be implemented:
 
 ## Files Modified
 
-1. `/Users/darrenehlers/aiteamforge/lcars-ui/index.html` - Added modal HTML
-2. `/Users/darrenehlers/aiteamforge/lcars-ui/css/lcars.css` - Added styles
-3. `/Users/darrenehlers/aiteamforge/lcars-ui/js/lcars.js` - Added functionality
+1. `/Users/darrenehlers/dev-team/lcars-ui/index.html` - Added modal HTML
+2. `/Users/darrenehlers/dev-team/lcars-ui/css/lcars.css` - Added styles
+3. `/Users/darrenehlers/dev-team/lcars-ui/js/lcars.js` - Added functionality
 
 ## Files Created
 
-1. `/Users/darrenehlers/aiteamforge/lcars-ui/config/academy/calendar-config.json` - Sample config
-2. `/Users/darrenehlers/aiteamforge/lcars-ui/docs/calendar-config-schema.md` - Schema docs
-3. `/Users/darrenehlers/aiteamforge/lcars-ui/docs/xaca-0039-008-implementation.md` - This file
+1. `/Users/darrenehlers/dev-team/lcars-ui/config/academy/calendar-config.json` - Sample config
+2. `/Users/darrenehlers/dev-team/lcars-ui/docs/calendar-config-schema.md` - Schema docs
+3. `/Users/darrenehlers/dev-team/lcars-ui/docs/xaca-0039-008-implementation.md` - This file
 
 ## Next Steps
 

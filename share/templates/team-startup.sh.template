@@ -32,6 +32,46 @@ if [[ $# -gt 0 ]]; then
 fi
 
 # ============================================================================
+# Cleanup orphaned processes from previous crashed sessions
+# ============================================================================
+# Kill stale zsh processes that have no controlling terminal and were
+# reparented to init/launchd (PID 1) — typically left by crashed tmux sessions.
+#
+# Scope: only kills orphans whose cwd is under AITEAMFORGE_DIR or TEAM_WORKING_DIR,
+# avoiding collateral damage to unrelated zsh sessions on the system.
+cleanup_orphans() {
+    local orphans orphan_pids=() pid cwd_line
+
+    # Gather candidate pids: zsh, no tty, ppid==1
+    orphans=$(ps -eo pid,ppid,tty,comm | awk '$4 == "zsh" && $3 == "??" && $2 == 1 {print $1}')
+
+    if [[ -n "$orphans" ]]; then
+        while IFS= read -r pid; do
+            [[ -z "$pid" ]] && continue
+            # Confirm the orphan belongs to this team by checking its cwd.
+            # Only kill if cwd is under our AITEAMFORGE_DIR or TEAM_WORKING_DIR.
+            cwd_line=$(lsof -p "$pid" 2>/dev/null | awk '$4 == "cwd" {print $NF}')
+            if [[ -n "$cwd_line" ]]; then
+                if [[ "$cwd_line" == "${AITEAMFORGE_DIR}"* || "$cwd_line" == "${TEAM_WORKING_DIR}"* ]]; then
+                    orphan_pids+=("$pid")
+                fi
+            fi
+        done <<< "$orphans"
+    fi
+
+    if [[ ${#orphan_pids[@]} -gt 0 ]]; then
+        echo "  Cleaning up ${#orphan_pids[@]} orphaned team process(es)..."
+        kill "${orphan_pids[@]}" 2>/dev/null || true
+    fi
+
+    # Kill any stale LCARS server processes on THIS team's port only.
+    # The port is team-specific so this cannot affect other teams' servers.
+    if pkill -f "server\.py ${LCARS_PORT}$" 2>/dev/null; then
+        echo "  Cleaned up stale LCARS server on port ${LCARS_PORT}"
+    fi
+}
+
+# ============================================================================
 # Pre-flight checks
 # ============================================================================
 PREFLIGHT_ERRORS=0
@@ -84,12 +124,30 @@ WM="$AITEAMFORGE_DIR/iterm2_window_manager.py"
 # ============================================================================
 clear
 
-echo "🚀 ${TEAM_NAME}"
+# ============================================================================
+# FIRST: Capture the current iTerm2 window IMMEDIATELY before user can switch.
+# This prevents race conditions if the user switches windows during startup.
+# Must happen before the banner so there is minimal delay after script launch.
+# ============================================================================
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+    echo "  Capturing current window..."
+    python3 "$WM" --action init-team-window --window-title "$ITERM_WINDOW_NAME" 2>>"$ITERM_STARTUP_LOG"
+    if [[ $? -ne 0 ]]; then
+        echo "  Warning: Window capture failed (see $ITERM_STARTUP_LOG)"
+    fi
+fi
+
+echo "  Cleaning up from previous sessions..."
+cleanup_orphans
+
+echo ""
+echo "  ${TEAM_NAME}"
 echo "   ${TEAM_THEME}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-echo "   LCARS Port: $LCARS_PORT"
-echo "   Agents: ${AGENTS[*]}"
+echo "   LCARS Port:  $LCARS_PORT"
+echo "   tmux socket: $TMUX_SOCKET"
+echo "   Agents:      ${AGENTS[*]}"
 echo ""
 
 # Ensure LCARS Web profile exists in iTerm2
@@ -98,22 +156,101 @@ if [[ -f "$LCARS_PROFILE_SCRIPT" ]]; then
     python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
 fi
 
-# Capture iTerm2 window
-if pgrep -f "iTerm.app" > /dev/null; then
-    echo "🔒 Capturing current window..."
-    python3 "$WM" --action init-team-window --window-title "$ITERM_WINDOW_NAME" 2>>"$ITERM_STARTUP_LOG"
+# ============================================================================
+# LCARS tmux session (created synchronously — used by fleet monitor)
+# ============================================================================
+LCARS_SESSION="${TEAM_ID}-lcars"
+if ! tmux -L "$TMUX_SOCKET" has-session -t "$LCARS_SESSION" 2>/dev/null; then
+    echo "  Creating LCARS session: $LCARS_SESSION"
+    tmux -L "$TMUX_SOCKET" new-session -d -s "$LCARS_SESSION" \
+        -n "lcars" -x 220 -y 50
+    tmux -L "$TMUX_SOCKET" send-keys -t "${LCARS_SESSION}:0" \
+        "echo 'LCARS Dashboard — http://localhost:${LCARS_PORT}'" C-m
+else
+    echo "  LCARS session already exists: $LCARS_SESSION"
 fi
+
+# ============================================================================
+# Async tmux session initialization
+# ============================================================================
+# Create tmux sessions in parallel for faster startup.
+# Each session gets named windows matching the production pattern:
+#   window 0 (cmd)     — main agent command window
+#   window 1 (monitor) — monitoring / scratch space
+# Sessions are created before opening iTerm2 tabs so attach succeeds.
+# ============================================================================
+echo "  Creating tmux sessions (async for speed)..."
+_tmux_pids=()
+
+for agent in "${AGENTS[@]}"; do
+    session_name="${TEAM_ID}-${agent}"
+    if tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
+        echo "  Session $session_name already exists — skipping"
+        continue
+    fi
+    echo "  Initializing $session_name..."
+    (
+        # Window 0: main command window
+        tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" \
+            -n "cmd" -x 220 -y 50 2>/dev/null
+
+        # Persist session identity variables so kanban helpers and cc aliases
+        # work correctly when an agent attaches to this session
+        tmux -L "$TMUX_SOCKET" setenv -t "$session_name" SESSION_TYPE    "$TEAM_ID"
+        tmux -L "$TMUX_SOCKET" setenv -t "$session_name" SESSION_NAME    "$agent"
+        tmux -L "$TMUX_SOCKET" setenv -t "$session_name" SESSION_CODE    "$session_name"
+        tmux -L "$TMUX_SOCKET" setenv -t "$session_name" SESSION_DIR     "$TEAM_ID"
+        tmux -L "$TMUX_SOCKET" setenv -t "$session_name" TMUX_SOCKET     "$TMUX_SOCKET"
+        tmux -L "$TMUX_SOCKET" setenv -t "$session_name" AITEAMFORGE_DIR "$AITEAMFORGE_DIR"
+
+        # Export env vars into window 0 and cd to the working directory
+        tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
+            "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}'" C-m
+        tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
+            "cd '${TEAM_WORKING_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
+
+        # Window 1: monitoring / scratch space
+        tmux -L "$TMUX_SOCKET" new-window -t "$session_name" -n "monitor"
+        tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
+            "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}'" C-m
+        tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
+            "cd '${TEAM_WORKING_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
+
+        # Return focus to window 0 (main command window)
+        tmux -L "$TMUX_SOCKET" select-window -t "${session_name}:0"
+    ) &
+    _tmux_pids+=($!)
+    sleep 0.2
+done
+
+# Wait for all background session-creation processes to finish
+if [[ ${#_tmux_pids[@]} -gt 0 ]]; then
+    echo "  Waiting for sessions to initialize..."
+    for _pid in "${_tmux_pids[@]}"; do
+        wait "$_pid" 2>/dev/null
+    done
+fi
+echo "  All sessions initialized"
+echo ""
 
 # ============================================================================
 # Start LCARS server
 # ============================================================================
-echo ""
-echo "📡 Starting LCARS server on port $LCARS_PORT..."
+echo "  Starting LCARS server on port $LCARS_PORT..."
 echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
-pkill -f "server.py.*$LCARS_PORT" 2>/dev/null
+echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
+# Note: cleanup_orphans() already killed any stale server on this port above
+
+# Log directory for LCARS server stderr — created here so the path is ready before launch.
+# Note: log files are not auto-rotated; if disk space is a concern, periodically clear
+# $AITEAMFORGE_DIR/logs/lcars-server-*.log (e.g. via logrotate or a cron job).
+LCARS_LOG_DIR="$AITEAMFORGE_DIR/logs"
+mkdir -p "$LCARS_LOG_DIR"
+LCARS_SERVER_LOG="${LCARS_LOG_DIR}/lcars-server-${TEAM_ID}.log"
+
 (cd "$AITEAMFORGE_DIR/lcars-ui" && \
     LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
-    python3 server.py "$LCARS_PORT" > /dev/null 2>&1 &)
+    python3 server.py "$LCARS_PORT" > /dev/null 2>>"$LCARS_SERVER_LOG" &)
 
 for i in {1..10}; do
     curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1 && break
@@ -121,51 +258,78 @@ for i in {1..10}; do
 done
 
 if curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1; then
-    echo "  ✅ LCARS server ready: http://localhost:$LCARS_PORT"
+    echo "  LCARS server ready: http://localhost:$LCARS_PORT"
 else
-    echo "  ⚠️  LCARS server may not have started (check logs)"
+    echo "  Warning: LCARS server may not have started (check: $LCARS_SERVER_LOG)"
 fi
 
 # ============================================================================
 # Create iTerm2 tabs
 # ============================================================================
 echo ""
-echo "⭐ Creating terminal tabs..."
+echo "  Creating terminal tabs..."
 
-if pgrep -f "iTerm.app" > /dev/null; then
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
 
-    # LCARS kanban dashboard — open in browser (inline browser profile
-    # requires iTerm2 restart after profile creation, so browser is more reliable)
-    echo "  Opening LCARS kanban in browser..."
-    open "http://localhost:$LCARS_PORT" 2>/dev/null
-    sleep 0.3
+    # Set the LCARS Web profile URL for the inline browser tab
+    LCARS_BROWSER_SCRIPT="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
+    if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
+        python3 "$LCARS_BROWSER_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
+    fi
 
-    # Agent tabs — write a small init script per agent so the command
-    # text isn't echoed visibly by async_send_text.
-    _AGENT_INIT_DIR="${AITEAMFORGE_DIR}/${TEAM_ID}/.agent-init"
-    mkdir -p "$_AGENT_INIT_DIR"
-    for agent in "${AGENTS[@]}"; do
-        echo "  Opening tab: $agent"
-        cat > "${_AGENT_INIT_DIR}/${agent}.sh" <<AGENTEOF
-#!/bin/zsh
-clear
-echo '🤖 ${TEAM_NAME} — ${agent}'
-echo '   Start Claude: claude'
-echo ''
-AGENTEOF
-        chmod +x "${_AGENT_INIT_DIR}/${agent}.sh"
-        python3 "$WM" \
+    # LCARS kanban dashboard — prefer iTerm2 inline browser, fall back to system browser
+    LCARS_OPENED=false
+
+    if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
+        echo "  Opening LCARS kanban in iTerm2 tab..."
+        if python3 "$WM" \
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
-            --tab-name "$agent" \
-            --command "source '${_AGENT_INIT_DIR}/${agent}.sh'" \
-            2>>"$ITERM_STARTUP_LOG"
+            --profile "LCARS Web" \
+            --tab-name "LCARS" \
+            --command "export ITERM_TAB_TITLE='LCARS' && tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars" \
+            2>>"$ITERM_STARTUP_LOG"; then
+            LCARS_OPENED=true
+        fi
+    fi
+
+    # Fallback: open in system browser
+    if [[ "$LCARS_OPENED" != "true" ]]; then
+        echo "  Opening LCARS kanban in browser..."
+        open "http://localhost:$LCARS_PORT" 2>/dev/null
+    fi
+    sleep 0.3
+
+    # Agent tabs — each tab attaches to its named tmux session.
+    # The session was created above in the async init block.
+    # Retry up to 3 times to handle transient iTerm2 Python API failures.
+    for agent in "${AGENTS[@]}"; do
+        session_name="${TEAM_ID}-${agent}"
+        echo "  Opening tab: $agent"
+        tab_created=false
+        for attempt in 1 2 3; do
+            python3 "$WM" \
+                --action create-tab \
+                --window-title "$ITERM_WINDOW_NAME" \
+                --tab-name "$agent" \
+                --command "export ITERM_TAB_TITLE='${agent}' && tmux -L ${TMUX_SOCKET} attach -t ${session_name}" \
+                2>>"$ITERM_STARTUP_LOG"
+            if [[ $? -eq 0 ]]; then
+                tab_created=true
+                break
+            fi
+            echo "    Warning: Tab creation attempt $attempt failed, retrying..." >&2
+            sleep 1
+        done
+        if [[ "$tab_created" != "true" ]]; then
+            echo "    Error: Failed to create tab: $agent (see $ITERM_STARTUP_LOG)"
+        fi
         sleep 0.3
     done
 
     # Add agent panels to agent tabs
     echo ""
-    echo "🎨 Adding agent panels..."
+    echo "  Adding agent panels..."
     for agent in "${AGENTS[@]}"; do
         agent_panel_script="$AITEAMFORGE_DIR/scripts/agent-panel-display.sh"
         if [[ -f "$agent_panel_script" ]]; then
@@ -179,16 +343,91 @@ AGENTEOF
         sleep 0.3
     done
 
-    # Switch to the first agent tab
+    # Switch to the first agent tab after all tabs are created
     echo ""
-    echo "🎯 Switching to ${AGENTS[0]} tab..."
+    echo "  Switching to ${AGENTS[0]} tab..."
     python3 "$WM" \
         --action select-tab \
         --window-title "$ITERM_WINDOW_NAME" \
         --tab-name "${AGENTS[0]}" \
         2>>"$ITERM_STARTUP_LOG"
 else
-    echo "  iTerm2 not running — open tabs manually"
+    # Terminal.app fallback: attach to each tmux session in a new tab
+    echo "  iTerm2 not running — using Terminal.app"
+    for agent in "${AGENTS[@]}"; do
+        session_name="${TEAM_ID}-${agent}"
+        echo "  Opening tab: $agent"
+        osascript <<APPLESCRIPT
+tell application "Terminal"
+    activate
+    tell application "System Events"
+        tell process "Terminal"
+            keystroke "t" using command down
+        end tell
+    end tell
+    delay 0.5
+    do script "printf '\\\\033]0;$agent\\\\007' && tmux -L $TMUX_SOCKET attach -t $session_name" in front window
+end tell
+APPLESCRIPT
+        sleep 0.5
+    done
+fi
+
+# ============================================================================
+# Post-startup health checks
+# ============================================================================
+# Verify critical services started correctly.  Runs after tab creation so the
+# user can watch without blocking tab creation.  Non-zero errors are advisory.
+# ============================================================================
+echo ""
+echo "  Running health checks..."
+_HEALTH_ERRORS=0
+
+# 1. LCARS server — must respond on /api/status within 3 seconds
+if curl -s --max-time 3 "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1; then
+    echo "    LCARS server    OK  http://localhost:$LCARS_PORT"
+else
+    echo "    LCARS server    FAIL  port $LCARS_PORT not responding (see: $LCARS_SERVER_LOG)"
+    _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+fi
+
+# 2. Kanban board — the board data directory must be readable
+if [[ -d "$KANBAN_DIR" ]]; then
+    echo "    Kanban board    OK  $KANBAN_DIR"
+else
+    echo "    Kanban board    FAIL  directory not found: $KANBAN_DIR"
+    _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+fi
+
+# 3. Fleet reporter — optional; warn if not detected.
+#    The fleet monitor server (port 3001 by default) is started separately
+#    and is not a hard requirement for team operation.
+_FLEET_PORT="${AITEAMFORGE_FLEET_PORT:-3001}"
+if curl -s --max-time 2 "http://localhost:${_FLEET_PORT}/health" > /dev/null 2>&1 || \
+   pgrep -f "fleet.monitor\|fleet-monitor\|fleet_monitor" > /dev/null 2>&1; then
+    echo "    Fleet reporter  OK"
+else
+    echo "    Fleet reporter  not detected (optional — start separately if needed)"
+fi
+
+# 4. tmux sessions — verify all agent sessions were created successfully
+_MISSING_SESSIONS=()
+for agent in "${AGENTS[@]}"; do
+    session_name="${TEAM_ID}-${agent}"
+    if ! tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
+        _MISSING_SESSIONS+=("$session_name")
+    fi
+done
+if [[ ${#_MISSING_SESSIONS[@]} -eq 0 ]]; then
+    echo "    tmux sessions   OK  ${#AGENTS[@]} agent sessions ready"
+else
+    echo "    tmux sessions   FAIL  missing: ${_MISSING_SESSIONS[*]}"
+    _HEALTH_ERRORS=$((_HEALTH_ERRORS + 1))
+fi
+
+if [[ $_HEALTH_ERRORS -gt 0 ]]; then
+    echo ""
+    echo "  $_HEALTH_ERRORS health check(s) failed — review output above before starting work."
 fi
 
 # ============================================================================
@@ -196,25 +435,30 @@ fi
 # ============================================================================
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "✅ ${TEAM_NAME} ready!"
+echo "  ${TEAM_NAME} ready!"
 echo ""
-echo "📚 Terminals:"
-echo "  * LCARS  — http://localhost:$LCARS_PORT"
+echo "  Terminals:"
+echo "    LCARS  http://localhost:$LCARS_PORT"
 for agent in "${AGENTS[@]}"; do
-    echo "  • $agent"
+    echo "    $agent"
 done
 echo ""
-echo "🎯 Quick Start:"
-echo "  1. Click an agent tab"
-echo "  2. Run: claude"
-echo "  3. Start working!"
+echo "  Quick Start:"
+echo "    1. Click an agent tab"
+echo "    2. Run: claude"
+echo "    3. Start working!"
 echo ""
-echo "📋 Kanban: kb-list | kb-add | kb-status"
+echo "  Kanban: kb-list | kb-add | kb-status"
+echo ""
+echo "  Remote attach (tmux -L ${TMUX_SOCKET}):"
+for agent in "${AGENTS[@]}"; do
+    echo "    tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}"
+done
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
 if [[ -s "$ITERM_STARTUP_LOG" ]]; then
-    echo "⚠️  Errors logged to: $ITERM_STARTUP_LOG"
+    echo "  iTerm2 errors logged to: $ITERM_STARTUP_LOG"
 fi
 
-echo "${TEAM_NAME} ready! 🚀"
+echo "${TEAM_NAME} ready!"

@@ -267,9 +267,9 @@ mv calendar/ fm_calendar/
 **Workaround:** Use absolute imports from outside the `lcars-ui` directory:
 
 ```python
-# Run Python from /Users/darrenehlers/aiteamforge, not from lcars-ui/
+# Run Python from /Users/darrenehlers/dev-team, not from lcars-ui/
 import sys
-sys.path.insert(0, '/Users/darrenehlers/aiteamforge/lcars-ui')
+sys.path.insert(0, '/Users/darrenehlers/dev-team/lcars-ui')
 from calendar.apple_provider import AppleCalendarProvider
 ```
 

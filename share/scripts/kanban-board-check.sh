@@ -304,7 +304,7 @@ _kbc_create_board_from_template() {
 
     # Fallback: try to find it relative to a known Homebrew prefix
     local brew_template
-    brew_template="$(brew --prefix 2>/dev/null)/opt/aiteamforge/share/templates/kanban/board-template.json"
+    brew_template="$(brew --prefix 2>/dev/null)/opt/aiteamforge/libexec/share/templates/kanban/board-template.json"
     if [ -f "$brew_template" ]; then
         _kbc_apply_template_subs "$brew_template" "$board_file" "$team" "$kanban_dir"
         print_success "Created board from Homebrew template"
@@ -313,12 +313,28 @@ _kbc_create_board_from_template() {
 
     # Last resort: write a minimal inline board
     print_warning "No template found — creating minimal board inline"
+    local _now
+    _now=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
     cat > "$board_file" <<EOF
 {
-  "name": "${team}",
-  "items": [],
+  "team": "${team}",
+  "teamName": "${team}",
+  "subtitle": "",
+  "ship": "",
+  "series": "",
+  "organization": "",
+  "orgColor": "",
+  "kanbanDir": "$(dirname "$board_file")",
+  "lastUpdated": "${_now}",
+  "nextId": 1,
+  "nextEpicId": 1,
+  "nextReleaseId": 1,
+  "fleetMonitorUrl": "",
+  "terminals": {},
+  "activeWindows": [],
   "backlog": [],
-  "blocked": []
+  "epics": [],
+  "releases": []
 }
 EOF
 

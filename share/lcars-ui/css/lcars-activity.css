@@ -1,0 +1,484 @@
+/* ═══════════════════════════════════════════════════════════════════════════════
+   LCARS Activity Timeline Panel
+   Modal overlay for displaying kanban item activity history.
+
+   Design follows LCARS aesthetic from lcars.css:
+   - Dark surfaces (#000, #0d0d1a, #1a1a2e)
+   - Antonio font, letter-spacing
+   - Rounded corners with colored accent bars
+   - Color-coded categories per action type
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   CATEGORY COLORS (left-border accent bars)
+   Green = creation | Amber = updates | Blue = status | Red = cancel | Teal = workflow
+   ───────────────────────────────────────────────────────────────────────────── */
+:root {
+    --activity-creation: #99ff99;
+    --activity-update:   #ffcc66;
+    --activity-status:   #99ccff;
+    --activity-cancel:   #ff6666;
+    --activity-workflow: #66ffcc;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   MODAL OVERLAY
+   Full-screen dark backdrop, panel slides in from right edge.
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-timeline-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 11000;     /* Above .lcars-modal (z-index: 10000) */
+    display: flex;
+    align-items: stretch;
+    justify-content: flex-end;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.25s ease;
+}
+
+.activity-timeline-modal.active {
+    pointer-events: auto;
+    opacity: 1;
+}
+
+/* Translucent backdrop — click to close */
+.activity-backdrop {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.80);
+    cursor: pointer;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   PANEL
+   Slides in from the right; fixed width side-panel layout.
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-panel {
+    position: relative;
+    z-index: 1;
+    background: var(--lcars-darker, #0d0d1a);
+    border-left: 4px solid var(--lcars-blue, #9999ff);
+    width: min(600px, 95vw);
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    box-shadow: -8px 0 40px rgba(153, 153, 255, 0.20);
+    transform: translateX(100%);
+    transition: transform 0.30s ease;
+}
+
+.activity-timeline-modal.active .activity-panel {
+    transform: translateX(0);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   PANEL HEADER
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--lcars-blue, #9999ff);
+    color: var(--lcars-black, #000000);
+    padding: 10px 16px;
+    flex-shrink: 0;
+    min-height: 48px;
+}
+
+.activity-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    overflow: hidden;
+}
+
+.activity-header-icon {
+    font-size: 1.4em;
+    line-height: 1;
+    flex-shrink: 0;
+}
+
+.activity-header-title {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 1.1em;
+    font-weight: 700;
+    letter-spacing: 3px;
+    white-space: nowrap;
+}
+
+.activity-header-id {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.85em;
+    font-weight: 500;
+    letter-spacing: 2px;
+    opacity: 0.70;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.activity-close-btn {
+    background: none;
+    border: none;
+    color: var(--lcars-black, #000);
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 1.4em;
+    font-weight: 700;
+    cursor: pointer;
+    padding: 0 6px;
+    line-height: 1;
+    flex-shrink: 0;
+    letter-spacing: 0;
+    transition: color 0.15s;
+}
+
+.activity-close-btn:hover {
+    color: var(--lcars-red, #cc4444);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   FILTER BAR
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: var(--lcars-dark, #1a1a2e);
+    border-bottom: 2px solid var(--lcars-navy, #6666cc);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+}
+
+.activity-filter-group {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+}
+
+.activity-filter-label {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.62em;
+    letter-spacing: 2px;
+    color: var(--lcars-lavender, #ccccff);
+    text-transform: uppercase;
+}
+
+.activity-filter-select,
+.activity-filter-input {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.80em;
+    letter-spacing: 1px;
+    background: var(--lcars-darker, #0d0d1a);
+    color: var(--lcars-peach, #ffcc99);
+    border: 1px solid var(--lcars-navy, #6666cc);
+    border-radius: 4px;
+    padding: 3px 8px;
+    outline: none;
+    min-width: 90px;
+    max-width: 140px;
+    transition: border-color 0.15s;
+}
+
+.activity-filter-select:focus,
+.activity-filter-input:focus {
+    border-color: var(--lcars-blue, #9999ff);
+}
+
+.activity-filter-select option {
+    background: var(--lcars-darker, #0d0d1a);
+    color: var(--lcars-peach, #ffcc99);
+}
+
+.activity-filter-input::placeholder {
+    color: var(--lcars-navy, #6666cc);
+    opacity: 1;
+}
+
+.activity-filter-clear {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.72em;
+    letter-spacing: 2px;
+    background: none;
+    border: 1px solid var(--lcars-tan, #cc9966);
+    color: var(--lcars-tan, #cc9966);
+    border-radius: 12px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    align-self: flex-end;
+    white-space: nowrap;
+}
+
+.activity-filter-clear:hover {
+    background: var(--lcars-tan, #cc9966);
+    color: var(--lcars-black, #000);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   TIMELINE BODY — scrollable list of entries
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-timeline-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 0;
+}
+
+/* Custom scrollbar (WebKit) */
+.activity-timeline-body::-webkit-scrollbar {
+    width: 6px;
+}
+
+.activity-timeline-body::-webkit-scrollbar-track {
+    background: var(--lcars-darker, #0d0d1a);
+}
+
+.activity-timeline-body::-webkit-scrollbar-thumb {
+    background: var(--lcars-navy, #6666cc);
+    border-radius: 3px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   TIMELINE ENTRY — single activity row
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-entry {
+    display: flex;
+    align-items: stretch;
+    margin: 4px 14px;
+    background: var(--lcars-dark, #1a1a2e);
+    border-radius: 6px;
+    overflow: hidden;
+    transition: background 0.15s;
+}
+
+.activity-entry:hover {
+    background: var(--lcars-surface, #252540);
+}
+
+/* Left color-bar indicating action category */
+.activity-entry-bar {
+    width: 5px;
+    flex-shrink: 0;
+}
+
+.activity-cat-creation .activity-entry-bar  { background: var(--activity-creation); }
+.activity-cat-update   .activity-entry-bar  { background: var(--activity-update); }
+.activity-cat-status   .activity-entry-bar  { background: var(--activity-status); }
+.activity-cat-cancel   .activity-entry-bar  { background: var(--activity-cancel); }
+.activity-cat-workflow .activity-entry-bar  { background: var(--activity-workflow); }
+
+.activity-entry-content {
+    flex: 1;
+    padding: 8px 12px;
+    min-width: 0;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   ENTRY HEADER ROW — icon / action label / agent badge / timestamp
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-entry-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.activity-icon {
+    font-size: 1.0em;
+    flex-shrink: 0;
+    line-height: 1;
+    width: 1.2em;
+    text-align: center;
+}
+
+/* Color the icon to match the category */
+.activity-cat-creation .activity-icon  { color: var(--activity-creation); }
+.activity-cat-update   .activity-icon  { color: var(--activity-update); }
+.activity-cat-status   .activity-icon  { color: var(--activity-status); }
+.activity-cat-cancel   .activity-icon  { color: var(--activity-cancel); }
+.activity-cat-workflow .activity-icon  { color: var(--activity-workflow); }
+
+.activity-action-label {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.80em;
+    letter-spacing: 1.5px;
+    color: var(--lcars-peach, #ffcc99);
+    white-space: nowrap;
+}
+
+/* Subitem ID reference tag */
+.activity-subitem-ref {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.70em;
+    letter-spacing: 1px;
+    color: var(--lcars-black, #000);
+    background: var(--lcars-lavender, #ccccff);
+    border-radius: 8px;
+    padding: 1px 7px;
+    white-space: nowrap;
+}
+
+/* Spacer pushes agent + timestamp to the right */
+.activity-spacer {
+    flex: 1;
+    min-width: 6px;
+}
+
+/* Agent badge — amber/gold per LCARS aesthetic */
+.activity-agent-badge {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.68em;
+    letter-spacing: 1px;
+    background: var(--lcars-amber, #ffcc00);
+    color: var(--lcars-black, #000);
+    border-radius: 10px;
+    padding: 1px 8px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    font-weight: 600;
+}
+
+/* Relative timestamp — dim LCARS blue-gray */
+.activity-timestamp {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.70em;
+    letter-spacing: 1px;
+    color: var(--lcars-navy, #6666cc);
+    white-space: nowrap;
+    flex-shrink: 0;
+    cursor: default;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   CHANGE DISPLAY — field old → new values and status badges
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-change {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 5px;
+    flex-wrap: wrap;
+}
+
+/* Monospace field values */
+.activity-field-value {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.75em;
+    letter-spacing: 0;
+    padding: 2px 6px;
+    border-radius: 3px;
+    word-break: break-all;
+}
+
+.activity-field-value.old {
+    color: var(--lcars-alert-red, #ff6666);
+    background: rgba(255, 102, 102, 0.10);
+    text-decoration: line-through;
+    opacity: 0.80;
+}
+
+.activity-field-value.new {
+    color: var(--lcars-green, #99ff99);
+    background: rgba(153, 255, 153, 0.10);
+}
+
+/* Arrow between old and new */
+.activity-change-arrow {
+    font-size: 0.90em;
+    color: var(--lcars-blue, #9999ff);
+    flex-shrink: 0;
+}
+
+/* Status badge pill */
+.activity-status-badge {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.70em;
+    letter-spacing: 1.5px;
+    font-weight: 700;
+    padding: 2px 10px;
+    border-radius: 12px;
+    white-space: nowrap;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   CONTEXT LINE — optional extra description text
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-context {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.72em;
+    letter-spacing: 0.5px;
+    color: var(--lcars-cyan, #99ccff);
+    margin-top: 4px;
+    opacity: 0.80;
+    word-break: break-word;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   EMPTY STATE / LOADING / ERROR
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-empty,
+.activity-loading,
+.activity-error {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    letter-spacing: 2px;
+    padding: 40px 20px;
+    text-align: center;
+}
+
+.activity-empty {
+    color: var(--lcars-navy, #6666cc);
+    font-size: 0.85em;
+}
+
+.activity-loading {
+    color: var(--lcars-blue, #9999ff);
+    font-size: 0.85em;
+    animation: activity-pulse 1.5s ease-in-out infinite;
+}
+
+.activity-error {
+    color: var(--lcars-alert-red, #ff6666);
+    font-size: 0.80em;
+}
+
+@keyframes activity-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.40; }
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   FOOTER — "Load More" pagination
+   ───────────────────────────────────────────────────────────────────────────── */
+.activity-footer {
+    padding: 10px 14px;
+    text-align: center;
+    background: var(--lcars-darker, #0d0d1a);
+    border-top: 2px solid var(--lcars-navy, #6666cc);
+    flex-shrink: 0;
+}
+
+.activity-load-more {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 0.80em;
+    letter-spacing: 2px;
+    background: none;
+    border: 2px solid var(--lcars-blue, #9999ff);
+    color: var(--lcars-blue, #9999ff);
+    border-radius: 16px;
+    padding: 6px 24px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+}
+
+.activity-load-more:hover {
+    background: var(--lcars-blue, #9999ff);
+    color: var(--lcars-black, #000);
+}

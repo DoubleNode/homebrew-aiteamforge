@@ -14,15 +14,15 @@ from pathlib import Path
 from datetime import datetime, timezone
 
 # Legacy fallback kanban directory
-KANBAN_DIR = Path.home() / "aiteamforge" / "kanban"
+KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 
 # Distributed kanban directories - must match server.py TEAM_KANBAN_DIRS
 TEAM_KANBAN_DIRS = {
-    "academy": Path.home() / "aiteamforge" / "kanban",
+    "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/aiteamforge/kanban"),
+    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
 }
 
@@ -30,15 +30,15 @@ TEAM_KANBAN_DIRS = {
 TEAMS = {
     'ios': {
         'board': TEAM_KANBAN_DIRS["ios"] / "ios-board.json",
-        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/DEV/aiteamforge/kanban/releases"),
+        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/DEV/dev-team/kanban/releases"),
     },
     'android': {
         'board': TEAM_KANBAN_DIRS["android"] / "android-board.json",
-        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-Android/develop/aiteamforge/kanban/releases"),
+        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-Android/develop/dev-team/kanban/releases"),
     },
     'firebase': {
         'board': TEAM_KANBAN_DIRS["firebase"] / "firebase-board.json",
-        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/develop/aiteamforge/kanban/releases"),
+        'releases': Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/develop/dev-team/kanban/releases"),
     },
 }
 

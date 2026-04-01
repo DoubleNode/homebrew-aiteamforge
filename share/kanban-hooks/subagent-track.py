@@ -3,8 +3,11 @@
 Subagent Tracker Hook for Claude Code
 
 Tracks Task tool subagent lifecycle for LCARS agent panel display.
-Writes active subagent list to /tmp/lcars-subagents-{session}-w{window}.json
+Writes active subagent list to <kanban/tmp>/lcars-subagents-{session}-w{window}.json
 so agent-panel-display.sh can render crew avatars.
+
+The tmp directory is team-specific, resolved via get_lcars_tmp_dir() from the
+tmux session name. Falls back to /tmp/ for unknown sessions or teams.
 
 Format: [{"type": "reno"}, {"type": "nahla"}, ...]
 Shows actively running subagents. Removed on completion (foreground only).
@@ -24,6 +27,8 @@ import sys
 import subprocess
 import fcntl
 import glob
+
+from kanban_utils import get_lcars_tmp_dir
 
 
 def get_tmux_context():
@@ -49,8 +54,15 @@ def get_tmux_context():
 
 
 def tracking_file_path(session_name, window_index):
-    """Build tracking file path for this session/window."""
-    return f"/tmp/lcars-subagents-{session_name}-w{window_index}.json"
+    """Build tracking file path for this session/window.
+
+    Resolves the tmp directory from the session name via get_lcars_tmp_dir(),
+    placing files in the team's kanban/tmp/ directory rather than /tmp/.
+    Lock files (.json.lock) and temp files (.json.tmp) are derived from the
+    returned path and land in the same directory.
+    """
+    tmp_dir = get_lcars_tmp_dir(session_name)
+    return f"{tmp_dir}lcars-subagents-{session_name}-w{window_index}.json"
 
 
 def locked_update(filepath, update_fn):

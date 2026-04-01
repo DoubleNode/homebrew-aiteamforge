@@ -23,16 +23,27 @@ create_test_config() {
   local config_file="$AITEAMFORGE_DIR/.aiteamforge-config"
   cat > "$config_file" <<'EOF'
 {
-  "version": "0.5.2",
+  "version": "1.3.0",
   "machine": {
     "name": "test-machine",
     "hostname": "localhost",
     "user": "Test User"
   },
   "teams": ["iOS", "Android", "Firebase"],
+  "team_paths": {
+    "iOS": {"working_dir": "/tmp/test/ios"},
+    "Android": {"working_dir": "/tmp/test/android"},
+    "Firebase": {"working_dir": "/tmp/test/firebase"}
+  },
+  "installed_features": ["shell_environment", "claude_code_config", "lcars_kanban"],
+  "fleet_registration_status": "not_configured",
   "features": {
-    "kanban": true,
-    "fleet_monitor": false
+    "shell_environment": true,
+    "claude_code_config": true,
+    "lcars_kanban": true,
+    "fleet_monitor": false,
+    "fleet_mode": "standalone",
+    "fleet_server_url": ""
   },
   "installed_at": "2026-02-17T00:00:00Z"
 }
@@ -43,7 +54,7 @@ create_invalid_json_config() {
   local config_file="$AITEAMFORGE_DIR/.aiteamforge-config"
   cat > "$config_file" <<'EOF'
 {
-  "version": "0.5.2",
+  "version": "1.3.0",
   "invalid json here
 EOF
 }
@@ -86,7 +97,7 @@ test_pass
 test_start "get_config_value reads top-level values"
 create_test_config
 value=$(get_config_value "version")
-assert_equal "0.5.2" "$value"
+assert_equal "1.3.0" "$value"
 test_pass
 
 test_start "get_config_value reads nested values"
@@ -110,7 +121,7 @@ test_pass
 test_start "get_installed_version returns correct version"
 create_test_config
 version=$(get_installed_version)
-assert_equal "0.5.2" "$version"
+assert_equal "1.3.0" "$version"
 test_pass
 
 test_start "get_configured_teams returns space-separated team list"
@@ -170,6 +181,84 @@ create_test_config
 # Temporarily hide jq
 PATH="/usr/bin:/bin" version=$(get_config_value "version")
 assert_not_empty "$version" || true  # Fallback may or may not work perfectly
+test_pass
+
+test_start "get_installed_features returns feature list"
+create_test_config
+features=$(get_installed_features)
+assert_contains "$features" "shell_environment"
+assert_contains "$features" "lcars_kanban"
+test_pass
+
+test_start "get_installed_features falls back to features map for older configs"
+# Write a config without installed_features but with boolean features map
+config_file="$AITEAMFORGE_DIR/.aiteamforge-config"
+cat > "$config_file" <<'EOF'
+{
+  "version": "1.2.0",
+  "teams": ["iOS"],
+  "features": {
+    "shell_environment": true,
+    "claude_code_config": false,
+    "lcars_kanban": true,
+    "fleet_monitor": false
+  },
+  "installed_at": "2026-01-01T00:00:00Z"
+}
+EOF
+features=$(get_installed_features)
+assert_contains "$features" "shell_environment"
+assert_contains "$features" "lcars_kanban"
+test_pass
+
+test_start "get_fleet_registration_status returns configured value"
+create_test_config
+status=$(get_fleet_registration_status)
+assert_equal "not_configured" "$status"
+test_pass
+
+test_start "get_fleet_registration_status returns registered when set"
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
+{
+  "version": "1.3.0",
+  "teams": ["iOS"],
+  "installed_features": ["shell_environment", "lcars_kanban", "fleet_monitor"],
+  "fleet_registration_status": "registered",
+  "features": {
+    "fleet_monitor": true
+  }
+}
+EOF
+status=$(get_fleet_registration_status)
+assert_equal "registered" "$status"
+test_pass
+
+test_start "get_fleet_registration_status falls back to pending for legacy fleet configs"
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
+{
+  "version": "1.2.0",
+  "teams": ["iOS"],
+  "features": {
+    "fleet_monitor": true
+  }
+}
+EOF
+status=$(get_fleet_registration_status)
+assert_equal "pending" "$status"
+test_pass
+
+test_start "get_fleet_registration_status defaults to not_configured for legacy non-fleet configs"
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
+{
+  "version": "1.2.0",
+  "teams": ["iOS"],
+  "features": {
+    "fleet_monitor": false
+  }
+}
+EOF
+status=$(get_fleet_registration_status)
+assert_equal "not_configured" "$status"
 test_pass
 
 # Success!

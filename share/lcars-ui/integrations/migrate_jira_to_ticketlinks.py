@@ -60,8 +60,8 @@ except ImportError:
         return item
 
 
-# Default kanban directory
-KANBAN_DIR = Path.home() / "aiteamforge" / "kanban"
+# Default kanban directory (aiteamforge academy install location)
+KANBAN_DIR = Path.home() / "aiteamforge" / "academy" / "kanban"
 
 
 def find_legacy_jira_fields(item: Dict[str, Any]) -> List[str]:

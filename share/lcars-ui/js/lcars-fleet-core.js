@@ -980,14 +980,6 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             // Bind keyboard navigation
             this.initKeyboardNav();
 
-            // Bind refresh button
-            const refreshBtn = document.querySelector('.sidebar-button.refresh-btn');
-            if (refreshBtn) {
-                refreshBtn.addEventListener('click', function() {
-                    self.refresh();
-                });
-            }
-
             console.log('[LCARS] Section navigation initialized');
         },
 
@@ -1201,16 +1193,6 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             });
             document.dispatchEvent(event);
 
-            // Visual feedback on refresh button - power surge animation
-            const btn = document.querySelector('.sidebar-button.refresh-btn');
-            if (btn) {
-                btn.classList.remove('lcars-surge'); // Reset if running
-                void btn.offsetWidth; // Force reflow
-                btn.classList.add('lcars-surge');
-                setTimeout(function() {
-                    btn.classList.remove('lcars-surge');
-                }, 500);
-            }
         },
 
         /**

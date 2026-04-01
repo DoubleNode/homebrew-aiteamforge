@@ -13,7 +13,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+_find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
+VERSION="$(_find_version)"
 
 # Options
 DRY_RUN=false
@@ -242,18 +244,41 @@ update_lcars() {
 update_shell_helpers() {
   print_section "Updating Shell Helpers"
 
-  local helpers=(
-    "kanban-helpers.sh"
-    "worktree-helpers.sh"
-    "claude_agent_aliases.sh"
-    "claude_code_cc_aliases.sh"
-  )
-
   local updated=0
 
-  for helper in "${helpers[@]}"; do
-    local source="${FRAMEWORK_DIR}/${helper}"
-    local target="${WORKING_DIR}/${helper}"
+  # Resolve the homebrew tap share directory (parent of FRAMEWORK_DIR's libexec)
+  local tap_share
+  tap_share="$(dirname "$FRAMEWORK_DIR")/share"
+
+  # Update kanban-helpers.sh from the kanban template (root of WORKING_DIR)
+  local kanban_template="${tap_share}/templates/kanban/kanban-helpers.template.sh"
+  local kanban_target="${WORKING_DIR}/kanban-helpers.sh"
+  if [ -f "$kanban_template" ] && [ -f "$kanban_target" ]; then
+    if [ "$kanban_template" -nt "$kanban_target" ] || [ "$FORCE" = true ]; then
+      print_info "Updating kanban-helpers.sh..."
+      if [ "$DRY_RUN" = false ]; then
+        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" "$kanban_template" > "$kanban_target"
+        print_success "Updated kanban-helpers.sh"
+        updated=$((updated + 1))
+      else
+        echo "Would update: kanban-helpers.sh"
+        updated=$((updated + 1))
+      fi
+    fi
+  fi
+
+  # Update alias files under share/aliases/
+  local aliases_dir="${WORKING_DIR}/share/aliases"
+  local templates_dir="${tap_share}/templates/aliases"
+  local alias_files=(
+    "agent-aliases.sh"
+    "cc-aliases.sh"
+    "worktree-aliases.sh"
+  )
+
+  for alias_file in "${alias_files[@]}"; do
+    local source="${templates_dir}/${alias_file}"
+    local target="${aliases_dir}/${alias_file}"
 
     if [ ! -f "$source" ]; then
       continue
@@ -263,20 +288,36 @@ update_shell_helpers() {
       continue
     fi
 
-    # Check if source is newer
     if [ "$source" -nt "$target" ] || [ "$FORCE" = true ]; then
-      print_info "Updating ${helper}..."
+      print_info "Updating share/aliases/${alias_file}..."
 
       if [ "$DRY_RUN" = false ]; then
-        cp "$source" "$target"
-        print_success "Updated ${helper}"
+        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" "$source" > "$target"
+        print_success "Updated share/aliases/${alias_file}"
         updated=$((updated + 1))
       else
-        echo "Would update: ${helper}"
+        echo "Would update: share/aliases/${alias_file}"
         updated=$((updated + 1))
       fi
     fi
   done
+
+  # Update update_claude_agent.sh
+  local agent_src="${tap_share}/scripts/update_claude_agent.sh"
+  local agent_target="${WORKING_DIR}/update_claude_agent.sh"
+  if [ -f "$agent_src" ] && [ -f "$agent_target" ]; then
+    if [ "$agent_src" -nt "$agent_target" ] || [ "$FORCE" = true ]; then
+      print_info "Updating update_claude_agent.sh..."
+      if [ "$DRY_RUN" = false ]; then
+        cp "$agent_src" "$agent_target"
+        print_success "Updated update_claude_agent.sh"
+        updated=$((updated + 1))
+      else
+        echo "Would update: update_claude_agent.sh"
+        updated=$((updated + 1))
+      fi
+    fi
+  fi
 
   if [ $updated -eq 0 ]; then
     print_success "All shell helpers up to date"

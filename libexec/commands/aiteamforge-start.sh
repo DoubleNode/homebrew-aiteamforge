@@ -13,7 +13,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+_find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
+VERSION="$(_find_version)"
 
 # Options
 OPEN_BROWSER=false

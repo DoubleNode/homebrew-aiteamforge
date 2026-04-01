@@ -98,6 +98,9 @@ TEAM_AGENTS=(
 TEAM_STARTUP_SCRIPT="ios-startup.sh"
 TEAM_SHUTDOWN_SCRIPT="ios-shutdown.sh"
 
+# Organization this team belongs to (used in kanban board)
+TEAM_ORGANIZATION="Main Event Entertainment"
+
 # Star Trek theme (optional)
 TEAM_THEME="Star Trek: The Next Generation"
 TEAM_SHIP="USS Enterprise-D"
@@ -121,7 +124,8 @@ TEAM_SHIP="USS Enterprise-D"
 - `TEAM_BREW_DEPS` - Homebrew packages to install
 - `TEAM_BREW_CASK_DEPS` - Homebrew cask packages to install
 - `TEAM_AGENTS` - Claude Code agent personas
-- `TEAM_THEME` - Star Trek theme
+- `TEAM_ORGANIZATION` - Organization name populated into the kanban board's `organization` field (falls back to `"DEVTEAM"` if not set)
+- `TEAM_THEME` - Star Trek theme (also used as the kanban board's `subtitle`)
 - `TEAM_SHIP` - Star Trek ship/station name
 
 ---

@@ -153,9 +153,9 @@ Manually trigger a calendar sync.
 ## Implementation Details
 
 ### File Locations
-- **Config file:** `~/aiteamforge/config/{team}/calendar.json`
-- **Status file:** `~/aiteamforge/config/{team}/calendar-sync-status.json`
-- **Events file:** `~/aiteamforge/config/{team}/calendar-events.json`
+- **Config file:** `~/dev-team/config/{team}/calendar.json`
+- **Status file:** `~/dev-team/config/{team}/calendar-sync-status.json`
+- **Events file:** `~/dev-team/config/{team}/calendar-events.json`
 
 ### Routing
 - POST routes added to `do_POST()` method (lines 131-140)
@@ -193,7 +193,7 @@ Run the test script to verify endpoints are accessible:
 
 ```bash
 # Start server first
-cd ~/aiteamforge/lcars-ui
+cd ~/dev-team/lcars-ui
 python3 server.py
 
 # In another terminal

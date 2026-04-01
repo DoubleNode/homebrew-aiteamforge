@@ -13,7 +13,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+_find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
+VERSION="$(_find_version)"
 
 # Counters
 TOTAL_CHECKS=0
@@ -477,10 +479,16 @@ check_network() {
   fi
 
   if [ -n "$ts_cmd" ]; then
-    if $ts_cmd status &>/dev/null; then
+    # Tailscale CLI can crash (Trace/BPT trap) on Apple Silicon when daemon
+    # isn't running. Use double-subshell to fully suppress trap messages.
+    local ts_ok=false
+    if ( ( $ts_cmd status &>/dev/null ) & wait $! ) &>/dev/null 2>&1; then
+      ts_ok=true
+    fi
+    if [ "$ts_ok" = true ]; then
       check_result pass "Tailscale connected"
       if [ "$VERBOSE" = true ]; then
-        $ts_cmd status --peers=false 2>/dev/null | head -n3
+        ( $ts_cmd status --peers=false 2>/dev/null | head -n3 ) 2>/dev/null || true
       fi
     else
       check_result warn "Tailscale not connected"

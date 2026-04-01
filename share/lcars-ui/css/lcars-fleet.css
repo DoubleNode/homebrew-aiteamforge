@@ -603,14 +603,6 @@ body.kiosk-active .kiosk-fab {
     display: none !important;
 }
 
-/* Refresh button */
-.sidebar-button.refresh-btn {
-    background: var(--lcars-cyan);
-    color: var(--lcars-black);
-    font-weight: 700;
-    margin-bottom: 16px;
-    border-bottom: 2px solid var(--lcars-black);
-}
 
 /* -------------------------------------------------------------------------------
    SECTION 10: CONTENT AREA
@@ -932,15 +924,8 @@ body.kiosk-active .kiosk-fab {
     }
 }
 
-/* Tablet (iPad) - fixed refresh with padding for dashboard visibility */
+/* Tablet (iPad) */
 @media (max-width: 1200px) {
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: 0px;
-        left: 10px;
-        width: var(--sidebar-width);
-        z-index: 100;
-    }
 
     /* Ensure dashboard buttons visible above fixed refresh button */
     .lcars-sidebar {
@@ -964,13 +949,6 @@ body.kiosk-active .kiosk-fab {
         padding: 10px;
     }
 
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: 0px;
-        left: 10px;
-        width: 150px;
-        z-index: 100;
-    }
 }
 
 @media (max-width: 600px) {
@@ -1123,14 +1101,6 @@ body.kiosk-active .kiosk-fab {
         display: none;
     }
 
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
-        left: 10px;
-        width: var(--sidebar-width);
-        z-index: 100;
-        margin-bottom: 0;
-        border-bottom: 1px solid var(--lcars-black);
     }
 }
 

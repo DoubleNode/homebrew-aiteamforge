@@ -4,6 +4,30 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+### Changed
+- **LCARS Tab Order Reorder** (XACA-0115) - Reordered all tab navigation for improved workflow
+  - New order: HOME → TODOS → CALENDAR → WORKFLOW → DETAILS → QUEUE → EPICS → RELEASES → SETTINGS
+  - TODOS and CALENDAR moved to positions 2-3 for faster access to daily-use tabs
+  - Updated SECTIONS array, sidebar buttons, mobile tabbar, and Alt+1-8 keyboard shortcuts
+
+### Fixed
+- **Terminal Activation tmux Socket Fix** (XACA-0102) - Terminal click-to-activate was
+  non-functional because the tmux command used the default socket (which doesn't exist) and
+  bare terminal names (which don't match). Fix adds `-L {team}` for per-team sockets and
+  constructs `{team}-{terminal}` session names using the `LCARS_TEAM` environment variable.
+- **Knowledge Panel Orphaned Chart Guard** (XACA-0098-016) - Debounce and AbortController
+  pattern added to `_renderHomeKnowledgeStats` to prevent orphaned chart injection on rapid
+  carousel navigation.
+  - Added module-level `_knowledgeAbortController` and `_knowledgeDebounceTimer` state variables
+  - `_renderHomeKnowledgeStats` now coalesces rapid calls with a 150ms debounce before firing
+    the `/api/knowledge-stats` fetch
+  - In-flight fetch is aborted immediately via `AbortController.signal` when a new call arrives
+  - Two `currentHomePanel !== 4` guards after each `await` prevent stale continuations from
+    injecting DOM content or charts when a different panel is active
+  - `navigateToPanel` cancels debounce timer and aborts fetch when leaving panel 4
+  - `stopCarousel` cancels debounce timer and aborts fetch when leaving the HOME tab entirely
+  - `AbortError` exceptions are silently suppressed (they are intentional, not failures)
+
 ### Added
 - **Team Todo List UI** (XACA-0101) - Lightweight per-team todo feature for quick one-shot items
   - New TODOS sidebar button and section in LCARS Kanban UI (`lcars-ui/index.html`)

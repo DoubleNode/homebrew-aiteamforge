@@ -55,12 +55,18 @@ cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
     "user": "Integration Test"
   },
   "teams": ["iOS"],
+  "team_paths": {
+    "iOS": {"working_dir": "/tmp/test/ios"}
+  },
+  "installed_features": ["shell_environment", "lcars_kanban"],
+  "fleet_registration_status": "not_configured",
   "features": {
-    "kanban": true,
+    "shell_environment": true,
+    "claude_code_config": false,
+    "lcars_kanban": true,
     "fleet_monitor": false,
-    "shell_env": true,
-    "claude_config": false,
-    "iterm_integration": false
+    "fleet_mode": "standalone",
+    "fleet_server_url": ""
   },
   "paths": {
     "install_dir": "$AITEAMFORGE_DIR",

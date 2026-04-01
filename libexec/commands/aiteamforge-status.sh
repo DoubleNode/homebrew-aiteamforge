@@ -13,7 +13,14 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+if [ -f "${LIBEXEC_DIR}/../VERSION" ]; then
+  VERSION="$(cat "${LIBEXEC_DIR}/../VERSION" | tr -d '[:space:]')"
+elif [ -f "${LIBEXEC_DIR}/../../VERSION" ]; then
+  VERSION="$(cat "${LIBEXEC_DIR}/../../VERSION" | tr -d '[:space:]')"
+else
+  VERSION="unknown"
+fi
 
 # Options
 JSON_OUTPUT=false
@@ -166,27 +173,48 @@ gather_status_data() {
     WORKTREE_COUNT=$((WORKTREE_COUNT - 1)) # Subtract parent dir
   fi
 
-  # Kanban summary
+  # Kanban summary — scan boards in central dir AND team-specific paths
   TOTAL_ITEMS=0
   IN_PROGRESS_ITEMS=0
   BOARD_COUNT=0
 
+  _count_board() {
+    local board="$1"
+    [ -f "$board" ] || return
+    BOARD_COUNT=$((BOARD_COUNT + 1))
+    if command -v jq &>/dev/null; then
+      # Support both schema formats: .backlog[] (flat) and .columns[].items[] (columnar)
+      local items
+      items=$(jq '(try ([.columns[].items[]] | length) catch 0) + (try (.backlog | length) catch 0)' "$board" 2>/dev/null || echo "0")
+      TOTAL_ITEMS=$((TOTAL_ITEMS + items))
+
+      local in_progress
+      in_progress=$(jq '(try ([.columns[] | select(.id == "in-progress") | .items[]] | length) catch 0) + (try ([.backlog[] | select(.status == "in-progress")] | length) catch 0)' "$board" 2>/dev/null || echo "0")
+      IN_PROGRESS_ITEMS=$((IN_PROGRESS_ITEMS + in_progress))
+    fi
+  }
+
+  # Scan central kanban dir
   if [ -d "${WORKING_DIR}/kanban" ]; then
     for board in ${WORKING_DIR}/kanban/*-board.json; do
-      if [ -f "$board" ]; then
-        BOARD_COUNT=$((BOARD_COUNT + 1))
-
-        if command -v jq &>/dev/null; then
-          local items
-          items=$(jq '[.columns[].items[]] | length' "$board" 2>/dev/null || echo "0")
-          TOTAL_ITEMS=$((TOTAL_ITEMS + items))
-
-          local in_progress
-          in_progress=$(jq '[.columns[] | select(.id == "in-progress") | .items[]] | length' "$board" 2>/dev/null || echo "0")
-          IN_PROGRESS_ITEMS=$((IN_PROGRESS_ITEMS + in_progress))
-        fi
-      fi
+      _count_board "$board"
     done
+  fi
+
+  # Scan team-specific kanban dirs from config
+  local config_file
+  config_file=$(get_config_file)
+  if [ -f "$config_file" ] && command -v jq &>/dev/null; then
+    local team_paths
+    team_paths=$(jq -r '.team_paths // {} | to_entries[] | .value.working_dir // empty' "$config_file" 2>/dev/null)
+    while IFS= read -r team_dir; do
+      [ -z "$team_dir" ] && continue
+      if [ -d "${team_dir}/kanban" ]; then
+        for board in ${team_dir}/kanban/*-board.json; do
+          _count_board "$board"
+        done
+      fi
+    done <<< "$team_paths"
   fi
 
   # Last backup

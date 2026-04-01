@@ -22,13 +22,14 @@ import os
 import subprocess
 import sys
 
-# If iterm2 is not available, try re-executing via the dev-team venv
+# If iterm2 is not available, try re-executing via the venv
 try:
     import iterm2
 except ImportError:
-    venv_python = os.path.expanduser("~/aiteamforge/.venv/bin/python3")
-    if os.path.isfile(venv_python) and sys.executable != venv_python:
-        os.execv(venv_python, [venv_python] + sys.argv)
+    for _venv_dir in ["~/aiteamforge/.venv", "~/dev-team/.venv"]:
+        venv_python = os.path.expanduser(f"{_venv_dir}/bin/python3")
+        if os.path.isfile(venv_python) and sys.executable != venv_python:
+            os.execv(venv_python, [venv_python] + sys.argv)
     print("Error: iterm2 module not installed.", file=sys.stderr)
     print("Fix with: python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2", file=sys.stderr)
     sys.exit(1)
@@ -135,6 +136,95 @@ async def find_or_create_window(connection, title, profile=None):
     return await create_window_with_title(connection, title, profile)
 
 
+async def _create_tab_applescript(connection, window, profile, tab_name=None, command=None, window_title=None):
+    """Fallback: create a tab via AppleScript when the Python API returns None.
+
+    The Python API's async_create_tab can return None for browser-mode profiles
+    and sometimes for regular profiles. AppleScript's `create tab with profile`
+    works reliably in both cases.
+
+    Targets a specific window by name to avoid creating tabs in the wrong window.
+    """
+    import subprocess as _sp
+
+    # Escape all user-controllable strings for safe AppleScript interpolation
+    _esc = lambda s: (s or "").replace('\\', '\\\\').replace('"', '\\"')
+    safe_profile = _esc(profile)
+    safe_window_title = _esc(window_title)
+    safe_tab_name = _esc(tab_name)
+
+    # Build the profile clause
+    if profile:
+        profile_clause = f'create tab with profile "{safe_profile}"'
+    else:
+        profile_clause = 'create tab with default profile'
+
+    # Target window: by name if available, otherwise current window
+    if window_title:
+        window_target = (
+            f'    set targetWindow to missing value\n'
+            f'    repeat with w in windows\n'
+            f'        if name of w contains "{safe_window_title}" then\n'
+            f'            set targetWindow to w\n'
+            f'            exit repeat\n'
+            f'        end if\n'
+            f'    end repeat\n'
+            f'    if targetWindow is missing value then\n'
+            f'        set targetWindow to current window\n'
+            f'    end if\n'
+            f'    tell targetWindow'
+        )
+    else:
+        window_target = '    tell current window'
+
+    # Build AppleScript
+    lines = [
+        'tell application "iTerm2"',
+        window_target,
+        f'        {profile_clause}',
+    ]
+    if tab_name or command:
+        lines.append('        tell current session')
+        if tab_name:
+            lines.append(f'            set name to "{safe_tab_name}"')
+        if command:
+            safe_cmd = command.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f'            write text "{safe_cmd}"')
+        lines.append('        end tell')
+    lines += ['    end tell', 'end tell']
+
+    script = "\n".join(lines)
+    result = _sp.run(
+        ["osascript", "-e", script],
+        capture_output=True, text=True, timeout=10
+    )
+
+    if result.returncode != 0:
+        print(f"AppleScript error: {result.stderr.strip()}", file=sys.stderr)
+        return None
+
+    # If we have a connection, set tab title via API for later lookup
+    if connection:
+        try:
+            app = await iterm2.async_get_app(connection)
+            if app.current_window and app.current_window.current_tab:
+                new_tab = app.current_window.current_tab
+                if tab_name:
+                    await new_tab.async_set_title(tab_name)
+                    try:
+                        await new_tab.async_set_variable("user.tab_name", tab_name)
+                    except Exception:
+                        pass
+                print(f"Created tab via AppleScript: {tab_name or profile}")
+                return new_tab
+        except Exception:
+            pass
+
+    # Pure AppleScript mode (no API connection) — tab was created, return sentinel
+    print(f"Created tab via AppleScript (no API): {tab_name or profile}")
+    return True  # Sentinel — caller just needs to know it succeeded
+
+
 async def create_tab_in_window(connection, window_title, profile=None, tab_name=None, command=None):
     """Create a new tab in the specified window.
 
@@ -168,36 +258,34 @@ async def create_tab_in_window(connection, window_title, profile=None, tab_name=
                 return None
 
     # ALWAYS create a new tab (never reuse the startup tab)
-    # Try with specified profile first, fall back to no-profile (system default)
-    # if the profile doesn't exist (INVALID_PROFILE_NAME) or returns None
-    # (profile in plist but not loaded by running iTerm2 instance).
-    tab = None
-    for attempt_profile in ([profile, None] if profile else [None]):
-        try:
-            if attempt_profile:
-                tab = await window.async_create_tab(profile=attempt_profile)
-            else:
-                tab = await window.async_create_tab()
-        except Exception as e:
-            err_msg = str(e)
-            if "INVALID_PROFILE_NAME" in err_msg and attempt_profile and profile:
-                print(f"Profile '{attempt_profile}' not found, retrying with system default", file=sys.stderr)
-                continue
-            print(f"Failed to create tab in window '{window_title}': {e}", file=sys.stderr)
-            return None
-        if tab is not None:
-            break
-        # tab is None with a profile — profile may exist in plist but not
-        # loaded by the running iTerm2 instance; retry without profile
-        if attempt_profile and profile:
-            print(f"Profile '{attempt_profile}' returned None, retrying with system default", file=sys.stderr)
+    try:
+        if profile:
+            tab = await window.async_create_tab(profile=profile)
+        else:
+            tab = await window.async_create_tab()
+    except Exception as e:
+        print(f"Failed to create tab in window '{window_title}': {e}", file=sys.stderr)
+        return None
 
     if not tab:
-        print(f"Failed to create tab in window '{window_title}': async_create_tab returned None", file=sys.stderr)
+        # Python API can return None for browser-mode profiles and sometimes
+        # after plist modifications. Fall back to AppleScript.
+        print(f"Python API returned None, trying AppleScript fallback...")
+        tab = await _create_tab_applescript(connection, window, profile, tab_name, command, window_title)
+        if tab:
+            return tab
+        print(f"AppleScript fallback also failed for '{tab_name or profile}'", file=sys.stderr)
         return None
 
     if tab_name:
         await tab.async_set_title(tab_name)
+        # Store tab name as a user variable so select_tab_by_name can find
+        # browser-mode tabs (LCARS Web profile) even after the page title
+        # overrides titleOverride.
+        try:
+            await tab.async_set_variable("user.tab_name", tab_name)
+        except Exception:
+            pass
 
     if command and tab.current_session:
         session = tab.current_session
@@ -299,10 +387,23 @@ async def select_tab_by_name(connection, window_title, tab_name):
         print(f"Window not found: {window_title}", file=sys.stderr)
         return False
 
-    # Find the tab by name
+    # Find the tab by name — three strategies in order of reliability:
+    # 1. user.tab_name variable (set at creation time, immune to page-title overrides)
+    # 2. titleOverride (set via async_set_title — browser tabs may lose this)
+    # 3. session name (fallback for shell-mode tabs without a user variable)
     for tab in window.tabs:
+        # Strategy 1: user variable set at creation — works for browser-mode tabs
         try:
-            # Get the tab title (set via async_set_title)
+            user_tab_name = await tab.async_get_variable("user.tab_name")
+            if user_tab_name == tab_name:
+                await tab.async_activate(order_window_front=True)
+                print(f"Selected tab (by user.tab_name): {tab_name} in window: {window_title}")
+                return True
+        except Exception:
+            pass
+
+        # Strategy 2: titleOverride — may be overwritten by browser page title
+        try:
             current_title = await tab.async_get_variable("titleOverride")
             if current_title == tab_name:
                 await tab.async_activate(order_window_front=True)
@@ -311,7 +412,7 @@ async def select_tab_by_name(connection, window_title, tab_name):
         except Exception:
             pass
 
-        # Also check session name as fallback
+        # Strategy 3: session name — shell-mode tabs without user variable
         if tab.current_session:
             try:
                 session_name = await tab.current_session.async_get_variable("name")
@@ -380,9 +481,13 @@ async def split_agent_panel(connection, window_title, tab_name, command):
         session.preferred_size = iterm2.util.Size(170, 50)
         await target_tab.async_update_layout()
 
-        # Run the display command in the agent panel pane
+        # Run the display command in the agent panel pane.
+        # Prefix with "stty -echo" so the command string is not echoed to the
+        # terminal when async_send_text simulates typing it.  The display
+        # script runs as a long-lived process that occupies the pane, so there
+        # is no interactive shell prompt where echo state would matter.
         if command:
-            await agent_session.async_send_text(command + "\n")
+            await agent_session.async_send_text("stty -echo; " + command + "\n")
 
         print(f"Created agent panel pane in tab: {tab_name}")
         # Activate the original (left) session so the terminal is focused
@@ -549,14 +654,28 @@ async def main_async(args):
     # Establish connection with a 5-second timeout. If iTerm2 is running but
     # its API socket is not ready (e.g. mid-restart), we exit cleanly rather
     # than hanging indefinitely.
+    connection = None
     try:
         connection = await asyncio.wait_for(
             iterm2.Connection.async_create(),
             timeout=5.0
         )
     except asyncio.TimeoutError:
-        print("Error: Timed out connecting to iTerm2 API (5s). iTerm2 may be starting up or unresponsive.", file=sys.stderr)
-        sys.exit(1)
+        print("Warning: Timed out connecting to iTerm2 API (5s).", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: iTerm2 API connection failed: {e}", file=sys.stderr)
+
+    # If the API is unavailable, fall back to pure AppleScript for create-tab
+    if not connection:
+        if args.action == "create-tab":
+            print("Using AppleScript-only fallback for tab creation...")
+            tab = await _create_tab_applescript(None, None, args.profile, args.tab_name, args.command, args.window_title)
+            if tab is not None:
+                return
+            sys.exit(1)
+        else:
+            print("Error: iTerm2 API unavailable and no fallback for this action.", file=sys.stderr)
+            sys.exit(1)
 
     if args.action == "create-window":
         await find_or_create_window(connection, args.window_title, args.profile)
@@ -566,15 +685,13 @@ async def main_async(args):
         await init_team_window(connection, args.window_title)
 
     elif args.action == "create-tab":
-        result = await create_tab_in_window(
+        await create_tab_in_window(
             connection,
             args.window_title,
             args.profile,
             args.tab_name,
             args.command
         )
-        if result is None:
-            sys.exit(1)
 
     elif args.action == "set-title":
         if args.window_id:

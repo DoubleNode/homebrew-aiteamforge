@@ -1,0 +1,29 @@
+{
+  "Profiles": [
+    {
+      "Name": "LCARS Web",
+      "Guid": "AITEAMFORGE-LCARS-WEB-0001-000000000001",
+      "Dynamic Profile Parent Name": "Default",
+      "Custom Command": "Browser",
+      "Initial URL": "http://localhost:8080",
+      "Tags": [
+        "aiteamforge"
+      ],
+      "Background Color": {
+        "Alpha Component": 1.0,
+        "Blue Component": 0.0,
+        "Color Space": "sRGB",
+        "Green Component": 0.0,
+        "Red Component": 0.0
+      }
+    },
+    {
+      "Name": "Agent Panel",
+      "Guid": "AITEAMFORGE-AGENT-PANEL-0001-000000000001",
+      "Dynamic Profile Parent Name": "Default",
+      "Tags": [
+        "aiteamforge"
+      ]
+    }
+  ]
+}

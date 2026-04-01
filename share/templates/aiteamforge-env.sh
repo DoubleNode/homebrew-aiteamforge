@@ -2,25 +2,43 @@
 # AITeamForge Environment Loader
 # Sources team-specific configurations, aliases, and secrets
 
+# Guard against double-sourcing (e.g. when iTerm2 startup sends "exec zsh"
+# to replace the initial shell, causing .zshrc — and this file — to be
+# sourced a second time inside the same logical session).
+if [[ -n "${_AITEAMFORGE_ENV_LOADED:-}" ]]; then
+    return 0
+fi
+export _AITEAMFORGE_ENV_LOADED=1
+
 # AITeamForge installation directory
 # This will be substituted during installation
 export AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 
 #──────────────────────────────────────────────────────────────────────────────
-# Load Shell Aliases
+# Kanban Helper Functions (kb-add, kb-list, kb-done, kb-backlog, etc.)
+# Sourced from the full kanban-helpers.sh installed by install-kanban.sh
 #──────────────────────────────────────────────────────────────────────────────
 
-# Agent switching aliases (claude-geordi, claude-sisko, etc.)
+if [ -f "$AITEAMFORGE_DIR/kanban-helpers.sh" ]; then
+    source "$AITEAMFORGE_DIR/kanban-helpers.sh"
+fi
+
+#──────────────────────────────────────────────────────────────────────────────
+# Shell Aliases and Functions
+#──────────────────────────────────────────────────────────────────────────────
+
+# Agent switching functions (claude-geordi, claude-sisko, claude-reno, etc.)
 if [ -f "$AITEAMFORGE_DIR/share/aliases/agent-aliases.sh" ]; then
     source "$AITEAMFORGE_DIR/share/aliases/agent-aliases.sh"
 fi
 
-# Kanban helper functions (kb-add, kb-list, kb-update, etc.)
-if [ -f "$AITEAMFORGE_DIR/share/aliases/kanban-aliases.sh" ]; then
-    source "$AITEAMFORGE_DIR/share/aliases/kanban-aliases.sh"
+# CC aliases — launch Claude with team-specific agent personas
+# (cc-ios-bridge, cc-academy-engineering, cc-firebase-ops, etc.)
+if [ -f "$AITEAMFORGE_DIR/share/aliases/cc-aliases.sh" ]; then
+    source "$AITEAMFORGE_DIR/share/aliases/cc-aliases.sh"
 fi
 
-# Worktree helper functions (wt-create, wt-list, etc.)
+# Worktree helper functions (wt-create, wt-list, wt-go, etc.)
 if [ -f "$AITEAMFORGE_DIR/share/aliases/worktree-aliases.sh" ]; then
     source "$AITEAMFORGE_DIR/share/aliases/worktree-aliases.sh"
 fi
@@ -46,6 +64,18 @@ if [ -f "$SECRETS_FILE" ]; then
         echo "⚠️  Warning: $SECRETS_FILE has loose permissions. Run: chmod 600 $SECRETS_FILE"
     fi
     source "$SECRETS_FILE"
+fi
+
+#──────────────────────────────────────────────────────────────────────────────
+# Python Virtual Environment (for iterm2 module and other Python scripts)
+#──────────────────────────────────────────────────────────────────────────────
+
+# Activate the AITeamForge venv if it exists, making the iterm2 module and
+# other installed packages available to scripts like iterm2_window_manager.py
+# and iterm-browser.py without requiring system-wide pip installs.
+AITEAMFORGE_VENV="${HOME}/.aiteamforge/venv"
+if [ -f "${AITEAMFORGE_VENV}/bin/activate" ]; then
+    source "${AITEAMFORGE_VENV}/bin/activate"
 fi
 
 #──────────────────────────────────────────────────────────────────────────────

@@ -95,7 +95,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'workflow', 'details', 'queue', 'releases', 'epics', 'calendar', 'todos', 'integrations', 'backups', 'commands'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'team-config', 'integrations', 'backups', 'commands', 'archive'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Queue filter state
@@ -1547,6 +1547,10 @@ function renderShipInfo() {
             displayGroupName = 'DEVTEAM';
         } else if (CONFIG.team && CONFIG.team.startsWith('legal-')) {
             displayGroupName = 'LEGAL';
+        } else if (CONFIG.team && CONFIG.team.startsWith('medical')) {
+            displayGroupName = 'MEDICAL';
+        } else if (CONFIG.team && CONFIG.team.startsWith('finance')) {
+            displayGroupName = 'FINANCE';
         } else {
             displayGroupName = 'DOUBLENODE';
         }
@@ -15042,11 +15046,6 @@ function closeRevertStatusModal() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 window.refreshData = function() {
-    const refreshBtn = document.querySelector('.refresh-btn');
-    if (refreshBtn) {
-        refreshBtn.style.opacity = '0.5';
-        setTimeout(() => refreshBtn.style.opacity = '1', 300);
-    }
     loadBoardData();
 };
 

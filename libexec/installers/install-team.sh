@@ -3,7 +3,7 @@
 # Installs a specific team's environment, tools, and configuration
 # Usage: install-team.sh <team-id> [--install-dir <path>]
 
-set -e
+set -euo pipefail
 
 # ============================================================================
 # CONFIGURATION
@@ -67,13 +67,56 @@ if [[ ! -f "$TEAM_CONF" ]]; then
     exit 1
 fi
 
+# Read conf values safely in a subshell so the conf file cannot modify the
+# current shell's PATH, functions, or other sensitive state.  The subshell
+# sources the file and then serializes only the known scalar and array
+# variables back to stdout as eval-safe quoted assignments.  The parent shell
+# evals that output to import the values.
+_read_conf() {
+    local conf_file="$1"
+    (
+        # Source in a clean subshell — side effects are contained here.
+        # shellcheck disable=SC1090
+        source "$conf_file"
+
+        # Emit scalar variables as KEY='value' lines.
+        printf 'TEAM_NAME=%q\n'         "${TEAM_NAME:-}"
+        printf 'TEAM_DESCRIPTION=%q\n'  "${TEAM_DESCRIPTION:-}"
+        printf 'TEAM_CATEGORY=%q\n'     "${TEAM_CATEGORY:-}"
+        printf 'TEAM_COLOR=%q\n'        "${TEAM_COLOR:-#5585CC}"
+        printf 'TEAM_LCARS_PORT=%q\n'   "${TEAM_LCARS_PORT:-8200}"
+        printf 'TEAM_TMUX_SOCKET=%q\n'  "${TEAM_TMUX_SOCKET:-$TEAM_ID}"
+        printf 'TEAM_WORKING_DIR=%q\n'  "${TEAM_WORKING_DIR:-}"
+        printf 'TEAM_THEME=%q\n'        "${TEAM_THEME:-}"
+        printf 'TEAM_SHIP=%q\n'         "${TEAM_SHIP:-}"
+        printf 'TEAM_STARTUP_SCRIPT=%q\n'  "${TEAM_STARTUP_SCRIPT:-${TEAM_ID}-startup.sh}"
+        printf 'TEAM_SHUTDOWN_SCRIPT=%q\n' "${TEAM_SHUTDOWN_SCRIPT:-${TEAM_ID}-shutdown.sh}"
+        printf 'TEAM_HAS_PROJECTS=%q\n'    "${TEAM_HAS_PROJECTS:-false}"
+        printf 'TEAM_REQUIRES_CLIENT_ID=%q\n' "${TEAM_REQUIRES_CLIENT_ID:-false}"
+        printf 'TEAM_ORGANIZATION=%q\n' "${TEAM_ORGANIZATION:-}"
+
+        # Emit arrays as bash array declarations so they survive the eval.
+        printf 'TEAM_AGENTS=('
+        printf '%q ' "${TEAM_AGENTS[@]+"${TEAM_AGENTS[@]}"}"
+        printf ')\n'
+
+        printf 'TEAM_BREW_DEPS=('
+        printf '%q ' "${TEAM_BREW_DEPS[@]+"${TEAM_BREW_DEPS[@]}"}"
+        printf ')\n'
+
+        printf 'TEAM_BREW_CASK_DEPS=('
+        printf '%q ' "${TEAM_BREW_CASK_DEPS[@]+"${TEAM_BREW_CASK_DEPS[@]}"}"
+        printf ')\n'
+    )
+}
+
+# Import conf values into the current shell via eval.
+eval "$(_read_conf "$TEAM_CONF")"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Installing Team: $TEAM_ID"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
-
-# Source the team configuration
-source "$TEAM_CONF"
 
 # Save the base working dir from conf (before env override)
 # For project-based teams, this is the parent dir (e.g., ~/medical)
@@ -134,6 +177,7 @@ mkdir -p "$TEAM_DIR/personas/agents"
 mkdir -p "$TEAM_DIR/personas/avatars"
 mkdir -p "$TEAM_DIR/personas/docs"
 mkdir -p "$TEAM_DIR/scripts"
+mkdir -p "$TEAM_DIR/scripts/prompts"
 mkdir -p "$TEAM_DIR/terminals"
 
 echo "  ✓ $TEAM_DIR"
@@ -149,6 +193,24 @@ if [[ -d "$PERSONAS_TEMPLATE_DIR" ]]; then
     echo "👤 Installing team personas..."
     cp -R "$PERSONAS_TEMPLATE_DIR"/* "$TEAM_DIR/personas/" || true
     echo "  ✓ Personas copied"
+    # Also copy avatar images into the flat avatars/ pool so agent-panel-display.sh
+    # can find them without fleet-monitor installed.
+    FLAT_AVATARS_DIR="$AITEAMFORGE_DIR/avatars"
+    mkdir -p "$FLAT_AVATARS_DIR"
+    if [[ -d "$PERSONAS_TEMPLATE_DIR/avatars" ]]; then
+        cp "$PERSONAS_TEMPLATE_DIR/avatars/"*.png "$FLAT_AVATARS_DIR/" 2>/dev/null || true
+        echo "  ✓ Avatars added to shared pool ($FLAT_AVATARS_DIR)"
+    fi
+
+    # Copy .txt system prompt files into scripts/prompts/ so cc-aliases can find them.
+    # cc-aliases reads <AITEAMFORGE_DIR>/<team>/scripts/prompts/<team>-<terminal>-prompt.txt
+    # to load the Claude system prompt when launching agents.
+    if [[ -d "$PERSONAS_TEMPLATE_DIR/prompts" ]]; then
+        mkdir -p "$TEAM_DIR/scripts/prompts"
+        cp "$PERSONAS_TEMPLATE_DIR/prompts/"*.txt "$TEAM_DIR/scripts/prompts/" 2>/dev/null || true
+        PROMPT_COUNT=$(ls "$TEAM_DIR/scripts/prompts/"*.txt 2>/dev/null | wc -l | tr -d ' ')
+        echo "  ✓ Installed $PROMPT_COUNT system prompt file(s) to scripts/prompts/"
+    fi
     echo ""
 fi
 
@@ -162,15 +224,11 @@ STARTUP_SCRIPT="$AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
 SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 
 # Build space-separated terminal list from agents (for template substitution)
-TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]}"
+TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]+"${TEAM_AGENTS[*]}"}"
 
-# Determine if this is a project-based team
-IS_PROJECT_TEAM="false"
-REQUIRES_CLIENT="false"
-if [[ -f "$TEAM_CONF" ]]; then
-    grep -q 'TEAM_HAS_PROJECTS="true"' "$TEAM_CONF" && IS_PROJECT_TEAM="true"
-    grep -q 'TEAM_REQUIRES_CLIENT_ID="true"' "$TEAM_CONF" && REQUIRES_CLIENT="true"
-fi
+# Determine if this is a project-based team (values already imported from conf)
+IS_PROJECT_TEAM="$TEAM_HAS_PROJECTS"
+REQUIRES_CLIENT="$TEAM_REQUIRES_CLIENT_ID"
 
 # Check for team-specific template first, then generic/project template
 STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_STARTUP_SCRIPT.template"
@@ -245,6 +303,91 @@ fi
 echo ""
 
 # ============================================================================
+# GENERATE TEAM BANNER SCRIPT
+# ============================================================================
+
+echo "🎨 Generating team banner script..."
+
+BANNER_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-banner.sh.template"
+BANNER_SCRIPT="$TEAM_DIR/scripts/${TEAM_ID}-banner.sh"
+
+if [[ -f "$BANNER_TEMPLATE" ]]; then
+    # Convert TEAM_COLOR hex (#RRGGBB) to a best-effort xterm-256 color code.
+    # We use Python for the conversion since it handles the math cleanly.
+    # The 256-color cube starts at index 16; gray ramp starts at 232.
+    _hex_to_256() {
+        local hex="${1#\#}"  # Strip leading #
+        python3 -c "
+import sys
+
+def nearest_256(r, g, b):
+    def cube_val(n):
+        return 0 if n == 0 else 55 + n * 40
+
+    # Brute-force search the full 6x6x6 color cube (indices 16-231)
+    best_cube_dist = float('inf')
+    best_cube_idx = 16
+    for ri in range(6):
+        for gi in range(6):
+            for bi in range(6):
+                cr, cg, cb = cube_val(ri), cube_val(gi), cube_val(bi)
+                d = (r-cr)**2 + (g-cg)**2 + (b-cb)**2
+                if d < best_cube_dist:
+                    best_cube_dist = d
+                    best_cube_idx = 16 + 36*ri + 6*gi + bi
+
+    # Search the gray ramp (indices 232-255, values 8, 18, 28 ... 238)
+    best_gray_dist = float('inf')
+    best_gray_idx = 232
+    for i in range(24):
+        gv = 8 + i * 10
+        d = (r-gv)**2 + (g-gv)**2 + (b-gv)**2
+        if d < best_gray_dist:
+            best_gray_dist = d
+            best_gray_idx = 232 + i
+
+    return best_cube_idx if best_cube_dist <= best_gray_dist else best_gray_idx
+
+h = sys.argv[1].lstrip('#')
+r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+print(nearest_256(r, g, b))
+" "$hex" 2>/dev/null || echo "178"
+    }
+
+    # Derive primary and secondary (slightly darker/lighter) color codes
+    TEAM_COLOR_HEX="${TEAM_COLOR:-#5585CC}"
+    PRIMARY_CODE=$(_hex_to_256 "$TEAM_COLOR_HEX")
+
+    # Secondary: shift toward darker by biasing toward a lower cube index.
+    # Simple approach: clamp primary - 36 (one cube "row" darker) or clamp to 16.
+    if [[ "$PRIMARY_CODE" -ge 52 ]]; then
+        SECONDARY_CODE=$((PRIMARY_CODE - 36))
+    else
+        SECONDARY_CODE=$((PRIMARY_CODE + 36))
+        # Keep within valid range
+        [[ "$SECONDARY_CODE" -gt 231 ]] && SECONDARY_CODE=231
+    fi
+
+    # Generate banner script by substituting template placeholders
+    TEAM_BANNER_SCRIPT_NAME="${TEAM_ID}-banner.sh"
+    sed -e "s|{{TEAM_ID}}|${TEAM_ID}|g" \
+        -e "s|{{TEAM_NAME}}|${TEAM_NAME}|g" \
+        -e "s|{{TEAM_SHIP}}|${TEAM_SHIP:-${TEAM_THEME}}|g" \
+        -e "s|{{TEAM_BANNER_SCRIPT}}|${TEAM_BANNER_SCRIPT_NAME}|g" \
+        -e "s|{{TEAM_COLOR_PRIMARY}}|${PRIMARY_CODE}|g" \
+        -e "s|{{TEAM_COLOR_SECONDARY}}|${SECONDARY_CODE}|g" \
+        "$BANNER_TEMPLATE" > "$BANNER_SCRIPT"
+    chmod +x "$BANNER_SCRIPT"
+    echo "  ✓ ${TEAM_ID}-banner.sh (primary color: ${PRIMARY_CODE}, secondary: ${SECONDARY_CODE})"
+    echo "    Path: $BANNER_SCRIPT"
+    echo "    Note: Edit color codes in the script to customize team themes"
+else
+    echo "  ⚠️  Banner template not found: $BANNER_TEMPLATE (skipping)"
+fi
+
+echo ""
+
+# ============================================================================
 # CONFIGURE CLAUDE CODE AGENT ALIASES
 # ============================================================================
 
@@ -303,7 +446,7 @@ if [[ ! -f "$TEAM_BOARD" ]]; then
 {
   "team": "$TEAM_ID",
   "teamName": "$TEAM_NAME",
-  "version": "0.5.2",
+  "version": "1.3.0",
   "items": {},
   "metadata": {
     "created": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",

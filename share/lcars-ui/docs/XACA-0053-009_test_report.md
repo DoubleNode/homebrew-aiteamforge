@@ -22,7 +22,7 @@ The +LINK popup implementation has been reviewed for edge cases, memory leaks, e
 
 ### 1. ✅ Viewport Containment (`calculateViewportPosition()`)
 
-**File:** `~/aiteamforge/lcars-ui/js/lcars.js` (lines 324-370)
+**File:** `~/dev-team/lcars-ui/js/lcars.js` (lines 324-370)
 
 **What It Does:**
 - Calculates optimal position for popup within viewport boundaries
@@ -42,7 +42,7 @@ The +LINK popup implementation has been reviewed for edge cases, memory leaks, e
 
 ### 2. ✅ Event Listener Cleanup (`cleanupEditor()`)
 
-**File:** `~/aiteamforge/lcars-ui/js/lcars.js` (lines 3433-3445)
+**File:** `~/dev-team/lcars-ui/js/lcars.js` (lines 3433-3445)
 
 **What It Does:**
 - Removes popup from DOM
@@ -73,7 +73,7 @@ const cleanupEditor = () => {
 
 ### 3. ⚠️ Integration Loading Edge Cases
 
-**File:** `~/aiteamforge/lcars-ui/js/lcars.js` (lines 3193-3227)
+**File:** `~/dev-team/lcars-ui/js/lcars.js` (lines 3193-3227)
 
 **Scenario 1: No Integrations Configured**
 ```javascript
@@ -151,7 +151,7 @@ const repositionEditor = () => {
 
 ### 5. ✅ Backend API Error Handling
 
-**File:** `~/aiteamforge/lcars-ui/server.py` (lines 843-929)
+**File:** `~/dev-team/lcars-ui/server.py` (lines 843-929)
 
 **What It Checks:**
 - ✅ Integrations module availability
@@ -185,7 +185,7 @@ const repositionEditor = () => {
 
 ### 6. ⚠️ Provider Error Handling
 
-**File:** `~/aiteamforge/lcars-ui/integrations/jira_provider.py`
+**File:** `~/dev-team/lcars-ui/integrations/jira_provider.py`
 
 **Issue:** The `create_item()` method is defined in the base provider class, and I couldn't find the Jira/Monday implementations in the grep results.
 
@@ -246,7 +246,7 @@ token = creds.get('token', '')  # ✅ Safe with default
 
 ### 8. ✅ Debounce Performance
 
-**File:** `~/aiteamforge/lcars-ui/js/lcars.js` (lines 3862-3867)
+**File:** `~/dev-team/lcars-ui/js/lcars.js` (lines 3862-3867)
 
 ```javascript
 debouncedReposition = () => {
@@ -272,7 +272,7 @@ window.addEventListener('scroll', debouncedReposition, true);  // ✅ Capture ph
 
 ### 9. ✅ CSS z-index Conflicts
 
-**File:** `~/aiteamforge/lcars-ui/css/lcars.css`
+**File:** `~/dev-team/lcars-ui/css/lcars.css`
 
 ```css
 .jira-editor {

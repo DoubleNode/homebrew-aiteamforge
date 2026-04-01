@@ -66,26 +66,32 @@
                 <div class="sidebar-button active" data-section="home">
                     <span>HOME</span>
                 </div>
-                <div class="sidebar-button" data-section="workflow">
-                    <span>WORKFLOW</span>
+                <div class="sidebar-split-row">
+                    <div class="sidebar-button" data-section="todos">
+                        <span>TODOS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="calendar">
+                        <span>CALENDAR</span>
+                    </div>
                 </div>
-                <div class="sidebar-button" data-section="details">
-                    <span>DETAILS</span>
+                <div class="sidebar-split-row">
+                    <div class="sidebar-button" data-section="workflow">
+                        <span>WORKFLOW</span>
+                    </div>
+                    <div class="sidebar-button" data-section="details">
+                        <span>DETAILS</span>
+                    </div>
                 </div>
                 <div class="sidebar-button" data-section="queue">
                     <span>QUEUE</span>
                 </div>
-                <div class="sidebar-button" data-section="releases">
-                    <span>RELEASES</span>
-                </div>
-                <div class="sidebar-button" data-section="epics">
-                    <span>EPICS</span>
-                </div>
-                <div class="sidebar-button" data-section="calendar">
-                    <span>CALENDAR</span>
-                </div>
-                <div class="sidebar-button" data-section="todos">
-                    <span>TODOS</span>
+                <div class="sidebar-split-row">
+                    <div class="sidebar-button" data-section="epics">
+                        <span>EPICS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="releases">
+                        <span>RELEASES</span>
+                    </div>
                 </div>
                 <div class="sidebar-button has-submenu" id="settings-button">
                     <span>SETTINGS</span>
@@ -96,12 +102,15 @@
                             <div class="sidebar-submenu-curve"></div>
                         </div>
                         <div class="sidebar-submenu-items">
+                            <div class="sidebar-submenu-item" data-section="team-config">TEAM CONFIG</div>
                             <div class="sidebar-submenu-item" data-section="integrations">INTEGRATIONS</div>
-                            <div class="sidebar-submenu-item" onclick="openCalendarSettingsModal()">CALENDAR SYNC</div>
                             <div class="sidebar-submenu-item" data-section="backups">BACKUPS</div>
-                            <div class="sidebar-submenu-item" data-section="commands">COMMANDS</div>
+                            <div class="sidebar-submenu-item" data-section="archive">ARCHIVE / TRANSFER</div>
                         </div>
                     </div>
+                </div>
+                <div class="sidebar-button" data-section="commands">
+                    <span>HELP</span>
                 </div>
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
@@ -115,9 +124,6 @@
                     </div>
                 </div>
                 <div class="sidebar-spacer"></div>
-                <div class="sidebar-button refresh-btn" onclick="refreshData()">
-                    <span>REFRESH</span>
-                </div>
             </nav>
 
             <!-- Content -->
@@ -534,6 +540,17 @@
                     </div>
                 </section>
 
+                <!-- Team Config -->
+                <section class="team-config-section">
+                    <div class="section-header orange">
+                        <span class="section-title">TEAM CONFIGURATION</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="team-config-placeholder">
+                        <p>Team configuration settings will appear here.</p>
+                    </div>
+                </section>
+
                 <!-- Integrations -->
                 <section class="integrations-section">
                     <div class="section-header green">
@@ -567,6 +584,20 @@
                         <button class="lcars-button integration-add-btn" id="add-integration-btn">
                             + ADD INTEGRATION
                         </button>
+                        <button class="lcars-button integration-add-btn" onclick="openCalendarSettingsModal()">
+                            CALENDAR SYNC CONFIG
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Archive / Transfer -->
+                <section class="archive-section">
+                    <div class="section-header amber">
+                        <span class="section-title">ARCHIVE / TRANSFER</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-placeholder">
+                        <p>Archive and transfer tools will appear here.</p>
                     </div>
                 </section>
 
@@ -641,9 +672,6 @@
             </div>
             <div class="tabbar-button" data-section="commands">
                 <span class="tabbar-label">COMMANDS</span>
-            </div>
-            <div class="tabbar-button refresh-btn" onclick="refreshData()">
-                <span class="tabbar-label">⟳</span>
             </div>
         </nav>
 

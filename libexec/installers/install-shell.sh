@@ -138,7 +138,10 @@ install_aliases() {
     info "Installing shell aliases"
 
     # Install each alias file
-    for alias_file in agent-aliases.sh kanban-aliases.sh worktree-aliases.sh; do
+    # Note: kanban-aliases.sh is intentionally omitted — kanban-helpers.sh
+    # (installed by install-kanban.sh) is sourced directly from aiteamforge-env.sh
+    # and provides the full kb-* function set.
+    for alias_file in agent-aliases.sh cc-aliases.sh worktree-aliases.sh; do
         local template="$INSTALL_ROOT/share/templates/aliases/$alias_file"
         local target="$aliases_dir/$alias_file"
 
@@ -155,6 +158,26 @@ install_aliases() {
     done
 
     success "Installed shell aliases"
+}
+
+# Install helper scripts (update_claude_agent.sh, etc.)
+install_helper_scripts() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+
+    info "Installing helper scripts"
+
+    # update_claude_agent.sh — updates tmux status bar with current agent name
+    # Used by claude-* alias functions in agent-aliases.sh
+    local agent_script_src="$scripts_src/update_claude_agent.sh"
+    local agent_script_dest="$AITEAMFORGE_DIR/update_claude_agent.sh"
+    if [ -f "$agent_script_src" ]; then
+        cp "$agent_script_src" "$agent_script_dest"
+        chmod +x "$agent_script_dest"
+    else
+        warning "update_claude_agent.sh not found at: $agent_script_src (skipping)"
+    fi
+
+    success "Installed helper scripts"
 }
 
 # Install secrets template
@@ -186,6 +209,52 @@ install_secrets_template() {
     success "Installed secrets template"
 }
 
+# Create Python virtual environment and install iterm2 module
+install_python_venv() {
+    local venv_dir="${HOME}/.aiteamforge/venv"
+
+    info "Setting up Python virtual environment"
+
+    # Check Python3 is available
+    if ! command -v python3 &>/dev/null; then
+        warning "python3 not found — skipping venv setup"
+        warning "Install Python 3 (brew install python3) and re-run setup to enable iTerm2 integration"
+        return 0
+    fi
+
+    # Verify python3 can create venvs (venv module may be missing on some systems)
+    if ! python3 -m venv --help &>/dev/null; then
+        warning "python3 venv module not available — skipping venv setup"
+        warning "Install python3-venv or use a full Python installation"
+        return 0
+    fi
+
+    # Create the venv directory (idempotent — venv handles existing dirs)
+    mkdir -p "$(dirname "$venv_dir")"
+    if ! python3 -m venv "$venv_dir" 2>/dev/null; then
+        warning "Failed to create Python venv at $venv_dir — skipping"
+        return 0
+    fi
+
+    info "Installing iterm2 Python module"
+
+    # Use the venv's pip to install the iterm2 package
+    local pip_bin="${venv_dir}/bin/pip"
+    if [ ! -x "$pip_bin" ]; then
+        warning "pip not found in venv — skipping iterm2 install"
+        return 0
+    fi
+
+    if ! "$pip_bin" install --quiet iterm2 2>/dev/null; then
+        warning "Failed to install iterm2 Python module — you can retry manually:"
+        warning "  ${venv_dir}/bin/pip install iterm2"
+        return 0
+    fi
+
+    success "Python venv created at $venv_dir with iterm2 module installed"
+    return 0
+}
+
 #──────────────────────────────────────────────────────────────────────────────
 # Main Installation Function
 #──────────────────────────────────────────────────────────────────────────────
@@ -211,7 +280,11 @@ install_shell_environment() {
     install_env_loader || return 1
     install_prompt || return 1
     install_aliases || return 1
+    install_helper_scripts || return 1
     install_secrets_template || return 1
+
+    # Set up Python venv with iterm2 module (non-fatal if Python unavailable)
+    install_python_venv
 
     # Add zshrc integration
     add_zshrc_integration || return 1
@@ -244,6 +317,7 @@ uninstall_shell_environment() {
     rm -f "$AITEAMFORGE_DIR/share/aiteamforge-env.sh"
     rm -f "$AITEAMFORGE_DIR/share/aiteamforge-prompt.sh"
     rm -rf "$AITEAMFORGE_DIR/share/aliases"
+    rm -f "$AITEAMFORGE_DIR/update_claude_agent.sh"
     rm -f "$AITEAMFORGE_DIR/secrets.env.template"
 
     success "Shell environment uninstalled"
@@ -267,5 +341,12 @@ uninstall_shell_environment() {
 #──────────────────────────────────────────────────────────────────────────────
 
 # This script is sourced by the setup wizard, so export the functions
+# NOTE: The wrapper in aiteamforge-setup.sh calls _run_shell_installer
+# to avoid name collision with install_shell_environment defined here.
+_run_shell_installer() { install_shell_environment; }
+_run_shell_uninstaller() { uninstall_shell_environment; }
 export -f install_shell_environment
 export -f uninstall_shell_environment
+export -f install_python_venv
+export -f _run_shell_installer
+export -f _run_shell_uninstaller

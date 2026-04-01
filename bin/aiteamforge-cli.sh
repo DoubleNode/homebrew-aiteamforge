@@ -25,7 +25,14 @@ fi
 # Get user's aiteamforge working directory (where actual configs/data live)
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+if [ -f "${AITEAMFORGE_HOME}/../VERSION" ]; then
+  VERSION="$(cat "${AITEAMFORGE_HOME}/../VERSION" | tr -d '[:space:]')"
+elif [ -f "${AITEAMFORGE_HOME}/VERSION" ]; then
+  VERSION="$(cat "${AITEAMFORGE_HOME}/VERSION" | tr -d '[:space:]')"
+else
+  VERSION="unknown"
+fi
 
 # Usage information
 usage() {

@@ -92,6 +92,178 @@ derive_org_color() {
     esac
 }
 
+# Map uniform color name from persona to LCARS color token
+# Persona files use human-readable names; board uses lowercase tokens.
+_map_uniform_color() {
+    local raw_color
+    raw_color="$(echo "$1" | tr '[:upper:]' '[:lower:]')"
+    case "$raw_color" in
+        command*)   echo "command" ;;
+        operations*) echo "operations" ;;
+        science*|sciences*) echo "science" ;;
+        medical*)   echo "medical" ;;
+        engineering*) echo "operations" ;;
+        *)          echo "operations" ;;   # safe default
+    esac
+}
+
+# Extract a field from a persona markdown file.
+# Fields follow the pattern "**Field:** Value" in the Core Identity section.
+# Returns empty string if not found or file doesn't exist.
+_parse_persona_field() {
+    local persona_file="$1"
+    local field_name="$2"     # e.g. "Name", "Role", "Uniform Color"
+    if [ ! -f "$persona_file" ]; then
+        echo ""
+        return
+    fi
+    # Match "**Field Name:** rest of line" — strip leading/trailing whitespace
+    grep -m1 "^\*\*${field_name}:\*\*" "$persona_file" \
+        | sed "s/^\*\*${field_name}:\*\*[[:space:]]*//" \
+        | sed 's/[[:space:]]*$//'
+}
+
+# Find the persona markdown file for a given team+agent.
+# Persona filenames follow the pattern: <team>_<character>_<role>_persona.md
+# where <role> is the agent identifier (e.g., "chancellor", "engineer", "documentation").
+# The agent name may appear in any segment, so we search broadly.
+_find_persona_file() {
+    local personas_dir="$1"   # INSTALL_ROOT/share/personas/<team>/agents/
+    local agent="$2"
+    if [ ! -d "$personas_dir" ]; then
+        echo ""
+        return
+    fi
+    # First try: agent name as an exact segment between underscores
+    local found
+    found="$(ls "${personas_dir}"/*_"${agent}"_persona.md 2>/dev/null | head -1 || true)"
+    [ -n "$found" ] && { echo "$found"; return; }
+    found="$(ls "${personas_dir}"/*_"${agent}"_*_persona.md 2>/dev/null | head -1 || true)"
+    [ -n "$found" ] && { echo "$found"; return; }
+    # Fallback: substring match (e.g. "chancellor" inside "nahla_chancellor_persona")
+    found="$(ls "${personas_dir}"/*persona.md 2>/dev/null | grep "_${agent}_\|_${agent}\.md$" | head -1 || true)"
+    echo "$found"
+}
+
+# Populate the terminals object in a kanban board JSON from team conf + persona files.
+# Usage: populate_board_terminals <team> <board_file>
+# Non-fatal: logs warnings on missing data and continues.
+populate_board_terminals() {
+    local team="$1"
+    local board_file="$2"
+
+    if [ ! -f "$board_file" ]; then
+        warning "Board file not found for terminal registration: $board_file"
+        return 0
+    fi
+
+    if ! command -v jq &>/dev/null; then
+        warning "jq not available — skipping terminal registration for $team"
+        return 0
+    fi
+
+    local conf_file="$INSTALL_ROOT/share/teams/${team}.conf"
+    if [ ! -f "$conf_file" ]; then
+        warning "No conf file for team '$team' — cannot register terminals"
+        return 0
+    fi
+
+    # Read TEAM_AGENTS array from conf (source in subshell, print one agent per line)
+    local agents_raw
+    agents_raw="$(
+        (
+            unset TEAM_REPOS TEAM_BREW_DEPS TEAM_BREW_CASK_DEPS TEAM_AGENTS
+            # shellcheck source=/dev/null
+            source "$conf_file" 2>/dev/null || true
+            for agent in "${TEAM_AGENTS[@]}"; do
+                printf '%s\n' "$agent"
+            done
+        )
+    )"
+
+    if [ -z "$agents_raw" ]; then
+        warning "No agents found in $conf_file — terminals object will remain empty"
+        return 0
+    fi
+
+    local personas_dir="$INSTALL_ROOT/share/personas/${team}/agents"
+
+    # Build terminals JSON object incrementally.
+    # We start with null and use jq to add each terminal entry.
+    local terminals_json="{}"
+    while IFS= read -r agent; do
+        [ -z "$agent" ] && continue
+
+        # Locate persona file for this agent
+        local persona_file
+        persona_file="$(_find_persona_file "$personas_dir" "$agent")"
+
+        # Parse character metadata from persona file (empty string if absent)
+        local dev_name role raw_color lcars_color
+        dev_name="$(_parse_persona_field "$persona_file" "Name")"
+        role="$(_parse_persona_field "$persona_file" "Role")"
+        raw_color="$(_parse_persona_field "$persona_file" "Uniform Color")"
+        lcars_color="$(_map_uniform_color "$raw_color")"
+
+        # Fall back to sensible defaults derived from the agent name
+        if [ -z "$dev_name" ]; then
+            # Title-case the agent name (Python-based for macOS/Linux portability)
+            dev_name="$(python3 -c "import sys; s=sys.argv[1]; print(s[:1].upper()+s[1:])" "$agent" 2>/dev/null || echo "$agent")"
+        fi
+        if [ -z "$role" ]; then
+            role="Team Agent"
+        fi
+
+        # Merge this terminal entry into the accumulating JSON object
+        # Note: jq --arg handles all JSON string escaping internally (apostrophes, quotes, etc.)
+        terminals_json="$(
+            printf '%s' "$terminals_json" | \
+            jq --arg key "$agent" \
+               --arg developer "$dev_name" \
+               --arg avatar "$agent" \
+               --arg role "$role" \
+               --arg color "$lcars_color" \
+               '.[$key] = {developer: $developer, avatar: $avatar, role: $role, color: $color}'
+        )"
+    done <<< "$agents_raw"
+
+    # Patch the board file: merge new terminals into existing terminals object.
+    # Existing entries are preserved; new entries are added; conflicting keys
+    # are overwritten only if the existing developer field is "Unknown" or empty
+    # (i.e. we don't overwrite manual customizations).
+    local tmp_file
+    tmp_file="$(mktemp /tmp/_kb_terminals_$$.json)"
+    local patch_success=false
+
+    jq --argjson new_terminals "$terminals_json" '
+        .terminals as $existing |
+        ($new_terminals | to_entries) as $new_entries |
+        reduce $new_entries[] as $entry (
+            $existing;
+            if (.[$entry.key] == null)
+              or (.[$entry.key].developer == "Unknown")
+              or (.[$entry.key].developer == "")
+            then
+              .[$entry.key] = $entry.value
+            else
+              .
+            end
+        ) as $merged_terminals |
+        .terminals = $merged_terminals |
+        .lastUpdated = (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+    ' "$board_file" > "$tmp_file" && patch_success=true
+
+    if [ "$patch_success" = true ] && [ -s "$tmp_file" ]; then
+        mv "$tmp_file" "$board_file"
+        local agent_count
+        agent_count="$(echo "$agents_raw" | grep -c '[^[:space:]]' || true)"
+        success "Registered ${agent_count} terminal(s) in kanban board for team: $team"
+    else
+        warning "Failed to patch terminals in board file: $board_file"
+        rm -f "$tmp_file"
+    fi
+}
+
 # Initialize empty kanban board for a team
 init_kanban_board() {
     local team="$1"
@@ -140,6 +312,12 @@ init_kanban_board() {
             local team_category=""
 
             if [ -f "$conf_file" ]; then
+                # Create a secure temp file for conf variable extraction
+                local _conf_tmp
+                _conf_tmp="$(mktemp)" || { warn "Failed to create temp file for conf extraction"; _conf_tmp=""; }
+                # Clean up temp file on exit (handles early returns and signals)
+                trap 'rm -f "$_conf_tmp"' EXIT
+
                 # Source conf to get team variables (unset arrays first to avoid parse errors)
                 (
                     # Temporarily unset array vars that might cause issues in subshell
@@ -151,19 +329,22 @@ init_kanban_board() {
                     echo "TEAM_THEME=${TEAM_THEME:-}"
                     echo "TEAM_SHIP=${TEAM_SHIP:-}"
                     echo "TEAM_CATEGORY=${TEAM_CATEGORY:-}"
-                ) > /tmp/_kanban_conf_$$.env
+                    echo "TEAM_ORGANIZATION=${TEAM_ORGANIZATION:-}"
+                ) > "$_conf_tmp"
 
                 # Read back the exported values
                 while IFS='=' read -r key val; do
                     case "$key" in
-                        TEAM_ID)       team_id="$val" ;;
-                        TEAM_NAME)     team_name="$val" ;;
-                        TEAM_THEME)    team_subtitle="$val" ;;
-                        TEAM_SHIP)     team_ship="$val" ;;
-                        TEAM_CATEGORY) team_category="$val" ;;
+                        TEAM_ID)           team_id="$val" ;;
+                        TEAM_NAME)         team_name="$val" ;;
+                        TEAM_THEME)        team_subtitle="$val" ;;
+                        TEAM_SHIP)         team_ship="$val" ;;
+                        TEAM_CATEGORY)     team_category="$val" ;;
+                        TEAM_ORGANIZATION) [ -n "$val" ] && team_org="$val" ;;
                     esac
-                done < /tmp/_kanban_conf_$$.env
-                rm -f /tmp/_kanban_conf_$$.env
+                done < "$_conf_tmp"
+                rm -f "$_conf_tmp"
+                trap - EXIT
 
                 # Derive series from team ID and org color from category
                 team_series="$(derive_series_prefix "$team_id")"
@@ -224,6 +405,10 @@ EOF
         fi
 
         success "Created kanban board: $board_file"
+
+        # Populate terminals from team conf + persona files.
+        # Non-fatal: board is still usable if this step fails.
+        populate_board_terminals "$team" "$board_file"
     else
         info "Kanban board already exists: $board_file (skipping)"
     fi
@@ -327,6 +512,85 @@ install_lcars_ui() {
     chmod +x "$lcars_dest"/*.sh 2>/dev/null || true
 
     success "Installed LCARS UI to: $lcars_dest"
+}
+
+# Install LCARS profile creation script for iTerm2 browser tab
+install_lcars_profile_script() {
+    local scripts_dest="$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$scripts_dest"
+
+    # Install LCARS profile creator
+    local create_src="$INSTALL_ROOT/share/scripts/create-lcars-profile.py"
+    if [ -f "$create_src" ]; then
+        cp "$create_src" "$scripts_dest/create-lcars-profile.py"
+        chmod +x "$scripts_dest/create-lcars-profile.py"
+        info "Installed: create-lcars-profile.py"
+    else
+        warning "create-lcars-profile.py not found (skipping)"
+    fi
+
+    # Install LCARS profile URL setter (for inline browser tabs)
+    local setter_src="$INSTALL_ROOT/share/scripts/set-lcars-profile-browser.py"
+    if [ -f "$setter_src" ]; then
+        cp "$setter_src" "$scripts_dest/set-lcars-profile-browser.py"
+        chmod +x "$scripts_dest/set-lcars-profile-browser.py"
+        info "Installed: set-lcars-profile-browser.py"
+    else
+        warning "set-lcars-profile-browser.py not found (skipping)"
+    fi
+
+    # Install Dynamic Profile JSON to iTerm2's hot-load directory.
+    # iTerm2 reads this directory automatically — no restart required.
+    # The profile uses 'Initial URL' (correct key for browser-mode tabs).
+    # set-lcars-profile-browser.py updates this file at team startup time
+    # to point to the correct per-team LCARS port.
+    local dynamic_profiles_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
+    local dynamic_profile_src="$INSTALL_ROOT/share/scripts/aiteamforge-lcars.json"
+    local dynamic_profile_dest="$dynamic_profiles_dir/aiteamforge-lcars.json"
+
+    if [ -f "$dynamic_profile_src" ]; then
+        mkdir -p "$dynamic_profiles_dir"
+        # Only install if the file does not already exist (avoid overwriting
+        # a customized profile with a different URL or color settings)
+        if [ ! -f "$dynamic_profile_dest" ]; then
+            cp "$dynamic_profile_src" "$dynamic_profile_dest"
+            info "Installed iTerm2 Dynamic Profile: aiteamforge-lcars.json"
+        else
+            info "iTerm2 Dynamic Profile already present (skipping overwrite)"
+        fi
+    else
+        warning "aiteamforge-lcars.json not found (skipping Dynamic Profile install)"
+    fi
+}
+
+# Install iTerm2 window manager script
+# Deploys iterm2_window_manager.py to both:
+#   $AITEAMFORGE_DIR/scripts/iterm2_window_manager.py  (canonical scripts location)
+#   $AITEAMFORGE_DIR/iterm2_window_manager.py           (root location checked by startup templates)
+# Templates use a two-path fallback and will find it in either location.
+install_iterm2_window_manager() {
+    local src="$INSTALL_ROOT/share/scripts/iterm2_window_manager.py"
+
+    if [ ! -f "$src" ]; then
+        warning "iterm2_window_manager.py not found at: $src (skipping)"
+        return 0
+    fi
+
+    local scripts_dest="$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$scripts_dest"
+
+    # Install to scripts/ subdirectory (canonical location)
+    cp "$src" "$scripts_dest/iterm2_window_manager.py"
+    chmod +x "$scripts_dest/iterm2_window_manager.py"
+    info "Installed: $scripts_dest/iterm2_window_manager.py"
+
+    # Also promote to AITEAMFORGE_DIR root — startup templates check this path first
+    # (team-startup.sh.template, team-project-startup.sh.template, agent-panel-display.sh)
+    cp "$src" "$AITEAMFORGE_DIR/iterm2_window_manager.py"
+    chmod +x "$AITEAMFORGE_DIR/iterm2_window_manager.py"
+    info "Installed: $AITEAMFORGE_DIR/iterm2_window_manager.py"
+
+    success "Installed iterm2_window_manager.py"
 }
 
 # Configure LCARS port
@@ -444,6 +708,45 @@ uninstall_backup_launchagent() {
     fi
 }
 
+# Install LCARS health check LaunchAgent
+install_lcars_health_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/kanban/lcars-health-plist.template"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
+
+    if [ ! -f "$plist_template" ]; then
+        warning "LCARS health LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    info "Installing LCARS health LaunchAgent"
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    sed -e "s|{{USER_HOME}}|$HOME|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        "$plist_template" > "$plist_dest"
+
+    launchctl unload "$plist_dest" 2>/dev/null || true
+
+    if launchctl load "$plist_dest"; then
+        success "Installed and loaded LCARS health LaunchAgent"
+        info "Health checks will run every 5 minutes"
+    else
+        warning "Failed to load LCARS health LaunchAgent (may need manual activation)"
+    fi
+}
+
+# Uninstall LCARS health LaunchAgent
+uninstall_lcars_health_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading LCARS health LaunchAgent"
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed LCARS health LaunchAgent"
+    fi
+}
+
 # Test LCARS server startup
 test_lcars_server() {
     local port="${1:-$DEFAULT_LCARS_PORT}"
@@ -519,6 +822,12 @@ install_kanban_system() {
     # Install LCARS UI (non-fatal if source missing)
     install_lcars_ui
 
+    # Install LCARS profile script for iTerm2 browser tab (non-fatal)
+    install_lcars_profile_script
+
+    # Install iTerm2 window manager (referenced by startup templates, non-fatal)
+    install_iterm2_window_manager
+
     # Configure LCARS port with default (non-interactive in setup wizard context)
     local lcars_port=$DEFAULT_LCARS_PORT
     if [ -d "$AITEAMFORGE_DIR/lcars-ui" ]; then
@@ -529,8 +838,9 @@ install_kanban_system() {
     # Install backup system (non-fatal if script missing)
     install_kanban_backup
 
-    # Install backup LaunchAgent if template exists
+    # Install LaunchAgents if templates exist
     install_backup_launchagent
+    install_lcars_health_launchagent
 
     success "LCARS Kanban System installed successfully"
 
@@ -591,3 +901,4 @@ uninstall_kanban_system() {
 
 export -f install_kanban_system
 export -f uninstall_kanban_system
+export -f populate_board_terminals

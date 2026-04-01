@@ -19,8 +19,14 @@ DEFAULT_INSTALL_DIR="${HOME}/aiteamforge"
 CONFIG_DIR="${HOME}/.aiteamforge"
 CONFIG_FILE="${CONFIG_DIR}/config.json"
 
-# Version
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+if [ -f "${SCRIPT_DIR}/../VERSION" ]; then
+  VERSION="$(cat "${SCRIPT_DIR}/../VERSION" | tr -d '[:space:]')"
+elif [ -f "${SCRIPT_DIR}/../../VERSION" ]; then
+  VERSION="$(cat "${SCRIPT_DIR}/../../VERSION" | tr -d '[:space:]')"
+else
+  VERSION="unknown"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Source UI Library
@@ -523,7 +529,7 @@ install_shell_environment() {
   export INSTALL_ROOT="${SCRIPT_DIR}"
   export AITEAMFORGE_DIR="${DEFAULT_INSTALL_DIR}"
 
-  # Source and run the actual installer
+  # Source the actual installer (defines _run_shell_installer)
   local installer="${SCRIPT_DIR}/installers/install-shell.sh"
   if [ ! -f "$installer" ]; then
     print_error "Shell installer not found: $installer"
@@ -531,7 +537,7 @@ install_shell_environment() {
   fi
 
   source "$installer"
-  install_shell_environment
+  _run_shell_installer
 }
 
 install_claude_config() {
@@ -552,7 +558,7 @@ install_claude_config() {
   fi
 
   source "$installer"
-  install_claude_config
+  _run_claude_config_installer
 }
 
 install_lcars_kanban() {
@@ -594,7 +600,7 @@ install_fleet_monitor() {
   fi
 
   source "$installer"
-  install_fleet_monitor
+  _run_fleet_monitor_installer
 }
 
 install_team_configs() {

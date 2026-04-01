@@ -105,7 +105,7 @@ def get_git_worktree():
     """Get current git worktree full path."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=2
@@ -120,7 +120,7 @@ def get_git_branch():
     """Get current git branch name."""
     try:
         result = subprocess.run(
-            ["git", "branch", "--show-current"],
+            ["git", "--no-optional-locks", "branch", "--show-current"],
             capture_output=True,
             text=True,
             timeout=2
@@ -135,7 +135,7 @@ def get_git_modified_count():
     """Get count of modified/untracked files."""
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=2
@@ -151,7 +151,7 @@ def get_git_lines_changed():
     """Get lines added and deleted in working directory."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--numstat"],
+            ["git", "--no-optional-locks", "diff", "--numstat"],
             capture_output=True,
             text=True,
             timeout=2

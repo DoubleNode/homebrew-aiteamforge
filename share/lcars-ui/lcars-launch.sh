@@ -6,7 +6,7 @@
 #   Usage: ./lcars-launch.sh [port] [team] [session_name]
 #
 #   Can be used as iTerm2 profile command:
-#   Set profile command to: ~/aiteamforge/lcars-ui/lcars-launch.sh 8080 dns dns-lcars
+#   Set profile command to: ~/dev-team/lcars-ui/lcars-launch.sh 8080 dns dns-lcars
 #
 #   The team determines which board to load (freelance, dns, ios, etc.)
 #   The session_name is used to write a port file for fleet-monitor integration
@@ -17,7 +17,7 @@ TEAM="${2:-freelance}"
 SESSION_NAME="${3:-}"
 URL="http://localhost:$PORT"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LCARS_PORTS_DIR="$HOME/aiteamforge/lcars-ports"
+LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
 
 # Export team for server
 export LCARS_TEAM="$TEAM"

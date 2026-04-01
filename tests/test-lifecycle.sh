@@ -23,8 +23,18 @@ create_test_config() {
     "user": "Test User"
   },
   "teams": ["iOS"],
+  "team_paths": {
+    "iOS": {"working_dir": "/tmp/test/ios"}
+  },
+  "installed_features": ["shell_environment", "lcars_kanban"],
+  "fleet_registration_status": "not_configured",
   "features": {
-    "kanban": true
+    "shell_environment": true,
+    "claude_code_config": false,
+    "lcars_kanban": true,
+    "fleet_monitor": false,
+    "fleet_mode": "standalone",
+    "fleet_server_url": ""
   }
 }
 EOF

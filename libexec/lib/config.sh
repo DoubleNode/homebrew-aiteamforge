@@ -121,6 +121,77 @@ validate_config() {
   return 0
 }
 
+# Get installed features (returns space-separated list of enabled feature names)
+# Features are stored as a JSON array in "installed_features".
+# Falls back to deriving the list from the boolean "features" map for configs
+# written by older versions of setup that pre-date this field.
+get_installed_features() {
+  local config_file
+  config_file=$(get_config_file)
+
+  if [ ! -f "$config_file" ]; then
+    return 1
+  fi
+
+  if command -v jq &>/dev/null; then
+    # Prefer the explicit installed_features array
+    local result
+    result=$(jq -r '.installed_features[]? // empty' "$config_file" 2>/dev/null | tr '\n' ' ')
+    if [ -n "$result" ]; then
+      echo "$result"
+      return 0
+    fi
+
+    # Fall back: derive from boolean features map (older config format)
+    local derived=""
+    for feature in shell_environment claude_code_config lcars_kanban fleet_monitor; do
+      local val
+      val=$(jq -r ".features.\"${feature}\" // false" "$config_file" 2>/dev/null)
+      if [ "$val" = "true" ]; then
+        derived="${derived}${feature} "
+      fi
+    done
+    echo "${derived% }"
+  fi
+}
+
+# Get fleet registration status
+# Values: "registered" | "pending" | "not_configured"
+# Returns "not_configured" if the field is absent (pre-dates this field).
+get_fleet_registration_status() {
+  local config_file
+  config_file=$(get_config_file)
+
+  if [ ! -f "$config_file" ]; then
+    return 1
+  fi
+
+  if command -v jq &>/dev/null; then
+    local reg_status
+    reg_status=$(jq -r '.fleet_registration_status // empty' "$config_file" 2>/dev/null)
+    if [ -n "$reg_status" ]; then
+      echo "$reg_status"
+      return 0
+    fi
+
+    # Derive from features: if fleet_monitor is true, assume pending (legacy config)
+    local fleet_enabled
+    fleet_enabled=$(jq -r '.features.fleet_monitor // false' "$config_file" 2>/dev/null)
+    if [ "$fleet_enabled" = "true" ]; then
+      echo "pending"
+    else
+      echo "not_configured"
+    fi
+  else
+    # No jq: fall back to grep
+    if grep -q '"fleet_registration_status"' "$config_file" 2>/dev/null; then
+      grep '"fleet_registration_status"' "$config_file" | sed -E 's/.*"fleet_registration_status": *"([^"]+)".*/\1/' | head -n1
+    else
+      echo "not_configured"
+    fi
+  fi
+}
+
 # Get working directory
 get_working_dir() {
   echo "${AITEAMFORGE_DIR:-$HOME/aiteamforge}"

@@ -26,7 +26,9 @@ fi
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
-VERSION="0.5.2"
+# Version — read from VERSION file (single source of truth)
+_find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
+VERSION="$(_find_version)"
 
 # Usage
 usage() {
@@ -49,6 +51,7 @@ Components:
   config          Check configuration files
   services        Check running services
   permissions     Check file permissions
+  install         Validate post-install structure (teams, scripts, LCARS, venv)
   all             Run all checks (default)
 
 Examples:
@@ -246,6 +249,7 @@ check_framework() {
   local core_templates=(
     "share/templates/kanban/kanban-helpers.template.sh"
     "share/templates/aliases/agent-aliases.sh"
+    "share/templates/aliases/cc-aliases.sh"
     "share/templates/aliases/worktree-aliases.sh"
   )
 
@@ -300,6 +304,38 @@ check_config() {
     if [ "$VERBOSE" = true ]; then
       echo "    $(cat "${AITEAMFORGE_DIR}/.aiteamforge-config")"
     fi
+
+    # Check installed_features field is present
+    if command -v jq &>/dev/null; then
+      local features_count
+      features_count=$(jq '.installed_features | length // 0' "${AITEAMFORGE_DIR}/.aiteamforge-config" 2>/dev/null || echo "0")
+      if [ "$features_count" -gt 0 ] 2>/dev/null; then
+        check_result pass "installed_features field present (${features_count} feature(s))"
+      else
+        check_result warn "installed_features field missing or empty (run: aiteamforge setup --upgrade)"
+      fi
+
+      # Check fleet registration status
+      local fleet_reg_status
+      fleet_reg_status=$(jq -r '.fleet_registration_status // "not_configured"' "${AITEAMFORGE_DIR}/.aiteamforge-config" 2>/dev/null || echo "not_configured")
+      case "$fleet_reg_status" in
+        registered)
+          check_result pass "Fleet registration: registered"
+          ;;
+        pending)
+          check_result warn "Fleet registration: pending (machine identity not yet confirmed)"
+          ;;
+        not_configured)
+          # Not an error — fleet is optional
+          if [ "$VERBOSE" = true ]; then
+            check_result pass "Fleet registration: not configured (fleet monitor not installed)"
+          fi
+          ;;
+        *)
+          check_result warn "Fleet registration: unknown status '${fleet_reg_status}'"
+          ;;
+      esac
+    fi
   else
     check_result fail "Not configured" "Run: aiteamforge setup"
   fi
@@ -310,6 +346,23 @@ check_config() {
   else
     check_result warn "Templates directory missing"
   fi
+
+  # Deployed alias files (installed by install-shell.sh)
+  local deployed_aliases=(
+    "share/aliases/agent-aliases.sh"
+    "share/aliases/cc-aliases.sh"
+    "share/aliases/worktree-aliases.sh"
+  )
+
+  for alias_file in "${deployed_aliases[@]}"; do
+    local alias_name
+    alias_name="$(basename "$alias_file")"
+    if [ -f "${AITEAMFORGE_DIR}/${alias_file}" ]; then
+      check_result pass "${alias_name} (deployed)"
+    else
+      check_result warn "${alias_name} missing" "Run: aiteamforge setup --shell"
+    fi
+  done
 
   echo ""
 }
@@ -392,6 +445,44 @@ check_permissions() {
   echo ""
 }
 
+# Check post-install structure via validate-install library
+check_install() {
+  echo -e "${CYAN}Checking post-install structure...${NC}"
+  echo ""
+
+  # Locate validate-install library alongside this script's framework home
+  local val_lib=""
+  for _cand in \
+      "${AITEAMFORGE_HOME}/libexec/lib/validate-install.sh" \
+      "$(dirname "$(realpath "$0" 2>/dev/null || echo "$0")")/../libexec/lib/validate-install.sh"; do
+    if [ -f "$_cand" ]; then
+      val_lib="$_cand"
+      break
+    fi
+  done
+
+  if [ -z "$val_lib" ]; then
+    echo -e "${YELLOW}⚠ validate-install library not found — skipping${NC}"
+    echo "  Expected: ${AITEAMFORGE_HOME}/libexec/lib/validate-install.sh"
+    WARNING_CHECKS=$((WARNING_CHECKS + 1))
+    TOTAL_CHECKS=$((TOTAL_CHECKS + 1))
+    return
+  fi
+
+  # Source and run — the library manages its own output and counters
+  source "$val_lib"
+  if validate_installation "${AITEAMFORGE_DIR}"; then
+    PASSED_CHECKS=$((PASSED_CHECKS + _VAL_PASS))
+    WARNING_CHECKS=$((WARNING_CHECKS + _VAL_WARN))
+    TOTAL_CHECKS=$((TOTAL_CHECKS + _VAL_PASS + _VAL_WARN + _VAL_FAIL))
+  else
+    PASSED_CHECKS=$((PASSED_CHECKS + _VAL_PASS))
+    WARNING_CHECKS=$((WARNING_CHECKS + _VAL_WARN))
+    FAILED_CHECKS=$((FAILED_CHECKS + _VAL_FAIL))
+    TOTAL_CHECKS=$((TOTAL_CHECKS + _VAL_PASS + _VAL_WARN + _VAL_FAIL))
+  fi
+}
+
 # Run checks based on component
 case "$CHECK_COMPONENT" in
   dependencies)
@@ -409,12 +500,16 @@ case "$CHECK_COMPONENT" in
   permissions)
     check_permissions
     ;;
+  install)
+    check_install
+    ;;
   all)
     check_dependencies
     check_framework
     check_config
     check_services
     check_permissions
+    check_install
     ;;
   *)
     echo -e "${RED}ERROR: Unknown component: ${CHECK_COMPONENT}${NC}" >&2

@@ -5,88 +5,102 @@ This profile uses iTerm2's built-in browser mode to display web pages
 inline in a tab (no external browser needed). Used by team startup
 scripts to show the LCARS kanban dashboard.
 
+Uses the Dynamic Profile mechanism (JSON file in DynamicProfiles/) which
+is hot-loaded by iTerm2 — no restart required, no plist corruption risk.
+The correct key for browser-mode tab URLs is 'Initial URL' (not
+'Initial Text', which is for shell-session keystroke injection).
+
 Usage: python3 create-lcars-profile.py [url]
 """
 
-import subprocess
-import plistlib
+import json
+import os
 import sys
-import uuid
+from pathlib import Path
+
+DYNAMIC_PROFILES_DIR = Path.home() / "Library" / "Application Support" / "iTerm2" / "DynamicProfiles"
+PROFILE_FILE = DYNAMIC_PROFILES_DIR / "aiteamforge-lcars.json"
+
+LCARS_WEB_GUID = "AITEAMFORGE-LCARS-WEB-0001-000000000001"
+AGENT_PANEL_GUID = "AITEAMFORGE-AGENT-PANEL-0001-000000000001"
 
 
-def profile_exists(name="LCARS Web"):
-    """Check if an iTerm2 profile with the given name exists."""
-    result = subprocess.run(
-        ["defaults", "export", "com.googlecode.iterm2", "-"],
-        capture_output=True
+def create_profiles(url: str) -> bool:
+    """Create or update the LCARS Web Dynamic Profile with the given URL.
+
+    Writes to ~/Library/Application Support/iTerm2/DynamicProfiles/ which
+    iTerm2 hot-loads automatically — no restart required.
+    """
+    DYNAMIC_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Load existing file if present, otherwise start fresh
+    if PROFILE_FILE.exists():
+        with open(PROFILE_FILE) as f:
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                data = {"Profiles": []}
+    else:
+        data = {"Profiles": []}
+
+    profiles = data.get("Profiles", [])
+
+    # Update LCARS Web profile if it exists, otherwise create it
+    lcars_profile = None
+    for p in profiles:
+        if p.get("Guid") == LCARS_WEB_GUID or p.get("Name") == "LCARS Web":
+            lcars_profile = p
+            break
+
+    if lcars_profile is not None:
+        lcars_profile["Initial URL"] = url
+        lcars_profile["Custom Command"] = "Browser"
+        lcars_profile["Guid"] = LCARS_WEB_GUID
+        print(f"Updated LCARS Web profile: Initial URL={url}")
+    else:
+        lcars_profile = {
+            "Name": "LCARS Web",
+            "Guid": LCARS_WEB_GUID,
+            "Dynamic Profile Parent Name": "Default",
+            "Custom Command": "Browser",
+            "Initial URL": url,
+            "Tags": ["aiteamforge"],
+            "Background Color": {
+                "Alpha Component": 1.0,
+                "Blue Component": 0.0,
+                "Color Space": "sRGB",
+                "Green Component": 0.0,
+                "Red Component": 0.0,
+            },
+        }
+        profiles.append(lcars_profile)
+        print(f"Created LCARS Web profile: Initial URL={url}")
+
+    # Ensure Agent Panel profile exists (no URL update — it has its own router)
+    agent_profile_exists = any(
+        p.get("Guid") == AGENT_PANEL_GUID or p.get("Name") == "Agent Panel"
+        for p in profiles
     )
-    if result.returncode != 0:
-        return False
-    data = plistlib.loads(result.stdout)
-    for bookmark in data.get("New Bookmarks", []):
-        if bookmark.get("Name") == name:
-            return True
-    return False
+    if not agent_profile_exists:
+        profiles.append({
+            "Name": "Agent Panel",
+            "Guid": AGENT_PANEL_GUID,
+            "Dynamic Profile Parent Name": "Default",
+            "Tags": ["aiteamforge"],
+        })
 
+    data["Profiles"] = profiles
 
-def create_profile(name="LCARS Web", url="http://localhost:8080"):
-    """Create a minimal LCARS Web browser profile in iTerm2."""
-    result = subprocess.run(
-        ["defaults", "export", "com.googlecode.iterm2", "-"],
-        capture_output=True
-    )
-    if result.returncode != 0:
-        print("Error: Could not read iTerm2 preferences", file=sys.stderr)
-        return False
+    with open(PROFILE_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
-    data = plistlib.loads(result.stdout)
-    bookmarks = data.get("New Bookmarks", [])
-
-    # Use the first available profile as base (may not be named "Default" on clean installs)
-    base = {}
-    if bookmarks:
-        base = dict(bookmarks[0])
-
-    # Override with LCARS Web settings
-    base["Name"] = name
-    base["Guid"] = str(uuid.uuid4()).upper()
-    base["Custom Command"] = "Browser"
-    base["Command"] = ""
-    base["Initial Text"] = url
-    base["Tags"] = ["aiteamforge"]
-
-    # Dark background for LCARS theme
-    black = {"Alpha Component": 1.0, "Blue Component": 0.0,
-             "Color Space": "sRGB", "Green Component": 0.0,
-             "Red Component": 0.0}
-    base["Background Color"] = black
-    base["Background Color (Dark)"] = black
-    base["Background Color (Light)"] = black
-
-    bookmarks.append(base)
-    data["New Bookmarks"] = bookmarks
-
-    # Write back
-    plist_bytes = plistlib.dumps(data)
-    result = subprocess.run(
-        ["defaults", "import", "com.googlecode.iterm2", "-"],
-        input=plist_bytes, capture_output=True
-    )
-    if result.returncode != 0:
-        print(f"Error writing profile: {result.stderr.decode()}", file=sys.stderr)
-        return False
-
-    print(f"Created iTerm2 profile: {name}")
     return True
 
 
 if __name__ == "__main__":
     url = sys.argv[1] if len(sys.argv) > 1 else "http://localhost:8080"
 
-    if profile_exists():
-        print("LCARS Web profile already exists")
+    if create_profiles(url=url):
+        print(f"Dynamic profile written: {PROFILE_FILE}")
     else:
-        if create_profile(url=url):
-            print("Note: Restart iTerm2 or open a new window for the profile to appear")
-        else:
-            sys.exit(1)
+        sys.exit(1)

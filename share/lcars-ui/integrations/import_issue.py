@@ -530,23 +530,43 @@ def display_success(item: Dict[str, Any], integration_id: str) -> None:
 
 def get_board_path(team: str) -> Path:
     """Get the path to a team's board file."""
-    # Teams with non-standard kanban locations (outside ~/aiteamforge/kanban/)
-    _team_board_paths = {
-        "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban" / "legal-coparenting-board.json",
-        "medical-general": Path.home() / "medical" / "general" / "kanban" / "medical-general-board.json",
-        "finance-personal": Path.home() / "finance" / "personal" / "kanban" / "finance-personal-board.json",
+    # Team kanban directory mapping (mirrors server.py _TEAM_KANBAN_DIRS_DEFAULT)
+    _team_kanban_dirs = {
+        # Main Event Teams
+        "academy": Path.home() / "aiteamforge" / "academy" / "kanban",
+        "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
+        "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
+        "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
+        "command": Path.home() / "aiteamforge" / "command" / "kanban",
+        "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+        # Freelance Projects
+        "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
+        "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
+        "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
+        "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+        "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+        "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+        "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
+        "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
+        # Legal Projects
+        "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
+        # Medical Projects
+        "medical-general": Path.home() / "medical" / "general" / "kanban",
+        # Finance Projects
+        "finance-personal": Path.home() / "finance" / "personal" / "kanban",
     }
 
-    # Check team-specific paths first
-    if team in _team_board_paths:
-        return _team_board_paths[team]
-
-    dev_team = Path.home() / 'aiteamforge'
+    # Look up team kanban directory
+    if team in _team_kanban_dirs:
+        kanban_dir = _team_kanban_dirs[team]
+    else:
+        # Default to aiteamforge/<team>/kanban for unknown teams
+        kanban_dir = Path.home() / "aiteamforge" / team / "kanban"
 
     # Try different board file patterns
     patterns = [
-        dev_team / 'kanban' / f'{team.lower()}-board.json',
-        dev_team / 'kanban' / f'{team}-board.json',
+        kanban_dir / f'{team.lower()}-board.json',
+        kanban_dir / f'{team}-board.json',
     ]
 
     for path in patterns:

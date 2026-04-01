@@ -23,11 +23,13 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
-VERSION="1.4.2"
+# Version — read from VERSION file (single source of truth)
+_find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
+VERSION="$(_find_version)"
 
 # Banner
 show_banner() {
-  cat <<'EOF'
+  cat <<EOF
 ╔══════════════════════════════════════════════════════════════════════╗
 ║                                                                      ║
 ║     █████╗ ██╗████████╗███████╗ █████╗ ███╗   ███╗                   ║
@@ -45,7 +47,7 @@ show_banner() {
 ║    ╚═╝      ╚═════╝ ╚═╝  ╚═╝ ╚═════╝ ╚══════╝                        ║
 ║                                                                      ║
 ║          AI-Powered Team Development Infrastructure                  ║
-║                        Version 1.3.0                                 ║
+║                        Version ${VERSION}                                 ║
 ║                                                                      ║
 ╚══════════════════════════════════════════════════════════════════════╝
 EOF
@@ -173,6 +175,38 @@ if [ "$MODE" = "uninstall" ]; then
   read -p "Remove working directory ${INSTALL_DIR}? (yes/no): " remove_dir
 
   if [ "$remove_dir" = "yes" ]; then
+    # Safety bounds: refuse to rm -rf dangerous paths
+    local _safe=true
+    local _err=""
+
+    # Reject empty path
+    if [ -z "${INSTALL_DIR}" ]; then
+      _safe=false; _err="INSTALL_DIR is empty"
+    fi
+
+    # Reject root or home directory
+    if [ "${INSTALL_DIR}" = "/" ] || [ "${INSTALL_DIR}" = "$HOME" ]; then
+      _safe=false; _err="INSTALL_DIR is a protected path (${INSTALL_DIR})"
+    fi
+
+    # Reject paths with fewer than 3 components (e.g. "/foo" or "/foo/bar")
+    local _components
+    _components=$(echo "${INSTALL_DIR}" | tr -s '/' | tr '/' '\n' | grep -c '.')
+    if [ "$_safe" = "true" ] && [ "${_components}" -lt 3 ]; then
+      _safe=false; _err="INSTALL_DIR has too few path components (${INSTALL_DIR})"
+    fi
+
+    # Reject paths that don't contain "aiteamforge"
+    if [ "$_safe" = "true" ] && [[ "${INSTALL_DIR}" != *"aiteamforge"* ]]; then
+      _safe=false; _err="INSTALL_DIR does not contain 'aiteamforge' (${INSTALL_DIR})"
+    fi
+
+    if [ "$_safe" = "false" ]; then
+      echo -e "${RED}✗ Refusing to delete: ${_err}${NC}"
+      echo -e "${RED}  Aborting uninstall to prevent data loss.${NC}"
+      exit 1
+    fi
+
     rm -rf "${INSTALL_DIR}"
     echo -e "${GREEN}✓${NC} Removed ${INSTALL_DIR}"
   else
@@ -514,9 +548,9 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       read -p "  Project ID [${default_project}]: " project_id
       project_id="${project_id:-$default_project}"
     fi
-    eval "_PROJECT_${team_id}=\"${project_id}\""
-    eval "_CLIENT_${team_id}=\"${client_id}\""
-    eval "_WORKDIR_${team_id}=\"${working_dir}/${client_id}/${project_id}\""
+    declare -g "_PROJECT_${team_id}=${project_id}"
+    declare -g "_CLIENT_${team_id}=${client_id}"
+    declare -g "_WORKDIR_${team_id}=${working_dir}/${client_id}/${project_id}"
     echo -e "  ${GREEN}✓${NC} ${team_id}: ${working_dir}/${client_id}/${project_id}"
 
   elif [ "$has_projects" = "true" ]; then
@@ -531,12 +565,12 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       read -p "  Project ID [${default_project}]: " project_id
       project_id="${project_id:-$default_project}"
     fi
-    eval "_PROJECT_${team_id}=\"${project_id}\""
-    eval "_WORKDIR_${team_id}=\"${working_dir}/${project_id}\""
+    declare -g "_PROJECT_${team_id}=${project_id}"
+    declare -g "_WORKDIR_${team_id}=${working_dir}/${project_id}"
     echo -e "  ${GREEN}✓${NC} ${team_id}: ${working_dir}/${project_id}"
 
   else
-    eval "_WORKDIR_${team_id}=\"${working_dir}\""
+    declare -g "_WORKDIR_${team_id}=${working_dir}"
   fi
 done
 
@@ -724,8 +758,11 @@ if [ -d "${AITEAMFORGE_HOME}/share/skills" ]; then
 fi
 
 # Copy agent personas, avatars, and terminal logos for selected teams
+# Also populate the flat avatars/ pool so agent-panel-display.sh can find them
+# without needing fleet-monitor installed.
 _personas_copied=0
 _logos_copied=0
+mkdir -p "${INSTALL_DIR}/avatars"
 for team_id in "${SELECTED_TEAMS[@]}"; do
   [ -z "$team_id" ] && continue
   # Agent personas and avatar thumbnails
@@ -734,12 +771,16 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
     mkdir -p "${INSTALL_DIR}/${team_id}/personas/avatars"
     cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/agents/"*.md "${INSTALL_DIR}/${team_id}/personas/agents/" 2>/dev/null
     cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/${team_id}/personas/avatars/" 2>/dev/null
+    # Also copy into flat avatars/ pool for agent-panel-display.sh path resolution
+    cp "${AITEAMFORGE_HOME}/share/personas/${team_id}/avatars/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null
     _personas_copied=$((_personas_copied + 1))
   fi
   # Terminal logos (for iTerm2 profiles)
   if [ -d "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos" ]; then
     mkdir -p "${INSTALL_DIR}/${team_id}/terminals/logos"
     cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/${team_id}/terminals/logos/" 2>/dev/null
+    # Also copy logos into flat avatars/ pool
+    cp "${AITEAMFORGE_HOME}/share/terminals/${team_id}/logos/"*.png "${INSTALL_DIR}/avatars/" 2>/dev/null
     _logos_copied=$((_logos_copied + 1))
   fi
 done
@@ -755,8 +796,10 @@ echo ""
 
 for team_id in "${SELECTED_TEAMS[@]}"; do
   [ -z "$team_id" ] && continue  # skip empty entries from removed teams
-  eval "team_work_dir=\"\${_WORKDIR_${team_id}:-${INSTALL_DIR}/${team_id}}\""
-  eval "team_project=\"\${_PROJECT_${team_id}:-}\""
+  _wdir_var="_WORKDIR_${team_id}"
+  _proj_var="_PROJECT_${team_id}"
+  team_work_dir="${!_wdir_var:-${INSTALL_DIR}/${team_id}}"
+  team_project="${!_proj_var:-}"
   echo -e "${BLUE}  Installing team: ${team_id} → ${team_work_dir}${NC}"
   if [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
     AITEAMFORGE_DIR="${INSTALL_DIR}" TEAM_WORKING_DIR="${team_work_dir}" bash "${INSTALLERS_DIR}/install-team.sh" "$team_id" --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/    /' || {
@@ -834,7 +877,7 @@ if [ "$INSTALL_KANBAN" = "yes" ]; then
     _team_dirs=""
     for _tid in "${SELECTED_TEAMS[@]}"; do
       [ -z "$_tid" ] && continue
-      eval "_tw=\"\${_WORKDIR_${_tid}:-${INSTALL_DIR}/${_tid}}\""
+      _twvar="_WORKDIR_${_tid}"; _tw="${!_twvar:-${INSTALL_DIR}/${_tid}}"
       _team_dirs="${_team_dirs}${_tid}:${_tw} "
     done
     (
@@ -917,6 +960,16 @@ echo ""
 # Convert yes/no to JSON true/false
 to_json_bool() { [ "$1" = "yes" ] && echo "true" || echo "false"; }
 
+# Build installed_features array (list of enabled feature names)
+_build_installed_features() {
+  local features=()
+  [ "$INSTALL_SHELL" = "yes" ]  && features+=("shell_environment")
+  [ "$INSTALL_CLAUDE" = "yes" ] && features+=("claude_code_config")
+  [ "$INSTALL_KANBAN" = "yes" ] && features+=("lcars_kanban")
+  [ "$INSTALL_FLEET" = "yes" ]  && features+=("fleet_monitor")
+  printf '"%s",' "${features[@]}" 2>/dev/null | sed 's/,$//'
+}
+
 cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
 {
   "version": "${VERSION}",
@@ -928,9 +981,9 @@ cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
   "team_paths": {$(
     for _tid in "${SELECTED_TEAMS[@]}"; do
       [ -z "$_tid" ] && continue
-      eval "_proj=\"\${_PROJECT_${_tid}:-}\""
-      eval "_wdir=\"\${_WORKDIR_${_tid}:-}\""
-      eval "_client=\"\${_CLIENT_${_tid}:-}\""
+      _pvar="_PROJECT_${_tid}"; _proj="${!_pvar:-}"
+      _wvar="_WORKDIR_${_tid}"; _wdir="${!_wvar:-}"
+      _cvar="_CLIENT_${_tid}"; _client="${!_cvar:-}"
       if [ -n "$_client" ] && [ -n "$_proj" ]; then
         printf '"%s": {"working_dir": "%s", "client_id": "%s", "project_id": "%s"},' "$_tid" "$_wdir" "$_client" "$_proj"
       elif [ -n "$_proj" ]; then
@@ -940,6 +993,8 @@ cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
       fi
     done | sed 's/,$//'
   )},
+  "installed_features": [$(_build_installed_features)],
+  "fleet_registration_status": "$([ "$INSTALL_FLEET" = "yes" ] && echo "pending" || echo "not_configured")",
   "features": {
     "shell_environment": $(to_json_bool "$INSTALL_SHELL"),
     "claude_code_config": $(to_json_bool "$INSTALL_CLAUDE"),
@@ -1159,3 +1214,32 @@ echo -e "    ${CYAN}aiteamforge doctor${NC}    Health check & diagnostics"
 echo -e "    ${CYAN}aiteamforge status${NC}    Show environment status"
 echo -e "    ${CYAN}aiteamforge help${NC}      All available commands"
 echo ""
+
+# ═══════════════════════════════════════════════════════════════════════════
+# FINAL STEP: POST-INSTALL VALIDATION
+# Verify everything landed correctly before handing control back to the user.
+# ═══════════════════════════════════════════════════════════════════════════
+
+echo -e "${BOLD}Running post-install validation...${NC}"
+echo ""
+
+# Locate the validate-install library (relative to this script or via AITEAMFORGE_HOME)
+_VAL_LIB=""
+for _candidate in \
+    "${AITEAMFORGE_HOME}/libexec/lib/validate-install.sh" \
+    "$(dirname "$(realpath "$0" 2>/dev/null || echo "$0")")/../libexec/lib/validate-install.sh"; do
+  if [ -f "$_candidate" ]; then
+    _VAL_LIB="$_candidate"
+    break
+  fi
+done
+
+if [ -n "$_VAL_LIB" ]; then
+  # Source and run — returns 0 on pass/warn, 1 on failures
+  source "$_VAL_LIB"
+  validate_installation "${INSTALL_DIR}" || true
+else
+  echo -e "${YELLOW}⚠ Validation library not found — skipping post-install check${NC}"
+  echo -e "  Run ${CYAN}aiteamforge doctor${NC} manually to verify your installation."
+  echo ""
+fi

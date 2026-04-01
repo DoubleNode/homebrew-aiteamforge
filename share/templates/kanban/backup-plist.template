@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.kanban-backup</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PYTHON3_PATH}}</string>
+        <string>{{AITEAMFORGE_DIR}}/kanban-backup.py</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>{{BACKUP_INTERVAL}}</integer>
+    <key>StandardOutPath</key>
+    <string>{{USER_HOME}}/aiteamforge-backups/kanban/backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{USER_HOME}}/aiteamforge-backups/kanban/backup-error.log</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
