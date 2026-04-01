@@ -66,6 +66,7 @@ Options:
   --upgrade              Upgrade existing installation
   --uninstall            Remove aiteamforge configuration
   --non-interactive      Run in non-interactive mode
+  --dry-run              Preview what would be installed without making changes
   -h, --help             Show this help
 
 Interactive Mode:
@@ -77,6 +78,7 @@ Examples:
   aiteamforge setup --install-dir ~/my-team  # Custom location
   aiteamforge setup --upgrade                # Upgrade existing
   aiteamforge setup --uninstall              # Clean removal
+  aiteamforge setup --dry-run                # Preview without changes
 EOF
 }
 
@@ -87,6 +89,7 @@ ORIGINAL_ARGS=("$@")
 INSTALL_DIR="$HOME/aiteamforge"
 MODE="interactive"
 IS_UPGRADE="false"
+DRY_RUN="false"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -106,6 +109,10 @@ while [[ $# -gt 0 ]]; do
       MODE="non-interactive"
       shift
       ;;
+    --dry-run)
+      DRY_RUN="true"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -117,6 +124,12 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+export DRY_RUN
+if [ "$DRY_RUN" = "true" ]; then
+  echo -e "${YELLOW}DRY RUN MODE: No changes will be made${NC}"
+  echo ""
+fi
 
 # Check if already configured
 is_configured() {
@@ -176,8 +189,8 @@ if [ "$MODE" = "uninstall" ]; then
 
   if [ "$remove_dir" = "yes" ]; then
     # Safety bounds: refuse to rm -rf dangerous paths
-    local _safe=true
-    local _err=""
+    _safe=true
+    _err=""
 
     # Reject empty path
     if [ -z "${INSTALL_DIR}" ]; then
@@ -190,7 +203,6 @@ if [ "$MODE" = "uninstall" ]; then
     fi
 
     # Reject paths with fewer than 3 components (e.g. "/foo" or "/foo/bar")
-    local _components
     _components=$(echo "${INSTALL_DIR}" | tr -s '/' | tr '/' '\n' | grep -c '.')
     if [ "$_safe" = "true" ] && [ "${_components}" -lt 3 ]; then
       _safe=false; _err="INSTALL_DIR has too few path components (${INSTALL_DIR})"
