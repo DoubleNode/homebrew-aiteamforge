@@ -730,7 +730,7 @@ mkdir -p "${INSTALL_DIR}/teams"
 # Copy scripts (window manager, agent panel display, helpers)
 if [ -d "${AITEAMFORGE_HOME}/share/scripts" ]; then
   mkdir -p "${INSTALL_DIR}/scripts"
-  cp "${AITEAMFORGE_HOME}/share/scripts/"* "${INSTALL_DIR}/scripts/" 2>/dev/null
+  find "${AITEAMFORGE_HOME}/share/scripts" -maxdepth 1 -type f -exec cp {} "${INSTALL_DIR}/scripts/" \; 2>/dev/null
   chmod +x "${INSTALL_DIR}/scripts/"*.sh "${INSTALL_DIR}/scripts/"*.py 2>/dev/null
   # Also copy window manager to root for backward compat with startup templates
   cp "${INSTALL_DIR}/scripts/iterm2_window_manager.py" "${INSTALL_DIR}/iterm2_window_manager.py" 2>/dev/null
