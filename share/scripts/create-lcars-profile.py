@@ -56,6 +56,8 @@ def create_profiles(url: str) -> bool:
         lcars_profile["Initial URL"] = url
         lcars_profile["Custom Command"] = "Browser"
         lcars_profile["Guid"] = LCARS_WEB_GUID
+        # Remove parent profile reference — causes errors on clean installs
+        lcars_profile.pop("Dynamic Profile Parent Name", None)
         print(f"Updated LCARS Web profile: Initial URL={url}")
     else:
         lcars_profile = {
@@ -86,6 +88,10 @@ def create_profiles(url: str) -> bool:
             "Guid": AGENT_PANEL_GUID,
             "Tags": ["aiteamforge"],
         })
+
+    # Strip parent profile references from ALL profiles (causes errors on clean installs)
+    for p in profiles:
+        p.pop("Dynamic Profile Parent Name", None)
 
     data["Profiles"] = profiles
 
