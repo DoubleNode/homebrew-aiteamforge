@@ -37,7 +37,7 @@ _kb_get_kanban_dir() {
 
     if [[ -f "$_config_file" ]] && command -v jq &>/dev/null; then
         local _working_dir
-        _working_dir=$(jq -r --arg t "$team" ".team_paths[$t].working_dir // empty" "$_config_file" 2>/dev/null)
+        _working_dir=$(jq -r --arg t "$team" '.team_paths[$t].working_dir // empty' "$_config_file" 2>/dev/null)
         if [[ -n "$_working_dir" ]]; then
             echo "${_working_dir}/kanban"
             return 0
