@@ -230,16 +230,46 @@ fi
 # ============================================================================
 # Pre-initialize agent panel JSON files
 # ============================================================================
-# Writes /tmp/lcars-agent-<team>-<agent>.json for each agent so the LCARS
-# agent panel and banner script have real developer/role data from the start.
-# Runs synchronously before session creation; fast (reads persona markdown only).
+# Writes kanban/tmp/lcars-agent-<team>-<agent>.json for each agent so the
+# LCARS agent panel and banner script have real developer/role data from the
+# start. Runs synchronously before session creation; fast (persona reads only).
 # ============================================================================
-_PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/share/scripts/init-agent-panel-json.py"
+# Resolve init script: installed layout uses scripts/, dev/tap uses share/scripts/
+_PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/scripts/init-agent-panel-json.py"
+[[ ! -f "$_PANEL_JSON_SCRIPT" ]] && _PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/share/scripts/init-agent-panel-json.py"
 if [[ -f "$_PANEL_JSON_SCRIPT" ]]; then
     echo "  Pre-initializing agent panel data..."
     python3 "$_PANEL_JSON_SCRIPT" "$TEAM_ID" "$AITEAMFORGE_DIR" 2>/dev/null \
         || echo "  Warning: Agent panel JSON init failed (banner will use fallback values)"
 fi
+
+# Resolve the kanban/tmp directory for this team (mirrors lcars-tmp-dir.sh).
+# The JSON files written by init-agent-panel-json.py live here; agent-panel-display.sh
+# reads from the same location. Falls back to /tmp/ if Python resolution fails.
+_KANBAN_TMP=$(python3 -c "
+import os, sys
+dirs = {
+    'academy': os.path.expanduser('~/dev-team/kanban'),
+    'ios': '/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban',
+    'android': '/Users/Shared/Development/Main Event/MainEventApp-Android/kanban',
+    'firebase': '/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban',
+    'command': '/Users/Shared/Development/Main Event/dev-team/kanban',
+    'mainevent': '/Users/Shared/Development/Main Event/dev-team/kanban',
+    'dns': '/Users/Shared/Development/DNSFramework/kanban',
+    'freelance': os.path.expanduser('~/dev-team/kanban'),
+    'legal-coparenting': os.path.expanduser('~/legal/coparenting/kanban'),
+    'finance-personal': os.path.expanduser('~/finance/personal/kanban'),
+    'medical': os.path.expanduser('~/medical/general/kanban'),
+}
+team = '$TEAM_ID'
+kanban_dir = dirs.get(team, os.path.expanduser('~/dev-team/kanban'))
+tmp_dir = os.path.join(kanban_dir, 'tmp')
+try:
+    os.makedirs(tmp_dir, exist_ok=True)
+    print(tmp_dir)
+except Exception:
+    print('/tmp')
+" 2>/dev/null || echo "/tmp")
 
 # ============================================================================
 # Async tmux session initialization
@@ -289,7 +319,7 @@ for agent in "${AGENTS[@]}"; do
         # (written by init-agent-panel-json.py) so the banner shows real developer
         # names/roles. Falls back to basic session vars if the JSON is missing.
         local _banner_script="${AITEAMFORGE_DIR}/${TEAM_ID}/scripts/${TEAM_ID}-banner.sh"
-        local _agent_json="/tmp/lcars-agent-${TEAM_ID}-${agent}.json"
+        local _agent_json="${_KANBAN_TMP}/lcars-agent-${TEAM_ID}-${agent}.json"
         if [[ -f "$_banner_script" ]]; then
             if [[ -f "$_agent_json" ]]; then
                 # Read persona fields from JSON for rich banner display

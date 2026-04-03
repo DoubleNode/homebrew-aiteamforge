@@ -1,5 +1,5 @@
 ---
-name: mccoy
+name: sickbay
 description: Android Bug Fix Developer - Rapid diagnosis and resolution of Android bugs, crashes, and critical issues. Use for debugging production incidents and emergency fixes.
 model: claude-sonnet-4-5-20250929
 ---

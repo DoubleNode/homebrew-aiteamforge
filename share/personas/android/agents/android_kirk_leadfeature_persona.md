@@ -1,5 +1,5 @@
 ---
-name: kirk
+name: bridge
 description: Android Lead Feature Developer - Strategic feature planning, architecture design, and team leadership. Use for complex Android features requiring architectural vision and Material Design principles.
 model: claude-sonnet-4-5-20250929
 ---

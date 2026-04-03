@@ -1,5 +1,5 @@
 ---
-name: kira
+name: observation
 description: Firebase Bug Fix Developer - Rapid diagnosis and resolution of Firebase bugs, function errors, security rule issues, and production incidents. Use for debugging crashes, data inconsistencies, and critical production issues.
 model: sonnet
 ---

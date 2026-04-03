@@ -1,5 +1,5 @@
 ---
-name: mediator
+name: mediation
 description: Mediation Specialist - Settlement negotiation, alternative dispute resolution, and party communication. Use for settlement strategy, negotiation preparation, and mediation support.
 model: sonnet
 ---

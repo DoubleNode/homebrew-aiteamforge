@@ -1,5 +1,5 @@
 ---
-name: sulu
+name: helm
 description: Android Documentation Expert - Creating comprehensive documentation, KDoc comments, architecture docs, and developer guides. Use for documentation tasks and technical writing.
 model: claude-sonnet-4-5-20250929
 ---

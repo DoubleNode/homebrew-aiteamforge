@@ -1,5 +1,5 @@
 ---
-name: advocate
+name: chambers
 description: Lead Counsel - Strategic case direction, legal theory development, and client advocacy. Use for case strategy, legal arguments, and high-level case management decisions.
 model: sonnet
 ---

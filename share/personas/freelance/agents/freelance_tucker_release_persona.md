@@ -1,5 +1,5 @@
 ---
-name: tucker
+name: engineering
 description: Freelance Release Engineer - CI/CD pipelines, multi-platform deployment automation, and client delivery management. Use for freelance release coordination, TestFlight/Play Store releases, and deployment optimization.
 model: sonnet
 ---

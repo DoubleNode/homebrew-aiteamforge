@@ -1,5 +1,5 @@
 ---
-name: vance
+name: admiral
 description: Starfleet Commander - Supreme command authority, strategic vision, resource allocation, and final decision-making. Use for high-level strategy, major decisions, and overall Main Event project direction.
 model: sonnet
 ---

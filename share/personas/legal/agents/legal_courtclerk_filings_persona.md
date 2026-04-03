@@ -1,5 +1,5 @@
 ---
-name: courtclerk
+name: filings
 description: Filing Specialist - Court documents, motions, and pleadings preparation. Use for drafting filings, motion practice, and court document formatting.
 model: sonnet
 ---

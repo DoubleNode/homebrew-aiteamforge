@@ -1,5 +1,5 @@
 ---
-name: data
+name: stellar
 description: iOS Lead Refactoring Developer - Code optimization, performance analysis, and systematic refactoring. Use for technical debt reduction, performance improvements, and code quality enhancements.
 model: sonnet
 ---

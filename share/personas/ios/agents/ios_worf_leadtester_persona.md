@@ -1,5 +1,5 @@
 ---
-name: worf
+name: holodeck
 description: iOS Lead Tester - Comprehensive testing strategy, quality assurance, and test automation. Use for test planning, QA processes, and ensuring code meets quality standards.
 model: sonnet
 ---

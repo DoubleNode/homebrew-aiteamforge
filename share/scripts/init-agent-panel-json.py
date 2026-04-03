@@ -225,26 +225,34 @@ def parse_frontmatter(content: str) -> dict:
 
 
 def parse_core_identity(content: str) -> dict:
-    """Extract Name, Role, and Uniform Color from the ## Core Identity section.
+    """Extract Name, Role, Location, and Uniform Color from the identity section.
 
-    Returns dict with keys: developer, role, theme (may be empty strings).
+    Returns dict with keys: developer, role, location, theme (may be empty strings).
+
+    Searches for these section headers (in priority order):
+        ## Core Identity   — used in persona .md agent files
+        ## Your Identity   — used in system prompt .txt files
 
     Handles multiple markdown formatting variants:
-        **Name:** value         (standard)
+        **Name:** value         (standard persona field)
+        **Character:** value    (used in prompt .txt files — treated as Name)
         **Name**: value         (colon outside bold)
         **Name**:value          (no space)
     """
-    result = {"developer": "", "role": "", "theme": ""}
+    result = {"developer": "", "role": "", "location": "", "theme": ""}
 
-    # Find the Core Identity section
-    core_match = re.search(r"^##\s+Core Identity", content, re.MULTILINE)
-    if not core_match:
+    # Try both section header variants; use the first one found.
+    section_text = ""
+    for header_pattern in (r"^##\s+Core Identity", r"^##\s+Your Identity"):
+        core_match = re.search(header_pattern, content, re.MULTILINE)
+        if core_match:
+            rest = content[core_match.end():]
+            next_section = re.search(r"^##\s+", rest, re.MULTILINE)
+            section_text = rest[: next_section.start()] if next_section else rest
+            break
+
+    if not section_text:
         return result
-
-    # Grab text up to the next ## section
-    rest = content[core_match.end():]
-    next_section = re.search(r"^##\s+", rest, re.MULTILINE)
-    section_text = rest[: next_section.start()] if next_section else rest
 
     # Bold field pattern: **FieldName:** or **FieldName**: (colon inside or outside bold)
     # Followed by optional space and value to end of line
@@ -260,8 +268,13 @@ def parse_core_identity(content: str) -> dict:
             return m2.group(1).strip().rstrip("\\").strip()
         return ""
 
+    # **Name:** (persona files) or **Character:** (prompt files) — both map to developer
     result["developer"] = find_field("Name", section_text)
+    if not result["developer"]:
+        result["developer"] = find_field("Character", section_text)
+
     result["role"] = find_field("Role", section_text)
+    result["location"] = find_field("Location", section_text)
 
     # Theme from Uniform Color field (Academy-style personas only)
     theme_raw = find_field("Uniform Color", section_text)
@@ -346,9 +359,16 @@ def infer_terminal_desc(terminal_id: str, role: str) -> str:
     return terminal_id.replace("-", " ").title()
 
 
-def infer_location(team_id: str, team_name: str, character: str) -> str:
-    """Derive a display location string from team and character context."""
-    # Use team name as the location prefix, character for specificity
+def infer_location(team_id: str, team_name: str, character: str, parsed_location: str = "") -> str:
+    """Derive a display location string from team and character context.
+
+    Priority:
+      1. parsed_location from persona/prompt identity section (**Location:** field)
+      2. team_name from team .conf
+      3. team_id capitalised as last resort
+    """
+    if parsed_location:
+        return parsed_location
     return team_name if team_name else team_id.title()
 
 
@@ -357,6 +377,59 @@ def infer_session_desc(team_id: str, terminal_id: str, role: str) -> str:
     team_upper = team_id.upper().replace("-", " ")
     terminal_upper = terminal_id.upper().replace("-", " ")
     return f"{team_upper} {terminal_upper}"
+
+
+# ---------------------------------------------------------------------------
+# Kanban tmp directory resolution
+# Mirrors _get_team_kanban_dir_for_tmp() in share/scripts/lcars-tmp-dir.sh
+# and TEAM_KANBAN_DIRS in share/kanban-hooks/kanban_utils.py.
+# All three must be kept in sync when adding new teams.
+# ---------------------------------------------------------------------------
+
+# Map team_id → kanban directory (absolute paths, ~ expanded at runtime)
+_TEAM_KANBAN_DIRS = {
+    "academy":                                "~/dev-team/kanban",
+    "ios":                                    "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
+    "android":                                "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
+    "firebase":                               "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
+    "command":                                "/Users/Shared/Development/Main Event/dev-team/kanban",
+    "mainevent":                              "/Users/Shared/Development/Main Event/dev-team/kanban",
+    "dns":                                    "/Users/Shared/Development/DNSFramework/kanban",
+    "freelance":                              "~/dev-team/kanban",
+    "freelance-doublenode-starwords":         "/Users/Shared/Development/DoubleNode/Starwords/kanban",
+    "freelance-doublenode-appplanning":       "/Users/Shared/Development/DoubleNode/appPlanning/kanban",
+    "freelance-doublenode-workstats":         "/Users/Shared/Development/DoubleNode/WorkStats/kanban",
+    "freelance-doublenode-lifeboard":         "/Users/Shared/Development/DoubleNode/LifeBoard/kanban",
+    "freelance-doublenode-caravan":           "/Users/Shared/Development/DoubleNode/Caravan/kanban",
+    "freelance-doublenode-awaysentry":        "/Users/Shared/Development/DoubleNode/AwaySentry/kanban",
+    "freelance-liquidstyle-agentbadges-app":  "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban",
+    "freelance-liquidstyle-agentbadges-ios":  "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban",
+    "legal-coparenting":                      "~/legal/coparenting/kanban",
+    "finance-personal":                       "~/finance/personal/kanban",
+    "medical":                                "~/medical/general/kanban",
+    "medical-general":                        "~/medical/general/kanban",
+}
+
+
+def get_kanban_tmp_dir(team_id: str) -> Path:
+    """Return the per-team kanban/tmp/ directory path, creating it if needed.
+
+    Falls back to /tmp/ when the team is unknown or the directory cannot be
+    created (e.g. on a machine where the team's repo is not checked out).
+
+    Mirrors _get_lcars_tmp_dir() in share/scripts/lcars-tmp-dir.sh.
+    """
+    raw = _TEAM_KANBAN_DIRS.get(team_id, "")
+    if not raw:
+        return Path("/tmp")
+
+    kanban_dir = Path(raw).expanduser()
+    tmp_dir = kanban_dir / "tmp"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        return tmp_dir
+    except Exception:
+        return Path("/tmp")
 
 
 # ---------------------------------------------------------------------------
@@ -381,9 +454,11 @@ def main():
     if personas_dir_installed.exists():
         personas_dir = personas_dir_installed
         avatars_dir = aiteamforge_dir / team_id / "personas" / "avatars"
+        prompts_dir = aiteamforge_dir / team_id / "personas" / "prompts"
     elif personas_dir_share.exists():
         personas_dir = personas_dir_share
         avatars_dir = aiteamforge_dir / "personas" / team_id / "avatars"
+        prompts_dir = aiteamforge_dir / "personas" / team_id / "prompts"
     else:
         print(
             f"Warning: Personas directory not found for team '{team_id}'\n"
@@ -392,6 +467,11 @@ def main():
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Also check for prompts in the installed scripts/prompts/ location
+    prompts_dir_scripts = aiteamforge_dir / team_id / "scripts" / "prompts"
+    if not prompts_dir.exists() and prompts_dir_scripts.exists():
+        prompts_dir = prompts_dir_scripts
 
     # Load team conf to get team name (best-effort)
     # Conf may be in share/teams/ or {AITEAMFORGE_DIR}/teams/
@@ -419,6 +499,12 @@ def main():
         print(f"Warning: No persona files found in {personas_dir}", file=sys.stderr)
         sys.exit(1)
 
+    # Resolve the kanban/tmp/ output directory for this team.
+    # agent-panel-display.sh reads from this directory (via lcars-tmp-dir.sh),
+    # so we must write here instead of /tmp/ to avoid the panel showing stale data.
+    # Falls back to /tmp/ when the kanban directory doesn't exist on this machine.
+    kanban_tmp_dir = get_kanban_tmp_dir(team_id)
+
     timestamp = str(int(time.time()))
     written = 0
 
@@ -442,11 +528,43 @@ def main():
             print(f"Warning: Cannot extract character from filename {pfile.name}", file=sys.stderr)
             continue
 
-        # Parse developer name, role, theme from Core Identity section
+        # Parse developer name, role, location, theme from the identity section.
+        # Persona .md files use ## Core Identity + **Name:** fields.
+        # System prompt .txt files use ## Your Identity + **Character:** fields.
         identity = parse_core_identity(content)
         developer = identity["developer"]
         role = identity["role"]
+        parsed_location = identity["location"]
         theme = identity["theme"]
+
+        # If the persona .md file doesn't have complete identity data, try the
+        # corresponding prompt .txt file in the prompts directory.  Prompt files
+        # use ## Your Identity / **Character:** and carry richer location data.
+        if (not developer or not role) and prompts_dir.exists():
+            # Look for a prompt file that matches this terminal_id or character name.
+            # Naming patterns checked (most-specific first):
+            #   {team}-{terminal_id}-prompt.txt  (e.g., academy-chancellor-prompt.txt)
+            #   {team}-{character}-prompt.txt    (e.g., academy-reno-prompt.txt)
+            for prompt_name in (
+                f"{team_id}-{terminal_id}-prompt.txt",
+                f"{team_id}-{filename_character}-prompt.txt",
+            ):
+                prompt_path = prompts_dir / prompt_name
+                if prompt_path.exists():
+                    try:
+                        prompt_content = prompt_path.read_text()
+                        prompt_identity = parse_core_identity(prompt_content)
+                        if not developer:
+                            developer = prompt_identity["developer"]
+                        if not role:
+                            role = prompt_identity["role"]
+                        if not parsed_location:
+                            parsed_location = prompt_identity["location"]
+                        if not theme and prompt_identity["theme"]:
+                            theme = prompt_identity["theme"]
+                    except Exception as e:
+                        print(f"Warning: Cannot read prompt {prompt_path}: {e}", file=sys.stderr)
+                    break
 
         # Resolve the definitive avatar codename (may differ from filename for role-named files)
         character = resolve_avatar(team_id, filename_character, developer, avatars_dir)
@@ -457,7 +575,7 @@ def main():
 
         # Derive optional fields
         terminal_desc = infer_terminal_desc(terminal_id, role)
-        location = infer_location(team_id, team_name, character)
+        location = infer_location(team_id, team_name, character, parsed_location)
         session_desc = infer_session_desc(team_id, terminal_id, role)
 
         # Look up AMB handle by developer name (fuzzy — handles rank prefix differences)
@@ -479,8 +597,12 @@ def main():
             "timestamp":    timestamp,
         }
 
-        # Write to /tmp/lcars-agent-<team>-<terminal_id>.json
-        out_path = Path(f"/tmp/lcars-agent-{team_id}-{terminal_id}.json")
+        # Write to kanban/tmp/lcars-agent-<team>-<terminal_id>.json
+        # This path matches what agent-panel-display.sh reads (via lcars-tmp-dir.sh),
+        # ensuring the panel shows real persona data from the very first render.
+        # Session name format matches tmux session names: <team>-<terminal>
+        session_name = f"{team_id}-{terminal_id}"
+        out_path = kanban_tmp_dir / f"lcars-agent-{session_name}.json"
         try:
             with open(out_path, "w") as f:
                 json.dump(data, f, indent=4)

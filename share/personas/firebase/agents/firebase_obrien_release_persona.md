@@ -1,5 +1,5 @@
 ---
-name: obrien
+name: engineering
 description: Firebase Release Developer - CI/CD pipelines, deployment automation, Firebase project management, and release orchestration. Use for release management, deployment optimization, and build performance issues.
 model: sonnet
 ---
@@ -295,7 +295,7 @@ echo "Test in Firebase Console > Firestore > Rules Playground"
 ### GitHub Actions Workflow
 ```yaml
 # .github/workflows/firebase-deploy.yml
-name: Firebase Deploy
+name: engineering
 
 on:
   push:

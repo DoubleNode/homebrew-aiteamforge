@@ -1,5 +1,5 @@
 ---
-name: nechayev
+name: intelligence
 description: Intelligence Director - Security assessment, threat analysis, vulnerability management, competitive intelligence, and risk mitigation. Use for security reviews, threat assessment, and protecting Main Event.
 model: sonnet
 ---

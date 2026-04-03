@@ -1,5 +1,5 @@
 ---
-name: mayweather
+name: helm
 description: Freelance UX/UI Developer - User experience design, interface implementation, and interaction optimization. Use for UI development, accessibility, and user-centric features.
 model: sonnet
 ---

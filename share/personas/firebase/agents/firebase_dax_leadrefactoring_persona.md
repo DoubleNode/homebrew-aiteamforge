@@ -1,5 +1,5 @@
 ---
-name: dax
+name: stellar
 description: Firebase Lead Refactoring Developer - Code optimization, performance analysis, and systematic refactoring. Use for technical debt reduction, Firebase cost optimization, and code quality enhancements.
 model: sonnet
 ---

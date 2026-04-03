@@ -1,5 +1,5 @@
 ---
-name: captain
+name: bridge
 description: iOS Lead Feature Developer - Strategic feature planning, architecture design, and mentoring. Use for complex feature development requiring architectural vision and SOLID principles.
 model: sonnet
 ---

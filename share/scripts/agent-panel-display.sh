@@ -6,6 +6,11 @@
 # Usage: agent-panel-display.sh <session-code>
 # Example: agent-panel-display.sh firebase-ops
 
+# Disable trace mode (set -x) if inherited from parent shell.
+# trace output would pollute the panel display with variable assignment lines
+# like "subagent_file=..." that have nothing to do with the panel content.
+{ set +x; } 2>/dev/null
+
 SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
 IMGCAT="$HOME/.iterm2/imgcat"
 SCRIPT_PATH="${0:A}"
@@ -1016,16 +1021,18 @@ while true; do
     fi
 
     # Staggered sleep: base 2s + per-panel offset to prevent simultaneous polling
-    local loop_start=$(date +%s)
+    # NOTE: no 'local' here — 'local' inside a loop at script top level causes zsh
+    # to re-print the variable value on each iteration (T010 stdout-leak pattern).
+    loop_start=$(date +%s)
     sleep $(echo "2 + $STAGGER_OFFSET" | bc)
 
     # ── Sleep/Wake Detection ──────────────────────────────
     # If the sleep took much longer than expected, the system was asleep.
     # Add a staggered wake delay so panels don't all resume at once.
-    local loop_elapsed=$(( $(date +%s) - loop_start ))
+    loop_elapsed=$(( $(date +%s) - loop_start ))
     if (( loop_elapsed > SLEEP_THRESHOLD )); then
         # System just woke up — stagger resume by session-unique offset (0-5s)
-        local wake_delay=$(echo "scale=2; ($STAGGER_OFFSET * 3) + 1" | bc)
+        wake_delay=$(echo "scale=2; ($STAGGER_OFFSET * 3) + 1" | bc)
         sleep "$wake_delay"
     fi
 
@@ -1037,7 +1044,7 @@ while true; do
     fi
 
     # ── Quick mtime checks (cheap) ───────────────────────
-    local needs_render=false
+    needs_render=false
 
     # Check if active tmux window changed (tmux mode only — no windows in iTerm2-native mode)
     if [[ "$ITERM2_NATIVE_MODE" == "false" ]]; then
@@ -1064,7 +1071,7 @@ while true; do
 
     # Check if kanban board file was modified
     if [[ "$needs_render" != "true" && -n "$BOARD_FILE" && -f "$BOARD_FILE" ]]; then
-        local current_board_mtime=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
+        current_board_mtime=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
         if [[ "$current_board_mtime" != "$LAST_BOARD_MTIME" ]]; then
             LAST_BOARD_MTIME="$current_board_mtime"
             needs_render=true
@@ -1074,15 +1081,14 @@ while true; do
     # Check if subagent tracking file changed
     # In iTerm2-native mode there are no tmux windows; fall back to a session-level file.
     if [[ "$needs_render" != "true" ]]; then
-        local sub_win_idx=$(get_window_index)
-        local subagent_file
+        sub_win_idx=$(get_window_index)
         if [[ -n "$sub_win_idx" ]]; then
             subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${sub_win_idx}.json"
         else
             subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}.json"
         fi
         if [[ -f "$subagent_file" ]]; then
-            local current_sub_mtime=$(stat -f %m "$subagent_file" 2>/dev/null)
+            current_sub_mtime=$(stat -f %m "$subagent_file" 2>/dev/null)
             if [[ "$current_sub_mtime" != "$LAST_SUBAGENT_MTIME" ]]; then
                 LAST_SUBAGENT_MTIME="$current_sub_mtime"
                 needs_render=true
@@ -1095,7 +1101,7 @@ while true; do
 
     # ── Content fingerprint gate (skip render if data unchanged) ──
     if [[ "$needs_render" == "true" ]]; then
-        local current_fingerprint=$(compute_content_fingerprint)
+        current_fingerprint=$(compute_content_fingerprint)
         if [[ "$current_fingerprint" == "$LAST_CONTENT_FINGERPRINT" ]]; then
             # mtime changed but content is identical — skip the expensive render
             needs_render=false
@@ -1110,10 +1116,10 @@ while true; do
     fi
 
     # Enforce fixed pane width (check every ~10 seconds)
-    local now=$(date +%s)
+    now=$(date +%s)
     if (( now - LAST_WIDTH_CHECK >= 10 )); then
         LAST_WIDTH_CHECK=$now
-        local current_cols=$(tput cols 2>/dev/null)
+        current_cols=$(tput cols 2>/dev/null)
         if [[ -n "$current_cols" && "$current_cols" != "$TARGET_COLS" ]]; then
             python3 "$WINDOW_MGR" -a resize-pane --target-cols "$TARGET_COLS" &>/dev/null
         fi

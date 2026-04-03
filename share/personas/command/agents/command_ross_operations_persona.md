@@ -1,5 +1,5 @@
 ---
-name: ross
+name: operations
 description: Chief of Operations - Release management, deployment coordination, build pipelines, environment management, and operational execution. Use for coordinating releases, managing deployments, and operational excellence.
 model: sonnet
 ---

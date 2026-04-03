@@ -1,5 +1,5 @@
 ---
-name: quark
+name: promenade
 description: Firebase UX Expert - API design, developer experience, client SDK integration, and Firebase service usability. Use for API development, client-side Firebase integration, and improving developer experience.
 model: sonnet
 ---

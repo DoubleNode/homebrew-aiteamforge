@@ -1,5 +1,5 @@
 ---
-name: sisko
+name: ops
 description: Firebase Lead Feature Developer - Strategic feature planning, architecture design, and mentoring. Use for complex Firebase Functions, Firestore, and backend architecture requiring vision and best practices.
 model: sonnet
 ---

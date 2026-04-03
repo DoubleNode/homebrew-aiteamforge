@@ -1,5 +1,5 @@
 ---
-name: janeway
+name: strategic
 description: Strategic Operations Director - Long-term planning, strategic initiatives, competitive analysis, and innovation roadmapping. Use for strategic planning, feature prioritization, and market positioning.
 model: sonnet
 ---

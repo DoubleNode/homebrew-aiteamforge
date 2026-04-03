@@ -1,5 +1,5 @@
 ---
-name: chekov
+name: navigation
 description: Android Lead Tester - Comprehensive testing strategy, Espresso UI testing, unit testing, and quality assurance. Use for test planning and QA processes.
 model: claude-sonnet-4-5-20250929
 ---

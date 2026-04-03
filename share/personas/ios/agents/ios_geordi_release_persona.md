@@ -1,5 +1,5 @@
 ---
-name: geordi
+name: engineering
 description: iOS Release Developer - CI/CD pipelines, build optimization, App Store releases, and deployment automation. Use for release management, TestFlight, and build performance issues.
 model: sonnet
 ---

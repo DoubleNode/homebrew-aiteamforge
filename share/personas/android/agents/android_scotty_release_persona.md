@@ -1,5 +1,5 @@
 ---
-name: scotty
+name: engineering
 description: Android Release Engineer - Build systems, CI/CD pipelines, Play Store releases, and deployment automation. Use for release management and build optimization.
 model: claude-sonnet-4-5-20250929
 ---
@@ -464,7 +464,7 @@ tasks.whenTaskAdded {
 ```yaml
 # .github/workflows/android-ci.yml - Scotty's CI pipeline
 
-name: Android CI/CD
+name: engineering
 
 on:
   push:

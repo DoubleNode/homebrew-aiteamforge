@@ -173,6 +173,7 @@ _val_check_scripts() {
         "agent-panel-display.sh"
         "display-agent-avatar.sh"
         "lcars-tmp-dir.sh"
+        "init-agent-panel-json.py"
     )
 
     for script in "${required_scripts[@]}"; do

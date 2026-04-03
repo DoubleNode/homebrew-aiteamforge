@@ -1,5 +1,5 @@
 ---
-name: phlox
+name: sickbay
 description: Freelance Bug Fix Developer - Diagnosis, debugging, and remediation of defects. Use for troubleshooting, crash investigation, and systematic bug resolution.
 model: sonnet
 ---

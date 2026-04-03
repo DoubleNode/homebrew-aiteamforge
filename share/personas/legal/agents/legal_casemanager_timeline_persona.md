@@ -1,5 +1,5 @@
 ---
-name: casemanager
+name: timeline
 description: Timeline Coordinator - Case deadlines, calendar management, and milestone tracking. Use for deadline management, scheduling, and case progress monitoring.
 model: sonnet
 ---

@@ -1,5 +1,5 @@
 ---
-name: paralegal
+name: discovery
 description: Discovery Specialist - Evidence gathering, document analysis, and investigation support. Use for evidence review, interrogatory preparation, and fact-finding.
 model: sonnet
 ---

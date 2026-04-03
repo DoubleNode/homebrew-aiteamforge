@@ -1,5 +1,5 @@
 ---
-name: paris
+name: communications
 description: Communications Director - Stakeholder communications, public relations, documentation publishing, user communications, and messaging coordination. Use for managing communications, stakeholder updates, and public-facing content.
 model: sonnet
 ---

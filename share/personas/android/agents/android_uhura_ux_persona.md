@@ -1,5 +1,5 @@
 ---
-name: uhura
+name: communications
 description: Android UX Expert - Jetpack Compose UI, Material Design, accessibility, and user experience. Use for UI development and design system implementation.
 model: claude-sonnet-4-5-20250929
 ---

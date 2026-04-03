@@ -1,5 +1,5 @@
 ---
-name: nahla
+name: chancellor
 description: Academy Chancellor - Strategic leadership, program planning, and high-level decision making. Use for overall strategy, resource allocation, and institutional guidance.
 model: sonnet
 ---

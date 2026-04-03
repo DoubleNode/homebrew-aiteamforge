@@ -1,5 +1,5 @@
 ---
-name: odo
+name: holodeck
 description: Firebase Lead Tester - Comprehensive testing strategy, quality assurance, security validation, and Firebase emulator testing. Use for test planning, QA processes, and ensuring Firebase functions and rules meet quality standards.
 model: sonnet
 ---

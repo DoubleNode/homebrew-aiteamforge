@@ -281,12 +281,10 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  This subitem should include:                                               │
 │  • Create feature branch and push to remote                                │
 │  • Create PR targeting develop (NEVER master) with full description        │
-│  • Auto-spawn test agent (background Agent, subagent_type for QA)          │
-│  • Auto-spawn review agent (background Agent, subagent_type for reviewer)  │
-│  • Both agents fire in PARALLEL (not sequential)                           │
-│  • Enter parallel monitoring loop (check both gates each cycle)            │
-│  • Address any requested changes from QA tester or reviewer                │
-│  • Merge PR after both approvals (squash merge, delete branch)             │
+│  • Generate Review Handoff Prompt for reviewer agent                       │
+│  • Monitor for bot review approval (polling loop)                          │
+│  • Address any requested changes from reviewer                             │
+│  • Merge PR after approval (squash merge, delete branch)                   │
 │  • Update kanban status (kb-done)                                          │
 │                                                                             │
 │  Position: ALWAYS the LAST subitem (after Testing & Debugging)             │
@@ -295,12 +293,11 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  ⛔ DO NOT combine PR creation with testing or implementation subitems     │
 │  ⛔ DO NOT merge without reviewer approval (bot or human)                  │
 │                                                                             │
-│  Follows the Auto-Spawn PR Test & Review workflow in CLAUDE.md:            │
+│  Follows the PR Review Workflow defined in CLAUDE.md:                      │
 │  • PR targets develop branch                                               │
-│  • Test + review agents auto-spawned via Agent tool (run_in_background)    │
-│  • Both run in parallel — no sequential dependency                         │
-│  • gh-bot-test/gh-bot-review used for formal approval (bot identity)       │
-│  • Creating agent enters parallel monitoring loop                          │
+│  • Review handoff prompt generated for cross-terminal review               │
+│  • gh-bot-review used for formal approval (same-account restriction)       │
+│  • Creating agent monitors and merges after bot approval                   │
 │  • --admin flag required (GitHub Team plan limitation)                     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘

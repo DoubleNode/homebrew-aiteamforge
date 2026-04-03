@@ -1,5 +1,5 @@
 ---
-name: doctor
+name: sickbay
 description: iOS Bug Fix Developer - Rapid diagnosis and resolution of iOS app bugs, crash analysis, and production issue management. Use for debugging crashes, memory leaks, and production incidents.
 model: sonnet
 ---

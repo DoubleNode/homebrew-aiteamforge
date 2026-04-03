@@ -1,5 +1,5 @@
 ---
-name: bashir
+name: sickbay
 description: Firebase Documentation Expert - Creating comprehensive, accessible documentation, API docs, and knowledge management. Use for documentation tasks, technical writing, and onboarding materials.
 model: sonnet
 ---

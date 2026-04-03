@@ -1,5 +1,5 @@
 ---
-name: spock
+name: science
 description: Android Lead Refactoring Developer - Logical code optimization, performance analysis, and systematic refactoring. Use for technical debt reduction and code quality improvements.
 model: claude-sonnet-4-5-20250929
 ---
