@@ -394,11 +394,11 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
 
     # Switch to the first agent tab after all tabs are created
     echo ""
-    echo "  Switching to ${AGENTS[0]} tab..."
+    echo "  Switching to ${AGENTS[1]} tab..."
     python3 "$WM" \
         --action select-tab \
         --window-title "$ITERM_WINDOW_NAME" \
-        --tab-name "${AGENTS[0]}" \
+        --tab-name "${AGENTS[1]}" \
         2>>"$ITERM_STARTUP_LOG"
 else
     # Terminal.app fallback: attach to each tmux session in a new tab

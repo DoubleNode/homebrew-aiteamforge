@@ -446,11 +446,11 @@ if pgrep -f "iTerm.app" > /dev/null; then
 
     # Switch to the first agent tab
     echo ""
-    echo "🎯 Switching to ${AGENTS[0]} tab..."
+    echo "🎯 Switching to ${AGENTS[1]} tab..."
     python3 "$WM" \
         --action select-tab \
         --window-title "$ITERM_WINDOW_NAME" \
-        --tab-name "${AGENTS[0]}" \
+        --tab-name "${AGENTS[1]}" \
         2>>"$ITERM_STARTUP_LOG"
 else
     # No iTerm2 — sessions are ready, print attach commands for manual use
