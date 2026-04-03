@@ -483,11 +483,13 @@ async def split_agent_panel(connection, window_title, tab_name, command):
 
         # Run the display command in the agent panel pane.
         # Prefix with "stty -echo" so the command string is not echoed to the
-        # terminal when async_send_text simulates typing it.  The display
-        # script runs as a long-lived process that occupies the pane, so there
-        # is no interactive shell prompt where echo state would matter.
+        # terminal when async_send_text simulates typing it.  Redirect stderr
+        # to suppress any debug output (e.g. variable assignment echo, path
+        # diagnostics) that the shell may emit before the display script runs.
+        # The display script runs as a long-lived process that occupies the
+        # pane, so there is no interactive shell prompt where echo state matters.
         if command:
-            await agent_session.async_send_text("stty -echo; " + command + "\n")
+            await agent_session.async_send_text("stty -echo; " + command + " 2>/dev/null\n")
 
         print(f"Created agent panel pane in tab: {tab_name}")
         # Activate the original (left) session so the terminal is focused

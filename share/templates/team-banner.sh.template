@@ -10,9 +10,9 @@ TERMINAL_NUMBER="${4:-{{TEAM_NAME}} Terminal Number}"
 TERMINAL_NAME="${5:-{{TEAM_NAME}} Terminal Name}"
 SESSION_DESCRIPTION="${6:-{{TEAM_NAME}} Terminal Name}"
 SESSION_LOCATION="${7:-{{TEAM_SHIP}}}"
-SESSION_DEVELOPER="${8:-Developer Name}"
-SESSION_ROLE="${9:-Developer Role}"
-TERMINAL_DESCRIPTION="${10:-Specialization Area}"
+SESSION_DEVELOPER="${8:-${SESSION_NAME}}"
+SESSION_ROLE="${9:-Agent}"
+TERMINAL_DESCRIPTION="${10:-${SESSION_TYPE}}"
 PASSED_SESSION_CODE="${11}"
 
 # Use passed SESSION_CODE if provided, otherwise construct from type-name
@@ -92,7 +92,7 @@ WORKING_PATH="%~"
 
 # Ensure worktree helpers are loaded (defensive check for race conditions)
 if ! command -v wt-current &> /dev/null; then
-    source ~/dev-team/worktree-helpers.sh 2>/dev/null || true
+    source "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/aliases/worktree-aliases.sh" 2>/dev/null || true
 fi
 
 clear
@@ -128,9 +128,13 @@ print -P "${WHITE}${BOLD}    ${SESSION_DESCRIPTION}${RESET}"
 print -P "${GRAY}    ${SESSION_LOCATION}${RESET}"
 print -P "${GRAY}    ${SESSION_DEVELOPER}${RESET}"
 print -P "${WHITE}${BOLD}    Role: ${SESSION_ROLE}${RESET}"
-print -P "${WHITE}${BOLD}    Worktree: $(wt-project status-name) - $(wt-project status-code)${RESET}"
-print -P "${WHITE}${BOLD}              $(wt-current short)${RESET}"
-print -P "${WHITE}              $(wt-project status-short)${RESET}"
+if command -v wt-project &>/dev/null && command -v wt-current &>/dev/null; then
+    print -P "${WHITE}${BOLD}    Worktree: $(wt-project status-name) - $(wt-project status-code)${RESET}"
+    print -P "${WHITE}${BOLD}              $(wt-current short)${RESET}"
+    print -P "${WHITE}              $(wt-project status-short)${RESET}"
+else
+    print -P "${WHITE}${BOLD}    Worktree: (not in worktree)${RESET}"
+fi
 print -P "${THEME_COLOR}═══════════════════════════════════════════════════════════${RESET}"
 print -P ""
 print -P "${WHITE}[${THEME_COLOR_HIGHLIGHT}${BOLD}${TERMINAL_NAME}${RESET}${WHITE}] ${TERMINAL_DESCRIPTION}${RESET}"
