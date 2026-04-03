@@ -416,10 +416,17 @@ EOF
 
 # Install kanban-helpers.sh
 install_kanban_helpers() {
-    local template="$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh"
+    # Prefer the standalone kanban-aliases.sh (works without tmux/dev-team context)
+    # Fall back to the full kanban-helpers.template.sh if aliases not found
+    local template=""
+    if [ -f "$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh" ]; then
+        template="$INSTALL_ROOT/share/templates/aliases/kanban-aliases.sh"
+    elif [ -f "$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh" ]; then
+        template="$INSTALL_ROOT/share/templates/kanban/kanban-helpers.template.sh"
+    fi
     local target="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
-    if [ ! -f "$template" ]; then
+    if [ -z "$template" ] || [ ! -f "$template" ]; then
         warning "Kanban helpers template not found (skipping)"
         return 0
     fi
