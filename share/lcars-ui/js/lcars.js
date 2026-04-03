@@ -152,7 +152,7 @@ const OS_CONFIG = {
     },
     'Web': {
         color: 'var(--div-web)',
-        logo: 'images/web_logo.png',
+        logo: 'images/web_logo.svg',
         label: 'Web'
     },
     'None': {
@@ -1547,10 +1547,6 @@ function renderShipInfo() {
             displayGroupName = 'DEVTEAM';
         } else if (CONFIG.team && CONFIG.team.startsWith('legal-')) {
             displayGroupName = 'LEGAL';
-        } else if (CONFIG.team && CONFIG.team.startsWith('medical')) {
-            displayGroupName = 'MEDICAL';
-        } else if (CONFIG.team && CONFIG.team.startsWith('finance')) {
-            displayGroupName = 'FINANCE';
         } else {
             displayGroupName = 'DOUBLENODE';
         }
@@ -2855,26 +2851,21 @@ function createQueueItem(item, index) {
         epicBadge.title = 'Click to assign to an epic';
         epicBadge.setAttribute('aria-label', 'No epic assigned');
     }
-    // XACA-0056: Epic badge is read-only for completed items
-    if (!isCompleted) {
-        epicBadge.classList.add('editable');
-        epicBadge.setAttribute('role', 'button');
-        epicBadge.setAttribute('tabindex', '0');
-        epicBadge.addEventListener('click', (e) => {
+    // XACA-0121: Epic badge is always editable (removed XACA-0056 isCompleted guard)
+    epicBadge.classList.add('editable');
+    epicBadge.setAttribute('role', 'button');
+    epicBadge.setAttribute('tabindex', '0');
+    epicBadge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showEpicAssignModal(item.id, item.title, CONFIG.team, item.epicId);
+    });
+    epicBadge.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
             e.stopPropagation();
             showEpicAssignModal(item.id, item.title, CONFIG.team, item.epicId);
-        });
-        epicBadge.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                e.stopPropagation();
-                showEpicAssignModal(item.id, item.title, CONFIG.team, item.epicId);
-            }
-        });
-    } else {
-        epicBadge.classList.add('readonly');
-        epicBadge.title = item.epicId ? `Epic: ${getEpicTitleById(item.epicId) || item.epicId}` : 'No epic assigned';
-    }
+        }
+    });
     trackingZone.appendChild(epicBadge);
 
     // XACA-0023: Release assignment badge
@@ -2923,28 +2914,21 @@ function createQueueItem(item, index) {
         releaseBadge.title = 'Click to assign to a release';
         releaseBadge.setAttribute('aria-label', 'No release assigned');
     }
-    // XACA-0056: Release badge is read-only for completed items
-    if (!isCompleted) {
-        releaseBadge.classList.add('editable');
-        releaseBadge.setAttribute('role', 'button');
-        releaseBadge.setAttribute('tabindex', '0');
-        releaseBadge.addEventListener('click', (e) => {
+    // XACA-0121: Release badge is always editable (removed XACA-0056 isCompleted guard)
+    releaseBadge.classList.add('editable');
+    releaseBadge.setAttribute('role', 'button');
+    releaseBadge.setAttribute('tabindex', '0');
+    releaseBadge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showReleaseAssignModal(item.id, item.title, CONFIG.team, item.releaseAssignment);
+    });
+    releaseBadge.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
             e.stopPropagation();
             showReleaseAssignModal(item.id, item.title, CONFIG.team, item.releaseAssignment);
-        });
-        releaseBadge.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                e.stopPropagation();
-                showReleaseAssignModal(item.id, item.title, CONFIG.team, item.releaseAssignment);
-            }
-        });
-    } else {
-        releaseBadge.classList.add('readonly');
-        if (item.releaseAssignment) {
-            releaseBadge.title = `Release: ${item.releaseAssignment.releaseName || item.releaseAssignment.releaseId}`;
         }
-    }
+    });
     trackingZone.appendChild(releaseBadge);
 
     // Due date pill moved to identity zone (always visible)
@@ -3041,6 +3025,27 @@ function createQueueItem(item, index) {
 
     // Check if plan document exists (async)
     checkPlanExists(item.id, docsButton);
+
+    // XACA-0117: Activity timeline button
+    const activityBtn = document.createElement('div');
+    activityBtn.className = 'queue-activity-btn';
+    activityBtn.textContent = '\u25D7'; // ◗ clock-like history symbol
+    activityBtn.title = 'View activity history';
+    activityBtn.setAttribute('role', 'button');
+    activityBtn.setAttribute('tabindex', '0');
+    activityBtn.setAttribute('aria-label', 'View activity history');
+    activityBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        ActivityTimeline.open(item.id);
+    });
+    activityBtn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            ActivityTimeline.open(item.id);
+        }
+    });
+    trackingZone.appendChild(activityBtn);
 
     header.appendChild(trackingZone);
     header.appendChild(workflowZone); // Appended AFTER trackingZone so tags stay to the right
@@ -8888,6 +8893,11 @@ function switchSection(sectionName, skipAnimation = false) {
         stopCarousel();
     }
 
+    // Stop archive polling when leaving ARCHIVE tab (XACA-0128)
+    if (previousSection === 'archive') {
+        stopArchivePolling();
+    }
+
     // Handle exit animation for previous section
     if (previousEl && !skipAnimation && previousSection !== 'startup') {
         // Add exiting class to trigger reverse cascade
@@ -8977,6 +8987,11 @@ function switchSection(sectionName, skipAnimation = false) {
     // Load integrations when switching to integrations section
     if (sectionName === 'integrations') {
         loadIntegrations();
+    }
+
+    // Load archive status when switching to archive section
+    if (sectionName === 'archive') {
+        loadArchiveStatus();
     }
 
     // Load todos when switching to todos section (XACA-0101)
@@ -15251,6 +15266,334 @@ const avatarTooltip = {
     }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ARCHIVE / TRANSFER (XACA-0128)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let currentArchiveJobId = null;
+let archivePollingInterval = null;
+let archiveManifest = null;
+
+function loadArchiveStatus() {
+    // Update toggle exclusion display based on checkbox states
+    updateExclusionDisplay();
+
+    // Wire up toggle change listeners
+    const gitToggle = document.getElementById('archive-include-git');
+    const nodeToggle = document.getElementById('archive-include-node-modules');
+
+    if (gitToggle && !gitToggle.dataset.listenerAdded) {
+        gitToggle.addEventListener('change', updateExclusionDisplay);
+        gitToggle.dataset.listenerAdded = 'true';
+    }
+    if (nodeToggle && !nodeToggle.dataset.listenerAdded) {
+        nodeToggle.addEventListener('change', updateExclusionDisplay);
+        nodeToggle.dataset.listenerAdded = 'true';
+    }
+}
+
+function updateExclusionDisplay() {
+    const gitChecked = document.getElementById('archive-include-git')?.checked || false;
+    const nodeChecked = document.getElementById('archive-include-node-modules')?.checked || false;
+
+    const gitExclusion = document.getElementById('exclusion-git');
+    const nodeExclusion = document.getElementById('exclusion-node');
+
+    if (gitExclusion) {
+        gitExclusion.classList.toggle('included', gitChecked);
+    }
+    if (nodeExclusion) {
+        nodeExclusion.classList.toggle('included', nodeChecked);
+    }
+}
+
+async function startArchiveGeneration() {
+    // Prevent double-click — if already generating, ignore
+    if (archivePollingInterval) return;
+
+    const generateBtn = document.getElementById('archive-generate-btn');
+    const progressSection = document.getElementById('archive-progress');
+    const downloadSection = document.getElementById('archive-download');
+    const statusEl = document.getElementById('archive-status');
+
+    // Disable button and show progress
+    if (generateBtn) generateBtn.disabled = true;
+    if (progressSection) progressSection.style.display = 'block';
+    if (downloadSection) downloadSection.style.display = 'none';
+    if (statusEl) statusEl.textContent = 'GENERATING...';
+
+    // Reset progress display
+    updateArchiveProgress(0, 'GENERATING...', 'Initializing...');
+
+    // Get options from toggles
+    const includeGitHistory = document.getElementById('archive-include-git')?.checked || false;
+    const includeNodeModules = document.getElementById('archive-include-node-modules')?.checked || false;
+
+    try {
+        const response = await fetch('/api/archive/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                includeGitHistory,
+                includeNodeModules,
+                customExclusions: [],
+            }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            console.error('Archive creation failed:', data);
+            if (statusEl) statusEl.textContent = 'ERROR';
+            if (generateBtn) generateBtn.disabled = false;
+            return;
+        }
+
+        currentArchiveJobId = data.jobId;
+
+        // Start polling for progress
+        archivePollingInterval = setInterval(() => pollArchiveStatus(data.jobId), 1000);
+
+    } catch (error) {
+        console.error('Archive request failed:', error);
+        if (statusEl) statusEl.textContent = 'ERROR';
+        if (generateBtn) generateBtn.disabled = false;
+    }
+}
+
+async function pollArchiveStatus(jobId) {
+    try {
+        const response = await fetch(`/api/archive/status/${jobId}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            console.error('Archive status check failed:', data);
+            stopArchivePolling();
+            const generateBtn = document.getElementById('archive-generate-btn');
+            if (generateBtn) generateBtn.disabled = false;
+            const statusEl = document.getElementById('archive-status');
+            if (statusEl) statusEl.textContent = 'ERROR';
+            return;
+        }
+
+        updateArchiveProgress(data.progress, 'GENERATING...', data.message);
+
+        if (data.status === 'completed') {
+            stopArchivePolling();
+            onArchiveComplete(data);
+        } else if (data.status === 'failed') {
+            stopArchivePolling();
+            onArchiveFailed(data);
+        }
+
+    } catch (error) {
+        console.error('Archive poll error:', error);
+        // Don't stop polling on network errors — might be transient
+    }
+}
+
+function stopArchivePolling() {
+    if (archivePollingInterval) {
+        clearInterval(archivePollingInterval);
+        archivePollingInterval = null;
+    }
+}
+
+function updateArchiveProgress(percent, label, message) {
+    const progressBar = document.getElementById('archive-progress-bar');
+    const percentEl = document.getElementById('archive-progress-percent');
+    const labelEl = document.getElementById('archive-progress-label');
+    const messageEl = document.getElementById('archive-progress-message');
+
+    if (progressBar) progressBar.style.width = `${percent}%`;
+    if (percentEl) percentEl.textContent = `${percent}%`;
+    if (labelEl) labelEl.textContent = label;
+    if (messageEl) messageEl.textContent = message;
+    const container = document.querySelector('.progress-bar-container');
+    if (container) container.setAttribute('aria-valuenow', percent);
+}
+
+function onArchiveComplete(data) {
+    const generateBtn = document.getElementById('archive-generate-btn');
+    const progressSection = document.getElementById('archive-progress');
+    const downloadSection = document.getElementById('archive-download');
+    const statusEl = document.getElementById('archive-status');
+    const lastExportEl = document.getElementById('archive-last-export');
+    const checklistBtn = document.getElementById('archive-checklist-btn');
+
+    // Update progress to 100%
+    updateArchiveProgress(100, 'COMPLETE', data.message || 'Archive ready for download');
+
+    // Show download section
+    if (downloadSection) {
+        downloadSection.style.display = 'flex';
+        document.getElementById('archive-download-filename').textContent = data.filename || '--';
+        document.getElementById('archive-download-size').textContent = data.fileSize || '--';
+        document.getElementById('archive-download-files').textContent = `${data.totalFiles || 0} files`;
+    }
+
+    // Update status
+    if (statusEl) statusEl.textContent = 'READY';
+    if (lastExportEl) lastExportEl.textContent = new Date().toLocaleString();
+    if (generateBtn) generateBtn.disabled = false;
+    if (checklistBtn) checklistBtn.disabled = false;
+
+    // Store manifest for checklist generation
+    if (data.manifest) {
+        archiveManifest = data.manifest;
+    }
+}
+
+function onArchiveFailed(data) {
+    const generateBtn = document.getElementById('archive-generate-btn');
+    const statusEl = document.getElementById('archive-status');
+
+    updateArchiveProgress(0, 'FAILED', data.message || 'Archive generation failed');
+
+    if (statusEl) statusEl.textContent = 'ERROR';
+    if (generateBtn) generateBtn.disabled = false;
+}
+
+function downloadArchive() {
+    if (!currentArchiveJobId) {
+        console.error('No archive job ID available');
+        return;
+    }
+
+    // Trigger browser download via a hidden link
+    const link = document.createElement('a');
+    link.href = `/api/archive/download/${currentArchiveJobId}`;
+    link.download = '';  // Let server set filename via Content-Disposition
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+async function generateDeploymentChecklist() {
+    const checklistContent = document.getElementById('archive-checklist-content');
+    const checklistBtn = document.getElementById('archive-checklist-btn');
+    if (!checklistContent) return;
+
+    if (checklistBtn) checklistBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/archive/checklist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jobId: currentArchiveJobId }),
+        });
+
+        if (!response.ok) {
+            checklistContent.textContent = 'Failed to generate checklist. Try again.';
+            checklistContent.style.display = 'block';
+            if (checklistBtn) checklistBtn.disabled = false;
+            return;
+        }
+
+        const data = await response.json();
+
+        // Render structured checklist from server data
+        const manifest = archiveManifest || {};
+        const lines = [];
+        lines.push('DEPLOYMENT CHECKLIST — DEV-TEAM ECOSYSTEM TRANSFER');
+        lines.push('═══════════════════════════════════════════════════');
+        lines.push('');
+        lines.push(`SOURCE: ${data.sourceSystem?.hostname || 'unknown'}`);
+        lines.push(`OS: ${data.sourceSystem?.os || 'unknown'} ${data.sourceSystem?.osVersion || ''}`);
+        lines.push(`PYTHON: ${data.sourceSystem?.pythonVersion || 'unknown'}`);
+        lines.push(`NODE: ${data.sourceSystem?.nodeVersion || 'unknown'}`);
+        if (data.archiveInfo) {
+            lines.push(`ARCHIVE: ${data.archiveInfo.filename || 'unknown'} (${data.archiveInfo.fileSize || '?'}, ${data.archiveInfo.totalFiles || '?'} files)`);
+        }
+        lines.push('');
+
+        lines.push('STEP 1: PREREQUISITES');
+        lines.push('─────────────────────');
+        if (data.prerequisites) {
+            for (const prereq of data.prerequisites) {
+                const status = prereq.installed ? '✓' : '☐';
+                const version = prereq.version ? ` (source: v${prereq.version})` : '';
+                lines.push(`${status} ${prereq.name}: ${prereq.command}${version}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 2: EXTRACT ARCHIVE');
+        lines.push('────────────────────────');
+        if (data.extractionSteps) {
+            for (const step of data.extractionSteps) {
+                lines.push(`☐ ${step}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 3: AUTHENTICATION');
+        lines.push('──────────────────────');
+        if (data.authSteps) {
+            for (const step of data.authSteps) {
+                lines.push(`☐ ${step.name}: ${step.command}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 4: SHELL CONFIGURATION');
+        lines.push('────────────────────────────');
+        if (data.shellSetup?.profileLine) {
+            lines.push(`☐ Add to ~/.zshrc: ${data.shellSetup.profileLine}`);
+        }
+        if (data.shellSetup?.scripts) {
+            for (const script of data.shellSetup.scripts) {
+                lines.push(`☐ Verify: ${script}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 5: GIT REMOTES');
+        lines.push('────────────────────');
+        if (data.gitRemotes && data.gitRemotes.length > 0) {
+            for (const remote of data.gitRemotes) {
+                lines.push(`☐ Configure: git remote add ${remote.name} ${remote.url}`);
+            }
+        } else {
+            lines.push('☐ Configure git remotes as needed');
+        }
+        lines.push('');
+
+        lines.push('STEP 6: LCARS SERVERS');
+        lines.push('─────────────────────');
+        if (data.lcarsServers) {
+            for (const [team, port] of Object.entries(data.lcarsServers)) {
+                lines.push(`☐ ${team}: python3 server.py ${port} → http://localhost:${port}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 7: EXTERNAL KANBAN DIRECTORIES');
+        lines.push('────────────────────────────────────');
+        if (data.externalKanban && data.externalKanban.length > 0) {
+            for (const ext of data.externalKanban) {
+                const exists = ext.exists ? '(exists on source)' : '(not found on source)';
+                lines.push(`☐ ${ext.team}: ${ext.path} ${exists}`);
+            }
+        } else {
+            lines.push('No external kanban directories detected.');
+        }
+        lines.push('');
+
+        lines.push('═══════════════════════════════════════════════════');
+        lines.push(`GENERATED: ${data.generatedAt || new Date().toISOString()}`);
+
+        checklistContent.textContent = lines.join('\n');
+        checklistContent.style.display = 'block';
+
+    } catch (error) {
+        console.error('Checklist generation failed:', error);
+        checklistContent.textContent = 'Failed to generate checklist. Server may be unavailable.';
+        checklistContent.style.display = 'block';
+    }
+
+    if (checklistBtn) checklistBtn.disabled = false;
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('LCARS Kanban Monitor Initializing...');
     await loadServerConfig();
@@ -15375,16 +15718,17 @@ document.addEventListener('DOMContentLoaded', async () => {
         navigateToCalendarItem(itemId, epicId);
     });
 
-    // Keyboard navigation - Alt+1 through Alt+4
+    // Keyboard navigation - Alt+1 through Alt+8
     document.addEventListener('keydown', (e) => {
         // Don't allow keyboard nav during startup
         if (activeSection === 'startup') return;
 
         if (e.altKey && !e.ctrlKey && !e.metaKey) {
             const key = parseInt(e.key);
-            if (key >= 1 && key <= 4) {
+            if (key >= 1 && key <= 8) {
                 e.preventDefault();
-                // Alt+1 = workflow (index 1), Alt+2 = details (index 2), etc.
+                // Alt+1 = home, Alt+2 = todos, Alt+3 = calendar, Alt+4 = workflow,
+                // Alt+5 = details, Alt+6 = queue, Alt+7 = epics, Alt+8 = releases
                 switchSection(SECTIONS[key]);
             }
         }

@@ -3,7 +3,6 @@
     {
       "Name": "LCARS Web",
       "Guid": "AITEAMFORGE-LCARS-WEB-0001-000000000001",
-      "Dynamic Profile Parent Name": "Default",
       "Custom Command": "Browser",
       "Initial URL": "http://localhost:8080",
       "Tags": [
@@ -20,7 +19,6 @@
     {
       "Name": "Agent Panel",
       "Guid": "AITEAMFORGE-AGENT-PANEL-0001-000000000001",
-      "Dynamic Profile Parent Name": "Default",
       "Tags": [
         "aiteamforge"
       ]

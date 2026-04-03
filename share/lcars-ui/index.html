@@ -26,6 +26,8 @@
     <link rel="stylesheet" href="css/lcars-fleet-theme.css">
     <!-- KanBan-specific overrides (Division/Org color coordination) -->
     <link rel="stylesheet" href="css/lcars.css?v=31.0">
+    <!-- Activity Timeline Panel -->
+    <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <!-- LCARS Chart Theming Module -->
@@ -596,8 +598,111 @@
                         <span class="section-title">ARCHIVE / TRANSFER</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div class="archive-placeholder">
-                        <p>Archive and transfer tools will appear here.</p>
+                    <div class="archive-overview" id="archive-overview">
+                        <div class="archive-stat">
+                            <span class="stat-label">TARGET</span>
+                            <span class="stat-value">~/dev-team/</span>
+                        </div>
+                        <div class="archive-stat">
+                            <span class="stat-label">STATUS</span>
+                            <span class="stat-value" id="archive-status">READY</span>
+                        </div>
+                        <div class="archive-stat">
+                            <span class="stat-label">LAST EXPORT</span>
+                            <span class="stat-value" id="archive-last-export">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Archive Options -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">EXPORT OPTIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-options" id="archive-options">
+                        <div class="archive-option">
+                            <label class="lcars-toggle">
+                                <input type="checkbox" id="archive-include-git">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <div class="option-info">
+                                <span class="option-label">INCLUDE GIT HISTORY</span>
+                                <span class="option-desc">Include .git directories (increases archive size significantly)</span>
+                            </div>
+                        </div>
+                        <div class="archive-option">
+                            <label class="lcars-toggle">
+                                <input type="checkbox" id="archive-include-node-modules">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <div class="option-info">
+                                <span class="option-label">INCLUDE NODE MODULES</span>
+                                <span class="option-desc">Include node_modules directories (can be reinstalled via npm install)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Smart Exclusions Display -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">SMART EXCLUSIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-exclusions" id="archive-exclusions">
+                        <div class="exclusion-item">__pycache__/, *.pyc</div>
+                        <div class="exclusion-item">.DS_Store</div>
+                        <div class="exclusion-item">.claude/ (tokens/secrets)</div>
+                        <div class="exclusion-item">worktrees/ (recreated per-machine)</div>
+                        <div class="exclusion-item">dev-team-backups/</div>
+                        <div class="exclusion-item">*.egg-info/</div>
+                        <div class="exclusion-item conditional" id="exclusion-git">.git/ directories</div>
+                        <div class="exclusion-item conditional" id="exclusion-node">node_modules/</div>
+                    </div>
+
+                    <!-- Generate Button + Progress -->
+                    <div class="archive-actions" id="archive-actions">
+                        <button class="lcars-button archive-generate-btn" id="archive-generate-btn" onclick="startArchiveGeneration()" aria-label="Generate dev-team archive">
+                            GENERATE ARCHIVE
+                        </button>
+                    </div>
+
+                    <!-- Progress Display (hidden by default) -->
+                    <div class="archive-progress" id="archive-progress" style="display: none;">
+                        <div class="progress-header">
+                            <span class="progress-label" id="archive-progress-label">GENERATING...</span>
+                            <span class="progress-percent" id="archive-progress-percent">0%</span>
+                        </div>
+                        <div class="progress-bar-container" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Archive generation progress">
+                            <div class="progress-bar" id="archive-progress-bar" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-message" id="archive-progress-message">Initializing...</div>
+                    </div>
+
+                    <!-- Download Section (hidden by default) -->
+                    <div class="archive-download" id="archive-download" style="display: none;">
+                        <div class="download-info">
+                            <span class="download-filename" id="archive-download-filename">--</span>
+                            <span class="download-size" id="archive-download-size">--</span>
+                            <span class="download-files" id="archive-download-files">-- files</span>
+                        </div>
+                        <button class="lcars-button archive-download-btn" id="archive-download-btn" onclick="downloadArchive()" aria-label="Download generated archive">
+                            DOWNLOAD
+                        </button>
+                    </div>
+
+                    <!-- Deployment Checklist Section -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">DEPLOYMENT CHECKLIST</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-checklist" id="archive-checklist">
+                        <div class="checklist-description">
+                            Generate a deployment checklist for the target machine after creating an archive.
+                        </div>
+                        <button class="lcars-button archive-checklist-btn" id="archive-checklist-btn" onclick="generateDeploymentChecklist()" disabled aria-label="Generate deployment checklist">
+                            GENERATE CHECKLIST
+                        </button>
+                        <div class="checklist-content" id="archive-checklist-content" style="display: none;">
+                            <!-- Populated by JavaScript -->
+                        </div>
                     </div>
                 </section>
 
@@ -1372,5 +1477,7 @@
     <div class="scanline"></div>
 
 <script src="js/lcars.js?v=3.16"></script>
+<!-- Activity Timeline Panel — must load after lcars.js (depends on escapeHtml, apiUrl) -->
+<script src="js/lcars-activity.js"></script>
 </body>
 </html>

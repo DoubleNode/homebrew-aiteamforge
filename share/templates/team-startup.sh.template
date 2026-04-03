@@ -96,9 +96,11 @@ fi
 if [[ -d "/Applications/iTerm.app" ]]; then
     _api=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || true)
     if [[ "$_api" != "1" ]]; then
-        echo "  ✗ iTerm2 Python API not enabled"
-        echo "    Fix: defaults write com.googlecode.iterm2 EnableAPIServer -bool true && restart iTerm2"
-        PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+        echo "  Enabling iTerm2 Python API..."
+        defaults write com.googlecode.iterm2 EnableAPIServer -bool true
+        echo "  ⚠ iTerm2 must be restarted for Python API to activate."
+        echo "    Please quit and restart iTerm2, then run this script again."
+        exit 1
     fi
 fi
 
@@ -356,27 +358,20 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
 
     # Agent tabs — each tab attaches to its named tmux session.
     # The session was created above in the async init block.
-    # Retry up to 3 times to handle transient iTerm2 Python API failures.
+    # Single attempt per agent: if Python API is unavailable the window manager
+    # falls back to AppleScript automatically — retrying would create duplicate
+    # empty tabs (AppleScript creates a tab even when reporting "failure").
     for agent in "${AGENTS[@]}"; do
         session_name="${TEAM_ID}-${agent}"
         echo "  Opening tab: $agent"
-        tab_created=false
-        for attempt in 1 2 3; do
-            python3 "$WM" \
-                --action create-tab \
-                --window-title "$ITERM_WINDOW_NAME" \
-                --tab-name "$agent" \
-                --command "export ITERM_TAB_TITLE='${agent}' && tmux -L ${TMUX_SOCKET} attach -t ${session_name}" \
-                2>>"$ITERM_STARTUP_LOG"
-            if [[ $? -eq 0 ]]; then
-                tab_created=true
-                break
-            fi
-            echo "    Warning: Tab creation attempt $attempt failed, retrying..." >&2
-            sleep 1
-        done
-        if [[ "$tab_created" != "true" ]]; then
-            echo "    Error: Failed to create tab: $agent (see $ITERM_STARTUP_LOG)"
+        python3 "$WM" \
+            --action create-tab \
+            --window-title "$ITERM_WINDOW_NAME" \
+            --tab-name "$agent" \
+            --command "export ITERM_TAB_TITLE='${agent}' && tmux -L ${TMUX_SOCKET} attach -t ${session_name}" \
+            2>>"$ITERM_STARTUP_LOG"
+        if [[ $? -ne 0 ]]; then
+            echo "    Warning: Tab creation failed for $agent (see $ITERM_STARTUP_LOG)" >&2
         fi
         sleep 0.3
     done

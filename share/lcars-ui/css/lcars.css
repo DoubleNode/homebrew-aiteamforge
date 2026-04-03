@@ -940,7 +940,6 @@ body {
     font-weight: 500;
 }
 
-
 /* Uptime display at bottom of sidebar */
 .sidebar-uptime {
     background: var(--lcars-tan);
@@ -1445,7 +1444,8 @@ body {
 .todos-section.active .section-bar,
 .commands-section.active .section-bar,
 .backups-section.active .section-bar,
-.integrations-section.active .section-bar {
+.integrations-section.active .section-bar,
+.archive-section.active .section-bar {
     transform: scaleX(1);
 }
 
@@ -1459,7 +1459,8 @@ body {
 .todos-section.active .section-title,
 .commands-section.active .section-title,
 .backups-section.active .section-title,
-.integrations-section.active .section-title {
+.integrations-section.active .section-title,
+.archive-section.active .section-title {
     opacity: 1;
     transform: translateX(0);
 }
@@ -1479,6 +1480,8 @@ body {
 .backups-section.active .section-bar { transition-delay: 0.10s; }
 .integrations-section.active .section-title { transition-delay: 0.05s; }
 .integrations-section.active .section-bar { transition-delay: 0.10s; }
+.archive-section.active .section-title { transition-delay: 0.05s; }
+.archive-section.active .section-bar { transition-delay: 0.10s; }
 .releases-section.active .section-title { transition-delay: 0.05s; }
 .releases-section.active .section-bar { transition-delay: 0.10s; }
 .epics-section.active .section-title { transition-delay: 0.05s; }
@@ -6858,6 +6861,7 @@ body {
         display: none;
     }
 
+
     /* Horizontal scrolling for Details section */
     .details-section {
         overflow-x: auto;
@@ -10198,16 +10202,12 @@ body {
     background: rgba(102, 204, 204, 0.4);
 }
 
-/* XACA-0056: Readonly badges for completed items */
-.queue-release-badge.readonly,
-.queue-epic-badge.readonly,
+/* XACA-0056: Readonly badges for completed items (XACA-0121: removed epic/release — now always editable) */
 .queue-jira.readonly {
     cursor: default;
     opacity: 0.5;
 }
 
-.queue-release-badge.readonly:hover,
-.queue-epic-badge.readonly:hover,
 .queue-jira.readonly:hover {
     background: inherit;
     opacity: 0.5;
@@ -11810,7 +11810,8 @@ body {
     .tracking-zone .queue-jira,
     .tracking-zone .queue-github,
     .tracking-zone .queue-monday,
-    .tracking-zone .queue-docs-btn {
+    .tracking-zone .queue-docs-btn,
+    .tracking-zone .queue-activity-btn {
         font-size: 10px;
         padding: 2px 5px;
     }
@@ -12768,6 +12769,38 @@ body {
     outline: 2px solid var(--lcars-white);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
+    transform: scale(1.05);
+}
+
+/* =========================================================================
+   ACTIVITY BUTTON (XACA-0117) — TERTIARY TRACKING ZONE ELEMENT
+   ========================================================================= */
+
+/* Activity history button in queue items - TERTIARY ELEMENT */
+.queue-activity-btn {
+    /* TERTIARY: 11px - Tracking zone element, matches queue-docs-btn */
+    font-size: 13px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(153, 204, 153, 0.25);
+    color: var(--lcars-green, #99cc99);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    opacity: 0.7; /* TERTIARY: Subtle until hover */
+    line-height: 1;
+}
+
+.queue-activity-btn:hover {
+    background: rgba(153, 204, 153, 0.45);
+    opacity: 1.0; /* Full brightness on hover */
+}
+
+.queue-activity-btn:focus {
+    outline: 2px solid var(--lcars-green, #99cc99);
+    outline-offset: 2px;
+    box-shadow: 0 0 10px rgba(153, 204, 153, 0.5);
     transform: scale(1.05);
 }
 
@@ -13795,4 +13828,335 @@ body {
     .knowledge-adoption-team-name {
         font-size: 11px;
     }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ARCHIVE / TRANSFER SECTION (XACA-0128)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.archive-overview {
+    display: flex;
+    gap: 20px;
+    padding: 15px 0;
+    flex-wrap: wrap;
+}
+
+.archive-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 120px;
+}
+
+.archive-stat .stat-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-text-muted, #8899aa);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.archive-stat .stat-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 18px;
+    color: var(--lcars-text, #ff9944);
+}
+
+/* Archive Options */
+.archive-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 15px 0;
+}
+
+.archive-option {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 10px 15px;
+    background: rgba(255, 153, 68, 0.05);
+    border-left: 3px solid var(--lcars-amber, #ff9944);
+    border-radius: 0 4px 4px 0;
+}
+
+.option-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.option-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: var(--lcars-text, #ff9944);
+    letter-spacing: 1px;
+}
+
+.option-desc {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+/* LCARS Toggle Switch */
+.lcars-toggle {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 24px;
+    flex-shrink: 0;
+}
+
+.lcars-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(255, 153, 68, 0.2);
+    border: 1px solid var(--lcars-amber, #ff9944);
+    border-radius: 12px;
+    transition: 0.3s;
+}
+
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 2px;
+    bottom: 2px;
+    background-color: var(--lcars-amber, #ff9944);
+    border-radius: 50%;
+    transition: 0.3s;
+    opacity: 0.5;
+}
+
+.lcars-toggle input:checked + .toggle-slider {
+    background-color: rgba(255, 153, 68, 0.3);
+}
+
+.lcars-toggle input:checked + .toggle-slider:before {
+    transform: translateX(24px);
+    opacity: 1;
+}
+
+/* Smart Exclusions */
+.archive-exclusions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 15px 0;
+}
+
+.exclusion-item {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    padding: 4px 12px;
+    background: rgba(204, 102, 102, 0.15);
+    border: 1px solid rgba(204, 102, 102, 0.4);
+    border-radius: 12px;
+    color: #cc6666;
+    letter-spacing: 0.5px;
+}
+
+.exclusion-item.conditional {
+    background: rgba(255, 153, 68, 0.15);
+    border-color: rgba(255, 153, 68, 0.4);
+    color: var(--lcars-amber, #ff9944);
+    transition: opacity 0.3s;
+}
+
+.exclusion-item.conditional.included {
+    opacity: 0.3;
+    text-decoration: line-through;
+}
+
+/* Archive Actions */
+.archive-actions {
+    padding: 20px 0;
+}
+
+.archive-generate-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    padding: 12px 30px;
+    background: var(--lcars-amber, #ff9944);
+    color: #000;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    transition: all 0.2s;
+}
+
+.archive-generate-btn:hover {
+    background: #ffaa55;
+    transform: scale(1.02);
+}
+
+.archive-generate-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Progress Display */
+.archive-progress {
+    padding: 15px 0;
+}
+
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.progress-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: var(--lcars-amber, #ff9944);
+    letter-spacing: 1px;
+}
+
+.progress-percent {
+    font-family: 'Antonio', sans-serif;
+    font-size: 18px;
+    color: var(--lcars-text, #ff9944);
+}
+
+.progress-bar-container {
+    height: 8px;
+    background: rgba(255, 153, 68, 0.15);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--lcars-amber, #ff9944), #ffcc88);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.progress-message {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+/* Download Section */
+.archive-download {
+    padding: 15px;
+    background: rgba(68, 204, 68, 0.08);
+    border: 1px solid rgba(68, 204, 68, 0.3);
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 10px;
+}
+
+.download-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.download-filename {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: #44cc44;
+    letter-spacing: 0.5px;
+}
+
+.download-size {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+.download-files {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+.archive-download-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    padding: 10px 25px;
+    background: #44cc44;
+    color: #000;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.archive-download-btn:hover {
+    background: #55dd55;
+}
+
+/* Deployment Checklist */
+.archive-checklist {
+    padding: 15px 0;
+}
+
+.checklist-description {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: var(--lcars-text-muted, #8899aa);
+    margin-bottom: 12px;
+}
+
+.archive-checklist-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    padding: 8px 20px;
+    background: rgba(102, 178, 255, 0.2);
+    color: #66b2ff;
+    border: 1px solid rgba(102, 178, 255, 0.4);
+    border-radius: 16px;
+    cursor: pointer;
+    letter-spacing: 1px;
+}
+
+.archive-checklist-btn:hover:not(:disabled) {
+    background: rgba(102, 178, 255, 0.3);
+}
+
+.archive-checklist-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.checklist-content {
+    margin-top: 15px;
+    padding: 15px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: var(--lcars-text, #ff9944);
+    line-height: 1.8;
+    white-space: pre-wrap;
+}
+
+/* Hide placeholder content that has no functional implementation */
+.team-config-placeholder,
+.archive-placeholder {
+    display: none;
 }

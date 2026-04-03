@@ -61,7 +61,6 @@ def create_profiles(url: str) -> bool:
         lcars_profile = {
             "Name": "LCARS Web",
             "Guid": LCARS_WEB_GUID,
-            "Dynamic Profile Parent Name": "Default",
             "Custom Command": "Browser",
             "Initial URL": url,
             "Tags": ["aiteamforge"],
@@ -85,7 +84,6 @@ def create_profiles(url: str) -> bool:
         profiles.append({
             "Name": "Agent Panel",
             "Guid": AGENT_PANEL_GUID,
-            "Dynamic Profile Parent Name": "Default",
             "Tags": ["aiteamforge"],
         })
 
