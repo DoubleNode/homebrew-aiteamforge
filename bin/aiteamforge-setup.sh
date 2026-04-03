@@ -177,8 +177,8 @@ if [ "$MODE" = "uninstall" ]; then
   # Remove shell integration (backup first)
   if [ -f "$HOME/.zshrc" ]; then
     cp "$HOME/.zshrc" "$HOME/.zshrc.backup.$(date +%s)"
-    # Remove aiteamforge sourcing lines
-    grep -v "aiteamforge" "$HOME/.zshrc" > "$HOME/.zshrc.tmp" || true
+    # Remove the entire aiteamforge block between markers
+    sed '/^# >>> aiteamforge initialize >>>/,/^# <<< aiteamforge initialize <<</d' "$HOME/.zshrc" > "$HOME/.zshrc.tmp" || true
     mv "$HOME/.zshrc.tmp" "$HOME/.zshrc"
     echo -e "${GREEN}✓${NC} Removed shell integration (backed up .zshrc)"
   fi
