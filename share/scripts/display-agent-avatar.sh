@@ -157,6 +157,19 @@ except:
         worktree_info=$(wt-current short 2>/dev/null || echo "develop")
     fi
 
+    # Derive section label for panel section header (e.g., "CHANCELLOR'S OFFICE").
+    # Use TERMINAL_DESCRIPTION workspace name (strip " at ..." suffix) or fall back
+    # to the office part of SESSION_LOCATION (after ": ").
+    local section_label=""
+    if [[ -n "${TERMINAL_DESCRIPTION:-}" ]]; then
+        # Strip " at <team name>" suffix if present (e.g. "Chancellor's Office at Starfleet Academy")
+        section_label="${TERMINAL_DESCRIPTION%% at *}"
+        section_label="${section_label^^}"
+    elif [[ "${SESSION_LOCATION:-}" == *": "* ]]; then
+        section_label="${SESSION_LOCATION#*: }"
+        section_label="${section_label^^}"
+    fi
+
     # Write agent data as JSON to per-session temp file
     # Uses Python for proper JSON escaping (handles apostrophes, special chars)
     # SESSION_CODE is set by the banner script (e.g., "academy-chancellor")
@@ -174,17 +187,18 @@ data = {
     'terminal': sys.argv[5],
     'terminal_desc': sys.argv[6],
     'session_desc': sys.argv[7],
-    'theme': sys.argv[8],
-    'avatar': sys.argv[9],
-    'worktree': sys.argv[10],
-    'amb_handle': sys.argv[11],
-    'timestamp': sys.argv[12]
+    'section': sys.argv[8],
+    'theme': sys.argv[9],
+    'avatar': sys.argv[10],
+    'worktree': sys.argv[11],
+    'amb_handle': sys.argv[12],
+    'timestamp': sys.argv[13]
 }
 json_str = json.dumps(data, indent=4)
-with open(sys.argv[13], 'w') as f:
+with open(sys.argv[14], 'w') as f:
     f.write(json_str)
-if len(sys.argv) > 14 and sys.argv[14]:
-    with open(sys.argv[14], 'w') as f:
+if len(sys.argv) > 15 and sys.argv[15]:
+    with open(sys.argv[15], 'w') as f:
         f.write(json_str)
 " \
     "${team}" \
@@ -194,6 +208,7 @@ if len(sys.argv) > 14 and sys.argv[14]:
     "${TERMINAL_NAME:-}" \
     "${TERMINAL_DESCRIPTION:-}" \
     "${SESSION_DESCRIPTION:-}" \
+    "${section_label}" \
     "${SESSION_THEME:-OPERATIONS}" \
     "${avatar_codename}" \
     "${worktree_info}" \

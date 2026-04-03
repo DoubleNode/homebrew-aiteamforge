@@ -81,7 +81,7 @@ BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 # These defaults are used when ~/.aiteamforge-config is not present (backward compatibility)
 _TEAM_KANBAN_DIRS_DEFAULT = {
     # Main Event Teams
-    "academy": Path.home() / "aiteamforge" / "academy" / "kanban",
+    "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
@@ -168,8 +168,8 @@ def _load_team_kanban_dirs_from_config() -> dict:
 
 TEAM_KANBAN_DIRS = _load_team_kanban_dirs_from_config()
 
-# Legacy fallback for backwards compatibility (academy install location)
-KANBAN_DIR = Path.home() / "aiteamforge" / "academy" / "kanban"
+# Legacy fallback for backwards compatibility
+KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 
 def get_board_file(team: str) -> Path:
     """Get the board file path for a team using distributed directories."""
@@ -1918,7 +1918,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         # Static team base paths fallback (used only when team not found in TEAM_KANBAN_DIRS)
         team_base_paths = {
-            'academy': Path.home() / "aiteamforge" / "academy" / "kanban",
+            'academy': Path.home() / "dev-team" / "kanban",
             'ios': main_event_base / "MainEventApp-iOS" / "kanban",
             'android': main_event_base / "MainEventApp-Android" / "kanban",
             'firebase': main_event_base / "MainEventApp-Functions" / "kanban",

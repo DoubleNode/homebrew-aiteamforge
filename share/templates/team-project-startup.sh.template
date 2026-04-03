@@ -314,6 +314,14 @@ for agent in "${AGENTS[@]}"; do
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
             "mkdir -p '${PROJECT_DIR}' 2>/dev/null; cd '${PROJECT_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
 
+        # Source the team-specific zshrc to set the LCARS-themed prompt.
+        # The file ~/.zshrc_<team>_<agent> contains the prompt definition,
+        # division color, and session identity variables.  We source it after
+        # exporting SESSION_TYPE so it can safely override the generic prompt
+        # that aiteamforge-prompt.sh skips when SESSION_TYPE is already set.
+        tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
+            "[[ -f \"\$HOME/.zshrc_${TEAM_ID}_${agent}\" ]] && source \"\$HOME/.zshrc_${TEAM_ID}_${agent}\"" C-m
+
         # Source the team banner script to display the LCARS agent banner in window 0.
         # A small inline helper reads agent data from the pre-initialized JSON
         # (written by init-agent-panel-json.py) so the banner shows real developer
@@ -346,6 +354,8 @@ for agent in "${AGENTS[@]}"; do
             "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}' PROJECT_DIR='${PROJECT_DIR}'" C-m
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
             "mkdir -p '${PROJECT_DIR}' 2>/dev/null; cd '${PROJECT_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
+        tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
+            "[[ -f \"\$HOME/.zshrc_${TEAM_ID}_${agent}\" ]] && source \"\$HOME/.zshrc_${TEAM_ID}_${agent}\"" C-m
 
         # Return focus to window 0 (main command window)
         tmux -L "$TMUX_SOCKET" select-window -t "${session_name}:0"

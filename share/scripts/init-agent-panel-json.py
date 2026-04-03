@@ -284,6 +284,35 @@ def parse_core_identity(content: str) -> dict:
     return result
 
 
+def extract_workspace_from_prompt(content: str) -> str:
+    """Extract workspace name from the prompt file's opening line.
+
+    Prompt files start with a line like:
+        You are operating from the **Chancellor's Office** at Starfleet Academy.
+        You are operating from the **Engineering Lab** at Starfleet Academy.
+        You are operating from the **Chancellor's Office at Starfleet Academy**.
+
+    Returns the workspace name without any trailing location context
+    (e.g. "Chancellor's Office", "Engineering Lab"), or "" if not found.
+
+    Strips trailing " at ..." and " in ..." suffixes from the bold text so that
+    prompts that bold the full phrase still produce a clean workspace name.
+    """
+    # Only check the first non-empty line
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        m = re.search(r"\*\*([^*]+)\*\*", line)
+        if m:
+            workspace = m.group(1).strip()
+            # Strip trailing " at ..." or " in ..." (location context)
+            workspace = re.sub(r"\s+(at|in)\s+.+$", "", workspace, flags=re.IGNORECASE)
+            return workspace.strip()
+        break
+    return ""
+
+
 def extract_character_from_filename(filename: str) -> str:
     """Extract character codename from persona filename.
 
@@ -346,9 +375,16 @@ def resolve_avatar(
     return filename_character
 
 
-def infer_terminal_desc(terminal_id: str, role: str) -> str:
-    """Derive a short terminal description from terminal ID and role."""
-    # Use the first segment of the role if available, else capitalize terminal_id
+def infer_terminal_desc(terminal_id: str, role: str, workspace: str = "") -> str:
+    """Derive a short terminal description from workspace, terminal ID, or role.
+
+    Priority:
+      1. workspace — extracted from prompt file first line (e.g. "Engineering Lab")
+      2. role first clause — first segment before comma, dash, or newline
+      3. terminal_id — capitalised fallback
+    """
+    if workspace:
+        return workspace
     if role:
         # Take first clause before comma, dash, or newline
         short = re.split(r"[,\-\n]", role)[0].strip()
@@ -362,21 +398,52 @@ def infer_terminal_desc(terminal_id: str, role: str) -> str:
 def infer_location(team_id: str, team_name: str, character: str, parsed_location: str = "") -> str:
     """Derive a display location string from team and character context.
 
+    Formats parsed_location as "{short_team}: {office}" when the location
+    follows the pattern "{Team Name} - {Office Name}".
+
+    For example:
+        "Starfleet Academy - Chancellor's Office"
+        → "Academy: Chancellor's Office"
+
     Priority:
       1. parsed_location from persona/prompt identity section (**Location:** field)
+         — formatted as "{last word of team part}: {office}" when possible
       2. team_name from team .conf
       3. team_id capitalised as last resort
     """
     if parsed_location:
+        if " - " in parsed_location:
+            parts = parsed_location.split(" - ", 1)
+            team_part = parts[0].strip()
+            office_part = parts[1].strip()
+            # Use the last word of the team part as the short label
+            short_team = team_part.split()[-1] if team_part.split() else team_part
+            return f"{short_team}: {office_part}"
         return parsed_location
     return team_name if team_name else team_id.title()
 
 
-def infer_session_desc(team_id: str, terminal_id: str, role: str) -> str:
-    """Build a session description string."""
+def infer_session_desc(team_id: str, terminal_id: str, role: str, frontmatter_desc: str = "") -> str:
+    """Build a session description string.
+
+    Base format: "{TEAM} {TERMINAL}" (e.g. "ACADEMY CHANCELLOR").
+    If frontmatter_desc follows the pattern "{Title} - {Area, ...}", appends
+    the first area segment as an uppercase suffix:
+        "Academy Chancellor - Strategic leadership, ..."
+        → "ACADEMY CHANCELLOR - STRATEGIC LEADERSHIP"
+    """
     team_upper = team_id.upper().replace("-", " ")
     terminal_upper = terminal_id.upper().replace("-", " ")
-    return f"{team_upper} {terminal_upper}"
+    base = f"{team_upper} {terminal_upper}"
+
+    if frontmatter_desc and " - " in frontmatter_desc:
+        after_dash = frontmatter_desc.split(" - ", 1)[1].strip()
+        # Take the first segment before comma or period
+        suffix = re.split(r"[,.]", after_dash)[0].strip()
+        if suffix:
+            return f"{base} - {suffix.upper()}"
+
+    return base
 
 
 # ---------------------------------------------------------------------------
@@ -537,34 +604,83 @@ def main():
         parsed_location = identity["location"]
         theme = identity["theme"]
 
+        # Workspace name extracted from prompt file opening line (e.g. "Engineering Lab").
+        # Used as terminal_desc when available; populated below when the prompt is read.
+        workspace = ""
+
         # If the persona .md file doesn't have complete identity data, try the
         # corresponding prompt .txt file in the prompts directory.  Prompt files
         # use ## Your Identity / **Character:** and carry richer location data.
-        if (not developer or not role) and prompts_dir.exists():
-            # Look for a prompt file that matches this terminal_id or character name.
-            # Naming patterns checked (most-specific first):
-            #   {team}-{terminal_id}-prompt.txt  (e.g., academy-chancellor-prompt.txt)
-            #   {team}-{character}-prompt.txt    (e.g., academy-reno-prompt.txt)
-            for prompt_name in (
-                f"{team_id}-{terminal_id}-prompt.txt",
-                f"{team_id}-{filename_character}-prompt.txt",
-            ):
-                prompt_path = prompts_dir / prompt_name
-                if prompt_path.exists():
-                    try:
-                        prompt_content = prompt_path.read_text()
-                        prompt_identity = parse_core_identity(prompt_content)
-                        if not developer:
-                            developer = prompt_identity["developer"]
-                        if not role:
-                            role = prompt_identity["role"]
-                        if not parsed_location:
-                            parsed_location = prompt_identity["location"]
-                        if not theme and prompt_identity["theme"]:
-                            theme = prompt_identity["theme"]
-                    except Exception as e:
-                        print(f"Warning: Cannot read prompt {prompt_path}: {e}", file=sys.stderr)
+        # Always read the prompt file when it exists so workspace can be extracted.
+        if prompts_dir.exists():
+            # Resolve the prompt file for this persona. Prompt filenames may use
+            # terminal_id (e.g. academy-chancellor-prompt.txt), character name
+            # (e.g. academy-reno-prompt.txt), or a role label (e.g.
+            # academy-engineering-prompt.txt). Try named candidates first; fall back
+            # to scanning all prompt files and matching on the **Character:** field.
+            prompt_candidates = [
+                prompts_dir / f"{team_id}-{terminal_id}-prompt.txt",
+                prompts_dir / f"{team_id}-{filename_character}-prompt.txt",
+            ]
+
+            resolved_prompt: Path | None = None
+            # Check explicit candidates first
+            for pc in prompt_candidates:
+                if pc.exists():
+                    resolved_prompt = pc
                     break
+
+            # If no explicit match, scan all prompt files and find the one whose
+            # ## Your Identity **Character:** value matches our developer name.
+            # This handles role-named files like academy-engineering-prompt.txt.
+            # Uses fuzzy word-overlap matching so slight name variations
+            # (e.g. "The Doctor (EMH Mark I)" vs "The Doctor (Emergency...)") match.
+            if resolved_prompt is None and developer:
+                dev_words = _word_set(developer)
+                for pf in sorted(prompts_dir.glob(f"{team_id}-*-prompt.txt")):
+                    if pf in prompt_candidates:
+                        continue
+                    try:
+                        pf_content = pf.read_text()
+                        pf_identity = parse_core_identity(pf_content)
+                        pf_dev = pf_identity.get("developer", "")
+                        if not pf_dev:
+                            continue
+                        pf_words = _word_set(pf_dev)
+                        # Match if significant words of one name are a subset of the other,
+                        # OR if the intersection of words covers at least half of the shorter set.
+                        # The second condition handles names like "The Doctor (EMH Mark I)"
+                        # vs "The Doctor (Emergency Medical Hologram)" where neither is a
+                        # full subset but both share distinctive words ("doctor").
+                        common = dev_words & pf_words
+                        shorter = min(len(dev_words), len(pf_words))
+                        match = (
+                            (dev_words and dev_words.issubset(pf_words)) or
+                            (pf_words and pf_words.issubset(dev_words)) or
+                            (shorter > 0 and len(common) >= max(1, shorter // 2))
+                        )
+                        if match:
+                            resolved_prompt = pf
+                            break
+                    except Exception:
+                        continue
+
+            if resolved_prompt is not None:
+                try:
+                    prompt_content = resolved_prompt.read_text()
+                    prompt_identity = parse_core_identity(prompt_content)
+                    if not developer:
+                        developer = prompt_identity["developer"]
+                    if not role:
+                        role = prompt_identity["role"]
+                    if not parsed_location:
+                        parsed_location = prompt_identity["location"]
+                    if not theme and prompt_identity["theme"]:
+                        theme = prompt_identity["theme"]
+                    # Extract workspace name from the prompt's opening line
+                    workspace = extract_workspace_from_prompt(prompt_content)
+                except Exception as e:
+                    print(f"Warning: Cannot read prompt {resolved_prompt}: {e}", file=sys.stderr)
 
         # Resolve the definitive avatar codename (may differ from filename for role-named files)
         character = resolve_avatar(team_id, filename_character, developer, avatars_dir)
@@ -574,9 +690,23 @@ def main():
             theme = CHARACTER_THEME.get(character, TEAM_DEFAULT_THEME.get(team_id, "OPERATIONS"))
 
         # Derive optional fields
-        terminal_desc = infer_terminal_desc(terminal_id, role)
+        # terminal_desc: workspace name from prompt opening line (e.g. "Engineering Lab"),
+        #   falling back to role first clause or terminal_id.
+        # location: formatted as "{short_team}: {office}" from parsed_location.
+        # session_desc: "{TEAM} {TERMINAL} - {AREA}" using frontmatter description suffix.
+        # section: uppercase workspace name for panel section header (e.g. "CHANCELLOR'S OFFICE").
+        frontmatter_desc = frontmatter.get("description", "")
+        terminal_desc = infer_terminal_desc(terminal_id, role, workspace)
         location = infer_location(team_id, team_name, character, parsed_location)
-        session_desc = infer_session_desc(team_id, terminal_id, role)
+        session_desc = infer_session_desc(team_id, terminal_id, role, frontmatter_desc)
+
+        # Derive section label: workspace name in uppercase (panel section header).
+        # Priority: workspace from prompt opening line → office part of location → empty.
+        section = ""
+        if workspace:
+            section = workspace.upper()
+        elif location and ": " in location:
+            section = location.split(": ", 1)[1].upper()
 
         # Look up AMB handle by developer name (fuzzy — handles rank prefix differences)
         amb_handle = fuzzy_amb_handle(developer, amb_handles)
@@ -590,6 +720,7 @@ def main():
             "terminal":     terminal_id,
             "terminal_desc": terminal_desc,
             "session_desc": session_desc,
+            "section":      section,
             "theme":        theme,
             "avatar":       character,
             "worktree":     "",

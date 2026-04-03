@@ -88,12 +88,17 @@ _find_avatar() {
         echo "${AVATARS_FLAT_DIR}/${filename}"
         return
     fi
-    # 2. Per-team personas avatars dir (if team known)
+    # 2. Per-team installed layout: {AITEAMFORGE_DIR}/{team}/personas/avatars/
     if [[ -n "$team_id" && -f "${_AITEAMFORGE_DIR}/${team_id}/personas/avatars/${filename}" ]]; then
         echo "${_AITEAMFORGE_DIR}/${team_id}/personas/avatars/${filename}"
         return
     fi
-    # 3. Legacy fleet-monitor dir
+    # 3. Share layout: {AITEAMFORGE_DIR}/personas/{team}/avatars/ (dev tap / pre-install)
+    if [[ -n "$team_id" && -f "${_AITEAMFORGE_DIR}/personas/${team_id}/avatars/${filename}" ]]; then
+        echo "${_AITEAMFORGE_DIR}/personas/${team_id}/avatars/${filename}"
+        return
+    fi
+    # 4. Legacy fleet-monitor dir
     if [[ -f "${AVATARS_LEGACY_DIR}/${filename}" ]]; then
         echo "${AVATARS_LEGACY_DIR}/${filename}"
         return
@@ -113,10 +118,17 @@ _glob_avatars() {
         local matches=(${dir}/${~pattern}(N))
         found+=("${matches[@]}")
     done
-    # Also search per-team persona dirs
+    # Also search per-team installed and share layout persona dirs
     if [[ -d "$_AITEAMFORGE_DIR" ]]; then
         local tdir
+        # Per-team installed layout: {AITEAMFORGE_DIR}/{team}/personas/avatars/
         for tdir in "$_AITEAMFORGE_DIR"/*/personas/avatars; do
+            [[ -d "$tdir" ]] || continue
+            local matches=(${tdir}/${~pattern}(N))
+            found+=("${matches[@]}")
+        done
+        # Share layout: {AITEAMFORGE_DIR}/personas/{team}/avatars/ (dev tap / pre-install)
+        for tdir in "$_AITEAMFORGE_DIR"/personas/*/avatars; do
             [[ -d "$tdir" ]] || continue
             local matches=(${tdir}/${~pattern}(N))
             found+=("${matches[@]}")
@@ -260,7 +272,7 @@ json_field() {
 json_read_all() {
     local jf="${RENDER_JSON_FILE:-$JSON_FILE}"
     [[ -f "$jf" ]] || return
-    jq -r '.team // "", .developer // "", .role // "", .location // "", .terminal // "", .terminal_desc // "", .theme // "", .avatar // "", .worktree // "", .amb_handle // ""' "$jf" 2>/dev/null
+    jq -r '.team // "", .developer // "", .role // "", .location // "", .terminal // "", .terminal_desc // "", .section // "", .theme // "", .avatar // "", .worktree // "", .amb_handle // ""' "$jf" 2>/dev/null
 }
 
 # Get the kanban board file path for this session
@@ -735,7 +747,7 @@ render_panel() {
     fi
 
     # Batch-read all fields in ONE jq invocation (one field per line avoids zsh IFS tab collapse)
-    local team developer role location terminal_name terminal_desc theme avatar worktree amb_handle
+    local team developer role location terminal_name terminal_desc section theme avatar worktree amb_handle
     local panel_data
     panel_data=$(json_read_all)
     if [[ -n "$panel_data" ]]; then
@@ -746,6 +758,7 @@ render_panel() {
             read -r location
             read -r terminal_name
             read -r terminal_desc
+            read -r section
             read -r theme
             read -r avatar
             read -r worktree
@@ -851,6 +864,22 @@ render_panel() {
     # ═══════════════════════════════════════
     # LOWER SECTION: Terminal Logo + Station
     # ═══════════════════════════════════════
+
+    # Section header label (e.g. "CHANCELLOR'S OFFICE") — shown above the logo.
+    # Priority: section field from JSON → office part of location → terminal_name (stripped).
+    local section_label="${section:-}"
+    if [[ -z "$section_label" && -n "$location" && "$location" == *": "* ]]; then
+        section_label="${location#*: }"
+        section_label="${section_label:u}"
+    fi
+    if [[ -z "$section_label" && -n "$terminal_name" ]]; then
+        # Strip -cmd / -ops / -log suffixes added by banner script
+        local term_stripped="${terminal_name%-cmd}"
+        term_stripped="${term_stripped%-ops}"
+        term_stripped="${term_stripped%-log}"
+        section_label="${term_stripped:u}"
+    fi
+    [[ -n "$section_label" ]] && echo "${GRAY}${section_label}${RESET}"
 
     # Derive terminal logo from session code with fallback chain
     # Try _panel.png first, then fall back to full _logo.png
