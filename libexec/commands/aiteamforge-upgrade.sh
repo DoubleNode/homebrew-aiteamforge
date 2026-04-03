@@ -100,7 +100,7 @@ WORKING_DIR=$(get_working_dir)
 CURRENT_VERSION=$(get_installed_version)
 
 # Banner
-clear
+[[ -t 1 ]] && clear
 print_header "AITEAMFORGE UPGRADE"
 
 echo "Current version: ${CURRENT_VERSION:-unknown}"

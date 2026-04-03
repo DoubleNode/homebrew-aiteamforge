@@ -105,7 +105,7 @@ fi
 WORKING_DIR=$(get_working_dir)
 
 # Banner
-clear
+[[ -t 1 ]] && clear
 print_header "AITEAMFORGE UNINSTALL"
 
 if [ "$PURGE" = true ]; then

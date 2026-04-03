@@ -92,7 +92,7 @@ fi
 WORKING_DIR=$(get_working_dir)
 
 # Banner
-clear
+[[ -t 1 ]] && clear
 print_header "AITEAMFORGE START"
 
 # Validate kanban boards for all configured teams

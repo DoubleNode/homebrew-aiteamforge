@@ -1561,7 +1561,7 @@ function renderShipInfo() {
         displayTeamName = boardData.teamName;
     }
     if (!titleDisplayName) {
-        titleDisplayName = boardData.teamName || 'STATUS';
+        titleDisplayName = boardData.teamName || null;
     }
 
     // Update sidebar team name
@@ -1579,8 +1579,14 @@ function renderShipInfo() {
     const titleFullEl = document.querySelector('.lcars-title .title-full');
     const titleMediumEl = document.querySelector('.lcars-title .title-medium');
 
-    if (titleFullEl && displayGroupName && titleDisplayName) {
-        titleFullEl.textContent = `${displayGroupName} ${titleDisplayName} STATUS`;
+    if (titleFullEl) {
+        if (displayGroupName && titleDisplayName) {
+            titleFullEl.textContent = `${displayGroupName} ${titleDisplayName} STATUS`;
+        } else if (displayGroupName) {
+            titleFullEl.textContent = `${displayGroupName} STATUS`;
+        } else if (titleDisplayName) {
+            titleFullEl.textContent = `${titleDisplayName} STATUS`;
+        }
     }
     if (titleMediumEl && titleDisplayName) {
         titleMediumEl.textContent = `${titleDisplayName} STATUS`;
@@ -1589,6 +1595,8 @@ function renderShipInfo() {
     // Update page title to match the display
     if (displayGroupName && titleDisplayName) {
         document.title = `${displayGroupName} ${titleDisplayName} STATUS`;
+    } else if (displayGroupName) {
+        document.title = `${displayGroupName} STATUS`;
     } else if (titleDisplayName) {
         document.title = `${titleDisplayName} STATUS`;
     }

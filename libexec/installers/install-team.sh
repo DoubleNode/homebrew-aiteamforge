@@ -388,6 +388,26 @@ fi
 echo ""
 
 # ============================================================================
+# AGENT FUNCTION NAME LOOKUP
+# Resolves the claude-* shell function name for a given team/agent pair.
+# Most agents map directly to claude-<agent> (matching agent-aliases.sh).
+# Exceptions (where character names differ from function names) are listed here.
+# ============================================================================
+
+_agent_function_name() {
+    local team="$1" agent="$2"
+    case "${team}/${agent}" in
+        # Academy exceptions: character names differ from function names
+        academy/chancellor) echo "claude-ake" ;;
+        # Command exceptions
+        command/admiral)    echo "claude-vance" ;;
+        command/commodore)  echo "claude-ross" ;;
+        # Default: claude-<agent> matches the function in agent-aliases.sh
+        *)                  echo "claude-${agent}" ;;
+    esac
+}
+
+# ============================================================================
 # CONFIGURE CLAUDE CODE AGENT ALIASES
 # ============================================================================
 
@@ -418,7 +438,7 @@ EOF
         cat >> "$ALIASES_FILE" <<EOF
 alias ${TEAM_ID}-${agent}='claude --agent-path "$AITEAMFORGE_DIR/claude/agents/${TEAM_NAME}/${agent}"'
 EOF
-        echo "  ✓ Alias: ${TEAM_ID}-${agent}"
+        echo "  ✓ Alias: $(_agent_function_name "$TEAM_ID" "$agent")"
     done
 
     echo ""
@@ -514,12 +534,15 @@ echo "Shutdown script: $AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 echo "Kanban board: $TEAM_BOARD"
 echo ""
 echo "Agent aliases:"
+_first_agent_func=""
 for agent in "${TEAM_AGENTS[@]}"; do
-    echo "  ${TEAM_ID}-${agent}"
+    _func="$(_agent_function_name "$TEAM_ID" "$agent")"
+    echo "  ${_func}"
+    [[ -z "$_first_agent_func" ]] && _first_agent_func="$_func"
 done
 echo ""
 echo "Next steps:"
 echo "  1. Source the aliases file: source $ALIASES_FILE"
 echo "  2. Launch the team: $AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
-echo "  3. Start working with agents: ${TEAM_ID}-${TEAM_AGENTS[0]}"
+echo "  3. Start working with agents: ${_first_agent_func}"
 echo ""

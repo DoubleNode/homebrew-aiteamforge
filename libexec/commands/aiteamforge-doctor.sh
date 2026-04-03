@@ -127,7 +127,7 @@ check_result() {
 }
 
 # Banner
-clear
+[[ -t 1 ]] && clear
 print_header "AITEAMFORGE DOCTOR - HEALTH CHECK"
 
 # Check: External Dependencies
@@ -479,16 +479,10 @@ check_network() {
   fi
 
   if [ -n "$ts_cmd" ]; then
-    # Tailscale CLI can crash (Trace/BPT trap) on Apple Silicon when daemon
-    # isn't running. Use double-subshell to fully suppress trap messages.
-    local ts_ok=false
-    if ( ( $ts_cmd status &>/dev/null ) & wait $! ) &>/dev/null 2>&1; then
-      ts_ok=true
-    fi
-    if [ "$ts_ok" = true ]; then
+    if "$ts_cmd" status &>/dev/null 2>&1; then
       check_result pass "Tailscale connected"
       if [ "$VERBOSE" = true ]; then
-        ( $ts_cmd status --peers=false 2>/dev/null | head -n3 ) 2>/dev/null || true
+        "$ts_cmd" status --peers=false 2>/dev/null | head -n3 || true
       fi
     else
       check_result warn "Tailscale not connected"

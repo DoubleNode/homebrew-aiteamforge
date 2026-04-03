@@ -293,7 +293,7 @@ output_brief() {
 
 # Output full LCARS-styled format
 output_full() {
-  clear
+  [[ -t 1 ]] && clear
   print_header "AITEAMFORGE STATUS"
 
   # Machine Identity

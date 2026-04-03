@@ -122,7 +122,7 @@ WM="$AITEAMFORGE_DIR/iterm2_window_manager.py"
 # ============================================================================
 # Start
 # ============================================================================
-clear
+[[ -t 1 ]] && clear
 
 # ============================================================================
 # FIRST: Capture the current iTerm2 window IMMEDIATELY before user can switch.
@@ -171,6 +171,20 @@ else
 fi
 
 # ============================================================================
+# Pre-initialize agent panel JSON files
+# ============================================================================
+# Writes /tmp/lcars-agent-<team>-<agent>.json for each agent so the LCARS
+# agent panel and banner script have real developer/role data from the start.
+# Runs synchronously before session creation; fast (reads persona markdown only).
+# ============================================================================
+_PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/share/scripts/init-agent-panel-json.py"
+if [[ -f "$_PANEL_JSON_SCRIPT" ]]; then
+    echo "  Pre-initializing agent panel data..."
+    python3 "$_PANEL_JSON_SCRIPT" "$TEAM_ID" "$AITEAMFORGE_DIR" 2>/dev/null \
+        || echo "  Warning: Agent panel JSON init failed (banner will use fallback values)"
+fi
+
+# ============================================================================
 # Async tmux session initialization
 # ============================================================================
 # Create tmux sessions in parallel for faster startup.
@@ -207,14 +221,40 @@ for agent in "${AGENTS[@]}"; do
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
             "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}'" C-m
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
-            "cd '${TEAM_WORKING_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
+            "mkdir -p '${TEAM_WORKING_DIR}' 2>/dev/null; cd '${TEAM_WORKING_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
+
+        # Source the team banner script to display the LCARS agent banner in window 0.
+        # A small inline helper reads agent data from the pre-initialized JSON
+        # (written by init-agent-panel-json.py) so the banner shows real developer
+        # names/roles. Falls back to basic session vars if the JSON is missing.
+        local _banner_script="${AITEAMFORGE_DIR}/${TEAM_ID}/scripts/${TEAM_ID}-banner.sh"
+        local _agent_json="/tmp/lcars-agent-${TEAM_ID}-${agent}.json"
+        if [[ -f "$_banner_script" ]]; then
+            if [[ -f "$_agent_json" ]]; then
+                # Read persona fields from JSON for rich banner display
+                local _btheme _bterm _bsdesc _bloc _bdev _brole _btdesc
+                _btheme=$(python3 -c "import json; d=json.load(open('$_agent_json')); print(d.get('theme','OPERATIONS'))" 2>/dev/null || echo "${TEAM_THEME}")
+                _bterm=$(python3  -c "import json; d=json.load(open('$_agent_json')); print(d.get('terminal','${agent}'))" 2>/dev/null || echo "${agent}")
+                _bsdesc=$(python3 -c "import json; d=json.load(open('$_agent_json')); print(d.get('session_desc',''))" 2>/dev/null || echo "")
+                _bloc=$(python3   -c "import json; d=json.load(open('$_agent_json')); print(d.get('location',''))" 2>/dev/null || echo "")
+                _bdev=$(python3   -c "import json; d=json.load(open('$_agent_json')); print(d.get('developer',''))" 2>/dev/null || echo "")
+                _brole=$(python3  -c "import json; d=json.load(open('$_agent_json')); print(d.get('role',''))" 2>/dev/null || echo "")
+                _btdesc=$(python3 -c "import json; d=json.load(open('$_agent_json')); print(d.get('terminal_desc',''))" 2>/dev/null || echo "")
+                tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
+                    "source '${_banner_script}' '${_btheme}' '${TEAM_ID}' '${agent}' '0' '${_bterm}' '${_bsdesc}' '${_bloc}' '${_bdev}' '${_brole}' '${_btdesc}' '${session_name}'" C-m
+            else
+                # JSON not available — use basic session vars; banner shows defaults for persona fields
+                tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
+                    "source '${_banner_script}' '${TEAM_THEME}' '${TEAM_ID}' '${agent}' '0' '${agent}' '${agent}' '' '' '' '' '${session_name}'" C-m
+            fi
+        fi
 
         # Window 1: monitoring / scratch space
         tmux -L "$TMUX_SOCKET" new-window -t "$session_name" -n "monitor"
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
             "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}'" C-m
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
-            "cd '${TEAM_WORKING_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
+            "mkdir -p '${TEAM_WORKING_DIR}' 2>/dev/null; cd '${TEAM_WORKING_DIR}' 2>/dev/null || cd \"\$HOME\"" C-m
 
         # Return focus to window 0 (main command window)
         tmux -L "$TMUX_SOCKET" select-window -t "${session_name}:0"
@@ -282,20 +322,34 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
 
     if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
         echo "  Opening LCARS kanban in iTerm2 tab..."
-        if python3 "$WM" \
+        _lcars_tab_err=$( python3 "$WM" \
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
             --profile "LCARS Web" \
             --tab-name "LCARS" \
             --command "export ITERM_TAB_TITLE='LCARS' && tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars" \
-            2>>"$ITERM_STARTUP_LOG"; then
+            2>&1 )
+        _lcars_tab_exit=$?
+        if [[ $_lcars_tab_exit -eq 0 ]]; then
             LCARS_OPENED=true
+        else
+            echo "  Warning: iTerm2 inline browser tab failed (exit $_lcars_tab_exit)" >&2
+            if [[ -n "$_lcars_tab_err" ]]; then
+                echo "  Reason: $_lcars_tab_err" >&2
+            fi
+            echo "  Possible causes: 'LCARS Web' profile not in iTerm2, or Python API unavailable." >&2
+            echo "  See full log: $ITERM_STARTUP_LOG" >&2
+            echo "$_lcars_tab_err" >> "$ITERM_STARTUP_LOG"
         fi
+    else
+        echo "  Note: LCARS browser script not found — skipping iTerm2 inline browser." >&2
+        echo "  (Expected: $LCARS_BROWSER_SCRIPT)" >&2
     fi
 
     # Fallback: open in system browser
     if [[ "$LCARS_OPENED" != "true" ]]; then
-        echo "  Opening LCARS kanban in browser..."
+        echo "  Opening LCARS kanban in system browser (Safari/default)..."
+        echo "  Tip: Run 'aiteamforge setup' to configure the 'LCARS Web' iTerm2 profile for inline browsing."
         open "http://localhost:$LCARS_PORT" 2>/dev/null
     fi
     sleep 0.3

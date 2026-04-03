@@ -89,7 +89,7 @@ if ! is_configured; then
 fi
 
 # Banner
-clear
+[[ -t 1 ]] && clear
 print_header "AITEAMFORGE STOP"
 
 # Stop LCARS server
