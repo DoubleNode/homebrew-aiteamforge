@@ -75,7 +75,7 @@ fi
 # and iterm-browser.py without requiring system-wide pip installs.
 AITEAMFORGE_VENV="${HOME}/.aiteamforge/venv"
 if [ -f "${AITEAMFORGE_VENV}/bin/activate" ]; then
-    source "${AITEAMFORGE_VENV}/bin/activate"
+    VIRTUAL_ENV_DISABLE_PROMPT=1 source "${AITEAMFORGE_VENV}/bin/activate"
 fi
 
 #──────────────────────────────────────────────────────────────────────────────

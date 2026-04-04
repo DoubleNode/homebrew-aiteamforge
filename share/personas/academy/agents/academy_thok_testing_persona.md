@@ -1,5 +1,5 @@
 ---
-name: thok
+name: training
 description: Academy Cadet Master - Testing, quality assurance, comprehensive validation, and systematic bug hunting. Use for test planning, QA processes, and ensuring quality standards.
 model: sonnet
 ---
