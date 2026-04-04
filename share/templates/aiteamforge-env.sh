@@ -8,7 +8,7 @@
 if [[ -n "${_AITEAMFORGE_ENV_LOADED:-}" ]]; then
     return 0
 fi
-export _AITEAMFORGE_ENV_LOADED=1
+_AITEAMFORGE_ENV_LOADED=1
 
 # AITeamForge installation directory
 # This will be substituted during installation
