@@ -455,7 +455,7 @@ def infer_session_desc(team_id: str, terminal_id: str, role: str, frontmatter_de
 
 # Map team_id → kanban directory (absolute paths, ~ expanded at runtime)
 _TEAM_KANBAN_DIRS = {
-    "academy":                                "~/dev-team/kanban",
+    "academy":                                "~/academy/kanban",
     "ios":                                    "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
     "android":                                "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
     "firebase":                               "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
@@ -478,14 +478,38 @@ _TEAM_KANBAN_DIRS = {
 }
 
 
-def get_kanban_tmp_dir(team_id: str) -> Path:
+def get_kanban_tmp_dir(team_id: str, aiteamforge_dir: str = "") -> Path:
     """Return the per-team kanban/tmp/ directory path, creating it if needed.
 
-    Falls back to /tmp/ when the team is unknown or the directory cannot be
-    created (e.g. on a machine where the team's repo is not checked out).
+    Priority:
+      1. Read from .aiteamforge-config (team_paths → working_dir + /kanban)
+      2. Fall back to hardcoded _TEAM_KANBAN_DIRS
+      3. Fall back to /tmp/
 
     Mirrors _get_lcars_tmp_dir() in share/scripts/lcars-tmp-dir.sh.
     """
+    # Try config-based resolution first
+    atf_dir = aiteamforge_dir or os.environ.get("AITEAMFORGE_DIR", str(Path.home() / "aiteamforge"))
+    config_path = Path(atf_dir) / ".aiteamforge-config"
+    if config_path.exists():
+        try:
+            with open(config_path) as f:
+                config = json.load(f)
+            team_paths = config.get("team_paths", {})
+            team_info = team_paths.get(team_id, {})
+            working_dir = team_info.get("working_dir", "")
+            if working_dir:
+                kanban_dir = Path(working_dir) / "kanban"
+                tmp_dir = kanban_dir / "tmp"
+                try:
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    return tmp_dir
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    # Fall back to hardcoded paths
     raw = _TEAM_KANBAN_DIRS.get(team_id, "")
     if not raw:
         return Path("/tmp")
@@ -570,7 +594,7 @@ def main():
     # agent-panel-display.sh reads from this directory (via lcars-tmp-dir.sh),
     # so we must write here instead of /tmp/ to avoid the panel showing stale data.
     # Falls back to /tmp/ when the kanban directory doesn't exist on this machine.
-    kanban_tmp_dir = get_kanban_tmp_dir(team_id)
+    kanban_tmp_dir = get_kanban_tmp_dir(team_id, aiteamforge_dir)
 
     timestamp = str(int(time.time()))
     written = 0
