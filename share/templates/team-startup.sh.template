@@ -238,7 +238,7 @@ for agent in "${AGENTS[@]}"; do
     (
         # Window 0: main command window
         tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" \
-            -n "cmd" -x 220 -y 50 2>/dev/null
+            -n "${agent}-cmd" -x 220 -y 50 2>/dev/null
 
         # Persist session identity variables so kanban helpers and cc aliases
         # work correctly when an agent attaches to this session
@@ -296,7 +296,7 @@ BANNER_EOF
         fi
 
         # Window 1: monitoring / scratch space
-        tmux -L "$TMUX_SOCKET" new-window -t "$session_name" -n "monitor"
+        tmux -L "$TMUX_SOCKET" new-window -t "$session_name" -n "${agent}-monitor"
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
             "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}'" C-m
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
@@ -337,7 +337,7 @@ mkdir -p "$LCARS_LOG_DIR"
 LCARS_SERVER_LOG="${LCARS_LOG_DIR}/lcars-server-${TEAM_ID}.log"
 
 (cd "$AITEAMFORGE_DIR/lcars-ui" && \
-    LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
+    AITEAMFORGE_DIR="$AITEAMFORGE_DIR" LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
     python3 server.py "$LCARS_PORT" > /dev/null 2>>"$LCARS_SERVER_LOG" &)
 
 for i in {1..10}; do

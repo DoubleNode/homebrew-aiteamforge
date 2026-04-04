@@ -2,10 +2,8 @@
 # AITeamForge LCARS-Inspired Prompt
 # Customizable prompt showing team, branch, and kanban status
 
-# Skip if already running a team-specific prompt
-# Team zshrc files will override this with their own prompts
-if [ -n "$SESSION_TYPE" ]; then
-    # Already in a team terminal, don't override
+# If a team-specific zshrc exists, let it handle the prompt
+if [ -n "$SESSION_TYPE" ] && [ -f "$HOME/.zshrc_${SESSION_TYPE}_${SESSION_NAME}" ]; then
     return 0
 fi
 
@@ -60,6 +58,10 @@ show_worktree() {
 show_team() {
     if [ -n "$AITEAMFORGE_NAME" ]; then
         echo "$AITEAMFORGE_NAME"
+    elif [ -n "$SESSION_NAME" ]; then
+        echo "${(U)SESSION_NAME}"
+    elif [ -n "$SESSION_TYPE" ]; then
+        echo "${(U)SESSION_TYPE}"
     else
         echo "GENERAL"
     fi
