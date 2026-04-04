@@ -339,14 +339,13 @@ for agent in "${AGENTS[@]}"; do
                 _bdev=$(python3   -c "import json; d=json.load(open('$_agent_json')); print(d.get('developer',''))" 2>/dev/null || echo "")
                 _brole=$(python3  -c "import json; d=json.load(open('$_agent_json')); print(d.get('role',''))" 2>/dev/null || echo "")
                 _btdesc=$(python3 -c "import json; d=json.load(open('$_agent_json')); print(d.get('terminal_desc',''))" 2>/dev/null || echo "")
-                # Escape single quotes in persona values to prevent argument splitting
-                local _esc_sdesc="${_bsdesc//\'/\'\\\'\'}"
-                local _esc_loc="${_bloc//\'/\'\\\'\'}"
-                local _esc_dev="${_bdev//\'/\'\\\'\'}"
-                local _esc_role="${_brole//\'/\'\\\'\'}"
-                local _esc_tdesc="${_btdesc//\'/\'\\\'\'}"
+                # Write banner invocation to a temp script to avoid quoting issues
+                local _banner_tmp="/tmp/.banner-${session_name}.sh"
+                cat > "$_banner_tmp" << BANNER_EOF
+source "$_banner_script" "$_btheme" "$TEAM_ID" "$agent" "0" "${_bterm}-cmd" "$_bsdesc" "$_bloc" "$_bdev" "$_brole" "$_btdesc" "$session_name"
+BANNER_EOF
                 tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
-                    "source '${_banner_script}' '${_btheme}' '${TEAM_ID}' '${agent}' '0' '${_bterm}-cmd' '${_esc_sdesc}' '${_esc_loc}' '${_esc_dev}' '${_esc_role}' '${_esc_tdesc}' '${session_name}'" C-m
+                    "source '$_banner_tmp'" C-m
             else
                 # JSON not available — use basic session vars; banner shows defaults for persona fields
                 tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
