@@ -81,7 +81,7 @@ BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 # These defaults are used when ~/.aiteamforge-config is not present (backward compatibility)
 _TEAM_KANBAN_DIRS_DEFAULT = {
     # Main Event Teams
-    "academy": Path.home() / "academy" / "kanban",
+    "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),

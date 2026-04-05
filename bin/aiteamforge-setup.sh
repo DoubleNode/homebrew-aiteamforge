@@ -519,6 +519,8 @@ echo -e "${GREEN}✓${NC} Selected teams: ${SELECTED_TEAMS[*]}"
 # Uses eval instead of declare -A (bash 3.2 compatible)
 # Variables: _PROJECT_<team_id>, _WORKDIR_<team_id>, _CLIENT_<team_id>
 # -----------------------------------------------------------------------
+# Sanitize user input before eval — allow only alphanumeric, hyphens, underscores, dots
+_sanitize_id() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9._-]//g'; }
 
 for team_id in "${SELECTED_TEAMS[@]}"; do
   conf_file="${TEAMS_DIR}/${team_id}.conf"
@@ -547,6 +549,7 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       client_id="default-client"
     else
       read -p "  Client ID: " client_id
+      client_id="$(_sanitize_id "$client_id")"
     fi
     if [ -z "$client_id" ]; then
       echo -e "  ${RED}Client ID is required. Skipping ${team_id}.${NC}"
@@ -558,8 +561,9 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       project_id="${default_project}"
     else
       read -p "  Project ID [${default_project}]: " project_id
-      project_id="${project_id:-$default_project}"
+      project_id="$(_sanitize_id "${project_id:-$default_project}")"
     fi
+    project_id="${project_id:-$default_project}"
     eval "_PROJECT_${team_id}=\"${project_id}\""
     eval "_CLIENT_${team_id}=\"${client_id}\""
     eval "_WORKDIR_${team_id}=\"${working_dir}/${client_id}/${project_id}\""
@@ -575,8 +579,9 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
       project_id="${default_project}"
     else
       read -p "  Project ID [${default_project}]: " project_id
-      project_id="${project_id:-$default_project}"
+      project_id="$(_sanitize_id "${project_id:-$default_project}")"
     fi
+    project_id="${project_id:-$default_project}"
     eval "_PROJECT_${team_id}=\"${project_id}\""
     eval "_WORKDIR_${team_id}=\"${working_dir}/${project_id}\""
     echo -e "  ${GREEN}✓${NC} ${team_id}: ${working_dir}/${project_id}"

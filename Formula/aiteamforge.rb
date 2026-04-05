@@ -2,9 +2,9 @@ class Aiteamforge < Formula
   desc "AITeamForge - AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
-      tag: "v0.8.8"
+      tag: "v1.4.2"
   license "MIT"
-  version "0.8.8"
+  version "0.8.9"
 
   # Core dependencies required for aiteamforge to function
   depends_on "python@3"

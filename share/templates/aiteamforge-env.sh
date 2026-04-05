@@ -2,9 +2,12 @@
 # AITeamForge Environment Loader
 # Sources team-specific configurations, aliases, and secrets
 
-# Guard against double-sourcing (e.g. when iTerm2 startup sends "exec zsh"
-# to replace the initial shell, causing .zshrc — and this file — to be
-# sourced a second time inside the same logical session).
+# Guard against double-sourcing within the same shell process (e.g. when
+# iTerm2 startup sends "exec zsh" to replace the initial shell, causing
+# .zshrc — and this file — to be sourced a second time inside the same
+# logical session).
+# NOTE: intentionally NOT exported so child processes (tmux, new shells)
+# do NOT inherit this guard and can source the env loader fresh.
 if [[ -n "${_AITEAMFORGE_ENV_LOADED:-}" ]]; then
     return 0
 fi
@@ -75,7 +78,7 @@ fi
 # and iterm-browser.py without requiring system-wide pip installs.
 AITEAMFORGE_VENV="${HOME}/.aiteamforge/venv"
 if [ -f "${AITEAMFORGE_VENV}/bin/activate" ]; then
-    VIRTUAL_ENV_DISABLE_PROMPT=1 source "${AITEAMFORGE_VENV}/bin/activate"
+    source "${AITEAMFORGE_VENV}/bin/activate"
 fi
 
 #──────────────────────────────────────────────────────────────────────────────

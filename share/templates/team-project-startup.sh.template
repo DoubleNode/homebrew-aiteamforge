@@ -16,6 +16,10 @@ LCARS_PORT="{{TEAM_LCARS_PORT}}"
 REQUIRES_CLIENT="{{TEAM_REQUIRES_CLIENT}}"
 AGENTS=({{TEAM_TERMINAL_LIST}})
 
+# Per-agent tmux window names (populated by installer from team conf AGENT_WINDOWS_* variables)
+# Format: "win0 win1 win2 win3" — used when creating tmux sessions
+{{TEAM_AGENT_WINDOWS_CONFIG}}
+
 # ============================================================================
 # Parameter validation
 # ============================================================================
@@ -230,9 +234,10 @@ fi
 # ============================================================================
 # Pre-initialize agent panel JSON files
 # ============================================================================
-# Writes kanban/tmp/lcars-agent-<team>-<agent>.json for each agent so the
-# LCARS agent panel and banner script have real developer/role data from the
-# start. Runs synchronously before session creation; fast (persona reads only).
+# Writes <kanban_tmp>/lcars-agent-<team>-<agent>.json for each agent so the
+# LCARS agent panel display has real developer/role data from the start.
+# Also writes a legacy copy to /tmp/ for use by banner scripts.
+# Runs synchronously before session creation; fast (reads persona markdown only).
 # ============================================================================
 # Resolve init script: installed layout uses scripts/, dev/tap uses share/scripts/
 _PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/scripts/init-agent-panel-json.py"
@@ -249,7 +254,7 @@ fi
 _KANBAN_TMP=$(python3 -c "
 import os, sys
 dirs = {
-    'academy': os.path.expanduser('~/academy/kanban'),
+    'academy': os.path.expanduser('~/dev-team/kanban'),
     'ios': '/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban',
     'android': '/Users/Shared/Development/Main Event/MainEventApp-Android/kanban',
     'firebase': '/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban',
@@ -270,6 +275,7 @@ try:
 except Exception:
     print('/tmp')
 " 2>/dev/null || echo "/tmp")
+
 
 # ============================================================================
 # Async tmux session initialization
@@ -294,9 +300,25 @@ for agent in "${AGENTS[@]}"; do
     fi
     echo "  Initializing $session_name..."
     (
-        # Window 0: main command window (cd to project directory)
+        # Resolve per-agent window names from installer-embedded config.
+        # Variable name uses underscores (hyphens in agent names are sanitized).
+        _agent_key="${agent//-/_}"
+        _windows_var="AGENT_WINDOWS_${_agent_key}"
+        _windows="${(P)_windows_var}"
+
+        # Parse window names array; fall back to "<agent>-cmd monitor" if not configured
+        _win_names=()
+        if [[ -n "$_windows" ]]; then
+            _win_names=(${(s: :)_windows})
+        else
+            _win_names=("${agent}-cmd" "monitor")
+        fi
+        _win0="${_win_names[1]:-${agent}-cmd}"
+        _win1="${_win_names[2]:-monitor}"
+
+        # Window 0: main command window (agent-specific name, cd to project directory)
         tmux -L "$TMUX_SOCKET" new-session -d -s "$session_name" \
-            -n "${agent}-cmd" -x 220 -y 50 2>/dev/null
+            -n "$_win0" -x 220 -y 50 2>/dev/null
 
         # Persist session identity variables so kanban helpers and cc aliases
         # work correctly when an agent attaches to this session
@@ -339,13 +361,8 @@ for agent in "${AGENTS[@]}"; do
                 _bdev=$(python3   -c "import json; d=json.load(open('$_agent_json')); print(d.get('developer',''))" 2>/dev/null || echo "")
                 _brole=$(python3  -c "import json; d=json.load(open('$_agent_json')); print(d.get('role',''))" 2>/dev/null || echo "")
                 _btdesc=$(python3 -c "import json; d=json.load(open('$_agent_json')); print(d.get('terminal_desc',''))" 2>/dev/null || echo "")
-                # Write banner invocation to a temp script to avoid quoting issues
-                local _banner_tmp="/tmp/.banner-${session_name}.sh"
-                cat > "$_banner_tmp" << BANNER_EOF
-source "$_banner_script" "$_btheme" "$TEAM_ID" "$agent" "0" "${_bterm}-cmd" "$_bsdesc" "$_bloc" "$_bdev" "$_brole" "$_btdesc" "$session_name"
-BANNER_EOF
                 tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
-                    "source '$_banner_tmp'" C-m
+                    "source '${_banner_script}' '${_btheme}' '${TEAM_ID}' '${agent}' '0' '${_bterm}' '${_bsdesc}' '${_bloc}' '${_bdev}' '${_brole}' '${_btdesc}' '${session_name}'" C-m
             else
                 # JSON not available — use basic session vars; banner shows defaults for persona fields
                 tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:0" \
@@ -353,8 +370,8 @@ BANNER_EOF
             fi
         fi
 
-        # Window 1: monitoring / scratch space
-        tmux -L "$TMUX_SOCKET" new-window -t "$session_name" -n "${agent}-monitor"
+        # Window 1: secondary workspace (agent-specific name, e.g. "monitor", "documentation", "testing")
+        tmux -L "$TMUX_SOCKET" new-window -t "$session_name" -n "$_win1"
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
             "export SESSION_TYPE='${TEAM_ID}' SESSION_NAME='${agent}' SESSION_CODE='${session_name}' SESSION_DIR='${TEAM_ID}' TMUX_SOCKET='${TMUX_SOCKET}' AITEAMFORGE_DIR='${AITEAMFORGE_DIR}' PROJECT_DIR='${PROJECT_DIR}'" C-m
         tmux -L "$TMUX_SOCKET" send-keys -t "${session_name}:1" \
@@ -387,7 +404,7 @@ echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lca
 echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
 pkill -f "server.py.*$LCARS_PORT" 2>/dev/null
 (cd "$AITEAMFORGE_DIR/lcars-ui" && \
-    AITEAMFORGE_DIR="$AITEAMFORGE_DIR" LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
+    LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
     python3 server.py "$LCARS_PORT" > /dev/null 2>&1 &)
 
 for i in {1..10}; do

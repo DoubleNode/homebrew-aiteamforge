@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""init-agent-panel-json.py — Generate /tmp/lcars-agent-<team>-<agent>.json files
+"""init-agent-panel-json.py — Generate lcars-agent-<team>-<agent>.json files
 
 Reads persona .md files for a team and writes per-agent JSON files that the
 LCARS agent panel display script (agent-panel-display.sh) reads to show agent
@@ -16,7 +16,8 @@ Args:
     aiteamforge_dir — root of the AITeamForge install (e.g. ~/aiteamforge)
 
 Output:
-    /tmp/lcars-agent-<team_id>-<terminal_id>.json  (one per agent)
+    <kanban_tmp>/lcars-agent-<team_id>-<terminal_id>.json  (one per agent)
+    /tmp/lcars-agent-<team_id>-<terminal_id>.json          (legacy copy for banner scripts)
 
 Exit codes:
     0 — success (all JSON files written)
@@ -29,6 +30,66 @@ import re
 import sys
 import time
 from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Team kanban directory mapping (mirrors TEAM_KANBAN_DIRS in kanban_utils.py
+# and the case statement in scripts/lcars-tmp-dir.sh).
+# All three sources must stay in sync when adding new teams.
+# ---------------------------------------------------------------------------
+_HOME = Path.home()
+
+TEAM_KANBAN_DIRS: dict[str, Path] = {
+    # Core teams
+    "academy":    _HOME / "dev-team" / "kanban",
+    "ios":        Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
+    "android":    Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
+    "firebase":   Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
+    "command":    Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+    "mainevent":  Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+    "dns":        Path("/Users/Shared/Development/DNSFramework/kanban"),
+
+    # Freelance — generic fallback
+    "freelance":  _HOME / "dev-team" / "kanban",
+
+    # Freelance — DoubleNode projects
+    "freelance-doublenode-starwords":    Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
+    "freelance-doublenode-appplanning":  Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
+    "freelance-doublenode-workstats":    Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
+    "freelance-doublenode-lifeboard":    Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+    "freelance-doublenode-caravan":      Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+    "freelance-doublenode-awaysentry":   Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+
+    # Freelance — Liquidstyle projects
+    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
+    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
+
+    # Personal life teams
+    "legal-coparenting": _HOME / "legal" / "coparenting" / "kanban",
+    "medical":           _HOME / "medical" / "general" / "kanban",
+    "medical-general":   _HOME / "medical" / "general" / "kanban",
+    "finance-personal":  _HOME / "finance" / "personal" / "kanban",
+}
+
+# Default fallback kanban directory (academy's) when team is unknown.
+_DEFAULT_KANBAN_DIR: Path = _HOME / "dev-team" / "kanban"
+
+
+def get_kanban_tmp_dir(team_id: str) -> Path:
+    """Return the kanban/tmp/ directory for a team, creating it if needed.
+
+    Mirrors _get_lcars_tmp_dir() in scripts/lcars-tmp-dir.sh and
+    get_lcars_tmp_dir() in kanban-hooks/kanban_utils.py.
+
+    Falls back to /tmp/ if the kanban directory cannot be created.
+    """
+    kanban_dir = TEAM_KANBAN_DIRS.get(team_id, _DEFAULT_KANBAN_DIR)
+    tmp_dir = kanban_dir / "tmp"
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        return tmp_dir
+    except OSError:
+        return Path("/tmp")
 
 
 # ---------------------------------------------------------------------------
@@ -455,7 +516,7 @@ def infer_session_desc(team_id: str, terminal_id: str, role: str, frontmatter_de
 
 # Map team_id → kanban directory (absolute paths, ~ expanded at runtime)
 _TEAM_KANBAN_DIRS = {
-    "academy":                                "~/academy/kanban",
+    "academy":                                "~/dev-team/kanban",
     "ios":                                    "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
     "android":                                "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
     "firebase":                               "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
@@ -478,38 +539,14 @@ _TEAM_KANBAN_DIRS = {
 }
 
 
-def get_kanban_tmp_dir(team_id: str, aiteamforge_dir: str = "") -> Path:
+def get_kanban_tmp_dir(team_id: str) -> Path:
     """Return the per-team kanban/tmp/ directory path, creating it if needed.
 
-    Priority:
-      1. Read from .aiteamforge-config (team_paths → working_dir + /kanban)
-      2. Fall back to hardcoded _TEAM_KANBAN_DIRS
-      3. Fall back to /tmp/
+    Falls back to /tmp/ when the team is unknown or the directory cannot be
+    created (e.g. on a machine where the team's repo is not checked out).
 
     Mirrors _get_lcars_tmp_dir() in share/scripts/lcars-tmp-dir.sh.
     """
-    # Try config-based resolution first
-    atf_dir = aiteamforge_dir or os.environ.get("AITEAMFORGE_DIR", str(Path.home() / "aiteamforge"))
-    config_path = Path(atf_dir) / ".aiteamforge-config"
-    if config_path.exists():
-        try:
-            with open(config_path) as f:
-                config = json.load(f)
-            team_paths = config.get("team_paths", {})
-            team_info = team_paths.get(team_id, {})
-            working_dir = team_info.get("working_dir", "")
-            if working_dir:
-                kanban_dir = Path(working_dir) / "kanban"
-                tmp_dir = kanban_dir / "tmp"
-                try:
-                    tmp_dir.mkdir(parents=True, exist_ok=True)
-                    return tmp_dir
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    # Fall back to hardcoded paths
     raw = _TEAM_KANBAN_DIRS.get(team_id, "")
     if not raw:
         return Path("/tmp")
@@ -594,7 +631,7 @@ def main():
     # agent-panel-display.sh reads from this directory (via lcars-tmp-dir.sh),
     # so we must write here instead of /tmp/ to avoid the panel showing stale data.
     # Falls back to /tmp/ when the kanban directory doesn't exist on this machine.
-    kanban_tmp_dir = get_kanban_tmp_dir(team_id, aiteamforge_dir)
+    kanban_tmp_dir = get_kanban_tmp_dir(team_id)
 
     timestamp = str(int(time.time()))
     written = 0
@@ -752,25 +789,38 @@ def main():
             "timestamp":    timestamp,
         }
 
-        # Write to kanban/tmp/lcars-agent-<team>-<terminal_id>.json
-        # This path matches what agent-panel-display.sh reads (via lcars-tmp-dir.sh),
-        # ensuring the panel shows real persona data from the very first render.
-        # Session name format matches tmux session names: <team>-<terminal>
-        session_name = f"{team_id}-{terminal_id}"
-        out_path = kanban_tmp_dir / f"lcars-agent-{session_name}.json"
+        # Write to <kanban_tmp>/lcars-agent-<team>-<terminal_id>.json
+        # This is the canonical location that agent-panel-display.sh reads.
+        kanban_tmp = get_kanban_tmp_dir(team_id)
+        out_path = kanban_tmp / f"lcars-agent-{team_id}-{terminal_id}.json"
+
+        # Also write a legacy copy to /tmp/ for banner scripts that still read
+        # from /tmp/lcars-agent-<team>-<agent>.json during session startup.
+        legacy_path = Path(f"/tmp/lcars-agent-{team_id}-{terminal_id}.json")
+
+        json_str = json.dumps(data, indent=4)
+        success = False
         try:
-            with open(out_path, "w") as f:
-                json.dump(data, f, indent=4)
-            print(f"  Wrote {out_path.name}")
-            written += 1
+            out_path.write_text(json_str)
+            print(f"  Wrote {out_path}")
+            success = True
         except Exception as e:
             print(f"Warning: Cannot write {out_path}: {e}", file=sys.stderr)
+
+        try:
+            legacy_path.write_text(json_str)
+        except Exception:
+            pass  # Legacy /tmp/ write is best-effort; don't fail if it errors
+
+        if success:
+            written += 1
 
     if written == 0:
         print(f"Warning: No agent JSON files written for team '{team_id}'", file=sys.stderr)
         sys.exit(1)
 
-    print(f"  Agent panel JSON: {written} file(s) initialized for '{team_id}'")
+    kanban_tmp = get_kanban_tmp_dir(team_id)
+    print(f"  Agent panel JSON: {written} file(s) initialized for '{team_id}' → {kanban_tmp}")
 
 
 if __name__ == "__main__":

@@ -12,7 +12,17 @@
 { set +x; } 2>/dev/null
 
 SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
-IMGCAT="$HOME/.iterm2/imgcat"
+# Resolve imgcat from multiple possible locations:
+#   1. iTerm2 shell integration (standard install path)
+#   2. System-installed imgcat (e.g., via homebrew or manual install)
+# Guards like [[ -x "$IMGCAT" ]] will silently skip image display if not found.
+if [[ -x "$HOME/.iterm2/imgcat" ]]; then
+    IMGCAT="$HOME/.iterm2/imgcat"
+elif command -v imgcat &>/dev/null; then
+    IMGCAT="$(command -v imgcat)"
+else
+    IMGCAT=""
+fi
 SCRIPT_PATH="${0:A}"
 SCRIPT_DIR="${SCRIPT_PATH:h}"
 SCRIPT_MTIME=$(stat -f %m "$SCRIPT_PATH" 2>/dev/null)
@@ -418,8 +428,8 @@ render_crew_strip() {
 
         if [[ $row_count -gt 0 ]]; then
             local crew_strip="${LCARS_TMP}lcars-crew-${SESSION_CODE}-r${row}.png"
-            magick "${magick_args[@]}" +append PNG32:"$crew_strip" 2>/dev/null && \
-            "$IMGCAT" -H 3 -W 100% "$crew_strip"
+            magick "${magick_args[@]}" +append PNG32:"$crew_strip" 2>/dev/null
+            [[ -f "$crew_strip" && -x "$IMGCAT" ]] && "$IMGCAT" -H 3 -W 100% "$crew_strip"
         fi
 
         (( idx += per_row ))
@@ -999,7 +1009,7 @@ render_panel() {
             # Crew unchanged — redisplay cached strip images without re-running magick
             local row=0
             while [[ -f "${LCARS_TMP}lcars-crew-${SESSION_CODE}-r${row}.png" ]]; do
-                "$IMGCAT" -H 3 -W 100% "${LCARS_TMP}lcars-crew-${SESSION_CODE}-r${row}.png"
+                [[ -x "$IMGCAT" ]] && "$IMGCAT" -H 3 -W 100% "${LCARS_TMP}lcars-crew-${SESSION_CODE}-r${row}.png"
                 ((row++))
             done
         fi

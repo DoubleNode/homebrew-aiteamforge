@@ -1,5 +1,5 @@
 ---
-name: medical
+name: emh
 description: Academy Training Officer - Documentation, technical writing, knowledge management, and training materials. Use for creating comprehensive documentation, onboarding guides, and educational content.
 model: sonnet
 ---

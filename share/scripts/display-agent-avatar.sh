@@ -164,10 +164,10 @@ except:
     if [[ -n "${TERMINAL_DESCRIPTION:-}" ]]; then
         # Strip " at <team name>" suffix if present (e.g. "Chancellor's Office at Starfleet Academy")
         section_label="${TERMINAL_DESCRIPTION%% at *}"
-        section_label="${(U)section_label}"
+        section_label="${section_label^^}"
     elif [[ "${SESSION_LOCATION:-}" == *": "* ]]; then
         section_label="${SESSION_LOCATION#*: }"
-        section_label="${(U)section_label}"
+        section_label="${section_label^^}"
     fi
 
     # Write agent data as JSON to per-session temp file

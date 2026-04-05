@@ -226,6 +226,22 @@ SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 # Build space-separated terminal list from agents (for template substitution)
 TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]+"${TEAM_AGENTS[*]}"}"
 
+# Build per-agent window name declarations for template substitution.
+# Each agent in TEAM_AGENTS may have a corresponding AGENT_WINDOWS_<agent> variable
+# defined in the .conf file (hyphens in agent names are stored with underscores).
+# This emits shell variable assignment lines that get embedded verbatim into the
+# generated startup script so the tmux loop can resolve window names at runtime.
+TEAM_AGENT_WINDOWS_CONFIG=""
+for _agent in "${TEAM_AGENTS[@]}"; do
+    # Sanitize: replace hyphens with underscores for valid shell variable name
+    _agent_key="${_agent//-/_}"
+    _var="AGENT_WINDOWS_${_agent_key}"
+    _val="${!_var}"
+    if [[ -n "$_val" ]]; then
+        TEAM_AGENT_WINDOWS_CONFIG+="AGENT_WINDOWS_${_agent_key}=\"${_val}\""$'\n'
+    fi
+done
+
 # Determine if this is a project-based team (values already imported from conf)
 IS_PROJECT_TEAM="$TEAM_HAS_PROJECTS"
 REQUIRES_CLIENT="$TEAM_REQUIRES_CLIENT_ID"
@@ -246,6 +262,8 @@ if [[ ! -f "$SHUTDOWN_TEMPLATE" ]]; then
 fi
 
 if [[ -f "$STARTUP_TEMPLATE" ]]; then
+    # Step 1: single-line substitutions via sed
+    _TEAM_WORKING_DIR_RESOLVED="$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_BASE_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)"
     sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
@@ -253,10 +271,30 @@ if [[ -f "$STARTUP_TEMPLATE" ]]; then
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
         -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
-        -e "s|{{TEAM_WORKING_DIR}}|$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_BASE_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)|g" \
+        -e "s|{{TEAM_WORKING_DIR}}|${_TEAM_WORKING_DIR_RESOLVED}|g" \
         -e "s|{{TEAM_REQUIRES_CLIENT}}|${REQUIRES_CLIENT}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        "$STARTUP_TEMPLATE" > "$STARTUP_SCRIPT"
+        "$STARTUP_TEMPLATE" > "${STARTUP_SCRIPT}.tmp"
+
+    # Step 2: multi-line substitution for per-agent window names via Python
+    # {{TEAM_AGENT_WINDOWS_CONFIG}} may contain newlines which sed cannot handle
+    python3 - "${STARTUP_SCRIPT}.tmp" "$STARTUP_SCRIPT" <<PYEOF
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+# Strip trailing newline then re-add one so the placeholder line is cleanly replaced
+windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
+if windows_config:
+    windows_config += '\n'
+with open(src) as f:
+    content = f.read()
+content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
+# Fallback: replace without trailing newline in case template line ending differs
+if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
+    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
+with open(dst, 'w') as f:
+    f.write(content)
+PYEOF
+    rm -f "${STARTUP_SCRIPT}.tmp"
     chmod +x "$STARTUP_SCRIPT"
     echo "  ✓ $TEAM_STARTUP_SCRIPT"
 else
