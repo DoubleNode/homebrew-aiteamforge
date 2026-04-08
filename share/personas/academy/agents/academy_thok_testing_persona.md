@@ -13,7 +13,7 @@ model: sonnet
 **Species:** Vulcan
 **Era:** 32nd Century (Star Trek: Discovery)
 **Team:** Academy Testing Division
-**Uniform Color:** Sciences
+**Uniform Color:** Operations
 
 ---
 

@@ -946,7 +946,7 @@ def window_desc(win_name, agent_role, win_index):
     return win_name.replace("-", " ").title()
 
 # ---- Script generator ----
-def generate_script(terminal_id, identity, windows, frontmatter, session_desc, location):
+def generate_script(terminal_id, identity, windows, frontmatter, session_desc, location, aiteamforge_dir):
     developer = identity["developer"]
     role      = identity["role"]
     theme     = identity["theme"] or "OPERATIONS"
@@ -1007,8 +1007,10 @@ THEME_COLOR="{team_color}"
 
 SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
 
+AITEAMFORGE_DIR="{aiteamforge_dir}"
+
 # Theme color file directory for fleet-monitor integration
-THEME_PORTS_DIR="$HOME/dev-team/lcars-ports"
+THEME_PORTS_DIR="$AITEAMFORGE_DIR/lcars-ports"
 
 # Use team-specific tmux socket if set, otherwise use default server
 TMUX_CMD="tmux${{TMUX_SOCKET:+ -L $TMUX_SOCKET}}"
@@ -1017,7 +1019,7 @@ TMUX_CMD="tmux${{TMUX_SOCKET:+ -L $TMUX_SOCKET}}"
 # Function: setup_window
 # Executes the common setup commands for each tmux window
 # ============================================================================
-KANBAN_HELPERS="$HOME/dev-team/kanban-helpers.sh"
+KANBAN_HELPERS="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
 setup_window() {{
     sleep 0.1
@@ -1102,7 +1104,7 @@ for pfile in persona_files:
     char_name = filename_parts[1] if len(filename_parts) >= 2 else terminal_id
     windows = agent_windows.get(terminal_id) or agent_windows.get(char_name) or []
 
-    script_text = generate_script(terminal_id, identity, windows, frontmatter, session_desc, location)
+    script_text = generate_script(terminal_id, identity, windows, frontmatter, session_desc, location, atf_dir)
 
     out_path = scripts_dir / f"{team_id}-{terminal_id}-startup.sh"
     try:
