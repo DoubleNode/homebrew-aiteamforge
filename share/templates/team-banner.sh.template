@@ -41,43 +41,20 @@ BLUE='%F{blue}'
 BOLD='%B'
 DIM='%F{240}'
 
-# Team-specific color palette
-# These are generated from the team's TEAM_COLOR during installation.
-# To customize, replace the color codes (0-255) with your preferred values.
-# See: https://www.ditig.com/publications/256-colors-cheat-sheet
-#
-# To add additional theme variants, follow this pattern:
-#
-#   THEME_2_PRIMARY='%F{NNN}'
-#   THEME_2_SECONDARY='%F{NNN}'
-#
-# Then add a corresponding if-block in the THEME MAPPING section below.
-
-TEAM_PRIMARY='%F{{{TEAM_COLOR_PRIMARY}}}'          # Primary theme color
-TEAM_SECONDARY='%F{{{TEAM_COLOR_SECONDARY}}}'      # Secondary / highlight color
+# Team-specific color palette (injected during installation from team color data)
+{{TEAM_BANNER_PALETTE}}
 
 # ============================================================================
 # Theme Mapping
 # ============================================================================
 # Map SESSION_THEME to THEME_COLOR and THEME_COLOR_HIGHLIGHT.
 # The SESSION_THEME value is passed as argument $1 to this script.
-#
-# Add additional if-blocks here for each theme variant your team uses.
-# Common theme names: COMMAND, OPERATIONS, SCIENCE, ENGINEERING, MEDICAL
-
-if [[ $SESSION_THEME == "OPERATIONS" ]]; then
-    THEME_COLOR=$TEAM_PRIMARY
-    THEME_COLOR_HIGHLIGHT=$TEAM_SECONDARY
-fi
-if [[ $SESSION_THEME == "COMMAND" ]]; then
-    THEME_COLOR=$TEAM_PRIMARY
-    THEME_COLOR_HIGHLIGHT=$TEAM_SECONDARY
-fi
+{{TEAM_BANNER_THEME_SELECT}}
 
 # Fall through to primary color if SESSION_THEME was not matched above.
 # This prevents empty THEME_COLOR from breaking the print -P calls below.
-THEME_COLOR="${THEME_COLOR:-$TEAM_PRIMARY}"
-THEME_COLOR_HIGHLIGHT="${THEME_COLOR_HIGHLIGHT:-$TEAM_SECONDARY}"
+THEME_COLOR="${THEME_COLOR:-$WHITE}"
+THEME_COLOR_HIGHLIGHT="${THEME_COLOR_HIGHLIGHT:-$GRAY}"
 
 # ============================================================================
 # Common shell strings

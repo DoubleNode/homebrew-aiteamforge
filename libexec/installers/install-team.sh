@@ -411,31 +411,239 @@ print(nearest_256(r, g, b))
 " "$hex" 2>/dev/null || echo "178"
     }
 
-    # Derive primary and secondary (slightly darker/lighter) color codes
-    TEAM_COLOR_HEX="${TEAM_COLOR:-#5585CC}"
-    PRIMARY_CODE=$(_hex_to_256 "$TEAM_COLOR_HEX")
+    # Extract team-specific color palette and theme-select blocks for banner.
+    # Uses the same TEAM_COLORS data as the zshrc generator for consistency.
+    # Writes palette and theme_select to temp files, then substitutes into banner template.
+    BANNER_PALETTE_FILE=$(mktemp)
+    BANNER_THEME_FILE=$(mktemp)
+    python3 - "$TEAM_ID" "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE" <<'BANNER_COLORS_EOF'
+import sys
 
-    # Secondary: shift toward darker by biasing toward a lower cube index.
-    # Simple approach: clamp primary - 36 (one cube "row" darker) or clamp to 16.
-    if [[ "$PRIMARY_CODE" -ge 52 ]]; then
-        SECONDARY_CODE=$((PRIMARY_CODE - 36))
-    else
-        SECONDARY_CODE=$((PRIMARY_CODE + 36))
-        # Keep within valid range
-        [[ "$SECONDARY_CODE" -gt 231 ]] && SECONDARY_CODE=231
-    fi
+team_id = sys.argv[1]
+palette_file = sys.argv[2]
+theme_file = sys.argv[3]
 
-    # Generate banner script by substituting template placeholders
+# Per-team color palettes — must match TEAM_COLORS in generate_per_agent_zshrc_files()
+TEAM_BANNER_COLORS = {
+    "academy": {
+        "palette": """\
+# Command Red (32nd Century Starfleet Red)
+COMMAND_RED='%F{124}'              # Deep red
+COMMAND_RED_BRIGHT='%F{160}'       # Brighter red for highlights
+
+# Operations Gold (32nd Century Starfleet Gold)
+OPS_GOLD='%F{178}'                # Mustard gold
+OPS_GOLD_DARK='%F{136}'           # Darker gold for contrast
+
+# Sciences Blue (32nd Century Starfleet Blue)
+SCIENCES_BLUE='%F{25}'             # Deep blue
+SCIENCES_BLUE_BRIGHT='%F{33}'      # Brighter blue""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_RED
+    THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD
+    THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]; then
+    THEME_COLOR=$SCIENCES_BLUE
+    THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+    "android": {
+        "palette": """\
+COMMAND_GOLD='%F{220}'
+COMMAND_GOLD_BRIGHT='%F{226}'
+SCIENCE_BLUE='%F{27}'
+SCIENCE_BLUE_BRIGHT='%F{33}'
+MEDICAL_BLUE='%F{39}'
+MEDICAL_BLUE_BRIGHT='%F{45}'
+ENGINEERING_RED='%F{160}'
+ENGINEERING_RED_BRIGHT='%F{196}'
+OPERATIONS_GOLD='%F{178}'
+OPERATIONS_GOLD_BRIGHT='%F{184}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_GOLD; THEME_COLOR_HIGHLIGHT=$COMMAND_GOLD_BRIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$SCIENCE_BLUE; THEME_COLOR_HIGHLIGHT=$SCIENCE_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "MEDICAL" ]]; then
+    THEME_COLOR=$MEDICAL_BLUE; THEME_COLOR_HIGHLIGHT=$MEDICAL_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "ENGINEERING" ]]; then
+    THEME_COLOR=$ENGINEERING_RED; THEME_COLOR_HIGHLIGHT=$ENGINEERING_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPERATIONS_GOLD; THEME_COLOR_HIGHLIGHT=$OPERATIONS_GOLD_BRIGHT
+fi""",
+    },
+    "ios": {
+        "palette": """\
+COMMAND_RED='%F{124}'
+COMMAND_RED_BRIGHT='%F{196}'
+OPS_GOLD='%F{136}'
+OPS_GOLD_ACCENT='%F{220}'
+SCIENCE_TEAL='%F{30}'
+SCIENCE_TEAL_BRIGHT='%F{51}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_RED; THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_ACCENT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$SCIENCE_TEAL; THEME_COLOR_HIGHLIGHT=$SCIENCE_TEAL_BRIGHT
+fi""",
+    },
+    "firebase": {
+        "palette": """\
+OPS_BLUE='%F{25}'
+OPS_BLUE_BRIGHT='%F{33}'
+ENG_GOLD='%F{94}'
+ENG_GOLD_DARK='%F{172}'
+SECURITY_GRAY='%F{236}'
+SECURITY_GRAY_LIGHT='%F{240}'
+SCIENCE_PURPLE='%F{60}'
+SCIENCE_PURPLE_BRIGHT='%F{99}'
+INCIDENT_RED='%F{52}'
+INCIDENT_RED_BRIGHT='%F{160}'
+PROM_GOLD='%F{94}'
+PROM_GOLD_BRIGHT='%F{214}'
+STELLAR_BLUE='%F{24}'
+STELLAR_BLUE_BRIGHT='%F{39}'
+SICKBAY_RED='%F{52}'
+SICKBAY_RED_BRIGHT='%F{160}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$OPS_BLUE; THEME_COLOR_HIGHLIGHT=$OPS_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "ENGINEERING" ]]; then
+    THEME_COLOR=$ENG_GOLD; THEME_COLOR_HIGHLIGHT=$ENG_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SECURITY" ]]; then
+    THEME_COLOR=$SECURITY_GRAY; THEME_COLOR_HIGHLIGHT=$SECURITY_GRAY_LIGHT
+fi
+if [[ $SESSION_THEME == "OBSERVATION" ]]; then
+    THEME_COLOR=$SCIENCE_PURPLE; THEME_COLOR_HIGHLIGHT=$SCIENCE_PURPLE_BRIGHT
+fi
+if [[ $SESSION_THEME == "INCIDENT" ]]; then
+    THEME_COLOR=$INCIDENT_RED; THEME_COLOR_HIGHLIGHT=$INCIDENT_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "PROMENADE" ]]; then
+    THEME_COLOR=$PROM_GOLD; THEME_COLOR_HIGHLIGHT=$PROM_GOLD_BRIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$STELLAR_BLUE; THEME_COLOR_HIGHLIGHT=$STELLAR_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_BLUE; THEME_COLOR_HIGHLIGHT=$OPS_BLUE_BRIGHT
+fi""",
+    },
+    "command": {
+        "palette": """\
+COMMAND_RED='%F{124}'
+COMMAND_RED_BRIGHT='%F{160}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_RED; THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi""",
+    },
+    "freelance": {
+        "palette": """\
+COMMAND_BLUE='%F{24}'
+COMMAND_BLUE_BRIGHT='%F{33}'
+OPS_GOLD='%F{136}'
+OPS_GOLD_DARK='%F{178}'
+SCIENCE_TEAL='%F{30}'
+SCIENCE_TEAL_BRIGHT='%F{37}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_BLUE; THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$SCIENCE_TEAL; THEME_COLOR_HIGHLIGHT=$SCIENCE_TEAL_BRIGHT
+fi""",
+    },
+    "legal": {
+        "palette": """\
+COMMAND_BLUE='%F{25}'
+COMMAND_BLUE_BRIGHT='%F{33}'
+OPS_GOLD='%F{178}'
+OPS_GOLD_DARK='%F{136}'
+SCIENCES_BLUE='%F{25}'
+SCIENCES_BLUE_BRIGHT='%F{33}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_BLUE; THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]; then
+    THEME_COLOR=$SCIENCES_BLUE; THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+    "medical": {
+        "palette": """\
+COMMAND_BLUE='%F{25}'
+COMMAND_BLUE_BRIGHT='%F{33}'
+OPS_GOLD='%F{25}'
+OPS_GOLD_ACCENT='%F{178}'
+SCIENCES_BLUE='%F{25}'
+SCIENCES_BLUE_BRIGHT='%F{39}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_BLUE; THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_ACCENT
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]; then
+    THEME_COLOR=$SCIENCES_BLUE; THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+}
+
+data = TEAM_BANNER_COLORS.get(team_id, {})
+palette = data.get("palette", "# No team-specific palette defined")
+theme_select = data.get("theme_select", "# No team-specific theme mapping")
+
+with open(palette_file, "w") as f:
+    f.write(palette)
+with open(theme_file, "w") as f:
+    f.write(theme_select)
+BANNER_COLORS_EOF
+
+    # Read palette and theme_select from temp files
+    BANNER_PALETTE=$(cat "$BANNER_PALETTE_FILE" 2>/dev/null || echo "# No palette")
+    BANNER_THEME_SELECT=$(cat "$BANNER_THEME_FILE" 2>/dev/null || echo "# No theme select")
+    rm -f "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE"
+
+    # Generate banner script — use awk for multi-line substitution since sed can't do it
     TEAM_BANNER_SCRIPT_NAME="${TEAM_ID}-banner.sh"
-    sed -e "s|{{TEAM_ID}}|${TEAM_ID}|g" \
-        -e "s|{{TEAM_NAME}}|${TEAM_NAME}|g" \
-        -e "s|{{TEAM_SHIP}}|${TEAM_SHIP:-${TEAM_THEME}}|g" \
-        -e "s|{{TEAM_BANNER_SCRIPT}}|${TEAM_BANNER_SCRIPT_NAME}|g" \
-        -e "s|{{TEAM_COLOR_PRIMARY}}|${PRIMARY_CODE}|g" \
-        -e "s|{{TEAM_COLOR_SECONDARY}}|${SECONDARY_CODE}|g" \
-        "$BANNER_TEMPLATE" > "$BANNER_SCRIPT"
+    awk -v palette="$BANNER_PALETTE" -v theme_sel="$BANNER_THEME_SELECT" \
+        -v team_id="$TEAM_ID" -v team_name="$TEAM_NAME" \
+        -v team_ship="${TEAM_SHIP:-${TEAM_THEME}}" \
+        -v banner_name="$TEAM_BANNER_SCRIPT_NAME" \
+    '{
+        gsub(/\{\{TEAM_ID\}\}/, team_id)
+        gsub(/\{\{TEAM_NAME\}\}/, team_name)
+        gsub(/\{\{TEAM_SHIP\}\}/, team_ship)
+        gsub(/\{\{TEAM_BANNER_SCRIPT\}\}/, banner_name)
+        if ($0 ~ /\{\{TEAM_BANNER_PALETTE\}\}/) { print palette; next }
+        if ($0 ~ /\{\{TEAM_BANNER_THEME_SELECT\}\}/) { print theme_sel; next }
+        print
+    }' "$BANNER_TEMPLATE" > "$BANNER_SCRIPT"
     chmod +x "$BANNER_SCRIPT"
-    echo "  ✓ ${TEAM_ID}-banner.sh (primary color: ${PRIMARY_CODE}, secondary: ${SECONDARY_CODE})"
+    echo "  ✓ ${TEAM_ID}-banner.sh (team-specific color palette)"
     echo "    Path: $BANNER_SCRIPT"
     echo "    Note: Edit color codes in the script to customize team themes"
 else
@@ -687,14 +895,22 @@ def parse_core_identity(text):
 
 # ---- Uniform-color → tmux colour codes ----
 # Format: (bg_code, accent_code)
-# Derived from statusline-command.sh get_theme_data() values.
+# Derived from proven dev-team per-agent startup scripts.
+# These are default values; teams can override via THEME_COLORS_<THEME> in .conf.
 THEME_COLORS = {
-    "COMMAND":    (27,  33),
-    "OPERATIONS": (178, 184),
-    "SCIENCES":   (33,  39),
-    "SECURITY":   (160, 196),
-    "PROMENADE":  (130, 136),
-    "MEDICAL":    (33,  39),
+    "COMMAND":    (124, 160),
+    "OPERATIONS": (136, 178),
+    "SCIENCES":   (25,  33),
+    "SCIENCE":    (30,  37),
+    "SECURITY":   (236, 240),
+    "PROMENADE":  (94,  214),
+    "MEDICAL":    (25,  33),
+    "INCIDENT":   (52,  160),
+    "ENGINEERING":(94,  172),
+    "OBSERVATION":(60,  99),
+    "HELM":       (136, 220),
+    "NAVIGATION": (58,  220),
+    "COMMUNICATIONS": (124, 196),
 }
 DEFAULT_THEME_COLORS = (240, 250)
 
@@ -827,10 +1043,10 @@ if [ $? != 0 ]; then
     $TMUX_CMD set -t $SESSION_CODE @claude_agent "{terminal_id}"
     $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | #{{@developer}}  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
-    $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour16,bold"
+    $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
     $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE window-status-style "bg=colour{bg_code},fg=colour255"
-    $TMUX_CMD set -t $SESSION_CODE window-status-current-style "bg=colour{accent_code},fg=colour16,bold"
+    $TMUX_CMD set -t $SESSION_CODE window-status-current-style "bg=colour{accent_code},fg=colour255,bold"
     $TMUX_CMD set -t $SESSION_CODE pane-border-style "fg=colour{bg_code}"
     $TMUX_CMD set -t $SESSION_CODE pane-active-border-style "fg=colour{accent_code}"
 
