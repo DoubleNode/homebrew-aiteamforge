@@ -1,6 +1,6 @@
 # Architecture Overview
 
-**Technical architecture and design principles of the Dev-Team system**
+**Technical architecture and design principles of the AITeamForge system**
 
 ---
 
@@ -52,7 +52,7 @@
 
 ### Framework Layer
 
-**Location:** `$(brew --prefix)/opt/dev-team/libexec/`
+**Location:** `$(brew --prefix)/opt/aiteamforge/libexec/`
 
 **Content:**
 - Core executables and scripts
@@ -63,10 +63,10 @@
 - Skills and helpers
 
 **Management:**
-- Installed via `brew install dev-team`
-- Upgraded via `brew upgrade dev-team`
+- Installed via `brew install aiteamforge`
+- Upgraded via `brew upgrade aiteamforge`
 - Read-only to users
-- Rolled back via `brew switch dev-team <version>`
+- Rolled back via `brew switch aiteamforge <version>`
 
 **Purpose:**
 - Provides stable, versioned product code
@@ -75,7 +75,7 @@
 
 ### Working Layer
 
-**Location:** `~/dev-team/` (or custom location via `--install-dir`)
+**Location:** `~/aiteamforge/` (or custom location via `--install-dir`)
 
 **Content:**
 - User-specific configuration
@@ -86,7 +86,7 @@
 - Git worktrees
 
 **Management:**
-- Created by `dev-team setup`
+- Created by `aiteamforge setup`
 - Modified by user and agents
 - Persisted across framework upgrades
 - Backed up by user
@@ -101,11 +101,11 @@
 ```
 ┌───────────────────────────────────────┐
 │  Framework Layer (Homebrew)           │
-│  /opt/homebrew/opt/dev-team/libexec/  │
+│  /opt/homebrew/opt/aiteamforge/libexec/  │
 │                                       │
 │  ├── bin/                             │
-│  │   ├── dev-team-cli.sh              │
-│  │   └── dev-team-setup.sh            │
+│  │   ├── aiteamforge-cli.sh              │
+│  │   └── aiteamforge-setup.sh            │
 │  ├── libexec/                         │
 │  │   ├── commands/                    │
 │  │   ├── installers/                  │
@@ -120,9 +120,9 @@
               ↓
 ┌───────────────────────────────────────┐
 │  Working Layer (User Data)            │
-│  ~/dev-team/                          │
+│  ~/aiteamforge/                          │
 │                                       │
-│  ├── .dev-team-config                 │
+│  ├── .aiteamforge-config                 │
 │  ├── config.json                      │
 │  ├── teams/                           │
 │  ├── kanban/                          │
@@ -143,18 +143,18 @@
 ### Framework Directory
 
 ```
-$(brew --prefix)/opt/dev-team/libexec/
+$(brew --prefix)/opt/aiteamforge/libexec/
 ├── bin/
-│   ├── dev-team-cli.sh              # Main CLI dispatcher
-│   └── dev-team-setup.sh            # Setup wizard entry point
+│   ├── aiteamforge-cli.sh              # Main CLI dispatcher
+│   └── aiteamforge-setup.sh            # Setup wizard entry point
 ├── libexec/
 │   ├── commands/                    # Subcommand scripts
-│   │   ├── dev-team-doctor.sh       # Health check
-│   │   ├── dev-team-status.sh       # Status display
-│   │   ├── dev-team-start.sh        # Start services
-│   │   ├── dev-team-stop.sh         # Stop services
-│   │   ├── dev-team-upgrade.sh      # Upgrade components
-│   │   └── dev-team-uninstall.sh    # Uninstall
+│   │   ├── aiteamforge-doctor.sh       # Health check
+│   │   ├── aiteamforge-status.sh       # Status display
+│   │   ├── aiteamforge-start.sh        # Start services
+│   │   ├── aiteamforge-stop.sh         # Stop services
+│   │   ├── aiteamforge-upgrade.sh      # Upgrade components
+│   │   └── aiteamforge-uninstall.sh    # Uninstall
 │   ├── installers/                  # Installer modules
 │   │   ├── install-team.sh          # Team installer
 │   │   ├── install-shell-env.sh     # Shell environment
@@ -206,8 +206,8 @@ $(brew --prefix)/opt/dev-team/libexec/
 ### Working Directory
 
 ```
-~/dev-team/
-├── .dev-team-config                 # Installation marker
+~/aiteamforge/
+├── .aiteamforge-config                 # Installation marker
 ├── config.json                      # User configuration
 ├── teams/                           # Team-specific files
 │   ├── ios/
@@ -258,9 +258,9 @@ $(brew --prefix)/opt/dev-team/libexec/
 ### Data Flow
 
 ```
-User runs: dev-team setup
+User runs: aiteamforge setup
          ↓
-    Setup Wizard (dev-team-setup.sh)
+    Setup Wizard (aiteamforge-setup.sh)
          ↓
     ┌────────────────────┐
     │ Stage 1: Check Deps│
@@ -306,7 +306,7 @@ User runs: dev-team setup
 ### Component Dependencies
 
 ```
-dev-team CLI
+aiteamforge CLI
     ↓
     ├── Commands (doctor, status, start, stop, etc.)
     │   ├── Read config.json
@@ -363,13 +363,13 @@ dev-team CLI
 - iTerm2 Integration (yes/no)
 
 **Stage 5: Configuration Generation**
-- Creates `~/.dev-team/config.json`
+- Creates `~/.aiteamforge/config.json`
 - Records machine identity, teams, features, paths, timestamp
 
 **Stage 6: Installation**
 - Runs installer modules in sequence
 - Shows progress with LCARS-style UI
-- Logs output to `~/dev-team/logs/install.log`
+- Logs output to `~/aiteamforge/logs/install.log`
 - Continues on installer failures (non-fatal)
 
 **Stage 7: Summary**
@@ -394,12 +394,12 @@ Each installer module:
 # install-example.sh
 
 install_example() {
-    local config_file="${1:-$HOME/.dev-team/config.json}"
+    local config_file="${1:-$HOME/.aiteamforge/config.json}"
 
     print_section "Installing Example Component"
 
     # Check if already installed
-    if [ -f "$HOME/dev-team/example/.installed" ]; then
+    if [ -f "$HOME/aiteamforge/example/.installed" ]; then
         print_warning "Already installed, skipping"
         return 0
     fi
@@ -408,7 +408,7 @@ install_example() {
     # ...
 
     # Mark as installed
-    touch "$HOME/dev-team/example/.installed"
+    touch "$HOME/aiteamforge/example/.installed"
 
     print_success "Example component installed"
     return 0
@@ -424,9 +424,9 @@ fi
 
 ## Lifecycle Commands
 
-### dev-team start
+### aiteamforge start
 
-**Purpose:** Start dev-team services and team environments
+**Purpose:** Start aiteamforge services and team environments
 
 **What it does:**
 1. Reads `config.json` to determine enabled features
@@ -435,14 +435,14 @@ fi
 4. Starts team-specific environments (if team specified)
 
 **Team startup:**
-- Calls `~/dev-team/<team>-startup.sh`
+- Calls `~/aiteamforge/<team>-startup.sh`
 - Opens iTerm2 windows/tabs (if iTerm2 integration enabled)
 - Initializes kanban board state
 - Starts team-specific services
 
-### dev-team stop
+### aiteamforge stop
 
-**Purpose:** Stop dev-team services and close team environments
+**Purpose:** Stop aiteamforge services and close team environments
 
 **What it does:**
 1. Stops team-specific environments
@@ -450,7 +450,7 @@ fi
 3. Stops LCARS server
 4. Saves kanban board state
 
-### dev-team doctor
+### aiteamforge doctor
 
 **Purpose:** Comprehensive health check and diagnostics
 
@@ -466,7 +466,7 @@ fi
 - ⚠ Warn (yellow) - Non-critical issue
 - ✗ Fail (red) - Critical issue
 
-### dev-team status
+### aiteamforge status
 
 **Purpose:** Show current environment status
 
@@ -477,7 +477,7 @@ fi
 - Kanban summary (items in progress)
 - Fleet Monitor status
 
-### dev-team upgrade
+### aiteamforge upgrade
 
 **Purpose:** Upgrade working directory components
 
@@ -496,7 +496,7 @@ fi
 
 ### Configuration Files
 
-**1. User Configuration (`~/.dev-team/config.json`)**
+**1. User Configuration (`~/.aiteamforge/config.json`)**
 ```json
 {
   "version": "1.0.0",
@@ -514,8 +514,8 @@ fi
     "iterm_integration": false
   },
   "paths": {
-    "install_dir": "/Users/johndoe/dev-team",
-    "config_dir": "/Users/johndoe/.dev-team"
+    "install_dir": "/Users/johndoe/aiteamforge",
+    "config_dir": "/Users/johndoe/.aiteamforge"
   },
   "installed_at": "2026-02-17T10:30:00Z"
 }
@@ -533,7 +533,7 @@ TEAM_BREW_DEPS=("swiftlint" "xcodegen")
 TEAM_AGENTS=("picard" "beverly" "data")
 ```
 
-**3. Fleet Monitor Configuration (`~/dev-team/fleet-monitor/config.json`)**
+**3. Fleet Monitor Configuration (`~/aiteamforge/fleet-monitor/config.json`)**
 ```json
 {
   "mode": "server",
@@ -546,18 +546,18 @@ TEAM_AGENTS=("picard" "beverly" "data")
 }
 ```
 
-**4. Claude Code Settings (`~/dev-team/claude/settings.json`)**
+**4. Claude Code Settings (`~/aiteamforge/claude/settings.json`)**
 ```json
 {
   "hooks": {
-    "SessionStart": "~/dev-team/kanban-hooks/kanban-session-start.py",
-    "PostToolUse": "~/dev-team/kanban-hooks/kanban-hook.py",
-    "Stop": "~/dev-team/kanban-hooks/kanban-stop.py"
+    "SessionStart": "~/aiteamforge/kanban-hooks/kanban-session-start.py",
+    "PostToolUse": "~/aiteamforge/kanban-hooks/kanban-hook.py",
+    "Stop": "~/aiteamforge/kanban-hooks/kanban-stop.py"
   },
   "mcpServers": {
     "kanban": {
       "command": "python3",
-      "args": ["~/dev-team/kanban-hooks/kanban_mcp_server.py"]
+      "args": ["~/aiteamforge/kanban-hooks/kanban_mcp_server.py"]
     }
   }
 }
@@ -573,7 +573,7 @@ Templates in `share/templates/` are processed by installers:
 **Example template processing:**
 ```bash
 # Template: share/templates/team-startup.sh.template
-# Becomes: ~/dev-team/ios-startup.sh
+# Becomes: ~/aiteamforge/ios-startup.sh
 
 # Variables available:
 # - ${TEAM_ID}
@@ -590,32 +590,32 @@ Templates in `share/templates/` are processed by installers:
 
 1. Create `share/teams/newteam.conf`
 2. Add entry to `share/teams/registry.json`
-3. Run `dev-team setup` and select new team
+3. Run `aiteamforge setup` and select new team
 
 No code changes required - team installer reads configuration.
 
 ### Adding New Features
 
 1. Create installer module: `libexec/installers/install-newfeature.sh`
-2. Add feature prompt in `dev-team-setup.sh` Stage 4
-3. Add installer call in `dev-team-setup.sh` Stage 6
+2. Add feature prompt in `aiteamforge-setup.sh` Stage 4
+3. Add installer call in `aiteamforge-setup.sh` Stage 6
 4. Update `config.json` schema to include feature flag
 
 ### Custom Commands
 
 Add new commands in `libexec/commands/`:
 ```bash
-# libexec/commands/dev-team-mycommand.sh
+# libexec/commands/aiteamforge-mycommand.sh
 #!/bin/bash
 # Implementation
 ```
 
-Update `bin/dev-team-cli.sh` dispatcher:
+Update `bin/aiteamforge-cli.sh` dispatcher:
 ```bash
 case "${1:-}" in
   mycommand)
     shift
-    exec "${DEV_TEAM_HOME}/libexec/commands/dev-team-mycommand.sh" "$@"
+    exec "${AITEAMFORGE_HOME}/libexec/commands/aiteamforge-mycommand.sh" "$@"
     ;;
 esac
 ```
@@ -625,7 +625,7 @@ esac
 Create custom installer for special setup:
 ```bash
 # ~/my-custom-installer.sh
-source "$(brew --prefix)/opt/dev-team/libexec/ui/lib/wizard-ui.sh"
+source "$(brew --prefix)/opt/aiteamforge/libexec/ui/lib/wizard-ui.sh"
 
 print_header "My Custom Setup"
 # ... installation logic ...

@@ -1,5 +1,5 @@
 {
-  "version": "1.0.0",
+  "version": "1.3.0",
   "teams": [
     {
       "id": "academy",
@@ -88,6 +88,17 @@
       "icon": "🏥",
       "order": 8,
       "recommended": false
+    },
+    {
+      "id": "finance",
+      "name": "Ferengi Commerce Authority",
+      "category": "personal",
+      "description": "Personal finance management and automation",
+      "color": "#FFD700",
+      "theme": "Star Trek: Deep Space Nine - Ferengi",
+      "icon": "💰",
+      "order": 9,
+      "recommended": false
     }
   ],
   "categories": {
@@ -110,6 +121,11 @@
       "name": "Strategic",
       "description": "Planning, legal, and research teams",
       "order": 4
+    },
+    "personal": {
+      "name": "Personal",
+      "description": "Personal productivity and life management teams",
+      "order": 5
     }
   }
 }

@@ -37,6 +37,8 @@
         <string>{{HOME_DIR}}</string>
         <key>PORT</key>
         <string>{{FLEET_PORT}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
     </dict>
 
     <key>ThrottleInterval</key>

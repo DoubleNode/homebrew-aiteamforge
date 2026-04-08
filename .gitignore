@@ -18,6 +18,11 @@
 *.swo
 *~
 
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
 # Temporary files
 *.tmp
 *.log

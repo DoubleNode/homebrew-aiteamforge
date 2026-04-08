@@ -9,7 +9,7 @@ This file contains team-specific overrides and additions to the global CLAUDE.md
 ## Team Repository
 
 **Primary Repository:**
-- Path: `{{DEV_TEAM_DIR}}/[team-repo-path]`
+- Path: `{{AITEAMFORGE_DIR}}/[team-repo-path]`
 - Team: {{TEAM_NAME}}
 
 ---
@@ -52,10 +52,10 @@ This team has the following agent personas configured:
 
 ## Team Resources
 
-- **Documentation:** `{{DEV_TEAM_DIR}}/[team-slug]/docs/`
-- **Scripts:** `{{DEV_TEAM_DIR}}/[team-slug]/scripts/`
-- **Personas:** `{{DEV_TEAM_DIR}}/[team-slug]/personas/`
-- **Terminal Configs:** `{{DEV_TEAM_DIR}}/[team-slug]/terminals/`
+- **Documentation:** `{{AITEAMFORGE_DIR}}/[team-slug]/docs/`
+- **Scripts:** `{{AITEAMFORGE_DIR}}/[team-slug]/scripts/`
+- **Personas:** `{{AITEAMFORGE_DIR}}/[team-slug]/personas/`
+- **Terminal Configs:** `{{AITEAMFORGE_DIR}}/[team-slug]/terminals/`
 
 ---
 

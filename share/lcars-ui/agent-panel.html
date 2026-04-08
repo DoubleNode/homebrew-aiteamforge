@@ -56,33 +56,35 @@
         text-transform: uppercase;
         letter-spacing: 1px;
     }
-    .divider {
-        width: 100%;
-        height: 2px;
-        background: linear-gradient(90deg, transparent, var(--theme-color), transparent);
-        margin: 8px 0;
+    .amb-section {
+        text-align: center;
+        margin-bottom: 8px;
     }
-    .info-block {
-        width: 100%;
-        margin-bottom: 6px;
-    }
-    .info-label {
-        font-size: 10px;
-        color: var(--text-secondary);
-        text-transform: uppercase;
-        letter-spacing: 1px;
-    }
-    .info-value {
-        font-size: 13px;
-        color: var(--text-primary);
-        font-weight: 500;
-    }
-    .location {
+    .amb-handle {
         font-size: 11px;
         color: var(--text-secondary);
+        font-family: 'SF Mono', 'Menlo', monospace;
+        margin-bottom: 4px;
+    }
+    .badge-row {
+        display: flex;
+        flex-wrap: wrap;
+        justify-content: center;
+        gap: 8px;
+        margin-bottom: 4px;
+    }
+    .badge-item img {
+        width: 20px;
+        height: 20px;
+    }
+    .badge-names {
         text-align: center;
-        font-style: italic;
-        margin-bottom: 8px;
+        margin-top: 4px;
+    }
+    .badge-names div {
+        font-size: 9px;
+        color: var(--text-secondary);
+        line-height: 1.4;
     }
     .terminal-badge {
         display: inline-block;
@@ -93,27 +95,6 @@
         padding: 3px 10px;
         border-radius: 4px;
         margin-bottom: 12px;
-    }
-    .worktree-info {
-        width: 100%;
-        background: rgba(255,255,255,0.03);
-        border: 1px solid var(--border-color);
-        border-radius: 6px;
-        padding: 8px 10px;
-        margin-top: 8px;
-    }
-    .worktree-info .info-value {
-        font-family: 'SF Mono', 'Menlo', monospace;
-        font-size: 11px;
-    }
-    .status-dot {
-        display: inline-block;
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: #4caf50;
-        margin-right: 4px;
-        vertical-align: middle;
     }
     .waiting {
         text-align: center;
@@ -151,26 +132,12 @@
         </div>
         <div class="developer-name" id="developer"></div>
         <div class="role" id="role"></div>
-        <div class="location" id="location"></div>
+        <div class="amb-section" id="amb-section" style="display:none;">
+            <div class="amb-handle" id="amb-handle"></div>
+            <div class="badge-row" id="badges"></div>
+            <div class="badge-names" id="badge-names"></div>
+        </div>
         <span class="terminal-badge" id="terminal-badge"></span>
-        <div class="divider"></div>
-        <div class="info-block">
-            <div class="info-label">Team</div>
-            <div class="info-value" id="team-name"></div>
-        </div>
-        <div class="info-block">
-            <div class="info-label">Session</div>
-            <div class="info-value" id="session-desc"></div>
-        </div>
-        <div class="info-block">
-            <div class="info-label">Terminal</div>
-            <div class="info-value" id="terminal-desc"></div>
-        </div>
-        <div class="divider"></div>
-        <div class="worktree-info">
-            <div class="info-label"><span class="status-dot"></span>Worktree</div>
-            <div class="info-value" id="worktree"></div>
-        </div>
     </div>
     <div id="waiting" class="waiting">
         <div class="pulse"></div>
@@ -179,6 +146,13 @@
 <script>
     const params = new URLSearchParams(window.location.search);
     let currentDataStr = '';
+
+    // Sanitize text for defense-in-depth against XSS if values ever enter innerHTML
+    function sanitizeText(str) {
+        const div = document.createElement('div');
+        div.textContent = str;
+        return div.innerHTML;
+    }
 
     function applyData(data) {
         document.getElementById('waiting').style.display = 'none';
@@ -191,12 +165,49 @@
         document.title = (data.developer || 'Agent') + ' - ' + (data.team || '').charAt(0).toUpperCase() + (data.team || '').slice(1);
         document.getElementById('developer').textContent = data.developer || '';
         document.getElementById('role').textContent = data.role || '';
-        document.getElementById('location').textContent = data.location || '';
+
+        // AMB badges (optional — only shows for registered agents)
+        const ambSection = document.getElementById('amb-section');
+        const ambHandle = document.getElementById('amb-handle');
+        const badgesEl = document.getElementById('badges');
+        const badgeNamesEl = document.getElementById('badge-names');
+        if (data.amb_handle) {
+            ambHandle.textContent = '@' + data.amb_handle;
+            if (data.badges && data.badges.length > 0) {
+                badgesEl.textContent = '';
+                badgeNamesEl.textContent = '';
+                data.badges.slice(0, 8).forEach(b => {
+                    const safeEmoji = sanitizeText(b.emoji || '');
+                    const safeName = sanitizeText(b.name || '');
+                    const cp = [...(b.emoji || '')].map(c => {
+                        const hex = c.codePointAt(0).toString(16);
+                        return hex;
+                    }).filter(h => h !== 'fe0f').join('-');
+                    const img = document.createElement('img');
+                    img.className = 'badge-item';
+                    img.src = 'https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72/' + cp + '.png';
+                    img.alt = safeEmoji;
+                    img.title = safeName;
+                    badgesEl.appendChild(img);
+                    if (b.name) {
+                        const nameDiv = document.createElement('div');
+                        nameDiv.textContent = safeName;
+                        badgeNamesEl.appendChild(nameDiv);
+                    }
+                });
+            } else {
+                badgesEl.textContent = '';
+                badgeNamesEl.textContent = '';
+            }
+            ambSection.style.display = 'block';
+        } else {
+            ambSection.style.display = 'none';
+            ambHandle.textContent = '';
+            badgesEl.textContent = '';
+            badgeNamesEl.textContent = '';
+        }
+
         document.getElementById('terminal-badge').textContent = data.terminal || '';
-        document.getElementById('team-name').textContent = (data.team || '').charAt(0).toUpperCase() + (data.team || '').slice(1);
-        document.getElementById('session-desc').textContent = data.session_desc || '';
-        document.getElementById('terminal-desc').textContent = data.terminal_desc || '';
-        document.getElementById('worktree').textContent = data.worktree || 'develop';
 
         if (data.avatar && data.team) {
             const img = document.getElementById('avatar');
@@ -217,13 +228,10 @@
             team: params.get('team'),
             developer: params.get('developer'),
             role: params.get('role'),
-            location: params.get('location'),
             terminal: params.get('terminal'),
-            terminal_desc: params.get('terminal_desc'),
-            session_desc: params.get('session_desc'),
             theme: params.get('theme'),
             avatar: params.get('avatar'),
-            worktree: params.get('worktree')
+            amb_handle: params.get('amb_handle')
         };
         currentDataStr = JSON.stringify(data);
         applyData(data);

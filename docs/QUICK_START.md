@@ -1,12 +1,12 @@
 # Quick Start Guide
 
-**Get up and running with Dev-Team in 5 minutes**
+**Get up and running with AITeamForge in 5 minutes**
 
 ---
 
 ## Prerequisites
 
-Before installing Dev-Team, you'll need:
+Before installing AITeamForge, you'll need:
 
 - **macOS** Big Sur (11.0) or later
 - **Homebrew** package manager ([install here](https://brew.sh))
@@ -16,19 +16,19 @@ Before installing Dev-Team, you'll need:
 
 ## Installation
 
-### Step 1: Install Dev-Team
+### Step 1: Install AITeamForge
 
 ```bash
-brew tap DoubleNode/dev-team
-brew install dev-team
+brew tap DoubleNode/aiteamforge
+brew install aiteamforge
 ```
 
-This installs the Dev-Team framework and its dependencies (Python 3, Node.js, jq, GitHub CLI, Git).
+This installs the AITeamForge framework and its dependencies (Python 3, Node.js, jq, GitHub CLI, Git).
 
 ### Step 2: Run Setup Wizard
 
 ```bash
-dev-team setup
+aiteamforge setup
 ```
 
 The setup wizard will guide you through:
@@ -42,7 +42,7 @@ The setup wizard will guide you through:
 ### Step 3: Verify Installation
 
 ```bash
-dev-team doctor
+aiteamforge doctor
 ```
 
 This runs a comprehensive health check and reports any issues.
@@ -64,12 +64,12 @@ The setup wizard will ask you to:
    - **Claude Code Config** - AI agent configuration (recommended: yes)
    - **iTerm2 Integration** - Terminal automation (recommended: no, optional)
 
-**Tip:** You can always re-run `dev-team setup` later to add more teams or features.
+**Tip:** You can always re-run `aiteamforge setup` later to add more teams or features.
 
 ### After Setup
 
 You'll have:
-- A `~/dev-team/` directory with all configurations
+- A `~/aiteamforge/` directory with all configurations
 - Shell aliases for common commands
 - Team-specific directories and scripts
 - LCARS Kanban system running (if selected)
@@ -91,7 +91,7 @@ This loads the new shell environment.
 ### 2. Check Status
 
 ```bash
-dev-team status
+aiteamforge status
 ```
 
 Shows what's installed and running.
@@ -100,10 +100,10 @@ Shows what's installed and running.
 
 ```bash
 # Start a specific team
-dev-team start ios
+aiteamforge start ios
 
 # Or start all teams
-dev-team start
+aiteamforge start
 ```
 
 This launches team-specific tools, terminals, and services.
@@ -144,10 +144,10 @@ cc                   # Launch Claude Code in current directory
 
 ```bash
 # Install iOS team
-dev-team setup  # Select "iOS Development"
+aiteamforge setup  # Select "iOS Development"
 
 # Start iOS environment
-dev-team start ios
+aiteamforge start ios
 
 # Use iOS-specific agents
 ios-picard     # Captain Picard - Lead Feature Developer
@@ -158,10 +158,10 @@ ios-beverly    # Dr. Crusher - Bugfix Specialist
 
 ```bash
 # Install multiple teams
-dev-team setup  # Select "iOS", "Android", "Firebase"
+aiteamforge setup  # Select "iOS", "Android", "Firebase"
 
 # Start all teams
-dev-team start
+aiteamforge start
 
 # Each team gets its own terminals, tools, and kanban board
 ```
@@ -170,10 +170,10 @@ dev-team start
 
 ```bash
 # On main machine (server)
-dev-team setup  # Enable "Fleet Monitor" as server
+aiteamforge setup  # Enable "Fleet Monitor" as server
 
 # On secondary machines (clients)
-dev-team setup  # Enable "Fleet Monitor" as client
+aiteamforge setup  # Enable "Fleet Monitor" as client
 
 # View fleet status
 open http://localhost:3000  # Fleet Monitor dashboard
@@ -186,7 +186,7 @@ open http://localhost:3000  # Fleet Monitor dashboard
 ### Run Diagnostics
 
 ```bash
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 ```
 
 Shows detailed information about your installation.
@@ -195,12 +195,12 @@ Shows detailed information about your installation.
 
 ```bash
 # View available docs
-ls ~/dev-team/docs/
+ls ~/aiteamforge/docs/
 
 # Key documents
-~/dev-team/docs/INSTALLATION.md      # Complete installation guide
-~/dev-team/docs/USER_GUIDE.md        # Day-to-day usage
-~/dev-team/docs/TROUBLESHOOTING.md   # Problem solving
+~/aiteamforge/docs/INSTALLATION.md      # Complete installation guide
+~/aiteamforge/docs/USER_GUIDE.md        # Day-to-day usage
+~/aiteamforge/docs/TROUBLESHOOTING.md   # Problem solving
 ```
 
 ### Common Issues
@@ -211,8 +211,8 @@ ls ~/dev-team/docs/
 lsof -i :8082
 
 # Restart LCARS
-dev-team stop
-dev-team start
+aiteamforge stop
+aiteamforge start
 ```
 
 **Claude Code not working?**
@@ -230,15 +230,15 @@ claude --version
 source ~/.zshrc
 
 # Verify installation
-which dev-team
+which aiteamforge
 ```
 
 ---
 
 ## What's Next?
 
-- **Read the [User Guide](USER_GUIDE.md)** - Learn all dev-team commands and workflows
-- **Explore [Architecture](ARCHITECTURE.md)** - Understand how dev-team works
+- **Read the [User Guide](USER_GUIDE.md)** - Learn all aiteamforge commands and workflows
+- **Explore [Architecture](ARCHITECTURE.md)** - Understand how aiteamforge works
 - **Set up [Multi-Machine](MULTI_MACHINE.md)** - Connect multiple development machines
 - **Check [Team Reference](TEAM_REFERENCE.md)** - Learn about available teams
 
@@ -246,18 +246,18 @@ which dev-team
 
 ## Uninstalling
 
-If you need to remove dev-team:
+If you need to remove aiteamforge:
 
 ```bash
 # Remove configuration
-dev-team uninstall
+aiteamforge uninstall
 
 # Remove framework
-brew uninstall dev-team
-brew untap DoubleNode/dev-team
+brew uninstall aiteamforge
+brew untap DoubleNode/aiteamforge
 ```
 
-Your `~/dev-team/` directory will be preserved. Delete it manually if desired.
+Your `~/aiteamforge/` directory will be preserved. Delete it manually if desired.
 
 ---
 

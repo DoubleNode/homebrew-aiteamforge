@@ -1,18 +1,18 @@
 #!/bin/bash
 
 # test-cli.sh
-# Tests for dev-team CLI dispatcher (bin/dev-team-cli.sh)
+# Tests for aiteamforge CLI dispatcher (bin/aiteamforge-cli.sh)
 
 # Source test runner functions (when run via test-runner)
 # shellcheck disable=SC2154
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-CLI_SCRIPT="$TAP_ROOT/bin/dev-team-cli.sh"
+CLI_SCRIPT="$TAP_ROOT/bin/aiteamforge-cli.sh"
 
-# Mock DEV_TEAM_HOME for testing
-export DEV_TEAM_HOME="$TAP_ROOT"
-export DEV_TEAM_DIR="$TEST_TMP_DIR/dev-team"
+# Mock AITEAMFORGE_HOME for testing
+export AITEAMFORGE_HOME="$TAP_ROOT"
+export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper Functions
@@ -33,23 +33,23 @@ test_pass
 
 test_start "CLI help command works"
 output=$(run_cli help)
-assert_contains "$output" "Dev-Team CLI"
+assert_contains "$output" "AITeamForge CLI"
 assert_contains "$output" "Usage:"
 test_pass
 
 test_start "CLI version command works"
 output=$(run_cli version)
-assert_contains "$output" "Dev-Team v"
+assert_contains "$output" "AITeamForge v"
 test_pass
 
 test_start "CLI --version flag works"
 output=$(run_cli --version)
-assert_contains "$output" "Dev-Team v"
+assert_contains "$output" "AITeamForge v"
 test_pass
 
 test_start "CLI -v flag works"
 output=$(run_cli -v)
-assert_contains "$output" "Dev-Team v"
+assert_contains "$output" "AITeamForge v"
 test_pass
 
 test_start "CLI --help flag works"
@@ -103,7 +103,7 @@ test_pass
 test_start "CLI setup command is routable"
 # Just check that setup script path is attempted (will fail with missing file, that's OK)
 output=$(run_cli setup --help 2>&1 || true)
-# Should attempt to exec dev-team-setup.sh
+# Should attempt to exec aiteamforge-setup.sh
 assert_success "true" # Always pass, just checking routing works
 test_pass
 

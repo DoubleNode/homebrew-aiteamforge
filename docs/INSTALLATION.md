@@ -1,6 +1,6 @@
 # Installation Guide
 
-**Complete installation instructions for Dev-Team environment**
+**Complete installation instructions for AITeamForge environment**
 
 ---
 
@@ -39,7 +39,7 @@
 
 ## Prerequisites
 
-Dev-Team requires several tools to be installed. The setup wizard can install most of these automatically via Homebrew.
+AITeamForge requires several tools to be installed. The setup wizard can install most of these automatically via Homebrew.
 
 ### Required Tools
 
@@ -109,29 +109,29 @@ If you plan to use Fleet Monitor across multiple machines:
 ### Step 1: Add Homebrew Tap
 
 ```bash
-brew tap DoubleNode/dev-team
+brew tap DoubleNode/aiteamforge
 ```
 
-This adds the Dev-Team formula repository to Homebrew.
+This adds the AITeamForge formula repository to Homebrew.
 
-### Step 2: Install Dev-Team
+### Step 2: Install AITeamForge
 
 ```bash
-brew install dev-team
+brew install aiteamforge
 ```
 
 **What this does:**
-- Downloads the dev-team framework
+- Downloads the aiteamforge framework
 - Installs required dependencies (Python, Node, jq, gh, Git)
 - Places executables in `/opt/homebrew/bin/` (or `/usr/local/bin/` on Intel)
-- Installs framework files to `/opt/homebrew/opt/dev-team/libexec/`
+- Installs framework files to `/opt/homebrew/opt/aiteamforge/libexec/`
 
 **Installation takes 2-5 minutes** depending on how many dependencies need installing.
 
 ### Step 3: Run Setup Wizard
 
 ```bash
-dev-team setup
+aiteamforge setup
 ```
 
 The interactive wizard will:
@@ -168,7 +168,7 @@ The interactive wizard will:
 - **iTerm2 Integration** - Terminal automation (recommended: no, optional)
 
 #### 3.5 Configuration Generation
-- Creates `~/.dev-team/config.json` with your selections
+- Creates `~/.aiteamforge/config.json` with your selections
 - Records machine identity, teams, features, paths, timestamp
 - This config drives all subsequent installation steps
 
@@ -195,12 +195,12 @@ The wizard runs these installers in order:
 source ~/.zshrc
 ```
 
-This loads the new shell environment with dev-team aliases and helpers.
+This loads the new shell environment with aiteamforge aliases and helpers.
 
 ### Step 5: Verify Installation
 
 ```bash
-dev-team doctor
+aiteamforge doctor
 ```
 
 Runs comprehensive health checks and reports issues.
@@ -209,26 +209,26 @@ Runs comprehensive health checks and reports issues.
 
 ## Migration from Manual Installation
 
-If you have an existing manual dev-team installation in `~/dev-team/`:
+If you have an existing manual aiteamforge installation in `~/aiteamforge/`:
 
 ### Option 1: Fresh Install (Recommended)
 
 1. **Backup existing installation:**
    ```bash
-   mv ~/dev-team ~/dev-team-backup-$(date +%Y%m%d)
+   mv ~/aiteamforge ~/aiteamforge-backup-$(date +%Y%m%d)
    ```
 
 2. **Install via Homebrew:**
    ```bash
-   brew tap DoubleNode/dev-team
-   brew install dev-team
-   dev-team setup
+   brew tap DoubleNode/aiteamforge
+   brew install aiteamforge
+   aiteamforge setup
    ```
 
 3. **Migrate data:**
    ```bash
    # Copy kanban boards
-   cp ~/dev-team-backup-*/kanban/*.json ~/dev-team/kanban/
+   cp ~/aiteamforge-backup-*/kanban/*.json ~/aiteamforge/kanban/
 
    # Copy team-specific configs (if customized)
    # Review and merge manually
@@ -240,22 +240,22 @@ If you have an existing manual dev-team installation in `~/dev-team/`:
 
 1. **Install framework without setup:**
    ```bash
-   brew tap DoubleNode/dev-team
-   brew install dev-team
+   brew tap DoubleNode/aiteamforge
+   brew install aiteamforge
    ```
 
 2. **Create compatibility marker:**
    ```bash
-   echo '{"version":"1.0.0","migrated":true}' > ~/.dev-team/config.json
+   echo '{"version":"1.0.0","migrated":true}' > ~/.aiteamforge/config.json
    ```
 
 3. **Update scripts to use framework:**
-   - Replace script paths with `$(brew --prefix)/opt/dev-team/libexec/`
+   - Replace script paths with `$(brew --prefix)/opt/aiteamforge/libexec/`
    - Update sourced files in `.zshrc`
 
 4. **Verify:**
    ```bash
-   dev-team doctor
+   aiteamforge doctor
    ```
 
 **Recommendation:** Use Option 1 (fresh install) unless you have extensive customizations.
@@ -268,17 +268,17 @@ If you have an existing manual dev-team installation in `~/dev-team/`:
 
 ```bash
 # Check version
-dev-team --version
+aiteamforge --version
 
 # Run health check
-dev-team doctor
+aiteamforge doctor
 ```
 
 ### Comprehensive Verification
 
 ```bash
 # Verbose diagnostics
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 ```
 
 **Checks performed:**
@@ -291,7 +291,7 @@ dev-team doctor --verbose
 ### Expected Output
 
 ```
-Dev-Team Health Check v1.0.0
+AITeamForge Health Check v1.0.0
 ════════════════════════════════════════════════════════════════
 
 DEPENDENCIES
@@ -307,13 +307,13 @@ DEPENDENCIES
 
 FRAMEWORK
 ────────────────────────────────────────────────────────────────
-  ✓ Framework installed at /opt/homebrew/opt/dev-team/libexec
+  ✓ Framework installed at /opt/homebrew/opt/aiteamforge/libexec
   ✓ Core scripts present (7/7)
   ✓ Core directories present (5/5)
 
 CONFIGURATION
 ────────────────────────────────────────────────────────────────
-  ✓ Working directory exists (~/dev-team)
+  ✓ Working directory exists (~/aiteamforge)
   ✓ Configuration file exists
   ✓ Templates copied
 
@@ -324,7 +324,7 @@ SERVICES
 
 PERMISSIONS
 ────────────────────────────────────────────────────────────────
-  ✓ Write access to ~/dev-team
+  ✓ Write access to ~/aiteamforge
   ✓ Execute permissions on core scripts
 
 ════════════════════════════════════════════════════════════════
@@ -335,13 +335,13 @@ RESULT: All critical checks passed
 
 ```bash
 # Check dependencies only
-dev-team doctor --check dependencies
+aiteamforge doctor --check dependencies
 
 # Check services only
-dev-team doctor --check services
+aiteamforge doctor --check services
 
 # Check configuration only
-dev-team doctor --check config
+aiteamforge doctor --check config
 ```
 
 ---
@@ -353,15 +353,15 @@ dev-team doctor --check config
 The setup wizard adds this to your `~/.zshrc`:
 
 ```bash
-# Dev-Team Environment
-if [ -f "$HOME/dev-team/shell-env.sh" ]; then
-    source "$HOME/dev-team/shell-env.sh"
+# AITeamForge Environment
+if [ -f "$HOME/aiteamforge/shell-env.sh" ]; then
+    source "$HOME/aiteamforge/shell-env.sh"
 fi
 ```
 
 **Manual verification:**
 ```bash
-grep -A 2 "Dev-Team" ~/.zshrc
+grep -A 2 "AITeamForge" ~/.zshrc
 ```
 
 ### LCARS Kanban Service
@@ -386,10 +386,10 @@ If you installed Claude Code integration, verify agent configs:
 
 ```bash
 # List configured agents
-ls ~/dev-team/claude/agents/
+ls ~/aiteamforge/claude/agents/
 
 # Check Claude Code settings
-cat ~/dev-team/claude/settings.json
+cat ~/aiteamforge/claude/settings.json
 ```
 
 ### Fleet Monitor (Multi-Machine Only)
@@ -457,7 +457,7 @@ python3 --version
 lsof -i :8082
 
 # Kill the process or use different port
-# Edit ~/dev-team/config.json and change lcars_port
+# Edit ~/aiteamforge/config.json and change lcars_port
 ```
 
 ### Issue: Claude Code Authentication Failed
@@ -480,12 +480,12 @@ claude auth status
 
 **Solution:**
 ```bash
-# Check if dev-team is properly installed
-which dev-team
-ls -la $(brew --prefix)/opt/dev-team/
+# Check if aiteamforge is properly installed
+which aiteamforge
+ls -la $(brew --prefix)/opt/aiteamforge/
 
 # Reinstall if needed
-brew reinstall dev-team
+brew reinstall aiteamforge
 ```
 
 ### Issue: Missing Dependencies
@@ -498,7 +498,7 @@ brew reinstall dev-team
 brew install python@3 node jq gh git
 
 # Re-run setup
-dev-team setup
+aiteamforge setup
 ```
 
 ---
@@ -507,23 +507,23 @@ dev-team setup
 
 ### Full Uninstall
 
-To completely remove dev-team:
+To completely remove aiteamforge:
 
 ```bash
 # 1. Remove configuration and services
-dev-team uninstall
+aiteamforge uninstall
 
 # 2. Remove framework
-brew uninstall dev-team
+brew uninstall aiteamforge
 
 # 3. Remove tap
-brew untap DoubleNode/dev-team
+brew untap DoubleNode/aiteamforge
 
 # 4. (Optional) Delete working directory
-rm -rf ~/dev-team
+rm -rf ~/aiteamforge
 
 # 5. (Optional) Remove shell integration
-# Edit ~/.zshrc and remove Dev-Team section
+# Edit ~/.zshrc and remove AITeamForge section
 ```
 
 ### Partial Uninstall
@@ -532,10 +532,10 @@ To remove only specific teams or features:
 
 ```bash
 # Re-run setup and deselect features
-dev-team setup
+aiteamforge setup
 
 # Or manually remove team directories
-rm -rf ~/dev-team/<team-name>
+rm -rf ~/aiteamforge/<team-name>
 ```
 
 ### Preserving Data
@@ -544,10 +544,10 @@ If you want to uninstall but keep your data:
 
 ```bash
 # Backup first
-tar -czf ~/dev-team-backup.tar.gz ~/dev-team/
+tar -czf ~/aiteamforge-backup.tar.gz ~/aiteamforge/
 
-# Uninstall framework only (keeps ~/dev-team/)
-brew uninstall dev-team
+# Uninstall framework only (keeps ~/aiteamforge/)
+brew uninstall aiteamforge
 ```
 
 ---
@@ -558,14 +558,14 @@ brew uninstall dev-team
 
 ```bash
 # Install to custom location
-dev-team setup --install-dir /opt/dev-team
+aiteamforge setup --install-dir /opt/aiteamforge
 ```
 
 ### Non-Interactive Installation
 
 ```bash
 # Create config file first
-cat > ~/.dev-team/config.json <<EOF
+cat > ~/.aiteamforge/config.json <<EOF
 {
   "machine": {"name": "server-01", "user": "Deploy Bot"},
   "teams": ["ios", "firebase"],
@@ -580,14 +580,14 @@ cat > ~/.dev-team/config.json <<EOF
 EOF
 
 # Run non-interactive setup
-dev-team setup --non-interactive
+aiteamforge setup --non-interactive
 ```
 
 ### Dry Run (Preview Changes)
 
 ```bash
 # Preview what will be installed without making changes
-dev-team setup --dry-run
+aiteamforge setup --dry-run
 ```
 
 ---
@@ -603,4 +603,4 @@ After successful installation:
 
 ---
 
-**Installation Support:** Run `dev-team doctor --verbose` for detailed diagnostics, or check [Troubleshooting](TROUBLESHOOTING.md) for common issues.
+**Installation Support:** Run `aiteamforge doctor --verbose` for detailed diagnostics, or check [Troubleshooting](TROUBLESHOOTING.md) for common issues.

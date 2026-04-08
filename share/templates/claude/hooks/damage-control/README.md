@@ -169,7 +169,7 @@ Installed automatically by `install-claude-config.sh`:
 
 ```bash
 # Via setup wizard
-dev-team-setup
+aiteamforge-setup
 
 # Or directly
 ./libexec/installers/install-claude-config.sh
@@ -367,7 +367,7 @@ Exit code: 0
 - [Claude Code Settings Documentation](../README.md)
 - [Pattern Configuration Guide](patterns.yaml)
 - [Test Suite](test-damage-control.py)
-- [Dev-Team Security Guide](../../../../../docs/SECURITY-CREDENTIAL-STORAGE.md)
+- [AITeamForge Security Guide](../../../../../docs/SECURITY-CREDENTIAL-STORAGE.md)
 
 ---
 

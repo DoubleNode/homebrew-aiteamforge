@@ -38,7 +38,7 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 # Keychain service and account identifiers
-KEYCHAIN_SERVICE = "dev-team.credential-store"
+KEYCHAIN_SERVICE = "aiteamforge.credential-store"
 KEYCHAIN_ACCOUNT = "master-passphrase"
 
 

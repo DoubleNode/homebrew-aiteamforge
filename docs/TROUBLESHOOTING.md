@@ -1,12 +1,12 @@
 # Troubleshooting Guide
 
-**Problem solving guide for common Dev-Team issues**
+**Problem solving guide for common AITeamForge issues**
 
 ---
 
 ## Table of Contents
 
-- [Using dev-team doctor](#using-dev-team-doctor)
+- [Using aiteamforge doctor](#using-aiteamforge-doctor)
 - [Installation Issues](#installation-issues)
 - [Service Issues](#service-issues)
 - [Shell Integration Issues](#shell-integration-issues)
@@ -18,24 +18,24 @@
 
 ---
 
-## Using dev-team doctor
+## Using aiteamforge doctor
 
-The `dev-team doctor` command is your first tool for diagnosing issues.
+The `aiteamforge doctor` command is your first tool for diagnosing issues.
 
 ### Basic Usage
 
 ```bash
 # Standard health check
-dev-team doctor
+aiteamforge doctor
 
 # Verbose diagnostics
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 
 # Check specific component
-dev-team doctor --check dependencies
-dev-team doctor --check services
-dev-team doctor --check config
-dev-team doctor --check permissions
+aiteamforge doctor --check dependencies
+aiteamforge doctor --check services
+aiteamforge doctor --check config
+aiteamforge doctor --check permissions
 ```
 
 ### Interpreting Results
@@ -138,24 +138,24 @@ sudo chown -R $(whoami) /opt/homebrew/
 
 **Symptoms:**
 - Wizard exits immediately
-- Error: "DEV_TEAM_HOME not set"
+- Error: "AITEAMFORGE_HOME not set"
 
 **Solution:**
 
-1. **Verify dev-team is installed:**
+1. **Verify aiteamforge is installed:**
    ```bash
-   which dev-team
-   ls -la $(brew --prefix)/opt/dev-team/
+   which aiteamforge
+   ls -la $(brew --prefix)/opt/aiteamforge/
    ```
 
 2. **Reinstall if needed:**
    ```bash
-   brew reinstall dev-team
+   brew reinstall aiteamforge
    ```
 
 3. **Run with explicit path:**
    ```bash
-   $(brew --prefix)/opt/dev-team/libexec/bin/dev-team-setup.sh
+   $(brew --prefix)/opt/aiteamforge/libexec/bin/aiteamforge-setup.sh
    ```
 
 ### Issue: Dependency Installation Fails
@@ -184,7 +184,7 @@ Error: Failed to install <package>
 
 4. **Retry setup:**
    ```bash
-   dev-team setup
+   aiteamforge setup
    ```
 
 ---
@@ -215,16 +215,16 @@ ps aux | grep "server.py"
 kill -9 <PID>
 
 # Or use different port
-# Edit ~/dev-team/config.json
+# Edit ~/aiteamforge/config.json
 # Change lcars_port to 8083
 # Restart LCARS
-dev-team restart lcars
+aiteamforge restart lcars
 ```
 
 **If no process using port:**
 ```bash
 # Start manually to see errors
-cd ~/dev-team/lcars-ui
+cd ~/aiteamforge/lcars-ui
 python3 server.py
 
 # Check for missing dependencies
@@ -235,7 +235,7 @@ pip3 install -r requirements.txt  # if requirements.txt exists
 ```bash
 # Use system python3
 which python3
-/opt/homebrew/bin/python3 ~/dev-team/lcars-ui/server.py
+/opt/homebrew/bin/python3 ~/aiteamforge/lcars-ui/server.py
 ```
 
 ### LCARS Server Running But Not Accessible
@@ -251,18 +251,18 @@ which python3
 netstat -an | grep 8082
 
 # Check server logs
-tail -f ~/dev-team/logs/lcars.log
+tail -f ~/aiteamforge/logs/lcars.log
 ```
 
 **Solutions:**
 
 ```bash
 # Verify server is bound to correct interface
-# Edit ~/dev-team/lcars-ui/server.py
+# Edit ~/aiteamforge/lcars-ui/server.py
 # Change to: server_address = ('0.0.0.0', 8082)
 
 # Restart LCARS
-dev-team restart lcars
+aiteamforge restart lcars
 
 # Try localhost explicitly
 curl http://127.0.0.1:8082/health
@@ -281,7 +281,7 @@ curl http://127.0.0.1:8082/health
 lsof -i :3000
 
 # Check Fleet Monitor logs
-tail -f ~/dev-team/logs/fleet-monitor.log
+tail -f ~/aiteamforge/logs/fleet-monitor.log
 ```
 
 **Solutions:**
@@ -292,14 +292,14 @@ tail -f ~/dev-team/logs/fleet-monitor.log
 kill -9 <PID>
 
 # Or change port in config
-# Edit ~/dev-team/fleet-monitor/config.json
+# Edit ~/aiteamforge/fleet-monitor/config.json
 # Change "port" to 3001
 ```
 
 **If Node.js errors:**
 ```bash
 # Reinstall dependencies
-cd ~/dev-team/fleet-monitor/server
+cd ~/aiteamforge/fleet-monitor/server
 rm -rf node_modules package-lock.json
 npm install
 
@@ -316,8 +316,8 @@ node server.js
 **Diagnosis:**
 
 ```bash
-# List dev-team LaunchAgents
-launchctl list | grep dev-team
+# List aiteamforge LaunchAgents
+launchctl list | grep aiteamforge
 
 # Check specific agent
 launchctl list com.devteam.kanban-backup
@@ -334,7 +334,7 @@ launchctl unload ~/Library/LaunchAgents/com.devteam.kanban-backup.plist
 launchctl load ~/Library/LaunchAgents/com.devteam.kanban-backup.plist
 
 # Check logs
-cat ~/dev-team/logs/kanban-backup.log
+cat ~/aiteamforge/logs/kanban-backup.log
 
 # Verify plist syntax
 plutil -lint ~/Library/LaunchAgents/com.devteam.kanban-backup.plist
@@ -354,20 +354,20 @@ plutil -lint ~/Library/LaunchAgents/com.devteam.kanban-backup.plist
 
 ```bash
 # Check if shell-env.sh exists
-ls -la ~/dev-team/shell-env.sh
+ls -la ~/aiteamforge/shell-env.sh
 
 # Check if sourced in .zshrc
-grep "dev-team" ~/.zshrc
+grep "aiteamforge" ~/.zshrc
 ```
 
 **Solutions:**
 
 ```bash
 # Manually source shell environment
-source ~/dev-team/shell-env.sh
+source ~/aiteamforge/shell-env.sh
 
 # Add to .zshrc if missing
-echo 'source ~/dev-team/shell-env.sh' >> ~/.zshrc
+echo 'source ~/aiteamforge/shell-env.sh' >> ~/.zshrc
 
 # Reload shell
 source ~/.zshrc
@@ -379,7 +379,7 @@ alias | grep "^kb-"
 ### Prompt Not Showing
 
 **Symptoms:**
-- Terminal prompt doesn't show dev-team info
+- Terminal prompt doesn't show aiteamforge info
 - Custom prompt disappeared
 
 **Diagnosis:**
@@ -390,7 +390,7 @@ echo $PS1
 echo $PROMPT
 
 # Check if prompt script exists
-ls -la ~/dev-team/scripts/prompt.sh
+ls -la ~/aiteamforge/scripts/prompt.sh
 ```
 
 **Solutions:**
@@ -400,16 +400,16 @@ ls -la ~/dev-team/scripts/prompt.sh
 source ~/.zshrc
 
 # If prompt script missing, regenerate
-dev-team setup --upgrade
+aiteamforge setup --upgrade
 
 # Manually set prompt
-export PROMPT="%F{blue}[dev-team]%f %~ %# "
+export PROMPT="%F{blue}[aiteamforge]%f %~ %# "
 ```
 
 ### PATH Issues
 
 **Symptoms:**
-- `dev-team` command not found after installation
+- `aiteamforge` command not found after installation
 - Other installed tools not found
 
 **Diagnosis:**
@@ -418,8 +418,8 @@ export PROMPT="%F{blue}[dev-team]%f %~ %# "
 # Check PATH
 echo $PATH
 
-# Find where dev-team is installed
-brew --prefix dev-team
+# Find where aiteamforge is installed
+brew --prefix aiteamforge
 ```
 
 **Solutions:**
@@ -433,7 +433,7 @@ echo 'export PATH="$(brew --prefix)/bin:$PATH"' >> ~/.zshrc
 source ~/.zshrc
 
 # Verify
-which dev-team
+which aiteamforge
 ```
 
 ---
@@ -494,23 +494,23 @@ claude auth login
 
 ```bash
 # Check agent configuration
-ls -la ~/dev-team/claude/agents/
+ls -la ~/aiteamforge/claude/agents/
 
 # Verify settings.json
-cat ~/dev-team/claude/settings.json | jq .
+cat ~/aiteamforge/claude/settings.json | jq .
 ```
 
 **Solutions:**
 
 ```bash
 # Regenerate agent configs
-dev-team setup --upgrade
+aiteamforge setup --upgrade
 
 # Manually verify agent path
 ios-picard --debug
 
 # Check persona files exist
-ls ~/dev-team/claude/agents/iOS\ Development/picard/
+ls ~/aiteamforge/claude/agents/iOS\ Development/picard/
 ```
 
 ### Kanban Hooks Not Firing
@@ -523,29 +523,29 @@ ls ~/dev-team/claude/agents/iOS\ Development/picard/
 
 ```bash
 # Check hook files exist
-ls -la ~/dev-team/kanban-hooks/
+ls -la ~/aiteamforge/kanban-hooks/
 
 # Check settings.json for hook paths
-cat ~/dev-team/claude/settings.json | jq .hooks
+cat ~/aiteamforge/claude/settings.json | jq .hooks
 
 # Test hook manually
-python3 ~/dev-team/kanban-hooks/kanban-session-start.py
+python3 ~/aiteamforge/kanban-hooks/kanban-session-start.py
 ```
 
 **Solutions:**
 
 ```bash
 # Fix hook permissions
-chmod +x ~/dev-team/kanban-hooks/*.py
+chmod +x ~/aiteamforge/kanban-hooks/*.py
 
 # Verify Python can execute hooks
-python3 ~/dev-team/kanban-hooks/kanban-session-start.py --test
+python3 ~/aiteamforge/kanban-hooks/kanban-session-start.py --test
 
 # Check hook logs
-cat ~/dev-team/logs/start-hook-debug.log
+cat ~/aiteamforge/logs/start-hook-debug.log
 
 # Regenerate settings.json
-dev-team setup --upgrade
+aiteamforge setup --upgrade
 ```
 
 ---
@@ -565,10 +565,10 @@ dev-team setup --upgrade
 curl http://localhost:8082/api/boards
 
 # Check board file exists
-ls -la ~/dev-team/kanban/ios-board.json
+ls -la ~/aiteamforge/kanban/ios-board.json
 
 # Validate JSON syntax
-jq . ~/dev-team/kanban/ios-board.json
+jq . ~/aiteamforge/kanban/ios-board.json
 ```
 
 **Solutions:**
@@ -576,11 +576,11 @@ jq . ~/dev-team/kanban/ios-board.json
 **If JSON syntax error:**
 ```bash
 # Restore from backup
-cp ~/dev-team/kanban-backups/ios-board-*.json \
-   ~/dev-team/kanban/ios-board.json
+cp ~/aiteamforge/kanban-backups/ios-board-*.json \
+   ~/aiteamforge/kanban/ios-board.json
 
 # Or create new board
-cat > ~/dev-team/kanban/ios-board.json <<'EOF'
+cat > ~/aiteamforge/kanban/ios-board.json <<'EOF'
 {
   "version": "1.0.0",
   "team": "ios",
@@ -593,10 +593,10 @@ EOF
 **If LCARS server error:**
 ```bash
 # Restart LCARS
-dev-team restart lcars
+aiteamforge restart lcars
 
 # Check logs
-tail -f ~/dev-team/logs/lcars.log
+tail -f ~/aiteamforge/logs/lcars.log
 ```
 
 ### kb- Commands Not Working
@@ -612,32 +612,32 @@ tail -f ~/dev-team/logs/lcars.log
 type kb-list
 
 # Check if board files exist
-ls ~/dev-team/kanban/
+ls ~/aiteamforge/kanban/
 
 # Test command manually
-bash -c "source ~/dev-team/scripts/kanban-helpers.sh && kb-list"
+bash -c "source ~/aiteamforge/scripts/kanban-helpers.sh && kb-list"
 ```
 
 **Solutions:**
 
 ```bash
 # Reload shell environment
-source ~/dev-team/scripts/kanban-helpers.sh
+source ~/aiteamforge/scripts/kanban-helpers.sh
 
 # Create missing board file
 kb-init ios
 
 # Fix permissions
-chmod 644 ~/dev-team/kanban/*.json
+chmod 644 ~/aiteamforge/kanban/*.json
 
 # Regenerate helpers
-dev-team setup --upgrade
+aiteamforge setup --upgrade
 ```
 
 ### Backup System Not Running
 
 **Symptoms:**
-- No files in `~/dev-team/kanban-backups/`
+- No files in `~/aiteamforge/kanban-backups/`
 - Backups older than today
 
 **Diagnosis:**
@@ -647,10 +647,10 @@ dev-team setup --upgrade
 launchctl list com.devteam.kanban-backup
 
 # Check backup script
-ls -la ~/dev-team/scripts/kanban-backup.py
+ls -la ~/aiteamforge/scripts/kanban-backup.py
 
 # Test backup manually
-python3 ~/dev-team/scripts/kanban-backup.py
+python3 ~/aiteamforge/scripts/kanban-backup.py
 ```
 
 **Solutions:**
@@ -666,7 +666,7 @@ cat ~/Library/LaunchAgents/com.devteam.kanban-backup.plist
 launchctl list com.devteam.kanban-backup | grep StartCalendarInterval
 
 # Check logs
-cat ~/dev-team/logs/kanban-backup.log
+cat ~/aiteamforge/logs/kanban-backup.log
 ```
 
 ### Board Conflicts After Sync
@@ -683,7 +683,7 @@ cat ~/dev-team/logs/kanban-backup.log
 kb-sync status
 
 # View sync log
-tail -f ~/dev-team/logs/kanban-sync.log
+tail -f ~/aiteamforge/logs/kanban-sync.log
 
 # Check Fleet Monitor connection
 curl http://server:3000/api/machines
@@ -754,11 +754,11 @@ curl http://localhost:3000/api/health
 ```bash
 # Check client heartbeat
 # On client:
-tail -f ~/dev-team/logs/fleet-monitor-client.log
+tail -f ~/aiteamforge/logs/fleet-monitor-client.log
 
 # Check server receives heartbeats
 # On server:
-tail -f ~/dev-team/logs/fleet-monitor.log | grep heartbeat
+tail -f ~/aiteamforge/logs/fleet-monitor.log | grep heartbeat
 ```
 
 **Solutions:**
@@ -766,7 +766,7 @@ tail -f ~/dev-team/logs/fleet-monitor.log | grep heartbeat
 ```bash
 # Restart client
 # On client:
-dev-team restart fleet-monitor
+aiteamforge restart fleet-monitor
 
 # Force heartbeat
 # On client:
@@ -782,22 +782,22 @@ curl -X POST http://server:3000/api/heartbeat \
 ### Migrating from Manual Installation
 
 **Symptoms:**
-- Have existing `~/dev-team/` with custom configs
+- Have existing `~/aiteamforge/` with custom configs
 - Want to switch to Homebrew version
 
 **Solution:**
 
 ```bash
 # 1. Backup existing installation
-mv ~/dev-team ~/dev-team-backup-$(date +%Y%m%d)
+mv ~/aiteamforge ~/aiteamforge-backup-$(date +%Y%m%d)
 
 # 2. Install via Homebrew
-brew tap DoubleNode/dev-team
-brew install dev-team
-dev-team setup
+brew tap DoubleNode/aiteamforge
+brew install aiteamforge
+aiteamforge setup
 
 # 3. Migrate kanban boards
-cp ~/dev-team-backup-*/kanban/*.json ~/dev-team/kanban/
+cp ~/aiteamforge-backup-*/kanban/*.json ~/aiteamforge/kanban/
 
 # 4. Migrate customizations (review files first)
 # Don't blindly copy - review and merge as needed
@@ -806,24 +806,24 @@ cp ~/dev-team-backup-*/kanban/*.json ~/dev-team/kanban/
 ### Upgrade Broke My Installation
 
 **Symptoms:**
-- After `brew upgrade dev-team`, things stopped working
+- After `brew upgrade aiteamforge`, things stopped working
 - Commands return errors
 
 **Solution:**
 
 ```bash
 # 1. Check what broke
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 
 # 2. Try repair
-dev-team setup --upgrade
+aiteamforge setup --upgrade
 
 # 3. If still broken, rollback
-brew switch dev-team <previous-version>
+brew switch aiteamforge <previous-version>
 
 # 4. Restore from backup (if you made one)
-cp ~/dev-team-backup.tar.gz ~
-tar -xzf ~/dev-team-backup.tar.gz
+cp ~/aiteamforge-backup.tar.gz ~
+tar -xzf ~/aiteamforge-backup.tar.gz
 
 # 5. Report bug (see Reporting Bugs section)
 ```
@@ -836,19 +836,19 @@ tar -xzf ~/dev-team-backup.tar.gz
 
 1. **Run diagnostics:**
    ```bash
-   dev-team doctor --verbose > ~/diagnostic-report.txt
+   aiteamforge doctor --verbose > ~/diagnostic-report.txt
    ```
 
 2. **Check logs:**
    ```bash
-   ls ~/dev-team/logs/
-   cat ~/dev-team/logs/*.log
+   ls ~/aiteamforge/logs/
+   cat ~/aiteamforge/logs/*.log
    ```
 
 3. **Try upgrading:**
    ```bash
-   brew upgrade dev-team
-   dev-team setup --upgrade
+   brew upgrade aiteamforge
+   aiteamforge setup --upgrade
    ```
 
 ### What to Include
@@ -860,21 +860,21 @@ tar -xzf ~/dev-team-backup.tar.gz
   brew --version
   ```
 
-- **Dev-Team version:**
+- **AITeamForge version:**
   ```bash
-  dev-team --version
-  brew info dev-team
+  aiteamforge --version
+  brew info aiteamforge
   ```
 
 - **Diagnostic report:**
   ```bash
-  dev-team doctor --verbose
+  aiteamforge doctor --verbose
   ```
 
 - **Relevant logs:**
   ```bash
-  cat ~/dev-team/logs/lcars.log
-  cat ~/dev-team/logs/fleet-monitor.log
+  cat ~/aiteamforge/logs/lcars.log
+  cat ~/aiteamforge/logs/fleet-monitor.log
   ```
 
 - **Steps to reproduce**
@@ -883,7 +883,7 @@ tar -xzf ~/dev-team-backup.tar.gz
 
 ### Where to Report
 
-- **GitHub Issues:** https://github.com/DoubleNode/dev-team/issues
+- **GitHub Issues:** https://github.com/DoubleNode/aiteamforge/issues
 - **Include:** Diagnostic report, logs, steps to reproduce
 
 ---
@@ -896,24 +896,24 @@ If nothing else works:
 
 ```bash
 # 1. Backup critical data
-tar -czf ~/dev-team-backup.tar.gz \
-  ~/dev-team/kanban/ \
-  ~/dev-team/config.json
+tar -czf ~/aiteamforge-backup.tar.gz \
+  ~/aiteamforge/kanban/ \
+  ~/aiteamforge/config.json
 
-# 2. Completely remove dev-team
-dev-team uninstall
-brew uninstall dev-team
-brew untap DoubleNode/dev-team
-rm -rf ~/dev-team
-rm -rf ~/.dev-team
+# 2. Completely remove aiteamforge
+aiteamforge uninstall
+brew uninstall aiteamforge
+brew untap DoubleNode/aiteamforge
+rm -rf ~/aiteamforge
+rm -rf ~/.aiteamforge
 
 # 3. Clean reinstall
-brew tap DoubleNode/dev-team
-brew install dev-team
-dev-team setup
+brew tap DoubleNode/aiteamforge
+brew install aiteamforge
+aiteamforge setup
 
 # 4. Restore data
-tar -xzf ~/dev-team-backup.tar.gz -C ~/
+tar -xzf ~/aiteamforge-backup.tar.gz -C ~/
 ```
 
 ---
@@ -923,9 +923,9 @@ tar -xzf ~/dev-team-backup.tar.gz -C ~/
 ### Built-in Help
 
 ```bash
-dev-team help
-dev-team doctor --help
-dev-team setup --help
+aiteamforge help
+aiteamforge doctor --help
+aiteamforge setup --help
 ```
 
 ### Documentation
@@ -942,4 +942,4 @@ dev-team setup --help
 
 ---
 
-**Remember:** Most issues can be diagnosed with `dev-team doctor --verbose`. Start there!
+**Remember:** Most issues can be diagnosed with `aiteamforge doctor --verbose`. Start there!

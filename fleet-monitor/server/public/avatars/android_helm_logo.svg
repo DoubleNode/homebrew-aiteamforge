@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Star Trek TOS - Helm Team Logo (Navigation Framework & Routing) -->
+<!-- Android Development Terminal - Helm Team -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#FFD700" stroke-width="3"/>
+  
+  <!-- Helm control console (central wheel) -->
+  <circle cx="100" cy="100" r="35" fill="none" stroke="#FFD700" stroke-width="3"/>
+  <circle cx="100" cy="100" r="25" fill="none" stroke="#FFD700" stroke-width="2"/>
+  
+  <!-- Center hub -->
+  <circle cx="100" cy="100" r="8" fill="#FFD700"/>
+  
+  <!-- Helm spokes (8 directional) -->
+  <line x1="100" y1="100" x2="100" y2="65" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="125" y2="75" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="135" y2="100" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="125" y2="125" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="100" y2="135" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="75" y2="125" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="65" y2="100" stroke="#FFD700" stroke-width="2.5"/>
+  <line x1="100" y1="100" x2="75" y2="75" stroke="#FFD700" stroke-width="2.5"/>
+  
+  <!-- Directional indicators on spokes -->
+  <circle cx="100" cy="65" r="3" fill="#FFD700"/>
+  <circle cx="125" cy="75" r="3" fill="#FFD700"/>
+  <circle cx="135" cy="100" r="3" fill="#FFD700"/>
+  <circle cx="125" cy="125" r="3" fill="#FFD700"/>
+  <circle cx="100" cy="135" r="3" fill="#FFD700"/>
+  <circle cx="75" cy="125" r="3" fill="#FFD700"/>
+  <circle cx="65" cy="100" r="3" fill="#FFD700"/>
+  <circle cx="75" cy="75" r="3" fill="#FFD700"/>
+  
+  <!-- Cardinal direction arrows (outside wheel) -->
+  <!-- North arrow -->
+  <path d="M 100 40 L 95 50 L 100 47 L 105 50 Z" fill="#FFD700"/>
+  <!-- East arrow -->
+  <path d="M 160 100 L 150 95 L 153 100 L 150 105 Z" fill="#FFD700"/>
+  <!-- South arrow -->
+  <path d="M 100 160 L 95 150 L 100 153 L 105 150 Z" fill="#FFD700"/>
+  <!-- West arrow -->
+  <path d="M 40 100 L 50 95 L 47 100 L 50 105 Z" fill="#FFD700"/>
+  
+  <!-- Corner navigation nodes -->
+  <circle cx="35" cy="35" r="4" fill="#FFD700"/>
+  <circle cx="165" cy="35" r="4" fill="#FFD700"/>
+  <circle cx="165" cy="165" r="4" fill="#FFD700"/>
+  <circle cx="35" cy="165" r="4" fill="#FFD700"/>
+  
+  <!-- Connecting traces to corners -->
+  <line x1="35" y1="35" x2="100" y2="40" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+  <line x1="165" y1="35" x2="100" y2="40" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+  <line x1="165" y1="165" x2="100" y2="160" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+  <line x1="35" y1="165" x2="100" y2="160" stroke="#FFD700" stroke-width="1" opacity="0.5"/>
+</svg>

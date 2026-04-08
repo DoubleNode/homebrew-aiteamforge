@@ -8,7 +8,7 @@
 
 ## Overview
 
-The dev-team environment supports multiple teams with different specializations, tools, and workflows. The team configuration system provides a data-driven approach to defining and installing teams.
+The aiteamforge environment supports multiple teams with different specializations, tools, and workflows. The team configuration system provides a data-driven approach to defining and installing teams.
 
 ## Architecture
 
@@ -98,6 +98,9 @@ TEAM_AGENTS=(
 TEAM_STARTUP_SCRIPT="ios-startup.sh"
 TEAM_SHUTDOWN_SCRIPT="ios-shutdown.sh"
 
+# Organization this team belongs to (used in kanban board)
+TEAM_ORGANIZATION="Main Event Entertainment"
+
 # Star Trek theme (optional)
 TEAM_THEME="Star Trek: The Next Generation"
 TEAM_SHIP="USS Enterprise-D"
@@ -121,7 +124,8 @@ TEAM_SHIP="USS Enterprise-D"
 - `TEAM_BREW_DEPS` - Homebrew packages to install
 - `TEAM_BREW_CASK_DEPS` - Homebrew cask packages to install
 - `TEAM_AGENTS` - Claude Code agent personas
-- `TEAM_THEME` - Star Trek theme
+- `TEAM_ORGANIZATION` - Organization name populated into the kanban board's `organization` field (falls back to `"DEVTEAM"` if not set)
+- `TEAM_THEME` - Star Trek theme (also used as the kanban board's `subtitle`)
 - `TEAM_SHIP` - Star Trek ship/station name
 
 ---
@@ -143,17 +147,17 @@ TEAM_SHIP="USS Enterprise-D"
 ### Install a Single Team
 
 ```bash
-./libexec/installers/install-team.sh <team-id> [--dev-team-dir <path>]
+./libexec/installers/install-team.sh <team-id> [--aiteamforge-dir <path>]
 ```
 
 **Examples:**
 
 ```bash
-# Install iOS team to default location (~/dev-team)
+# Install iOS team to default location (~/aiteamforge)
 ./libexec/installers/install-team.sh ios
 
 # Install Android team to custom location
-./libexec/installers/install-team.sh android --dev-team-dir /opt/dev-team
+./libexec/installers/install-team.sh android --aiteamforge-dir /opt/aiteamforge
 
 # Install Academy team
 ./libexec/installers/install-team.sh academy
@@ -180,7 +184,7 @@ For each team, the installer creates:
 ### 1. Directory Structure
 
 ```
-~/dev-team/
+~/aiteamforge/
 ├── <team-id>/
 │   ├── personas/
 │   │   ├── agents/          # Agent persona markdown files
@@ -192,29 +196,29 @@ For each team, the installer creates:
 
 ### 2. Startup/Shutdown Scripts
 
-- `~/dev-team/<team-id>-startup.sh` - Team startup script
-- `~/dev-team/<team-id>-shutdown.sh` - Team shutdown script
+- `~/aiteamforge/<team-id>-startup.sh` - Team startup script
+- `~/aiteamforge/<team-id>-shutdown.sh` - Team shutdown script
 
 Generated from templates with variable substitution.
 
 ### 3. Kanban Board
 
-- `~/dev-team/kanban/<team-id>-board.json` - Empty kanban board structure
+- `~/aiteamforge/kanban/<team-id>-board.json` - Empty kanban board structure
 
 ### 4. LCARS Port Assignments
 
 For each agent in the team:
-- `~/dev-team/lcars-ports/<team-id>-<agent>.port` - Port number
-- `~/dev-team/lcars-ports/<team-id>-<agent>.theme` - Color theme
-- `~/dev-team/lcars-ports/<team-id>-<agent>.order` - Display order
+- `~/aiteamforge/lcars-ports/<team-id>-<agent>.port` - Port number
+- `~/aiteamforge/lcars-ports/<team-id>-<agent>.theme` - Color theme
+- `~/aiteamforge/lcars-ports/<team-id>-<agent>.order` - Display order
 
 ### 5. Agent Aliases
 
-Adds to `~/dev-team/claude_agent_aliases.sh`:
+Adds to `~/aiteamforge/claude_agent_aliases.sh`:
 
 ```bash
-alias ios-picard='claude --agent-path "$DEV_TEAM_DIR/claude/agents/iOS Development/picard"'
-alias ios-beverly='claude --agent-path "$DEV_TEAM_DIR/claude/agents/iOS Development/beverly"'
+alias ios-picard='claude --agent-path "$AITEAMFORGE_DIR/claude/agents/iOS Development/picard"'
+alias ios-beverly='claude --agent-path "$AITEAMFORGE_DIR/claude/agents/iOS Development/beverly"'
 # ...
 ```
 
@@ -319,7 +323,7 @@ That's it. No code changes required - the installer reads your configuration and
 
 ## Integration with Setup Wizard
 
-The setup wizard (`bin/dev-team-setup`) will:
+The setup wizard (`bin/aiteamforge-setup`) will:
 
 1. Load `share/teams/registry.json`
 2. Display teams grouped by category
@@ -424,13 +428,13 @@ After modifying team configurations:
 ./libexec/installers/test-install-team.sh
 
 # Test installation to temp directory
-./libexec/installers/install-team.sh <team-id> --dev-team-dir /tmp/test-dev-team
+./libexec/installers/install-team.sh <team-id> --aiteamforge-dir /tmp/test-aiteamforge
 
 # Verify results
-ls -la /tmp/test-dev-team/
+ls -la /tmp/test-aiteamforge/
 
 # Cleanup
-rm -rf /tmp/test-dev-team
+rm -rf /tmp/test-aiteamforge
 ```
 
 ### Debugging

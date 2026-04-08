@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LCARS - DoubleNode Operations</title>
+
+    <!-- LCARS-003: Antonio Typography from Google Fonts - Preload for faster loading -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="preload" href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" as="style">
+    <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- LCARS Fleet Core Framework -->
+    <link rel="stylesheet" href="css/lcars-fleet.css">
+    <!-- LCARS Kiosk Mode Styles (shared) -->
+    <link rel="stylesheet" href="../shared/css/lcars-kiosk.css">
+    <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css">
+</head>
+<body class="org-color-blue">
+    <!-- ═══════════════════════════════════════════════════════════════════════════ -->
+    <!-- STARTUP BOOT SEQUENCE                                                       -->
+    <!-- ═══════════════════════════════════════════════════════════════════════════ -->
+    <section class="startup-section">
+        <div class="startup-container">
+            <div class="startup-logo" id="startup-logo"></div>
+            <div class="startup-text">
+                <div class="startup-title">DOUBLENODE</div>
+                <div class="startup-subtitle">OPERATIONS CENTER</div>
+                <div class="startup-version">LCARS 47-112</div>
+            </div>
+            <div class="startup-data">
+                <div class="startup-data-scroll" id="startup-data-scroll"></div>
+            </div>
+            <div class="startup-progress">
+                <div class="startup-progress-bar" id="startup-progress-bar"></div>
+            </div>
+            <div class="startup-status" id="startup-status">INITIALIZING...</div>
+        </div>
+        <div class="startup-skip">CLICK ANYWHERE TO SKIP</div>
+    </section>
+
+    <div class="lcars-container">
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- TOP FRAME - Blue header for DoubleNode                              -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <header class="lcars-top-frame">
+            <div class="top-sidebar">
+                <div class="top-sidebar-content">
+                    <span class="stardate" id="stardate">2026.006</span>
+                    <span class="top-divider"></span>
+                    <span class="lcars-version">LCARS 02-048</span>
+                    <span class="top-divider"></span>
+                    <span class="team-name">FLEET MONITOR</span>
+                    <span class="group-id" id="group-id">DOUBLENODE</span>
+                </div>
+            </div>
+            <div class="top-bar"></div>
+            <div class="lcars-title" id="lcars-title">
+                <span class="title-full">DOUBLENODE OPERATIONS</span>
+                <span class="title-medium">DOUBLENODE OPS</span>
+                <span class="title-short">DN OPS</span>
+            </div>
+            <img class="header-fleet-logo" src="/avatars/fleet_logo.png" alt="Fleet Monitor">
+        </header>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- MAIN CONTENT AREA with L-shaped sidebar                             -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <main class="lcars-main">
+            <!-- Data Bar - Persistent Fleet Metrics across all sections -->
+            <div class="lcars-data-bar">
+                <div class="candy-pill candy-blue" data-candy="0">
+                    <span class="candy-value">00000</span>
+                    <span class="candy-label">TOTAL</span>
+                </div>
+                <div class="candy-pill candy-cyan" data-candy="1">
+                    <span class="candy-value">0000</span>
+                    <span class="candy-label">ONLINE</span>
+                </div>
+                <div class="candy-pill candy-lavender" data-candy="2">
+                    <span class="candy-value">0000</span>
+                    <span class="candy-label">OFFLINE</span>
+                </div>
+                <div class="candy-pill candy-purple" data-candy="3">
+                    <span class="candy-value">00000</span>
+                    <span class="candy-label">SESSIONS</span>
+                </div>
+                <div class="candy-pill candy-mauve" data-candy="4">
+                    <span class="candy-value">00000</span>
+                    <span class="candy-label">AUX-1</span>
+                </div>
+                <div class="candy-pill candy-violet" data-candy="5">
+                    <span class="candy-value">0000</span>
+                    <span class="candy-label">AUX-2</span>
+                </div>
+            </div>
+
+            <!-- Sidebar navigation -->
+            <nav class="lcars-sidebar">
+                <div class="sidebar-label">FLEET STATUS</div>
+                <div class="sidebar-button active" data-section="overview">
+                    <span>OVERVIEW</span>
+                </div>
+                <div class="sidebar-button" data-section="organizations">
+                    <span>ORGS</span>
+                </div>
+                <div class="sidebar-button" data-section="machines">
+                    <span>MACHINES</span>
+                </div>
+                <div class="sidebar-button" data-section="settings">
+                    <span>SETTINGS</span>
+                </div>
+                <div class="sidebar-spacer"></div>
+                <div class="sidebar-info stacked">
+                    <div class="info-row">
+                        <span class="info-label">VESSEL</span>
+                        <span class="info-value" id="ship-name">USS Enterprise</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">UPDATED</span>
+                        <span class="info-value" id="last-update">--:--:--</span>
+                    </div>
+                </div>
+                <div class="sidebar-spacer"></div>
+                <!-- Dashboard Switcher -->
+                <div class="sidebar-label">DASHBOARDS</div>
+                <a href="lcars-index.html" class="sidebar-link">ACADEMY</a>
+                <a href="lcars-mainevent.html" class="sidebar-link">MAIN EVENT</a>
+                <a href="lcars-doublenode.html" class="sidebar-link active">DOUBLENODE</a>
+                <a href="lcars-all.html" class="sidebar-link">ALL FLEET</a>
+                <div class="sidebar-spacer"></div>
+            </nav>
+
+            <!-- Content Area -->
+            <div class="lcars-content">
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: OVERVIEW - Fleet Summary                                    -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section active" data-section="overview">
+                    <!-- Summary Cards -->
+                    <section style="margin-top: 20px;">
+                        <div class="section-header cyan">
+                            <span class="section-title">SUMMARY</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div class="summary-cards" style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 15px;">
+                            <div class="summary-card">
+                                <div class="summary-value" id="total-machines">0</div>
+                                <div class="summary-label">TOTAL MACHINES</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-value text-green" id="online-machines">0</div>
+                                <div class="summary-label">ONLINE</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-value text-red" id="offline-machines">0</div>
+                                <div class="summary-label">OFFLINE</div>
+                            </div>
+                            <div class="summary-card">
+                                <div class="summary-value text-purple" id="total-sessions">0</div>
+                                <div class="summary-label">SESSIONS</div>
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- Organization Navigation -->
+                    <section style="margin-top: 20px;">
+                        <div class="section-header purple">
+                            <span class="section-title">DIVISIONS</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div id="organization-nav" class="organization-nav" style="margin-top: 15px;"></div>
+                    </section>
+
+                    <!-- Connection Status -->
+                    <section style="margin-top: 20px;">
+                        <div class="connection-status">
+                            <span class="status-indicator online" id="connection-indicator"></span>
+                            <span id="connection-status">MONITORING ACTIVE</span>
+                        </div>
+                    </section>
+                </div><!-- End OVERVIEW section -->
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: ORGANIZATIONS - Division/Team Hierarchy                     -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="organizations">
+                    <section>
+                        <div class="section-header lavender">
+                            <span class="section-title">DOUBLENODE DIVISIONS</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div id="divisions-container" style="margin-top: 15px;"></div>
+                    </section>
+                </div><!-- End ORGANIZATIONS section -->
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: MACHINES - Machine Status Panel                             -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="machines">
+                    <section>
+                        <div class="section-header purple">
+                            <span class="section-title">MACHINE STATUS</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div id="machines-list" style="margin-top: 15px;"></div>
+                    </section>
+                </div><!-- End MACHINES section -->
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: SETTINGS - Preferences & Keyboard Shortcuts                 -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="settings">
+                    <section>
+                        <div class="section-header tan">
+                            <span class="section-title">KEYBOARD NAVIGATION</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div class="keyboard-shortcuts" id="keyboard-shortcuts">
+                            <div class="shortcut-item">
+                                <span class="shortcut-key">⌥ + 1</span>
+                                <span class="shortcut-desc">Overview</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-key">⌥ + 2</span>
+                                <span class="shortcut-desc">Organizations</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-key">⌥ + 3</span>
+                                <span class="shortcut-desc">Machines</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-key">⌥ + 4</span>
+                                <span class="shortcut-desc">Settings</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-key">⌥ + ←</span>
+                                <span class="shortcut-desc">Previous Section</span>
+                            </div>
+                            <div class="shortcut-item">
+                                <span class="shortcut-key">⌥ + →</span>
+                                <span class="shortcut-desc">Next Section</span>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section style="margin-top: 30px;">
+                        <div class="section-header tan">
+                            <span class="section-title">PREFERENCES</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 15px; max-width: 400px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                                <span class="lcars-text-sm">Auto Refresh</span>
+                                <span class="status-badge online">ENABLED</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                                <span class="lcars-text-sm">Refresh Interval</span>
+                                <span class="lcars-text-sm text-tan">60 seconds</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                                <span class="lcars-text-sm">Dashboard</span>
+                                <select class="lcars-select blue" id="dashboard-select" onchange="window.location.href=this.value">
+                                    <option value="lcars-index.html">ACADEMY</option>
+                                    <option value="lcars-mainevent.html">MAIN EVENT</option>
+                                    <option value="lcars-doublenode.html" selected>DOUBLENODE</option>
+                                    <option value="lcars-all.html">ALL FLEET</option>
+                                </select>
+                            </div>
+                        </div>
+                    </section>
+
+                    <section style="margin-top: 30px;">
+                        <div class="section-header purple">
+                            <span class="section-title">INTERFACE</span>
+                            <div class="section-bar"></div>
+                        </div>
+                        <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 15px; max-width: 400px;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                                <span class="lcars-text-sm">Current Interface</span>
+                                <span class="status-badge online">LCARS</span>
+                            </div>
+                            <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                                <span class="lcars-text-sm">Switch Interface</span>
+                                <button class="lcars-button" onclick="LCARS_CORE.switchToClassic()">CLASSIC UI</button>
+                            </div>
+                        </div>
+                    </section>
+                </div><!-- End SETTINGS section -->
+
+            </div>
+        </main>
+    </div>
+
+    <!-- Scanline overlay for CRT effect -->
+    <div class="scanline"></div>
+
+    <!-- LCARS Fleet Core JavaScript -->
+    <script src="js/lcars-fleet-core.js"></script>
+    <!-- Kiosk Mode: Auto-Rotation on Idle (shared) -->
+    <script src="../shared/js/lcars-kiosk.js"></script>
+    <!-- DoubleNode Dashboard Application -->
+    <script src="js/lcars-doublenode-app.js"></script>
+</body>
+</html>

@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Star Trek TOS - Navigation Team Logo (Location Services & Maps) -->
+<!-- Android Development Terminal - Navigation Team -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#FFD700" stroke-width="3"/>
+  
+  <!-- Star chart grid (subtle background) -->
+  <line x1="100" y1="20" x2="100" y2="180" stroke="#FFD700" stroke-width="1" opacity="0.3"/>
+  <line x1="20" y1="100" x2="180" y2="100" stroke="#FFD700" stroke-width="1" opacity="0.3"/>
+  
+  <circle cx="100" cy="100" r="60" fill="none" stroke="#FFD700" stroke-width="1" opacity="0.3"/>
+  <circle cx="100" cy="100" r="40" fill="none" stroke="#FFD700" stroke-width="1" opacity="0.3"/>
+  
+  <!-- Constellation pattern (Big Dipper inspired) -->
+  <!-- Stars (larger nodes) -->
+  <circle cx="60" cy="50" r="4" fill="#FFD700"/>
+  <circle cx="80" cy="55" r="3.5" fill="#FFD700"/>
+  <circle cx="95" cy="60" r="3" fill="#FFD700"/>
+  <circle cx="110" cy="58" r="4" fill="#FFD700"/>
+  <circle cx="115" cy="75" r="3" fill="#FFD700"/>
+  <circle cx="130" cy="70" r="3.5" fill="#FFD700"/>
+  <circle cx="145" cy="65" r="4" fill="#FFD700"/>
+  
+  <!-- Constellation lines connecting stars -->
+  <line x1="60" y1="50" x2="80" y2="55" stroke="#FFD700" stroke-width="2"/>
+  <line x1="80" y1="55" x2="95" y2="60" stroke="#FFD700" stroke-width="2"/>
+  <line x1="95" y1="60" x2="110" y2="58" stroke="#FFD700" stroke-width="2"/>
+  <line x1="110" y1="58" x2="115" y2="75" stroke="#FFD700" stroke-width="2"/>
+  <line x1="110" y1="58" x2="130" y2="70" stroke="#FFD700" stroke-width="2"/>
+  <line x1="130" y1="70" x2="145" y2="65" stroke="#FFD700" stroke-width="2"/>
+  
+  <!-- Additional star field (smaller stars) -->
+  <circle cx="45" cy="80" r="2" fill="#FFD700" opacity="0.7"/>
+  <circle cx="70" cy="95" r="1.5" fill="#FFD700" opacity="0.6"/>
+  <circle cx="135" cy="95" r="2" fill="#FFD700" opacity="0.7"/>
+  <circle cx="160" cy="85" r="1.5" fill="#FFD700" opacity="0.6"/>
+  
+  <circle cx="50" cy="130" r="1.5" fill="#FFD700" opacity="0.6"/>
+  <circle cx="85" cy="145" r="2" fill="#FFD700" opacity="0.7"/>
+  <circle cx="120" cy="135" r="1.5" fill="#FFD700" opacity="0.6"/>
+  <circle cx="155" cy="140" r="2" fill="#FFD700" opacity="0.7"/>
+  
+  <!-- Navigation crosshair (center) -->
+  <circle cx="100" cy="100" r="15" fill="none" stroke="#FFD700" stroke-width="2"/>
+  <line x1="90" y1="100" x2="85" y2="100" stroke="#FFD700" stroke-width="2"/>
+  <line x1="110" y1="100" x2="115" y2="100" stroke="#FFD700" stroke-width="2"/>
+  <line x1="100" y1="90" x2="100" y2="85" stroke="#FFD700" stroke-width="2"/>
+  <line x1="100" y1="110" x2="100" y2="115" stroke="#FFD700" stroke-width="2"/>
+  
+  <!-- Corner waypoint markers -->
+  <g transform="translate(30, 30)">
+    <circle r="5" fill="none" stroke="#FFD700" stroke-width="2"/>
+    <line x1="-3" y1="0" x2="3" y2="0" stroke="#FFD700" stroke-width="1.5"/>
+    <line x1="0" y1="-3" x2="0" y2="3" stroke="#FFD700" stroke-width="1.5"/>
+  </g>
+  
+  <g transform="translate(170, 30)">
+    <circle r="5" fill="none" stroke="#FFD700" stroke-width="2"/>
+    <line x1="-3" y1="0" x2="3" y2="0" stroke="#FFD700" stroke-width="1.5"/>
+    <line x1="0" y1="-3" x2="0" y2="3" stroke="#FFD700" stroke-width="1.5"/>
+  </g>
+  
+  <g transform="translate(30, 170)">
+    <circle r="5" fill="none" stroke="#FFD700" stroke-width="2"/>
+    <line x1="-3" y1="0" x2="3" y2="0" stroke="#FFD700" stroke-width="1.5"/>
+    <line x1="0" y1="-3" x2="0" y2="3" stroke="#FFD700" stroke-width="1.5"/>
+  </g>
+  
+  <g transform="translate(170, 170)">
+    <circle r="5" fill="none" stroke="#FFD700" stroke-width="2"/>
+    <line x1="-3" y1="0" x2="3" y2="0" stroke="#FFD700" stroke-width="1.5"/>
+    <line x1="0" y1="-3" x2="0" y2="3" stroke="#FFD700" stroke-width="1.5"/>
+  </g>
+</svg>

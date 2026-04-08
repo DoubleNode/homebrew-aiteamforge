@@ -1,6 +1,6 @@
 # Team Reference
 
-**Complete reference for all Dev-Team teams and their configurations**
+**Complete reference for all AITeamForge teams and their configurations**
 
 ---
 
@@ -19,7 +19,7 @@
 
 ## Team Overview
 
-Dev-Team supports multiple specialized teams, each with:
+AITeamForge supports multiple specialized teams, each with:
 - **Unique identity** - Name, color scheme, icon
 - **Claude Code agents** - AI agents with team-specific personas
 - **Development tools** - Homebrew packages and dependencies
@@ -182,7 +182,7 @@ Dev-Team supports multiple specialized teams, each with:
 - gh (GitHub CLI)
 
 **Repository Associations:**
-- dev-team
+- aiteamforge
 
 **Use Cases:**
 - Dev-team infrastructure development
@@ -418,7 +418,7 @@ You can add custom teams without modifying code. See [ADDING_A_TEAM.md](ADDING_A
 
 3. **Install the team:**
    ```bash
-   dev-team setup  # Select "myteam"
+   aiteamforge setup  # Select "myteam"
    ```
 
 ---
@@ -501,7 +501,7 @@ Each team should use unique port range:
 
 Each installed team gets:
 ```
-~/dev-team/<team-id>/
+~/aiteamforge/<team-id>/
 ├── personas/
 │   ├── agents/              # Agent persona .md files
 │   ├── avatars/             # Agent avatar images
@@ -513,19 +513,19 @@ Each installed team gets:
 ### Team Scripts
 
 Generated for each team:
-- `~/dev-team/<team-id>-startup.sh` - Start team environment
-- `~/dev-team/<team-id>-shutdown.sh` - Stop team environment
+- `~/aiteamforge/<team-id>-startup.sh` - Start team environment
+- `~/aiteamforge/<team-id>-shutdown.sh` - Stop team environment
 
 ### Kanban Board
 
 Each team gets its own kanban board:
-- `~/dev-team/kanban/<team-id>-board.json`
+- `~/aiteamforge/kanban/<team-id>-board.json`
 
 ### Agent Aliases
 
 Each agent gets shell alias:
 ```bash
-alias ios-picard='claude --agent-path "$DEV_TEAM_DIR/claude/agents/iOS Development/picard"'
+alias ios-picard='claude --agent-path "$AITEAMFORGE_DIR/claude/agents/iOS Development/picard"'
 ```
 
 ---
@@ -559,7 +559,7 @@ Consider team distribution:
 
 ## Summary
 
-Dev-Team provides **10 pre-configured teams** across **5 categories**:
+AITeamForge provides **10 pre-configured teams** across **5 categories**:
 - **3 platform teams** (iOS, Android, Firebase)
 - **2 infrastructure teams** (Academy, DNS Framework)
 - **1 project-based team** (Freelance)
@@ -578,7 +578,7 @@ Each team includes:
 ---
 
 **Next Steps:**
-- Install teams with `dev-team setup`
-- Start a team with `dev-team start <team>`
+- Install teams with `aiteamforge setup`
+- Start a team with `aiteamforge start <team>`
 - Use team agents (e.g., `ios-picard`)
 - Manage team kanban boards with `kb-` commands

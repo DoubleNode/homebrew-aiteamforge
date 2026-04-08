@@ -41,11 +41,11 @@ from typing import Optional
 # Distributed kanban directories - each team has their own
 TEAM_KANBAN_DIRS = {
     # Main Event Teams
-    "academy": Path.home() / "dev-team" / "kanban",
+    "academy": Path.home() / "aiteamforge" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+    "command": Path("/Users/Shared/Development/Main Event/aiteamforge/kanban"),
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
 
     # Freelance Projects
@@ -53,13 +53,15 @@ TEAM_KANBAN_DIRS = {
     "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
     "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
     "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+    "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+    "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
 
     # Legal Projects
     "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
 }
 
 # Centralized backup destination
-BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
+BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 STATUS_FILE = BACKUP_DIR / "backup-status.json"
 HASH_FILE = BACKUP_DIR / "file-hashes.json"
 

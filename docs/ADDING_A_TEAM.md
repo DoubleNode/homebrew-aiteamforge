@@ -117,7 +117,7 @@ If you see errors, fix them before proceeding.
 
 **What Happens:**
 1. ✅ Installs Homebrew dependencies
-2. ✅ Creates `~/dev-team/myteam/` directory structure
+2. ✅ Creates `~/aiteamforge/myteam/` directory structure
 3. ✅ Generates startup/shutdown scripts
 4. ✅ Creates kanban board
 5. ✅ Sets up LCARS port assignments
@@ -129,16 +129,16 @@ If you see errors, fix them before proceeding.
 
 ```bash
 # Check team directory was created
-ls -la ~/dev-team/myteam/
+ls -la ~/aiteamforge/myteam/
 
 # Check startup script exists
-ls -la ~/dev-team/myteam-startup.sh
+ls -la ~/aiteamforge/myteam-startup.sh
 
 # Check kanban board created
-cat ~/dev-team/kanban/myteam-board.json
+cat ~/aiteamforge/kanban/myteam-board.json
 
 # Source aliases and try launching an agent
-source ~/dev-team/claude_agent_aliases.sh
+source ~/aiteamforge/claude_agent_aliases.sh
 myteam-agent1
 ```
 
@@ -228,7 +228,7 @@ Validate JSON: `jq empty share/teams/registry.json`
 Install manually: `brew install <package>`
 
 **Agent alias not working:**
-Source the file: `source ~/dev-team/claude_agent_aliases.sh`
+Source the file: `source ~/aiteamforge/claude_agent_aliases.sh`
 
 ---
 

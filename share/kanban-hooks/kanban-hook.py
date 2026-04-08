@@ -31,28 +31,61 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kanban_utils import get_board_file, read_board_safely, update_board_safely, parse_session_name
 
 # Configuration
-KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
+KANBAN_DIR = os.path.expanduser("~/aiteamforge/kanban")
+
+def _resolve_amb_handle_from_tmux():
+    """Resolve the AMB agent handle from the current tmux session name.
+
+    Uses amb-session-map.json to map session names (e.g., 'android-helm')
+    to AMB handles (e.g., 'sulu'). Returns None if not in tmux or unmapped.
+    """
+    try:
+        pane_target = os.environ.get("TMUX_PANE", "")
+        tmux_cmd = ["tmux", "display-message"]
+        if pane_target:
+            tmux_cmd.extend(["-t", pane_target])
+        tmux_cmd.extend(["-p", "#S"])
+        result = subprocess.run(tmux_cmd, capture_output=True, text=True, timeout=2)
+        if result.returncode != 0:
+            return None
+        session_name = result.stdout.strip()
+        if not session_name:
+            return None
+
+        session_map_file = os.path.expanduser("~/aiteamforge/amb-session-map.json")
+        if not os.path.isfile(session_map_file):
+            return None
+        with open(session_map_file) as f:
+            session_map = json.load(f)
+        return session_map.get(session_name)
+    except Exception:
+        return None
+
 
 def get_tmux_context():
     """Get current tmux session name, window index, and window name."""
     try:
+        pane_target = os.environ.get("TMUX_PANE", "")
+        tmux_cmd_base = ["tmux", "display-message"]
+        if pane_target:
+            tmux_cmd_base = ["tmux", "display-message", "-t", pane_target]
         # Get session name
         session_result = subprocess.run(
-            ["tmux", "display-message", "-p", "#S"],
+            tmux_cmd_base + ["-p", "#S"],
             capture_output=True,
             text=True,
             timeout=2
         )
         # Get window index
         window_idx_result = subprocess.run(
-            ["tmux", "display-message", "-p", "#I"],
+            tmux_cmd_base + ["-p", "#I"],
             capture_output=True,
             text=True,
             timeout=2
         )
         # Get window name
         window_name_result = subprocess.run(
-            ["tmux", "display-message", "-p", "#W"],
+            tmux_cmd_base + ["-p", "#W"],
             capture_output=True,
             text=True,
             timeout=2
@@ -72,7 +105,7 @@ def get_git_worktree():
     """Get current git worktree full path."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=2
@@ -87,7 +120,7 @@ def get_git_branch():
     """Get current git branch name."""
     try:
         result = subprocess.run(
-            ["git", "branch", "--show-current"],
+            ["git", "--no-optional-locks", "branch", "--show-current"],
             capture_output=True,
             text=True,
             timeout=2
@@ -102,7 +135,7 @@ def get_git_modified_count():
     """Get count of modified/untracked files."""
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             capture_output=True,
             text=True,
             timeout=2
@@ -118,7 +151,7 @@ def get_git_lines_changed():
     """Get lines added and deleted in working directory."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--numstat"],
+            ["git", "--no-optional-locks", "diff", "--numstat"],
             capture_output=True,
             text=True,
             timeout=2
@@ -289,11 +322,13 @@ def update_window(team, terminal, window_index, window_name, task_status, task=N
         existing_entry = None
         existing_idx = None
         existing_working_on_id = None
+        existing_work_mode = None
         for i, win in enumerate(board.get("activeWindows", [])):
             if win.get("id") == window_id:
                 existing_entry = win
                 existing_idx = i
                 existing_working_on_id = win.get("workingOnId")
+                existing_work_mode = win.get("workMode")
                 break
 
         # Track status history and timing
@@ -362,6 +397,9 @@ def update_window(team, terminal, window_index, window_name, task_status, task=N
         # XACA-0015: Removed worktree comparison that caused false clears on path variations
         if existing_working_on_id:
             new_entry["workingOnId"] = existing_working_on_id
+        # Preserve workMode (DEV/TEST/REVIEW/DEBUG) - only set via _kb_set_working_on
+        if existing_work_mode:
+            new_entry["workMode"] = existing_work_mode
 
         # XACA-0023: Auto-link item from branch name if no workingOnId yet
         if not new_entry.get("workingOnId") and git_branch:
@@ -610,6 +648,29 @@ def main():
     try:
         # Read hook input from stdin
         input_data = json.load(sys.stdin)
+
+        # AMB heartbeat detection — write local timestamp when MCP heartbeat is called
+        # File read by agent-panel-display.sh to show "heartbeat Xm ago" on the panel
+        # Uses .last_heartbeat_time_ (NOT .last_ping_time_ which is owned by amb scripts)
+        # Note: amb-proxy.py also writes this timestamp on successful heartbeat calls,
+        # so this hook serves as a redundant write for per-handle MCP servers.
+        tool_name = input_data.get("tool_name", "")
+        if "heartbeat" in tool_name and tool_name.startswith("mcp__amb"):
+            try:
+                handle = None
+                parts = tool_name.split("__")
+                if len(parts) >= 3 and parts[1].startswith("amb-"):
+                    # Per-handle server: mcp__amb-jett-reno__heartbeat -> jett-reno
+                    handle = parts[1].replace("amb-", "", 1)
+                elif parts[1] == "amb":
+                    # Global "amb" server: resolve handle from tmux session
+                    handle = _resolve_amb_handle_from_tmux()
+                if handle:
+                    ts_file = os.path.expanduser(f"~/.claude/.last_heartbeat_time_{handle}")
+                    with open(ts_file, "w") as f:
+                        f.write(str(int(datetime.now(timezone.utc).timestamp())))
+            except Exception:
+                pass
 
         # Get tmux context (session, window index, window name)
         session_name, window_index, window_name = get_tmux_context()

@@ -6,7 +6,7 @@
     <string>com.devteam.fleet-reporter</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
+        <string>/opt/homebrew/bin/bash</string>
         <string>{{REPORTER_SCRIPT_PATH}}</string>
     </array>
     <key>StartInterval</key>
@@ -14,17 +14,19 @@
     <key>RunAtLoad</key>
     <true/>
     <key>WorkingDirectory</key>
-    <string>{{DEV_TEAM_DIR}}</string>
+    <string>{{AITEAMFORGE_DIR}}</string>
     <key>StandardOutPath</key>
-    <string>{{DEV_TEAM_DIR}}/logs/fleet-reporter.log</string>
+    <string>{{AITEAMFORGE_DIR}}/logs/fleet-reporter.log</string>
     <key>StandardErrorPath</key>
-    <string>{{DEV_TEAM_DIR}}/logs/fleet-reporter.error.log</string>
+    <string>{{AITEAMFORGE_DIR}}/logs/fleet-reporter.error.log</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
         <string>{{USER_HOME}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
     </dict>
     <key>KeepAlive</key>
     <false/>

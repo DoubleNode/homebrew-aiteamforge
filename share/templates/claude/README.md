@@ -1,6 +1,6 @@
 # Claude Code Configuration Templates
 
-This directory contains templates for setting up Claude Code CLI configuration as part of the dev-team environment.
+This directory contains templates for setting up Claude Code CLI configuration as part of the aiteamforge environment.
 
 ## Directory Structure
 
@@ -27,7 +27,7 @@ claude/
 
 All templates support the following variable substitutions:
 
-- `{{DEV_TEAM_DIR}}` - Path to dev-team installation (e.g., `~/dev-team`)
+- `{{AITEAMFORGE_DIR}}` - Path to aiteamforge installation (e.g., `~/aiteamforge`)
 - `{{HOME}}` - User's home directory
 - `{{CLAUDE_CONFIG_DIR}}` - Claude Code config directory (usually `~/.claude`)
 - `{{USER}}` - Current username
@@ -74,14 +74,14 @@ Located in `~/.claude/hooks/`:
      - Dangerous system commands
    - Uses `patterns.yaml` for easy customization
 
-2. **Kanban Hooks** (referenced from dev-team)
+2. **Kanban Hooks** (referenced from aiteamforge)
    - **SessionStart** - Initialize kanban session
    - **PostToolUse** - Track tool usage for kanban items
    - **Stop** - Clean up kanban session
 
 ### Skills
 
-Skills are symlinked from `~/dev-team/skills/` to `~/.claude/skills/`:
+Skills are symlinked from `~/aiteamforge/skills/` to `~/.claude/skills/`:
 
 - Kanban Manager
 - LCARS Styling
@@ -90,7 +90,7 @@ Skills are symlinked from `~/dev-team/skills/` to `~/.claude/skills/`:
 - git-worktree
 - Team-specific skills
 
-Skills are symlinked so updates to the dev-team skills directory automatically reflect in Claude Code.
+Skills are symlinked so updates to the aiteamforge skills directory automatically reflect in Claude Code.
 
 ### Team-Specific Configuration
 
@@ -100,7 +100,7 @@ For each selected team, the installer creates:
    - Team-specific CLAUDE.md (optional overrides)
    - Agent persona markdown files
 
-2. **Agent Personas** (copied from `~/dev-team/{team}/personas/agents/`)
+2. **Agent Personas** (copied from `~/aiteamforge/{team}/personas/agents/`)
    - Persona markdown files with:
      - Agent name and description
      - Model preference (opus/sonnet)
@@ -123,7 +123,7 @@ The `install-claude-config.sh` installer:
 
 ```bash
 # Install via setup wizard (recommended)
-dev-team-setup
+aiteamforge-setup
 
 # Or directly for specific teams
 ./libexec/installers/install-claude-config.sh "Academy Team" "iOS Dev Team"
@@ -133,7 +133,7 @@ dev-team-setup
 
 ```bash
 # List available backups
-ls ~/dev-team/.backups/
+ls ~/aiteamforge/.backups/
 
 # Restore specific backup
 ./libexec/installers/install-claude-config.sh --restore 20260217-095800
@@ -208,7 +208,7 @@ After installation:
 ├── current-agent                       # Current active agent name
 ├── hooks/                              # Hook scripts
 │   └── damage-control/
-├── skills/                             # Symlinked to ~/dev-team/skills/
+├── skills/                             # Symlinked to ~/aiteamforge/skills/
 └── agents/                             # Team agent configurations
     ├── Academy Team/
     │   ├── academy_reno_engineer_persona.md
@@ -247,17 +247,17 @@ jq . ~/.claude/settings.json
 
 ### Skills Not Loading
 
-Skills should be symlinks to dev-team:
+Skills should be symlinks to aiteamforge:
 
 ```bash
 ls -la ~/.claude/skills/
-# Should show symlinks like: Kanban Manager -> /Users/.../dev-team/skills/Kanban Manager
+# Should show symlinks like: Kanban Manager -> /Users/.../aiteamforge/skills/Kanban Manager
 ```
 
 If not symlinked, reinstall:
 
 ```bash
-dev-team-setup --reinstall-claude-config
+aiteamforge-setup --reinstall-claude-config
 ```
 
 ### MCP Server Not Connecting
@@ -266,7 +266,7 @@ Check MCP server configuration:
 
 ```bash
 # Test MCP server manually
-node ~/dev-team/mcp-servers/kanban-integration/dist/index.js
+node ~/aiteamforge/mcp-servers/kanban-integration/dist/index.js
 
 # Check Claude Code logs
 tail -f ~/.claude/debug/*.log
@@ -274,7 +274,7 @@ tail -f ~/.claude/debug/*.log
 
 ## See Also
 
-- [Dev-Team Installation Guide](../../../docs/homebrew-tap/INSTALLATION_GUIDE.md)
+- [AITeamForge Installation Guide](../../../docs/homebrew-tap/INSTALLATION_GUIDE.md)
 - [Environment Inventory](../../../docs/homebrew-tap/ENVIRONMENT_INVENTORY.md)
 - [Claude Code Documentation](https://claude.com/code)
 - [Damage Control Hooks Documentation](hooks/damage-control/README.md)

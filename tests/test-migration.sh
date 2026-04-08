@@ -1,17 +1,17 @@
 #!/bin/bash
 
 # test-migration.sh
-# Tests for migration commands (dev-team migrate)
+# Tests for migration commands (aiteamforge migrate)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-MIGRATE_SCRIPT="$TAP_ROOT/libexec/commands/dev-team-migrate.sh"
-MIGRATE_CHECK_SCRIPT="$TAP_ROOT/libexec/commands/dev-team-migrate-check.sh"
+MIGRATE_SCRIPT="$TAP_ROOT/libexec/commands/aiteamforge-migrate.sh"
+MIGRATE_CHECK_SCRIPT="$TAP_ROOT/libexec/commands/aiteamforge-migrate-check.sh"
 
 # Set up test environment
-export DEV_TEAM_DIR="$TEST_TMP_DIR/dev-team"
-export DEV_TEAM_HOME="$TAP_ROOT"
-mkdir -p "$DEV_TEAM_DIR"
+export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
+export AITEAMFORGE_HOME="$TAP_ROOT"
+mkdir -p "$AITEAMFORGE_DIR"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests

@@ -1,0 +1,1041 @@
+/* ===============================================================================
+   LCARS Fleet Monitor - Dashboard Admin Panel CSS
+
+   Styles for the ADMIN tab that manages dashboard configurations
+   Includes: list view, editor panel, form inputs, modals, toasts
+
+   Import AFTER lcars-fleet-theme.css:
+   <link rel="stylesheet" href="css/lcars-dashboards.css">
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   SECTION 1: ADMIN SECTION LAYOUT
+   Two-column layout: dashboard list + editor panel
+   ------------------------------------------------------------------------------- */
+
+.admin-container {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    height: calc(100vh - 250px);
+    min-height: 400px;
+}
+
+/* Single column on narrow screens */
+@media (max-width: 900px) {
+    .admin-container {
+        grid-template-columns: 1fr;
+        grid-template-rows: auto 1fr;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 2: DASHBOARD LIST PANEL
+   ------------------------------------------------------------------------------- */
+
+.dashboard-list-panel {
+    background: var(--lcars-darker);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.panel-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 15px 20px;
+    background: var(--lcars-dark);
+    border-bottom: 2px solid var(--lcars-blue);
+}
+
+.panel-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--lcars-blue);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.dashboard-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 3: DASHBOARD CARD ITEMS
+   ------------------------------------------------------------------------------- */
+
+.dashboard-card {
+    background: var(--lcars-dark);
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 12px 15px;
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.dashboard-card:hover {
+    background: var(--lcars-surface);
+    border-color: var(--lcars-blue);
+}
+
+.dashboard-card.selected {
+    background: var(--lcars-surface);
+    border-color: var(--lcars-cyan);
+    box-shadow: 0 0 10px var(--lcars-cyan);
+}
+
+.dashboard-card.system {
+    border-left: 3px solid var(--lcars-purple);
+}
+
+.dashboard-card-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.dashboard-card-name {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--lcars-peach);
+    letter-spacing: 1px;
+}
+
+.dashboard-card-path {
+    font-size: 11px;
+    color: var(--lcars-tan);
+    letter-spacing: 0.5px;
+}
+
+.dashboard-card-badges {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.badge-system {
+    font-size: 9px;
+    padding: 2px 6px;
+    background: var(--lcars-purple);
+    color: var(--lcars-black);
+    border-radius: 3px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+
+.badge-divisions {
+    font-size: 9px;
+    padding: 2px 6px;
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+    border-radius: 3px;
+    letter-spacing: 0.5px;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 4: EDITOR PANEL
+   ------------------------------------------------------------------------------- */
+
+.dashboard-editor-panel {
+    background: var(--lcars-darker);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.editor-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+}
+
+.editor-placeholder {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: var(--lcars-tan);
+    text-align: center;
+    gap: 10px;
+}
+
+.editor-placeholder-icon {
+    font-size: 48px;
+    opacity: 0.5;
+}
+
+.editor-placeholder-text {
+    font-size: 14px;
+    letter-spacing: 1px;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 5: FORM STYLES
+   ------------------------------------------------------------------------------- */
+
+.form-group {
+    margin-bottom: 20px;
+}
+
+.form-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--lcars-tan);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+
+.form-input {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 4px;
+    color: var(--lcars-peach);
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    letter-spacing: 1px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--lcars-blue);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.3);
+}
+
+.form-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.form-input::placeholder {
+    color: var(--lcars-tan);
+    opacity: 0.6;
+}
+
+.form-input.error {
+    border-color: var(--lcars-alert-red);
+}
+
+.form-error {
+    font-size: 11px;
+    color: var(--lcars-alert-red);
+    margin-top: 4px;
+    letter-spacing: 0.5px;
+}
+
+/* Select input styling */
+.form-select {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 4px;
+    color: var(--lcars-peach);
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    letter-spacing: 1px;
+    cursor: pointer;
+    appearance: none;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23cc9966' d='M2 4l4 4 4-4'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+}
+
+.form-select:focus {
+    outline: none;
+    border-color: var(--lcars-blue);
+}
+
+/* Textarea styling */
+.form-textarea {
+    width: 100%;
+    min-height: 80px;
+    padding: 10px 14px;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 4px;
+    color: var(--lcars-peach);
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    letter-spacing: 1px;
+    resize: vertical;
+}
+
+.form-textarea:focus {
+    outline: none;
+    border-color: var(--lcars-blue);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.3);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 6: DIVISION MULTI-SELECT CHECKBOXES
+   ------------------------------------------------------------------------------- */
+
+.division-checkboxes {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 8px;
+}
+
+.division-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.division-checkbox:hover {
+    border-color: var(--lcars-blue);
+    background: var(--lcars-surface);
+}
+
+.division-checkbox.checked {
+    border-color: var(--lcars-cyan);
+    background: rgba(153, 204, 255, 0.1);
+}
+
+.division-checkbox input[type="checkbox"] {
+    display: none;
+}
+
+.division-checkbox-mark {
+    width: 18px;
+    height: 18px;
+    border: 2px solid var(--lcars-tan);
+    border-radius: 3px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.division-checkbox.checked .division-checkbox-mark {
+    background: var(--lcars-cyan);
+    border-color: var(--lcars-cyan);
+}
+
+.division-checkbox.checked .division-checkbox-mark::after {
+    content: '';
+    width: 6px;
+    height: 10px;
+    border: solid var(--lcars-black);
+    border-width: 0 2px 2px 0;
+    transform: rotate(45deg);
+    margin-bottom: 2px;
+}
+
+.division-checkbox-label {
+    font-size: 12px;
+    color: var(--lcars-peach);
+    letter-spacing: 0.5px;
+}
+
+.division-note {
+    margin-top: 10px;
+    font-size: 11px;
+    color: var(--lcars-tan);
+    font-style: italic;
+}
+
+.division-checkbox-count {
+    font-size: 10px;
+    color: var(--lcars-tan);
+    margin-left: auto;
+    padding: 2px 6px;
+    background: var(--lcars-surface);
+    border-radius: 3px;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 6B: MACHINE MULTI-SELECT CHECKBOXES
+   ------------------------------------------------------------------------------- */
+
+.machine-checkboxes {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+}
+
+.machine-checkbox {
+    position: relative;
+}
+
+.machine-checkbox.offline {
+    opacity: 0.6;
+}
+
+.machine-checkbox.offline .division-checkbox-label {
+    color: var(--lcars-tan);
+}
+
+.machine-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.machine-status-dot.online {
+    background: var(--lcars-green);
+    box-shadow: 0 0 6px var(--lcars-green);
+}
+
+.machine-status-dot.offline {
+    background: var(--lcars-alert-red);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 7: BUTTONS
+   ------------------------------------------------------------------------------- */
+
+.btn-lcars {
+    padding: 10px 20px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-lcars-primary {
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+}
+
+.btn-lcars-primary:hover {
+    background: var(--lcars-cyan);
+    box-shadow: 0 0 15px rgba(153, 204, 255, 0.4);
+}
+
+.btn-lcars-secondary {
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+}
+
+.btn-lcars-secondary:hover {
+    background: var(--lcars-peach);
+}
+
+.btn-lcars-danger {
+    background: var(--lcars-red);
+    color: var(--lcars-white);
+}
+
+.btn-lcars-danger:hover {
+    background: var(--lcars-alert-red);
+    box-shadow: 0 0 15px rgba(255, 102, 102, 0.4);
+}
+
+.btn-lcars-success {
+    background: var(--lcars-green-dark);
+    color: var(--lcars-black);
+}
+
+.btn-lcars-success:hover {
+    background: var(--lcars-green);
+    box-shadow: 0 0 15px var(--lcars-green-glow);
+}
+
+.btn-lcars:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.btn-lcars-new {
+    padding: 8px 16px;
+    font-size: 11px;
+    background: var(--lcars-green-dark);
+    color: var(--lcars-black);
+}
+
+.btn-lcars-new:hover {
+    background: var(--lcars-green);
+}
+
+/* Button group for form actions */
+.button-group {
+    display: flex;
+    gap: 10px;
+    margin-top: 20px;
+    padding-top: 20px;
+    border-top: 1px solid var(--lcars-surface);
+}
+
+.button-group-right {
+    justify-content: flex-end;
+}
+
+.button-group-spread {
+    justify-content: space-between;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 8: DELETE CONFIRMATION MODAL
+   ------------------------------------------------------------------------------- */
+
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+}
+
+.modal-overlay.active {
+    opacity: 1;
+    visibility: visible;
+}
+
+.modal-content {
+    background: var(--lcars-darker);
+    border: 2px solid var(--lcars-red);
+    border-radius: 12px;
+    padding: 0;
+    max-width: 400px;
+    width: 90%;
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+}
+
+.modal-overlay.active .modal-content {
+    transform: scale(1);
+}
+
+.modal-header {
+    background: var(--lcars-red);
+    padding: 15px 20px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+}
+
+.modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--lcars-white);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.modal-body {
+    padding: 25px 20px;
+}
+
+.modal-message {
+    font-size: 14px;
+    color: var(--lcars-peach);
+    line-height: 1.6;
+    margin-bottom: 10px;
+}
+
+.modal-warning {
+    font-size: 12px;
+    color: var(--lcars-alert-red);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+
+.modal-footer {
+    padding: 15px 20px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    border-top: 1px solid var(--lcars-surface);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 9: TOAST NOTIFICATIONS
+   ------------------------------------------------------------------------------- */
+
+.toast-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.toast {
+    min-width: 280px;
+    max-width: 400px;
+    padding: 14px 20px;
+    border-radius: 6px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    animation: toast-slide-in 0.3s ease;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+}
+
+@keyframes toast-slide-in {
+    from {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+    to {
+        transform: translateX(0);
+        opacity: 1;
+    }
+}
+
+.toast.toast-exit {
+    animation: toast-slide-out 0.3s ease forwards;
+}
+
+@keyframes toast-slide-out {
+    to {
+        transform: translateX(100%);
+        opacity: 0;
+    }
+}
+
+.toast-success {
+    background: var(--lcars-dark);
+    border-left: 4px solid var(--lcars-green);
+}
+
+.toast-error {
+    background: var(--lcars-dark);
+    border-left: 4px solid var(--lcars-alert-red);
+}
+
+.toast-info {
+    background: var(--lcars-dark);
+    border-left: 4px solid var(--lcars-blue);
+}
+
+.toast-warning {
+    background: var(--lcars-dark);
+    border-left: 4px solid var(--lcars-amber);
+}
+
+.toast-icon {
+    font-size: 18px;
+}
+
+.toast-success .toast-icon { color: var(--lcars-green); }
+.toast-error .toast-icon { color: var(--lcars-alert-red); }
+.toast-info .toast-icon { color: var(--lcars-blue); }
+.toast-warning .toast-icon { color: var(--lcars-amber); }
+
+.toast-message {
+    flex: 1;
+    font-size: 13px;
+    color: var(--lcars-peach);
+    letter-spacing: 0.5px;
+}
+
+.toast-close {
+    background: none;
+    border: none;
+    color: var(--lcars-tan);
+    font-size: 18px;
+    cursor: pointer;
+    padding: 0;
+    line-height: 1;
+}
+
+.toast-close:hover {
+    color: var(--lcars-peach);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 10: ORG COLOR PREVIEW
+   ------------------------------------------------------------------------------- */
+
+.color-preview-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 8px;
+}
+
+.color-option {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 12px;
+    background: var(--lcars-dark);
+    border: 2px solid transparent;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.color-option:hover {
+    border-color: var(--lcars-blue);
+}
+
+.color-option.selected {
+    border-color: var(--lcars-cyan);
+    background: rgba(153, 204, 255, 0.1);
+}
+
+.color-swatch {
+    width: 20px;
+    height: 20px;
+    border-radius: 3px;
+    flex-shrink: 0;
+}
+
+.color-swatch.lavender { background: var(--lcars-lavender); }
+.color-swatch.blue { background: var(--lcars-blue); }
+.color-swatch.cyan { background: var(--lcars-cyan); }
+.color-swatch.purple { background: var(--lcars-purple); }
+.color-swatch.orange { background: var(--lcars-orange); }
+.color-swatch.red { background: var(--lcars-red); }
+.color-swatch.crimson { background: var(--lcars-crimson); }
+.color-swatch.tan { background: var(--lcars-tan); }
+.color-swatch.peach { background: var(--lcars-peach); }
+.color-swatch.green { background: var(--lcars-green); }
+
+.color-label {
+    font-size: 11px;
+    color: var(--lcars-peach);
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 11: LOADING STATES
+   ------------------------------------------------------------------------------- */
+
+.loading-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 2px solid var(--lcars-surface);
+    border-top-color: var(--lcars-blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 12: EMPTY STATE
+   ------------------------------------------------------------------------------- */
+
+.empty-state {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 40px 20px;
+    text-align: center;
+}
+
+.empty-state-icon {
+    font-size: 48px;
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    margin-bottom: 15px;
+}
+
+.empty-state-title {
+    font-size: 16px;
+    color: var(--lcars-peach);
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+}
+
+.empty-state-text {
+    font-size: 12px;
+    color: var(--lcars-tan);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 13: DRAG AND DROP REORDERING
+   ------------------------------------------------------------------------------- */
+
+.dashboard-card {
+    position: relative;
+}
+
+.drag-handle {
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 14px;
+    color: var(--lcars-tan);
+    opacity: 0.4;
+    cursor: grab;
+    padding: 4px;
+    transition: opacity 0.2s ease, color 0.2s ease;
+}
+
+.drag-handle:hover {
+    opacity: 1;
+    color: var(--lcars-cyan);
+}
+
+.dashboard-card:active .drag-handle {
+    cursor: grabbing;
+}
+
+/* Adjust card padding to accommodate drag handle */
+.dashboard-card {
+    padding-left: 35px;
+}
+
+/* Dragging state */
+.dashboard-card.dragging {
+    opacity: 0.5;
+    transform: scale(1.02);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+    z-index: 100;
+}
+
+/* Drop target states */
+.dashboard-card.drag-over {
+    background: var(--lcars-surface);
+}
+
+.dashboard-card.drag-over-top {
+    border-top: 3px solid var(--lcars-cyan);
+}
+
+.dashboard-card.drag-over-bottom {
+    border-bottom: 3px solid var(--lcars-cyan);
+}
+
+/* Visual feedback line for drop position */
+.dashboard-card.drag-over-top::before {
+    content: '';
+    position: absolute;
+    top: -2px;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--lcars-cyan);
+    box-shadow: 0 0 10px var(--lcars-cyan);
+    border-radius: 2px;
+}
+
+.dashboard-card.drag-over-bottom::after {
+    content: '';
+    position: absolute;
+    bottom: -2px;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: var(--lcars-cyan);
+    box-shadow: 0 0 10px var(--lcars-cyan);
+    border-radius: 2px;
+}
+
+/* =========================================================================
+   Analytics Section
+   ========================================================================= */
+
+.analytics-chart-card {
+    min-height: 200px;
+}
+
+@media (max-width: 1024px) {
+    #analytics-overall-charts {
+        grid-template-columns: 1fr 1fr !important;
+    }
+}
+
+@media (max-width: 768px) {
+    #analytics-overall-charts {
+        grid-template-columns: 1fr !important;
+    }
+    #analytics-team-cards {
+        grid-template-columns: 1fr !important;
+    }
+}
+
+/* =========================================================================
+   Analytics Pages — Sub-screen navigation
+   ========================================================================= */
+
+/* The analytics section needs position:relative so hidden pages
+   (position:absolute) use its width for their 100% width calc. */
+.lcars-section[data-section="analytics"] {
+    position: relative;
+}
+
+/* Page visibility: off-screen by default, shown when .active.
+   Uses position:absolute (NOT display:none) so Chart.js canvases
+   always have real dimensions and render correctly. */
+.analytics-page {
+    position: absolute;
+    left: -9999px;
+    width: 100%;
+    visibility: hidden;
+    opacity: 0;
+    pointer-events: none;
+}
+
+.analytics-page.active {
+    position: relative;
+    left: auto;
+    width: auto;
+    visibility: visible;
+    opacity: 1;
+    pointer-events: auto;
+}
+
+/* -------------------------------------------------------------------------
+   Nav pills strip — LCARS styled navigation for analytics sub-pages
+   Includes prev/next arrows, pill buttons, and page counter
+   ------------------------------------------------------------------------- */
+.analytics-page-nav {
+    display: flex;
+    gap: 6px;
+    padding: 8px 0 12px;
+    flex-wrap: wrap;
+    align-items: center;
+}
+
+/* Prev / Next arrow buttons */
+.analytics-page-arrow {
+    background: var(--lcars-surface);
+    color: var(--lcars-cyan);
+    border: 1px solid var(--lcars-blue);
+    border-radius: 50%;
+    width: 30px;
+    height: 30px;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+}
+
+.analytics-page-arrow:hover {
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.4);
+}
+
+/* Page counter badge */
+.analytics-page-counter {
+    color: var(--lcars-tan);
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 1px;
+    opacity: 0.7;
+    margin-left: 4px;
+    white-space: nowrap;
+}
+
+.analytics-page-pill {
+    background: var(--lcars-dark);
+    color: var(--lcars-tan);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 14px;
+    padding: 5px 14px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+}
+
+.analytics-page-pill:hover {
+    border-color: var(--lcars-blue);
+    background: var(--lcars-surface);
+    color: var(--lcars-peach);
+}
+
+.analytics-page-pill.active {
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+    border-color: var(--lcars-blue);
+}
+
+/* Team pills — slightly different accent to distinguish from static pages */
+.analytics-page-pill.team-pill {
+    border-color: rgba(255, 153, 0, 0.3);
+}
+
+.analytics-page-pill.team-pill.active {
+    background: var(--lcars-orange);
+    border-color: var(--lcars-orange);
+    color: var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------
+   Expanded team page layout (inside dynamic team pages)
+   ------------------------------------------------------------------------- */
+.analytics-team-page-content {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+}
+
+.analytics-team-page-content .team-header {
+    margin-bottom: 0;
+}
+
+.analytics-team-page-content .team-metrics-grid {
+    /* Grid is set inline; this provides responsive override */
+}
+
+@media (max-width: 768px) {
+    .analytics-team-page-content .team-metrics-grid {
+        grid-template-columns: repeat(2, 1fr) !important;
+    }
+}
+
+@media (max-width: 480px) {
+    .analytics-team-page-content .team-metrics-grid {
+        grid-template-columns: 1fr !important;
+    }
+}

@@ -1,10 +1,10 @@
-# Dev-Team Lifecycle Commands
+# AITeamForge Lifecycle Commands
 
-This directory contains the complete lifecycle management commands for dev-team.
+This directory contains the complete lifecycle management commands for aiteamforge.
 
 ## Commands
 
-### `dev-team-doctor.sh`
+### `aiteamforge-doctor.sh`
 **Purpose:** Comprehensive health check and diagnostics
 
 **Features:**
@@ -29,8 +29,8 @@ This directory contains the complete lifecycle management commands for dev-team.
 
 ---
 
-### `dev-team-upgrade.sh`
-**Purpose:** Update dev-team components to latest version
+### `aiteamforge-upgrade.sh`
+**Purpose:** Update aiteamforge components to latest version
 
 **What Gets Updated:**
 - Homebrew formula (if newer available)
@@ -52,8 +52,8 @@ This directory contains the complete lifecycle management commands for dev-team.
 
 ---
 
-### `dev-team-uninstall.sh`
-**Purpose:** Clean removal of dev-team environment
+### `aiteamforge-uninstall.sh`
+**Purpose:** Clean removal of aiteamforge environment
 
 **What Gets Removed:**
 - zshrc integration
@@ -73,12 +73,12 @@ This directory contains the complete lifecycle management commands for dev-team.
 
 **Note:** Does NOT uninstall Homebrew formula. After running this, execute:
 ```bash
-brew uninstall dev-team
+brew uninstall aiteamforge
 ```
 
 ---
 
-### `dev-team-status.sh`
+### `aiteamforge-status.sh`
 **Purpose:** Display current environment status
 
 **Shows:**
@@ -99,15 +99,15 @@ brew uninstall dev-team
 
 **Examples:**
 ```bash
-dev-team status               # Full display
-dev-team status --brief       # One-line: "Dev-Team 1.0.0 | MyMachine | 5/12 tasks | Status: OK"
-dev-team status --json        # JSON output
+aiteamforge status               # Full display
+aiteamforge status --brief       # One-line: "AITeamForge 1.0.0 | MyMachine | 5/12 tasks | Status: OK"
+aiteamforge status --json        # JSON output
 ```
 
 ---
 
-### `dev-team-start.sh`
-**Purpose:** Start dev-team services
+### `aiteamforge-start.sh`
+**Purpose:** Start aiteamforge services
 
 **Services:**
 - `all` - Start all services (default)
@@ -120,15 +120,15 @@ dev-team status --json        # JSON output
 
 **Examples:**
 ```bash
-dev-team start                # Start everything
-dev-team start lcars          # Start LCARS only
-dev-team start --open         # Start and open browser
+aiteamforge start                # Start everything
+aiteamforge start lcars          # Start LCARS only
+aiteamforge start --open         # Start and open browser
 ```
 
 ---
 
-### `dev-team-stop.sh`
-**Purpose:** Stop dev-team services
+### `aiteamforge-stop.sh`
+**Purpose:** Stop aiteamforge services
 
 **Services:**
 - `all` - Stop all services (default)
@@ -141,18 +141,18 @@ dev-team start --open         # Start and open browser
 
 **Examples:**
 ```bash
-dev-team stop                 # Stop everything
-dev-team stop lcars           # Stop LCARS only
-dev-team stop --persist       # Stop but keep agents loaded
+aiteamforge stop                 # Stop everything
+aiteamforge stop lcars           # Stop LCARS only
+aiteamforge stop --persist       # Stop but keep agents loaded
 ```
 
 ---
 
-### `dev-team-migrate-check.sh`
+### `aiteamforge-migrate-check.sh`
 **Purpose:** Pre-migration analysis for existing installations
 
 **What It Does:**
-- Detects existing manual installation at ~/dev-team (or custom path)
+- Detects existing manual installation at ~/aiteamforge (or custom path)
 - Identifies installed components (kanban, agents, teams, services)
 - Checks for uncommitted git changes
 - Analyzes configuration files
@@ -178,14 +178,14 @@ dev-team stop --persist       # Stop but keep agents loaded
 - 3 - Invalid installation or not found
 
 **Options:**
-- `--dir <path>` - Path to existing installation (default: ~/dev-team)
+- `--dir <path>` - Path to existing installation (default: ~/aiteamforge)
 - `--verbose` - Show detailed analysis
 
 **Examples:**
 ```bash
-dev-team migrate --check                    # Check default location
-dev-team migrate --check --verbose          # Detailed analysis
-dev-team migrate --check --dir ~/old        # Check custom location
+aiteamforge migrate --check                    # Check default location
+aiteamforge migrate --check --verbose          # Detailed analysis
+aiteamforge migrate --check --dir ~/old        # Check custom location
 ```
 
 **Typical Output:**
@@ -202,18 +202,18 @@ dev-team migrate --check --dir ~/old        # Check custom location
 
 ---
 
-### `dev-team-migrate.sh`
+### `aiteamforge-migrate.sh`
 **Purpose:** Migrate existing manual installation to Homebrew-managed structure
 
 **CRITICAL:** This script handles user data migration. Data loss is unacceptable. Every step is reversible.
 
 **What It Migrates:**
-- Kanban boards and plan documents → `~/.dev-team/kanban/`
-- Kanban backups → `~/.dev-team/kanban-backups/`
-- Configuration files → `~/.dev-team/config/`
-- Claude agent configs → `~/.dev-team/claude/`
-- Team data directories → `~/.dev-team/teams/`
-- Fleet Monitor data → `~/.dev-team/fleet-monitor/`
+- Kanban boards and plan documents → `~/.aiteamforge/kanban/`
+- Kanban backups → `~/.aiteamforge/kanban-backups/`
+- Configuration files → `~/.aiteamforge/config/`
+- Claude agent configs → `~/.aiteamforge/claude/`
+- Team data directories → `~/.aiteamforge/teams/`
+- Fleet Monitor data → `~/.aiteamforge/fleet-monitor/`
 
 **What It Updates:**
 - LaunchAgent plists (path updates)
@@ -222,15 +222,15 @@ dev-team migrate --check --dir ~/old        # Check custom location
 
 **What It Does NOT Touch:**
 - Git repository structure (preserved as-is)
-- Original ~/dev-team directory (left intact for user to delete after verification)
+- Original ~/aiteamforge directory (left intact for user to delete after verification)
 - Framework files (replaced by Homebrew installation)
 
 **Migration Phases:**
-1. **Pre-Migration Checks** - Runs `dev-team migrate --check` automatically
-2. **Backup Phase** - Full backup to `~/.dev-team/migration-backups/TIMESTAMP/`
+1. **Pre-Migration Checks** - Runs `aiteamforge migrate --check` automatically
+2. **Backup Phase** - Full backup to `~/.aiteamforge/migration-backups/TIMESTAMP/`
 3. **Migration Phase** - Copies user data to new locations
 4. **Update Phase** - Updates paths in configs and LaunchAgents
-5. **Validation Phase** - Runs `dev-team doctor` to verify
+5. **Validation Phase** - Runs `aiteamforge doctor` to verify
 
 **Safety Features:**
 - Full backup created before any changes
@@ -238,7 +238,7 @@ dev-team migrate --check --dir ~/old        # Check custom location
 - Dry run mode (preview without changes)
 - Rollback support (restore from backup)
 - Original installation preserved (never deleted)
-- Complete migration log (~/.dev-team/migration.log)
+- Complete migration log (~/.aiteamforge/migration.log)
 - Idempotent (can run multiple times safely)
 
 **Options:**
@@ -254,16 +254,16 @@ dev-team migrate --check --dir ~/old        # Check custom location
 **Examples:**
 ```bash
 # Standard migration workflow
-dev-team migrate --check                    # Analyze first
-dev-team migrate --dry-run                  # Preview changes
-dev-team migrate                            # Perform migration
+aiteamforge migrate --check                    # Analyze first
+aiteamforge migrate --dry-run                  # Preview changes
+aiteamforge migrate                            # Perform migration
 
 # Advanced usage
-dev-team migrate --old-dir ~/old-location   # Custom source
-dev-team migrate --force                    # Ignore warnings
+aiteamforge migrate --old-dir ~/old-location   # Custom source
+aiteamforge migrate --force                    # Ignore warnings
 
 # Rollback if needed
-dev-team migrate --rollback                 # Undo migration
+aiteamforge migrate --rollback                 # Undo migration
 ```
 
 **Exit Codes:**
@@ -274,17 +274,17 @@ dev-team migrate --rollback                 # Undo migration
 
 **Post-Migration Steps:**
 1. Restart terminal (new shell integration)
-2. Run `dev-team doctor` (verify installation)
-3. Run `dev-team start` (start services)
+2. Run `aiteamforge doctor` (verify installation)
+3. Run `aiteamforge start` (start services)
 4. Verify kanban boards accessible
 5. Test agent workflows
-6. Only then, manually delete ~/dev-team if desired
+6. Only then, manually delete ~/aiteamforge if desired
 
 **Architecture Change:**
 
 Before (Manual):
 ```
-~/dev-team/                  (everything mixed together)
+~/aiteamforge/                  (everything mixed together)
   kanban/                    (user data)
   kanban-helpers.sh          (framework code)
   academy-startup.sh         (framework code)
@@ -293,12 +293,12 @@ Before (Manual):
 
 After (Homebrew):
 ```
-/opt/homebrew/opt/dev-team/  (framework - Homebrew-managed)
+/opt/homebrew/opt/aiteamforge/  (framework - Homebrew-managed)
   libexec/commands/
   libexec/lib/
   share/templates/
 
-~/.dev-team/                 (user data - persists across updates)
+~/.aiteamforge/                 (user data - persists across updates)
   kanban/
   config/
   claude/
@@ -306,7 +306,7 @@ After (Homebrew):
 ```
 
 **Benefits:**
-- Framework updates via `brew upgrade dev-team`
+- Framework updates via `brew upgrade aiteamforge`
 - User data preserved across updates
 - Clean separation of framework vs user data
 - Easier multi-machine setup
@@ -318,7 +318,7 @@ After (Homebrew):
 
 ### `../lib/config.sh`
 Configuration loader and helpers:
-- `is_configured()` - Check if dev-team is configured
+- `is_configured()` - Check if aiteamforge is configured
 - `get_config_value <key>` - Read config value
 - `get_installed_version()` - Get version
 - `get_configured_teams()` - Get team list
@@ -337,19 +337,19 @@ LCARS-styled UI helpers:
 
 ## CLI Integration
 
-Commands are invoked via the main CLI dispatcher at `bin/dev-team-cli.sh`:
+Commands are invoked via the main CLI dispatcher at `bin/aiteamforge-cli.sh`:
 
 ```bash
-dev-team doctor              # Health check
-dev-team status              # Show status
-dev-team upgrade             # Upgrade
-dev-team uninstall           # Remove
-dev-team start [service]     # Start services
-dev-team stop [service]      # Stop services
-dev-team restart             # Restart all
+aiteamforge doctor              # Health check
+aiteamforge status              # Show status
+aiteamforge upgrade             # Upgrade
+aiteamforge uninstall           # Remove
+aiteamforge start [service]     # Start services
+aiteamforge stop [service]      # Stop services
+aiteamforge restart             # Restart all
 ```
 
-All lifecycle commands are located in the framework (`${DEV_TEAM_HOME}/libexec/commands/`) rather than the working directory, ensuring they're always available and versioned with the framework.
+All lifecycle commands are located in the framework (`${AITEAMFORGE_HOME}/libexec/commands/`) rather than the working directory, ensuring they're always available and versioned with the framework.
 
 ---
 

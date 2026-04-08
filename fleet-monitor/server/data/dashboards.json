@@ -1,0 +1,140 @@
+{
+  "dashboards": [
+    {
+      "id": "academy",
+      "name": "Academy",
+      "title": "STARFLEET ACADEMY",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "Academy development team monitoring",
+      "url_path": "/lcars/",
+      "html_file": "lcars-dashboard.html?dashboard=academy",
+      "divisions": [
+        "academy"
+      ],
+      "machines": [],
+      "org_color": "lavender",
+      "system": false,
+      "sort_order": 1,
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "mainevent",
+      "name": "Main Event",
+      "title": "MAIN EVENT",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "Main Event app development monitoring",
+      "url_path": "/lcars/mainevent",
+      "html_file": "lcars-dashboard.html?dashboard=mainevent",
+      "divisions": [
+        "mainevent"
+      ],
+      "machines": [],
+      "org_color": "orange",
+      "system": false,
+      "sort_order": 2,
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "doublenode",
+      "name": "DoubleNode",
+      "title": "DOUBLENODE",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "DoubleNode freelance projects monitoring",
+      "url_path": "/lcars/doublenode",
+      "html_file": "lcars-dashboard.html?dashboard=doublenode",
+      "divisions": [
+        "freelance-doublenode-starwords",
+        "freelance-doublenode-workstats",
+        "freelance-doublenode-appplanning"
+      ],
+      "machines": [],
+      "org_color": "cyan",
+      "system": false,
+      "sort_order": 3,
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "finance",
+      "name": "Finance",
+      "title": "FERENGI COMMERCE AUTHORITY",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "Personal finance management and automation",
+      "url_path": "/lcars/finance",
+      "html_file": "lcars-dashboard.html?dashboard=finance",
+      "divisions": ["finance-personal"],
+      "machines": [],
+      "org_color": "gold",
+      "system": false,
+      "sort_order": 5,
+      "created_at": "2026-02-25T00:00:00.000Z",
+      "updated_at": "2026-02-25T00:00:00.000Z"
+    },
+    {
+      "id": "all",
+      "name": "All Fleet",
+      "title": "ALL FLEET",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "All divisions and teams across the fleet",
+      "url_path": "/lcars/all",
+      "html_file": "lcars-dashboard.html?dashboard=all",
+      "divisions": [],
+      "machines": [],
+      "org_color": "lavender",
+      "system": true,
+      "sort_order": 4,
+      "show_all_fleet_on": [
+        "academy",
+        "mainevent",
+        "doublenode",
+        "finance"
+      ],
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    }
+  ],
+  "divisions": [
+    {
+      "id": "academy",
+      "name": "Academy",
+      "description": "Starfleet Academy development infrastructure"
+    },
+    {
+      "id": "mainevent",
+      "name": "Main Event",
+      "description": "Main Event mobile app development"
+    },
+    {
+      "id": "freelance-doublenode-starwords",
+      "name": "Freelance: StarWords",
+      "description": "DoubleNode StarWords project"
+    },
+    {
+      "id": "freelance-doublenode-workstats",
+      "name": "Freelance: WorkStats",
+      "description": "DoubleNode WorkStats project"
+    },
+    {
+      "id": "freelance-doublenode-appplanning",
+      "name": "Freelance: AppPlanning",
+      "description": "DoubleNode AppPlanning project"
+    },
+    {
+      "id": "command",
+      "name": "Command",
+      "description": "Strategic leadership and command operations"
+    },
+    {
+      "id": "finance-personal",
+      "name": "Finance: Personal",
+      "description": "Ferengi personal finance management"
+    }
+  ],
+  "meta": {
+    "version": "1.1.0",
+    "created_at": "2026-01-19T00:00:00.000Z",
+    "last_modified": "2026-01-19T00:00:00.000Z"
+  }
+}

@@ -1,4 +1,4 @@
-# Dev-Team Homebrew Tap - Overview
+# AITeamForge Homebrew Tap - Overview
 
 **Status:** Phase 2 Complete - Core Infrastructure Ready
 **Version:** 1.0.0
@@ -8,7 +8,7 @@
 
 ## What We Built
 
-This Homebrew tap provides the packaging and distribution mechanism for the dev-team environment. It follows a **two-layer architecture**: the framework layer (managed by Homebrew) and the working layer (managed by the user).
+This Homebrew tap provides the packaging and distribution mechanism for the aiteamforge environment. It follows a **two-layer architecture**: the framework layer (managed by Homebrew) and the working layer (managed by the user).
 
 ---
 
@@ -17,15 +17,15 @@ This Homebrew tap provides the packaging and distribution mechanism for the dev-
 ### Two-Layer Design
 
 **Layer 1: Framework (Homebrew-managed)**
-- Location: `$(brew --prefix)/opt/dev-team/libexec/`
+- Location: `$(brew --prefix)/opt/aiteamforge/libexec/`
 - Content: Read-only template files, core scripts, documentation
-- Management: Installed via `brew install dev-team`, upgraded via `brew upgrade dev-team`
+- Management: Installed via `brew install aiteamforge`, upgraded via `brew upgrade aiteamforge`
 - Immutable by users
 
 **Layer 2: Working Directory (User-managed)**
-- Location: `~/dev-team` (or custom location)
+- Location: `~/aiteamforge` (or custom location)
 - Content: User configurations, kanban data, generated scripts, team configs
-- Management: Created by `dev-team setup`, preserved across framework upgrades
+- Management: Created by `aiteamforge setup`, preserved across framework upgrades
 - Fully mutable by users
 
 This separation allows:
@@ -38,9 +38,9 @@ This separation allows:
 
 ## Components
 
-### 1. Homebrew Formula (`Formula/dev-team.rb`)
+### 1. Homebrew Formula (`Formula/aiteamforge.rb`)
 
-**Purpose:** Defines how to install dev-team via Homebrew
+**Purpose:** Defines how to install aiteamforge via Homebrew
 
 **Key Features:**
 - Declares dependencies (Python, Node.js, jq, gh, Git)
@@ -53,7 +53,7 @@ This separation allows:
 **What it does:**
 1. Checks dependencies
 2. Downloads release tarball
-3. Installs to `$(brew --prefix)/opt/dev-team/libexec/`
+3. Installs to `$(brew --prefix)/opt/aiteamforge/libexec/`
 4. Creates executable stubs in `$(brew --prefix)/bin/`
 5. Shows post-install instructions
 
@@ -65,33 +65,33 @@ This separation allows:
 
 ---
 
-### 2. Main CLI (`bin/dev-team-cli.sh`)
+### 2. Main CLI (`bin/aiteamforge-cli.sh`)
 
 **Purpose:** Command dispatcher that routes subcommands to appropriate handlers
 
 **Commands:**
 ```bash
-dev-team setup       # Run setup wizard
-dev-team doctor      # Health check
-dev-team status      # Show environment status
-dev-team upgrade     # Upgrade components
-dev-team start       # Start environment
-dev-team stop        # Stop environment
-dev-team restart     # Restart environment
-dev-team version     # Show version info
-dev-team help        # Show help
+aiteamforge setup       # Run setup wizard
+aiteamforge doctor      # Health check
+aiteamforge status      # Show environment status
+aiteamforge upgrade     # Upgrade components
+aiteamforge start       # Start environment
+aiteamforge stop        # Stop environment
+aiteamforge restart     # Restart environment
+aiteamforge version     # Show version info
+aiteamforge help        # Show help
 ```
 
 **How it works:**
-- Exports `DEV_TEAM_HOME` (framework location)
-- Exports `DEV_TEAM_DIR` (working directory)
+- Exports `AITEAMFORGE_HOME` (framework location)
+- Exports `AITEAMFORGE_DIR` (working directory)
 - Routes to appropriate script based on subcommand
 - Checks if configured before allowing most commands
 - Falls back to help on unknown commands
 
 ---
 
-### 3. Setup Wizard (`bin/dev-team-setup.sh`)
+### 3. Setup Wizard (`bin/aiteamforge-setup.sh`)
 
 **Purpose:** Interactive configuration and installation wizard
 
@@ -121,7 +121,7 @@ dev-team help        # Show help
 
 ---
 
-### 4. Health Check (`bin/dev-team-doctor.sh`)
+### 4. Health Check (`bin/aiteamforge-doctor.sh`)
 
 **Purpose:** Comprehensive diagnostics and health monitoring
 
@@ -204,13 +204,13 @@ dev-team help        # Show help
 
 ```bash
 # 1. Add tap
-brew tap DoubleNode/dev-team
+brew tap DoubleNode/aiteamforge
 
 # 2. Install framework
-brew install dev-team
+brew install aiteamforge
 
 # 3. Run setup wizard
-dev-team setup
+aiteamforge setup
   # Checks dependencies
   # Installs missing deps (if approved)
   # Chooses installation location
@@ -219,11 +219,11 @@ dev-team setup
   # Shows next steps
 
 # 4. Verify health
-dev-team doctor
+aiteamforge doctor
 
-# 5. Use dev-team
-dev-team start ios
-dev-team status
+# 5. Use aiteamforge
+aiteamforge start ios
+aiteamforge status
 ```
 
 ---
@@ -240,7 +240,7 @@ dev-team status
 - Setup wizard bridges the two
 
 **Benefits:**
-- Clean upgrades via `brew upgrade dev-team`
+- Clean upgrades via `brew upgrade aiteamforge`
 - User data preserved across upgrades
 - Multiple working directories possible
 - Clear separation of concerns
@@ -279,7 +279,7 @@ dev-team status
 
 **Homebrew Installation:**
 ```
-$(brew --prefix)/opt/dev-team/
+$(brew --prefix)/opt/aiteamforge/
 ├── libexec/                    # Framework files (read-only)
 │   ├── bin/                   # Core scripts
 │   ├── scripts/               # Automation
@@ -290,15 +290,15 @@ $(brew --prefix)/opt/dev-team/
 └── bin -> libexec/bin/        # Symlink
 
 $(brew --prefix)/bin/
-├── dev-team                   # Stub → libexec/bin/dev-team-cli.sh
-├── dev-team-setup             # Stub → libexec/bin/dev-team-setup.sh
-└── dev-team-doctor            # Stub → libexec/bin/dev-team-doctor.sh
+├── aiteamforge                   # Stub → libexec/bin/aiteamforge-cli.sh
+├── aiteamforge-setup             # Stub → libexec/bin/aiteamforge-setup.sh
+└── aiteamforge-doctor            # Stub → libexec/bin/aiteamforge-doctor.sh
 ```
 
 **Working Directory:**
 ```
-~/dev-team/                     # User's working directory
-├── .dev-team-config            # Installation metadata
+~/aiteamforge/                     # User's working directory
+├── .aiteamforge-config            # Installation metadata
 ├── templates/                  # Copied from framework
 ├── docs/                       # Copied from framework
 ├── skills/                     # Copied from framework
@@ -348,11 +348,11 @@ $(brew --prefix)/bin/
 ## Testing Strategy
 
 ### Manual Testing
-1. Formula audit: `brew audit --strict Formula/dev-team.rb`
-2. Install from source: `brew install --build-from-source dev-team`
-3. Run formula tests: `brew test dev-team`
-4. Test all commands: `dev-team --version`, `dev-team-setup --help`, etc.
-5. Full integration: `dev-team setup` → configure → `dev-team doctor`
+1. Formula audit: `brew audit --strict Formula/aiteamforge.rb`
+2. Install from source: `brew install --build-from-source aiteamforge`
+3. Run formula tests: `brew test aiteamforge`
+4. Test all commands: `aiteamforge --version`, `aiteamforge-setup --help`, etc.
+5. Full integration: `aiteamforge setup` → configure → `aiteamforge doctor`
 
 ### Automated Testing (CI)
 - Formula audit and lint
@@ -420,8 +420,8 @@ $(brew --prefix)/bin/
 
 ### Releasing a New Version
 
-1. Update version in `Formula/dev-team.rb`
-2. Tag main dev-team repo: `git tag v1.0.0`
+1. Update version in `Formula/aiteamforge.rb`
+2. Tag main aiteamforge repo: `git tag v1.0.0`
 3. Push tag: `git push origin v1.0.0`
 4. Calculate new SHA256 of release tarball
 5. Update formula SHA256
@@ -433,21 +433,21 @@ $(brew --prefix)/bin/
 
 ```bash
 # Always test locally before pushing
-brew audit --strict Formula/dev-team.rb
-brew install --build-from-source dev-team
-brew test dev-team
+brew audit --strict Formula/aiteamforge.rb
+brew install --build-from-source aiteamforge
+brew test aiteamforge
 
 # Test uninstall/reinstall
-brew uninstall dev-team
-brew install dev-team
+brew uninstall aiteamforge
+brew install aiteamforge
 ```
 
 ### Common Issues
 
 **Formula not found:**
 ```bash
-brew untap DoubleNode/dev-team
-brew tap DoubleNode/dev-team
+brew untap DoubleNode/aiteamforge
+brew tap DoubleNode/aiteamforge
 ```
 
 **SHA256 mismatch:**

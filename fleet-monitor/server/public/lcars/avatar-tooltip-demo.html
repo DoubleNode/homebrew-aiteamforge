@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LCARS Avatar Tooltip Demo</title>
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css">
+    <style>
+        body {
+            background: #000;
+            color: #fff;
+            font-family: 'Antonio', sans-serif;
+            padding: 40px;
+        }
+
+        h1 {
+            color: var(--lcars-blue);
+            margin-bottom: 30px;
+        }
+
+        .demo-section {
+            margin-bottom: 40px;
+        }
+
+        .demo-section h2 {
+            color: var(--lcars-gold);
+            font-size: 18px;
+            margin-bottom: 15px;
+        }
+
+        .demo-section h2 .series {
+            font-size: 12px;
+            color: rgba(255, 255, 255, 0.4);
+            margin-left: 8px;
+        }
+
+        .avatar-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(80px, 1fr));
+            gap: 20px;
+            max-width: 800px;
+        }
+
+        .avatar-item {
+            text-align: center;
+        }
+
+        .avatar-item img {
+            width: 64px;
+            height: 64px;
+            border-radius: 50%;
+            border: 2px solid var(--lcars-blue);
+            transition: border-color 0.2s, transform 0.2s;
+        }
+
+        .avatar-item img:hover {
+            transform: scale(1.1);
+        }
+
+        /* Team-specific border colors */
+        .team-academy img { border-color: #cc3333; }
+        .team-ios img { border-color: #9999ff; }
+        .team-android img { border-color: #ffcc66; }
+        .team-firebase img { border-color: #cc6633; }
+        .team-dns img { border-color: #9966cc; }
+        .team-freelance img { border-color: #3399cc; }
+        .team-mainevent img { border-color: #6699cc; }
+        .team-command img { border-color: #cc9933; }
+        .team-legal img { border-color: #66cc99; }
+
+        .avatar-label {
+            margin-top: 8px;
+            font-size: 11px;
+            color: rgba(255, 255, 255, 0.6);
+        }
+
+        .code-example {
+            background: rgba(255, 255, 255, 0.05);
+            border-left: 3px solid var(--lcars-blue);
+            padding: 15px;
+            margin-top: 20px;
+            font-family: monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+
+        .divider {
+            border: none;
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            margin: 30px 0;
+        }
+    </style>
+</head>
+<body>
+    <h1>LCARS Avatar Tooltip Demo</h1>
+
+    <!-- Academy Team -->
+    <div class="demo-section">
+        <h2>Academy Team <span class="series">Star Trek: Discovery</span></h2>
+        <div class="avatar-grid team-academy">
+            <div class="avatar-item">
+                <img src="/avatars/academy_nahla_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="nahla"
+                     alt="Nahla">
+                <div class="avatar-label">Nahla</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/academy_reno_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="reno"
+                     alt="Reno">
+                <div class="avatar-label">Reno</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/academy_thok_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="thok"
+                     alt="Thok">
+                <div class="avatar-label">Thok</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/academy_emh_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="emh"
+                     alt="EMH">
+                <div class="avatar-label">EMH</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- iOS Team -->
+    <div class="demo-section">
+        <h2>iOS Team <span class="series">Star Trek: The Next Generation</span></h2>
+        <div class="avatar-grid team-ios">
+            <div class="avatar-item">
+                <img src="/avatars/ios_picard_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="captain"
+                     alt="Picard">
+                <div class="avatar-label">Picard</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/ios_data_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="data"
+                     alt="Data">
+                <div class="avatar-label">Data</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/ios_geordi_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="geordi"
+                     alt="Geordi">
+                <div class="avatar-label">Geordi</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/ios_worf_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="worf"
+                     alt="Worf">
+                <div class="avatar-label">Worf</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/ios_beverly_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="doctor"
+                     alt="Beverly">
+                <div class="avatar-label">Beverly</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/ios_deanna_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="counselor"
+                     alt="Deanna">
+                <div class="avatar-label">Deanna</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/ios_wesley_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="wesley"
+                     alt="Wesley">
+                <div class="avatar-label">Wesley</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Android Team -->
+    <div class="demo-section">
+        <h2>Android Team <span class="series">Star Trek: The Original Series</span></h2>
+        <div class="avatar-grid team-android">
+            <div class="avatar-item">
+                <img src="/avatars/android_kirk_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="kirk"
+                     alt="Kirk">
+                <div class="avatar-label">Kirk</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/android_spock_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="spock"
+                     alt="Spock">
+                <div class="avatar-label">Spock</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/android_mccoy_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="mccoy"
+                     alt="McCoy">
+                <div class="avatar-label">McCoy</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/android_scotty_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="scotty"
+                     alt="Scotty">
+                <div class="avatar-label">Scotty</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/android_uhura_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="uhura"
+                     alt="Uhura">
+                <div class="avatar-label">Uhura</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/android_sulu_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="sulu"
+                     alt="Sulu">
+                <div class="avatar-label">Sulu</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/android_chekov_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="chekov"
+                     alt="Chekov">
+                <div class="avatar-label">Chekov</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Firebase Team -->
+    <div class="demo-section">
+        <h2>Firebase Team <span class="series">Star Trek: Deep Space Nine</span></h2>
+        <div class="avatar-grid team-firebase">
+            <div class="avatar-item">
+                <img src="/avatars/firebase_sisko_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="sisko"
+                     alt="Sisko">
+                <div class="avatar-label">Sisko</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/firebase_kira_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="kira"
+                     alt="Kira">
+                <div class="avatar-label">Kira</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/firebase_dax_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="dax"
+                     alt="Dax">
+                <div class="avatar-label">Dax</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/firebase_obrien_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="obrien"
+                     alt="O'Brien">
+                <div class="avatar-label">O'Brien</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/firebase_odo_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="odo"
+                     alt="Odo">
+                <div class="avatar-label">Odo</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/firebase_bashir_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="bashir"
+                     alt="Bashir">
+                <div class="avatar-label">Bashir</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/firebase_quark_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="quark"
+                     alt="Quark">
+                <div class="avatar-label">Quark</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- MainEvent Team -->
+    <div class="demo-section">
+        <h2>MainEvent Team <span class="series">Star Trek: Voyager</span></h2>
+        <div class="avatar-grid team-mainevent">
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_janeway_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_janeway"
+                     alt="Janeway">
+                <div class="avatar-label">Janeway</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_doctor_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_doctor"
+                     alt="The Doctor">
+                <div class="avatar-label">The Doctor</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_seven_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_seven"
+                     alt="Seven">
+                <div class="avatar-label">Seven</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_torres_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_torres"
+                     alt="Torres">
+                <div class="avatar-label">Torres</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_paris_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_paris"
+                     alt="Paris">
+                <div class="avatar-label">Paris</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_kim_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_kim"
+                     alt="Kim">
+                <div class="avatar-label">Kim</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/mainevent_tuvok_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="me_tuvok"
+                     alt="Tuvok">
+                <div class="avatar-label">Tuvok</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Command Team -->
+    <div class="demo-section">
+        <h2>Command Team <span class="series">Starfleet Admiralty</span></h2>
+        <div class="avatar-grid team-command">
+            <div class="avatar-item">
+                <img src="/avatars/command_vance_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="vance"
+                     alt="Vance">
+                <div class="avatar-label">Vance</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/command_janeway_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="janeway"
+                     alt="Janeway">
+                <div class="avatar-label">Janeway</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/command_ross_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="ross"
+                     alt="Ross">
+                <div class="avatar-label">Ross</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/command_nechayev_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="nechayev"
+                     alt="Nechayev">
+                <div class="avatar-label">Nechayev</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/command_paris_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="paris"
+                     alt="Paris">
+                <div class="avatar-label">Paris</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- DNS Framework Team -->
+    <div class="demo-section">
+        <h2>DNS Framework Team <span class="series">Star Trek: Lower Decks</span></h2>
+        <div class="avatar-grid team-dns">
+            <div class="avatar-item">
+                <img src="/avatars/dns_mariner_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="mariner"
+                     alt="Mariner">
+                <div class="avatar-label">Mariner</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/dns_boimler_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="boimler"
+                     alt="Boimler">
+                <div class="avatar-label">Boimler</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/dns_tendi_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="tendi"
+                     alt="Tendi">
+                <div class="avatar-label">Tendi</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/dns_rutherford_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="rutherford"
+                     alt="Rutherford">
+                <div class="avatar-label">Rutherford</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/dns_tana_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="tana"
+                     alt="T'Ana">
+                <div class="avatar-label">T'Ana</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/dns_ransom_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="ransom"
+                     alt="Ransom">
+                <div class="avatar-label">Ransom</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/dns_shaxs_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="shaxs"
+                     alt="Shaxs">
+                <div class="avatar-label">Shaxs</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Freelance Team -->
+    <div class="demo-section">
+        <h2>Freelance Team <span class="series">Star Trek: Enterprise</span></h2>
+        <div class="avatar-grid team-freelance">
+            <div class="avatar-item">
+                <img src="/avatars/freelance_archer_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="archer"
+                     alt="Archer">
+                <div class="avatar-label">Archer</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/freelance_tpol_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="tpol"
+                     alt="T'Pol">
+                <div class="avatar-label">T'Pol</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/freelance_tucker_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="tucker"
+                     alt="Tucker">
+                <div class="avatar-label">Tucker</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/freelance_phlox_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="phlox"
+                     alt="Phlox">
+                <div class="avatar-label">Phlox</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/freelance_reed_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="reed"
+                     alt="Reed">
+                <div class="avatar-label">Reed</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/freelance_sato_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="sato"
+                     alt="Sato">
+                <div class="avatar-label">Sato</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/freelance_mayweather_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="mayweather"
+                     alt="Mayweather">
+                <div class="avatar-label">Mayweather</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Legal Team -->
+    <div class="demo-section">
+        <h2>Legal Team <span class="series">Boston Legal</span></h2>
+        <div class="avatar-grid team-legal">
+            <div class="avatar-item">
+                <img src="/avatars/legal_crane_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="crane"
+                     alt="Crane">
+                <div class="avatar-label">Denny Crane</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/legal_shore_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="shore"
+                     alt="Shore">
+                <div class="avatar-label">Alan Shore</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/legal_schmidt_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="schmidt"
+                     alt="Schmidt">
+                <div class="avatar-label">Shirley Schmidt</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/legal_chase_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="chase"
+                     alt="Chase">
+                <div class="avatar-label">Brad Chase</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/legal_sack_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="sack"
+                     alt="Sack">
+                <div class="avatar-label">Carl Sack</div>
+            </div>
+            <div class="avatar-item">
+                <img src="/avatars/legal_espenson_avatar_thumb.png"
+                     class="lcars-avatar"
+                     data-persona="espenson"
+                     alt="Espenson">
+                <div class="avatar-label">Jerry Espenson</div>
+            </div>
+        </div>
+    </div>
+
+    <hr class="divider">
+
+    <!-- Usage Instructions -->
+    <div class="demo-section">
+        <h2>Usage Instructions</h2>
+        <p>To add tooltips to any avatar image:</p>
+        <div class="code-example">
+&lt;img src="/avatars/academy_reno_avatar_thumb.png"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;class="lcars-avatar"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;data-persona="reno"<br>
+&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;alt="Reno"&gt;
+        </div>
+        <p style="margin-top: 15px;">Just add two things:</p>
+        <ul style="margin-left: 20px; line-height: 1.8;">
+            <li><code>class="lcars-avatar"</code> - Enables hover behavior</li>
+            <li><code>data-persona="key"</code> - Persona key from LCARS.personas.metadata</li>
+        </ul>
+        <p style="margin-top: 15px;">The tooltip system handles everything else automatically!</p>
+        <p style="margin-top: 10px; color: rgba(255,255,255,0.4); font-size: 13px;">
+            9 teams &middot; 57 personas &middot; All avatars generated with DALL-E
+        </p>
+    </div>
+
+    <script src="js/lcars-fleet-core.js"></script>
+    <script>
+        // Initialize LCARS core (includes persona tooltips)
+        window.LCARS_CORE.init();
+    </script>
+</body>
+</html>

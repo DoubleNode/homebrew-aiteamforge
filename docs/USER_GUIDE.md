@@ -1,6 +1,6 @@
 # User Guide
 
-**Day-to-day usage of the Dev-Team environment**
+**Day-to-day usage of the AITeamForge environment**
 
 ---
 
@@ -20,7 +20,7 @@
 
 ## Overview
 
-Dev-Team provides a comprehensive development environment with:
+AITeamForge provides a comprehensive development environment with:
 - **Multiple specialized teams** (iOS, Android, Firebase, etc.)
 - **LCARS Kanban system** for visual task management
 - **Claude Code integration** with team-specific AI agents
@@ -35,36 +35,36 @@ Dev-Team provides a comprehensive development environment with:
 ### Core Commands
 
 ```bash
-dev-team setup      # Run interactive setup wizard
-dev-team doctor     # Health check and diagnostics
-dev-team status     # Show current environment status
-dev-team start      # Start dev-team services
-dev-team stop       # Stop dev-team services
-dev-team restart    # Restart dev-team services
-dev-team upgrade    # Upgrade dev-team components
-dev-team uninstall  # Remove dev-team environment
-dev-team version    # Show version information
-dev-team help       # Show help message
+aiteamforge setup      # Run interactive setup wizard
+aiteamforge doctor     # Health check and diagnostics
+aiteamforge status     # Show current environment status
+aiteamforge start      # Start aiteamforge services
+aiteamforge stop       # Stop aiteamforge services
+aiteamforge restart    # Restart aiteamforge services
+aiteamforge upgrade    # Upgrade aiteamforge components
+aiteamforge uninstall  # Remove aiteamforge environment
+aiteamforge version    # Show version information
+aiteamforge help       # Show help message
 ```
 
 ### Command Details
 
-#### dev-team setup
+#### aiteamforge setup
 
-Run the interactive setup wizard to configure dev-team.
+Run the interactive setup wizard to configure aiteamforge.
 
 ```bash
 # Interactive setup
-dev-team setup
+aiteamforge setup
 
 # Non-interactive (uses existing config or defaults)
-dev-team setup --non-interactive
+aiteamforge setup --non-interactive
 
 # Preview changes without applying
-dev-team setup --dry-run
+aiteamforge setup --dry-run
 
 # Install to custom directory
-dev-team setup --install-dir /opt/dev-team
+aiteamforge setup --install-dir /opt/aiteamforge
 ```
 
 **Use cases:**
@@ -73,24 +73,24 @@ dev-team setup --install-dir /opt/dev-team
 - Enabling new features
 - Reconfiguring existing setup
 
-#### dev-team doctor
+#### aiteamforge doctor
 
 Run comprehensive health checks and diagnostics.
 
 ```bash
 # Standard health check
-dev-team doctor
+aiteamforge doctor
 
 # Verbose diagnostics
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 
 # Check specific component
-dev-team doctor --check dependencies
-dev-team doctor --check services
-dev-team doctor --check config
+aiteamforge doctor --check dependencies
+aiteamforge doctor --check services
+aiteamforge doctor --check config
 
 # Attempt automatic fixes (future feature)
-dev-team doctor --fix
+aiteamforge doctor --fix
 ```
 
 **What it checks:**
@@ -100,19 +100,19 @@ dev-team doctor --fix
 - Running services (LCARS, Fleet Monitor)
 - File permissions
 
-#### dev-team status
+#### aiteamforge status
 
 Show current environment status.
 
 ```bash
 # Full status
-dev-team status
+aiteamforge status
 
 # JSON output
-dev-team status --json
+aiteamforge status --json
 
 # Brief status
-dev-team status --brief
+aiteamforge status --brief
 ```
 
 **Displays:**
@@ -122,31 +122,31 @@ dev-team status --brief
 - Current kanban status
 - Fleet Monitor status (if enabled)
 
-#### dev-team start/stop/restart
+#### aiteamforge start/stop/restart
 
-Control dev-team services and environments.
+Control aiteamforge services and environments.
 
 ```bash
 # Start all teams
-dev-team start
+aiteamforge start
 
 # Start specific team
-dev-team start ios
-dev-team start android
-dev-team start firebase
+aiteamforge start ios
+aiteamforge start android
+aiteamforge start firebase
 
 # Stop all services
-dev-team stop
+aiteamforge stop
 
 # Stop specific team
-dev-team stop ios
+aiteamforge stop ios
 
 # Restart everything
-dev-team restart
+aiteamforge restart
 
 # Restart specific service
-dev-team restart lcars
-dev-team restart fleet-monitor
+aiteamforge restart lcars
+aiteamforge restart fleet-monitor
 ```
 
 ---
@@ -170,11 +170,11 @@ dev-team restart fleet-monitor
 
 ### Selecting Teams
 
-Teams are selected during initial setup via `dev-team setup`. You can add or remove teams by re-running the wizard.
+Teams are selected during initial setup via `aiteamforge setup`. You can add or remove teams by re-running the wizard.
 
 ```bash
 # Add new teams
-dev-team setup  # Re-run wizard, select additional teams
+aiteamforge setup  # Re-run wizard, select additional teams
 ```
 
 ### Starting a Team Environment
@@ -183,10 +183,10 @@ Each team has its own startup script that configures the environment.
 
 ```bash
 # Start iOS team
-dev-team start ios
+aiteamforge start ios
 
 # Start multiple teams
-dev-team start ios firebase
+aiteamforge start ios firebase
 ```
 
 **What happens on team start:**
@@ -205,10 +205,10 @@ dev-team start ios firebase
 
 ### Team Directory Structure
 
-Each team has a directory in `~/dev-team/`:
+Each team has a directory in `~/aiteamforge/`:
 
 ```
-~/dev-team/<team-id>/
+~/aiteamforge/<team-id>/
 ├── personas/
 │   ├── agents/          # Agent persona markdown files
 │   ├── avatars/         # Agent avatar images
@@ -230,7 +230,7 @@ Open in your browser:
 http://localhost:8082
 ```
 
-**Default port:** 8082 (configurable via `~/dev-team/config.json`)
+**Default port:** 8082 (configurable via `~/aiteamforge/config.json`)
 
 ### Kanban Commands
 
@@ -301,11 +301,11 @@ Kanban boards are automatically backed up hourly.
 
 ```bash
 # View backups
-ls ~/dev-team/kanban-backups/
+ls ~/aiteamforge/kanban-backups/
 
 # Restore from backup
-cp ~/dev-team/kanban-backups/ios-board-20260217-1400.json \
-   ~/dev-team/kanban/ios-board.json
+cp ~/aiteamforge/kanban-backups/ios-board-20260217-1400.json \
+   ~/aiteamforge/kanban/ios-board.json
 ```
 
 **Backup schedule:** Every hour (via LaunchAgent)
@@ -380,7 +380,7 @@ Agents automatically track their work in the kanban system:
 
 Agent configurations are stored in:
 ```
-~/dev-team/claude/agents/<Team Name>/<agent-name>/
+~/aiteamforge/claude/agents/<Team Name>/<agent-name>/
 ```
 
 Each agent has:
@@ -392,7 +392,7 @@ Each agent has:
 
 ## Git Worktrees
 
-Dev-Team includes automation for git worktrees, allowing parallel development.
+AITeamForge includes automation for git worktrees, allowing parallel development.
 
 ### Worktree Commands
 
@@ -421,7 +421,7 @@ wt-switch feature/my-feature
 wt-create feature/xios-0042
 
 # 2. CD into worktree
-cd ~/dev-team/worktrees/feature/xios-0042
+cd ~/aiteamforge/worktrees/feature/xios-0042
 
 # 3. Work on feature (separate from main repo)
 # Make changes, commit, push
@@ -452,16 +452,16 @@ kb-run XIOS-0042
 
 ## Shell Aliases and Shortcuts
 
-Dev-Team installs numerous shell aliases for common operations.
+AITeamForge installs numerous shell aliases for common operations.
 
 ### Core Aliases
 
 ```bash
-# Dev-Team commands
-dt-status        # Alias for: dev-team status
-dt-doctor        # Alias for: dev-team doctor
-dt-start         # Alias for: dev-team start
-dt-stop          # Alias for: dev-team stop
+# AITeamForge commands
+dt-status        # Alias for: aiteamforge status
+dt-doctor        # Alias for: aiteamforge doctor
+dt-start         # Alias for: aiteamforge start
+dt-stop          # Alias for: aiteamforge stop
 
 # Claude Code shortcuts
 cc               # Launch Claude Code in current directory
@@ -499,16 +499,16 @@ gcb              # git checkout -b
 
 ```bash
 # Quick navigation
-cddt             # cd ~/dev-team
-cdk              # cd ~/dev-team/kanban
-cdl              # cd ~/dev-team/lcars-ui
-cdt              # cd ~/dev-team/teams
+cddt             # cd ~/aiteamforge
+cdk              # cd ~/aiteamforge/kanban
+cdl              # cd ~/aiteamforge/lcars-ui
+cdt              # cd ~/aiteamforge/teams
 ```
 
 ### Viewing Aliases
 
 ```bash
-# List all dev-team aliases
+# List all aiteamforge aliases
 alias | grep "^dt-"
 alias | grep "^kb-"
 alias | grep "^wt-"
@@ -525,16 +525,16 @@ alias | grep "^wt-"
 curl http://localhost:8082/health
 
 # Start LCARS
-dev-team start lcars
+aiteamforge start lcars
 
 # Stop LCARS
-dev-team stop lcars
+aiteamforge stop lcars
 
 # Restart LCARS
-dev-team restart lcars
+aiteamforge restart lcars
 
 # View LCARS logs
-tail -f ~/dev-team/logs/lcars.log
+tail -f ~/aiteamforge/logs/lcars.log
 ```
 
 ### Fleet Monitor Service (Multi-Machine Only)
@@ -544,25 +544,25 @@ tail -f ~/dev-team/logs/lcars.log
 curl http://localhost:3000/api/health
 
 # Start Fleet Monitor
-dev-team start fleet-monitor
+aiteamforge start fleet-monitor
 
 # Stop Fleet Monitor
-dev-team stop fleet-monitor
+aiteamforge stop fleet-monitor
 
 # Restart Fleet Monitor
-dev-team restart fleet-monitor
+aiteamforge restart fleet-monitor
 
 # View Fleet Monitor logs
-tail -f ~/dev-team/logs/fleet-monitor.log
+tail -f ~/aiteamforge/logs/fleet-monitor.log
 ```
 
 ### LaunchAgents (Background Services)
 
-Dev-Team installs LaunchAgents for background tasks:
+AITeamForge installs LaunchAgents for background tasks:
 
 ```bash
-# List dev-team LaunchAgents
-launchctl list | grep dev-team
+# List aiteamforge LaunchAgents
+launchctl list | grep aiteamforge
 
 # View LaunchAgent status
 launchctl list com.devteam.kanban-backup
@@ -580,14 +580,14 @@ launchctl kickstart -k gui/$(id -u)/com.devteam.kanban-backup
 
 ## Upgrading and Maintenance
 
-### Upgrading Dev-Team
+### Upgrading AITeamForge
 
 ```bash
 # Upgrade framework
-brew upgrade dev-team
+brew upgrade aiteamforge
 
 # Upgrade working directory components
-dev-team upgrade
+aiteamforge upgrade
 ```
 
 **What gets upgraded:**
@@ -608,33 +608,33 @@ dev-team upgrade
 1. **Check for updates:**
    ```bash
    brew update
-   brew outdated dev-team
+   brew outdated aiteamforge
    ```
 
 2. **Backup current state:**
    ```bash
-   tar -czf ~/dev-team-backup-$(date +%Y%m%d).tar.gz ~/dev-team/
+   tar -czf ~/aiteamforge-backup-$(date +%Y%m%d).tar.gz ~/aiteamforge/
    ```
 
 3. **Upgrade framework:**
    ```bash
-   brew upgrade dev-team
+   brew upgrade aiteamforge
    ```
 
 4. **Upgrade working directory:**
    ```bash
-   dev-team upgrade
+   aiteamforge upgrade
    ```
 
 5. **Verify upgrade:**
    ```bash
-   dev-team doctor
-   dev-team --version
+   aiteamforge doctor
+   aiteamforge --version
    ```
 
 6. **Restart services:**
    ```bash
-   dev-team restart
+   aiteamforge restart
    ```
 
 ### Maintenance Tasks
@@ -650,7 +650,7 @@ wt-clean
 ```bash
 # Backups older than 7 days are auto-deleted
 # Manual cleanup:
-find ~/dev-team/kanban-backups -mtime +7 -delete
+find ~/aiteamforge/kanban-backups -mtime +7 -delete
 ```
 
 #### Update Dependencies
@@ -670,13 +670,13 @@ brew upgrade tailscale
 
 ```bash
 # Run diagnostics
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 
 # Attempt automatic repair
-dev-team doctor --fix
+aiteamforge doctor --fix
 
 # Manual repair: re-run setup
-dev-team setup
+aiteamforge setup
 ```
 
 ---
@@ -687,17 +687,17 @@ dev-team setup
 
 ```bash
 # Framework location
-echo $DEV_TEAM_HOME
-# Output: /opt/homebrew/opt/dev-team/libexec
+echo $AITEAMFORGE_HOME
+# Output: /opt/homebrew/opt/aiteamforge/libexec
 
 # Working directory location
-echo $DEV_TEAM_DIR
-# Output: /Users/username/dev-team
+echo $AITEAMFORGE_DIR
+# Output: /Users/username/aiteamforge
 ```
 
 ### Custom Configuration
 
-Edit `~/dev-team/config.json` to customize:
+Edit `~/aiteamforge/config.json` to customize:
 - LCARS port number
 - Fleet Monitor settings
 - Team-specific settings
@@ -707,11 +707,11 @@ Edit `~/dev-team/config.json` to customize:
 
 See [ADDING_A_TEAM.md](ADDING_A_TEAM.md) for detailed instructions on creating custom teams.
 
-### Scripting with Dev-Team
+### Scripting with AITeamForge
 
 ```bash
 # Non-interactive operations
-dev-team status --json | jq .teams
+aiteamforge status --json | jq .teams
 
 # Programmatic kanban operations
 kb-add "Automated task" --team ios --status backlog
@@ -730,7 +730,7 @@ done
 
 1. **Start your team environment:**
    ```bash
-   dev-team start ios
+   aiteamforge start ios
    ```
 
 2. **Check kanban status:**
@@ -766,12 +766,12 @@ Use worktrees to work on multiple features simultaneously:
 ```bash
 # Terminal 1: Feature A
 kb-run XIOS-0042
-cd ~/dev-team/worktrees/xios-0042
+cd ~/aiteamforge/worktrees/xios-0042
 ios-picard
 
 # Terminal 2: Feature B
 kb-run XIOS-0043
-cd ~/dev-team/worktrees/xios-0043
+cd ~/aiteamforge/worktrees/xios-0043
 ios-beverly
 
 # Each worktree is isolated
@@ -783,7 +783,7 @@ Work across platforms simultaneously:
 
 ```bash
 # Start all relevant teams
-dev-team start ios android firebase
+aiteamforge start ios android firebase
 
 # Work in each team's context
 # Agents track work to correct team's kanban board
@@ -797,9 +797,9 @@ dev-team start ios android firebase
 
 ```bash
 # Command help
-dev-team help
-dev-team setup --help
-dev-team doctor --help
+aiteamforge help
+aiteamforge setup --help
+aiteamforge doctor --help
 
 # Kanban help
 kb-help
@@ -812,19 +812,19 @@ wt-help
 
 ```bash
 # View installed documentation
-ls ~/dev-team/docs/
+ls ~/aiteamforge/docs/
 
 # Key documents
-cat ~/dev-team/docs/QUICK_START.md
-cat ~/dev-team/docs/INSTALLATION.md
-cat ~/dev-team/docs/TROUBLESHOOTING.md
+cat ~/aiteamforge/docs/QUICK_START.md
+cat ~/aiteamforge/docs/INSTALLATION.md
+cat ~/aiteamforge/docs/TROUBLESHOOTING.md
 ```
 
 ### Diagnostics
 
 ```bash
 # Full diagnostic report
-dev-team doctor --verbose > ~/dev-team-diagnostic-report.txt
+aiteamforge doctor --verbose > ~/aiteamforge-diagnostic-report.txt
 ```
 
 ---

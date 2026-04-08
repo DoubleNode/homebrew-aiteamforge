@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <!-- Dark space background -->
+  <rect width="32" height="32" fill="#0a0e1a"/>
+  
+  <!-- LCARS-style frame -->
+  <path d="M2 2 h28 v28 h-28 z" fill="none" stroke="#ff9966" stroke-width="1.5"/>
+  
+  <!-- Three status indicators representing the three fleets -->
+  <!-- TNG - Command Red (top) -->
+  <circle cx="16" cy="10" r="3" fill="#C41E3A" opacity="0.9"/>
+  <circle cx="16" cy="10" r="2" fill="#ff5577" opacity="0.7"/>
+  
+  <!-- TOS - Operations Gold (left) -->
+  <circle cx="9" cy="20" r="3" fill="#FFCC99" opacity="0.9"/>
+  <circle cx="9" cy="20" r="2" fill="#ffdd99" opacity="0.7"/>
+  
+  <!-- DS9 - Science Teal (right) -->
+  <circle cx="23" cy="20" r="3" fill="#669999" opacity="0.9"/>
+  <circle cx="23" cy="20" r="2" fill="#88bbbb" opacity="0.7"/>
+  
+  <!-- Connecting lines (fleet network) -->
+  <line x1="16" y1="13" x2="9" y2="17" stroke="#9999ff" stroke-width="1" opacity="0.5"/>
+  <line x1="16" y1="13" x2="23" y2="17" stroke="#9999ff" stroke-width="1" opacity="0.5"/>
+  <line x1="9" y1="20" x2="23" y2="20" stroke="#9999ff" stroke-width="1" opacity="0.3"/>
+  
+  <!-- Small accent dots (stars) -->
+  <circle cx="6" cy="6" r="0.5" fill="#ffffff" opacity="0.6"/>
+  <circle cx="26" cy="8" r="0.5" fill="#ffffff" opacity="0.6"/>
+  <circle cx="28" cy="26" r="0.5" fill="#ffffff" opacity="0.6"/>
+  <circle cx="5" cy="28" r="0.5" fill="#ffffff" opacity="0.6"/>
+</svg>

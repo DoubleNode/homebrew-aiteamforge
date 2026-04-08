@@ -13,7 +13,7 @@
 const CONFIG = {
     dataPath: 'data/freelance-board.json',
     team: 'freelance',
-    refreshInterval: 5000,
+    refreshInterval: 60000,
     autoRefresh: true
 };
 
@@ -66,11 +66,36 @@ function apiUrl(path) {
 let boardData = null;
 let refreshTimer = null;
 
+// HOME tab chart instances (preserved across re-renders to enable smooth updates)
+let homeCharts = {
+    statusDoughnut: null,
+    subitemDoughnut: null,
+    knowledgeDoughnut: null
+};
+
+// HOME tab carousel state
+let currentHomePanel = 0;
+const TOTAL_HOME_PANELS = 6;
+let carouselAutoTimer = null;
+const CAROUSEL_AUTO_INTERVAL = 10000; // 10 seconds
+let carouselPaused = false;
+let carouselInitialized = false;
+let homeFullscreen = false;
+
+// Knowledge panel async fetch state — prevents orphaned chart injection on rapid navigation.
+// _knowledgeAbortController: AbortController for the in-flight /api/knowledge-stats fetch.
+//   Aborted and replaced each time panel 4 renders; null when no fetch is in flight.
+// _knowledgeDebounceTimer: setTimeout handle for the 150ms debounce that precedes the fetch.
+//   Cleared on rapid re-navigation so only one fetch fires per "landing".
+let _knowledgeAbortController = null;
+let _knowledgeDebounceTimer = null;
+const KNOWLEDGE_DEBOUNCE_MS = 150;
+
 // Tab navigation state
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'workflow', 'details', 'queue', 'releases', 'epics', 'calendar', 'integrations', 'backups', 'commands'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'team-config', 'integrations', 'backups', 'commands', 'archive'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Queue filter state
@@ -127,7 +152,7 @@ const OS_CONFIG = {
     },
     'Web': {
         color: 'var(--div-web)',
-        logo: 'images/web_logo.png',
+        logo: 'images/web_logo.svg',
         label: 'Web'
     },
     'None': {
@@ -200,6 +225,10 @@ function getLogoTeamName(team) {
     // Map medical sub-teams to medical logo
     if (team.startsWith('medical-')) {
         return 'medical';
+    }
+    // Map finance sub-projects to finance logo
+    if (team.startsWith('finance-')) {
+        return 'finance';
     }
     return team;
 }
@@ -513,6 +542,930 @@ function renderBoard() {
     if (activeSection === 'calendar') {
         renderCalendar();
     }
+
+    // Render home analytics if home section is active
+    if (activeSection === 'home') {
+        renderHomeAnalytics();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HOME CAROUSEL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Navigate to a specific carousel panel by index.
+ * Clamps index to valid range [0, TOTAL_HOME_PANELS-1] with wraparound.
+ * Updates track transform, dot/panel active classes, and resets auto-advance timer.
+ */
+function navigateToPanel(index) {
+    // Wrap around: -1 goes to last panel, TOTAL_HOME_PANELS goes to first
+    if (index < 0) {
+        index = TOTAL_HOME_PANELS - 1;
+    } else if (index >= TOTAL_HOME_PANELS) {
+        index = 0;
+    }
+
+    // If leaving a knowledge/adoption panel (4 or 5), cancel any pending debounce
+    // or in-flight fetch so the async continuation cannot inject stale DOM content.
+    // Both panels share the same /api/knowledge-stats fetch infrastructure.
+    const leavingKnowledgePanel = (currentHomePanel === 4 || currentHomePanel === 5)
+        && (index !== 4 && index !== 5);
+    if (leavingKnowledgePanel) {
+        if (_knowledgeDebounceTimer !== null) {
+            clearTimeout(_knowledgeDebounceTimer);
+            _knowledgeDebounceTimer = null;
+        }
+        if (_knowledgeAbortController !== null) {
+            _knowledgeAbortController.abort();
+            _knowledgeAbortController = null;
+        }
+    }
+
+    currentHomePanel = index;
+
+    // Slide the track
+    const track = document.querySelector('.carousel-track');
+    if (track) {
+        track.style.transform = `translateX(-${index * 100}%)`;
+    }
+
+    // Update active dot
+    document.querySelectorAll('.carousel-dot').forEach((dot, i) => {
+        dot.classList.toggle('active', i === index);
+    });
+
+    // Update active panel
+    document.querySelectorAll('.carousel-panel').forEach((panel, i) => {
+        panel.classList.toggle('active', i === index);
+    });
+
+    // Lazy-render panel content (always re-render on navigate for fresh data;
+    // the _renderHome* functions handle create-vs-update via homeCharts checks)
+    renderHomePanel(index);
+
+    // Trigger chart resize for the newly visible panel after CSS transition completes
+    // Chart.js canvases need explicit resize when their container transitions from hidden
+    // Scope to only the target panel's charts to avoid unnecessary work
+    const panelChartKeys = {
+        0: [],
+        1: ['statusDoughnut'],
+        2: [],
+        3: ['subitemDoughnut'],
+        4: ['knowledgeDoughnut'],
+        5: []
+    };
+    setTimeout(() => {
+        (panelChartKeys[index] || []).forEach(key => {
+            if (homeCharts[key]) {
+                homeCharts[key].resize();
+            }
+        });
+    }, 50);
+
+    // Reset auto-advance timer so panel gets its full 30 seconds
+    _resetCarouselAutoTimer();
+}
+
+/**
+ * Start the 30-second auto-advance timer.
+ * Advances to next panel (with wraparound) unless paused.
+ */
+function _startCarouselAutoTimer() {
+    _stopCarouselAutoTimer();
+    carouselAutoTimer = setInterval(() => {
+        if (!carouselPaused) {
+            navigateToPanel(currentHomePanel + 1);
+        }
+    }, CAROUSEL_AUTO_INTERVAL);
+}
+
+/**
+ * Stop the auto-advance timer.
+ */
+function _stopCarouselAutoTimer() {
+    if (carouselAutoTimer) {
+        clearInterval(carouselAutoTimer);
+        carouselAutoTimer = null;
+    }
+}
+
+/**
+ * Reset auto-advance timer to give current panel a fresh 30 seconds.
+ */
+function _resetCarouselAutoTimer() {
+    if (carouselAutoTimer !== null) {
+        _startCarouselAutoTimer();
+    }
+}
+
+/**
+ * Initialize the carousel: set up event listeners, activate first panel,
+ * start auto-advance timer. Safe to call multiple times (idempotent).
+ */
+function initCarousel() {
+    if (carouselInitialized) {
+        // Already initialized — just make sure we're on panel 0 and timer is running
+        navigateToPanel(0);
+        _startCarouselAutoTimer();
+        return;
+    }
+
+    carouselInitialized = true;
+
+    // Prev/Next arrow buttons
+    const prevBtn = document.getElementById('carousel-prev');
+    const nextBtn = document.getElementById('carousel-next');
+
+    if (prevBtn) {
+        prevBtn.addEventListener('click', () => {
+            navigateToPanel(currentHomePanel - 1);
+        });
+    }
+
+    if (nextBtn) {
+        nextBtn.addEventListener('click', () => {
+            navigateToPanel(currentHomePanel + 1);
+        });
+    }
+
+    // Dot navigation
+    document.querySelectorAll('.carousel-dot').forEach(dot => {
+        dot.addEventListener('click', () => {
+            const panelIndex = parseInt(dot.dataset.panel, 10);
+            if (!isNaN(panelIndex)) {
+                navigateToPanel(panelIndex);
+            }
+        });
+    });
+
+    // Pause auto-advance when user hovers over viewport
+    const viewport = document.querySelector('.carousel-viewport');
+    if (viewport) {
+        viewport.addEventListener('mouseenter', () => {
+            carouselPaused = true;
+        });
+
+        viewport.addEventListener('mouseleave', () => {
+            carouselPaused = false;
+        });
+    }
+
+    // Fullscreen button
+    const fsBtn = document.getElementById('carousel-fullscreen');
+    if (fsBtn) {
+        fsBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggleHomeFullscreen();
+        });
+    }
+
+    // Set first panel active and start timer
+    navigateToPanel(0);
+    _startCarouselAutoTimer();
+}
+
+/**
+ * Stop carousel auto-advance (called when leaving HOME tab).
+ * Also cancels any in-flight knowledge-panel fetch so stale async
+ * continuations cannot inject DOM content after the HOME tab is hidden.
+ */
+function stopCarousel() {
+    _stopCarouselAutoTimer();
+    carouselPaused = false;
+    // Cancel any pending knowledge-panel debounce or fetch
+    if (_knowledgeDebounceTimer !== null) {
+        clearTimeout(_knowledgeDebounceTimer);
+        _knowledgeDebounceTimer = null;
+    }
+    if (_knowledgeAbortController !== null) {
+        _knowledgeAbortController.abort();
+        _knowledgeAbortController = null;
+    }
+    // Exit fullscreen when leaving HOME tab
+    if (homeFullscreen) _exitHomeFullscreen();
+}
+
+/**
+ * Toggle fullscreen mode for the HOME dashboard.
+ * Uses the browser Fullscreen API for true device fullscreen (hides browser chrome,
+ * dock, menubar — the works). Also adds .home-fullscreen class to hide LCARS chrome.
+ */
+function toggleHomeFullscreen() {
+    if (homeFullscreen) {
+        _exitHomeFullscreen();
+        return;
+    }
+
+    const container = document.querySelector('.lcars-container');
+    if (!container) return;
+
+    homeFullscreen = true;
+    container.classList.add('home-fullscreen');
+
+    // Request true device fullscreen via Fullscreen API
+    const el = document.documentElement;
+    const requestFS = el.requestFullscreen || el.webkitRequestFullscreen || el.mozRequestFullScreen || el.msRequestFullscreen;
+    if (requestFS) {
+        requestFS.call(el).catch(() => {
+            // Fullscreen API blocked (e.g. iframe sandbox) — CSS-only fallback still works
+        });
+    }
+
+    // Resize charts after fullscreen transition settles
+    setTimeout(_resizeHomeCharts, 200);
+
+    // Any click/tap exits fullscreen (added on next frame to avoid immediate trigger)
+    requestAnimationFrame(() => {
+        document.addEventListener('click', _fullscreenClickHandler, { once: true, capture: true });
+    });
+}
+
+/**
+ * Handle click to exit fullscreen. Ignores clicks on carousel controls.
+ */
+function _fullscreenClickHandler(e) {
+    // Let carousel nav buttons work without exiting
+    if (e.target.closest('.carousel-arrow') || e.target.closest('.carousel-dot')) {
+        requestAnimationFrame(() => {
+            document.addEventListener('click', _fullscreenClickHandler, { once: true, capture: true });
+        });
+        return;
+    }
+    _exitHomeFullscreen();
+}
+
+/**
+ * Exit fullscreen mode — exits browser fullscreen and restores normal LCARS layout.
+ */
+function _exitHomeFullscreen() {
+    const container = document.querySelector('.lcars-container');
+    if (!container) return;
+
+    homeFullscreen = false;
+    container.classList.remove('home-fullscreen');
+    document.removeEventListener('click', _fullscreenClickHandler, { capture: true });
+
+    // Exit browser fullscreen if active
+    const exitFS = document.exitFullscreen || document.webkitExitFullscreen || document.mozCancelFullScreen || document.msExitFullscreen;
+    if (exitFS && document.fullscreenElement) {
+        exitFS.call(document);
+    }
+
+    // Force full re-render of current panel after layout settles.
+    // Simple resize() doesn't always work because Chart.js caches fullscreen dimensions.
+    // Destroying and re-creating via renderHomePanel ensures correct sizing.
+    // Double-tap: re-render at 300ms, then resize at 600ms as safety net.
+    setTimeout(() => {
+        renderHomePanel(currentHomePanel);
+        setTimeout(_resizeHomeCharts, 300);
+    }, 300);
+}
+
+/**
+ * Listen for browser-level fullscreen exit (e.g. user presses Escape natively).
+ * Syncs our state if the browser exits fullscreen without going through our handler.
+ */
+document.addEventListener('fullscreenchange', () => {
+    if (!document.fullscreenElement && homeFullscreen) {
+        homeFullscreen = false;
+        const container = document.querySelector('.lcars-container');
+        if (container) container.classList.remove('home-fullscreen');
+        document.removeEventListener('click', _fullscreenClickHandler, { capture: true });
+        setTimeout(() => { renderHomePanel(currentHomePanel); }, 300);
+    }
+});
+
+/**
+ * Keyboard handlers for fullscreen mode:
+ * - Escape: exit fullscreen (CSS-only fallback for iTerm2/embedded WebKit)
+ * - ArrowLeft/ArrowRight: navigate panels (replaces hidden arrow buttons)
+ */
+document.addEventListener('keydown', (e) => {
+    if (!homeFullscreen) return;
+    if (e.repeat) return; // Ignore key auto-repeat to prevent skipping panels
+
+    if (e.key === 'Escape') {
+        _exitHomeFullscreen();
+    } else if (e.key === 'ArrowLeft') {
+        e.preventDefault();
+        navigateToPanel(currentHomePanel - 1);
+    } else if (e.key === 'ArrowRight') {
+        e.preventDefault();
+        navigateToPanel(currentHomePanel + 1);
+    }
+});
+
+/**
+ * Resize all active home charts (used after fullscreen transitions).
+ */
+function _resizeHomeCharts() {
+    Object.values(homeCharts).forEach(chart => {
+        if (chart && typeof chart.resize === 'function') chart.resize();
+    });
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// HOME ANALYTICS
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Destroy any orphaned Chart.js instance on a canvas before re-creating.
+ * Prevents memory leaks when a previous createChart call succeeded but
+ * the reference wasn't stored (e.g., null guard path).
+ */
+function _destroyOrphanedChart(canvasId) {
+    const canvas = document.getElementById(canvasId);
+    if (canvas && typeof Chart !== 'undefined') {
+        const existing = Chart.getChart(canvas);
+        if (existing) existing.destroy();
+    }
+}
+
+/**
+ * Renders the analytics content for a single carousel panel.
+ * Lazy-initializes chart panels — each _renderHome* function handles
+ * create-vs-update internally via homeCharts instance checks.
+ *
+ * Panel mapping:
+ *   0 — MISSION STATUS  : summary metrics (2x2 grid)
+ *   1 — MISSION CHARTS  : status doughnut + completion bar
+ *   2 — EPIC PROGRESS   : epic progress bars
+ *   3 — SUBITEM INTEL   : subitem statistics doughnut
+ *   4 — KNOWLEDGE BASE  : knowledge file doughnut + summary metrics
+ *   5 — RETRO COVERAGE  : retrospective adoption coverage bar + per-team breakdown
+ *
+ * @param {number} panelIndex - The carousel panel index to render (0–5).
+ */
+function renderHomePanel(panelIndex) {
+    if (!boardData) return;
+
+    // Defense-in-depth: destroy existing charts before re-init to prevent
+    // orphaned Chart.js instances accumulating across board refreshes.
+    // The individual render functions use LCARSCharts.updateChart() when
+    // homeCharts[key] is non-null, so we only destroy on intentional re-init.
+    Object.keys(homeCharts).forEach(key => {
+        if (homeCharts[key] && typeof homeCharts[key].destroy === 'function') {
+            homeCharts[key].destroy();
+            homeCharts[key] = null;
+        }
+    });
+
+    const backlog = boardData.backlog || [];
+    const epics   = boardData.epics   || [];
+
+    switch (panelIndex) {
+        case 0:
+            _renderHomeSummaryMetrics(backlog);
+            break;
+        case 1:
+            _renderHomeStatusDoughnut(backlog);
+            _renderHomeCompletionBar(backlog);
+            break;
+        case 2:
+            _renderHomeEpicProgress(backlog, epics);
+            break;
+        case 3:
+            _renderHomeSubitemStats(backlog);
+            break;
+        case 4:
+            _renderHomeKnowledgeStats();
+            break;
+        case 5:
+            _renderHomeAdoptionStats();
+            break;
+    }
+}
+
+/**
+ * Entry point for HOME tab analytics rendering.
+ * Only renders the currently visible carousel panel (lazy initialization).
+ * Navigation to other panels triggers their rendering via navigateToPanel().
+ * On board data refresh, re-renders the active panel with updated data.
+ */
+function renderHomeAnalytics() {
+    if (!boardData) return;
+    renderHomePanel(currentHomePanel);
+}
+
+/**
+ * Populate #home-summary-metrics with LCARS-styled metric cards.
+ * Shows: TOTAL ITEMS, COMPLETED, IN PROGRESS, COMPLETION RATE
+ */
+function _renderHomeSummaryMetrics(backlog) {
+    const container = document.getElementById('home-summary-metrics');
+    if (!container) return;
+
+    const total       = backlog.length;
+    const completed   = backlog.filter(i => i.status === 'completed').length;
+    const inProgress  = backlog.filter(i => i.status === 'in_progress' || i.status === 'coding' || i.status === 'planning' || i.status === 'testing' || i.status === 'commit' || i.status === 'pr_review').length;
+    const rate        = total > 0 ? Math.round((completed / total) * 100) : 0;
+
+    const metrics = [
+        { value: total,         label: 'TOTAL ITEMS',    color: '#99CCFF' },
+        { value: completed,     label: 'COMPLETED',      color: '#99CC99' },
+        { value: inProgress,    label: 'IN PROGRESS',    color: '#FFCC99' },
+        { value: rate + '%',    label: 'COMPLETION RATE', color: '#CC99CC' }
+    ];
+
+    container.innerHTML = metrics.map(m => `
+        <div class="summary-card lcars-fade-in-up" style="background: rgba(0,0,0,0.35); border-radius: 12px; padding: 20px 16px; text-align: center; border-left: 4px solid ${m.color}; display: flex; flex-direction: column; justify-content: center; align-items: center;">
+            <div class="summary-value" style="font-family: 'Antonio', sans-serif; font-size: 48px; font-weight: 700; color: ${m.color}; line-height: 1;">${m.value}</div>
+            <div class="summary-label" style="font-family: 'Antonio', sans-serif; font-size: 13px; color: rgba(255,204,153,0.65); margin-top: 8px; letter-spacing: 0.12em;">${m.label}</div>
+        </div>
+    `).join('');
+}
+
+/**
+ * Render status distribution doughnut chart in #home-status-doughnut.
+ * Counts items by status and maps colors via LCARSCharts.statusColors.
+ */
+function _renderHomeStatusDoughnut(backlog) {
+    // Count items per status, normalizing undefined/null to 'backlog'
+    const counts = {};
+    backlog.forEach(item => {
+        const s = item.status || 'backlog';
+        counts[s] = (counts[s] || 0) + 1;
+    });
+
+    // Sort by count descending for a cleaner chart
+    const entries  = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    const labels   = entries.map(([s]) => s.toUpperCase().replace(/_/g, ' '));
+    const data     = entries.map(([, c]) => c);
+    const bgColors = entries.map(([s]) => LCARSCharts.statusColors[s] || LCARSCharts.colors.tan);
+
+    const chartData = {
+        labels,
+        datasets: [{
+            data,
+            backgroundColor: bgColors,
+            borderColor:      LCARSCharts.colors.background,
+            borderWidth:      2,
+            hoverBorderColor: LCARSCharts.colors.tan,
+            hoverBorderWidth: 3
+        }]
+    };
+
+    if (homeCharts.statusDoughnut) {
+        LCARSCharts.updateChart(homeCharts.statusDoughnut, chartData);
+    } else {
+        _destroyOrphanedChart('home-status-doughnut');
+        homeCharts.statusDoughnut = LCARSCharts.createDoughnut('home-status-doughnut', chartData, {
+            maintainAspectRatio: false,
+            responsive: true
+        });
+    }
+}
+
+/**
+ * Render LCARS-styled horizontal bars showing completed vs active vs pending
+ * vs cancelled in #home-completion-bars.
+ *
+ * Uses pure HTML/CSS instead of Chart.js — more reliable and fits the LCARS
+ * aesthetic naturally. Chart.js bar charts were persistently blank in this
+ * carousel context despite multiple approaches.
+ */
+function _renderHomeCompletionBar(backlog) {
+    const container = document.getElementById('home-completion-bars');
+    if (!container) return;
+
+    const total     = backlog.length;
+    const completed = backlog.filter(i => i.status === 'completed').length;
+    const cancelled = backlog.filter(i => i.status === 'cancelled').length;
+    const active    = backlog.filter(i => i.status && i.status !== 'completed' && i.status !== 'cancelled').length;
+    const pending   = total - completed - cancelled - active;
+    const maxVal    = Math.max(completed, active, pending, cancelled, 1);
+
+    const bars = [
+        { label: 'COMPLETED', value: completed, color: '#99CC99' },
+        { label: 'ACTIVE',    value: active,    color: '#99CCFF' },
+        { label: 'PENDING',   value: pending > 0 ? pending : 0, color: '#FFCC99' },
+        { label: 'CANCELLED', value: cancelled, color: '#CC6666' }
+    ];
+
+    container.innerHTML = bars.map(b => {
+        const pct = maxVal > 0 ? Math.round((b.value / maxVal) * 100) : 0;
+        return `
+            <div style="display: flex; align-items: center; gap: 10px;">
+                <div style="width: 90px; font-family: 'Antonio', sans-serif; font-size: 11px; color: rgba(255,204,153,0.65); text-align: right; letter-spacing: 0.05em; flex-shrink: 0;">${b.label}</div>
+                <div style="flex: 1; height: 20px; background: rgba(255,204,153,0.08); border-radius: 4px; overflow: hidden;">
+                    <div style="height: 100%; width: ${pct}%; background: ${b.color}; border-radius: 4px; transition: width 0.6s ease;"></div>
+                </div>
+                <div style="width: 30px; font-family: 'Antonio', sans-serif; font-size: 13px; color: ${b.color}; text-align: right; flex-shrink: 0;">${b.value}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+/**
+ * Render animated horizontal progress bars for each epic in #home-epic-progress.
+ * Counts how many of each epic's itemIds have status === 'completed'.
+ */
+function _renderHomeEpicProgress(backlog, epics) {
+    const container = document.getElementById('home-epic-progress');
+    if (!container) return;
+
+    if (epics.length === 0) {
+        container.innerHTML = `<div style="color: rgba(255,204,153,0.45); font-family: 'Antonio', sans-serif; font-size: 13px; text-align: center; padding: 20px 0;">NO EPICS DEFINED</div>`;
+        return;
+    }
+
+    // Build a quick lookup from item ID to status
+    const itemStatusMap = {};
+    backlog.forEach(item => {
+        itemStatusMap[item.id] = item.status || 'backlog';
+    });
+
+    const rows = epics.map(epic => {
+        const ids       = epic.itemIds || [];
+        const epicTotal = ids.length;
+        const done      = ids.filter(id => itemStatusMap[id] === 'completed').length;
+        const pct       = epicTotal > 0 ? Math.round((done / epicTotal) * 100) : 0;
+        const title     = (epic.title || epic.name || epic.id || 'UNKNOWN').toUpperCase();
+
+        // Color based on completion percentage
+        let barColor;
+        if (pct >= 100) {
+            barColor = `linear-gradient(90deg, ${LCARSCharts.colors.green}, #66CC99)`;
+        } else if (pct >= 60) {
+            barColor = `linear-gradient(90deg, ${LCARSCharts.colors.cyan}, ${LCARSCharts.colors.blue})`;
+        } else if (pct >= 30) {
+            barColor = `linear-gradient(90deg, ${LCARSCharts.colors.orange}, ${LCARSCharts.colors.tan})`;
+        } else {
+            barColor = `linear-gradient(90deg, ${LCARSCharts.colors.purple}, ${LCARSCharts.colors.blue})`;
+        }
+
+        return `
+            <div class="epic-progress-row" style="margin-bottom: 8px;">
+                <div style="display: flex; justify-content: space-between; align-items: baseline; color: #FFCC99; font-family: 'Antonio', sans-serif; font-size: 13px; margin-bottom: 5px;">
+                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 75%;">${escapeHtml(title)}</span>
+                    <span style="color: rgba(255,204,153,0.7); font-size: 12px; flex-shrink: 0; margin-left: 8px;">${done}/${epicTotal} &bull; ${pct}%</span>
+                </div>
+                <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 10px; overflow: hidden;">
+                    <div style="background: ${barColor}; height: 100%; width: ${pct}%; border-radius: 4px; transition: width 1s ease;"></div>
+                </div>
+            </div>
+        `;
+    });
+
+    container.innerHTML = rows.join('');
+}
+
+/**
+ * Render subitem tracking doughnut (#home-subitem-doughnut) and text metrics (#home-subitem-metrics).
+ * Counts all subitems across all items by status (completed vs everything else).
+ */
+function _renderHomeSubitemStats(backlog) {
+    const metricsEl = document.getElementById('home-subitem-metrics');
+
+    // Gather all subitems from all items
+    let totalSubs     = 0;
+    let completedSubs = 0;
+    let cancelledSubs = 0;
+    let activeSubs    = 0;
+
+    backlog.forEach(item => {
+        if (!item.subitems || !Array.isArray(item.subitems)) return;
+        item.subitems.forEach(sub => {
+            totalSubs++;
+            const s = sub.status || 'todo';
+            if (s === 'completed') {
+                completedSubs++;
+            } else if (s === 'cancelled') {
+                cancelledSubs++;
+            } else if (s === 'in_progress' || s === 'started') {
+                activeSubs++;
+            }
+        });
+    });
+
+    const pendingSubs = totalSubs - completedSubs - cancelledSubs - activeSubs;
+    const subRate     = totalSubs > 0 ? Math.round((completedSubs / totalSubs) * 100) : 0;
+
+    // Doughnut chart: completed / active / pending / cancelled
+    const chartData = {
+        labels: ['COMPLETED', 'ACTIVE', 'PENDING', 'CANCELLED'],
+        datasets: [{
+            data: [completedSubs, activeSubs, pendingSubs > 0 ? pendingSubs : 0, cancelledSubs],
+            backgroundColor: [
+                LCARSCharts.colors.green,
+                LCARSCharts.colors.cyan,
+                LCARSCharts.colors.tan,
+                LCARSCharts.colors.red
+            ],
+            borderColor:      LCARSCharts.colors.background,
+            borderWidth:      2,
+            hoverBorderColor: LCARSCharts.colors.tan,
+            hoverBorderWidth: 3
+        }]
+    };
+
+    if (homeCharts.subitemDoughnut) {
+        LCARSCharts.updateChart(homeCharts.subitemDoughnut, chartData);
+    } else {
+        _destroyOrphanedChart('home-subitem-doughnut');
+        homeCharts.subitemDoughnut = LCARSCharts.createDoughnut('home-subitem-doughnut', chartData, {
+            maintainAspectRatio: false,
+            responsive: true
+        });
+    }
+
+    // Text metrics
+    if (metricsEl) {
+        const metricRows = [
+            { label: 'TOTAL SUBITEMS',  value: totalSubs,     color: '#99CCFF' },
+            { label: 'COMPLETED',       value: completedSubs, color: '#99CC99' },
+            { label: 'ACTIVE',          value: activeSubs,    color: '#FFCC99' },
+            { label: 'PENDING',         value: pendingSubs > 0 ? pendingSubs : 0, color: 'rgba(255,204,153,0.55)' },
+            { label: 'CANCELLED',       value: cancelledSubs, color: '#CC6666' },
+            { label: 'COMPLETION RATE', value: subRate + '%', color: '#CC99CC' }
+        ];
+
+        metricsEl.innerHTML = metricRows.map(r => `
+            <div style="display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(255,204,153,0.08);">
+                <span style="font-family: 'Antonio', sans-serif; font-size: 12px; color: rgba(255,204,153,0.65); letter-spacing: 0.06em;">${r.label}</span>
+                <span style="font-family: 'Antonio', sans-serif; font-size: 18px; font-weight: 700; color: ${r.color};">${r.value}</span>
+            </div>
+        `).join('');
+    }
+}
+
+/**
+ * Render knowledge base analytics panel (panel index 4).
+ * Fetches /api/knowledge-stats and populates:
+ *   - #home-knowledge-doughnut: Chart.js doughnut showing file distribution by type
+ *   - #home-knowledge-metrics: stat rows with summary numbers
+ * Rapid navigation guard: uses a debounce timer (KNOWLEDGE_DEBOUNCE_MS) to coalesce
+ * repeated calls, and an AbortController to cancel any in-flight request when the
+ * user navigates away from panel 4. After each await point the panel index is
+ * re-checked so that a stale resolution cannot inject DOM content or charts when a
+ * different panel is now active.
+ */
+async function _renderHomeKnowledgeStats() {
+    // ── Debounce: abort any queued (but not yet started) fetch ────────────────
+    if (_knowledgeDebounceTimer !== null) {
+        clearTimeout(_knowledgeDebounceTimer);
+        _knowledgeDebounceTimer = null;
+    }
+
+    // ── Abort any in-flight fetch from a previous call ────────────────────────
+    if (_knowledgeAbortController !== null) {
+        _knowledgeAbortController.abort();
+        _knowledgeAbortController = null;
+    }
+
+    const metricsEl   = document.getElementById('home-knowledge-metrics');
+
+    // Show loading state while fetching
+    if (metricsEl) {
+        metricsEl.innerHTML = `<div style="color: rgba(255,204,153,0.45); font-family: 'Antonio', sans-serif; font-size: 13px; text-align: center; padding: 20px 0;">LOADING...</div>`;
+    }
+
+    // ── Debounce: wait KNOWLEDGE_DEBOUNCE_MS before firing the real fetch ─────
+    // If the user navigates away during this window, the outer call will have
+    // already cleared this timer (above), so the fetch never starts.
+    await new Promise((resolve, reject) => {
+        _knowledgeDebounceTimer = setTimeout(resolve, KNOWLEDGE_DEBOUNCE_MS);
+        // Store a reject path so an abort signal can cancel the debounce too.
+        // We reuse the abort signal check after the debounce resolves.
+    });
+    _knowledgeDebounceTimer = null;
+
+    // ── Navigation guard: bail if user has already left panel 4 ──────────────
+    if (currentHomePanel !== 4) {
+        if (metricsEl) metricsEl.innerHTML = '';
+        return;
+    }
+
+    // ── Create a fresh AbortController for this fetch ─────────────────────────
+    const controller = new AbortController();
+    _knowledgeAbortController = controller;
+
+    let stats;
+    try {
+        const response = await fetch('/api/knowledge-stats', { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        stats = await response.json();
+    } catch (err) {
+        // Suppress abort errors — they are intentional navigation cancellations.
+        if (err.name === 'AbortError') {
+            return;
+        }
+        console.warn('[LCARS] Failed to fetch /api/knowledge-stats:', err);
+        // Only update DOM if still on the knowledge panel.
+        if (currentHomePanel === 4 && metricsEl) {
+            metricsEl.innerHTML = `<div style="color: rgba(204,102,102,0.75); font-family: 'Antonio', sans-serif; font-size: 13px; text-align: center; padding: 20px 0;">DATA UNAVAILABLE</div>`;
+        }
+        return;
+    } finally {
+        // Clear the controller reference once the fetch has settled.
+        if (_knowledgeAbortController === controller) {
+            _knowledgeAbortController = null;
+        }
+    }
+
+    // ── Navigation guard: bail if user navigated away while fetch was in-flight
+    if (currentHomePanel !== 4) {
+        return;
+    }
+
+    const summary = stats.summary || {};
+
+    // ── Doughnut chart: Agent KB files vs Team KB files vs Memory files ──────
+    // Derive agent-only file count (total KB files minus team files)
+    // Note: memoryFiles are from a separate directory (~/.claude/projects/*/memory/)
+    // and are NOT included in totalKnowledgeFiles, so must not be subtracted
+    const teamFiles   = summary.totalKnowledgeFiles
+        ? Object.values(stats.teams || {}).reduce((sum, t) => sum + (t.fileCount || 0), 0)
+        : 0;
+    const memoryFiles = summary.totalMemoryFiles || 0;
+    const agentFiles  = Math.max(0, (summary.totalKnowledgeFiles || 0) - teamFiles);
+
+    const chartData = {
+        labels: ['AGENT FILES', 'TEAM FILES', 'MEMORY FILES'],
+        datasets: [{
+            data: [agentFiles, teamFiles, memoryFiles],
+            backgroundColor: [
+                LCARSCharts.colors.orange,
+                LCARSCharts.colors.tan,
+                LCARSCharts.colors.yellow
+            ],
+            borderColor:      LCARSCharts.colors.background,
+            borderWidth:      2,
+            hoverBorderColor: LCARSCharts.colors.tan,
+            hoverBorderWidth: 3
+        }]
+    };
+
+    if (homeCharts.knowledgeDoughnut) {
+        LCARSCharts.updateChart(homeCharts.knowledgeDoughnut, chartData);
+    } else {
+        _destroyOrphanedChart('home-knowledge-doughnut');
+        homeCharts.knowledgeDoughnut = LCARSCharts.createDoughnut('home-knowledge-doughnut', chartData, {
+            maintainAspectRatio: false,
+            responsive: true
+        });
+    }
+
+    // ── Metrics panel ─────────────────────────────────────────────────────────
+    if (!metricsEl) return;
+
+    // Format bytes to human-readable (KB or MB)
+    function _fmtBytes(bytes) {
+        if (!bytes || bytes === 0) return '0 KB';
+        if (bytes < 1024 * 1024) return Math.round(bytes / 1024) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+    }
+
+    // Format ISO timestamp as short relative time or date
+    function _fmtDate(iso) {
+        if (!iso) return 'N/A';
+        const d = new Date(iso);
+        if (isNaN(d)) return 'N/A';
+        const diffMs  = Date.now() - d.getTime();
+        const diffMin = Math.floor(diffMs / 60000);
+        if (diffMin < 1)   return 'JUST NOW';
+        if (diffMin < 60)  return diffMin + 'M AGO';
+        const diffHr = Math.floor(diffMin / 60);
+        if (diffHr < 24)   return diffHr + 'H AGO';
+        const diffDay = Math.floor(diffHr / 24);
+        if (diffDay < 7)   return diffDay + 'D AGO';
+        return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).toUpperCase();
+    }
+
+    const mostActive = summary.mostActiveAgent
+        ? escapeHtml(summary.mostActiveAgent)
+        : 'N/A';
+
+    const metricRows = [
+        { label: 'TOTAL AGENTS',      value: summary.totalAgents        || 0,  color: LCARSCharts.colors.cyan   },
+        { label: 'TOTAL TEAMS',       value: summary.totalTeams         || 0,  color: LCARSCharts.colors.blue   },
+        { label: 'KNOWLEDGE FILES',   value: summary.totalKnowledgeFiles || 0, color: LCARSCharts.colors.orange },
+        { label: 'KNOWLEDGE ENTRIES', value: summary.totalKnowledgeEntries || 0, color: LCARSCharts.colors.tan  },
+        { label: 'KB SIZE',           value: _fmtBytes(summary.totalKnowledgeSizeBytes), color: LCARSCharts.colors.yellow },
+        { label: 'PROJECTS W/ MEMORY',value: summary.projectsWithMemory || 0,  color: LCARSCharts.colors.purple },
+        { label: 'MOST ACTIVE',       value: mostActive,                        color: LCARSCharts.colors.tan   },
+        { label: 'LAST UPDATED',      value: _fmtDate(summary.lastUpdated),     color: LCARSCharts.colors.green },
+    ];
+
+    metricsEl.innerHTML = metricRows.map(r => `
+        <div class="knowledge-stat-row">
+            <div class="knowledge-stat-value" style="color: ${r.color};">${r.value}</div>
+            <div class="knowledge-stat-label">${r.label}</div>
+        </div>
+    `).join('');
+}
+
+/**
+ * Render retrospective adoption coverage metrics on panel 5.
+ *
+ * Fetches /api/knowledge-stats (same endpoint as panel 4) and renders the
+ * adoption section: overall coverage bar + per-team breakdown rows.
+ *
+ * Uses the same debounce/abort infrastructure as _renderHomeKnowledgeStats
+ * to prevent stale DOM injection on rapid navigation.
+ */
+async function _renderHomeAdoptionStats() {
+    // ── Debounce: abort any queued (but not yet started) fetch ────────────────
+    if (_knowledgeDebounceTimer !== null) {
+        clearTimeout(_knowledgeDebounceTimer);
+        _knowledgeDebounceTimer = null;
+    }
+
+    // ── Abort any in-flight fetch from a previous call ────────────────────────
+    if (_knowledgeAbortController !== null) {
+        _knowledgeAbortController.abort();
+        _knowledgeAbortController = null;
+    }
+
+    const adoptionEl = document.getElementById('home-knowledge-adoption');
+    if (!adoptionEl) return;
+
+    // Show loading state
+    adoptionEl.innerHTML = `<div style="color: rgba(255,204,153,0.45); font-family: 'Antonio', sans-serif; font-size: 13px; text-align: center; padding: 40px 0;">LOADING...</div>`;
+
+    // ── Debounce: wait before firing the real fetch ──────────────────────────
+    await new Promise((resolve) => {
+        _knowledgeDebounceTimer = setTimeout(resolve, KNOWLEDGE_DEBOUNCE_MS);
+    });
+    _knowledgeDebounceTimer = null;
+
+    // ── Navigation guard: bail if user has already left panel 5 ──────────────
+    if (currentHomePanel !== 5) {
+        adoptionEl.innerHTML = '';
+        return;
+    }
+
+    // ── Create a fresh AbortController for this fetch ───────────────────────
+    const controller = new AbortController();
+    _knowledgeAbortController = controller;
+
+    let stats;
+    try {
+        const response = await fetch('/api/knowledge-stats', { signal: controller.signal });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        stats = await response.json();
+    } catch (err) {
+        if (err.name === 'AbortError') return;
+        console.warn('[LCARS] Failed to fetch /api/knowledge-stats:', err);
+        if (currentHomePanel === 5 && adoptionEl) {
+            adoptionEl.innerHTML = `<div style="color: rgba(204,102,102,0.75); font-family: 'Antonio', sans-serif; font-size: 13px; text-align: center; padding: 40px 0;">DATA UNAVAILABLE</div>`;
+        }
+        return;
+    } finally {
+        if (_knowledgeAbortController === controller) {
+            _knowledgeAbortController = null;
+        }
+    }
+
+    // ── Navigation guard: bail if user navigated away during fetch ───────────
+    if (currentHomePanel !== 5) return;
+
+    const adoption = stats.adoption || {};
+    const overallPct = adoption.overall_coverage_pct || 0;
+    const totalCompleted = adoption.total_completed || 0;
+    const totalWithRetros = adoption.total_with_retros || 0;
+    const teamRows = adoption.teams || [];
+
+    // Coverage bar color: red < 25%, yellow 25-50%, green > 50%
+    function _coverageColor(pct) {
+        if (pct >= 50) return LCARSCharts.colors.green || '#66cc66';
+        if (pct >= 25) return LCARSCharts.colors.yellow || '#ffff99';
+        return '#cc6666';
+    }
+
+    const overallColor = _coverageColor(overallPct);
+    const overallBarWidth = Math.min(100, overallPct).toFixed(1);
+
+    const teamRowsHtml = teamRows.slice(0, 8).map(t => {
+        const pct = t.coverage_pct || 0;
+        const barColor = _coverageColor(pct);
+        const barWidth = Math.min(100, pct).toFixed(1);
+        const teamLabel = escapeHtml(t.team.toUpperCase());
+        return `
+        <div class="knowledge-adoption-team-row">
+            <div class="knowledge-adoption-team-name">${teamLabel}</div>
+            <div class="knowledge-adoption-bar-wrap">
+                <div class="knowledge-adoption-bar" style="width: ${barWidth}%; background: ${barColor};"></div>
+            </div>
+            <div class="knowledge-adoption-team-pct" style="color: ${barColor};">${pct}%</div>
+            <div class="knowledge-adoption-team-detail">${t.items_with_retros}/${t.completed_items}</div>
+        </div>`;
+    }).join('');
+
+    adoptionEl.innerHTML = `
+        <div class="knowledge-adoption-overall">
+            <div class="knowledge-adoption-overall-label">OVERALL: <span style="color: ${overallColor};">${overallPct}%</span>
+                <span class="knowledge-adoption-overall-sub">(${totalWithRetros} of ${totalCompleted} items)</span>
+            </div>
+            <div class="knowledge-adoption-bar-wrap">
+                <div class="knowledge-adoption-bar" style="width: ${overallBarWidth}%; background: ${overallColor};"></div>
+            </div>
+        </div>
+        <div class="knowledge-adoption-teams">
+            ${teamRowsHtml || '<div class="knowledge-adoption-empty">No completed items with retrospective data</div>'}
+        </div>
+    `;
 }
 
 function updateContentWatermark() {
@@ -604,7 +1557,7 @@ function renderShipInfo() {
         displayTeamName = boardData.teamName;
     }
     if (!titleDisplayName) {
-        titleDisplayName = boardData.teamName || 'STATUS';
+        titleDisplayName = boardData.teamName || null;
     }
 
     // Update sidebar team name
@@ -622,8 +1575,14 @@ function renderShipInfo() {
     const titleFullEl = document.querySelector('.lcars-title .title-full');
     const titleMediumEl = document.querySelector('.lcars-title .title-medium');
 
-    if (titleFullEl && displayGroupName && titleDisplayName) {
-        titleFullEl.textContent = `${displayGroupName} ${titleDisplayName} STATUS`;
+    if (titleFullEl) {
+        if (displayGroupName && titleDisplayName) {
+            titleFullEl.textContent = `${displayGroupName} ${titleDisplayName} STATUS`;
+        } else if (displayGroupName) {
+            titleFullEl.textContent = `${displayGroupName} STATUS`;
+        } else if (titleDisplayName) {
+            titleFullEl.textContent = `${titleDisplayName} STATUS`;
+        }
     }
     if (titleMediumEl && titleDisplayName) {
         titleMediumEl.textContent = `${titleDisplayName} STATUS`;
@@ -632,6 +1591,8 @@ function renderShipInfo() {
     // Update page title to match the display
     if (displayGroupName && titleDisplayName) {
         document.title = `${displayGroupName} ${titleDisplayName} STATUS`;
+    } else if (displayGroupName) {
+        document.title = `${displayGroupName} STATUS`;
     } else if (titleDisplayName) {
         document.title = `${titleDisplayName} STATUS`;
     }
@@ -886,6 +1847,49 @@ function renderTerminalDetails() {
     });
 }
 
+/**
+ * Make an element clickable to activate a terminal (switch iTerm2 tab + tmux window).
+ * Adds click/keydown handlers, accessibility attributes, and CSS class.
+ */
+function makeClickableTerminal(el, win) {
+    el.classList.add('clickable-terminal');
+    el.tabIndex = 0;
+    el.setAttribute('role', 'button');
+    el.title = `Click to switch to ${win.terminal} terminal`;
+    el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        activateTerminal(win.terminal, win.window);
+    });
+    el.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            activateTerminal(win.terminal, win.window);
+        }
+    });
+}
+
+/**
+ * Activate a terminal by switching iTerm2 tab and tmux window.
+ * Calls POST /api/terminal/activate endpoint.
+ */
+async function activateTerminal(terminal, windowIndex) {
+    try {
+        const response = await fetch(apiUrl('/api/terminal/activate'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ terminal, window: windowIndex })
+        });
+
+        if (!response.ok) {
+            const error = await response.json().catch(() => ({ error: 'Unknown error' }));
+            console.warn('Terminal activation failed:', error);
+        }
+    } catch (err) {
+        console.warn('Terminal activation error:', err);
+    }
+}
+
 function createDetailRow(win) {
     const row = document.createElement('div');
     row.className = `detail-row ${win.color || 'operations'}`;
@@ -907,6 +1911,7 @@ function createDetailRow(win) {
     terminalLogo.src = getTerminalLogoUrl(boardData?.team, win.terminal);
     terminalLogo.alt = win.terminal;
     terminalLogo.onerror = function() { this.src = 'images/default_terminal_logo.svg'; };
+    makeClickableTerminal(terminalLogo, win);
     topSection.appendChild(terminalLogo);
 
     // Top lines container
@@ -920,6 +1925,7 @@ function createDetailRow(win) {
     const terminal = document.createElement('span');
     terminal.className = 'detail-terminal';
     terminal.textContent = win.terminal;
+    makeClickableTerminal(terminal, win);
     line1.appendChild(terminal);
 
     const windowName = document.createElement('span');
@@ -1845,26 +2851,21 @@ function createQueueItem(item, index) {
         epicBadge.title = 'Click to assign to an epic';
         epicBadge.setAttribute('aria-label', 'No epic assigned');
     }
-    // XACA-0056: Epic badge is read-only for completed items
-    if (!isCompleted) {
-        epicBadge.classList.add('editable');
-        epicBadge.setAttribute('role', 'button');
-        epicBadge.setAttribute('tabindex', '0');
-        epicBadge.addEventListener('click', (e) => {
+    // XACA-0121: Epic badge is always editable (removed XACA-0056 isCompleted guard)
+    epicBadge.classList.add('editable');
+    epicBadge.setAttribute('role', 'button');
+    epicBadge.setAttribute('tabindex', '0');
+    epicBadge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showEpicAssignModal(item.id, item.title, CONFIG.team, item.epicId);
+    });
+    epicBadge.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
             e.stopPropagation();
             showEpicAssignModal(item.id, item.title, CONFIG.team, item.epicId);
-        });
-        epicBadge.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                e.stopPropagation();
-                showEpicAssignModal(item.id, item.title, CONFIG.team, item.epicId);
-            }
-        });
-    } else {
-        epicBadge.classList.add('readonly');
-        epicBadge.title = item.epicId ? `Epic: ${getEpicTitleById(item.epicId) || item.epicId}` : 'No epic assigned';
-    }
+        }
+    });
     trackingZone.appendChild(epicBadge);
 
     // XACA-0023: Release assignment badge
@@ -1913,28 +2914,21 @@ function createQueueItem(item, index) {
         releaseBadge.title = 'Click to assign to a release';
         releaseBadge.setAttribute('aria-label', 'No release assigned');
     }
-    // XACA-0056: Release badge is read-only for completed items
-    if (!isCompleted) {
-        releaseBadge.classList.add('editable');
-        releaseBadge.setAttribute('role', 'button');
-        releaseBadge.setAttribute('tabindex', '0');
-        releaseBadge.addEventListener('click', (e) => {
+    // XACA-0121: Release badge is always editable (removed XACA-0056 isCompleted guard)
+    releaseBadge.classList.add('editable');
+    releaseBadge.setAttribute('role', 'button');
+    releaseBadge.setAttribute('tabindex', '0');
+    releaseBadge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        showReleaseAssignModal(item.id, item.title, CONFIG.team, item.releaseAssignment);
+    });
+    releaseBadge.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
             e.stopPropagation();
             showReleaseAssignModal(item.id, item.title, CONFIG.team, item.releaseAssignment);
-        });
-        releaseBadge.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-                e.preventDefault();
-                e.stopPropagation();
-                showReleaseAssignModal(item.id, item.title, CONFIG.team, item.releaseAssignment);
-            }
-        });
-    } else {
-        releaseBadge.classList.add('readonly');
-        if (item.releaseAssignment) {
-            releaseBadge.title = `Release: ${item.releaseAssignment.releaseName || item.releaseAssignment.releaseId}`;
         }
-    }
+    });
     trackingZone.appendChild(releaseBadge);
 
     // Due date pill moved to identity zone (always visible)
@@ -2018,19 +3012,40 @@ function createQueueItem(item, index) {
     docsButton.setAttribute('aria-label', 'View plan document');
     docsButton.addEventListener('click', (e) => {
         e.stopPropagation();
-        showPlanDocModal(item.id);
+        showPlanDocModal(item.id, docsButton.getAttribute('data-retro-exists') === 'true');
     });
     docsButton.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             e.stopPropagation();
-            showPlanDocModal(item.id);
+            showPlanDocModal(item.id, docsButton.getAttribute('data-retro-exists') === 'true');
         }
     });
     trackingZone.appendChild(docsButton);
 
     // Check if plan document exists (async)
     checkPlanExists(item.id, docsButton);
+
+    // XACA-0117: Activity timeline button
+    const activityBtn = document.createElement('div');
+    activityBtn.className = 'queue-activity-btn';
+    activityBtn.textContent = '\u25D7'; // ◗ clock-like history symbol
+    activityBtn.title = 'View activity history';
+    activityBtn.setAttribute('role', 'button');
+    activityBtn.setAttribute('tabindex', '0');
+    activityBtn.setAttribute('aria-label', 'View activity history');
+    activityBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        ActivityTimeline.open(item.id);
+    });
+    activityBtn.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            ActivityTimeline.open(item.id);
+        }
+    });
+    trackingZone.appendChild(activityBtn);
 
     header.appendChild(trackingZone);
     header.appendChild(workflowZone); // Appended AFTER trackingZone so tags stay to the right
@@ -2132,12 +3147,12 @@ function createQueueItem(item, index) {
 
     // Meta info (subitem count + timestamp) on right
     if (hasSubitems) {
-        const completedCount = item.subitems.filter(s => s.status === 'completed').length;
+        const completedCount = item.subitems.filter(s => s.status === 'completed' || s.status === 'cancelled').length;
         const totalCount = item.subitems.length;
         const countBadge = document.createElement('div');
         countBadge.className = 'subitem-count';
         countBadge.textContent = `${completedCount}/${totalCount}`;
-        countBadge.title = `${completedCount} of ${totalCount} subitems completed`;
+        countBadge.title = `${completedCount} of ${totalCount} subitems resolved`;
         if (completedCount === totalCount) {
             countBadge.classList.add('all-complete');
         }
@@ -3622,8 +4637,8 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
                 const resultItem = document.createElement('div');
                 resultItem.className = 'jira-search-result';
                 resultItem.innerHTML = `
-                    <span class="jira-result-key">${issue.ticketId}</span>
-                    <span class="jira-result-summary">${issue.summary}</span>
+                    <span class="jira-result-key">${escapeHtml(issue.ticketId)}</span>
+                    <span class="jira-result-summary">${escapeHtml(issue.summary)}</span>
                 `;
                 resultItem.title = `${issue.ticketId}: ${issue.summary}`;
                 resultItem.addEventListener('click', (e) => {
@@ -7836,6 +8851,7 @@ function getSectionClass(section) {
     return `${section}-section`;
 }
 
+
 function switchSection(sectionName, skipAnimation = false) {
     const newIndex = SECTIONS.indexOf(sectionName);
     if (newIndex === -1) return;
@@ -7872,6 +8888,16 @@ function switchSection(sectionName, skipAnimation = false) {
         btn.classList.toggle('active', btn.dataset.section === sectionName);
     });
 
+    // Stop carousel auto-advance when leaving HOME tab
+    if (previousSection === 'home') {
+        stopCarousel();
+    }
+
+    // Stop archive polling when leaving ARCHIVE tab (XACA-0128)
+    if (previousSection === 'archive') {
+        stopArchivePolling();
+    }
+
     // Handle exit animation for previous section
     if (previousEl && !skipAnimation && previousSection !== 'startup') {
         // Add exiting class to trigger reverse cascade
@@ -7900,6 +8926,12 @@ function switchSection(sectionName, skipAnimation = false) {
 
             setTimeout(() => {
                 el.classList.add('active');
+                // Render charts AFTER section is visible (Canvas needs dimensions)
+                if (section === 'home') {
+                    renderHomeAnalytics();
+                    // Initialize carousel (idempotent) and start auto-advance
+                    initCarousel();
+                }
             }, entranceDelay);
         } else if (section !== previousSection) {
             // Other sections stay hidden
@@ -7917,6 +8949,9 @@ function switchSection(sectionName, skipAnimation = false) {
     if (sectionName !== 'startup') {
         updateCandyColors(sectionName);
     }
+
+    // Note: renderHomeAnalytics() is called inside the entrance setTimeout above (line ~8759)
+    // so canvases have real dimensions when Chart.js reads them.
 
     // Load backup status and files when switching to backups section
     if (sectionName === 'backups') {
@@ -7953,11 +8988,21 @@ function switchSection(sectionName, skipAnimation = false) {
     if (sectionName === 'integrations') {
         loadIntegrations();
     }
+
+    // Load archive status when switching to archive section
+    if (sectionName === 'archive') {
+        loadArchiveStatus();
+    }
+
+    // Load todos when switching to todos section (XACA-0101)
+    if (sectionName === 'todos') {
+        loadTodos();
+    }
 }
 
 function loadSavedSection() {
-    // Always start on WORKFLOW tab - don't restore last viewed section
-    return 'workflow';
+    // Always start on HOME tab - don't restore last viewed section
+    return 'home';
 }
 
 /**
@@ -9005,7 +10050,7 @@ function renderReleaseCard(release, flowConfig = null) {
                 ${isExpanded ? '<div class="release-items-loading">Loading items...</div>' : ''}
             </div>
             <div class="release-card-actions">
-                <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}')" style="display:none">DOCS</button>
+                <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true')" style="display:none">DOCS</button>
                 <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'promoteRelease(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>PROMOTE</button>
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
                 <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'showEditReleaseModal(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>EDIT</button>
@@ -9081,7 +10126,7 @@ async function loadReleaseItems(releaseId) {
                 <span class="release-item-id">${item.itemId}</span>
                 <span class="release-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="release-item-title">${escapeHtml(item.title)}</span>
-                <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}')" title="View Plan Document" style="display:none">DOCS</button>
+                <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="release-item-remove" onclick="event.stopPropagation(); removeItemFromRelease('${releaseId}', '${item.itemId}')" title="Remove from release">✕</button>
             </div>
         `}).join('');
@@ -10728,7 +11773,7 @@ function renderEpicCard(epic) {
                     </div>
                 </div>
                 <div class="epic-card-actions">
-                    <button class="epic-action-btn docs" data-item-id="${epic.id}" onclick="event.stopPropagation(); showPlanDocModal('${epic.id}')" title="View Plan Document" style="display:none">DOCS</button>
+                    <button class="epic-action-btn docs" data-item-id="${epic.id}" onclick="event.stopPropagation(); showPlanDocModal('${epic.id}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                     <button class="epic-action-btn edit" onclick="event.stopPropagation(); showEditEpicModal('${epic.id}')" title="Edit Epic">✎</button>
                     <button class="epic-action-btn delete" onclick="event.stopPropagation(); confirmDeleteEpic('${epic.id}')" title="Delete Epic">✕</button>
                     <span class="epic-expand-icon">${isExpanded ? '▼' : '▶'}</span>
@@ -10802,7 +11847,7 @@ async function loadEpicItems(epicId) {
                 <span class="epic-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="epic-item-title">${escapeHtml(item.title)}</span>
                 <span class="epic-item-team">${item.team}</span>
-                <button class="epic-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}')" title="View Plan Document" style="display:none">DOCS</button>
+                <button class="epic-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="epic-item-remove" onclick="removeItemFromEpic('${epicId}', '${item.itemId}')" title="Remove from epic">✕</button>
             </div>
         `).join('');
@@ -11485,7 +12530,7 @@ function renderMarkdown(content) {
 /**
  * Show plan document modal for an item
  */
-function showPlanDocModal(itemId) {
+function showPlanDocModal(itemId, retroExists) {
     pauseAutoRefresh();
 
     // Create overlay
@@ -11496,6 +12541,8 @@ function showPlanDocModal(itemId) {
     // Create modal
     const modal = document.createElement('div');
     modal.className = 'lcars-modal plan-doc-modal';
+    modal.setAttribute('data-active-tab', 'plan');
+    modal.setAttribute('data-item-id', itemId);
 
     // Create header
     const header = document.createElement('div');
@@ -11505,6 +12552,28 @@ function showPlanDocModal(itemId) {
         <button class="lcars-modal-close" onclick="hidePlanDocModal()">&times;</button>
     `;
 
+    // Create tab bar (only if retro exists)
+    let tabBar = null;
+    if (retroExists) {
+        tabBar = document.createElement('div');
+        tabBar.className = 'plan-doc-tabs';
+
+        const planTab = document.createElement('button');
+        planTab.className = 'plan-doc-tab active';
+        planTab.setAttribute('data-tab', 'plan');
+        planTab.textContent = 'PLAN';
+        planTab.onclick = function() { switchDocTab(itemId, 'plan'); };
+
+        const retroTab = document.createElement('button');
+        retroTab.className = 'plan-doc-tab';
+        retroTab.setAttribute('data-tab', 'retro');
+        retroTab.textContent = 'RETRO';
+        retroTab.onclick = function() { switchDocTab(itemId, 'retro'); };
+
+        tabBar.appendChild(planTab);
+        tabBar.appendChild(retroTab);
+    }
+
     // Create body (for markdown content)
     const body = document.createElement('div');
     body.className = 'lcars-modal-body plan-doc-content';
@@ -11512,6 +12581,7 @@ function showPlanDocModal(itemId) {
 
     // Assemble modal
     modal.appendChild(header);
+    if (tabBar) modal.appendChild(tabBar);
     modal.appendChild(body);
     overlay.appendChild(modal);
 
@@ -11568,6 +12638,60 @@ function hidePlanDocModal() {
         overlay.classList.remove('active');
         setTimeout(() => overlay.remove(), 300);
     }
+}
+
+/**
+ * Switch between plan and retro tabs in the doc modal
+ */
+function switchDocTab(itemId, tabType) {
+    const overlay = document.getElementById('plan-doc-modal-overlay');
+    if (!overlay) return;
+
+    const modal = overlay.querySelector('.plan-doc-modal');
+    if (!modal) return;
+
+    // Update active tab styling
+    const tabs = modal.querySelectorAll('.plan-doc-tab');
+    tabs.forEach(tab => {
+        tab.classList.toggle('active', tab.getAttribute('data-tab') === tabType);
+    });
+
+    // Update modal state
+    modal.setAttribute('data-active-tab', tabType);
+
+    // Update title
+    const title = modal.querySelector('.lcars-modal-title');
+    if (title) {
+        title.textContent = tabType === 'retro'
+            ? `RETROSPECTIVE: ${itemId}`
+            : `PLAN DOCUMENT: ${itemId}`;
+    }
+
+    // Fetch and display content
+    const body = modal.querySelector('.plan-doc-content');
+    if (!body) return;
+
+    const endpoint = tabType === 'retro' ? 'retro-content' : 'plan-content';
+    body.innerHTML = '<div class="plan-doc-loading">Loading ' +
+        (tabType === 'retro' ? 'retrospective' : 'plan document') + '...</div>';
+
+    fetch(apiUrl('/api/kanban/' + itemId + '/' + endpoint))
+        .then(response => {
+            if (!response.ok) throw new Error(tabType === 'retro' ? 'Retrospective not found' : 'Plan document not found');
+            return response.json();
+        })
+        .then(data => {
+            if (data.filename && title) {
+                title.textContent = (tabType === 'retro' ? 'RETROSPECTIVE: ' : 'PLAN DOCUMENT: ') + data.filename;
+            }
+            body.innerHTML = renderMarkdown(data.content);
+        })
+        .catch(error => {
+            console.error('Error loading ' + tabType + ':', error);
+            body.innerHTML = '<div class="plan-doc-error"><strong>Error loading ' +
+                (tabType === 'retro' ? 'retrospective' : 'plan document') + '</strong><br>' +
+                error.message + '</div>';
+        });
 }
 
 // =========================================================================
@@ -12687,15 +13811,7 @@ function showIntegrationTestResult(card, success, message) {
     }
 }
 
-/**
- * Escape HTML to prevent XSS
- */
-function escapeHtml(text) {
-    if (!text) return '';
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
-}
+// escapeHtml() defined earlier (line ~10041) — single definition used globally
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INTEGRATION MODAL
@@ -13298,6 +14414,68 @@ function showRevertConfirmDialog(item, targetStatus, isSubitem, onConfirm, onCan
 // ═══════════════════════════════════════════════════════════════════════════════
 
 /**
+ * Show LCARS-styled error modal when item completion is blocked by incomplete subitems
+ * @param {Object} item - The item that cannot be completed
+ * @param {Array} incomplete - Array of incomplete subitems [{id, title, status}]
+ */
+function showIncompleteSubitemsError(item, incomplete) {
+    // Remove any existing error dialog
+    const existing = document.querySelector('.incomplete-subitems-error-dialog');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.className = 'lcars-modal-overlay';
+
+    const subitemRows = incomplete.map(s => {
+        const statusDisplay = (s.status || 'todo') === 'in_progress' ? 'IN PROGRESS' : (s.status || 'todo').toUpperCase();
+        return `<div class="modal-field" style="display:flex; justify-content:space-between; align-items:center; padding:4px 0;">
+            <span>${escapeHtml(s.id || '')} — ${escapeHtml(s.title || 'Untitled')}</span>
+            <span style="color:var(--lcars-orange); font-size:0.85em; margin-left:12px;">${statusDisplay}</span>
+        </div>`;
+    }).join('');
+
+    overlay.innerHTML = `
+        <div class="lcars-modal incomplete-subitems-error-dialog">
+            <div class="lcars-modal-header">
+                <div class="lcars-modal-title">CANNOT COMPLETE ITEM</div>
+            </div>
+            <div class="lcars-modal-body">
+                <div class="status-change-confirm-details">
+                    <div class="modal-item-info">
+                        <div class="modal-item-id">${item.id || 'Unknown ID'}</div>
+                        <div class="modal-item-title">${escapeHtml(item.title || 'Untitled')}</div>
+                    </div>
+                    <div class="status-change-warning">
+                        This item has ${incomplete.length} incomplete subitem${incomplete.length !== 1 ? 's' : ''}. Complete or cancel all subitems before marking the parent item as completed.
+                    </div>
+                    <div class="modal-field">
+                        <div class="modal-label">INCOMPLETE SUBITEMS</div>
+                    </div>
+                    ${subitemRows}
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button class="modal-btn modal-btn-cancel incomplete-subitems-dismiss">UNDERSTOOD</button>
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    const dismissBtn = overlay.querySelector('.incomplete-subitems-dismiss');
+    dismissBtn.addEventListener('click', () => overlay.remove());
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) overlay.remove(); });
+
+    const escHandler = (e) => {
+        if (e.key === 'Escape') {
+            overlay.remove();
+            document.removeEventListener('keydown', escHandler);
+        }
+    };
+    document.addEventListener('keydown', escHandler);
+}
+
+/**
  * Change an item's status - supports changing TO or FROM completed
  * XACA-0053: Extended to handle completing items as well as reverting
  * @param {Object} item - The item to change
@@ -13307,6 +14485,16 @@ function showRevertConfirmDialog(item, targetStatus, isSubitem, onConfirm, onCan
 async function changeItemStatus(item, newStatus) {
     try {
         const isCompleting = newStatus === 'completed';
+
+        // Block completion if subitems are incomplete (client-side check)
+        if (isCompleting && item.subitems && item.subitems.length > 0) {
+            const incomplete = item.subitems.filter(s => s.status !== 'completed' && s.status !== 'cancelled');
+            if (incomplete.length > 0) {
+                showIncompleteSubitemsError(item, incomplete);
+                return false;
+            }
+        }
+
         const timestamp = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 
         // Build updates object
@@ -13341,6 +14529,15 @@ async function changeItemStatus(item, newStatus) {
         if (!response.ok) {
             const errorText = await response.text();
             console.error('Failed to change item status:', response.status, errorText);
+            // Parse structured error from server (defense in depth)
+            try {
+                const errorData = JSON.parse(errorText);
+                if (errorData.incompleteSubitems) {
+                    showIncompleteSubitemsError(item, errorData.incompleteSubitems);
+                }
+            } catch (_) {
+                // Non-JSON error — already logged above
+            }
             return false;
         }
 
@@ -13646,6 +14843,10 @@ async function checkPlanExists(itemId, docsButton) {
         if (data.exists) {
             console.log('[DOCS] Plan exists! Showing button for', itemId);
             docsButton.style.display = ''; // Show the button
+            // Store retroExists for the modal
+            if (data.retroExists) {
+                docsButton.setAttribute('data-retro-exists', 'true');
+            }
         } else {
             console.log('[DOCS] No plan for', itemId);
         }
@@ -13868,11 +15069,6 @@ function closeRevertStatusModal() {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 window.refreshData = function() {
-    const refreshBtn = document.querySelector('.refresh-btn');
-    if (refreshBtn) {
-        refreshBtn.style.opacity = '0.5';
-        setTimeout(() => refreshBtn.style.opacity = '1', 300);
-    }
     loadBoardData();
 };
 
@@ -14070,9 +15266,340 @@ const avatarTooltip = {
     }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// ARCHIVE / TRANSFER (XACA-0128)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+let currentArchiveJobId = null;
+let archivePollingInterval = null;
+let archiveManifest = null;
+
+function loadArchiveStatus() {
+    // Update toggle exclusion display based on checkbox states
+    updateExclusionDisplay();
+
+    // Wire up toggle change listeners
+    const gitToggle = document.getElementById('archive-include-git');
+    const nodeToggle = document.getElementById('archive-include-node-modules');
+
+    if (gitToggle && !gitToggle.dataset.listenerAdded) {
+        gitToggle.addEventListener('change', updateExclusionDisplay);
+        gitToggle.dataset.listenerAdded = 'true';
+    }
+    if (nodeToggle && !nodeToggle.dataset.listenerAdded) {
+        nodeToggle.addEventListener('change', updateExclusionDisplay);
+        nodeToggle.dataset.listenerAdded = 'true';
+    }
+}
+
+function updateExclusionDisplay() {
+    const gitChecked = document.getElementById('archive-include-git')?.checked || false;
+    const nodeChecked = document.getElementById('archive-include-node-modules')?.checked || false;
+
+    const gitExclusion = document.getElementById('exclusion-git');
+    const nodeExclusion = document.getElementById('exclusion-node');
+
+    if (gitExclusion) {
+        gitExclusion.classList.toggle('included', gitChecked);
+    }
+    if (nodeExclusion) {
+        nodeExclusion.classList.toggle('included', nodeChecked);
+    }
+}
+
+async function startArchiveGeneration() {
+    // Prevent double-click — if already generating, ignore
+    if (archivePollingInterval) return;
+
+    const generateBtn = document.getElementById('archive-generate-btn');
+    const progressSection = document.getElementById('archive-progress');
+    const downloadSection = document.getElementById('archive-download');
+    const statusEl = document.getElementById('archive-status');
+
+    // Disable button and show progress
+    if (generateBtn) generateBtn.disabled = true;
+    if (progressSection) progressSection.style.display = 'block';
+    if (downloadSection) downloadSection.style.display = 'none';
+    if (statusEl) statusEl.textContent = 'GENERATING...';
+
+    // Reset progress display
+    updateArchiveProgress(0, 'GENERATING...', 'Initializing...');
+
+    // Get options from toggles
+    const includeGitHistory = document.getElementById('archive-include-git')?.checked || false;
+    const includeNodeModules = document.getElementById('archive-include-node-modules')?.checked || false;
+
+    try {
+        const response = await fetch('/api/archive/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                includeGitHistory,
+                includeNodeModules,
+                customExclusions: [],
+            }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+            console.error('Archive creation failed:', data);
+            if (statusEl) statusEl.textContent = 'ERROR';
+            if (generateBtn) generateBtn.disabled = false;
+            return;
+        }
+
+        currentArchiveJobId = data.jobId;
+
+        // Start polling for progress
+        archivePollingInterval = setInterval(() => pollArchiveStatus(data.jobId), 1000);
+
+    } catch (error) {
+        console.error('Archive request failed:', error);
+        if (statusEl) statusEl.textContent = 'ERROR';
+        if (generateBtn) generateBtn.disabled = false;
+    }
+}
+
+async function pollArchiveStatus(jobId) {
+    try {
+        const response = await fetch(`/api/archive/status/${jobId}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            console.error('Archive status check failed:', data);
+            stopArchivePolling();
+            const generateBtn = document.getElementById('archive-generate-btn');
+            if (generateBtn) generateBtn.disabled = false;
+            const statusEl = document.getElementById('archive-status');
+            if (statusEl) statusEl.textContent = 'ERROR';
+            return;
+        }
+
+        updateArchiveProgress(data.progress, 'GENERATING...', data.message);
+
+        if (data.status === 'completed') {
+            stopArchivePolling();
+            onArchiveComplete(data);
+        } else if (data.status === 'failed') {
+            stopArchivePolling();
+            onArchiveFailed(data);
+        }
+
+    } catch (error) {
+        console.error('Archive poll error:', error);
+        // Don't stop polling on network errors — might be transient
+    }
+}
+
+function stopArchivePolling() {
+    if (archivePollingInterval) {
+        clearInterval(archivePollingInterval);
+        archivePollingInterval = null;
+    }
+}
+
+function updateArchiveProgress(percent, label, message) {
+    const progressBar = document.getElementById('archive-progress-bar');
+    const percentEl = document.getElementById('archive-progress-percent');
+    const labelEl = document.getElementById('archive-progress-label');
+    const messageEl = document.getElementById('archive-progress-message');
+
+    if (progressBar) progressBar.style.width = `${percent}%`;
+    if (percentEl) percentEl.textContent = `${percent}%`;
+    if (labelEl) labelEl.textContent = label;
+    if (messageEl) messageEl.textContent = message;
+    const container = document.querySelector('.progress-bar-container');
+    if (container) container.setAttribute('aria-valuenow', percent);
+}
+
+function onArchiveComplete(data) {
+    const generateBtn = document.getElementById('archive-generate-btn');
+    const progressSection = document.getElementById('archive-progress');
+    const downloadSection = document.getElementById('archive-download');
+    const statusEl = document.getElementById('archive-status');
+    const lastExportEl = document.getElementById('archive-last-export');
+    const checklistBtn = document.getElementById('archive-checklist-btn');
+
+    // Update progress to 100%
+    updateArchiveProgress(100, 'COMPLETE', data.message || 'Archive ready for download');
+
+    // Show download section
+    if (downloadSection) {
+        downloadSection.style.display = 'flex';
+        document.getElementById('archive-download-filename').textContent = data.filename || '--';
+        document.getElementById('archive-download-size').textContent = data.fileSize || '--';
+        document.getElementById('archive-download-files').textContent = `${data.totalFiles || 0} files`;
+    }
+
+    // Update status
+    if (statusEl) statusEl.textContent = 'READY';
+    if (lastExportEl) lastExportEl.textContent = new Date().toLocaleString();
+    if (generateBtn) generateBtn.disabled = false;
+    if (checklistBtn) checklistBtn.disabled = false;
+
+    // Store manifest for checklist generation
+    if (data.manifest) {
+        archiveManifest = data.manifest;
+    }
+}
+
+function onArchiveFailed(data) {
+    const generateBtn = document.getElementById('archive-generate-btn');
+    const statusEl = document.getElementById('archive-status');
+
+    updateArchiveProgress(0, 'FAILED', data.message || 'Archive generation failed');
+
+    if (statusEl) statusEl.textContent = 'ERROR';
+    if (generateBtn) generateBtn.disabled = false;
+}
+
+function downloadArchive() {
+    if (!currentArchiveJobId) {
+        console.error('No archive job ID available');
+        return;
+    }
+
+    // Trigger browser download via a hidden link
+    const link = document.createElement('a');
+    link.href = `/api/archive/download/${currentArchiveJobId}`;
+    link.download = '';  // Let server set filename via Content-Disposition
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+async function generateDeploymentChecklist() {
+    const checklistContent = document.getElementById('archive-checklist-content');
+    const checklistBtn = document.getElementById('archive-checklist-btn');
+    if (!checklistContent) return;
+
+    if (checklistBtn) checklistBtn.disabled = true;
+
+    try {
+        const response = await fetch('/api/archive/checklist', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ jobId: currentArchiveJobId }),
+        });
+
+        if (!response.ok) {
+            checklistContent.textContent = 'Failed to generate checklist. Try again.';
+            checklistContent.style.display = 'block';
+            if (checklistBtn) checklistBtn.disabled = false;
+            return;
+        }
+
+        const data = await response.json();
+
+        // Render structured checklist from server data
+        const manifest = archiveManifest || {};
+        const lines = [];
+        lines.push('DEPLOYMENT CHECKLIST — DEV-TEAM ECOSYSTEM TRANSFER');
+        lines.push('═══════════════════════════════════════════════════');
+        lines.push('');
+        lines.push(`SOURCE: ${data.sourceSystem?.hostname || 'unknown'}`);
+        lines.push(`OS: ${data.sourceSystem?.os || 'unknown'} ${data.sourceSystem?.osVersion || ''}`);
+        lines.push(`PYTHON: ${data.sourceSystem?.pythonVersion || 'unknown'}`);
+        lines.push(`NODE: ${data.sourceSystem?.nodeVersion || 'unknown'}`);
+        if (data.archiveInfo) {
+            lines.push(`ARCHIVE: ${data.archiveInfo.filename || 'unknown'} (${data.archiveInfo.fileSize || '?'}, ${data.archiveInfo.totalFiles || '?'} files)`);
+        }
+        lines.push('');
+
+        lines.push('STEP 1: PREREQUISITES');
+        lines.push('─────────────────────');
+        if (data.prerequisites) {
+            for (const prereq of data.prerequisites) {
+                const status = prereq.installed ? '✓' : '☐';
+                const version = prereq.version ? ` (source: v${prereq.version})` : '';
+                lines.push(`${status} ${prereq.name}: ${prereq.command}${version}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 2: EXTRACT ARCHIVE');
+        lines.push('────────────────────────');
+        if (data.extractionSteps) {
+            for (const step of data.extractionSteps) {
+                lines.push(`☐ ${step}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 3: AUTHENTICATION');
+        lines.push('──────────────────────');
+        if (data.authSteps) {
+            for (const step of data.authSteps) {
+                lines.push(`☐ ${step.name}: ${step.command}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 4: SHELL CONFIGURATION');
+        lines.push('────────────────────────────');
+        if (data.shellSetup?.profileLine) {
+            lines.push(`☐ Add to ~/.zshrc: ${data.shellSetup.profileLine}`);
+        }
+        if (data.shellSetup?.scripts) {
+            for (const script of data.shellSetup.scripts) {
+                lines.push(`☐ Verify: ${script}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 5: GIT REMOTES');
+        lines.push('────────────────────');
+        if (data.gitRemotes && data.gitRemotes.length > 0) {
+            for (const remote of data.gitRemotes) {
+                lines.push(`☐ Configure: git remote add ${remote.name} ${remote.url}`);
+            }
+        } else {
+            lines.push('☐ Configure git remotes as needed');
+        }
+        lines.push('');
+
+        lines.push('STEP 6: LCARS SERVERS');
+        lines.push('─────────────────────');
+        if (data.lcarsServers) {
+            for (const [team, port] of Object.entries(data.lcarsServers)) {
+                lines.push(`☐ ${team}: python3 server.py ${port} → http://localhost:${port}`);
+            }
+        }
+        lines.push('');
+
+        lines.push('STEP 7: EXTERNAL KANBAN DIRECTORIES');
+        lines.push('────────────────────────────────────');
+        if (data.externalKanban && data.externalKanban.length > 0) {
+            for (const ext of data.externalKanban) {
+                const exists = ext.exists ? '(exists on source)' : '(not found on source)';
+                lines.push(`☐ ${ext.team}: ${ext.path} ${exists}`);
+            }
+        } else {
+            lines.push('No external kanban directories detected.');
+        }
+        lines.push('');
+
+        lines.push('═══════════════════════════════════════════════════');
+        lines.push(`GENERATED: ${data.generatedAt || new Date().toISOString()}`);
+
+        checklistContent.textContent = lines.join('\n');
+        checklistContent.style.display = 'block';
+
+    } catch (error) {
+        console.error('Checklist generation failed:', error);
+        checklistContent.textContent = 'Failed to generate checklist. Server may be unavailable.';
+        checklistContent.style.display = 'block';
+    }
+
+    if (checklistBtn) checklistBtn.disabled = false;
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     console.log('LCARS Kanban Monitor Initializing...');
     await loadServerConfig();
+
+    // Initialize LCARS Chart.js theming (must run after Chart.js loads)
+    LCARSCharts.init();
 
     // Apply team class to container for org/div color theming
     applyTeamTheme();
@@ -14191,17 +15718,41 @@ document.addEventListener('DOMContentLoaded', async () => {
         navigateToCalendarItem(itemId, epicId);
     });
 
-    // Keyboard navigation - Alt+1 through Alt+4
+    // Keyboard navigation - Alt+1 through Alt+8
     document.addEventListener('keydown', (e) => {
         // Don't allow keyboard nav during startup
         if (activeSection === 'startup') return;
 
         if (e.altKey && !e.ctrlKey && !e.metaKey) {
             const key = parseInt(e.key);
-            if (key >= 1 && key <= 4) {
+            if (key >= 1 && key <= 8) {
                 e.preventDefault();
-                // Alt+1 = workflow (index 1), Alt+2 = details (index 2), etc.
+                // Alt+1 = home, Alt+2 = todos, Alt+3 = calendar, Alt+4 = workflow,
+                // Alt+5 = details, Alt+6 = queue, Alt+7 = epics, Alt+8 = releases
                 switchSection(SECTIONS[key]);
+            }
+        }
+
+        // Escape exits fullscreen mode
+        if (e.key === 'Escape' && homeFullscreen) {
+            e.preventDefault();
+            _exitHomeFullscreen();
+        }
+
+        // Left/Right arrow keys navigate carousel panels when HOME tab is active
+        // Only fires if no modifier key and no focused input element
+        // Skip when fullscreen — the dedicated fullscreen keydown handler (line ~840) handles it
+        if (activeSection === 'home' && !homeFullscreen && !e.altKey && !e.ctrlKey && !e.metaKey && !e.shiftKey) {
+            const tag = document.activeElement ? document.activeElement.tagName : '';
+            const isInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT';
+            if (!isInput) {
+                if (e.key === 'ArrowLeft') {
+                    e.preventDefault();
+                    navigateToPanel(currentHomePanel - 1);
+                } else if (e.key === 'ArrowRight') {
+                    e.preventDefault();
+                    navigateToPanel(currentHomePanel + 1);
+                }
             }
         }
     });
@@ -14211,3 +15762,305 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     console.log('LCARS Kanban Monitor Ready');
 });
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TODO LIST (XACA-0101)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// State
+let currentTodoFilter = 'todo';
+let todosCache = [];
+
+/**
+ * Load todos from API for the current team and render them.
+ * GET /api/todos?team={team}
+ */
+async function loadTodos() {
+    // Show loading, hide list and empty state
+    const loadingEl = document.getElementById('todo-loading');
+    const listEl = document.getElementById('todo-list');
+    const emptyEl = document.getElementById('todo-empty');
+    if (loadingEl) loadingEl.style.display = '';
+    if (listEl) listEl.style.display = 'none';
+    if (emptyEl) emptyEl.style.display = 'none';
+
+    try {
+        const team = CONFIG.team || 'freelance';
+        const response = await fetch(apiUrl(`/api/todos?team=${encodeURIComponent(team)}`));
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        todosCache = data.todos || [];
+    } catch (err) {
+        console.error('Failed to load todos:', err);
+        todosCache = [];
+    }
+
+    if (loadingEl) loadingEl.style.display = 'none';
+    if (listEl) listEl.style.display = '';
+    renderTodos();
+}
+
+/**
+ * Render the todo list based on the current filter.
+ * Filters todosCache by currentTodoFilter and generates list HTML.
+ */
+function renderTodos() {
+    const listEl = document.getElementById('todo-list');
+    const emptyEl = document.getElementById('todo-empty');
+    if (!listEl) return;
+
+    // Filter by status — 'todo' = active, 'completed' = done
+    const filtered = todosCache.filter(t => t.status === currentTodoFilter);
+
+    if (filtered.length === 0) {
+        listEl.innerHTML = '';
+        if (emptyEl) emptyEl.style.display = '';
+        return;
+    }
+
+    if (emptyEl) emptyEl.style.display = 'none';
+
+    // Sort: critical/high first for active; newest first for completed
+    const sorted = [...filtered].sort((a, b) => {
+        if (currentTodoFilter === 'todo') {
+            const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
+            const pa = priorityOrder[a.priority] ?? 2;
+            const pb = priorityOrder[b.priority] ?? 2;
+            if (pa !== pb) return pa - pb;
+        }
+        // Secondary sort: newest created first
+        return new Date(b.createdAt || 0) - new Date(a.createdAt || 0);
+    });
+
+    listEl.innerHTML = sorted.map(todo => renderTodoItem(todo)).join('');
+}
+
+/**
+ * Build the HTML string for a single todo item row.
+ * Includes checkbox, text, priority badge, optional due date, and edit button.
+ */
+function renderTodoItem(todo) {
+    const isCompleted = todo.status === 'completed';
+    const completedClass = isCompleted ? ' todo-completed' : '';
+    const checkboxChecked = isCompleted ? 'checked' : '';
+    const safeId = String(todo.id).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    const safeText = (todo.text || '').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Priority badge
+    const priority = todo.priority || 'medium';
+    const priorityLabel = priority.toUpperCase();
+    const priorityBadge = `<span class="todo-priority-badge todo-priority-${priority}">${priorityLabel}</span>`;
+
+    // Due date display + overdue detection (single computation)
+    let dueDateHtml = '';
+    let overdueItemClass = '';
+    if (todo.requiredBy) {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        const dueDate = new Date(todo.requiredBy + 'T00:00:00');
+        const isOverdue = !isCompleted && dueDate < today;
+        if (isOverdue) overdueItemClass = ' todo-overdue';
+        const overdueClass = isOverdue ? ' todo-due-overdue' : '';
+        const overdueLabel = isOverdue ? ' (OVERDUE)' : '';
+        const formattedDate = String(todo.requiredBy).replace(/</g, '&lt;').replace(/>/g, '&gt;');
+        dueDateHtml = `<span class="todo-due-date${overdueClass}">BY ${formattedDate}${overdueLabel}</span>`;
+    }
+
+    return `
+        <div class="todo-item${completedClass}${overdueItemClass}" data-todo-id="${safeId}">
+            <input type="checkbox" class="todo-checkbox" ${checkboxChecked}
+                   onchange="toggleTodo('${safeId}')" title="Mark ${isCompleted ? 'active' : 'complete'}">
+            <div class="todo-content">
+                <div class="todo-text">${safeText}</div>
+                <div class="todo-meta">
+                    ${priorityBadge}
+                    ${dueDateHtml}
+                </div>
+            </div>
+            <button class="todo-edit-btn" onclick="openTodoModal('${safeId}')">EDIT</button>
+        </div>
+    `;
+}
+
+/**
+ * Update the active tab and re-render with the new filter.
+ */
+function filterTodos(filter) {
+    currentTodoFilter = filter;
+
+    // Update tab button active state
+    document.querySelectorAll('.todo-tab').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.filter === filter);
+    });
+
+    renderTodos();
+}
+
+/**
+ * Open the todo modal for add (todoId = null) or edit (todoId provided).
+ * Pre-fills form fields when editing.
+ */
+function openTodoModal(todoId = null) {
+    const modal = document.getElementById('todo-modal');
+    const titleEl = document.getElementById('todo-modal-title');
+    const editIdEl = document.getElementById('todo-edit-id');
+    const textEl = document.getElementById('todo-text');
+    const priorityEl = document.getElementById('todo-priority');
+    const requiredByEl = document.getElementById('todo-required-by');
+    const deleteBtn = document.getElementById('todo-delete-btn');
+
+    if (!modal) return;
+
+    // Clear the form first
+    editIdEl.value = '';
+    textEl.value = '';
+    priorityEl.value = 'medium';
+    requiredByEl.value = '';
+    if (deleteBtn) deleteBtn.style.display = 'none';
+
+    if (todoId !== null) {
+        // Edit mode — find existing todo in cache
+        const todo = todosCache.find(t => String(t.id) === String(todoId));
+        if (todo) {
+            editIdEl.value = todo.id;
+            textEl.value = todo.text || '';
+            priorityEl.value = todo.priority || 'medium';
+            requiredByEl.value = todo.requiredBy || '';
+            if (titleEl) titleEl.textContent = 'EDIT TODO';
+            if (deleteBtn) deleteBtn.style.display = '';
+        } else {
+            if (titleEl) titleEl.textContent = 'EDIT TODO';
+        }
+    } else {
+        // Add mode
+        if (titleEl) titleEl.textContent = 'ADD TODO';
+    }
+
+    modal.style.display = 'flex';
+    // Focus the text area after display
+    setTimeout(() => textEl.focus(), 50);
+}
+
+/**
+ * Close the todo modal and clear the form.
+ */
+function closeTodoModal() {
+    const modal = document.getElementById('todo-modal');
+    if (modal) modal.style.display = 'none';
+}
+
+/**
+ * Save a todo — creates new (POST) or updates existing (PUT) based on edit-id field.
+ * Reloads todos and closes the modal on success.
+ */
+async function saveTodo() {
+    const editId = document.getElementById('todo-edit-id').value;
+    const text = (document.getElementById('todo-text').value || '').trim();
+    const priority = document.getElementById('todo-priority').value;
+    const requiredBy = document.getElementById('todo-required-by').value || null;
+
+    if (!text) {
+        alert('Item text is required.');
+        document.getElementById('todo-text').focus();
+        return;
+    }
+
+    const team = CONFIG.team || 'freelance';
+    const payload = { team, text, priority, requiredBy };
+
+    try {
+        let response;
+        if (editId) {
+            // Update existing — server expects { team, id, updates: {...} }
+            response = await fetch(apiUrl('/api/todos'), {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ team, id: editId, updates: { text, priority, requiredBy } })
+            });
+        } else {
+            // Create new
+            response = await fetch(apiUrl('/api/todos'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+        }
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
+        }
+
+        closeTodoModal();
+        await loadTodos();
+    } catch (err) {
+        console.error('Failed to save todo:', err);
+        alert(`Failed to save todo: ${err.message}`);
+    }
+}
+
+/**
+ * Delete the currently open todo after user confirmation.
+ * Sends DELETE /api/todos, then reloads and closes modal.
+ */
+async function deleteTodo() {
+    const editId = document.getElementById('todo-edit-id').value;
+    if (!editId) return;
+
+    if (!confirm('Delete this todo item? This cannot be undone.')) return;
+
+    const team = CONFIG.team || 'freelance';
+
+    try {
+        const response = await fetch(apiUrl('/api/todos'), {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ team, id: editId })
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
+        }
+
+        closeTodoModal();
+        await loadTodos();
+    } catch (err) {
+        console.error('Failed to delete todo:', err);
+        alert(`Failed to delete todo: ${err.message}`);
+    }
+}
+
+/**
+ * Toggle a todo item between active ('todo') and completed status.
+ * Sends PUT /api/todos with the toggled status, then reloads.
+ */
+async function toggleTodo(todoId) {
+    const todo = todosCache.find(t => String(t.id) === String(todoId));
+    if (!todo) return;
+
+    const newStatus = todo.status === 'completed' ? 'todo' : 'completed';
+    const team = CONFIG.team || 'freelance';
+
+    try {
+        const response = await fetch(apiUrl('/api/todos'), {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ team, id: todoId, updates: { status: newStatus } })
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
+        }
+
+        await loadTodos();
+    } catch (err) {
+        console.error('Failed to toggle todo:', err);
+        alert(`Failed to update todo: ${err.message}`);
+        // Re-render to restore checkbox visual state
+        renderTodos();
+    }
+}

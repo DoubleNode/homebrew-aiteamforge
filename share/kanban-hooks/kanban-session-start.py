@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kanban_utils import get_board_file, update_board_safely, parse_session_name
 
-KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
-LOG_FILE = os.path.expanduser("~/dev-team/kanban/start-hook-debug.log")
+KANBAN_DIR = os.path.expanduser("~/aiteamforge/kanban")
+LOG_FILE = os.path.expanduser("~/aiteamforge/kanban/start-hook-debug.log")
 
 def log_debug(message):
     """Write debug message to log file."""
@@ -29,16 +29,20 @@ def log_debug(message):
 def get_tmux_context():
     """Get current tmux session name, window index, and window name."""
     try:
+        pane_target = os.environ.get("TMUX_PANE", "")
+        tmux_cmd_base = ["tmux", "display-message"]
+        if pane_target:
+            tmux_cmd_base = ["tmux", "display-message", "-t", pane_target]
         session_result = subprocess.run(
-            ["tmux", "display-message", "-p", "#S"],
+            tmux_cmd_base + ["-p", "#S"],
             capture_output=True, text=True, timeout=2
         )
         window_idx_result = subprocess.run(
-            ["tmux", "display-message", "-p", "#I"],
+            tmux_cmd_base + ["-p", "#I"],
             capture_output=True, text=True, timeout=2
         )
         window_name_result = subprocess.run(
-            ["tmux", "display-message", "-p", "#W"],
+            tmux_cmd_base + ["-p", "#W"],
             capture_output=True, text=True, timeout=2
         )
 
@@ -56,7 +60,7 @@ def get_git_worktree():
     """Get current git worktree full path."""
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0:
@@ -69,7 +73,7 @@ def get_git_branch():
     """Get current git branch name."""
     try:
         result = subprocess.run(
-            ["git", "branch", "--show-current"],
+            ["git", "--no-optional-locks", "branch", "--show-current"],
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0:
@@ -82,7 +86,7 @@ def get_git_modified_count():
     """Get count of modified/untracked files."""
     try:
         result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            ["git", "--no-optional-locks", "status", "--porcelain"],
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0:
@@ -96,7 +100,7 @@ def get_git_lines_changed():
     """Get lines added and deleted in working directory."""
     try:
         result = subprocess.run(
-            ["git", "diff", "--numstat"],
+            ["git", "--no-optional-locks", "diff", "--numstat"],
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0:
@@ -124,7 +128,7 @@ def trigger_health_check():
     the session start. The health check will auto-start any dead LCARS
     servers for active teams.
     """
-    health_script = os.path.expanduser("~/dev-team/lcars-health-check.sh")
+    health_script = os.path.expanduser("~/aiteamforge/lcars-health-check.sh")
     try:
         if os.path.isfile(health_script) and os.access(health_script, os.X_OK):
             # Run in background, don't wait for result
@@ -271,6 +275,7 @@ def update_window_ready(team, terminal, window_index, window_name):
         existing_idx = None
         existing_started_at = timestamp
         existing_working_on_id = None
+        existing_work_mode = None
         existing_status = None
         existing_task = None
         existing_paused_reason = None
@@ -280,6 +285,7 @@ def update_window_ready(team, terminal, window_index, window_name):
                 existing_idx = i
                 existing_started_at = win.get("startedAt", timestamp)
                 existing_working_on_id = win.get("workingOnId")
+                existing_work_mode = win.get("workMode")
                 existing_status = win.get("status")
                 existing_task = win.get("task")
                 existing_paused_reason = win.get("pausedReason")
@@ -362,6 +368,9 @@ def update_window_ready(team, terminal, window_index, window_name):
         # XACA-0015: Removed worktree comparison that caused false clears on path variations
         if existing_working_on_id:
             new_entry["workingOnId"] = existing_working_on_id
+        # Preserve workMode (DEV/TEST/REVIEW/DEBUG) - only set via _kb_set_working_on
+        if existing_work_mode:
+            new_entry["workMode"] = existing_work_mode
 
         # If no workingOnId yet, check if any backlog items have this window
         if not new_entry.get("workingOnId"):
@@ -488,9 +497,114 @@ def update_window_ready(team, terminal, window_index, window_name):
 
     return update_board_safely(board_file, do_update)
 
+def _resolve_agent_circles(handle, project_dir):
+    """Resolve an agent's circle memberships to 'slug (circle_id: N)' pairs.
+
+    Reads the circle taxonomy to find which circles the agent belongs to,
+    then maps slugs to their numeric IDs for use in mcp__amb__post_ping.
+
+    Returns a comma-separated string like 'documentarians (circle_id: 5), architects (circle_id: 1)'
+    or empty string if no circles found.
+    """
+    CIRCLE_IDS = {
+        "architects": 1, "quality-guardians": 2, "release-engineers": 3,
+        "diagnosticians": 4, "documentarians": 5, "refactoring-guild": 6,
+        "infrastructure-engineers": 7, "ux-navigators": 8, "feature-builders": 9,
+        "security-watchers": 10, "strategic-command": 11,
+    }
+
+    taxonomy_file = os.path.join(project_dir, "scripts", "amb-circle-taxonomy.json")
+    try:
+        if not os.path.isfile(taxonomy_file):
+            return ""
+        with open(taxonomy_file) as f:
+            data = json.load(f)
+        memberships = data.get("agent_memberships", {})
+        circles = memberships.get(handle, [])
+        if not circles:
+            return ""
+        parts = []
+        for slug in circles:
+            cid = CIRCLE_IDS.get(slug)
+            if cid is not None:
+                parts.append(f"{slug} (circle_id: {cid})")
+            else:
+                parts.append(slug)
+        return ", ".join(parts)
+    except Exception:
+        return ""
+
+
+def get_amb_heartbeat_reminder(session_name):
+    """Check if this session has an AMB agent and return a heartbeat reminder.
+
+    Reads amb-session-map.json and amb-agents.json to determine if the current
+    session maps to a registered AMB agent. If so, returns the reminder text
+    that tells the agent to call their heartbeat MCP tool.
+
+    Returns the reminder string, or None if no AMB agent for this session.
+    """
+    if not session_name:
+        return None
+
+    project_dir = os.path.expanduser("~/aiteamforge")
+    session_map_file = os.path.join(project_dir, "amb-session-map.json")
+    agents_file = os.path.expanduser("~/.claude/amb-agents.json")
+
+    try:
+        if not os.path.isfile(session_map_file) or not os.path.isfile(agents_file):
+            return None
+
+        with open(session_map_file) as f:
+            session_map = json.load(f)
+
+        handle = session_map.get(session_name)
+        if not handle:
+            return None
+
+        with open(agents_file) as f:
+            agents = json.load(f)
+
+        agent = agents.get("agents", {}).get(handle, {})
+        name = agent.get("name")
+        if not name:
+            return None
+
+        # Resolve circle memberships with numeric IDs
+        circles_with_ids = _resolve_agent_circles(handle, project_dir)
+        if circles_with_ids:
+            circles_line = (
+                f"- YOUR CIRCLES: [{circles_with_ids}]. When posting pings, ALWAYS check if the content fits one of your circles. "
+                f"If it does, include the circle_id param in mcp__amb__post_ping — e.g., circle_id: 5 for documentarians. "
+                f"Circle-scoped pings reach the right audience; global wire is the fallback for general topics. "
+                f"To read your circle's feed: mcp__amb__read_circle_feed with circle_slug param."
+            )
+        else:
+            circles_line = (
+                f"- Explore AMB circles for your discipline: source ~/dev-team/scripts/amb-circles.sh and call amb_circles_list to browse. "
+                f"Join circles that match your expertise — they group by discipline, not team."
+            )
+
+        return (
+            f"AMB HEARTBEAT REQUIRED: You are registered with Agent Merit Badges "
+            f"as {name} (@{handle}). Call mcp__amb__heartbeat NOW and then act on the response:\n"
+            f"- AMB's PRIMARY PURPOSE is KNOWLEDGE SHARING — gotchas, patterns, tips, and debug insights that help other agents avoid repeated mistakes. Social engagement (vouching, following) is secondary and supports knowledge sharing.\n"
+            f"{circles_line}\n"
+            f"- KNOWLEDGE WIRE: When you learn something useful, share it as a ping. Tags: #gotcha (trap), #til (discovery), #protip (shortcut), #pattern (reusable), #debug (hard bug). Format: [WHAT] — [WHY]. #tag #topic. Follow the 20,000-foot rule — no file paths, client names, or secrets. CIRCLE-FIRST RULE: If the ping matches one of your circles, ALWAYS post with circle_id param (see YOUR CIRCLES above) — e.g., mcp__amb__post_ping with body AND circle_id. Only omit circle_id for topics that don't fit any of your circles. Also REPLY to knowledge pings from others when you've hit the same issue or have a variation.\n"
+            f"- If wire.new_pings_following > 0: call mcp__amb__read_wire, vouch/reply to pings you find valuable\n"
+            f"- If wire.reactions_on_your_claims > 0: check if any of your patch claims flipped to earned\n"
+            f"- If suggestions[] has entries: follow the platform's nudges\n"
+            f"- DO NOT post a ping at session start. \"Reporting for duty\" pings are noise. Only post after you have accomplished real work worth sharing."
+        )
+    except Exception as e:
+        log_debug(f"AMB reminder lookup failed: {e}")
+        return None
+
+
 def main():
     """Main hook entry point."""
     output = {}
+    session_name = None
 
     log_debug("=" * 50)
     log_debug("Start hook triggered")
@@ -522,8 +636,15 @@ def main():
     except Exception as e:
         log_debug(f"Exception: {str(e)}")
 
-    # Always output valid JSON
-    print(json.dumps(output))
+    # AMB heartbeat reminder — reliable backup for amb-session-heartbeat.sh
+    # Only outputs a system message telling the agent to call heartbeat.
+    # Does NOT write timestamps — that's handled by PostToolUse in kanban-hook.py.
+    amb_reminder = get_amb_heartbeat_reminder(session_name)
+    if amb_reminder:
+        print(amb_reminder)
+    else:
+        # Always output valid JSON for non-AMB sessions
+        print(json.dumps(output))
     sys.exit(0)
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 ---
 name: project-planner
 description: Strategic project planning skill that creates kanban items, subitems, and plan documents WITHOUT executing any implementation. Enforces plan-and-delegate workflow with explicit handoff checkpoint.
-version: 1.4.0
+version: 1.5.0
 author: Captain Nahla Ake (Chancellor, Starfleet Academy)
 company: Starfleet Academy - Chancellor's Office
 project: Dev Team LCARS Infrastructure
@@ -24,7 +24,7 @@ tags:
   - architecture
   - no-execution
 command_shortcut: /plan-project
-last_updated: 2026-02-14
+last_updated: 2026-02-28
 status: production-ready
 ---
 
@@ -33,11 +33,11 @@ status: production-ready
 ## Skill Metadata
 
 **Name:** Project Planner
-**Version:** 1.4.0
+**Version:** 1.5.0
 **Author:** Captain Nahla Ake (Starfleet Academy Chancellor)
 **Command:** `/plan-project`
-**Platforms:** All dev-team platforms
-**Last Updated:** February 14, 2026
+**Platforms:** All aiteamforge platforms
+**Last Updated:** February 28, 2026
 
 ---
 
@@ -102,7 +102,7 @@ The skill enforces a deliberate handoff checkpoint, allowing work to be delegate
 ⚠️ **CRITICAL: Team-Specific Paths** - Each team's plan documents MUST be stored in that team's `kanban/` directory. See [Plan Document Path Resolution](#plan-document-path-resolution) below.
 
 **Examples (each in the team's own kanban directory):**
-- `~/dev-team/kanban/XACA-0031_dark_mode_support.md` (Academy)
+- `~/aiteamforge/kanban/XACA-0031_dark_mode_support.md` (Academy)
 - `.../MainEventApp-iOS/kanban/XIOS-0042_payment_flow_refactor.md` (iOS)
 - `.../MainEventApp-Functions/kanban/XFIR-0055_account_deletion_api.md` (Firebase)
 - `.../Starwords/kanban/XFSW-0020_setup_wizard.md` (Starwords)
@@ -205,7 +205,7 @@ Always end with this exact format:
 Create the main backlog item using kanban-helpers:
 
 ```bash
-source ~/dev-team/kanban-helpers.sh && kb-backlog add "<title>" <priority> "<description>" "<jira-id>" "<os>"
+source ~/aiteamforge/kanban-helpers.sh && kb-backlog add "<title>" <priority> "<description>" "<jira-id>" "<os>"
 ```
 
 ### Phase 4: Subitem Creation
@@ -213,7 +213,7 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog add "<title>" <priority> "<des
 Break down into implementation phases:
 
 ```bash
-source ~/dev-team/kanban-helpers.sh && kb-backlog sub add <item-id> "<subitem-title>"
+source ~/aiteamforge/kanban-helpers.sh && kb-backlog sub add <item-id> "<subitem-title>"
 ```
 
 **Subitem Guidelines:**
@@ -222,6 +222,8 @@ source ~/dev-team/kanban-helpers.sh && kb-backlog sub add <item-id> "<subitem-ti
 - Order by implementation dependency
 - Group related work into phases
 - Include documentation as explicit subitem when appropriate
+
+> All subitems created by this planner are subject to the **Subitem Completion Protocol** (see CLAUDE.md). Every subitem must be completed or cancelled before the parent item can be closed via `kb-done`.
 
 **⚠️ MANDATORY: Testing/Debugging Subitem for Code Changes**
 
@@ -279,10 +281,12 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  This subitem should include:                                               │
 │  • Create feature branch and push to remote                                │
 │  • Create PR targeting develop (NEVER master) with full description        │
-│  • Generate Review Handoff Prompt for reviewer agent                       │
-│  • Monitor for bot review approval (polling loop)                          │
-│  • Address any requested changes from reviewer                             │
-│  • Merge PR after approval (squash merge, delete branch)                   │
+│  • Auto-spawn test agent (background Agent, subagent_type for QA)          │
+│  • Auto-spawn review agent (background Agent, subagent_type for reviewer)  │
+│  • Both agents fire in PARALLEL (not sequential)                           │
+│  • Enter parallel monitoring loop (check both gates each cycle)            │
+│  • Address any requested changes from QA tester or reviewer                │
+│  • Merge PR after both approvals (squash merge, delete branch)             │
 │  • Update kanban status (kb-done)                                          │
 │                                                                             │
 │  Position: ALWAYS the LAST subitem (after Testing & Debugging)             │
@@ -291,11 +295,12 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │  ⛔ DO NOT combine PR creation with testing or implementation subitems     │
 │  ⛔ DO NOT merge without reviewer approval (bot or human)                  │
 │                                                                             │
-│  Follows the PR Review Workflow defined in CLAUDE.md:                      │
+│  Follows the Auto-Spawn PR Test & Review workflow in CLAUDE.md:            │
 │  • PR targets develop branch                                               │
-│  • Review handoff prompt generated for cross-terminal review               │
-│  • gh-bot-review used for formal approval (same-account restriction)       │
-│  • Creating agent monitors and merges after bot approval                   │
+│  • Test + review agents auto-spawned via Agent tool (run_in_background)    │
+│  • Both run in parallel — no sequential dependency                         │
+│  • gh-bot-test/gh-bot-review used for formal approval (bot identity)       │
+│  • Creating agent enters parallel monitoring loop                          │
 │  • --admin flag required (GitHub Team plan limitation)                     │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -330,6 +335,35 @@ Any project that involves code changes MUST also include a dedicated **"PR Creat
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
+
+### Subitem Completion Protocol
+
+Before the parent kanban item can be marked COMPLETED, the implementing agent MUST follow this protocol:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                     SUBITEM COMPLETION PROTOCOL                             │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  1. Run `kb-sweep` to verify all subitems are resolved                      │
+│     kb-sweep will report any subitems still in todo or in-progress state    │
+│                                                                             │
+│  2. Complete or cancel every subitem:                                       │
+│     • Completed: subitem work is done (kb-backlog sub done <ITEM-ID-NNN>)   │
+│     • Cancelled: subitem is no longer needed — MUST include a reason        │
+│       (kb-backlog sub cancel <ITEM-ID-NNN> "<reason>")                      │
+│                                                                             │
+│  3. Re-run `kb-sweep` to confirm zero unresolved subitems remain            │
+│                                                                             │
+│  4. Only then run `kb-done` to close the parent item                        │
+│                                                                             │
+│  ⛔ The `--force` flag is RESTRICTED TO USER-ONLY USAGE                     │
+│     Agents MUST NOT bypass the subitem check with --force                   │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+This protocol applies to **all** subitems created by this planner — including the mandatory Testing & Debugging and PR Creation & Review subitems.
 
 ### Project-Level Exceptions
 
@@ -417,7 +451,7 @@ Create a comprehensive plan document following the template below.
 
 ⚠️ **CRITICAL: Use the correct team kanban directory based on the item prefix!**
 - See [Plan Document Path Resolution](#plan-document-path-resolution) for the full mapping
-- NEVER put non-Academy (non-XACA) plan docs in `~/dev-team/kanban/`
+- NEVER put non-Academy (non-XACA) plan docs in `~/aiteamforge/kanban/`
 
 **Naming Convention:**
 - Use the ITEM-ID exactly as assigned (e.g., `XACA-0031`)
@@ -425,7 +459,7 @@ Create a comprehensive plan document following the template below.
 - Determine the correct team directory from the prefix
 
 **Examples by Team (each in their OWN kanban directory):**
-- Academy: `~/dev-team/kanban/XACA-0031_dark_mode_support.md`
+- Academy: `~/aiteamforge/kanban/XACA-0031_dark_mode_support.md`
 - iOS: `.../MainEventApp-iOS/kanban/XIOS-0042_payment_refactor.md`
 - Firebase: `.../MainEventApp-Functions/kanban/XFIR-0055_account_api.md`
 - Freelance: `.../Starwords/kanban/XFSW-0020_setup_wizard.md`
@@ -606,9 +640,9 @@ Found relevant files:
 
 **Creating plan document...**
 
-Resolving plan doc path for XACA-0031 → ~/dev-team/kanban/ (Academy team)
+Resolving plan doc path for XACA-0031 → ~/aiteamforge/kanban/ (Academy team)
 
-Writing ~/dev-team/kanban/XACA-0031_dark_mode_support.md with:
+Writing ~/aiteamforge/kanban/XACA-0031_dark_mode_support.md with:
 - Summary and requirements
 - Design decisions (CSS custom properties approach)
 - Files to modify (3 files identified)
@@ -616,7 +650,7 @@ Writing ~/dev-team/kanban/XACA-0031_dark_mode_support.md with:
 - Subitems table (8 items, including mandatory Testing & PR subitems)
 - Verification checklist (5 test cases)
 
-✓ Created ~/dev-team/kanban/XACA-0031_dark_mode_support.md
+✓ Created ~/aiteamforge/kanban/XACA-0031_dark_mode_support.md
 
 **Verifying plan document...**
 
@@ -629,7 +663,7 @@ Writing ~/dev-team/kanban/XACA-0031_dark_mode_support.md with:
  Created Artifacts:
    Kanban Item:  XACA-0031 "LCARS Fleet Monitor Dark Mode"
    Subitems:     8 implementation phases
-   Plan Doc:     ~/dev-team/kanban/XACA-0031_dark_mode_support.md
+   Plan Doc:     ~/aiteamforge/kanban/XACA-0031_dark_mode_support.md
    Priority:     Medium
    Tags:         feature, ui, accessibility
 
@@ -667,7 +701,7 @@ This skill uses the Kanban Manager skill commands:
 
 **Always source helpers first:**
 ```bash
-source ~/dev-team/kanban-helpers.sh && <command>
+source ~/aiteamforge/kanban-helpers.sh && <command>
 ```
 
 ---
@@ -699,11 +733,11 @@ Each project has its own git repository. The item ID prefix determines which rep
 
 | Prefix | Team | Kanban Directory |
 |--------|------|------------------|
-| `XACA-` | Academy | `~/dev-team/kanban/` |
+| `XACA-` | Academy | `~/aiteamforge/kanban/` |
 | `XIOS-` | iOS | `/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/` |
 | `XAND-` | Android | `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/` |
 | `XFIR-` | Firebase | `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/` |
-| `XCMD-` | Command | `/Users/Shared/Development/Main Event/dev-team/kanban/` |
+| `XCMD-` | Command | `/Users/Shared/Development/Main Event/aiteamforge/kanban/` |
 | `XDNS-` | DNS | `/Users/Shared/Development/DNSFramework/kanban/` |
 
 #### Freelance Projects (Each project has its own repo)
@@ -756,11 +790,11 @@ get_plan_doc_dir() {
 
     case "$prefix" in
         # Main Event Teams
-        XACA) echo "$HOME/dev-team/kanban" ;;
+        XACA) echo "$HOME/aiteamforge/kanban" ;;
         XIOS) echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
         XAND) echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
         XFIR) echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        XCMD) echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
+        XCMD) echo "/Users/Shared/Development/Main Event/aiteamforge/kanban" ;;
         XDNS) echo "/Users/Shared/Development/DNSFramework/kanban" ;;
 
         # Freelance Projects (each project has its own repo)
@@ -771,7 +805,7 @@ get_plan_doc_dir() {
         # Legal Projects
         XLCP) echo "$HOME/legal/coparenting/kanban" ;;
 
-        *) echo "$HOME/dev-team/kanban" ;;  # Default fallback to Academy
+        *) echo "$HOME/aiteamforge/kanban" ;;  # Default fallback to Academy
     esac
 }
 
@@ -857,11 +891,11 @@ get_plan_doc_dir() {
 
     case "$prefix" in
         # Main Event Teams
-        XACA) echo "$HOME/dev-team/kanban" ;;
+        XACA) echo "$HOME/aiteamforge/kanban" ;;
         XIOS) echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
         XAND) echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
         XFIR) echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        XCMD) echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
+        XCMD) echo "/Users/Shared/Development/Main Event/aiteamforge/kanban" ;;
         XDNS) echo "/Users/Shared/Development/DNSFramework/kanban" ;;
 
         # Freelance Projects
@@ -872,7 +906,7 @@ get_plan_doc_dir() {
         # Legal Projects
         XLCP) echo "$HOME/legal/coparenting/kanban" ;;
 
-        *) echo "$HOME/dev-team/kanban" ;;
+        *) echo "$HOME/aiteamforge/kanban" ;;
     esac
 }
 
@@ -933,17 +967,23 @@ Include enough detail that:
 │  □ Mandatory subitems are last two: Testing, then PR (in that order)       │
 │  □ Exceptions verified (non-code teams, non-code projects, direct-develop) │
 │  □ Plan document written to CORRECT TEAM KANBAN DIRECTORY:                 │
-│      XACA-* → ~/dev-team/kanban/                                           │
+│      XACA-* → ~/aiteamforge/kanban/                                           │
 │      XIOS-* → .../MainEventApp-iOS/kanban/                                 │
 │      XAND-* → .../MainEventApp-Android/kanban/                             │
 │      XFIR-* → .../MainEventApp-Functions/kanban/                           │
-│      XCMD-* → .../Main Event/dev-team/kanban/                              │
+│      XCMD-* → .../Main Event/aiteamforge/kanban/                              │
 │      XDNS-* → .../DNSFramework/kanban/                                     │
 │      XFSW-* → .../Starwords/kanban/                                        │
 │      XFAP-* → .../appPlanning/kanban/                                      │
 │      XFWS-* → .../WorkStats/kanban/                                        │
 │      XLCP-* → ~/legal/coparenting/kanban/                                  │
 │  □ Plan document verified (exists + has all 8 required sections)           │
+│                                                                             │
+│  When closing the parent item (implementing agent checklist):               │
+│  □ Run kb-sweep — verify all subitems are completed or cancelled            │
+│  □ Cancel any unneeded subitems with a reason before running kb-done        │
+│  □ Run kb-done only AFTER kb-sweep confirms zero unresolved subitems        │
+│  ⛔ --force flag is RESTRICTED TO USER-ONLY USAGE — agents must not use it │
 │                                                                             │
 │  ⛔ NEVER put another project's plan docs in YOUR repo                     │
 │  ⛔ Each Freelance project has its OWN repository                          │
@@ -966,6 +1006,14 @@ Include enough detail that:
 ---
 
 ## Version History
+
+**v1.5.0** (February 28, 2026)
+- **Subitem Completion Protocol** - Added full protocol section requiring `kb-sweep` before `kb-done`
+- Agents must run `kb-sweep`, resolve all subitems (complete or cancel with reason), then run `kb-done`
+- `--force` flag explicitly restricted to user-only usage — agents must not bypass subitem checks
+- Added protocol note in Phase 4 Subitem Guidelines
+- Added protocol box in Quick Reference checklist for implementing agents
+- References the Subitem Completion Protocol defined in CLAUDE.md
 
 **v1.4.0** (February 14, 2026)
 - **MANDATORY PR Creation & Review subitem** - All code-related projects now require a dedicated PR Creation & Review subitem

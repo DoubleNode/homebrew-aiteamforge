@@ -1,0 +1,843 @@
+/**
+ * LCARS (Library Computer Access/Retrieval System) Theme
+ * Star Trek: The Next Generation / Deep Space Nine / Voyager style interface
+ */
+
+/* ============================================================================
+   VARIABLES & RESET
+   ============================================================================ */
+
+:root {
+    /* LCARS Color Palette */
+    --lcars-orange: #FF9966;
+    --lcars-red: #CC6666;
+    --lcars-purple: #CC99CC;
+    --lcars-blue: #9999FF;
+    --lcars-yellow: #FFCC99;
+    --lcars-tan: #FFCC66;
+    --lcars-peach: #FF9966;
+
+    /* Status Colors */
+    --status-online: #66FF66;
+    --status-warning: #FFCC00;
+    --status-offline: #FF6666;
+
+    /* Background Colors */
+    --bg-primary: #000000;
+    --bg-secondary: #111111;
+    --bg-panel: #1A1A1A;
+
+    /* Text Colors */
+    --text-primary: #FFFFFF;
+    --text-secondary: #CCCCCC;
+    --text-accent: var(--lcars-orange);
+
+    /* Fonts */
+    --font-primary: 'Swiss 911 Ultra Compressed', 'Arial Narrow', sans-serif;
+    --font-mono: 'Courier New', monospace;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: var(--font-primary);
+    background-color: var(--bg-primary);
+    color: var(--text-primary);
+    line-height: 1.6;
+    overflow-x: hidden;
+}
+
+/* ============================================================================
+   LAYOUT
+   ============================================================================ */
+
+.lcars-container {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 15px;
+}
+
+/* ============================================================================
+   HEADER
+   ============================================================================ */
+
+.lcars-header {
+    margin-bottom: 15px;
+    padding: 12px 20px;
+    background: linear-gradient(90deg, var(--bg-primary) 0%, var(--lcars-orange) 100%);
+    border-radius: 0 30px 30px 0;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.lcars-title {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    flex: 1;
+}
+
+.lcars-header-icon {
+    width: 60px;
+    height: 60px;
+    flex-shrink: 0;
+}
+
+.lcars-title h1 {
+    font-size: 2rem;
+    letter-spacing: 3px;
+    color: var(--text-primary);
+    text-transform: uppercase;
+}
+
+.lcars-bracket-left,
+.lcars-bracket-right {
+    width: 40px;
+    height: 40px;
+    background: var(--lcars-orange);
+    border-radius: 50%;
+}
+
+.lcars-subtitle {
+    font-size: 1rem;
+    color: var(--text-secondary);
+    margin-top: 5px;
+    letter-spacing: 1px;
+}
+
+.lcars-stardate {
+    font-size: 0.85rem;
+    color: var(--text-accent);
+    margin-top: 3px;
+    font-family: var(--font-mono);
+}
+
+/* ============================================================================
+   FLEET SUMMARY
+   ============================================================================ */
+
+.fleet-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin-bottom: 15px;
+}
+
+.summary-card {
+    background: var(--bg-panel);
+    border-left: 6px solid var(--lcars-blue);
+    padding: 12px 15px;
+    border-radius: 0 15px 15px 0;
+    transition: all 0.3s ease;
+}
+
+.summary-card:hover {
+    transform: translateX(5px);
+    border-left-width: 12px;
+}
+
+.summary-card.online {
+    border-left-color: var(--status-online);
+}
+
+.summary-card.offline {
+    border-left-color: var(--status-offline);
+}
+
+.card-label {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    letter-spacing: 0.5px;
+    margin-bottom: 3px;
+}
+
+.card-value {
+    font-size: 1.8rem;
+    font-weight: bold;
+    color: var(--lcars-orange);
+}
+
+.card-value.small {
+    font-size: 0.95rem;
+}
+
+/* ============================================================================
+   ORGANIZATION NAVIGATION
+   ============================================================================ */
+
+.organization-nav {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 20px;
+    padding: 15px;
+    background: var(--bg-panel);
+    border-radius: 15px;
+    overflow-x: auto;
+    border: 2px solid var(--lcars-red);
+}
+
+.org-nav-button {
+    flex: 1;
+    min-width: 200px;
+    background: var(--bg-secondary);
+    border: 2px solid var(--lcars-orange);
+    border-radius: 10px;
+    padding: 12px 15px;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.org-nav-button:hover {
+    transform: translateY(-3px);
+    box-shadow: 0 5px 15px rgba(255, 153, 102, 0.4);
+}
+
+.org-nav-button.lcars-blue {
+    border-color: var(--lcars-blue);
+}
+
+.org-nav-button.lcars-blue:hover {
+    box-shadow: 0 5px 15px rgba(153, 153, 255, 0.4);
+}
+
+.org-nav-button.lcars-purple {
+    border-color: var(--lcars-purple);
+}
+
+.org-nav-button.lcars-purple:hover {
+    box-shadow: 0 5px 15px rgba(204, 153, 204, 0.4);
+}
+
+.org-nav-button.lcars-orange {
+    border-color: var(--lcars-orange);
+}
+
+.org-nav-button.lcars-orange:hover {
+    box-shadow: 0 5px 15px rgba(255, 153, 102, 0.4);
+}
+
+.org-nav-name {
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-primary);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+.org-nav-stats {
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+/* ============================================================================
+   DIVISIONS CONTAINER
+   ============================================================================ */
+
+.divisions-container {
+    margin-bottom: 15px;
+}
+
+/* ============================================================================
+   ORGANIZATION CONTAINERS
+   ============================================================================ */
+
+.organization-container {
+    background: var(--bg-primary);
+    margin-bottom: 20px;
+    border-radius: 20px;
+    overflow: hidden;
+    border: 3px solid var(--lcars-orange);
+    padding: 15px;
+}
+
+/* Organization-specific border colors */
+.organization-container.lcars-blue {
+    border-color: var(--lcars-blue);
+}
+
+.organization-container.lcars-purple {
+    border-color: var(--lcars-purple);
+}
+
+.organization-container.lcars-orange {
+    border-color: var(--lcars-orange);
+}
+
+.organization-header {
+    background: linear-gradient(90deg, var(--bg-secondary) 0%, var(--bg-primary) 100%);
+    color: var(--text-primary);
+    padding: 10px 20px;
+    margin-bottom: 15px;
+    border-radius: 10px;
+    font-size: 1.4rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-left: 8px solid var(--lcars-orange);
+}
+
+.organization-container.lcars-blue .organization-header {
+    border-left-color: var(--lcars-blue);
+}
+
+.organization-container.lcars-purple .organization-header {
+    border-left-color: var(--lcars-purple);
+}
+
+.organization-container.lcars-orange .organization-header {
+    border-left-color: var(--lcars-orange);
+}
+
+.organization-stats {
+    font-size: 0.9rem;
+    opacity: 0.8;
+}
+
+/* Division mini-nav within organizations */
+.division-mini-nav {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 15px;
+    padding: 10px;
+    background: var(--bg-secondary);
+    border-radius: 10px;
+    overflow-x: auto;
+    flex-wrap: wrap;
+}
+
+.division-mini-nav-button {
+    flex: 1;
+    min-width: 180px;
+    background: var(--bg-panel);
+    border: 1px solid #555555;
+    border-radius: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.division-mini-nav-button:hover {
+    transform: translateY(-2px);
+    border-color: #888888;
+    box-shadow: 0 3px 10px rgba(255, 255, 255, 0.1);
+}
+
+.division-mini-nav-name {
+    font-size: 0.8rem;
+    font-weight: bold;
+    color: var(--text-primary);
+    letter-spacing: 0.5px;
+}
+
+.division-mini-nav-stats {
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+    font-family: var(--font-mono);
+}
+
+/* ============================================================================
+   DIVISION PANELS (inside organizations)
+   ============================================================================ */
+
+.division-panel {
+    background: var(--bg-panel);
+    margin-bottom: 12px;
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid #444444;
+}
+
+.division-panel:last-child {
+    margin-bottom: 0;
+}
+
+.division-header {
+    background: #333333;
+    color: var(--text-primary);
+    padding: 8px 20px;
+    font-size: 1.1rem;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.division-stats {
+    font-size: 0.85rem;
+    opacity: 0.8;
+}
+
+.division-content {
+    padding: 12px;
+}
+
+/* Projects */
+.project-section {
+    margin-bottom: 12px;
+}
+
+.project-header {
+    background: var(--bg-secondary);
+    padding: 6px 15px;
+    margin-bottom: 8px;
+    border-left: 4px solid var(--lcars-purple);
+    border-radius: 0 8px 8px 0;
+    font-size: 1rem;
+    color: var(--lcars-purple);
+    letter-spacing: 1px;
+}
+
+.project-header.default {
+    display: none; /* Hide default project label */
+}
+
+/* Teams */
+.teams-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.team-card {
+    background: var(--bg-secondary);
+    border: 2px solid var(--lcars-blue);
+    border-radius: 8px;
+    padding: 10px 12px;
+    transition: all 0.3s ease;
+}
+
+.team-card:hover {
+    border-color: var(--lcars-orange);
+    transform: scale(1.02);
+}
+
+/* ============================================================================
+   LCARS TERMINAL STYLING (Primary Command Interfaces)
+   ============================================================================ */
+
+.team-card.lcars-terminal {
+    background: linear-gradient(135deg, var(--bg-secondary) 0%, #1a1510 100%);
+    border: 3px solid var(--lcars-tan);
+    box-shadow:
+        0 0 15px rgba(255, 204, 102, 0.3),
+        inset 0 0 20px rgba(255, 204, 102, 0.05);
+    position: relative;
+}
+
+.team-card.lcars-terminal::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 4px;
+    background: linear-gradient(90deg,
+        var(--lcars-tan) 0%,
+        var(--lcars-yellow) 50%,
+        var(--lcars-tan) 100%);
+    border-radius: 6px 6px 0 0;
+}
+
+.team-card.lcars-terminal:hover {
+    border-color: var(--lcars-yellow);
+    box-shadow:
+        0 0 25px rgba(255, 204, 102, 0.5),
+        inset 0 0 30px rgba(255, 204, 102, 0.1);
+    transform: scale(1.03);
+}
+
+.team-card.lcars-terminal .team-header {
+    border-bottom-color: var(--lcars-tan);
+}
+
+.team-card.lcars-terminal .team-name {
+    color: var(--lcars-tan);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.team-card.lcars-terminal .team-avatar,
+.team-avatar.lcars-avatar {
+    border: 2px solid var(--lcars-tan);
+    box-shadow: 0 0 8px rgba(255, 204, 102, 0.4);
+}
+
+.lcars-badge {
+    display: inline-block;
+    background: linear-gradient(135deg, var(--lcars-tan) 0%, var(--lcars-yellow) 100%);
+    color: #000000;
+    font-size: 0.55rem;
+    font-weight: bold;
+    padding: 2px 6px;
+    border-radius: 3px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    vertical-align: middle;
+    animation: lcars-pulse 2s ease-in-out infinite;
+}
+
+@keyframes lcars-pulse {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 5px rgba(255, 204, 102, 0.5);
+    }
+    50% {
+        opacity: 0.85;
+        box-shadow: 0 0 12px rgba(255, 204, 102, 0.8);
+    }
+}
+
+.team-card.lcars-terminal .session-value {
+    color: var(--lcars-tan);
+}
+
+/* LCARS Action Indicators (in header) */
+.lcars-action {
+    font-size: 0.6rem;
+    font-weight: bold;
+    padding: 3px 8px;
+    border-radius: 4px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-left: auto;
+    margin-right: 8px;
+    transition: all 0.3s ease;
+}
+
+.lcars-action-open {
+    background: linear-gradient(135deg, var(--status-online) 0%, #44cc44 100%);
+    color: #000000;
+    box-shadow: 0 0 8px rgba(102, 255, 102, 0.4);
+}
+
+.lcars-action-offline {
+    background: linear-gradient(135deg, var(--status-offline) 0%, #cc4444 100%);
+    color: #000000;
+    opacity: 0.7;
+}
+
+/* LCARS Clickable State (Online) */
+.team-card.lcars-terminal.lcars-clickable {
+    cursor: pointer;
+}
+
+.team-card.lcars-terminal.lcars-clickable:hover {
+    border-color: var(--status-online);
+    box-shadow:
+        0 0 30px rgba(102, 255, 102, 0.4),
+        inset 0 0 30px rgba(255, 204, 102, 0.1);
+    transform: scale(1.04);
+}
+
+.team-card.lcars-terminal.lcars-clickable:hover .lcars-action-open {
+    box-shadow: 0 0 15px rgba(102, 255, 102, 0.8);
+    transform: scale(1.1);
+}
+
+.team-card.lcars-terminal.lcars-clickable:active {
+    transform: scale(0.98);
+    box-shadow:
+        0 0 15px rgba(102, 255, 102, 0.6),
+        inset 0 0 40px rgba(255, 204, 102, 0.2);
+}
+
+/* LCARS Offline State */
+.team-card.lcars-terminal.lcars-offline {
+    cursor: not-allowed;
+    opacity: 0.6;
+}
+
+.team-card.lcars-terminal.lcars-offline:hover {
+    transform: none;
+    box-shadow:
+        0 0 15px rgba(255, 102, 102, 0.3),
+        inset 0 0 20px rgba(255, 204, 102, 0.05);
+}
+
+.team-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--lcars-blue);
+}
+
+.team-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+}
+
+.team-avatar {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--lcars-blue);
+    background: var(--bg-secondary);
+}
+
+.team-avatar.fallback {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.2rem;
+    color: var(--lcars-blue);
+}
+
+.team-name {
+    font-size: 0.95rem;
+    color: var(--lcars-blue);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.team-status {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+}
+
+.team-status.online {
+    background: var(--status-online);
+    box-shadow: 0 0 10px var(--status-online);
+}
+
+.team-status.warning {
+    background: var(--status-warning);
+    box-shadow: 0 0 10px var(--status-warning);
+}
+
+.team-status.offline {
+    background: var(--status-offline);
+    box-shadow: 0 0 10px var(--status-offline);
+}
+
+.session-info {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+}
+
+.session-detail {
+    display: flex;
+    justify-content: space-between;
+    padding: 3px 0;
+}
+
+.session-label {
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+}
+
+.session-value {
+    color: var(--lcars-orange);
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+}
+
+/* ============================================================================
+   MACHINES PANEL
+   ============================================================================ */
+
+.machines-panel {
+    background: var(--bg-panel);
+    border-radius: 15px;
+    padding: 12px 15px;
+    border: 2px solid var(--lcars-tan);
+    margin-bottom: 15px;
+}
+
+.panel-title {
+    color: var(--lcars-tan);
+    font-size: 1.2rem;
+    letter-spacing: 2px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+}
+
+.machine-item {
+    background: var(--bg-secondary);
+    border-left: 5px solid var(--status-online);
+    padding: 10px 12px;
+    margin-bottom: 8px;
+    border-radius: 0 8px 8px 0;
+    transition: all 0.3s ease;
+}
+
+.machine-item:hover {
+    transform: translateX(5px);
+}
+
+.machine-item.offline {
+    border-left-color: var(--status-offline);
+    opacity: 0.6;
+}
+
+.machine-item.warning {
+    border-left-color: var(--status-warning);
+}
+
+.machine-name {
+    font-size: 0.95rem;
+    color: var(--lcars-tan);
+    margin-bottom: 6px;
+    text-transform: uppercase;
+}
+
+.machine-details {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+    font-size: 0.75rem;
+    color: var(--text-secondary);
+}
+
+.machine-detail {
+    display: flex;
+    justify-content: space-between;
+}
+
+.machine-detail-value {
+    color: var(--text-primary);
+    font-family: var(--font-mono);
+}
+
+/* ============================================================================
+   FOOTER
+   ============================================================================ */
+
+.lcars-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 15px;
+    background: var(--bg-panel);
+    border-top: 2px solid var(--lcars-orange);
+    font-size: 0.85rem;
+}
+
+.footer-left,
+.footer-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* UI Switch Button */
+.ui-switch-btn {
+    background: linear-gradient(135deg, #9999ff, #6699ff);
+    color: #0a0e1a;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-decoration: none;
+    text-transform: uppercase;
+    transition: all 0.2s ease;
+}
+
+.ui-switch-btn:hover {
+    background: linear-gradient(135deg, #ccccff, #99ccff);
+    transform: scale(1.05);
+    box-shadow: 0 0 10px rgba(153, 153, 255, 0.5);
+}
+
+.footer-divider {
+    color: rgba(153, 153, 255, 0.5);
+    margin: 0 4px;
+}
+
+.status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    display: inline-block;
+}
+
+.status-indicator.online {
+    background: var(--status-online);
+    animation: pulse 2s infinite;
+}
+
+.status-indicator.offline {
+    background: var(--status-offline);
+}
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 5px var(--status-online);
+    }
+    50% {
+        opacity: 0.5;
+        box-shadow: 0 0 15px var(--status-online);
+    }
+}
+
+/* ============================================================================
+   RESPONSIVE
+   ============================================================================ */
+
+@media (max-width: 768px) {
+    .lcars-title h1 {
+        font-size: 1.5rem;
+    }
+
+    .fleet-summary {
+        grid-template-columns: 1fr;
+    }
+
+    .teams-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .machine-details {
+        grid-template-columns: 1fr;
+    }
+
+    .lcars-header {
+        padding: 10px 15px;
+    }
+}
+
+/* ============================================================================
+   UTILITY CLASSES
+   ============================================================================ */
+
+.text-online {
+    color: var(--status-online);
+}
+
+.text-warning {
+    color: var(--status-warning);
+}
+
+.text-offline {
+    color: var(--status-offline);
+}
+
+.hidden {
+    display: none;
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Claude Code Configuration Installer
-# Part of dev-team Homebrew tap setup wizard
+# Part of aiteamforge Homebrew tap setup wizard
 #
 # Installs and configures Claude Code CLI settings, CLAUDE.md files,
 # MCP servers, skills, hooks, and agent personas.
@@ -10,13 +10,22 @@ set -euo pipefail
 # Source shared utilities (will be sourced by setup wizard)
 # shellcheck disable=SC2034
 INSTALLER_NAME="Claude Code Configuration"
-INSTALLER_VERSION="1.0.0"
+INSTALLER_VERSION="1.4.2"
 
 # Default paths (will be overridden by setup wizard config)
-CLAUDE_CONFIG_DIR="${HOME}/.claude"
-DEV_TEAM_DIR="${DEV_TEAM_DIR:-${HOME}/dev-team}"
+# CLAUDE_CONFIG_DIR: Where Claude Code config lives.
+# When CLAUDE_SANDBOX=1 (set by setup wizard for non-production installs),
+# configs are staged under AITEAMFORGE_DIR instead of modifying real ~/.claude.
+AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-${HOME}/aiteamforge}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-}"
-BACKUP_DIR="${DEV_TEAM_DIR}/.backups/claude-config-$(date +%Y%m%d-%H%M%S)"
+
+if [[ "${CLAUDE_SANDBOX:-0}" == "1" ]]; then
+    CLAUDE_CONFIG_DIR="${AITEAMFORGE_DIR}/.claude-staging"
+else
+    CLAUDE_CONFIG_DIR="${HOME}/.claude"
+fi
+
+BACKUP_DIR="${AITEAMFORGE_DIR}/.backups/claude-config-$(date +%Y%m%d-%H%M%S)"
 
 # Colors (if not already defined)
 if [[ -z "${COLOR_BLUE:-}" ]]; then
@@ -91,7 +100,7 @@ apply_template() {
     fi
 
     # Replace placeholders with actual values
-    sed -e "s|{{DEV_TEAM_DIR}}|${DEV_TEAM_DIR}|g" \
+    sed -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
         -e "s|{{HOME}}|${HOME}|g" \
         -e "s|{{CLAUDE_CONFIG_DIR}}|${CLAUDE_CONFIG_DIR}|g" \
         -e "s|{{USER}}|${USER}|g" \
@@ -153,7 +162,7 @@ install_team_claude_md() {
     # Apply template
     if [[ -f "$template" ]]; then
         # Team-specific template substitution (can be customized per team)
-        sed -e "s|{{DEV_TEAM_DIR}}|${DEV_TEAM_DIR}|g" \
+        sed -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
             -e "s|{{HOME}}|${HOME}|g" \
             -e "s|{{TEAM_NAME}}|${team_name}|g" \
             "$template" > "$target"
@@ -189,15 +198,32 @@ install_hooks() {
     local hooks_dir="${CLAUDE_CONFIG_DIR}/hooks"
     mkdir -p "$hooks_dir"
 
-    # Install damage control hooks
+    # Install damage control hooks (skip files that already exist and are read-only)
     if [[ -d "${TEMPLATE_DIR}/claude/hooks/damage-control" ]]; then
         log_info "Installing damage control hooks..."
-        cp -r "${TEMPLATE_DIR}/claude/hooks/damage-control" "$hooks_dir/"
+        mkdir -p "$hooks_dir/damage-control"
 
-        # Make hooks executable
-        find "$hooks_dir/damage-control" -type f -name "*.py" -exec chmod +x {} \;
+        local hook_errors=0
+        for hook_file in "${TEMPLATE_DIR}/claude/hooks/damage-control/"*; do
+            [[ -f "$hook_file" ]] || continue
+            local target="$hooks_dir/damage-control/$(basename "$hook_file")"
+            if [[ -f "$target" && ! -w "$target" ]]; then
+                log_warning "Skipping read-only hook: $(basename "$hook_file")"
+                continue
+            fi
+            if cp "$hook_file" "$target" 2>/dev/null; then
+                chmod +x "$target" 2>/dev/null || true
+            else
+                log_warning "Could not install: $(basename "$hook_file")"
+                hook_errors=$((hook_errors + 1))
+            fi
+        done
 
-        log_success "Damage control hooks installed"
+        if [[ $hook_errors -eq 0 ]]; then
+            log_success "Damage control hooks installed"
+        else
+            log_warning "Some hooks could not be installed (existing files may be protected)"
+        fi
     fi
 
     # Apply template substitution to any hook scripts
@@ -216,18 +242,18 @@ install_hooks() {
 install_skills() {
     log_info "Installing Claude Code skills..."
 
-    local skills_src="${DEV_TEAM_DIR}/skills"
+    local skills_src="${AITEAMFORGE_DIR}/skills"
     local skills_target="${CLAUDE_CONFIG_DIR}/skills"
 
     if [[ ! -d "$skills_src" ]]; then
-        log_warning "Skills directory not found in dev-team, skipping"
+        log_warning "Skills directory not found in aiteamforge, skipping"
         return 0
     fi
 
     mkdir -p "$skills_target"
 
     # Copy all skills (or create symlinks for easier updates)
-    # Using symlinks so skills can be updated in dev-team without reinstalling
+    # Using symlinks so skills can be updated in aiteamforge without reinstalling
     find "$skills_src" -mindepth 1 -maxdepth 1 -type d | while read -r skill_dir; do
         local skill_name=$(basename "$skill_dir")
         local target_link="${skills_target}/${skill_name}"
@@ -237,12 +263,12 @@ install_skills() {
             rm -rf "$target_link"
         fi
 
-        # Create symlink to dev-team skills
+        # Create symlink to aiteamforge skills
         ln -s "$skill_dir" "$target_link"
         log_info "Linked skill: $skill_name"
     done
 
-    log_success "Skills installed (symlinked to dev-team)"
+    log_success "Skills installed (symlinked to aiteamforge)"
 }
 
 # Install agent personas
@@ -252,7 +278,7 @@ install_agent_personas() {
     log_info "Installing agent personas for $team_name..."
 
     local team_slug=$(echo "$team_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-    local personas_src="${DEV_TEAM_DIR}/${team_slug}/personas/agents"
+    local personas_src="${AITEAMFORGE_DIR}/${team_slug}/personas/agents"
     local agent_dir="${CLAUDE_CONFIG_DIR}/agents/${team_name}"
 
     if [[ ! -d "$personas_src" ]]; then
@@ -283,11 +309,11 @@ install_statusline() {
         chmod +x "$target"
         log_success "Statusline command installed"
     else
-        # Try copying from dev-team if template doesn't exist
-        if [[ -f "${DEV_TEAM_DIR}/claude/statusline-command.sh" ]]; then
-            cp "${DEV_TEAM_DIR}/claude/statusline-command.sh" "$target"
+        # Try copying from aiteamforge if template doesn't exist
+        if [[ -f "${AITEAMFORGE_DIR}/claude/statusline-command.sh" ]]; then
+            cp "${AITEAMFORGE_DIR}/claude/statusline-command.sh" "$target"
             chmod +x "$target"
-            log_success "Statusline command installed from dev-team"
+            log_success "Statusline command installed from aiteamforge"
         else
             log_warning "Statusline command not found"
         fi
@@ -306,11 +332,11 @@ install_agent_tracking() {
         chmod +x "$target"
         log_success "Agent tracking script installed"
     else
-        # Try copying from dev-team
-        if [[ -f "${DEV_TEAM_DIR}/claude/agent-tracking.sh" ]]; then
-            cp "${DEV_TEAM_DIR}/claude/agent-tracking.sh" "$target"
+        # Try copying from aiteamforge
+        if [[ -f "${AITEAMFORGE_DIR}/claude/agent-tracking.sh" ]]; then
+            cp "${AITEAMFORGE_DIR}/claude/agent-tracking.sh" "$target"
             chmod +x "$target"
-            log_success "Agent tracking script installed from dev-team"
+            log_success "Agent tracking script installed from aiteamforge"
         else
             log_warning "Agent tracking script not found"
         fi
@@ -424,7 +450,7 @@ restore_claude_config() {
         return 1
     fi
 
-    local backup_path="${DEV_TEAM_DIR}/.backups/claude-config-${backup_date}"
+    local backup_path="${AITEAMFORGE_DIR}/.backups/claude-config-${backup_date}"
 
     if [[ ! -d "$backup_path" ]]; then
         log_error "Backup not found: $backup_path"
@@ -446,6 +472,9 @@ restore_claude_config() {
     log_success "Configuration restored from backup"
     return 0
 }
+
+# Wrapper to avoid name collision when sourced by setup wizard
+_run_claude_config_installer() { install_claude_config "$@"; }
 
 # If script is run directly (not sourced), execute main function
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then

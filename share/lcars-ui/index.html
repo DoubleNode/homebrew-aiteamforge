@@ -25,7 +25,13 @@
     <link rel="stylesheet" href="css/lcars-fleet.css">
     <link rel="stylesheet" href="css/lcars-fleet-theme.css">
     <!-- KanBan-specific overrides (Division/Org color coordination) -->
-    <link rel="stylesheet" href="css/lcars.css?v=30.0">
+    <link rel="stylesheet" href="css/lcars.css?v=31.0">
+    <!-- Activity Timeline Panel -->
+    <link rel="stylesheet" href="css/lcars-activity.css">
+    <!-- Chart.js: Data visualization library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+    <!-- LCARS Chart Theming Module -->
+    <script src="js/lcars-charts.js"></script>
 </head>
 <body>
     <div class="lcars-container">
@@ -59,23 +65,35 @@
             <!-- Sidebar -->
             <nav class="lcars-sidebar">
                 <div class="sidebar-label">WORKFLOW STATUS</div>
-                <div class="sidebar-button active" data-section="workflow">
-                    <span>WORKFLOW</span>
+                <div class="sidebar-button active" data-section="home">
+                    <span>HOME</span>
                 </div>
-                <div class="sidebar-button" data-section="details">
-                    <span>DETAILS</span>
+                <div class="sidebar-split-row">
+                    <div class="sidebar-button" data-section="todos">
+                        <span>TODOS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="calendar">
+                        <span>CALENDAR</span>
+                    </div>
+                </div>
+                <div class="sidebar-split-row">
+                    <div class="sidebar-button" data-section="workflow">
+                        <span>WORKFLOW</span>
+                    </div>
+                    <div class="sidebar-button" data-section="details">
+                        <span>DETAILS</span>
+                    </div>
                 </div>
                 <div class="sidebar-button" data-section="queue">
                     <span>QUEUE</span>
                 </div>
-                <div class="sidebar-button" data-section="releases">
-                    <span>RELEASES</span>
-                </div>
-                <div class="sidebar-button" data-section="epics">
-                    <span>EPICS</span>
-                </div>
-                <div class="sidebar-button" data-section="calendar">
-                    <span>CALENDAR</span>
+                <div class="sidebar-split-row">
+                    <div class="sidebar-button" data-section="epics">
+                        <span>EPICS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="releases">
+                        <span>RELEASES</span>
+                    </div>
                 </div>
                 <div class="sidebar-button has-submenu" id="settings-button">
                     <span>SETTINGS</span>
@@ -86,12 +104,15 @@
                             <div class="sidebar-submenu-curve"></div>
                         </div>
                         <div class="sidebar-submenu-items">
+                            <div class="sidebar-submenu-item" data-section="team-config">TEAM CONFIG</div>
                             <div class="sidebar-submenu-item" data-section="integrations">INTEGRATIONS</div>
-                            <div class="sidebar-submenu-item" onclick="openCalendarSettingsModal()">CALENDAR SYNC</div>
                             <div class="sidebar-submenu-item" data-section="backups">BACKUPS</div>
-                            <div class="sidebar-submenu-item" data-section="commands">COMMANDS</div>
+                            <div class="sidebar-submenu-item" data-section="archive">ARCHIVE / TRANSFER</div>
                         </div>
                     </div>
+                </div>
+                <div class="sidebar-button" data-section="commands">
+                    <span>HELP</span>
                 </div>
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
@@ -105,9 +126,6 @@
                     </div>
                 </div>
                 <div class="sidebar-spacer"></div>
-                <div class="sidebar-button refresh-btn" onclick="refreshData()">
-                    <span>REFRESH</span>
-                </div>
             </nav>
 
             <!-- Content -->
@@ -144,6 +162,125 @@
                             </div>
                         </div>
                     </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: HOME - Team Analytics Dashboard (4-panel carousel)        -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="home-section">
+
+                    <!-- Carousel Viewport -->
+                    <div class="carousel-viewport">
+                        <div class="carousel-track">
+
+                            <!-- Panel 0: MISSION STATUS (metrics only, 2×2 grid) -->
+                            <div class="carousel-panel" data-panel-index="0">
+                                <div class="section-header cyan">
+                                    <span class="section-title">MISSION STATUS</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-summary-metrics" class="home-metrics-grid">
+                                    <!-- Populated by JS: 4 metric cards in 2×2 layout -->
+                                </div>
+                            </div>
+
+                            <!-- Panel 1: MISSION CHARTS (doughnut + bar) -->
+                            <div class="carousel-panel" data-panel-index="1">
+                                <div class="section-header cyan">
+                                    <span class="section-title">MISSION CHARTS</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-charts-container" class="home-charts-grid">
+                                    <div class="home-chart-card">
+                                        <div class="chart-title" style="color: #FFCC99; font-family: 'Antonio', sans-serif; font-size: 14px; margin-bottom: 8px;">STATUS DISTRIBUTION</div>
+                                        <div style="position: relative; flex: 1; min-height: 150px;">
+                                            <canvas id="home-status-doughnut"></canvas>
+                                        </div>
+                                    </div>
+                                    <div class="home-chart-card">
+                                        <div class="chart-title" style="color: #FFCC99; font-family: 'Antonio', sans-serif; font-size: 14px; margin-bottom: 8px;">COMPLETION RATE</div>
+                                        <div id="home-completion-bars" style="flex: 1; display: flex; flex-direction: column; justify-content: center; gap: 12px; padding: 10px 0;"></div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Panel 2: EPIC PROGRESS -->
+                            <div class="carousel-panel" data-panel-index="2">
+                                <div class="section-header purple">
+                                    <span class="section-title">EPIC PROGRESS</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-epic-progress" style="display: flex; flex-direction: column; gap: 10px; margin-top: 15px; overflow-y: auto; flex: 1;">
+                                    <!-- Epic progress bars populated by JS -->
+                                </div>
+                            </div>
+
+                            <!-- Panel 3: SUBITEM INTELLIGENCE -->
+                            <div class="carousel-panel" data-panel-index="3">
+                                <div class="section-header green">
+                                    <span class="section-title">SUBITEM INTELLIGENCE</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-subitem-stats" style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 15px; flex: 1; min-height: 0;">
+                                    <div class="home-chart-card">
+                                        <div style="position: relative; flex: 1; min-height: 150px;">
+                                            <canvas id="home-subitem-doughnut" width="400" height="300"></canvas>
+                                        </div>
+                                    </div>
+                                    <div id="home-subitem-metrics" style="display: flex; flex-direction: column; gap: 8px; justify-content: center;">
+                                        <!-- Populated by JS -->
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Panel 4: KNOWLEDGE BASE -->
+                            <div class="carousel-panel" data-panel-index="4">
+                                <div class="section-header gold">
+                                    <span class="section-title">KNOWLEDGE BASE</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-knowledge-stats" class="home-charts-grid">
+                                    <div class="home-chart-card">
+                                        <div class="chart-title knowledge-chart-title">FILES BY TYPE</div>
+                                        <div style="position: relative; flex: 1; min-height: 150px;">
+                                            <canvas id="home-knowledge-doughnut"></canvas>
+                                        </div>
+                                    </div>
+                                    <div id="home-knowledge-metrics" class="knowledge-metrics-panel">
+                                        <!-- Populated by JS: memory file stats -->
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Panel 5: RETROSPECTIVE COVERAGE -->
+                            <div class="carousel-panel" data-panel-index="5">
+                                <div class="section-header gold">
+                                    <span class="section-title">RETROSPECTIVE COVERAGE</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-knowledge-adoption" class="knowledge-adoption-panel">
+                                    <!-- Populated by JS: retrospective adoption metrics -->
+                                </div>
+                            </div>
+
+                        </div><!-- /.carousel-track -->
+                    </div><!-- /.carousel-viewport -->
+
+                    <!-- Carousel Navigation -->
+                    <div class="carousel-nav">
+                        <button class="carousel-arrow" id="carousel-prev" aria-label="Previous panel">&#9664;</button>
+                        <div class="carousel-dots">
+                            <span class="carousel-dot active" data-panel="0"></span>
+                            <span class="carousel-dot" data-panel="1"></span>
+                            <span class="carousel-dot" data-panel="2"></span>
+                            <span class="carousel-dot" data-panel="3"></span>
+                            <span class="carousel-dot" data-panel="4"></span>
+                            <span class="carousel-dot" data-panel="5"></span>
+                        </div>
+                        <button class="carousel-arrow" id="carousel-next" aria-label="Next panel">&#9654;</button>
+                        <button class="carousel-viewscreen" id="carousel-fullscreen">VIEWSCREEN</button>
+                    </div>
+
                 </section>
 
                 <!-- Kanban Board -->
@@ -405,6 +542,17 @@
                     </div>
                 </section>
 
+                <!-- Team Config -->
+                <section class="team-config-section">
+                    <div class="section-header orange">
+                        <span class="section-title">TEAM CONFIGURATION</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="team-config-placeholder">
+                        <p>Team configuration settings will appear here.</p>
+                    </div>
+                </section>
+
                 <!-- Integrations -->
                 <section class="integrations-section">
                     <div class="section-header green">
@@ -438,8 +586,158 @@
                         <button class="lcars-button integration-add-btn" id="add-integration-btn">
                             + ADD INTEGRATION
                         </button>
+                        <button class="lcars-button integration-add-btn" onclick="openCalendarSettingsModal()">
+                            CALENDAR SYNC CONFIG
+                        </button>
                     </div>
                 </section>
+
+                <!-- Archive / Transfer -->
+                <section class="archive-section">
+                    <div class="section-header amber">
+                        <span class="section-title">ARCHIVE / TRANSFER</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-overview" id="archive-overview">
+                        <div class="archive-stat">
+                            <span class="stat-label">TARGET</span>
+                            <span class="stat-value">~/dev-team/</span>
+                        </div>
+                        <div class="archive-stat">
+                            <span class="stat-label">STATUS</span>
+                            <span class="stat-value" id="archive-status">READY</span>
+                        </div>
+                        <div class="archive-stat">
+                            <span class="stat-label">LAST EXPORT</span>
+                            <span class="stat-value" id="archive-last-export">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Archive Options -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">EXPORT OPTIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-options" id="archive-options">
+                        <div class="archive-option">
+                            <label class="lcars-toggle">
+                                <input type="checkbox" id="archive-include-git">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <div class="option-info">
+                                <span class="option-label">INCLUDE GIT HISTORY</span>
+                                <span class="option-desc">Include .git directories (increases archive size significantly)</span>
+                            </div>
+                        </div>
+                        <div class="archive-option">
+                            <label class="lcars-toggle">
+                                <input type="checkbox" id="archive-include-node-modules">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <div class="option-info">
+                                <span class="option-label">INCLUDE NODE MODULES</span>
+                                <span class="option-desc">Include node_modules directories (can be reinstalled via npm install)</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Smart Exclusions Display -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">SMART EXCLUSIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-exclusions" id="archive-exclusions">
+                        <div class="exclusion-item">__pycache__/, *.pyc</div>
+                        <div class="exclusion-item">.DS_Store</div>
+                        <div class="exclusion-item">.claude/ (tokens/secrets)</div>
+                        <div class="exclusion-item">worktrees/ (recreated per-machine)</div>
+                        <div class="exclusion-item">dev-team-backups/</div>
+                        <div class="exclusion-item">*.egg-info/</div>
+                        <div class="exclusion-item conditional" id="exclusion-git">.git/ directories</div>
+                        <div class="exclusion-item conditional" id="exclusion-node">node_modules/</div>
+                    </div>
+
+                    <!-- Generate Button + Progress -->
+                    <div class="archive-actions" id="archive-actions">
+                        <button class="lcars-button archive-generate-btn" id="archive-generate-btn" onclick="startArchiveGeneration()" aria-label="Generate dev-team archive">
+                            GENERATE ARCHIVE
+                        </button>
+                    </div>
+
+                    <!-- Progress Display (hidden by default) -->
+                    <div class="archive-progress" id="archive-progress" style="display: none;">
+                        <div class="progress-header">
+                            <span class="progress-label" id="archive-progress-label">GENERATING...</span>
+                            <span class="progress-percent" id="archive-progress-percent">0%</span>
+                        </div>
+                        <div class="progress-bar-container" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Archive generation progress">
+                            <div class="progress-bar" id="archive-progress-bar" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-message" id="archive-progress-message">Initializing...</div>
+                    </div>
+
+                    <!-- Download Section (hidden by default) -->
+                    <div class="archive-download" id="archive-download" style="display: none;">
+                        <div class="download-info">
+                            <span class="download-filename" id="archive-download-filename">--</span>
+                            <span class="download-size" id="archive-download-size">--</span>
+                            <span class="download-files" id="archive-download-files">-- files</span>
+                        </div>
+                        <button class="lcars-button archive-download-btn" id="archive-download-btn" onclick="downloadArchive()" aria-label="Download generated archive">
+                            DOWNLOAD
+                        </button>
+                    </div>
+
+                    <!-- Deployment Checklist Section -->
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">DEPLOYMENT CHECKLIST</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="archive-checklist" id="archive-checklist">
+                        <div class="checklist-description">
+                            Generate a deployment checklist for the target machine after creating an archive.
+                        </div>
+                        <button class="lcars-button archive-checklist-btn" id="archive-checklist-btn" onclick="generateDeploymentChecklist()" disabled aria-label="Generate deployment checklist">
+                            GENERATE CHECKLIST
+                        </button>
+                        <div class="checklist-content" id="archive-checklist-content" style="display: none;">
+                            <!-- Populated by JavaScript -->
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: TODOS - Team Quick Todo List (XACA-0101)                  -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="todos-section">
+                    <div class="section-header orange">
+                        <span class="section-title">TEAM TODO LIST</span>
+                        <div class="todo-header-controls">
+                            <div class="todo-tabs">
+                                <button class="todo-tab active" data-filter="todo" onclick="filterTodos('todo')">ACTIVE</button>
+                                <button class="todo-tab" data-filter="completed" onclick="filterTodos('completed')">COMPLETED</button>
+                            </div>
+                            <button class="lcars-btn lcars-btn-primary todo-add-btn" onclick="openTodoModal()">+ ADD TODO</button>
+                        </div>
+                        <div class="section-bar"></div>
+                    </div>
+
+                    <!-- Todo list container -->
+                    <div id="todo-list" class="todo-list">
+                        <!-- Dynamically populated by renderTodos() -->
+                    </div>
+
+                    <!-- Empty state -->
+                    <div id="todo-empty" class="todo-empty" style="display: none;">
+                        <p>No items to display.</p>
+                    </div>
+
+                    <!-- Loading state -->
+                    <div id="todo-loading" class="todo-loading">
+                        <p>LOADING...</p>
+                    </div>
+                </section>
+
             </div>
         </main>
 
@@ -447,7 +745,16 @@
         <!-- MOBILE TAB BAR: Bottom navigation for narrow screens               -->
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <nav class="mobile-tabbar">
-            <div class="tabbar-button active" data-section="workflow">
+            <div class="tabbar-button active" data-section="home">
+                <span class="tabbar-label">HOME</span>
+            </div>
+            <div class="tabbar-button" data-section="todos">
+                <span class="tabbar-label">TODOS</span>
+            </div>
+            <div class="tabbar-button" data-section="calendar">
+                <span class="tabbar-label">CALENDAR</span>
+            </div>
+            <div class="tabbar-button" data-section="workflow">
                 <span class="tabbar-label">WORKFLOW</span>
             </div>
             <div class="tabbar-button" data-section="details">
@@ -456,14 +763,11 @@
             <div class="tabbar-button" data-section="queue">
                 <span class="tabbar-label">QUEUE</span>
             </div>
-            <div class="tabbar-button" data-section="releases">
-                <span class="tabbar-label">RELEASES</span>
-            </div>
             <div class="tabbar-button" data-section="epics">
                 <span class="tabbar-label">EPICS</span>
             </div>
-            <div class="tabbar-button" data-section="calendar">
-                <span class="tabbar-label">CALENDAR</span>
+            <div class="tabbar-button" data-section="releases">
+                <span class="tabbar-label">RELEASES</span>
             </div>
             <div class="tabbar-button" data-section="integrations">
                 <span class="tabbar-label">INTEGR</span>
@@ -473,9 +777,6 @@
             </div>
             <div class="tabbar-button" data-section="commands">
                 <span class="tabbar-label">COMMANDS</span>
-            </div>
-            <div class="tabbar-button refresh-btn" onclick="refreshData()">
-                <span class="tabbar-label">⟳</span>
             </div>
         </nav>
 
@@ -1129,9 +1430,54 @@
         </div>
     </div>
 
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <!-- TODO ADD/EDIT MODAL (XACA-0101)                                        -->
+    <!-- ═══════════════════════════════════════════════════════════════════════ -->
+    <div id="todo-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeTodoModal()"></div>
+        <div class="lcars-modal-content">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title" id="todo-modal-title">ADD TODO</span>
+                <button class="lcars-modal-close" onclick="closeTodoModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <!-- Hidden field for edit mode -->
+                <input type="hidden" id="todo-edit-id" value="">
+
+                <div class="form-group">
+                    <label for="todo-text">ITEM TEXT</label>
+                    <textarea id="todo-text" class="lcars-textarea" rows="3" placeholder="What needs to be done?" maxlength="500"></textarea>
+                </div>
+
+                <div class="form-group">
+                    <label for="todo-priority">PRIORITY</label>
+                    <select id="todo-priority">
+                        <option value="low">Low</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="high">High</option>
+                        <option value="critical">Critical</option>
+                    </select>
+                </div>
+
+                <div class="form-group">
+                    <label for="todo-required-by">REQUIRED BY (OPTIONAL)</label>
+                    <input type="date" id="todo-required-by">
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button" class="lcars-btn lcars-btn-danger" id="todo-delete-btn" onclick="deleteTodo()" style="display: none;">DELETE</button>
+                <div class="modal-footer-spacer"></div>
+                <button type="button" class="lcars-btn lcars-btn-secondary" onclick="closeTodoModal()">CANCEL</button>
+                <button type="button" class="lcars-btn lcars-btn-primary" onclick="saveTodo()">SAVE</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Scan line animation overlay -->
     <div class="scanline"></div>
 
-<script src="js/lcars.js?v=3.15"></script>
+<script src="js/lcars.js?v=3.16"></script>
+<!-- Activity Timeline Panel — must load after lcars.js (depends on escapeHtml, apiUrl) -->
+<script src="js/lcars-activity.js"></script>
 </body>
 </html>

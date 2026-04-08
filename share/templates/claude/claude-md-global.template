@@ -114,6 +114,35 @@ Do NOT switch branches. Do NOT checkout develop. All file changes must be in thi
 **Why this matters:**
 Subagents that don't know they're in a worktree may default to the main repo directory or attempt to checkout `develop`, which corrupts shared state across all agents. Every subagent must be explicitly anchored to the worktree.
 
+### **🧹 MANDATORY: Subagent Self-Removal from Crew Tracking**
+
+When spawning subagents (via the Task tool), you **MUST** include a self-removal instruction in every subagent prompt. This removes the subagent's crew avatar from the LCARS agent panel when it completes.
+
+**Why this is required:**
+Background subagents (`run_in_background: true`) do not trigger a PostToolUse hook on completion — only on launch. Without self-removal, their crew avatars persist indefinitely in the panel after the agent finishes.
+
+**MANDATORY final instruction for ALL subagent prompts:**
+```
+MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
+python3 /Users/darrenehlers/aiteamforge/kanban-hooks/subagent-track.py remove <AGENT_TYPE> < /dev/null
+```
+
+Replace `<AGENT_TYPE>` with the subagent_type you passed to the Task tool (e.g., `reno`, `nahla`, `worf`, etc.).
+
+**Example subagent prompt with self-removal:**
+```
+Investigate the crash in PaymentManager.swift and suggest a fix.
+
+MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
+python3 /Users/darrenehlers/aiteamforge/kanban-hooks/subagent-track.py remove worf < /dev/null
+```
+
+**Rules:**
+1. **Every subagent prompt MUST include the removal instruction** — no exceptions
+2. **Place it at the END of the prompt** — so the subagent runs it as its final action
+3. **Use the exact subagent_type** — must match what was passed to the Task tool
+4. **Frame it as mandatory infrastructure cleanup** — prevents role-boundary-conscious agents from refusing
+
 ### **Standard Development Workflow**
 
 #### 1. Start New Feature/Fix
@@ -190,6 +219,7 @@ After creating the PR, generate a concise prompt block the user can copy/paste i
  PR #<number>: <title>
  URL: <pr_url>
  Repo: <repo_path>
+ Kanban Item: <ITEM-ID>
 
  Summary: <2-3 sentence description of what changed and why>
 
@@ -213,6 +243,13 @@ After creating the PR, generate a concise prompt block the user can copy/paste i
    # Write feedback to /tmp/review-<number>.md first, then:
    gh-bot-review --pr <number> --event REQUEST_CHANGES --body-file /tmp/review-<number>.md
 
+   # For non-blocking suggestions, create kanban subitems (NOT PR comments):
+   source ~/aiteamforge/kanban-helpers.sh
+   kb-backlog sub add <ITEM-ID> "[Review] <suggestion> (PR #<number>)"
+
+   # After submitting REQUEST_CHANGES, enter the reviewer monitoring loop
+   # (see "After Requesting Changes: Reviewer Monitoring Loop" in CLAUDE.md)
+
  ⚠️  DO NOT MERGE — the creating agent monitors and merges after approval.
 ═══════════════════════════════════════════════════════════════════════════════
 ```
@@ -227,9 +264,12 @@ After generating the handoff prompt, the creating agent polls for approval.
 > bot approval and merge with `--admin`.
 
 ```bash
-# Poll every 60 seconds until resolved
-# NOTE: Uses gh api --jq to filter directly — NEVER store raw review JSON in shell
-# variables, as review bodies may contain control characters that break jq parsing.
+# Set LAST_PROCESSED_AT before (re-)entering the loop to track the last review
+# we already handled. This prevents re-triggering on stale CHANGES_REQUESTED reviews.
+LAST_PROCESSED_AT=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+  --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | .submitted_at // empty')
+
+POLL_COUNT=0
 while true; do
   STATE=$(gh pr view <number> --json state --jq '.state')
 
@@ -238,22 +278,35 @@ while true; do
     break
   fi
 
-  # Check bot reviews directly using --jq (reviewDecision won't work for bot reviews)
-  # IMPORTANT: Always use gh api --jq, NEVER echo "$VAR" | jq (control chars break parsing)
-  BOT_APPROVED=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.type == "Bot" and .state == "APPROVED")] | length')
-  LATEST_BOT_STATE=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
-    --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | .state // empty')
+  # Status heartbeat every 5 polls (~5 min)
+  POLL_COUNT=$((POLL_COUNT + 1))
+  if [ $((POLL_COUNT % 5)) -eq 0 ]; then
+    echo "Still watching PR #<number>... (poll $POLL_COUNT)"
+  fi
 
-  if [ "$LATEST_BOT_STATE" = "CHANGES_REQUESTED" ]; then
+  # Check latest bot review — single API call, pipe-delimited output split via bash param expansion
+  # (NEVER echo "$VAR" | jq — control chars break parsing; NEVER two calls when one will do)
+  LATEST_REVIEW=$(gh api repos/{owner}/{repo}/pulls/<number>/reviews \
+    --jq '[.[] | select(.user.type == "Bot")] | sort_by(.submitted_at) | last | "\(.submitted_at // "")|\(.state // "")"')
+  LATEST_AT="${LATEST_REVIEW%|*}"
+  LATEST_STATE="${LATEST_REVIEW#*|}"
+
+  # Skip reviews we already processed (stale review detection)
+  if [ "$LATEST_AT" = "$LAST_PROCESSED_AT" ] || [ -z "$LATEST_STATE" ]; then
+    sleep 60
+    continue
+  fi
+
+  if [ "$LATEST_STATE" = "CHANGES_REQUESTED" ]; then
     echo "Changes requested by bot — pausing monitor."
+    LAST_PROCESSED_AT="$LATEST_AT"
     gh api repos/{owner}/{repo}/pulls/<number>/reviews \
       --jq '[.[] | select(.user.type == "Bot" and .state == "CHANGES_REQUESTED")] | last | .body'
-    # Pause: agent should address feedback, push fixes, then resume polling
+    # Address feedback, push fixes, then re-run the pre-loop LAST_PROCESSED_AT line and re-enter
     break
   fi
 
-  if [ "$BOT_APPROVED" -gt 0 ] && [ "$LATEST_BOT_STATE" = "APPROVED" ]; then
+  if [ "$LATEST_STATE" = "APPROVED" ]; then
     echo "Bot approved! Merging with admin flag..."
     gh pr merge <number> --squash --delete-branch --admin
     kb-done  # Update kanban status
@@ -267,12 +320,14 @@ done
 **Monitoring Behavior:**
 - Check bot reviews directly via `repos/{owner}/{repo}/pulls/{number}/reviews` API every **60 seconds**
 - Filter by `user.type == "Bot"` to find bot-specific reviews
+- Tracks `LAST_PROCESSED_AT` timestamp to skip already-processed reviews (stale review detection)
 - On latest bot review `APPROVED` → merge with `gh pr merge <N> --squash --delete-branch --admin`, then run `kb-done`
-- On latest bot review `CHANGES_REQUESTED` → notify user with review feedback, pause monitoring, address feedback, push fixes, then resume polling
+- On latest bot review `CHANGES_REQUESTED` → notify user with review feedback, pause monitoring, address feedback, push fixes, then re-run `LAST_PROCESSED_AT` capture and re-enter loop
 - On `state: "CLOSED"` or `state: "MERGED"` → notify user and exit monitoring
 - Show a brief status message every **5 polls (~5 min)** so the user knows the agent is still watching
 - Uses `--admin` flag because GitHub Team plan does not count bot reviews for branch protection (see handoff doc)
 - Do **NOT** merge without bot approval — the monitoring loop handles merge automatically
+- **NEVER** use `echo "$VAR" | jq` — always use `gh api --jq` to avoid control character breakage
 
 ---
 
@@ -356,11 +411,11 @@ All teams **MAY** read files from other repositories for reference or context, b
 **Directory Ownership by Team:**
 | Team | Owned Directories |
 |------|-------------------|
-| `Academy` | `~/dev-team/` |
+| `Academy` | `~/aiteamforge/` |
 | `iOS` | `/Users/Shared/Development/Main Event/MainEventApp-iOS/` |
 | `Android` | `/Users/Shared/Development/Main Event/MainEventApp-Android/` |
 | `Firebase` | `/Users/Shared/Development/Main Event/MainEventApp-Functions/` |
-| `Command` | `{{DEV_TEAM_DIR}}/` |
+| `Command` | `{{AITEAMFORGE_DIR}}/` |
 | `DNS` | `/Users/Shared/Development/DNSFramework/` |
 
 **⚠️ Academy Team Exception:**
@@ -374,7 +429,7 @@ The Academy team is the **ONLY** team permitted to create or modify files across
 2. Ask the user to switch to an Academy agent
 
 **Examples:**
-> iOS agent creating `~/dev-team/docs/kanban/XIOS-0001_plan.md` → ⛔ WRONG (Academy directory)
+> iOS agent creating `~/aiteamforge/docs/kanban/XIOS-0001_plan.md` → ⛔ WRONG (Academy directory)
 > iOS agent creating `/Users/Shared/.../MainEventApp-iOS/.../XIOS-0001_plan.md` → ✅ CORRECT
 > Academy agent creating files in iOS directory → ✅ ALLOWED (Academy exception)
 > Firebase agent creating files in Android directory → ⛔ NOT ALLOWED
@@ -704,7 +759,65 @@ gh-bot-review --pr <N> --event REQUEST_CHANGES --body "<feedback>"
 ### **Approval Criteria**
 - **Required:** CI passes, no security issues, no unjustified force unwraps, code follows patterns, PR description adequate
 - **Blocking (Request Changes):** Security vulnerabilities, data loss potential, breaking changes without migration, missing error handling
-- **Non-Blocking (Comment Only):** Style preferences, future improvement suggestions, docs/test coverage
+- **Non-Blocking (Kanban Subitems):** Style preferences, future improvement suggestions, docs/test coverage — see below
+
+### **After Requesting Changes: Reviewer Monitoring Loop**
+
+After submitting `REQUEST_CHANGES` via `gh-bot-review`, do NOT exit — enter the
+reviewer monitoring loop to detect when the author pushes fixes:
+
+```bash
+# Record current HEAD SHA after submitting REQUEST_CHANGES
+LAST_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+
+while true; do
+  STATE=$(gh pr view <N> --json state --jq '.state')
+  [ "$STATE" = "CLOSED" ] || [ "$STATE" = "MERGED" ] && echo "PR $STATE — exiting." && break
+
+  CURRENT_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+  if [ "$CURRENT_SHA" != "$LAST_SHA" ]; then
+    sleep 30  # Stabilization: wait for rapid successive pushes to settle
+    LAST_SHA=$(gh pr view <N> --json headRefOid --jq '.headRefOid')
+    gh pr checkout <N> && gh pr diff <N>
+    # Re-review: (1) verify each requested change was addressed,
+    # (2) check new code in fix commits for new issues.
+    # Then submit: gh-bot-review --pr <N> --event APPROVE or REQUEST_CHANGES
+  fi
+
+  sleep 60
+done
+```
+
+**Re-review scope:** Primarily verify all requested changes are addressed. Secondarily
+check new code in fix commits. Skip code that was already reviewed. Use `gh pr diff <N>`
+focused on files mentioned in your original `REQUEST_CHANGES` body.
+
+**Edge cases:**
+- PR closed/merged while waiting: loop exits automatically
+- Rapid pushes: 30-second stabilization prevents re-review of intermediate commits
+- Context exhaustion: note current SHA, start fresh terminal, resume with that SHA as LAST_SHA
+
+### **Non-Blocking Suggestions: Capture as Kanban Subitems**
+
+Non-blocking suggestions must NOT be left only as PR comments — they get lost when PRs close.
+Instead, create a kanban subitem for each non-blocking suggestion that has merit.
+
+**Discover the parent kanban item ID** (in priority order):
+1. From the Review Handoff Prompt — look for `Kanban Item: <ID>`
+2. From the branch name: `gh pr view <N> --json headRefName --jq '.headRefName' | grep -oE '[A-Z]+-[0-9]+' | head -1`
+3. From the PR description body
+4. Fallback: if ID cannot be found, add as a PR comment instead
+
+**Create one subitem per suggestion:**
+```bash
+source ~/aiteamforge/kanban-helpers.sh
+kb-backlog sub add <ITEM-ID> "[Review] <actionable description> (PR #<N>)"
+```
+
+Rules:
+- Title MUST start with `[Review]`
+- One subitem per suggestion — do not batch
+- Non-blocking subitems do NOT need to be addressed before merge
 
 ### **Merge**
 - **Creating agent** merges after bot approval via monitoring loop (PREFERRED)
@@ -770,7 +883,7 @@ After completing:
 
 ---
 
-**Last Updated:** 2026-02-11 (Added cross-terminal PR review workflow with gh-bot-review and approval monitoring)
+**Last Updated:** 2026-02-18 (Added reviewer re-review monitoring loop, non-blocking subitems protocol, fixed stale review detection in creating agent monitoring loop, updated review handoff template with kanban item ID)
 **Maintained By:** Claude Code
 
 ---

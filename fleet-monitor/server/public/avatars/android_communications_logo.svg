@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Star Trek TOS - Communications Team Logo (UI/UX & User Interaction) -->
+<!-- Android Development Terminal - Communications Team -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#CC0000" stroke-width="3"/>
+  
+  <!-- Uhura's communications earpiece (stylized) -->
+  <!-- Ear cup -->
+  <circle cx="85" cy="100" r="25" fill="none" stroke="#CC0000" stroke-width="3"/>
+  <circle cx="85" cy="100" r="15" fill="#CC0000" opacity="0.3"/>
+  
+  <!-- Headband arc -->
+  <path d="M 85 75 Q 100 60 115 75" fill="none" stroke="#CC0000" stroke-width="3" stroke-linecap="round"/>
+  
+  <!-- Microphone boom -->
+  <line x1="110" y1="100" x2="135" y2="110" stroke="#CC0000" stroke-width="3" stroke-linecap="round"/>
+  <circle cx="137" cy="112" r="5" fill="#CC0000"/>
+  
+  <!-- Signal waves (radiating outward) -->
+  <!-- Wave 1 (inner) -->
+  <path d="M 140 100 Q 145 100 150 105" fill="none" stroke="#CC0000" stroke-width="2" opacity="0.8"/>
+  <path d="M 140 100 Q 145 100 150 95" fill="none" stroke="#CC0000" stroke-width="2" opacity="0.8"/>
+  
+  <!-- Wave 2 (middle) -->
+  <path d="M 152 100 Q 160 100 165 108" fill="none" stroke="#CC0000" stroke-width="2" opacity="0.6"/>
+  <path d="M 152 100 Q 160 100 165 92" fill="none" stroke="#CC0000" stroke-width="2" opacity="0.6"/>
+  
+  <!-- Wave 3 (outer) -->
+  <path d="M 167 100 Q 178 100 183 112" fill="none" stroke="#CC0000" stroke-width="2" opacity="0.4"/>
+  <path d="M 167 100 Q 178 100 183 88" fill="none" stroke="#CC0000" stroke-width="2" opacity="0.4"/>
+  
+  <!-- Data stream indicators (bottom) -->
+  <rect x="70" y="140" width="3" height="15" fill="#CC0000" opacity="0.8"/>
+  <rect x="78" y="135" width="3" height="20" fill="#CC0000" opacity="0.7"/>
+  <rect x="86" y="138" width="3" height="17" fill="#CC0000" opacity="0.6"/>
+  <rect x="94" y="133" width="3" height="22" fill="#CC0000" opacity="0.8"/>
+  <rect x="102" y="140" width="3" height="15" fill="#CC0000" opacity="0.7"/>
+  
+  <!-- Corner accent elements -->
+  <circle cx="30" cy="30" r="3" fill="#CC0000"/>
+  <circle cx="170" cy="30" r="3" fill="#CC0000"/>
+  <circle cx="30" cy="170" r="3" fill="#CC0000"/>
+  <circle cx="170" cy="170" r="3" fill="#CC0000"/>
+</svg>

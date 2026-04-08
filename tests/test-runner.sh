@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # test-runner.sh
-# Test framework for dev-team Homebrew Tap
+# Test framework for aiteamforge Homebrew Tap
 # Discovers and runs test files, provides assert functions, reports results
 
 set -eo pipefail
@@ -67,7 +67,7 @@ print_verbose() {
 
 # Create isolated temp directory for test
 setup_test_env() {
-  TEST_TMP_DIR=$(mktemp -d -t dev-team-test.XXXXXX)
+  TEST_TMP_DIR=$(mktemp -d -t aiteamforge-test.XXXXXX)
   TEST_RESULTS_FILE="$TEST_TMP_DIR/.test-results"
   touch "$TEST_RESULTS_FILE"
   print_verbose "Created test temp dir: $TEST_TMP_DIR"
@@ -482,7 +482,7 @@ usage() {
   cat <<EOF
 Usage: $(basename "$0") [OPTIONS] [TEST_FILE...]
 
-Test runner for dev-team Homebrew Tap
+Test runner for aiteamforge Homebrew Tap
 
 OPTIONS:
   -v, --verbose     Verbose output (show each test)
@@ -537,7 +537,7 @@ main() {
   # Print banner
   echo ""
   echo -e "${BLUE}═══════════════════════════════════════════════════════════════════════════${NC}"
-  echo -e "${BLUE}  Dev-Team Homebrew Tap Test Suite${NC}"
+  echo -e "${BLUE}  AITeamForge Homebrew Tap Test Suite${NC}"
   echo -e "${BLUE}═══════════════════════════════════════════════════════════════════════════${NC}"
   echo ""
 

@@ -420,7 +420,7 @@ man git-worktree
 
 ### Online Resources:
 - **Git Docs:** https://git-scm.com/docs/git-worktree
-- **Skill Location:** `~/dev-team/skills/Git_Worktree_Manager_SKILL.md`
+- **Skill Location:** `~/aiteamforge/skills/Git_Worktree_Manager_SKILL.md`
 
 ---
 

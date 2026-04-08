@@ -25,6 +25,38 @@ has_tailscale() {
     command -v tailscale &>/dev/null || [ -x "/opt/homebrew/bin/tailscale" ]
 }
 
+# Get the Tailscale binary path
+get_tailscale_path() {
+    if [ -x "/opt/homebrew/bin/tailscale" ]; then
+        echo "/opt/homebrew/bin/tailscale"
+    elif command -v tailscale &>/dev/null; then
+        command -v tailscale
+    else
+        echo ""
+    fi
+}
+
+# Check if Tailscale is logged in (has an active account)
+is_tailscale_logged_in() {
+    local ts_path
+    ts_path=$(get_tailscale_path)
+    [ -z "$ts_path" ] && return 1
+    # 'tailscale status' exits non-zero if not logged in
+    "$ts_path" status &>/dev/null
+}
+
+# Check if Tailscale Funnel is enabled for this account
+# Funnel requires: logged in + MagicDNS enabled + HTTPS enabled + Funnel feature enabled
+is_tailscale_funnel_capable() {
+    local ts_path
+    ts_path=$(get_tailscale_path)
+    [ -z "$ts_path" ] && return 1
+    # Try a dry-run funnel command to check capability
+    # We use a non-destructive status check; actual capability requires attempting
+    # the funnel or checking the account's Tailscale features
+    "$ts_path" funnel status &>/dev/null
+}
+
 # Check if iTerm2 is available
 has_iterm2() {
     [ -d "/Applications/iTerm.app" ]
@@ -49,13 +81,8 @@ generate_machine_id() {
 get_tailscale_ip() {
     if has_tailscale; then
         local ts_path
-        if [ -x "/opt/homebrew/bin/tailscale" ]; then
-            ts_path="/opt/homebrew/bin/tailscale"
-        else
-            ts_path="tailscale"
-        fi
-
-        $ts_path ip -4 2>/dev/null | head -n1 || echo ""
+        ts_path=$(get_tailscale_path)
+        "$ts_path" ip -4 2>/dev/null | head -n1 || echo ""
     else
         echo ""
     fi
@@ -65,13 +92,8 @@ get_tailscale_ip() {
 get_tailscale_hostname() {
     if has_tailscale; then
         local ts_path
-        if [ -x "/opt/homebrew/bin/tailscale" ]; then
-            ts_path="/opt/homebrew/bin/tailscale"
-        else
-            ts_path="tailscale"
-        fi
-
-        $ts_path status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4 || echo ""
+        ts_path=$(get_tailscale_path)
+        "$ts_path" status --json 2>/dev/null | grep -o '"HostName":"[^"]*"' | cut -d'"' -f4 || echo ""
     else
         echo ""
     fi
@@ -83,9 +105,13 @@ get_tailscale_hostname() {
 
 # Create Fleet Monitor configuration
 create_fleet_config() {
-    local config_file="$DEV_TEAM_DIR/config/fleet-config.json"
+    local config_file="$AITEAMFORGE_DIR/config/fleet-config.json"
     local machine_id="${1:-}"
     local nickname="${2:-}"
+
+    # Sanitize nickname: strip characters that break sed replacement patterns
+    # (|, \, &, newlines, and control characters) since we use | as sed delimiter
+    nickname=$(printf '%s' "$nickname" | tr -d '|\\&\n\r\t\000-\037')
 
     if [ -z "$machine_id" ]; then
         machine_id=$(generate_machine_id)
@@ -159,7 +185,11 @@ CFGEOF
 create_machine_identity() {
     local machine_id="$1"
     local nickname="${2:-}"
-    local identity_file="$DEV_TEAM_DIR/config/machine-identity.json"
+    local identity_file="$AITEAMFORGE_DIR/config/machine-identity.json"
+
+    # Sanitize nickname: strip characters that break sed replacement patterns
+    # (|, \, &, newlines, and control characters) since we use | as sed delimiter
+    nickname=$(printf '%s' "$nickname" | tr -d '|\\&\n\r\t\000-\037')
 
     local hostname=$(hostname -s)
     local local_ip=$(ipconfig getifaddr en0 2>/dev/null || echo "unknown")
@@ -224,7 +254,7 @@ IDEOF
 
 # Install Fleet Monitor server
 install_fleet_server() {
-    local fleet_dir="$DEV_TEAM_DIR/fleet-monitor"
+    local fleet_dir="$AITEAMFORGE_DIR/fleet-monitor"
 
     info "Installing Fleet Monitor server..."
 
@@ -251,29 +281,24 @@ install_fleet_server() {
     success "Fleet Monitor server installed at $fleet_dir"
 }
 
-# Install Tailscale Funnel restore script and LaunchAgent
-install_tailscale_funnel() {
-    if ! has_tailscale; then
-        info "Tailscale not installed, skipping Funnel setup"
-        return 0
-    fi
+# Write the funnel restore script and install its LaunchAgent.
+# Called after auth is confirmed. Returns 0 on success.
+_write_funnel_restore_script() {
+    local ts_path="$1"
 
-    info "Setting up Tailscale Funnel restore script..."
+    local funnel_script="$AITEAMFORGE_DIR/tailscale-funnel-restore.sh"
 
-    local funnel_script="$DEV_TEAM_DIR/tailscale-funnel-restore.sh"
-    local ts_path="/opt/homebrew/bin/tailscale"
-
-    # Get team ports for LCARS dashboards
+    # Build team route lines from any installed LCARS port files
     local team_routes=""
-    # Use compgen to check if glob pattern matches any files
-    if compgen -G "$DEV_TEAM_DIR"/lcars-ports/*.port >/dev/null 2>&1; then
-        for team_port_file in "$DEV_TEAM_DIR"/lcars-ports/*.port; do
+    if compgen -G "$AITEAMFORGE_DIR"/lcars-ports/*.port >/dev/null 2>&1; then
+        local team_port_file team_name port path
+        for team_port_file in "$AITEAMFORGE_DIR"/lcars-ports/*.port; do
             if [ -f "$team_port_file" ]; then
-                local team_name=$(basename "$team_port_file" .port)
-                local port=$(cat "$team_port_file")
-                local path="/${team_name}"
+                team_name=$(basename "$team_port_file" .port)
+                port=$(cat "$team_port_file")
+                path="/${team_name}"
                 team_routes+="$ts_path funnel --bg --yes --set-path $path http://localhost:$port\n"
-                team_routes+="echo \"✓ Port ${TAILSCALE_FUNNEL_PORT}${path} configured\"\n\n"
+                team_routes+="echo \"Port ${TAILSCALE_FUNNEL_PORT}${path} configured\"\n\n"
             fi
         done
     fi
@@ -287,37 +312,245 @@ install_tailscale_funnel() {
         > "$funnel_script"
 
     chmod +x "$funnel_script"
-
     success "Tailscale Funnel restore script created at $funnel_script"
 
     # Install Funnel LaunchAgent to restore routes on system restart
-    local launchagent_file="$HOME/Library/LaunchAgents/com.devteam.tailscale-funnel.plist"
+    local launchagent_file="$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist"
+    local plist_template="$SCRIPT_DIR/../../share/templates/fleet-monitor/funnel-launchagent.template.plist"
+
+    if [ ! -f "$plist_template" ]; then
+        warning "Funnel LaunchAgent template not found, skipping auto-restore setup"
+        return 0
+    fi
 
     info "Installing Tailscale Funnel LaunchAgent..."
 
-    # Create LaunchAgent from template
     sed \
         -e "s|{{FUNNEL_SCRIPT_PATH}}|$funnel_script|g" \
-        -e "s|{{LOG_DIR}}|$DEV_TEAM_DIR/logs|g" \
-        "$SCRIPT_DIR/../../share/templates/fleet-monitor/funnel-launchagent.template.plist" \
-        > "$launchagent_file"
+        -e "s|{{LOG_DIR}}|$AITEAMFORGE_DIR/logs|g" \
+        "$plist_template" > "$launchagent_file"
 
-    # Load LaunchAgent
-    if launchctl list | grep -q "com.devteam.tailscale-funnel"; then
+    if launchctl list | grep -q "com.aiteamforge.tailscale-funnel"; then
         info "Unloading existing Tailscale Funnel LaunchAgent..."
         launchctl unload "$launchagent_file" 2>/dev/null || true
     fi
 
-    info "Loading Tailscale Funnel LaunchAgent..."
     launchctl load "$launchagent_file"
-
     success "Tailscale Funnel LaunchAgent installed (will restore routes on restart)"
+}
+
+# Attempt to configure Funnel routes and validate they work.
+# Returns 0 on success, 1 on failure.
+_configure_and_validate_funnel() {
+    local ts_path="$1"
+
+    info "Configuring Funnel route for Fleet Monitor (port ${TAILSCALE_FUNNEL_PORT})..."
+
+    if "$ts_path" funnel --bg --yes http://127.0.0.1:"${TAILSCALE_FUNNEL_PORT}" 2>&1; then
+        success "Funnel route configured"
+    else
+        warning "Funnel route configuration failed"
+        echo ""
+        echo "This usually means one of:"
+        echo "  - Funnel is not enabled for your Tailscale account"
+        echo "  - HTTPS is not enabled in your Tailscale admin console"
+        echo "  - MagicDNS is not enabled in your Tailscale admin console"
+        echo ""
+        echo "To enable Funnel:"
+        echo "  1. Go to https://login.tailscale.com/admin/dns"
+        echo "  2. Enable 'MagicDNS' if not already on"
+        echo "  3. Enable 'HTTPS Certificates' if not already on"
+        echo "  4. Go to https://login.tailscale.com/admin/acls"
+        echo "  5. Add the 'funnel' node attribute to your ACL policy:"
+        echo "     \"nodeAttrs\": [{\"target\": [\"autogroup:member\"], \"attr\": [\"funnel\"]}]"
+        echo ""
+        return 1
+    fi
+
+    # Validate funnel is actually reachable
+    info "Validating Funnel status..."
+    local funnel_status
+    funnel_status=$("$ts_path" funnel status 2>/dev/null || echo "")
+    if echo "$funnel_status" | grep -q "${TAILSCALE_FUNNEL_PORT}\|Funnel on"; then
+        success "Funnel is active and serving"
+    else
+        warning "Funnel route was set but status check is inconclusive"
+        echo "Run 'tailscale funnel status' to verify after installation"
+    fi
+
+    return 0
+}
+
+# Install Tailscale Funnel restore script and LaunchAgent.
+# Handles full interactive setup flow including auth guidance.
+# Sets TAILSCALE_FUNNEL_CONFIGURED=true/false for the caller to track in config.
+TAILSCALE_FUNNEL_CONFIGURED="false"
+install_tailscale_funnel() {
+    if ! has_tailscale; then
+        info "Tailscale not installed, skipping Funnel setup"
+        info "Install Tailscale from https://tailscale.com/download to enable remote dashboard access"
+        TAILSCALE_FUNNEL_CONFIGURED="false"
+        return 0
+    fi
+
+    local ts_path
+    ts_path=$(get_tailscale_path)
+
+    echo ""
+    echo "────────────────────────────────────────────────────────────────"
+    echo "  Tailscale Funnel Setup"
+    echo "────────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Tailscale Funnel makes your Fleet Monitor dashboard accessible"
+    echo "from anywhere on the internet via a secure HTTPS URL."
+    echo ""
+    echo "This requires:"
+    echo "  - A Tailscale account (free at https://tailscale.com)"
+    echo "  - Tailscale logged in on this machine"
+    echo "  - MagicDNS, HTTPS certificates, and Funnel enabled in admin"
+    echo ""
+
+    # Allow skip for users who don't want Tailscale Funnel
+    if [ "${NON_INTERACTIVE:-}" != "true" ]; then
+        read -p "Set up Tailscale Funnel? (y/n, default: y): " setup_funnel
+        if [[ "$setup_funnel" =~ ^[Nn] ]]; then
+            info "Skipping Tailscale Funnel setup"
+            info "You can run the funnel restore script manually later:"
+            info "  $AITEAMFORGE_DIR/tailscale-funnel-restore.sh"
+            TAILSCALE_FUNNEL_CONFIGURED="false"
+            # Write the restore script so it's ready when the user wants it
+            _write_funnel_restore_script "$ts_path"
+            return 0
+        fi
+    elif [ "${SETUP_TAILSCALE_FUNNEL:-}" = "false" ]; then
+        info "Tailscale Funnel setup skipped (SETUP_TAILSCALE_FUNNEL=false)"
+        TAILSCALE_FUNNEL_CONFIGURED="false"
+        _write_funnel_restore_script "$ts_path"
+        return 0
+    fi
+
+    # STEP 1: Check if Tailscale is logged in
+    info "Checking Tailscale status..."
+    if ! is_tailscale_logged_in; then
+        echo ""
+        echo "Tailscale is installed but not logged in."
+        echo ""
+        echo "Step 1: Log in to Tailscale"
+        echo "  Run this command in a new terminal:"
+        echo ""
+        echo "    tailscale login"
+        echo ""
+        echo "  Your browser will open. Sign in or create a free account."
+        echo "  Once logged in, return here and press Enter."
+        echo ""
+
+        if [ "${NON_INTERACTIVE:-}" != "true" ]; then
+            read -p "Press Enter after logging in to Tailscale (or 's' to skip): " auth_done
+            if [[ "$auth_done" =~ ^[Ss] ]]; then
+                warning "Tailscale auth skipped - Funnel will not be configured"
+                info "Run '$AITEAMFORGE_DIR/tailscale-funnel-restore.sh' after logging in"
+                TAILSCALE_FUNNEL_CONFIGURED="false"
+                _write_funnel_restore_script "$ts_path"
+                return 0
+            fi
+        else
+            warning "Non-interactive mode: Tailscale not logged in, skipping Funnel setup"
+            TAILSCALE_FUNNEL_CONFIGURED="false"
+            _write_funnel_restore_script "$ts_path"
+            return 0
+        fi
+
+        # Re-check after user says they logged in
+        if ! is_tailscale_logged_in; then
+            warning "Tailscale still not logged in - skipping Funnel setup"
+            info "Run '$AITEAMFORGE_DIR/tailscale-funnel-restore.sh' after logging in"
+            TAILSCALE_FUNNEL_CONFIGURED="false"
+            _write_funnel_restore_script "$ts_path"
+            return 0
+        fi
+        success "Tailscale is now logged in"
+    else
+        success "Tailscale is connected"
+    fi
+
+    # STEP 2: Check if Funnel is available (requires admin console setup)
+    info "Checking Tailscale Funnel availability..."
+    if ! is_tailscale_funnel_capable; then
+        echo ""
+        echo "Tailscale Funnel is not yet enabled for your account."
+        echo ""
+        echo "Step 2: Enable Funnel in the Tailscale admin console"
+        echo ""
+        echo "  a) Go to: https://login.tailscale.com/admin/dns"
+        echo "     - Enable 'MagicDNS'"
+        echo "     - Enable 'HTTPS Certificates'"
+        echo ""
+        echo "  b) Go to: https://login.tailscale.com/admin/acls"
+        echo "     - Add this to your ACL policy (inside the top-level object):"
+        echo ""
+        echo "       \"nodeAttrs\": ["
+        echo "         {"
+        echo "           \"target\": [\"autogroup:member\"],"
+        echo "           \"attr\": [\"funnel\"]"
+        echo "         }"
+        echo "       ]"
+        echo ""
+        echo "     - Click 'Save' to apply the policy"
+        echo ""
+
+        if [ "${NON_INTERACTIVE:-}" != "true" ]; then
+            read -p "Press Enter after enabling Funnel in the admin console (or 's' to skip): " funnel_done
+            if [[ "$funnel_done" =~ ^[Ss] ]]; then
+                warning "Funnel admin setup skipped - Funnel will not be configured"
+                info "Run '$AITEAMFORGE_DIR/tailscale-funnel-restore.sh' after enabling Funnel"
+                TAILSCALE_FUNNEL_CONFIGURED="false"
+                _write_funnel_restore_script "$ts_path"
+                return 0
+            fi
+        else
+            warning "Non-interactive mode: Tailscale Funnel not available, skipping"
+            TAILSCALE_FUNNEL_CONFIGURED="false"
+            _write_funnel_restore_script "$ts_path"
+            return 0
+        fi
+    fi
+
+    # STEP 3: Configure Funnel routes and validate
+    echo ""
+    echo "Step 3: Configuring Funnel routes..."
+    echo ""
+
+    if _configure_and_validate_funnel "$ts_path"; then
+        TAILSCALE_FUNNEL_CONFIGURED="true"
+    else
+        echo ""
+        if [ "${NON_INTERACTIVE:-}" != "true" ]; then
+            read -p "Funnel configuration failed. Continue anyway? (y/n, default: n): " continue_anyway
+            if [[ ! "$continue_anyway" =~ ^[Yy] ]]; then
+                warning "Funnel setup incomplete"
+                info "Retry later with: $AITEAMFORGE_DIR/tailscale-funnel-restore.sh"
+                TAILSCALE_FUNNEL_CONFIGURED="false"
+                _write_funnel_restore_script "$ts_path"
+                return 0
+            fi
+        fi
+        TAILSCALE_FUNNEL_CONFIGURED="false"
+    fi
+
+    # Always write the restore script (needed for LaunchAgent and manual reruns)
+    _write_funnel_restore_script "$ts_path"
+
+    if [ "$TAILSCALE_FUNNEL_CONFIGURED" = "true" ]; then
+        echo ""
+        echo "Current Funnel configuration:"
+        "$ts_path" funnel status 2>/dev/null || true
+    fi
 }
 
 # Install Fleet Monitor LaunchAgent
 install_fleet_launchagent() {
-    local launchagent_file="$HOME/Library/LaunchAgents/com.devteam.fleet-monitor.plist"
-    local fleet_server_path="$DEV_TEAM_DIR/fleet-monitor/server"
+    local launchagent_file="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-monitor.plist"
+    local fleet_server_path="$AITEAMFORGE_DIR/fleet-monitor/server"
     local node_path
 
     # Find Node.js path
@@ -336,18 +569,19 @@ install_fleet_launchagent() {
     sed \
         -e "s|{{NODE_PATH}}|$node_path|g" \
         -e "s|{{FLEET_SERVER_PATH}}|$fleet_server_path|g" \
-        -e "s|{{LOG_DIR}}|$DEV_TEAM_DIR/logs|g" \
+        -e "s|{{LOG_DIR}}|$AITEAMFORGE_DIR/logs|g" \
         -e "s|{{HOMEBREW_PREFIX}}|/opt/homebrew|g" \
         -e "s|{{HOME_DIR}}|$HOME|g" \
         -e "s|{{FLEET_PORT}}|$FLEET_MONITOR_PORT|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$SCRIPT_DIR/../../share/templates/fleet-monitor/fleet-launchagent.template.plist" \
         > "$launchagent_file"
 
     # Create logs directory
-    mkdir -p "$DEV_TEAM_DIR/logs"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
 
     # Load LaunchAgent
-    if launchctl list | grep -q "com.devteam.fleet-monitor"; then
+    if launchctl list | grep -q "com.aiteamforge.fleet-monitor"; then
         info "Unloading existing Fleet Monitor LaunchAgent..."
         launchctl unload "$launchagent_file" 2>/dev/null || true
     fi
@@ -362,7 +596,7 @@ install_fleet_launchagent() {
         success "Fleet Monitor LaunchAgent installed and running"
     else
         warning "Fleet Monitor LaunchAgent installed but service may not have started"
-        info "Check logs at $DEV_TEAM_DIR/logs/fleet-monitor.log"
+        info "Check logs at $AITEAMFORGE_DIR/logs/fleet-monitor.log"
     fi
 }
 
@@ -375,9 +609,13 @@ install_iterm_integration() {
 
     info "Setting up iTerm2 agent panel integration..."
 
+    # Ensure scripts directory exists
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+
     # Copy iTerm2 helper scripts
-    local iterm_badge_helper="$DEV_TEAM_DIR/iterm2_badge_helper.sh"
-    local iterm_window_manager="$DEV_TEAM_DIR/iterm2_window_manager.py"
+    local iterm_badge_helper="$AITEAMFORGE_DIR/iterm2_badge_helper.sh"
+    local iterm_window_manager="$AITEAMFORGE_DIR/iterm2_window_manager.py"
+    local lcars_profile_script="$AITEAMFORGE_DIR/scripts/create-lcars-profile.py"
 
     if [ -f "$SCRIPT_DIR/../../share/scripts/iterm2_badge_helper.sh" ]; then
         cp "$SCRIPT_DIR/../../share/scripts/iterm2_badge_helper.sh" "$iterm_badge_helper"
@@ -389,13 +627,39 @@ install_iterm_integration() {
         chmod +x "$iterm_window_manager"
     fi
 
+    # create-lcars-profile.py: writes the LCARS Web Dynamic Profile (browser mode)
+    # Installed to scripts/ so team startup templates can find it at
+    # $AITEAMFORGE_DIR/scripts/create-lcars-profile.py
+    if [ -f "$SCRIPT_DIR/../../share/scripts/create-lcars-profile.py" ]; then
+        cp "$SCRIPT_DIR/../../share/scripts/create-lcars-profile.py" "$lcars_profile_script"
+        chmod +x "$lcars_profile_script"
+    fi
+
+    # Install Dynamic Profile JSON to iTerm2's hot-load directory.
+    # iTerm2 reads this directory automatically — no restart required.
+    # The profile uses 'Initial URL' (correct key for browser-mode tabs).
+    # set-lcars-profile-browser.py updates this file at team startup time.
+    local dynamic_profiles_dir="$HOME/Library/Application Support/iTerm2/DynamicProfiles"
+    local dynamic_profile_src="$SCRIPT_DIR/../../share/scripts/aiteamforge-lcars.json"
+    local dynamic_profile_dest="$dynamic_profiles_dir/aiteamforge-lcars.json"
+
+    if [ -f "$dynamic_profile_src" ]; then
+        mkdir -p "$dynamic_profiles_dir"
+        if [ ! -f "$dynamic_profile_dest" ]; then
+            cp "$dynamic_profile_src" "$dynamic_profile_dest"
+            info "Installed iTerm2 Dynamic Profile: aiteamforge-lcars.json"
+        else
+            info "iTerm2 Dynamic Profile already present (skipping overwrite)"
+        fi
+    fi
+
     success "iTerm2 agent panel integration configured"
 }
 
 # Install fleet reporter client (status reporting script)
 install_fleet_reporter() {
     local reporter_src="$SCRIPT_DIR/../../share/scripts/fleet-reporter.sh"
-    local reporter_dest="$DEV_TEAM_DIR/fleet-monitor/client/fleet-reporter.sh"
+    local reporter_dest="$AITEAMFORGE_DIR/fleet-monitor/client/fleet-reporter.sh"
 
     if [ ! -f "$reporter_src" ]; then
         warning "Fleet reporter script not found (skipping status reporting)"
@@ -405,7 +669,7 @@ install_fleet_reporter() {
     info "Installing fleet reporter client..."
 
     # Create target directory
-    mkdir -p "$DEV_TEAM_DIR/fleet-monitor/client"
+    mkdir -p "$AITEAMFORGE_DIR/fleet-monitor/client"
 
     # Copy fleet reporter script
     cp "$reporter_src" "$reporter_dest"
@@ -414,14 +678,14 @@ install_fleet_reporter() {
     success "Fleet reporter installed at $reporter_dest"
 }
 
-# Create fleet reporter config at the path the reporter expects ($HOME/.dev-team/)
+# Create fleet reporter config at the path the reporter expects ($HOME/.aiteamforge/)
 create_fleet_reporter_config() {
     local server_url="${1:-http://localhost:${FLEET_MONITOR_PORT}}"
 
     info "Creating fleet reporter configuration..."
 
-    # The reporter reads from $HOME/.dev-team/fleet-config.json
-    mkdir -p "$HOME/.dev-team"
+    # The reporter reads from $HOME/.aiteamforge/fleet-config.json
+    mkdir -p "$HOME/.aiteamforge"
 
     local reporter_config_template="$SCRIPT_DIR/../../share/templates/fleet-monitor/fleet-reporter-config.template.json"
 
@@ -457,10 +721,10 @@ create_fleet_reporter_config() {
             -e "s|{{LOCAL_ENABLED}}|$local_enabled|g" \
             -e "s|{{LOCAL_PORT}}|$local_port|g" \
             -e "s|{{DASHBOARD_GROUP}}||g" \
-            "$reporter_config_template" > "$HOME/.dev-team/fleet-config.json"
+            "$reporter_config_template" > "$HOME/.aiteamforge/fleet-config.json"
     else
         # Fallback: generate config directly
-        cat > "$HOME/.dev-team/fleet-config.json" <<RCEOF
+        cat > "$HOME/.aiteamforge/fleet-config.json" <<RCEOF
 {
   "mode": "$FLEET_MODE",
   "centralServer": {
@@ -480,14 +744,14 @@ create_fleet_reporter_config() {
 RCEOF
     fi
 
-    success "Fleet reporter config created at $HOME/.dev-team/fleet-config.json"
+    success "Fleet reporter config created at $HOME/.aiteamforge/fleet-config.json"
 }
 
 # Install LaunchAgent for fleet reporter (periodic status reporting)
 install_fleet_reporter_launchagent() {
-    local reporter_script="$DEV_TEAM_DIR/fleet-monitor/client/fleet-reporter.sh"
+    local reporter_script="$AITEAMFORGE_DIR/fleet-monitor/client/fleet-reporter.sh"
     local plist_template="$SCRIPT_DIR/../../share/templates/fleet-monitor/fleet-reporter-launchagent.template.plist"
-    local plist_dest="$HOME/Library/LaunchAgents/com.devteam.fleet-reporter.plist"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
 
     if [ ! -f "$reporter_script" ]; then
         warning "Fleet reporter not installed, skipping LaunchAgent"
@@ -505,12 +769,12 @@ install_fleet_reporter_launchagent() {
     mkdir -p "$HOME/Library/LaunchAgents"
 
     # Create logs directory
-    mkdir -p "$DEV_TEAM_DIR/logs"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
 
     # Substitute variables in template
     sed \
         -e "s|{{REPORTER_SCRIPT_PATH}}|$reporter_script|g" \
-        -e "s|{{DEV_TEAM_DIR}}|$DEV_TEAM_DIR|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         -e "s|{{USER_HOME}}|$HOME|g" \
         "$plist_template" > "$plist_dest"
 
@@ -528,7 +792,7 @@ install_fleet_reporter_launchagent() {
 
 # Uninstall fleet reporter LaunchAgent
 uninstall_fleet_reporter_launchagent() {
-    local plist_file="$HOME/Library/LaunchAgents/com.devteam.fleet-reporter.plist"
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading fleet reporter LaunchAgent"
@@ -596,8 +860,8 @@ install_fleet_monitor() {
     fi
 
     # Create necessary directories
-    mkdir -p "$DEV_TEAM_DIR/config"
-    mkdir -p "$DEV_TEAM_DIR/logs"
+    mkdir -p "$AITEAMFORGE_DIR/config"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
 
     # Generate machine ID
     local machine_id=$(generate_machine_id)
@@ -607,18 +871,40 @@ install_fleet_monitor() {
     create_fleet_config "$machine_id" "${machine_nickname:-}"
     create_machine_identity "$machine_id" "${machine_nickname:-}"
 
+    # Update .aiteamforge-config to record fleet registration status now that
+    # the machine identity has been created.
+    local main_config="${AITEAMFORGE_DIR}/.aiteamforge-config"
+    if [ -f "$main_config" ] && command -v jq &>/dev/null; then
+        local tmp_config
+        tmp_config=$(mktemp)
+        jq '.fleet_registration_status = "registered"' "$main_config" > "$tmp_config" \
+            && mv "$tmp_config" "$main_config" \
+            || rm -f "$tmp_config"
+    fi
+
     # Install Fleet Monitor server (for standalone and server modes)
     if [ "$FLEET_MODE" != "client" ]; then
         install_fleet_server
         # Only install LaunchAgent if server was actually installed
-        if [ -d "$DEV_TEAM_DIR/fleet-monitor/server" ]; then
+        if [ -d "$AITEAMFORGE_DIR/fleet-monitor/server" ]; then
             install_fleet_launchagent
         fi
     fi
 
-    # Install Tailscale integration (if available)
-    if has_tailscale; then
-        install_tailscale_funnel
+    # Install Tailscale integration (guided interactive setup)
+    # Always call — the function handles not-installed, not-logged-in, and skip cases
+    install_tailscale_funnel
+
+    # Update .aiteamforge-config with Tailscale Funnel status
+    local main_config="${AITEAMFORGE_DIR}/.aiteamforge-config"
+    if [ -f "$main_config" ] && command -v jq &>/dev/null; then
+        local tmp_config
+        tmp_config=$(mktemp)
+        jq --arg status "$TAILSCALE_FUNNEL_CONFIGURED" \
+            '.installed_features.tailscale_funnel = ($status == "true")' \
+            "$main_config" > "$tmp_config" \
+            && mv "$tmp_config" "$main_config" \
+            || rm -f "$tmp_config"
     fi
 
     # Install iTerm2 integration (if available)
@@ -649,8 +935,9 @@ install_fleet_monitor() {
     if [ "$FLEET_MODE" != "client" ]; then
         local access_url="http://localhost:${FLEET_MONITOR_PORT}"
 
-        if has_tailscale; then
-            local ts_hostname=$(get_tailscale_hostname)
+        if [ "$TAILSCALE_FUNNEL_CONFIGURED" = "true" ]; then
+            local ts_hostname
+            ts_hostname=$(get_tailscale_hostname)
             if [ -n "$ts_hostname" ]; then
                 access_url="https://${ts_hostname}"
             fi
@@ -659,10 +946,19 @@ install_fleet_monitor() {
         info "Fleet Monitor dashboard: $access_url"
         info "LCARS interface: $access_url/lcars"
 
-        if has_tailscale; then
+        if [ "$TAILSCALE_FUNNEL_CONFIGURED" = "true" ]; then
             echo ""
-            info "Tailscale Funnel configured - dashboard is accessible from anywhere"
-            info "Run 'tailscale funnel status' to see URLs"
+            info "Tailscale Funnel active - dashboard is accessible from anywhere"
+            info "Run 'tailscale funnel status' to see your public URL"
+        elif has_tailscale; then
+            echo ""
+            info "Tailscale is installed but Funnel was not configured"
+            info "To enable remote access later, run:"
+            info "  $AITEAMFORGE_DIR/tailscale-funnel-restore.sh"
+        else
+            echo ""
+            info "Dashboard is only accessible locally (no Tailscale)"
+            info "Install Tailscale from https://tailscale.com/download for remote access"
         fi
     else
         info "Fleet Monitor client configured"
@@ -678,7 +974,7 @@ uninstall_fleet_monitor() {
     header "Fleet Monitor Uninstall"
 
     # Stop and remove Fleet Monitor LaunchAgent
-    local launchagent_file="$HOME/Library/LaunchAgents/com.devteam.fleet-monitor.plist"
+    local launchagent_file="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-monitor.plist"
     if [ -f "$launchagent_file" ]; then
         info "Unloading Fleet Monitor LaunchAgent..."
         launchctl unload "$launchagent_file" 2>/dev/null || true
@@ -686,7 +982,7 @@ uninstall_fleet_monitor() {
     fi
 
     # Stop and remove Tailscale Funnel LaunchAgent
-    local funnel_launchagent="$HOME/Library/LaunchAgents/com.devteam.tailscale-funnel.plist"
+    local funnel_launchagent="$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist"
     if [ -f "$funnel_launchagent" ]; then
         info "Unloading Tailscale Funnel LaunchAgent..."
         launchctl unload "$funnel_launchagent" 2>/dev/null || true
@@ -694,32 +990,35 @@ uninstall_fleet_monitor() {
     fi
 
     # Remove Fleet Monitor directory
-    if [ -d "$DEV_TEAM_DIR/fleet-monitor" ]; then
+    if [ -d "$AITEAMFORGE_DIR/fleet-monitor" ]; then
         info "Removing Fleet Monitor files..."
-        rm -rf "$DEV_TEAM_DIR/fleet-monitor"
+        rm -rf "$AITEAMFORGE_DIR/fleet-monitor"
     fi
 
     # Stop and remove Fleet Reporter LaunchAgent
     uninstall_fleet_reporter_launchagent
 
     # Remove configuration files
-    rm -f "$DEV_TEAM_DIR/config/fleet-config.json"
-    rm -f "$DEV_TEAM_DIR/config/machine-identity.json"
-    rm -f "$DEV_TEAM_DIR/tailscale-funnel-restore.sh"
+    rm -f "$AITEAMFORGE_DIR/config/fleet-config.json"
+    rm -f "$AITEAMFORGE_DIR/config/machine-identity.json"
+    rm -f "$AITEAMFORGE_DIR/tailscale-funnel-restore.sh"
 
     # Remove reporter config
-    rm -f "$HOME/.dev-team/fleet-config.json"
+    rm -f "$HOME/.aiteamforge/fleet-config.json"
 
     # Remove logs
-    rm -f "$DEV_TEAM_DIR/logs/fleet-monitor.log"
-    rm -f "$DEV_TEAM_DIR/logs/fleet-monitor.error.log"
-    rm -f "$DEV_TEAM_DIR/logs/fleet-reporter.log"
-    rm -f "$DEV_TEAM_DIR/logs/fleet-reporter.error.log"
-    rm -f "$DEV_TEAM_DIR/logs/tailscale-funnel.log"
-    rm -f "$DEV_TEAM_DIR/logs/tailscale-funnel.error.log"
+    rm -f "$AITEAMFORGE_DIR/logs/fleet-monitor.log"
+    rm -f "$AITEAMFORGE_DIR/logs/fleet-monitor.error.log"
+    rm -f "$AITEAMFORGE_DIR/logs/fleet-reporter.log"
+    rm -f "$AITEAMFORGE_DIR/logs/fleet-reporter.error.log"
+    rm -f "$AITEAMFORGE_DIR/logs/tailscale-funnel.log"
+    rm -f "$AITEAMFORGE_DIR/logs/tailscale-funnel.error.log"
 
     success "Fleet Monitor uninstalled"
 }
+
+# Wrapper to avoid name collision when sourced by setup wizard
+_run_fleet_monitor_installer() { install_fleet_monitor "$@"; }
 
 # If script is run directly (not sourced), execute install
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then

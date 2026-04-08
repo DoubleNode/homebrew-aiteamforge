@@ -944,7 +944,7 @@ window.LCARS_CORE = window.LCARS_CORE || {};
 
     LCARS.sections = {
         // Available sections in order
-        list: ['overview', 'organizations', 'machines', 'settings', 'admin'],
+        list: ['overview', 'organizations', 'machines', 'analytics', 'settings', 'admin'],
 
         // Current state
         active: 'overview',
@@ -979,14 +979,6 @@ window.LCARS_CORE = window.LCARS_CORE || {};
 
             // Bind keyboard navigation
             this.initKeyboardNav();
-
-            // Bind refresh button
-            const refreshBtn = document.querySelector('.sidebar-button.refresh-btn');
-            if (refreshBtn) {
-                refreshBtn.addEventListener('click', function() {
-                    self.refresh();
-                });
-            }
 
             console.log('[LCARS] Section navigation initialized');
         },
@@ -1124,6 +1116,11 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                         self.switchSection(self.list[3]);
                         return;
                     }
+                    if (e.code === 'Digit5' || e.code === 'Numpad5') {
+                        e.preventDefault();
+                        self.switchSection(self.list[4]);
+                        return;
+                    }
 
                     // Option+R for refresh (check both e.code and e.key for compatibility)
                     if (e.code === 'KeyR' || e.key === 'r' || e.key === 'R' || e.key === '®') {
@@ -1196,16 +1193,6 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             });
             document.dispatchEvent(event);
 
-            // Visual feedback on refresh button - power surge animation
-            const btn = document.querySelector('.sidebar-button.refresh-btn');
-            if (btn) {
-                btn.classList.remove('lcars-surge'); // Reset if running
-                void btn.offsetWidth; // Force reflow
-                btn.classList.add('lcars-surge');
-                setTimeout(function() {
-                    btn.classList.remove('lcars-surge');
-                }, 500);
-            }
         },
 
         /**

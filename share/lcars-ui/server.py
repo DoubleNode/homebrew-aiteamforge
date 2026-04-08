@@ -17,13 +17,36 @@ import http.server
 import socketserver
 import json
 import os
+import re
+import subprocess
 import sys
+import time
+import traceback
 import urllib.request
 import urllib.error
 import base64
 import glob
+from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
+
+# Import kanban utilities for team-specific tmp directory resolution
+try:
+    import sys as _sys
+    _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
+    if _KANBAN_HOOKS_DIR not in _sys.path:
+        _sys.path.insert(0, _KANBAN_HOOKS_DIR)
+    from kanban_utils import log_activity, read_activity_log, get_lcars_tmp_dir
+    LOG_ACTIVITY_AVAILABLE = True
+except ImportError as e:
+    LOG_ACTIVITY_AVAILABLE = False
+    def log_activity(*args, **kwargs):
+        pass
+    def read_activity_log(*args, **kwargs):
+        return {"entries": [], "itemId": kwargs.get("item_id", "")}
+    def get_lcars_tmp_dir(session_name: str) -> str:
+        return "/tmp/"
+    print(f"[LCARS] Warning: kanban_utils not available, activity logging disabled: {e}")
 
 # Import integration providers
 try:
@@ -52,16 +75,17 @@ except ImportError as e:
 
 # Configuration
 DEFAULT_PORT = 8080
-BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
+BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 
 # Distributed kanban directories - each team has their own
-TEAM_KANBAN_DIRS = {
+# These defaults are used when ~/.aiteamforge-config is not present (backward compatibility)
+_TEAM_KANBAN_DIRS_DEFAULT = {
     # Main Event Teams
     "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+    "command": Path.home() / "aiteamforge" / "command" / "kanban",
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
 
     # Freelance Projects
@@ -69,13 +93,80 @@ TEAM_KANBAN_DIRS = {
     "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
     "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
     "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+    "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+    "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+
+    # Liquidstyle Freelance Projects
+    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
+    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
 
     # Legal Projects
     "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
 
     # Medical Projects
     "medical-general": Path.home() / "medical" / "general" / "kanban",
+
+    # Finance Projects
+    "finance-personal": Path.home() / "finance" / "personal" / "kanban",
 }
+
+def _load_team_kanban_dirs_from_config() -> dict:
+    """Try to load team kanban dirs from ~/.aiteamforge-config (JSON).
+
+    The config file lives at ${AITEAMFORGE_DIR:-~/aiteamforge}/.aiteamforge-config
+    and is written by aiteamforge-setup.sh.
+
+    Expected structure:
+      {
+        "install_dir": "/Users/name/aiteamforge",
+        "team_paths": {
+          "academy": {"working_dir": "/Users/name/aiteamforge/academy", ...},
+          "ios":     {"working_dir": "/path/to/ios", ...},
+          ...
+        }
+      }
+
+    Each team's kanban directory is working_dir + "/kanban".
+
+    Falls back to hardcoded defaults if the config file is missing, unreadable,
+    or missing the team_paths key.
+    """
+    aiteamforge_dir = os.environ.get("AITEAMFORGE_DIR", str(Path.home() / "aiteamforge"))
+    config_path = Path(aiteamforge_dir) / ".aiteamforge-config"
+
+    if not config_path.exists():
+        print(f"[LCARS] TEAM_KANBAN_DIRS: config not found at {config_path} — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    try:
+        with open(config_path, "r") as f:
+            config = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f"[LCARS] TEAM_KANBAN_DIRS: failed to read {config_path} ({e}) — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    team_paths = config.get("team_paths")
+    if not team_paths or not isinstance(team_paths, dict):
+        print(f"[LCARS] TEAM_KANBAN_DIRS: no 'team_paths' in config — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    dirs = {}
+    for team_id, team_info in team_paths.items():
+        if not isinstance(team_info, dict):
+            continue
+        working_dir = team_info.get("working_dir")
+        if not working_dir:
+            continue
+        dirs[team_id] = Path(working_dir) / "kanban"
+
+    if not dirs:
+        print(f"[LCARS] TEAM_KANBAN_DIRS: config has empty team_paths — using hardcoded defaults")
+        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
+
+    print(f"[LCARS] TEAM_KANBAN_DIRS: loaded {len(dirs)} team(s) from {config_path}")
+    return dirs
+
+TEAM_KANBAN_DIRS = _load_team_kanban_dirs_from_config()
 
 # Legacy fallback for backwards compatibility
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
@@ -86,9 +177,12 @@ def get_board_file(team: str) -> Path:
     return kanban_dir / f"{team}-board.json"
 BACKUP_STATUS_FILE = BACKUP_DIR / "backup-status.json"
 UI_DIR = Path(__file__).parent
-CONFIG_DIR = Path.home() / "dev-team" / "config"
+CONFIG_DIR = Path.home() / "aiteamforge" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
+# Team-specific tmp directory — resolved from SESSION_NAME via kanban_utils.
+# Falls back to /tmp/ for unknown sessions.
+LCARS_TMP_DIR = Path(get_lcars_tmp_dir(SESSION_NAME))
 
 # Team-specific configuration directories (distributed into each team's kanban/config/)
 # Releases, integrations, and calendar configs live alongside board data for self-containment.
@@ -100,6 +194,45 @@ INTEGRATIONS_FILE = TEAM_CONFIG_DIR / "integrations.json"
 # NOTE: No central RELEASES_DIR - releases are stored in each team's own project directory
 # Use _get_releases_dir_for_team(team) to get the correct path
 
+# AMB (Agent Merit Badges) badge cache — { handle: { "badges": [...], "fetched_at": float } }
+_amb_badge_cache = {}
+_AMB_CACHE_TTL = 300  # 5 minutes
+
+
+def _fetch_amb_badges(handle):
+    """Fetch badges for an AMB agent handle, with 5-minute cache TTL.
+
+    Returns a list of badge dicts [{"emoji": "...", "name": "...", "tier": "..."}].
+    Returns empty list on any failure (graceful degradation).
+    """
+    if not handle:
+        return []
+
+    now = time.time()
+    cached = _amb_badge_cache.get(handle)
+    if cached and (now - cached["fetched_at"]) < _AMB_CACHE_TTL:
+        return cached["badges"]
+
+    try:
+        url = f"https://dev.agentbadges.com/api/v1/agents/{handle}/patches"
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            resp_data = json.loads(resp.read().decode())
+            patches = resp_data.get("data", [])
+            badges = [
+                {"emoji": p.get("emoji", ""), "name": p.get("name", ""), "tier": p.get("tier", "")}
+                for p in patches
+                if p.get("emoji")
+            ]
+            _amb_badge_cache[handle] = {"badges": badges, "fetched_at": now}
+            return badges
+    except Exception:
+        # On failure, return stale cache if available, otherwise empty
+        if cached:
+            return cached["badges"]
+        return []
+
+
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     """Custom handler for LCARS Kanban Monitor"""
 
@@ -108,10 +241,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # - Freelance: freelance-{clientId}-{projectId} (e.g., freelance-doublenode-workstats)
     # - Legal: legal-{projectId} (e.g., legal-coparenting)
     # - MainEvent floaters: mainevent-{projectId} (project-specific)
-    PATH_PREFIXES = ['/academy', '/firebase', '/dns', '/freelance-doublenode-workstats', '/freelance-doublenode-starwords', '/freelance-doublenode-appplanning', '/command', '/ios', '/android', '/mainevent', '/legal-coparenting']
+    PATH_PREFIXES = ['/academy', '/firebase', '/dns', '/freelance-doublenode-workstats', '/freelance-doublenode-starwords', '/freelance-doublenode-appplanning', '/command', '/ios', '/android', '/mainevent', '/legal-coparenting', '/finance-personal']
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
+
+    # Compiled pattern for valid resource IDs: alphanumeric, hyphens, underscores only.
+    # Max 128 chars to prevent abuse. No path traversal characters permitted.
+    _RESOURCE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
+
+    @classmethod
+    def _validate_resource_id(cls, value, name='id'):
+        """Validate a release_id or epic_id extracted from a URL path segment.
+
+        Returns None if valid, or an error string describing the problem.
+        Rejects any value containing path traversal sequences or characters
+        outside the alphanumeric/hyphen/underscore set.
+        """
+        if not value:
+            return f"Missing {name}"
+        # Explicit traversal guard (belt-and-suspenders before the regex check)
+        for bad in ('..', '/', '\\'):
+            if bad in value:
+                return f"Invalid {name}: contains disallowed characters"
+        if not cls._RESOURCE_ID_RE.match(value):
+            return f"Invalid {name}: must be alphanumeric with hyphens/underscores, max 128 chars"
+        return None
 
     def do_OPTIONS(self):
         """Handle CORS preflight requests"""
@@ -168,9 +323,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_create_release()
         elif path.startswith('/api/releases/') and path.endswith('/items'):
             release_id = path.replace('/api/releases/', '').replace('/items', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_assign_item_to_release(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_promote_release(release_id)
         elif path == '/api/releases/flow-config':
             self.handle_update_flow_config()
@@ -181,7 +344,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_create_epic()
         elif path.startswith('/api/epics/') and path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '').replace('/items', '')
+            err = self._validate_resource_id(epic_id, 'epic_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_assign_item_to_epic(epic_id)
+        # Todo API endpoints
+        elif path == '/api/todos':
+            self.handle_create_todo()
         # Calendar sync API endpoints
         elif path == '/api/calendar/config':
             self.handle_save_calendar_config()
@@ -196,6 +366,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_trigger_calendar_sync()
         elif path == '/api/calendar/conflicts/resolve':
             self.handle_resolve_calendar_conflict()
+        elif path == '/api/terminal/activate':
+            self.handle_terminal_activate()
         else:
             self.send_error(404, f"Unknown POST endpoint: {path}")
 
@@ -213,11 +385,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_update_release(release_id)
         # Epic API endpoints
         elif path.startswith('/api/epics/') and not path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '')
+            err = self._validate_resource_id(epic_id, 'epic_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_update_epic(epic_id)
+        # Todo API endpoints
+        elif path == '/api/todos':
+            self.handle_update_todo()
         else:
             self.send_error(404, f"Unknown PUT endpoint: {path}")
 
@@ -235,6 +418,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if path.startswith('/api/releases/') and path.endswith('/archive'):
             release_id = path.replace('/api/releases/', '').replace('/archive', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_toggle_release_archive(release_id)
         else:
             self.send_error(404, f"Unknown PATCH endpoint: {path}")
@@ -256,11 +443,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             parts = path.replace('/api/releases/', '').split('/items/')
             if len(parts) == 2:
                 release_id, item_id = parts
+                err = self._validate_resource_id(release_id, 'release_id')
+                if err:
+                    self.send_error(400, err)
+                    return
+                err = self._validate_resource_id(item_id, 'item_id')
+                if err:
+                    self.send_error(400, err)
+                    return
                 self.handle_remove_item_from_release(release_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
         elif path.startswith('/api/releases/'):
             release_id = path.replace('/api/releases/', '')
+            err = self._validate_resource_id(release_id, 'release_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_archive_release(release_id)
         # Epic API endpoints
         elif path.startswith('/api/epics/') and '/items/' in path:
@@ -268,12 +467,27 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             parts = path.replace('/api/epics/', '').split('/items/')
             if len(parts) == 2:
                 epic_id, item_id = parts
+                err = self._validate_resource_id(epic_id, 'epic_id')
+                if err:
+                    self.send_error(400, err)
+                    return
+                err = self._validate_resource_id(item_id, 'item_id')
+                if err:
+                    self.send_error(400, err)
+                    return
                 self.handle_remove_item_from_epic(epic_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
         elif path.startswith('/api/epics/'):
             epic_id = path.replace('/api/epics/', '')
+            err = self._validate_resource_id(epic_id, 'epic_id')
+            if err:
+                self.send_error(400, err)
+                return
             self.handle_delete_epic(epic_id)
+        # Todo API endpoints
+        elif path == '/api/todos':
+            self.handle_delete_todo()
         else:
             self.send_error(404, f"Unknown DELETE endpoint: {path}")
 
@@ -395,6 +609,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     if index >= 0:
                         item = data['backlog'][index]
                         actual_item_id = item.get('id', item_id)
+
+                        # Block completion if subitems are incomplete
+                        if updates.get('status') == 'completed':
+                            subitems = item.get('subitems', [])
+                            incomplete = [s for s in subitems if s.get('status') not in ('completed', 'cancelled')]
+                            if incomplete:
+                                self.send_response(400)
+                                self.send_header('Content-Type', 'application/json')
+                                self.send_header('Access-Control-Allow-Origin', '*')
+                                self.end_headers()
+                                self.wfile.write(json.dumps({
+                                    "error": "Cannot complete item with incomplete subitems",
+                                    "incompleteSubitems": [{"id": s.get("id"), "title": s.get("title"), "status": s.get("status")} for s in incomplete]
+                                }).encode())
+                                return
 
                         # Track old release assignment BEFORE applying updates
                         old_release_assignment = item.get('releaseAssignment')
@@ -1417,6 +1646,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'XFAP': TEAM_KANBAN_DIRS.get('freelance-doublenode-appplanning'),
             'XFWS': TEAM_KANBAN_DIRS.get('freelance-doublenode-workstats'),
             'XFLB': TEAM_KANBAN_DIRS.get('freelance-doublenode-lifeboard'),
+            'XFIN': TEAM_KANBAN_DIRS.get('finance-personal'),
         }
 
         # If prefix is found, use it
@@ -1466,6 +1696,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         'XFLB': 'freelance-doublenode-lifeboard',
         # Legal projects
         'XLCP': 'legal-coparenting',
+        # Finance projects
+        'XFIN': 'finance-personal',
     }
 
     def _extract_team_from_item_id(self, item_id):
@@ -1588,7 +1820,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         import fcntl
         board_file = self._get_board_file(team)
         # Debug logging to file
-        with open('/tmp/lcars-flow-debug.log', 'a') as log:
+        with open(LCARS_TMP_DIR / 'lcars-flow-debug.log', 'a') as log:
             log.write(f"[LCARS] _save_releases_config - team: {team}, board_file: {board_file}\n")
 
         if not board_file.exists():
@@ -1684,14 +1916,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         main_event_base = Path("/Users/Shared/Development/Main Event")
 
-        # Static team base paths (Main Event platform teams and infrastructure)
+        # Static team base paths fallback (used only when team not found in TEAM_KANBAN_DIRS)
         team_base_paths = {
             'academy': Path.home() / "dev-team" / "kanban",
-            'ios': main_event_base / "MainEventApp-iOS" / "DEV" / "dev-team" / "kanban",
-            'android': main_event_base / "MainEventApp-Android" / "develop" / "dev-team" / "kanban",
-            'firebase': main_event_base / "MainEventApp-Functions" / "develop" / "dev-team" / "kanban",
-            'command': main_event_base / "dev-team" / "kanban",
-            'dns': Path("/Users/Shared/Development/DNSFramework") / "dev-team" / "kanban",
+            'ios': main_event_base / "MainEventApp-iOS" / "kanban",
+            'android': main_event_base / "MainEventApp-Android" / "kanban",
+            'firebase': main_event_base / "MainEventApp-Functions" / "kanban",
+            'command': Path.home() / "aiteamforge" / "command" / "kanban",
+            'dns': Path("/Users/Shared/Development/DNSFramework") / "kanban",
         }
 
         # PRIORITY 1: Use canonical TEAM_KANBAN_DIRS mapping (source of truth)
@@ -1724,7 +1956,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if project_dir:
                 return Path(project_dir) / "kanban" / subdir
             # Fallback to Main Event base directory
-            return main_event_base / "dev-team" / "kanban" / subdir
+            return main_event_base / "aiteamforge" / "kanban" / subdir
 
         # PRIORITY 3: Use static team_base_paths for known teams
         return team_base_paths.get(team, team_base_paths['academy']) / subdir
@@ -1859,6 +2091,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         manifest['updatedAt'] = self._get_timestamp()
         self._atomic_write_json(self._get_release_manifest_path(release_id, team), manifest)
 
+    @staticmethod
+    def _derive_item_status(board_item):
+        """Derive item status from subitems and activity signals.
+
+        Many items track progress through subitems rather than a top-level
+        status field. This method computes the effective status from:
+        - Subitem statuses (completed, in_progress, etc.)
+        - activelyWorking flag
+        - startedAt timestamp
+        """
+        subitems = board_item.get('subitems', [])
+        if subitems:
+            statuses = [s.get('status', 'todo') for s in subitems]
+            non_cancelled = [s for s in statuses if s != 'cancelled']
+            if non_cancelled and all(s == 'completed' for s in non_cancelled):
+                return 'completed'
+            if any(s in ('in_progress', 'completed') for s in non_cancelled):
+                return 'in_progress'
+        if board_item.get('activelyWorking'):
+            return 'in_progress'
+        if board_item.get('startedAt'):
+            return 'in_progress'
+        return 'todo'
+
     def _calculate_release_progress(self, release_id):
         """Calculate completion progress for a release by platform.
 
@@ -1877,7 +2133,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 with open(board_file, 'r') as f:
                     board_data = json.load(f)
                 for board_item in board_data.get('backlog', []):
-                    board_status[board_item.get('id')] = board_item.get('status')
+                    status = board_item.get('status') or self._derive_item_status(board_item)
+                    board_status[board_item.get('id')] = status
         except Exception as e:
             print(f"[LCARS] Warning: Could not load board for release progress: {e}")
 
@@ -2071,6 +2328,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         # Update manifest item with live board data
                         if 'status' in board_item:
                             manifest_item['status'] = board_item['status']
+                        else:
+                            # Derive status from subitems and activity signals
+                            manifest_item['status'] = self._derive_item_status(board_item)
                         if 'title' in board_item:
                             manifest_item['title'] = board_item['title']
                         if 'priority' in board_item:
@@ -2321,7 +2581,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     for item in board_data.get('backlog', []):
                         if item.get('id') == item_id:
                             title = item.get('title', title)
-                            status = item.get('status', status)
+                            status = item.get('status') or self._derive_item_status(item)
                             break
 
             if existing_item:
@@ -2626,7 +2886,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             stages = post_data['stages']
             team = post_data.get('team')  # Optional team parameter for cross-team support
             # Debug logging to file (terminal output may be redirected)
-            with open('/tmp/lcars-flow-debug.log', 'a') as log:
+            with open(LCARS_TMP_DIR / 'lcars-flow-debug.log', 'a') as log:
                 log.write(f"[{self._get_timestamp()}] Flow config update - team from request: {team}\n")
                 log.write(f"[{self._get_timestamp()}] Flow config update - stages: {stages}\n")
 
@@ -3150,6 +3410,292 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, f"Error getting epic items: {e}")
 
+    # =========================================================================
+    # TODO API HANDLERS (XACA-0101)
+    # =========================================================================
+
+    # Priority sort order: critical=0, high=1, medium=2, low=3
+    TODO_PRIORITY_ORDER = {'critical': 0, 'high': 1, 'medium': 2, 'low': 3}
+
+    def serve_todos_list(self, query_string=''):
+        """GET /api/todos - List todos for a team
+
+        Query parameters:
+            team: Team name (required)
+            status: Filter by 'todo' or 'completed'; omit to return all
+        """
+        from urllib.parse import parse_qs
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0]
+            status_filter = params.get('status', [None])[0]
+
+            if not team:
+                self._send_json_response({"success": False, "error": "Missing required parameter: team"}, 400)
+                return
+
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({"success": False, "error": f"Board not found: {team}"}, 404)
+                return
+
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+
+            todos = data.get('todos', [])
+
+            # Apply status filter if provided
+            if status_filter in ('todo', 'completed'):
+                todos = [t for t in todos if t.get('status') == status_filter]
+
+            # Sort: active todos by priority then createdAt; completed by completedAt desc
+            active = sorted(
+                [t for t in todos if t.get('status') != 'completed'],
+                key=lambda t: (
+                    self.TODO_PRIORITY_ORDER.get(t.get('priority', 'medium'), 2),
+                    t.get('createdAt', '')
+                )
+            )
+            completed = sorted(
+                [t for t in todos if t.get('status') == 'completed'],
+                key=lambda t: t.get('completedAt', ''),
+                reverse=True
+            )
+
+            if status_filter == 'todo':
+                result = active
+            elif status_filter == 'completed':
+                result = completed
+            else:
+                result = active + completed
+
+            self._send_json_response({"success": True, "todos": result})
+
+        except Exception as e:
+            self.send_error(500, f"Error listing todos: {e}")
+
+    def handle_create_todo(self):
+        """POST /api/todos - Create a new todo"""
+        import random
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            team = post_data.get('team')
+            text = post_data.get('text', '').strip()
+
+            if not team:
+                self._send_json_response({"success": False, "error": "Missing required field: team"}, 400)
+                return
+            if not text:
+                self._send_json_response({"success": False, "error": "Missing required field: text"}, 400)
+                return
+            if len(text) > 500:
+                self._send_json_response({"success": False, "error": "Text exceeds maximum length of 500 characters"}, 400)
+                return
+
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({"success": False, "error": f"Board not found: {team}"}, 404)
+                return
+
+            priority = post_data.get('priority', 'medium')
+            if priority not in self.TODO_PRIORITY_ORDER:
+                self._send_json_response({"success": False, "error": f"Invalid priority: {priority}. Must be one of: critical, high, medium, low"}, 400)
+                return
+
+            required_by = post_data.get('requiredBy')
+            if required_by:
+                try:
+                    datetime.strptime(str(required_by), '%Y-%m-%d')
+                except ValueError:
+                    self._send_json_response({"success": False, "error": "Invalid requiredBy date. Must be a valid YYYY-MM-DD date"}, 400)
+                    return
+
+            timestamp = self._get_timestamp()
+            todo_id = f"todo-{int(time.time())}-{random.randint(1000, 9999)}"
+
+            todo = {
+                "id": todo_id,
+                "text": text,
+                "priority": priority,
+                "requiredBy": required_by,
+                "status": "todo",
+                "createdAt": timestamp,
+                "completedAt": None
+            }
+
+            import fcntl
+            lock_file = board_file.with_suffix('.json.lock')
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(board_file, 'r') as f:
+                        data = json.load(f)
+
+                    if 'todos' not in data:
+                        data['todos'] = []
+
+                    data['todos'].append(todo)
+                    data['lastUpdated'] = timestamp
+
+                    self._atomic_write_json(board_file, data)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            print(f"[LCARS] Todo created: {todo_id} for team={team}")
+            self._send_json_response({"success": True, "todo": todo, "message": "Todo created"}, 201)
+
+        except Exception as e:
+            self.send_error(500, f"Error creating todo: {e}")
+
+    def handle_update_todo(self):
+        """PUT /api/todos - Update an existing todo"""
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            team = post_data.get('team')
+            todo_id = post_data.get('id')
+            updates = post_data.get('updates', {})
+
+            if not team:
+                self._send_json_response({"success": False, "error": "Missing required field: team"}, 400)
+                return
+            if not todo_id:
+                self._send_json_response({"success": False, "error": "Missing required field: id"}, 400)
+                return
+            if not updates:
+                self._send_json_response({"success": False, "error": "Missing required field: updates"}, 400)
+                return
+
+            # Validate priority if provided
+            if 'priority' in updates and updates['priority'] not in self.TODO_PRIORITY_ORDER:
+                self._send_json_response({"success": False, "error": f"Invalid priority: {updates['priority']}. Must be one of: critical, high, medium, low"}, 400)
+                return
+
+            # Validate status if provided
+            if 'status' in updates and updates['status'] not in ('todo', 'completed'):
+                self._send_json_response({"success": False, "error": f"Invalid status: {updates['status']}. Must be 'todo' or 'completed'"}, 400)
+                return
+
+            # Validate requiredBy date format if provided
+            if 'requiredBy' in updates and updates['requiredBy']:
+                try:
+                    datetime.strptime(str(updates['requiredBy']), '%Y-%m-%d')
+                except ValueError:
+                    self._send_json_response({"success": False, "error": "Invalid requiredBy date. Must be a valid YYYY-MM-DD date"}, 400)
+                    return
+
+            # Validate text if provided: strip, reject empty, check length
+            if 'text' in updates:
+                updates['text'] = str(updates['text']).strip()
+                if not updates['text']:
+                    self._send_json_response({"success": False, "error": "Text cannot be empty"}, 400)
+                    return
+                if len(updates['text']) > 500:
+                    self._send_json_response({"success": False, "error": "Text exceeds maximum length of 500 characters"}, 400)
+                    return
+
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({"success": False, "error": f"Board not found: {team}"}, 404)
+                return
+
+            import fcntl
+            lock_file = board_file.with_suffix('.json.lock')
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(board_file, 'r') as f:
+                        data = json.load(f)
+
+                    todos = data.get('todos', [])
+                    todo_index = next((i for i, t in enumerate(todos) if t.get('id') == todo_id), -1)
+
+                    if todo_index < 0:
+                        self._send_json_response({"success": False, "error": f"Todo not found: {todo_id}"}, 404)
+                        return
+
+                    todo = todos[todo_index]
+
+                    # Apply only the fields present in updates
+                    allowed_fields = ('text', 'priority', 'requiredBy', 'status')
+                    for field in allowed_fields:
+                        if field in updates:
+                            todo[field] = updates[field]
+
+                    # Handle completedAt based on status transition
+                    new_status = updates.get('status')
+                    if new_status == 'completed' and todo.get('completedAt') is None:
+                        todo['completedAt'] = self._get_timestamp()
+                    elif new_status == 'todo':
+                        todo['completedAt'] = None
+
+                    data['todos'][todo_index] = todo
+                    data['lastUpdated'] = self._get_timestamp()
+
+                    self._atomic_write_json(board_file, data)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            print(f"[LCARS] Todo updated: {todo_id} for team={team}")
+            self._send_json_response({"success": True, "todo": todo, "message": "Todo updated"})
+
+        except Exception as e:
+            self.send_error(500, f"Error updating todo: {e}")
+
+    def handle_delete_todo(self):
+        """DELETE /api/todos - Delete a todo"""
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            team = post_data.get('team')
+            todo_id = post_data.get('id')
+
+            if not team:
+                self._send_json_response({"success": False, "error": "Missing required field: team"}, 400)
+                return
+            if not todo_id:
+                self._send_json_response({"success": False, "error": "Missing required field: id"}, 400)
+                return
+
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({"success": False, "error": f"Board not found: {team}"}, 404)
+                return
+
+            import fcntl
+            lock_file = board_file.with_suffix('.json.lock')
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(board_file, 'r') as f:
+                        data = json.load(f)
+
+                    todos = data.get('todos', [])
+                    original_count = len(todos)
+                    data['todos'] = [t for t in todos if t.get('id') != todo_id]
+
+                    if len(data['todos']) == original_count:
+                        self._send_json_response({"success": False, "error": f"Todo not found: {todo_id}"}, 404)
+                        return
+
+                    data['lastUpdated'] = self._get_timestamp()
+                    self._atomic_write_json(board_file, data)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            print(f"[LCARS] Todo deleted: {todo_id} for team={team}")
+            self._send_json_response({"success": True, "message": "Todo deleted"})
+
+        except Exception as e:
+            self.send_error(500, f"Error deleting todo: {e}")
+
+    # END TODO API HANDLERS
+    # =========================================================================
+
     def serve_calendar_items(self, query_string=''):
         """GET /api/calendar/items - List items and epics with due dates
 
@@ -3584,6 +4130,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if not base_path:
                 self._send_json_response({
                     "exists": False,
+                    "retroExists": False,
                     "itemId": item_id,
                     "error": "Unknown team prefix in item ID"
                 })
@@ -3592,15 +4139,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Check if path exists and search for plan document
             if not base_path.exists():
                 exists = False
+                retro_exists = False
             else:
                 # Support both underscore and dash separators in filenames
                 pattern_underscore = str(base_path / f"{item_id}_*.md")
                 pattern_dash = str(base_path / f"{item_id}-*.md")
-                matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
-                exists = len(matches) > 0
+                all_matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                # Filter: retro files end with _RETROSPECTIVE.md or -RETROSPECTIVE.md
+                retro_matches = [m for m in all_matches if m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD')]
+                plan_matches = [m for m in all_matches if not (m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD'))]
+                exists = len(plan_matches) > 0
+                retro_exists = len(retro_matches) > 0
 
             self._send_json_response({
                 "exists": exists,
+                "retroExists": retro_exists,
                 "itemId": item_id
             })
 
@@ -3608,6 +4161,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR checking plan existence for {item_id}: {e}")
             self._send_json_response({
                 "exists": False,
+                "retroExists": False,
                 "itemId": item_id,
                 "error": str(e)
             }, status=500)
@@ -3639,7 +4193,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 for directory in plan_dir:
                     pattern_underscore = str(directory / f"{item_id}_*.md")
                     pattern_dash = str(directory / f"{item_id}-*.md")
-                    matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                    all_matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                    # Exclude retrospective files
+                    matches = [m for m in all_matches if not (m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD'))]
                     if matches:
                         plan_file = Path(matches[0])
                         break
@@ -3660,7 +4216,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Support both underscore and dash separators in filenames
                 pattern_underscore = str(plan_dir / f"{item_id}_*.md")
                 pattern_dash = str(plan_dir / f"{item_id}-*.md")
-                matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                all_matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                # Exclude retrospective files
+                matches = [m for m in all_matches if not (m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD'))]
 
                 if not matches:
                     self._send_json_response({
@@ -3683,6 +4241,131 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         except Exception as e:
             print(f"[LCARS] ERROR reading plan content for {item_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            self._send_json_response({
+                "error": str(e),
+                "itemId": item_id
+            }, status=500)
+
+    def serve_retro_exists(self, item_id):
+        """GET /api/kanban/<item-id>/retro-exists - Check if retrospective exists for item"""
+        try:
+            import glob
+
+            # Get the base path for this team's plan documents
+            base_path = self._get_plan_doc_path_for_item(item_id)
+
+            if not base_path:
+                self._send_json_response({
+                    "exists": False,
+                    "itemId": item_id,
+                    "error": "Unknown team prefix in item ID"
+                })
+                return
+
+            # Check if path exists and search for retrospective document
+            if not base_path.exists():
+                exists = False
+            else:
+                # Support both underscore and dash separators in filenames
+                pattern_underscore = str(base_path / f"{item_id}_*.md")
+                pattern_dash = str(base_path / f"{item_id}-*.md")
+                all_matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                # Only include retrospective files
+                retro_matches = [m for m in all_matches if m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD')]
+                exists = len(retro_matches) > 0
+
+            self._send_json_response({
+                "exists": exists,
+                "itemId": item_id
+            })
+
+        except Exception as e:
+            print(f"[LCARS] ERROR checking retro existence for {item_id}: {e}")
+            self._send_json_response({
+                "exists": False,
+                "itemId": item_id,
+                "error": str(e)
+            }, status=500)
+
+    def serve_retro_content(self, item_id):
+        """GET /api/kanban/<item-id>/retro-content - Read and return retrospective content"""
+        try:
+            import glob
+
+            # Extract team from item ID
+            team = self._extract_team_from_item_id(item_id)
+            if not team:
+                self._send_json_response({
+                    "error": f"Unknown team prefix in item ID: {item_id}"
+                }, status=404)
+                return
+
+            # Get plan document directory for team (retros live alongside plan docs)
+            plan_dir = self._get_plan_docs_dir_for_team(team)
+
+            if not plan_dir:
+                self._send_json_response({
+                    "error": f"No plan document directory configured for team: {team}"
+                }, status=404)
+                return
+
+            # Handle freelance team with multiple possible directories
+            if isinstance(plan_dir, list):
+                # Search all freelance directories (support both _ and - separators)
+                retro_file = None
+                for directory in plan_dir:
+                    pattern_underscore = str(directory / f"{item_id}_*.md")
+                    pattern_dash = str(directory / f"{item_id}-*.md")
+                    all_matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                    # Only include retrospective files
+                    retro_matches = [m for m in all_matches if m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD')]
+                    if retro_matches:
+                        retro_file = Path(retro_matches[0])
+                        break
+                if not retro_file:
+                    # No matches found in any directory
+                    self._send_json_response({
+                        "error": f"No retrospective document found for item: {item_id}"
+                    }, status=404)
+                    return
+            else:
+                # Standard team with single directory
+                if not plan_dir.exists():
+                    self._send_json_response({
+                        "error": f"Plan document directory does not exist: {plan_dir}"
+                    }, status=404)
+                    return
+
+                # Support both underscore and dash separators in filenames
+                pattern_underscore = str(plan_dir / f"{item_id}_*.md")
+                pattern_dash = str(plan_dir / f"{item_id}-*.md")
+                all_matches = glob.glob(pattern_underscore) + glob.glob(pattern_dash)
+                # Only include retrospective files
+                retro_matches = [m for m in all_matches if m.upper().endswith('_RETROSPECTIVE.MD') or m.upper().endswith('-RETROSPECTIVE.MD')]
+
+                if not retro_matches:
+                    self._send_json_response({
+                        "error": f"No retrospective document found for item: {item_id}"
+                    }, status=404)
+                    return
+
+                retro_file = Path(retro_matches[0])
+
+            # Read the retrospective document
+            with open(retro_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Return the content
+            self._send_json_response({
+                "content": content,
+                "itemId": item_id,
+                "filename": retro_file.name
+            })
+
+        except Exception as e:
+            print(f"[LCARS] ERROR reading retro content for {item_id}: {e}")
             import traceback
             traceback.print_exc()
             self._send_json_response({
@@ -4433,6 +5116,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/epics/'):
             epic_id = path.replace('/api/epics/', '')
             self.serve_epic_detail(epic_id)
+        # Todo API endpoints
+        elif path == '/api/todos':
+            self.serve_todos_list(parsed.query)
         # Kanban plan document API
         elif path.startswith('/api/kanban/') and path.endswith('/plan-exists'):
             item_id = path.replace('/api/kanban/', '').replace('/plan-exists', '')
@@ -4440,6 +5126,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/kanban/') and path.endswith('/plan-content'):
             item_id = path.replace('/api/kanban/', '').replace('/plan-content', '')
             self.serve_plan_content(item_id)
+        elif path.startswith('/api/kanban/') and path.endswith('/retro-exists'):
+            item_id = path.replace('/api/kanban/', '').replace('/retro-exists', '')
+            self.serve_retro_exists(item_id)
+        elif path.startswith('/api/kanban/') and path.endswith('/retro-content'):
+            item_id = path.replace('/api/kanban/', '').replace('/retro-content', '')
+            self.serve_retro_content(item_id)
         # Calendar sync API endpoints
         elif path == '/api/calendar/config':
             self.serve_calendar_config()
@@ -4465,6 +5157,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Agent Panel API endpoint
         elif path == '/api/agent-panel':
             self.serve_agent_panel_data()
+        # Knowledge Base analytics endpoint
+        elif path == '/api/knowledge-stats':
+            self.serve_knowledge_stats()
         # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
         # This allows the router to work from ANY port - startup scripts write
         # the target team to the static file, and all servers serve the same file.
@@ -4561,6 +5256,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'dns': 'dns-framework',
             'legal-coparenting': 'legal',
             'medical-general': 'medical',
+            'finance-personal': 'finance',
             'freelance-doublenode-workstats': 'freelance',
             'freelance-doublenode-starwords': 'freelance',
             'freelance-doublenode-appplanning': 'freelance',
@@ -4572,7 +5268,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         team_dir = team_dir_map.get(team, team)
 
         # Build the actual file path
-        dev_team_dir = Path.home() / "dev-team"
+        dev_team_dir = Path.home() / "aiteamforge"
         if img_type == 'logo':
             # Logos: {team}/terminals/logos/{team}_{terminal}_logo.png
             base_dir = dev_team_dir / team_dir / "terminals" / "logos"
@@ -4684,25 +5380,156 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
 
+    def handle_terminal_activate(self):
+        """POST /api/terminal/activate - Switch tmux window and iTerm2 tab
+
+        Accepts JSON body: {"terminal": "chancellor", "window": 1}
+        Executes tmux select-window and switches the iTerm2 tab containing that session.
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self._send_json_response({"error": "Missing request body"}, status=400)
+                return
+
+            post_data = json.loads(self.rfile.read(content_length))
+
+            terminal = post_data.get('terminal')
+            window = post_data.get('window')
+
+            # Validate required parameters
+            if terminal is None:
+                self._send_json_response({"error": "Missing required parameter: terminal"}, status=400)
+                return
+            if window is None:
+                self._send_json_response({"error": "Missing required parameter: window"}, status=400)
+                return
+
+            # Sanitize terminal name — only allow alphanumeric, hyphens, underscores
+            # This prevents command injection through the tmux target
+            if not re.match(r'^[a-zA-Z0-9_-]+$', str(terminal)):
+                self._send_json_response({"error": "Invalid terminal name: only alphanumeric, hyphens, and underscores allowed"}, status=400)
+                return
+
+            # Validate window is an integer
+            try:
+                window_index = int(window)
+            except (TypeError, ValueError):
+                self._send_json_response({"error": "Invalid window index: must be an integer"}, status=400)
+                return
+
+            terminal = str(terminal)
+
+            # Build the full tmux session name: {team}-{terminal}
+            # Each team uses its own tmux socket (-L {team}) and prefixed session names
+            tmux_session = f"{LCARS_TEAM}-{terminal}"
+
+            # Step 1: Switch the tmux window in the target session
+            tmux_result = subprocess.run(
+                ["tmux", "-L", LCARS_TEAM, "select-window", "-t", f"{tmux_session}:{window_index}"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if tmux_result.returncode != 0:
+                error_msg = tmux_result.stderr.strip() or f"tmux select-window failed with code {tmux_result.returncode}"
+                print(f"[LCARS] ERROR activating terminal window: {error_msg}")
+                self._send_json_response({"error": error_msg}, status=500)
+                return
+
+            print(f"[LCARS] tmux -L {LCARS_TEAM} select-window {tmux_session}:{window_index} — OK")
+
+            # Step 2: Switch the iTerm2 tab that contains this tmux session
+            # We search all iTerm2 sessions for one whose name contains the session name
+            applescript = f'''
+tell application "iTerm2"
+    activate
+    set foundTab to false
+    repeat with aWindow in windows
+        repeat with aTab in tabs of aWindow
+            repeat with aSession in sessions of aTab
+                if name of aSession contains "{tmux_session}" then
+                    select aTab
+                    set index of aWindow to 1
+                    set foundTab to true
+                    exit repeat
+                end if
+            end repeat
+            if foundTab then exit repeat
+        end repeat
+        if foundTab then exit repeat
+    end repeat
+end tell
+'''
+
+            iterm_result = subprocess.run(
+                ["osascript", "-e", applescript],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+
+            if iterm_result.returncode != 0:
+                # iTerm2 switch failure is non-fatal — tmux window was already switched
+                error_msg = iterm_result.stderr.strip() or f"osascript failed with code {iterm_result.returncode}"
+                print(f"[LCARS] WARNING: iTerm2 tab switch failed (non-fatal): {error_msg}")
+                self._send_json_response({
+                    "success": True,
+                    "terminal": terminal,
+                    "window": window_index,
+                    "iterm_warning": error_msg
+                })
+                return
+
+            print(f"[LCARS] iTerm2 tab switched to session containing '{tmux_session}'")
+
+            self._send_json_response({
+                "success": True,
+                "terminal": terminal,
+                "window": window_index
+            })
+
+        except json.JSONDecodeError as e:
+            self._send_json_response({"error": f"Invalid JSON: {str(e)}"}, status=400)
+        except Exception as e:
+            print(f"[LCARS] ERROR in handle_terminal_activate: {e}")
+            traceback.print_exc()
+            self._send_json_response({"error": str(e)}, status=500)
+
     def serve_agent_panel_data(self):
         """Serve agent panel data from temp file written by banner scripts.
 
         Supports per-session data via ?session=X query parameter.
-        Files are written by display_agent_avatar as /tmp/lcars-agent-{session_code}.json
+        Files are written by display_agent_avatar as <kanban/tmp>/lcars-agent-{session_code}.json
         where session_code matches the tmux session name (e.g., 'academy-chancellor').
+        The tmp directory is team-specific (LCARS_TMP_DIR), resolved from SESSION_NAME at startup.
         """
         parsed = urlparse(self.path)
         query = parse_qs(parsed.query)
         session = query.get('session', [None])[0]
 
-        # Use /tmp directly - banner scripts write to /tmp/lcars-agent-*.json
-        # (tempfile.gettempdir() returns /var/folders/... on macOS, which is wrong)
-        tmp_dir = Path('/tmp')
+        # Use team-specific kanban/tmp/ directory — banner scripts write to this location.
+        # LCARS_TMP_DIR is resolved from SESSION_NAME at startup via get_lcars_tmp_dir().
+        tmp_dir = LCARS_TMP_DIR
         agent_file = None
 
         if session:
-            # Per-session file: /tmp/lcars-agent-{session_code}.json
-            agent_file = tmp_dir / f"lcars-agent-{session}.json"
+            # Check for per-window file first (supports multi-agent terminals)
+            # The active window index is written by a tmux hook to <kanban/tmp>/lcars-active-window-{session}
+            active_window_file = tmp_dir / f"lcars-active-window-{session}"
+            if active_window_file.exists():
+                try:
+                    win_idx = active_window_file.read_text().strip()
+                    if win_idx:
+                        win_file = tmp_dir / f"lcars-agent-{session}-w{win_idx}.json"
+                        if win_file.exists():
+                            agent_file = win_file
+                except Exception:
+                    pass
+            # Fallback to session-level file
+            if agent_file is None:
+                agent_file = tmp_dir / f"lcars-agent-{session}.json"
         else:
             # Fallback: find most recent agent file for this team
             candidates = sorted(
@@ -4717,6 +5544,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             try:
                 with open(agent_file, 'r') as f:
                     data = json.load(f)
+                # Enrich with AMB badges if agent has a handle
+                amb_handle = data.get("amb_handle", "")
+                if amb_handle:
+                    data["badges"] = _fetch_amb_badges(amb_handle)
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -4733,6 +5564,166 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Cache-Control', 'no-cache')
         self.end_headers()
         self.wfile.write(json.dumps({"status": "waiting"}).encode())
+
+    def serve_knowledge_stats(self):
+        """Serve knowledge base statistics.
+
+        Scans two knowledge stores:
+          1. Agent/team knowledge entries at ~/.claude/knowledge/<agent>/
+             (retrospective lessons, patterns, and INDEX.md files written by agents)
+          2. Project auto-memory files at ~/.claude/projects/<project>/memory/
+             (per-project MEMORY.md files written automatically by Claude)
+
+        Returns aggregated statistics suitable for the HOME carousel widget.
+        """
+        try:
+            self._serve_knowledge_stats_inner()
+        except Exception as exc:
+            import traceback
+            print(f"[LCARS] /api/knowledge-stats error: {exc}\n{traceback.format_exc()}")
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(exc)}).encode())
+
+    def _serve_knowledge_stats_inner(self):
+        """Inner implementation for serve_knowledge_stats — called inside try/except."""
+        from datetime import datetime, timezone
+
+        kb_base = Path.home() / ".claude" / "knowledge"
+        projects_base = Path.home() / ".claude" / "projects"
+
+        # ------------------------------------------------------------------ #
+        # 1. Agent / team knowledge entries                                   #
+        # ------------------------------------------------------------------ #
+        agent_stats = {}
+        total_kb_files = 0
+        total_kb_size_bytes = 0
+        kb_last_modified = 0.0
+        most_active_agent = None
+        most_active_count = 0
+
+        if kb_base.exists():
+            for agent_dir in sorted(kb_base.iterdir()):
+                if not agent_dir.is_dir():
+                    continue
+                agent = agent_dir.name
+                files = [f for f in agent_dir.iterdir() if f.is_file()]
+                file_count = len(files)
+                if file_count == 0:
+                    continue
+
+                # Cache stat() results to avoid double syscalls per file
+                file_stats = [(f, f.stat()) for f in files]
+                size_bytes = sum(s.st_size for _, s in file_stats)
+                mtime = max(s.st_mtime for _, s in file_stats)
+                # Non-index entries (knowledge entries proper)
+                entry_count = sum(1 for f, _ in file_stats if f.name != "INDEX.md")
+
+                agent_stats[agent] = {
+                    "fileCount": file_count,
+                    "entryCount": entry_count,
+                    "sizeBytes": size_bytes,
+                    "lastModified": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+
+                total_kb_files += file_count
+                total_kb_size_bytes += size_bytes
+                if mtime > kb_last_modified:
+                    kb_last_modified = mtime
+
+                # Only track most active for individual agents (not team-* dirs)
+                if not agent.startswith("team-") and entry_count > most_active_count:
+                    most_active_count = entry_count
+                    most_active_agent = agent
+
+        # Split agents vs teams
+        team_stats = {k: v for k, v in agent_stats.items() if k.startswith("team-")}
+        individual_stats = {k: v for k, v in agent_stats.items() if not k.startswith("team-")}
+
+        total_entry_count = sum(v["entryCount"] for v in agent_stats.values())
+
+        # ------------------------------------------------------------------ #
+        # 2. Project memory files (auto-memory)                               #
+        # ------------------------------------------------------------------ #
+        memory_projects = []
+        total_memory_files = 0
+        total_projects_scanned = 0
+        memory_last_modified = 0.0
+
+        if projects_base.exists():
+            for proj_dir in projects_base.iterdir():
+                if not proj_dir.is_dir():
+                    continue
+                total_projects_scanned += 1
+                mem_dir = proj_dir / "memory"
+                if not mem_dir.exists():
+                    continue
+                mem_files = [f for f in mem_dir.iterdir() if f.is_file()]
+                if not mem_files:
+                    continue
+                file_count = len(mem_files)
+                # Cache stat() results to avoid double syscalls per file
+                mem_stats = [f.stat() for f in mem_files]
+                size_bytes = sum(s.st_size for s in mem_stats)
+                mtime = max(s.st_mtime for s in mem_stats)
+                total_memory_files += file_count
+                if mtime > memory_last_modified:
+                    memory_last_modified = mtime
+                # Convert dir name back to readable path (hyphens to slashes)
+                readable = proj_dir.name.replace("-", "/").lstrip("/")
+                memory_projects.append({
+                    "project": readable,
+                    "fileCount": file_count,
+                    "sizeBytes": size_bytes,
+                    "lastModified": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                })
+
+        # Sort memory projects by most recently modified
+        memory_projects.sort(key=lambda p: p["lastModified"], reverse=True)
+
+        # ------------------------------------------------------------------ #
+        # 3. Build response                                                   #
+        # ------------------------------------------------------------------ #
+        overall_last_modified = max(kb_last_modified, memory_last_modified)
+
+        result = {
+            "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "team": LCARS_TEAM,
+
+            # High-level summary for carousel widget
+            "summary": {
+                "totalAgents": len(individual_stats),
+                "totalTeams": len(team_stats),
+                "totalKnowledgeFiles": total_kb_files,
+                "totalKnowledgeEntries": total_entry_count,
+                "totalKnowledgeSizeBytes": total_kb_size_bytes,
+                "totalMemoryFiles": total_memory_files,
+                "totalProjectsScanned": total_projects_scanned,
+                "projectsWithMemory": len(memory_projects),
+                "mostActiveAgent": most_active_agent,
+                "mostActiveEntryCount": most_active_count,
+                "lastUpdated": datetime.fromtimestamp(overall_last_modified, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if overall_last_modified else None,
+            },
+
+            # Per-agent breakdown (individual agents)
+            "agents": individual_stats,
+
+            # Per-team knowledge breakdown
+            "teams": team_stats,
+
+            # Projects with auto-memory
+            "memoryProjects": memory_projects,
+        }
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.write(json.dumps(result, indent=2).encode())
 
     def serve_integrations_list(self):
         """Serve list of configured integrations"""
@@ -4914,6 +5905,345 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Expires', '0')
         self.end_headers()
         self.wfile.write(js_content.encode())
+
+    def _get_team_agents(self):
+        """Get the set of knowledge directory names belonging to the current team.
+
+        Reads the team's board file to extract terminal avatar fields, then
+        adds the team-level knowledge dir (e.g. 'team-academy').  Returns a
+        set of directory names to include in knowledge stats, or None to
+        fall back to unfiltered scanning.
+        """
+        board_file = get_board_file(LCARS_TEAM)
+        if not board_file.exists():
+            return None
+        try:
+            with open(board_file, 'r') as f:
+                board = json.load(f)
+            terminals = board.get('terminals', {})
+            agents = set()
+            for _term_name, term_info in terminals.items():
+                avatar = term_info.get('avatar')
+                if avatar:
+                    agents.add(avatar)
+            # Include the team-level knowledge dir (e.g. team-academy)
+            agents.add(f"team-{LCARS_TEAM}")
+            return agents if agents else None
+        except Exception:
+            return None
+
+    def _get_team_project_prefixes(self):
+        """Get path prefixes for project memory dirs belonging to this team.
+
+        Derives from TEAM_KANBAN_DIRS — the kanban dir's parent is the repo
+        root, which maps to the project memory directory name format
+        (path with '/' replaced by '-').
+        """
+        kanban_dir = TEAM_KANBAN_DIRS.get(LCARS_TEAM)
+        if not kanban_dir:
+            return None
+        # The repo root is the kanban dir's parent
+        repo_root = str(kanban_dir.parent)
+        # Project memory dirs use format: -Users-darrenehlers-aiteamforge
+        prefix = repo_root.replace("/", "-")
+        return [prefix]
+
+    def serve_knowledge_stats(self):
+        """Serve knowledge base statistics filtered to the current team.
+
+        Scans two knowledge stores:
+          1. Agent/team knowledge entries at ~/.claude/knowledge/<agent>/
+             (filtered to agents on the current team's board)
+          2. Project auto-memory files at ~/.claude/projects/<project>/memory/
+             (filtered to projects whose paths match the team's repository)
+
+        Also computes retrospective adoption metrics by cross-referencing
+        completed kanban items against knowledge filenames.
+
+        Returns aggregated statistics suitable for the HOME carousel widget.
+        """
+        try:
+            self._serve_knowledge_stats_inner()
+        except Exception as exc:
+            import traceback
+            print(f"[LCARS] /api/knowledge-stats error: {exc}\n{traceback.format_exc()}")
+            self.send_response(500)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(exc)}).encode())
+
+    def _compute_adoption_metrics(self, kb_base):
+        """Compute retrospective adoption metrics scoped to the current team.
+
+        Returns a dict with:
+          - teams: list of per-team dicts (team, completed_items, items_with_retros,
+                   coverage_pct, knowledge_entries)
+          - overall_coverage_pct: float
+          - total_completed: int
+          - total_with_retros: int
+
+        Strategy:
+          1. Load the current team's board JSON and count items with status
+             "completed" or "done".
+          2. Scan ~/.claude/knowledge/ for files whose names contain a matching
+             item ID (e.g. xaca-0098 in xaca-0098-*.md or any content reference).
+          3. Coverage % = items_with_retros / completed_items * 100.
+        """
+        team_results = []
+        total_completed = 0
+        total_with_retros = 0
+
+        # Build a flat list of all knowledge file names (lowercased) for fast lookup
+        kb_filenames = []
+        if kb_base.exists():
+            for agent_dir in kb_base.iterdir():
+                if agent_dir.is_dir():
+                    for f in agent_dir.iterdir():
+                        if f.is_file():
+                            kb_filenames.append(f.name.lower())
+
+        # Scope to current team only — avoids cross-team data leakage in the UI
+        scoped_teams = {LCARS_TEAM: TEAM_KANBAN_DIRS[LCARS_TEAM]} if LCARS_TEAM in TEAM_KANBAN_DIRS else TEAM_KANBAN_DIRS
+        for team_name, kanban_dir in scoped_teams.items():
+            board_file = kanban_dir / f"{team_name}-board.json"
+            if not board_file.exists():
+                continue
+
+            try:
+                with open(board_file, 'r', encoding='utf-8') as fh:
+                    board = json.load(fh)
+            except Exception:
+                continue
+
+            series_prefix = board.get("series", "").lower()
+            items = board.get("backlog", [])
+
+            # Count completed items (top-level, not subitems)
+            completed_ids = []
+            for item in items:
+                if isinstance(item, dict) and item.get("status") in ("completed", "done"):
+                    item_id = item.get("id", "")
+                    if item_id:
+                        completed_ids.append(item_id.lower())
+
+            if not completed_ids:
+                continue
+
+            # Count which completed items have a matching retrospective
+            # Check two locations:
+            #   1. kanban/ dir for ITEM_ID_*_RETROSPECTIVE.md (canonical location)
+            #   2. knowledge/ dirs for any file containing the item ID
+            items_with_retros = 0
+            for item_id in completed_ids:
+                found = False
+                # Primary: check kanban dir for _RETROSPECTIVE.md files
+                item_upper = item_id.upper()
+                for f in kanban_dir.iterdir():
+                    if f.is_file() and f.name.startswith(item_upper + "_") and f.name.endswith("_RETROSPECTIVE.md"):
+                        found = True
+                        break
+                # Fallback: check knowledge filenames
+                if not found:
+                    for fname in kb_filenames:
+                        if item_id in fname:
+                            found = True
+                            break
+                if found:
+                    items_with_retros += 1
+
+            completed_count = len(completed_ids)
+            coverage_pct = round(items_with_retros / completed_count * 100, 1) if completed_count > 0 else 0.0
+
+            # Count knowledge entries attributed to this team's series
+            # (any kb file whose name starts with the series prefix, e.g. "xaca-")
+            kb_entry_count = 0
+            if series_prefix:
+                for fname in kb_filenames:
+                    if fname.startswith(series_prefix) and fname != "index.md":
+                        kb_entry_count += 1
+
+            team_results.append({
+                "team": team_name,
+                "completed_items": completed_count,
+                "items_with_retros": items_with_retros,
+                "coverage_pct": coverage_pct,
+                "knowledge_entries": kb_entry_count,
+            })
+
+            total_completed += completed_count
+            total_with_retros += items_with_retros
+
+        # Sort by coverage_pct descending, then by team name
+        team_results.sort(key=lambda t: (-t["coverage_pct"], t["team"]))
+
+        overall_pct = round(total_with_retros / total_completed * 100, 1) if total_completed > 0 else 0.0
+
+        return {
+            "teams": team_results,
+            "overall_coverage_pct": overall_pct,
+            "total_completed": total_completed,
+            "total_with_retros": total_with_retros,
+        }
+
+    def _serve_knowledge_stats_inner(self):
+        """Inner implementation for serve_knowledge_stats — called inside try/except."""
+        from datetime import datetime, timezone
+
+        kb_base = Path.home() / ".claude" / "knowledge"
+        projects_base = Path.home() / ".claude" / "projects"
+
+        # ------------------------------------------------------------------ #
+        # 0. Determine team-scoped filter sets                                #
+        # ------------------------------------------------------------------ #
+        team_agents = self._get_team_agents()
+        team_project_prefixes = self._get_team_project_prefixes()
+
+        # ------------------------------------------------------------------ #
+        # 1. Agent / team knowledge entries                                   #
+        # ------------------------------------------------------------------ #
+        agent_stats = {}
+        total_kb_files = 0
+        total_kb_size_bytes = 0
+        kb_last_modified = 0.0
+        most_active_agent = None
+        most_active_count = 0
+
+        if kb_base.exists():
+            for agent_dir in sorted(kb_base.iterdir()):
+                if not agent_dir.is_dir():
+                    continue
+                agent = agent_dir.name
+                # Filter to current team's agents only
+                if team_agents is not None and agent not in team_agents:
+                    continue
+                files = [f for f in agent_dir.iterdir() if f.is_file()]
+                file_count = len(files)
+                if file_count == 0:
+                    continue
+
+                # Cache stat() results to avoid double syscalls per file
+                file_stats = [(f, f.stat()) for f in files]
+                size_bytes = sum(s.st_size for _, s in file_stats)
+                mtime = max(s.st_mtime for _, s in file_stats)
+                # Non-index entries (knowledge entries proper)
+                entry_count = sum(1 for f, _ in file_stats if f.name != "INDEX.md")
+
+                agent_stats[agent] = {
+                    "fileCount": file_count,
+                    "entryCount": entry_count,
+                    "sizeBytes": size_bytes,
+                    "lastModified": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                }
+
+                total_kb_files += file_count
+                total_kb_size_bytes += size_bytes
+                if mtime > kb_last_modified:
+                    kb_last_modified = mtime
+
+                # Only track most active for individual agents (not team-* dirs)
+                if not agent.startswith("team-") and entry_count > most_active_count:
+                    most_active_count = entry_count
+                    most_active_agent = agent
+
+        # Split agents vs teams
+        team_stats = {k: v for k, v in agent_stats.items() if k.startswith("team-")}
+        individual_stats = {k: v for k, v in agent_stats.items() if not k.startswith("team-")}
+
+        total_entry_count = sum(v["entryCount"] for v in agent_stats.values())
+
+        # ------------------------------------------------------------------ #
+        # 2. Project memory files (auto-memory)                               #
+        # ------------------------------------------------------------------ #
+        memory_projects = []
+        total_memory_files = 0
+        total_projects_scanned = 0
+        memory_last_modified = 0.0
+
+        if projects_base.exists():
+            for proj_dir in projects_base.iterdir():
+                if not proj_dir.is_dir():
+                    continue
+                # Filter to projects matching this team's repo path
+                if team_project_prefixes is not None:
+                    if not any(proj_dir.name.startswith(pfx) for pfx in team_project_prefixes):
+                        continue
+                total_projects_scanned += 1
+                mem_dir = proj_dir / "memory"
+                if not mem_dir.exists():
+                    continue
+                mem_files = [f for f in mem_dir.iterdir() if f.is_file()]
+                if not mem_files:
+                    continue
+                file_count = len(mem_files)
+                # Cache stat() results to avoid double syscalls per file
+                mem_stats = [f.stat() for f in mem_files]
+                size_bytes = sum(s.st_size for s in mem_stats)
+                mtime = max(s.st_mtime for s in mem_stats)
+                total_memory_files += file_count
+                if mtime > memory_last_modified:
+                    memory_last_modified = mtime
+                # Convert dir name back to readable path (hyphens to slashes)
+                readable = proj_dir.name.replace("-", "/").lstrip("/")
+                memory_projects.append({
+                    "project": readable,
+                    "fileCount": file_count,
+                    "sizeBytes": size_bytes,
+                    "lastModified": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                })
+
+        # Sort memory projects by most recently modified
+        memory_projects.sort(key=lambda p: p["lastModified"], reverse=True)
+
+        # ------------------------------------------------------------------ #
+        # 3. Adoption metrics (retrospective coverage per team)               #
+        # ------------------------------------------------------------------ #
+        adoption = self._compute_adoption_metrics(kb_base)
+
+        # ------------------------------------------------------------------ #
+        # 4. Build response                                                   #
+        # ------------------------------------------------------------------ #
+        overall_last_modified = max(kb_last_modified, memory_last_modified)
+
+        result = {
+            "generatedAt": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "team": LCARS_TEAM,
+
+            # High-level summary for carousel widget
+            "summary": {
+                "totalAgents": len(individual_stats),
+                "totalTeams": len(team_stats),
+                "totalKnowledgeFiles": total_kb_files,
+                "totalKnowledgeEntries": total_entry_count,
+                "totalKnowledgeSizeBytes": total_kb_size_bytes,
+                "totalMemoryFiles": total_memory_files,
+                "totalProjectsScanned": total_projects_scanned,
+                "projectsWithMemory": len(memory_projects),
+                "mostActiveAgent": most_active_agent,
+                "mostActiveEntryCount": most_active_count,
+                "lastUpdated": datetime.fromtimestamp(overall_last_modified, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") if overall_last_modified else None,
+            },
+
+            # Per-agent breakdown (individual agents)
+            "agents": individual_stats,
+
+            # Per-team knowledge breakdown
+            "teams": team_stats,
+
+            # Projects with auto-memory
+            "memoryProjects": memory_projects,
+
+            # Retrospective adoption metrics
+            "adoption": adoption,
+        }
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Cache-Control', 'no-cache')
+        self.end_headers()
+        self.wfile.write(json.dumps(result, indent=2).encode())
 
     def log_message(self, format, *args):
         """Custom log formatting"""

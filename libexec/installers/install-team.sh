@@ -1,9 +1,9 @@
 #!/bin/bash
 # Team Installer Module
 # Installs a specific team's environment, tools, and configuration
-# Usage: install-team.sh <team-id> [--dev-team-dir <path>]
+# Usage: install-team.sh <team-id> [--install-dir <path>]
 
-set -e
+set -euo pipefail
 
 # ============================================================================
 # CONFIGURATION
@@ -14,7 +14,7 @@ HOMEBREW_TAP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEAMS_DIR="$HOMEBREW_TAP_ROOT/share/teams"
 
 # Default installation location (can be overridden)
-DEV_TEAM_DIR="${DEV_TEAM_DIR:-$HOME/dev-team}"
+AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
 # ============================================================================
 # ARGUMENT PARSING
@@ -23,8 +23,8 @@ DEV_TEAM_DIR="${DEV_TEAM_DIR:-$HOME/dev-team}"
 TEAM_ID=""
 while [[ $# -gt 0 ]]; do
     case $1 in
-        --dev-team-dir)
-            DEV_TEAM_DIR="$2"
+        --install-dir|--aiteamforge-dir)
+            AITEAMFORGE_DIR="$2"
             shift 2
             ;;
         *)
@@ -40,7 +40,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TEAM_ID" ]]; then
-    echo "Usage: install-team.sh <team-id> [--dev-team-dir <path>]"
+    echo "Usage: install-team.sh <team-id> [--install-dir <path>]"
     echo ""
     echo "Available teams:"
     for conf in "$TEAMS_DIR"/*.conf; do
@@ -67,13 +67,72 @@ if [[ ! -f "$TEAM_CONF" ]]; then
     exit 1
 fi
 
+# Read conf values safely in a subshell so the conf file cannot modify the
+# current shell's PATH, functions, or other sensitive state.  The subshell
+# sources the file and then serializes only the known scalar and array
+# variables back to stdout as eval-safe quoted assignments.  The parent shell
+# evals that output to import the values.
+_read_conf() {
+    local conf_file="$1"
+    (
+        # Source in a clean subshell — side effects are contained here.
+        # shellcheck disable=SC1090
+        source "$conf_file"
+
+        # Emit scalar variables as KEY='value' lines.
+        printf 'TEAM_NAME=%q\n'         "${TEAM_NAME:-}"
+        printf 'TEAM_DESCRIPTION=%q\n'  "${TEAM_DESCRIPTION:-}"
+        printf 'TEAM_CATEGORY=%q\n'     "${TEAM_CATEGORY:-}"
+        printf 'TEAM_COLOR=%q\n'        "${TEAM_COLOR:-#5585CC}"
+        printf 'TEAM_LCARS_PORT=%q\n'   "${TEAM_LCARS_PORT:-8200}"
+        printf 'TEAM_TMUX_SOCKET=%q\n'  "${TEAM_TMUX_SOCKET:-$TEAM_ID}"
+        printf 'TEAM_WORKING_DIR=%q\n'  "${TEAM_WORKING_DIR:-}"
+        printf 'TEAM_THEME=%q\n'        "${TEAM_THEME:-}"
+        printf 'TEAM_SHIP=%q\n'         "${TEAM_SHIP:-}"
+        printf 'TEAM_STARTUP_SCRIPT=%q\n'  "${TEAM_STARTUP_SCRIPT:-${TEAM_ID}-startup.sh}"
+        printf 'TEAM_SHUTDOWN_SCRIPT=%q\n' "${TEAM_SHUTDOWN_SCRIPT:-${TEAM_ID}-shutdown.sh}"
+        printf 'TEAM_HAS_PROJECTS=%q\n'    "${TEAM_HAS_PROJECTS:-false}"
+        printf 'TEAM_REQUIRES_CLIENT_ID=%q\n' "${TEAM_REQUIRES_CLIENT_ID:-false}"
+        printf 'TEAM_ORGANIZATION=%q\n' "${TEAM_ORGANIZATION:-}"
+
+        # Emit arrays as bash array declarations so they survive the eval.
+        printf 'TEAM_AGENTS=('
+        printf '%q ' "${TEAM_AGENTS[@]+"${TEAM_AGENTS[@]}"}"
+        printf ')\n'
+
+        printf 'TEAM_BREW_DEPS=('
+        printf '%q ' "${TEAM_BREW_DEPS[@]+"${TEAM_BREW_DEPS[@]}"}"
+        printf ')\n'
+
+        printf 'TEAM_BREW_CASK_DEPS=('
+        printf '%q ' "${TEAM_BREW_CASK_DEPS[@]+"${TEAM_BREW_CASK_DEPS[@]}"}"
+        printf ')\n'
+
+        # Emit per-agent window name variables (AGENT_WINDOWS_<agent>)
+        for _a in "${TEAM_AGENTS[@]+"${TEAM_AGENTS[@]}"}"; do
+            local _ak="${_a//-/_}"
+            local _wvar="AGENT_WINDOWS_${_ak}"
+            local _wval="${!_wvar:-}"
+            if [[ -n "$_wval" ]]; then
+                printf 'AGENT_WINDOWS_%s=%q\n' "$_ak" "$_wval"
+            fi
+        done
+    )
+}
+
+# Import conf values into the current shell via eval.
+eval "$(_read_conf "$TEAM_CONF")"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Installing Team: $TEAM_ID"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
-# Source the team configuration
-source "$TEAM_CONF"
+# Save the base working dir from conf (before env override)
+# For project-based teams, this is the parent dir (e.g., ~/medical)
+# while TEAM_WORKING_DIR from env includes the project (e.g., ~/medical/ehlers.darren)
+TEAM_BASE_WORKING_DIR="${TEAM_WORKING_DIR}"
+TEAM_BASE_WORKING_DIR="${TEAM_BASE_WORKING_DIR/\$HOME/$HOME}"
 
 echo "Team Name: $TEAM_NAME"
 echo "Category: $TEAM_CATEGORY"
@@ -88,6 +147,7 @@ echo ""
 if [[ ${#TEAM_BREW_DEPS[@]} -gt 0 ]]; then
     echo "📦 Installing Homebrew dependencies..."
     for dep in "${TEAM_BREW_DEPS[@]}"; do
+        [[ -z "$dep" ]] && continue
         if brew list "$dep" &>/dev/null; then
             echo "  ✓ $dep (already installed)"
         else
@@ -103,6 +163,7 @@ fi
 if [[ ${#TEAM_BREW_CASK_DEPS[@]} -gt 0 ]]; then
     echo "📦 Installing Homebrew cask dependencies..."
     for dep in "${TEAM_BREW_CASK_DEPS[@]}"; do
+        [[ -z "$dep" ]] && continue
         if brew list --cask "$dep" &>/dev/null; then
             echo "  ✓ $dep (already installed)"
         else
@@ -121,13 +182,14 @@ fi
 
 echo "📁 Creating team directory structure..."
 
-TEAM_DIR="$DEV_TEAM_DIR/$TEAM_ID"
+TEAM_DIR="$AITEAMFORGE_DIR/$TEAM_ID"
 mkdir -p "$TEAM_DIR"
 mkdir -p "$TEAM_DIR/personas"
 mkdir -p "$TEAM_DIR/personas/agents"
 mkdir -p "$TEAM_DIR/personas/avatars"
 mkdir -p "$TEAM_DIR/personas/docs"
 mkdir -p "$TEAM_DIR/scripts"
+mkdir -p "$TEAM_DIR/scripts/prompts"
 mkdir -p "$TEAM_DIR/terminals"
 
 echo "  ✓ $TEAM_DIR"
@@ -142,7 +204,32 @@ PERSONAS_TEMPLATE_DIR="$HOMEBREW_TAP_ROOT/share/personas/$TEAM_ID"
 if [[ -d "$PERSONAS_TEMPLATE_DIR" ]]; then
     echo "👤 Installing team personas..."
     cp -R "$PERSONAS_TEMPLATE_DIR"/* "$TEAM_DIR/personas/" || true
-    echo "  ✓ Personas copied"
+    echo "  ✓ Personas copied to $TEAM_DIR/personas/"
+    # Also copy to the team working directory if it differs from TEAM_DIR
+    if [[ -n "${TEAM_WORKING_DIR:-}" ]] && [[ "${TEAM_WORKING_DIR/\$HOME/$HOME}" != "$TEAM_DIR" ]]; then
+        _WORKING_DIR_RESOLVED="${TEAM_WORKING_DIR/\$HOME/$HOME}"
+        mkdir -p "$_WORKING_DIR_RESOLVED/personas"
+        cp -R "$PERSONAS_TEMPLATE_DIR"/* "$_WORKING_DIR_RESOLVED/personas/" || true
+        echo "  ✓ Personas copied to $_WORKING_DIR_RESOLVED/personas/"
+    fi
+    # Also copy avatar images into the flat avatars/ pool so agent-panel-display.sh
+    # can find them without fleet-monitor installed.
+    FLAT_AVATARS_DIR="$AITEAMFORGE_DIR/avatars"
+    mkdir -p "$FLAT_AVATARS_DIR"
+    if [[ -d "$PERSONAS_TEMPLATE_DIR/avatars" ]]; then
+        cp "$PERSONAS_TEMPLATE_DIR/avatars/"*.png "$FLAT_AVATARS_DIR/" 2>/dev/null || true
+        echo "  ✓ Avatars added to shared pool ($FLAT_AVATARS_DIR)"
+    fi
+
+    # Copy .txt system prompt files into scripts/prompts/ so cc-aliases can find them.
+    # cc-aliases reads <AITEAMFORGE_DIR>/<team>/scripts/prompts/<team>-<terminal>-prompt.txt
+    # to load the Claude system prompt when launching agents.
+    if [[ -d "$PERSONAS_TEMPLATE_DIR/prompts" ]]; then
+        mkdir -p "$TEAM_DIR/scripts/prompts"
+        cp "$PERSONAS_TEMPLATE_DIR/prompts/"*.txt "$TEAM_DIR/scripts/prompts/" 2>/dev/null || true
+        PROMPT_COUNT=$(ls "$TEAM_DIR/scripts/prompts/"*.txt 2>/dev/null | wc -l | tr -d ' ')
+        echo "  ✓ Installed $PROMPT_COUNT system prompt file(s) to scripts/prompts/"
+    fi
     echo ""
 fi
 
@@ -152,32 +239,89 @@ fi
 
 echo "🚀 Creating startup/shutdown scripts..."
 
-# Check if templates exist
-STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_STARTUP_SCRIPT.template"
-SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_SHUTDOWN_SCRIPT.template"
+STARTUP_SCRIPT="$AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
+SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 
-STARTUP_SCRIPT="$DEV_TEAM_DIR/$TEAM_STARTUP_SCRIPT"
-SHUTDOWN_SCRIPT="$DEV_TEAM_DIR/$TEAM_SHUTDOWN_SCRIPT"
+# Build space-separated terminal list from agents (for template substitution)
+TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]+"${TEAM_AGENTS[*]}"}"
+
+# Build per-agent window name declarations for template substitution.
+# Each agent in TEAM_AGENTS may have a corresponding AGENT_WINDOWS_<agent> variable
+# defined in the .conf file (hyphens in agent names are stored with underscores).
+# This emits shell variable assignment lines that get embedded verbatim into the
+# generated startup script so the tmux loop can resolve window names at runtime.
+TEAM_AGENT_WINDOWS_CONFIG=""
+for _agent in "${TEAM_AGENTS[@]}"; do
+    # Sanitize: replace hyphens with underscores for valid shell variable name
+    _agent_key="${_agent//-/_}"
+    _var="AGENT_WINDOWS_${_agent_key}"
+    _val="${!_var:-}"
+    if [[ -n "$_val" ]]; then
+        TEAM_AGENT_WINDOWS_CONFIG+="AGENT_WINDOWS_${_agent_key}=\"${_val}\""$'\n'
+    fi
+done
+
+# Determine if this is a project-based team (values already imported from conf)
+IS_PROJECT_TEAM="$TEAM_HAS_PROJECTS"
+REQUIRES_CLIENT="$TEAM_REQUIRES_CLIENT_ID"
+
+# Check for team-specific template first, then generic/project template
+STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_STARTUP_SCRIPT.template"
+if [[ ! -f "$STARTUP_TEMPLATE" ]]; then
+    if [[ "$IS_PROJECT_TEAM" == "true" ]]; then
+        STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-project-startup.sh.template"
+    else
+        STARTUP_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-startup.sh.template"
+    fi
+fi
+
+SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/$TEAM_SHUTDOWN_SCRIPT.template"
+if [[ ! -f "$SHUTDOWN_TEMPLATE" ]]; then
+    SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-shutdown.sh.template"
+fi
 
 if [[ -f "$STARTUP_TEMPLATE" ]]; then
-    # Replace template variables
-    sed -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+    # Step 1: single-line substitutions via sed
+    _TEAM_WORKING_DIR_RESOLVED="$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_BASE_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)"
+    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+        -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
         -e "s|{{TEAM_SHIP}}|$TEAM_SHIP|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
-        -e "s|{{DEV_TEAM_DIR}}|$DEV_TEAM_DIR|g" \
-        "$STARTUP_TEMPLATE" > "$STARTUP_SCRIPT"
+        -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
+        -e "s|{{TEAM_WORKING_DIR}}|${_TEAM_WORKING_DIR_RESOLVED}|g" \
+        -e "s|{{TEAM_REQUIRES_CLIENT}}|${REQUIRES_CLIENT}|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        "$STARTUP_TEMPLATE" > "${STARTUP_SCRIPT}.tmp"
+
+    # Step 2: multi-line substitution for per-agent window names via Python
+    # {{TEAM_AGENT_WINDOWS_CONFIG}} may contain newlines which sed cannot handle
+    python3 - "${STARTUP_SCRIPT}.tmp" "$STARTUP_SCRIPT" <<PYEOF
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+# Strip trailing newline then re-add one so the placeholder line is cleanly replaced
+windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
+if windows_config:
+    windows_config += '\n'
+with open(src) as f:
+    content = f.read()
+content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
+# Fallback: replace without trailing newline in case template line ending differs
+if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
+    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
+with open(dst, 'w') as f:
+    f.write(content)
+PYEOF
+    rm -f "${STARTUP_SCRIPT}.tmp"
     chmod +x "$STARTUP_SCRIPT"
     echo "  ✓ $TEAM_STARTUP_SCRIPT"
 else
-    # Create a basic startup script (full version generated after team setup)
+    echo "  ⚠️  Template not found: $TEAM_STARTUP_SCRIPT.template (will create basic version)"
     cat > "$STARTUP_SCRIPT" <<EOF
 #!/bin/zsh
 # $TEAM_NAME Startup Script
-# Auto-generated by dev-team installer
-# This is a basic version — run 'dev-team setup --upgrade' after
-# configuring your team to generate the full startup script.
+# Auto-generated by aiteamforge installer
 
 echo "🚀 $TEAM_NAME"
 echo "   $TEAM_THEME"
@@ -186,17 +330,18 @@ echo ""
 echo "Team: $TEAM_ID"
 echo "LCARS Port: $TEAM_LCARS_PORT"
 echo ""
-echo "Tip: Customize this script at:"
-echo "  $DEV_TEAM_DIR/$TEAM_STARTUP_SCRIPT"
-echo ""
 EOF
     chmod +x "$STARTUP_SCRIPT"
-    echo "  ✓ $TEAM_STARTUP_SCRIPT (starter version)"
+    echo "  ✓ $TEAM_STARTUP_SCRIPT (basic version)"
 fi
 
 if [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
-    sed -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
-        -e "s|{{DEV_TEAM_DIR}}|$DEV_TEAM_DIR|g" \
+    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+        -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+        -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+        -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+        -e "s|{{TEAM_WORKING_DIR}}|${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$SHUTDOWN_TEMPLATE" > "$SHUTDOWN_SCRIPT"
     chmod +x "$SHUTDOWN_SCRIPT"
     echo "  ✓ $TEAM_SHUTDOWN_SCRIPT"
@@ -204,18 +349,120 @@ else
     cat > "$SHUTDOWN_SCRIPT" <<EOF
 #!/bin/zsh
 # $TEAM_NAME Shutdown Script
-# Auto-generated by dev-team installer
-
 echo "Shutting down $TEAM_NAME..."
-# Kill tmux sessions for this team
-tmux -L $TEAM_ID kill-server 2>/dev/null || true
+tmux -L $TEAM_TMUX_SOCKET kill-server 2>/dev/null || true
 echo "✓ $TEAM_NAME shut down"
 EOF
     chmod +x "$SHUTDOWN_SCRIPT"
-    echo "  ✓ $TEAM_SHUTDOWN_SCRIPT (starter version)"
+    echo "  ✓ $TEAM_SHUTDOWN_SCRIPT (basic version)"
 fi
 
 echo ""
+
+# ============================================================================
+# GENERATE TEAM BANNER SCRIPT
+# ============================================================================
+
+echo "🎨 Generating team banner script..."
+
+BANNER_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-banner.sh.template"
+BANNER_SCRIPT="$TEAM_DIR/scripts/${TEAM_ID}-banner.sh"
+
+if [[ -f "$BANNER_TEMPLATE" ]]; then
+    # Convert TEAM_COLOR hex (#RRGGBB) to a best-effort xterm-256 color code.
+    # We use Python for the conversion since it handles the math cleanly.
+    # The 256-color cube starts at index 16; gray ramp starts at 232.
+    _hex_to_256() {
+        local hex="${1#\#}"  # Strip leading #
+        python3 -c "
+import sys
+
+def nearest_256(r, g, b):
+    def cube_val(n):
+        return 0 if n == 0 else 55 + n * 40
+
+    # Brute-force search the full 6x6x6 color cube (indices 16-231)
+    best_cube_dist = float('inf')
+    best_cube_idx = 16
+    for ri in range(6):
+        for gi in range(6):
+            for bi in range(6):
+                cr, cg, cb = cube_val(ri), cube_val(gi), cube_val(bi)
+                d = (r-cr)**2 + (g-cg)**2 + (b-cb)**2
+                if d < best_cube_dist:
+                    best_cube_dist = d
+                    best_cube_idx = 16 + 36*ri + 6*gi + bi
+
+    # Search the gray ramp (indices 232-255, values 8, 18, 28 ... 238)
+    best_gray_dist = float('inf')
+    best_gray_idx = 232
+    for i in range(24):
+        gv = 8 + i * 10
+        d = (r-gv)**2 + (g-gv)**2 + (b-gv)**2
+        if d < best_gray_dist:
+            best_gray_dist = d
+            best_gray_idx = 232 + i
+
+    return best_cube_idx if best_cube_dist <= best_gray_dist else best_gray_idx
+
+h = sys.argv[1].lstrip('#')
+r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+print(nearest_256(r, g, b))
+" "$hex" 2>/dev/null || echo "178"
+    }
+
+    # Derive primary and secondary (slightly darker/lighter) color codes
+    TEAM_COLOR_HEX="${TEAM_COLOR:-#5585CC}"
+    PRIMARY_CODE=$(_hex_to_256 "$TEAM_COLOR_HEX")
+
+    # Secondary: shift toward darker by biasing toward a lower cube index.
+    # Simple approach: clamp primary - 36 (one cube "row" darker) or clamp to 16.
+    if [[ "$PRIMARY_CODE" -ge 52 ]]; then
+        SECONDARY_CODE=$((PRIMARY_CODE - 36))
+    else
+        SECONDARY_CODE=$((PRIMARY_CODE + 36))
+        # Keep within valid range
+        [[ "$SECONDARY_CODE" -gt 231 ]] && SECONDARY_CODE=231
+    fi
+
+    # Generate banner script by substituting template placeholders
+    TEAM_BANNER_SCRIPT_NAME="${TEAM_ID}-banner.sh"
+    sed -e "s|{{TEAM_ID}}|${TEAM_ID}|g" \
+        -e "s|{{TEAM_NAME}}|${TEAM_NAME}|g" \
+        -e "s|{{TEAM_SHIP}}|${TEAM_SHIP:-${TEAM_THEME}}|g" \
+        -e "s|{{TEAM_BANNER_SCRIPT}}|${TEAM_BANNER_SCRIPT_NAME}|g" \
+        -e "s|{{TEAM_COLOR_PRIMARY}}|${PRIMARY_CODE}|g" \
+        -e "s|{{TEAM_COLOR_SECONDARY}}|${SECONDARY_CODE}|g" \
+        "$BANNER_TEMPLATE" > "$BANNER_SCRIPT"
+    chmod +x "$BANNER_SCRIPT"
+    echo "  ✓ ${TEAM_ID}-banner.sh (primary color: ${PRIMARY_CODE}, secondary: ${SECONDARY_CODE})"
+    echo "    Path: $BANNER_SCRIPT"
+    echo "    Note: Edit color codes in the script to customize team themes"
+else
+    echo "  ⚠️  Banner template not found: $BANNER_TEMPLATE (skipping)"
+fi
+
+echo ""
+
+# ============================================================================
+# AGENT FUNCTION NAME LOOKUP
+# Resolves the claude-* shell function name for a given team/agent pair.
+# Most agents map directly to claude-<agent> (matching agent-aliases.sh).
+# Exceptions (where character names differ from function names) are listed here.
+# ============================================================================
+
+_agent_function_name() {
+    local team="$1" agent="$2"
+    case "${team}/${agent}" in
+        # Academy exceptions: character names differ from function names
+        academy/chancellor) echo "claude-ake" ;;
+        # Command exceptions
+        command/admiral)    echo "claude-vance" ;;
+        command/commodore)  echo "claude-ross" ;;
+        # Default: claude-<agent> matches the function in agent-aliases.sh
+        *)                  echo "claude-${agent}" ;;
+    esac
+}
 
 # ============================================================================
 # CONFIGURE CLAUDE CODE AGENT ALIASES
@@ -223,7 +470,7 @@ echo ""
 
 echo "🤖 Configuring Claude Code agent aliases..."
 
-ALIASES_FILE="$DEV_TEAM_DIR/claude_agent_aliases.sh"
+ALIASES_FILE="$AITEAMFORGE_DIR/claude_agent_aliases.sh"
 ALIASES_TEAM_SECTION="# $TEAM_NAME aliases"
 
 # Create aliases file if it doesn't exist
@@ -231,7 +478,7 @@ if [[ ! -f "$ALIASES_FILE" ]]; then
     cat > "$ALIASES_FILE" <<EOF
 #!/bin/bash
 # Claude Code Agent Aliases
-# Auto-generated by dev-team installer
+# Auto-generated by aiteamforge installer
 
 EOF
 fi
@@ -244,11 +491,10 @@ $ALIASES_TEAM_SECTION
 EOF
 
     for agent in "${TEAM_AGENTS[@]}"; do
-        AGENT_NAME=$(echo "$agent" | tr '[:lower:]' '[:upper:]')
         cat >> "$ALIASES_FILE" <<EOF
-alias ${TEAM_ID}-${agent}='claude --agent-path "$DEV_TEAM_DIR/claude/agents/${TEAM_NAME}/${agent}"'
+alias ${TEAM_ID}-${agent}='claude --agent-path "$AITEAMFORGE_DIR/claude/agents/${TEAM_NAME}/${agent}"'
 EOF
-        echo "  ✓ Alias: ${TEAM_ID}-${agent}"
+        echo "  ✓ Alias: $(_agent_function_name "$TEAM_ID" "$agent")"
     done
 
     echo ""
@@ -260,7 +506,12 @@ fi
 
 echo "📋 Setting up team kanban board..."
 
-KANBAN_DIR="$DEV_TEAM_DIR/kanban"
+# Use team working dir if set (project-based teams), otherwise central kanban dir
+if [[ -n "${TEAM_WORKING_DIR:-}" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR" && "$TEAM_WORKING_DIR" != "$AITEAMFORGE_DIR/$TEAM_ID" ]]; then
+    KANBAN_DIR="${TEAM_WORKING_DIR}/kanban"
+else
+    KANBAN_DIR="$AITEAMFORGE_DIR/kanban"
+fi
 mkdir -p "$KANBAN_DIR"
 
 TEAM_BOARD="$KANBAN_DIR/${TEAM_ID}-board.json"
@@ -271,7 +522,7 @@ if [[ ! -f "$TEAM_BOARD" ]]; then
 {
   "team": "$TEAM_ID",
   "teamName": "$TEAM_NAME",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "items": {},
   "metadata": {
     "created": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
@@ -292,7 +543,7 @@ echo ""
 
 echo "🖥️  Configuring LCARS port assignments..."
 
-LCARS_PORTS_DIR="$DEV_TEAM_DIR/lcars-ports"
+LCARS_PORTS_DIR="$AITEAMFORGE_DIR/lcars-ports"
 mkdir -p "$LCARS_PORTS_DIR"
 
 # Create port files for each agent
@@ -326,6 +577,921 @@ echo "  ✓ Port assignments created"
 echo ""
 
 # ============================================================================
+# GENERATE PER-AGENT STARTUP SCRIPTS
+# ============================================================================
+# Creates individual startup scripts for each agent persona found in the team's
+# personas directory.  Scripts are named <team>-<terminal_id>-startup.sh and
+# follow the android-bridge-startup.sh pattern: hardcoded persona variables,
+# a setup_window() function, 4 named tmux windows, status-line theming, and a
+# SKIP_ATTACH guard.
+#
+# The generator is driven by persona .md files (not TEAM_AGENTS) so the script
+# name uses the frontmatter 'name:' field (e.g. "reno") rather than the TEAM_AGENTS
+# role label (e.g. "engineering").  AGENT_WINDOWS_* variables are read directly
+# from the raw conf text because the _read_conf() loader only serialises windows
+# for agents whose names appear in TEAM_AGENTS, and character names (reno, emh,
+# thok) often differ from role labels (engineering, medical, training).
+# ============================================================================
+
+generate_per_agent_startup_scripts() {
+    local personas_dir="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
+    # Fall back to the homebrew-tap share layout if installed layout is absent
+    if [[ ! -d "$personas_dir" ]]; then
+        personas_dir="$HOMEBREW_TAP_ROOT/share/personas/$TEAM_ID/agents"
+    fi
+    if [[ ! -d "$personas_dir" ]]; then
+        echo "  ⚠️  No personas directory found for $TEAM_ID — skipping per-agent startup scripts"
+        return 0
+    fi
+
+    local scripts_dir="$AITEAMFORGE_DIR/$TEAM_ID/scripts"
+    mkdir -p "$scripts_dir"
+
+    # Read all AGENT_WINDOWS_* values directly from the raw conf text so that
+    # character-named keys (e.g. AGENT_WINDOWS_reno) are found even when the
+    # TEAM_AGENTS array uses role labels (e.g. "engineering").
+    local raw_conf_text
+    raw_conf_text=$(grep '^AGENT_WINDOWS_' "$TEAM_CONF" 2>/dev/null || true)
+
+    python3 - "$personas_dir" "$scripts_dir" "$TEAM_ID" \
+              "$AITEAMFORGE_DIR" "$TEAM_COLOR" "$raw_conf_text" <<'PYEOF'
+import re
+import sys
+import os
+from pathlib import Path
+
+# ---- Arguments ----
+personas_dir  = Path(sys.argv[1])
+scripts_dir   = Path(sys.argv[2])
+team_id       = sys.argv[3]
+atf_dir       = sys.argv[4]
+team_color    = sys.argv[5]          # hex e.g. "#0099CC"
+raw_conf_text = sys.argv[6]          # raw AGENT_WINDOWS_* lines from conf
+
+# ---- Parse AGENT_WINDOWS from raw conf text ----
+# Each line looks like:  AGENT_WINDOWS_reno="win0 win1 win2 win3"
+agent_windows = {}
+for line in raw_conf_text.splitlines():
+    m = re.match(r'^AGENT_WINDOWS_(\w+)="([^"]*)"', line.strip())
+    if m:
+        agent_windows[m.group(1).lower()] = m.group(2).split()
+
+# ---- Frontmatter parser ----
+def parse_frontmatter(text):
+    result = {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return result
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            val = val.strip().strip('"').strip("'")
+            if key.strip() not in result:
+                result[key.strip()] = val
+    return result
+
+# ---- Bold-field extractor (matches ## Core Identity section) ----
+def parse_core_identity(text):
+    result = {"developer": "", "role": "", "location": "", "theme": ""}
+    for header_pattern in (r"^##\s+Core Identity", r"^##\s+Your Identity"):
+        m = re.search(header_pattern, text, re.MULTILINE)
+        if m:
+            rest = text[m.end():]
+            ns = re.search(r"^##\s+", rest, re.MULTILINE)
+            section = rest[:ns.start()] if ns else rest
+            break
+    else:
+        return result
+
+    def find_field(field, text):
+        pat = rf"\*\*{re.escape(field)}\*\*:?\s*(.+)"
+        m = re.search(pat, text)
+        if m:
+            return m.group(1).strip().rstrip("\\").strip()
+        pat2 = rf"\*\*{re.escape(field)}:\*\*\s*(.+)"
+        m2 = re.search(pat2, text)
+        if m2:
+            return m2.group(1).strip().rstrip("\\").strip()
+        return ""
+
+    result["developer"] = find_field("Name", section) or find_field("Character", section)
+    result["role"]      = find_field("Role", section)
+    result["location"]  = find_field("Location", section)
+    theme_raw           = find_field("Uniform Color", section)
+    if theme_raw:
+        result["theme"] = theme_raw.upper()
+    return result
+
+# ---- Uniform-color → tmux colour codes ----
+# Format: (bg_code, accent_code)
+# Derived from statusline-command.sh get_theme_data() values.
+THEME_COLORS = {
+    "COMMAND":    (27,  33),
+    "OPERATIONS": (178, 184),
+    "SCIENCES":   (33,  39),
+    "SECURITY":   (160, 196),
+    "PROMENADE":  (130, 136),
+    "MEDICAL":    (33,  39),
+}
+DEFAULT_THEME_COLORS = (240, 250)
+
+# ---- Session description builder ----
+def make_session_desc(team_id, terminal_id, frontmatter_desc):
+    team_upper     = team_id.upper().replace("-", " ")
+    terminal_upper = terminal_id.upper().replace("-", " ")
+    base = f"{team_upper} {terminal_upper}"
+    if frontmatter_desc and " - " in frontmatter_desc:
+        after_dash = frontmatter_desc.split(" - ", 1)[1].strip()
+        suffix = re.split(r"[,.]", after_dash)[0].strip()
+        if suffix:
+            return f"{base} - {suffix.upper()}"
+    return base
+
+# ---- Location formatter ----
+def make_location(team_id, parsed_location):
+    if parsed_location and " - " in parsed_location:
+        parts = parsed_location.split(" - ", 1)
+        short_team = parts[0].strip().split()[-1] if parts[0].strip().split() else parts[0].strip()
+        return f"{short_team}: {parts[1].strip()}"
+    return parsed_location or team_id.title()
+
+# ---- Window description helper ----
+def window_desc(win_name, agent_role, win_index):
+    """Derive a TERMINAL_DESCRIPTION for a window name."""
+    if win_index == 0:
+        # Use agent role first clause for the primary window
+        if agent_role:
+            return re.split(r"[,\-\n]", agent_role)[0].strip()
+        return win_name.replace("-", " ").title()
+    # Subsequent windows: capitalise the window name
+    return win_name.replace("-", " ").title()
+
+# ---- Script generator ----
+def generate_script(terminal_id, identity, windows, frontmatter, session_desc, location):
+    developer = identity["developer"]
+    role      = identity["role"]
+    theme     = identity["theme"] or "OPERATIONS"
+
+    bg_code, accent_code = THEME_COLORS.get(theme, DEFAULT_THEME_COLORS)
+
+    # Ensure we have at least 4 windows; pad with generic names if needed
+    base_windows = list(windows) if windows else [f"{terminal_id}-cmd", "monitor", "scratch", "debug"]
+    while len(base_windows) < 4:
+        base_windows.append(f"window-{len(base_windows)}")
+    win_names = base_windows[:4]
+
+    # Build 4-window block
+    window_blocks = []
+    for i, wname in enumerate(win_names):
+        wdesc = window_desc(wname, role, i)
+        if i == 0:
+            window_blocks.append(
+                f'    # Window 0: Primary\n'
+                f'    TERMINAL_NUMBER=0\n'
+                f'    TERMINAL_NAME="{wname}"\n'
+                f'    TERMINAL_DESCRIPTION="{wdesc}"\n'
+                f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
+                f'    $TMUX_CMD new-session -d -s $SESSION_CODE -n $TERMINAL_NAME -c "$SESSION_DIRECTORY"\n'
+                f'    setup_window\n'
+                f'    sleep 0.2\n'
+                f'    echo "CONNECTED"'
+            )
+        else:
+            window_blocks.append(
+                f'    # Window {i}\n'
+                f'    TERMINAL_NUMBER={i}\n'
+                f'    TERMINAL_NAME="{wname}"\n'
+                f'    TERMINAL_DESCRIPTION="{wdesc}"\n'
+                f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
+                f'    $TMUX_CMD new-window -t $SESSION_CODE:$TERMINAL_NUMBER -n $TERMINAL_NAME\n'
+                f'    setup_window\n'
+                f'    sleep 0.2\n'
+                f'    echo "CONNECTED"'
+            )
+
+    window_section = "\n\n".join(window_blocks)
+
+    script = f'''#!/bin/bash
+set +x
+# {team_id.title()} {terminal_id.title()} Terminal Startup
+# Auto-generated by aiteamforge installer (install-team.sh generate_per_agent_startup_scripts)
+
+SESSION_THEME="{theme}"
+SESSION_TYPE="{team_id}"
+SESSION_NAME="{terminal_id}"
+SESSION_DESCRIPTION="{session_desc}"
+SESSION_LOCATION="{location}"
+SESSION_DEVELOPER="{developer}"
+SESSION_ROLE="{role}"
+SESSION_DIRECTORY="$HOME/{team_id}"
+THEME_COLOR="{team_color}"
+
+SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
+
+# Theme color file directory for fleet-monitor integration
+THEME_PORTS_DIR="$HOME/dev-team/lcars-ports"
+
+# Use team-specific tmux socket if set, otherwise use default server
+TMUX_CMD="tmux${{TMUX_SOCKET:+ -L $TMUX_SOCKET}}"
+
+# ============================================================================
+# Function: setup_window
+# Executes the common setup commands for each tmux window
+# ============================================================================
+KANBAN_HELPERS="$HOME/dev-team/kanban-helpers.sh"
+
+setup_window() {{
+    sleep 0.1
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER "cd $SESSION_DIRECTORY" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". ~/.zshrc_${{SESSION_TYPE}}_${{SESSION_NAME}}" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
+    $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh \\"$SESSION_THEME\\" \\"$SESSION_TYPE\\" \\"$SESSION_NAME\\" \\"$TERMINAL_NUMBER\\" \\"$TERMINAL_NAME\\" \\"$SESSION_DESCRIPTION\\" \\"$SESSION_LOCATION\\" \\"$SESSION_DEVELOPER\\" \\"$SESSION_ROLE\\" \\"$TERMINAL_DESCRIPTION\\"" C-m
+}}
+
+$TMUX_CMD has-session -t $SESSION_CODE
+
+if [ $? != 0 ]; then
+    clear
+    echo "Initializing {team_id.title()} {terminal_id.title()}..."
+
+{window_section}
+
+    # Configure tmux status line - {theme} theme
+    $TMUX_CMD set -t $SESSION_CODE status-left-length 15
+    $TMUX_CMD set -t $SESSION_CODE status-left "  $SESSION_NAME "
+    # Set session-specific variables for dynamic status-right
+    $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
+    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{terminal_id}"
+    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | #{{@developer}}  "
+    $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
+    $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour16,bold"
+    $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"
+    $TMUX_CMD set -t $SESSION_CODE window-status-style "bg=colour{bg_code},fg=colour255"
+    $TMUX_CMD set -t $SESSION_CODE window-status-current-style "bg=colour{accent_code},fg=colour16,bold"
+    $TMUX_CMD set -t $SESSION_CODE pane-border-style "fg=colour{bg_code}"
+    $TMUX_CMD set -t $SESSION_CODE pane-active-border-style "fg=colour{accent_code}"
+
+    sleep 0.5
+    $TMUX_CMD select-window -t $SESSION_CODE:0
+
+    # Write theme color file for fleet-monitor integration
+    mkdir -p "$THEME_PORTS_DIR"
+    echo "$THEME_COLOR" > "$THEME_PORTS_DIR/${{SESSION_CODE}}.theme"
+
+    echo "{team_id.title()} {terminal_id.title()} initialized"
+    echo ""
+    echo "--> {len(win_names)} command stations active"
+    echo "--> {developer} reporting for duty"
+    echo ""
+    sleep 1
+fi
+
+# Only attach if not being launched by master startup script
+if [ -z "$SKIP_ATTACH" ]; then
+    $TMUX_CMD attach-session -t $SESSION_CODE
+fi
+'''
+    return script
+
+# ---- Main loop over persona files ----
+persona_files = sorted(personas_dir.glob("*_persona.md"))
+if not persona_files:
+    print(f"  Warning: no persona files found in {personas_dir}", file=sys.stderr)
+    sys.exit(0)
+
+generated = 0
+for pfile in persona_files:
+    try:
+        content = pfile.read_text()
+    except Exception as e:
+        print(f"  Warning: cannot read {pfile}: {e}", file=sys.stderr)
+        continue
+
+    frontmatter = parse_frontmatter(content)
+    terminal_id = frontmatter.get("name", "").strip()
+    if not terminal_id:
+        print(f"  Warning: no 'name' field in {pfile.name} — skipping", file=sys.stderr)
+        continue
+
+    identity = parse_core_identity(content)
+    frontmatter_desc = frontmatter.get("description", "")
+    session_desc     = make_session_desc(team_id, terminal_id, frontmatter_desc)
+    location         = make_location(team_id, identity["location"])
+
+    # Resolve window names: try persona frontmatter name first, then filename character
+    filename_parts = pfile.stem.replace("_persona", "").split("_")
+    char_name = filename_parts[1] if len(filename_parts) >= 2 else terminal_id
+    windows = agent_windows.get(terminal_id) or agent_windows.get(char_name) or []
+
+    script_text = generate_script(terminal_id, identity, windows, frontmatter, session_desc, location)
+
+    out_path = scripts_dir / f"{team_id}-{terminal_id}-startup.sh"
+    try:
+        out_path.write_text(script_text)
+        out_path.chmod(0o755)
+        print(f"  ✓ {out_path.name}")
+        generated += 1
+    except Exception as e:
+        print(f"  Warning: cannot write {out_path}: {e}", file=sys.stderr)
+
+print(f"  Generated {generated} per-agent startup script(s) in {scripts_dir}")
+PYEOF
+}
+
+echo "📜 Generating per-agent startup scripts..."
+generate_per_agent_startup_scripts
+echo ""
+
+# ============================================================================
+# GENERATE PER-AGENT ZSHRC FILES
+# ============================================================================
+#
+# Generates ~/.zshrc_<team>_<terminal_id> files for each agent persona found
+# in the team's personas directory.  Each file sets up the LCARS-themed zsh
+# prompt for one tmux window.
+#
+# Pattern based on dev-team home-scripts/.zshrc_<team>_<terminal> files.
+# Gold standard reference: dev-team/home-scripts/.zshrc_android_bridge
+#
+# Each generated file contains:
+#   1. Header comment (character name, division)
+#   2. SESSION_* variables (TITLE, THEME, TYPE, NAME, CODE)
+#   3. Unset block — clears all OTHER team theme vars
+#   4. Theme export — sets CLAUDE_<SERIES>_THEME="<TERMINAL_ID_UPPER>"
+#   5. Common color definitions (team-specific palette)
+#   6. Theme selection if-blocks (division → THEME_COLOR / THEME_COLOR_HIGHLIGHT)
+#   7. Prompt setup (parse_git_branch, show_worktree, PROMPT)
+#   8. TMUX developer / agent name exports
+#   9. Source helpers (claude_agent_aliases, worktree-helpers, prompt file)
+#  10. wt-project / wt-dev context setup
+# ============================================================================
+
+generate_per_agent_zshrc_files() {
+    local personas_dir="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
+    if [[ ! -d "$personas_dir" ]]; then
+        personas_dir="$HOMEBREW_TAP_ROOT/share/personas/$TEAM_ID/agents"
+    fi
+    if [[ ! -d "$personas_dir" ]]; then
+        echo "  ⚠️  No personas directory found for $TEAM_ID — skipping zshrc generation"
+        return 0
+    fi
+
+    python3 - "$personas_dir" "$TEAM_ID" "$HOME" "$AITEAMFORGE_DIR" <<'ZSHRC_PYEOF'
+import re
+import sys
+import os
+from pathlib import Path
+
+# ---- Arguments ----
+personas_dir  = Path(sys.argv[1])
+team_id       = sys.argv[2]
+home_dir      = sys.argv[3]
+atf_dir       = sys.argv[4]
+
+# -------------------------------------------------------------------------
+# Team ID → Claude theme variable name
+# Must match statusline-command.sh and LCARS UI routing logic.
+# -------------------------------------------------------------------------
+TEAM_THEME_VARS = {
+    "academy":   "CLAUDE_ACADEMY_THEME",
+    "android":   "CLAUDE_TOS_THEME",
+    "ios":       "CLAUDE_TNG_THEME",
+    "firebase":  "CLAUDE_DS9_THEME",
+    "command":   "CLAUDE_COMMAND_THEME",
+    "freelance": "CLAUDE_ENT_THEME",
+    "finance":   "CLAUDE_FINANCE_THEME",
+    "mainevent": "CLAUDE_MAINEVENT_THEME",
+    "dns":       "CLAUDE_DNS_THEME",
+    "legal":     "CLAUDE_LEGAL_THEME",
+    "medical":   "CLAUDE_MEDICAL_THEME",
+}
+# Default for unknown teams
+tid_upper = team_id.upper().replace("-", "_")
+theme_var = TEAM_THEME_VARS.get(team_id, f"CLAUDE_{tid_upper}_THEME")
+
+# Lowercase version used in the temp-file path written by the zshrc
+# e.g. CLAUDE_TOS_THEME → claude_tos_theme
+theme_var_lower = theme_var.lower()
+
+# -------------------------------------------------------------------------
+# All known theme variables — every zshrc unsets all except its own
+# -------------------------------------------------------------------------
+ALL_THEME_VARS = [
+    "CLAUDE_ACADEMY_THEME",
+    "CLAUDE_TOS_THEME",
+    "CLAUDE_TNG_THEME",
+    "CLAUDE_DS9_THEME",
+    "CLAUDE_ENT_THEME",
+    "CLAUDE_COMMAND_THEME",
+    "CLAUDE_MAINEVENT_THEME",
+    "CLAUDE_DNS_THEME",
+    "CLAUDE_FINANCE_THEME",
+    "CLAUDE_LEGAL_THEME",
+    "CLAUDE_MEDICAL_THEME",
+]
+
+# -------------------------------------------------------------------------
+# Per-team color palette block and theme-selection if-block
+# Derived from existing dev-team/home-scripts/.zshrc_<team>_* files.
+# -------------------------------------------------------------------------
+TEAM_COLORS = {
+    "academy": {
+        "palette": """\
+# Command Red (32nd Century Starfleet Red)
+COMMAND_RED='%F{124}'              # Deep red
+COMMAND_RED_BRIGHT='%F{160}'       # Brighter red for highlights
+
+# Operations Gold (32nd Century Starfleet Gold)
+OPS_GOLD='%F{178}'                 # Mustard gold
+OPS_GOLD_DARK='%F{136}'            # Darker gold for contrast
+
+# Sciences Blue (32nd Century Starfleet Blue)
+SCIENCES_BLUE='%F{25}'             # Deep blue
+SCIENCES_BLUE_BRIGHT='%F{33}'      # Brighter blue""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]
+then
+THEME_COLOR=$COMMAND_RED
+THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]
+then
+THEME_COLOR=$OPS_GOLD
+THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]
+then
+THEME_COLOR=$SCIENCES_BLUE
+THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+    "android": {
+        "palette": """\
+# Command Gold (Kirk's Bridge)
+COMMAND_GOLD='%F{220}'               # Warm gold
+COMMAND_GOLD_BRIGHT='%F{226}'        # Brighter gold for highlights
+
+# Science Blue (Spock's Lab)
+SCIENCE_BLUE='%F{27}'                # Science blue
+SCIENCE_BLUE_BRIGHT='%F{33}'         # Brighter science blue
+
+# Medical Blue (McCoy's Sickbay)
+MEDICAL_BLUE='%F{39}'                # Medical blue
+MEDICAL_BLUE_BRIGHT='%F{45}'         # Brighter medical blue
+
+# Engineering Red (Scotty's Engineering)
+ENGINEERING_RED='%F{160}'            # Engineering red
+ENGINEERING_RED_BRIGHT='%F{196}'     # Brighter red
+
+# Operations Gold (Uhura, Chekov, Sulu)
+OPERATIONS_GOLD='%F{178}'            # Operations gold
+OPERATIONS_GOLD_BRIGHT='%F{184}'     # Brighter operations gold""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]
+then
+THEME_COLOR=$COMMAND_GOLD
+THEME_COLOR_HIGHLIGHT=$COMMAND_GOLD_BRIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]
+then
+THEME_COLOR=$SCIENCE_BLUE
+THEME_COLOR_HIGHLIGHT=$SCIENCE_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "MEDICAL" ]]
+then
+THEME_COLOR=$MEDICAL_BLUE
+THEME_COLOR_HIGHLIGHT=$MEDICAL_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "ENGINEERING" ]]
+then
+THEME_COLOR=$ENGINEERING_RED
+THEME_COLOR_HIGHLIGHT=$ENGINEERING_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "COMMUNICATIONS" ]] || [[ $SESSION_THEME == "NAVIGATION" ]] || [[ $SESSION_THEME == "HELM" ]]
+then
+THEME_COLOR=$OPERATIONS_GOLD
+THEME_COLOR_HIGHLIGHT=$OPERATIONS_GOLD_BRIGHT
+fi""",
+    },
+    "ios": {
+        "palette": """\
+# Command Red/Burgundy (Picard's Bridge)
+COMMAND_RED='%F{52}'              # Dark burgundy/maroon
+COMMAND_RED_BRIGHT='%F{88}'       # Lighter burgundy for highlights
+
+# Operations Gold (Engineering, Holodeck, Stellar Cartography)
+OPS_GOLD='%F{178}'                # Mustard gold
+OPS_GOLD_DARK='%F{136}'           # Darker gold for contrast
+
+# Science/Medical Teal (Sickbay, Observation)
+SCIENCE_TEAL='%F{30}'             # Teal/cyan
+SCIENCE_TEAL_BRIGHT='%F{37}'      # Brighter teal""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]
+then
+THEME_COLOR=$COMMAND_RED
+THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]
+then
+THEME_COLOR=$OPS_GOLD
+THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]
+then
+THEME_COLOR=$SCIENCE_TEAL
+THEME_COLOR_HIGHLIGHT=$SCIENCE_TEAL_BRIGHT
+fi""",
+    },
+    "firebase": {
+        "palette": """\
+# Operations Blue/Teal - for firebase-ops
+OPS_BLUE='%F{24}'                  # Deep blue
+OPS_BLUE_BRIGHT='%F{33}'           # Brighter blue
+
+# Engineering Gold/Amber - for firebase-engineering
+ENG_GOLD='%F{214}'                 # Amber/gold
+ENG_GOLD_DARK='%F{172}'            # Darker gold
+
+# Security Gray - for firebase-holodeck (Odo's office)
+SECURITY_GRAY='%F{240}'            # Dark gray
+SECURITY_GRAY_LIGHT='%F{246}'      # Lighter gray
+
+# Science Purple - for firebase-stellar (Dax's lab)
+SCIENCE_PURPLE='%F{93}'            # Purple
+SCIENCE_PURPLE_BRIGHT='%F{141}'    # Brighter purple
+
+# Medical/Incident Red - for firebase-sickbay
+INCIDENT_RED='%F{160}'             # Red
+INCIDENT_RED_BRIGHT='%F{196}'      # Bright red
+
+# Promenade Gold - for firebase-promenade (Quark's bar)
+PROM_GOLD='%F{220}'                # Warm gold
+PROM_GOLD_BRIGHT='%F{226}'         # Bright gold""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "OPERATIONS" ]]
+then
+THEME_COLOR=$OPS_BLUE
+THEME_COLOR_HIGHLIGHT=$OPS_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "ENGINEERING" ]]
+then
+THEME_COLOR=$ENG_GOLD
+THEME_COLOR_HIGHLIGHT=$ENG_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SECURITY" ]]
+then
+THEME_COLOR=$SECURITY_GRAY
+THEME_COLOR_HIGHLIGHT=$SECURITY_GRAY_LIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]
+then
+THEME_COLOR=$SCIENCE_PURPLE
+THEME_COLOR_HIGHLIGHT=$SCIENCE_PURPLE_BRIGHT
+fi
+if [[ $SESSION_THEME == "INCIDENT" ]]
+then
+THEME_COLOR=$INCIDENT_RED
+THEME_COLOR_HIGHLIGHT=$INCIDENT_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "PROMENADE" ]]
+then
+THEME_COLOR=$PROM_GOLD
+THEME_COLOR_HIGHLIGHT=$PROM_GOLD_BRIGHT
+fi""",
+    },
+    "freelance": {
+        "palette": """\
+# Command Blue (Enterprise NX-01)
+COMMAND_BLUE='%F{24}'              # Deep blue
+COMMAND_BLUE_BRIGHT='%F{33}'       # Brighter blue for highlights
+
+# Operations Gold (Early Starfleet)
+OPS_GOLD='%F{178}'                # Mustard gold
+OPS_GOLD_DARK='%F{136}'           # Darker gold for contrast
+
+# Science/Medical Teal
+SCIENCE_TEAL='%F{30}'             # Teal/cyan
+SCIENCE_TEAL_BRIGHT='%F{37}'      # Brighter teal""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]
+then
+THEME_COLOR=$COMMAND_BLUE
+THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]
+then
+THEME_COLOR=$OPS_GOLD
+THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]
+then
+THEME_COLOR=$SCIENCE_TEAL
+THEME_COLOR_HIGHLIGHT=$SCIENCE_TEAL_BRIGHT
+fi""",
+    },
+    "command": {
+        "palette": """\
+# Command Red (Starfleet Command)
+COMMAND_RED='%F{124}'              # Deep red
+COMMAND_RED_BRIGHT='%F{160}'       # Brighter red for highlights""",
+        "theme_select": """\
+THEME_COLOR=$COMMAND_RED
+THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT""",
+    },
+    "finance": {
+        "palette": """\
+# Command Gold (Supreme Financial Authority) - for finance-nagus
+COMMAND_GOLD='%F{94}'              # Deep amber/gold
+COMMAND_GOLD_BRIGHT='%F{220}'      # Bright gold for highlights
+
+# Operations Orange (Commerce & Transactions)
+OPS_ORANGE='%F{130}'               # Deep orange
+OPS_ORANGE_BRIGHT='%F{208}'        # Bright orange for highlights
+
+# Sciences Green (Data & Analysis)
+SCIENCES_GREEN='%F{22}'            # Deep green
+SCIENCES_GREEN_BRIGHT='%F{34}'     # Brighter green""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]
+then
+THEME_COLOR=$COMMAND_GOLD
+THEME_COLOR_HIGHLIGHT=$COMMAND_GOLD_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]
+then
+THEME_COLOR=$OPS_ORANGE
+THEME_COLOR_HIGHLIGHT=$OPS_ORANGE_BRIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]
+then
+THEME_COLOR=$SCIENCES_GREEN
+THEME_COLOR_HIGHLIGHT=$SCIENCES_GREEN_BRIGHT
+fi""",
+    },
+}
+
+# Generic fallback palette for teams not listed above (legal, medical, dns, mainevent, etc.)
+GENERIC_COLORS = {
+    "palette": """\
+# Primary color
+PRIMARY_COLOR='%F{33}'             # Blue
+PRIMARY_COLOR_BRIGHT='%F{45}'      # Brighter blue
+
+# Secondary color
+SECONDARY_COLOR='%F{178}'          # Gold
+SECONDARY_COLOR_BRIGHT='%F{220}'   # Brighter gold""",
+    "theme_select": """\
+THEME_COLOR=$PRIMARY_COLOR
+THEME_COLOR_HIGHLIGHT=$PRIMARY_COLOR_BRIGHT""",
+}
+
+palette_block = TEAM_COLORS.get(team_id, GENERIC_COLORS)["palette"]
+theme_select_block = TEAM_COLORS.get(team_id, GENERIC_COLORS)["theme_select"]
+
+# -------------------------------------------------------------------------
+# Division name → SESSION_THEME value
+# "Uniform Color: Operations" → SESSION_THEME="OPERATIONS"
+# Keeps the existing theme-select if-blocks working correctly.
+# -------------------------------------------------------------------------
+def division_to_session_theme(division):
+    """Map Uniform Color / division text to the SESSION_THEME string.
+
+    GOTCHA: Persona files use "Sciences" (with trailing S) but some teams'
+    zshrc theme-select if-blocks expect "SCIENCE" (no trailing S). Academy
+    is the exception — it uses "SCIENCES" everywhere. When adding a new
+    team, check which spelling its color if-blocks use.
+    """
+    d = division.upper().strip()
+    mapping = {
+        "COMMAND":       "COMMAND",
+        "OPERATIONS":    "OPERATIONS",
+        "ENGINEERING":   "ENGINEERING",
+        "SCIENCES":      "SCIENCES",
+        "SCIENCE":       "SCIENCE",
+        "SECURITY":      "SECURITY",
+        "MEDICAL":       "MEDICAL",
+        "PROMENADE":     "PROMENADE",
+        "INCIDENT":      "INCIDENT",
+    }
+    # SCIENCES → SCIENCE for non-academy teams (see docstring above)
+    if d == "SCIENCES" and team_id not in ("academy",):
+        return "SCIENCE"
+    return mapping.get(d, "COMMAND")
+
+# -------------------------------------------------------------------------
+# Frontmatter + Core Identity parsers
+# TODO: These duplicate the parsers in generate_per_agent_startup_scripts().
+# Extract to a shared .py helper (e.g. share/scripts/persona_parser.py) to
+# eliminate the duplication across both Python heredocs.
+# -------------------------------------------------------------------------
+def parse_frontmatter(text):
+    result = {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return result
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            val = val.strip().strip('"').strip("'")
+            if key.strip() not in result:
+                result[key.strip()] = val
+    return result
+
+def find_bold_field(text, field):
+    """Extract value from **Field:** or **Field**: pattern in markdown."""
+    pat = rf"\*\*{re.escape(field)}\*\*:?\s*(.+)"
+    m = re.search(pat, text)
+    if m:
+        return m.group(1).strip().rstrip("\\").strip()
+    pat2 = rf"\*\*{re.escape(field)}:\*\*\s*(.+)"
+    m2 = re.search(pat2, text)
+    if m2:
+        return m2.group(1).strip().rstrip("\\").strip()
+    return ""
+
+def parse_core_identity(text):
+    """Return dict with developer, role, division from ## Core Identity section."""
+    result = {"developer": "", "role": "", "division": ""}
+    section_text = text
+    for header_pattern in (r"^##\s+Core Identity", r"^##\s+Your Identity"):
+        m = re.search(header_pattern, text, re.MULTILINE)
+        if m:
+            rest = text[m.end():]
+            ns = re.search(r"^##\s+", rest, re.MULTILINE)
+            section_text = rest[:ns.start()] if ns else rest
+            break
+
+    result["developer"] = (
+        find_bold_field(section_text, "Name") or
+        find_bold_field(section_text, "Character")
+    )
+    result["role"] = find_bold_field(section_text, "Role")
+    result["division"] = (
+        find_bold_field(section_text, "Uniform Color") or
+        find_bold_field(section_text, "Command Color") or
+        find_bold_field(section_text, "Division")
+    )
+    return result
+
+# -------------------------------------------------------------------------
+# Build the unset block — omits the current team's own theme var
+# -------------------------------------------------------------------------
+unset_lines = "\n".join(
+    f"unset {v}" for v in ALL_THEME_VARS if v != theme_var
+)
+
+# -------------------------------------------------------------------------
+# Main loop — one file per persona
+# -------------------------------------------------------------------------
+persona_files = sorted(personas_dir.glob("*_persona.md"))
+if not persona_files:
+    print(f"  Warning: no persona files found in {personas_dir}", file=sys.stderr)
+    sys.exit(0)
+
+generated = 0
+for pfile in persona_files:
+    try:
+        content = pfile.read_text()
+    except Exception as e:
+        print(f"  Warning: cannot read {pfile}: {e}", file=sys.stderr)
+        continue
+
+    frontmatter = parse_frontmatter(content)
+    terminal_id = frontmatter.get("name", "").strip()
+    if not terminal_id:
+        print(f"  Warning: no 'name' field in {pfile.name} — skipping", file=sys.stderr)
+        continue
+
+    identity = parse_core_identity(content)
+    char_name  = identity["developer"] or terminal_id.replace("-", " ").title()
+    division   = identity["division"] or "COMMAND"
+    session_theme = division_to_session_theme(division)
+
+    # Theme export value = uppercase terminal_id
+    theme_value = terminal_id.upper().replace("-", "_")
+
+    # SESSION_TITLE = uppercase terminal_id
+    session_title = terminal_id.upper().replace("-", " ")
+
+    # Output path: $HOME/.zshrc_<team>_<terminal_id>
+    out_path = Path(home_dir) / f".zshrc_{team_id}_{terminal_id}"
+
+    # Escape single quotes in char_name for shell safety
+    char_name_safe = char_name.replace("'", "'\\''")
+
+    zshrc = f'''\
+#!/bin/zsh
+# {team_id.title()} {terminal_id.title()} - Agent Terminal
+# Character: {char_name}
+# Division: {division.title()}
+
+SESSION_TITLE='{session_title}'
+SESSION_THEME="{session_theme}"
+SESSION_TYPE="{team_id}"
+SESSION_NAME="{terminal_id}"
+SESSION_CODE="${{SESSION_TYPE}}-${{SESSION_NAME}}"
+
+# Clear all other team theme variables (prevents priority conflicts)
+{unset_lines}
+
+# Set Claude Code theme (session-specific)
+export {theme_var}="{theme_value}"
+if [ -n "$TERM_SESSION_ID" ]; then
+    echo "{theme_value}" > ~/.{theme_var_lower}_${{TERM_SESSION_ID}}
+else
+    echo "{theme_value}" > ~/.{theme_var_lower}
+fi
+
+# Common colors
+BLACK='%F{{black}}'
+WHITE='%F{{white}}'
+GRAY='%F{{245}}'
+RESET='%f%b'
+YELLOW='%F{{yellow}}'
+CYAN='%F{{cyan}}'
+GREEN='%F{{green}}'
+RED='%F{{red}}'
+MAGENTA='%F{{magenta}}'
+BLUE='%F{{blue}}'
+BOLD='%B'
+
+{palette_block}
+
+{theme_select_block}
+
+# Common strings
+HOSTNAME="%m"
+USERNAME="%n"
+WORKING_PATH="%~"
+
+# Enable command substitution in prompt
+setopt PROMPT_SUBST
+
+# Git branch function
+parse_git_branch() {{
+    git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \\(.*\\)/(\\1)/'
+}}
+
+SESSION_COLOR=$RESET
+SESSION_STATUS=''
+
+# Worktree indicator function
+show_worktree() {{
+    if [ -n "$CURRENT_WORKTREE" ]; then
+        echo "🌿${{CURRENT_WORKTREE}}"
+    fi
+}}
+
+# Custom prompt (with worktree support)
+PROMPT='${{THEME_COLOR_HIGHLIGHT}}┌─[${{WHITE}}${{BOLD}}${{SESSION_TITLE}}${{RESET}}${{THEME_COLOR_HIGHLIGHT}}]─[${{GREEN}}$(show_worktree)${{THEME_COLOR_HIGHLIGHT}}]─[${{YELLOW}}${{USERNAME}}${{THEME_COLOR_HIGHLIGHT}}@${{CYAN}}${{HOSTNAME}}${{THEME_COLOR_HIGHLIGHT}}]─[${{WHITE}}${{WORKING_PATH}}${{THEME_COLOR_HIGHLIGHT}}]${{YELLOW}}$(parse_git_branch)${{SESSION_COLOR}}${{SESSION_STATUS}}${{RESET}}
+${{THEME_COLOR_HIGHLIGHT}}└─➤${{RESET}} '
+
+# Set session-specific developer for tmux status bar
+if [ -n "$TMUX" ]; then
+    tmux set-option @developer "{char_name_safe}"
+    tmux set-option @claude_agent "{team_id}-{terminal_id}"
+fi
+
+# Source shared helpers (prefer AITEAMFORGE_DIR, fall back gracefully)
+_ATFD="${{AITEAMFORGE_DIR:-$HOME/aiteamforge}}"
+[[ -f "$_ATFD/claude_agent_aliases.sh" ]]   && source "$_ATFD/claude_agent_aliases.sh"
+[[ -f "$_ATFD/claude_code_cc_aliases.sh" ]] && source "$_ATFD/claude_code_cc_aliases.sh"
+[[ -f "$_ATFD/worktree-helpers.sh" ]]       && source "$_ATFD/worktree-helpers.sh"
+
+# Source agent prompt (character persona for Claude Code)
+_PROMPT_FILE="$_ATFD/${{SESSION_TYPE}}/scripts/prompts/${{SESSION_CODE}}-prompt.sh"
+[[ -f "$_PROMPT_FILE" ]] && source "$_PROMPT_FILE"
+
+# Auto-set worktree project context
+wt-project $SESSION_TYPE > /dev/null 2>&1 || true
+wt-dev > /dev/null 2>&1 || true
+'''
+
+    try:
+        out_path.write_text(zshrc)
+        # zshrc files are read by the shell, not executed — no chmod +x needed
+        print(f"  ✓ {out_path.name}")
+        generated += 1
+    except Exception as e:
+        print(f"  Warning: cannot write {out_path}: {e}", file=sys.stderr)
+
+print(f"  Generated {generated} zshrc file(s)")
+ZSHRC_PYEOF
+}
+
+echo "🖥️  Generating per-agent zshrc files..."
+echo "  Note: Reinstalling will overwrite existing zshrc files — back up any manual customizations first."
+generate_per_agent_zshrc_files
+echo ""
+
+# ============================================================================
 # INSTALLATION SUMMARY
 # ============================================================================
 
@@ -334,17 +1500,20 @@ echo "  ✅ Team Installation Complete: $TEAM_NAME"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Team directory: $TEAM_DIR"
-echo "Startup script: $DEV_TEAM_DIR/$TEAM_STARTUP_SCRIPT"
-echo "Shutdown script: $DEV_TEAM_DIR/$TEAM_SHUTDOWN_SCRIPT"
+echo "Startup script: $AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
+echo "Shutdown script: $AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 echo "Kanban board: $TEAM_BOARD"
 echo ""
 echo "Agent aliases:"
+_first_agent_func=""
 for agent in "${TEAM_AGENTS[@]}"; do
-    echo "  ${TEAM_ID}-${agent}"
+    _func="$(_agent_function_name "$TEAM_ID" "$agent")"
+    echo "  ${_func}"
+    [[ -z "$_first_agent_func" ]] && _first_agent_func="$_func"
 done
 echo ""
 echo "Next steps:"
 echo "  1. Source the aliases file: source $ALIASES_FILE"
-echo "  2. Launch the team: $DEV_TEAM_DIR/$TEAM_STARTUP_SCRIPT"
-echo "  3. Start working with agents: ${TEAM_ID}-${TEAM_AGENTS[0]}"
+echo "  2. Launch the team: $AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
+echo "  3. Start working with agents: ${_first_agent_func}"
 echo ""

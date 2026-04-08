@@ -1,6 +1,6 @@
 # Multi-Machine Setup Guide
 
-**Connect multiple dev-team installations for coordinated development**
+**Connect multiple aiteamforge installations for coordinated development**
 
 ---
 
@@ -21,7 +21,7 @@
 
 ## Overview
 
-Dev-Team supports multi-machine setups through **Fleet Monitor**, a distributed system for coordinating development across multiple machines.
+AITeamForge supports multi-machine setups through **Fleet Monitor**, a distributed system for coordinating development across multiple machines.
 
 ### Use Cases
 
@@ -163,7 +163,7 @@ The **server machine** hosts the Fleet Monitor service and acts as the central c
 ### Prerequisites
 
 - Tailscale installed and connected
-- Dev-Team installed
+- AITeamForge installed
 - Machine that's usually running (main workstation or dedicated server)
 
 ### Setup Steps
@@ -171,7 +171,7 @@ The **server machine** hosts the Fleet Monitor service and acts as the central c
 #### Step 1: Run Setup Wizard
 
 ```bash
-dev-team setup
+aiteamforge setup
 ```
 
 During feature selection:
@@ -189,7 +189,7 @@ When prompted:
 
 ```bash
 # Check Fleet Monitor config
-cat ~/dev-team/fleet-monitor/config.json
+cat ~/aiteamforge/fleet-monitor/config.json
 ```
 
 **Example server config:**
@@ -210,7 +210,7 @@ cat ~/dev-team/fleet-monitor/config.json
 
 ```bash
 # Start Fleet Monitor
-dev-team start fleet-monitor
+aiteamforge start fleet-monitor
 
 # Verify it's running
 curl http://localhost:3000/api/health
@@ -238,16 +238,16 @@ https://macbook-pro-office.TAILNET.ts.net:3000
 
 ```bash
 # Check Fleet Monitor status
-dev-team status
+aiteamforge status
 
 # View Fleet Monitor logs
-tail -f ~/dev-team/logs/fleet-monitor.log
+tail -f ~/aiteamforge/logs/fleet-monitor.log
 
 # Restart Fleet Monitor
-dev-team restart fleet-monitor
+aiteamforge restart fleet-monitor
 
 # Stop Fleet Monitor
-dev-team stop fleet-monitor
+aiteamforge stop fleet-monitor
 ```
 
 ---
@@ -259,7 +259,7 @@ dev-team stop fleet-monitor
 ### Prerequisites
 
 - Tailscale installed and connected
-- Dev-Team installed
+- AITeamForge installed
 - Know server machine's Tailscale hostname or IP
 
 ### Setup Steps
@@ -267,7 +267,7 @@ dev-team stop fleet-monitor
 #### Step 1: Run Setup Wizard
 
 ```bash
-dev-team setup
+aiteamforge setup
 ```
 
 During feature selection:
@@ -285,7 +285,7 @@ When prompted:
 
 ```bash
 # Check Fleet Monitor config
-cat ~/dev-team/fleet-monitor/config.json
+cat ~/aiteamforge/fleet-monitor/config.json
 ```
 
 **Example client config:**
@@ -306,7 +306,7 @@ cat ~/dev-team/fleet-monitor/config.json
 
 ```bash
 # Start Fleet Monitor client
-dev-team start fleet-monitor
+aiteamforge start fleet-monitor
 
 # Verify it's reporting
 curl http://localhost:3000/api/status
@@ -329,16 +329,16 @@ open http://localhost:3000
 
 ```bash
 # Check client status
-dev-team status
+aiteamforge status
 
 # View client logs
-tail -f ~/dev-team/logs/fleet-monitor-client.log
+tail -f ~/aiteamforge/logs/fleet-monitor-client.log
 
 # Restart client
-dev-team restart fleet-monitor
+aiteamforge restart fleet-monitor
 
 # Stop client
-dev-team stop fleet-monitor
+aiteamforge stop fleet-monitor
 ```
 
 ---
@@ -356,7 +356,7 @@ dev-team stop fleet-monitor
 ### Setup
 
 ```bash
-dev-team setup
+aiteamforge setup
 ```
 
 During feature selection:
@@ -431,7 +431,7 @@ Fleet Monitor can optionally sync kanban boards across machines.
 
 #### On Server
 
-Edit `~/dev-team/fleet-monitor/config.json`:
+Edit `~/aiteamforge/fleet-monitor/config.json`:
 
 ```json
 {
@@ -450,7 +450,7 @@ Edit `~/dev-team/fleet-monitor/config.json`:
 
 #### On Clients
 
-Edit `~/dev-team/fleet-monitor/config.json`:
+Edit `~/aiteamforge/fleet-monitor/config.json`:
 
 ```json
 {
@@ -495,7 +495,7 @@ kb-sync
 kb-sync status
 
 # View sync log
-tail -f ~/dev-team/logs/kanban-sync.log
+tail -f ~/aiteamforge/logs/kanban-sync.log
 ```
 
 ---
@@ -580,7 +580,7 @@ tailscale status
    tailscale status | grep macbook-pro-office
 
    # Update client config with IP
-   # Edit ~/dev-team/fleet-monitor/config.json
+   # Edit ~/aiteamforge/fleet-monitor/config.json
    # Change "server" to use IP: "http://100.64.0.1:3000"
    ```
 
@@ -594,7 +594,7 @@ tailscale status
 tailscale ping macbook-pro-office
 
 # View Fleet Monitor logs
-tail -f ~/dev-team/logs/fleet-monitor-client.log
+tail -f ~/aiteamforge/logs/fleet-monitor-client.log
 ```
 
 **Solutions:**
@@ -624,14 +624,14 @@ tail -f ~/dev-team/logs/fleet-monitor-client.log
 kb-sync status
 
 # View sync log
-tail -f ~/dev-team/logs/kanban-sync.log
+tail -f ~/aiteamforge/logs/kanban-sync.log
 ```
 
 **Solutions:**
 
 1. **Verify sync is enabled:**
    ```bash
-   cat ~/dev-team/fleet-monitor/config.json | jq .sync
+   cat ~/aiteamforge/fleet-monitor/config.json | jq .sync
    ```
 
 2. **Manually trigger sync:**
@@ -672,11 +672,11 @@ lsof -i :3000
 
 2. **Change Fleet Monitor port:**
    ```bash
-   # Edit ~/dev-team/fleet-monitor/config.json
+   # Edit ~/aiteamforge/fleet-monitor/config.json
    # Change "port" to different value (e.g., 3001)
 
    # Restart
-   dev-team restart fleet-monitor
+   aiteamforge restart fleet-monitor
    ```
 
 3. **Update clients to use new port:**
@@ -689,7 +689,7 @@ lsof -i :3000
 
 ```bash
 # Comprehensive network test
-dev-team doctor --check network
+aiteamforge doctor --check network
 
 # Test connectivity to all registered machines
 fleet-monitor-test-connections
@@ -704,13 +704,13 @@ If network issues persist:
 
 1. **Collect diagnostic info:**
    ```bash
-   dev-team doctor --verbose > ~/diagnostic-report.txt
+   aiteamforge doctor --verbose > ~/diagnostic-report.txt
    tailscale status >> ~/diagnostic-report.txt
    ```
 
 2. **Check Fleet Monitor logs:**
    ```bash
-   tail -100 ~/dev-team/logs/fleet-monitor.log
+   tail -100 ~/aiteamforge/logs/fleet-monitor.log
    ```
 
 3. **Check Tailscale logs:**

@@ -179,14 +179,14 @@ git --version
 1. Download `Git_Worktree_Manager_SKILL.md`
 2. Save to your skills directory:
    ```bash
-   mkdir -p ~/dev-team/skills/
-   cp Git_Worktree_Manager_SKILL.md ~/dev-team/skills/
+   mkdir -p ~/aiteamforge/skills/
+   cp Git_Worktree_Manager_SKILL.md ~/aiteamforge/skills/
    ```
 
 3. Reference it in Claude Code:
    ```bash
    # In any terminal with Claude Code
-   "Read the Git Worktree Manager skill from ~/dev-team/skills/"
+   "Read the Git Worktree Manager skill from ~/aiteamforge/skills/"
    ```
 
 ### Step 3: Create Worktrees Directory (Optional)

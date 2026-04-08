@@ -650,7 +650,7 @@ Total worktrees: 4 across 3 projects
 **Switch by context:**
 ```
 "Switch to feature worktree"
-→ Provides cd command: cd ~/dev-team/main-event-feature
+→ Provides cd command: cd ~/aiteamforge/main-event-feature
 → Or: directly changes directory if in tmux session
 ```
 
@@ -799,8 +799,8 @@ All Fun Card widget worktrees cleaned up!
 
 1. **Determine worktree directory**
    ```bash
-   # Pattern: ~/dev-team/[project]-[context]-[optional-descriptor]
-   WORKTREE_DIR=~/dev-team/main-event-feature
+   # Pattern: ~/aiteamforge/[project]-[context]-[optional-descriptor]
+   WORKTREE_DIR=~/aiteamforge/main-event-feature
    ```
 
 2. **Create worktree with Git command**
@@ -870,7 +870,7 @@ Feature Development:
   🟢 main-event-feature
      Branch: feature/funcard-reload
      Status: Clean
-     Path: ~/dev-team/main-event-feature
+     Path: ~/aiteamforge/main-event-feature
      Last commit: MEM-445: Add Fun Card widget foundation
      Ahead of develop: 3 commits
 
@@ -878,7 +878,7 @@ Bug Fixes:
   🔴 main-event-hotfix-crash-3455
      Branch: hotfix/crash-3455
      Status: DIRTY (2 uncommitted files)
-     Path: ~/dev-team/main-event-hotfix-crash-3455
+     Path: ~/aiteamforge/main-event-hotfix-crash-3455
      Last commit: Fix force unwrap in booking flow
      Ahead of develop: 1 commit
      ⚠️  Uncommitted changes - commit before cleanup!
@@ -887,7 +887,7 @@ Refactoring:
   🟢 main-event-refactor-force-unwraps
      Branch: refactor/force-unwraps
      Status: Clean
-     Path: ~/dev-team/main-event-refactor-force-unwraps
+     Path: ~/aiteamforge/main-event-refactor-force-unwraps
      Last commit: Refactor RewardsViewController guard statements
      Ahead of develop: 8 commits
 
@@ -895,7 +895,7 @@ Main Repository:
   🟢 main-event-ios
      Branch: develop
      Status: Clean
-     Path: ~/dev-team/main-event-ios
+     Path: ~/aiteamforge/main-event-ios
 ```
 
 ### Worktree Cleanup Rules
@@ -928,7 +928,7 @@ Main Repository:
 
 1. **Confirmation prompt**
    ```
-   About to remove worktree: ~/dev-team/main-event-hotfix-crash-3455
+   About to remove worktree: ~/aiteamforge/main-event-hotfix-crash-3455
    Branch: hotfix/crash-3455
    Status: Clean, 0 uncommitted changes
    
@@ -1000,7 +1000,7 @@ The skill detects the current terminal context to provide intelligent suggestion
 3. **Check working directory**
    ```bash
    pwd
-   # If in ~/dev-team/main-event-feature → feature context
+   # If in ~/aiteamforge/main-event-feature → feature context
    ```
 
 4. **Check current branch**
@@ -1059,7 +1059,7 @@ Skill: "You're in ios-bridge (Captain Picard - Strategic Feature Development).
 
 I recommend setting up a feature worktree:
 
-  Directory: ~/dev-team/main-event-feature-funcard-reload
+  Directory: ~/aiteamforge/main-event-feature-funcard-reload
   Branch: feature/MEM-445-funcard-reload
   Based on: develop
 
@@ -1072,7 +1072,7 @@ Skill: [Creates worktree]
 "✅ Worktree created successfully!
 
 To get started:
-  cd ~/dev-team/main-event-feature-funcard-reload
+  cd ~/aiteamforge/main-event-feature-funcard-reload
 
 Your feature branch 'feature/MEM-445-funcard-reload' is ready.
 You're now in a clean workspace isolated from other work.
@@ -1123,11 +1123,11 @@ The skill can enhance bash prompts to show current worktree context:
 
 ```bash
 # Example enhanced prompt
-[ios-sickbay] ~/dev-team/main-event-hotfix (hotfix/crash-3455) $
+[ios-sickbay] ~/aiteamforge/main-event-hotfix (hotfix/crash-3455) $
 
 # Breakdown:
 # [ios-sickbay] - Terminal context
-# ~/dev-team/main-event-hotfix - Worktree directory
+# ~/aiteamforge/main-event-hotfix - Worktree directory
 # (hotfix/crash-3455) - Current branch
 ```
 
@@ -1141,7 +1141,7 @@ You: [Switch from ios-bridge to ios-sickbay]
 Skill: "Welcome to ios-sickbay, Dr. Crusher.
 
 I notice you have a hotfix worktree available:
-  ~/dev-team/main-event-hotfix (hotfix/crash-3455)
+  ~/aiteamforge/main-event-hotfix (hotfix/crash-3455)
   Last commit: 2 hours ago
   Status: Clean
 
@@ -1211,7 +1211,7 @@ Create safety backups before risky operations:
 Move worktrees to different locations:
 
 ```
-"Move worktree main-event-feature to ~/dev-team/archives/"
+"Move worktree main-event-feature to ~/aiteamforge/archives/"
 → Uses git worktree move command
 → Updates any configuration references
 → Verifies integrity after move
@@ -1239,10 +1239,10 @@ Regular developtenance and diagnostics:
 
 **Error: Worktree already exists**
 ```
-Error: Worktree 'main-event-feature' already exists at ~/dev-team/main-event-feature
+Error: Worktree 'main-event-feature' already exists at ~/aiteamforge/main-event-feature
 
 Options:
-1. Switch to existing worktree: cd ~/dev-team/main-event-feature
+1. Switch to existing worktree: cd ~/aiteamforge/main-event-feature
 2. Create with different name: main-event-feature-funcard-reload
 3. Remove existing and recreate (requires confirmation)
 
@@ -1253,7 +1253,7 @@ What would you like to do?
 ```
 Error: Branch 'feature/funcard-reload' is already checked out in another worktree
 
-Currently checked out at: ~/dev-team/main-event-feature
+Currently checked out at: ~/aiteamforge/main-event-feature
 
 Options:
 1. Switch to that worktree instead
@@ -1267,7 +1267,7 @@ What would you like to do?
 ```
 Error: Cannot remove worktree - uncommitted changes detected
 
-Uncommitted files in ~/dev-team/main-event-hotfix:
+Uncommitted files in ~/aiteamforge/main-event-hotfix:
   M  Sources/Booking/BookingViewController.swift
   A  Sources/Booking/BookingViewModelTests.swift
   ?? Sources/Booking/BookingError.swift
@@ -1340,7 +1340,7 @@ What would you like to do?
 **For Feature Development:**
 ```
 1. Create worktree: "Create worktree for feature/MEM-445-widget"
-2. Work in worktree: cd ~/dev-team/main-event-feature-MEM-445
+2. Work in worktree: cd ~/aiteamforge/main-event-feature-MEM-445
 3. Commit regularly: git commit -m "Progress on widget"
 4. Push to remote: git push origin feature/MEM-445-widget
 5. Create PR when ready
@@ -1350,7 +1350,7 @@ What would you like to do?
 **For Hotfixes:**
 ```
 1. Create worktree: "Create worktree for hotfix/crash-3455"
-2. Fix issue quickly: cd ~/dev-team/main-event-hotfix-crash-3455
+2. Fix issue quickly: cd ~/aiteamforge/main-event-hotfix-crash-3455
 3. Test fix thoroughly
 4. Commit and push: git commit -m "Fix crash #3455" && git push
 5. Create PR for fast-track review
@@ -1360,7 +1360,7 @@ What would you like to do?
 **For Refactoring:**
 ```
 1. Create worktree: "Create worktree for refactor/force-unwraps"
-2. Systematic refactoring: cd ~/dev-team/main-event-refactor-force-unwraps
+2. Systematic refactoring: cd ~/aiteamforge/main-event-refactor-force-unwraps
 3. Commit frequently (one file or logical group at a time)
 4. Push regularly to prevent data loss
 5. Create PR when refactor is complete
@@ -1373,17 +1373,17 @@ What would you like to do?
 
 ```
 Terminal 1 (ios-bridge):
-  Working directory: ~/dev-team/main-event-feature-funcard
+  Working directory: ~/aiteamforge/main-event-feature-funcard
   Branch: feature/funcard-reload
   Task: Implementing Fun Card reload feature
 
 Terminal 2 (ios-sickbay):
-  Working directory: ~/dev-team/main-event-hotfix-crash
+  Working directory: ~/aiteamforge/main-event-hotfix-crash
   Branch: hotfix/crash-3455
   Task: Fixing booking flow crash
 
 Terminal 3 (ios-stellar):
-  Working directory: ~/dev-team/main-event-refactor
+  Working directory: ~/aiteamforge/main-event-refactor
   Branch: refactor/force-unwraps
   Task: Systematic force unwrap elimination
 
@@ -1589,7 +1589,7 @@ You: "Create worktree for refactor/force-unwraps"
 
 Skill:
 ✅ Refactor worktree created!
-   Directory: ~/dev-team/main-event-refactor-force-unwraps
+   Directory: ~/aiteamforge/main-event-refactor-force-unwraps
    Branch: refactor/force-unwraps (new, based on develop)
    
 Perfect for systematic refactoring, Lt. Cmdr. Data.
@@ -1598,7 +1598,7 @@ Fascinating how many force unwraps we can eliminate! 🖖
 
 **Step 2: Systematic refactoring over several days**
 ```
-Day 1: cd ~/dev-team/main-event-refactor-force-unwraps
+Day 1: cd ~/aiteamforge/main-event-refactor-force-unwraps
        Refactor BookingViewController.swift
        Commit: "Refactor BookingViewController force unwraps"
        
@@ -1622,7 +1622,7 @@ Refactoring:
   🟢 main-event-refactor-force-unwraps
      Branch: refactor/force-unwraps
      Status: Clean
-     Path: ~/dev-team/main-event-refactor-force-unwraps
+     Path: ~/aiteamforge/main-event-refactor-force-unwraps
      Last commit: Refactor AccountManager force unwraps
      Ahead of develop: 12 commits
      📊 Force unwraps eliminated: ~85
@@ -1631,7 +1631,7 @@ Feature Development:
   🟢 main-event-feature-funcard-reload
      Branch: feature/MEM-445-funcard-reload
      Status: Clean
-     Path: ~/dev-team/main-event-feature-funcard-reload
+     Path: ~/aiteamforge/main-event-feature-funcard-reload
      Last commit: Complete Fun Card widget UI
      Ahead of develop: 8 commits
 
@@ -1639,7 +1639,7 @@ Main Repository:
   🟢 main-event-ios
      Branch: develop
      Status: Clean
-     Path: ~/dev-team/main-event-ios
+     Path: ~/aiteamforge/main-event-ios
 ```
 
 **Step 4: Complete refactoring**
@@ -1675,7 +1675,7 @@ You: "Create worktree for release/2.9.0"
 
 Skill:
 ✅ Release worktree created!
-   Directory: ~/dev-team/main-event-release
+   Directory: ~/aiteamforge/main-event-release
    Branch: release/2.9.0 (new, based on develop)
    
 Release management ready, Commander La Forge.
@@ -1684,7 +1684,7 @@ All systems nominal! 🚀
 
 **Step 2: Prepare release**
 ```
-You: cd ~/dev-team/main-event-release
+You: cd ~/aiteamforge/main-event-release
 You: [Update version numbers, finalize release notes]
 You: [Run final tests, verify build settings]
 You: [Commit release preparation changes]
@@ -1693,7 +1693,7 @@ You: [Commit release preparation changes]
 **Step 3: Feature work continues in parallel**
 ```
 [Meanwhile, in ios-bridge terminal]
-Other developer: cd ~/dev-team/main-event-feature-v2.10
+Other developer: cd ~/aiteamforge/main-event-feature-v2.10
 Other developer: [Working on v2.10.0 features without affecting release]
 ```
 
@@ -1734,7 +1734,7 @@ Skill: [Pushes]
 You: yes
 
 Skill:
-✅ Removed worktree: ~/dev-team/main-event-release
+✅ Removed worktree: ~/aiteamforge/main-event-release
 ✅ Deleted local branch: release/2.9.0 (merged)
 
 🎉 Release v2.9.0 complete!
@@ -1808,13 +1808,13 @@ set -g status-right '#(cd #{pane_current_path}; git rev-parse --show-toplevel 2>
 **Solution:**
 ```bash
 # Check if directory exists
-ls -la ~/dev-team/main-event-feature
+ls -la ~/aiteamforge/main-event-feature
 
 # If exists and empty, remove it
-rm -rf ~/dev-team/main-event-feature
+rm -rf ~/aiteamforge/main-event-feature
 
 # If permission issue
-sudo chown -R $USER ~/dev-team
+sudo chown -R $USER ~/aiteamforge
 
 # Retry creation
 "Create worktree for feature"
@@ -1841,7 +1841,7 @@ sudo chown -R $USER ~/dev-team
 **Solution:**
 ```bash
 # Check actual status
-cd ~/dev-team/main-event-feature
+cd ~/aiteamforge/main-event-feature
 git status
 
 # Often it's just .DS_Store on macOS

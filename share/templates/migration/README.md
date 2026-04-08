@@ -1,6 +1,6 @@
 # Migration Templates
 
-This directory contains templates and reference data used by the dev-team migration system.
+This directory contains templates and reference data used by the aiteamforge migration system.
 
 ## Files
 
@@ -39,28 +39,28 @@ If you add new components that need migration:
 1. Add the path mapping to `mappings`
 2. Add critical files to `preserve.critical_data`
 3. Add framework files to `skip_migration.framework_files`
-4. Update `dev-team-migrate.sh` to handle the new component
+4. Update `aiteamforge-migrate.sh` to handle the new component
 
 ## Migration Workflow
 
-1. **Check**: `dev-team migrate --check`
+1. **Check**: `aiteamforge migrate --check`
    - Analyzes current installation
    - Identifies components
    - Calculates risk score
    - Recommends proceed/review/fix
 
-2. **Dry Run**: `dev-team migrate --dry-run`
+2. **Dry Run**: `aiteamforge migrate --dry-run`
    - Shows what would be migrated
    - No changes made
    - Safe preview
 
-3. **Migrate**: `dev-team migrate`
+3. **Migrate**: `aiteamforge migrate`
    - Creates backup
    - Migrates user data
    - Updates paths
    - Validates installation
 
-4. **Rollback**: `dev-team migrate --rollback`
+4. **Rollback**: `aiteamforge migrate --rollback`
    - Restores from backup
    - Reverses migration
    - Safe undo
@@ -71,8 +71,8 @@ If you add new components that need migration:
 - **Verification**: File counts compared before/after
 - **Dry Run**: Preview changes without making them
 - **Rollback**: Undo migration from backup
-- **Preserve Original**: Never deletes ~/dev-team (user decides when safe)
-- **Logging**: Complete log at ~/.dev-team/migration.log
+- **Preserve Original**: Never deletes ~/aiteamforge (user decides when safe)
+- **Logging**: Complete log at ~/.aiteamforge/migration.log
 
 ## Exit Codes
 
@@ -92,27 +92,27 @@ If you add new components that need migration:
 
 ```bash
 # Check if migration is safe
-dev-team migrate --check
+aiteamforge migrate --check
 
 # Preview migration
-dev-team migrate --dry-run
+aiteamforge migrate --dry-run
 
 # Perform migration
-dev-team migrate
+aiteamforge migrate
 
 # Verify migration
-dev-team doctor
+aiteamforge doctor
 
 # Rollback if needed
-dev-team migrate --rollback
+aiteamforge migrate --rollback
 ```
 
 ## Troubleshooting
 
-### "No dev-team installation found"
+### "No aiteamforge installation found"
 Use `--old-dir` to specify custom location:
 ```bash
-dev-team migrate --old-dir /path/to/dev-team
+aiteamforge migrate --old-dir /path/to/aiteamforge
 ```
 
 ### "Insufficient disk space"
@@ -124,16 +124,16 @@ Fix the issues reported by `migrate --check`, then run check again.
 Or use `--force` to proceed anyway (use with caution).
 
 ### "Validation failed"
-Run `dev-team doctor` to see specific issues.
+Run `aiteamforge doctor` to see specific issues.
 Some issues may require manual configuration.
 
 ### "Need to rollback"
 ```bash
 # Rollback to most recent backup
-dev-team migrate --rollback
+aiteamforge migrate --rollback
 
 # Rollback to specific backup
-dev-team migrate --rollback-from ~/.dev-team/migration-backups/2026-02-17_103045
+aiteamforge migrate --rollback-from ~/.aiteamforge/migration-backups/2026-02-17_103045
 ```
 
 ## Post-Migration
@@ -141,20 +141,20 @@ dev-team migrate --rollback-from ~/.dev-team/migration-backups/2026-02-17_103045
 After successful migration:
 
 1. **Restart terminal** (new shell integration)
-2. **Run `dev-team doctor`** (verify installation)
-3. **Run `dev-team start`** (start services)
+2. **Run `aiteamforge doctor`** (verify installation)
+3. **Run `aiteamforge start`** (start services)
 4. **Test kanban boards** (verify data intact)
 5. **Test agent workflows** (verify configs work)
 
 Only after verification:
-6. **Manually delete** `~/dev-team/` (if desired)
-7. **Keep backup** in `~/.dev-team/migration-backups/` (just in case)
+6. **Manually delete** `~/aiteamforge/` (if desired)
+7. **Keep backup** in `~/.aiteamforge/migration-backups/` (just in case)
 
 ## Architecture
 
 ### Before Migration (Manual)
 ```
-~/dev-team/                  (git repo with everything)
+~/aiteamforge/                  (git repo with everything)
   kanban/                    (user data)
   config/                    (user configs)
   claude/                    (agent configs)
@@ -166,13 +166,13 @@ Only after verification:
 
 ### After Migration (Homebrew)
 ```
-/opt/homebrew/opt/dev-team/  (framework code - Homebrew-managed)
+/opt/homebrew/opt/aiteamforge/  (framework code - Homebrew-managed)
   libexec/
-    commands/                (dev-team commands)
+    commands/                (aiteamforge commands)
     lib/                     (shared libraries)
   share/                     (templates, assets)
 
-~/.dev-team/                 (user data - persists across updates)
+~/.aiteamforge/                 (user data - persists across updates)
   kanban/                    (preserved)
   config/                    (preserved)
   claude/                    (preserved)
@@ -181,7 +181,7 @@ Only after verification:
 ```
 
 ### Benefits
-- **Framework updates** via `brew upgrade dev-team`
+- **Framework updates** via `brew upgrade aiteamforge`
 - **User data preserved** across updates
 - **Clean separation** of framework vs user data
 - **Multi-machine** easier with Homebrew

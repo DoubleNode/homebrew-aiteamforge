@@ -1,23 +1,20 @@
 #!/usr/bin/env bash
 # Fleet Status Reporter
 # Collects tmux session data and reports to central monitoring server
-# Run via cron every 60 seconds: * * * * * ~/dev-team/fleet-monitor/client/fleet-reporter.sh
+# Run via cron every 60 seconds: * * * * * ~/aiteamforge/fleet-monitor/client/fleet-reporter.sh
 
 # Ensure PATH includes common locations (cron has minimal PATH)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
 
-# Note: intentionally omit -e (errexit). This reporter runs every 60s via
-# LaunchAgent — it's better to report partial data than die silently when
-# grep/pipeline commands return non-zero on "no match" edge cases.
-set -uo pipefail
+set -euo pipefail
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
 # Configuration file locations (new XACA-0024 system)
-FLEET_CONFIG_FILE="$HOME/.dev-team/fleet-config.json"
-MACHINE_CONFIG_FILE="$HOME/.dev-team/machine.json"
+FLEET_CONFIG_FILE="$HOME/.aiteamforge/fleet-config.json"
+MACHINE_CONFIG_FILE="$HOME/.aiteamforge/machine.json"
 
 # Machine GUID - persistent unique identifier for this machine
 # Stored in ~/.fleet-machine-id, created on first run
@@ -159,17 +156,17 @@ OS_TYPE=$(uname -s)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
 # LCARS port files directory
-LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+LCARS_PORTS_DIR="$HOME/aiteamforge/lcars-ports"
 
 # Backup status file location
-BACKUP_STATUS_FILE="$HOME/dev-team-backups/kanban/backup-status.json"
+BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"
 
 # ============================================================================
 # FUNCTIONS
 # ============================================================================
 
 # Get LCARS port for a session (if available)
-# Looks for port file at ~/dev-team/lcars-ports/{session_name}.port
+# Looks for port file at ~/aiteamforge/lcars-ports/{session_name}.port
 get_lcars_port() {
     local session_name="$1"
     local port_file="$LCARS_PORTS_DIR/${session_name}.port"
@@ -182,7 +179,7 @@ get_lcars_port() {
 }
 
 # Get theme color for a session (if available)
-# Looks for theme file at ~/dev-team/lcars-ports/{session_name}.theme
+# Looks for theme file at ~/aiteamforge/lcars-ports/{session_name}.theme
 get_theme_color() {
     local session_name="$1"
     local theme_file="$LCARS_PORTS_DIR/${session_name}.theme"
@@ -195,7 +192,7 @@ get_theme_color() {
 }
 
 # Get tab order for a session (if available)
-# Looks for order file at ~/dev-team/lcars-ports/{session_name}.order
+# Looks for order file at ~/aiteamforge/lcars-ports/{session_name}.order
 get_tab_order() {
     local session_name="$1"
     local order_file="$LCARS_PORTS_DIR/${session_name}.order"
@@ -325,11 +322,7 @@ get_tmux_sessions() {
             # Format: session_name: X windows (created DATE) [attached]
 
             session_name=$(echo "$line" | awk -F: '{print $1}')
-            # Use sed instead of grep — grep returns exit 1 on no match,
-            # which kills the subshell under set -euo pipefail.
-            # tmux outputs "N windows" (plural) or "1 window" (singular).
-            windows=$(echo "$line" | sed -n 's/.*: \([0-9][0-9]*\) window.*/\1/p')
-            [ -z "$windows" ] && windows=0
+            windows=$(echo "$line" | grep -o '[0-9]* windows' | awk '{print $1}')
             attached=$(echo "$line" | grep -q 'attached' && echo "true" || echo "false")
 
             # Extract creation date
@@ -540,13 +533,10 @@ main() {
 
     # Build payload
     echo "Collecting tmux session data..."
-    if ! payload=$(build_payload); then
-        echo "Warning: build_payload failed, using fallback payload" >&2
-        payload="{\"machine\":{\"machine_id\":\"$MACHINE_ID\",\"hostname\":\"$HOSTNAME\",\"ip\":\"$IP_ADDRESS\",\"os\":\"$OS_TYPE\",\"timestamp\":\"$TIMESTAMP\"},\"sessions\":[],\"backup_status\":null}"
-    fi
+    payload=$(build_payload)
 
-    # Count sessions (grep -c returns exit 1 on no match, so catch with || true)
-    session_count=$(echo "$payload" | grep -c '"name":') || session_count=0
+    # Count sessions
+    session_count=$(echo "$payload" | grep -o '"name":' | wc -l | tr -d ' ')
     echo "Found $session_count tmux sessions"
     echo ""
 

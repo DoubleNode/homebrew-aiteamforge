@@ -1,6 +1,6 @@
-# Contributing to Dev-Team Homebrew Tap
+# Contributing to AITeamForge Homebrew Tap
 
-Thank you for your interest in contributing to the Dev-Team Homebrew Tap!
+Thank you for your interest in contributing to the AITeamForge Homebrew Tap!
 
 ## Development Setup
 
@@ -13,8 +13,8 @@ Thank you for your interest in contributing to the Dev-Team Homebrew Tap!
 ### Clone the Tap
 
 ```bash
-brew tap DoubleNode/dev-team
-cd $(brew --repository DoubleNode/dev-team)
+brew tap DoubleNode/aiteamforge
+cd $(brew --repository DoubleNode/aiteamforge)
 ```
 
 ## Formula Development
@@ -23,24 +23,24 @@ cd $(brew --repository DoubleNode/dev-team)
 
 ```bash
 # Edit the formula
-vim Formula/dev-team.rb
+vim Formula/aiteamforge.rb
 
 # Audit the formula
-brew audit --strict --online Formula/dev-team.rb
+brew audit --strict --online Formula/aiteamforge.rb
 
 # Install from source to test
-brew install --build-from-source dev-team
+brew install --build-from-source aiteamforge
 
 # Run formula tests
-brew test dev-team
+brew test aiteamforge
 
 # Test the actual commands
-dev-team --version
-dev-team-setup --help
-dev-team-doctor --verbose
+aiteamforge --version
+aiteamforge-setup --help
+aiteamforge-doctor --verbose
 
 # Uninstall when done testing
-brew uninstall dev-team
+brew uninstall aiteamforge
 ```
 
 ### Formula Style Guide
@@ -63,17 +63,17 @@ When updating the formula for a new release:
 
 2. **Update URL**
    ```ruby
-   url "https://github.com/DoubleNode/dev-team/archive/refs/tags/v1.1.0.tar.gz"
+   url "https://github.com/DoubleNode/aiteamforge/archive/refs/tags/v1.1.0.tar.gz"
    ```
 
 3. **Calculate new SHA256**
    ```bash
    # Download the release tarball
-   curl -L -o dev-team-1.1.0.tar.gz \
-     https://github.com/DoubleNode/dev-team/archive/refs/tags/v1.1.0.tar.gz
+   curl -L -o aiteamforge-1.1.0.tar.gz \
+     https://github.com/DoubleNode/aiteamforge/archive/refs/tags/v1.1.0.tar.gz
 
    # Calculate SHA256
-   shasum -a 256 dev-team-1.1.0.tar.gz
+   shasum -a 256 aiteamforge-1.1.0.tar.gz
 
    # Update formula
    sha256 "new_sha256_hash_here"
@@ -81,14 +81,14 @@ When updating the formula for a new release:
 
 4. **Test the updated formula**
    ```bash
-   brew reinstall --build-from-source dev-team
-   brew test dev-team
+   brew reinstall --build-from-source aiteamforge
+   brew test aiteamforge
    ```
 
 5. **Commit changes**
    ```bash
-   git add Formula/dev-team.rb
-   git commit -m "dev-team: update to version 1.1.0"
+   git add Formula/aiteamforge.rb
+   git commit -m "aiteamforge: update to version 1.1.0"
    git push origin main
    ```
 
@@ -97,17 +97,17 @@ When updating the formula for a new release:
 ### Editing CLI Scripts
 
 Scripts are located in `bin/`:
-- `dev-team-cli.sh` - Main CLI dispatcher
-- `dev-team-setup.sh` - Setup wizard
-- `dev-team-doctor.sh` - Health check and diagnostics
+- `aiteamforge-cli.sh` - Main CLI dispatcher
+- `aiteamforge-setup.sh` - Setup wizard
+- `aiteamforge-doctor.sh` - Health check and diagnostics
 
 ### Testing Scripts
 
 ```bash
 # Check syntax
-bash -n bin/dev-team-cli.sh
-bash -n bin/dev-team-setup.sh
-bash -n bin/dev-team-doctor.sh
+bash -n bin/aiteamforge-cli.sh
+bash -n bin/aiteamforge-setup.sh
+bash -n bin/aiteamforge-doctor.sh
 
 # Run ShellCheck
 brew install shellcheck
@@ -117,9 +117,9 @@ shellcheck bin/*.sh
 chmod +x bin/*.sh
 
 # Test directly
-./bin/dev-team-cli.sh help
-./bin/dev-team-setup.sh --help
-./bin/dev-team-doctor.sh --version
+./bin/aiteamforge-cli.sh help
+./bin/aiteamforge-setup.sh --help
+./bin/aiteamforge-doctor.sh --version
 ```
 
 ## Testing
@@ -128,33 +128,33 @@ chmod +x bin/*.sh
 
 1. **Install from source**
    ```bash
-   brew install --build-from-source dev-team
+   brew install --build-from-source aiteamforge
    ```
 
 2. **Run setup wizard**
    ```bash
-   dev-team setup
+   aiteamforge setup
    ```
 
 3. **Test all commands**
    ```bash
-   dev-team --version
-   dev-team help
-   dev-team-setup --help
-   dev-team-doctor
-   dev-team-doctor --verbose
-   dev-team-doctor --check dependencies
+   aiteamforge --version
+   aiteamforge help
+   aiteamforge-setup --help
+   aiteamforge-doctor
+   aiteamforge-doctor --verbose
+   aiteamforge-doctor --check dependencies
    ```
 
 4. **Test upgrade path**
    ```bash
-   dev-team setup --upgrade
+   aiteamforge setup --upgrade
    ```
 
 5. **Test uninstall**
    ```bash
-   dev-team setup --uninstall
-   brew uninstall dev-team
+   aiteamforge setup --uninstall
+   brew uninstall aiteamforge
    ```
 
 ### Automated Testing
@@ -187,16 +187,16 @@ Tests include:
 
 4. **Test your changes**
    ```bash
-   brew audit --strict Formula/dev-team.rb
-   brew install --build-from-source dev-team
-   brew test dev-team
+   brew audit --strict Formula/aiteamforge.rb
+   brew install --build-from-source aiteamforge
+   brew test aiteamforge
    ```
 
 5. **Commit with descriptive message**
    ```bash
    git commit -m "feat: Add support for custom port configuration
 
-   - Add --port option to dev-team-setup
+   - Add --port option to aiteamforge-setup
    - Update health check to verify custom ports
    - Document port configuration in README"
    ```
@@ -220,39 +220,39 @@ Tests include:
    version "1.1.0"
    ```
 
-2. **Tag the main dev-team repository**
+2. **Tag the main aiteamforge repository**
    ```bash
-   cd /path/to/dev-team
+   cd /path/to/aiteamforge
    git tag -a v1.1.0 -m "Release v1.1.0"
    git push origin v1.1.0
    ```
 
 3. **GitHub will create release tarball**
    ```
-   https://github.com/DoubleNode/dev-team/archive/refs/tags/v1.1.0.tar.gz
+   https://github.com/DoubleNode/aiteamforge/archive/refs/tags/v1.1.0.tar.gz
    ```
 
 4. **Update formula SHA256**
    ```bash
-   curl -L -o dev-team-1.1.0.tar.gz \
-     https://github.com/DoubleNode/dev-team/archive/refs/tags/v1.1.0.tar.gz
-   shasum -a 256 dev-team-1.1.0.tar.gz
+   curl -L -o aiteamforge-1.1.0.tar.gz \
+     https://github.com/DoubleNode/aiteamforge/archive/refs/tags/v1.1.0.tar.gz
+   shasum -a 256 aiteamforge-1.1.0.tar.gz
    ```
 
 5. **Update formula with new SHA256**
 
 6. **Test thoroughly**
    ```bash
-   brew uninstall dev-team
-   brew install --build-from-source dev-team
-   brew test dev-team
-   dev-team setup  # Full integration test
+   brew uninstall aiteamforge
+   brew install --build-from-source aiteamforge
+   brew test aiteamforge
+   aiteamforge setup  # Full integration test
    ```
 
 7. **Commit and tag**
    ```bash
-   git add Formula/dev-team.rb
-   git commit -m "dev-team: update to version 1.1.0"
+   git add Formula/aiteamforge.rb
+   git commit -m "aiteamforge: update to version 1.1.0"
    git tag -a v1.1.0 -m "Formula v1.1.0"
    git push origin main
    git push origin v1.1.0
@@ -263,28 +263,28 @@ Tests include:
 ### Formula Not Found After Changes
 
 ```bash
-brew untap DoubleNode/dev-team
-brew tap DoubleNode/dev-team
+brew untap DoubleNode/aiteamforge
+brew tap DoubleNode/aiteamforge
 ```
 
 ### Installation Fails
 
 ```bash
 # Check formula syntax
-brew audit Formula/dev-team.rb
+brew audit Formula/aiteamforge.rb
 
 # Install with verbose output
-brew install --build-from-source --verbose dev-team
+brew install --build-from-source --verbose aiteamforge
 ```
 
 ### Test Failures
 
 ```bash
 # Check what test block expects
-cat Formula/dev-team.rb | grep -A 20 "test do"
+cat Formula/aiteamforge.rb | grep -A 20 "test do"
 
 # Run test with verbose output
-brew test --verbose dev-team
+brew test --verbose aiteamforge
 ```
 
 ## Code Style

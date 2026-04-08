@@ -562,6 +562,26 @@ body {
     border-bottom: none;
 }
 
+/* Split row - two buttons sharing one row */
+.sidebar-split-row {
+    display: flex;
+    gap: 0;
+}
+
+.sidebar-split-row .sidebar-button {
+    flex: 1;
+    border-top: 2px solid var(--lcars-black);
+}
+
+.sidebar-split-row .sidebar-button:first-child {
+    border-top-left-radius: 0;
+    border-right: 2px solid var(--lcars-black);
+}
+
+.sidebar-split-row .sidebar-button:last-child {
+    border-top-right-radius: 0;
+}
+
 .sidebar-button:hover {
     filter: brightness(1.2);
 }
@@ -571,6 +591,8 @@ body {
 }
 
 /* Navigation buttons - Fixed unique colors (same for all teams) */
+.sidebar-button[data-section="home"] { background: var(--lcars-blue); }
+.sidebar-button[data-section="todos"] { background: var(--lcars-orange); }
 .sidebar-button[data-section="workflow"] { background: var(--lcars-peach); }
 .sidebar-button[data-section="details"] { background: var(--lcars-cyan); }
 .sidebar-button[data-section="queue"] { background: var(--lcars-purple); }
@@ -581,10 +603,19 @@ body {
 .sidebar-button[data-section="backups"] { background: var(--lcars-tan); }
 .sidebar-button[data-section="commands"] {
     background: var(--lcars-crimson);
+    border-top: none;
     border-bottom: 2px solid var(--lcars-black);
 }
 
 /* Active state - invert colors (black background, original color text) */
+.sidebar-button[data-section="home"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-blue);
+}
+.sidebar-button[data-section="todos"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-orange);
+}
 .sidebar-button[data-section="workflow"].active {
     background: var(--lcars-black);
     color: var(--lcars-peach);
@@ -909,15 +940,6 @@ body {
     font-weight: 500;
 }
 
-/* Refresh button */
-.sidebar-button.refresh-btn {
-    background: var(--lcars-cyan);
-    color: var(--lcars-black);
-    font-weight: 700;
-    margin-bottom: 16px;
-    border-bottom: 2px solid var(--lcars-black);
-}
-
 /* Uptime display at bottom of sidebar */
 .sidebar-uptime {
     background: var(--lcars-tan);
@@ -977,7 +999,6 @@ body {
     /* Just below the bar + small gap */
     margin-top: calc(var(--bar-height) + var(--gap));
     position: relative;  /* For absolute positioning of sections */
-    height: 100%;  /* Ensure full height */
     min-height: 0;  /* Allow flex item to shrink below content size */
 }
 
@@ -1325,15 +1346,19 @@ body {
 
 /* Hide all sections by default */
 .lcars-content > .startup-section,
+.lcars-content > .home-section,
 .lcars-content > .kanban-section,
 .lcars-content > .details-section,
 .lcars-content > .queue-section,
 .lcars-content > .releases-section,
 .lcars-content > .epics-section,
 .lcars-content > .calendar-section,
+.lcars-content > .todos-section,
 .lcars-content > .commands-section,
 .lcars-content > .backups-section,
-.lcars-content > .integrations-section {
+.lcars-content > .integrations-section,
+.lcars-content > .team-config-section,
+.lcars-content > .archive-section {
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
@@ -1348,15 +1373,19 @@ body {
 
 /* Active section - visible and fills container */
 .lcars-content > .startup-section.active,
+.lcars-content > .home-section.active,
 .lcars-content > .kanban-section.active,
 .lcars-content > .details-section.active,
 .lcars-content > .queue-section.active,
 .lcars-content > .releases-section.active,
 .lcars-content > .epics-section.active,
 .lcars-content > .calendar-section.active,
+.lcars-content > .todos-section.active,
 .lcars-content > .commands-section.active,
 .lcars-content > .backups-section.active,
-.lcars-content > .integrations-section.active {
+.lcars-content > .integrations-section.active,
+.lcars-content > .team-config-section.active,
+.lcars-content > .archive-section.active {
     display: block;
     overflow-y: auto !important;
     padding-top: 5px; /* Minimal padding - status-legend is above content area */
@@ -1405,32 +1434,40 @@ body {
 }
 
 /* Active section - bar draws and title fades in */
+.home-section.active .section-bar,
 .kanban-section.active .section-bar,
 .details-section.active .section-bar,
 .queue-section.active .section-bar,
 .releases-section.active .section-bar,
 .epics-section.active .section-bar,
 .calendar-section.active .section-bar,
+.todos-section.active .section-bar,
 .commands-section.active .section-bar,
 .backups-section.active .section-bar,
-.integrations-section.active .section-bar {
+.integrations-section.active .section-bar,
+.archive-section.active .section-bar {
     transform: scaleX(1);
 }
 
+.home-section.active .section-title,
 .kanban-section.active .section-title,
 .details-section.active .section-title,
 .queue-section.active .section-title,
 .releases-section.active .section-title,
 .epics-section.active .section-title,
 .calendar-section.active .section-title,
+.todos-section.active .section-title,
 .commands-section.active .section-title,
 .backups-section.active .section-title,
-.integrations-section.active .section-title {
+.integrations-section.active .section-title,
+.archive-section.active .section-title {
     opacity: 1;
     transform: translateX(0);
 }
 
 /* Stagger section headers - title before bar */
+.home-section.active .section-title { transition-delay: 0.05s; }
+.home-section.active .section-bar { transition-delay: 0.10s; }
 .kanban-section.active .section-title { transition-delay: 0.05s; }
 .kanban-section.active .section-bar { transition-delay: 0.10s; }
 .details-section.active .section-title { transition-delay: 0.05s; }
@@ -1443,12 +1480,16 @@ body {
 .backups-section.active .section-bar { transition-delay: 0.10s; }
 .integrations-section.active .section-title { transition-delay: 0.05s; }
 .integrations-section.active .section-bar { transition-delay: 0.10s; }
+.archive-section.active .section-title { transition-delay: 0.05s; }
+.archive-section.active .section-bar { transition-delay: 0.10s; }
 .releases-section.active .section-title { transition-delay: 0.05s; }
 .releases-section.active .section-bar { transition-delay: 0.10s; }
 .epics-section.active .section-title { transition-delay: 0.05s; }
 .epics-section.active .section-bar { transition-delay: 0.10s; }
 .calendar-section.active .section-title { transition-delay: 0.05s; }
 .calendar-section.active .section-bar { transition-delay: 0.10s; }
+.todos-section.active .section-title { transition-delay: 0.05s; }
+.todos-section.active .section-bar { transition-delay: 0.10s; }
 
 /* -------------------------------------------------------------------------------
    KANBAN BOARD TRANSITIONS
@@ -1679,6 +1720,7 @@ body {
    ------------------------------------------------------------------------------- */
 
 /* Base exit state - applies to exiting sections */
+.home-section.exiting,
 .kanban-section.exiting,
 .details-section.exiting,
 .queue-section.exiting,
@@ -1688,6 +1730,7 @@ body {
 }
 
 /* Section headers collapse on exit */
+.home-section.exiting .section-bar,
 .kanban-section.exiting .section-bar,
 .details-section.exiting .section-bar,
 .queue-section.exiting .section-bar,
@@ -1698,6 +1741,7 @@ body {
     transition-duration: 0.15s;
 }
 
+.home-section.exiting .section-title,
 .kanban-section.exiting .section-title,
 .details-section.exiting .section-title,
 .queue-section.exiting .section-title,
@@ -1784,6 +1828,7 @@ body {
    When refreshing, skip all transitions for immediate state change
    ------------------------------------------------------------------------------- */
 
+.home-section.refreshing,
 .kanban-section.refreshing,
 .details-section.refreshing,
 .queue-section.refreshing,
@@ -2531,6 +2576,36 @@ body {
 .detail-working-id.clickable:hover {
     color: var(--lcars-cyan);
     text-shadow: 0 0 10px var(--lcars-cyan);
+}
+
+/* Clickable terminal elements - switch iTerm2 tab & tmux window */
+.clickable-terminal {
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.clickable-terminal:hover {
+    filter: brightness(1.3);
+}
+
+/* Terminal logo clickable hover — scale + glow (scale limited to logo to avoid text jitter) */
+.detail-logo.clickable-terminal:hover {
+    transform: scale(1.05);
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: 2px;
+    box-shadow: 0 0 12px var(--lcars-cyan);
+}
+
+/* Terminal name text clickable hover */
+.detail-terminal.clickable-terminal:hover {
+    color: var(--lcars-cyan);
+    text-shadow: 0 0 10px var(--lcars-cyan);
+}
+
+/* Keyboard focus styles for accessibility */
+.clickable-terminal:focus-visible {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: 2px;
 }
 
 /* Task line */
@@ -5950,6 +6025,7 @@ body {
 }
 
 /* Button colors matching sidebar - fixed unique colors */
+.tabbar-button[data-section="home"] { background: var(--lcars-blue); }
 .tabbar-button[data-section="workflow"] { background: var(--lcars-peach); }
 .tabbar-button[data-section="details"] { background: var(--lcars-cyan); }
 .tabbar-button[data-section="queue"] { background: var(--lcars-purple); }
@@ -5959,10 +6035,11 @@ body {
 .tabbar-button[data-section="commands"] { background: var(--lcars-crimson); }
 .tabbar-button[data-section="backups"] { background: var(--lcars-tan); }
 
-/* Hide refresh button in tab bar - endcaps provide visual balance */
-.tabbar-button.refresh-btn { display: none; }
-
 /* Active state - inverted colors (matches sidebar styling) */
+.tabbar-button[data-section="home"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-blue);
+}
 .tabbar-button[data-section="workflow"].active {
     background: var(--lcars-black);
     color: var(--lcars-peach);
@@ -6521,14 +6598,6 @@ body {
         padding: 3px 10px;
     }
 
-    /* Refresh button - fixed positioning for tablets */
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: 0px;
-        left: 10px;
-        width: var(--sidebar-width);
-        z-index: 100;
-    }
 }
 
 /* Tablet portrait - max 3 columns */
@@ -6578,14 +6647,6 @@ body {
         display: none !important;
     }
 
-    /* Refresh button - fixed positioning for tablets */
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: 0px;
-        left: 10px;
-        width: 150px;
-        z-index: 100;
-    }
 }
 
 /* Mobile / iPhone specific adjustments */
@@ -6800,16 +6861,6 @@ body {
         display: none;
     }
 
-    /* Refresh button - fixed to bottom of sidebar area */
-    .sidebar-button.refresh-btn {
-        position: fixed;
-        bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
-        left: 10px;
-        width: var(--sidebar-width);
-        z-index: 100;
-        margin-bottom: 0;
-        border-bottom: 1px solid var(--lcars-black);
-    }
 
     /* Horizontal scrolling for Details section */
     .details-section {
@@ -6936,6 +6987,7 @@ body {
     }
 
     /* Sections need extra padding for tab bar since they're position:absolute */
+    .lcars-content > .home-section.active,
     .lcars-content > .kanban-section.active,
     .lcars-content > .details-section.active,
     .lcars-content > .queue-section.active,
@@ -10150,16 +10202,12 @@ body {
     background: rgba(102, 204, 204, 0.4);
 }
 
-/* XACA-0056: Readonly badges for completed items */
-.queue-release-badge.readonly,
-.queue-epic-badge.readonly,
+/* XACA-0056: Readonly badges for completed items (XACA-0121: removed epic/release — now always editable) */
 .queue-jira.readonly {
     cursor: default;
     opacity: 0.5;
 }
 
-.queue-release-badge.readonly:hover,
-.queue-epic-badge.readonly:hover,
 .queue-jira.readonly:hover {
     background: inherit;
     opacity: 0.5;
@@ -11762,7 +11810,8 @@ body {
     .tracking-zone .queue-jira,
     .tracking-zone .queue-github,
     .tracking-zone .queue-monday,
-    .tracking-zone .queue-docs-btn {
+    .tracking-zone .queue-docs-btn,
+    .tracking-zone .queue-activity-btn {
         font-size: 10px;
         padding: 2px 5px;
     }
@@ -12723,6 +12772,38 @@ body {
     transform: scale(1.05);
 }
 
+/* =========================================================================
+   ACTIVITY BUTTON (XACA-0117) — TERTIARY TRACKING ZONE ELEMENT
+   ========================================================================= */
+
+/* Activity history button in queue items - TERTIARY ELEMENT */
+.queue-activity-btn {
+    /* TERTIARY: 11px - Tracking zone element, matches queue-docs-btn */
+    font-size: 13px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: rgba(153, 204, 153, 0.25);
+    color: var(--lcars-green, #99cc99);
+    cursor: pointer;
+    transition: all 0.2s ease;
+    white-space: nowrap;
+    opacity: 0.7; /* TERTIARY: Subtle until hover */
+    line-height: 1;
+}
+
+.queue-activity-btn:hover {
+    background: rgba(153, 204, 153, 0.45);
+    opacity: 1.0; /* Full brightness on hover */
+}
+
+.queue-activity-btn:focus {
+    outline: 2px solid var(--lcars-green, #99cc99);
+    outline-offset: 2px;
+    box-shadow: 0 0 10px rgba(153, 204, 153, 0.5);
+    transform: scale(1.05);
+}
+
 /* OS logo focus */
 .queue-os-logo:focus,
 .queue-os-logo-inline:focus {
@@ -12872,6 +12953,53 @@ body {
     font-style: italic;
 }
 
+/* Plan/Retro tab toggle */
+.plan-doc-tabs {
+    display: flex;
+    gap: 0;
+    padding: 0 20px;
+    background: rgba(0, 0, 0, 0.3);
+    border-bottom: 1px solid rgba(102, 204, 204, 0.2);
+}
+
+.plan-doc-tab {
+    flex: 1;
+    padding: 10px 20px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    background: transparent;
+    border: none;
+    border-bottom: 3px solid transparent;
+    color: var(--lcars-text-muted, #6699cc);
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.plan-doc-tab:hover {
+    color: var(--lcars-text, #99ccff);
+    background: rgba(102, 204, 204, 0.05);
+}
+
+.plan-doc-tab.active {
+    color: var(--lcars-teal, #66cccc);
+    border-bottom-color: var(--lcars-teal, #66cccc);
+    background: rgba(102, 204, 204, 0.1);
+}
+
+.plan-doc-tab[data-tab="retro"].active {
+    color: var(--lcars-amber, #ffcc00);
+    border-bottom-color: var(--lcars-amber, #ffcc00);
+    background: rgba(255, 204, 0, 0.1);
+}
+
+.plan-doc-tab[data-tab="retro"]:hover {
+    color: var(--lcars-amber, #ffcc00);
+    background: rgba(255, 204, 0, 0.05);
+}
+
 /* Custom scrollbar for plan doc content */
 .plan-doc-content::-webkit-scrollbar {
     width: 8px;
@@ -12973,4 +13101,1062 @@ body {
     text-transform: uppercase;
     letter-spacing: 2px;
     margin-top: 2px;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   HOME SECTION - Team Analytics Dashboard (Carousel Layout)
+   ───────────────────────────────────────────────────────────────────────────── */
+
+.home-section {
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* Override generic section rules for HOME — flex layout, no scroll, no bottom padding */
+.lcars-content > .home-section.active {
+    display: flex !important;
+    flex-direction: column !important;
+    overflow: hidden !important;
+    padding-bottom: 10px !important;
+}
+
+/* ── Carousel Viewport ─────────────────────────────────────────────────────── */
+
+/* Carousel viewport — fills available height minus nav bar */
+.carousel-viewport {
+    flex: 1;
+    overflow: hidden;
+    position: relative;
+    min-height: 0; /* Required for flex children to shrink properly */
+}
+
+/* Carousel track — slides horizontally via transform */
+.carousel-track {
+    display: flex;
+    height: 100%;
+    transition: transform 0.4s ease;
+    will-change: transform;
+}
+
+/* Individual panel — fixed width, clips overflow */
+.carousel-panel {
+    flex-shrink: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    padding: 10px 10px 0;
+    box-sizing: border-box;
+    opacity: 0.4;
+    transition: opacity 0.4s ease;
+    display: flex;
+    flex-direction: column;
+}
+
+.carousel-panel.active {
+    opacity: 1;
+}
+
+/* Panel 2 epic container — internal scroll only, panel boundary stays fixed */
+.carousel-panel .epic-scroll-container {
+    overflow-y: auto;
+    flex: 1;
+}
+
+/* ── Carousel Navigation Bar ───────────────────────────────────────────────── */
+
+.carousel-nav {
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    flex-shrink: 0;
+    position: relative;
+}
+
+/* LCARS pill arrow buttons */
+.carousel-arrow {
+    background: #FF9900;
+    color: #000;
+    border: none;
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    cursor: pointer;
+    transition: background 0.2s ease, opacity 0.2s ease;
+    letter-spacing: 0.05em;
+}
+
+.carousel-arrow:hover {
+    background: #FFCC99;
+}
+
+/* Dot container */
+.carousel-dots {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Dot panel indicators */
+.carousel-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: rgba(255, 204, 153, 0.3);
+    cursor: pointer;
+    transition: background 0.3s ease, transform 0.3s ease;
+}
+
+.carousel-dot.active {
+    background: #FF9900;
+    transform: scale(1.3);
+}
+
+.carousel-dot:hover:not(.active) {
+    background: rgba(255, 204, 153, 0.6);
+}
+
+/* ── Chart Container Sizing ────────────────────────────────────────────────── */
+
+/* Chart wrapper — responsive height for panels 1 and 2 */
+.carousel-chart-container {
+    position: relative;
+    height: 260px;
+}
+
+/* Panel 3 (Subitem Intelligence) gets taller chart — fills panel minus header */
+.carousel-panel[data-panel-index="2"] .carousel-chart-container {
+    height: calc(100% - 60px);
+}
+
+/* ── Chart Card Base ───────────────────────────────────────────────────────── */
+
+.home-chart-card {
+    background: transparent;
+    border-radius: 8px;
+    padding: 15px;
+    display: flex;
+    flex-direction: column;
+    max-height: 400px;
+}
+
+/* ── Metrics Grid (2×2 layout for Panel 0) ─────────────────────────────────── */
+
+.home-metrics-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    padding: 15px 10px;
+    flex: 1;
+    align-content: center;
+}
+
+/* ── Charts Grid (2-column layout for Panel 1) ────────────────────────────── */
+
+.home-charts-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    margin-top: 10px;
+    flex: 1;
+    min-height: 0;
+}
+
+/* ── VIEWSCREEN Fullscreen Button ──────────────────────────────────────────── */
+
+.carousel-viewscreen {
+    background: #FF9900;
+    color: #000;
+    border: none;
+    border-radius: 20px;
+    padding: 4px 14px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s ease;
+    letter-spacing: 0.12em;
+    position: absolute;
+    right: 10px;
+}
+
+.carousel-viewscreen:hover {
+    background: #FFCC99;
+}
+
+/* ── HOME Scrollbar Removal ────────────────────────────────────────────────── */
+
+.home-section,
+.home-section * {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+}
+
+.home-section::-webkit-scrollbar,
+.home-section *::-webkit-scrollbar {
+    display: none;
+}
+
+/* ── Fullscreen Mode (CSS-only fallback for iTerm2/embedded WebKit) ────────── */
+
+.home-fullscreen {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    z-index: 99999 !important;
+    background: #0A0A1A !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border-radius: 0 !important;
+}
+
+.home-fullscreen .lcars-top-frame,
+.home-fullscreen .lcars-sidebar,
+.home-fullscreen .status-legend,
+.home-fullscreen .mobile-tabbar,
+.home-fullscreen .scanline,
+.home-fullscreen .content-watermark {
+    display: none !important;
+}
+
+.home-fullscreen .lcars-main {
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.home-fullscreen .lcars-content {
+    margin: 0 !important;
+    padding: 10px !important;
+    width: 100% !important;
+    height: 100% !important;
+}
+
+.home-fullscreen .home-section.active {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    z-index: 100000 !important;
+    padding: 15px !important;
+    background: #0A0A1A !important;
+}
+
+/* Hide carousel controls in fullscreen (arrow keys navigate instead) */
+.home-fullscreen .carousel-arrow,
+.home-fullscreen .carousel-viewscreen {
+    display: none !important;
+}
+
+/* ── Responsive: Narrow Screens ────────────────────────────────────────────── */
+
+@media (max-width: 768px) {
+    #home-charts-container {
+        grid-template-columns: 1fr !important;
+    }
+
+    #home-subitem-stats {
+        grid-template-columns: 1fr !important;
+    }
+
+    /* Reduce arrow padding on narrow screens */
+    .carousel-arrow {
+        padding: 4px 10px;
+        font-size: 14px;
+    }
+
+    /* Stack panel 3 two-column layout vertically on mobile */
+    .carousel-panel[data-panel-index="2"] .carousel-chart-container {
+        height: 260px;
+    }
+}
+
+/* =========================================================================
+   TODOS SECTION (XACA-0101)
+   ========================================================================= */
+
+/* ── Section header orange color (for todos-section) ────────────────────── */
+.section-header.orange {
+    color: var(--lcars-orange);
+}
+
+.section-header.orange .section-bar {
+    background: linear-gradient(90deg, var(--lcars-orange) 0%, transparent 100%);
+}
+
+/* ── Section header controls ─────────────────────────────────────────────── */
+.todo-header-controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-left: auto;
+}
+
+.todo-add-btn {
+    font-size: 0.8em;
+    padding: 6px 14px;
+    letter-spacing: 1px;
+}
+
+/* ── Toggle tabs ─────────────────────────────────────────────────────────── */
+.todo-tabs {
+    display: flex;
+    border: 2px solid var(--lcars-orange);
+    border-radius: 20px;
+    overflow: hidden;
+}
+
+.todo-tab {
+    padding: 5px 16px;
+    background: transparent;
+    border: none;
+    color: var(--lcars-orange);
+    font-family: inherit;
+    font-size: 0.75em;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+}
+
+.todo-tab.active {
+    background: var(--lcars-orange);
+    color: var(--lcars-black);
+}
+
+.todo-tab:not(.active):hover {
+    background: rgba(255, 153, 0, 0.15);
+}
+
+/* ── List container ──────────────────────────────────────────────────────── */
+.todo-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 16px 0;
+}
+
+/* ── Individual todo item ────────────────────────────────────────────────── */
+.todo-item {
+    display: flex;
+    align-items: flex-start;
+    gap: 12px;
+    background: var(--lcars-surface);
+    border: 1px solid rgba(255, 153, 0, 0.2);
+    border-radius: 6px;
+    padding: 12px 16px;
+    transition: border-color 0.2s;
+}
+
+.todo-item:hover {
+    border-color: rgba(255, 153, 0, 0.5);
+}
+
+.todo-item.todo-overdue {
+    border-color: var(--lcars-red);
+    background: rgba(204, 68, 68, 0.1);
+}
+
+/* Checkbox */
+.todo-checkbox {
+    width: 20px;
+    height: 20px;
+    min-width: 20px;
+    cursor: pointer;
+    margin-top: 2px;
+    accent-color: var(--lcars-orange);
+}
+
+/* Text content */
+.todo-content {
+    flex: 1;
+    min-width: 0;
+}
+
+.todo-text {
+    font-size: 0.95em;
+    color: var(--lcars-white);
+    word-break: break-word;
+    line-height: 1.4;
+}
+
+.todo-item.todo-completed .todo-text {
+    text-decoration: line-through;
+    color: var(--lcars-brown);
+    opacity: 0.7;
+}
+
+.todo-meta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 6px;
+    flex-wrap: wrap;
+}
+
+/* Edit button */
+.todo-edit-btn {
+    background: none;
+    border: 1px solid var(--lcars-blue);
+    color: var(--lcars-blue);
+    font-family: inherit;
+    font-size: 0.75em;
+    letter-spacing: 1px;
+    padding: 4px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+    white-space: nowrap;
+    align-self: center;
+    transition: background 0.15s, color 0.15s;
+}
+
+.todo-edit-btn:hover {
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+}
+
+/* ── Priority badges ─────────────────────────────────────────────────────── */
+.todo-priority-badge {
+    font-size: 0.7em;
+    font-weight: bold;
+    letter-spacing: 1.5px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    text-transform: uppercase;
+}
+
+.todo-priority-low {
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+}
+
+.todo-priority-medium {
+    background: var(--lcars-orange);
+    color: var(--lcars-black);
+}
+
+.todo-priority-high {
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+.todo-priority-critical {
+    background: var(--lcars-crimson);
+    color: var(--lcars-white);
+    animation: todo-critical-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes todo-critical-pulse {
+    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(255, 68, 102, 0.5); }
+    50% { opacity: 0.85; box-shadow: 0 0 0 4px rgba(255, 68, 102, 0); }
+}
+
+/* ── Date indicator ──────────────────────────────────────────────────────── */
+.todo-due-date {
+    font-size: 0.75em;
+    color: var(--lcars-cyan);
+    letter-spacing: 0.5px;
+}
+
+.todo-due-date.todo-due-overdue {
+    color: var(--lcars-alert-red);
+    font-weight: bold;
+}
+
+/* ── Empty state ─────────────────────────────────────────────────────────── */
+.todo-empty {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--lcars-brown);
+    font-size: 0.9em;
+    letter-spacing: 1px;
+}
+
+/* ── Loading state ───────────────────────────────────────────────────────── */
+.todo-loading {
+    text-align: center;
+    padding: 40px 20px;
+    color: var(--lcars-blue);
+    font-size: 0.9em;
+    letter-spacing: 2px;
+}
+
+/* ── Todo modal form extensions ──────────────────────────────────────────── */
+.lcars-textarea {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--lcars-black);
+    border: 1px solid var(--lcars-blue);
+    color: var(--lcars-white);
+    font-family: inherit;
+    font-size: 0.95em;
+    resize: vertical;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+
+.lcars-textarea:focus {
+    outline: none;
+    border-color: var(--lcars-orange);
+}
+
+/* Extend .form-group styles to cover date inputs and selects in this modal */
+#todo-modal .form-group select,
+#todo-modal .form-group input[type="date"] {
+    width: 100%;
+    padding: 10px 12px;
+    background: var(--lcars-black);
+    border: 1px solid var(--lcars-blue);
+    color: var(--lcars-white);
+    font-family: inherit;
+    font-size: 0.95em;
+    border-radius: 4px;
+    box-sizing: border-box;
+}
+
+#todo-modal .form-group select:focus,
+#todo-modal .form-group input[type="date"]:focus {
+    outline: none;
+    border-color: var(--lcars-orange);
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+@media (max-width: 600px) {
+    .todo-header-controls {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+    }
+}
+
+/* ── Knowledge Base Panel (Panel 4) ─────────────────────────────────────── */
+
+/* Gold section header — LCARS amber used for Knowledge Base theme */
+.section-header.gold {
+    color: var(--lcars-amber);
+}
+
+.section-header.gold .section-bar {
+    background: linear-gradient(90deg, var(--lcars-amber) 0%, transparent 100%);
+}
+
+/* Chart title inside Knowledge Base panel */
+.knowledge-chart-title {
+    color: var(--lcars-amber);
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    margin-bottom: 8px;
+    letter-spacing: 0.08em;
+}
+
+/* Right-side metrics grid in Knowledge Base panel (2 columns) */
+.knowledge-metrics-panel {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    align-content: center;
+    padding: 10px 5px;
+}
+
+/* Individual stat cell: label + value pair */
+.knowledge-stat-row {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    padding: 8px 10px;
+    border-left: 3px solid var(--lcars-amber);
+    min-width: 0;
+    overflow: hidden;
+}
+
+.knowledge-stat-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--lcars-amber);
+    line-height: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.knowledge-stat-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: rgba(255, 204, 153, 0.65);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+}
+
+/* Responsive: stack knowledge panel chart and metrics on narrow screens */
+@media (max-width: 768px) {
+    #home-knowledge-stats {
+        grid-template-columns: 1fr !important;
+    }
+    .knowledge-metrics-panel {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PANEL 5: RETROSPECTIVE COVERAGE (adoption metrics)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Container for the adoption metrics panel */
+.knowledge-adoption-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 10px 5px;
+}
+
+/* Overall coverage section: label + bar */
+.knowledge-adoption-overall {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    padding: 12px 14px;
+    border-left: 3px solid var(--lcars-amber);
+}
+
+.knowledge-adoption-overall-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    font-weight: 700;
+    color: var(--lcars-amber);
+    letter-spacing: 0.08em;
+}
+
+.knowledge-adoption-overall-sub {
+    font-size: 12px;
+    font-weight: 400;
+    color: rgba(255, 204, 153, 0.55);
+    margin-left: 6px;
+}
+
+/* Shared bar wrapper for overall and per-team bars */
+.knowledge-adoption-bar-wrap {
+    height: 8px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.knowledge-adoption-bar {
+    height: 100%;
+    border-radius: 4px;
+    transition: width 0.4s ease;
+    min-width: 2px;
+}
+
+/* Per-team breakdown container */
+.knowledge-adoption-teams {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+/* Individual team row: name | bar | pct | detail */
+.knowledge-adoption-team-row {
+    display: grid;
+    grid-template-columns: 100px 1fr 48px 48px;
+    gap: 10px;
+    align-items: center;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 6px;
+    padding: 8px 12px;
+    border-left: 2px solid rgba(255, 204, 153, 0.2);
+}
+
+.knowledge-adoption-team-name {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: rgba(255, 204, 153, 0.75);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.knowledge-adoption-team-pct {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    font-weight: 700;
+    text-align: right;
+}
+
+.knowledge-adoption-team-detail {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: rgba(255, 204, 153, 0.45);
+    text-align: right;
+    letter-spacing: 0.04em;
+}
+
+/* Empty state when no board data is available */
+.knowledge-adoption-empty {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: rgba(255, 204, 153, 0.35);
+    text-align: center;
+    padding: 20px 0;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+/* Responsive: adjust team row grid on narrow screens */
+@media (max-width: 768px) {
+    .knowledge-adoption-team-row {
+        grid-template-columns: 80px 1fr 40px 40px;
+        gap: 6px;
+        padding: 6px 8px;
+    }
+    .knowledge-adoption-team-name {
+        font-size: 11px;
+    }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ARCHIVE / TRANSFER SECTION (XACA-0128)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.archive-overview {
+    display: flex;
+    gap: 20px;
+    padding: 15px 0;
+    flex-wrap: wrap;
+}
+
+.archive-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 120px;
+}
+
+.archive-stat .stat-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-text-muted, #8899aa);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.archive-stat .stat-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 18px;
+    color: var(--lcars-text, #ff9944);
+}
+
+/* Archive Options */
+.archive-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 15px 0;
+}
+
+.archive-option {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    padding: 10px 15px;
+    background: rgba(255, 153, 68, 0.05);
+    border-left: 3px solid var(--lcars-amber, #ff9944);
+    border-radius: 0 4px 4px 0;
+}
+
+.option-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.option-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: var(--lcars-text, #ff9944);
+    letter-spacing: 1px;
+}
+
+.option-desc {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+/* LCARS Toggle Switch */
+.lcars-toggle {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 24px;
+    flex-shrink: 0;
+}
+
+.lcars-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+.toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: rgba(255, 153, 68, 0.2);
+    border: 1px solid var(--lcars-amber, #ff9944);
+    border-radius: 12px;
+    transition: 0.3s;
+}
+
+.toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 18px;
+    width: 18px;
+    left: 2px;
+    bottom: 2px;
+    background-color: var(--lcars-amber, #ff9944);
+    border-radius: 50%;
+    transition: 0.3s;
+    opacity: 0.5;
+}
+
+.lcars-toggle input:checked + .toggle-slider {
+    background-color: rgba(255, 153, 68, 0.3);
+}
+
+.lcars-toggle input:checked + .toggle-slider:before {
+    transform: translateX(24px);
+    opacity: 1;
+}
+
+/* Smart Exclusions */
+.archive-exclusions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 15px 0;
+}
+
+.exclusion-item {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    padding: 4px 12px;
+    background: rgba(204, 102, 102, 0.15);
+    border: 1px solid rgba(204, 102, 102, 0.4);
+    border-radius: 12px;
+    color: #cc6666;
+    letter-spacing: 0.5px;
+}
+
+.exclusion-item.conditional {
+    background: rgba(255, 153, 68, 0.15);
+    border-color: rgba(255, 153, 68, 0.4);
+    color: var(--lcars-amber, #ff9944);
+    transition: opacity 0.3s;
+}
+
+.exclusion-item.conditional.included {
+    opacity: 0.3;
+    text-decoration: line-through;
+}
+
+/* Archive Actions */
+.archive-actions {
+    padding: 20px 0;
+}
+
+.archive-generate-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    padding: 12px 30px;
+    background: var(--lcars-amber, #ff9944);
+    color: #000;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    transition: all 0.2s;
+}
+
+.archive-generate-btn:hover {
+    background: #ffaa55;
+    transform: scale(1.02);
+}
+
+.archive-generate-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+    transform: none;
+}
+
+/* Progress Display */
+.archive-progress {
+    padding: 15px 0;
+}
+
+.progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.progress-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: var(--lcars-amber, #ff9944);
+    letter-spacing: 1px;
+}
+
+.progress-percent {
+    font-family: 'Antonio', sans-serif;
+    font-size: 18px;
+    color: var(--lcars-text, #ff9944);
+}
+
+.progress-bar-container {
+    height: 8px;
+    background: rgba(255, 153, 68, 0.15);
+    border-radius: 4px;
+    overflow: hidden;
+    margin-bottom: 8px;
+}
+
+.progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, var(--lcars-amber, #ff9944), #ffcc88);
+    border-radius: 4px;
+    transition: width 0.3s ease;
+}
+
+.progress-message {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+/* Download Section */
+.archive-download {
+    padding: 15px;
+    background: rgba(68, 204, 68, 0.08);
+    border: 1px solid rgba(68, 204, 68, 0.3);
+    border-radius: 8px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 10px;
+}
+
+.download-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.download-filename {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: #44cc44;
+    letter-spacing: 0.5px;
+}
+
+.download-size {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+.download-files {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-text-muted, #8899aa);
+}
+
+.archive-download-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    padding: 10px 25px;
+    background: #44cc44;
+    color: #000;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.archive-download-btn:hover {
+    background: #55dd55;
+}
+
+/* Deployment Checklist */
+.archive-checklist {
+    padding: 15px 0;
+}
+
+.checklist-description {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: var(--lcars-text-muted, #8899aa);
+    margin-bottom: 12px;
+}
+
+.archive-checklist-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    padding: 8px 20px;
+    background: rgba(102, 178, 255, 0.2);
+    color: #66b2ff;
+    border: 1px solid rgba(102, 178, 255, 0.4);
+    border-radius: 16px;
+    cursor: pointer;
+    letter-spacing: 1px;
+}
+
+.archive-checklist-btn:hover:not(:disabled) {
+    background: rgba(102, 178, 255, 0.3);
+}
+
+.archive-checklist-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.checklist-content {
+    margin-top: 15px;
+    padding: 15px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: var(--lcars-text, #ff9944);
+    line-height: 1.8;
+    white-space: pre-wrap;
+}
+
+/* Hide placeholder content that has no functional implementation */
+.team-config-placeholder,
+.archive-placeholder {
+    display: none;
 }

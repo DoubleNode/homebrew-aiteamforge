@@ -105,7 +105,7 @@ test_template_variables() {
     local test_output="${TEST_DIR}/test.output"
 
     cat > "$test_template" <<'EOF'
-DEV_TEAM_DIR={{DEV_TEAM_DIR}}
+AITEAMFORGE_DIR={{AITEAMFORGE_DIR}}
 HOME={{HOME}}
 CLAUDE_CONFIG_DIR={{CLAUDE_CONFIG_DIR}}
 USER={{USER}}
@@ -113,13 +113,13 @@ EOF
 
     # Source the installer to get the apply_template function
     # But override variables to test values
-    export DEV_TEAM_DIR="/test/dev-team"
+    export AITEAMFORGE_DIR="/test/aiteamforge"
     export HOME="/test/home"
     export CLAUDE_CONFIG_DIR="/test/.claude"
     export USER="testuser"
 
     # Apply template substitution
-    sed -e "s|{{DEV_TEAM_DIR}}|${DEV_TEAM_DIR}|g" \
+    sed -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
         -e "s|{{HOME}}|${HOME}|g" \
         -e "s|{{CLAUDE_CONFIG_DIR}}|${CLAUDE_CONFIG_DIR}|g" \
         -e "s|{{USER}}|${USER}|g" \
@@ -132,8 +132,8 @@ EOF
         return 1
     fi
 
-    if ! grep -q "DEV_TEAM_DIR=/test/dev-team" "$test_output"; then
-        log_fail "DEV_TEAM_DIR not substituted correctly"
+    if ! grep -q "AITEAMFORGE_DIR=/test/aiteamforge" "$test_output"; then
+        log_fail "AITEAMFORGE_DIR not substituted correctly"
         return 1
     fi
 
@@ -154,7 +154,7 @@ test_settings_json_valid() {
     local temp_file="${TEST_DIR}/settings.json"
 
     # Apply substitution
-    sed -e "s|{{DEV_TEAM_DIR}}|/test/dev-team|g" \
+    sed -e "s|{{AITEAMFORGE_DIR}}|/test/aiteamforge|g" \
         -e "s|{{HOME}}|/test/home|g" \
         -e "s|{{CLAUDE_CONFIG_DIR}}|/test/.claude|g" \
         -e "s|{{USER}}|testuser|g" \
@@ -183,7 +183,7 @@ test_mcp_settings_valid() {
     local temp_file="${TEST_DIR}/mcp-settings.json"
 
     # Apply substitution
-    sed -e "s|{{DEV_TEAM_DIR}}|/test/dev-team|g" \
+    sed -e "s|{{AITEAMFORGE_DIR}}|/test/aiteamforge|g" \
         -e "s|{{HOME}}|/test/home|g" \
         "$template" > "$temp_file"
 

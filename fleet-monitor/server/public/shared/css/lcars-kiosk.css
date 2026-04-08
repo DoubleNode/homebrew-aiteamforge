@@ -1,0 +1,218 @@
+/* ════════════════════════════════════════════════════════════════
+   KIOSK MODE - Auto-rotation animations and transitions
+
+   Shared kiosk CSS extracted from lcars/css/lcars-fleet.css and
+   lcars2/css/lcars-fleet.css to eliminate duplication.
+
+   Consumed by:
+     lcars/lcars-dashboard.html           (via ../shared/css/lcars-kiosk.css)
+     lcars2/lcars-all.html                (via ../shared/css/lcars-kiosk.css)
+     lcars2/lcars-doublenode.html         (via ../shared/css/lcars-kiosk.css)
+     lcars2/lcars-index.html              (via ../shared/css/lcars-kiosk.css)
+     lcars2/lcars-mainevent.html          (via ../shared/css/lcars-kiosk.css)
+   ════════════════════════════════════════════════════════════════ */
+
+/* -------------------------------------------------------------------------------
+   KIOSK KEYFRAME ANIMATIONS
+   ------------------------------------------------------------------------------- */
+
+@keyframes kiosk-progress {
+    from { width: 0%; }
+    to { width: 100%; }
+}
+
+@keyframes kiosk-glow {
+    0%, 100% { box-shadow: 0 0 5px var(--lcars-blue); }
+    50% { box-shadow: 0 0 15px var(--lcars-blue); }
+}
+
+@keyframes kiosk-fade-in {
+    from { opacity: 0; transform: scale(0.98); }
+    to { opacity: 1; transform: scale(1); }
+}
+
+@keyframes kiosk-fade-out {
+    from { opacity: 1; transform: scale(1); }
+    to { opacity: 0; transform: scale(0.98); }
+}
+
+@keyframes kiosk-slide-in {
+    from { opacity: 0; transform: translateX(30px); }
+    to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes kiosk-slide-out {
+    from { opacity: 1; transform: translateX(0); }
+    to { opacity: 0; transform: translateX(-30px); }
+}
+
+@keyframes kiosk-scroll-pulse {
+    0%, 100% {
+        box-shadow: 0 0 0 0 rgba(153, 153, 255, 0);
+        background-color: transparent;
+    }
+    40% {
+        box-shadow: 0 0 12px 4px rgba(153, 153, 255, 0.5);
+        background-color: rgba(153, 153, 255, 0.08);
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION TRANSITION ANIMATIONS
+   Applied by JavaScript during kiosk section rotation
+   ------------------------------------------------------------------------------- */
+
+/* Fade out current section - opacity 1->0, slight scale down, 400ms */
+.kiosk-fade-out {
+    animation: kiosk-fade-out 400ms var(--lcars-ease-smooth) forwards;
+}
+
+/* Fade in next section - opacity 0->1, slight scale up from 0.98, 400ms */
+.kiosk-fade-in {
+    animation: kiosk-fade-in 400ms var(--lcars-ease-smooth) forwards;
+}
+
+/* Slide current section out to the left - translateX 0 -> -30px, opacity 1->0, 400ms */
+.kiosk-slide-out-left {
+    animation: kiosk-slide-out 400ms var(--lcars-ease-smooth) forwards;
+}
+
+/* Slide next section in from the right - translateX 30px -> 0, opacity 0->1, 400ms */
+.kiosk-slide-in-right {
+    animation: kiosk-slide-in 400ms var(--lcars-ease-smooth) forwards;
+}
+
+/* -------------------------------------------------------------------------------
+   KIOSK MODE INDICATOR
+   Fixed badge shown in bottom-right corner while kiosk mode is active
+   ------------------------------------------------------------------------------- */
+
+.kiosk-indicator {
+    position: fixed;
+    top: 12px;
+    right: 20px;
+    padding: 6px 16px;
+    border-radius: 20px;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    z-index: 9999;
+    pointer-events: none;
+    background: rgba(0, 0, 0, 0.75);
+    color: var(--lcars-blue);
+    border: 1px solid var(--lcars-blue);
+    animation: kiosk-glow 2s ease-in-out infinite;
+}
+
+/* -------------------------------------------------------------------------------
+   KIOSK PROGRESS BAR
+   Thin bar at top of screen showing time until next section rotation.
+   Width animates from 0% to 100% over the rotation interval using kiosk-progress keyframes.
+   Duration is driven by --kiosk-rotation-interval (set by JS from KIOSK_CONFIG.rotationInterval).
+   Falls back to 8s if the custom property is not set.
+   JavaScript resets the animation on each section change.
+   ------------------------------------------------------------------------------- */
+
+.kiosk-progress-bar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    height: 3px;
+    z-index: 9999;
+    pointer-events: none;
+    background: var(--lcars-cyan);
+    animation: kiosk-progress var(--kiosk-rotation-interval, 8s) linear forwards;
+}
+
+/* -------------------------------------------------------------------------------
+   ORGS SCROLL HIGHLIGHT ANIMATIONS
+   Applied to division elements during kiosk auto-scroll in ORGS section
+   ------------------------------------------------------------------------------- */
+
+/* Brief highlight/glow on the division being scrolled to - pulse, 1s */
+.kiosk-scroll-target {
+    animation: kiosk-scroll-pulse 1s ease-in-out;
+}
+
+/* -------------------------------------------------------------------------------
+   KIOSK FULL-SCREEN MODE (body.kiosk-active)
+   Applied when kiosk mode is running to maximize content area
+   ------------------------------------------------------------------------------- */
+
+body.kiosk-active .lcars-sidebar {
+    display: none !important;
+}
+
+body.kiosk-active .analytics-page-nav {
+    display: none !important;
+}
+
+body.kiosk-active .lcars-data-bar {
+    display: none !important;
+}
+
+body.kiosk-active .lcars-top-frame {
+    display: none !important;
+}
+
+/* Collapse grid to single column and reset content placement.
+   The normal layout is: grid-template-columns: var(--sidebar-width) 1fr
+   with .lcars-content at grid-column:2, grid-row:2.
+   Hiding the sidebar without fixing these causes content to fly off-screen. */
+body.kiosk-active .lcars-main {
+    grid-template-columns: 1fr;
+    grid-template-rows: 1fr;
+}
+
+body.kiosk-active .lcars-content {
+    grid-column: 1;
+    grid-row: 1;
+    margin-left: 0;
+    padding: 20px 30px;
+}
+
+body.kiosk-active .analytics-page {
+    min-height: calc(100vh - 80px);
+    overflow: hidden;
+}
+
+/* Expand charts in kiosk mode */
+body.kiosk-active .analytics-chart-card {
+    min-height: 300px;
+}
+
+/* Hide the scanline in kiosk for cleaner display */
+body.kiosk-active ~ .scanline {
+    display: none;
+}
+
+/* -------------------------------------------------------------------------------
+   KIOSK PAGE DOTS
+   Fixed at bottom center, show current page position during analytics rotation
+   ------------------------------------------------------------------------------- */
+
+.kiosk-page-dots {
+    position: fixed;
+    bottom: 40px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    gap: 8px;
+    z-index: 9999;
+    pointer-events: none;
+}
+
+.kiosk-page-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: rgba(153, 204, 255, 0.3);
+    transition: all 0.3s ease;
+}
+
+.kiosk-page-dot.active {
+    background: var(--lcars-cyan, #99CCFF);
+    width: 20px;
+    border-radius: 4px;
+    box-shadow: 0 0 8px var(--lcars-cyan, #99CCFF);
+}

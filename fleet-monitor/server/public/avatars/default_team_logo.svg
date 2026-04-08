@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="#1A1A1A" stroke="#9999FF" stroke-width="3"/>
+
+  <!-- Starfleet insignia inspired shape -->
+  <path d="M 100 40 L 120 90 L 100 80 L 80 90 Z" fill="#9999FF" opacity="0.8"/>
+  <circle cx="100" cy="95" r="8" fill="#9999FF"/>
+
+  <!-- Team indicator -->
+  <rect x="70" y="110" width="60" height="40" rx="5" fill="#9999FF" opacity="0.3"/>
+  <text x="100" y="135" font-family="Arial, sans-serif" font-size="24" fill="#9999FF" text-anchor="middle" font-weight="bold">TEAM</text>
+
+  <!-- Accent lines -->
+  <line x1="50" y1="160" x2="150" y2="160" stroke="#9999FF" stroke-width="2" opacity="0.5"/>
+</svg>

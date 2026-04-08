@@ -1,17 +1,17 @@
-# Dev-Team Homebrew Tap
+# AITeamForge Homebrew Tap
 
 ![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-blue)
 ![Version](https://img.shields.io/badge/version-1.0.0-green)
 ![macOS](https://img.shields.io/badge/macOS-Big_Sur+-blue)
 
-**Starfleet Development Environment** - AI-powered multi-team development infrastructure
+**AITeamForge** - AI-powered multi-team development infrastructure
 
-> This Homebrew tap provides the `dev-team` formula for installing and managing the Dev-Team environment on macOS - a comprehensive AI-assisted development platform with specialized teams, visual kanban management, and multi-machine coordination.
+> This Homebrew tap provides the `aiteamforge` formula for installing and managing the AITeamForge environment on macOS - a comprehensive AI-assisted development platform with specialized teams, visual kanban management, and multi-machine coordination.
 
-## What is Dev-Team?
+## What is AITeamForge?
 
-Dev-Team is a comprehensive development environment designed for AI-assisted development with multiple specialized teams.
+AITeamForge is a comprehensive development environment designed for AI-assisted development with multiple specialized teams.
 
 ### Key Features
 
@@ -19,7 +19,7 @@ Dev-Team is a comprehensive development environment designed for AI-assisted dev
 Separate teams (iOS, Android, Firebase, etc.) with distinct AI agents, kanban boards, and workflows.
 
 ```bash
-dev-team start ios      # Start iOS team
+aiteamforge start ios      # Start iOS team
 ios-picard              # Launch Captain Picard agent
 kb-list                 # View iOS kanban board
 ```
@@ -67,7 +67,7 @@ open http://localhost:3000
 iTerm2 integration with automated window/tab management (optional).
 
 ```bash
-dev-team start ios
+aiteamforge start ios
 # Automatically opens terminals, configures environments
 ```
 
@@ -77,17 +77,17 @@ Get up and running in under 5 minutes:
 
 ```bash
 # 1. Add tap and install
-brew tap DoubleNode/dev-team
-brew install dev-team
+brew tap DoubleNode/aiteamforge
+brew install aiteamforge
 
 # 2. Run interactive setup wizard
-dev-team setup
+aiteamforge setup
 
 # 3. Verify installation
-dev-team doctor
+aiteamforge doctor
 
 # 4. Start your environment
-dev-team start ios
+aiteamforge start ios
 ```
 
 **That's it!** Your AI-powered development environment is ready.
@@ -101,21 +101,21 @@ dev-team start ios
 
 ### Step-by-Step Installation
 
-**Step 1: Add the Dev-Team tap**
+**Step 1: Add the AITeamForge tap**
 ```bash
-brew tap DoubleNode/dev-team
+brew tap DoubleNode/aiteamforge
 ```
 
-**Step 2: Install Dev-Team**
+**Step 2: Install AITeamForge**
 ```bash
-brew install dev-team
+brew install aiteamforge
 ```
 
 This installs the framework and required dependencies (Python 3, Node.js, jq, GitHub CLI, Git).
 
 **Step 3: Run the Setup Wizard**
 ```bash
-dev-team setup
+aiteamforge setup
 ```
 
 The interactive wizard guides you through:
@@ -135,7 +135,7 @@ source ~/.zshrc
 
 **Step 5: Verify Everything Works**
 ```bash
-dev-team doctor
+aiteamforge doctor
 ```
 
 ## Usage
@@ -143,13 +143,13 @@ dev-team doctor
 ### Main Commands
 
 ```bash
-dev-team setup      # Run interactive setup wizard
-dev-team doctor     # Health check and diagnostics
-dev-team status     # Show current environment status
-dev-team start      # Start dev-team environment
-dev-team stop       # Stop dev-team environment
-dev-team upgrade    # Upgrade components
-dev-team help       # Show help information
+aiteamforge setup      # Run interactive setup wizard
+aiteamforge doctor     # Health check and diagnostics
+aiteamforge status     # Show current environment status
+aiteamforge start      # Start aiteamforge environment
+aiteamforge stop       # Stop aiteamforge environment
+aiteamforge upgrade    # Upgrade components
+aiteamforge help       # Show help information
 ```
 
 ### Example Usage
@@ -157,10 +157,10 @@ dev-team help       # Show help information
 **For iOS Development:**
 ```bash
 # Install and select iOS team
-dev-team setup  # Choose "iOS Development"
+aiteamforge setup  # Choose "iOS Development"
 
 # Start iOS environment
-dev-team start ios
+aiteamforge start ios
 
 # Use iOS agents
 ios-picard      # Captain Picard - Lead Feature Developer
@@ -174,10 +174,10 @@ kb-add "New feature"
 **For Multi-Platform Development:**
 ```bash
 # Install iOS, Android, and Firebase teams
-dev-team setup  # Choose multiple teams
+aiteamforge setup  # Choose multiple teams
 
 # Start all teams
-dev-team start
+aiteamforge start
 
 # Each team has its own kanban board and agents
 ```
@@ -185,10 +185,10 @@ dev-team start
 **For Multi-Machine Setup:**
 ```bash
 # On main machine (server)
-dev-team setup  # Enable "Fleet Monitor" as server
+aiteamforge setup  # Enable "Fleet Monitor" as server
 
 # On secondary machines (clients)
-dev-team setup  # Enable "Fleet Monitor" as client
+aiteamforge setup  # Enable "Fleet Monitor" as client
 
 # Monitor entire fleet
 open http://localhost:3000
@@ -220,7 +220,7 @@ The setup wizard will check for and offer to install missing dependencies.
 
 **Framework** (Homebrew-managed):
 ```
-$(brew --prefix)/opt/dev-team/libexec/
+$(brew --prefix)/opt/aiteamforge/libexec/
 ├── bin/                    # Core executables
 ├── scripts/                # Automation scripts
 ├── config/templates/       # Configuration templates
@@ -233,25 +233,25 @@ $(brew --prefix)/opt/dev-team/libexec/
 
 **Working Directory** (user-managed):
 ```
-~/dev-team/                 # Default location
+~/aiteamforge/                 # Default location
 ├── templates/              # Copied from framework
 ├── docs/                   # Copied from framework
 ├── skills/                 # Copied from framework
 ├── kanban/                 # Kanban board data
 ├── teams/                  # Team configurations
 ├── scripts/                # Generated scripts
-└── .dev-team-config        # Installation metadata
+└── .aiteamforge-config        # Installation metadata
 ```
 
 ### Two-Layer Design
 
-1. **Framework Layer** (`$(brew --prefix)/opt/dev-team/libexec/`)
+1. **Framework Layer** (`$(brew --prefix)/opt/aiteamforge/libexec/`)
    - Installed via Homebrew
    - Read-only template files
-   - Upgraded via `brew upgrade dev-team`
+   - Upgraded via `brew upgrade aiteamforge`
 
-2. **Working Layer** (`~/dev-team` or custom location)
-   - Created by `dev-team setup`
+2. **Working Layer** (`~/aiteamforge` or custom location)
+   - Created by `aiteamforge setup`
    - User-specific configuration
    - Kanban data, team configs, generated scripts
    - Preserved across framework upgrades
@@ -288,7 +288,7 @@ AI agents with team-specific personas:
 
 ### Fleet Monitor
 Multi-machine coordination (optional):
-- Monitor multiple dev-team installations
+- Monitor multiple aiteamforge installations
 - Centralized kanban aggregation
 - Cross-machine agent status
 - Tailscale integration
@@ -298,27 +298,27 @@ Multi-machine coordination (optional):
 ### Customize Installation Location
 
 ```bash
-dev-team setup --install-dir ~/my-custom-location
+aiteamforge setup --install-dir ~/my-custom-location
 ```
 
 ### Upgrade Existing Installation
 
 ```bash
 # Upgrade framework
-brew upgrade dev-team
+brew upgrade aiteamforge
 
 # Upgrade working directory
-dev-team setup --upgrade
+aiteamforge setup --upgrade
 ```
 
 ### Uninstall
 
 ```bash
 # Remove configuration (keeps framework)
-dev-team setup --uninstall
+aiteamforge setup --uninstall
 
 # Remove framework
-brew uninstall dev-team
+brew uninstall aiteamforge
 ```
 
 ## Troubleshooting
@@ -326,7 +326,7 @@ brew uninstall dev-team
 ### Health Check
 
 ```bash
-dev-team doctor
+aiteamforge doctor
 ```
 
 Checks:
@@ -339,15 +339,15 @@ Checks:
 ### Verbose Diagnostics
 
 ```bash
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 ```
 
 ### Check Specific Component
 
 ```bash
-dev-team doctor --check dependencies
-dev-team doctor --check services
-dev-team doctor --check config
+aiteamforge doctor --check dependencies
+aiteamforge doctor --check services
+aiteamforge doctor --check config
 ```
 
 ### Common Issues
@@ -358,7 +358,7 @@ dev-team doctor --check config
 lsof -i :8082
 
 # Start manually
-cd ~/dev-team/lcars-ui
+cd ~/aiteamforge/lcars-ui
 python3 server.py
 ```
 
@@ -374,7 +374,7 @@ gh auth login
 
 **Missing dependencies**
 ```bash
-dev-team doctor
+aiteamforge doctor
 # Follow install instructions for missing deps
 ```
 
@@ -394,21 +394,21 @@ Comprehensive documentation is available in the `docs/` directory:
 
 ### Support
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Problem solving guide
-- **[Contributing](CONTRIBUTING.md)** - How to contribute to dev-team
+- **[Contributing](CONTRIBUTING.md)** - How to contribute to aiteamforge
 
 ### Quick Reference
 
 **After installation, docs are also available locally:**
 ```bash
-ls ~/dev-team/docs/
-cat ~/dev-team/docs/QUICK_START.md
+ls ~/aiteamforge/docs/
+cat ~/aiteamforge/docs/QUICK_START.md
 ```
 
 ## FAQ
 
-### What is Dev-Team?
+### What is AITeamForge?
 
-Dev-Team is a comprehensive macOS development environment that combines:
+AITeamForge is a comprehensive macOS development environment that combines:
 - **AI pair programming** with Claude Code agents
 - **Visual task management** with LCARS Kanban
 - **Multi-machine coordination** with Fleet Monitor
@@ -416,15 +416,15 @@ Dev-Team is a comprehensive macOS development environment that combines:
 
 ### Do I need Claude Code?
 
-No, it's optional. Dev-Team works standalone, but Claude Code integration provides AI-assisted development with automatic kanban tracking.
+No, it's optional. AITeamForge works standalone, but Claude Code integration provides AI-assisted development with automatic kanban tracking.
 
 ### Can I use this for team development?
 
-Yes! Dev-Team supports both solo and team development. Fleet Monitor enables multi-machine coordination perfect for distributed teams.
+Yes! AITeamForge supports both solo and team development. Fleet Monitor enables multi-machine coordination perfect for distributed teams.
 
 ### What teams are available?
 
-Dev-Team includes 10 pre-configured teams:
+AITeamForge includes 10 pre-configured teams:
 - **Platform:** iOS, Android, Firebase
 - **Infrastructure:** Academy, DNS Framework
 - **Project-Based:** Freelance
@@ -450,16 +450,16 @@ Yes! The two-layer architecture separates the framework (Homebrew-managed) from 
 ### How do I uninstall?
 
 ```bash
-dev-team uninstall     # Remove configuration
-brew uninstall dev-team
-brew untap DoubleNode/dev-team
+aiteamforge uninstall     # Remove configuration
+brew uninstall aiteamforge
+brew untap DoubleNode/aiteamforge
 ```
 
-Your `~/dev-team/` directory is preserved. Delete it manually if desired.
+Your `~/aiteamforge/` directory is preserved. Delete it manually if desired.
 
 ### What if something breaks?
 
-Run `dev-team doctor` for diagnostics. See [Troubleshooting](docs/TROUBLESHOOTING.md) for common issues and solutions.
+Run `aiteamforge doctor` for diagnostics. See [Troubleshooting](docs/TROUBLESHOOTING.md) for common issues and solutions.
 
 ## Development
 
@@ -467,25 +467,25 @@ Run `dev-team doctor` for diagnostics. See [Troubleshooting](docs/TROUBLESHOOTIN
 
 ```bash
 # Clone this tap
-brew tap DoubleNode/dev-team
-cd $(brew --repository DoubleNode/dev-team)
+brew tap DoubleNode/aiteamforge
+cd $(brew --repository DoubleNode/aiteamforge)
 
 # Edit formula
-vim Formula/dev-team.rb
+vim Formula/aiteamforge.rb
 
 # Test formula
-brew install --build-from-source dev-team
-brew test dev-team
+brew install --build-from-source aiteamforge
+brew test aiteamforge
 ```
 
 ### Testing
 
 ```bash
 # Run formula tests
-brew test dev-team
+brew test aiteamforge
 
 # Manual testing
-dev-team doctor --verbose
+aiteamforge doctor --verbose
 ```
 
 ## License
@@ -494,9 +494,9 @@ MIT License - See formula for details
 
 ## Support
 
-- **Issues**: https://github.com/DoubleNode/dev-team/issues
-- **Documentation**: `~/dev-team/docs/`
-- **Health Check**: `dev-team doctor`
+- **Issues**: https://github.com/DoubleNode/aiteamforge/issues
+- **Documentation**: `~/aiteamforge/docs/`
+- **Health Check**: `aiteamforge doctor`
 
 ## Version
 
@@ -508,5 +508,5 @@ Current version: **1.0.0**
 - 🚧 Installer modules (Phases 4-8 in progress)
 
 ```bash
-dev-team --version
+aiteamforge --version
 ```

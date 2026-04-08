@@ -1,4 +1,4 @@
-# Dev-Team Setup Wizard
+# AITeamForge Setup Wizard
 
 **Version:** 1.0.0
 **Component:** Interactive environment installer
@@ -8,7 +8,7 @@
 
 ## Overview
 
-The dev-team setup wizard (`dev-team-setup`) is an interactive CLI tool that guides new users through setting up the Starfleet Development Environment on their machine. It runs after `brew install dev-team` and handles all configuration and installation tasks.
+The aiteamforge setup wizard (`aiteamforge-setup`) is an interactive CLI tool that guides new users through setting up the AITeamForge on their machine. It runs after `brew install aiteamforge` and handles all configuration and installation tasks.
 
 ## Features
 
@@ -46,7 +46,7 @@ The wizard guides users through seven stages:
    - iTerm2 Integration (default: no - optional)
 
 5. **Configuration Generation**
-   - Creates `~/.dev-team/config.json` with all selections
+   - Creates `~/.aiteamforge/config.json` with all selections
    - Records machine identity, teams, features, paths, timestamp
    - This config drives all subsequent installers
 
@@ -68,7 +68,7 @@ The wizard guides users through seven stages:
 ### 3. **Non-Interactive Mode**
 For scripted/automated installations:
 ```bash
-dev-team-setup --non-interactive
+aiteamforge-setup --non-interactive
 ```
 - Reads from existing config file or uses defaults
 - No prompts
@@ -77,7 +77,7 @@ dev-team-setup --non-interactive
 ### 4. **Dry Run Mode**
 Preview changes without applying them:
 ```bash
-dev-team-setup --dry-run
+aiteamforge-setup --dry-run
 ```
 - Shows what would be installed
 - Prints config that would be generated
@@ -97,21 +97,21 @@ dev-team-setup --dry-run
 ### Basic Interactive Setup
 ```bash
 # After installing via Homebrew
-brew install dev-team
+brew install aiteamforge
 
 # Run the setup wizard
-dev-team-setup
+aiteamforge-setup
 ```
 
 ### Preview Without Changes
 ```bash
-dev-team-setup --dry-run
+aiteamforge-setup --dry-run
 ```
 
 ### Automated Setup
 ```bash
 # Create config file first
-cat > ~/.dev-team/config.json <<EOF
+cat > ~/.aiteamforge/config.json <<EOF
 {
   "machine": {
     "name": "macbook-pro-office",
@@ -129,19 +129,19 @@ cat > ~/.dev-team/config.json <<EOF
 EOF
 
 # Run in non-interactive mode
-dev-team-setup --non-interactive
+aiteamforge-setup --non-interactive
 ```
 
 ### Get Help
 ```bash
-dev-team-setup --help
+aiteamforge-setup --help
 ```
 
 ---
 
 ## Configuration File Format
 
-The wizard generates `~/.dev-team/config.json`:
+The wizard generates `~/.aiteamforge/config.json`:
 
 ```json
 {
@@ -160,8 +160,8 @@ The wizard generates `~/.dev-team/config.json`:
     "iterm_integration": false
   },
   "paths": {
-    "install_dir": "/Users/johndoe/dev-team",
-    "config_dir": "/Users/johndoe/.dev-team"
+    "install_dir": "/Users/johndoe/aiteamforge",
+    "config_dir": "/Users/johndoe/.aiteamforge"
   },
   "installed_at": "2026-02-17T10:30:00Z"
 }
@@ -181,9 +181,9 @@ This config is used by:
 ```
 homebrew-tap/
 ├── bin/
-│   └── dev-team-setup           # Wrapper script (Homebrew adds to PATH)
+│   └── aiteamforge-setup           # Wrapper script (Homebrew adds to PATH)
 ├── libexec/
-│   ├── dev-team-setup.sh        # Main wizard logic
+│   ├── aiteamforge-setup.sh        # Main wizard logic
 │   ├── lib/
 │   │   └── wizard-ui.sh         # UI helpers (colors, prompts, banners)
 │   └── installers/              # Module installers (built by other phases)
@@ -317,16 +317,16 @@ The wizard handles errors gracefully:
 ### Manual Testing
 ```bash
 # Test help
-dev-team-setup --help
+aiteamforge-setup --help
 
 # Test dry run
-dev-team-setup --dry-run
+aiteamforge-setup --dry-run
 
 # Test non-interactive with defaults
-dev-team-setup --non-interactive
+aiteamforge-setup --non-interactive
 
 # Test interactive (full wizard)
-dev-team-setup
+aiteamforge-setup
 ```
 
 ### Automated Testing
@@ -346,10 +346,10 @@ The wizard is designed to work with Homebrew Tap installation:
 
 ### Homebrew Formula (Phase 2)
 ```ruby
-class DevTeam < Formula
-  desc "Starfleet Development Environment"
-  homepage "https://github.com/YOUR_ORG/dev-team"
-  url "https://github.com/YOUR_ORG/dev-team/archive/v1.0.0.tar.gz"
+class Aiteamforge < Formula
+  desc "AITeamForge"
+  homepage "https://github.com/YOUR_ORG/aiteamforge"
+  url "https://github.com/YOUR_ORG/aiteamforge/archive/v1.0.0.tar.gz"
 
   depends_on "python@3"
   depends_on "node"
@@ -359,23 +359,23 @@ class DevTeam < Formula
 
   def install
     libexec.install Dir["homebrew-tap/libexec/*"]
-    bin.install "homebrew-tap/bin/dev-team-setup"
+    bin.install "homebrew-tap/bin/aiteamforge-setup"
   end
 
   def caveats
     <<~EOS
-      Dev-Team has been installed. Run the setup wizard:
-        dev-team-setup
+      AITeamForge has been installed. Run the setup wizard:
+        aiteamforge-setup
     EOS
   end
 end
 ```
 
 ### Post-Install Flow
-1. User runs: `brew install dev-team`
+1. User runs: `brew install aiteamforge`
 2. Homebrew installs dependencies (python, node, jq, gh)
 3. Homebrew shows caveats message
-4. User runs: `dev-team-setup`
+4. User runs: `aiteamforge-setup`
 5. Wizard completes setup
 6. User restarts terminal
 7. Dev-team environment is ready
@@ -407,10 +407,10 @@ end
 - [ ] Error scenario testing
 
 ### Future Ideas
-- [ ] Update mode: `dev-team-setup --update` (add new teams/features)
-- [ ] Uninstall mode: `dev-team-setup --uninstall`
-- [ ] Repair mode: `dev-team-setup --repair` (fix broken installations)
-- [ ] Config validation: `dev-team-setup --validate`
+- [ ] Update mode: `aiteamforge-setup --update` (add new teams/features)
+- [ ] Uninstall mode: `aiteamforge-setup --uninstall`
+- [ ] Repair mode: `aiteamforge-setup --repair` (fix broken installations)
+- [ ] Config validation: `aiteamforge-setup --validate`
 - [ ] Migration tool for upgrading from old versions
 
 ---
@@ -420,10 +420,10 @@ end
 ### Wizard Won't Start
 ```bash
 # Check if wrapper is executable
-ls -la $(which dev-team-setup)
+ls -la $(which aiteamforge-setup)
 
 # Check if libexec path is correct
-dev-team-setup --help
+aiteamforge-setup --help
 ```
 
 ### Missing Dependencies Error
@@ -438,23 +438,23 @@ brew install python@3 node jq gh
 ### Config File Issues
 ```bash
 # View current config
-cat ~/.dev-team/config.json
+cat ~/.aiteamforge/config.json
 
 # Validate JSON
-jq . ~/.dev-team/config.json
+jq . ~/.aiteamforge/config.json
 
 # Reset config (deletes existing)
-rm ~/.dev-team/config.json
-dev-team-setup
+rm ~/.aiteamforge/config.json
+aiteamforge-setup
 ```
 
 ### Installer Module Failures
 ```bash
 # Re-run wizard to retry failed installers
-dev-team-setup
+aiteamforge-setup
 
 # Check logs (when implemented)
-cat ~/.dev-team/logs/install.log
+cat ~/.aiteamforge/logs/install.log
 ```
 
 ---
@@ -462,7 +462,7 @@ cat ~/.dev-team/logs/install.log
 ## Developer Notes
 
 ### Adding New Teams
-Edit `AVAILABLE_TEAMS` array in `dev-team-setup.sh`:
+Edit `AVAILABLE_TEAMS` array in `aiteamforge-setup.sh`:
 ```bash
 AVAILABLE_TEAMS=(
   "NewTeam|Description of new team"

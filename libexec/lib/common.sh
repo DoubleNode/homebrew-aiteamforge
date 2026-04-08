@@ -1,9 +1,15 @@
 #!/bin/bash
 # common.sh
-# Bash-compatible utility functions for dev-team installer scripts
+# Bash-compatible utility functions for aiteamforge installer scripts
 # Provides basic output functions: header, info, success, warning, error, prompt_yes_no
 
-# ANSI color codes (no readonly — allows safe re-sourcing in subshells)
+# Guard against double-sourcing (readonly errors in subshells)
+if [[ -n "${_COMMON_SH_LOADED:-}" ]]; then
+    return 0 2>/dev/null || true
+fi
+_COMMON_SH_LOADED=1
+
+# ANSI color codes
 COLOR_RESET='\033[0m'
 COLOR_BOLD='\033[1m'
 COLOR_GREEN='\033[38;5;46m'

@@ -1,6 +1,6 @@
-# Dev-Team Homebrew Tap - Test Suite
+# AITeamForge Homebrew Tap - Test Suite
 
-Comprehensive end-to-end test suite for the dev-team Homebrew Tap system. Tests cover everything from CLI dispatch through setup wizard, installers, lifecycle commands, and migration tools.
+Comprehensive end-to-end test suite for the aiteamforge Homebrew Tap system. Tests cover everything from CLI dispatch through setup wizard, installers, lifecycle commands, and migration tools.
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ cd /path/to/homebrew-tap/tests
 ### Core Framework Tests
 
 #### `test-cli.sh` - CLI Dispatcher Tests
-Tests the main CLI entry point (`bin/dev-team-cli.sh`):
+Tests the main CLI entry point (`bin/aiteamforge-cli.sh`):
 - Help and version commands
 - Command routing (setup, doctor, status, etc.)
 - Unknown command handling
@@ -68,7 +68,7 @@ Tests team definitions (`share/teams/`):
 ### Workflow Tests
 
 #### `test-setup-wizard.sh` - Setup Wizard Tests
-Tests the interactive setup wizard (`bin/dev-team-setup.sh`):
+Tests the interactive setup wizard (`bin/aiteamforge-setup.sh`):
 - Command-line flags (--help, --dry-run, etc.)
 - Non-interactive mode
 - All 7 setup stages execute
@@ -88,7 +88,7 @@ Tests daily-use commands (`libexec/commands/`):
 **Run:** `./test-runner.sh test-lifecycle.sh`
 
 #### `test-migration.sh` - Migration Tests
-Tests migration tools (`libexec/commands/dev-team-migrate*.sh`):
+Tests migration tools (`libexec/commands/aiteamforge-migrate*.sh`):
 - Migration check (readiness assessment)
 - Dry-run migration
 - Backup creation
@@ -183,8 +183,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Set up test environment
-export DEV_TEAM_DIR="$TEST_TMP_DIR/dev-team"
-export DEV_TEAM_HOME="$TAP_ROOT"
+export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
+export AITEAMFORGE_HOME="$TAP_ROOT"
 
 # Tests
 test_start "Your feature works"
@@ -215,8 +215,8 @@ chmod +x test-yourfeature.sh
 
 Every test gets a clean environment:
 - `$TEST_TMP_DIR` - Isolated temp directory (auto-cleaned)
-- `$DEV_TEAM_DIR` - Points to test-specific directory
-- `$DEV_TEAM_HOME` - Points to tap root
+- `$AITEAMFORGE_DIR` - Points to test-specific directory
+- `$AITEAMFORGE_HOME` - Points to tap root
 - No modification of real system files
 
 ## Test Coverage
@@ -238,7 +238,7 @@ Every test gets a clean environment:
 ### GitHub Actions
 
 ```yaml
-name: Test Dev-Team Tap
+name: Test AITeamForge Tap
 
 on: [push, pull_request]
 
@@ -295,7 +295,7 @@ brew install zsh
 
 The test runner uses `trap` to ensure cleanup. If tests are interrupted (Ctrl+C), cleanup should still occur. If temp files remain:
 ```bash
-rm -rf /tmp/dev-team-test.*
+rm -rf /tmp/aiteamforge-test.*
 ```
 
 ### Verbose Output Shows Nothing
@@ -337,7 +337,7 @@ When adding new features to the tap:
 
 ## License
 
-Same as dev-team project (MIT).
+Same as aiteamforge project (MIT).
 
 ---
 

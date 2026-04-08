@@ -7,15 +7,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # Set up isolated test environment
-export DEV_TEAM_DIR="$TEST_TMP_DIR/dev-team-integration"
-export DEV_TEAM_HOME="$TAP_ROOT"
-mkdir -p "$DEV_TEAM_DIR"
+export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge-integration"
+export AITEAMFORGE_HOME="$TAP_ROOT"
+mkdir -p "$AITEAMFORGE_DIR"
 
-SETUP_SCRIPT="$TAP_ROOT/bin/dev-team-setup.sh"
-DOCTOR_SCRIPT="$TAP_ROOT/libexec/commands/dev-team-doctor.sh"
-STATUS_SCRIPT="$TAP_ROOT/libexec/commands/dev-team-status.sh"
-STOP_SCRIPT="$TAP_ROOT/libexec/commands/dev-team-stop.sh"
-UNINSTALL_SCRIPT="$TAP_ROOT/libexec/commands/dev-team-uninstall.sh"
+SETUP_SCRIPT="$TAP_ROOT/bin/aiteamforge-setup.sh"
+DOCTOR_SCRIPT="$TAP_ROOT/libexec/commands/aiteamforge-doctor.sh"
+STATUS_SCRIPT="$TAP_ROOT/libexec/commands/aiteamforge-status.sh"
+STOP_SCRIPT="$TAP_ROOT/libexec/commands/aiteamforge-stop.sh"
+UNINSTALL_SCRIPT="$TAP_ROOT/libexec/commands/aiteamforge-uninstall.sh"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Tests
@@ -45,31 +45,37 @@ assert_not_empty "$output"
 test_pass
 
 test_start "Integration: Create minimal working config"
-mkdir -p "$DEV_TEAM_DIR/.dev-team"
-cat > "$DEV_TEAM_DIR/.dev-team-config" <<'EOF'
+mkdir -p "$AITEAMFORGE_DIR/.aiteamforge"
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
 {
-  "version": "1.0.0",
+  "version": "1.3.0",
   "machine": {
     "name": "test-machine",
     "hostname": "localhost",
     "user": "Integration Test"
   },
   "teams": ["iOS"],
+  "team_paths": {
+    "iOS": {"working_dir": "/tmp/test/ios"}
+  },
+  "installed_features": ["shell_environment", "lcars_kanban"],
+  "fleet_registration_status": "not_configured",
   "features": {
-    "kanban": true,
+    "shell_environment": true,
+    "claude_code_config": false,
+    "lcars_kanban": true,
     "fleet_monitor": false,
-    "shell_env": true,
-    "claude_config": false,
-    "iterm_integration": false
+    "fleet_mode": "standalone",
+    "fleet_server_url": ""
   },
   "paths": {
-    "install_dir": "$DEV_TEAM_DIR",
-    "config_dir": "$DEV_TEAM_DIR/.dev-team"
+    "install_dir": "$AITEAMFORGE_DIR",
+    "config_dir": "$AITEAMFORGE_DIR/.aiteamforge"
   },
   "installed_at": "2026-02-17T00:00:00Z"
 }
 EOF
-config_file="$DEV_TEAM_DIR/.dev-team-config"
+config_file="$AITEAMFORGE_DIR/.aiteamforge-config"
 assert_file_exists "$config_file"
 test_pass
 
@@ -114,18 +120,18 @@ bash "$STOP_SCRIPT" >/dev/null 2>&1 || true
 test_pass
 
 test_start "Integration: Config file is valid JSON"
-assert_file_valid_json "$DEV_TEAM_DIR/.dev-team-config"
+assert_file_valid_json "$AITEAMFORGE_DIR/.aiteamforge-config"
 test_pass
 
 test_start "Integration: Config has required fields"
 if command -v jq &>/dev/null; then
-  version=$(jq -r '.version' "$DEV_TEAM_DIR/.dev-team-config")
+  version=$(jq -r '.version' "$AITEAMFORGE_DIR/.aiteamforge-config")
   assert_not_empty "$version"
 
-  machine_name=$(jq -r '.machine.name' "$DEV_TEAM_DIR/.dev-team-config")
+  machine_name=$(jq -r '.machine.name' "$AITEAMFORGE_DIR/.aiteamforge-config")
   assert_not_empty "$machine_name"
 
-  teams=$(jq -r '.teams' "$DEV_TEAM_DIR/.dev-team-config")
+  teams=$(jq -r '.teams' "$AITEAMFORGE_DIR/.aiteamforge-config")
   assert_not_equal "null" "$teams"
 fi
 test_pass

@@ -1,16 +1,16 @@
 #!/bin/bash
 
 # test-setup-wizard.sh
-# Tests for setup wizard (bin/dev-team-setup.sh)
+# Tests for setup wizard (bin/aiteamforge-setup.sh)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-SETUP_SCRIPT="$TAP_ROOT/libexec/dev-team-setup.sh"
+SETUP_SCRIPT="$TAP_ROOT/libexec/aiteamforge-setup.sh"
 
 # Set up test environment
-export DEV_TEAM_DIR="$TEST_TMP_DIR/dev-team"
-export DEV_TEAM_HOME="$TAP_ROOT"
-mkdir -p "$DEV_TEAM_DIR"
+export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
+export AITEAMFORGE_HOME="$TAP_ROOT"
+mkdir -p "$AITEAMFORGE_DIR"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper Functions
@@ -35,7 +35,7 @@ test_pass
 
 test_start "Setup script --help flag works"
 output=$(run_setup --help)
-assert_contains "$output" "dev-team-setup"
+assert_contains "$output" "aiteamforge-setup"
 assert_contains "$output" "USAGE:"
 assert_contains "$output" "OPTIONS:"
 test_pass

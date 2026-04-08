@@ -3,7 +3,7 @@
 # Simplified worktree management for multi-project development
 
 # Installation directory (substituted during install)
-DEV_TEAM_DIR="{{DEV_TEAM_DIR}}"
+AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Configuration

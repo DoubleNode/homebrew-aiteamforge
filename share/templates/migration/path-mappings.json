@@ -1,46 +1,46 @@
 {
   "description": "Maps old manual installation paths to new Homebrew-managed paths",
-  "version": "1.0.0",
+  "version": "1.3.0",
   "mappings": {
     "framework": {
       "description": "Framework files (scripts, libraries)",
-      "old": "~/dev-team/",
-      "new": "/opt/homebrew/Cellar/dev-team/<VERSION>/libexec/"
+      "old": "~/aiteamforge/",
+      "new": "/opt/homebrew/Cellar/aiteamforge/<VERSION>/libexec/"
     },
     "user_data": {
       "description": "Persistent user data (kanban boards, configs)",
-      "old": "~/dev-team/kanban/",
-      "new": "~/.dev-team/kanban/"
+      "old": "~/aiteamforge/kanban/",
+      "new": "~/.aiteamforge/kanban/"
     },
     "config": {
       "description": "User configuration files",
-      "old": "~/dev-team/config/",
-      "new": "~/.dev-team/config/"
+      "old": "~/aiteamforge/config/",
+      "new": "~/.aiteamforge/config/"
     },
     "claude_agents": {
       "description": "Claude Code agent configurations",
-      "old": "~/dev-team/claude/",
-      "new": "~/.dev-team/claude/"
+      "old": "~/aiteamforge/claude/",
+      "new": "~/.aiteamforge/claude/"
     },
     "team_data": {
       "description": "Team-specific data directories",
-      "old": "~/dev-team/{team}/",
-      "new": "~/.dev-team/teams/{team}/"
+      "old": "~/aiteamforge/{team}/",
+      "new": "~/.aiteamforge/teams/{team}/"
     },
     "backups": {
       "description": "Kanban backup data",
-      "old": "~/dev-team/kanban-backups/",
-      "new": "~/.dev-team/kanban-backups/"
+      "old": "~/aiteamforge/kanban-backups/",
+      "new": "~/.aiteamforge/kanban-backups/"
     },
     "fleet_monitor": {
       "description": "Fleet Monitor data",
-      "old": "~/dev-team/fleet-monitor/",
-      "new": "~/.dev-team/fleet-monitor/"
+      "old": "~/aiteamforge/fleet-monitor/",
+      "new": "~/.aiteamforge/fleet-monitor/"
     },
     "lcars_data": {
       "description": "LCARS persistent data (NOT the UI code)",
-      "old": "~/dev-team/lcars-ui/data/",
-      "new": "~/.dev-team/lcars-data/"
+      "old": "~/aiteamforge/lcars-ui/data/",
+      "new": "~/.aiteamforge/lcars-data/"
     }
   },
   "preserve": {
@@ -110,7 +110,7 @@
       "~/.zprofile",
       "~/.bashrc"
     ],
-    "old_source_pattern": "source ~/dev-team/",
-    "new_source_pattern": "source ~/.dev-team/shell-init.sh"
+    "old_source_pattern": "source ~/aiteamforge/",
+    "new_source_pattern": "source ~/.aiteamforge/shell-init.sh"
   }
 }

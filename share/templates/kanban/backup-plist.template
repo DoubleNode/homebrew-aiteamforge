@@ -3,33 +3,21 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.devteam.kanban-backup</string>
+    <string>com.aiteamforge.kanban-backup</string>
     <key>ProgramArguments</key>
     <array>
         <string>{{PYTHON3_PATH}}</string>
-        <string>{{DEV_TEAM_DIR}}/kanban-backup.py</string>
-        <string>--backup</string>
+        <string>{{AITEAMFORGE_DIR}}/kanban-backup.py</string>
     </array>
     <key>StartInterval</key>
     <integer>{{BACKUP_INTERVAL}}</integer>
+    <key>StandardOutPath</key>
+    <string>{{USER_HOME}}/aiteamforge-backups/kanban/backup.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{USER_HOME}}/aiteamforge-backups/kanban/backup-error.log</string>
     <key>RunAtLoad</key>
     <true/>
-    <key>WorkingDirectory</key>
-    <string>{{DEV_TEAM_DIR}}</string>
-    <key>StandardOutPath</key>
-    <string>{{USER_HOME}}/dev-team-backups/kanban/backup.log</string>
-    <key>StandardErrorPath</key>
-    <string>{{USER_HOME}}/dev-team-backups/kanban/backup-error.log</string>
-    <key>EnvironmentVariables</key>
-    <dict>
-        <key>PATH</key>
-        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    </dict>
     <key>KeepAlive</key>
     <false/>
-    <key>Nice</key>
-    <integer>10</integer>
-    <key>ProcessType</key>
-    <string>Background</string>
 </dict>
 </plist>

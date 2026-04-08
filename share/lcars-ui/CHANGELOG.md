@@ -4,6 +4,56 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+### Changed
+- **LCARS Tab Order Reorder** (XACA-0115) - Reordered all tab navigation for improved workflow
+  - New order: HOME → TODOS → CALENDAR → WORKFLOW → DETAILS → QUEUE → EPICS → RELEASES → SETTINGS
+  - TODOS and CALENDAR moved to positions 2-3 for faster access to daily-use tabs
+  - Updated SECTIONS array, sidebar buttons, mobile tabbar, and Alt+1-8 keyboard shortcuts
+
+### Fixed
+- **Terminal Activation tmux Socket Fix** (XACA-0102) - Terminal click-to-activate was
+  non-functional because the tmux command used the default socket (which doesn't exist) and
+  bare terminal names (which don't match). Fix adds `-L {team}` for per-team sockets and
+  constructs `{team}-{terminal}` session names using the `LCARS_TEAM` environment variable.
+- **Knowledge Panel Orphaned Chart Guard** (XACA-0098-016) - Debounce and AbortController
+  pattern added to `_renderHomeKnowledgeStats` to prevent orphaned chart injection on rapid
+  carousel navigation.
+  - Added module-level `_knowledgeAbortController` and `_knowledgeDebounceTimer` state variables
+  - `_renderHomeKnowledgeStats` now coalesces rapid calls with a 150ms debounce before firing
+    the `/api/knowledge-stats` fetch
+  - In-flight fetch is aborted immediately via `AbortController.signal` when a new call arrives
+  - Two `currentHomePanel !== 4` guards after each `await` prevent stale continuations from
+    injecting DOM content or charts when a different panel is active
+  - `navigateToPanel` cancels debounce timer and aborts fetch when leaving panel 4
+  - `stopCarousel` cancels debounce timer and aborts fetch when leaving the HOME tab entirely
+  - `AbortError` exceptions are silently suppressed (they are intentional, not failures)
+
+### Added
+- **Team Todo List UI** (XACA-0101) - Lightweight per-team todo feature for quick one-shot items
+  - New TODOS sidebar button and section in LCARS Kanban UI (`lcars-ui/index.html`)
+  - Toggle tabs to switch between ACTIVE and COMPLETED views
+  - Checkbox-based completion toggle with immediate API update
+  - Priority badges (low/medium/high/critical) with LCARS color coding; critical items pulse
+  - Optional required-by date with overdue highlighting (red border + date label)
+  - Add/Edit modal with text, priority, and date fields; delete with confirmation
+  - Empty state and loading state indicators
+  - Reusable `lcars-modal` pattern for todo add/edit form
+  - `todos-section` integrated into section switching, hide/show, and entrance animation system
+  - All JavaScript functions: `loadTodos`, `renderTodos`, `filterTodos`, `openTodoModal`,
+    `closeTodoModal`, `saveTodo`, `deleteTodo`, `toggleTodo`, `renderTodoItem`
+  - API endpoints: `GET /api/todos`, `POST /api/todos`, `PUT /api/todos`, `DELETE /api/todos`
+    (server implementation in `server.py` via XACA-0101-002)
+  - Server handlers: `serve_todos_list`, `handle_create_todo`, `handle_update_todo`, `handle_delete_todo`
+  - File locking + atomic writes; auto-sets completedAt on status transitions; sorts active by priority/date
+- **AMB Badge Display** (XACA-0080) - Optional Agent Merit Badges display in agent panels
+  - `@handle` text and up to 5 earned badge emojis shown between role and location/divider
+  - Only visible for agents registered on the AMB platform (file-based detection)
+  - `agent-panel.html`: `.amb-section` with handle + badge row, hidden by default
+  - `agent-panel-display.sh`: `get_amb_badges()` with 5-min file cache, centered emoji display
+  - `server.py`: `_fetch_amb_badges()` with in-memory cache (5-min TTL), badge enrichment in API response
+  - `display-agent-avatar.sh`: `amb_handle` field in JSON output with config file validation
+  - Graceful degradation at every layer (API down, no handle, no badges = invisible)
+
 ## [2026-02-12] - Agent Panel Split Panes & VESSEL/UPDATED Alignment
 
 ### Added

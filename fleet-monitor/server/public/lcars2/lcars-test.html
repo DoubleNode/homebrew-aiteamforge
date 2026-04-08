@@ -1,0 +1,1197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LCARS Fleet Monitor - Framework Test</title>
+
+    <!-- LCARS-003: Antonio Typography from Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">
+
+    <!-- LCARS Fleet Core Framework -->
+    <link rel="stylesheet" href="css/lcars-fleet.css">
+    <!-- LCARS Fleet Theme (Red/Blue Color Scheme) -->
+    <link rel="stylesheet" href="css/lcars-fleet-theme.css">
+</head>
+<body>
+    <!-- ═══════════════════════════════════════════════════════════════════════════ -->
+    <!-- STARTUP BOOT SEQUENCE (LCARS-022 through LCARS-026)                         -->
+    <!-- ═══════════════════════════════════════════════════════════════════════════ -->
+    <section class="startup-section">
+        <div class="startup-container">
+            <div class="startup-logo" id="startup-logo"></div>
+            <div class="startup-text">
+                <div class="startup-title">STARFLEET ACADEMY</div>
+                <div class="startup-subtitle">FLEET MONITOR SYSTEM</div>
+                <div class="startup-version">LCARS 47-112</div>
+            </div>
+            <div class="startup-data">
+                <div class="startup-data-scroll" id="startup-data-scroll"></div>
+            </div>
+            <div class="startup-progress">
+                <div class="startup-progress-bar" id="startup-progress-bar"></div>
+            </div>
+            <div class="startup-status" id="startup-status">INITIALIZING...</div>
+        </div>
+        <div class="startup-skip">CLICK ANYWHERE TO SKIP</div>
+    </section>
+
+    <div class="lcars-container">
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- LCARS-006: TOP FRAME - Blue secondary header                        -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <header class="lcars-top-frame">
+            <div class="top-sidebar">
+                <div class="top-sidebar-content">
+                    <span class="stardate" id="stardate">2026.006</span>
+                    <span class="top-divider"></span>
+                    <span class="lcars-version">LCARS 02-048</span>
+                    <span class="top-divider"></span>
+                    <span class="team-name">FLEET MONITOR</span>
+                    <span class="group-id" id="group-id">FRAMEWORK TEST</span>
+                </div>
+            </div>
+            <div class="top-bar">
+                <div class="top-bar-buttons" id="top-bar-buttons">
+                    <div class="top-button bg-tan"><span class="top-button-value" id="btn-systems">ONLINE</span><span class="top-button-label">SYSTEMS</span></div>
+                    <div class="top-button bg-lavender"><span class="top-button-value" id="btn-nodes">47</span><span class="top-button-label">NODES</span></div>
+                    <div class="top-button bg-peach"><span class="top-button-value" id="btn-sessions">128</span><span class="top-button-label">SESSIONS</span></div>
+                    <div class="top-button bg-green"><span class="top-button-value" id="btn-status">NOMINAL</span><span class="top-button-label">STATUS</span></div>
+                </div>
+            </div>
+            <div class="lcars-title" id="lcars-title">
+                <span class="title-full">LCARS FRAMEWORK TEST</span>
+                <span class="title-medium">FRAMEWORK TEST</span>
+                <span class="title-short">TEST</span>
+            </div>
+            <img class="header-fleet-logo" src="/avatars/fleet_logo.png" alt="Fleet Monitor">
+        </header>
+
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <!-- LCARS-004: MAIN CONTENT AREA with L-shaped sidebar                  -->
+        <!-- ═══════════════════════════════════════════════════════════════════ -->
+        <main class="lcars-main">
+            <!-- LCARS-017: Fleet Monitor sidebar navigation -->
+            <nav class="lcars-sidebar">
+                <div class="sidebar-label">FLEET STATUS</div>
+                <div class="sidebar-button active" data-section="overview">
+                    <span>OVERVIEW</span>
+                </div>
+                <div class="sidebar-button" data-section="organizations">
+                    <span>ORGS</span>
+                </div>
+                <div class="sidebar-button" data-section="machines">
+                    <span>MACHINES</span>
+                </div>
+                <div class="sidebar-button" data-section="settings">
+                    <span>SETTINGS</span>
+                </div>
+                <div class="sidebar-spacer"></div>
+                <div class="sidebar-info stacked">
+                    <div class="info-row">
+                        <span class="info-label">VESSEL</span>
+                        <span class="info-value" id="ship-name">USS Enterprise</span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">UPDATED</span>
+                        <span class="info-value" id="last-update">--:--:--</span>
+                    </div>
+                </div>
+                <div class="sidebar-spacer"></div>
+            </nav>
+
+            <!-- Content Area -->
+            <div class="lcars-content">
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: OVERVIEW - Fleet Summary & Framework Demo                   -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section active" data-section="overview">
+
+                <!-- Test Section: Typography -->
+                <section>
+                    <div class="section-header blue">
+                        <span class="section-title">TYPOGRAPHY TEST</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 10px;">
+                        <p class="lcars-text-2xl lcars-font-bold">LCARS 2XL BOLD</p>
+                        <p class="lcars-text-xl lcars-font-semibold">LCARS XL SEMIBOLD</p>
+                        <p class="lcars-text-lg lcars-font-medium">LCARS LG MEDIUM</p>
+                        <p class="lcars-text-md lcars-font-normal">LCARS MD NORMAL</p>
+                        <p class="lcars-text-sm">LCARS SM - Standard text</p>
+                        <p class="lcars-text-xs">LCARS XS - Small text</p>
+                    </div>
+                </section>
+
+                <!-- Test Section: Color Palette -->
+                <section>
+                    <div class="section-header crimson">
+                        <span class="section-title">COLOR PALETTE (RED/BLUE EMPHASIS)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px;">
+                        <!-- Primary Colors -->
+                        <div class="bg-red" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">RED</span>
+                        </div>
+                        <div class="bg-crimson" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">CRIMSON</span>
+                        </div>
+                        <div class="bg-blue" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">BLUE</span>
+                        </div>
+                        <div class="bg-cyan" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">CYAN</span>
+                        </div>
+                        <div class="bg-lavender" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">LAVENDER</span>
+                        </div>
+                        <!-- Secondary Colors -->
+                        <div class="bg-purple" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">PURPLE</span>
+                        </div>
+                        <div class="bg-mauve" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">MAUVE</span>
+                        </div>
+                        <div class="bg-orange" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">ORANGE</span>
+                        </div>
+                        <div class="bg-peach" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">PEACH</span>
+                        </div>
+                        <div class="bg-tan" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">TAN</span>
+                        </div>
+                        <!-- Status Colors -->
+                        <div class="bg-green" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">GREEN</span>
+                        </div>
+                        <div class="bg-yellow" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">YELLOW</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Test Section: Organization Colors -->
+                <section>
+                    <div class="section-header purple">
+                        <span class="section-title">ORGANIZATION COLORS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;">
+                        <div class="bg-org-mainevent" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">MAIN EVENT</span>
+                        </div>
+                        <div class="bg-org-doublenode" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">DOUBLENODE</span>
+                        </div>
+                        <div class="bg-org-devteam" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">DEV TEAM</span>
+                        </div>
+                        <div class="bg-org-academy" style="padding: 20px; border-radius: 8px; text-align: center;">
+                            <span style="color: black; font-weight: 600;">ACADEMY</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Test Section: Corner Cutouts -->
+                <section>
+                    <div class="section-header cyan">
+                        <span class="section-title">CORNER CUTOUT DEMO</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; gap: 20px; flex-wrap: wrap;">
+                        <!-- BR: center at 100% 100%, BLACK first (corner cutout), parent second -->
+                        <div style="width: 150px; height: 100px; background: var(--lcars-blue); position: relative; overflow: hidden;">
+                            <div style="position: absolute; bottom: 0; right: 0; width: 30px; height: 30px; background: radial-gradient(circle at 100% 100%, var(--lcars-black) 30px, var(--lcars-blue) 30px);"></div>
+                            <span style="color: black; padding: 10px; display: block; font-size: 12px;">BR CUTOUT</span>
+                        </div>
+                        <!-- TR: center at 100% 0%, BLACK first, parent second -->
+                        <div style="width: 150px; height: 100px; background: var(--lcars-crimson); position: relative; overflow: hidden;">
+                            <div style="position: absolute; top: 0; right: 0; width: 30px; height: 30px; background: radial-gradient(circle at 100% 0%, var(--lcars-black) 30px, var(--lcars-crimson) 30px);"></div>
+                            <span style="color: black; padding: 10px; display: block; font-size: 12px; margin-top: 40px;">TR CUTOUT</span>
+                        </div>
+                        <!-- BL: center at 0% 100%, BLACK first, parent second -->
+                        <div style="width: 150px; height: 100px; background: var(--lcars-purple); position: relative; overflow: hidden;">
+                            <div style="position: absolute; bottom: 0; left: 0; width: 30px; height: 30px; background: radial-gradient(circle at 0% 100%, var(--lcars-black) 30px, var(--lcars-purple) 30px);"></div>
+                            <span style="color: black; padding: 10px; display: block; font-size: 12px;">BL CUTOUT</span>
+                        </div>
+                        <!-- TL: center at 0% 0%, BLACK first, parent second -->
+                        <div style="width: 150px; height: 100px; background: var(--lcars-orange); position: relative; overflow: hidden;">
+                            <div style="position: absolute; top: 0; left: 0; width: 30px; height: 30px; background: radial-gradient(circle at 0% 0%, var(--lcars-black) 30px, var(--lcars-orange) 30px);"></div>
+                            <span style="color: black; padding: 10px; display: block; font-size: 12px; margin-top: 40px;">TL CUTOUT</span>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- Test Section: ANIMATION LIBRARY                                        -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+
+                <!-- SUBTLE ANIMATIONS -->
+                <section>
+                    <div class="section-header orange">
+                        <span class="section-title">SUBTLE ANIMATIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 20px;">
+
+                        <!-- Glow Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">GLOW EFFECTS</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <div class="lcars-glow bg-cyan" style="padding: 15px 30px; border-radius: 8px; color: var(--lcars-cyan);">
+                                    <span style="color: black; font-weight: 600;">GLOW</span>
+                                </div>
+                                <div class="lcars-glow-slow bg-blue" style="padding: 15px 30px; border-radius: 8px; color: var(--lcars-blue);">
+                                    <span style="color: black; font-weight: 600;">GLOW SLOW</span>
+                                </div>
+                                <div class="lcars-glow-fast bg-crimson" style="padding: 15px 30px; border-radius: 8px; color: var(--lcars-crimson);">
+                                    <span style="color: black; font-weight: 600;">GLOW FAST</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Breathe Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">BREATHE EFFECTS</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <div class="lcars-breathe bg-green" style="padding: 15px 30px; border-radius: 8px;">
+                                    <span style="color: black; font-weight: 600;">BREATHE</span>
+                                </div>
+                                <div class="lcars-breathe-slow bg-purple" style="padding: 15px 30px; border-radius: 8px;">
+                                    <span style="color: black; font-weight: 600;">BREATHE SLOW</span>
+                                </div>
+                                <div class="pulse bg-peach" style="padding: 15px 30px; border-radius: 8px;">
+                                    <span style="color: black; font-weight: 600;">PULSE (legacy)</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Hover Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">HOVER EFFECTS (hover over these)</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <div class="lcars-hover-lift bg-lavender" style="padding: 15px 30px; border-radius: 8px; cursor: pointer;">
+                                    <span style="color: black; font-weight: 600;">HOVER LIFT</span>
+                                </div>
+                                <div class="lcars-hover-glow bg-orange" style="padding: 15px 30px; border-radius: 8px; cursor: pointer; color: var(--lcars-orange);">
+                                    <span style="color: black; font-weight: 600;">HOVER GLOW</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Rotate Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">ROTATE EFFECTS</p>
+                            <div style="display: flex; gap: 30px; flex-wrap: wrap; align-items: center;">
+                                <div class="lcars-rotate-slow" style="width: 40px; height: 40px; background: conic-gradient(var(--lcars-cyan), var(--lcars-blue), var(--lcars-cyan)); border-radius: 50%;"></div>
+                                <div class="lcars-rotate" style="width: 40px; height: 40px; background: conic-gradient(var(--lcars-crimson), var(--lcars-orange), var(--lcars-crimson)); border-radius: 50%;"></div>
+                                <div class="lcars-rotate-fast" style="width: 40px; height: 40px; background: conic-gradient(var(--lcars-green), var(--lcars-yellow), var(--lcars-green)); border-radius: 50%;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Shimmer Effect -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">SHIMMER EFFECT</p>
+                            <div class="lcars-shimmer bg-tan" style="padding: 15px 60px; border-radius: 8px; position: relative; overflow: hidden;">
+                                <span style="color: black; font-weight: 600;">LOADING DATA...</span>
+                            </div>
+                        </div>
+
+                        <!-- Type Cursor -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">TYPEWRITER CURSOR</p>
+                            <div class="lcars-type text-cyan" style="font-size: 16px; display: inline-block;">
+                                ACCESSING STARFLEET DATABASE_
+                            </div>
+                        </div>
+
+                        <!-- Cascade Animation -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">CASCADE REVEAL (click to replay)</p>
+                            <div id="cascade-demo" class="lcars-cascade" style="display: flex; gap: 10px; flex-wrap: wrap;">
+                                <span class="status-badge online">SYSTEM 1</span>
+                                <span class="status-badge online">SYSTEM 2</span>
+                                <span class="status-badge online">SYSTEM 3</span>
+                                <span class="status-badge online">SYSTEM 4</span>
+                                <span class="status-badge online">SYSTEM 5</span>
+                            </div>
+                        </div>
+
+                        <!-- Stagger Animation -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">STAGGER DELAYS (for sequential reveals)</p>
+                            <div class="lcars-stagger" style="display: flex; gap: 10px;">
+                                <div class="lcars-fade-in bg-blue" style="padding: 10px 20px; border-radius: 4px; opacity: 0;"><span style="color: black;">1</span></div>
+                                <div class="lcars-fade-in bg-cyan" style="padding: 10px 20px; border-radius: 4px; opacity: 0;"><span style="color: black;">2</span></div>
+                                <div class="lcars-fade-in bg-lavender" style="padding: 10px 20px; border-radius: 4px; opacity: 0;"><span style="color: black;">3</span></div>
+                                <div class="lcars-fade-in bg-purple" style="padding: 10px 20px; border-radius: 4px; opacity: 0;"><span style="color: black;">4</span></div>
+                                <div class="lcars-fade-in bg-mauve" style="padding: 10px 20px; border-radius: 4px; opacity: 0;"><span style="color: black;">5</span></div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- DRAMATIC ANIMATIONS -->
+                <section>
+                    <div class="section-header crimson">
+                        <span class="section-title">DRAMATIC ANIMATIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 20px;">
+
+                        <!-- Alert Modes -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">ALERT MODES</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <div class="lcars-red-alert" style="padding: 20px 30px; border-radius: 8px; border: 2px solid var(--lcars-crimson);">
+                                    <span class="text-crimson lcars-text-lg lcars-font-bold">RED ALERT</span>
+                                </div>
+                                <div class="lcars-yellow-alert" style="padding: 20px 30px; border-radius: 8px; border: 2px solid var(--lcars-yellow);">
+                                    <span class="text-yellow lcars-text-lg lcars-font-bold">YELLOW ALERT</span>
+                                </div>
+                                <div class="lcars-red-alert-border" style="padding: 20px 30px; border-radius: 8px;">
+                                    <span class="text-crimson lcars-text-lg lcars-font-bold">BORDER ALERT</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Warp Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">WARP EFFECTS (click to trigger)</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <button id="btn-warp" class="lcars-button bg-blue">Trigger Warp</button>
+                                <button id="btn-warp-in" class="lcars-button bg-cyan">Warp In</button>
+                                <button id="btn-warp-out" class="lcars-button bg-lavender">Warp Out</button>
+                            </div>
+                            <div id="warp-target" style="margin-top: 15px; padding: 20px 40px; background: var(--lcars-blue); border-radius: 8px; display: inline-block;">
+                                <span style="color: black; font-weight: 600;">WARP TARGET</span>
+                            </div>
+                        </div>
+
+                        <!-- Scan Effect -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">SCAN EFFECTS</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <div class="lcars-scan bg-dark" style="padding: 20px 60px; border-radius: 8px; border: 1px solid var(--lcars-cyan);">
+                                    <span class="text-cyan">SCANNING...</span>
+                                </div>
+                                <div class="lcars-scan lcars-scan-slow bg-dark" style="padding: 20px 60px; border-radius: 8px; border: 1px solid var(--lcars-green);">
+                                    <span class="text-green">DEEP SCAN</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Transport Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">TRANSPORT EFFECTS (click to trigger)</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <button id="btn-transport-in" class="lcars-button bg-cyan">Transport In</button>
+                                <button id="btn-transport-out" class="lcars-button bg-orange">Transport Out</button>
+                            </div>
+                            <div id="transport-target" style="margin-top: 15px; padding: 20px 40px; background: var(--lcars-cyan); border-radius: 8px; display: inline-block;">
+                                <span style="color: black; font-weight: 600;">ENSIGN SMITH</span>
+                            </div>
+                        </div>
+
+                        <!-- Shield Effect -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">SHIELD FLUCTUATION</p>
+                            <div class="lcars-shield" style="padding: 20px 40px; border-radius: 8px; display: inline-block;">
+                                <span class="text-cyan">SHIELDS AT 78%</span>
+                            </div>
+                        </div>
+
+                        <!-- Glitch Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">GLITCH EFFECTS (click to trigger)</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap; align-items: center;">
+                                <button id="btn-glitch" class="lcars-button bg-crimson">Trigger Glitch</button>
+                                <div id="glitch-target" style="padding: 15px 30px; background: var(--lcars-dark); border: 1px solid var(--lcars-crimson); border-radius: 4px;">
+                                    <span class="text-crimson lcars-font-bold">SYSTEM ERROR</span>
+                                </div>
+                                <div class="lcars-glitch-loop" style="padding: 15px 30px; background: var(--lcars-dark); border: 1px solid var(--lcars-alert-red); border-radius: 4px;">
+                                    <span class="text-alert-red lcars-font-bold">CRITICAL!</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Glitch Text -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">GLITCH TEXT</p>
+                            <span class="lcars-glitch-text lcars-text-xl lcars-font-bold text-crimson">MALFUNCTION DETECTED</span>
+                        </div>
+
+                        <!-- Surge & Charge Effects -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">SURGE & CHARGE (click to trigger)</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap; align-items: center;">
+                                <button id="btn-surge" class="lcars-button bg-orange">Power Surge</button>
+                                <button id="btn-charge" class="lcars-button bg-cyan">Energy Charge</button>
+                                <div id="surge-target" style="padding: 15px 30px; background: var(--lcars-orange); border-radius: 8px;">
+                                    <span style="color: black; font-weight: 600;">POWER CORE</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Tactical Display -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">TACTICAL RADAR SWEEP</p>
+                            <div class="lcars-tactical" style="width: 100px; height: 100px; background: var(--lcars-dark); border: 2px solid var(--lcars-green);">
+                            </div>
+                        </div>
+
+                        <!-- Flicker Effect -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">POWER FLICKER</p>
+                            <div class="lcars-flicker bg-tan" style="padding: 15px 30px; border-radius: 8px; display: inline-block;">
+                                <span style="color: black; font-weight: 600;">UNSTABLE POWER</span>
+                            </div>
+                        </div>
+
+                        <!-- Ping & Ripple -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">PING & RIPPLE</p>
+                            <div style="display: flex; gap: 40px; flex-wrap: wrap; align-items: center;">
+                                <div class="lcars-ping" style="width: 40px; height: 40px; background: var(--lcars-green); border-radius: 50%; color: var(--lcars-green);"></div>
+                                <div class="lcars-ripple" style="width: 40px; height: 40px; background: var(--lcars-cyan); border-radius: 50%; color: var(--lcars-cyan);"></div>
+                            </div>
+                        </div>
+
+                        <!-- Shake & Bounce -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">SHAKE & BOUNCE (click to trigger)</p>
+                            <div style="display: flex; gap: 15px; flex-wrap: wrap; align-items: center;">
+                                <button id="btn-shake" class="lcars-button bg-crimson">Shake</button>
+                                <div id="shake-target" class="bg-crimson" style="padding: 15px 30px; border-radius: 8px;">
+                                    <span style="color: black; font-weight: 600;">IMPACT!</span>
+                                </div>
+                                <div class="lcars-bounce bg-green" style="padding: 15px 30px; border-radius: 8px;">
+                                    <span style="color: black; font-weight: 600;">ATTENTION</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- FADE ANIMATIONS -->
+                <section>
+                    <div class="section-header purple">
+                        <span class="section-title">FADE & TRANSITION ANIMATIONS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 20px;">
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">FADE VARIANTS (click to replay)</p>
+                            <div style="display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 15px;">
+                                <button id="btn-fade-replay" class="lcars-button bg-purple">Replay Fades</button>
+                            </div>
+                            <div id="fade-demos" style="display: flex; gap: 15px; flex-wrap: wrap;">
+                                <div class="lcars-fade-in bg-blue" style="padding: 15px 20px; border-radius: 8px; opacity: 0;">
+                                    <span style="color: black;">FADE IN</span>
+                                </div>
+                                <div class="lcars-fade-in-up bg-cyan" style="padding: 15px 20px; border-radius: 8px; opacity: 0;">
+                                    <span style="color: black;">FADE UP</span>
+                                </div>
+                                <div class="lcars-fade-in-down bg-lavender" style="padding: 15px 20px; border-radius: 8px; opacity: 0;">
+                                    <span style="color: black;">FADE DOWN</span>
+                                </div>
+                                <div class="lcars-fade-in-scale bg-purple" style="padding: 15px 20px; border-radius: 8px; opacity: 0;">
+                                    <span style="color: black;">FADE SCALE</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ANIMATION UTILITIES -->
+                <section>
+                    <div class="section-header tan">
+                        <span class="section-title">ANIMATION UTILITIES</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 15px;">
+                        <div style="padding: 15px; background: rgba(153, 153, 255, 0.1); border-radius: 8px;">
+                            <p class="lcars-text-sm text-blue" style="margin-bottom: 10px;">UTILITY CLASSES:</p>
+                            <ul style="list-style: none; display: flex; flex-direction: column; gap: 8px;">
+                                <li class="lcars-text-xs text-peach"><code>.lcars-anim-delay-100</code> to <code>.lcars-anim-delay-1000</code> - Animation delays</li>
+                                <li class="lcars-text-xs text-peach"><code>.lcars-anim-fast</code>, <code>.lcars-anim-slow</code>, <code>.lcars-anim-slower</code> - Duration modifiers</li>
+                                <li class="lcars-text-xs text-peach"><code>.lcars-anim-once</code>, <code>.lcars-anim-twice</code>, <code>.lcars-anim-infinite</code> - Iteration control</li>
+                                <li class="lcars-text-xs text-peach"><code>.lcars-anim-paused</code>, <code>.lcars-anim-running</code> - Playback control</li>
+                                <li class="lcars-text-xs text-peach"><code>.lcars-stagger</code> - Auto-delays children (nth-child 1-10)</li>
+                                <li class="lcars-text-xs text-peach"><code>.lcars-cascade</code> - Boot sequence reveal for children</li>
+                            </ul>
+                        </div>
+                        <div style="padding: 15px; background: rgba(153, 255, 153, 0.1); border-radius: 8px;">
+                            <p class="lcars-text-sm text-green" style="margin-bottom: 10px;">ACCESSIBILITY:</p>
+                            <p class="lcars-text-xs text-peach">All animations respect <code>prefers-reduced-motion</code>. Users with motion sensitivity will see static alternatives.</p>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- LCARS-009: Status Indicators Demo -->
+                <section>
+                    <div class="section-header red">
+                        <span class="section-title">STATUS INDICATORS (LCARS-009)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 15px;">
+                        <!-- Status Indicators -->
+                        <div style="display: flex; gap: 30px; align-items: center;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator online"></span>
+                                <span class="lcars-text-sm">ONLINE (with glow)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator offline"></span>
+                                <span class="lcars-text-sm">OFFLINE (pulsing)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator warning"></span>
+                                <span class="lcars-text-sm">WARNING</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator idle"></span>
+                                <span class="lcars-text-sm">IDLE</span>
+                            </div>
+                        </div>
+                        <!-- Status Badges -->
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <span class="status-badge online">ONLINE</span>
+                            <span class="status-badge offline">OFFLINE</span>
+                            <span class="status-badge warning">WARNING</span>
+                            <span class="status-badge idle">IDLE</span>
+                        </div>
+                        <!-- Status Rows -->
+                        <div style="display: flex; flex-direction: column; gap: 10px; max-width: 500px;">
+                            <div class="status-row online">
+                                <span class="status-indicator online"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">ENTERPRISE-BRIDGE</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">12 sessions</span>
+                            </div>
+                            <div class="status-row offline">
+                                <span class="status-indicator offline"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">DEFIANT-OPS</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">Last seen: 2h ago</span>
+                            </div>
+                            <div class="status-row warning">
+                                <span class="status-indicator warning"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">VOYAGER-ENG</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">Low activity</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- LCARS-008: Organization Panels Demo -->
+                <section>
+                    <div class="section-header crimson">
+                        <span class="section-title">ORGANIZATION PANELS (LCARS-008)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px;">
+                        <!-- Main Event Panel -->
+                        <div class="organization-panel org-mainevent">
+                            <div class="organization-header">
+                                <span class="organization-title">MAIN EVENT</span>
+                                <span class="organization-count">4 divisions</span>
+                            </div>
+                            <div class="division-container div-ios">
+                                <div class="division-header">iOS Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">3 active sessions</p>
+                            </div>
+                            <div class="division-container div-android">
+                                <div class="division-header">Android Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">2 active sessions</p>
+                            </div>
+                        </div>
+                        <!-- DoubleNode Panel -->
+                        <div class="organization-panel org-doublenode">
+                            <div class="organization-header">
+                                <span class="organization-title">DOUBLENODE</span>
+                                <span class="organization-count">2 divisions</span>
+                            </div>
+                            <div class="division-container div-dns">
+                                <div class="division-header">DNS Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">1 active session</p>
+                            </div>
+                            <div class="division-container div-freelance">
+                                <div class="division-header">Freelance Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">5 active sessions</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- LCARS-010: Candy Pill Schemes Demo -->
+                <section>
+                    <div class="section-header purple">
+                        <span class="section-title">CANDY PILL SCHEMES (LCARS-010)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 20px;">
+                        <!-- Overview Scheme -->
+                        <div>
+                            <p class="lcars-text-sm text-blue" style="margin-bottom: 8px;">OVERVIEW SCHEME (Blue/Cyan)</p>
+                            <div class="candy-scheme-overview" style="display: flex; height: 40px;">
+                                <div class="candy-pill candy-1" style="flex: 1;">47892</div>
+                                <div class="candy-pill candy-2" style="flex: 1;">3847</div>
+                                <div class="candy-pill candy-3" style="flex: 1;">192.47</div>
+                                <div class="candy-pill candy-4" style="flex: 1;">7284</div>
+                                <div class="candy-pill candy-5" style="flex: 1;">AA-392</div>
+                                <div class="candy-pill candy-6" style="flex: 1;">0x7F</div>
+                            </div>
+                        </div>
+                        <!-- Organizations Scheme -->
+                        <div>
+                            <p class="lcars-text-sm text-crimson" style="margin-bottom: 8px;">ORGANIZATIONS SCHEME (Red/Crimson)</p>
+                            <div class="candy-scheme-organizations" style="display: flex; height: 40px;">
+                                <div class="candy-pill candy-1" style="flex: 1;">12847</div>
+                                <div class="candy-pill candy-2" style="flex: 1;">9274</div>
+                                <div class="candy-pill candy-3" style="flex: 1;">47.93</div>
+                                <div class="candy-pill candy-4" style="flex: 1;">3829</div>
+                                <div class="candy-pill candy-5" style="flex: 1;">BB-104</div>
+                                <div class="candy-pill candy-6" style="flex: 1;">0x3A</div>
+                            </div>
+                        </div>
+                        <!-- Machines Scheme -->
+                        <div>
+                            <p class="lcars-text-sm text-purple" style="margin-bottom: 8px;">MACHINES SCHEME (Purple/Mauve)</p>
+                            <div class="candy-scheme-machines" style="display: flex; height: 40px;">
+                                <div class="candy-pill candy-1" style="flex: 1;">84729</div>
+                                <div class="candy-pill candy-2" style="flex: 1;">2847</div>
+                                <div class="candy-pill candy-3" style="flex: 1;">73.21</div>
+                                <div class="candy-pill candy-4" style="flex: 1;">9183</div>
+                                <div class="candy-pill candy-5" style="flex: 1;">CC-847</div>
+                                <div class="candy-pill candy-6" style="flex: 1;">0xF2</div>
+                            </div>
+                        </div>
+                        <!-- Alert Demo -->
+                        <div>
+                            <p class="lcars-text-sm text-orange" style="margin-bottom: 8px;">ALERT MODE (Offline Detection)</p>
+                            <div style="display: flex; height: 40px; max-width: 300px;">
+                                <div class="candy-pill alert" style="flex: 1;">ALERT</div>
+                                <div class="candy-pill alert" style="flex: 1;">2 OFFLINE</div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- LCARS-011 through LCARS-016: Animated Candy Pill System -->
+                <section>
+                    <div class="section-header green">
+                        <span class="section-title">ANIMATED CANDY PILLS (LCARS-011-016)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 20px;">
+                        <!-- Data-Driven Candy Bar -->
+                        <div>
+                            <p class="lcars-text-sm text-green" style="margin-bottom: 8px;">FLEET DATA DISPLAY (Live Updates)</p>
+                            <div id="fleet-candy-bar" class="section-overview" style="display: flex; height: 45px; gap: 2px;">
+                                <div class="candy-pill candy-blue" data-candy="0" style="flex: 1;">
+                                    <span class="candy-value">00000</span>
+                                    <span class="candy-label">TOTAL</span>
+                                </div>
+                                <div class="candy-pill candy-cyan" data-candy="1" style="flex: 1;">
+                                    <span class="candy-value">0000</span>
+                                    <span class="candy-label">ONLINE</span>
+                                </div>
+                                <div class="candy-pill candy-red" data-candy="2" style="flex: 1;">
+                                    <span class="candy-value">0000</span>
+                                    <span class="candy-label">OFFLINE</span>
+                                </div>
+                                <div class="candy-pill candy-orange" data-candy="3" style="flex: 1;">
+                                    <span class="candy-value">00000</span>
+                                    <span class="candy-label">SESSIONS</span>
+                                </div>
+                                <div class="candy-pill candy-tan" data-candy="4" style="flex: 1;">
+                                    <span class="candy-value">00000</span>
+                                    <span class="candy-label">AUX-1</span>
+                                </div>
+                                <div class="candy-pill candy-peach" data-candy="5" style="flex: 1;">
+                                    <span class="candy-value">0000</span>
+                                    <span class="candy-label">AUX-2</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Animation Controls -->
+                        <div style="display: flex; gap: 15px; flex-wrap: wrap;">
+                            <button id="btn-pulse" class="lcars-button bg-cyan">Trigger Pulse</button>
+                            <button id="btn-invert" class="lcars-button bg-lavender">Trigger Inversion</button>
+                            <button id="btn-alert-on" class="lcars-button bg-crimson">Alert Mode ON</button>
+                            <button id="btn-alert-off" class="lcars-button bg-green">Alert Mode OFF</button>
+                        </div>
+
+                        <!-- Section Scheme Switcher -->
+                        <div>
+                            <p class="lcars-text-sm text-tan" style="margin-bottom: 8px;">SECTION COLOR SCHEME SWITCHER</p>
+                            <div style="display: flex; gap: 10px; flex-wrap: wrap;">
+                                <button class="lcars-button bg-blue scheme-btn" data-scheme="overview">Overview</button>
+                                <button class="lcars-button bg-cyan scheme-btn" data-scheme="machines">Machines</button>
+                                <button class="lcars-button bg-orange scheme-btn" data-scheme="sessions">Sessions</button>
+                                <button class="lcars-button bg-crimson scheme-btn" data-scheme="alerts">Alerts</button>
+                                <button class="lcars-button bg-lavender scheme-btn" data-scheme="settings">Settings</button>
+                            </div>
+                        </div>
+
+                        <!-- Feature Status -->
+                        <div style="margin-top: 10px; padding: 15px; background: rgba(153, 153, 255, 0.1); border-radius: 8px;">
+                            <p class="lcars-text-xs text-blue" style="margin-bottom: 5px;">ACTIVE FEATURES:</p>
+                            <ul style="list-style: none; display: flex; flex-wrap: wrap; gap: 15px;">
+                                <li class="lcars-text-xs text-green">Data-driven values</li>
+                                <li class="lcars-text-xs text-green">Staggered update intervals</li>
+                                <li class="lcars-text-xs text-green">State-change pulse</li>
+                                <li class="lcars-text-xs text-green">Random inversion</li>
+                                <li class="lcars-text-xs text-green">Section color schemes</li>
+                                <li class="lcars-text-xs text-green">Offline alert mode</li>
+                            </ul>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Framework Status -->
+                <section style="margin-top: 30px; padding: 20px; background: var(--lcars-dark); border-radius: 10px; border-left: 4px solid var(--lcars-green);">
+                    <h3 class="lcars-text-lg text-green" style="margin-bottom: 15px;">FRAMEWORK STATUS: OPERATIONAL</h3>
+                    <ul style="list-style: none; display: flex; flex-direction: column; gap: 8px;">
+                        <li class="lcars-text-sm text-peach">LCARS-001: Directory structure - COMPLETE</li>
+                        <li class="lcars-text-sm text-peach">LCARS-002: Base styles - COMPLETE</li>
+                        <li class="lcars-text-sm text-peach">LCARS-003: Antonio typography - COMPLETE</li>
+                        <li class="lcars-text-sm text-peach">LCARS-004: L-shaped frame structure - COMPLETE</li>
+                        <li class="lcars-text-sm text-peach">LCARS-005: Concave corner cutouts - COMPLETE</li>
+                        <li class="lcars-text-sm text-peach">LCARS-006: Top frame structure - COMPLETE</li>
+                        <li class="lcars-text-sm text-cyan">LCARS-007: Red/blue color variables - COMPLETE</li>
+                        <li class="lcars-text-sm text-cyan">LCARS-008: Organization color classes - COMPLETE</li>
+                        <li class="lcars-text-sm text-cyan">LCARS-009: Status indicators with glow - COMPLETE</li>
+                        <li class="lcars-text-sm text-cyan">LCARS-010: Candy pill color schemes - COMPLETE</li>
+                        <li class="lcars-text-sm text-green">LCARS-011: Candy pill structure & animations - COMPLETE</li>
+                        <li class="lcars-text-sm text-green">LCARS-012: Data-driven candy values - COMPLETE</li>
+                        <li class="lcars-text-sm text-green">LCARS-013: State-change pulse animations - COMPLETE</li>
+                        <li class="lcars-text-sm text-green">LCARS-014: Section-specific color schemes - COMPLETE</li>
+                        <li class="lcars-text-sm text-green">LCARS-015: Candy inversion effect - COMPLETE</li>
+                        <li class="lcars-text-sm text-green">LCARS-016: Alert mode for offline machines - COMPLETE</li>
+                        <li class="lcars-text-sm text-purple">LCARS-017: Sidebar navigation structure - COMPLETE</li>
+                        <li class="lcars-text-sm text-purple">LCARS-018: Section switching logic - COMPLETE</li>
+                        <li class="lcars-text-sm text-purple">LCARS-019: Directional slide animations - COMPLETE</li>
+                        <li class="lcars-text-sm text-purple">LCARS-020: localStorage persistence - COMPLETE</li>
+                        <li class="lcars-text-sm text-purple">LCARS-021: Keyboard navigation - COMPLETE</li>
+                        <li class="lcars-text-sm text-orange">LCARS-022: Startup splash section HTML - COMPLETE</li>
+                        <li class="lcars-text-sm text-orange">LCARS-023: Team logo display - COMPLETE</li>
+                        <li class="lcars-text-sm text-orange">LCARS-024: Scrolling data lines - COMPLETE</li>
+                        <li class="lcars-text-sm text-orange">LCARS-025: Progress bar animation - COMPLETE</li>
+                        <li class="lcars-text-sm text-orange">LCARS-026: Transition to saved section - COMPLETE</li>
+                    </ul>
+                </section>
+
+                </div><!-- End OVERVIEW section -->
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: ORGANIZATIONS - Org/Division/Team Hierarchy                 -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="organizations">
+
+                <section>
+                    <div class="section-header peach">
+                        <span class="section-title">ORGANIZATION HIERARCHY</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px;">
+                        <!-- Main Event Panel -->
+                        <div class="organization-panel org-mainevent">
+                            <div class="organization-header">
+                                <span class="organization-title">MAIN EVENT</span>
+                                <span class="organization-count">4 divisions</span>
+                            </div>
+                            <div class="division-container div-ios">
+                                <div class="division-header">iOS Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">3 active sessions</p>
+                            </div>
+                            <div class="division-container div-android">
+                                <div class="division-header">Android Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">2 active sessions</p>
+                            </div>
+                            <div class="division-container div-firebase">
+                                <div class="division-header">Firebase Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">1 active session</p>
+                            </div>
+                        </div>
+                        <!-- DoubleNode Panel -->
+                        <div class="organization-panel org-doublenode">
+                            <div class="organization-header">
+                                <span class="organization-title">DOUBLENODE</span>
+                                <span class="organization-count">2 divisions</span>
+                            </div>
+                            <div class="division-container div-dns">
+                                <div class="division-header">DNS Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">1 active session</p>
+                            </div>
+                            <div class="division-container div-freelance">
+                                <div class="division-header">Freelance Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">5 active sessions</p>
+                            </div>
+                        </div>
+                        <!-- Academy Panel -->
+                        <div class="organization-panel org-academy">
+                            <div class="organization-header">
+                                <span class="organization-title">ACADEMY</span>
+                                <span class="organization-count">1 division</span>
+                            </div>
+                            <div class="division-container">
+                                <div class="division-header">Training Division</div>
+                                <p class="lcars-text-xs" style="color: var(--lcars-tan);">2 active sessions</p>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                </div><!-- End ORGANIZATIONS section -->
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: MACHINES - Machine Status Panel                             -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="machines">
+
+                <section>
+                    <div class="section-header purple">
+                        <span class="section-title">MACHINE STATUS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 15px;">
+                        <!-- Status Summary -->
+                        <div style="display: flex; gap: 30px; align-items: center;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator online"></span>
+                                <span class="lcars-text-sm">42 ONLINE</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator offline"></span>
+                                <span class="lcars-text-sm">5 OFFLINE</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <span class="status-indicator warning"></span>
+                                <span class="lcars-text-sm">3 WARNING</span>
+                            </div>
+                        </div>
+                        <!-- Machine List -->
+                        <div style="display: flex; flex-direction: column; gap: 10px; max-width: 600px;">
+                            <div class="status-row online">
+                                <span class="status-indicator online"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">ENTERPRISE-BRIDGE</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">12 sessions</span>
+                            </div>
+                            <div class="status-row online">
+                                <span class="status-indicator online"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">ENTERPRISE-ENG</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">8 sessions</span>
+                            </div>
+                            <div class="status-row offline">
+                                <span class="status-indicator offline"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">DEFIANT-OPS</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">Last seen: 2h ago</span>
+                            </div>
+                            <div class="status-row warning">
+                                <span class="status-indicator warning"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">VOYAGER-ENG</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">Low activity</span>
+                            </div>
+                            <div class="status-row online">
+                                <span class="status-indicator online"></span>
+                                <span class="lcars-text-sm" style="flex: 1;">DISCOVERY-LAB</span>
+                                <span class="lcars-text-xs" style="color: var(--lcars-tan);">5 sessions</span>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                </div><!-- End MACHINES section -->
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: SETTINGS - Preferences & Keyboard Shortcuts                 -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="settings">
+
+                <section>
+                    <div class="section-header tan">
+                        <span class="section-title">KEYBOARD NAVIGATION</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="keyboard-shortcuts" id="keyboard-shortcuts">
+                        <div class="shortcut-item">
+                            <span class="shortcut-key">⌥ + 1</span>
+                            <span class="shortcut-desc">Overview</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-key">⌥ + 2</span>
+                            <span class="shortcut-desc">Organizations</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-key">⌥ + 3</span>
+                            <span class="shortcut-desc">Machines</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-key">⌥ + 4</span>
+                            <span class="shortcut-desc">Settings</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-key">⌥ + ←</span>
+                            <span class="shortcut-desc">Previous Section</span>
+                        </div>
+                        <div class="shortcut-item">
+                            <span class="shortcut-key">⌥ + →</span>
+                            <span class="shortcut-desc">Next Section</span>
+                        </div>
+                    </div>
+                </section>
+
+                <section style="margin-top: 30px;">
+                    <div class="section-header tan">
+                        <span class="section-title">PREFERENCES</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div style="margin-top: 15px; display: flex; flex-direction: column; gap: 15px; max-width: 400px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                            <span class="lcars-text-sm">Auto Refresh</span>
+                            <span class="status-badge online">ENABLED</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                            <span class="lcars-text-sm">Refresh Interval</span>
+                            <span class="lcars-text-sm text-tan">30 seconds</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px; background: var(--lcars-dark); border-radius: 4px;">
+                            <span class="lcars-text-sm">Saved Section</span>
+                            <span class="lcars-text-sm text-blue" id="saved-section-display">overview</span>
+                        </div>
+                    </div>
+                </section>
+
+                </div><!-- End SETTINGS section -->
+
+            </div>
+        </main>
+    </div>
+
+    <!-- Scanline overlay for CRT effect -->
+    <div class="scanline"></div>
+
+    <!-- LCARS Fleet Core JavaScript -->
+    <script src="js/lcars-fleet-core.js"></script>
+
+    <script>
+        // Disable auto-init so we can configure manually
+        window.LCARS_AUTO_INIT = false;
+
+        // Update timestamp
+        function updateTime() {
+            const now = new Date();
+            document.getElementById('last-update').textContent =
+                now.toLocaleTimeString('en-US', { hour12: false });
+        }
+        updateTime();
+        setInterval(updateTime, 1000);
+
+        // =====================================================================
+        // LCARS FULL INITIALIZATION
+        // =====================================================================
+        document.addEventListener('DOMContentLoaded', function() {
+            // Initialize with demo data
+            LCARS_CORE.candy.updateData({
+                totalMachines: 47,
+                onlineMachines: 42,
+                offlineMachines: 5,
+                totalSessions: 128
+            });
+
+            // Initialize the full LCARS system (candy + sections)
+            LCARS_CORE.init({
+                candyOptions: { section: 'overview' }
+            });
+
+            // Update saved section display when section changes
+            const savedDisplay = document.getElementById('saved-section-display');
+            if (savedDisplay) {
+                // Update on init
+                savedDisplay.textContent = LCARS_CORE.sections.active;
+
+                // Listen for section changes
+                const originalSwitch = LCARS_CORE.sections.switchSection.bind(LCARS_CORE.sections);
+                LCARS_CORE.sections.switchSection = function(name, skip) {
+                    originalSwitch(name, skip);
+                    savedDisplay.textContent = name;
+                };
+            }
+
+            // Simulate data updates every 3 seconds
+            setInterval(function() {
+                const total = 45 + Math.floor(Math.random() * 10);
+                const offline = Math.floor(Math.random() * 8);
+                const online = total - offline;
+                const sessions = 100 + Math.floor(Math.random() * 50);
+
+                LCARS_CORE.candy.updateData({
+                    totalMachines: total,
+                    onlineMachines: online,
+                    offlineMachines: offline,
+                    totalSessions: sessions
+                });
+            }, 3000);
+
+            // Demo button: Trigger Pulse
+            document.getElementById('btn-pulse').addEventListener('click', function() {
+                const pills = document.querySelectorAll('#fleet-candy-bar .candy-pill');
+                pills.forEach(function(pill, i) {
+                    setTimeout(function() {
+                        LCARS_CORE.candy.triggerPulse(pill);
+                    }, i * 100);
+                });
+            });
+
+            // Demo button: Trigger Inversion
+            document.getElementById('btn-invert').addEventListener('click', function() {
+                LCARS_CORE.candy.triggerInversion();
+            });
+
+            // Demo button: Alert Mode ON
+            document.getElementById('btn-alert-on').addEventListener('click', function() {
+                LCARS_CORE.candy.updateData({ offlineMachines: 5 });
+            });
+
+            // Demo button: Alert Mode OFF
+            document.getElementById('btn-alert-off').addEventListener('click', function() {
+                LCARS_CORE.candy.updateData({ offlineMachines: 0 });
+            });
+
+            // Scheme switcher buttons
+            document.querySelectorAll('.scheme-btn').forEach(function(btn) {
+                btn.addEventListener('click', function() {
+                    const scheme = this.getAttribute('data-scheme');
+                    LCARS_CORE.candy.changeSection(scheme);
+                });
+            });
+
+
+            // =====================================================================
+            // ANIMATION LIBRARY DEMO HANDLERS
+            // =====================================================================
+
+            // Helper to trigger animation by adding/removing class
+            function triggerAnimation(element, animClass, duration) {
+                element.classList.remove(animClass);
+                void element.offsetWidth; // Force reflow
+                element.classList.add(animClass);
+                if (duration) {
+                    setTimeout(() => element.classList.remove(animClass), duration);
+                }
+            }
+
+            // Warp effects
+            const warpTarget = document.getElementById('warp-target');
+            if (warpTarget) {
+                document.getElementById('btn-warp')?.addEventListener('click', function() {
+                    triggerAnimation(warpTarget, 'lcars-warp', 800);
+                });
+                document.getElementById('btn-warp-in')?.addEventListener('click', function() {
+                    warpTarget.style.opacity = '0';
+                    setTimeout(() => {
+                        warpTarget.style.opacity = '1';
+                        triggerAnimation(warpTarget, 'lcars-warp-in', 500);
+                    }, 100);
+                });
+                document.getElementById('btn-warp-out')?.addEventListener('click', function() {
+                    triggerAnimation(warpTarget, 'lcars-warp-out', 400);
+                    setTimeout(() => {
+                        warpTarget.classList.remove('lcars-warp-out');
+                        warpTarget.style.opacity = '1';
+                    }, 500);
+                });
+            }
+
+            // Transport effects
+            const transportTarget = document.getElementById('transport-target');
+            if (transportTarget) {
+                document.getElementById('btn-transport-in')?.addEventListener('click', function() {
+                    transportTarget.style.opacity = '0';
+                    setTimeout(() => {
+                        triggerAnimation(transportTarget, 'lcars-transport-in', 800);
+                    }, 100);
+                });
+                document.getElementById('btn-transport-out')?.addEventListener('click', function() {
+                    triggerAnimation(transportTarget, 'lcars-transport-out', 600);
+                    setTimeout(() => {
+                        transportTarget.classList.remove('lcars-transport-out');
+                        transportTarget.style.opacity = '1';
+                    }, 700);
+                });
+            }
+
+            // Glitch effect
+            const glitchTarget = document.getElementById('glitch-target');
+            if (glitchTarget) {
+                document.getElementById('btn-glitch')?.addEventListener('click', function() {
+                    triggerAnimation(glitchTarget, 'lcars-glitch', 500);
+                });
+            }
+
+            // Surge & Charge effects
+            const surgeTarget = document.getElementById('surge-target');
+            if (surgeTarget) {
+                document.getElementById('btn-surge')?.addEventListener('click', function() {
+                    triggerAnimation(surgeTarget, 'lcars-surge', 500);
+                });
+                document.getElementById('btn-charge')?.addEventListener('click', function() {
+                    triggerAnimation(surgeTarget, 'lcars-charge', 1000);
+                });
+            }
+
+            // Shake effect
+            const shakeTarget = document.getElementById('shake-target');
+            if (shakeTarget) {
+                document.getElementById('btn-shake')?.addEventListener('click', function() {
+                    triggerAnimation(shakeTarget, 'lcars-shake', 500);
+                });
+            }
+
+            // Cascade replay
+            const cascadeDemo = document.getElementById('cascade-demo');
+            if (cascadeDemo) {
+                cascadeDemo.addEventListener('click', function() {
+                    const children = cascadeDemo.children;
+                    // Remove animation classes and reset
+                    Array.from(children).forEach(child => {
+                        child.style.animation = 'none';
+                        child.style.opacity = '0';
+                    });
+                    // Force reflow
+                    void cascadeDemo.offsetWidth;
+                    // Re-enable animations
+                    Array.from(children).forEach(child => {
+                        child.style.animation = '';
+                    });
+                });
+            }
+
+            // Fade replay
+            const fadeDemos = document.getElementById('fade-demos');
+            if (fadeDemos) {
+                document.getElementById('btn-fade-replay')?.addEventListener('click', function() {
+                    const children = fadeDemos.children;
+                    Array.from(children).forEach(child => {
+                        child.style.animation = 'none';
+                        child.style.opacity = '0';
+                    });
+                    void fadeDemos.offsetWidth;
+                    Array.from(children).forEach(child => {
+                        child.style.animation = '';
+                    });
+                });
+            }
+
+            console.log('[LCARS] Animation library demo handlers initialized');
+            console.log('[LCARS] Demo initialized with sections');
+        });
+    </script>
+</body>
+</html>

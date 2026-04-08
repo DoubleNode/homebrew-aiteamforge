@@ -1,0 +1,1461 @@
+/* ===============================================================================
+   LCARS Fleet Monitor - Core Framework CSS
+
+   Library Computer Access/Retrieval System - Fleet Monitor Edition
+   Based on Star Trek TNG LCARS design patterns by Michael Okuda
+
+   Color Scheme: Red/Blue Emphasis (per Fleet Monitor redesign spec)
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   SECTION 1: CSS CUSTOM PROPERTIES (VARIABLES)
+
+   LAYOUT DIMENSIONS ONLY - Colors are defined in lcars-fleet-theme.css
+   This separation allows for easy theme switching without modifying structure
+   ------------------------------------------------------------------------------- */
+:root {
+    /* LAYOUT DIMENSIONS */
+    --sidebar-width: 200px;
+    --frame-top-height: 120px;
+    --elbow-curve: 80px;
+    --bar-height: 40px;
+    --gap: 6px;
+    --button-radius: 25px;
+    --corner-radius: 30px;
+
+    /* EASING FUNCTIONS (standard LCARS timing) */
+    --lcars-ease-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+    --lcars-ease-elastic: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 2: RESET & BASE STYLES
+
+   Clean foundation for LCARS interface
+   ------------------------------------------------------------------------------- */
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+html, body {
+    height: 100%;
+    overflow: hidden;
+}
+
+body {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    background: var(--lcars-black);
+    color: var(--lcars-peach);
+    font-size: 16px;
+    letter-spacing: 1px;
+}
+
+
+/* -------------------------------------------------------------------------------
+   SECTION 3: ANTONIO TYPOGRAPHY
+
+   LCARS-003: Proper font loading and letter-spacing patterns
+   Antonio is the authentic LCARS typeface - bold, condensed, futuristic
+   ------------------------------------------------------------------------------- */
+
+/* Typography Scale - All caps, letter-spacing creates LCARS aesthetic */
+.lcars-text-xs {
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+
+.lcars-text-sm {
+    font-size: 12px;
+    letter-spacing: 1px;
+}
+
+.lcars-text-md {
+    font-size: 14px;
+    letter-spacing: 1.5px;
+}
+
+.lcars-text-lg {
+    font-size: 18px;
+    letter-spacing: 2px;
+}
+
+.lcars-text-xl {
+    font-size: 24px;
+    letter-spacing: 3px;
+}
+
+.lcars-text-2xl {
+    font-size: 32px;
+    letter-spacing: 4px;
+}
+
+/* Font weights - Antonio works best at 400-700 */
+.lcars-font-normal { font-weight: 400; }
+.lcars-font-medium { font-weight: 500; }
+.lcars-font-semibold { font-weight: 600; }
+.lcars-font-bold { font-weight: 700; }
+
+/* Text transforms - LCARS is traditionally uppercase */
+.lcars-uppercase { text-transform: uppercase; }
+
+/* -------------------------------------------------------------------------------
+   SECTION 4: MAIN CONTAINER STRUCTURE
+
+   The LCARS container provides the overall page layout:
+   - Flexbox column for stacking top frame + main content
+   - Viewport height with padding
+   ------------------------------------------------------------------------------- */
+.lcars-container {
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    padding: 10px;
+    padding-bottom: 8px;
+    gap: 0;
+    position: relative;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 5: TOP FRAME (SECONDARY HEADER)
+
+   LCARS-006: The thin blue bar at the very top with stardate/version info
+
+   Layout:
+   +------------------+
+   |  BLUE SIDEBAR    | <- Contains team name, group ID
+   |  (info block)    |
+   |             +====+============================== thin bar
+   |             |    <- concave corner (black cutout)
+   +-------------+
+   ------------------------------------------------------------------------------- */
+.lcars-top-frame {
+    position: relative;
+    margin-bottom: 4px;
+    margin-top: 0;
+    height: 115px;
+    overflow: visible;
+}
+
+/* Top sidebar - blue block at top-left */
+.top-sidebar {
+    width: var(--sidebar-width);
+    height: 115px;
+    background: var(--lcars-blue);
+    border-top-left-radius: 0;
+    border-bottom-left-radius: 60px;
+    margin-top: 0;
+    display: flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    padding-right: 20px;
+    padding-top: 40px;
+    position: relative;
+}
+
+/* Lavender accent band within the top sidebar */
+.top-sidebar::before {
+    content: '';
+    position: absolute;
+    top: 12px;
+    left: 0;
+    right: 0;
+    height: 38px;
+    background: var(--lcars-lavender);
+    border-top: 2px solid var(--lcars-black);
+    z-index: 1;
+}
+
+/* LCARS-005: Concave corner cutout - BLACK arc into BLUE
+   Uses radial-gradient technique for the curved corner effect */
+.top-sidebar::after {
+    content: '';
+    position: absolute;
+    bottom: 8px;
+    right: -30px;
+    width: 30px;
+    height: 30px;
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-black) 30px,
+        var(--lcars-blue) 30px
+    );
+    z-index: 5;
+}
+
+/* Thin horizontal bar - extends from sidebar to right edge */
+.top-bar {
+    position: absolute;
+    bottom: 0;
+    left: var(--sidebar-width);
+    right: 0;
+    height: 8px;
+    background: var(--lcars-blue);
+    border-radius: 0;
+}
+
+/* Top sidebar content - stardate, version, team info */
+.top-sidebar-content {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lcars-black);
+    letter-spacing: 1px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    position: relative;
+    z-index: 10;
+}
+
+/* Black divider line below group ID */
+.top-sidebar-content::after {
+    content: '';
+    position: fixed;
+    top: 62px;
+    left: 10px;
+    width: var(--sidebar-width);
+    height: 2px;
+    background: var(--lcars-black);
+    z-index: 15;
+}
+
+/* Stardate - positioned to right of blue sidebar */
+.top-sidebar-content .stardate {
+    position: fixed;
+    top: 28px;
+    left: calc(var(--sidebar-width) + 20px);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lcars-blue);
+    z-index: 25;
+}
+
+/* LCARS version - below stardate */
+.top-sidebar-content .lcars-version {
+    position: fixed;
+    top: 43px;
+    left: calc(var(--sidebar-width) + 20px);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lcars-blue);
+    z-index: 25;
+}
+
+/* Team name - inside sidebar, right-aligned */
+.top-sidebar-content .team-name {
+    position: absolute;
+    top: -22px;
+    right: -10px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-black);
+    white-space: nowrap;
+    z-index: 10;
+}
+
+/* Group ID - below team name */
+.top-sidebar-content .group-id {
+    position: absolute;
+    top: -7px;
+    right: -10px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-black);
+    white-space: nowrap;
+    text-transform: uppercase;
+    text-align: right;
+    z-index: 10;
+}
+
+/* Hide divider dots - items are positioned separately */
+.top-divider {
+    display: none;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 6: LCARS TITLE (Upper Right)
+
+   Responsive title with three levels: full, medium, short
+   ------------------------------------------------------------------------------- */
+.lcars-title {
+    position: absolute;
+    top: 15px;
+    right: 100px;
+    font-size: 32px;
+    font-weight: 600;
+    color: var(--lcars-peach);
+    letter-spacing: 4px;
+    z-index: 20;
+}
+
+/* Hide header logo during startup boot sequence */
+.startup-section:not(.hidden) ~ .lcars-container .header-fleet-logo {
+    opacity: 0;
+}
+
+/* Header fleet logo - far upper-right corner, circular */
+.header-fleet-logo {
+    position: absolute;
+    top: 10px;
+    right: 6px;
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    object-fit: cover;
+    border: none;
+    background: transparent;
+    z-index: 20;
+}
+
+.lcars-title .title-medium,
+.lcars-title .title-short {
+    display: none;
+}
+
+/* Medium viewport - hide full title, show medium */
+@media (max-width: 900px) {
+    .lcars-title .title-full {
+        display: none;
+    }
+    .lcars-title .title-medium {
+        display: inline;
+    }
+}
+
+/* Small viewport - show short title only */
+@media (max-width: 700px) {
+    .lcars-title .title-full,
+    .lcars-title .title-medium {
+        display: none;
+    }
+    .lcars-title .title-short {
+        display: inline;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 7: MAIN CONTENT WRAPPER
+
+   Flexbox container for sidebar + content area
+   ------------------------------------------------------------------------------- */
+.lcars-main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: var(--sidebar-width) 1fr;
+    grid-template-rows: var(--bar-height) 1fr;
+    gap: 0;
+    overflow: hidden;
+    position: relative;
+    min-height: 0;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 7B: DATA BAR - Persistent Fleet Metrics
+
+   Horizontal candy bar that sits at the top of the content area,
+   visually integrated with the L-shaped swoop. Shows key metrics
+   across all sections.
+   ------------------------------------------------------------------------------- */
+.lcars-data-bar {
+    grid-column: 2;
+    grid-row: 1;
+    display: flex;
+    height: var(--bar-height);
+    gap: 2px;
+    background: linear-gradient(to right, var(--lcars-black) calc(100% - 40px), var(--lcars-orange) calc(100% - 40px));
+    padding-left: calc(var(--corner-radius) + 2px);
+    padding-right: 44px;
+    align-items: stretch;
+}
+
+.lcars-data-bar .candy-pill {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 4px 12px;
+}
+
+.lcars-data-bar .candy-value {
+    font-size: 1rem;
+    font-weight: 500;
+}
+
+.lcars-data-bar .candy-label {
+    font-size: 0.6rem;
+    opacity: 0.8;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 8: LEFT FRAME - L-SHAPED SWOOP
+
+   LCARS-004: The complete L-shaped frame structure
+
+   The iconic LCARS design - vertical sidebar curves into horizontal bar:
+
+   +================+  <- Bar extends right
+   |                |
+   |   SIDEBAR      |
+   |   (buttons)    |
+   |                |
+   +================+
+
+   - Orange frame (can be themed per organization)
+   - Rounded top-left corner (60px radius)
+   - Horizontal bar extends across top of content area
+   - Inner concave corner where bar meets content
+   ------------------------------------------------------------------------------- */
+.lcars-sidebar {
+    grid-column: 1;
+    grid-row: 1 / 3; /* Span both rows */
+    width: var(--sidebar-width);
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    position: relative;
+    padding-top: calc(var(--bar-height) + 30px);
+    background: var(--lcars-orange);
+    border-top-left-radius: 60px;
+    border-bottom-left-radius: 0;
+}
+
+/* Horizontal bar extension - connects sidebar to data bar edge */
+.lcars-sidebar::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 60px;
+    right: calc(-1 * var(--corner-radius));
+    height: var(--bar-height);
+    background: var(--lcars-orange);
+    border-radius: 0;
+    z-index: 1;
+}
+
+/* LCARS-005: Inner concave corner - creates the signature swoop
+
+   Geometry: A 30px radius curve at the corner creates:
+   - BLACK inside (content area - the cutout)
+   - ORANGE outside (frame extension)
+
+   radial-gradient creates a circle with:
+   - Center at bottom-right of pseudo-element (30px, 30px)
+   - Black up to 30px radius
+   - Orange from 30px outward
+   This creates the concave effect - black quarter-circle "cut" into orange */
+.lcars-sidebar::after {
+    content: '';
+    position: absolute;
+    top: var(--bar-height);
+    left: var(--sidebar-width);
+    width: var(--corner-radius);
+    height: var(--corner-radius);
+    background: radial-gradient(
+        circle at 30px 30px,
+        var(--lcars-black) 30px,
+        var(--lcars-orange) 30px
+    );
+    z-index: 5;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 9: SIDEBAR BUTTONS
+
+   Navigation buttons with color-coded states
+   Authentic LCARS pattern: colored rectangles with thin black separators
+   ------------------------------------------------------------------------------- */
+.sidebar-label {
+    color: var(--lcars-black);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    padding: 4px 12px 4px 12px;
+    min-height: var(--bar-height);
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+}
+
+.sidebar-button {
+    color: var(--lcars-black);
+    padding: 6px 12px;
+    min-height: var(--bar-height);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    border-radius: 0;
+    text-align: right;
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    position: relative;
+    border-top: 2px solid var(--lcars-black);
+    border-bottom: none;
+}
+
+.sidebar-button:hover {
+    filter: brightness(1.15);
+    box-shadow: 0 0 12px rgba(255, 255, 255, 0.3), inset 0 0 8px rgba(255, 255, 255, 0.1);
+}
+
+/* Button color assignments - Fleet Monitor sections */
+.sidebar-button[data-section="overview"] { background: var(--lcars-cyan); }
+.sidebar-button[data-section="organizations"] { background: var(--lcars-peach); }
+.sidebar-button[data-section="machines"] { background: var(--lcars-purple); }
+.sidebar-button[data-section="settings"] {
+    background: var(--lcars-tan);
+}
+.sidebar-button[data-section="admin"] {
+    background: var(--lcars-orange);
+    border-bottom: 2px solid var(--lcars-black);
+}
+
+/* Active state - invert colors */
+.sidebar-button.active {
+    filter: none;
+}
+
+.sidebar-button[data-section="overview"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
+.sidebar-button[data-section="organizations"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-peach);
+}
+.sidebar-button[data-section="machines"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-purple);
+}
+.sidebar-button[data-section="settings"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-tan);
+}
+.sidebar-button[data-section="admin"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-orange);
+}
+
+/* Active indicator bar on left edge */
+.sidebar-button[data-section].active::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    background: currentColor;
+}
+
+/* Spacer - shows black gap between button groups */
+.sidebar-spacer {
+    flex: 1;
+    min-height: 20px;
+}
+
+/* Floating Kiosk Button — fixed lower-right corner */
+.kiosk-fab {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 18px;
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+    border: none;
+    border-radius: 24px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    cursor: pointer;
+    z-index: 9000;
+    transition: all 0.25s ease;
+    box-shadow: 0 2px 12px rgba(153, 153, 255, 0.3);
+}
+
+.kiosk-fab:hover {
+    background: var(--lcars-cyan);
+    box-shadow: 0 4px 20px rgba(153, 204, 255, 0.5);
+    transform: scale(1.05);
+}
+
+.kiosk-fab-icon {
+    font-size: 11px;
+}
+
+.kiosk-fab-label {
+    line-height: 1;
+}
+
+/* Hide fab when kiosk is active */
+body.kiosk-active .kiosk-fab {
+    display: none !important;
+}
+
+/* Refresh button */
+.sidebar-button.refresh-btn {
+    background: var(--lcars-cyan);
+    color: var(--lcars-black);
+    font-weight: 700;
+    margin-bottom: 16px;
+    border-bottom: 2px solid var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 10: CONTENT AREA
+
+   Main content container - receives margin-left to account for the
+   L-frame's inner corner curve
+   ------------------------------------------------------------------------------- */
+.lcars-content {
+    grid-column: 2;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    padding: 15px;
+    padding-top: 15px;
+    padding-bottom: 10px;
+    margin-left: calc(var(--corner-radius) + var(--gap));
+    /* margin-top handled by grid row placement */
+    position: relative;
+    min-height: 0;
+}
+
+/* Custom scrollbar styling */
+.lcars-content {
+    scrollbar-width: thin;
+    scrollbar-color: var(--lcars-tan) var(--lcars-dark);
+}
+
+.lcars-content::-webkit-scrollbar {
+    width: 8px;
+}
+
+.lcars-content::-webkit-scrollbar-track {
+    background: var(--lcars-dark);
+    border-radius: 4px;
+}
+
+.lcars-content::-webkit-scrollbar-thumb {
+    background: var(--lcars-tan);
+    border-radius: 4px;
+}
+
+.lcars-content::-webkit-scrollbar-thumb:hover {
+    background: var(--lcars-orange);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 11: INFO BLOCKS (VESSEL / UPDATED)
+
+   Fixed-positioned info display in header area
+   ------------------------------------------------------------------------------- */
+.sidebar-info.stacked {
+    position: fixed !important;
+    right: 110px !important;
+    top: 64px !important;
+    background: transparent !important;
+    color: var(--lcars-peach);
+    padding: 0 !important;
+    border-radius: 0 !important;
+    border-bottom: none !important;
+    text-align: right !important;
+    z-index: 25;
+    display: flex !important;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+}
+
+.sidebar-info.stacked .info-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.sidebar-info.stacked .info-row:last-child {
+    margin-top: -4px;
+}
+
+.sidebar-info.stacked .info-label {
+    font-size: 10px;
+    color: var(--lcars-brown);
+    letter-spacing: 1px;
+    font-weight: 500;
+}
+
+.sidebar-info.stacked .info-value {
+    font-size: 14px;
+    color: var(--lcars-tan);
+    font-weight: 500;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 12: REUSABLE CORNER CUTOUT CLASSES
+
+   LCARS-005: Utility classes for creating concave corners
+   Use these on elements that need the signature LCARS curved cutout
+   ------------------------------------------------------------------------------- */
+
+/* Top-right corner cutout (most common - content area corner) */
+.lcars-corner-tr {
+    position: relative;
+}
+
+.lcars-corner-tr::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: var(--corner-radius);
+    height: var(--corner-radius);
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-black) var(--corner-radius),
+        currentColor var(--corner-radius)
+    );
+}
+
+/* Bottom-right corner cutout */
+.lcars-corner-br {
+    position: relative;
+}
+
+.lcars-corner-br::after {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    right: 0;
+    width: var(--corner-radius);
+    height: var(--corner-radius);
+    background: radial-gradient(
+        circle at 100% 100%,
+        var(--lcars-black) var(--corner-radius),
+        currentColor var(--corner-radius)
+    );
+}
+
+/* Top-left corner cutout */
+.lcars-corner-tl {
+    position: relative;
+}
+
+.lcars-corner-tl::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: var(--corner-radius);
+    height: var(--corner-radius);
+    background: radial-gradient(
+        circle at 0% 0%,
+        var(--lcars-black) var(--corner-radius),
+        currentColor var(--corner-radius)
+    );
+}
+
+/* Bottom-left corner cutout */
+.lcars-corner-bl {
+    position: relative;
+}
+
+.lcars-corner-bl::before {
+    content: '';
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    width: var(--corner-radius);
+    height: var(--corner-radius);
+    background: radial-gradient(
+        circle at 0% 100%,
+        var(--lcars-black) var(--corner-radius),
+        currentColor var(--corner-radius)
+    );
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 13: SECTION HEADERS
+
+   Consistent header styling for content sections
+   ------------------------------------------------------------------------------- */
+.section-header {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin-top: 10px;
+}
+
+.section-title {
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    white-space: nowrap;
+}
+
+.section-bar {
+    flex: 1;
+    height: 4px;
+    background: var(--lcars-tan);
+    border-radius: 2px;
+}
+
+/* Section header color variants */
+.section-header.orange .section-title { color: var(--lcars-orange); }
+.section-header.orange .section-bar { background: var(--lcars-orange); }
+
+.section-header.blue .section-title { color: var(--lcars-blue); }
+.section-header.blue .section-bar { background: var(--lcars-blue); }
+
+.section-header.purple .section-title { color: var(--lcars-purple); }
+.section-header.purple .section-bar { background: var(--lcars-purple); }
+
+.section-header.red .section-title { color: var(--lcars-red); }
+.section-header.red .section-bar { background: var(--lcars-red); }
+
+.section-header.crimson .section-title { color: var(--lcars-crimson); }
+.section-header.crimson .section-bar { background: var(--lcars-crimson); }
+
+.section-header.cyan .section-title { color: var(--lcars-cyan); }
+.section-header.cyan .section-bar { background: var(--lcars-cyan); }
+
+/* -------------------------------------------------------------------------------
+   SECTION 14: ANIMATIONS
+
+   Base animations for LCARS interface
+   ------------------------------------------------------------------------------- */
+@keyframes pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+.pulse {
+    animation: pulse 2s ease-in-out infinite;
+}
+
+@keyframes slideInRight {
+    from { transform: translateX(100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+@keyframes slideInLeft {
+    from { transform: translateX(-100%); opacity: 0; }
+    to { transform: translateX(0); opacity: 1; }
+}
+
+.slide-in-right {
+    animation: slideInRight 0.3s ease-in-out;
+}
+
+.slide-in-left {
+    animation: slideInLeft 0.3s ease-in-out;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 15: SCANLINE OVERLAY
+
+   Optional CRT scanline effect for authentic retro feel
+   ------------------------------------------------------------------------------- */
+.scanline {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    pointer-events: none;
+    z-index: 9999;
+    background: repeating-linear-gradient(
+        0deg,
+        rgba(0, 0, 0, 0.03),
+        rgba(0, 0, 0, 0.03) 1px,
+        transparent 1px,
+        transparent 2px
+    );
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 16: RESPONSIVE ADJUSTMENTS
+
+   Mobile and tablet breakpoints
+   ------------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------------
+   SECTION 15B: RESPONSIVE SIDEBAR DASHBOARDS
+
+   Dashboard links in sidebar that hide when window height is too small
+   ------------------------------------------------------------------------------- */
+.sidebar-dashboards {
+    display: flex;
+    flex-direction: column;
+    flex-shrink: 0;
+    overflow: visible;
+}
+
+/* When hidden by JavaScript */
+.sidebar-dashboards.hidden {
+    display: none !important;
+}
+
+/* Spacer after dashboards - can shrink */
+.sidebar-dashboards + .sidebar-spacer {
+    flex-shrink: 1;
+    min-height: 4px;
+}
+
+/* Hide dashboards at shorter viewport heights (550px for iPad compatibility) */
+@media (max-height: 550px) {
+    .sidebar-dashboards {
+        display: none;
+    }
+
+    .sidebar-dashboards + .sidebar-spacer {
+        display: none;
+    }
+}
+
+/* Very small height - also hide the vessel/updated info */
+@media (max-height: 500px) {
+    .sidebar-info.stacked {
+        display: none !important;
+    }
+}
+
+/* Tablet (iPad) - fixed refresh with padding for dashboard visibility */
+@media (max-width: 1200px) {
+    .sidebar-button.refresh-btn {
+        position: fixed;
+        bottom: 0px;
+        left: 10px;
+        width: var(--sidebar-width);
+        z-index: 100;
+    }
+
+    /* Ensure dashboard buttons visible above fixed refresh button */
+    .lcars-sidebar {
+        padding-bottom: 70px;
+    }
+
+    /* Reduce spacer expansion so dashboards have room */
+    .sidebar-spacer {
+        flex: 0 1 20px;
+        max-height: 40px;
+    }
+}
+
+@media (max-width: 800px) {
+    :root {
+        --sidebar-width: 150px;
+    }
+
+    .sidebar-button {
+        font-size: 12px;
+        padding: 10px;
+    }
+
+    .sidebar-button.refresh-btn {
+        position: fixed;
+        bottom: 0px;
+        left: 10px;
+        width: 150px;
+        z-index: 100;
+    }
+}
+
+@media (max-width: 600px) {
+    :root {
+        --sidebar-width: 100px;
+        --bar-height: 32px;
+        --corner-radius: 20px;
+    }
+
+    .sidebar-button {
+        font-size: 10px;
+        padding: 4px 6px;
+        min-height: 32px;
+        height: 32px;
+    }
+
+    .sidebar-button span {
+        letter-spacing: 0;
+    }
+
+    .sidebar-label {
+        font-size: 10px;
+        letter-spacing: 0;
+        padding: 0 6px 2px 6px;
+        min-height: 32px;
+        height: 32px;
+        flex: 0 0 32px !important;
+        display: flex !important;
+        align-items: flex-end !important;
+        justify-content: flex-end !important;
+    }
+
+    .top-sidebar::before {
+        height: 32px;
+    }
+
+    .lcars-sidebar {
+        border-top-left-radius: 60px;
+        border-bottom-left-radius: 0;
+    }
+
+    .lcars-sidebar::before {
+        left: 60px;
+        right: calc(-100vw + var(--sidebar-width) + 10px);
+        height: 32px !important;
+    }
+
+    .lcars-sidebar::after {
+        top: 32px;
+        width: 20px;
+        height: 20px;
+        background: radial-gradient(
+            circle at 20px 20px,
+            var(--lcars-black) 20px,
+            var(--lcars-orange) 20px
+        );
+    }
+
+    .top-sidebar {
+        width: var(--sidebar-width);
+    }
+
+    .top-sidebar-content {
+        padding: 4px 8px;
+    }
+
+    .top-sidebar-content .stardate,
+    .top-sidebar-content .lcars-version,
+    .top-sidebar-content .team-name,
+    .top-sidebar-content .group-id {
+        font-size: 10px;
+    }
+
+    .top-sidebar-content .stardate {
+        top: 25px;
+        left: calc(var(--sidebar-width) + 18px);
+    }
+
+    .top-sidebar-content .lcars-version {
+        top: 38px;
+        left: calc(var(--sidebar-width) + 18px);
+    }
+
+    .top-sidebar-content::after {
+        top: 55px;
+        height: 1px;
+    }
+
+    /* Thinner black bars on mobile */
+    .top-sidebar::before {
+        border-top-width: 1px;
+    }
+
+    .sidebar-button,
+    .sidebar-button:first-child {
+        border-top-width: 1px;
+    }
+
+    .sidebar-button[data-section="admin"] {
+        border-bottom-width: 1px;
+    }
+
+    .top-sidebar-content .team-name {
+        top: -25px;
+        right: -16px;
+        font-size: 10px;
+        letter-spacing: 0;
+    }
+
+    .top-sidebar-content .group-id {
+        top: -12px;
+        right: -16px;
+        font-size: 10px;
+        letter-spacing: 0;
+    }
+
+    .lcars-title {
+        top: 18px;
+        right: 76px;
+        letter-spacing: 4px;
+    }
+
+    .header-fleet-logo {
+        width: 56px;
+        height: 56px;
+        top: 10px;
+        right: 10px;
+    }
+
+    .sidebar-info.stacked {
+        right: 76px !important;
+        top: 68px !important;
+        gap: 0px;
+    }
+
+    .sidebar-info.stacked .info-label {
+        font-size: 7px;
+    }
+
+    .sidebar-info.stacked .info-value {
+        font-size: 10px;
+    }
+
+    .sidebar-spacer {
+        min-height: 2px;
+        flex: 0.1;
+    }
+
+    .sidebar-button[data-section="admin"] + .sidebar-spacer {
+        display: none;
+    }
+
+    .sidebar-button.refresh-btn {
+        position: fixed;
+        bottom: calc(env(safe-area-inset-bottom, 0px) + 8px);
+        left: 10px;
+        width: var(--sidebar-width);
+        z-index: 100;
+        margin-bottom: 0;
+        border-bottom: 1px solid var(--lcars-black);
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 17: UTILITY CLASSES
+
+   Common patterns for quick styling
+   ------------------------------------------------------------------------------- */
+
+/* Color utilities - text */
+.text-red { color: var(--lcars-red); }
+.text-crimson { color: var(--lcars-crimson); }
+.text-blue { color: var(--lcars-blue); }
+.text-cyan { color: var(--lcars-cyan); }
+.text-lavender { color: var(--lcars-lavender); }
+.text-purple { color: var(--lcars-purple); }
+.text-mauve { color: var(--lcars-mauve); }
+.text-orange { color: var(--lcars-orange); }
+.text-peach { color: var(--lcars-peach); }
+.text-tan { color: var(--lcars-tan); }
+.text-green { color: var(--lcars-green); }
+.text-yellow { color: var(--lcars-yellow); }
+
+/* Color utilities - background */
+.bg-red { background: var(--lcars-red); }
+.bg-crimson { background: var(--lcars-crimson); }
+.bg-blue { background: var(--lcars-blue); }
+.bg-cyan { background: var(--lcars-cyan); }
+.bg-lavender { background: var(--lcars-lavender); }
+.bg-purple { background: var(--lcars-purple); }
+.bg-mauve { background: var(--lcars-mauve); }
+.bg-orange { background: var(--lcars-orange); }
+.bg-peach { background: var(--lcars-peach); }
+.bg-tan { background: var(--lcars-tan); }
+.bg-green { background: var(--lcars-green); }
+.bg-yellow { background: var(--lcars-yellow); }
+.bg-dark { background: var(--lcars-dark); }
+.bg-black { background: var(--lcars-black); }
+
+/* Organization-specific utilities */
+.org-mainevent { color: var(--org-mainevent); }
+.org-doublenode { color: var(--org-doublenode); }
+.org-devteam { color: var(--org-devteam); }
+.org-academy { color: var(--org-academy); }
+
+.bg-org-mainevent { background: var(--org-mainevent); }
+.bg-org-doublenode { background: var(--org-doublenode); }
+.bg-org-devteam { background: var(--org-devteam); }
+.bg-org-academy { background: var(--org-academy); }
+
+/* -------------------------------------------------------------------------------
+   SECTION: EPIC SYSTEM STYLES
+
+   Styles for Epic container components showing grouped kanban items
+   ------------------------------------------------------------------------------- */
+
+/* Epic Container */
+#epics-container {
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+/* Epic Card Base */
+.epic-card {
+    background: var(--lcars-dark);
+    border-radius: 8px;
+    padding: 15px;
+    border-left: 4px solid var(--lcars-cyan);
+    transition: border-color 0.3s ease;
+}
+
+/* Epic Status Variants */
+.epic-planning { border-left-color: var(--lcars-tan); }
+.epic-active { border-left-color: var(--lcars-cyan); }
+.epic-completed { border-left-color: var(--lcars-green, #90EE90); }
+.epic-on-hold { border-left-color: var(--lcars-orange); }
+.epic-cancelled { border-left-color: var(--lcars-red); }
+
+/* Epic Header */
+.epic-header {
+    margin-bottom: 12px;
+}
+
+.epic-title-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.epic-id {
+    font-size: 11px;
+    color: var(--lcars-cyan);
+    background: rgba(153, 204, 255, 0.15);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+}
+
+.epic-title {
+    font-size: 16px;
+    font-weight: 500;
+    color: var(--lcars-peach);
+    flex: 1;
+}
+
+.epic-status {
+    font-size: 10px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+.epic-status.planning { background: var(--lcars-tan); color: #000; }
+.epic-status.active { background: var(--lcars-cyan); color: #000; }
+.epic-status.completed { background: var(--lcars-green, #90EE90); color: #000; }
+.epic-status.on_hold { background: var(--lcars-orange); color: #000; }
+.epic-status.cancelled { background: var(--lcars-red); color: #fff; }
+
+/* Epic Meta Row */
+.epic-meta {
+    display: flex;
+    gap: 10px;
+    margin-top: 8px;
+    font-size: 11px;
+}
+
+.epic-priority {
+    padding: 2px 6px;
+    border-radius: 3px;
+}
+
+.epic-priority.priority-critical { background: var(--lcars-red); color: #fff; }
+.epic-priority.priority-high { background: var(--lcars-orange); color: #000; }
+.epic-priority.priority-medium { background: var(--lcars-tan); color: #000; }
+.epic-priority.priority-low { background: var(--lcars-lavender); color: #000; }
+
+.epic-category {
+    color: var(--lcars-lavender);
+    text-transform: uppercase;
+}
+
+.epic-due {
+    color: var(--lcars-orange);
+}
+
+/* Epic Progress */
+.epic-progress {
+    margin-bottom: 12px;
+}
+
+.progress-bar-container {
+    height: 6px;
+    background: rgba(255, 255, 255, 0.1);
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+.progress-bar-fill {
+    height: 100%;
+    transition: width 0.3s ease;
+    border-radius: 3px;
+}
+
+.progress-stats {
+    display: flex;
+    gap: 15px;
+    margin-top: 6px;
+    font-size: 11px;
+}
+
+.progress-text {
+    color: var(--lcars-peach);
+}
+
+.progress-in-progress {
+    color: var(--lcars-cyan);
+}
+
+.progress-blocked {
+    color: var(--lcars-red);
+}
+
+.progress-cancelled {
+    color: var(--lcars-red);
+}
+
+/* Epic Buttons Row */
+.epic-buttons {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 10px;
+}
+
+.epic-toggle {
+    background: transparent;
+    border: 1px solid var(--lcars-cyan);
+    color: var(--lcars-cyan);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.epic-toggle:hover {
+    background: rgba(153, 204, 255, 0.2);
+}
+
+.epic-delete {
+    background: transparent;
+    border: 1px solid var(--lcars-red);
+    color: var(--lcars-red);
+    padding: 4px 12px;
+    border-radius: 4px;
+    font-family: inherit;
+    font-size: 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.epic-delete:hover {
+    background: rgba(255, 80, 80, 0.2);
+}
+
+/* Epic Items List */
+.epic-items {
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    padding-top: 10px;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+.epic-items.collapsed {
+    display: none;
+}
+
+.epic-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 10px;
+    border-radius: 4px;
+    margin-bottom: 4px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.epic-item:hover {
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.mission-item-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    border: 2px solid var(--lcars-cyan);
+    flex-shrink: 0;
+    object-fit: cover;
+}
+
+.item-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.epic-item.item-todo .item-status-dot { background: var(--lcars-tan); }
+.epic-item.item-in_progress .item-status-dot { background: var(--lcars-cyan); }
+.epic-item.item-completed .item-status-dot { background: var(--lcars-green, #90EE90); }
+.epic-item.item-blocked .item-status-dot { background: var(--lcars-red); }
+.epic-item.item-cancelled .item-status-dot { background: var(--lcars-red); }
+
+.item-id {
+    font-size: 10px;
+    color: var(--lcars-cyan);
+    min-width: 80px;
+}
+
+.item-title {
+    flex: 1;
+    font-size: 12px;
+    color: var(--lcars-peach);
+}
+
+.item-status {
+    font-size: 9px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    min-width: 70px;
+    text-align: center;
+}
+
+.epic-item.item-todo .item-status { background: var(--lcars-tan); color: #000; }
+.epic-item.item-in_progress .item-status { background: var(--lcars-cyan); color: #000; }
+.epic-item.item-completed .item-status { background: var(--lcars-green, #90EE90); color: #000; }
+.epic-item.item-blocked .item-status { background: var(--lcars-red); color: #fff; }
+.epic-item.item-cancelled .item-status { background: var(--lcars-red); color: #fff; }
+
+/* Cancelled item styling - strikethrough text, muted appearance */
+.epic-item.item-cancelled .item-title {
+    text-decoration: line-through;
+    opacity: 0.7;
+}
+
+.epic-item.item-cancelled .item-id {
+    opacity: 0.7;
+}
+
+.no-items {
+    padding: 10px;
+    text-align: center;
+}
+
+/* Epic Filter Selection */
+.epic-card.epic-filter-selected {
+    box-shadow: 0 0 0 2px var(--lcars-cyan), 0 0 15px rgba(153, 204, 255, 0.3);
+}
+
+/* Epic Filter Bar */
+.epic-filter-bar {
+    padding: 10px;
+    background: var(--lcars-dark);
+    border-radius: 6px;
+}

@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Star Trek TOS - Engineering Team Logo (Build Systems & Infrastructure) -->
+<!-- Android Development Terminal - Engineering Team -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#CC0000" stroke-width="3"/>
+  
+  <!-- Warp core energy column (center) -->
+  <rect x="92" y="50" width="16" height="100" fill="none" stroke="#CC0000" stroke-width="2"/>
+  
+  <!-- Energy pulses inside core -->
+  <rect x="94" y="60" width="12" height="8" fill="#CC0000" opacity="0.7"/>
+  <rect x="94" y="80" width="12" height="12" fill="#CC0000" opacity="0.5"/>
+  <rect x="94" y="100" width="12" height="10" fill="#CC0000" opacity="0.8"/>
+  <rect x="94" y="120" width="12" height="9" fill="#CC0000" opacity="0.6"/>
+  <rect x="94" y="135" width="12" height="11" fill="#CC0000" opacity="0.7"/>
+  
+  <!-- Engineering tools - Wrench (left side) -->
+  <g transform="translate(45, 95)">
+    <!-- Wrench handle -->
+    <rect x="0" y="0" width="6" height="35" fill="#CC0000"/>
+    <!-- Wrench head (open end) -->
+    <path d="M 0 0 L 0 -8 L 12 -8 L 12 8 L 0 8 Z" fill="none" stroke="#CC0000" stroke-width="2"/>
+    <line x1="0" y1="-8" x2="0" y2="8" stroke="#CC0000" stroke-width="2"/>
+  </g>
+  
+  <!-- Engineering tools - Spanner (right side) -->
+  <g transform="translate(148, 95)">
+    <!-- Spanner handle -->
+    <rect x="0" y="0" width="6" height="35" fill="#CC0000"/>
+    <!-- Spanner head (box end) -->
+    <rect x="-3" y="-10" width="12" height="12" fill="none" stroke="#CC0000" stroke-width="2"/>
+    <circle cx="3" cy="-4" r="3" fill="#CC0000"/>
+  </g>
+  
+  <!-- Energy flow lines (radiating from core) -->
+  <line x1="100" y1="50" x2="85" y2="35" stroke="#CC0000" stroke-width="1.5" opacity="0.6"/>
+  <line x1="100" y1="50" x2="115" y2="35" stroke="#CC0000" stroke-width="1.5" opacity="0.6"/>
+  
+  <line x1="100" y1="150" x2="85" y2="165" stroke="#CC0000" stroke-width="1.5" opacity="0.6"/>
+  <line x1="100" y1="150" x2="115" y2="165" stroke="#CC0000" stroke-width="1.5" opacity="0.6"/>
+  
+  <!-- Circuit board nodes (corners) -->
+  <circle cx="35" cy="35" r="4" fill="#CC0000"/>
+  <circle cx="165" cy="35" r="4" fill="#CC0000"/>
+  <circle cx="35" cy="165" r="4" fill="#CC0000"/>
+  <circle cx="165" cy="165" r="4" fill="#CC0000"/>
+  
+  <!-- Connection traces -->
+  <line x1="35" y1="35" x2="55" y2="55" stroke="#CC0000" stroke-width="1.5"/>
+  <line x1="165" y1="35" x2="145" y2="55" stroke="#CC0000" stroke-width="1.5"/>
+  <line x1="35" y1="165" x2="55" y2="145" stroke="#CC0000" stroke-width="1.5"/>
+  <line x1="165" y1="165" x2="145" y2="145" stroke="#CC0000" stroke-width="1.5"/>
+</svg>

@@ -1,0 +1,806 @@
+/* ===============================================================================
+   LCARS Fleet Monitor - Kiosk Health & Status Screens CSS
+
+   Provides styles for two full-screen kiosk page types:
+     1. Division Health Summary  — .kiosk-health-summary
+     2. Team Status Board        — .kiosk-status-board
+
+   Load order: AFTER lcars-fleet-theme.css
+   Parent selector: body.kiosk-active (kiosk-mode overrides where needed)
+
+   Design language:
+   - Dark LCARS backgrounds, colored borders/accents (not solid fills)
+   - Antonio typeface, uppercase headings, generous letter-spacing
+   - Large typography readable from across a room (kiosk viewing distance)
+   - No page scrolling — all content fills 100vh
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   SECTION 1: HEALTH STATUS CUSTOM PROPERTIES
+
+   Scoped color tokens for health indicators, independent of org colors.
+   Score thresholds: healthy=70-100, warning=40-69, critical=0-39, unknown=no data
+   ------------------------------------------------------------------------------- */
+:root {
+    --kiosk-health-healthy:  #27ae60;     /* Green  — 70-100 score */
+    --kiosk-health-warning:  #f39c12;     /* Gold   — 40-69  score */
+    --kiosk-health-critical: #cc4444;     /* Red    — 0-39   score */
+    --kiosk-health-unknown:  #666666;     /* Gray   — no data */
+
+    /* Glow variants for pulse animations */
+    --kiosk-health-healthy-glow:  rgba(39, 174, 96, 0.45);
+    --kiosk-health-warning-glow:  rgba(243, 156, 18, 0.45);
+    --kiosk-health-critical-glow: rgba(204, 68, 68, 0.45);
+
+    /* Surface colors for cards */
+    --kiosk-card-bg:     #0d0d1a;        /* Slightly lighter than pure black */
+    --kiosk-card-border: rgba(255, 255, 255, 0.07);
+
+    /* Timing */
+    --kiosk-bar-transition: 0.8s cubic-bezier(0.22, 1, 0.36, 1);
+    --kiosk-pulse-healthy:  3s;
+    --kiosk-pulse-warning:  1.8s;
+    --kiosk-pulse-critical: 0.9s;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 2: KEYFRAME ANIMATIONS
+   ------------------------------------------------------------------------------- */
+
+/* Healthy — slow, subtle glow breath */
+@keyframes kiosk-health-pulse {
+    0%, 100% { box-shadow: 0 0 6px  var(--kiosk-health-healthy-glow); }
+    50%       { box-shadow: 0 0 22px var(--kiosk-health-healthy-glow); }
+}
+
+/* Warning — medium speed alert glow */
+@keyframes kiosk-health-warning-pulse {
+    0%, 100% { box-shadow: 0 0 6px  var(--kiosk-health-warning-glow); }
+    50%       { box-shadow: 0 0 22px var(--kiosk-health-warning-glow); }
+}
+
+/* Critical — fast, aggressive alert pulse */
+@keyframes kiosk-health-critical-pulse {
+    0%, 100% { box-shadow: 0 0 4px  var(--kiosk-health-critical-glow); opacity: 1; }
+    50%       { box-shadow: 0 0 28px var(--kiosk-health-critical-glow); opacity: 0.8; }
+}
+
+/* Health bar fill — smooth width transition on load */
+@keyframes kiosk-health-bar-fill {
+    from { width: 0%; }
+    to   { width: var(--kiosk-bar-target, 0%); }
+}
+
+/* Score count-up fade — pair with JS that sets opacity/max-width */
+@keyframes kiosk-score-countup {
+    from { opacity: 0; transform: scale(0.85); }
+    to   { opacity: 1; transform: scale(1); }
+}
+
+/* Scan sweep — decorative horizontal sweep across cards */
+@keyframes kiosk-sweep {
+    0%   { left: -100%; opacity: 0.12; }
+    50%  { opacity: 0.06; }
+    100% { left: 200%;  opacity: 0; }
+}
+
+/* Activity indicator — gentle ring ping */
+@keyframes kiosk-activity-ping {
+    0%   { transform: scale(1);   opacity: 0.9; }
+    70%  { transform: scale(2.2); opacity: 0; }
+    100% { transform: scale(2.2); opacity: 0; }
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 3: ANIMATION UTILITY CLASSES
+   Apply these classes to trigger the appropriate pulse animation
+   ------------------------------------------------------------------------------- */
+
+.kiosk-health-pulse {
+    animation: kiosk-health-pulse var(--kiosk-pulse-healthy) ease-in-out infinite;
+}
+
+.kiosk-health-warning-pulse {
+    animation: kiosk-health-warning-pulse var(--kiosk-pulse-warning) ease-in-out infinite;
+}
+
+.kiosk-health-critical-pulse {
+    animation: kiosk-health-critical-pulse var(--kiosk-pulse-critical) ease-in-out infinite;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 4: DIVISION HEALTH SUMMARY PAGE
+   .kiosk-health-summary — full-page container for division health cards
+
+   Layout: 2-3 column responsive grid filling the full viewport.
+   No scrolling; cards scale to fit.
+   ------------------------------------------------------------------------------- */
+
+.kiosk-health-summary {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 20px;
+    width: 100%;
+    height: 100%;
+    padding: 24px;
+    background: var(--lcars-black);
+    box-sizing: border-box;
+    overflow: hidden;
+    align-content: start;
+}
+
+/* Page title strip across the top of the summary page */
+.kiosk-health-summary-header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 4px;
+}
+
+.kiosk-health-summary-title {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    color: var(--lcars-cyan);
+}
+
+.kiosk-health-summary-bar {
+    flex: 1;
+    height: 4px;
+    background: linear-gradient(to right, var(--lcars-cyan), transparent);
+    border-radius: 2px;
+}
+
+/* -------------------------------------------------------------------------------
+   DIVISION CARD
+   .kiosk-division-card — card for each division in the summary view
+
+   LCARS design:
+   - Dark background, colored left border (status color)
+   - Rounded pill-style left edge (large border-radius on left corners)
+   - Overflow hidden to contain the scan-sweep pseudo-element
+   ------------------------------------------------------------------------------- */
+
+.kiosk-division-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 20px 22px 20px 24px;
+    background: var(--kiosk-card-bg);
+    border: 1px solid var(--kiosk-card-border);
+    border-left: 5px solid var(--lcars-tan);   /* default; override with status class */
+    border-radius: 30px 12px 12px 30px;        /* pill on left, subtle on right */
+    overflow: hidden;
+    transition: border-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+/* Decorative scan-sweep shimmer */
+.kiosk-division-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -100%;
+    width: 60%;
+    height: 100%;
+    background: linear-gradient(
+        90deg,
+        transparent,
+        rgba(255, 255, 255, 0.04),
+        transparent
+    );
+    animation: kiosk-sweep 6s ease-in-out infinite;
+    pointer-events: none;
+}
+
+/* Division card — health status variants */
+.kiosk-division-card.health-healthy  { border-left-color: var(--kiosk-health-healthy); }
+.kiosk-division-card.health-warning  { border-left-color: var(--kiosk-health-warning); }
+.kiosk-division-card.health-critical { border-left-color: var(--kiosk-health-critical); }
+.kiosk-division-card.health-unknown  { border-left-color: var(--kiosk-health-unknown); }
+
+/* Name row at top of division card */
+.kiosk-division-name {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--lcars-peach);
+    line-height: 1;
+}
+
+/* -------------------------------------------------------------------------------
+   HEALTH SCORE
+   .kiosk-health-score — big number + letter grade side by side
+
+   Displayed prominently; readable from several metres away.
+   ------------------------------------------------------------------------------- */
+
+.kiosk-health-score {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    line-height: 1;
+    animation: kiosk-score-countup 0.6s var(--lcars-ease-smooth) both;
+}
+
+.kiosk-health-score-number {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 72px;
+    font-weight: 700;
+    letter-spacing: -2px;
+    color: var(--lcars-peach);
+    line-height: 1;
+}
+
+/* Status-colored score number */
+.health-healthy  .kiosk-health-score-number { color: var(--kiosk-health-healthy); }
+.health-warning  .kiosk-health-score-number { color: var(--kiosk-health-warning); }
+.health-critical .kiosk-health-score-number { color: var(--kiosk-health-critical); }
+.health-unknown  .kiosk-health-score-number { color: var(--kiosk-health-unknown); }
+
+.kiosk-health-score-grade {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 40px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--lcars-tan);
+    opacity: 0.85;
+}
+
+/* Small label used alongside score numbers (e.g. "Fleet" label in summary header) */
+.kiosk-health-score-label {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--lcars-brown);
+    align-self: center;
+}
+
+/* Fleet rollup badge — inline score + grade in summary header */
+.kiosk-health-fleet-badge {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    flex-shrink: 0;
+}
+
+/* Fleet score overrides — smaller than division card scores */
+.kiosk-health-fleet-score { font-size: 42px; }
+.kiosk-health-fleet-grade { font-size: 24px; }
+
+/* No-data placeholder — shared by division health and team status pages */
+.kiosk-health-no-data {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 200px;
+}
+
+.kiosk-health-no-data-label {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 22px;
+    letter-spacing: 4px;
+    color: var(--lcars-brown);
+    text-transform: uppercase;
+}
+
+/* -------------------------------------------------------------------------------
+   HEALTH BAR
+   .kiosk-health-bar — horizontal progress bar showing health %
+
+   Uses CSS custom property --kiosk-bar-target set inline by JS.
+   ------------------------------------------------------------------------------- */
+
+.kiosk-health-bar {
+    width: 100%;
+    height: 10px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    overflow: hidden;
+    position: relative;
+}
+
+.kiosk-health-bar-fill {
+    height: 100%;
+    border-radius: 6px;
+    width: var(--kiosk-bar-target, 0%);
+    transition: width var(--kiosk-bar-transition);
+    background: var(--kiosk-health-unknown);   /* overridden by status class below */
+}
+
+/* Bar fill colors by status */
+.health-healthy  .kiosk-health-bar-fill { background: var(--kiosk-health-healthy); }
+.health-warning  .kiosk-health-bar-fill { background: var(--kiosk-health-warning); }
+.health-critical .kiosk-health-bar-fill { background: var(--kiosk-health-critical); }
+
+/* Shimmer on bar fill */
+.kiosk-health-bar-fill::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 30px;
+    height: 100%;
+    background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.25), transparent);
+    border-radius: 0 6px 6px 0;
+}
+
+/* -------------------------------------------------------------------------------
+   DIVISION METRICS GRID
+   .kiosk-division-metrics — small stats grid inside division card
+   ------------------------------------------------------------------------------- */
+
+.kiosk-division-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 10px 14px;
+}
+
+.kiosk-metric {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.kiosk-metric-value {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+    line-height: 1;
+}
+
+.kiosk-metric-label {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 9px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--lcars-brown);
+    line-height: 1;
+}
+
+/* -------------------------------------------------------------------------------
+   HEALTH INDICATOR
+   .kiosk-health-indicator — circular/pill status badge with glow
+
+   Apply the appropriate animation class for pulsing:
+     .kiosk-health-pulse           (healthy)
+     .kiosk-health-warning-pulse   (warning)
+     .kiosk-health-critical-pulse  (critical)
+   ------------------------------------------------------------------------------- */
+
+.kiosk-health-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 5px 14px 5px 10px;
+    border-radius: 20px;
+    border: 1px solid currentColor;
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    line-height: 1;
+    transition: box-shadow 0.3s ease;
+}
+
+.kiosk-health-indicator::before {
+    content: '';
+    display: block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+}
+
+/* Indicator status colors */
+.kiosk-health-indicator.healthy  { color: var(--kiosk-health-healthy); }
+.kiosk-health-indicator.warning  { color: var(--kiosk-health-warning); }
+.kiosk-health-indicator.critical { color: var(--kiosk-health-critical); }
+.kiosk-health-indicator.unknown  { color: var(--kiosk-health-unknown); }
+
+/* -------------------------------------------------------------------------------
+   SECTION 5: TEAM STATUS BOARD PAGE
+   .kiosk-status-board — full-page grid of team cards
+
+   Layout: auto-fit grid, minimum 280px per card. Cards fill the viewport.
+   ------------------------------------------------------------------------------- */
+
+.kiosk-status-board {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px;
+    width: 100%;
+    height: 100%;
+    padding: 24px;
+    background: var(--lcars-black);
+    box-sizing: border-box;
+    overflow: hidden;
+    align-content: start;
+}
+
+/* Page header — spans all columns */
+.kiosk-status-board-header {
+    grid-column: 1 / -1;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 4px;
+}
+
+.kiosk-status-board-title {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 28px;
+    font-weight: 600;
+    letter-spacing: 5px;
+    text-transform: uppercase;
+    color: var(--lcars-purple);
+}
+
+.kiosk-status-board-bar {
+    flex: 1;
+    height: 4px;
+    background: linear-gradient(to right, var(--lcars-purple), transparent);
+    border-radius: 2px;
+}
+
+/* -------------------------------------------------------------------------------
+   TEAM CARD
+   .kiosk-team-card — individual team card with status coloring
+
+   LCARS design:
+   - Dark surface, thick colored left border (team/status color)
+   - Right side thinner border for visual separation
+   - Pill left edge, subtle right corners
+   ------------------------------------------------------------------------------- */
+
+.kiosk-team-card {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 18px 16px 20px;
+    background: var(--kiosk-card-bg);
+    border: 1px solid var(--kiosk-card-border);
+    border-left: 5px solid var(--lcars-tan);   /* default; override with status class */
+    border-radius: 24px 10px 10px 24px;
+    overflow: hidden;
+    transition: border-color 0.4s ease, box-shadow 0.4s ease;
+}
+
+/* Status variants on team card — left border + optional glow */
+.kiosk-team-card.health-healthy {
+    border-left-color: var(--kiosk-health-healthy);
+}
+
+.kiosk-team-card.health-warning {
+    border-left-color: var(--kiosk-health-warning);
+}
+
+.kiosk-team-card.health-critical {
+    border-left-color: var(--kiosk-health-critical);
+    animation: kiosk-health-critical-pulse var(--kiosk-pulse-critical) ease-in-out infinite;
+}
+
+.kiosk-team-card.health-unknown {
+    border-left-color: var(--kiosk-health-unknown);
+}
+
+/* -------------------------------------------------------------------------------
+   TEAM HEADER
+   .kiosk-team-header — team name + avatar/emoji area
+   ------------------------------------------------------------------------------- */
+
+.kiosk-team-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+/* Avatar circle — emoji or image inside */
+.kiosk-team-avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    background: var(--lcars-dark);
+    border: 2px solid var(--lcars-tan);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 22px;
+    flex-shrink: 0;
+    overflow: hidden;
+}
+
+.kiosk-team-avatar img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+}
+
+.kiosk-team-name-group {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    flex: 1;
+    min-width: 0;
+}
+
+.kiosk-team-name {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--lcars-peach);
+    line-height: 1;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.kiosk-team-org {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--lcars-brown);
+    line-height: 1;
+}
+
+/* -------------------------------------------------------------------------------
+   TEAM SCORE
+   .kiosk-team-score — health score display per team (smaller than division score)
+   ------------------------------------------------------------------------------- */
+
+.kiosk-team-score {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    line-height: 1;
+}
+
+.kiosk-team-score-number {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: -1px;
+    color: var(--lcars-peach);
+    line-height: 1;
+    animation: kiosk-score-countup 0.5s var(--lcars-ease-smooth) both;
+}
+
+/* Team score colors inherit from parent card status class */
+.kiosk-team-card.health-healthy  .kiosk-team-score-number { color: var(--kiosk-health-healthy); }
+.kiosk-team-card.health-warning  .kiosk-team-score-number { color: var(--kiosk-health-warning); }
+.kiosk-team-card.health-critical .kiosk-team-score-number { color: var(--kiosk-health-critical); }
+.kiosk-team-card.health-unknown  .kiosk-team-score-number { color: var(--kiosk-health-unknown); }
+
+.kiosk-team-score-grade {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-tan);
+    opacity: 0.8;
+}
+
+/* -------------------------------------------------------------------------------
+   TEAM METRICS
+   .kiosk-team-metrics — compact stats grid (items, completion %, WIP)
+   ------------------------------------------------------------------------------- */
+
+.kiosk-team-metrics {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 8px 10px;
+}
+
+/* Reuse .kiosk-metric / .kiosk-metric-value / .kiosk-metric-label from above —
+   those are shared between division and team views */
+
+/* -------------------------------------------------------------------------------
+   TEAM ACTIVITY INDICATOR
+   .kiosk-team-activity — pulse ring shown when team has recent activity
+   ------------------------------------------------------------------------------- */
+
+.kiosk-team-activity {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+/* The "ping" ring element */
+.kiosk-team-activity-ring {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    border: 2px solid var(--kiosk-health-healthy);
+    animation: kiosk-activity-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Static dot at centre — keeps position while ring expands */
+.kiosk-team-activity-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--kiosk-health-healthy);
+    position: relative;
+    z-index: 1;
+}
+
+.kiosk-team-activity-label {
+    font-family: 'Antonio', 'Helvetica Neue', Arial, sans-serif;
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--kiosk-health-healthy);
+}
+
+/* Inactive/idle state */
+.kiosk-team-activity.idle .kiosk-team-activity-ring {
+    display: none;
+}
+
+.kiosk-team-activity.idle .kiosk-team-activity-dot {
+    background: var(--kiosk-health-unknown);
+}
+
+.kiosk-team-activity.idle .kiosk-team-activity-label {
+    color: var(--kiosk-health-unknown);
+}
+
+/* -------------------------------------------------------------------------------
+   TEAM STATUS DOT
+   .kiosk-team-status-dot — small colored dot for quick health read at a glance
+   Typically placed in the card header alongside the team name.
+   ------------------------------------------------------------------------------- */
+
+.kiosk-team-status-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--kiosk-health-unknown);
+    transition: background 0.3s ease, box-shadow 0.3s ease;
+}
+
+.kiosk-team-status-dot.healthy {
+    background: var(--kiosk-health-healthy);
+    box-shadow: 0 0 8px var(--kiosk-health-healthy-glow);
+}
+
+.kiosk-team-status-dot.warning {
+    background: var(--kiosk-health-warning);
+    box-shadow: 0 0 8px var(--kiosk-health-warning-glow);
+}
+
+.kiosk-team-status-dot.critical {
+    background: var(--kiosk-health-critical);
+    box-shadow: 0 0 8px var(--kiosk-health-critical-glow);
+    animation: kiosk-health-critical-pulse var(--kiosk-pulse-critical) ease-in-out infinite;
+}
+
+.kiosk-team-status-dot.unknown {
+    background: var(--kiosk-health-unknown);
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 5b: KIOSK CONTENT CONTAINER
+
+   #analytics-content is the render target for kiosk-only pages (division-health,
+   team-status). It sits alongside the regular .analytics-page elements inside the
+   analytics section. Visibility is controlled by lcars-analytics-pages.js via
+   style.display — hidden when a regular page is active, shown for kiosk pages.
+
+   Default: display:none so it doesn't intrude when a regular analytics page is shown.
+   JS sets style.display='' (block) when a kiosk page is rendered into it.
+   ------------------------------------------------------------------------------- */
+
+#analytics-content {
+    display: none;           /* Hidden by default; JS shows it for kiosk pages */
+    width: 100%;
+    min-height: calc(100vh - 140px);   /* Fill the analytics section height */
+    overflow: hidden;
+}
+
+body.kiosk-active #analytics-content {
+    min-height: calc(100vh - 80px);    /* Extra room in kiosk mode (no nav pills) */
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 6: KIOSK-ACTIVE OVERRIDES
+
+   These rules only apply when body.kiosk-active is set.
+   They ensure kiosk health screens consume the full viewport correctly.
+   ------------------------------------------------------------------------------- */
+
+body.kiosk-active .kiosk-health-summary,
+body.kiosk-active .kiosk-status-board {
+    height: calc(100vh - 40px);   /* Leave room for kiosk progress bar + dots */
+    padding: 20px 30px;
+}
+
+/* Bump up font sizes for kiosk viewing distance */
+body.kiosk-active .kiosk-health-score-number {
+    font-size: 88px;
+}
+
+body.kiosk-active .kiosk-team-score-number {
+    font-size: 58px;
+}
+
+body.kiosk-active .kiosk-division-name,
+body.kiosk-active .kiosk-team-name {
+    font-size: 22px;
+    letter-spacing: 4px;
+}
+
+body.kiosk-active .kiosk-metric-value {
+    font-size: 26px;
+}
+
+body.kiosk-active .kiosk-health-bar {
+    height: 14px;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION 7: RESPONSIVE ADJUSTMENTS
+
+   The kiosk is typically landscape 1080p or 4K, but handle smaller displays.
+   ------------------------------------------------------------------------------- */
+
+/* Narrow screens — collapse to single column, reduce type sizes */
+@media (max-width: 768px) {
+    .kiosk-health-summary,
+    .kiosk-status-board {
+        grid-template-columns: 1fr;
+        padding: 16px;
+        gap: 12px;
+        overflow-y: auto;   /* Allow scrolling on small screens only */
+    }
+
+    .kiosk-health-score-number {
+        font-size: 56px;
+    }
+
+    .kiosk-team-score-number {
+        font-size: 40px;
+    }
+
+    .kiosk-division-metrics,
+    .kiosk-team-metrics {
+        grid-template-columns: repeat(3, 1fr);
+    }
+}
+
+/* Very wide displays (4K kiosk) — cap at 4 columns */
+@media (min-width: 2560px) {
+    .kiosk-health-summary {
+        grid-template-columns: repeat(4, 1fr);
+    }
+
+    .kiosk-status-board {
+        grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+    }
+
+    .kiosk-health-score-number {
+        font-size: 100px;
+    }
+
+    .kiosk-team-score-number {
+        font-size: 72px;
+    }
+}

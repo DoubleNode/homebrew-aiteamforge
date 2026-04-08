@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Star Trek TOS - Science Team Logo (Data Analysis & Testing) -->
+<!-- Android Development Terminal - Science Team -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200">
+  <!-- Background circle -->
+  <circle cx="100" cy="100" r="95" fill="none" stroke="#0066CC" stroke-width="3"/>
+  
+  <!-- Spock's tricorder/science scanner (central device) -->
+  <!-- Main scanner body -->
+  <rect x="75" y="70" width="50" height="60" rx="3" fill="none" stroke="#0066CC" stroke-width="2.5"/>
+  
+  <!-- Scanner screen/display -->
+  <rect x="80" y="75" width="40" height="25" fill="#0066CC" opacity="0.2"/>
+  
+  <!-- Display data lines -->
+  <line x1="82" y1="80" x2="118" y2="80" stroke="#0066CC" stroke-width="1.5" opacity="0.8"/>
+  <line x1="82" y1="85" x2="115" y2="85" stroke="#0066CC" stroke-width="1.5" opacity="0.7"/>
+  <line x1="82" y1="90" x2="110" y2="90" stroke="#0066CC" stroke-width="1.5" opacity="0.6"/>
+  <line x1="82" y1="95" x2="118" y2="95" stroke="#0066CC" stroke-width="1.5" opacity="0.8"/>
+  
+  <!-- Control buttons -->
+  <circle cx="85" cy="110" r="3" fill="#0066CC"/>
+  <circle cx="95" cy="110" r="3" fill="#0066CC"/>
+  <circle cx="105" cy="110" r="3" fill="#0066CC"/>
+  <circle cx="115" cy="110" r="3" fill="#0066CC"/>
+  
+  <!-- Scanner antenna/sensor -->
+  <rect x="98" y="55" width="4" height="15" fill="#0066CC"/>
+  <circle cx="100" cy="52" r="4" fill="#0066CC"/>
+  
+  <!-- Data streams emanating from scanner (upward) -->
+  <!-- Stream 1 (left) -->
+  <path d="M 85 55 L 85 35 L 82 32" fill="none" stroke="#0066CC" stroke-width="2" opacity="0.7"/>
+  <circle cx="82" cy="32" r="2" fill="#0066CC" opacity="0.7"/>
+  
+  <!-- Stream 2 (center-left) -->
+  <path d="M 92 55 L 92 30 L 90 27" fill="none" stroke="#0066CC" stroke-width="2" opacity="0.6"/>
+  <circle cx="90" cy="27" r="2" fill="#0066CC" opacity="0.6"/>
+  
+  <!-- Stream 3 (center-right) -->
+  <path d="M 108 55 L 108 30 L 110 27" fill="none" stroke="#0066CC" stroke-width="2" opacity="0.6"/>
+  <circle cx="110" cy="27" r="2" fill="#0066CC" opacity="0.6"/>
+  
+  <!-- Stream 4 (right) -->
+  <path d="M 115 55 L 115 35 L 118 32" fill="none" stroke="#0066CC" stroke-width="2" opacity="0.7"/>
+  <circle cx="118" cy="32" r="2" fill="#0066CC" opacity="0.7"/>
+  
+  <!-- Data analysis nodes (bottom) -->
+  <!-- Binary/hexadecimal pattern -->
+  <g transform="translate(70, 145)">
+    <rect width="4" height="8" fill="#0066CC" opacity="0.8"/>
+  </g>
+  <g transform="translate(78, 142)">
+    <rect width="4" height="11" fill="#0066CC" opacity="0.7"/>
+  </g>
+  <g transform="translate(86, 140)">
+    <rect width="4" height="13" fill="#0066CC" opacity="0.6"/>
+  </g>
+  <g transform="translate(94, 143)">
+    <rect width="4" height="10" fill="#0066CC" opacity="0.8"/>
+  </g>
+  <g transform="translate(102, 145)">
+    <rect width="4" height="8" fill="#0066CC" opacity="0.7"/>
+  </g>
+  <g transform="translate(110, 141)">
+    <rect width="4" height="12" fill="#0066CC" opacity="0.6"/>
+  </g>
+  <g transform="translate(118, 144)">
+    <rect width="4" height="9" fill="#0066CC" opacity="0.8"/>
+  </g>
+  <g transform="translate(126, 142)">
+    <rect width="4" height="11" fill="#0066CC" opacity="0.7"/>
+  </g>
+  
+  <!-- Corner science nodes -->
+  <circle cx="35" cy="35" r="4" fill="#0066CC"/>
+  <circle cx="165" cy="35" r="4" fill="#0066CC"/>
+  <circle cx="35" cy="165" r="4" fill="#0066CC"/>
+  <circle cx="165" cy="165" r="4" fill="#0066CC"/>
+  
+  <!-- Logic gates connecting to corners -->
+  <line x1="35" y1="35" x2="50" y2="50" stroke="#0066CC" stroke-width="1.5" opacity="0.5"/>
+  <line x1="165" y1="35" x2="150" y2="50" stroke="#0066CC" stroke-width="1.5" opacity="0.5"/>
+  <line x1="35" y1="165" x2="50" y2="150" stroke="#0066CC" stroke-width="1.5" opacity="0.5"/>
+  <line x1="165" y1="165" x2="150" y2="150" stroke="#0066CC" stroke-width="1.5" opacity="0.5"/>
+  
+  <circle cx="50" cy="50" r="2.5" fill="#0066CC"/>
+  <circle cx="150" cy="50" r="2.5" fill="#0066CC"/>
+  <circle cx="50" cy="150" r="2.5" fill="#0066CC"/>
+  <circle cx="150" cy="150" r="2.5" fill="#0066CC"/>
+</svg>

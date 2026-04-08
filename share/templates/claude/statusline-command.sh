@@ -31,13 +31,42 @@ short_dir=$(basename "$dir")
 # ============================================================================
 # Get the current kanban item being worked on from the board file
 
-get_working_item() {
-    local KANBAN_DIR="${HOME}/dev-team/kanban"
+# Return the kanban directory for a given team.
+# Mirrors TEAM_KANBAN_DIRS in kanban-hooks/kanban_utils.py.
+_get_team_kanban_dir() {
+    local team="$1"
+    case "$team" in
+        academy)                        echo "${HOME}/aiteamforge/kanban" ;;
+        ios)                            echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
+        android)                        echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
+        firebase)                       echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
+        command|mainevent)              echo "/Users/Shared/Development/Main Event/aiteamforge/kanban" ;;
+        dns)                            echo "/Users/Shared/Development/DNSFramework/kanban" ;;
+        freelance)                      echo "${HOME}/aiteamforge/kanban" ;;
+        freelance-doublenode-starwords) echo "/Users/Shared/Development/DoubleNode/Starwords/kanban" ;;
+        freelance-doublenode-appplanning) echo "/Users/Shared/Development/DoubleNode/appPlanning/kanban" ;;
+        freelance-doublenode-workstats) echo "/Users/Shared/Development/DoubleNode/WorkStats/kanban" ;;
+        freelance-doublenode-lifeboard) echo "/Users/Shared/Development/DoubleNode/LifeBoard/kanban" ;;
+        legal-coparenting)              echo "${HOME}/legal/coparenting/kanban" ;;
+        finance-personal)               echo "${HOME}/finance/personal/kanban" ;;
+        medical)                        echo "${HOME}/medical/kanban" ;;
+        *)                              echo "${HOME}/aiteamforge/kanban" ;;
+    esac
+}
 
+get_working_item() {
     # Detect team/terminal/window from tmux session
+    # Use $TMUX_PANE to explicitly target the correct pane when running from
+    # background processes (hooks), where the implicit "current pane" may be wrong.
     local session_name window_name
-    session_name=$(tmux display-message -p '#S' 2>/dev/null || echo "")
-    window_name=$(tmux display-message -p '#W' 2>/dev/null || echo "main")
+    local pane_target="${TMUX_PANE:-}"
+    if [[ -n "$pane_target" ]]; then
+        session_name=$(tmux display-message -t "$pane_target" -p '#S' 2>/dev/null || echo "")
+        window_name=$(tmux display-message -t "$pane_target" -p '#W' 2>/dev/null || echo "main")
+    else
+        session_name=$(tmux display-message -p '#S' 2>/dev/null || echo "")
+        window_name=$(tmux display-message -p '#W' 2>/dev/null || echo "main")
+    fi
 
     # If not in tmux, can't determine context
     [[ -z "$session_name" ]] && return
@@ -51,20 +80,13 @@ get_working_item() {
     # Build window_id (terminal:window_name)
     local window_id="${terminal}:${window_name}"
 
-    # Determine board file from team prefix
-    local board_file=""
-    case "$team" in
-        ios) board_file="${KANBAN_DIR}/ios-board.json" ;;
-        android) board_file="${KANBAN_DIR}/android-board.json" ;;
-        firebase) board_file="${KANBAN_DIR}/firebase-board.json" ;;
-        command) board_file="${KANBAN_DIR}/command-board.json" ;;
-        academy) board_file="${KANBAN_DIR}/academy-board.json" ;;
-        dns) board_file="${KANBAN_DIR}/dns-board.json" ;;
-        freelance) board_file="${KANBAN_DIR}/freelance-board.json" ;;
-        freelance-doublenode-starwords) board_file="${KANBAN_DIR}/freelance-doublenode-starwords-board.json" ;;
-        freelance-doublenode-workstats) board_file="${KANBAN_DIR}/freelance-doublenode-workstats-board.json" ;;
-        *) return ;;  # Unknown team, no working item
-    esac
+    # Determine board file using per-team kanban directory mapping
+    local kanban_dir
+    kanban_dir=$(_get_team_kanban_dir "$team")
+    local board_file="${kanban_dir}/${team}-board.json"
+
+    # Reject truly unknown teams (empty team string means bad session name)
+    [[ -z "$team" ]] && return
 
     # Check board file exists
     [[ ! -f "$board_file" ]] && return
@@ -90,11 +112,31 @@ get_working_item() {
             "$board_file" 2>/dev/null | head -1)
     fi
 
-    echo "$working_id"
+    # Output working_id and workMode pipe-separated for caller to split
+    if [ -n "$working_id" ]; then
+        local work_mode
+        work_mode=$(jq -r --arg wid "$window_id" \
+            '.activeWindows[] | select(.id == $wid) | .workMode // empty' \
+            "$board_file" 2>/dev/null)
+        echo "${working_id}|${work_mode}"
+    fi
 }
 
-# Get the working item (if any)
-working_item=$(get_working_item)
+# Get the working item and work mode (pipe-separated: "ITEM-ID|WORK_MODE")
+_working_data=$(get_working_item)
+working_item="${_working_data%%|*}"
+work_mode="${_working_data#*|}"
+# If no pipe delimiter in output, work_mode equals working_item — clear it
+[[ "$work_mode" == "$working_item" ]] && work_mode=""
+
+# Map work mode to emoji+label indicator
+work_mode_indicator=""
+case "$work_mode" in
+    DEV)    work_mode_indicator="🔧 DEV" ;;
+    TEST)   work_mode_indicator="🧪 TEST" ;;
+    REVIEW) work_mode_indicator="👁  REVIEW" ;;
+    DEBUG)  work_mode_indicator="🐛 DEBUG" ;;
+esac
 
 # Parse context window data for percentage calculation
 context_size=$(echo "$input" | jq -r '.context_window.context_window_size // 200000')
@@ -406,7 +448,11 @@ title=$(echo "$theme_data" | cut -d':' -f4)
 # Build working item segment (only if set)
 working_item_segment=""
 if [ -n "$working_item" ]; then
-    working_item_segment="─[📌${working_item}]"
+    if [ -n "$work_mode_indicator" ]; then
+        working_item_segment="─[📌 ${working_item} ${work_mode_indicator}]"
+    else
+        working_item_segment="─[📌 ${working_item}]"
+    fi
 fi
 
 # Use $'...' syntax for proper escape sequence handling
