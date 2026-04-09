@@ -942,13 +942,12 @@ def make_location(team_id, parsed_location):
     return parsed_location or team_id.title()
 
 # ---- Window description helper ----
-def window_desc(win_name, agent_role, win_index):
-    """Derive a TERMINAL_DESCRIPTION for a window name."""
+def window_desc(win_name, terminal_id, win_index):
+    """Derive a TERMINAL_DESCRIPTION for a window name.
+    Window 0 is always '<Division> Command Center' to match dev-team pattern.
+    Subsequent windows use the window name in title case."""
     if win_index == 0:
-        # Use agent role first clause for the primary window
-        if agent_role:
-            return re.split(r"[,\-\n]", agent_role)[0].strip()
-        return win_name.replace("-", " ").title()
+        return f"{terminal_id.replace('-', ' ').title()} Command Center"
     # Subsequent windows: capitalise the window name
     return win_name.replace("-", " ").title()
 
@@ -969,7 +968,7 @@ def generate_script(terminal_id, identity, windows, frontmatter, session_desc, l
     # Build 4-window block
     window_blocks = []
     for i, wname in enumerate(win_names):
-        wdesc = window_desc(wname, role, i)
+        wdesc = window_desc(wname, terminal_id, i)
         if i == 0:
             window_blocks.append(
                 f'    # Window 0: Primary\n'
@@ -1041,6 +1040,12 @@ $TMUX_CMD has-session -t $SESSION_CODE
 if [ $? != 0 ]; then
     clear
     echo "Initializing {team_id.title()} {terminal_id.title()}..."
+
+    # Configure tmux for iTerm2 compatibility (imgcat images, mouse clicks)
+    $TMUX_CMD set -g allow-passthrough on 2>/dev/null
+    $TMUX_CMD set -g mouse on 2>/dev/null
+    $TMUX_CMD set-option -g allow-rename off 2>/dev/null
+    $TMUX_CMD set-window-option -g automatic-rename off 2>/dev/null
 
 {window_section}
 
