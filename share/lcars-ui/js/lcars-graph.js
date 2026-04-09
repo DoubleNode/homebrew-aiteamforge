@@ -447,6 +447,8 @@ function updateGraphStats(data) {
 function buildDetailRow(labelText, valueText) {
     const row = document.createElement('div');
     row.className = 'detail-row';
+    row.style.opacity = '1';
+    row.style.transform = 'none';
 
     const label = document.createElement('span');
     label.className = 'detail-label';
@@ -478,12 +480,15 @@ function showGraphNodeDetails(nodeData) {
     if (title) title.textContent = nodeData.label || nodeData.id;
 
     if (content) {
-        content.innerHTML = '';
+        // Clear content safely using DOM removal
+        while (content.firstChild) content.removeChild(content.firstChild);
 
         // Type badge with color from GRAPH_NODE_COLORS
         const typeColor = GRAPH_NODE_COLORS[nodeData.type] || GRAPH_NODE_COLORS.default;
         const badgeRow = document.createElement('div');
         badgeRow.className = 'detail-row';
+        badgeRow.style.opacity = '1';
+        badgeRow.style.transform = 'none';
         const badgeLabel = document.createElement('span');
         badgeLabel.className = 'detail-label';
         badgeLabel.textContent = 'TYPE';
@@ -504,58 +509,149 @@ function showGraphNodeDetails(nodeData) {
             content.appendChild(buildDetailRow('GROUP', nodeData.nodeGroup));
         }
 
-        // All properties
-        const props = nodeData.properties || {};
-        Object.keys(props).forEach(key => {
-            const val = props[key];
-            if (val !== null && val !== undefined && val !== '') {
-                const displayVal = typeof val === 'object' ? JSON.stringify(val) : String(val);
-                content.appendChild(buildDetailRow(key.toUpperCase(), displayVal));
-            }
-        });
+        // Render local properties immediately (fast feedback)
+        _renderNodeProperties(content, nodeData.properties);
+
+        // Fetch enriched details from the server API
+        _fetchAndEnrichNodeDetails(nodeData.id, content, relSection);
     }
 
-    // Show relationships from connected edges
-    if (relSection && cyGraph) {
-        relSection.innerHTML = '';
-        const node = cyGraph.getElementById(nodeData.id);
-        if (node && node.length > 0) {
-            const edges = node.connectedEdges();
-            if (edges.length > 0) {
+    // Show relationships from connected edges (local graph data)
+    _renderNodeRelationships(relSection, nodeData);
+}
+
+/**
+ * Render node properties into the detail content panel.
+ * Skips keys already shown (id, label, type, group) and empty values.
+ * Long values get a scrollable, wrapped style for readability.
+ *
+ * @param {HTMLElement} container - The content div to append rows to
+ * @param {object} props - Key/value properties to display
+ */
+function _renderNodeProperties(container, props) {
+    // Priority order: show description first, then other props alphabetically
+    const items = props || {};
+    const sortedKeys = Object.keys(items).sort((a, b) => {
+        if (a === 'description') return -1;
+        if (b === 'description') return 1;
+        return a.localeCompare(b);
+    });
+    sortedKeys.forEach(key => {
+        const val = items[key];
+        if (val === null || val === undefined || val === '' || val === 0) return;
+        // Skip internal/noisy LightRAG metadata
+        if (['source_id', 'file_path', 'truncate', 'entity_id'].indexOf(key) !== -1) return;
+        // Format epoch timestamps as readable dates
+        if (key === 'created_at' && typeof val === 'number' && val > 1000000000) {
+            items[key] = new Date(val * 1000).toLocaleDateString('en-US', {
+                year: 'numeric', month: 'short', day: 'numeric'
+            });
+        }
+        let displayVal = typeof val === 'object' ? JSON.stringify(val, null, 2) : String(val);
+        // Clean LightRAG <SEP> delimiters into readable line breaks
+        if (typeof displayVal === 'string' && displayVal.includes('<SEP>')) {
+            displayVal = displayVal.split('<SEP>').map(s => s.trim()).filter(Boolean).join('\n');
+        }
+        const row = buildDetailRow(key.toUpperCase(), displayVal);
+        // Description and long values get block layout via CSS class
+        if (key === 'description' || displayVal.length > 100) {
+            row.classList.add('detail-description');
+            const valSpan = row.querySelector('.detail-value');
+            if (valSpan) {
+                valSpan.style.whiteSpace = 'pre-wrap';
+                valSpan.style.wordBreak = 'break-word';
+                valSpan.style.lineHeight = '1.4';
+            }
+        }
+        container.appendChild(row);
+    });
+}
+
+/**
+ * Fetch enriched node details from /api/graph/node and update the panel.
+ * Merges server properties with what's already shown, avoiding duplicates.
+ *
+ * @param {string} nodeId - The node ID to look up
+ * @param {HTMLElement} content - The detail content div
+ * @param {HTMLElement} relSection - The relationships section div
+ */
+async function _fetchAndEnrichNodeDetails(nodeId, content, relSection) {
+    const engineId = currentGraphEngine || 'demo';
+    try {
+        const resp = await fetch(apiUrl('/api/graph/node'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId, nodeId }),
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.node) return;
+
+        // Check that this node is still selected (user may have clicked another)
+        const panel = document.getElementById('graph-detail-panel');
+        const titleEl = panel ? panel.querySelector('.graph-detail-title') : null;
+        const currentLabel = titleEl ? titleEl.textContent : '';
+        const nodeLabel = data.node.label || nodeId;
+        if (currentLabel !== nodeLabel && currentLabel !== nodeId) return;
+
+        // Determine which property keys are already rendered in the panel
+        const existingLabels = new Set();
+        content.querySelectorAll('.detail-label').forEach(el => {
+            existingLabels.add(el.textContent.trim());
+        });
+
+        // Skip meta keys that are already shown as dedicated rows
+        const metaKeys = new Set(['id', 'label', 'name', 'type', 'entity_type', 'group', 'cluster']);
+
+        // Collect only new properties not already displayed
+        const newProps = {};
+        const enrichedProps = data.node.properties || {};
+        Object.keys(enrichedProps).forEach(key => {
+            if (metaKeys.has(key)) return;
+            if (existingLabels.has(key.toUpperCase())) return;
+            newProps[key] = enrichedProps[key];
+        });
+        if (Object.keys(newProps).length > 0) {
+            _renderNodeProperties(content, newProps);
+        }
+
+        // Enrich relationships from server if the local graph had none
+        if (data.node.relationships && data.node.relationships.length > 0 && relSection) {
+            const existingRelCount = relSection.querySelectorAll('.detail-row').length;
+            // Only add server relationships if local graph had none (header row = 1)
+            if (existingRelCount <= 1) {
+                while (relSection.firstChild) relSection.removeChild(relSection.firstChild);
+
                 const relHeader = document.createElement('div');
                 relHeader.className = 'detail-row';
+                relHeader.style.opacity = '1';
+                relHeader.style.transform = 'none';
                 const relLabel = document.createElement('span');
                 relLabel.className = 'detail-label';
                 relLabel.style.color = '#99CCFF';
-                relLabel.textContent = 'RELATIONSHIPS (' + edges.length + ')';
+                relLabel.textContent = 'RELATIONSHIPS (' + data.node.relationships.length + ')';
                 relHeader.appendChild(relLabel);
                 relSection.appendChild(relHeader);
 
-                edges.forEach(edge => {
-                    const edgeData = edge.data();
-                    const isOutgoing = edgeData.source === nodeData.id;
-                    const otherNodeId = isOutgoing ? edgeData.target : edgeData.source;
-                    const otherNode = cyGraph.getElementById(otherNodeId);
-                    const otherLabel = otherNode.length > 0 ? (otherNode.data('label') || otherNodeId) : otherNodeId;
-                    const arrow = isOutgoing ? '→' : '←';
-                    const relText = arrow + ' ' + (edgeData.label || 'RELATED') + ' ' + arrow + ' ' + otherLabel;
-
+                data.node.relationships.forEach(rel => {
                     const relRow = document.createElement('div');
                     relRow.className = 'detail-row';
+                    relRow.style.opacity = '1';
+                    relRow.style.transform = 'none';
                     relRow.style.cursor = 'pointer';
                     relRow.style.fontSize = '12px';
-
                     const relValue = document.createElement('span');
                     relValue.className = 'detail-value';
                     relValue.style.color = '#CC99CC';
                     relValue.style.fontSize = '12px';
-                    relValue.textContent = relText;
-
+                    const targetLabel = rel.targetLabel || rel.target;
+                    relValue.textContent = '\u2192 ' + (rel.type || 'RELATED') + ' \u2192 ' + targetLabel;
                     relRow.appendChild(relValue);
 
-                    // Click to navigate to the connected node
+                    // Click to navigate if node exists in graph
                     relRow.addEventListener('click', function() {
-                        const targetNode = cyGraph.getElementById(otherNodeId);
+                        if (!cyGraph) return;
+                        const targetNode = cyGraph.getElementById(rel.target);
                         if (targetNode.length > 0) {
                             cyGraph.animate({
                                 center: { eles: targetNode },
@@ -566,12 +662,81 @@ function showGraphNodeDetails(nodeData) {
                             highlightNeighbors(targetNode);
                         }
                     });
-
                     relSection.appendChild(relRow);
                 });
             }
         }
+    } catch (err) {
+        console.warn('[Graph] Node detail fetch failed:', err);
     }
+}
+
+/**
+ * Render relationships from the local Cytoscape graph edges into the panel.
+ *
+ * @param {HTMLElement} relSection - The relationships container div
+ * @param {object} nodeData - The Cytoscape node data
+ */
+function _renderNodeRelationships(relSection, nodeData) {
+    if (!relSection || !cyGraph) return;
+    while (relSection.firstChild) relSection.removeChild(relSection.firstChild);
+    const node = cyGraph.getElementById(nodeData.id);
+    if (!node || node.length === 0) return;
+
+    const edges = node.connectedEdges();
+    if (edges.length === 0) return;
+
+    const relHeader = document.createElement('div');
+    relHeader.className = 'detail-row';
+    relHeader.style.opacity = '1';
+    relHeader.style.transform = 'none';
+    const relLabel = document.createElement('span');
+    relLabel.className = 'detail-label';
+    relLabel.style.color = '#99CCFF';
+    relLabel.textContent = 'RELATIONSHIPS (' + edges.length + ')';
+    relHeader.appendChild(relLabel);
+    relSection.appendChild(relHeader);
+
+    edges.forEach(edge => {
+        const edgeData = edge.data();
+        const isOutgoing = edgeData.source === nodeData.id;
+        const otherNodeId = isOutgoing ? edgeData.target : edgeData.source;
+        const otherNode = cyGraph.getElementById(otherNodeId);
+        const otherLabel = otherNode.length > 0 ? (otherNode.data('label') || otherNodeId) : otherNodeId;
+        const arrow = isOutgoing ? '\u2192' : '\u2190';
+        const relText = arrow + ' ' + (edgeData.label || 'RELATED') + ' ' + arrow + ' ' + otherLabel;
+
+        const relRow = document.createElement('div');
+        relRow.className = 'detail-row';
+        relRow.style.opacity = '1';
+        relRow.style.transform = 'none';
+        relRow.style.cursor = 'pointer';
+        relRow.style.fontSize = '12px';
+
+        const relValue = document.createElement('span');
+        relValue.className = 'detail-value';
+        relValue.style.color = '#CC99CC';
+        relValue.style.fontSize = '12px';
+        relValue.textContent = relText;
+
+        relRow.appendChild(relValue);
+
+        // Click to navigate to the connected node
+        relRow.addEventListener('click', function() {
+            const targetNode = cyGraph.getElementById(otherNodeId);
+            if (targetNode.length > 0) {
+                cyGraph.animate({
+                    center: { eles: targetNode },
+                    zoom: cyGraph.zoom(),
+                }, { duration: 300 });
+                targetNode.select();
+                showGraphNodeDetails(targetNode.data());
+                highlightNeighbors(targetNode);
+            }
+        });
+
+        relSection.appendChild(relRow);
+    });
 }
 
 /**
