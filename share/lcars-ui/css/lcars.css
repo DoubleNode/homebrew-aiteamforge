@@ -652,6 +652,10 @@ body {
     background: var(--lcars-black);
     color: var(--lcars-tan);
 }
+.sidebar-button[data-section="knowledge-graph"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
 
 /* Active state left bar - rectangle with no curve */
 .sidebar-button[data-section].active {
@@ -1357,6 +1361,8 @@ body {
 .lcars-content > .commands-section,
 .lcars-content > .backups-section,
 .lcars-content > .integrations-section,
+.lcars-content > .rag-engines-section,
+.lcars-content > .knowledge-graph-section,
 .lcars-content > .team-config-section,
 .lcars-content > .archive-section {
     position: absolute !important;
@@ -1384,12 +1390,20 @@ body {
 .lcars-content > .commands-section.active,
 .lcars-content > .backups-section.active,
 .lcars-content > .integrations-section.active,
+.lcars-content > .rag-engines-section.active,
+.lcars-content > .knowledge-graph-section.active,
 .lcars-content > .team-config-section.active,
 .lcars-content > .archive-section.active {
     display: block;
     overflow-y: auto !important;
     padding-top: 5px; /* Minimal padding - status-legend is above content area */
     padding-bottom: 60px;
+}
+
+/* Knowledge graph section - flex layout for graph container */
+.lcars-content > .knowledge-graph-section.active {
+    display: flex !important;
+    overflow-y: auto !important;
 }
 
 /* Startup section special - centered content, no scroll */
@@ -1480,6 +1494,8 @@ body {
 .backups-section.active .section-bar { transition-delay: 0.10s; }
 .integrations-section.active .section-title { transition-delay: 0.05s; }
 .integrations-section.active .section-bar { transition-delay: 0.10s; }
+.rag-engines-section.active .section-title { transition-delay: 0.05s; }
+.rag-engines-section.active .section-bar { transition-delay: 0.10s; }
 .archive-section.active .section-title { transition-delay: 0.05s; }
 .archive-section.active .section-bar { transition-delay: 0.10s; }
 .releases-section.active .section-title { transition-delay: 0.05s; }
@@ -6996,8 +7012,27 @@ body {
     .lcars-content > .calendar-section.active,
     .lcars-content > .commands-section.active,
     .lcars-content > .backups-section.active,
-    .lcars-content > .integrations-section.active {
+    .lcars-content > .integrations-section.active,
+    .lcars-content > .rag-engines-section.active {
         padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px)); /* 40px tabbar + 10px gap + scroll buffer */
+    }
+
+    .rag-engines-overview {
+        grid-template-columns: 1fr;
+    }
+
+    .rag-engine-card {
+        grid-template-columns: 40px 1fr;
+    }
+
+    .rag-engine-status {
+        grid-column: 1 / -1;
+        flex-direction: row;
+        justify-content: space-between;
+    }
+
+    .rag-engine-form-row {
+        grid-template-columns: 1fr;
     }
 
     /* Adjust horizontal bar to start from left edge */
@@ -8205,6 +8240,455 @@ body {
     font-size: 12px;
     background: rgba(255, 85, 85, 0.1);
     border-radius: 4px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   RAG ENGINES SECTION
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.rag-engines-section {
+    padding: 0 20px;
+}
+
+.rag-engines-overview {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 15px;
+    margin: 15px 0;
+}
+
+.rag-engine-stat {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 12px;
+    background: rgba(0, 0, 0, 0.3);
+    border-radius: 8px;
+    border: 1px solid var(--lcars-blue-dark, #3366cc);
+}
+
+/* Engine Cards */
+.rag-engines-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin: 15px 0;
+}
+
+.rag-engine-card {
+    display: grid;
+    grid-template-columns: 50px 1fr auto;
+    gap: 15px;
+    align-items: center;
+    padding: 15px;
+    background: rgba(0, 0, 0, 0.3);
+    border: 1px solid var(--lcars-blue-dark, #3366cc);
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.rag-engine-card:hover {
+    background: rgba(50, 50, 80, 0.4);
+    border-color: var(--lcars-gold, #ffcc00);
+}
+
+.rag-engine-card.not-installed {
+    opacity: 0.7;
+    border-style: dashed;
+}
+
+.rag-engine-card.running {
+    border-color: var(--lcars-green, #00cc66);
+}
+
+.rag-engine-card.error {
+    border-color: var(--lcars-red, #cc0000);
+}
+
+/* Engine Icon */
+.rag-engine-icon {
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 24px;
+    background: rgba(0, 0, 0, 0.4);
+    border-radius: 8px;
+}
+
+/* Engine Info */
+.rag-engine-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.rag-engine-name {
+    font-size: 1.1em;
+    font-weight: 600;
+    color: var(--lcars-gold, #ffcc00);
+}
+
+.rag-engine-type {
+    font-size: 0.8em;
+    color: var(--lcars-cyan, #99ccff);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.rag-engine-desc {
+    font-size: 0.85em;
+    color: var(--lcars-text, #aabbcc);
+    margin-top: 2px;
+}
+
+.rag-engine-content-stats {
+    font-size: 0.8em;
+    color: var(--lcars-orange, #ff9966);
+    margin-top: 3px;
+    letter-spacing: 0.5px;
+}
+
+/* Engine Status */
+.rag-engine-status {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+}
+
+.rag-engine-status-badge {
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 0.75em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.rag-engine-status-badge.running {
+    background: rgba(0, 204, 102, 0.2);
+    color: var(--lcars-green, #00cc66);
+    border: 1px solid var(--lcars-green, #00cc66);
+}
+
+.rag-engine-status-badge.installed {
+    background: rgba(255, 204, 0, 0.15);
+    color: var(--lcars-gold, #ffcc00);
+    border: 1px solid var(--lcars-gold, #ffcc00);
+}
+
+.rag-engine-status-badge.not-installed {
+    background: rgba(100, 100, 120, 0.2);
+    color: var(--lcars-text-dim, #667788);
+    border: 1px solid var(--lcars-text-dim, #667788);
+}
+
+.rag-engine-status-badge.error {
+    background: rgba(204, 0, 0, 0.2);
+    color: var(--lcars-red, #cc0000);
+    border: 1px solid var(--lcars-red, #cc0000);
+}
+
+/* Engine Action Buttons */
+.rag-engine-actions-row {
+    display: flex;
+    gap: 6px;
+}
+
+.rag-engine-btn {
+    padding: 4px 10px;
+    border: 1px solid var(--lcars-blue-dark, #3366cc);
+    background: rgba(0, 0, 0, 0.3);
+    color: var(--lcars-text, #aabbcc);
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 0.75em;
+    text-transform: uppercase;
+    transition: all 0.2s ease;
+}
+
+.rag-engine-btn:hover {
+    background: rgba(50, 50, 80, 0.5);
+    color: var(--lcars-gold, #ffcc00);
+}
+
+.rag-engine-btn.install {
+    border-color: var(--lcars-green, #00cc66);
+    color: var(--lcars-green, #00cc66);
+}
+
+.rag-engine-btn.uninstall {
+    border-color: var(--lcars-red, #cc0000);
+    color: var(--lcars-red, #cc0000);
+}
+
+.rag-engine-btn.update {
+    border-color: var(--lcars-amber, #ffaa00);
+    color: var(--lcars-amber, #ffaa00);
+}
+
+.rag-engine-btn.update:hover {
+    background: rgba(255, 170, 0, 0.15);
+    color: var(--lcars-gold, #ffcc00);
+}
+
+.rag-engine-btn.update:disabled {
+    border-color: var(--lcars-text-dim, #667788);
+    color: var(--lcars-text-dim, #667788);
+    opacity: 0.6;
+}
+
+.rag-engine-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* Engine Version Display */
+.rag-engine-version {
+    font-size: 0.78em;
+    color: var(--lcars-text-dim, #667788);
+    margin-top: 2px;
+    font-family: monospace;
+    letter-spacing: 0.5px;
+}
+
+/* Update Available Badge */
+.rag-engine-update-badge {
+    display: inline-block;
+    margin-top: 4px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 0.72em;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    background: rgba(255, 170, 0, 0.15);
+    color: var(--lcars-amber, #ffaa00);
+    border: 1px solid rgba(255, 170, 0, 0.5);
+    text-transform: none;
+    font-family: monospace;
+}
+
+/* Install Progress Bar */
+.rag-engine-progress {
+    width: 100%;
+    margin-top: 8px;
+    display: none;
+    grid-column: 1 / -1;
+}
+
+.rag-engine-progress.active {
+    display: block;
+}
+
+.rag-engine-progress-bar {
+    height: 4px;
+    background: rgba(0, 0, 0, 0.4);
+    border-radius: 2px;
+    overflow: hidden;
+}
+
+.rag-engine-progress-fill {
+    height: 100%;
+    background: var(--lcars-gold, #ffcc00);
+    border-radius: 2px;
+    transition: width 0.3s ease;
+    width: 0%;
+}
+
+.rag-engine-progress-fill.indeterminate {
+    width: 30%;
+    animation: rag-indeterminate-progress 1.5s ease-in-out infinite;
+}
+
+@keyframes rag-indeterminate-progress {
+    0% { transform: translateX(-100%); }
+    50% { transform: translateX(230%); }
+    100% { transform: translateX(-100%); }
+}
+
+.rag-engine-progress-text {
+    font-size: 0.75em;
+    color: var(--lcars-text-dim, #667788);
+    margin-top: 4px;
+    text-align: center;
+}
+
+.rag-engine-progress-text.error {
+    color: var(--lcars-red, #cc0000);
+}
+
+.rag-engine-progress-text.success {
+    color: var(--lcars-green, #99ff99);
+}
+
+/* Engine Log Panel */
+.rag-engine-log {
+    display: none;
+    width: 100%;
+    margin-top: 8px;
+    border: 1px solid rgba(204, 153, 0, 0.3);
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.5);
+    overflow: hidden;
+    grid-column: 1 / -1;
+}
+
+.rag-engine-log.active {
+    display: block;
+}
+
+.rag-engine-log-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.3);
+    border-bottom: 1px solid rgba(204, 153, 0, 0.2);
+}
+
+.rag-engine-log-title {
+    font-size: 0.8em;
+    font-weight: bold;
+}
+
+.rag-engine-log-title.error {
+    color: var(--lcars-red, #cc0000);
+}
+
+.rag-engine-log-title.success {
+    color: var(--lcars-green, #99ff99);
+}
+
+.rag-engine-log-dismiss {
+    background: none;
+    border: none;
+    color: var(--lcars-text-dim, #667788);
+    font-size: 1.2em;
+    cursor: pointer;
+    padding: 0 4px;
+    line-height: 1;
+}
+
+.rag-engine-log-dismiss:hover {
+    color: var(--lcars-gold, #ffcc00);
+}
+
+.rag-engine-log-body {
+    padding: 8px 10px;
+    margin: 0;
+    font-family: 'Courier New', monospace;
+    font-size: 0.75em;
+    color: var(--lcars-text-dim, #aabbcc);
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 300px;
+    overflow-y: auto;
+    line-height: 1.4;
+}
+
+/* Loading/Empty/Error states */
+.rag-engines-loading,
+.rag-engines-empty,
+.rag-engines-error {
+    padding: 30px;
+    text-align: center;
+    font-size: 0.9em;
+}
+
+.rag-engines-loading {
+    color: var(--lcars-cyan, #99ccff);
+}
+
+.rag-engines-empty {
+    color: var(--lcars-text-dim, #667788);
+}
+
+.rag-engines-error {
+    color: var(--lcars-red, #cc0000);
+}
+
+/* Action buttons row */
+.rag-engine-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+}
+
+.rag-engine-refresh-btn {
+    flex: 0 0 auto;
+}
+
+.rag-engine-add-btn {
+    flex: 0 0 auto;
+    background-color: var(--lcars-green, #33cc99);
+    color: #000;
+}
+
+/* RAG Engine Configuration Modal */
+.rag-engine-modal {
+    max-width: 600px;
+    width: 90%;
+}
+
+.rag-engine-modal .modal-body {
+    max-height: 60vh;
+    overflow-y: auto;
+}
+
+.rag-engine-form-group {
+    margin-bottom: 16px;
+}
+
+.rag-engine-form-group label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 0.85em;
+    color: var(--lcars-cyan, #99ccff);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.rag-engine-form-group input,
+.rag-engine-form-group select,
+.rag-engine-form-group textarea {
+    width: 100%;
+    padding: 8px 12px;
+    background: rgba(0, 0, 0, 0.4);
+    border: 1px solid var(--lcars-blue-dark, #3366cc);
+    border-radius: 4px;
+    color: var(--lcars-text, #aabbcc);
+    font-family: inherit;
+    font-size: 0.9em;
+}
+
+.rag-engine-form-group input:focus,
+.rag-engine-form-group select:focus,
+.rag-engine-form-group textarea:focus {
+    border-color: var(--lcars-gold, #ffcc00);
+    outline: none;
+}
+
+.rag-engine-form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+}
+
+.rag-engine-settings-section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid var(--lcars-blue-dark, #3366cc);
+}
+
+.rag-engine-settings-title {
+    font-size: 0.85em;
+    color: var(--lcars-gold, #ffcc00);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 12px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -13357,6 +13841,196 @@ body {
     display: none !important;
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════
+   RAG ENGINE CAROUSEL PANELS
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Panel content layout */
+.rag-engine-panel-content {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    margin-top: 15px;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Status row: indicator + label + type badge + port */
+.rag-engine-status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: rgba(153, 153, 204, 0.08);
+    border-radius: 8px;
+    border-left: 3px solid #9999CC;
+}
+
+/* Status indicator dot */
+.rag-status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+.rag-status-running {
+    background: #33CC99;
+    box-shadow: 0 0 8px rgba(51, 204, 153, 0.6);
+    animation: rag-pulse 2s ease-in-out infinite;
+}
+
+.rag-status-installed {
+    background: #FFCC99;
+    box-shadow: 0 0 6px rgba(255, 204, 153, 0.4);
+}
+
+.rag-status-offline {
+    background: #CC6666;
+    box-shadow: 0 0 6px rgba(204, 102, 102, 0.4);
+}
+
+@keyframes rag-pulse {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.5; }
+}
+
+/* Status label text */
+.rag-status-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    color: #FFCC99;
+    letter-spacing: 0.1em;
+}
+
+/* Type badge (LIGHTRAG, CODE GRAPH RAG, etc) */
+.rag-type-badge {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: #000;
+    background: #9999CC;
+    padding: 2px 10px;
+    border-radius: 10px;
+    letter-spacing: 0.05em;
+}
+
+/* Port label */
+.rag-port-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: #9999CC;
+    margin-left: auto;
+    letter-spacing: 0.05em;
+}
+
+/* Stats grid — 2×2 with wide bottom row */
+.rag-engine-stats-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    flex: 1;
+    align-content: start;
+    padding: 0 4px;
+}
+
+/* Individual stat card */
+.rag-stat-card {
+    background: rgba(153, 153, 204, 0.06);
+    border-radius: 8px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    border: 1px solid rgba(153, 153, 204, 0.15);
+}
+
+/* Wide stat card spans full width */
+.rag-stat-wide {
+    grid-column: 1 / -1;
+}
+
+/* Stat value — big number */
+.rag-stat-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 36px;
+    color: #FF9900;
+    line-height: 1;
+}
+
+/* Success color */
+.rag-stat-success {
+    color: #33CC99;
+}
+
+/* Error color */
+.rag-stat-error {
+    color: #CC6666;
+}
+
+/* Stat label — small text */
+.rag-stat-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: #9999CC;
+    letter-spacing: 0.1em;
+    text-align: center;
+}
+
+/* Progress bar container */
+.rag-progress-bar {
+    width: 100%;
+    height: 8px;
+    background: rgba(153, 153, 204, 0.15);
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+/* Progress bar fill */
+.rag-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #FF9900, #33CC99);
+    border-radius: 4px;
+    transition: width 0.6s ease;
+}
+
+/* Health message */
+.rag-health-message {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: #FFCC99;
+    text-align: center;
+    letter-spacing: 0.05em;
+    opacity: 0.8;
+}
+
+/* ── RAG Panels Container — transparent to flex layout ─────────────────── */
+/* display:contents makes this wrapper invisible to the flex track,        */
+/* so .carousel-panel children participate directly in .carousel-track     */
+/* flex layout (flex-shrink:0; width:100% applies correctly).              */
+#rag-engine-panels-container {
+    display: contents;
+}
+
+/* ── RAG Panel Fullscreen Adjustments ─────────────────────────────────────── */
+
+.home-fullscreen .rag-stat-value {
+    font-size: 48px;
+}
+
+.home-fullscreen .rag-engine-stats-grid {
+    gap: 20px;
+    padding: 0 20px;
+}
+
+.home-fullscreen .rag-stat-card {
+    padding: 24px;
+}
+
+.home-fullscreen .rag-engine-status-row {
+    padding: 12px 20px;
+}
+
 /* ── Responsive: Narrow Screens ────────────────────────────────────────────── */
 
 @media (max-width: 768px) {
@@ -14159,4 +14833,450 @@ body {
 .team-config-placeholder,
 .archive-placeholder {
     display: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   KNOWLEDGE GRAPH SECTION
+   Graph visualization with Cytoscape.js — LCARS themed
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* --- Section container --- */
+.knowledge-graph-section {
+    flex-direction: column;
+    height: 100%;
+    gap: 8px;
+    padding-bottom: 10px;
+}
+
+/* --- Toolbar --- */
+.graph-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 16px;
+    padding: 10px 12px;
+    background: rgba(13, 13, 26, 0.6);
+    border: 1px solid rgba(255, 153, 0, 0.15);
+    border-radius: 0 20px 20px 0;
+}
+
+.graph-toolbar-group {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.graph-toolbar-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: #7799BB;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.graph-engine-select {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: #FF9900;
+    background: #0d0d1a;
+    border: 1px solid #334455;
+    border-radius: 12px;
+    padding: 4px 12px;
+    outline: none;
+    cursor: pointer;
+    min-width: 140px;
+    text-transform: uppercase;
+}
+
+.graph-engine-select:hover {
+    border-color: #FF9900;
+}
+
+.graph-engine-select:focus {
+    border-color: #FFCC66;
+    box-shadow: 0 0 6px rgba(255, 153, 0, 0.3);
+}
+
+.graph-engine-select option {
+    background: #0d0d1a;
+    color: #FF9900;
+}
+
+.graph-toolbar-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    color: #FF9900;
+    background: rgba(255, 153, 0, 0.1);
+    border: 1px solid rgba(255, 153, 0, 0.3);
+    border-radius: 12px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+
+.graph-toolbar-btn:hover {
+    background: rgba(255, 153, 0, 0.25);
+    border-color: #FF9900;
+}
+
+.graph-icon-btn {
+    font-size: 18px;
+    line-height: 1;
+}
+
+/* Layout buttons */
+.graph-layout-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: #99CCFF;
+    background: rgba(153, 204, 255, 0.08);
+    border: 1px solid rgba(153, 204, 255, 0.25);
+    border-radius: 12px;
+    padding: 4px 10px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.graph-layout-btn:hover {
+    background: rgba(153, 204, 255, 0.2);
+    border-color: #99CCFF;
+}
+
+.graph-layout-btn.active {
+    background: #99CCFF;
+    color: #000000;
+    border-color: #99CCFF;
+    font-weight: 600;
+}
+
+/* --- Stats bar --- */
+.graph-stats-bar {
+    display: flex;
+    gap: 20px;
+    padding: 6px 14px;
+    background: rgba(13, 13, 26, 0.4);
+    border-left: 4px solid #99CCFF;
+}
+
+.graph-stat {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.graph-stat .stat-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: #7799BB;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+.graph-stat .stat-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: #FF9900;
+    font-weight: 600;
+}
+
+/* --- Graph container wrapper --- */
+.graph-container-wrapper {
+    flex: 1;
+    display: flex;
+    position: relative;
+    min-height: 300px;
+    border: 1px solid rgba(255, 153, 0, 0.15);
+    border-radius: 0 20px 20px 0;
+    overflow: hidden;
+}
+
+/* --- Cytoscape canvas --- */
+.graph-canvas {
+    flex: 1;
+    background: #1a1a2e;
+    position: relative;
+}
+
+/* Make sure Cytoscape fills the container */
+.graph-canvas > div {
+    position: absolute !important;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+}
+
+/* --- Detail panel (slides in from right) --- */
+.graph-detail-panel {
+    width: 0;
+    min-width: 0;
+    overflow: hidden;
+    background: rgba(13, 13, 26, 0.95);
+    border-left: 2px solid #FF9900;
+    transition: width 0.3s ease, min-width 0.3s ease, padding 0.3s ease;
+    display: flex;
+    flex-direction: column;
+}
+
+.graph-detail-panel.visible {
+    width: 300px;
+    min-width: 300px;
+    padding: 12px;
+}
+
+.graph-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 10px;
+    border-bottom: 1px solid rgba(255, 153, 0, 0.3);
+    margin-bottom: 10px;
+}
+
+.graph-detail-title {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    color: #FFCC66;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.graph-detail-close {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    color: #7799BB;
+    background: none;
+    border: 1px solid rgba(119, 153, 187, 0.3);
+    border-radius: 50%;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s ease;
+    flex-shrink: 0;
+    margin-left: 8px;
+}
+
+.graph-detail-close:hover {
+    color: #FF9900;
+    border-color: #FF9900;
+    background: rgba(255, 153, 0, 0.1);
+}
+
+.graph-detail-content {
+    flex: 1;
+    overflow-y: auto;
+}
+
+.detail-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 6px 0;
+    border-bottom: 1px solid rgba(51, 68, 85, 0.4);
+}
+
+.detail-row .detail-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: #7799BB;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    flex-shrink: 0;
+    margin-right: 12px;
+}
+
+.detail-row .detail-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: #CCCCCC;
+    text-align: right;
+    word-break: break-word;
+}
+
+.detail-placeholder {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: #556677;
+    text-align: center;
+    padding: 30px 10px;
+    font-style: italic;
+}
+
+/* Relationships list in detail panel */
+.graph-detail-relationships {
+    margin-top: 12px;
+    border-top: 1px solid rgba(255, 153, 0, 0.2);
+    padding-top: 10px;
+    max-height: 200px;
+    overflow-y: auto;
+}
+
+.graph-detail-relationships:empty {
+    display: none;
+}
+
+/* --- Search / Query bar --- */
+.graph-search-bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 8px 12px;
+    background: rgba(13, 13, 26, 0.6);
+    border: 1px solid rgba(255, 153, 0, 0.15);
+    border-radius: 0 0 20px 0;
+    align-items: center;
+}
+
+.graph-search-input {
+    flex: 1;
+    min-width: 200px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    color: #FFCC66;
+    background: #0d0d1a;
+    border: 1px solid #334455;
+    border-radius: 16px;
+    padding: 8px 16px;
+    outline: none;
+    transition: border-color 0.2s ease;
+    letter-spacing: 0.5px;
+}
+
+.graph-search-input::placeholder {
+    color: #556677;
+    text-transform: uppercase;
+    font-size: 12px;
+}
+
+.graph-search-input:focus {
+    border-color: #FF9900;
+    box-shadow: 0 0 8px rgba(255, 153, 0, 0.2);
+}
+
+.graph-search-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: #000000;
+    background: #FF9900;
+    border: none;
+    border-radius: 16px;
+    padding: 8px 20px;
+    cursor: pointer;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-weight: 600;
+    transition: all 0.2s ease;
+}
+
+.graph-search-btn:hover {
+    background: #FFCC66;
+}
+
+/* RAG answer display */
+.graph-rag-answer {
+    width: 100%;
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    color: #CCCCCC;
+    background: rgba(153, 204, 255, 0.05);
+    border: 1px solid rgba(153, 204, 255, 0.2);
+    border-radius: 8px;
+    padding: 10px 14px;
+    margin-top: 4px;
+    line-height: 1.5;
+    max-height: 150px;
+    overflow-y: auto;
+}
+
+/* --- Mobile responsiveness --- */
+@media (max-width: 768px) {
+    .graph-toolbar {
+        gap: 8px;
+        padding: 8px;
+    }
+
+    .graph-toolbar-group {
+        flex-wrap: wrap;
+    }
+
+    .graph-detail-panel.visible {
+        width: 100%;
+        min-width: 100%;
+        position: absolute;
+        right: 0;
+        top: 0;
+        bottom: 0;
+        z-index: 10;
+    }
+
+    .graph-search-bar {
+        flex-direction: column;
+    }
+
+    .graph-search-input {
+        min-width: unset;
+        width: 100%;
+    }
+}
+
+/* ============================================================================
+   Sound Toggle — candy bar pill button for mute/unmute
+   ============================================================================ */
+
+.legend-pill.sound-pill {
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition:
+        background-color 0.15s ease,
+        opacity 0.15s ease,
+        filter 0.15s ease;
+}
+
+.legend-pill.sound-pill:hover {
+    filter: brightness(1.3);
+}
+
+.legend-pill.sound-pill:active {
+    filter: brightness(0.7);
+}
+
+/* Muted state — dim the pill */
+.legend-pill.sound-pill.sound-muted {
+    opacity: 0.4;
+}
+
+/* ============================================================================
+   Viewscreen — candy bar pill button for HOME fullscreen
+   ============================================================================ */
+
+.legend-pill.viewscreen-pill {
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition:
+        background-color 0.15s ease,
+        opacity 0.15s ease,
+        filter 0.15s ease;
+}
+
+.legend-pill.viewscreen-pill:hover {
+    filter: brightness(1.3);
+}
+
+.legend-pill.viewscreen-pill:active {
+    filter: brightness(0.7);
 }

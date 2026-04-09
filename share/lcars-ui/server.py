@@ -30,7 +30,7 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
 
-# Import kanban utilities for team-specific tmp directory resolution
+# Import kanban activity logging from kanban-hooks
 try:
     import sys as _sys
     _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
@@ -59,6 +59,22 @@ except ImportError:
     SYNC_AVAILABLE = False
     print("[LCARS] Warning: Integration module not available")
 
+# Import RAG engine providers
+try:
+    from rag_engines import get_manager as get_rag_manager
+    RAG_ENGINES_AVAILABLE = True
+except ImportError:
+    RAG_ENGINES_AVAILABLE = False
+    print("[LCARS] Warning: RAG engines module not available")
+
+# Import Neo4j/Memgraph Bolt driver (optional — used for graph queries)
+try:
+    from neo4j import GraphDatabase as _BoltGraphDatabase
+    BOLT_AVAILABLE = True
+except ImportError:
+    _BoltGraphDatabase = None
+    BOLT_AVAILABLE = False
+
 # Import calendar sync service
 try:
     from calendar.sync_service import CalendarSyncService
@@ -75,17 +91,16 @@ except ImportError as e:
 
 # Configuration
 DEFAULT_PORT = 8080
-BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
+BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
 
 # Distributed kanban directories - each team has their own
-# These defaults are used when ~/.aiteamforge-config is not present (backward compatibility)
-_TEAM_KANBAN_DIRS_DEFAULT = {
+TEAM_KANBAN_DIRS = {
     # Main Event Teams
     "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path.home() / "aiteamforge" / "command" / "kanban",
+    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
 
     # Freelance Projects
@@ -110,66 +125,171 @@ _TEAM_KANBAN_DIRS_DEFAULT = {
     "finance-personal": Path.home() / "finance" / "personal" / "kanban",
 }
 
-def _load_team_kanban_dirs_from_config() -> dict:
-    """Try to load team kanban dirs from ~/.aiteamforge-config (JSON).
-
-    The config file lives at ${AITEAMFORGE_DIR:-~/aiteamforge}/.aiteamforge-config
-    and is written by aiteamforge-setup.sh.
-
-    Expected structure:
-      {
-        "install_dir": "/Users/name/aiteamforge",
-        "team_paths": {
-          "academy": {"working_dir": "/Users/name/aiteamforge/academy", ...},
-          "ios":     {"working_dir": "/path/to/ios", ...},
-          ...
-        }
-      }
-
-    Each team's kanban directory is working_dir + "/kanban".
-
-    Falls back to hardcoded defaults if the config file is missing, unreadable,
-    or missing the team_paths key.
-    """
-    aiteamforge_dir = os.environ.get("AITEAMFORGE_DIR", str(Path.home() / "aiteamforge"))
-    config_path = Path(aiteamforge_dir) / ".aiteamforge-config"
-
-    if not config_path.exists():
-        print(f"[LCARS] TEAM_KANBAN_DIRS: config not found at {config_path} — using hardcoded defaults")
-        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
-
-    try:
-        with open(config_path, "r") as f:
-            config = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        print(f"[LCARS] TEAM_KANBAN_DIRS: failed to read {config_path} ({e}) — using hardcoded defaults")
-        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
-
-    team_paths = config.get("team_paths")
-    if not team_paths or not isinstance(team_paths, dict):
-        print(f"[LCARS] TEAM_KANBAN_DIRS: no 'team_paths' in config — using hardcoded defaults")
-        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
-
-    dirs = {}
-    for team_id, team_info in team_paths.items():
-        if not isinstance(team_info, dict):
-            continue
-        working_dir = team_info.get("working_dir")
-        if not working_dir:
-            continue
-        dirs[team_id] = Path(working_dir) / "kanban"
-
-    if not dirs:
-        print(f"[LCARS] TEAM_KANBAN_DIRS: config has empty team_paths — using hardcoded defaults")
-        return _TEAM_KANBAN_DIRS_DEFAULT.copy()
-
-    print(f"[LCARS] TEAM_KANBAN_DIRS: loaded {len(dirs)} team(s) from {config_path}")
-    return dirs
-
-TEAM_KANBAN_DIRS = _load_team_kanban_dirs_from_config()
-
 # Legacy fallback for backwards compatibility
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
+
+# Archive job tracking
+ARCHIVE_JOBS = {}  # {job_id: {status, progress, message, filename, fileSize, error}}
+ARCHIVE_DIR = Path("/tmp/lcars-archives")
+
+
+def format_bytes_archive(size):
+    """Format bytes to human-readable string"""
+    for unit in ['B', 'KB', 'MB', 'GB']:
+        if size < 1024:
+            return f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def generate_archive(job_id, options):
+    """Generate a tar.gz archive of the dev-team directory (runs in background thread)"""
+    import tarfile
+    from datetime import datetime
+
+    DEV_TEAM_DIR = Path.home() / "dev-team"
+
+    try:
+        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"dev-team-export-{timestamp}.tar.gz"
+        output_path = ARCHIVE_DIR / filename
+
+        ARCHIVE_JOBS[job_id]['message'] = 'Scanning files...'
+        ARCHIVE_JOBS[job_id]['progress'] = 5
+
+        # Build exclusion sets
+        always_exclude_dirs = {'__pycache__', '.DS_Store', '.claude', 'worktrees', 'dev-team-backups'}
+
+        exclude_dirs = set(always_exclude_dirs)
+        if not options.get('includeNodeModules'):
+            exclude_dirs.add('node_modules')
+
+        # Collect files first for progress tracking
+        files_to_archive = []
+        for root, dirs, files in os.walk(DEV_TEAM_DIR):
+            rel_root = Path(root).relative_to(DEV_TEAM_DIR)
+
+            # Skip excluded directories
+            dirs[:] = [
+                d for d in dirs
+                if d not in exclude_dirs
+                and not d.endswith('.egg-info')
+                and not (d == '.git' and not options.get('includeGitHistory'))
+            ]
+
+            for fname in files:
+                if fname == '.DS_Store':
+                    continue
+                if fname.endswith('.pyc'):
+                    continue
+                rel_path = str(rel_root / fname)
+                # Skip archives directory itself
+                abs_path = os.path.join(root, fname)
+                if abs_path.startswith(str(ARCHIVE_DIR)):
+                    continue
+                # Check custom exclusions
+                skip = False
+                for pattern in options.get('customExclusions', []):
+                    if pattern in rel_path:
+                        skip = True
+                        break
+                if not skip:
+                    files_to_archive.append((abs_path, rel_path))
+
+        total_files = len(files_to_archive)
+        ARCHIVE_JOBS[job_id]['message'] = f'Compressing {total_files} files...'
+        ARCHIVE_JOBS[job_id]['progress'] = 10
+
+        # Create tar.gz
+        with tarfile.open(output_path, 'w:gz') as tar:
+            for i, (abs_path, rel_path) in enumerate(files_to_archive):
+                try:
+                    tar.add(abs_path, arcname=f"dev-team/{rel_path}")
+                except (PermissionError, FileNotFoundError) as e:
+                    print(f"[LCARS Archive] Skipped: {rel_path} ({e.__class__.__name__})")
+
+                # Update progress (10% to 90% range)
+                if total_files > 0:
+                    progress = 10 + int((i / total_files) * 80)
+                    if progress != ARCHIVE_JOBS[job_id]['progress']:
+                        ARCHIVE_JOBS[job_id]['progress'] = progress
+                    if i % 500 == 0:
+                        ARCHIVE_JOBS[job_id]['message'] = f'Compressing... ({i}/{total_files} files)'
+
+            # Add manifest.json to archive
+            ARCHIVE_JOBS[job_id]['message'] = 'Writing manifest...'
+            ARCHIVE_JOBS[job_id]['progress'] = 92
+
+            import socket
+            import io
+            manifest = {
+                "version": "1.0",
+                "createdAt": datetime.now().astimezone().isoformat(),
+                "sourceHost": socket.gethostname(),
+                "sourcePath": str(DEV_TEAM_DIR),
+                "totalFiles": total_files,
+                "options": {
+                    "includeGitHistory": options.get('includeGitHistory', False),
+                    "includeNodeModules": options.get('includeNodeModules', False),
+                    "customExclusions": options.get('customExclusions', []),
+                },
+                "pathRemapping": {
+                    "~/dev-team/": "Target dev-team root directory",
+                    "~/dev-team/kanban/": "Academy kanban board data",
+                    "~/dev-team/lcars-ui/": "LCARS web interface",
+                    "~/dev-team/scripts/": "Shell scripts and automation",
+                    "~/dev-team/config/": "Team configuration files",
+                    "~/dev-team/kanban-helpers.sh": "Kanban CLI helper functions",
+                    "~/dev-team/home-scripts/": "Shell profile configurations",
+                },
+                "externalDependencies": {
+                    "distributedKanbanDirs": {
+                        "description": "Teams with kanban data in external directories (not included)",
+                        "dirs": [str(p) for p in TEAM_KANBAN_DIRS.values()
+                                 if not str(p).startswith(str(DEV_TEAM_DIR))]
+                    },
+                    "backupDir": "~/dev-team-backups/kanban (not included)",
+                    "claudeConfig": "~/.claude/ (not included - contains auth tokens)",
+                },
+                "environment": {
+                    "python": "3.x required",
+                    "node": "Required if using integrations",
+                    "homebrew": "Recommended package manager (macOS)",
+                    "tools": ["git", "tmux", "jq", "gh (GitHub CLI)", "claude (Claude Code CLI)"],
+                },
+            }
+
+            manifest_json = json.dumps(manifest, indent=2)
+            manifest_bytes = manifest_json.encode('utf-8')
+
+            manifest_info = tarfile.TarInfo(name="dev-team/ARCHIVE_MANIFEST.json")
+            manifest_info.size = len(manifest_bytes)
+            manifest_info.mtime = int(datetime.now().timestamp())
+            tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
+
+        # Finalize
+        file_size = output_path.stat().st_size
+        ARCHIVE_JOBS[job_id].update({
+            'status': 'completed',
+            'progress': 100,
+            'message': 'Archive ready for download',
+            'filename': filename,
+            'fileSize': format_bytes_archive(file_size),
+            'fileSizeBytes': file_size,
+            'totalFiles': total_files,
+            'manifest': manifest,
+        })
+
+    except Exception as e:
+        ARCHIVE_JOBS[job_id].update({
+            'status': 'failed',
+            'progress': 0,
+            'message': f'Archive failed: {str(e)}',
+            'error': str(e),
+        })
+
 
 def get_board_file(team: str) -> Path:
     """Get the board file path for a team using distributed directories."""
@@ -177,7 +297,7 @@ def get_board_file(team: str) -> Path:
     return kanban_dir / f"{team}-board.json"
 BACKUP_STATUS_FILE = BACKUP_DIR / "backup-status.json"
 UI_DIR = Path(__file__).parent
-CONFIG_DIR = Path.home() / "aiteamforge" / "config"
+CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
 # Team-specific tmp directory — resolved from SESSION_NAME via kanban_utils.
@@ -246,28 +366,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
-    # Compiled pattern for valid resource IDs: alphanumeric, hyphens, underscores only.
-    # Max 128 chars to prevent abuse. No path traversal characters permitted.
-    _RESOURCE_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,128}$')
-
-    @classmethod
-    def _validate_resource_id(cls, value, name='id'):
-        """Validate a release_id or epic_id extracted from a URL path segment.
-
-        Returns None if valid, or an error string describing the problem.
-        Rejects any value containing path traversal sequences or characters
-        outside the alphanumeric/hyphen/underscore set.
-        """
-        if not value:
-            return f"Missing {name}"
-        # Explicit traversal guard (belt-and-suspenders before the regex check)
-        for bad in ('..', '/', '\\'):
-            if bad in value:
-                return f"Invalid {name}: contains disallowed characters"
-        if not cls._RESOURCE_ID_RE.match(value):
-            return f"Invalid {name}: must be alphanumeric with hyphens/underscores, max 128 chars"
-        return None
-
     def do_OPTIONS(self):
         """Handle CORS preflight requests"""
         self.send_response(200)
@@ -323,17 +421,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_create_release()
         elif path.startswith('/api/releases/') and path.endswith('/items'):
             release_id = path.replace('/api/releases/', '').replace('/items', '')
-            err = self._validate_resource_id(release_id, 'release_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_assign_item_to_release(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
-            err = self._validate_resource_id(release_id, 'release_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_promote_release(release_id)
         elif path == '/api/releases/flow-config':
             self.handle_update_flow_config()
@@ -344,10 +434,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_create_epic()
         elif path.startswith('/api/epics/') and path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '').replace('/items', '')
-            err = self._validate_resource_id(epic_id, 'epic_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_assign_item_to_epic(epic_id)
         # Todo API endpoints
         elif path == '/api/todos':
@@ -368,6 +454,39 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_resolve_calendar_conflict()
         elif path == '/api/terminal/activate':
             self.handle_terminal_activate()
+        # Archive API endpoints
+        elif path == '/api/archive/create':
+            self.handle_create_archive()
+        elif path == '/api/archive/checklist':
+            self.handle_generate_checklist()
+        # RAG Engine API endpoints
+        elif path == '/api/rag-engines/save':
+            self.handle_rag_engine_save()
+        elif path == '/api/rag-engines/delete':
+            self.handle_rag_engine_delete()
+        elif path == '/api/rag-engines/install':
+            self.handle_rag_engine_install()
+        elif path == '/api/rag-engines/uninstall':
+            self.handle_rag_engine_uninstall()
+        elif path == '/api/rag-engines/start':
+            self.handle_rag_engine_start()
+        elif path == '/api/rag-engines/stop':
+            self.handle_rag_engine_stop()
+        elif path == '/api/rag-engines/health':
+            self.handle_rag_engine_health()
+        elif path == '/api/rag-engines/configure':
+            self.handle_rag_engine_configure()
+        elif path == '/api/rag-engines/check-updates':
+            self.handle_rag_engine_check_updates()
+        elif path == '/api/rag-engines/update':
+            self.handle_rag_engine_update()
+        # Graph API endpoints
+        elif path == '/api/graph/data':
+            self.handle_graph_data()
+        elif path == '/api/graph/query':
+            self.handle_graph_query()
+        elif path == '/api/graph/node':
+            self.handle_graph_node()
         else:
             self.send_error(404, f"Unknown POST endpoint: {path}")
 
@@ -385,18 +504,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '')
-            err = self._validate_resource_id(release_id, 'release_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_update_release(release_id)
         # Epic API endpoints
         elif path.startswith('/api/epics/') and not path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '')
-            err = self._validate_resource_id(epic_id, 'epic_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_update_epic(epic_id)
         # Todo API endpoints
         elif path == '/api/todos':
@@ -418,10 +529,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Release API endpoints
         if path.startswith('/api/releases/') and path.endswith('/archive'):
             release_id = path.replace('/api/releases/', '').replace('/archive', '')
-            err = self._validate_resource_id(release_id, 'release_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_toggle_release_archive(release_id)
         else:
             self.send_error(404, f"Unknown PATCH endpoint: {path}")
@@ -443,23 +550,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             parts = path.replace('/api/releases/', '').split('/items/')
             if len(parts) == 2:
                 release_id, item_id = parts
-                err = self._validate_resource_id(release_id, 'release_id')
-                if err:
-                    self.send_error(400, err)
-                    return
-                err = self._validate_resource_id(item_id, 'item_id')
-                if err:
-                    self.send_error(400, err)
-                    return
                 self.handle_remove_item_from_release(release_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
         elif path.startswith('/api/releases/'):
             release_id = path.replace('/api/releases/', '')
-            err = self._validate_resource_id(release_id, 'release_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_archive_release(release_id)
         # Epic API endpoints
         elif path.startswith('/api/epics/') and '/items/' in path:
@@ -467,23 +562,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             parts = path.replace('/api/epics/', '').split('/items/')
             if len(parts) == 2:
                 epic_id, item_id = parts
-                err = self._validate_resource_id(epic_id, 'epic_id')
-                if err:
-                    self.send_error(400, err)
-                    return
-                err = self._validate_resource_id(item_id, 'item_id')
-                if err:
-                    self.send_error(400, err)
-                    return
                 self.handle_remove_item_from_epic(epic_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
         elif path.startswith('/api/epics/'):
             epic_id = path.replace('/api/epics/', '')
-            err = self._validate_resource_id(epic_id, 'epic_id')
-            if err:
-                self.send_error(400, err)
-                return
             self.handle_delete_epic(epic_id)
         # Todo API endpoints
         elif path == '/api/todos':
@@ -560,6 +643,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                         print(f"[LCARS] Updated collapsed: {old_value} -> {collapsed} for {item_id}")
 
+                        actual_item_id = data['backlog'][index].get('id', str(item_id))
+                        if old_value != collapsed:
+                            log_activity("collapsed_toggled", actual_item_id, "item",
+                                         field="collapsed",
+                                         old_value=str(old_value),
+                                         new_value=str(collapsed))
+
                         self.send_response(200)
                         self.send_header('Content-Type', 'application/json')
                         self.send_header('Access-Control-Allow-Origin', '*')
@@ -629,6 +719,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         old_release_assignment = item.get('releaseAssignment')
                         old_release_id = old_release_assignment.get('releaseId') if old_release_assignment else None
 
+                        # Snapshot old field values BEFORE applying updates (for activity logging)
+                        old_values = {key: item.get(key) for key in updates}
+                        old_tags = list(item.get('tags', []))
+
                         # Apply updates
                         for key, value in updates.items():
                             data['backlog'][index][key] = value
@@ -642,6 +736,51 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         data['lastUpdated'] = self._get_timestamp()
 
                         self._atomic_write_json(board_file, data)
+
+                        # Log activity for each changed field
+                        for key, new_val in updates.items():
+                            old_val = old_values.get(key)
+                            if old_val == new_val:
+                                continue
+                            if key == 'status':
+                                log_activity("status_change", actual_item_id, "item",
+                                             field="status",
+                                             old_value=str(old_val) if old_val is not None else None,
+                                             new_value=str(new_val) if new_val is not None else None)
+                            elif key == 'title':
+                                log_activity("field_update", actual_item_id, "item",
+                                             field="title",
+                                             old_value=str(old_val) if old_val is not None else None,
+                                             new_value=str(new_val) if new_val is not None else None)
+                            elif key == 'priority':
+                                log_activity("field_update", actual_item_id, "item",
+                                             field="priority",
+                                             old_value=str(old_val) if old_val is not None else None,
+                                             new_value=str(new_val) if new_val is not None else None)
+                            elif key == 'description':
+                                old_str = str(old_val)[:100] if old_val is not None else None
+                                new_str = str(new_val)[:100] if new_val is not None else None
+                                log_activity("field_update", actual_item_id, "item",
+                                             field="description",
+                                             old_value=old_str,
+                                             new_value=new_str)
+                            elif key == 'tags':
+                                new_tags = new_val if isinstance(new_val, list) else []
+                                for tag in new_tags:
+                                    if tag not in old_tags:
+                                        log_activity("tag_added", actual_item_id, "item",
+                                                     field="tags",
+                                                     new_value=str(tag))
+                                for tag in old_tags:
+                                    if tag not in new_tags:
+                                        log_activity("tag_removed", actual_item_id, "item",
+                                                     field="tags",
+                                                     old_value=str(tag))
+                            else:
+                                log_activity("field_update", actual_item_id, "item",
+                                             field=key,
+                                             old_value=str(old_val) if old_val is not None else None,
+                                             new_value=str(new_val) if new_val is not None else None)
 
                         # Check new release assignment after updates
                         new_release_assignment = data['backlog'][index].get('releaseAssignment')
@@ -712,6 +851,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         self.send_error(400, f"Subitem not found: {parent_index}.{sub_index}")
                         return
 
+                    subitem = parent_item['subitems'][sub_index]
+                    actual_subitem_id = subitem.get('id', f"{parent_index}.{sub_index}")
+
+                    # Snapshot old field values BEFORE applying updates (for activity logging)
+                    old_subitem_values = {key: subitem.get(key) for key in updates}
+
                     # Apply updates to subitem
                     for key, value in updates.items():
                         data['backlog'][parent_index]['subitems'][sub_index][key] = value
@@ -727,6 +872,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     data['lastUpdated'] = self._get_timestamp()
 
                     self._atomic_write_json(board_file, data)
+
+                    # Log activity for each changed subitem field
+                    for key, new_val in updates.items():
+                        old_val = old_subitem_values.get(key)
+                        if old_val == new_val:
+                            continue
+                        if key == 'status':
+                            log_activity("subitem_status_change", actual_subitem_id, "subitem",
+                                         field="status",
+                                         old_value=str(old_val) if old_val is not None else None,
+                                         new_value=str(new_val) if new_val is not None else None)
+                        elif key == 'title':
+                            log_activity("field_update", actual_subitem_id, "subitem",
+                                         field="title",
+                                         old_value=str(old_val) if old_val is not None else None,
+                                         new_value=str(new_val) if new_val is not None else None)
+                        elif key == 'description':
+                            old_str = str(old_val)[:100] if old_val is not None else None
+                            new_str = str(new_val)[:100] if new_val is not None else None
+                            log_activity("field_update", actual_subitem_id, "subitem",
+                                         field="description",
+                                         old_value=old_str,
+                                         new_value=new_str)
+                        else:
+                            log_activity("field_update", actual_subitem_id, "subitem",
+                                         field=key,
+                                         old_value=str(old_val) if old_val is not None else None,
+                                         new_value=str(new_val) if new_val is not None else None)
 
                     # Sync parent item to release manifest if it has a release assignment
                     parent_release = parent_item.get('releaseAssignment')
@@ -1646,6 +1819,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'XFAP': TEAM_KANBAN_DIRS.get('freelance-doublenode-appplanning'),
             'XFWS': TEAM_KANBAN_DIRS.get('freelance-doublenode-workstats'),
             'XFLB': TEAM_KANBAN_DIRS.get('freelance-doublenode-lifeboard'),
+            'XVAN': TEAM_KANBAN_DIRS.get('freelance-doublenode-caravan'),
+            'XFAS': TEAM_KANBAN_DIRS.get('freelance-doublenode-awaysentry'),
+            'XFLA': TEAM_KANBAN_DIRS.get('freelance-liquidstyle-agentbadges-app'),
+            'XFLI': TEAM_KANBAN_DIRS.get('freelance-liquidstyle-agentbadges-ios'),
             'XFIN': TEAM_KANBAN_DIRS.get('finance-personal'),
         }
 
@@ -1694,6 +1871,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         'XFAP': 'freelance-doublenode-appplanning',
         'XFWS': 'freelance-doublenode-workstats',
         'XFLB': 'freelance-doublenode-lifeboard',
+        'XVAN': 'freelance-doublenode-caravan',
+        'XFAS': 'freelance-doublenode-awaysentry',
+        'XFLA': 'freelance-liquidstyle-agentbadges-app',
+        'XFLI': 'freelance-liquidstyle-agentbadges-ios',
         # Legal projects
         'XLCP': 'legal-coparenting',
         # Finance projects
@@ -1916,14 +2097,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """
         main_event_base = Path("/Users/Shared/Development/Main Event")
 
-        # Static team base paths fallback (used only when team not found in TEAM_KANBAN_DIRS)
+        # Static team base paths (Main Event platform teams and infrastructure)
         team_base_paths = {
             'academy': Path.home() / "dev-team" / "kanban",
-            'ios': main_event_base / "MainEventApp-iOS" / "kanban",
-            'android': main_event_base / "MainEventApp-Android" / "kanban",
-            'firebase': main_event_base / "MainEventApp-Functions" / "kanban",
-            'command': Path.home() / "aiteamforge" / "command" / "kanban",
-            'dns': Path("/Users/Shared/Development/DNSFramework") / "kanban",
+            'ios': main_event_base / "MainEventApp-iOS" / "DEV" / "dev-team" / "kanban",
+            'android': main_event_base / "MainEventApp-Android" / "develop" / "dev-team" / "kanban",
+            'firebase': main_event_base / "MainEventApp-Functions" / "develop" / "dev-team" / "kanban",
+            'command': main_event_base / "dev-team" / "kanban",
+            'dns': Path("/Users/Shared/Development/DNSFramework") / "dev-team" / "kanban",
         }
 
         # PRIORITY 1: Use canonical TEAM_KANBAN_DIRS mapping (source of truth)
@@ -1956,7 +2137,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if project_dir:
                 return Path(project_dir) / "kanban" / subdir
             # Fallback to Main Event base directory
-            return main_event_base / "aiteamforge" / "kanban" / subdir
+            return main_event_base / "dev-team" / "kanban" / subdir
 
         # PRIORITY 3: Use static team_base_paths for known teams
         return team_base_paths.get(team, team_base_paths['academy']) / subdir
@@ -4119,6 +4300,85 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # CALENDAR SYNC API
     # =========================================================================
 
+    def serve_activity_log(self, item_id, query_string=''):
+        """GET /api/kanban/<item-id>/activity - Read activity log entries for an item
+
+        Query parameters:
+            limit  (int)    -- max entries to return
+            offset (int)    -- skip N entries (pagination)
+            action (string) -- filter by action type (e.g. "status_change")
+            agent  (string) -- filter by agent handle
+            subitem (string) -- filter to a specific subitem ID
+        """
+        import re
+        from urllib.parse import parse_qs
+        try:
+            # Validate item_id format to prevent path traversal
+            if not re.match(r'^X[A-Z]{2,4}-\d{4}$', item_id):
+                self.send_response(400)
+                self.send_header('Content-Type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "Invalid item ID format"}).encode())
+                return
+
+            params = parse_qs(query_string) if query_string else {}
+
+            # Parse optional query parameters
+            limit_raw = params.get('limit', [None])[0]
+            offset_raw = params.get('offset', [None])[0]
+            action_filter = params.get('action', [None])[0]
+            agent_filter = params.get('agent', [None])[0]
+            subitem_filter = params.get('subitem', [None])[0]
+
+            limit = int(limit_raw) if limit_raw is not None else None
+            offset = int(offset_raw) if offset_raw is not None else 0
+
+            # Get all filtered entries (no pagination) to compute counts
+            all_filtered = read_activity_log(
+                item_id,
+                limit=None,
+                offset=0,
+                action_filter=action_filter,
+                agent_filter=agent_filter,
+                subitem_filter=subitem_filter,
+            )
+
+            all_entries = all_filtered.get("entries", [])
+            filtered_count = len(all_entries)
+
+            # Compute total (unfiltered) entry count if we have metadata
+            total_entries = all_filtered.get("totalEntries", filtered_count)
+            # If no filters were applied, filtered == total
+            if action_filter is None and agent_filter is None and subitem_filter is None:
+                total_entries = filtered_count
+
+            # Apply pagination manually so we can return accurate counts
+            paginated_entries = all_entries[offset:]
+            if limit is not None:
+                paginated_entries = paginated_entries[:limit]
+
+            response = dict(all_filtered)
+            response["entries"] = paginated_entries
+            response["itemId"] = all_filtered.get("itemId", item_id)
+            response["totalEntries"] = total_entries
+            response["filteredEntries"] = filtered_count
+            response["limit"] = limit
+            response["offset"] = offset
+
+            self._send_json_response(response)
+
+        except ValueError as e:
+            self._send_json_response({
+                "error": f"Invalid query parameter: {e}",
+                "itemId": item_id
+            }, status=400)
+        except Exception as e:
+            print(f"[LCARS] ERROR reading activity log for {item_id}: {e}")
+            self._send_json_response({
+                "error": str(e),
+                "itemId": item_id
+            }, status=500)
+
     def serve_plan_exists(self, item_id):
         """GET /api/kanban/<item-id>/plan-exists - Check if plan document exists for item"""
         try:
@@ -5086,6 +5346,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_backup_status()
         elif path == '/api/integrations':
             self.serve_integrations_list()
+        elif path == '/api/rag-engines':
+            self.serve_rag_engines_list()
+        elif path == '/api/rag-engines/summary':
+            self.serve_rag_engines_summary()
+        elif path.startswith('/api/rag-engines/log'):
+            self.serve_rag_engine_log()
+        elif path == '/api/graph/engines':
+            self.serve_graph_engines()
         elif path == '/api/sync/status':
             self.serve_sync_status()
         elif path == '/api/backup-files':
@@ -5119,6 +5387,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Todo API endpoints
         elif path == '/api/todos':
             self.serve_todos_list(parsed.query)
+        # Kanban activity log API
+        elif path.startswith('/api/kanban/') and path.endswith('/activity'):
+            item_id = path.replace('/api/kanban/', '').replace('/activity', '')
+            self.serve_activity_log(item_id, parsed.query)
         # Kanban plan document API
         elif path.startswith('/api/kanban/') and path.endswith('/plan-exists'):
             item_id = path.replace('/api/kanban/', '').replace('/plan-exists', '')
@@ -5160,6 +5432,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Knowledge Base analytics endpoint
         elif path == '/api/knowledge-stats':
             self.serve_knowledge_stats()
+        # Archive API endpoints
+        elif path.startswith('/api/archive/status/'):
+            job_id = path.replace('/api/archive/status/', '')
+            self.serve_archive_status(job_id)
+        elif path.startswith('/api/archive/download/'):
+            job_id = path.replace('/api/archive/download/', '')
+            self.serve_archive_download(job_id)
         # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
         # This allows the router to work from ANY port - startup scripts write
         # the target team to the static file, and all servers serve the same file.
@@ -5261,6 +5540,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'freelance-doublenode-starwords': 'freelance',
             'freelance-doublenode-appplanning': 'freelance',
             'freelance-doublenode-lifeboard': 'freelance',
+            'freelance-doublenode-caravan': 'freelance',
+            'freelance-doublenode-awaysentry': 'freelance',
+            'freelance-liquidstyle-agentbadges-app': 'freelance',
+            'freelance-liquidstyle-agentbadges-ios': 'freelance',
             'freelance-workstats': 'freelance',
             'freelance-starwords': 'freelance',
             'freelance-appplanning': 'freelance',
@@ -5268,7 +5551,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         team_dir = team_dir_map.get(team, team)
 
         # Build the actual file path
-        dev_team_dir = Path.home() / "aiteamforge"
+        dev_team_dir = Path.home() / "dev-team"
         if img_type == 'logo':
             # Logos: {team}/terminals/logos/{team}_{terminal}_logo.png
             base_dir = dev_team_dir / team_dir / "terminals" / "logos"
@@ -5748,6 +6031,1138 @@ end tell
                 "error": str(e)
             })
 
+    def serve_rag_engines_list(self):
+        """Serve GET /api/rag-engines — list of configured RAG engines"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "engines": [],
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            manager = get_rag_manager()
+            engines = manager.list_engines()
+            registered_types = manager.get_registered_types()
+
+            # Enrich running engines with content stats
+            for engine_dict in engines:
+                if engine_dict.get('status') == 'running':
+                    provider = manager.get_engine(engine_dict['id'])
+                    if provider:
+                        stats = provider.get_content_stats()
+                        if stats:
+                            engine_dict['contentStats'] = stats
+
+            self._send_json_response({
+                "engines": engines,
+                "registeredTypes": registered_types
+            })
+        except Exception as e:
+            self._send_json_response({
+                "engines": [],
+                "error": str(e)
+            })
+
+    def serve_rag_engines_summary(self):
+        """Serve GET /api/rag-engines/summary — lightweight summary for HOME carousel panels"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({"engines": [], "total": 0})
+            return
+
+        try:
+            manager = get_rag_manager()
+            engines = manager.list_engines()
+            summary = []
+
+            for engine_dict in engines:
+                if not engine_dict.get('enabled', False):
+                    continue
+
+                entry = {
+                    "id": engine_dict.get("id", ""),
+                    "name": engine_dict.get("name", ""),
+                    "type": engine_dict.get("type", ""),
+                    "status": engine_dict.get("status", "unknown"),
+                    "port": engine_dict.get("port", 0),
+                }
+
+                # Add content stats for running engines
+                if engine_dict.get('status') == 'running':
+                    provider = manager.get_engine(engine_dict['id'])
+                    if provider:
+                        stats = provider.get_content_stats()
+                        if stats:
+                            entry['contentStats'] = stats
+                        health = provider.health_check()
+                        if health:
+                            entry['health'] = health.to_dict() if hasattr(health, 'to_dict') else health
+
+                summary.append(entry)
+
+            self._send_json_response({
+                "engines": summary,
+                "total": len(summary),
+                "activeCount": sum(1 for e in summary if e.get("status") == "running")
+            })
+        except Exception as e:
+            self._send_json_response({"engines": [], "total": 0, "error": str(e)})
+
+    def handle_rag_engine_save(self):
+        """Handle POST /api/rag-engines/save — add or update a RAG engine config"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_data = post_data.get('engine')
+            if not engine_data or not engine_data.get('id'):
+                self._send_json_response({
+                    "success": False,
+                    "error": "Invalid engine data"
+                })
+                return
+
+            manager = get_rag_manager()
+            saved = manager.save_engine(engine_data)
+            if not saved:
+                self._send_json_response({
+                    "success": False,
+                    "error": "Failed to save engine configuration"
+                })
+                return
+
+            manager.reload()
+            self._send_json_response({"success": True})
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_delete(self):
+        """Handle POST /api/rag-engines/delete — remove a RAG engine config"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_id = post_data.get('engineId')
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            deleted = manager.delete_engine(engine_id)
+            if not deleted:
+                self._send_json_response({
+                    "success": False,
+                    "error": f"Engine '{engine_id}' not found"
+                })
+                return
+
+            self._send_json_response({"success": True})
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_install(self):
+        """Handle POST /api/rag-engines/install — install a RAG engine"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_id = post_data.get('engineId')
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            progress = manager.install_engine(engine_id)
+            self._send_json_response(progress.to_dict())
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_uninstall(self):
+        """Handle POST /api/rag-engines/uninstall — uninstall a RAG engine"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_id = post_data.get('engineId')
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            status = manager.uninstall_engine(engine_id)
+            self._send_json_response(status.to_dict())
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_start(self):
+        """Handle POST /api/rag-engines/start — start a RAG engine service"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_id = post_data.get('engineId')
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            status = manager.start_engine(engine_id)
+            self._send_json_response(status.to_dict())
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_stop(self):
+        """Handle POST /api/rag-engines/stop — stop a RAG engine service"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_id = post_data.get('engineId')
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            status = manager.stop_engine(engine_id)
+            self._send_json_response(status.to_dict())
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_health(self):
+        """Handle POST /api/rag-engines/health — check health of one or all RAG engines"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+            engine_id = post_data.get('engineId')  # Optional — None checks all
+
+            manager = get_rag_manager()
+            results = manager.health_check(engine_id)
+            self._send_json_response({
+                "results": {eid: s.to_dict() for eid, s in results.items()}
+            })
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_configure(self):
+        """Handle POST /api/rag-engines/configure — apply settings to a RAG engine"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers['Content-Length'])
+            post_data = json.loads(self.rfile.read(content_length))
+
+            engine_id = post_data.get('engineId')
+            settings = post_data.get('settings', {})
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            engine = manager.get_engine(engine_id)
+            if not engine:
+                self._send_json_response({
+                    "success": False,
+                    "error": f"Engine '{engine_id}' not found"
+                })
+                return
+
+            status = engine.configure(settings)
+            self._send_json_response(status.to_dict())
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    # Simple in-memory cache for PyPI version check results.
+    # Key: engine_id, Value: {"timestamp": float, "result": dict}
+    _update_check_cache: dict = {}
+    _UPDATE_CHECK_TTL = 300  # 5 minutes in seconds
+
+    def handle_rag_engine_check_updates(self):
+        """Handle POST /api/rag-engines/check-updates — check PyPI for newer versions"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            import time as _time
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+            engine_id = post_data.get('engineId')  # Optional — None = check all
+
+            manager = get_rag_manager()
+            now = _time.time()
+            results = {}
+
+            engines_to_check = (
+                {engine_id: manager.get_engine(engine_id)}
+                if engine_id
+                else {e.id: e for e in manager.get_all_engines()}
+            )
+
+            for eid, engine in engines_to_check.items():
+                if engine is None:
+                    results[eid] = {"error": f"Engine '{eid}' not found"}
+                    continue
+
+                # Use cached result if still fresh
+                cache_entry = LCARSHandler._update_check_cache.get(eid)
+                if cache_entry and (now - cache_entry["timestamp"]) < LCARSHandler._UPDATE_CHECK_TTL:
+                    results[eid] = cache_entry["result"]
+                    continue
+
+                update_info = engine.check_for_updates()
+                LCARSHandler._update_check_cache[eid] = {
+                    "timestamp": now,
+                    "result": update_info
+                }
+                results[eid] = update_info
+
+            self._send_json_response({"results": results})
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def handle_rag_engine_update(self):
+        """Handle POST /api/rag-engines/update — upgrade an engine package to latest PyPI version"""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({
+                "success": False,
+                "error": "RAG engines module not available"
+            })
+            return
+
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+            engine_id = post_data.get('engineId')
+            if not engine_id:
+                self._send_json_response({
+                    "success": False,
+                    "error": "No engineId provided"
+                })
+                return
+
+            manager = get_rag_manager()
+            engine = manager.get_engine(engine_id)
+            if not engine:
+                self._send_json_response({
+                    "success": False,
+                    "error": f"Engine '{engine_id}' not found"
+                })
+                return
+
+            status = engine.update()
+
+            # Invalidate the update-check cache for this engine so fresh info shows next check
+            LCARSHandler._update_check_cache.pop(engine_id, None)
+
+            self._send_json_response(status.to_dict())
+        except Exception as e:
+            self._send_json_response({
+                "success": False,
+                "error": str(e)
+            })
+
+    def serve_rag_engine_log(self):
+        """Serve GET /api/rag-engines/log?engineId=X — read stderr log file for an engine"""
+        import re
+        from urllib.parse import urlparse, parse_qs
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        engine_id = params.get('engineId', [None])[0]
+
+        if not engine_id:
+            self._send_json_response({"error": "No engineId provided"})
+            return
+
+        # Sanitize engineId to prevent path traversal
+        if not re.match(r'^[a-zA-Z0-9_-]+$', engine_id):
+            self._send_json_response({"error": "Invalid engineId"})
+            return
+
+        log_path = os.path.join(
+            os.path.expanduser("~"), "rag-data", "logs", f"{engine_id}-stderr.log"
+        )
+
+        if not os.path.exists(log_path):
+            self._send_json_response({
+                "content": "(no log file found — engine may not have been started yet)",
+                "path": log_path
+            })
+            return
+
+        try:
+            with open(log_path, 'r') as f:
+                # Read last 50KB to avoid serving huge logs
+                f.seek(0, 2)
+                size = f.tell()
+                if size > 50000:
+                    f.seek(size - 50000)
+                    f.readline()  # skip partial first line
+                else:
+                    f.seek(0)
+                content = f.read()
+
+            self._send_json_response({
+                "content": content,
+                "path": log_path,
+                "size": size
+            })
+        except Exception as e:
+            self._send_json_response({"error": f"Failed to read log: {e}"})
+
+    # -------------------------------------------------------------------------
+    # Graph API handlers
+    # -------------------------------------------------------------------------
+
+    def _generate_demo_graph(self):
+        """Generate demo graph data for when no engines are available."""
+        from datetime import datetime, timezone
+        return {
+            'nodes': [
+                {'id': 'n1', 'label': 'Knowledge Graph', 'type': 'concept', 'group': 'core',
+                 'properties': {'description': 'Demo node - connect a RAG engine to see real data'}},
+                {'id': 'n2', 'label': 'LightRAG', 'type': 'engine', 'group': 'engine',
+                 'properties': {'port': 9621}},
+                {'id': 'n3', 'label': 'Code-Graph-RAG', 'type': 'engine', 'group': 'engine',
+                 'properties': {'port': 9622}},
+                {'id': 'n4', 'label': 'RAG-Anything', 'type': 'engine', 'group': 'engine',
+                 'properties': {}},
+                {'id': 'n5', 'label': 'Entities', 'type': 'concept', 'group': 'data',
+                 'properties': {}},
+                {'id': 'n6', 'label': 'Relationships', 'type': 'concept', 'group': 'data',
+                 'properties': {}},
+                {'id': 'n7', 'label': 'Documents', 'type': 'source', 'group': 'data',
+                 'properties': {}},
+                {'id': 'n8', 'label': 'Source Code', 'type': 'source', 'group': 'data',
+                 'properties': {}},
+            ],
+            'edges': [
+                {'id': 'e1', 'source': 'n1', 'target': 'n5', 'label': 'CONTAINS', 'properties': {}},
+                {'id': 'e2', 'source': 'n1', 'target': 'n6', 'label': 'CONTAINS', 'properties': {}},
+                {'id': 'e3', 'source': 'n2', 'target': 'n1', 'label': 'BUILDS', 'properties': {}},
+                {'id': 'e4', 'source': 'n3', 'target': 'n1', 'label': 'BUILDS', 'properties': {}},
+                {'id': 'e5', 'source': 'n4', 'target': 'n1', 'label': 'BUILDS', 'properties': {}},
+                {'id': 'e6', 'source': 'n7', 'target': 'n5', 'label': 'EXTRACTED_FROM', 'properties': {}},
+                {'id': 'e7', 'source': 'n8', 'target': 'n5', 'label': 'EXTRACTED_FROM', 'properties': {}},
+                {'id': 'e8', 'source': 'n5', 'target': 'n6', 'label': 'LINKED_BY', 'properties': {}},
+            ],
+            'engine': 'demo',
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+            'message': 'Demo graph - connect and start a RAG engine to visualize real knowledge graph data'
+        }
+
+    def _normalize_lightrag_graph(self, raw, engine_id, limit=200):
+        """Normalize LightRAG /graphs response into {nodes, edges} format."""
+        from datetime import datetime, timezone
+        nodes = []
+        edges = []
+
+        # LightRAG returns graph data — structure varies by version.
+        # Common shapes: {nodes: [...], edges: [...]} or {vertices: [...], edges: [...]}
+        raw_nodes = raw.get('nodes') or raw.get('vertices') or []
+        raw_edges = raw.get('edges') or raw.get('relationships') or []
+
+        for i, n in enumerate(raw_nodes[:limit]):
+            node_id = str(n.get('id') or n.get('entity_name') or f'n{i}')
+            nodes.append({
+                'id': node_id,
+                'label': str(n.get('label') or n.get('entity_name') or n.get('name') or node_id),
+                'type': str(n.get('type') or n.get('entity_type') or 'entity'),
+                'group': str(n.get('group') or n.get('cluster') or 'default'),
+                'properties': {k: v for k, v in n.items()
+                               if k not in ('id', 'entity_name', 'label', 'type', 'group')},
+            })
+
+        for i, e in enumerate(raw_edges[:limit]):
+            src = str(e.get('source') or e.get('src') or e.get('src_id') or '')
+            tgt = str(e.get('target') or e.get('dst') or e.get('tgt_id') or '')
+            if not src or not tgt:
+                continue
+            edges.append({
+                'id': str(e.get('id') or f'e{i}'),
+                'source': src,
+                'target': tgt,
+                'label': str(e.get('label') or e.get('relation') or e.get('type') or 'RELATED'),
+                'properties': {k: v for k, v in e.items()
+                               if k not in ('id', 'source', 'src', 'src_id', 'target', 'dst',
+                                            'tgt_id', 'label', 'relation', 'type')},
+            })
+
+        return {
+            'nodes': nodes,
+            'edges': edges,
+            'engine': engine_id,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _normalize_bolt_graph(self, records, engine_id):
+        """Normalize neo4j/Memgraph Bolt query results into {nodes, edges} format."""
+        from datetime import datetime, timezone
+        nodes = {}
+        edges = []
+
+        for record in records:
+            for key in record.keys():
+                val = record[key]
+                # Node
+                if hasattr(val, 'id') and hasattr(val, 'labels'):
+                    node_id = str(val.id)
+                    if node_id not in nodes:
+                        labels = list(val.labels) if val.labels else []
+                        props = dict(val.items()) if hasattr(val, 'items') else {}
+                        nodes[node_id] = {
+                            'id': node_id,
+                            'label': props.get('name') or props.get('label') or (labels[0] if labels else node_id),
+                            'type': labels[0] if labels else 'node',
+                            'group': labels[0] if labels else 'default',
+                            'properties': props,
+                        }
+                # Relationship
+                elif hasattr(val, 'id') and hasattr(val, 'type') and hasattr(val, 'start_node'):
+                    props = dict(val.items()) if hasattr(val, 'items') else {}
+                    edges.append({
+                        'id': str(val.id),
+                        'source': str(val.start_node.id),
+                        'target': str(val.end_node.id),
+                        'label': str(val.type),
+                        'properties': props,
+                    })
+
+        return {
+            'nodes': list(nodes.values()),
+            'edges': edges,
+            'engine': engine_id,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+
+    def serve_graph_engines(self):
+        """Handle GET /api/graph/engines — list available graph-capable engines."""
+        if not RAG_ENGINES_AVAILABLE:
+            self._send_json_response({'engines': []})
+            return
+
+        try:
+            manager = get_rag_manager()
+            engines = []
+            for engine in manager.get_all_engines():
+                status = engine.get_status()
+                engines.append({
+                    'id': engine.id,
+                    'name': engine.name,
+                    'type': engine.engine_type,
+                    'status': status.status,
+                    'port': engine.port,
+                })
+            self._send_json_response({'engines': engines})
+        except Exception as e:
+            self._send_json_response({'engines': [], 'error': str(e)})
+
+    def handle_graph_data(self):
+        """Handle POST /api/graph/data — fetch graph data from a specific engine."""
+        from datetime import datetime, timezone
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+            engine_id = body.get('engineId', '')
+            limit = max(1, min(int(body.get('limit', 200)), 5000))
+
+            if not engine_id:
+                self._send_json_response({'error': 'engineId is required'})
+                return
+
+            # Try to get engine info from RAG manager
+            port = None
+            engine_type = 'unknown'
+            if RAG_ENGINES_AVAILABLE:
+                try:
+                    manager = get_rag_manager()
+                    engine = manager.get_engine(engine_id)
+                    if engine:
+                        port = getattr(engine, 'port', None)
+                        engine_type = getattr(engine, 'engine_type', 'unknown')
+                except Exception:
+                    pass
+
+            # LightRAG REST API path
+            if engine_type in ('lightrag', 'light_rag') and port:
+                try:
+                    query_param = body.get('query', '*')
+                    url = f'http://localhost:{port}/graphs?label={urllib.parse.quote(query_param)}&max_depth=3'
+                    req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        raw = json.loads(resp.read().decode('utf-8'))
+                    result = self._normalize_lightrag_graph(raw, engine_id, limit)
+                    self._send_json_response(result)
+                    return
+                except Exception as e:
+                    self._send_json_response({
+                        'nodes': [], 'edges': [], 'engine': engine_id,
+                        'error': f'LightRAG API error: {e}'
+                    })
+                    return
+
+            # Memgraph/Neo4j Bolt path (Code-Graph-RAG, RAG-Anything)
+            if engine_type in ('code_graph_rag', 'rag_anything', 'memgraph') and BOLT_AVAILABLE:
+                try:
+                    from neo4j import GraphDatabase
+                    bolt_port = port or 7687
+                    bolt_url = f'bolt://localhost:{bolt_port}'
+                    driver = GraphDatabase.driver(bolt_url, auth=('', ''))
+                    with driver.session() as session:
+                        result = session.run(
+                            'MATCH (n) OPTIONAL MATCH (n)-[r]->(m) RETURN n, r, m LIMIT $limit',
+                            limit=limit
+                        )
+                        records = list(result)
+                    driver.close()
+                    graph = self._normalize_bolt_graph(records, engine_id)
+                    self._send_json_response(graph)
+                    return
+                except Exception as e:
+                    demo = self._generate_demo_graph()
+                    demo['message'] = f'Bolt connection unavailable: {e}'
+                    self._send_json_response(demo)
+                    return
+
+            # Fallback: demo data
+            demo = self._generate_demo_graph()
+            if not RAG_ENGINES_AVAILABLE:
+                demo['message'] = 'RAG engines module not available — showing demo graph'
+            else:
+                demo['message'] = f'Engine "{engine_id}" not available or graph data not supported — showing demo graph'
+            self._send_json_response(demo)
+
+        except Exception as e:
+            self._send_json_response({'error': str(e), 'nodes': [], 'edges': []})
+
+    def handle_graph_query(self):
+        """Handle POST /api/graph/query — run RAG query and return relevant subgraph."""
+        from datetime import datetime, timezone
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+            engine_id = body.get('engineId', '')
+            query = body.get('query', '')
+            mode = body.get('mode', 'hybrid')
+
+            # Validate mode against allowlist
+            allowed_modes = ('local', 'global', 'hybrid', 'naive')
+            if mode not in allowed_modes:
+                mode = 'hybrid'
+
+            if not engine_id or not query:
+                self._send_json_response({'error': 'engineId and query are required'})
+                return
+
+            # Try to get engine info
+            port = None
+            engine_type = 'unknown'
+            if RAG_ENGINES_AVAILABLE:
+                try:
+                    manager = get_rag_manager()
+                    engine = manager.get_engine(engine_id)
+                    if engine:
+                        port = getattr(engine, 'port', None)
+                        engine_type = getattr(engine, 'engine_type', 'unknown')
+                except Exception:
+                    pass
+
+            # LightRAG REST query
+            if engine_type in ('lightrag', 'light_rag') and port:
+                try:
+                    query_url = f'http://localhost:{port}/query'
+                    payload = json.dumps({'query': query, 'mode': mode}).encode('utf-8')
+                    req = urllib.request.Request(
+                        query_url,
+                        data=payload,
+                        headers={'Content-Type': 'application/json', 'Accept': 'application/json'},
+                        method='POST'
+                    )
+                    with urllib.request.urlopen(req, timeout=120) as resp:
+                        raw = json.loads(resp.read().decode('utf-8'))
+
+                    answer = raw.get('response') or raw.get('answer') or raw.get('result') or ''
+
+                    # Try to fetch subgraph after query
+                    graph_data = {'nodes': [], 'edges': [], 'engine': engine_id,
+                                  'timestamp': datetime.now(timezone.utc).isoformat()}
+                    try:
+                        graph_url = f'http://localhost:{port}/graphs'
+                        graph_req = urllib.request.Request(graph_url, headers={'Accept': 'application/json'})
+                        with urllib.request.urlopen(graph_req, timeout=10) as graph_resp:
+                            graph_raw = json.loads(graph_resp.read().decode('utf-8'))
+                        graph_data = self._normalize_lightrag_graph(graph_raw, engine_id)
+                    except Exception:
+                        pass
+
+                    graph_data['answer'] = answer
+                    self._send_json_response(graph_data)
+                    return
+                except Exception as e:
+                    # Return error with the current engine — never fall back to demo
+                    error_data = {'nodes': [], 'edges': [], 'engine': engine_id,
+                                  'answer': f'Query failed: {e}',
+                                  'message': f'LightRAG query error: {e}',
+                                  'timestamp': datetime.now(timezone.utc).isoformat()}
+                    self._send_json_response(error_data)
+                    return
+
+            # Fallback: demo response
+            demo = self._generate_demo_graph()
+            demo['answer'] = f'Demo answer for query: "{query}". Connect and start a RAG engine to get real answers.'
+            demo['message'] = f'Engine "{engine_id}" not available — showing demo response'
+            self._send_json_response(demo)
+
+        except Exception as e:
+            self._send_json_response({'error': str(e), 'nodes': [], 'edges': [], 'answer': ''})
+
+    def handle_graph_node(self):
+        """Handle POST /api/graph/node — get details for a specific node."""
+        from datetime import datetime, timezone
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+            engine_id = body.get('engineId', '')
+            node_id = body.get('nodeId', '')
+
+            if not engine_id or not node_id:
+                self._send_json_response({'error': 'engineId and nodeId are required'})
+                return
+
+            # Try to get engine info
+            port = None
+            engine_type = 'unknown'
+            if RAG_ENGINES_AVAILABLE:
+                try:
+                    manager = get_rag_manager()
+                    engine = manager.get_engine(engine_id)
+                    if engine:
+                        port = getattr(engine, 'port', None)
+                        engine_type = getattr(engine, 'engine_type', 'unknown')
+                except Exception:
+                    pass
+
+            # Memgraph/Neo4j Bolt: look up node by id
+            if engine_type in ('code_graph_rag', 'rag_anything', 'memgraph') and BOLT_AVAILABLE:
+                try:
+                    from neo4j import GraphDatabase
+                    bolt_port = port or 7687
+                    driver = GraphDatabase.driver(f'bolt://localhost:{bolt_port}', auth=('', ''))
+                    with driver.session() as session:
+                        result = session.run(
+                            'MATCH (n) WHERE id(n) = $node_id '
+                            'OPTIONAL MATCH (n)-[r]->(m) RETURN n, r, m',
+                            node_id=int(node_id)
+                        )
+                        records = list(result)
+                    driver.close()
+
+                    if not records:
+                        self._send_json_response({'node': None, 'error': 'Node not found'})
+                        return
+
+                    # Build node detail from first record
+                    first = records[0]
+                    bolt_node = first['n']
+                    props = dict(bolt_node.items()) if hasattr(bolt_node, 'items') else {}
+                    labels = list(bolt_node.labels) if hasattr(bolt_node, 'labels') else []
+                    relationships = []
+                    for rec in records:
+                        rel = rec.get('r')
+                        tgt = rec.get('m')
+                        if rel and tgt:
+                            tgt_props = dict(tgt.items()) if hasattr(tgt, 'items') else {}
+                            tgt_labels = list(tgt.labels) if hasattr(tgt, 'labels') else []
+                            relationships.append({
+                                'target': str(tgt.id),
+                                'targetLabel': tgt_props.get('name') or (tgt_labels[0] if tgt_labels else str(tgt.id)),
+                                'type': str(rel.type),
+                                'properties': dict(rel.items()) if hasattr(rel, 'items') else {},
+                            })
+
+                    node_detail = {
+                        'id': node_id,
+                        'label': props.get('name') or props.get('label') or (labels[0] if labels else node_id),
+                        'type': labels[0] if labels else 'node',
+                        'properties': props,
+                        'relationships': relationships,
+                    }
+                    self._send_json_response({'node': node_detail})
+                    return
+                except Exception as e:
+                    self._send_json_response({'node': None, 'error': f'Bolt lookup failed: {e}'})
+                    return
+
+            # LightRAG: no direct node lookup endpoint, return what we know
+            if engine_type in ('lightrag', 'light_rag') and port:
+                try:
+                    url = f'http://localhost:{port}/graphs'
+                    req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+                    with urllib.request.urlopen(req, timeout=10) as resp:
+                        raw = json.loads(resp.read().decode('utf-8'))
+                    graph = self._normalize_lightrag_graph(raw, engine_id)
+                    # Find the requested node
+                    matched = next((n for n in graph['nodes'] if n['id'] == node_id), None)
+                    if matched:
+                        rels = [{'target': e['target'], 'type': e['label'], 'properties': e['properties']}
+                                for e in graph['edges'] if e['source'] == node_id]
+                        matched['relationships'] = rels
+                        self._send_json_response({'node': matched})
+                    else:
+                        self._send_json_response({'node': None, 'error': f'Node "{node_id}" not found'})
+                    return
+                except Exception as e:
+                    self._send_json_response({'node': None, 'error': f'LightRAG lookup failed: {e}'})
+                    return
+
+            # Fallback: demo node
+            self._send_json_response({
+                'node': {
+                    'id': node_id,
+                    'label': f'Demo Node ({node_id})',
+                    'type': 'demo',
+                    'properties': {'note': 'Connect a RAG engine to see real node data'},
+                    'relationships': [],
+                },
+                'message': f'Engine "{engine_id}" not available — showing demo node'
+            })
+
+        except Exception as e:
+            self._send_json_response({'node': None, 'error': str(e)})
+
+    def handle_create_archive(self):
+        """Handle POST /api/archive/create — start archive generation in background"""
+        import uuid
+        import threading
+        from datetime import datetime, timezone
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+        # Prune old completed/failed jobs (older than 1 hour)
+        now = datetime.now(timezone.utc)
+        stale_ids = []
+        for jid, jdata in ARCHIVE_JOBS.items():
+            if jdata.get('status') in ('completed', 'failed'):
+                created = jdata.get('createdAt', '')
+                try:
+                    created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
+                    if (now - created_dt).total_seconds() > 3600:
+                        stale_ids.append(jid)
+                except (ValueError, AttributeError):
+                    stale_ids.append(jid)
+        for jid in stale_ids:
+            del ARCHIVE_JOBS[jid]
+
+        # Cleanup old archive files (older than 1 hour)
+        if ARCHIVE_DIR.exists():
+            for archive_file in ARCHIVE_DIR.glob('dev-team-export-*.tar.gz'):
+                try:
+                    age = (now - datetime.fromtimestamp(archive_file.stat().st_mtime, tz=timezone.utc)).total_seconds()
+                    if age > 3600:
+                        archive_file.unlink()
+                except Exception:
+                    pass
+
+        job_id = str(uuid.uuid4())
+
+        # Sanitize custom exclusions — only allow simple path patterns
+        raw_exclusions = body.get('customExclusions', [])
+        options = {
+            'includeGitHistory': body.get('includeGitHistory', False),
+            'includeNodeModules': body.get('includeNodeModules', False),
+            'customExclusions': [
+                p for p in raw_exclusions
+                if isinstance(p, str) and len(p) < 200 and '..' not in p and not p.startswith('/')
+            ],
+        }
+
+        ARCHIVE_JOBS[job_id] = {
+            'status': 'generating',
+            'progress': 0,
+            'message': 'Initializing archive...',
+            'filename': None,
+            'fileSize': None,
+            'error': None,
+            'createdAt': datetime.now(timezone.utc).isoformat(),
+        }
+
+        thread = threading.Thread(
+            target=generate_archive,
+            args=(job_id, options),
+            daemon=True
+        )
+        thread.start()
+
+        self._send_json_response({'jobId': job_id, 'status': 'generating'})
+
+    def handle_generate_checklist(self):
+        """Generate a deployment checklist based on current system state"""
+        import platform
+        import shutil
+        from datetime import datetime, timezone
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+
+        job_id = body.get('jobId')
+
+        # Gather system info
+        DEV_TEAM_DIR = Path.home() / "dev-team"
+
+        # Check what tools are installed
+        tools = {}
+        for tool in ['python3', 'node', 'npm', 'git', 'tmux', 'jq', 'gh', 'claude']:
+            tools[tool] = shutil.which(tool) is not None
+
+        # Check Python version
+        python_version = platform.python_version()
+
+        # Check Node version
+        node_version = None
+        try:
+            result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
+            if result.returncode == 0:
+                node_version = result.stdout.strip()
+        except Exception:
+            pass
+
+        # Get git remote info
+        git_remotes = []
+        try:
+            result = subprocess.run(['git', 'remote', '-v'], capture_output=True, text=True,
+                                    cwd=str(DEV_TEAM_DIR), timeout=5)
+            if result.returncode == 0:
+                for line in result.stdout.strip().split('\n'):
+                    if line and '(fetch)' in line:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            git_remotes.append({'name': parts[0], 'url': parts[1]})
+        except Exception:
+            pass
+
+        # Check which kanban dirs exist outside dev-team
+        external_kanban = []
+        for team, path in TEAM_KANBAN_DIRS.items():
+            if not str(path).startswith(str(DEV_TEAM_DIR)):
+                external_kanban.append({
+                    'team': team,
+                    'path': str(path),
+                    'exists': path.exists(),
+                })
+
+        # Get archive info if job_id provided
+        archive_info = None
+        if job_id and job_id in ARCHIVE_JOBS:
+            job = ARCHIVE_JOBS[job_id]
+            archive_info = {
+                'filename': job.get('filename'),
+                'fileSize': job.get('fileSize'),
+                'totalFiles': job.get('totalFiles'),
+            }
+
+        # Get shell scripts that need to be sourced
+        shell_scripts = []
+        for script in ['kanban-helpers.sh', 'scripts/prompts/academy.sh']:
+            script_path = DEV_TEAM_DIR / script
+            if script_path.exists():
+                shell_scripts.append(f"~/dev-team/{script}")
+
+        # Get LCARS server ports from config
+        lcars_ports = {
+            'academy': 8203,
+            'command': 8234,
+            'firebase': 8240,
+            'ios': 8260,
+            'legal-coparenting': 8427,
+            'finance-personal': 8230,
+        }
+
+        checklist = {
+            'generated': True,
+            'generatedAt': datetime.now(timezone.utc).isoformat(),
+            'sourceSystem': {
+                'hostname': platform.node(),
+                'os': platform.system(),
+                'osVersion': platform.release(),
+                'pythonVersion': python_version,
+                'nodeVersion': node_version,
+            },
+            'prerequisites': [
+                {'name': 'Homebrew', 'command': '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"', 'required': True},
+                {'name': 'Python 3', 'command': 'brew install python3', 'version': python_version, 'required': True},
+                {'name': 'Node.js', 'command': 'brew install node', 'version': node_version, 'required': True},
+                {'name': 'Git', 'command': 'brew install git', 'installed': tools.get('git', False), 'required': True},
+                {'name': 'tmux', 'command': 'brew install tmux', 'installed': tools.get('tmux', False), 'required': True},
+                {'name': 'jq', 'command': 'brew install jq', 'installed': tools.get('jq', False), 'required': True},
+                {'name': 'GitHub CLI', 'command': 'brew install gh', 'installed': tools.get('gh', False), 'required': True},
+                {'name': 'Claude Code', 'command': 'npm install -g @anthropic-ai/claude-code', 'installed': tools.get('claude', False), 'required': True},
+            ],
+            'extractionSteps': [
+                'mkdir -p ~/dev-team',
+                'tar -xzf [archive-file].tar.gz -C ~/',
+                'ls ~/dev-team/',
+            ],
+            'authSteps': [
+                {'name': 'GitHub CLI', 'command': 'gh auth login'},
+                {'name': 'Claude Code', 'command': 'claude login'},
+            ],
+            'shellSetup': {
+                'scripts': shell_scripts,
+                'profileLine': 'source ~/dev-team/kanban-helpers.sh',
+            },
+            'gitRemotes': git_remotes,
+            'externalKanban': external_kanban,
+            'lcarsServers': lcars_ports,
+            'archiveInfo': archive_info,
+        }
+
+        self._send_json_response(checklist)
+
+    def serve_archive_status(self, job_id):
+        """Handle GET /api/archive/status/<job_id> — return job progress"""
+        job = ARCHIVE_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Job not found'}, status=404)
+            return
+
+        # Use _send_json_response for consistency; Cache-Control is not needed here
+        # because the frontend polls every 1s and does not cache status responses.
+        self._send_json_response({**job, 'jobId': job_id})
+
+    def serve_archive_download(self, job_id):
+        """Handle GET /api/archive/download/<job_id> — stream tar.gz to client"""
+        job = ARCHIVE_JOBS.get(job_id)
+        if not job or job['status'] != 'completed' or not job.get('filename'):
+            self._send_json_response({'error': 'Archive not ready'}, status=404)
+            return
+
+        file_path = ARCHIVE_DIR / job['filename']
+        if not file_path.exists():
+            self._send_json_response({'error': 'Archive file not found'}, status=404)
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/gzip')
+        self.send_header('Content-Disposition', f'attachment; filename="{job["filename"]}"')
+        self.send_header('Content-Length', str(file_path.stat().st_size))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
     def serve_backup_status(self):
         """Serve kanban backup system status"""
         from datetime import datetime, timezone
@@ -5828,14 +7243,6 @@ end tell
             except Exception:
                 return None
 
-        def format_bytes(size):
-            """Format bytes to human-readable string"""
-            for unit in ['B', 'KB', 'MB', 'GB']:
-                if size < 1024:
-                    return f"{size:.1f} {unit}"
-                size /= 1024
-            return f"{size:.1f} TB"
-
         try:
             files_by_team = {}
             total_size = 0
@@ -5867,7 +7274,7 @@ end tell
                             'filename': backup_file.name,
                             'timestamp': timestamp,
                             'size': stat.st_size,
-                            'sizeFormatted': format_bytes(stat.st_size),
+                            'sizeFormatted': format_bytes_archive(stat.st_size),
                             'path': str(backup_file)
                         })
                         total_size += stat.st_size
@@ -5881,7 +7288,7 @@ end tell
                 'teams': files_by_team,
                 'totalFiles': total_count,
                 'totalSize': total_size,
-                'totalSizeFormatted': format_bytes(total_size)
+                'totalSizeFormatted': format_bytes_archive(total_size)
             }
 
             self.send_response(200)
@@ -5944,7 +7351,7 @@ end tell
             return None
         # The repo root is the kanban dir's parent
         repo_root = str(kanban_dir.parent)
-        # Project memory dirs use format: -Users-darrenehlers-aiteamforge
+        # Project memory dirs use format: -Users-darrenehlers-dev-team
         prefix = repo_root.replace("/", "-")
         return [prefix]
 

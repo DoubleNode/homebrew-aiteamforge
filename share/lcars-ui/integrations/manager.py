@@ -20,36 +20,21 @@ from .provider import (
 )
 
 
-# Team kanban directory mapping (mirrors server.py TEAM_KANBAN_DIRS_DEFAULT and kanban-helpers.sh)
+# Team kanban directory mapping (mirrors server.py TEAM_KANBAN_DIRS and kanban-helpers.sh)
 # Used to locate team-specific config files in kanban/config/
 _TEAM_KANBAN_DIRS = {
-    # Main Event Teams
-    "academy": Path.home() / "aiteamforge" / "academy" / "kanban",
+    "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path.home() / "aiteamforge" / "command" / "kanban",
+    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
-
-    # Freelance Projects
     "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
     "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
     "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
     "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-    "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
-    "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
-
-    # Liquidstyle Freelance Projects
-    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
-    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
-
-    # Legal Projects
     "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
-
-    # Medical Projects
     "medical-general": Path.home() / "medical" / "general" / "kanban",
-
-    # Finance Projects
     "finance-personal": Path.home() / "finance" / "personal" / "kanban",
 }
 
@@ -101,15 +86,19 @@ class IntegrationManager:
         lcars_team = os.environ.get("LCARS_TEAM", "freelance")
 
         # Resolve team kanban directory (fallback to academy)
-        kanban_dir = _TEAM_KANBAN_DIRS.get(lcars_team, Path.home() / "aiteamforge" / "academy" / "kanban")
+        kanban_dir = _TEAM_KANBAN_DIRS.get(lcars_team, Path.home() / "dev-team" / "kanban")
 
         search_paths = [
             # Explicit path
             Path(self._config_path) if self._config_path else None,
             # Team kanban config directory (PREFERRED - distributed with board data)
             kanban_dir / 'config' / 'integrations.json',
+            # Legacy: Centralized config directory (fallback during migration)
+            Path.home() / 'dev-team' / 'config' / lcars_team / 'integrations.json',
             # Legacy: Local to lcars-ui
             Path(__file__).parent.parent / 'config' / 'integrations.json',
+            # Legacy: Dev team config root
+            Path.home() / 'dev-team' / 'config' / 'integrations.json',
         ]
 
         for path in search_paths:

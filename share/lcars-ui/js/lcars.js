@@ -66,6 +66,9 @@ function apiUrl(path) {
 let boardData = null;
 let refreshTimer = null;
 
+// RAG Engines health polling interval
+let ragEnginesHealthInterval = null;
+
 // HOME tab chart instances (preserved across re-renders to enable smooth updates)
 let homeCharts = {
     statusDoughnut: null,
@@ -75,12 +78,17 @@ let homeCharts = {
 
 // HOME tab carousel state
 let currentHomePanel = 0;
-const TOTAL_HOME_PANELS = 6;
+let TOTAL_HOME_PANELS = 6; // Base panels; increases dynamically with RAG engines
 let carouselAutoTimer = null;
 const CAROUSEL_AUTO_INTERVAL = 10000; // 10 seconds
 let carouselPaused = false;
 let carouselInitialized = false;
 let homeFullscreen = false;
+
+// RAG engine carousel state
+let ragEngineData = [];          // Cached RAG engine summary data
+let ragEnginePanelCount = 0;     // Number of active RAG engine panels
+let _ragAbortController = null;  // AbortController for summary fetch
 
 // Knowledge panel async fetch state — prevents orphaned chart injection on rapid navigation.
 // _knowledgeAbortController: AbortController for the in-flight /api/knowledge-stats fetch.
@@ -95,7 +103,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'team-config', 'integrations', 'backups', 'commands', 'archive'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'archive'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Queue filter state
@@ -535,6 +543,8 @@ function renderBoard() {
     renderKanbanColumns();
     renderTerminalDetails();
     renderMissionQueue();
+    populateEpicFilterOptions();
+    populateReleaseFilterOptions();
     updateStardate();
     updateContentWatermark();
 
@@ -564,6 +574,8 @@ function navigateToPanel(index) {
         index = TOTAL_HOME_PANELS - 1;
     } else if (index >= TOTAL_HOME_PANELS) {
         index = 0;
+        // Refresh RAG engine data on carousel wrap-around (once per full cycle)
+        _refreshRAGEnginePanels();
     }
 
     // If leaving a knowledge/adoption panel (4 or 5), cancel any pending debounce
@@ -689,16 +701,6 @@ function initCarousel() {
         });
     }
 
-    // Dot navigation
-    document.querySelectorAll('.carousel-dot').forEach(dot => {
-        dot.addEventListener('click', () => {
-            const panelIndex = parseInt(dot.dataset.panel, 10);
-            if (!isNaN(panelIndex)) {
-                navigateToPanel(panelIndex);
-            }
-        });
-    });
-
     // Pause auto-advance when user hovers over viewport
     const viewport = document.querySelector('.carousel-viewport');
     if (viewport) {
@@ -719,6 +721,11 @@ function initCarousel() {
             toggleHomeFullscreen();
         });
     }
+
+    // Fetch RAG engine data for dynamic panels
+    _refreshRAGEnginePanels();
+    // Generate initial dots for base 6 panels (RAG fetch may be slow)
+    _rebuildCarouselDots();
 
     // Set first panel active and start timer
     navigateToPanel(0);
@@ -744,7 +751,141 @@ function stopCarousel() {
     }
     // Exit fullscreen when leaving HOME tab
     if (homeFullscreen) _exitHomeFullscreen();
+    // Cancel any pending RAG engine fetch
+    if (_ragAbortController) {
+        _ragAbortController.abort();
+        _ragAbortController = null;
+    }
 }
+
+/**
+ * Fetch RAG engine summary and dynamically update carousel panels.
+ * Called on HOME tab init and periodically to detect engine changes.
+ */
+async function _refreshRAGEnginePanels() {
+    // Abort any prior in-flight fetch
+    if (_ragAbortController) _ragAbortController.abort();
+    _ragAbortController = new AbortController();
+
+    try {
+        const resp = await fetch('/api/rag-engines/summary', {
+            signal: _ragAbortController.signal
+        });
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        const engines = (data.engines || []).filter(e => e.status === 'running' || e.status === 'installed');
+
+        // Only rebuild if engine count changed
+        if (engines.length !== ragEnginePanelCount) {
+            ragEngineData = engines;
+            ragEnginePanelCount = engines.length;
+            TOTAL_HOME_PANELS = 6 + ragEnginePanelCount;
+            _rebuildRAGPanelsDOM(engines);
+            _rebuildCarouselDots();
+        } else {
+            // Just update data for re-render
+            ragEngineData = engines;
+        }
+    } catch (e) {
+        if (e.name !== 'AbortError') {
+            console.warn('[RAG Carousel] Failed to fetch engine summary:', e.message);
+        }
+    }
+}
+
+/**
+ * Rebuild the RAG engine panel DOM elements inside #rag-engine-panels-container.
+ * Security: all dynamic string values use DOM API (textContent, dataset) — no innerHTML.
+ */
+function _rebuildRAGPanelsDOM(engines) {
+    const container = document.getElementById('rag-engine-panels-container');
+    if (!container) return;
+    container.textContent = '';
+
+    engines.forEach((engine, i) => {
+        const panelIndex = 6 + i;
+        const typeLabel = (engine.type || '').toUpperCase().replace(/-/g, ' ');
+        const statusClass = engine.status === 'running' ? 'rag-status-running' :
+                           engine.status === 'installed' ? 'rag-status-installed' : 'rag-status-offline';
+
+        // Build panel via DOM API to avoid innerHTML with untrusted data
+        const panel = document.createElement('div');
+        panel.className = 'carousel-panel';
+        panel.dataset.panelIndex = panelIndex;
+
+        const header = document.createElement('div');
+        header.className = 'section-header cyan';
+
+        const title = document.createElement('span');
+        title.className = 'section-title';
+        title.textContent = (engine.name || engine.id) + ' ENGINE';
+
+        const bar = document.createElement('div');
+        bar.className = 'section-bar';
+
+        header.appendChild(title);
+        header.appendChild(bar);
+
+        const content = document.createElement('div');
+        content.className = 'rag-engine-panel-content';
+        content.dataset.engineId = engine.id;
+
+        const statusRow = document.createElement('div');
+        statusRow.className = 'rag-engine-status-row';
+
+        const indicator = document.createElement('span');
+        indicator.className = 'rag-status-indicator ' + statusClass;
+
+        const statusLabel = document.createElement('span');
+        statusLabel.className = 'rag-status-label';
+        statusLabel.textContent = (engine.status || 'unknown').toUpperCase();
+
+        const typeBadge = document.createElement('span');
+        typeBadge.className = 'rag-type-badge';
+        typeBadge.textContent = typeLabel;
+
+        statusRow.appendChild(indicator);
+        statusRow.appendChild(statusLabel);
+        statusRow.appendChild(typeBadge);
+
+        if (engine.port) {
+            const portLabel = document.createElement('span');
+            portLabel.className = 'rag-port-label';
+            portLabel.textContent = 'PORT ' + engine.port;
+            statusRow.appendChild(portLabel);
+        }
+
+        const statsGrid = document.createElement('div');
+        statsGrid.className = 'rag-engine-stats-grid';
+        statsGrid.id = 'rag-stats-' + engine.id;
+
+        content.appendChild(statusRow);
+        content.appendChild(statsGrid);
+
+        panel.appendChild(header);
+        panel.appendChild(content);
+        container.appendChild(panel);
+    });
+}
+
+/**
+ * Rebuild carousel dots to match current TOTAL_HOME_PANELS count.
+ */
+function _rebuildCarouselDots() {
+    const dotsContainer = document.getElementById('carousel-dots');
+    if (!dotsContainer) return;
+    dotsContainer.textContent = '';
+
+    for (let i = 0; i < TOTAL_HOME_PANELS; i++) {
+        const dot = document.createElement('span');
+        dot.className = 'carousel-dot' + (i === currentHomePanel ? ' active' : '');
+        dot.dataset.panel = i;
+        dot.addEventListener('click', () => navigateToPanel(i));
+        dotsContainer.appendChild(dot);
+    }
+}
+
 
 /**
  * Toggle fullscreen mode for the HOME dashboard.
@@ -933,6 +1074,12 @@ function renderHomePanel(panelIndex) {
             break;
         case 5:
             _renderHomeAdoptionStats();
+            break;
+        default:
+            // Dynamic RAG engine panels (index 6+)
+            if (panelIndex >= 6 && panelIndex < 6 + ragEnginePanelCount) {
+                _renderHomeRAGPanel(panelIndex - 6);
+            }
             break;
     }
 }
@@ -1466,6 +1613,85 @@ async function _renderHomeAdoptionStats() {
             ${teamRowsHtml || '<div class="knowledge-adoption-empty">No completed items with retrospective data</div>'}
         </div>
     `;
+}
+
+/**
+ * Render content stats for a RAG engine carousel panel.
+ * @param {number} engineIndex - Index into ragEngineData (0-based).
+ */
+function _renderHomeRAGPanel(engineIndex) {
+    if (engineIndex < 0 || engineIndex >= ragEngineData.length) return;
+    const engine = ragEngineData[engineIndex];
+    const container = document.getElementById('rag-stats-' + engine.id);
+    if (!container) return;
+
+    const stats = engine.contentStats || {};
+    const processed = stats.processed || {};
+    const failed = stats.failed || {};
+    const total = stats.total || {};
+    const health = engine.health || {};
+
+    const docCount = total.documents || 0;
+    const chunkCount = total.chunks || 0;
+    const processedDocs = processed.documents || 0;
+    const failedDocs = failed.documents || 0;
+    const successRate = docCount > 0 ? Math.round((processedDocs / docCount) * 100) : 0;
+
+    // Build stats grid via DOM API (no innerHTML with dynamic data)
+    container.textContent = '';
+
+    function makeStatCard(value, label, extraClass) {
+        const card = document.createElement('div');
+        card.className = 'rag-stat-card' + (extraClass ? ' ' + extraClass : '');
+        const valEl = document.createElement('div');
+        valEl.className = 'rag-stat-value' + (extraClass ? ' ' + extraClass : '');
+        valEl.textContent = typeof value === 'number' ? value.toLocaleString() : value;
+        const labelEl = document.createElement('div');
+        labelEl.className = 'rag-stat-label';
+        labelEl.textContent = label;
+        card.appendChild(valEl);
+        card.appendChild(labelEl);
+        return card;
+    }
+
+    container.appendChild(makeStatCard(docCount, 'TOTAL DOCUMENTS'));
+    container.appendChild(makeStatCard(chunkCount, 'TOTAL CHUNKS'));
+
+    const processedCard = makeStatCard(processedDocs, 'PROCESSED');
+    processedCard.querySelector('.rag-stat-value').classList.add('rag-stat-success');
+    container.appendChild(processedCard);
+
+    const failedCard = makeStatCard(failedDocs, 'FAILED');
+    if (failedDocs > 0) {
+        failedCard.querySelector('.rag-stat-value').classList.add('rag-stat-error');
+    }
+    container.appendChild(failedCard);
+
+    // Progress bar card
+    const progressCard = document.createElement('div');
+    progressCard.className = 'rag-stat-card rag-stat-wide';
+    const progressBar = document.createElement('div');
+    progressBar.className = 'rag-progress-bar';
+    const progressFill = document.createElement('div');
+    progressFill.className = 'rag-progress-fill';
+    progressFill.style.width = successRate + '%';
+    progressBar.appendChild(progressFill);
+    const progressLabel = document.createElement('div');
+    progressLabel.className = 'rag-stat-label';
+    progressLabel.textContent = successRate + '% SUCCESS RATE';
+    progressCard.appendChild(progressBar);
+    progressCard.appendChild(progressLabel);
+    container.appendChild(progressCard);
+
+    if (health.message) {
+        const healthCard = document.createElement('div');
+        healthCard.className = 'rag-stat-card rag-stat-wide';
+        const healthMsg = document.createElement('div');
+        healthMsg.className = 'rag-health-message';
+        healthMsg.textContent = health.message;
+        healthCard.appendChild(healthMsg);
+        container.appendChild(healthCard);
+    }
 }
 
 function updateContentWatermark() {
@@ -8898,6 +9124,11 @@ function switchSection(sectionName, skipAnimation = false) {
         stopArchivePolling();
     }
 
+    // Stop RAG engines health polling when leaving RAG ENGINES tab
+    if (previousSection === 'rag-engines') {
+        stopRAGEnginesHealthPolling();
+    }
+
     // Handle exit animation for previous section
     if (previousEl && !skipAnimation && previousSection !== 'startup') {
         // Add exiting class to trigger reverse cascade
@@ -8987,6 +9218,22 @@ function switchSection(sectionName, skipAnimation = false) {
     // Load integrations when switching to integrations section
     if (sectionName === 'integrations') {
         loadIntegrations();
+    }
+
+    // Load RAG engines when switching to rag-engines section
+    if (sectionName === 'rag-engines') {
+        loadRAGEngines();
+    }
+
+    // Initialize knowledge graph when entering that section
+    if (sectionName === 'knowledge-graph') {
+        if (!cyGraph) {
+            initKnowledgeGraph('knowledge-graph-container');
+        }
+        loadGraphEngines();
+        if (cyGraph && cyGraph.elements().length === 0) {
+            loadGraphData('demo');
+        }
     }
 
     // Load archive status when switching to archive section
@@ -13812,6 +14059,1161 @@ function showIntegrationTestResult(card, success, message) {
 }
 
 // escapeHtml() defined earlier (line ~10041) — single definition used globally
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RAG ENGINES - Load, Render, and Actions
+// ═══════════════════════════════════════════════════════════════════════════════
+
+async function loadRAGEngines() {
+    const statusEl = document.getElementById('rag-system-status');
+    const installedCountEl = document.getElementById('rag-installed-count');
+    const runningCountEl = document.getElementById('rag-running-count');
+    const listEl = document.getElementById('rag-engines-list');
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines'));
+        if (!response.ok) throw new Error('Failed to fetch RAG engines');
+
+        const data = await response.json();
+        const engines = data.engines || [];
+
+        // Update overview stats
+        const installedCount = engines.filter(e => e.status !== 'not_installed').length;
+        const runningCount = engines.filter(e => e.status === 'running').length;
+        const errorCount = engines.filter(e => e.status === 'error').length;
+
+        if (installedCountEl) installedCountEl.textContent = installedCount;
+        if (runningCountEl) runningCountEl.textContent = runningCount;
+
+        // Derive system status from engine states
+        if (statusEl) {
+            let systemStatus, systemClass;
+            if (engines.length === 0 || installedCount === 0) {
+                systemStatus = 'NO ENGINES';
+                systemClass = 'stat-value offline';
+            } else if (errorCount > 0) {
+                systemStatus = 'DEGRADED';
+                systemClass = 'stat-value error';
+            } else if (runningCount > 0) {
+                systemStatus = 'ACTIVE';
+                systemClass = 'stat-value online';
+            } else {
+                systemStatus = 'IDLE';
+                systemClass = 'stat-value';
+            }
+            statusEl.textContent = systemStatus;
+            statusEl.className = systemClass;
+        }
+
+        // Render engine cards
+        renderRAGEnginesList(engines);
+
+        // Auto-health-check any running engines in the background
+        const runningEngines = engines.filter(e => e.status === 'running');
+        if (runningEngines.length > 0) {
+            setTimeout(() => {
+                runningEngines.forEach(e => healthCheckRAGEngineSilent(e.id));
+            }, 500);
+        }
+
+        // Start periodic health polling if engines are running
+        startRAGEnginesHealthPolling(runningEngines.length > 0);
+
+    } catch (error) {
+        console.error('Failed to load RAG engines:', error);
+
+        if (statusEl) {
+            statusEl.textContent = 'ERROR';
+            statusEl.className = 'stat-value offline';
+        }
+
+        if (listEl) {
+            listEl.textContent = '';
+            const errDiv = document.createElement('div');
+            errDiv.className = 'rag-engines-error';
+            errDiv.textContent = 'Failed to load RAG engines: ' + error.message;
+            listEl.appendChild(errDiv);
+        }
+    }
+}
+
+function renderRAGEnginesList(engines) {
+    const container = document.getElementById('rag-engines-list');
+    if (!container) return;
+
+    if (!engines || engines.length === 0) {
+        container.innerHTML = '<div class="rag-engines-empty">No RAG engines configured. Use the engine presets to get started.</div>';
+        return;
+    }
+
+    let html = '';
+
+    for (const engine of engines) {
+        // Python backend uses underscores (not_installed); CSS classes use hyphens (not-installed)
+        const statusClass = (engine.status || 'not_installed').replace(/_/g, '-');
+        const statusText = formatRAGStatus(engine.status);
+        const icon = getRAGEngineIcon(engine.type);
+
+        // Build version display and update badge strings
+        const versionStr = engine.version ? `v${escapeHtml(engine.version)}` : '';
+        const latestStr = engine.latestVersion ? `v${escapeHtml(engine.latestVersion)}` : '';
+        const showUpdateBadge = engine.updateAvailable && engine.version && engine.latestVersion;
+        const versionHtml = versionStr
+            ? `<div class="rag-engine-version">${versionStr}</div>`
+            : '';
+        const updateBadgeHtml = showUpdateBadge
+            ? `<div class="rag-engine-update-badge" data-current-version="${escapeHtml(engine.version)}" data-latest-version="${escapeHtml(engine.latestVersion)}">${versionStr} &rarr; ${latestStr}</div>`
+            : '';
+
+        html += `
+            <div class="rag-engine-card ${statusClass}" data-engine-id="${escapeHtml(engine.id)}" data-update-available="${showUpdateBadge ? 'true' : 'false'}" data-current-version="${escapeHtml(engine.version || '')}" data-latest-version="${escapeHtml(engine.latestVersion || '')}">
+                <div class="rag-engine-icon">${icon}</div>
+                <div class="rag-engine-info">
+                    <div class="rag-engine-name">${escapeHtml(engine.name)}</div>
+                    <div class="rag-engine-type">${escapeHtml(engine.type)} · Port ${engine.port || '--'}</div>
+                    <div class="rag-engine-desc">${escapeHtml(engine.dataDir || '--')}</div>
+                    ${engine.contentStats ? renderRAGContentStats(engine.contentStats) : ''}
+                    ${versionHtml}
+                    ${updateBadgeHtml}
+                </div>
+                <div class="rag-engine-status">
+                    <span class="rag-engine-status-badge ${statusClass}">${statusText}</span>
+                    <div class="rag-engine-actions-row">
+                        ${renderRAGEngineActions(engine)}
+                    </div>
+                </div>
+                <div class="rag-engine-progress" id="rag-progress-${escapeHtml(engine.id)}">
+                    <div class="rag-engine-progress-bar">
+                        <div class="rag-engine-progress-fill" id="rag-progress-fill-${escapeHtml(engine.id)}"></div>
+                    </div>
+                    <div class="rag-engine-progress-text" id="rag-progress-text-${escapeHtml(engine.id)}"></div>
+                </div>
+                <div class="rag-engine-log" id="rag-log-${escapeHtml(engine.id)}">
+                    <div class="rag-engine-log-header">
+                        <span class="rag-engine-log-title" id="rag-log-title-${escapeHtml(engine.id)}"></span>
+                        <button class="rag-engine-log-dismiss" onclick="dismissRAGEngineLog('${escapeHtml(engine.id)}')">&times;</button>
+                    </div>
+                    <pre class="rag-engine-log-body" id="rag-log-body-${escapeHtml(engine.id)}"></pre>
+                </div>
+            </div>
+        `;
+    }
+
+    container.innerHTML = html;
+}
+
+function renderRAGContentStats(stats) {
+    const total = stats.total || {};
+    const processed = stats.processed || {};
+    const failed = stats.failed || {};
+
+    let parts = [];
+    if (total.documents !== undefined) parts.push(`${total.documents} docs`);
+    if (total.chunks !== undefined) parts.push(`${total.chunks} chunks`);
+    if (processed.documents !== undefined) parts.push(`${processed.documents} processed`);
+    if (failed.documents) parts.push(`${failed.documents} failed`);
+
+    if (parts.length === 0) return '';
+    return `<div class="rag-engine-content-stats">${escapeHtml(parts.join(' · '))}</div>`;
+}
+
+function getRAGEngineIcon(type) {
+    const icons = {
+        'lightrag': '🔮',
+        'code-graph-rag': '🧬',
+        'rag-anything': '📦'
+    };
+    return icons[type] || '🔧';
+}
+
+function formatRAGStatus(status) {
+    const labels = {
+        'not_installed': 'Not Installed',
+        'installed': 'Installed',
+        'running': 'Running',
+        'error': 'Error'
+    };
+    return labels[status] || status || 'Unknown';
+}
+
+function renderRAGEngineActions(engine) {
+    const actions = [];
+
+    switch (engine.status) {
+        case 'not_installed':
+            actions.push(`<button class="rag-engine-btn install" onclick="installRAGEngine('${escapeHtml(engine.id)}')">Install</button>`);
+            break;
+        case 'installed':
+            actions.push(`<button class="rag-engine-btn" onclick="startRAGEngine('${escapeHtml(engine.id)}')">Start</button>`);
+            actions.push(`<button class="rag-engine-btn uninstall" onclick="uninstallRAGEngine('${escapeHtml(engine.id)}')">Uninstall</button>`);
+            break;
+        case 'running':
+            actions.push(`<button class="rag-engine-btn" onclick="stopRAGEngine('${escapeHtml(engine.id)}')">Stop</button>`);
+            actions.push(`<button class="rag-engine-btn" onclick="healthCheckRAGEngine('${escapeHtml(engine.id)}')">Health</button>`);
+            break;
+        case 'error':
+            actions.push(`<button class="rag-engine-btn" onclick="startRAGEngine('${escapeHtml(engine.id)}')">Retry</button>`);
+            actions.push(`<button class="rag-engine-btn uninstall" onclick="uninstallRAGEngine('${escapeHtml(engine.id)}')">Uninstall</button>`);
+            break;
+    }
+
+    // Show Update button when an update is available (installed or running state)
+    if (engine.updateAvailable && (engine.status === 'installed' || engine.status === 'running')) {
+        actions.push(`<button class="rag-engine-btn update" id="rag-update-btn-${escapeHtml(engine.id)}" onclick="updateRAGEngine('${escapeHtml(engine.id)}')">Update</button>`);
+    }
+
+    // Always show configure and log buttons
+    actions.push(`<button class="rag-engine-btn" onclick="editRAGEngine('${escapeHtml(engine.id)}')">Config</button>`);
+    actions.push(`<button class="rag-engine-btn" onclick="viewRAGEngineLog('${escapeHtml(engine.id)}')">Log</button>`);
+
+    return actions.join('');
+}
+
+function showRAGEngineLog(engineId, title, body, isError) {
+    const logEl = document.getElementById(`rag-log-${engineId}`);
+    const titleEl = document.getElementById(`rag-log-title-${engineId}`);
+    const bodyEl = document.getElementById(`rag-log-body-${engineId}`);
+    if (!logEl) return;
+
+    if (titleEl) {
+        titleEl.textContent = title;
+        titleEl.className = 'rag-engine-log-title ' + (isError ? 'error' : 'success');
+    }
+    if (bodyEl) bodyEl.textContent = body || '(no details)';
+    logEl.classList.add('active');
+}
+
+function dismissRAGEngineLog(engineId) {
+    const logEl = document.getElementById(`rag-log-${engineId}`);
+    if (logEl) logEl.classList.remove('active');
+}
+
+/**
+ * Check all RAG engines for available updates and re-render cards with update badges.
+ * Called by the "Check for Updates" toolbar button.
+ */
+async function checkAllRAGEngineUpdates() {
+    const btn = document.getElementById('rag-check-updates-btn');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'CHECKING...';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/check-updates'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({})
+        });
+        const data = await response.json();
+
+        if (data.error) {
+            console.error('RAG update check error:', data.error);
+            if (btn) btn.textContent = 'CHECK FAILED';
+        } else if (data.results) {
+            // Patch update info into currently rendered engine cards without full re-render
+            let updatesFound = 0;
+            for (const [engineId, updateInfo] of Object.entries(data.results)) {
+                applyUpdateInfoToCard(engineId, updateInfo);
+                if (updateInfo.update_available) updatesFound++;
+            }
+            if (btn) {
+                btn.textContent = updatesFound > 0
+                    ? `${updatesFound} UPDATE${updatesFound > 1 ? 'S' : ''} AVAILABLE`
+                    : 'ALL UP TO DATE';
+            }
+        }
+    } catch (err) {
+        console.error('Failed to check RAG engine updates:', err);
+        if (btn) btn.textContent = 'CHECK FAILED';
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            // Reset button text after a few seconds
+            setTimeout(() => {
+                if (btn) btn.textContent = 'CHECK FOR UPDATES';
+            }, 4000);
+        }
+    }
+}
+
+/**
+ * Apply update check results to an existing engine card without a full re-render.
+ * Updates version badge visibility and update button presence.
+ * @param {string} engineId
+ * @param {{current_version: string|null, latest_version: string|null, update_available: boolean}} updateInfo
+ */
+function applyUpdateInfoToCard(engineId, updateInfo) {
+    const card = document.querySelector(`.rag-engine-card[data-engine-id="${CSS.escape(engineId)}"]`);
+    if (!card) return;
+
+    const { current_version: currentVersion, latest_version: latestVersion, update_available: updateAvailable } = updateInfo;
+
+    // Update card data attributes
+    card.dataset.updateAvailable = updateAvailable ? 'true' : 'false';
+    card.dataset.currentVersion = currentVersion || '';
+    card.dataset.latestVersion = latestVersion || '';
+
+    const infoDiv = card.querySelector('.rag-engine-info');
+    if (!infoDiv) return;
+
+    // Remove existing version/badge elements
+    infoDiv.querySelectorAll('.rag-engine-version, .rag-engine-update-badge').forEach(el => el.remove());
+
+    // Add version display
+    if (currentVersion) {
+        const versionEl = document.createElement('div');
+        versionEl.className = 'rag-engine-version';
+        versionEl.textContent = `v${currentVersion}`;
+        infoDiv.appendChild(versionEl);
+    }
+
+    // Add update badge if applicable
+    if (updateAvailable && currentVersion && latestVersion) {
+        const badgeEl = document.createElement('div');
+        badgeEl.className = 'rag-engine-update-badge';
+        badgeEl.dataset.currentVersion = currentVersion;
+        badgeEl.dataset.latestVersion = latestVersion;
+        // Use textContent with unicode arrow to avoid XSS — no HTML injection
+        badgeEl.textContent = `v${currentVersion} \u2192 v${latestVersion}`;
+        infoDiv.appendChild(badgeEl);
+
+        // Add update button to actions row if not already present
+        const actionsRow = card.querySelector('.rag-engine-actions-row');
+        if (actionsRow && !actionsRow.querySelector(`#rag-update-btn-${CSS.escape(engineId)}`)) {
+            const updateBtn = document.createElement('button');
+            updateBtn.className = 'rag-engine-btn update';
+            updateBtn.id = `rag-update-btn-${engineId}`;
+            updateBtn.textContent = 'Update';
+            updateBtn.onclick = () => updateRAGEngine(engineId);
+            // Insert before Config button
+            const buttons = actionsRow.querySelectorAll('button');
+            const configBtn = Array.from(buttons).find(b => b.textContent.trim() === 'Config');
+            if (configBtn) {
+                actionsRow.insertBefore(updateBtn, configBtn);
+            } else {
+                actionsRow.appendChild(updateBtn);
+            }
+        }
+    } else {
+        // Remove update button if no longer needed
+        const existingUpdateBtn = card.querySelector(`#rag-update-btn-${CSS.escape(engineId)}`);
+        if (existingUpdateBtn) existingUpdateBtn.remove();
+    }
+}
+
+/**
+ * Update a RAG engine package to the latest PyPI version.
+ * Shows progress feedback on the card during the upgrade process.
+ * @param {string} engineId
+ */
+async function updateRAGEngine(engineId) {
+    const btn = document.getElementById(`rag-update-btn-${engineId}`);
+    const progressEl = document.getElementById(`rag-progress-${engineId}`);
+    const progressFillEl = document.getElementById(`rag-progress-fill-${engineId}`);
+    const progressTextEl = document.getElementById(`rag-progress-text-${engineId}`);
+
+    // Disable button and show progress
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Updating...';
+    }
+
+    if (progressEl) progressEl.classList.add('active');
+    if (progressFillEl) {
+        progressFillEl.classList.add('indeterminate');
+        progressFillEl.style.width = '';
+    }
+
+    const steps = ['Stopping engine...', 'Upgrading package...', 'Restarting engine...'];
+    let stepIdx = 0;
+
+    const stepInterval = setInterval(() => {
+        if (stepIdx < steps.length && progressTextEl) {
+            progressTextEl.textContent = steps[stepIdx++];
+        }
+    }, 2000);
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/update'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+        const data = await response.json();
+
+        clearInterval(stepInterval);
+
+        if (progressFillEl) {
+            progressFillEl.classList.remove('indeterminate');
+            progressFillEl.style.width = '100%';
+        }
+
+        const success = data.status !== 'error' && !data.error;
+        const message = data.message || (success ? 'Update complete' : 'Update failed');
+
+        if (progressTextEl) {
+            progressTextEl.textContent = message;
+            progressTextEl.className = 'rag-engine-progress-text ' + (success ? 'success' : 'error');
+        }
+
+        // Refresh engine list after a brief delay to show the new version
+        setTimeout(() => {
+            if (progressEl) progressEl.classList.remove('active');
+            if (progressFillEl) progressFillEl.style.width = '0%';
+            loadRAGEngines();
+        }, 2500);
+
+    } catch (err) {
+        clearInterval(stepInterval);
+
+        if (progressFillEl) progressFillEl.classList.remove('indeterminate');
+        if (progressTextEl) {
+            progressTextEl.textContent = `Update failed: ${err.message}`;
+            progressTextEl.className = 'rag-engine-progress-text error';
+        }
+
+        // Re-enable button on error
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Update';
+        }
+
+        setTimeout(() => {
+            if (progressEl) progressEl.classList.remove('active');
+        }, 4000);
+    }
+}
+
+async function viewRAGEngineLog(engineId) {
+    try {
+        const response = await fetch(apiUrl(`/api/rag-engines/log?engineId=${encodeURIComponent(engineId)}`));
+        const data = await response.json();
+        if (data.error) {
+            showRAGEngineLog(engineId, 'Log Error', data.error, true);
+        } else {
+            showRAGEngineLog(engineId, `Stderr Log: ${engineId}`, data.content || '(empty log)', false);
+        }
+    } catch (err) {
+        showRAGEngineLog(engineId, 'Log Error', err.message, true);
+    }
+}
+
+async function installRAGEngine(engineId) {
+    if (!confirm(`Install RAG engine: ${engineId}?`)) return;
+
+    const progressEl = document.getElementById(`rag-progress-${engineId}`);
+    const fillEl = document.getElementById(`rag-progress-fill-${engineId}`);
+    const textEl = document.getElementById(`rag-progress-text-${engineId}`);
+
+    if (progressEl) progressEl.classList.add('active');
+
+    // Show indeterminate progress — we don't know how long the backend will take
+    if (fillEl) {
+        fillEl.style.width = '';
+        fillEl.classList.add('indeterminate');
+    }
+    if (textEl) {
+        textEl.textContent = 'Installing... this may take a few minutes';
+        textEl.className = 'rag-engine-progress-text';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/install'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+
+        const result = await response.json();
+
+        // Stop indeterminate animation
+        if (fillEl) fillEl.classList.remove('indeterminate');
+
+        if (result.error) {
+            if (fillEl) fillEl.style.width = '0%';
+            if (textEl) {
+                textEl.textContent = 'Installation failed (see log below)';
+                textEl.className = 'rag-engine-progress-text error';
+            }
+            if (progressEl) progressEl.classList.remove('active');
+            showRAGEngineLog(engineId, 'Installation Failed', result.error, true);
+            return;
+        }
+
+        // Show success state, then refresh the full engine list
+        if (fillEl) fillEl.style.width = '100%';
+        if (textEl) {
+            textEl.textContent = result.message || 'Installation complete';
+            textEl.className = 'rag-engine-progress-text success';
+        }
+        setTimeout(() => {
+            if (progressEl) progressEl.classList.remove('active');
+            loadRAGEngines();
+        }, 1500);
+
+    } catch (error) {
+        if (fillEl) {
+            fillEl.classList.remove('indeterminate');
+            fillEl.style.width = '0%';
+        }
+        if (textEl) {
+            textEl.textContent = 'Installation error (see log below)';
+            textEl.className = 'rag-engine-progress-text error';
+        }
+        if (progressEl) progressEl.classList.remove('active');
+        showRAGEngineLog(engineId, 'Installation Error', error.message, true);
+    }
+}
+
+async function uninstallRAGEngine(engineId) {
+    if (!confirm(`Uninstall RAG engine: ${engineId}? This will remove all engine data.`)) return;
+
+    const progressEl = document.getElementById(`rag-progress-${engineId}`);
+    const fillEl = document.getElementById(`rag-progress-fill-${engineId}`);
+    const textEl = document.getElementById(`rag-progress-text-${engineId}`);
+
+    if (progressEl) progressEl.classList.add('active');
+    if (fillEl) {
+        fillEl.style.width = '';
+        fillEl.classList.add('indeterminate');
+    }
+    if (textEl) {
+        textEl.textContent = 'Uninstalling...';
+        textEl.className = 'rag-engine-progress-text';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/uninstall'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+
+        const result = await response.json();
+        if (fillEl) fillEl.classList.remove('indeterminate');
+
+        if (result.status === 'error' || result.error) {
+            if (fillEl) fillEl.style.width = '0%';
+            if (textEl) {
+                textEl.textContent = 'Uninstall failed (see log below)';
+                textEl.className = 'rag-engine-progress-text error';
+            }
+            if (progressEl) progressEl.classList.remove('active');
+            showRAGEngineLog(engineId, 'Uninstall Failed', result.message || result.error || 'Unknown error', true);
+            return;
+        }
+
+        if (fillEl) fillEl.style.width = '100%';
+        if (textEl) {
+            textEl.textContent = result.message || 'Uninstalled successfully';
+            textEl.className = 'rag-engine-progress-text success';
+        }
+        setTimeout(() => {
+            if (progressEl) progressEl.classList.remove('active');
+            loadRAGEngines();
+        }, 1500);
+
+    } catch (error) {
+        if (fillEl) fillEl.classList.remove('indeterminate');
+        if (textEl) {
+            textEl.textContent = 'Uninstall error (see log below)';
+            textEl.className = 'rag-engine-progress-text error';
+        }
+        if (progressEl) progressEl.classList.remove('active');
+        showRAGEngineLog(engineId, 'Uninstall Error', error.message, true);
+    }
+}
+
+async function startRAGEngine(engineId) {
+    const progressEl = document.getElementById(`rag-progress-${engineId}`);
+    const fillEl = document.getElementById(`rag-progress-fill-${engineId}`);
+    const textEl = document.getElementById(`rag-progress-text-${engineId}`);
+
+    if (progressEl) progressEl.classList.add('active');
+    if (fillEl) {
+        fillEl.style.width = '';
+        fillEl.classList.add('indeterminate');
+    }
+    if (textEl) {
+        textEl.textContent = 'Starting...';
+        textEl.className = 'rag-engine-progress-text';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/start'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+
+        const result = await response.json();
+        if (fillEl) fillEl.classList.remove('indeterminate');
+
+        if (result.status === 'error' || result.error) {
+            if (fillEl) fillEl.style.width = '0%';
+            if (textEl) {
+                textEl.textContent = 'Start failed (see log below)';
+                textEl.className = 'rag-engine-progress-text error';
+            }
+            if (progressEl) progressEl.classList.remove('active');
+            showRAGEngineLog(engineId, 'Start Failed', result.message || result.error || 'Unknown error', true);
+            return;
+        }
+
+        if (fillEl) fillEl.style.width = '100%';
+        if (textEl) {
+            textEl.textContent = result.message || 'Engine started successfully';
+            textEl.className = 'rag-engine-progress-text success';
+        }
+        setTimeout(() => {
+            if (progressEl) progressEl.classList.remove('active');
+            loadRAGEngines();
+        }, 1500);
+
+    } catch (error) {
+        if (fillEl) fillEl.classList.remove('indeterminate');
+        if (textEl) {
+            textEl.textContent = 'Start error (see log below)';
+            textEl.className = 'rag-engine-progress-text error';
+        }
+        if (progressEl) progressEl.classList.remove('active');
+        showRAGEngineLog(engineId, 'Start Error', error.message, true);
+    }
+}
+
+async function stopRAGEngine(engineId) {
+    const progressEl = document.getElementById(`rag-progress-${engineId}`);
+    const fillEl = document.getElementById(`rag-progress-fill-${engineId}`);
+    const textEl = document.getElementById(`rag-progress-text-${engineId}`);
+
+    if (progressEl) progressEl.classList.add('active');
+    if (fillEl) {
+        fillEl.style.width = '';
+        fillEl.classList.add('indeterminate');
+    }
+    if (textEl) {
+        textEl.textContent = 'Stopping...';
+        textEl.className = 'rag-engine-progress-text';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/stop'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+
+        const result = await response.json();
+        if (fillEl) fillEl.classList.remove('indeterminate');
+
+        if (result.status === 'error' || result.error) {
+            if (fillEl) fillEl.style.width = '0%';
+            if (textEl) {
+                textEl.textContent = 'Stop failed (see log below)';
+                textEl.className = 'rag-engine-progress-text error';
+            }
+            if (progressEl) progressEl.classList.remove('active');
+            showRAGEngineLog(engineId, 'Stop Failed', result.message || result.error || 'Unknown error', true);
+            return;
+        }
+
+        if (fillEl) fillEl.style.width = '100%';
+        if (textEl) {
+            textEl.textContent = result.message || 'Engine stopped successfully';
+            textEl.className = 'rag-engine-progress-text success';
+        }
+        setTimeout(() => {
+            if (progressEl) progressEl.classList.remove('active');
+            loadRAGEngines();
+        }, 1500);
+
+    } catch (error) {
+        if (fillEl) fillEl.classList.remove('indeterminate');
+        if (textEl) {
+            textEl.textContent = 'Stop error (see log below)';
+            textEl.className = 'rag-engine-progress-text error';
+        }
+        if (progressEl) progressEl.classList.remove('active');
+        showRAGEngineLog(engineId, 'Stop Error', error.message, true);
+    }
+}
+
+async function healthCheckRAGEngine(engineId) {
+    const card = document.querySelector(`[data-engine-id="${engineId}"]`);
+    const badge = card?.querySelector('.rag-engine-status-badge');
+
+    if (badge) {
+        badge.textContent = 'Checking...';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/health'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+
+        const result = await response.json();
+        const status = result.results?.[engineId];
+
+        if (status && badge) {
+            badge.textContent = status.health || formatRAGStatus(status.status);
+            const statusCssClass = (status.status || 'not_installed').replace(/_/g, '-');
+            badge.className = `rag-engine-status-badge ${statusCssClass}`;
+
+            // Show message temporarily
+            if (status.message) {
+                let msgEl = card.querySelector('.rag-engine-health-message');
+                if (!msgEl) {
+                    msgEl = document.createElement('div');
+                    msgEl.className = 'rag-engine-health-message';
+                    msgEl.style.cssText = 'font-size: 0.8em; padding: 6px 12px; color: var(--lcars-cyan); grid-column: 1 / -1;';
+                    card.appendChild(msgEl);
+                }
+                msgEl.textContent = status.message;
+                setTimeout(() => msgEl.remove(), 5000);
+            }
+        }
+
+        // Full refresh after delay
+        setTimeout(() => loadRAGEngines(), 3000);
+
+    } catch (error) {
+        if (badge) badge.textContent = 'Error';
+        alert('Health check error: ' + error.message);
+    }
+}
+
+function editRAGEngine(engineId) {
+    // Find engine data from last load — re-fetch to be sure
+    fetch(apiUrl('/api/rag-engines'))
+        .then(r => r.json())
+        .then(data => {
+            const engine = (data.engines || []).find(e => e.id === engineId);
+            if (engine) {
+                openRAGEngineModal(engineId, engine);
+            } else {
+                alert('Engine not found: ' + engineId);
+            }
+        })
+        .catch(err => alert('Failed to load engine data: ' + err.message));
+}
+
+/**
+ * Silent health check — updates badge and card class without showing alerts.
+ * Used for background auto-checks on load and periodic polling.
+ */
+async function healthCheckRAGEngineSilent(engineId) {
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/health'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engineId })
+        });
+
+        const result = await response.json();
+        const status = result.results?.[engineId];
+        if (!status) return;
+
+        const card = document.querySelector(`[data-engine-id="${engineId}"]`);
+        if (!card) return;
+
+        const badge = card.querySelector('.rag-engine-status-badge');
+        const statusCssClass = (status.status || 'not_installed').replace(/_/g, '-');
+
+        if (badge) {
+            badge.textContent = formatRAGStatus(status.status);
+            badge.className = `rag-engine-status-badge ${statusCssClass}`;
+        }
+
+        // Update card class to match new status
+        card.className = card.className.replace(/\b(running|installed|not-installed|error)\b/g, '').trim();
+        card.classList.add(statusCssClass);
+
+    } catch (_err) {
+        // Silent — don't surface errors from background health checks
+    }
+}
+
+/**
+ * Start/stop periodic health polling for running RAG engines.
+ * @param {boolean} hasRunning - true if any engines are currently running
+ */
+function startRAGEnginesHealthPolling(hasRunning) {
+    // Clear any existing poll
+    if (ragEnginesHealthInterval) {
+        clearInterval(ragEnginesHealthInterval);
+        ragEnginesHealthInterval = null;
+    }
+
+    if (!hasRunning) return;
+
+    // Counter to trigger update checks every 10th health poll (~5 minutes at 30s intervals)
+    let healthPollCount = 0;
+    const UPDATE_CHECK_EVERY_N_POLLS = 10;
+
+    // Poll every 30 seconds while the section is active
+    ragEnginesHealthInterval = setInterval(() => {
+        // Only poll if rag-engines section is visible
+        const section = document.querySelector('.rag-engines-section');
+        if (!section || !section.classList.contains('active')) {
+            clearInterval(ragEnginesHealthInterval);
+            ragEnginesHealthInterval = null;
+            return;
+        }
+
+        healthPollCount++;
+
+        // Fetch current engine list and health-check running ones
+        fetch(apiUrl('/api/rag-engines'))
+            .then(r => r.json())
+            .then(data => {
+                const engines = data.engines || [];
+                const running = engines.filter(e => e.status === 'running');
+                if (running.length === 0) {
+                    clearInterval(ragEnginesHealthInterval);
+                    ragEnginesHealthInterval = null;
+                    return;
+                }
+                running.forEach(e => healthCheckRAGEngineSilent(e.id));
+            })
+            .catch(() => {}); // Silent on network errors
+
+        // Every Nth poll, also check PyPI for available updates and patch cards in place
+        if (healthPollCount % UPDATE_CHECK_EVERY_N_POLLS === 0) {
+            fetch(apiUrl('/api/rag-engines/check-updates'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({})
+            })
+                .then(r => r.json())
+                .then(data => {
+                    if (data.results) {
+                        for (const [engineId, updateInfo] of Object.entries(data.results)) {
+                            applyUpdateInfoToCard(engineId, updateInfo);
+                        }
+                    }
+                })
+                .catch(() => {}); // Silent on network errors
+        }
+    }, 30000);
+}
+
+/**
+ * Stop RAG engines health polling (called on section leave).
+ */
+function stopRAGEnginesHealthPolling() {
+    if (ragEnginesHealthInterval) {
+        clearInterval(ragEnginesHealthInterval);
+        ragEnginesHealthInterval = null;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RAG ENGINE CONFIGURATION MODAL
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Engine type presets with default settings and descriptions
+ */
+const RAG_ENGINE_PRESETS = {
+    'lightrag': {
+        name: 'LightRAG',
+        icon: '🔮',
+        description: 'Cross-team text knowledge graphs for semantic search across documents and notes',
+        defaultPort: 9621,
+        defaultDataDir: '~/rag-data/lightrag',
+        settings: [
+            { key: 'graphType', label: 'Graph Type', type: 'select', options: ['knowledge', 'semantic', 'hybrid'], default: 'hybrid' },
+            { key: 'chunkSize', label: 'Chunk Size', type: 'number', default: 512, min: 128, max: 4096 },
+            { key: 'overlapSize', label: 'Chunk Overlap', type: 'number', default: 64, min: 0, max: 512 },
+            { key: 'embeddingModel', label: 'Embedding Model', type: 'text', default: 'text-embedding-3-small' },
+            { key: 'maxNodes', label: 'Max Graph Nodes', type: 'number', default: 10000, min: 1000, max: 1000000 }
+        ]
+    },
+    'code-graph-rag': {
+        name: 'Code-Graph-RAG',
+        icon: '🧬',
+        description: 'Source code intelligence — AST parsing, dependency graphs, and semantic code search',
+        defaultPort: 9622,
+        defaultDataDir: '~/rag-data/code-graph',
+        settings: [
+            { key: 'languages', label: 'Languages', type: 'text', default: 'swift,python,typescript', placeholder: 'Comma-separated' },
+            { key: 'indexDepth', label: 'Index Depth', type: 'select', options: ['shallow', 'standard', 'deep'], default: 'standard' },
+            { key: 'includeTests', label: 'Index Test Files', type: 'checkbox', default: false },
+            { key: 'maxFileSize', label: 'Max File Size (KB)', type: 'number', default: 500, min: 50, max: 5000 },
+            { key: 'excludePatterns', label: 'Exclude Patterns', type: 'text', default: 'node_modules,build,.git', placeholder: 'Comma-separated globs' }
+        ]
+    },
+    'rag-anything': {
+        name: 'RAG-Anything',
+        icon: '📦',
+        description: 'Multimodal asset archives — index PDFs, images, audio, and mixed-media documents',
+        defaultPort: 9623,
+        defaultDataDir: '~/rag-data/rag-anything',
+        settings: [
+            { key: 'mediaTypes', label: 'Media Types', type: 'text', default: 'pdf,png,jpg,mp3,docx', placeholder: 'Comma-separated' },
+            { key: 'ocrEnabled', label: 'Enable OCR', type: 'checkbox', default: true },
+            { key: 'audioTranscription', label: 'Audio Transcription', type: 'checkbox', default: false },
+            { key: 'maxAssetSize', label: 'Max Asset Size (MB)', type: 'number', default: 50, min: 1, max: 500 },
+            { key: 'thumbnailGeneration', label: 'Generate Thumbnails', type: 'checkbox', default: true }
+        ]
+    }
+};
+
+/**
+ * Open the RAG engine configuration modal
+ * @param {string|null} engineId - Engine ID to edit, or null for new engine
+ * @param {object|null} engineData - Existing engine data (for edit mode)
+ */
+function openRAGEngineModal(engineId = null, engineData = null) {
+    const modal = document.getElementById('rag-engine-modal');
+    const titleEl = document.getElementById('rag-engine-modal-title');
+    const bodyEl = document.getElementById('rag-engine-modal-body');
+
+    if (!modal || !bodyEl) return;
+
+    const isEdit = !!engineId && !!engineData;
+    titleEl.textContent = isEdit ? `CONFIGURE: ${engineData.name}` : 'ADD RAG ENGINE';
+
+    let html = '';
+
+    if (!isEdit) {
+        // Engine type selector (only for new engines)
+        html += `
+            <div class="rag-engine-form-group">
+                <label>ENGINE TYPE</label>
+                <select id="rag-engine-type-select" onchange="updateRAGEngineModalFields()">
+                    <option value="">-- Select Engine Type --</option>
+                    ${Object.entries(RAG_ENGINE_PRESETS).map(([type, preset]) =>
+                        `<option value="${type}">${preset.icon} ${preset.name}</option>`
+                    ).join('')}
+                </select>
+            </div>
+            <div id="rag-engine-type-description" class="rag-engine-desc" style="margin-bottom: 16px; color: var(--lcars-text-dim, #667788);"></div>
+        `;
+    }
+
+    // Common fields container
+    html += `<div id="rag-engine-fields-container">`;
+
+    if (isEdit) {
+        const preset = RAG_ENGINE_PRESETS[engineData.type] || {};
+        html += renderRAGEngineFields(engineData.type, engineData, preset);
+    }
+
+    html += `</div>`;
+
+    bodyEl.innerHTML = html;
+
+    // Store edit state
+    modal.dataset.editId = engineId || '';
+    modal.dataset.engineType = engineData?.type || '';
+
+    modal.style.display = 'flex';
+}
+
+/**
+ * Update modal fields when engine type is selected (new engine mode)
+ */
+function updateRAGEngineModalFields() {
+    const typeSelect = document.getElementById('rag-engine-type-select');
+    const descEl = document.getElementById('rag-engine-type-description');
+    const fieldsContainer = document.getElementById('rag-engine-fields-container');
+    const modal = document.getElementById('rag-engine-modal');
+
+    if (!typeSelect || !fieldsContainer) return;
+
+    const selectedType = typeSelect.value;
+    const preset = RAG_ENGINE_PRESETS[selectedType];
+
+    if (!preset) {
+        fieldsContainer.innerHTML = '';
+        if (descEl) descEl.textContent = '';
+        return;
+    }
+
+    if (descEl) descEl.textContent = preset.description;
+    modal.dataset.engineType = selectedType;
+
+    // Create default engine data from preset
+    const defaultData = {
+        id: selectedType,
+        type: selectedType,
+        name: preset.name,
+        port: preset.defaultPort,
+        dataDir: preset.defaultDataDir,
+        settings: {}
+    };
+    preset.settings.forEach(s => { defaultData.settings[s.key] = s.default; });
+
+    fieldsContainer.innerHTML = renderRAGEngineFields(selectedType, defaultData, preset);
+}
+
+/**
+ * Render the configuration fields for a specific engine type
+ */
+function renderRAGEngineFields(engineType, data, preset) {
+    if (!preset) return '<div class="rag-engines-empty">Unknown engine type</div>';
+
+    let html = `
+        <div class="rag-engine-form-group">
+            <label>ENGINE NAME</label>
+            <input type="text" id="rag-engine-name" value="${escapeHtml(data.name || preset.name)}" />
+        </div>
+        <div class="rag-engine-form-row">
+            <div class="rag-engine-form-group">
+                <label>PORT</label>
+                <input type="number" id="rag-engine-port" value="${data.port || preset.defaultPort}" min="1024" max="65535" />
+            </div>
+            <div class="rag-engine-form-group">
+                <label>ENABLED</label>
+                <select id="rag-engine-enabled">
+                    <option value="true" ${data.enabled !== false ? 'selected' : ''}>Yes</option>
+                    <option value="false" ${data.enabled === false ? 'selected' : ''}>No</option>
+                </select>
+            </div>
+        </div>
+        <div class="rag-engine-form-group">
+            <label>DATA DIRECTORY</label>
+            <input type="text" id="rag-engine-data-dir" value="${escapeHtml(data.dataDir || preset.defaultDataDir)}" />
+        </div>
+        <div class="rag-engine-form-group">
+            <label>INSTALL PATH (optional)</label>
+            <input type="text" id="rag-engine-install-path" value="${escapeHtml(data.installPath || '')}" placeholder="Auto-detected if blank" />
+        </div>
+    `;
+
+    // Engine-specific settings
+    if (preset.settings && preset.settings.length > 0) {
+        html += `
+            <div class="rag-engine-settings-section">
+                <div class="rag-engine-settings-title">${preset.icon} ${preset.name} SETTINGS</div>
+        `;
+
+        for (const setting of preset.settings) {
+            const currentVal = data.settings?.[setting.key] ?? setting.default;
+
+            html += `<div class="rag-engine-form-group">`;
+            html += `<label>${escapeHtml(setting.label.toUpperCase())}</label>`;
+
+            if (setting.type === 'select') {
+                html += `<select id="rag-setting-${setting.key}">`;
+                for (const opt of setting.options) {
+                    html += `<option value="${opt}" ${currentVal === opt ? 'selected' : ''}>${opt}</option>`;
+                }
+                html += `</select>`;
+            } else if (setting.type === 'checkbox') {
+                html += `
+                    <select id="rag-setting-${setting.key}">
+                        <option value="true" ${currentVal ? 'selected' : ''}>Yes</option>
+                        <option value="false" ${!currentVal ? 'selected' : ''}>No</option>
+                    </select>
+                `;
+            } else if (setting.type === 'number') {
+                html += `<input type="number" id="rag-setting-${setting.key}" value="${currentVal}"
+                    ${setting.min !== undefined ? `min="${setting.min}"` : ''}
+                    ${setting.max !== undefined ? `max="${setting.max}"` : ''} />`;
+            } else {
+                html += `<input type="text" id="rag-setting-${setting.key}" value="${escapeHtml(String(currentVal || ''))}"
+                    ${setting.placeholder ? `placeholder="${escapeHtml(setting.placeholder)}"` : ''} />`;
+            }
+
+            html += `</div>`;
+        }
+
+        html += `</div>`;
+    }
+
+    return html;
+}
+
+/**
+ * Close the RAG engine modal
+ */
+function closeRAGEngineModal() {
+    const modal = document.getElementById('rag-engine-modal');
+    if (modal) {
+        modal.style.display = 'none';
+        modal.dataset.editId = '';
+        modal.dataset.engineType = '';
+    }
+}
+
+/**
+ * Save the RAG engine configuration from the modal
+ */
+async function saveRAGEngineConfig() {
+    const modal = document.getElementById('rag-engine-modal');
+    const engineType = modal?.dataset.engineType;
+    const editId = modal?.dataset.editId;
+
+    if (!engineType) {
+        alert('Please select an engine type');
+        return;
+    }
+
+    const preset = RAG_ENGINE_PRESETS[engineType];
+    if (!preset) return;
+
+    // Gather common fields
+    const engineData = {
+        id: editId || engineType,
+        type: engineType,
+        name: document.getElementById('rag-engine-name')?.value || preset.name,
+        enabled: document.getElementById('rag-engine-enabled')?.value !== 'false',
+        port: parseInt(document.getElementById('rag-engine-port')?.value) || preset.defaultPort,
+        dataDir: document.getElementById('rag-engine-data-dir')?.value || preset.defaultDataDir,
+        installPath: document.getElementById('rag-engine-install-path')?.value || '',
+        settings: {}
+    };
+
+    // Gather engine-specific settings
+    for (const setting of (preset.settings || [])) {
+        const el = document.getElementById(`rag-setting-${setting.key}`);
+        if (!el) continue;
+
+        if (setting.type === 'checkbox') {
+            engineData.settings[setting.key] = el.value === 'true';
+        } else if (setting.type === 'number') {
+            engineData.settings[setting.key] = parseInt(el.value) || setting.default;
+        } else {
+            engineData.settings[setting.key] = el.value;
+        }
+    }
+
+    // Save via API
+    const saveBtn = document.getElementById('rag-engine-save-btn');
+    if (saveBtn) {
+        saveBtn.disabled = true;
+        saveBtn.textContent = 'SAVING...';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/rag-engines/save'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engine: engineData })
+        });
+
+        const result = await response.json();
+
+        if (result.success) {
+            closeRAGEngineModal();
+            loadRAGEngines(); // Refresh the list
+        } else {
+            alert('Failed to save: ' + (result.error || 'Unknown error'));
+        }
+    } catch (error) {
+        alert('Error saving engine config: ' + error.message);
+    } finally {
+        if (saveBtn) {
+            saveBtn.disabled = false;
+            saveBtn.textContent = 'SAVE';
+        }
+    }
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // INTEGRATION MODAL

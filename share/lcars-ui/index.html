@@ -95,6 +95,9 @@
                         <span>RELEASES</span>
                     </div>
                 </div>
+                <div class="sidebar-button" data-section="knowledge-graph">
+                    <span>KNOWLEDGE GRAPH</span>
+                </div>
                 <div class="sidebar-button has-submenu" id="settings-button">
                     <span>SETTINGS</span>
                     <div class="sidebar-submenu">
@@ -106,6 +109,7 @@
                         <div class="sidebar-submenu-items">
                             <div class="sidebar-submenu-item" data-section="team-config">TEAM CONFIG</div>
                             <div class="sidebar-submenu-item" data-section="integrations">INTEGRATIONS</div>
+                            <div class="sidebar-submenu-item" data-section="rag-engines">RAG ENGINES</div>
                             <div class="sidebar-submenu-item" data-section="backups">BACKUPS</div>
                             <div class="sidebar-submenu-item" data-section="archive">ARCHIVE / TRANSFER</div>
                         </div>
@@ -141,8 +145,8 @@
                     <div class="legend-pill candy-2" id="candy-2">0000</div>
                     <div class="legend-pill candy-3" id="candy-3">000.00</div>
                     <div class="legend-pill candy-4" id="candy-4">0000</div>
-                    <div class="legend-pill candy-5" id="candy-5">00-000</div>
-                    <div class="legend-pill candy-6" id="candy-6">0000</div>
+                    <div class="legend-pill candy-5 viewscreen-pill" id="carousel-fullscreen" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">VIEWSCREEN</div>
+                    <div class="legend-pill candy-6 sound-pill" id="sound-toggle" role="button" tabindex="0" onclick="LCARSSound.toggleMute()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}"><span id="sound-status">SOUND</span></div>
                 </section>
 
                 <!-- Startup Splash Screen -->
@@ -263,22 +267,19 @@
                                 </div>
                             </div>
 
+                            <!-- Panels 6+: RAG ENGINE PANELS (dynamically injected by JS) -->
+                            <div id="rag-engine-panels-container"></div>
+
                         </div><!-- /.carousel-track -->
                     </div><!-- /.carousel-viewport -->
 
                     <!-- Carousel Navigation -->
                     <div class="carousel-nav">
                         <button class="carousel-arrow" id="carousel-prev" aria-label="Previous panel">&#9664;</button>
-                        <div class="carousel-dots">
-                            <span class="carousel-dot active" data-panel="0"></span>
-                            <span class="carousel-dot" data-panel="1"></span>
-                            <span class="carousel-dot" data-panel="2"></span>
-                            <span class="carousel-dot" data-panel="3"></span>
-                            <span class="carousel-dot" data-panel="4"></span>
-                            <span class="carousel-dot" data-panel="5"></span>
+                        <div class="carousel-dots" id="carousel-dots">
+                            <!-- Dots generated dynamically by JS based on panel count -->
                         </div>
                         <button class="carousel-arrow" id="carousel-next" aria-label="Next panel">&#9654;</button>
-                        <button class="carousel-viewscreen" id="carousel-fullscreen">VIEWSCREEN</button>
                     </div>
 
                 </section>
@@ -592,6 +593,139 @@
                     </div>
                 </section>
 
+                <!-- RAG Engines -->
+                <section class="rag-engines-section">
+                    <div class="section-header green">
+                        <span class="section-title">RAG ENGINES</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="rag-engines-overview" id="rag-engines-overview">
+                        <div class="rag-engine-stat">
+                            <span class="stat-label">STATUS</span>
+                            <span class="stat-value" id="rag-system-status">LOADING...</span>
+                        </div>
+                        <div class="rag-engine-stat">
+                            <span class="stat-label">INSTALLED</span>
+                            <span class="stat-value" id="rag-installed-count">--</span>
+                        </div>
+                        <div class="rag-engine-stat">
+                            <span class="stat-label">RUNNING</span>
+                            <span class="stat-value" id="rag-running-count">--</span>
+                        </div>
+                    </div>
+
+                    <div class="section-header cyan" style="margin-top: 20px;">
+                        <span class="section-title">AVAILABLE ENGINES</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="rag-engines-list" id="rag-engines-list">
+                        <div class="rag-engines-loading">Loading RAG engines...</div>
+                    </div>
+
+                    <div class="rag-engine-actions">
+                        <button class="lcars-button rag-engine-refresh-btn" id="rag-refresh-btn" onclick="loadRAGEngines()">
+                            REFRESH STATUS
+                        </button>
+                        <button class="lcars-button rag-engine-check-updates-btn" id="rag-check-updates-btn" onclick="checkAllRAGEngineUpdates()">
+                            CHECK FOR UPDATES
+                        </button>
+                        <button class="lcars-button rag-engine-add-btn" id="rag-add-btn" onclick="openRAGEngineModal()">
+                            ADD ENGINE
+                        </button>
+                    </div>
+                </section>
+
+                <!-- Knowledge Graph Visualizer -->
+                <section class="knowledge-graph-section">
+                    <div class="section-header cyan">
+                        <span class="section-title">KNOWLEDGE GRAPH</span>
+                        <div class="section-bar"></div>
+                    </div>
+
+                    <!-- Graph toolbar -->
+                    <div class="graph-toolbar">
+                        <!-- Engine selector -->
+                        <div class="graph-toolbar-group">
+                            <label class="graph-toolbar-label">ENGINE</label>
+                            <select class="graph-engine-select" id="graph-engine-selector" onchange="onGraphEngineChange(this)">
+                                <option value="demo">Demo Graph</option>
+                            </select>
+                            <button class="lcars-button graph-toolbar-btn graph-icon-btn" onclick="loadGraphEngines()" title="Refresh engines">⟳</button>
+                        </div>
+
+                        <!-- Layout controls -->
+                        <div class="graph-toolbar-group">
+                            <label class="graph-toolbar-label">LAYOUT</label>
+                            <button class="lcars-button graph-layout-btn active" data-layout="cose" onclick="applyGraphLayout('cose')">FORCE</button>
+                            <button class="lcars-button graph-layout-btn" data-layout="circle" onclick="applyGraphLayout('circle')">CIRCLE</button>
+                            <button class="lcars-button graph-layout-btn" data-layout="breadthfirst" onclick="applyGraphLayout('breadthfirst')">TREE</button>
+                            <button class="lcars-button graph-layout-btn" data-layout="grid" onclick="applyGraphLayout('grid')">GRID</button>
+                            <button class="lcars-button graph-layout-btn" data-layout="concentric" onclick="applyGraphLayout('concentric')">RINGS</button>
+                        </div>
+
+                        <!-- Zoom controls -->
+                        <div class="graph-toolbar-group">
+                            <label class="graph-toolbar-label">VIEW</label>
+                            <button class="lcars-button graph-toolbar-btn graph-icon-btn" onclick="graphZoomIn()" title="Zoom in">+</button>
+                            <button class="lcars-button graph-toolbar-btn graph-icon-btn" onclick="graphZoomOut()" title="Zoom out">−</button>
+                            <button class="lcars-button graph-toolbar-btn" onclick="graphFitAll()" title="Fit all">FIT</button>
+                            <button class="lcars-button graph-toolbar-btn" onclick="graphCenter()" title="Center">CTR</button>
+                        </div>
+                    </div>
+
+                    <!-- Graph stats bar -->
+                    <div class="graph-stats-bar">
+                        <div class="graph-stat">
+                            <span class="stat-label">NODES</span>
+                            <span class="stat-value" id="graph-node-count">0</span>
+                        </div>
+                        <div class="graph-stat">
+                            <span class="stat-label">EDGES</span>
+                            <span class="stat-value" id="graph-edge-count">0</span>
+                        </div>
+                        <div class="graph-stat">
+                            <span class="stat-label">ENGINE</span>
+                            <span class="stat-value" id="graph-engine-label">--</span>
+                        </div>
+                    </div>
+
+                    <!-- Main graph area with detail panel -->
+                    <div class="graph-container-wrapper">
+                        <!-- Cytoscape.js graph canvas -->
+                        <div class="graph-canvas" id="knowledge-graph-container"></div>
+
+                        <!-- Detail panel (slides in from right) -->
+                        <div class="graph-detail-panel" id="graph-detail-panel">
+                            <div class="graph-detail-header">
+                                <span class="graph-detail-title">SELECT A NODE</span>
+                                <button class="graph-detail-close" onclick="hideGraphDetails()">✕</button>
+                            </div>
+                            <div class="graph-detail-content">
+                                <div class="detail-placeholder">Click a node or edge to view details</div>
+                            </div>
+                            <div class="graph-detail-relationships" id="graph-detail-relationships"></div>
+                        </div>
+                    </div>
+
+                    <!-- Search / Query bar -->
+                    <div class="graph-search-bar">
+                        <input type="text" class="graph-search-input" id="graph-search-input"
+                               placeholder="Search nodes or query the knowledge graph..."
+                               onkeydown="if(event.key==='Enter') searchGraph(this.value)">
+                        <select class="graph-engine-select graph-search-mode" id="graph-search-mode" style="min-width: 100px;">
+                            <option value="hybrid">HYBRID</option>
+                            <option value="local">LOCAL</option>
+                            <option value="global">GLOBAL</option>
+                            <option value="naive">NAIVE</option>
+                        </select>
+                        <button class="lcars-button graph-search-btn" onclick="searchGraph(document.getElementById('graph-search-input').value)">
+                            QUERY
+                        </button>
+                        <button class="lcars-button graph-toolbar-btn" onclick="clearGraphSearch()" title="Clear search and reload graph">CLR</button>
+                        <div class="graph-rag-answer" id="graph-rag-answer" style="display: none;"></div>
+                    </div>
+                </section>
+
                 <!-- Archive / Transfer -->
                 <section class="archive-section">
                     <div class="section-header amber">
@@ -772,6 +906,9 @@
             <div class="tabbar-button" data-section="integrations">
                 <span class="tabbar-label">INTEGR</span>
             </div>
+            <div class="tabbar-button" data-section="rag-engines">
+                <span class="tabbar-label">RAG</span>
+            </div>
             <div class="tabbar-button" data-section="backups">
                 <span class="tabbar-label">BACKUPS</span>
             </div>
@@ -865,6 +1002,25 @@
                 <div class="modal-footer-spacer"></div>
                 <button type="button" class="lcars-btn lcars-btn-secondary" onclick="testIntegrationFromModal()">Test Connection</button>
                 <button type="submit" class="lcars-btn lcars-btn-primary" form="integration-form">Save</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- RAG Engine Configuration Modal -->
+    <div id="rag-engine-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeRAGEngineModal()"></div>
+        <div class="lcars-modal-content rag-engine-modal">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title" id="rag-engine-modal-title">CONFIGURE RAG ENGINE</span>
+                <button class="lcars-modal-close" onclick="closeRAGEngineModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body" id="rag-engine-modal-body">
+                <!-- Dynamic content filled by JS -->
+            </div>
+            <div class="lcars-modal-footer">
+                <div class="modal-footer-spacer"></div>
+                <button type="button" class="lcars-btn lcars-btn-secondary" onclick="closeRAGEngineModal()">CANCEL</button>
+                <button type="button" class="lcars-btn lcars-btn-primary" id="rag-engine-save-btn" onclick="saveRAGEngineConfig()">SAVE</button>
             </div>
         </div>
     </div>
@@ -1476,7 +1632,13 @@
     <!-- Scan line animation overlay -->
     <div class="scanline"></div>
 
-<script src="js/lcars.js?v=3.16"></script>
+    <!-- LCARS Sound Manager — must load before lcars.js -->
+    <script src="js/lcars-sound.js?v=2.0"></script>
+    <!-- Cytoscape.js: Graph visualization library -->
+    <script src="js/vendor/cytoscape.min.js"></script>
+    <!-- LCARS Knowledge Graph Module -->
+    <script src="js/lcars-graph.js?v=1.3"></script>
+<script src="js/lcars.js?v=3.18"></script>
 <!-- Activity Timeline Panel — must load after lcars.js (depends on escapeHtml, apiUrl) -->
 <script src="js/lcars-activity.js"></script>
 </body>
