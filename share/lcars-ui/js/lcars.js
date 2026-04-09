@@ -898,6 +898,12 @@ function toggleHomeFullscreen() {
         return;
     }
 
+    // VIEWSCREEN always shows HOME tab content — switch there first if needed.
+    // Use skipAnimation=true so the transition is instant before fullscreen kicks in.
+    if (activeSection !== 'home') {
+        switchSection('home', true);
+    }
+
     const container = document.querySelector('.lcars-container');
     if (!container) return;
 
