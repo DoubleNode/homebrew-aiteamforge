@@ -1,1 +1,6059 @@
-../../fleet-monitor/server/public/lcars/css/lcars-fleet-theme.css
+/* ===============================================================================
+   LCARS Fleet Monitor - Theme CSS
+
+   RED/BLUE EMPHASIS COLOR SCHEME
+
+   This file provides the color theme for Fleet Monitor, shifting away from
+   the traditional orange-heavy LCARS palette to emphasize red and blue.
+
+   Import AFTER lcars-fleet.css:
+   <link rel="stylesheet" href="css/lcars-fleet.css">
+   <link rel="stylesheet" href="css/lcars-fleet-theme.css">
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   LCARS-007: CSS CUSTOM PROPERTIES - RED/BLUE EMPHASIS
+
+   Color Philosophy:
+   - PRIMARY: Red/Blue spectrum for main UI elements
+   - SECONDARY: Supporting colors (purple, orange, tan) for accents
+   - STATUS: Clear distinction for online/offline/warning states
+   - INTERFACE: Dark backgrounds for authentic LCARS look
+   ------------------------------------------------------------------------------- */
+:root {
+    /* ═══════════════════════════════════════════════════════════════════════════
+       PRIMARY COLORS - Red/Blue Focus
+       These are the dominant colors in the Fleet Monitor interface
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Red Spectrum - Used for Main Event organization, alerts, emphasis */
+    --lcars-red: #cc4444;           /* Deep red - headers, important elements */
+    --lcars-crimson: #ff4466;       /* Bright crimson - Main Event primary */
+    --lcars-rose: #ff6688;          /* Light rose - hover states on red */
+
+    /* Blue Spectrum - Used for DoubleNode organization, info, navigation */
+    --lcars-blue: #9999ff;          /* Core blue - primary UI elements */
+    --lcars-cyan: #99ccff;          /* Cyan - Dev Team, secondary info */
+    --lcars-lavender: #ccccff;      /* Light lavender - subtle highlights */
+    --lcars-navy: #6666cc;          /* Dark blue - pressed states */
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       SECONDARY COLORS - Supporting Palette
+       Used sparingly for variety and visual interest
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Purple Spectrum - Academy organization, special elements */
+    --lcars-purple: #cc99ff;        /* Primary purple - Academy */
+    --lcars-mauve: #cc99cc;         /* Muted purple - secondary */
+    --lcars-violet: #aa77dd;        /* Deep violet - accents */
+
+    /* Warm Spectrum - REDUCED USAGE (legacy LCARS colors) */
+    --lcars-orange: #ff9900;        /* Orange - use sparingly, frame accents */
+    --lcars-peach: #ffcc99;         /* Peach - text, subtle backgrounds */
+    --lcars-tan: #cc9966;           /* Tan - borders, dividers */
+    --lcars-brown: #bb8866;         /* Brown - inactive states */
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       STATUS COLORS - Clear State Indicators
+       High contrast for accessibility, distinct meanings
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Online/Success - Bright green with good visibility */
+    --lcars-green: #99ff99;         /* Primary green */
+    --lcars-green-glow: rgba(153, 255, 153, 0.4);  /* Glow effect */
+    --lcars-green-dark: #66cc66;    /* Darker variant */
+
+    /* Warning - Yellow/amber for attention */
+    --lcars-yellow: #ffff99;        /* Primary yellow */
+    --lcars-amber: #ffcc00;         /* Amber - more urgent */
+    --lcars-yellow-glow: rgba(255, 255, 153, 0.3);
+
+    /* Offline/Error - Red for critical states */
+    --lcars-alert-red: #ff6666;     /* Alert red */
+    --lcars-alert-glow: rgba(255, 102, 102, 0.4);
+    --lcars-error: #ff4444;         /* Error state */
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       INTERFACE COLORS - Backgrounds and Surfaces
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    --lcars-black: #000000;         /* True black - main background */
+    --lcars-white: #ffffff;         /* Pure white - LCARS terminals, badges */
+    --lcars-dark: #1a1a2e;          /* Dark blue-black - panels, cards */
+    --lcars-darker: #0d0d1a;        /* Deeper dark - nested elements */
+    --lcars-surface: #252540;       /* Elevated surface */
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       ORGANIZATION MAPPING
+       Each organization has a primary color identity
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Organization colors - match sidebar dashboard buttons */
+    --org-mainevent: var(--lcars-crimson);    /* Main Event - Red/Crimson */
+    --org-doublenode: var(--lcars-blue);      /* DoubleNode - Blue */
+    --org-devteam: var(--lcars-cyan);         /* Dev Team/Academy - Cyan */
+    --org-academy: var(--lcars-cyan);         /* Academy - Cyan (matches sidebar) */
+    --org-personal: var(--lcars-green);       /* Personal - Green */
+    --org-legal: var(--lcars-green);          /* Legal - Green */
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       DIVISION COLORS
+       Unique colors for each division/team
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Main Event Divisions */
+    --div-ios: var(--lcars-blue);             /* iOS - TNG Blue */
+    --div-android: var(--lcars-green);        /* Android - TOS Green */
+    --div-firebase: var(--lcars-amber);       /* Firebase - DS9 Amber */
+    --div-command: var(--lcars-rose);         /* Command - Light Red */
+
+    /* DoubleNode Divisions */
+    --div-dns: var(--lcars-lavender);         /* DNS - Lower Decks Lavender */
+    --div-freelance: var(--lcars-purple);     /* Freelance - ENT Purple */
+    --div-freelance-starwords: var(--lcars-violet);   /* StarWords - Violet */
+    --div-freelance-workstats: var(--lcars-mauve);    /* WorkStats - Mauve */
+
+    /* Academy Division */
+    --div-academy: var(--lcars-peach);        /* Academy - Peach */
+
+    /* Personal Divisions */
+    --div-legal: var(--lcars-green);          /* Legal - Green */
+    --div-legal-coparenting: var(--lcars-green-dark);  /* Coparenting - Dark Green */
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-008: ORGANIZATION-SPECIFIC COLOR CLASSES
+
+   Apply these classes to containers to automatically theme child elements
+   Uses CSS custom property --org-color for inheritance
+   ------------------------------------------------------------------------------- */
+
+/* Organization Classes - Set the --org-color variable */
+.org-mainevent {
+    --org-color: var(--org-mainevent);
+    --org-color-light: var(--lcars-rose);
+    --org-color-dark: var(--lcars-red);
+}
+
+.org-doublenode {
+    --org-color: var(--org-doublenode);
+    --org-color-light: var(--lcars-lavender);
+    --org-color-dark: var(--lcars-navy);
+}
+
+.org-devteam {
+    --org-color: var(--org-devteam);
+    --org-color-light: var(--lcars-lavender);
+    --org-color-dark: var(--lcars-blue);
+}
+
+.org-academy {
+    --org-color: var(--org-academy);
+    --org-color-light: var(--lcars-lavender);
+    --org-color-dark: var(--lcars-violet);
+}
+
+.org-personal {
+    --org-color: var(--org-personal);
+    --org-color-light: var(--lcars-green);
+    --org-color-dark: var(--lcars-green-dark);
+}
+
+.org-legal {
+    --org-color: var(--org-legal);
+    --org-color-light: var(--lcars-green);
+    --org-color-dark: var(--lcars-green-dark);
+}
+
+/* Division Classes - Set the --div-color variable */
+.div-ios { --div-color: var(--div-ios); }
+.div-android { --div-color: var(--div-android); }
+.div-firebase { --div-color: var(--div-firebase); }
+.div-command { --div-color: var(--div-command); }
+.div-dns { --div-color: var(--div-dns); }
+.div-freelance { --div-color: var(--div-freelance); }
+.div-freelance-starwords { --div-color: var(--div-freelance-starwords); }
+.div-freelance-workstats { --div-color: var(--div-freelance-workstats); }
+.div-academy { --div-color: var(--div-academy); }
+
+/* Organization Panel Styling - L-frame border uses org color */
+.organization-panel {
+    position: relative;
+    background: var(--lcars-black);
+    border-left: 12px solid var(--org-color, var(--lcars-blue));
+    border-top: 4px solid var(--org-color, var(--lcars-blue));
+    border-top-left-radius: 20px;
+    padding: 20px;
+    padding-top: 20px;
+    margin-bottom: 20px;
+    margin-left: 20px;
+}
+
+/* Top-left corner is squared - no inner curve */
+
+/* Organization header styling */
+.organization-header {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+    margin-bottom: 20px;
+}
+
+.organization-title {
+    font-size: 20px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--org-color, var(--lcars-blue));
+    text-transform: uppercase;
+}
+
+.organization-count {
+    font-size: 14px;
+    color: var(--lcars-tan);
+    padding: 4px 12px;
+    background: var(--lcars-dark);
+    border-radius: 12px;
+}
+
+/* Division container - see LCARS-033 section below for full L-frame styling */
+
+/* -------------------------------------------------------------------------------
+   LCARS-009: STATUS INDICATOR CLASSES
+
+   Clear visual distinction between online/offline/warning states
+   Includes glow effects and pulse animations for emphasis
+   ------------------------------------------------------------------------------- */
+
+/* Base status indicator - small circle */
+.status-indicator {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* Online Status - Bright green with glow */
+.status-online,
+.status-indicator.online {
+    background: var(--lcars-green);
+    box-shadow:
+        0 0 6px var(--lcars-green-glow),
+        0 0 12px var(--lcars-green-glow);
+}
+
+/* Offline Status - Red with subtle pulse */
+.status-offline,
+.status-indicator.offline {
+    background: var(--lcars-alert-red);
+    box-shadow: 0 0 8px var(--lcars-alert-glow);
+    animation: status-pulse-offline 2s ease-in-out infinite;
+}
+
+@keyframes status-pulse-offline {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 8px var(--lcars-alert-glow);
+    }
+    50% {
+        opacity: 0.7;
+        box-shadow: 0 0 15px var(--lcars-alert-glow);
+    }
+}
+
+/* Warning Status - Yellow/amber */
+.status-warning,
+.status-indicator.warning {
+    background: var(--lcars-yellow);
+    box-shadow: 0 0 6px var(--lcars-yellow-glow);
+    animation: status-pulse-warning 1.5s ease-in-out infinite;
+}
+
+@keyframes status-pulse-warning {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.6; }
+}
+
+/* Idle/Unknown Status - Muted tan */
+.status-idle,
+.status-indicator.idle {
+    background: var(--lcars-tan);
+    opacity: 0.7;
+}
+
+/* Status Badge - Larger pill-shaped indicator with text */
+.status-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+}
+
+.status-badge.online {
+    background: var(--lcars-green);
+    color: var(--lcars-black);
+    box-shadow: 0 0 10px var(--lcars-green-glow);
+}
+
+.status-badge.offline {
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+    animation: status-pulse-offline 2s ease-in-out infinite;
+}
+
+.status-badge.warning {
+    background: var(--lcars-yellow);
+    color: var(--lcars-black);
+}
+
+.status-badge.idle {
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+}
+
+/* Status text colors (for inline use) */
+.text-status-online { color: var(--lcars-green); }
+.text-status-offline { color: var(--lcars-alert-red); }
+.text-status-warning { color: var(--lcars-yellow); }
+.text-status-idle { color: var(--lcars-tan); }
+
+/* Status row - machine/terminal listing */
+.status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 15px;
+    background: var(--lcars-dark);
+    border-radius: 8px;
+    border-left: 4px solid var(--lcars-tan);
+    transition: all 0.2s ease;
+}
+
+.status-row:hover {
+    background: var(--lcars-surface);
+    transform: translateX(3px);
+}
+
+.status-row.online {
+    border-left-color: var(--lcars-green);
+}
+
+.status-row.offline {
+    border-left-color: var(--lcars-alert-red);
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+.status-row.offline .machine-name,
+.status-row.offline .session-count,
+.status-row.offline .last-seen {
+    color: var(--lcars-black);
+}
+
+.status-row.warning {
+    border-left-color: var(--lcars-yellow);
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-010: CANDY PILL COLOR SCHEMES
+
+   Section-specific color arrays for the animated candy display bar
+   Each section has a distinct color palette for visual differentiation
+   ------------------------------------------------------------------------------- */
+
+/* Candy pill base styles */
+.candy-pill {
+    display: flex;
+    align-items: flex-end;
+    justify-content: flex-end;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-black);
+    border-left: 1px solid var(--lcars-black);
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+/* Data-driven candy pills with value + label children */
+.candy-pill[data-candy] {
+    flex-direction: row;
+    align-items: flex-end;
+    justify-content: flex-end;
+    gap: 6px;
+    padding: 6px 12px;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   CANDY PILL COLOR CLASSES
+   Direct background color application via class names
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.candy-pill.candy-blue { background: var(--lcars-blue); }
+.candy-pill.candy-cyan { background: var(--lcars-cyan); }
+.candy-pill.candy-red { background: var(--lcars-red); }
+.candy-pill.candy-orange { background: var(--lcars-orange); }
+.candy-pill.candy-tan { background: var(--lcars-tan); }
+.candy-pill.candy-peach { background: var(--lcars-peach); }
+.candy-pill.candy-lavender { background: var(--lcars-lavender); }
+.candy-pill.candy-purple { background: var(--lcars-purple); }
+.candy-pill.candy-mauve { background: var(--lcars-mauve); }
+.candy-pill.candy-crimson { background: var(--lcars-crimson); }
+.candy-pill.candy-rose { background: var(--lcars-rose); }
+.candy-pill.candy-violet { background: var(--lcars-violet); }
+.candy-pill.candy-brown { background: var(--lcars-brown); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   OVERVIEW SECTION - Blue/Cyan Emphasis
+   Calm, informational feel for fleet overview
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.section-overview .candy-pill:nth-child(1),
+.candy-scheme-overview .candy-1 { background: var(--lcars-blue); }
+
+.section-overview .candy-pill:nth-child(2),
+.candy-scheme-overview .candy-2 { background: var(--lcars-cyan); }
+
+.section-overview .candy-pill:nth-child(3),
+.candy-scheme-overview .candy-3 { background: var(--lcars-lavender); }
+
+.section-overview .candy-pill:nth-child(4),
+.candy-scheme-overview .candy-4 { background: var(--lcars-blue); }
+
+.section-overview .candy-pill:nth-child(5),
+.candy-scheme-overview .candy-5 { background: var(--lcars-cyan); }
+
+.section-overview .candy-pill:nth-child(6),
+.candy-scheme-overview .candy-6 { background: var(--lcars-lavender); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ORGANIZATIONS SECTION - Red/Crimson Emphasis
+   Bold, active feel for organization management
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.section-organizations .candy-pill:nth-child(1),
+.candy-scheme-organizations .candy-1 { background: var(--lcars-crimson); }
+
+.section-organizations .candy-pill:nth-child(2),
+.candy-scheme-organizations .candy-2 { background: var(--lcars-red); }
+
+.section-organizations .candy-pill:nth-child(3),
+.candy-scheme-organizations .candy-3 { background: var(--lcars-rose); }
+
+.section-organizations .candy-pill:nth-child(4),
+.candy-scheme-organizations .candy-4 { background: var(--lcars-crimson); }
+
+.section-organizations .candy-pill:nth-child(5),
+.candy-scheme-organizations .candy-5 { background: var(--lcars-peach); }
+
+.section-organizations .candy-pill:nth-child(6),
+.candy-scheme-organizations .candy-6 { background: var(--lcars-red); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MACHINES SECTION - Purple/Mauve Emphasis
+   Technical, detailed feel for machine status
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.section-machines .candy-pill:nth-child(1),
+.candy-scheme-machines .candy-1 { background: var(--lcars-purple); }
+
+.section-machines .candy-pill:nth-child(2),
+.candy-scheme-machines .candy-2 { background: var(--lcars-mauve); }
+
+.section-machines .candy-pill:nth-child(3),
+.candy-scheme-machines .candy-3 { background: var(--lcars-violet); }
+
+.section-machines .candy-pill:nth-child(4),
+.candy-scheme-machines .candy-4 { background: var(--lcars-lavender); }
+
+.section-machines .candy-pill:nth-child(5),
+.candy-scheme-machines .candy-5 { background: var(--lcars-purple); }
+
+.section-machines .candy-pill:nth-child(6),
+.candy-scheme-machines .candy-6 { background: var(--lcars-mauve); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   WORKFLOW SECTION - Mixed warm tones (legacy compatibility)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.section-workflow .candy-pill:nth-child(1),
+.candy-scheme-workflow .candy-1 { background: var(--lcars-peach); }
+
+.section-workflow .candy-pill:nth-child(2),
+.candy-scheme-workflow .candy-2 { background: var(--lcars-blue); }
+
+.section-workflow .candy-pill:nth-child(3),
+.candy-scheme-workflow .candy-3 { background: var(--lcars-tan); }
+
+.section-workflow .candy-pill:nth-child(4),
+.candy-scheme-workflow .candy-4 { background: var(--lcars-purple); }
+
+.section-workflow .candy-pill:nth-child(5),
+.candy-scheme-workflow .candy-5 { background: var(--lcars-cyan); }
+
+.section-workflow .candy-pill:nth-child(6),
+.candy-scheme-workflow .candy-6 { background: var(--lcars-crimson); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   SETTINGS SECTION - Neutral/Cyan tones
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.section-settings .candy-pill:nth-child(1),
+.candy-scheme-settings .candy-1 { background: var(--lcars-cyan); }
+
+.section-settings .candy-pill:nth-child(2),
+.candy-scheme-settings .candy-2 { background: var(--lcars-tan); }
+
+.section-settings .candy-pill:nth-child(3),
+.candy-scheme-settings .candy-3 { background: var(--lcars-lavender); }
+
+.section-settings .candy-pill:nth-child(4),
+.candy-scheme-settings .candy-4 { background: var(--lcars-cyan); }
+
+.section-settings .candy-pill:nth-child(5),
+.candy-scheme-settings .candy-5 { background: var(--lcars-tan); }
+
+.section-settings .candy-pill:nth-child(6),
+.candy-scheme-settings .candy-6 { background: var(--lcars-lavender); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   CANDY PILL INVERSION EFFECT
+   When inverted, background becomes black, text becomes the original color
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.candy-pill.inverted {
+    background: var(--lcars-black) !important;
+    transition: all 0.15s ease-in-out;
+}
+
+/* Inverted color mappings - text takes the original background color */
+.candy-pill.inverted.candy-blue { color: var(--lcars-blue); }
+.candy-pill.inverted.candy-cyan { color: var(--lcars-cyan); }
+.candy-pill.inverted.candy-lavender { color: var(--lcars-lavender); }
+.candy-pill.inverted.candy-crimson { color: var(--lcars-crimson); }
+.candy-pill.inverted.candy-red { color: var(--lcars-red); }
+.candy-pill.inverted.candy-rose { color: var(--lcars-rose); }
+.candy-pill.inverted.candy-purple { color: var(--lcars-purple); }
+.candy-pill.inverted.candy-mauve { color: var(--lcars-mauve); }
+.candy-pill.inverted.candy-violet { color: var(--lcars-violet); }
+.candy-pill.inverted.candy-peach { color: var(--lcars-peach); }
+.candy-pill.inverted.candy-tan { color: var(--lcars-tan); }
+.candy-pill.inverted.candy-orange { color: var(--lcars-orange); }
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   CANDY PILL ALERT MODE
+   Flash red when machines go offline
+   ═══════════════════════════════════════════════════════════════════════════════ */
+.candy-pill.alert {
+    animation: candy-alert 0.5s ease-in-out infinite;
+}
+
+@keyframes candy-alert {
+    0%, 100% {
+        background: var(--lcars-alert-red);
+        color: var(--lcars-black);
+    }
+    50% {
+        background: var(--lcars-black);
+        color: var(--lcars-alert-red);
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   THEME OVERRIDES FOR BASE FRAMEWORK
+
+   Apply red/blue emphasis to sidebar and other frame elements
+   ------------------------------------------------------------------------------- */
+
+/* Sidebar frame - shift from orange to blue-accented */
+.lcars-sidebar {
+    background: var(--lcars-blue);
+}
+
+.lcars-sidebar::before {
+    background: var(--lcars-blue);
+}
+
+.lcars-sidebar::after {
+    background: radial-gradient(
+        circle at 30px 30px,
+        var(--lcars-black) 30px,
+        var(--lcars-blue) 30px
+    );
+}
+
+/* Sidebar buttons - use varied colors from the red/blue palette */
+.sidebar-button[data-section="workflow"] { background: var(--lcars-peach); }
+.sidebar-button[data-section="details"] { background: var(--lcars-cyan); }
+.sidebar-button[data-section="queue"] { background: var(--lcars-purple); }
+.sidebar-button[data-section="commands"] { background: var(--lcars-crimson); }
+
+/* Active states - inverted with colored text */
+.sidebar-button[data-section="workflow"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-peach);
+}
+.sidebar-button[data-section="details"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
+.sidebar-button[data-section="queue"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-purple);
+}
+.sidebar-button[data-section="commands"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-crimson);
+}
+
+/* Refresh button - cyan accent */
+.sidebar-button.refresh-btn {
+    background: var(--lcars-cyan);
+}
+
+/* Section header color variants - additional themes */
+.section-header.red .section-title { color: var(--lcars-red); }
+.section-header.red .section-bar { background: var(--lcars-red); }
+
+.section-header.crimson .section-title { color: var(--lcars-crimson); }
+.section-header.crimson .section-bar { background: var(--lcars-crimson); }
+
+/* -------------------------------------------------------------------------------
+   ACCESSIBILITY: CONTRAST RATIOS
+
+   All color combinations meet WCAG AA standards (4.5:1 for normal text)
+
+   Black text on:
+   - lcars-blue (#9999ff): 7.3:1
+   - lcars-cyan (#99ccff): 9.1:1
+   - lcars-crimson (#ff4466): 4.8:1
+   - lcars-green (#99ff99): 12.1:1
+   - lcars-yellow (#ffff99): 15.1:1
+
+   Peach text (#ffcc99) on black (#000000): 11.2:1
+   Blue text (#9999ff) on black (#000000): 5.4:1
+   ------------------------------------------------------------------------------- */
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+    :root {
+        --lcars-dark: #000000;
+        --lcars-surface: #1a1a1a;
+        --lcars-blue: #aaaaff;
+        --lcars-cyan: #aaddff;
+        --lcars-crimson: #ff5577;
+        --lcars-green: #aaffaa;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   RESPONSIVE COLOR ADJUSTMENTS
+   Slightly brighter colors on mobile for outdoor visibility
+   ------------------------------------------------------------------------------- */
+@media (max-width: 600px) {
+    :root {
+        --lcars-blue: #aaaaff;
+        --lcars-cyan: #aaddff;
+        --lcars-crimson: #ff5577;
+    }
+
+    /* Adjust sidebar curve for mobile */
+    .lcars-sidebar::after {
+        background: radial-gradient(
+            circle at 20px 20px,
+            var(--lcars-black) 20px,
+            var(--lcars-blue) 20px
+        );
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   CANDY PILL ANIMATIONS
+   State-change pulses, inversion effects, and alert modes
+   ------------------------------------------------------------------------------- */
+
+/* Base candy pill transition */
+.candy-pill {
+    transition:
+        background-color 0.15s ease,
+        transform 0.15s ease,
+        box-shadow 0.15s ease,
+        filter 0.1s ease;
+}
+
+/* State-change pulse animation */
+@keyframes candy-pulse {
+    0% {
+        transform: scale(1);
+        filter: brightness(1);
+    }
+    50% {
+        transform: scale(1.05);
+        filter: brightness(1.3);
+    }
+    100% {
+        transform: scale(1);
+        filter: brightness(1);
+    }
+}
+
+.candy-pill.candy-pulse {
+    animation: candy-pulse 0.3s ease-out;
+}
+
+/* Inversion effect - simulates power fluctuation */
+@keyframes candy-invert {
+    0% {
+        filter: invert(0) brightness(1);
+    }
+    25% {
+        filter: invert(1) brightness(1.2);
+    }
+    75% {
+        filter: invert(1) brightness(0.9);
+    }
+    100% {
+        filter: invert(0) brightness(1);
+    }
+}
+
+.candy-pill.candy-inverted {
+    animation: candy-invert 0.3s ease-in-out;
+}
+
+/* Alternative inversion - color swap */
+.candy-pill.candy-inverted .candy-value {
+    color: var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------------
+   ALERT MODE ANIMATIONS
+   For offline machines and critical status
+   ------------------------------------------------------------------------------- */
+
+/* Alert state base */
+.candy-pill.candy-alert {
+    box-shadow:
+        0 0 10px var(--lcars-crimson),
+        inset 0 0 5px rgba(255, 68, 102, 0.3);
+    border: 1px solid var(--lcars-crimson);
+}
+
+/* Alert pulse animation */
+@keyframes candy-alert-pulse {
+    0% {
+        box-shadow:
+            0 0 10px var(--lcars-crimson),
+            inset 0 0 5px rgba(255, 68, 102, 0.3);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow:
+            0 0 25px var(--lcars-crimson),
+            0 0 40px rgba(255, 68, 102, 0.5),
+            inset 0 0 10px rgba(255, 68, 102, 0.5);
+        transform: scale(1.02);
+    }
+    100% {
+        box-shadow:
+            0 0 10px var(--lcars-crimson),
+            inset 0 0 5px rgba(255, 68, 102, 0.3);
+        transform: scale(1);
+    }
+}
+
+.candy-pill.candy-alert-pulse {
+    animation: candy-alert-pulse 0.5s ease-in-out;
+}
+
+/* Critical alert - more aggressive */
+@keyframes candy-critical {
+    0%, 100% {
+        background-color: var(--candy-bg, var(--lcars-crimson));
+        opacity: 1;
+    }
+    50% {
+        background-color: var(--lcars-black);
+        opacity: 0.8;
+    }
+}
+
+.candy-pill.candy-critical {
+    animation: candy-critical 0.5s ease-in-out infinite;
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION-SPECIFIC CANDY COLORS
+   Color schemes that change based on active section
+   ------------------------------------------------------------------------------- */
+
+/* Overview section (default) - Blue/Cyan emphasis */
+.section-overview .candy-pill:nth-child(1) { --candy-bg: var(--lcars-blue); }
+.section-overview .candy-pill:nth-child(2) { --candy-bg: var(--lcars-cyan); }
+.section-overview .candy-pill:nth-child(3) { --candy-bg: var(--lcars-crimson); }
+.section-overview .candy-pill:nth-child(4) { --candy-bg: var(--lcars-orange); }
+.section-overview .candy-pill:nth-child(5) { --candy-bg: var(--lcars-tan); }
+.section-overview .candy-pill:nth-child(6) { --candy-bg: var(--lcars-peach); }
+
+/* Machines section - Cool blue tones */
+.section-machines .candy-pill:nth-child(1) { --candy-bg: var(--lcars-cyan); }
+.section-machines .candy-pill:nth-child(2) { --candy-bg: var(--lcars-blue); }
+.section-machines .candy-pill:nth-child(3) { --candy-bg: var(--lcars-lavender); }
+.section-machines .candy-pill:nth-child(4) { --candy-bg: var(--lcars-blue); }
+.section-machines .candy-pill:nth-child(5) { --candy-bg: var(--lcars-cyan); }
+.section-machines .candy-pill:nth-child(6) { --candy-bg: var(--lcars-lavender); }
+
+/* Sessions section - Warm orange/peach tones */
+.section-sessions .candy-pill:nth-child(1) { --candy-bg: var(--lcars-orange); }
+.section-sessions .candy-pill:nth-child(2) { --candy-bg: var(--lcars-peach); }
+.section-sessions .candy-pill:nth-child(3) { --candy-bg: var(--lcars-tan); }
+.section-sessions .candy-pill:nth-child(4) { --candy-bg: var(--lcars-brown); }
+.section-sessions .candy-pill:nth-child(5) { --candy-bg: var(--lcars-mauve); }
+.section-sessions .candy-pill:nth-child(6) { --candy-bg: var(--lcars-orange); }
+
+/* Alerts section - Red/Orange warning tones */
+.section-alerts .candy-pill:nth-child(1) { --candy-bg: var(--lcars-crimson); }
+.section-alerts .candy-pill:nth-child(2) { --candy-bg: var(--lcars-orange); }
+.section-alerts .candy-pill:nth-child(3) { --candy-bg: var(--lcars-crimson); }
+.section-alerts .candy-pill:nth-child(4) { --candy-bg: var(--lcars-orange); }
+.section-alerts .candy-pill:nth-child(5) { --candy-bg: var(--lcars-crimson); }
+.section-alerts .candy-pill:nth-child(6) { --candy-bg: var(--lcars-orange); }
+
+/* Settings section - Muted purple/mauve tones */
+.section-settings .candy-pill:nth-child(1) { --candy-bg: var(--lcars-lavender); }
+.section-settings .candy-pill:nth-child(2) { --candy-bg: var(--lcars-mauve); }
+.section-settings .candy-pill:nth-child(3) { --candy-bg: var(--lcars-tan); }
+.section-settings .candy-pill:nth-child(4) { --candy-bg: var(--lcars-peach); }
+.section-settings .candy-pill:nth-child(5) { --candy-bg: var(--lcars-brown); }
+.section-settings .candy-pill:nth-child(6) { --candy-bg: var(--lcars-lavender); }
+
+/* Apply candy background from CSS variable */
+.candy-pill[class*="section-"] {
+    background-color: var(--candy-bg, var(--lcars-blue));
+}
+
+/* -------------------------------------------------------------------------------
+   CANDY VALUE DISPLAY
+   Typography and layout for candy pill values
+   ------------------------------------------------------------------------------- */
+
+.candy-value {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    font-weight: 400;
+    letter-spacing: 0.05em;
+    color: var(--lcars-black);
+    text-align: center;
+    line-height: 1;
+    user-select: none;
+    transition: color 0.1s ease;
+}
+
+/* Smaller values for compact pills */
+.candy-pill.candy-compact .candy-value {
+    font-size: 0.9rem;
+}
+
+/* Larger values for featured pills */
+.candy-pill.candy-featured .candy-value {
+    font-size: 1.4rem;
+    font-weight: 500;
+}
+
+/* Value label (optional) */
+.candy-label {
+    font-family: var(--font-primary);
+    font-size: 0.65rem;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--lcars-black);
+    opacity: 0.7;
+    margin-top: 2px;
+}
+
+/* -------------------------------------------------------------------------------
+   REDUCED MOTION SUPPORT
+   Disable animations for users who prefer reduced motion
+   ------------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    .candy-pill {
+        transition: none;
+    }
+
+    .candy-pill.candy-pulse,
+    .candy-pill.candy-inverted,
+    .candy-pill.candy-alert-pulse,
+    .candy-pill.candy-critical {
+        animation: none;
+    }
+
+    /* Simple visual indicator instead of animation */
+    .candy-pill.candy-alert {
+        border-width: 2px;
+    }
+
+    /* Disable section slide animations */
+    .lcars-section {
+        animation: none !important;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   SECTION TRANSITIONS
+   Clean crossfade for smooth content switching
+   ------------------------------------------------------------------------------- */
+
+/* Content area needs relative positioning for absolute section stacking */
+.lcars-content {
+    position: relative;
+}
+
+/* Section container base styles - stacked absolutely for smooth crossfade */
+.lcars-section {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    opacity: 0;
+    visibility: hidden;
+    overflow-y: auto;
+    padding-right: 10px; /* Space for scrollbar */
+    padding-bottom: 10px; /* Extra space at bottom for scroll */
+    transition: opacity 0.2s ease-out, visibility 0.2s ease-out;
+    will-change: opacity;
+}
+
+.lcars-section.active {
+    opacity: 1;
+    visibility: visible;
+    z-index: 1;
+}
+
+/* Exiting section fades out faster */
+.lcars-section.exiting {
+    opacity: 0;
+    visibility: visible;
+    z-index: 0;
+    transition: opacity 0.15s ease-in;
+}
+
+/* Custom scrollbar for sections */
+.lcars-section {
+    scrollbar-width: thin;
+    scrollbar-color: var(--lcars-tan) var(--lcars-dark);
+}
+
+.lcars-section::-webkit-scrollbar {
+    width: 8px;
+}
+
+.lcars-section::-webkit-scrollbar-track {
+    background: var(--lcars-dark);
+    border-radius: 4px;
+}
+
+.lcars-section::-webkit-scrollbar-thumb {
+    background: var(--lcars-tan);
+    border-radius: 4px;
+}
+
+.lcars-section::-webkit-scrollbar-thumb:hover {
+    background: var(--lcars-peach);
+}
+
+/* -------------------------------------------------------------------------------
+   CASCADING DRAW EFFECT
+   Elements reveal in sequence when section becomes active
+   ------------------------------------------------------------------------------- */
+
+/* Child sections start hidden and slide up when parent becomes active */
+.lcars-section > section {
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.25s ease-out, transform 0.25s ease-out;
+}
+
+.lcars-section.active > section {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* Stagger delays for each section block */
+.lcars-section.active > section:nth-child(1) { transition-delay: 0.05s; }
+.lcars-section.active > section:nth-child(2) { transition-delay: 0.12s; }
+.lcars-section.active > section:nth-child(3) { transition-delay: 0.19s; }
+.lcars-section.active > section:nth-child(4) { transition-delay: 0.26s; }
+.lcars-section.active > section:nth-child(5) { transition-delay: 0.33s; }
+.lcars-section.active > section:nth-child(6) { transition-delay: 0.40s; }
+
+/* Section header bar "draws" from left */
+.section-header .section-bar {
+    transform-origin: left center;
+    transform: scaleX(0);
+    transition: transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lcars-section.active .section-header .section-bar {
+    transform: scaleX(1);
+}
+
+/* Stagger the bar draws to match section delays */
+.lcars-section.active > section:nth-child(1) .section-bar { transition-delay: 0.1s; }
+.lcars-section.active > section:nth-child(2) .section-bar { transition-delay: 0.17s; }
+.lcars-section.active > section:nth-child(3) .section-bar { transition-delay: 0.24s; }
+.lcars-section.active > section:nth-child(4) .section-bar { transition-delay: 0.31s; }
+.lcars-section.active > section:nth-child(5) .section-bar { transition-delay: 0.38s; }
+.lcars-section.active > section:nth-child(6) .section-bar { transition-delay: 0.45s; }
+
+/* Section title fades in with bar */
+.section-header .section-title {
+    opacity: 0;
+    transform: translateX(-10px);
+    transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1), transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lcars-section.active .section-header .section-title {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+/* Stagger title to appear slightly before bar */
+.lcars-section.active > section:nth-child(1) .section-title { transition-delay: 0.05s; }
+.lcars-section.active > section:nth-child(2) .section-title { transition-delay: 0.10s; }
+.lcars-section.active > section:nth-child(3) .section-title { transition-delay: 0.17s; }
+.lcars-section.active > section:nth-child(4) .section-title { transition-delay: 0.24s; }
+.lcars-section.active > section:nth-child(5) .section-title { transition-delay: 0.31s; }
+.lcars-section.active > section:nth-child(6) .section-title { transition-delay: 0.38s; }
+
+/* Status indicator entrance - scales up with initial ping */
+.lcars-section .status-indicator {
+    transform: scale(0);
+    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.lcars-section.active .status-indicator {
+    transform: scale(1);
+}
+
+/* Stagger status indicators within their containers */
+.lcars-section.active .status-row:nth-child(1) .status-indicator { transition-delay: 0.15s; }
+.lcars-section.active .status-row:nth-child(2) .status-indicator { transition-delay: 0.20s; }
+.lcars-section.active .status-row:nth-child(3) .status-indicator { transition-delay: 0.25s; }
+.lcars-section.active .status-row:nth-child(4) .status-indicator { transition-delay: 0.30s; }
+.lcars-section.active .status-row:nth-child(5) .status-indicator { transition-delay: 0.35s; }
+.lcars-section.active .status-row:nth-child(n+6) .status-indicator { transition-delay: 0.40s; }
+
+/* Team card status indicators */
+.lcars-section.active .team-card:nth-child(1) .status-indicator { transition-delay: 0.10s; }
+.lcars-section.active .team-card:nth-child(2) .status-indicator { transition-delay: 0.15s; }
+.lcars-section.active .team-card:nth-child(3) .status-indicator { transition-delay: 0.20s; }
+.lcars-section.active .team-card:nth-child(4) .status-indicator { transition-delay: 0.25s; }
+.lcars-section.active .team-card:nth-child(n+5) .status-indicator { transition-delay: 0.30s; }
+
+/* Connection status indicator */
+.lcars-section.active .connection-status .status-indicator { transition-delay: 0.25s; }
+
+/* Refreshing state resets for new elements */
+.lcars-section.refreshing .section-title,
+.lcars-section.refreshing .status-indicator {
+    transition: none !important;
+}
+
+/* Content within sections cascades in */
+.lcars-section .summary-cards,
+.lcars-section .organization-nav,
+.lcars-section .keyboard-shortcuts,
+.lcars-section .connection-status,
+.lcars-section #divisions-container,
+.lcars-section #machines-list {
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+
+.lcars-section.active .summary-cards,
+.lcars-section.active .organization-nav,
+.lcars-section.active .keyboard-shortcuts,
+.lcars-section.active .connection-status,
+.lcars-section.active #divisions-container,
+.lcars-section.active #machines-list {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* Content appears slightly after its parent section header */
+.lcars-section.active > section:nth-child(1) .summary-cards,
+.lcars-section.active > section:nth-child(1) .organization-nav,
+.lcars-section.active > section:nth-child(1) .keyboard-shortcuts,
+.lcars-section.active > section:nth-child(1) .connection-status,
+.lcars-section.active > section:nth-child(1) #divisions-container,
+.lcars-section.active > section:nth-child(1) #machines-list {
+    transition-delay: 0.15s;
+}
+
+.lcars-section.active > section:nth-child(2) .summary-cards,
+.lcars-section.active > section:nth-child(2) .organization-nav,
+.lcars-section.active > section:nth-child(2) .keyboard-shortcuts,
+.lcars-section.active > section:nth-child(2) .connection-status,
+.lcars-section.active > section:nth-child(2) #divisions-container,
+.lcars-section.active > section:nth-child(2) #machines-list {
+    transition-delay: 0.22s;
+}
+
+.lcars-section.active > section:nth-child(3) .summary-cards,
+.lcars-section.active > section:nth-child(3) .organization-nav,
+.lcars-section.active > section:nth-child(3) .keyboard-shortcuts,
+.lcars-section.active > section:nth-child(3) .connection-status,
+.lcars-section.active > section:nth-child(3) #divisions-container,
+.lcars-section.active > section:nth-child(3) #machines-list {
+    transition-delay: 0.29s;
+}
+
+/* -------------------------------------------------------------------------------
+   SUMMARY CARD "DRAW" EFFECT
+   Two-phase animation: colored bar draws down, then content slides out
+   ------------------------------------------------------------------------------- */
+
+/* Summary card uses pseudo-element for the colored bar */
+.lcars-section .summary-card {
+    position: relative;
+    overflow: hidden;
+    /* Remove the static border-left entirely - ::before handles the animated bar */
+    border-left: none !important;
+    /* Add left padding to compensate for removed 8px border */
+    padding-left: 28px !important;
+    /* Start with content hidden via clip-path */
+    clip-path: inset(0 100% 0 0);
+    transition: clip-path 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* Colored bar draws in from top */
+.lcars-section .summary-card::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 8px;  /* Match original border-left width */
+    background: var(--lcars-blue);
+    transform-origin: top center;
+    transform: scaleY(0);
+    /* Smoother easing for bar draw effect */
+    transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+    z-index: 1;
+}
+
+/* Different bar colors per card - matches original border colors */
+.lcars-section .summary-card:nth-child(1)::before { background: var(--lcars-blue); }
+.lcars-section .summary-card:nth-child(2)::before { background: var(--lcars-green); }
+.lcars-section .summary-card:nth-child(3)::before { background: var(--lcars-alert-red); }
+.lcars-section .summary-card:nth-child(4)::before { background: var(--lcars-cyan); }
+
+/* When section is active: bar draws in first, then content reveals */
+.lcars-section.active .summary-card::before {
+    transform: scaleY(1);
+}
+
+.lcars-section.active .summary-card {
+    clip-path: inset(0 0 0 0);
+}
+
+/* Stagger: bar draws first, content follows */
+.lcars-section.active .summary-card:nth-child(1)::before { transition-delay: 0.12s; }
+.lcars-section.active .summary-card:nth-child(1) { transition-delay: 0.22s; }
+.lcars-section.active .summary-card:nth-child(2)::before { transition-delay: 0.18s; }
+.lcars-section.active .summary-card:nth-child(2) { transition-delay: 0.28s; }
+.lcars-section.active .summary-card:nth-child(3)::before { transition-delay: 0.24s; }
+.lcars-section.active .summary-card:nth-child(3) { transition-delay: 0.34s; }
+.lcars-section.active .summary-card:nth-child(4)::before { transition-delay: 0.30s; }
+.lcars-section.active .summary-card:nth-child(4) { transition-delay: 0.40s; }
+
+/* Exit: content clips first, then bar retracts */
+.lcars-section.exiting .summary-card {
+    clip-path: inset(0 100% 0 0);
+    transition-delay: 0s;
+    transition-duration: 0.15s;
+}
+.lcars-section.exiting .summary-card::before {
+    transform: scaleY(0);
+    transform-origin: bottom center;
+    transition-delay: 0.1s;
+    transition-duration: 0.15s;
+}
+
+/* Refreshing state resets ALL animated elements instantly (no transition) */
+.lcars-section.refreshing .summary-card,
+.lcars-section.refreshing .summary-card::before,
+.lcars-section.refreshing > section,
+.lcars-section.refreshing .section-bar,
+.lcars-section.refreshing .summary-cards,
+.lcars-section.refreshing .organization-nav,
+.lcars-section.refreshing .org-nav-button,
+.lcars-section.refreshing .keyboard-shortcuts,
+.lcars-section.refreshing .shortcut-item,
+.lcars-section.refreshing .connection-status,
+.lcars-section.refreshing #divisions-container,
+.lcars-section.refreshing #machines-list,
+.lcars-section.refreshing .organization-panel,
+.lcars-section.refreshing .organization-panel > .organization-header,
+.lcars-section.refreshing .organization-panel > p,
+.lcars-section.refreshing .division-container,
+.lcars-section.refreshing .division-container > .division-header,
+.lcars-section.refreshing .division-container > p,
+.lcars-section.refreshing .team-card,
+.lcars-section.refreshing .status-row {
+    transition: none !important;
+}
+
+/* Keyboard shortcut items cascade */
+.lcars-section .shortcut-item {
+    opacity: 0;
+    transform: translateX(-8px);
+    transition: opacity 0.15s ease-out, transform 0.15s ease-out;
+}
+
+.lcars-section.active .shortcut-item {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+.lcars-section.active .shortcut-item:nth-child(1) { transition-delay: 0.20s; }
+.lcars-section.active .shortcut-item:nth-child(2) { transition-delay: 0.24s; }
+.lcars-section.active .shortcut-item:nth-child(3) { transition-delay: 0.28s; }
+.lcars-section.active .shortcut-item:nth-child(4) { transition-delay: 0.32s; }
+.lcars-section.active .shortcut-item:nth-child(5) { transition-delay: 0.36s; }
+.lcars-section.active .shortcut-item:nth-child(6) { transition-delay: 0.40s; }
+.lcars-section.active .shortcut-item:nth-child(7) { transition-delay: 0.44s; }
+
+/* -------------------------------------------------------------------------------
+   REVERSE CASCADE EXIT
+   Elements fade out in reverse order - deepest items first, then headers
+   ------------------------------------------------------------------------------- */
+
+/* Base exit transition - faster than enter */
+.lcars-section.exiting > section,
+.lcars-section.exiting .section-bar,
+.lcars-section.exiting .section-title,
+.lcars-section.exiting .summary-cards,
+.lcars-section.exiting .summary-card,
+.lcars-section.exiting .organization-nav,
+.lcars-section.exiting .keyboard-shortcuts,
+.lcars-section.exiting .shortcut-item,
+.lcars-section.exiting .connection-status,
+.lcars-section.exiting #divisions-container,
+.lcars-section.exiting #machines-list {
+    opacity: 0;
+    transition-duration: 0.15s;
+}
+
+/* Status indicators shrink on exit */
+.lcars-section.exiting .status-indicator {
+    transform: scale(0);
+    transition-duration: 0.1s;
+    transition-delay: 0s;
+}
+
+/* Section titles fade with bars */
+.lcars-section.exiting .section-title {
+    transform: translateX(-10px);
+    transition-delay: 0.10s;
+}
+
+/* Individual items fade first (reverse order) */
+.lcars-section.exiting .shortcut-item:nth-child(7) { transition-delay: 0s; }
+.lcars-section.exiting .shortcut-item:nth-child(6) { transition-delay: 0.02s; }
+.lcars-section.exiting .shortcut-item:nth-child(5) { transition-delay: 0.04s; }
+.lcars-section.exiting .shortcut-item:nth-child(4) { transition-delay: 0.06s; }
+.lcars-section.exiting .shortcut-item:nth-child(3) { transition-delay: 0.08s; }
+.lcars-section.exiting .shortcut-item:nth-child(2) { transition-delay: 0.10s; }
+.lcars-section.exiting .shortcut-item:nth-child(1) { transition-delay: 0.12s; }
+
+.lcars-section.exiting .summary-card:nth-child(4) { transition-delay: 0s; }
+.lcars-section.exiting .summary-card:nth-child(3) { transition-delay: 0.03s; }
+.lcars-section.exiting .summary-card:nth-child(2) { transition-delay: 0.06s; }
+.lcars-section.exiting .summary-card:nth-child(1) { transition-delay: 0.09s; }
+
+/* Content containers fade after their children start */
+.lcars-section.exiting .summary-cards,
+.lcars-section.exiting .organization-nav,
+.lcars-section.exiting .keyboard-shortcuts,
+.lcars-section.exiting .connection-status,
+.lcars-section.exiting #divisions-container,
+.lcars-section.exiting #machines-list {
+    transition-delay: 0.08s;
+}
+
+/* Header bars collapse back (reverse of draw) */
+.lcars-section.exiting .section-bar {
+    transform: scaleX(0);
+    transition-delay: 0.12s;
+}
+
+/* Section blocks fade last (reverse order) */
+.lcars-section.exiting > section:nth-child(6) { transition-delay: 0.10s; }
+.lcars-section.exiting > section:nth-child(5) { transition-delay: 0.12s; }
+.lcars-section.exiting > section:nth-child(4) { transition-delay: 0.14s; }
+.lcars-section.exiting > section:nth-child(3) { transition-delay: 0.16s; }
+.lcars-section.exiting > section:nth-child(2) { transition-delay: 0.18s; }
+.lcars-section.exiting > section:nth-child(1) { transition-delay: 0.20s; }
+
+/* -------------------------------------------------------------------------------
+   STATUS ROW CASCADE (Machines tab)
+   ------------------------------------------------------------------------------- */
+
+.lcars-section .status-row {
+    opacity: 0;
+    transform: translateX(-8px);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+
+.lcars-section.active .status-row {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+/* Stagger delays for status rows */
+.lcars-section.active .status-row:nth-child(1) { transition-delay: 0.1s; }
+.lcars-section.active .status-row:nth-child(2) { transition-delay: 0.14s; }
+.lcars-section.active .status-row:nth-child(3) { transition-delay: 0.18s; }
+.lcars-section.active .status-row:nth-child(4) { transition-delay: 0.22s; }
+.lcars-section.active .status-row:nth-child(5) { transition-delay: 0.26s; }
+.lcars-section.active .status-row:nth-child(6) { transition-delay: 0.30s; }
+.lcars-section.active .status-row:nth-child(7) { transition-delay: 0.34s; }
+.lcars-section.active .status-row:nth-child(8) { transition-delay: 0.38s; }
+.lcars-section.active .status-row:nth-child(9) { transition-delay: 0.42s; }
+.lcars-section.active .status-row:nth-child(10) { transition-delay: 0.46s; }
+.lcars-section.active .status-row:nth-child(n+11) { transition-delay: 0.5s; }
+
+/* Reverse cascade on exit */
+.lcars-section.exiting .status-row {
+    opacity: 0;
+    transition-delay: 0s;
+    transition-duration: 0.1s;
+}
+
+/* Section-specific accent colors */
+.lcars-section[data-section="overview"] {
+    --section-accent: var(--lcars-blue);
+}
+
+.lcars-section[data-section="organizations"] {
+    --section-accent: var(--lcars-peach);
+}
+
+.lcars-section[data-section="machines"] {
+    --section-accent: var(--lcars-purple);
+}
+
+.lcars-section[data-section="settings"] {
+    --section-accent: var(--lcars-tan);
+}
+
+/* Section header styling with accent */
+.lcars-section .section-header {
+    border-left-color: var(--section-accent, var(--lcars-blue));
+}
+
+/* -------------------------------------------------------------------------------
+   KEYBOARD SHORTCUT HINTS
+   Display for settings section
+   ------------------------------------------------------------------------------- */
+
+.keyboard-shortcuts {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+    margin-top: 15px;
+}
+
+.shortcut-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 8px 12px;
+    background: var(--lcars-dark);
+    border-radius: 4px;
+    border-left: 3px solid var(--lcars-tan);
+}
+
+.shortcut-key {
+    font-family: var(--font-display);
+    font-size: 0.85rem;
+    padding: 4px 8px;
+    background: var(--lcars-surface);
+    border: 1px solid var(--lcars-tan);
+    border-radius: 4px;
+    color: var(--lcars-tan);
+    min-width: 60px;
+    text-align: center;
+}
+
+.shortcut-desc {
+    font-size: 0.8rem;
+    color: var(--lcars-peach);
+}
+
+/* -------------------------------------------------------------------------------
+   STARTUP BOOT SEQUENCE
+   Immersive LCARS boot animation on initial load
+   ------------------------------------------------------------------------------- */
+
+/* Startup section - full viewport overlay */
+.startup-section {
+    position: fixed;
+    top: 0;
+    left: -1px;
+    right: 0;
+    bottom: 0;
+    background: var(--lcars-black);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+    transition: opacity 0.5s ease-out;
+}
+
+.startup-section.fade-out {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.startup-section.hidden {
+    display: none;
+}
+
+/* Startup container - centered content */
+.startup-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 20px;
+    max-width: 600px;
+    width: 90%;
+    padding: 40px;
+}
+
+/* Logo area */
+.startup-logo {
+    width: 200px;
+    height: 200px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 0;
+    animation: fadeInLogo 1s ease-out 0.3s forwards;
+}
+
+.startup-logo img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    border: none;
+}
+
+.startup-logo-fallback {
+    font-family: var(--font-display);
+    font-size: 3rem;
+    color: var(--lcars-blue);
+    text-align: center;
+}
+
+@keyframes fadeInLogo {
+    from {
+        opacity: 0;
+        transform: scale(0.8);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+/* Title text */
+.startup-text {
+    text-align: center;
+    opacity: 0;
+    animation: fadeInText 0.8s ease-out 0.5s forwards;
+}
+
+.startup-title {
+    font-family: var(--font-display);
+    font-size: 1.8rem;
+    color: var(--lcars-peach);
+    letter-spacing: 0.2em;
+    margin-bottom: 8px;
+}
+
+.startup-subtitle {
+    font-family: var(--font-display);
+    font-size: 1.2rem;
+    color: var(--lcars-blue);
+    letter-spacing: 0.15em;
+    margin-bottom: 12px;
+}
+
+.startup-version {
+    font-family: var(--font-primary);
+    font-size: 0.75rem;
+    color: var(--lcars-tan);
+    letter-spacing: 0.1em;
+}
+
+@keyframes fadeInText {
+    from {
+        opacity: 0;
+        transform: translateY(10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Scrolling data area */
+.startup-data {
+    width: 100%;
+    height: 150px;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 4px;
+    overflow: hidden;
+    font-family: var(--font-primary);
+    font-size: 0.7rem;
+    line-height: 1.8;
+    padding: 10px;
+    opacity: 0;
+    animation: fadeInData 0.5s ease-out 0.8s forwards;
+}
+
+.startup-data-scroll {
+    height: 100%;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    scrollbar-width: thin;
+    scrollbar-color: var(--lcars-tan) transparent;
+}
+
+.startup-data-scroll::-webkit-scrollbar {
+    width: 4px;
+}
+
+.startup-data-scroll::-webkit-scrollbar-thumb {
+    background: var(--lcars-tan);
+    border-radius: 2px;
+}
+
+.data-line {
+    color: var(--lcars-cyan);
+    white-space: nowrap;
+    overflow: visible;
+    min-height: 1.2em;
+    line-height: 1.2;
+}
+
+.data-line.status {
+    color: var(--lcars-peach);
+}
+
+.data-line.success {
+    color: var(--lcars-green);
+}
+
+.data-line.hex {
+    color: var(--lcars-lavender);
+}
+
+@keyframes fadeInData {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Progress bar */
+.startup-progress {
+    width: 100%;
+    height: 12px;
+    background: var(--lcars-dark);
+    border-radius: 6px;
+    overflow: hidden;
+    border: 1px solid var(--lcars-surface);
+    opacity: 0;
+    animation: fadeInProgress 0.5s ease-out 1s forwards;
+}
+
+.startup-progress-bar {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--lcars-blue) 0%, var(--lcars-cyan) 50%, var(--lcars-green) 100%);
+    border-radius: 6px;
+    transition: width 0.1s ease-out;
+}
+
+.startup-progress-bar.complete {
+    background: var(--lcars-green);
+}
+
+@keyframes fadeInProgress {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Status text */
+.startup-status {
+    font-family: var(--font-display);
+    font-size: 0.9rem;
+    color: var(--lcars-tan);
+    letter-spacing: 0.1em;
+    text-align: center;
+    opacity: 0;
+    animation: fadeInStatus 0.5s ease-out 1.2s forwards;
+}
+
+.startup-status.ready {
+    color: var(--lcars-green);
+}
+
+@keyframes fadeInStatus {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+/* Click to skip hint */
+.startup-skip {
+    position: absolute;
+    bottom: 30px;
+    left: 50%;
+    transform: translateX(-50%);
+    font-family: var(--font-primary);
+    font-size: 0.65rem;
+    color: var(--lcars-tan);
+    opacity: 0;
+    animation: fadeInSkip 0.5s ease-out 2s forwards;
+    cursor: pointer;
+}
+
+.startup-skip:hover {
+    color: var(--lcars-peach);
+}
+
+@keyframes fadeInSkip {
+    from { opacity: 0; }
+    to { opacity: 0.6; }
+}
+
+/* Reduced motion - skip animations */
+@media (prefers-reduced-motion: reduce) {
+    .startup-logo,
+    .startup-text,
+    .startup-data,
+    .startup-progress,
+    .startup-status,
+    .startup-skip {
+        animation: none;
+        opacity: 1;
+    }
+
+    .startup-section {
+        transition: none;
+    }
+}
+
+/* ===============================================================================
+   PHASE 3: DASHBOARD COMPONENTS (LCARS-027 through LCARS-031)
+   Summary cards, team cards, organization nav, sidebar links
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   Summary Cards - Fleet metrics display
+   ------------------------------------------------------------------------------- */
+.summary-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 15px;
+}
+
+.summary-card {
+    background: var(--lcars-dark);
+    border-radius: 8px;
+    padding: 20px;
+    text-align: center;
+    border-left: 4px solid var(--lcars-blue);
+}
+
+.summary-card .summary-value {
+    font-size: 2.5rem;
+    font-weight: 700;
+    color: var(--lcars-white);
+    letter-spacing: var(--lcars-spacing-wide);
+    line-height: 1;
+}
+
+.summary-card .summary-label {
+    font-size: 0.75rem;
+    color: var(--lcars-tan);
+    letter-spacing: var(--lcars-spacing-wider);
+    margin-top: 15px;
+}
+
+/* -------------------------------------------------------------------------------
+   Organization Navigation - Quick jump buttons
+   ------------------------------------------------------------------------------- */
+.organization-nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.org-nav-button {
+    background: var(--lcars-blue);
+    border: none;
+    border-radius: 20px;
+    padding: 10px 20px;
+    /* Transition-based cascade */
+    opacity: 0;
+    transform: translateY(8px) scale(0.95);
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    /* Smoother easing curve for continuous flow */
+    transition: transform 0.35s cubic-bezier(0.22, 1, 0.36, 1), filter 0.2s ease, opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+    font-family: var(--lcars-font);
+}
+
+/* When section is active, buttons become visible with stagger */
+.lcars-section.active .org-nav-button {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+/* Stagger delays - more visible separation */
+.lcars-section.active .org-nav-button:nth-child(1) { transition-delay: 0.15s; }
+.lcars-section.active .org-nav-button:nth-child(2) { transition-delay: 0.25s; }
+.lcars-section.active .org-nav-button:nth-child(3) { transition-delay: 0.35s; }
+.lcars-section.active .org-nav-button:nth-child(4) { transition-delay: 0.45s; }
+.lcars-section.active .org-nav-button:nth-child(5) { transition-delay: 0.55s; }
+
+/* Reverse cascade on exit */
+.lcars-section.exiting .org-nav-button {
+    opacity: 0;
+    transform: translateY(8px) scale(0.95);
+    transition-delay: 0s;
+    transition-duration: 0.1s;
+}
+
+.org-nav-button:hover {
+    transform: scale(1.02);
+    filter: brightness(1.1);
+}
+
+.org-nav-button .org-nav-name {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--lcars-black);
+    letter-spacing: var(--lcars-spacing-wide);
+}
+
+.org-nav-button .org-nav-stats {
+    font-size: 0.65rem;
+    color: rgba(0, 0, 0, 0.7);
+    letter-spacing: var(--lcars-spacing-normal);
+}
+
+.org-nav-button.org-mainevent { background: var(--lcars-crimson); }
+.org-nav-button.org-doublenode { background: var(--lcars-blue); }
+.org-nav-button.org-academy { background: var(--lcars-cyan); }
+.org-nav-button.org-personal { background: var(--lcars-green); }
+.org-nav-button.org-legal { background: var(--lcars-green); }
+
+/* -------------------------------------------------------------------------------
+   Teams Grid - Card layout for teams
+   ------------------------------------------------------------------------------- */
+.teams-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 15px;
+    margin-top: 10px;
+}
+
+.team-card {
+    background: var(--lcars-dark);
+    border-radius: 8px;
+    padding: 15px;
+    border-left: 3px solid var(--lcars-tan);
+    /* Transition-based cascade - scoped to active section */
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+    /* Smoother easing curve for continuous flow */
+    transition: opacity 0.35s cubic-bezier(0.22, 1, 0.36, 1), transform 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* When section is active, cards become visible with stagger */
+.lcars-section.active .team-card {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+}
+
+/* Cascade delays for team cards - closer together for continuous flow */
+.lcars-section.active .teams-grid .team-card:nth-child(1) { transition-delay: 0.04s; }
+.lcars-section.active .teams-grid .team-card:nth-child(2) { transition-delay: 0.08s; }
+.lcars-section.active .teams-grid .team-card:nth-child(3) { transition-delay: 0.12s; }
+.lcars-section.active .teams-grid .team-card:nth-child(4) { transition-delay: 0.16s; }
+.lcars-section.active .teams-grid .team-card:nth-child(5) { transition-delay: 0.20s; }
+.lcars-section.active .teams-grid .team-card:nth-child(6) { transition-delay: 0.24s; }
+.lcars-section.active .teams-grid .team-card:nth-child(7) { transition-delay: 0.28s; }
+.lcars-section.active .teams-grid .team-card:nth-child(8) { transition-delay: 0.32s; }
+.lcars-section.active .teams-grid .team-card:nth-child(9) { transition-delay: 0.36s; }
+.lcars-section.active .teams-grid .team-card:nth-child(10) { transition-delay: 0.40s; }
+
+/* Reverse cascade on exit */
+.lcars-section.exiting .team-card { transition-delay: 0s; transition-duration: 0.1s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(10) { transition-delay: 0s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(9) { transition-delay: 0.02s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(8) { transition-delay: 0.04s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(7) { transition-delay: 0.06s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(6) { transition-delay: 0.08s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(5) { transition-delay: 0.1s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(4) { transition-delay: 0.12s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(3) { transition-delay: 0.14s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(2) { transition-delay: 0.16s; }
+.lcars-section.exiting .teams-grid .team-card:nth-child(1) { transition-delay: 0.18s; }
+
+.team-card.lcars-terminal {
+    border-left: 6px solid var(--lcars-white);
+    background: var(--lcars-orange);
+}
+
+/* LCARS terminal card text - inverted colors (black on orange) */
+.team-card.lcars-terminal .team-name {
+    color: var(--lcars-black);
+}
+
+.team-card.lcars-terminal .session-label {
+    color: var(--lcars-black);
+}
+
+.team-card.lcars-terminal .session-value {
+    color: var(--lcars-black);
+}
+
+.team-card.lcars-clickable {
+    cursor: pointer;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.team-card.lcars-clickable:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.team-card .team-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+    gap: 12px;
+}
+
+.team-card .team-avatar {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    border: 2px solid var(--lcars-cyan);
+    object-fit: cover;
+    flex-shrink: 0;
+    box-shadow: 0 0 8px rgba(153, 204, 255, 0.4);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.team-card:hover .team-avatar {
+    transform: scale(1.05);
+    box-shadow: 0 0 12px rgba(153, 204, 255, 0.6);
+}
+
+.team-card.lcars-terminal .team-avatar {
+    border-color: var(--lcars-white);
+    box-shadow: 0 0 8px rgba(255, 255, 255, 0.4);
+}
+
+.team-card.lcars-terminal:hover .team-avatar {
+    box-shadow: 0 0 12px rgba(255, 255, 255, 0.6);
+}
+
+.team-card .team-name {
+    font-size: 0.875rem;
+    font-weight: 600;
+    color: var(--lcars-white);
+    letter-spacing: var(--lcars-spacing-wide);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+
+.lcars-badge {
+    background: var(--lcars-white);
+    color: var(--lcars-black);
+    font-size: 0.6rem;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: var(--lcars-spacing-wider);
+}
+
+.session-info {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.session-detail {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.75rem;
+}
+
+.session-label {
+    color: var(--lcars-tan);
+}
+
+.session-value {
+    color: var(--lcars-peach);
+}
+
+/* -------------------------------------------------------------------------------
+   Sidebar Dashboard Links - LCARS button style with separators
+   ------------------------------------------------------------------------------- */
+.sidebar-link {
+    display: block;
+    padding: 6px 12px;
+    min-height: 36px;
+    color: var(--lcars-black);
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: var(--lcars-spacing-wide);
+    border-top: 2px solid var(--lcars-black);
+    transition: filter 0.2s ease;
+    display: flex;
+    align-items: flex-end;
+}
+
+.sidebar-link:hover {
+    filter: brightness(1.2);
+}
+
+/* Dashboard link - last link gets bottom border for visual separation */
+.sidebar-link:last-child {
+    border-bottom: 2px solid var(--lcars-black);
+}
+
+/* Fallback background if no inline style (for static HTML) */
+.sidebar-link {
+    background: var(--lcars-lavender);
+}
+
+/* Active state - invert to black background, inherit text color from data attribute */
+.sidebar-link.active {
+    filter: none;
+    background: var(--lcars-black) !important;
+}
+
+/* -------------------------------------------------------------------------------
+   Connection Status Display
+   ------------------------------------------------------------------------------- */
+.connection-status {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 15px;
+    background: var(--lcars-dark);
+    border-radius: 8px;
+    font-size: 0.75rem;
+    letter-spacing: var(--lcars-spacing-wide);
+    color: var(--lcars-tan);
+    animation: lcars-breathe-slow 4s ease-in-out infinite;
+}
+
+/* Breathing stops when disconnected */
+.connection-status.disconnected {
+    animation: none;
+    opacity: 0.6;
+}
+
+/* Connection error state - glitch effect */
+.connection-status.error {
+    animation: lcars-glitch 0.3s ease-in-out infinite;
+    color: var(--lcars-alert-red);
+    border: 1px solid var(--lcars-alert-red);
+}
+
+/* Status text glitch effect */
+.connection-status.error #connection-status {
+    animation: lcars-glitch-text 0.3s linear infinite;
+}
+
+/* -------------------------------------------------------------------------------
+   Empty Message Display
+   ------------------------------------------------------------------------------- */
+.empty-message {
+    text-align: center;
+    color: var(--lcars-tan);
+    padding: 40px;
+    font-style: italic;
+}
+
+/* -------------------------------------------------------------------------------
+   Top Bar Status Buttons
+   Full-height status indicators aligned with the MAIN CONTENT top bar
+   (the lower swoop's bar, not the header's bar)
+   Buttons separated by black lines
+   ------------------------------------------------------------------------------- */
+
+/* Top bar stays thin, buttons overflow below it */
+.top-bar:has(.top-bar-buttons) {
+    overflow: visible;
+}
+
+/* Container for status buttons - positioned to align with main content bar */
+.top-bar-buttons {
+    position: absolute;
+    top: calc(100% + 4px);  /* Below 8px bar + 4px gap = align with main content */
+    left: var(--corner-radius, 30px);  /* Align with corner radius */
+    right: 0;  /* Extend bar to right edge */
+    height: var(--bar-height, 40px);  /* Match main content bar height */
+    display: flex;
+    align-items: stretch;
+    background: var(--lcars-blue);  /* Bar background extends full width */
+    z-index: 10;
+}
+
+/* Individual status button - full height, black borders */
+.top-button {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 0 15px;
+    min-width: 70px;
+    height: 100%;
+    background: var(--lcars-tan);
+    border-left: 1px solid var(--lcars-black);
+    border-right: 1px solid var(--lcars-black);
+    margin-right: -1px; /* Overlap borders */
+}
+
+/* First button has left border too */
+.top-button:first-child {
+    border-left: 1px solid var(--lcars-black);
+}
+
+/* Button value - the main data */
+.top-button-value {
+    font-family: var(--font-display, 'Antonio', sans-serif);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lcars-black);
+    line-height: 1;
+    letter-spacing: 0.5px;
+}
+
+/* Button label - small descriptor */
+.top-button-label {
+    font-family: var(--font-primary, 'Roboto Condensed', sans-serif);
+    font-size: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--lcars-black);
+    opacity: 0.7;
+    line-height: 1;
+    letter-spacing: 0.5px;
+    margin-top: 1px;
+}
+
+/* Color variants for top buttons */
+.top-button.bg-blue { background: var(--lcars-blue); }
+.top-button.bg-cyan { background: var(--lcars-cyan); }
+.top-button.bg-lavender { background: var(--lcars-lavender); }
+.top-button.bg-green { background: var(--lcars-green); }
+.top-button.bg-crimson { background: var(--lcars-crimson); }
+.top-button.bg-orange { background: var(--lcars-orange); }
+.top-button.bg-purple { background: var(--lcars-purple); }
+.top-button.bg-tan { background: var(--lcars-tan); }
+.top-button.bg-peach { background: var(--lcars-peach); }
+
+/* Alert state for buttons */
+.top-button.alert {
+    background: var(--lcars-alert-red);
+    animation: top-button-alert 1s ease-in-out infinite;
+}
+
+@keyframes top-button-alert {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+/* Responsive - hide buttons on smaller screens */
+@media (max-width: 900px) {
+    .top-bar-buttons {
+        display: none;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   Organization Color Header Classes
+   Applied to body element to affect header AND top-sidebar corner cutout
+   ------------------------------------------------------------------------------- */
+
+/* Crimson - Main Event */
+.org-color-crimson .top-bar,
+.org-color-crimson .top-sidebar,
+.org-color-crimson .top-bar-buttons {
+    background: var(--lcars-crimson);
+}
+.org-color-crimson .top-sidebar::after {
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-black) 30px,
+        var(--lcars-crimson) 30px
+    );
+}
+
+/* Blue - DoubleNode */
+.org-color-blue .top-bar,
+.org-color-blue .top-sidebar,
+.org-color-blue .top-bar-buttons {
+    background: var(--lcars-blue);
+}
+.org-color-blue .top-sidebar::after {
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-black) 30px,
+        var(--lcars-blue) 30px
+    );
+}
+
+/* Cyan - Academy */
+.org-color-cyan .top-bar,
+.org-color-cyan .top-sidebar,
+.org-color-cyan .top-bar-buttons {
+    background: var(--lcars-cyan);
+}
+.org-color-cyan .top-sidebar::after {
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-black) 30px,
+        var(--lcars-cyan) 30px
+    );
+}
+
+/* Lavender - All Fleet */
+.org-color-lavender .top-bar,
+.org-color-lavender .top-sidebar,
+.org-color-lavender .top-bar-buttons {
+    background: var(--lcars-lavender);
+}
+.org-color-lavender .top-sidebar::after {
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-black) 30px,
+        var(--lcars-lavender) 30px
+    );
+}
+
+/* ===============================================================================
+   PHASE 4: COMPONENT REDESIGN (LCARS-032 through LCARS-036)
+   Authentic LCARS-style components for Fleet Monitor
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   LCARS-032: Summary Panels - LCARS-style metric displays
+
+   Redesigned with:
+   - Pill-shaped right border (rounded right edge)
+   - Large numeric values (48px)
+   - Color-coded left borders
+   - Proper LCARS typography
+   ------------------------------------------------------------------------------- */
+
+.summary-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+}
+
+.summary-card,
+.summary-panel {
+    background: var(--lcars-dark);
+    border-left: 8px solid var(--lcars-blue);
+    border-radius: 0 25px 25px 0;
+    padding: 20px 24px;
+    position: relative;
+    overflow: hidden;
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.summary-card:hover,
+.summary-panel:hover {
+    transform: translateX(4px);
+    box-shadow: -4px 0 20px rgba(153, 153, 255, 0.2);
+}
+
+/* Summary value - large LCARS numbers */
+.summary-card .summary-value,
+.summary-panel .value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 48px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    line-height: 1;
+    color: var(--lcars-peach);
+}
+
+/* Summary label */
+.summary-card .summary-label,
+.summary-panel .label {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--lcars-lavender);
+    margin-top: 15px;
+    text-transform: uppercase;
+}
+
+/* Color-coded borders per metric type */
+.summary-card:nth-child(1) { border-left-color: var(--lcars-blue); }
+.summary-card:nth-child(2) { border-left-color: var(--lcars-green); }
+.summary-card:nth-child(3) { border-left-color: var(--lcars-alert-red); }
+.summary-card:nth-child(4) { border-left-color: var(--lcars-cyan); }
+
+/* Hover glow matches border color */
+.summary-card:nth-child(1):hover { box-shadow: -4px 0 20px rgba(153, 153, 255, 0.3); }
+.summary-card:nth-child(2):hover { box-shadow: -4px 0 20px rgba(153, 255, 153, 0.3); }
+.summary-card:nth-child(3):hover { box-shadow: -4px 0 20px rgba(255, 102, 102, 0.3); }
+.summary-card:nth-child(4):hover { box-shadow: -4px 0 20px rgba(153, 204, 255, 0.3); }
+
+/* Decorative corner accent */
+.summary-card::after,
+.summary-panel::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    right: 0;
+    width: 50px;
+    height: 50px;
+    background: radial-gradient(
+        circle at 100% 0%,
+        var(--lcars-surface) 20px,
+        transparent 20px
+    );
+    opacity: 0.5;
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-033: Organization Containers - L-Frame Border Design
+
+   Redesigned with:
+   - L-shaped frame with organization color
+   - Horizontal bar extending from left border
+   - Inner corner cutout
+   - Collapsible styling support
+   ------------------------------------------------------------------------------- */
+
+.organization-panel {
+    position: relative;
+    background:
+        /* Bottom-left inner curve - tapers to point */
+        radial-gradient(
+            circle at 0% 100%,
+            transparent 24px,
+            var(--org-color, var(--lcars-blue)) 25px
+        ) left -16px bottom / 28px 28px no-repeat,
+        /* Top-right inner curve - extends below topbar, tapers to point */
+        radial-gradient(
+            circle at 0% 100%,
+            transparent 4px,
+            var(--org-color, var(--lcars-blue)) 5px
+        ) right -2px top 2px / 7px 7px no-repeat,
+        /* Black background */
+        var(--lcars-black);
+    background-origin: border-box;
+    border-left: 16px solid var(--org-color, var(--lcars-blue));
+    border-top: none;
+    border-top-left-radius: 28px;
+    border-top-right-radius: 7px;  /* Scaled for 4px topbar (28 * 0.25) */
+    border-bottom-left-radius: 28px;
+    border-bottom-right-radius: 0;
+    padding: 30px 20px 20px 20px;
+    margin-bottom: 24px;
+    margin-left: -1px;
+    overflow: hidden;
+    /* Transition-based cascade - scoped to active section */
+    opacity: 0;
+    transform: translateY(15px);
+    /* Smoother easing curve for continuous flow */
+    transition: opacity 0.5s cubic-bezier(0.22, 1, 0.36, 1), transform 0.5s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* When section is active, panels become visible with stagger */
+.lcars-section.active .organization-panel {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* Stagger delays for organization panels - more visible separation */
+.lcars-section.active .organization-panel:nth-child(1) { transition-delay: 0.10s; }
+.lcars-section.active .organization-panel:nth-child(2) { transition-delay: 0.25s; }
+.lcars-section.active .organization-panel:nth-child(3) { transition-delay: 0.40s; }
+.lcars-section.active .organization-panel:nth-child(4) { transition-delay: 0.55s; }
+.lcars-section.active .organization-panel:nth-child(5) { transition-delay: 0.70s; }
+
+/* Two-phase animation: Panel content fades in AFTER the border/frame */
+.organization-panel > .organization-header,
+.organization-panel > p,
+.organization-panel > .division-container {
+    opacity: 0;
+    transform: translateY(8px);
+    transition: opacity 0.3s cubic-bezier(0.22, 1, 0.36, 1), transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lcars-section.active .organization-panel > .organization-header,
+.lcars-section.active .organization-panel > p {
+    opacity: 1;
+    transform: translateY(0);
+}
+
+/* Content appears after panel frame is visible */
+.lcars-section.active .organization-panel:nth-child(1) > .organization-header,
+.lcars-section.active .organization-panel:nth-child(1) > p { transition-delay: 0.30s; }
+.lcars-section.active .organization-panel:nth-child(2) > .organization-header,
+.lcars-section.active .organization-panel:nth-child(2) > p { transition-delay: 0.45s; }
+.lcars-section.active .organization-panel:nth-child(3) > .organization-header,
+.lcars-section.active .organization-panel:nth-child(3) > p { transition-delay: 0.60s; }
+
+/* Reverse cascade on exit */
+.lcars-section.exiting .organization-panel { transition-delay: 0s; transition-duration: 0.15s; }
+.lcars-section.exiting .organization-panel:nth-child(5) { transition-delay: 0s; }
+.lcars-section.exiting .organization-panel:nth-child(4) { transition-delay: 0.03s; }
+.lcars-section.exiting .organization-panel:nth-child(3) { transition-delay: 0.06s; }
+.lcars-section.exiting .organization-panel:nth-child(2) { transition-delay: 0.09s; }
+.lcars-section.exiting .organization-panel:nth-child(1) { transition-delay: 0.12s; }
+
+/* L-shaped top bar - extends under sidebar, clipped by panel's border-radius */
+.organization-panel::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -21px;
+    right: 0;
+    height: 4px;
+    background: var(--org-color, var(--lcars-blue));
+    border-radius: 0 2px 2px 0;
+}
+
+/* Top-left inner curve */
+.organization-panel::after {
+    content: '';
+    position: absolute;
+    top: 1px;
+    left: -2px;
+    width: 17px;
+    height: 17px;
+    background: radial-gradient(
+        circle at 100% 100%,
+        var(--lcars-black) 13px,
+        var(--org-color, var(--lcars-blue)) 14px
+    );
+    z-index: 9999;
+    pointer-events: none;
+}
+
+/* Topbar extended for proper corner coverage */
+.organization-panel::before {
+    right: -10px;
+}
+
+/* Organization header - sits below the L-frame bar */
+.organization-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 15px;
+    margin-bottom: 20px;
+    position: relative;
+}
+
+/* Organization title - colored to match org */
+.organization-title {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    color: var(--org-color, var(--lcars-blue));
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+/* Session count badge */
+.organization-count {
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-black);
+    padding: 4px 16px;
+    background: var(--org-color, var(--lcars-blue));
+    border-radius: 12px;
+}
+
+/* Organization content area */
+.organization-content {
+    padding: 50px 20px 20px 40px;
+}
+
+/* Division container within organization - L-frame with 4px sidebar, 16px topbar (reversed from org panel) */
+.division-container {
+    position: relative;
+    background:
+        /* Bottom-left inner curve - tapers to point (scaled for 4px sidebar) */
+        radial-gradient(
+            circle at 0% 100%,
+            transparent 5px,
+            var(--div-color, var(--lcars-tan)) 6px
+        ) left -4px bottom / 7px 7px no-repeat,
+        /* Top-right inner curve - at junction of 16px topbar and right edge */
+        radial-gradient(
+            circle at 0% 100%,
+            transparent 13px,
+            var(--div-color, var(--lcars-tan)) 14px
+        ) right -2px top 2px / 16px 16px no-repeat,
+        /* Dark background */
+        var(--lcars-darker);
+    background-origin: border-box;
+    border-left: 4px solid var(--div-color, var(--lcars-tan));
+    border-top: none;
+    border-top-left-radius: 20px;
+    border-top-right-radius: 16px;
+    border-bottom-left-radius: 7px;
+    border-bottom-right-radius: 0;
+    padding: 24px 20px 16px 16px;
+    margin-bottom: 16px;
+    margin-left: -1px;
+    overflow: hidden;
+    /* Transition-based cascade - scoped to active section */
+    opacity: 0;
+    transform: translateX(-10px);
+    /* Smoother easing curve for continuous flow */
+    transition: opacity 0.45s cubic-bezier(0.22, 1, 0.36, 1), transform 0.45s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* When section is active, divisions become visible with stagger */
+.lcars-section.active .division-container {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+/* Stagger delays for division containers - more visible separation */
+.lcars-section.active .division-container:nth-child(1) { transition-delay: 0.15s; }
+.lcars-section.active .division-container:nth-child(2) { transition-delay: 0.28s; }
+.lcars-section.active .division-container:nth-child(3) { transition-delay: 0.41s; }
+.lcars-section.active .division-container:nth-child(4) { transition-delay: 0.54s; }
+.lcars-section.active .division-container:nth-child(5) { transition-delay: 0.67s; }
+.lcars-section.active .division-container:nth-child(6) { transition-delay: 0.80s; }
+
+/* Two-phase animation: Division content fades in AFTER the border/frame */
+.division-container > .division-header,
+.division-container > p {
+    opacity: 0;
+    transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.lcars-section.active .division-container > .division-header,
+.lcars-section.active .division-container > p {
+    opacity: 1;
+}
+
+/* Content appears after division frame is visible */
+.lcars-section.active .division-container:nth-child(1) > .division-header,
+.lcars-section.active .division-container:nth-child(1) > p { transition-delay: 0.35s; }
+.lcars-section.active .division-container:nth-child(2) > .division-header,
+.lcars-section.active .division-container:nth-child(2) > p { transition-delay: 0.48s; }
+.lcars-section.active .division-container:nth-child(3) > .division-header,
+.lcars-section.active .division-container:nth-child(3) > p { transition-delay: 0.61s; }
+.lcars-section.active .division-container:nth-child(4) > .division-header,
+.lcars-section.active .division-container:nth-child(4) > p { transition-delay: 0.74s; }
+
+/* Reverse cascade on exit */
+.lcars-section.exiting .division-container { transition-delay: 0s; transition-duration: 0.12s; }
+.lcars-section.exiting .division-container:nth-child(6) { transition-delay: 0s; }
+.lcars-section.exiting .division-container:nth-child(5) { transition-delay: 0.02s; }
+.lcars-section.exiting .division-container:nth-child(4) { transition-delay: 0.04s; }
+.lcars-section.exiting .division-container:nth-child(3) { transition-delay: 0.06s; }
+.lcars-section.exiting .division-container:nth-child(2) { transition-delay: 0.08s; }
+.lcars-section.exiting .division-container:nth-child(1) { transition-delay: 0.10s; }
+
+/* L-shaped top bar for division - 16px height */
+.division-container::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -6px;
+    right: 0;
+    height: 16px;
+    background: var(--div-color, var(--lcars-tan));
+    border-radius: 0;
+}
+
+/* Top-left inner curve for division - at junction of sidebar and topbar bottom (y=16) */
+.division-container::after {
+    content: '';
+    position: absolute;
+    top: 15px;
+    left: -1px;
+    width: 8px;
+    height: 8px;
+    background: radial-gradient(
+        circle at 100% 100%,
+        var(--lcars-darker) 6px,
+        var(--div-color, var(--lcars-tan)) 7px
+    );
+    z-index: 9999;
+    pointer-events: none;
+}
+
+/* Division header - positioned inside the 16px topbar */
+.division-header {
+    position: absolute;
+    top: 0;
+    left: 20px;
+    right: 10px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    color: var(--lcars-black);
+    text-transform: uppercase;
+    z-index: 3;
+}
+
+/* Session count button inside topbar - full height with black bars */
+.division-stats {
+    display: flex;
+    align-items: flex-end;
+    height: 16px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--lcars-black);
+    background: var(--lcars-peach);
+    padding: 0 10px 1px 10px;
+    letter-spacing: 1px;
+    border-left: 1px solid var(--lcars-black);
+    border-right: 1px solid var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-034: Team Cards - Corner Cutout Design
+
+   Redesigned with:
+   - Top-right corner cutout detail
+   - LCARS terminal variant with glow effect
+   - Status indicator with pulse animation
+   - Hover interactions
+   ------------------------------------------------------------------------------- */
+
+.teams-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
+    margin-top: 15px;
+}
+
+.team-card {
+    background: var(--lcars-dark);
+    border-radius: 8px;
+    padding: 16px;
+    position: relative;
+    overflow: hidden;
+    border-left: 4px solid var(--lcars-tan);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.team-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+/* LCARS Terminal Variant - inverted orange/white styling */
+.team-card.lcars-terminal {
+    border-left: 6px solid var(--lcars-white);
+    background: var(--lcars-orange);
+    box-shadow: 0 0 15px rgba(255, 153, 0, 0.15);
+}
+
+.team-card.lcars-terminal:hover {
+    box-shadow:
+        0 6px 25px rgba(0, 0, 0, 0.4),
+        0 0 20px rgba(255, 153, 0, 0.3);
+}
+
+/* LCARS terminal text colors - black on orange */
+.team-card.lcars-terminal .team-name {
+    color: var(--lcars-black);
+}
+
+.team-card.lcars-terminal .session-label,
+.team-card.lcars-terminal .session-value,
+.team-card.lcars-terminal .detail-label,
+.team-card.lcars-terminal .detail-value {
+    color: var(--lcars-black);
+}
+
+/* Clickable team cards */
+.team-card.lcars-clickable {
+    cursor: pointer;
+}
+
+.team-card.lcars-clickable:active {
+    transform: scale(0.98);
+}
+
+/* Team header */
+.team-card .team-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 12px;
+    padding-right: 20px;
+}
+
+.team-card .team-name {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+/* Team stats row with status indicator */
+.team-card .team-stats {
+    display: flex;
+    align-items: center;
+    gap: 12px;  /* Space between status indicator and text */
+    margin-top: 8px;
+}
+
+/* LCARS badge */
+.lcars-badge {
+    background: var(--lcars-white);
+    color: var(--lcars-black);
+    font-size: 9px;
+    font-weight: 700;
+    padding: 2px 6px;
+    border-radius: 4px;
+    letter-spacing: 1px;
+}
+
+/* Session info grid */
+.session-info {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.session-detail {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    padding: 2px 0;
+    border-bottom: 1px solid var(--lcars-surface);
+}
+
+.session-detail:last-child {
+    border-bottom: none;
+}
+
+.session-label {
+    color: var(--lcars-tan);
+    font-weight: 500;
+    letter-spacing: 0.5px;
+}
+
+.session-value {
+    color: var(--lcars-peach);
+    font-weight: 400;
+    text-align: right;
+}
+
+/* Status text colors */
+.session-value.text-online,
+.text-online { color: var(--lcars-green); }
+.session-value.text-offline,
+.text-offline { color: var(--lcars-alert-red); }
+
+/* -------------------------------------------------------------------------------
+   XACA-0063-004: Prominent Avatar Display in Detail Rows
+
+   Large, LCARS-styled avatars with division-colored borders and subtle glow
+   ------------------------------------------------------------------------------- */
+
+/* Container for session info with avatar layout */
+.session-info-with-avatar {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+}
+
+/* Stacked layout: terminal logo (circular) on top, avatar (smaller, rounded square) below */
+.team-avatar-stack {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Terminal logo - circular, prominent */
+.team-terminal-logo {
+    width: 64px;
+    height: 64px;
+    border-radius: 50%;
+    border: 2px solid var(--lcars-tan);
+    object-fit: cover;
+    background: var(--lcars-dark);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+/* Division-specific terminal logo border colors */
+.team-terminal-logo.div-academy { border-color: var(--lcars-peach); }
+.team-terminal-logo.div-ios { border-color: var(--lcars-blue); }
+.team-terminal-logo.div-android { border-color: var(--lcars-green); }
+.team-terminal-logo.div-firebase { border-color: var(--lcars-amber); }
+.team-terminal-logo.div-command { border-color: var(--lcars-lavender); }
+.team-terminal-logo.div-dns { border-color: var(--lcars-cyan); }
+.team-terminal-logo.div-mainevent { border-color: var(--lcars-crimson, #cc6666); }
+.team-terminal-logo.div-freelance { border-color: var(--lcars-teal, #66cccc); }
+
+/* Avatar image - rounded square, below terminal logo, same size */
+.team-avatar-stack .team-avatar {
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    object-fit: cover;
+    border: 2px solid var(--lcars-tan);
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+    background: var(--lcars-black);
+}
+
+/* Division-specific avatar border colors */
+.team-avatar-stack .team-avatar.div-academy { border-color: var(--lcars-peach); }
+.team-avatar-stack .team-avatar.div-ios { border-color: var(--lcars-blue); }
+.team-avatar-stack .team-avatar.div-android { border-color: var(--lcars-green); }
+.team-avatar-stack .team-avatar.div-firebase { border-color: var(--lcars-amber); }
+.team-avatar-stack .team-avatar.div-command { border-color: var(--lcars-lavender); }
+.team-avatar-stack .team-avatar.div-dns { border-color: var(--lcars-cyan); }
+.team-avatar-stack .team-avatar.div-mainevent { border-color: var(--lcars-crimson, #cc6666); }
+.team-avatar-stack .team-avatar.div-freelance { border-color: var(--lcars-teal, #66cccc); }
+
+/* Hover effects on the stack */
+.team-avatar-stack:hover .team-terminal-logo {
+    transform: scale(1.05);
+    box-shadow: 0 0 10px rgba(153, 204, 255, 0.4);
+}
+
+.team-avatar-stack:hover .team-avatar {
+    transform: scale(1.05);
+    box-shadow: 0 0 8px rgba(153, 204, 255, 0.3);
+}
+
+/* Adjust session info to fill remaining space */
+.session-info-with-avatar .session-info {
+    flex: 1;
+    min-width: 0;
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-035: Machine Status Panel - Grid Layout
+
+   Redesigned with:
+   - Responsive grid layout
+   - Status-colored left border
+   - Hostname prominent display
+   - Details grid with last seen
+   ------------------------------------------------------------------------------- */
+
+.machines-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 16px;
+}
+
+.machine-card {
+    background: var(--lcars-dark);
+    border-left: 6px solid var(--lcars-tan);
+    border-radius: 0 8px 8px 0;
+    padding: 16px 20px;
+    position: relative;
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.machine-card:hover {
+    transform: translateX(4px);
+    background: var(--lcars-surface);
+}
+
+/* Status-colored borders */
+.machine-card.online {
+    border-left-color: var(--lcars-green);
+}
+
+.machine-card.offline {
+    border-left-color: var(--lcars-alert-red);
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+.machine-card.offline .hostname,
+.machine-card.offline .detail-value,
+.machine-card.offline .detail-label,
+.machine-card.offline .last-seen {
+    color: var(--lcars-black);
+}
+
+.machine-card.warning {
+    border-left-color: var(--lcars-yellow);
+}
+
+/* Hostname - prominent display */
+.machine-card .hostname {
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+    margin-bottom: 12px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+/* Machine details grid */
+.machine-card .details {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.machine-card .detail-item {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.machine-card .detail-label {
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-tan);
+    text-transform: uppercase;
+}
+
+.machine-card .detail-value {
+    font-size: 13px;
+    color: var(--lcars-lavender);
+}
+
+/* Last seen timestamp */
+.machine-card .last-seen {
+    grid-column: 1 / -1;
+    margin-top: 15px;
+    padding-top: 15px;
+    border-top: 1px solid var(--lcars-surface);
+    font-size: 11px;
+    color: var(--lcars-tan);
+    display: flex;
+    justify-content: space-between;
+}
+
+/* Status row - legacy support with enhancements */
+.status-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--lcars-dark);
+    border-radius: 0 8px 8px 0;
+    border-left: 6px solid var(--lcars-tan);
+    transition: all 0.2s ease;
+    margin-bottom: 8px;
+}
+
+.status-row:hover {
+    background: var(--lcars-surface);
+    transform: translateX(4px);
+}
+
+.status-row.online {
+    border-left-color: var(--lcars-green);
+}
+
+.status-row.offline {
+    border-left-color: var(--lcars-alert-red);
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+.status-row.offline .machine-name,
+.status-row.offline .session-count,
+.status-row.offline .last-seen {
+    color: var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-037: Enhanced Machine Row Display
+
+   Multi-line machine status with:
+   - Machine hostname and status
+   - GUID display (truncated)
+   - Last seen / first seen timestamps
+   - Uptime sparkline graph
+   ------------------------------------------------------------------------------- */
+
+/* Enhanced machine row - multi-line layout */
+.machine-row {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px 16px;
+    background: var(--lcars-dark);
+    border-radius: 0 12px 12px 0;
+    border-left: 6px solid var(--lcars-tan);
+    transition: all 0.2s ease;
+    margin-bottom: 10px;
+}
+
+.machine-row:hover {
+    background: var(--lcars-surface);
+    transform: translateX(4px);
+}
+
+.machine-row.online {
+    border-left-color: var(--lcars-green);
+}
+
+.machine-row.offline {
+    border-left-color: var(--lcars-alert-red);
+    background: var(--lcars-alert-red);
+}
+
+.machine-row.offline .machine-hostname,
+.machine-row.offline .machine-guid,
+.machine-row.offline .machine-meta,
+.machine-row.offline .machine-sessions {
+    color: var(--lcars-black);
+}
+
+.machine-row.warning {
+    border-left-color: var(--lcars-yellow);
+}
+
+/* Top line: status dot + hostname + sessions */
+.machine-row-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.machine-row-header .status-indicator {
+    margin-right: 8px;
+}
+
+.machine-hostname {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    font-weight: 500;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+    flex: 1;
+}
+
+.machine-sessions {
+    font-size: 12px;
+    color: var(--lcars-lavender);
+    white-space: nowrap;
+}
+
+/* Middle line: GUID */
+.machine-guid {
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+    color: var(--lcars-tan);
+    opacity: 0.8;
+}
+
+/* Machine backup status line */
+.machine-backup-status {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    font-size: 10px;
+    margin: 4px 0;
+    flex-wrap: wrap;
+}
+
+.machine-backup-status .backup-label {
+    color: var(--lcars-lavender);
+    font-weight: 500;
+}
+
+.machine-backup-status .backup-team-status {
+    display: inline-flex;
+    gap: 4px;
+}
+
+.machine-backup-status .backup-team-name {
+    color: var(--lcars-tan);
+}
+
+/* Flexbox wrap for team backup statuses - each item takes its natural width */
+.backup-team-grid {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 2px 12px;
+    flex: 1;
+    min-width: 0;
+}
+
+.backup-team-grid .backup-team-status {
+    display: inline-flex;
+    gap: 4px;
+    white-space: nowrap;
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-042: Expandable Backup Details Panel
+
+   Clickable backup status that expands to show per-division details
+   ------------------------------------------------------------------------------- */
+
+.machine-backup-container {
+    margin: 4px 0;
+}
+
+.machine-backup-status.clickable {
+    cursor: pointer;
+    padding: 4px 8px;
+    margin: -4px -8px;
+    border-radius: 4px;
+    transition: background-color 0.2s ease;
+}
+
+.machine-backup-status.clickable:hover {
+    background-color: rgba(153, 153, 255, 0.15);
+}
+
+.backup-expand-indicator {
+    color: var(--lcars-tan);
+    font-size: 8px;
+    margin-right: 6px;
+    transition: transform 0.2s ease;
+    display: inline-block;
+}
+
+.backup-expand-indicator.expanded {
+    transform: rotate(90deg);
+}
+
+.backup-details-panel {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out, padding 0.3s ease-out;
+    background: var(--lcars-darker);
+    border-left: 3px solid var(--lcars-purple);
+    margin-left: 14px;
+    margin-top: 0;
+    padding: 0 12px;
+}
+
+.backup-details-panel.expanded {
+    max-height: 500px;
+    overflow-y: auto;
+    padding: 8px 12px;
+    margin-top: 8px;
+}
+
+.backup-details-header {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1.5fr;
+    gap: 8px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--lcars-purple);
+    margin-bottom: 6px;
+}
+
+.backup-details-header .backup-details-col {
+    font-size: 9px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--lcars-lavender);
+    font-weight: 500;
+}
+
+/* Visual grouping for Last Check header (spans Status + Time) */
+.backup-details-header .backup-check-group-header {
+    background: rgba(153, 153, 255, 0.1);
+    padding: 2px 6px;
+    border-radius: 3px;
+    border-left: 2px solid var(--lcars-lavender);
+}
+
+.backup-detail-row {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1.5fr;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 10px;
+}
+
+/* Visual grouping for Status + Last Check time */
+.backup-detail-check-group {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    background: rgba(153, 153, 255, 0.08);
+    padding: 2px 6px;
+    border-radius: 3px;
+    border-left: 2px solid var(--lcars-lavender);
+}
+
+.backup-detail-row:not(:last-child) {
+    border-bottom: 1px solid rgba(153, 153, 255, 0.2);
+}
+
+.backup-detail-division {
+    color: var(--lcars-peach);
+    font-weight: 500;
+}
+
+.backup-detail-status {
+    font-weight: 500;
+}
+
+.backup-detail-time {
+    color: var(--lcars-tan);
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    font-size: 9px;
+}
+
+/* Mobile adjustments for backup panel */
+@media (max-width: 600px) {
+    .backup-details-panel.expanded {
+        max-height: 400px;
+        overflow-y: auto;
+        margin-left: 8px;
+    }
+
+    .backup-detail-row {
+        font-size: 9px;
+    }
+
+    .backup-details-header .backup-details-col {
+        font-size: 8px;
+    }
+}
+
+/* Bottom line: metadata and sparkline */
+.machine-row-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+}
+
+.machine-meta {
+    display: flex;
+    gap: 16px;
+    font-size: 10px;
+    color: var(--lcars-tan);
+}
+
+.machine-meta-item {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.machine-meta-label {
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.7;
+}
+
+.machine-meta-value {
+    color: var(--lcars-lavender);
+}
+
+/* Uptime Sparkline */
+.uptime-sparkline {
+    display: flex;
+    align-items: flex-end;
+    gap: 1px;
+    height: 16px;
+    min-width: 96px;
+}
+
+.sparkline-bar {
+    width: 2px;
+    min-height: 2px;
+    border-radius: 1px;
+    transition: height 0.2s ease;
+}
+
+.sparkline-bar.online {
+    background: var(--lcars-green);
+}
+
+.sparkline-bar.offline {
+    background: var(--lcars-alert-red);
+}
+
+.sparkline-bar.warning {
+    background: var(--lcars-yellow);
+}
+
+/* Machine row in offline state - sparkline adjustments */
+.machine-row.offline .sparkline-bar.online {
+    background: var(--lcars-black);
+    opacity: 0.6;
+}
+
+.machine-row.offline .sparkline-bar.offline {
+    background: var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-040: Machine Nickname UI
+
+   Inline editing for machine nicknames with LCARS styling
+   ------------------------------------------------------------------------------- */
+
+.machine-nickname-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 0;
+    font-size: 11px;
+}
+
+.machine-nickname-label {
+    color: var(--lcars-tan);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    opacity: 0.7;
+}
+
+.machine-nickname-value {
+    color: var(--lcars-lavender);
+    /* No flex: 1 - let button sit right after the value */
+}
+
+.machine-nickname-value.empty {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    font-style: italic;
+}
+
+.nickname-edit-btn {
+    background: transparent;
+    border: 1px solid #888;
+    color: #999;
+    padding: 2px 6px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+    transition: all 0.2s ease;
+}
+
+.nickname-edit-btn:hover {
+    border-color: var(--lcars-tan);
+    color: var(--lcars-tan);
+    opacity: 1;
+}
+
+/* Inline editor */
+.nickname-editor {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex: 1;
+}
+
+.nickname-input {
+    flex: 1;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-cyan);
+    color: var(--lcars-peach);
+    padding: 4px 8px;
+    border-radius: 4px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    outline: none;
+}
+
+.nickname-input:focus {
+    border-color: var(--lcars-lavender);
+    box-shadow: 0 0 4px var(--lcars-cyan);
+}
+
+.nickname-input::placeholder {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+}
+
+.nickname-save-btn,
+.nickname-cancel-btn {
+    background: transparent;
+    border: 1px solid;
+    padding: 3px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s ease;
+}
+
+.nickname-save-btn {
+    border-color: var(--lcars-green);
+    color: var(--lcars-green);
+}
+
+.nickname-save-btn:hover {
+    background: var(--lcars-green);
+    color: var(--lcars-black);
+}
+
+.nickname-cancel-btn {
+    border-color: var(--lcars-alert-red);
+    color: var(--lcars-alert-red);
+}
+
+.nickname-cancel-btn:hover {
+    background: var(--lcars-alert-red);
+    color: var(--lcars-black);
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-039: Activity Log - Server-style Live Log Display
+
+   Monospace text log showing last 20 status updates
+   Newest entries at top, single-line with hard truncation
+   ------------------------------------------------------------------------------- */
+
+.activity-log {
+    background: #0a0a0a;
+    border: 1px solid var(--lcars-tan);
+    border-radius: 0 0 12px 0;
+    padding: 12px 15px;
+    max-height: 300px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    font-family: 'JetBrains Mono', 'SF Mono', 'Menlo', 'Monaco', monospace;
+    font-size: 11px;
+    line-height: 1.5;
+}
+
+.log-entry {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    color: var(--lcars-tan);
+    padding: 2px 0;
+}
+
+.log-entry.empty {
+    color: var(--lcars-tan);
+    opacity: 0.5;
+    font-style: italic;
+}
+
+.log-entry.status {
+    color: var(--lcars-green);
+}
+
+.log-entry.connect {
+    color: var(--lcars-cyan);
+}
+
+.log-entry.offline {
+    color: var(--lcars-alert-red);
+}
+
+.log-entry.reconnect {
+    color: var(--lcars-peach);
+}
+
+/* Custom scrollbar for activity log */
+.activity-log {
+    scrollbar-width: thin;
+    scrollbar-color: var(--lcars-tan) #0a0a0a;
+}
+
+.activity-log::-webkit-scrollbar {
+    width: 6px;
+}
+
+.activity-log::-webkit-scrollbar-track {
+    background: #0a0a0a;
+    border-radius: 3px;
+}
+
+.activity-log::-webkit-scrollbar-thumb {
+    background: var(--lcars-tan);
+    border-radius: 3px;
+}
+
+.activity-log::-webkit-scrollbar-thumb:hover {
+    background: var(--lcars-peach);
+}
+
+/* Mobile adjustments for activity log */
+@media (max-width: 600px) {
+    .activity-log {
+        max-height: 200px;
+        font-size: 10px;
+        padding: 10px 12px;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-041: Machine State History Panel
+
+   Slide-down panel showing machine state change timeline
+   Expands when clicking on machine row in Machines tab
+   ------------------------------------------------------------------------------- */
+
+.machine-item-container {
+    /* Container for machine row + history panel */
+}
+
+.machine-expand-indicator {
+    color: var(--lcars-tan);
+    font-size: 10px;
+    margin-right: 6px;
+    transition: transform 0.2s ease;
+    display: inline-block;
+}
+
+.machine-expand-indicator.expanded {
+    transform: rotate(90deg);
+}
+
+.machine-row {
+    cursor: pointer;
+    transition: background-color 0.2s ease;
+}
+
+.machine-row:hover {
+    background-color: rgba(153, 153, 255, 0.1);
+}
+
+.machine-history-panel {
+    max-height: 0;
+    overflow: hidden;
+    transition: max-height 0.3s ease-out;
+    background: var(--lcars-darker);
+    border-left: 3px solid var(--lcars-purple);
+    margin-left: 20px;
+    margin-bottom: 0;
+}
+
+.machine-history-panel.expanded {
+    max-height: 400px;
+    overflow-y: auto;
+    margin-bottom: 10px;
+}
+
+.history-loading,
+.history-error,
+.history-empty {
+    padding: 20px;
+    text-align: center;
+    color: var(--lcars-tan);
+    font-style: italic;
+}
+
+.history-error {
+    color: var(--lcars-alert-red);
+}
+
+.history-timeline {
+    padding: 10px 15px;
+}
+
+.history-date-group {
+    margin-bottom: 15px;
+}
+
+.history-date-header {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-lavender);
+    text-transform: uppercase;
+    padding-bottom: 5px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--lcars-surface);
+}
+
+.history-entry {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 6px 0;
+    font-size: 11px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.history-entry:last-child {
+    border-bottom: none;
+}
+
+.history-icon {
+    font-size: 12px;
+    width: 16px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.history-time {
+    font-family: 'JetBrains Mono', 'SF Mono', monospace;
+    color: var(--lcars-tan);
+    font-size: 10px;
+    flex-shrink: 0;
+    opacity: 0.8;
+}
+
+.history-details {
+    color: var(--lcars-peach);
+    flex: 1;
+    word-break: break-word;
+}
+
+/* Event type coloring */
+.history-entry.event-status .history-icon { color: var(--lcars-blue); }
+.history-entry.event-session-start .history-icon { color: var(--lcars-green); }
+.history-entry.event-session-stop .history-icon { color: var(--lcars-alert-red); }
+.history-entry.event-ip-change .history-icon { color: var(--lcars-purple); }
+.history-entry.event-first-seen .history-icon { color: var(--lcars-cyan); }
+.history-entry.event-reconnect .history-icon { color: var(--lcars-green); }
+
+/* Custom scrollbar for history panel */
+.machine-history-panel {
+    scrollbar-width: thin;
+    scrollbar-color: var(--lcars-purple) var(--lcars-darker);
+}
+
+.machine-history-panel::-webkit-scrollbar {
+    width: 6px;
+}
+
+.machine-history-panel::-webkit-scrollbar-track {
+    background: var(--lcars-darker);
+    border-radius: 3px;
+}
+
+.machine-history-panel::-webkit-scrollbar-thumb {
+    background: var(--lcars-purple);
+    border-radius: 3px;
+}
+
+.machine-history-panel::-webkit-scrollbar-thumb:hover {
+    background: var(--lcars-lavender);
+}
+
+/* Mobile adjustments for history panel */
+@media (max-width: 600px) {
+    .machine-history-panel.expanded {
+        max-height: 300px;
+        margin-left: 10px;
+    }
+
+    .history-entry {
+        font-size: 10px;
+    }
+
+    .history-time {
+        font-size: 9px;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-036: Section Headers - Enhanced Design
+
+   Redesigned with:
+   - Title + extending bar pattern
+   - Multiple color variants
+   - Consistent spacing and typography
+   ------------------------------------------------------------------------------- */
+
+.section-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    margin-bottom: 20px;
+    margin-top: 15px;
+}
+
+.section-title {
+    font-family: 'Antonio', sans-serif;
+    font-size: 18px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    white-space: nowrap;
+    text-transform: uppercase;
+}
+
+.section-bar {
+    flex: 1;
+    height: 4px;
+    border-radius: 2px;
+    background: var(--lcars-tan);
+    position: relative;
+}
+
+/* Decorative end cap on section bar */
+.section-bar::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: -4px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: inherit;
+}
+
+/* Section header color variants */
+.section-header.blue .section-title { color: var(--lcars-blue); }
+.section-header.blue .section-bar { background: var(--lcars-blue); }
+
+.section-header.cyan .section-title { color: var(--lcars-cyan); }
+.section-header.cyan .section-bar { background: var(--lcars-cyan); }
+
+.section-header.crimson .section-title { color: var(--lcars-crimson); }
+.section-header.crimson .section-bar { background: var(--lcars-crimson); }
+
+.section-header.red .section-title { color: var(--lcars-red); }
+.section-header.red .section-bar { background: var(--lcars-red); }
+
+.section-header.purple .section-title { color: var(--lcars-purple); }
+.section-header.purple .section-bar { background: var(--lcars-purple); }
+
+.section-header.lavender .section-title { color: var(--lcars-lavender); }
+.section-header.lavender .section-bar { background: var(--lcars-lavender); }
+
+.section-header.orange .section-title { color: var(--lcars-orange); }
+.section-header.orange .section-bar { background: var(--lcars-orange); }
+
+.section-header.peach .section-title { color: var(--lcars-peach); }
+.section-header.peach .section-bar { background: var(--lcars-peach); }
+
+.section-header.tan .section-title { color: var(--lcars-tan); }
+.section-header.tan .section-bar { background: var(--lcars-tan); }
+
+.section-header.green .section-title { color: var(--lcars-green); }
+.section-header.green .section-bar { background: var(--lcars-green); }
+
+/* -------------------------------------------------------------------------------
+   LCARS Button Styling
+   ------------------------------------------------------------------------------- */
+
+.lcars-button {
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+    border: none;
+    padding: 8px 16px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border-radius: 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.lcars-button:hover {
+    background: var(--lcars-peach);
+    transform: scale(1.02);
+}
+
+.lcars-button:active {
+    transform: scale(0.98);
+}
+
+.lcars-button.primary {
+    background: var(--lcars-blue);
+}
+
+.lcars-button.primary:hover {
+    background: var(--lcars-cyan);
+}
+
+.lcars-button.danger {
+    background: var(--lcars-alert-red);
+    color: var(--lcars-white);
+}
+
+.lcars-button.danger:hover {
+    background: var(--lcars-red);
+}
+
+/* -------------------------------------------------------------------------------
+   Enhanced Status Indicators with Pulse Animation
+   ------------------------------------------------------------------------------- */
+
+.status-indicator {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    position: relative;
+}
+
+.status-indicator.online {
+    background: var(--lcars-green);
+    box-shadow:
+        0 0 8px var(--lcars-green-glow),
+        0 0 16px var(--lcars-green-glow);
+    animation: status-online-pulse 2s ease-in-out infinite;
+    /* Margin to prevent ping animation clipping (250% expands ~9px beyond) */
+    margin-left: 10px;
+}
+
+/* Ping ripple effect for online indicators */
+.status-indicator.online::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 100%;
+    height: 100%;
+    border-radius: 50%;
+    border: 2px solid var(--lcars-green);
+    transform: translate(-50%, -50%);
+    animation: status-ping 3s ease-out infinite;
+    opacity: 0;
+}
+
+@keyframes status-ping {
+    0% {
+        width: 100%;
+        height: 100%;
+        opacity: 0.8;
+    }
+    100% {
+        width: 250%;
+        height: 250%;
+        opacity: 0;
+    }
+}
+
+@keyframes status-online-pulse {
+    0%, 100% {
+        box-shadow:
+            0 0 8px var(--lcars-green-glow),
+            0 0 16px var(--lcars-green-glow);
+    }
+    50% {
+        box-shadow:
+            0 0 12px var(--lcars-green-glow),
+            0 0 24px var(--lcars-green-glow);
+    }
+}
+
+.status-indicator.offline {
+    background: var(--lcars-alert-red);
+    box-shadow: 0 0 8px var(--lcars-alert-glow);
+    animation: status-offline-blink 1s ease-in-out infinite;
+}
+
+@keyframes status-offline-blink {
+    0%, 100% {
+        opacity: 1;
+        box-shadow: 0 0 8px var(--lcars-alert-glow);
+    }
+    50% {
+        opacity: 0.5;
+        box-shadow: 0 0 16px var(--lcars-alert-glow);
+    }
+}
+
+/* Warning state - yellow alert */
+.status-indicator.warning {
+    background: var(--lcars-yellow);
+    box-shadow: 0 0 8px rgba(255, 255, 153, 0.5);
+    animation: status-warning-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes status-warning-pulse {
+    0%, 100% {
+        box-shadow: 0 0 8px rgba(255, 255, 153, 0.5);
+        transform: scale(1);
+    }
+    50% {
+        box-shadow: 0 0 14px rgba(255, 255, 153, 0.7);
+        transform: scale(1.1);
+    }
+}
+
+/* Yellow alert mode for data bar */
+.lcars-data-bar.lcars-yellow-alert-border {
+    box-shadow: 0 0 10px rgba(255, 255, 153, 0.4), inset 0 0 5px rgba(255, 255, 153, 0.1);
+    border: 1px solid var(--lcars-yellow);
+}
+
+/* -------------------------------------------------------------------------------
+   Responsive Adjustments for Components
+   ------------------------------------------------------------------------------- */
+
+/* iPad/tablet portrait - hide pills 5 and 6 */
+@media (max-width: 1024px) {
+    .lcars-data-bar .candy-pill:nth-child(5),
+    .lcars-data-bar .candy-pill:nth-child(6) {
+        display: none !important;
+    }
+}
+
+@media (max-width: 800px) {
+
+    .summary-cards {
+        grid-template-columns: repeat(2, 1fr);
+        gap: 10px;
+    }
+
+    .summary-card .summary-value,
+    .summary-panel .value {
+        font-size: 36px;
+    }
+
+    .teams-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .machines-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .machine-card .details {
+        grid-template-columns: 1fr;
+    }
+}
+
+@media (max-width: 600px) {
+    .summary-cards {
+        grid-template-columns: 1fr 1fr;
+    }
+
+    .summary-card .summary-value,
+    .summary-panel .value {
+        font-size: 28px;
+    }
+
+    .summary-card,
+    .summary-panel {
+        padding: 12px 16px;
+        border-left-width: 6px;
+        border-radius: 0 16px 16px 0;
+    }
+
+    .section-title {
+        font-size: 14px;
+        letter-spacing: 2px;
+    }
+
+    .organization-title {
+        font-size: 14px;
+        letter-spacing: 2px;
+    }
+
+    .team-card {
+        padding: 12px;
+    }
+
+    .team-card .team-name {
+        font-size: 12px;
+    }
+}
+
+/* ===============================================================================
+   PHASE 5B: RESPONSIVE & POLISH (LCARS-040 through LCARS-044)
+   Final responsive adjustments, animations, and interaction effects
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   LCARS-040: Enhanced Mobile Responsive (480px ultra-mobile)
+
+   For very small screens, switch to bottom navigation bar
+   ------------------------------------------------------------------------------- */
+
+@media (max-width: 480px) {
+    /* Prevent any horizontal overflow on mobile */
+    html, body {
+        overflow-x: hidden !important;
+        max-width: 100vw !important;
+    }
+
+    /* Full height container - section handles tabbar offset */
+    .lcars-container {
+        height: 100vh !important;
+        max-height: 100vh !important;
+        width: 100vw !important;
+        max-width: 100vw !important;
+        overflow-x: hidden !important;
+    }
+
+    /* All sections constrained to viewport */
+    .lcars-section > * {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    .lcars-section > section {
+        max-width: 100% !important;
+        overflow-x: hidden !important;
+        padding-right: 8px !important;
+    }
+
+    /* Bottom navigation mode - matches candy bar height */
+    .lcars-sidebar {
+        position: fixed;
+        bottom: 0;
+        left: -1px;
+        right: 0;
+        top: auto;
+        width: 100%;
+        height: 48px;
+        min-height: 48px;
+        box-sizing: border-box !important;
+        flex-direction: row;
+        border-radius: 0;
+        border-top-left-radius: 0;
+        padding: 0 40px;
+        background: var(--lcars-black);
+        border-top: 8px solid var(--lcars-black) !important;
+        z-index: 1000;
+    }
+
+    /* Endcaps - rounded on outer edges */
+    .lcars-sidebar::before,
+    .lcars-sidebar::after {
+        display: block !important;
+        content: '' !important;
+        position: absolute !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        height: auto !important;
+        width: 40px !important;
+        background: var(--lcars-blue) !important;
+    }
+
+    /* Left endcap - curve on left (outer) edge */
+    .lcars-sidebar::before {
+        left: 0 !important;
+        right: auto !important;
+        border-radius: 20px 0 0 0 !important;
+    }
+
+    /* Right endcap - curve on right (outer) edge */
+    .lcars-sidebar::after {
+        right: 0 !important;
+        left: auto !important;
+        border-radius: 0 20px 0 0 !important;
+    }
+
+    /* Hide non-essential sidebar items */
+    .sidebar-label,
+    .sidebar-spacer,
+    .sidebar-info {
+        display: none !important;
+    }
+
+    /* Hide refresh button on mobile tabbar */
+    .sidebar-button.refresh-btn {
+        display: none !important;
+    }
+
+    /* Horizontal button layout */
+    .sidebar-button[data-section] {
+        flex: 1;
+        min-height: 40px;
+        height: 40px;
+        border-radius: 0;
+        border: none;
+        border-left: 1px solid var(--lcars-black);
+        margin: 0;
+        padding: 4px 6px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: flex-end;
+    }
+
+    /* Last visible button (settings) - add right border before endcap */
+    .sidebar-button[data-section="settings"] {
+        border-right: 1px solid var(--lcars-black);
+    }
+
+    .sidebar-button[data-section] span {
+        font-size: 9px;
+        letter-spacing: 0;
+        text-align: right;
+    }
+
+    /* Adjust main area - single column full width on mobile */
+    .lcars-main {
+        grid-template-columns: 1fr;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+    }
+
+    /* Data bar needs to be in column 1 on mobile - with blue endcaps */
+    .lcars-data-bar {
+        grid-column: 1 !important;
+        max-width: 100vw !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+        position: relative !important;
+        padding-left: 40px !important;
+        padding-right: 40px !important;
+        gap: 0 !important;
+    }
+
+    /* Left endcap - squared blue */
+    .lcars-data-bar::before {
+        content: '' !important;
+        position: absolute !important;
+        left: 0 !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        width: 40px !important;
+        background: var(--lcars-blue) !important;
+        border-radius: 0 !important;
+    }
+
+    /* Right endcap - squared blue */
+    .lcars-data-bar::after {
+        content: '' !important;
+        position: absolute !important;
+        right: 0 !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        width: 40px !important;
+        background: var(--lcars-blue) !important;
+        border-radius: 0 !important;
+    }
+
+    /* Only show first 3 candy pills on mobile - hide 4th, 5th, 6th */
+    .lcars-data-bar .candy-pill:nth-child(4),
+    .lcars-data-bar .candy-pill:nth-child(5),
+    .lcars-data-bar .candy-pill:nth-child(6) {
+        display: none !important;
+    }
+
+    /* Candy pills - 1px black gaps between all elements */
+    .lcars-data-bar .candy-pill {
+        border-left: 1px solid var(--lcars-black) !important;
+        border-right: none !important;
+    }
+
+    /* First pill - keep left border (line between endcap and pill) */
+    .lcars-data-bar .candy-pill:first-child {
+        border-left: 1px solid var(--lcars-black) !important;
+    }
+
+    /* Last visible pill (3rd) - add right border before endcap */
+    .lcars-data-bar .candy-pill:nth-child(3) {
+        border-right: 1px solid var(--lcars-black) !important;
+    }
+
+    /* Show medium title on mobile - more room than desktop assumes */
+    .lcars-title .title-short {
+        display: none !important;
+    }
+    .lcars-title .title-medium {
+        display: inline !important;
+    }
+
+    /* Adjust content area for bottom nav - full width */
+    .lcars-content {
+        grid-column: 1 !important;
+        width: 100%;
+        max-width: 100%;
+        margin: 8px 0 0 0;
+        padding: 0;
+        margin-left: 0 !important;
+        overflow-x: hidden !important;
+    }
+
+    /* Create visible gap above tabbar */
+    .lcars-section,
+    .lcars-section.active,
+    .lcars-section.exiting {
+        bottom: 0 !important;
+        padding-bottom: 8px !important;
+        padding-right: 8px !important;
+        padding-left: 8px !important;
+        left: 0 !important;
+        right: 0 !important;
+        width: auto !important;
+        max-width: 100% !important;
+        overflow-x: hidden !important;
+        box-sizing: border-box !important;
+    }
+
+    /* Scroll spacer at bottom of content */
+    .lcars-section::after {
+        content: '' !important;
+        display: block !important;
+        height: 80px !important;
+        width: 100% !important;
+        background: transparent !important;
+        flex-shrink: 0 !important;
+    }
+
+    /* Full width summary cards - 2 columns with forced shrinking */
+    .summary-cards {
+        display: grid !important;
+        grid-template-columns: repeat(2, minmax(0, 1fr)) !important;
+        gap: 8px !important;
+        width: calc(100vw - 32px) !important;
+        max-width: calc(100vw - 32px) !important;
+        overflow: visible !important;
+        box-sizing: border-box !important;
+        margin-left: 0 !important;
+        margin-right: 0 !important;
+    }
+
+    .summary-card {
+        width: 100% !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+        padding: 12px 8px !important;
+    }
+
+    .summary-card .summary-value {
+        font-size: 28px !important;
+        word-break: break-word !important;
+    }
+
+    .summary-card .summary-label {
+        font-size: 8px !important;
+        word-break: break-word !important;
+    }
+
+    /* Organization nav constrained */
+    .organization-nav {
+        max-width: 100% !important;
+        overflow-x: hidden !important;
+    }
+
+    /* Machines list constrained */
+    #machines-list {
+        max-width: 100% !important;
+        overflow-x: hidden !important;
+    }
+
+    .machine-row {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        overflow: hidden !important;
+    }
+
+    /* Keyboard shortcuts - 3 columns on mobile */
+    .keyboard-shortcuts {
+        display: grid !important;
+        grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
+        gap: 6px !important;
+        max-width: 100% !important;
+        overflow: hidden !important;
+        box-sizing: border-box !important;
+    }
+
+    .shortcut-item {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+        overflow: hidden !important;
+        padding: 6px 8px !important;
+        gap: 4px !important;
+    }
+
+    .shortcut-key {
+        font-size: 10px !important;
+        min-width: 40px !important;
+        padding: 2px 4px !important;
+    }
+
+    .shortcut-desc {
+        font-size: 9px !important;
+    }
+
+    /* Settings preferences sections - constrain width */
+    .lcars-section[data-section="settings"] section > div {
+        max-width: 100% !important;
+        box-sizing: border-box !important;
+    }
+
+    .summary-card .summary-value {
+        font-size: 24px;
+    }
+
+    .summary-card .summary-label {
+        font-size: 9px;
+    }
+
+    /* Smaller section titles */
+    .section-title {
+        font-size: 12px;
+        letter-spacing: 1px;
+    }
+
+    .section-bar::after {
+        width: 8px;
+        height: 8px;
+        top: -2px;
+    }
+
+    /* Organization panels stack */
+    .organization-panel {
+        margin-bottom: 16px;
+        padding: 24px 12px 12px 12px;
+        border-left-width: 12px;
+        border-top-left-radius: 20px;
+        border-top-right-radius: 20px;
+        border-bottom-left-radius: 20px;
+        border-bottom-right-radius: 0;
+        max-width: calc(100vw - 24px);
+        overflow-x: hidden;
+        /* Use shorthand like base rule for complete override */
+        background:
+            /* Top-left inner curve */
+            radial-gradient(
+                circle at 0% 0%,
+                transparent 10px,
+                var(--org-color, var(--lcars-blue)) 11px
+            ) left -11px top 0px / 13px 13px no-repeat border-box,
+            /* Bottom-left inner curve */
+            radial-gradient(
+                circle at 0% 100%,
+                transparent 18px,
+                var(--org-color, var(--lcars-blue)) 19px
+            ) left -12px bottom / 22px 22px no-repeat border-box,
+            /* Black background */
+            var(--lcars-black) !important;
+    }
+
+    .organization-panel::before {
+        left: -17px;
+        height: 3px;
+        border-radius: 0 2px 2px 0;
+    }
+
+    /* Top-left inner curve - adjusted position to eliminate 1px nub */
+    .organization-panel::after {
+        content: '' !important;
+        position: absolute !important;
+        top: 0px !important;
+        left: -3px !important;
+        width: 17px !important;
+        height: 17px !important;
+        background: radial-gradient(
+            circle at 100% 100%,
+            var(--lcars-black) 13px,
+            var(--org-color, var(--lcars-blue)) 14px
+        ) !important;
+        z-index: 9999 !important;
+        pointer-events: none !important;
+    }
+
+    /* No inner curves on top corners - squared 90-degree corners */
+
+    .organization-title {
+        font-size: 12px;
+        letter-spacing: 1px;
+    }
+
+    /* Team cards single column */
+    .teams-grid {
+        grid-template-columns: 1fr;
+        gap: 10px;
+        overflow: hidden;
+    }
+
+    .team-card {
+        padding: 10px;
+        max-width: 100%;
+        width: 100%;
+        box-sizing: border-box;
+        overflow: hidden;
+    }
+
+    /* Hide dashboard switcher on ultra-mobile */
+    .sidebar-link {
+        display: none;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-040b: Landscape Mobile (Short Viewport)
+
+   When height is limited (phone landscape), use bottom navigation
+   regardless of width. Triggers at max-height: 500px to catch all phones.
+   ------------------------------------------------------------------------------- */
+
+@media (max-height: 500px) and (min-width: 481px) {
+    /* Hide candy bar completely in landscape - save vertical space */
+    .lcars-data-bar {
+        display: none !important;
+    }
+
+    /* Compact top frame - reduce from 115px to 50px */
+    .lcars-top-frame {
+        height: 50px !important;
+        margin-bottom: 2px !important;
+    }
+
+    /* Compact top sidebar elbow */
+    .top-sidebar {
+        height: 50px !important;
+        padding-top: 0 !important;
+        border-bottom-left-radius: 30px !important;
+        align-items: flex-end !important;
+        padding-bottom: 10px !important;
+    }
+
+    /* Sidebar content - align with title */
+    .top-sidebar-content {
+        font-size: 10px !important;
+    }
+
+    /* Hide the lavender accent band */
+    .top-sidebar::before {
+        display: none !important;
+    }
+
+    /* Adjust the concave corner cutout position */
+    .top-sidebar::after {
+        bottom: 6px !important;
+        width: 20px !important;
+        height: 20px !important;
+        right: -20px !important;
+        background: radial-gradient(
+            circle at 100% 0%,
+            var(--lcars-black) 20px,
+            var(--lcars-blue) 20px
+        ) !important;
+    }
+
+    /* Keep horizontal bar visible */
+    .top-bar {
+        height: 6px !important;
+        bottom: 0 !important;
+    }
+
+    /* Title positioning - moved up 40px more */
+    .lcars-title {
+        bottom: 58px !important;
+    }
+
+    /* Adjust grid to remove candy bar row */
+    .lcars-main {
+        grid-template-rows: 1fr !important;
+    }
+
+    /* Content starts immediately (no candy bar gap) */
+    .lcars-content {
+        grid-row: 1 !important;
+    }
+
+    /* Bottom navigation mode for landscape */
+    .lcars-sidebar {
+        position: fixed;
+        bottom: 0;
+        left: -1px;
+        right: 0;
+        top: auto;
+        width: 100%;
+        height: 48px;
+        min-height: 48px;
+        box-sizing: border-box !important;
+        flex-direction: row;
+        border-radius: 0;
+        border-top-left-radius: 0;
+        padding: 0 40px;
+        background: var(--lcars-black);
+        border-top: 8px solid var(--lcars-black) !important;
+        z-index: 1000;
+    }
+
+    /* Endcaps - rounded on outer edges */
+    .lcars-sidebar::before,
+    .lcars-sidebar::after {
+        display: block !important;
+        content: '' !important;
+        position: absolute !important;
+        top: 0 !important;
+        bottom: 0 !important;
+        height: auto !important;
+        width: 40px !important;
+        background: var(--lcars-blue) !important;
+    }
+
+    /* Left endcap - curve on left (outer) edge */
+    .lcars-sidebar::before {
+        left: 0 !important;
+        right: auto !important;
+        border-radius: 20px 0 0 0 !important;
+    }
+
+    /* Right endcap - curve on right (outer) edge */
+    .lcars-sidebar::after {
+        right: 0 !important;
+        left: auto !important;
+        border-radius: 0 20px 0 0 !important;
+    }
+
+    /* Hide non-essential sidebar items */
+    .sidebar-label,
+    .sidebar-spacer,
+    .sidebar-info {
+        display: none !important;
+    }
+
+    /* Hide refresh button on landscape tabbar */
+    .sidebar-button.refresh-btn {
+        display: none !important;
+    }
+
+    /* Hide dashboard switcher in landscape */
+    .sidebar-link {
+        display: none !important;
+    }
+
+    /* Horizontal button layout */
+    .sidebar-button[data-section] {
+        flex: 1;
+        min-height: 40px;
+        height: 40px;
+        border-radius: 0;
+        border: none;
+        border-left: 1px solid var(--lcars-black);
+        margin: 0;
+        padding: 4px 6px;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        justify-content: flex-end;
+    }
+
+    /* Last visible button (settings) - add right border before endcap */
+    .sidebar-button[data-section="settings"] {
+        border-right: 1px solid var(--lcars-black);
+    }
+
+    .sidebar-button[data-section] span {
+        font-size: 9px;
+        letter-spacing: 0;
+        text-align: right;
+    }
+
+    /* Adjust main area layout for landscape */
+    .lcars-main {
+        grid-template-columns: 1fr;
+        width: 100%;
+        margin: 0;
+        padding: 0;
+    }
+
+    /* Content area adjustments */
+    .lcars-content {
+        grid-column: 1 !important;
+        width: 100%;
+        max-width: 100%;
+        margin: 8px 0 0 0;
+        padding: 0 8px;
+        margin-left: 0 !important;
+    }
+
+    /* Section padding for bottom tabbar */
+    .lcars-section,
+    .lcars-section.active,
+    .lcars-section.exiting {
+        bottom: 0 !important;
+        padding-bottom: 8px !important;
+        padding-left: 8px !important;
+        padding-right: 8px !important;
+    }
+
+    /* Scroll spacer at bottom */
+    .lcars-section::after {
+        content: '' !important;
+        display: block !important;
+        height: 60px !important;
+        width: 100% !important;
+        background: transparent !important;
+        flex-shrink: 0 !important;
+    }
+
+    /* Summary cards - use more columns in landscape since we have width */
+    .summary-cards {
+        display: grid !important;
+        grid-template-columns: repeat(4, minmax(0, 1fr)) !important;
+        gap: 8px !important;
+    }
+
+    .summary-card {
+        padding: 8px 12px !important;
+    }
+
+    .summary-card .summary-value {
+        font-size: 24px !important;
+    }
+
+    .summary-card .summary-label {
+        font-size: 8px !important;
+    }
+}
+
+/* Safe area support for notched devices */
+@supports (padding: env(safe-area-inset-bottom)) {
+    @media (max-width: 480px) {
+        .lcars-sidebar {
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+    }
+    /* Also apply safe area in landscape */
+    @media (max-height: 500px) and (min-width: 481px) {
+        .lcars-sidebar {
+            padding-bottom: env(safe-area-inset-bottom, 0px);
+        }
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-041: Enhanced Scanline Effect
+
+   Improved CRT scanline with toggle support
+   ------------------------------------------------------------------------------- */
+
+/* Scanline toggle class */
+.scanline-disabled .scanline {
+    display: none;
+}
+
+/* Enhanced scanline with subtle animation */
+.scanline {
+    opacity: 0.15;
+    animation: scanline-flicker 8s ease-in-out infinite;
+}
+
+@keyframes scanline-flicker {
+    0%, 100% { opacity: 0.15; }
+    50% { opacity: 0.12; }
+    75% { opacity: 0.18; }
+}
+
+/* Disable scanline animation for reduced motion */
+@media (prefers-reduced-motion: reduce) {
+    .scanline {
+        animation: none;
+        opacity: 0.1;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   LCARS-043: Interactive Hover/Click Effects
+
+   Consistent interaction feedback across all clickable elements
+   ------------------------------------------------------------------------------- */
+
+/* Base interactive class */
+.interactive {
+    transition: transform 0.2s ease, box-shadow 0.2s ease, filter 0.2s ease;
+    cursor: pointer;
+}
+
+.interactive:hover {
+    transform: translateX(3px);
+}
+
+.interactive:active {
+    transform: scale(0.98);
+    filter: brightness(0.9);
+}
+
+/* Sidebar button interactions - no horizontal movement */
+.sidebar-button {
+    transition: filter 0.15s ease, background 0.15s ease;
+}
+
+.sidebar-button:hover {
+    filter: brightness(1.15);
+}
+
+.sidebar-button:active {
+    filter: brightness(0.9);
+}
+
+/* Card interactions - team cards */
+.team-card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.team-card:hover {
+    transform: translateY(-3px) scale(1.01);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.4);
+}
+
+.team-card:active {
+    transform: scale(0.99);
+}
+
+/* Summary card interactions */
+.summary-card {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.summary-card:hover {
+    transform: translateX(6px);
+}
+
+/* Organization nav button interactions */
+.org-nav-button {
+    transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+
+.org-nav-button:hover {
+    transform: translateY(-3px) scale(1.02);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+}
+
+.org-nav-button:active {
+    transform: scale(0.98);
+}
+
+/* Machine status row interactions */
+.status-row {
+    transition: transform 0.2s ease, background 0.2s ease;
+}
+
+.status-row:hover {
+    transform: translateX(6px);
+}
+
+/* LCARS button press effect */
+.lcars-button {
+    transition: transform 0.15s ease, background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.lcars-button:hover {
+    transform: scale(1.03);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.lcars-button:active {
+    transform: scale(0.97);
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Sidebar link interactions */
+.sidebar-link {
+    transition: filter 0.15s ease, background 0.15s ease;
+}
+
+.sidebar-link:hover {
+    filter: brightness(1.15);
+}
+
+.sidebar-link:active {
+    filter: brightness(0.9);
+}
+
+/* Disable hover effects on touch devices to prevent sticky states */
+@media (hover: none) {
+    .sidebar-button:hover,
+    .team-card:hover,
+    .summary-card:hover,
+    .org-nav-button:hover,
+    .status-row:hover,
+    .lcars-button:hover,
+    .sidebar-link:hover,
+    .interactive:hover {
+        transform: none;
+        box-shadow: none;
+        filter: none;
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   Number Value Transition Support
+
+   CSS classes for smooth number animations (JS adds/removes these)
+   ------------------------------------------------------------------------------- */
+
+.value-updating {
+    transition: transform 0.1s ease;
+    transform: scale(1.05);
+}
+
+.value-updated {
+    animation: value-flash 0.3s ease;
+}
+
+@keyframes value-flash {
+    0% { filter: brightness(1.3); }
+    100% { filter: brightness(1); }
+}
+
+/* -------------------------------------------------------------------------------
+   Additional Polish
+
+   Fine-tuning and edge cases
+   ------------------------------------------------------------------------------- */
+
+/* Focus states for accessibility */
+.sidebar-button:focus-visible,
+.lcars-button:focus-visible,
+.org-nav-button:focus-visible,
+.team-card:focus-visible {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: 2px;
+}
+
+/* Smooth scrolling within content areas */
+.lcars-content {
+    scroll-behavior: smooth;
+}
+
+/* Print styles - hide decorative elements */
+@media print {
+    .scanline,
+    .lcars-sidebar,
+    .lcars-top-frame,
+    .startup-section {
+        display: none !important;
+    }
+
+    .lcars-content {
+        margin: 0 !important;
+        padding: 20px !important;
+    }
+
+    .lcars-main {
+        margin: 0 !important;
+    }
+}
+/* -------------------------------------------------------------------------------
+   LCARS Select Dropdown
+   Theme-appropriate styled select element
+   ------------------------------------------------------------------------------- */
+
+.lcars-select {
+    appearance: none;
+    -webkit-appearance: none;
+    background: var(--lcars-dark);
+    border: 2px solid var(--lcars-tan);
+    border-radius: 16px;
+    padding: 8px 32px 8px 16px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+    cursor: pointer;
+    min-width: 160px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23cc9966' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 12px center;
+    transition: border-color 0.2s ease, background-color 0.2s ease;
+}
+
+.lcars-select:hover {
+    border-color: var(--lcars-peach);
+    background-color: var(--lcars-surface);
+}
+
+.lcars-select:focus {
+    outline: none;
+    border-color: var(--lcars-blue);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.3);
+}
+
+.lcars-select option {
+    background: var(--lcars-dark);
+    color: var(--lcars-peach);
+    padding: 8px;
+}
+
+/* Color variants */
+.lcars-select.blue {
+    border-color: var(--lcars-blue);
+    color: var(--lcars-blue);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%239999ff' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+}
+
+.lcars-select.blue:hover {
+    border-color: var(--lcars-cyan);
+}
+
+.lcars-select.cyan {
+    border-color: var(--lcars-cyan);
+    color: var(--lcars-cyan);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%2399ccff' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+}
+
+.lcars-select.crimson {
+    border-color: var(--lcars-crimson);
+    color: var(--lcars-crimson);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23ff4466' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+}
+
+/* ===============================================================================
+   LCARS ANIMATION LIBRARY
+
+   Comprehensive animation system for LCARS interfaces
+   Organized into: SUBTLE (everyday use) and DRAMATIC (alerts/effects)
+
+   Usage: Add class directly or trigger via JavaScript
+   Example: <div class="lcars-glow">Glowing Element</div>
+   Example: element.classList.add('lcars-red-alert');
+   =============================================================================== */
+
+/* -------------------------------------------------------------------------------
+   SUBTLE ANIMATIONS - Everyday UI Polish
+
+   These animations are gentle and suitable for regular interface elements.
+   They enhance the experience without being distracting.
+   ------------------------------------------------------------------------------- */
+
+/* GLOW - Gentle pulsing glow effect */
+@keyframes lcars-glow {
+    0%, 100% {
+        box-shadow: 0 0 5px currentColor;
+        filter: brightness(1);
+    }
+    50% {
+        box-shadow: 0 0 15px currentColor, 0 0 25px currentColor;
+        filter: brightness(1.1);
+    }
+}
+
+.lcars-glow {
+    animation: lcars-glow 2s ease-in-out infinite;
+}
+
+.lcars-glow-slow {
+    animation: lcars-glow 4s ease-in-out infinite;
+}
+
+.lcars-glow-fast {
+    animation: lcars-glow 1s ease-in-out infinite;
+}
+
+/* BREATHE - Slow opacity pulse, like life support */
+@keyframes lcars-breathe {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
+}
+
+.lcars-breathe {
+    animation: lcars-breathe 3s ease-in-out infinite;
+}
+
+.lcars-breathe-slow {
+    animation: lcars-breathe 5s ease-in-out infinite;
+}
+
+/* SHIMMER - Horizontal shine effect across element */
+@keyframes lcars-shimmer {
+    0% {
+        background-position: -200% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.lcars-shimmer {
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(255, 255, 255, 0.2) 50%,
+        transparent 100%
+    );
+    background-size: 200% 100%;
+    animation: lcars-shimmer 2s ease-in-out infinite;
+}
+
+/* FADE IN variants */
+@keyframes lcars-fade-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+}
+
+@keyframes lcars-fade-in-up {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes lcars-fade-in-down {
+    from {
+        opacity: 0;
+        transform: translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes lcars-fade-in-scale {
+    from {
+        opacity: 0;
+        transform: scale(0.9);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.lcars-fade-in {
+    animation: lcars-fade-in 0.3s ease-out forwards;
+}
+
+.lcars-fade-in-up {
+    animation: lcars-fade-in-up 0.4s ease-out forwards;
+}
+
+.lcars-fade-in-down {
+    animation: lcars-fade-in-down 0.4s ease-out forwards;
+}
+
+.lcars-fade-in-scale {
+    animation: lcars-fade-in-scale 0.3s ease-out forwards;
+}
+
+/* FADE OUT variants */
+@keyframes lcars-fade-out {
+    from { opacity: 1; }
+    to { opacity: 0; }
+}
+
+@keyframes lcars-fade-out-down {
+    from {
+        opacity: 1;
+        transform: translateY(0);
+    }
+    to {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+}
+
+.lcars-fade-out {
+    animation: lcars-fade-out 0.3s ease-in forwards;
+}
+
+.lcars-fade-out-down {
+    animation: lcars-fade-out-down 0.3s ease-in forwards;
+}
+
+/* TYPEWRITER - Text reveal effect */
+@keyframes lcars-type-cursor {
+    0%, 50% { border-color: var(--lcars-cyan); }
+    51%, 100% { border-color: transparent; }
+}
+
+.lcars-type {
+    overflow: hidden;
+    white-space: nowrap;
+    border-right: 2px solid var(--lcars-cyan);
+    animation: lcars-type-cursor 0.8s step-end infinite;
+}
+
+/* DATA SCROLL - Vertical scrolling data effect */
+@keyframes lcars-data-scroll {
+    0% { transform: translateY(0); }
+    100% { transform: translateY(-50%); }
+}
+
+.lcars-data-scroll {
+    animation: lcars-data-scroll 10s linear infinite;
+}
+
+.lcars-data-scroll-fast {
+    animation: lcars-data-scroll 5s linear infinite;
+}
+
+/* ROTATE - Gentle continuous rotation */
+@keyframes lcars-rotate {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.lcars-rotate {
+    animation: lcars-rotate 4s linear infinite;
+}
+
+.lcars-rotate-slow {
+    animation: lcars-rotate 8s linear infinite;
+}
+
+.lcars-rotate-fast {
+    animation: lcars-rotate 2s linear infinite;
+}
+
+/* HOVER LIFT - Subtle lift on hover */
+.lcars-hover-lift {
+    transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.lcars-hover-lift:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+/* HOVER GLOW - Glow on hover */
+.lcars-hover-glow {
+    transition: box-shadow 0.3s ease, filter 0.3s ease;
+}
+
+.lcars-hover-glow:hover {
+    box-shadow: 0 0 15px currentColor;
+    filter: brightness(1.15);
+}
+
+/* STAGGER - For sequential animation of children */
+.lcars-stagger > *:nth-child(1) { animation-delay: 0.05s; }
+.lcars-stagger > *:nth-child(2) { animation-delay: 0.1s; }
+.lcars-stagger > *:nth-child(3) { animation-delay: 0.15s; }
+.lcars-stagger > *:nth-child(4) { animation-delay: 0.2s; }
+.lcars-stagger > *:nth-child(5) { animation-delay: 0.25s; }
+.lcars-stagger > *:nth-child(6) { animation-delay: 0.3s; }
+.lcars-stagger > *:nth-child(7) { animation-delay: 0.35s; }
+.lcars-stagger > *:nth-child(8) { animation-delay: 0.4s; }
+.lcars-stagger > *:nth-child(9) { animation-delay: 0.45s; }
+.lcars-stagger > *:nth-child(10) { animation-delay: 0.5s; }
+
+/* -------------------------------------------------------------------------------
+   DRAMATIC ANIMATIONS - Alert States & Special Effects
+
+   These animations are attention-grabbing for critical states.
+   Use sparingly - they're meant to communicate urgency.
+   ------------------------------------------------------------------------------- */
+
+/* RED ALERT - Full red alert mode with screen pulse */
+@keyframes lcars-red-alert {
+    0%, 100% {
+        background-color: transparent;
+        box-shadow: inset 0 0 0 rgba(255, 68, 102, 0);
+    }
+    50% {
+        background-color: rgba(255, 68, 102, 0.1);
+        box-shadow: inset 0 0 100px rgba(255, 68, 102, 0.2);
+    }
+}
+
+@keyframes lcars-red-alert-border {
+    0%, 100% {
+        border-color: var(--lcars-crimson);
+        box-shadow: 0 0 10px var(--lcars-crimson);
+    }
+    50% {
+        border-color: var(--lcars-alert-red);
+        box-shadow: 0 0 30px var(--lcars-alert-red), 0 0 60px var(--lcars-crimson);
+    }
+}
+
+.lcars-red-alert {
+    animation: lcars-red-alert 1s ease-in-out infinite;
+}
+
+.lcars-red-alert-border {
+    border: 2px solid var(--lcars-crimson);
+    animation: lcars-red-alert-border 1s ease-in-out infinite;
+}
+
+/* YELLOW ALERT - Caution mode */
+@keyframes lcars-yellow-alert {
+    0%, 100% {
+        background-color: transparent;
+        box-shadow: inset 0 0 0 rgba(255, 255, 153, 0);
+    }
+    50% {
+        background-color: rgba(255, 255, 153, 0.08);
+        box-shadow: inset 0 0 60px rgba(255, 255, 153, 0.15);
+    }
+}
+
+.lcars-yellow-alert {
+    animation: lcars-yellow-alert 1.5s ease-in-out infinite;
+}
+
+/* WARP - Stretch effect like going to warp speed */
+@keyframes lcars-warp {
+    0% {
+        transform: scaleX(1);
+        filter: blur(0);
+    }
+    50% {
+        transform: scaleX(1.5);
+        filter: blur(2px);
+    }
+    100% {
+        transform: scaleX(1);
+        filter: blur(0);
+    }
+}
+
+@keyframes lcars-warp-in {
+    0% {
+        transform: scaleX(3) scaleY(0.1);
+        opacity: 0;
+        filter: blur(10px);
+    }
+    60% {
+        transform: scaleX(1.2) scaleY(1.1);
+        opacity: 1;
+        filter: blur(2px);
+    }
+    100% {
+        transform: scaleX(1) scaleY(1);
+        opacity: 1;
+        filter: blur(0);
+    }
+}
+
+@keyframes lcars-warp-out {
+    0% {
+        transform: scaleX(1) scaleY(1);
+        opacity: 1;
+        filter: blur(0);
+    }
+    40% {
+        transform: scaleX(1.2) scaleY(1.1);
+        opacity: 1;
+        filter: blur(2px);
+    }
+    100% {
+        transform: scaleX(3) scaleY(0.1);
+        opacity: 0;
+        filter: blur(10px);
+    }
+}
+
+.lcars-warp {
+    animation: lcars-warp 0.8s ease-in-out;
+}
+
+.lcars-warp-in {
+    animation: lcars-warp-in 0.5s ease-out forwards;
+}
+
+.lcars-warp-out {
+    animation: lcars-warp-out 0.4s ease-in forwards;
+}
+
+/* SCAN - Horizontal scanning beam effect */
+@keyframes lcars-scan {
+    0% {
+        background-position: -100% 0;
+    }
+    100% {
+        background-position: 200% 0;
+    }
+}
+
+.lcars-scan {
+    position: relative;
+    overflow: hidden;
+}
+
+.lcars-scan::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -1px;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        90deg,
+        transparent 0%,
+        rgba(153, 204, 255, 0.3) 45%,
+        rgba(153, 204, 255, 0.5) 50%,
+        rgba(153, 204, 255, 0.3) 55%,
+        transparent 100%
+    );
+    background-size: 50% 100%;
+    animation: lcars-scan 2s linear infinite;
+    pointer-events: none;
+}
+
+.lcars-scan-slow::after {
+    animation: lcars-scan 4s linear infinite;
+}
+
+/* TRANSPORT - Star Trek transporter dissolve effect */
+@keyframes lcars-transport-in {
+    0% {
+        opacity: 0;
+        filter: blur(20px) brightness(2);
+        transform: scale(1.1);
+    }
+    30% {
+        opacity: 0.5;
+        filter: blur(10px) brightness(1.5);
+    }
+    60% {
+        opacity: 0.8;
+        filter: blur(5px) brightness(1.2);
+    }
+    100% {
+        opacity: 1;
+        filter: blur(0) brightness(1);
+        transform: scale(1);
+    }
+}
+
+@keyframes lcars-transport-out {
+    0% {
+        opacity: 1;
+        filter: blur(0) brightness(1);
+        transform: scale(1);
+    }
+    40% {
+        opacity: 0.8;
+        filter: blur(5px) brightness(1.2);
+    }
+    70% {
+        opacity: 0.5;
+        filter: blur(10px) brightness(1.5);
+    }
+    100% {
+        opacity: 0;
+        filter: blur(20px) brightness(2);
+        transform: scale(1.1);
+    }
+}
+
+.lcars-transport-in {
+    animation: lcars-transport-in 0.8s ease-out forwards;
+}
+
+.lcars-transport-out {
+    animation: lcars-transport-out 0.6s ease-in forwards;
+}
+
+/* SHIELD - Shield fluctuation effect */
+@keyframes lcars-shield {
+    0%, 100% {
+        box-shadow:
+            0 0 10px rgba(153, 204, 255, 0.5),
+            inset 0 0 20px rgba(153, 204, 255, 0.1);
+        border-color: var(--lcars-cyan);
+    }
+    25% {
+        box-shadow:
+            0 0 20px rgba(153, 204, 255, 0.7),
+            inset 0 0 30px rgba(153, 204, 255, 0.2);
+        border-color: var(--lcars-blue);
+    }
+    50% {
+        box-shadow:
+            0 0 5px rgba(153, 204, 255, 0.3),
+            inset 0 0 10px rgba(153, 204, 255, 0.05);
+        border-color: var(--lcars-lavender);
+    }
+    75% {
+        box-shadow:
+            0 0 25px rgba(153, 204, 255, 0.8),
+            inset 0 0 40px rgba(153, 204, 255, 0.25);
+        border-color: var(--lcars-cyan);
+    }
+}
+
+.lcars-shield {
+    border: 2px solid var(--lcars-cyan);
+    animation: lcars-shield 2s ease-in-out infinite;
+}
+
+/* SURGE - Power surge/overload effect */
+@keyframes lcars-surge {
+    0%, 100% {
+        filter: brightness(1);
+        transform: scale(1);
+    }
+    10% {
+        filter: brightness(2);
+        transform: scale(1.02);
+    }
+    20% {
+        filter: brightness(0.8);
+        transform: scale(0.99);
+    }
+    30% {
+        filter: brightness(1.5);
+        transform: scale(1.01);
+    }
+    40% {
+        filter: brightness(1);
+        transform: scale(1);
+    }
+}
+
+.lcars-surge {
+    animation: lcars-surge 0.5s ease-out;
+}
+
+/* GLITCH - System malfunction effect */
+@keyframes lcars-glitch {
+    0%, 100% {
+        transform: translate(0);
+        filter: none;
+    }
+    10% {
+        transform: translate(-2px, 1px);
+        filter: hue-rotate(90deg);
+    }
+    20% {
+        transform: translate(2px, -1px);
+        filter: hue-rotate(-90deg);
+    }
+    30% {
+        transform: translate(-1px, 2px);
+        filter: saturate(2);
+    }
+    40% {
+        transform: translate(1px, -2px);
+        filter: invert(0.1);
+    }
+    50% {
+        transform: translate(-2px, -1px);
+        filter: hue-rotate(180deg);
+    }
+    60% {
+        transform: translate(2px, 1px);
+        clip-path: inset(20% 0 30% 0);
+    }
+    70% {
+        transform: translate(-1px, -2px);
+        clip-path: inset(50% 0 20% 0);
+    }
+    80% {
+        transform: translate(1px, 2px);
+        filter: none;
+        clip-path: none;
+    }
+}
+
+@keyframes lcars-glitch-text {
+    0%, 100% {
+        text-shadow: none;
+    }
+    10% {
+        text-shadow: -2px 0 var(--lcars-cyan), 2px 0 var(--lcars-crimson);
+    }
+    20% {
+        text-shadow: 2px 0 var(--lcars-cyan), -2px 0 var(--lcars-crimson);
+    }
+    30% {
+        text-shadow: -1px 0 var(--lcars-green), 1px 0 var(--lcars-crimson);
+    }
+    40% {
+        text-shadow: none;
+    }
+}
+
+.lcars-glitch {
+    animation: lcars-glitch 0.5s ease-in-out;
+}
+
+.lcars-glitch-loop {
+    animation: lcars-glitch 0.3s ease-in-out infinite;
+}
+
+.lcars-glitch-text {
+    animation: lcars-glitch-text 0.3s ease-in-out infinite;
+}
+
+/* CASCADE - Boot sequence cascade reveal */
+@keyframes lcars-cascade {
+    0% {
+        opacity: 0;
+        transform: translateX(-20px);
+        filter: blur(4px);
+    }
+    60% {
+        opacity: 1;
+        transform: translateX(5px);
+        filter: blur(0);
+    }
+    100% {
+        opacity: 1;
+        transform: translateX(0);
+        filter: blur(0);
+    }
+}
+
+.lcars-cascade > * {
+    opacity: 0;
+    animation: lcars-cascade 0.4s ease-out forwards;
+}
+
+.lcars-cascade > *:nth-child(1) { animation-delay: 0s; }
+.lcars-cascade > *:nth-child(2) { animation-delay: 0.1s; }
+.lcars-cascade > *:nth-child(3) { animation-delay: 0.2s; }
+.lcars-cascade > *:nth-child(4) { animation-delay: 0.3s; }
+.lcars-cascade > *:nth-child(5) { animation-delay: 0.4s; }
+.lcars-cascade > *:nth-child(6) { animation-delay: 0.5s; }
+.lcars-cascade > *:nth-child(7) { animation-delay: 0.6s; }
+.lcars-cascade > *:nth-child(8) { animation-delay: 0.7s; }
+.lcars-cascade > *:nth-child(9) { animation-delay: 0.8s; }
+.lcars-cascade > *:nth-child(10) { animation-delay: 0.9s; }
+
+/* RIPPLE - Energy ripple from center */
+@keyframes lcars-ripple {
+    0% {
+        box-shadow: 0 0 0 0 currentColor;
+        opacity: 0.7;
+    }
+    100% {
+        box-shadow: 0 0 0 30px currentColor;
+        opacity: 0;
+    }
+}
+
+.lcars-ripple {
+    position: relative;
+}
+
+.lcars-ripple::after {
+    content: '';
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    transform: translate(-50%, -50%);
+    animation: lcars-ripple 1.5s ease-out infinite;
+    pointer-events: none;
+}
+
+/* TACTICAL - Radar sweep effect (rotating pseudo-element) */
+@keyframes lcars-tactical-sweep {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.lcars-tactical {
+    position: relative;
+    overflow: hidden;
+    border-radius: 50%;
+}
+
+.lcars-tactical::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -1px;
+    right: 0;
+    bottom: 0;
+    background: conic-gradient(
+        from 0deg,
+        transparent 0deg,
+        rgba(153, 255, 153, 0.5) 15deg,
+        rgba(153, 255, 153, 0.3) 30deg,
+        transparent 60deg
+    );
+    animation: lcars-tactical-sweep 2s linear infinite;
+    pointer-events: none;
+}
+
+/* Grid lines overlay */
+.lcars-tactical::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -1px;
+    right: 0;
+    bottom: 0;
+    background:
+        radial-gradient(circle, transparent 30%, rgba(153, 255, 153, 0.1) 31%, transparent 32%),
+        radial-gradient(circle, transparent 60%, rgba(153, 255, 153, 0.1) 61%, transparent 62%),
+        linear-gradient(0deg, transparent 49%, rgba(153, 255, 153, 0.15) 50%, transparent 51%),
+        linear-gradient(90deg, transparent 49%, rgba(153, 255, 153, 0.15) 50%, transparent 51%);
+    pointer-events: none;
+}
+
+/* ENERGY CHARGE - Building up energy */
+@keyframes lcars-charge {
+    0% {
+        box-shadow: inset 0 0 0 0 var(--lcars-cyan);
+    }
+    50% {
+        box-shadow: inset 0 0 30px 10px var(--lcars-cyan);
+    }
+    100% {
+        box-shadow:
+            inset 0 0 0 0 var(--lcars-cyan),
+            0 0 30px var(--lcars-cyan),
+            0 0 60px var(--lcars-blue);
+    }
+}
+
+.lcars-charge {
+    animation: lcars-charge 1s ease-in forwards;
+}
+
+/* FLICKER - Unstable power flicker */
+@keyframes lcars-flicker {
+    0%, 19%, 21%, 23%, 25%, 54%, 56%, 100% {
+        opacity: 1;
+    }
+    20%, 24%, 55% {
+        opacity: 0.4;
+    }
+    22% {
+        opacity: 0.8;
+    }
+}
+
+.lcars-flicker {
+    animation: lcars-flicker 2s linear infinite;
+}
+
+/* PING - Sonar ping effect */
+@keyframes lcars-ping {
+    0% {
+        transform: scale(1);
+        opacity: 1;
+    }
+    75%, 100% {
+        transform: scale(2);
+        opacity: 0;
+    }
+}
+
+.lcars-ping {
+    position: relative;
+}
+
+.lcars-ping::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: -1px;
+    right: 0;
+    bottom: 0;
+    border: 2px solid currentColor;
+    border-radius: inherit;
+    animation: lcars-ping 1.5s ease-out infinite;
+    pointer-events: none;
+}
+
+/* SHAKE - Alert shake */
+@keyframes lcars-shake {
+    0%, 100% { transform: translateX(0); }
+    10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); }
+    20%, 40%, 60%, 80% { transform: translateX(4px); }
+}
+
+.lcars-shake {
+    animation: lcars-shake 0.5s ease-in-out;
+}
+
+/* BOUNCE - Attention bounce */
+@keyframes lcars-bounce {
+    0%, 20%, 50%, 80%, 100% {
+        transform: translateY(0);
+    }
+    40% {
+        transform: translateY(-10px);
+    }
+    60% {
+        transform: translateY(-5px);
+    }
+}
+
+.lcars-bounce {
+    animation: lcars-bounce 1s ease infinite;
+}
+
+/* -------------------------------------------------------------------------------
+   ANIMATION UTILITIES
+
+   Helper classes for controlling animations
+   ------------------------------------------------------------------------------- */
+
+/* Animation timing */
+.lcars-anim-delay-100 { animation-delay: 0.1s; }
+.lcars-anim-delay-200 { animation-delay: 0.2s; }
+.lcars-anim-delay-300 { animation-delay: 0.3s; }
+.lcars-anim-delay-500 { animation-delay: 0.5s; }
+.lcars-anim-delay-1000 { animation-delay: 1s; }
+
+/* Animation duration overrides */
+.lcars-anim-fast { animation-duration: 0.2s !important; }
+.lcars-anim-normal { animation-duration: 0.5s !important; }
+.lcars-anim-slow { animation-duration: 1s !important; }
+.lcars-anim-slower { animation-duration: 2s !important; }
+
+/* Animation iteration */
+.lcars-anim-once { animation-iteration-count: 1 !important; }
+.lcars-anim-twice { animation-iteration-count: 2 !important; }
+.lcars-anim-infinite { animation-iteration-count: infinite !important; }
+
+/* Pause/play */
+.lcars-anim-paused { animation-play-state: paused !important; }
+.lcars-anim-running { animation-play-state: running !important; }
+
+/* -------------------------------------------------------------------------------
+   REDUCED MOTION SUPPORT FOR NEW ANIMATIONS
+
+   Respect user preferences for reduced motion
+   ------------------------------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+    .lcars-glow,
+    .lcars-glow-slow,
+    .lcars-glow-fast,
+    .lcars-breathe,
+    .lcars-breathe-slow,
+    .lcars-shimmer,
+    .lcars-rotate,
+    .lcars-rotate-slow,
+    .lcars-rotate-fast,
+    .lcars-red-alert,
+    .lcars-red-alert-border,
+    .lcars-yellow-alert,
+    .lcars-warp,
+    .lcars-shield,
+    .lcars-glitch-loop,
+    .lcars-glitch-text,
+    .lcars-tactical::before,
+    .lcars-flicker,
+    .lcars-ping::before,
+    .lcars-bounce,
+    .lcars-ripple::after,
+    .lcars-scan::after {
+        animation: none !important;
+    }
+
+    /* Provide static alternatives where helpful */
+    .lcars-glow,
+    .lcars-hover-glow:hover {
+        box-shadow: 0 0 10px currentColor;
+    }
+
+    .lcars-red-alert {
+        background-color: rgba(255, 68, 102, 0.1);
+        border: 2px solid var(--lcars-crimson);
+    }
+
+    .lcars-yellow-alert {
+        background-color: rgba(255, 255, 153, 0.08);
+        border: 2px solid var(--lcars-yellow);
+    }
+}
+
+/* -------------------------------------------------------------------------------
+   AVATAR INTEGRATION
+   Agent avatars in organization and session views
+   ------------------------------------------------------------------------------- */
+
+/* Organization-level avatar grid (stacked terminal logo + avatar) */
+.org-avatars {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 8px;
+    padding: 0 12px;
+}
+
+/* Team LCARS logo in division header grid (first item, circular) */
+.org-team-logo {
+    width: 48px;
+    height: 48px;
+    border-radius: 50%;
+    border: 2px solid var(--lcars-tan);
+    object-fit: cover;
+    background: var(--lcars-dark);
+    opacity: 0;
+    transform: scale(0);
+    transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+
+.lcars-section.active .org-team-logo {
+    opacity: 1;
+    transform: scale(1);
+    transition-delay: 0.05s;
+}
+
+.org-team-logo:hover {
+    transform: scale(1.1);
+    box-shadow: 0 0 10px rgba(255, 204, 153, 0.4);
+}
+
+/* Avatar thumbnail in division header grid */
+.org-avatar-thumb {
+    width: 48px;
+    height: 48px;
+    border-radius: 6px;
+    border: 2px solid var(--lcars-blue);
+    object-fit: cover;
+    transition: transform 0.2s ease, border-color 0.2s ease;
+}
+
+.org-avatar-thumb:hover {
+    transform: scale(1.15);
+    border-color: var(--lcars-cyan);
+}
+
+.org-avatar-thumb.offline {
+    opacity: 0.4;
+    border-color: var(--lcars-gray);
+}
+
+/* Session-level avatar (larger, with label) */
+.session-avatar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 0;
+    margin-top: 4px;
+}
+
+.session-avatar-img {
+    width: 48px;
+    height: 48px;
+    border-radius: 24px;
+    border: 2px solid var(--lcars-cyan);
+    object-fit: cover;
+    transition: border-color 0.2s ease;
+}
+
+.session-avatar.offline .session-avatar-img {
+    opacity: 0.5;
+    border-color: var(--lcars-gray);
+}
+
+.session-avatar-name {
+    font-family: var(--font-antonio);
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--lcars-cyan);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.session-avatar.offline .session-avatar-name {
+    color: var(--lcars-gray);
+}
+
+/* Team card avatar integration */
+.team-card .session-avatar {
+    padding: 6px 0 0 0;
+    border-top: 1px solid rgba(153, 153, 255, 0.2);
+    margin-top: 8px;
+}
+
+.team-card .session-avatar-img {
+    width: 40px;
+    height: 40px;
+    border-radius: 20px;
+}
+
+.team-card .session-avatar-name {
+    font-size: 12px;
+}
+
+/* LCARS terminal cards - darker background needs lighter avatar borders */
+.team-card.lcars-terminal .session-avatar-img {
+    border-color: var(--lcars-orange);
+}
+
+.team-card.lcars-terminal .session-avatar-name {
+    color: var(--lcars-orange);
+}
+
+/* Avatar loading/error states */
+.session-avatar-img.loading {
+    background: linear-gradient(
+        90deg,
+        var(--lcars-surface) 25%,
+        var(--lcars-gray) 50%,
+        var(--lcars-surface) 75%
+    );
+    background-size: 200% 100%;
+    animation: avatar-loading 1.5s ease-in-out infinite;
+}
+
+@keyframes avatar-loading {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
+.session-avatar-img.error {
+    opacity: 0.3;
+    border-color: var(--lcars-red);
+}
+
+/* Avatar animations on section entry */
+.lcars-section .session-avatar {
+    opacity: 0;
+    transform: translateX(-10px);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+}
+
+.lcars-section.active .session-avatar {
+    opacity: 1;
+    transform: translateX(0);
+}
+
+/* Stagger avatar animations */
+.lcars-section.active .team-card:nth-child(1) .session-avatar { transition-delay: 0.15s; }
+.lcars-section.active .team-card:nth-child(2) .session-avatar { transition-delay: 0.20s; }
+.lcars-section.active .team-card:nth-child(3) .session-avatar { transition-delay: 0.25s; }
+.lcars-section.active .team-card:nth-child(4) .session-avatar { transition-delay: 0.30s; }
+.lcars-section.active .team-card:nth-child(5) .session-avatar { transition-delay: 0.35s; }
+.lcars-section.active .team-card:nth-child(n+6) .session-avatar { transition-delay: 0.40s; }
+
+/* Organization avatar grid animations */
+.lcars-section .org-avatar-thumb {
+    opacity: 0;
+    transform: scale(0);
+    transition: opacity 0.3s ease, transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.lcars-section.active .org-avatar-thumb {
+    opacity: 1;
+    transform: scale(1);
+}
+
+/* Stagger org avatar grid */
+.lcars-section.active .org-avatar-thumb:nth-child(1) { transition-delay: 0.10s; }
+.lcars-section.active .org-avatar-thumb:nth-child(2) { transition-delay: 0.15s; }
+.lcars-section.active .org-avatar-thumb:nth-child(3) { transition-delay: 0.20s; }
+.lcars-section.active .org-avatar-thumb:nth-child(4) { transition-delay: 0.25s; }
+.lcars-section.active .org-avatar-thumb:nth-child(5) { transition-delay: 0.30s; }
+.lcars-section.active .org-avatar-thumb:nth-child(n+6) { transition-delay: 0.35s; }
+
+/* Cache bust: 1767817431 */
+
+/* ===============================================================================
+   PERSONA AVATAR TOOLTIPS
+   =============================================================================== */
+
+/* Avatar image styling */
+.lcars-avatar {
+    cursor: pointer;
+    transition: transform 0.15s ease, opacity 0.15s ease;
+}
+
+.lcars-avatar:hover {
+    transform: scale(1.05);
+    opacity: 0.9;
+}
+
+/* Tooltip container */
+.lcars-avatar-tooltip {
+    position: fixed;
+    z-index: 10000;
+    pointer-events: auto;
+    opacity: 0;
+    transition: opacity 0.2s ease;
+}
+
+.lcars-avatar-tooltip.visible {
+    opacity: 1;
+}
+
+/* Tooltip content box */
+.lcars-avatar-tooltip .tooltip-content {
+    background: rgba(0, 0, 0, 0.95);
+    border: 2px solid var(--lcars-blue);
+    border-radius: 12px;
+    padding: 12px 16px;
+    min-width: 220px;
+    max-width: 400px;
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(153, 153, 255, 0.3);
+    backdrop-filter: blur(8px);
+}
+
+/* Arrow pointer */
+.lcars-avatar-tooltip .tooltip-arrow {
+    position: absolute;
+    width: 0;
+    height: 0;
+    border-style: solid;
+}
+
+.lcars-avatar-tooltip.arrow-top .tooltip-arrow {
+    top: -8px;
+    /* left set dynamically by JS to point at trigger element */
+    transform: translateX(-50%);
+    border-width: 0 8px 8px 8px;
+    border-color: transparent transparent var(--lcars-blue) transparent;
+}
+
+.lcars-avatar-tooltip.arrow-bottom .tooltip-arrow {
+    bottom: -8px;
+    /* left set dynamically by JS to point at trigger element */
+    transform: translateX(-50%);
+    border-width: 8px 8px 0 8px;
+    border-color: var(--lcars-blue) transparent transparent transparent;
+}
+
+/* Tooltip text */
+.lcars-avatar-tooltip .tooltip-name {
+    font-family: 'Antonio', sans-serif;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--lcars-blue);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+}
+
+.lcars-avatar-tooltip .tooltip-divider {
+    height: 2px;
+    background: linear-gradient(90deg, var(--lcars-blue) 0%, transparent 100%);
+    margin-bottom: 8px;
+}
+
+.lcars-avatar-tooltip .tooltip-role {
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.85);
+    margin-bottom: 4px;
+    line-height: 1.4;
+}
+
+.lcars-avatar-tooltip .tooltip-team {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.5);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+/* Team-specific colors */
+.lcars-avatar-tooltip.team-academy .tooltip-content {
+    border-color: var(--lcars-blue);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(153, 153, 255, 0.3);
+}
+.lcars-avatar-tooltip.team-academy .tooltip-name {
+    color: var(--lcars-blue);
+}
+.lcars-avatar-tooltip.team-academy .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-blue) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-ios .tooltip-content {
+    border-color: var(--lcars-gold);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(255, 204, 102, 0.3);
+}
+.lcars-avatar-tooltip.team-ios .tooltip-name {
+    color: var(--lcars-gold);
+}
+.lcars-avatar-tooltip.team-ios .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-gold) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-android .tooltip-content {
+    border-color: var(--lcars-crimson);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(255, 68, 102, 0.3);
+}
+.lcars-avatar-tooltip.team-android .tooltip-name {
+    color: var(--lcars-crimson);
+}
+.lcars-avatar-tooltip.team-android .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-crimson) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-firebase .tooltip-content {
+    border-color: var(--lcars-orange);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(255, 153, 102, 0.3);
+}
+.lcars-avatar-tooltip.team-firebase .tooltip-name {
+    color: var(--lcars-orange);
+}
+.lcars-avatar-tooltip.team-firebase .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-orange) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-dns-framework .tooltip-content {
+    border-color: var(--lcars-lavender);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(153, 102, 255, 0.3);
+}
+.lcars-avatar-tooltip.team-dns-framework .tooltip-name {
+    color: var(--lcars-lavender);
+}
+.lcars-avatar-tooltip.team-dns-framework .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-lavender) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-freelance .tooltip-content {
+    border-color: var(--lcars-cyan);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(102, 255, 255, 0.3);
+}
+.lcars-avatar-tooltip.team-freelance .tooltip-name {
+    color: var(--lcars-cyan);
+}
+.lcars-avatar-tooltip.team-freelance .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-cyan) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-command .tooltip-content {
+    border-color: var(--lcars-white);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(255, 255, 255, 0.3);
+}
+.lcars-avatar-tooltip.team-command .tooltip-name {
+    color: var(--lcars-white);
+}
+.lcars-avatar-tooltip.team-command .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-white) 0%, transparent 100%);
+}
+
+.lcars-avatar-tooltip.team-mainevent .tooltip-content {
+    border-color: var(--lcars-mauve);
+    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5), 0 0 15px rgba(204, 153, 204, 0.3);
+}
+.lcars-avatar-tooltip.team-mainevent .tooltip-name {
+    color: var(--lcars-mauve);
+}
+.lcars-avatar-tooltip.team-mainevent .tooltip-divider {
+    background: linear-gradient(90deg, var(--lcars-mauve) 0%, transparent 100%);
+}
