@@ -1041,13 +1041,15 @@ if [ $? != 0 ]; then
     clear
     echo "Initializing {team_id.title()} {terminal_id.title()}..."
 
-    # Configure tmux for iTerm2 compatibility (imgcat images, mouse clicks)
+{window_section}
+
+    # Configure tmux for iTerm2 compatibility (must be AFTER new-session creates the server)
+    # allow-passthrough: Required for imgcat inline images through tmux panes
+    # mouse: Enables clicking on tmux window tabs and pane borders
     $TMUX_CMD set -g allow-passthrough on 2>/dev/null
     $TMUX_CMD set -g mouse on 2>/dev/null
     $TMUX_CMD set-option -g allow-rename off 2>/dev/null
     $TMUX_CMD set-window-option -g automatic-rename off 2>/dev/null
-
-{window_section}
 
     # Configure tmux status line - {theme} theme
     $TMUX_CMD set -t $SESSION_CODE status-left-length 15
