@@ -353,15 +353,46 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     # Add agent panels to agent tabs
     echo ""
     echo "  Adding agent panels..."
+
+    # Wait for iTerm2 Python API to become ready (may lag after launch)
+    _api_ready=false
+    for _wait in 1 2 3 4 5; do
+        if "$VENV_PYTHON" "$WM" \
+            --action select-tab \
+            --window-title "$ITERM_WINDOW_NAME" \
+            --tab-name "${AGENTS[1]}" \
+            2>/dev/null; then
+            _api_ready=true
+            break
+        fi
+        echo "    ⏳ Waiting for iTerm2 API (attempt $_wait/5)..."
+        sleep 2
+    done
+    if [[ "$_api_ready" != "true" ]]; then
+        echo "    ⚠️  iTerm2 API not ready after 10s — agent panels may not open"
+    fi
+
     for agent in "${AGENTS[@]}"; do
         agent_panel_script="$AITEAMFORGE_DIR/scripts/agent-panel-display.sh"
         if [[ -f "$agent_panel_script" ]]; then
-            "$VENV_PYTHON" "$WM" \
-                --action split-agent-panel \
-                --window-title "$ITERM_WINDOW_NAME" \
-                --tab-name "$agent" \
-                --command "KANBAN_DIR='${KANBAN_DIR}' $agent_panel_script ${TEAM_ID}-${agent}" \
-                2>>"$ITERM_STARTUP_LOG"
+            _panel_ok=false
+            for _attempt in 1 2 3; do
+                "$VENV_PYTHON" "$WM" \
+                    --action split-agent-panel \
+                    --window-title "$ITERM_WINDOW_NAME" \
+                    --tab-name "$agent" \
+                    --command "KANBAN_DIR='${KANBAN_DIR}' $agent_panel_script ${TEAM_ID}-${agent}" \
+                    2>>"$ITERM_STARTUP_LOG"
+                if [[ $? -eq 0 ]]; then
+                    _panel_ok=true
+                    break
+                fi
+                echo "    ⚠️  Panel split attempt $_attempt failed for $agent, retrying..." >&2
+                sleep 1
+            done
+            if [[ "$_panel_ok" != "true" ]]; then
+                echo "    ❌ Failed to create agent panel: $agent (see $ITERM_STARTUP_LOG)"
+            fi
         fi
         sleep 0.3
     done
