@@ -14,7 +14,6 @@ from ..provider import RAGEngineProvider, RAGEngineConfig, RAGEngineStatus, Inst
 
 # RAG-Anything defaults
 _DEFAULT_PORT = 9623
-_DEFAULT_DATA_DIR = str(Path.home() / "rag-data" / "rag-anything")
 
 
 class RAGAnythingEngine(RAGEngineProvider):
@@ -40,8 +39,6 @@ class RAGAnythingEngine(RAGEngineProvider):
         """
         if not config.port:
             config.port = _DEFAULT_PORT
-        if not config.data_dir:
-            config.data_dir = _DEFAULT_DATA_DIR
 
         super().__init__(config)
 
