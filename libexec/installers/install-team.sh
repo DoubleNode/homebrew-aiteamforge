@@ -622,30 +622,37 @@ with open(theme_file, "w") as f:
     f.write(theme_select)
 BANNER_COLORS_EOF
 
-    # Read palette and theme_select from temp files
-    BANNER_PALETTE=$(cat "$BANNER_PALETTE_FILE" 2>/dev/null || echo "# No palette")
-    BANNER_THEME_SELECT=$(cat "$BANNER_THEME_FILE" 2>/dev/null || echo "# No theme select")
-    rm -f "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE"
-
-    # Generate banner script — use awk for multi-line substitution since sed can't do it
+    # Generate banner script — Python handles multi-line substitution cleanly
+    # (awk -v breaks on $-signs and newlines in palette/theme strings)
     TEAM_BANNER_SCRIPT_NAME="${TEAM_ID}-banner.sh"
-    awk -v palette="$BANNER_PALETTE" -v theme_sel="$BANNER_THEME_SELECT" \
-        -v team_id="$TEAM_ID" -v team_name="$TEAM_NAME" \
-        -v team_ship="${TEAM_SHIP:-${TEAM_THEME}}" \
-        -v banner_name="$TEAM_BANNER_SCRIPT_NAME" \
-    '{
-        gsub(/\{\{TEAM_ID\}\}/, team_id)
-        gsub(/\{\{TEAM_NAME\}\}/, team_name)
-        gsub(/\{\{TEAM_SHIP\}\}/, team_ship)
-        gsub(/\{\{TEAM_BANNER_SCRIPT\}\}/, banner_name)
-        if ($0 ~ /\{\{TEAM_BANNER_PALETTE\}\}/) { print palette; next }
-        if ($0 ~ /\{\{TEAM_BANNER_THEME_SELECT\}\}/) { print theme_sel; next }
-        print
-    }' "$BANNER_TEMPLATE" > "$BANNER_SCRIPT"
+    python3 - "$BANNER_TEMPLATE" "$BANNER_SCRIPT" "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE" \
+              "$TEAM_ID" "$TEAM_NAME" "${TEAM_SHIP:-${TEAM_THEME}}" "$TEAM_BANNER_SCRIPT_NAME" <<'BANNER_SUB_EOF'
+import sys
+template_path, output_path = sys.argv[1], sys.argv[2]
+palette_path, theme_path = sys.argv[3], sys.argv[4]
+team_id, team_name, team_ship, banner_name = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
+
+with open(template_path) as f:
+    content = f.read()
+with open(palette_path) as f:
+    palette = f.read()
+with open(theme_path) as f:
+    theme_select = f.read()
+
+content = content.replace("{{TEAM_ID}}", team_id)
+content = content.replace("{{TEAM_NAME}}", team_name)
+content = content.replace("{{TEAM_SHIP}}", team_ship)
+content = content.replace("{{TEAM_BANNER_SCRIPT}}", banner_name)
+content = content.replace("{{TEAM_BANNER_PALETTE}}", palette)
+content = content.replace("{{TEAM_BANNER_THEME_SELECT}}", theme_select)
+
+with open(output_path, "w") as f:
+    f.write(content)
+BANNER_SUB_EOF
+    rm -f "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE"
     chmod +x "$BANNER_SCRIPT"
     echo "  ✓ ${TEAM_ID}-banner.sh (team-specific color palette)"
     echo "    Path: $BANNER_SCRIPT"
-    echo "    Note: Edit color codes in the script to customize team themes"
 else
     echo "  ⚠️  Banner template not found: $BANNER_TEMPLATE (skipping)"
 fi
