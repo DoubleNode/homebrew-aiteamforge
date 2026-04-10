@@ -7,7 +7,16 @@
 # Example: agent-panel-display.sh firebase-ops
 
 SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
-AVATARS_DIR="$HOME/dev-team/fleet-monitor/server/public/avatars"
+# Resolve avatars directory: installed env → dev-team source → homebrew cellar → empty
+if [[ -n "$AITEAMFORGE_DIR" && -d "$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars" ]]; then
+    AVATARS_DIR="$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars"
+elif [[ -d "$HOME/dev-team/fleet-monitor/server/public/avatars" ]]; then
+    AVATARS_DIR="$HOME/dev-team/fleet-monitor/server/public/avatars"
+elif [[ -n "$AITEAMFORGE_HOME" && -d "$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars" ]]; then
+    AVATARS_DIR="$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars"
+else
+    AVATARS_DIR=""
+fi
 # Resolve imgcat from multiple possible locations:
 #   1. iTerm2 shell integration (standard install path)
 #   2. System-installed imgcat (e.g., via homebrew or manual install)

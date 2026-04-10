@@ -411,7 +411,7 @@ if pgrep -f "iTerm.app" > /dev/null; then
                 --action split-agent-panel \
                 --window-title "$ITERM_WINDOW_NAME" \
                 --tab-name "$agent" \
-                --command "KANBAN_DIR='${KANBAN_DIR}' $agent_panel_script ${TEAM_ID}-${agent}" \
+                --command "AITEAMFORGE_DIR='${AITEAMFORGE_DIR}' KANBAN_DIR='${KANBAN_DIR}' $agent_panel_script ${TEAM_ID}-${agent}" \
                 2>>"$ITERM_STARTUP_LOG"
         fi
         sleep 0.3
