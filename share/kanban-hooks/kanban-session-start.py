@@ -14,8 +14,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kanban_utils import get_board_file, update_board_safely, parse_session_name
 
-KANBAN_DIR = os.path.expanduser("~/aiteamforge/kanban")
-LOG_FILE = os.path.expanduser("~/aiteamforge/kanban/start-hook-debug.log")
+KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
+LOG_FILE = os.path.expanduser("~/dev-team/kanban/start-hook-debug.log")
 
 def log_debug(message):
     """Write debug message to log file."""
@@ -60,7 +60,7 @@ def get_git_worktree():
     """Get current git worktree full path."""
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0:
@@ -73,7 +73,7 @@ def get_git_branch():
     """Get current git branch name."""
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "branch", "--show-current"],
+            ["git", "branch", "--show-current"],
             capture_output=True, text=True, timeout=2
         )
         if result.returncode == 0:
@@ -128,7 +128,7 @@ def trigger_health_check():
     the session start. The health check will auto-start any dead LCARS
     servers for active teams.
     """
-    health_script = os.path.expanduser("~/aiteamforge/lcars-health-check.sh")
+    health_script = os.path.expanduser("~/dev-team/lcars-health-check.sh")
     try:
         if os.path.isfile(health_script) and os.access(health_script, os.X_OK):
             # Run in background, don't wait for result
@@ -497,7 +497,7 @@ def update_window_ready(team, terminal, window_index, window_name):
 
     return update_board_safely(board_file, do_update)
 
-def _resolve_agent_circles(handle, project_dir):
+def _resolve_agent_circles(handle):
     """Resolve an agent's circle memberships to 'slug (circle_id: N)' pairs.
 
     Reads the circle taxonomy to find which circles the agent belongs to,
@@ -513,7 +513,7 @@ def _resolve_agent_circles(handle, project_dir):
         "security-watchers": 10, "strategic-command": 11,
     }
 
-    taxonomy_file = os.path.join(project_dir, "scripts", "amb-circle-taxonomy.json")
+    taxonomy_file = os.path.expanduser("~/dev-team/scripts/amb-circle-taxonomy.json")
     try:
         if not os.path.isfile(taxonomy_file):
             return ""
@@ -547,8 +547,7 @@ def get_amb_heartbeat_reminder(session_name):
     if not session_name:
         return None
 
-    project_dir = os.path.expanduser("~/aiteamforge")
-    session_map_file = os.path.join(project_dir, "amb-session-map.json")
+    session_map_file = os.path.expanduser("~/dev-team/amb-session-map.json")
     agents_file = os.path.expanduser("~/.claude/amb-agents.json")
 
     try:
@@ -571,7 +570,7 @@ def get_amb_heartbeat_reminder(session_name):
             return None
 
         # Resolve circle memberships with numeric IDs
-        circles_with_ids = _resolve_agent_circles(handle, project_dir)
+        circles_with_ids = _resolve_agent_circles(handle)
         if circles_with_ids:
             circles_line = (
                 f"- YOUR CIRCLES: [{circles_with_ids}]. When posting pings, ALWAYS check if the content fits one of your circles. "

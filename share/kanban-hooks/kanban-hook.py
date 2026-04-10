@@ -31,7 +31,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kanban_utils import get_board_file, read_board_safely, update_board_safely, parse_session_name
 
 # Configuration
-KANBAN_DIR = os.path.expanduser("~/aiteamforge/kanban")
+KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
 
 def _resolve_amb_handle_from_tmux():
     """Resolve the AMB agent handle from the current tmux session name.
@@ -52,7 +52,7 @@ def _resolve_amb_handle_from_tmux():
         if not session_name:
             return None
 
-        session_map_file = os.path.expanduser("~/aiteamforge/amb-session-map.json")
+        session_map_file = os.path.expanduser("~/dev-team/amb-session-map.json")
         if not os.path.isfile(session_map_file):
             return None
         with open(session_map_file) as f:
@@ -105,7 +105,7 @@ def get_git_worktree():
     """Get current git worktree full path."""
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "rev-parse", "--show-toplevel"],
+            ["git", "rev-parse", "--show-toplevel"],
             capture_output=True,
             text=True,
             timeout=2
@@ -120,7 +120,7 @@ def get_git_branch():
     """Get current git branch name."""
     try:
         result = subprocess.run(
-            ["git", "--no-optional-locks", "branch", "--show-current"],
+            ["git", "branch", "--show-current"],
             capture_output=True,
             text=True,
             timeout=2

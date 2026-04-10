@@ -7188,7 +7188,29 @@ kb-knowledge-search() {
         "legal-coparenting:${HOME}/legal/coparenting/kanban/knowledge"
         "medical-general:${HOME}/medical/general/kanban/knowledge"
         "finance-personal:${AITEAMFORGE_DIR}/kanban/finance/knowledge"
+        "freelance:${AITEAMFORGE_DIR}/kanban/freelance/knowledge"
+        "legal:${AITEAMFORGE_DIR}/kanban/legal/knowledge"
+        "mainevent-distributed:${AITEAMFORGE_DIR}/kanban/mainevent/knowledge"
+        "medical-distributed:${AITEAMFORGE_DIR}/kanban/medical/knowledge"
     )
+
+    # Dynamic discovery: auto-detect kanban/*/knowledge dirs not already listed
+    local discovered_dir discovered_team already_listed existing
+    for discovered_dir in "${AITEAMFORGE_DIR}/kanban"/*/knowledge; do
+        [[ -d "$discovered_dir" ]] || continue
+        discovered_team=$(basename "$(dirname "$discovered_dir")")
+        # Skip if already in team_dirs (check by path suffix)
+        already_listed=false
+        for existing in "${team_dirs[@]}"; do
+            if [[ "${existing#*:}" == "$discovered_dir" ]]; then
+                already_listed=true
+                break
+            fi
+        done
+        if [[ "$already_listed" == "false" ]]; then
+            team_dirs+=("${discovered_team}-auto:${discovered_dir}")
+        fi
+    done
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════════════"

@@ -28,12 +28,11 @@ else
 fi
 
 # Also update iTerm2 badge if helper is available
-_BADGE_HELPER="${AITEAMFORGE_DIR:-${HOME}/aiteamforge}/share/scripts/iterm2_badge_helper.sh"
 if type -t set_claude_badge > /dev/null; then
     set_claude_badge "$AGENT_NAME"
     echo "✓ Updated iTerm2 badge"
-elif [ -f "$_BADGE_HELPER" ]; then
-    source "$_BADGE_HELPER"
+elif [ -f ~/dev-team/iterm2_badge_helper.sh ]; then
+    source ~/dev-team/iterm2_badge_helper.sh
     set_claude_badge "$AGENT_NAME"
     echo "✓ Updated iTerm2 badge"
 fi

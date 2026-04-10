@@ -84,16 +84,6 @@ _get_team_kanban_dir_for_tmp() {
 _get_lcars_tmp_dir() {
     local session_name="$1"
 
-    # If KANBAN_DIR is already set (e.g. by startup script), use it directly
-    # instead of the hardcoded mapping. This makes AITeamForge installs work
-    # regardless of where teams are installed.
-    if [[ -n "${KANBAN_DIR:-}" ]]; then
-        local tmp_dir="${KANBAN_DIR}/tmp"
-        mkdir -p "$tmp_dir" 2>/dev/null || { echo "/tmp/"; return 1; }
-        echo "${tmp_dir}/"
-        return 0
-    fi
-
     # Require a non-empty session name with at least one dash
     if [[ -z "$session_name" || "$session_name" != *-* ]]; then
         echo "/tmp/"

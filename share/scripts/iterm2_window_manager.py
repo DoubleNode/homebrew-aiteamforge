@@ -147,24 +147,20 @@ async def _create_tab_applescript(connection, window, profile, tab_name=None, co
     """
     import subprocess as _sp
 
-    # Escape all user-controllable strings for safe AppleScript interpolation
-    _esc = lambda s: (s or "").replace('\\', '\\\\').replace('"', '\\"')
-    safe_profile = _esc(profile)
-    safe_window_title = _esc(window_title)
-    safe_tab_name = _esc(tab_name)
-
     # Build the profile clause
     if profile:
+        safe_profile = profile.replace('\\', '\\\\').replace('"', '\\"')
         profile_clause = f'create tab with profile "{safe_profile}"'
     else:
         profile_clause = 'create tab with default profile'
 
     # Target window: by name if available, otherwise current window
     if window_title:
+        safe_title = window_title.replace('\\', '\\\\').replace('"', '\\"')
         window_target = (
             f'    set targetWindow to missing value\n'
             f'    repeat with w in windows\n'
-            f'        if name of w contains "{safe_window_title}" then\n'
+            f'        if name of w contains "{safe_title}" then\n'
             f'            set targetWindow to w\n'
             f'            exit repeat\n'
             f'        end if\n'
@@ -186,7 +182,8 @@ async def _create_tab_applescript(connection, window, profile, tab_name=None, co
     if tab_name or command:
         lines.append('        tell current session')
         if tab_name:
-            lines.append(f'            set name to "{safe_tab_name}"')
+            safe_tab = tab_name.replace('\\', '\\\\').replace('"', '\\"')
+            lines.append(f'            set name to "{safe_tab}"')
         if command:
             safe_cmd = command.replace('\\', '\\\\').replace('"', '\\"')
             lines.append(f'            write text "{safe_cmd}"')
@@ -483,13 +480,11 @@ async def split_agent_panel(connection, window_title, tab_name, command):
 
         # Run the display command in the agent panel pane.
         # Prefix with "stty -echo" so the command string is not echoed to the
-        # terminal when async_send_text simulates typing it.  Redirect stderr
-        # to suppress any debug output (e.g. variable assignment echo, path
-        # diagnostics) that the shell may emit before the display script runs.
-        # The display script runs as a long-lived process that occupies the
-        # pane, so there is no interactive shell prompt where echo state matters.
+        # terminal when async_send_text simulates typing it.  The display
+        # script runs as a long-lived process that occupies the pane, so there
+        # is no interactive shell prompt where echo state would matter.
         if command:
-            await agent_session.async_send_text("stty -echo; " + command + " 2>/dev/null\n")
+            await agent_session.async_send_text("stty -echo; " + command + "\n")
 
         print(f"Created agent panel pane in tab: {tab_name}")
         # Activate the original (left) session so the terminal is focused
@@ -546,16 +541,12 @@ async def resize_pane_by_env(connection, target_cols=30):
                     if current_width == target_cols:
                         return True  # already correct
 
-                    # Calculate the other pane's size from the current
-                    # total so the window size doesn't change.
-                    total_cols = sum(
-                        s.grid_size.width for s in tab.sessions
-                    )
-                    other_cols = max(total_cols - target_cols, 80)
-                    session.preferred_size = iterm2.util.Size(target_cols, 50)
-                    for other in tab.sessions:
-                        if other.session_id != session.session_id:
-                            other.preferred_size = iterm2.util.Size(other_cols, 50)
+                    # Only set the agent panel's preferred size.
+                    # Do NOT compute or set the other pane's size —
+                    # reading total_cols and subtracting creates a
+                    # feedback loop where rounding/divider errors
+                    # accumulate, shrinking the window each cycle.
+                    session.preferred_size = iterm2.util.Size(target_cols, session.grid_size.height)
                     await tab.async_update_layout()
                     print(f"Resized pane {session.session_id}: "
                           f"{current_width} -> {target_cols} cols")
@@ -597,11 +588,7 @@ async def reset_all_agent_panels(connection, target_cols=30):
                 skipped += 1
                 continue
 
-            total = agent_w + main_w
-            agent.preferred_size = iterm2.util.Size(target_cols, 50)
-            main.preferred_size = iterm2.util.Size(
-                max(total - target_cols, 80), 50
-            )
+            agent.preferred_size = iterm2.util.Size(target_cols, agent.grid_size.height)
             await tab.async_update_layout()
             fixed += 1
 

@@ -6,12 +6,8 @@
 # Usage: agent-panel-display.sh <session-code>
 # Example: agent-panel-display.sh firebase-ops
 
-# Disable trace mode (set -x) if inherited from parent shell.
-# trace output would pollute the panel display with variable assignment lines
-# like "subagent_file=..." that have nothing to do with the panel content.
-{ set +x; } 2>/dev/null
-
 SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
+AVATARS_DIR="$HOME/dev-team/fleet-monitor/server/public/avatars"
 # Resolve imgcat from multiple possible locations:
 #   1. iTerm2 shell integration (standard install path)
 #   2. System-installed imgcat (e.g., via homebrew or manual install)
@@ -27,125 +23,19 @@ SCRIPT_PATH="${0:A}"
 SCRIPT_DIR="${SCRIPT_PATH:h}"
 SCRIPT_MTIME=$(stat -f %m "$SCRIPT_PATH" 2>/dev/null)
 
-# Source the shared LCARS tmp dir helper to resolve per-team kanban/tmp/ directories.
-# Falls back to /tmp/ if the helper is unavailable (standalone / older install).
-if [[ -f "${SCRIPT_DIR}/lcars-tmp-dir.sh" ]]; then
-    source "${SCRIPT_DIR}/lcars-tmp-dir.sh"
-    LCARS_TMP=$(_get_lcars_tmp_dir "$SESSION_CODE")
-else
-    LCARS_TMP="/tmp/"
-fi
+# Load shared tmp-dir helper (maps session → kanban/tmp/)
+source "${SCRIPT_DIR}/lcars-tmp-dir.sh"
+
+# Resolve per-team tmp directory once at startup.
+# Most LCARS temp files are session/team-scoped and live here.
+# Exceptions that stay in /tmp/:
+#   /tmp/lcars-twemoji/        — shared emoji PNG cache across all teams
+#   /tmp/lcars-resize-lock     — cross-session resize coordination
+#   /tmp/lcars-port-forwards/  — system-level port forward PIDs
+LCARS_TMP=$(_get_lcars_tmp_dir "$SESSION_CODE")
 
 JSON_BASE="${LCARS_TMP}lcars-agent-${SESSION_CODE}"
 JSON_FILE="${JSON_BASE}.json"
-
-# ── Display mode detection ─────────────────────────────────────────────────────
-# iTerm2-native mode: active when $TMUX is unset (no tmux session).
-# In this mode the panel runs directly in an iTerm2 split pane — no window-index
-# tracking, no tmux hooks. imgcat/imgcat still works; resize uses iterm2_window_manager.py.
-# Tmux mode: existing behaviour, unchanged.
-if [[ -z "${TMUX:-}" ]]; then
-    ITERM2_NATIVE_MODE=true
-else
-    ITERM2_NATIVE_MODE=false
-fi
-
-# ── Avatar directory resolution ───────────────────────────────────────────────
-# Priority order for avatar files:
-#   1. $AITEAMFORGE_DIR/avatars/          — flat aggregated pool (standalone install)
-#   2. $AITEAMFORGE_DIR/<team>/personas/avatars/ — per-team install layout (install-team.sh)
-#   3. $HOME/aiteamforge/fleet-monitor/server/public/avatars — legacy / dev-team
-#
-# AITEAMFORGE_DIR is read from:
-#   a. $AITEAMFORGE_DIR environment variable (set by startup scripts)
-#   b. install_dir from $HOME/aiteamforge/.aiteamforge-config
-#   c. default: $HOME/aiteamforge
-_resolve_aiteamforge_dir() {
-    if [[ -n "${AITEAMFORGE_DIR:-}" ]]; then
-        echo "$AITEAMFORGE_DIR"
-        return
-    fi
-    local cfg
-    for cfg in "$HOME/aiteamforge/.aiteamforge-config" "$HOME/.aiteamforge/.aiteamforge-config"; do
-        if [[ -f "$cfg" ]]; then
-            local dir
-            dir=$(jq -r '.install_dir // empty' "$cfg" 2>/dev/null || true)
-            if [[ -n "$dir" && -d "$dir" ]]; then
-                echo "$dir"
-                return
-            fi
-        fi
-    done
-    echo "$HOME/aiteamforge"
-}
-
-_AITEAMFORGE_DIR="$(_resolve_aiteamforge_dir)"
-
-# Build ordered list of avatar search directories (populated after team is known)
-# AVATARS_SEARCH_DIRS is set at render time once we know the team from the JSON file.
-# For crew avatars (team-agnostic glob), all dirs are searched.
-AVATARS_LEGACY_DIR="$_AITEAMFORGE_DIR/fleet-monitor/server/public/avatars"
-AVATARS_FLAT_DIR="$_AITEAMFORGE_DIR/avatars"
-
-# Find an avatar file by searching all known locations.
-# Usage: _find_avatar <filename> [team_id]
-# Returns the first matching absolute path, or empty string if not found.
-_find_avatar() {
-    local filename="$1"
-    local team_id="${2:-}"
-    # 1. Flat aggregated pool
-    if [[ -f "${AVATARS_FLAT_DIR}/${filename}" ]]; then
-        echo "${AVATARS_FLAT_DIR}/${filename}"
-        return
-    fi
-    # 2. Per-team installed layout: {AITEAMFORGE_DIR}/{team}/personas/avatars/
-    if [[ -n "$team_id" && -f "${_AITEAMFORGE_DIR}/${team_id}/personas/avatars/${filename}" ]]; then
-        echo "${_AITEAMFORGE_DIR}/${team_id}/personas/avatars/${filename}"
-        return
-    fi
-    # 3. Share layout: {AITEAMFORGE_DIR}/personas/{team}/avatars/ (dev tap / pre-install)
-    if [[ -n "$team_id" && -f "${_AITEAMFORGE_DIR}/personas/${team_id}/avatars/${filename}" ]]; then
-        echo "${_AITEAMFORGE_DIR}/personas/${team_id}/avatars/${filename}"
-        return
-    fi
-    # 4. Legacy fleet-monitor dir
-    if [[ -f "${AVATARS_LEGACY_DIR}/${filename}" ]]; then
-        echo "${AVATARS_LEGACY_DIR}/${filename}"
-        return
-    fi
-    # Not found
-    echo ""
-}
-
-# Glob for avatars matching a pattern across all known search dirs.
-# Usage: _glob_avatars <pattern>  (e.g., "*_reno_avatar_panel.png")
-# Outputs matching paths one per line.
-_glob_avatars() {
-    local pattern="$1"
-    local found=()
-    for dir in "$AVATARS_FLAT_DIR" "$AVATARS_LEGACY_DIR"; do
-        [[ -d "$dir" ]] || continue
-        local matches=(${dir}/${~pattern}(N))
-        found+=("${matches[@]}")
-    done
-    # Also search per-team installed and share layout persona dirs
-    if [[ -d "$_AITEAMFORGE_DIR" ]]; then
-        local tdir
-        # Per-team installed layout: {AITEAMFORGE_DIR}/{team}/personas/avatars/
-        for tdir in "$_AITEAMFORGE_DIR"/*/personas/avatars; do
-            [[ -d "$tdir" ]] || continue
-            local matches=(${tdir}/${~pattern}(N))
-            found+=("${matches[@]}")
-        done
-        # Share layout: {AITEAMFORGE_DIR}/personas/{team}/avatars/ (dev tap / pre-install)
-        for tdir in "$_AITEAMFORGE_DIR"/personas/*/avatars; do
-            [[ -d "$tdir" ]] || continue
-            local matches=(${tdir}/${~pattern}(N))
-            found+=("${matches[@]}")
-        done
-    fi
-    (( ${#found[@]} )) && printf '%s\n' "${found[@]}"
-}
 LAST_WINDOW_INDEX=""
 LAST_CONTENT_FINGERPRINT=""
 LAST_CREW_LIST=""
@@ -162,7 +52,6 @@ SLEEP_THRESHOLD=5  # If sleep 2 takes longer than this, system was asleep
 
 # Derive tmux socket from session code (team name is the prefix before first hyphen)
 # e.g., "academy-engineering" → socket "academy", "firebase-ops" → socket "firebase"
-# In iTerm2-native mode these are set but never used (tmux calls are guarded below).
 TMUX_SOCKET="${SESSION_CODE%%-*}"
 # Handle special cases: dns-framework sessions use "dns" socket
 [[ "$TMUX_SOCKET" == "dns" ]] && true  # already correct
@@ -236,22 +125,18 @@ get_theme_color() {
 # Active window file (written by tmux session-window-changed hook)
 ACTIVE_WINDOW_FILE="${LCARS_TMP}lcars-active-window-${SESSION_CODE}"
 
-if [[ "$ITERM2_NATIVE_MODE" == "false" ]]; then
-    # Ensure the tmux hook is set for window-change detection
-    "${TMUX_CMD[@]}" set-hook -g session-window-changed \
-        "run-shell 'echo #{window_index} > ${LCARS_TMP}lcars-active-window-#{session_name}'" 2>/dev/null
+# Ensure the tmux hook is set for window-change detection
+"${TMUX_CMD[@]}" set-hook -g session-window-changed \
+    "run-shell 'echo #{window_index} > ${LCARS_TMP}lcars-active-window-#{session_name}'" 2>/dev/null
 
-    # Initialize the active-window file if it doesn't exist
-    if [[ ! -f "$ACTIVE_WINDOW_FILE" ]]; then
-        local_idx=$("${TMUX_CMD[@]}" list-windows -t "$SESSION_CODE" -F '#{window_active}:#{window_index}' 2>/dev/null | grep '^1:' | cut -d: -f2)
-        [[ -n "$local_idx" ]] && echo "$local_idx" > "$ACTIVE_WINDOW_FILE"
-    fi
+# Initialize the active-window file if it doesn't exist
+if [[ ! -f "$ACTIVE_WINDOW_FILE" ]]; then
+    local_idx=$("${TMUX_CMD[@]}" list-windows -t "$SESSION_CODE" -F '#{window_active}:#{window_index}' 2>/dev/null | grep '^1:' | cut -d: -f2)
+    [[ -n "$local_idx" ]] && echo "$local_idx" > "$ACTIVE_WINDOW_FILE"
 fi
 
-# Get the active tmux window index from hook-written file.
-# In iTerm2-native mode returns "" — get_active_json() falls back to main JSON.
+# Get the active tmux window index from hook-written file
 get_window_index() {
-    [[ "$ITERM2_NATIVE_MODE" == "true" ]] && return
     cat "$ACTIVE_WINDOW_FILE" 2>/dev/null | tr -d '[:space:]'
 }
 
@@ -282,18 +167,18 @@ json_field() {
 json_read_all() {
     local jf="${RENDER_JSON_FILE:-$JSON_FILE}"
     [[ -f "$jf" ]] || return
-    jq -r '.team // "", .developer // "", .role // "", .location // "", .terminal // "", .terminal_desc // "", .section // "", .theme // "", .avatar // "", .worktree // "", .amb_handle // ""' "$jf" 2>/dev/null
+    jq -r '.team // "", .developer // "", .role // "", .location // "", .terminal // "", .terminal_desc // "", .theme // "", .avatar // "", .worktree // "", .amb_handle // ""' "$jf" 2>/dev/null
 }
 
 # Get the kanban board file path for this session
 get_board_file() {
     local board_prefix="${SESSION_CODE%-*}"
     for search_dir in \
-        "${_AITEAMFORGE_DIR}/kanban" \
+        "$HOME/dev-team/kanban" \
         "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" \
         "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" \
         "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" \
-        "/Users/Shared/Development/Main Event/aiteamforge/kanban" \
+        "/Users/Shared/Development/Main Event/dev-team/kanban" \
         "/Users/Shared/Development/DNSFramework/kanban" \
         "/Users/Shared/Development/DoubleNode/Starwords/kanban" \
         "/Users/Shared/Development/DoubleNode/appPlanning/kanban" \
@@ -351,15 +236,9 @@ kanban_field() {
 
 # Get crew avatars from subagent tracking file (Task tool subagents spawned by this session)
 # Supports both legacy format (["reno"]) and new expiry format ([{"type":"reno","expires":null}])
-# In iTerm2-native mode (no tmux windows) falls back to session-level tracking file.
 get_crew_avatars() {
     local win_idx=$(get_window_index)
-    local subagent_file
-    if [[ -n "$win_idx" ]]; then
-        subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
-    else
-        subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}.json"
-    fi
+    local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
     [[ ! -f "$subagent_file" ]] && return
 
     # Skip stale files (>10 min old = likely orphaned)
@@ -405,14 +284,9 @@ render_crew_strip() {
 
         for (( i=idx; i <= total && i < idx+per_row; i++ )); do
             local agent="${agents[$i]}"
-            # Glob across all avatar search dirs for this agent (prefer _panel.png)
-            local agent_panel_lines agent_lines agent_thumb_lines
-            agent_panel_lines=($(_glob_avatars "*_${agent}_avatar_panel.png"))
-            agent_lines=($(_glob_avatars "*_${agent}_avatar.png"))
-            agent_thumb_lines=($(_glob_avatars "*_${agent}_avatar_thumb.png"))
-            local agent_files=("${agent_panel_lines[@]}")
-            [[ ${#agent_files[@]} -eq 0 ]] && agent_files=("${agent_lines[@]}")
-            [[ ${#agent_files[@]} -eq 0 ]] && agent_files=("${agent_thumb_lines[@]}")
+            # Glob across all team prefixes for this agent's avatar (prefer _panel.png)
+            local agent_files=(${AVATARS_DIR}/*_${agent}_avatar_panel.png(N))
+            [[ ${#agent_files[@]} -eq 0 ]] && agent_files=(${AVATARS_DIR}/*_${agent}_avatar.png(N))
             [[ ${#agent_files[@]} -eq 0 ]] && continue
             local agent_file="${agent_files[1]}"
             # Add spacer before each avatar after the first
@@ -491,12 +365,7 @@ get_remote_host_info() {
 compute_content_fingerprint() {
     local active_json=$(get_active_json)
     local win_idx=$(get_window_index)
-    local subagent_file
-    if [[ -n "$win_idx" ]]; then
-        subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
-    else
-        subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}.json"
-    fi
+    local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
     local board_file=$(get_board_file)
 
     # Use stat (mtime+size) instead of full file reads — orders of magnitude cheaper
@@ -588,8 +457,9 @@ render_amb_badges() {
     command -v magick &>/dev/null || return
     [[ ! -x "$IMGCAT" ]] && return
 
-    local twemoji_dir="${LCARS_TMP}lcars-twemoji"
-    local badge_dir="${LCARS_TMP}lcars-twemoji/badges"
+    local twemoji_dir="/tmp/lcars-twemoji"
+    local badge_dir="/tmp/lcars-twemoji/badges"
+    # NOTE: twemoji_dir stays in /tmp/ — it's a shared emoji PNG cache across all teams
     mkdir -p "$twemoji_dir" "$badge_dir"
 
     # Extract emoji codepoints and badge names via Python
@@ -757,7 +627,7 @@ render_panel() {
     fi
 
     # Batch-read all fields in ONE jq invocation (one field per line avoids zsh IFS tab collapse)
-    local team developer role location terminal_name terminal_desc section theme avatar worktree amb_handle
+    local team developer role location terminal_name terminal_desc theme avatar worktree amb_handle
     local panel_data
     panel_data=$(json_read_all)
     if [[ -n "$panel_data" ]]; then
@@ -768,7 +638,6 @@ render_panel() {
             read -r location
             read -r terminal_name
             read -r terminal_desc
-            read -r section
             read -r theme
             read -r avatar
             read -r worktree
@@ -783,12 +652,11 @@ render_panel() {
     # ═══════════════════════════════════════
 
     # Display avatar image via imgcat (rounded corners)
-    # Search order: _panel.png (200x200) → _avatar.png → _thumb.png fallback
-    local avatar_file
-    avatar_file="$(_find_avatar "${team}_${avatar}_avatar_panel.png" "$team")"
-    [[ -z "$avatar_file" ]] && avatar_file="$(_find_avatar "${team}_${avatar}_avatar.png" "$team")"
-    [[ -z "$avatar_file" ]] && avatar_file="$(_find_avatar "${team}_${avatar}_avatar_thumb.png" "$team")"
-    if [[ -n "$avatar_file" && -x "$IMGCAT" ]]; then
+    # Use pre-generated _panel.png (200x200) with fallback to full _avatar.png
+    local avatar_panel="${AVATARS_DIR}/${team}_${avatar}_avatar_panel.png"
+    local avatar_file="${avatar_panel}"
+    [[ ! -f "$avatar_file" ]] && avatar_file="${AVATARS_DIR}/${team}_${avatar}_avatar.png"
+    if [[ -f "$avatar_file" && -x "$IMGCAT" ]]; then
         local rounded_file="${LCARS_TMP}lcars-avatar-${SESSION_CODE}-${avatar}-rounded.png"
         if command -v magick &>/dev/null; then
             # Cache: only run magick if cached file doesn't exist or source is newer
@@ -875,42 +743,32 @@ render_panel() {
     # LOWER SECTION: Terminal Logo + Station
     # ═══════════════════════════════════════
 
-    # Section header label (e.g. "CHANCELLOR'S OFFICE") — shown above the logo.
-    # Priority: section field from JSON → office part of location → terminal_name (stripped).
-    local section_label="${section:-}"
-    if [[ -z "$section_label" && -n "$location" && "$location" == *": "* ]]; then
-        section_label="${location#*: }"
-        section_label="${section_label:u}"
-    fi
-    if [[ -z "$section_label" && -n "$terminal_name" ]]; then
-        # Strip -cmd / -ops / -log suffixes added by banner script
-        local term_stripped="${terminal_name%-cmd}"
-        term_stripped="${term_stripped%-ops}"
-        term_stripped="${term_stripped%-log}"
-        section_label="${term_stripped:u}"
-    fi
-    [[ -n "$section_label" ]] && echo "${GRAY}${section_label}${RESET}"
-
     # Derive terminal logo from session code with fallback chain
     # Try _panel.png first, then fall back to full _logo.png
     # Full match: academy-engineering → academy_engineering_logo_panel.png
     # Team + last part: freelance-doublenode-starwords-command → freelance_command_logo_panel.png
     local logo_file=""
-    local team_prefix="${SESSION_CODE%%-*}"
-    local last_part="${SESSION_CODE##*-}"
-    local term_part="${SESSION_CODE#*-}"
-    term_part="${term_part//-/_}"
     for suffix in "_logo_panel.png" "_logo.png"; do
         # Try full match
-        logo_file="$(_find_avatar "${SESSION_CODE//-/_}${suffix}" "$team_prefix")"
-        [[ -n "$logo_file" ]] && break
+        local candidate="${AVATARS_DIR}/${SESSION_CODE//-/_}${suffix}"
+        if [[ -f "$candidate" ]]; then
+            logo_file="$candidate"
+            break
+        fi
         # Try team + last segment
-        logo_file="$(_find_avatar "${team_prefix}_${last_part}${suffix}" "$team_prefix")"
-        [[ -n "$logo_file" ]] && break
-        # Try globbing for partial match across all avatar dirs
-        local glob_lines=($(_glob_avatars "${team_prefix}_${term_part}*${suffix}"))
-        if [[ ${#glob_lines[@]} -gt 0 ]]; then
-            logo_file="${glob_lines[1]}"
+        local team_prefix="${SESSION_CODE%%-*}"
+        local last_part="${SESSION_CODE##*-}"
+        candidate="${AVATARS_DIR}/${team_prefix}_${last_part}${suffix}"
+        if [[ -f "$candidate" ]]; then
+            logo_file="$candidate"
+            break
+        fi
+        # Try globbing for partial match
+        local term_part="${SESSION_CODE#*-}"
+        term_part="${term_part//-/_}"
+        local glob_match=(${AVATARS_DIR}/${team_prefix}_${term_part}*${suffix}(N[1]))
+        if [[ -n "$glob_match" ]]; then
+            logo_file="$glob_match"
             break
         fi
     done
@@ -1043,9 +901,10 @@ LAST_BOARD_MTIME=""
 [[ -n "$BOARD_FILE" && -f "$BOARD_FILE" ]] && LAST_BOARD_MTIME=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
 LAST_SUBAGENT_MTIME=""
 TARGET_COLS=30
-LAST_WIDTH_CHECK=0
-WINDOW_MGR="${_AITEAMFORGE_DIR}/iterm2_window_manager.py"
-[[ ! -f "$WINDOW_MGR" ]] && WINDOW_MGR="${_AITEAMFORGE_DIR}/scripts/iterm2_window_manager.py"
+# Stagger the first width check by session-unique offset (0-30s)
+# so panels don't all fire at once after a bulk restart.
+LAST_WIDTH_CHECK=$(( $(date +%s) + (STAGGER_HASH % 30) ))
+WINDOW_MGR="$HOME/dev-team/iterm2_window_manager.py"
 render_panel
 
 # Capture initial content fingerprint
@@ -1060,18 +919,16 @@ while true; do
     fi
 
     # Staggered sleep: base 2s + per-panel offset to prevent simultaneous polling
-    # NOTE: no 'local' here — 'local' inside a loop at script top level causes zsh
-    # to re-print the variable value on each iteration (T010 stdout-leak pattern).
-    loop_start=$(date +%s)
+    local loop_start=$(date +%s)
     sleep $(echo "2 + $STAGGER_OFFSET" | bc)
 
     # ── Sleep/Wake Detection ──────────────────────────────
     # If the sleep took much longer than expected, the system was asleep.
     # Add a staggered wake delay so panels don't all resume at once.
-    loop_elapsed=$(( $(date +%s) - loop_start ))
+    local loop_elapsed=$(( $(date +%s) - loop_start ))
     if (( loop_elapsed > SLEEP_THRESHOLD )); then
         # System just woke up — stagger resume by session-unique offset (0-5s)
-        wake_delay=$(echo "scale=2; ($STAGGER_OFFSET * 3) + 1" | bc)
+        local wake_delay=$(echo "scale=2; ($STAGGER_OFFSET * 3) + 1" | bc)
         sleep "$wake_delay"
     fi
 
@@ -1083,17 +940,15 @@ while true; do
     fi
 
     # ── Quick mtime checks (cheap) ───────────────────────
-    needs_render=false
+    local needs_render=false
 
-    # Check if active tmux window changed (tmux mode only — no windows in iTerm2-native mode)
-    if [[ "$ITERM2_NATIVE_MODE" == "false" ]]; then
-        CURRENT_WINDOW_INDEX=$(get_window_index)
-        if [[ "$CURRENT_WINDOW_INDEX" != "$LAST_WINDOW_INDEX" ]]; then
-            LAST_WINDOW_INDEX="$CURRENT_WINDOW_INDEX"
-            ACTIVE_JSON=$(get_active_json)
-            LAST_MTIME=$(stat -f %m "$ACTIVE_JSON" 2>/dev/null)
-            needs_render=true
-        fi
+    # Check if active tmux window changed
+    CURRENT_WINDOW_INDEX=$(get_window_index)
+    if [[ "$CURRENT_WINDOW_INDEX" != "$LAST_WINDOW_INDEX" ]]; then
+        LAST_WINDOW_INDEX="$CURRENT_WINDOW_INDEX"
+        ACTIVE_JSON=$(get_active_json)
+        LAST_MTIME=$(stat -f %m "$ACTIVE_JSON" 2>/dev/null)
+        needs_render=true
     fi
 
     # Check if active JSON file was modified
@@ -1110,7 +965,7 @@ while true; do
 
     # Check if kanban board file was modified
     if [[ "$needs_render" != "true" && -n "$BOARD_FILE" && -f "$BOARD_FILE" ]]; then
-        current_board_mtime=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
+        local current_board_mtime=$(stat -f %m "$BOARD_FILE" 2>/dev/null)
         if [[ "$current_board_mtime" != "$LAST_BOARD_MTIME" ]]; then
             LAST_BOARD_MTIME="$current_board_mtime"
             needs_render=true
@@ -1118,16 +973,11 @@ while true; do
     fi
 
     # Check if subagent tracking file changed
-    # In iTerm2-native mode there are no tmux windows; fall back to a session-level file.
     if [[ "$needs_render" != "true" ]]; then
-        sub_win_idx=$(get_window_index)
-        if [[ -n "$sub_win_idx" ]]; then
-            subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${sub_win_idx}.json"
-        else
-            subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}.json"
-        fi
+        local sub_win_idx=$(get_window_index)
+        local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${sub_win_idx}.json"
         if [[ -f "$subagent_file" ]]; then
-            current_sub_mtime=$(stat -f %m "$subagent_file" 2>/dev/null)
+            local current_sub_mtime=$(stat -f %m "$subagent_file" 2>/dev/null)
             if [[ "$current_sub_mtime" != "$LAST_SUBAGENT_MTIME" ]]; then
                 LAST_SUBAGENT_MTIME="$current_sub_mtime"
                 needs_render=true
@@ -1140,7 +990,7 @@ while true; do
 
     # ── Content fingerprint gate (skip render if data unchanged) ──
     if [[ "$needs_render" == "true" ]]; then
-        current_fingerprint=$(compute_content_fingerprint)
+        local current_fingerprint=$(compute_content_fingerprint)
         if [[ "$current_fingerprint" == "$LAST_CONTENT_FINGERPRINT" ]]; then
             # mtime changed but content is identical — skip the expensive render
             needs_render=false
@@ -1154,12 +1004,22 @@ while true; do
         render_panel
     fi
 
-    # Enforce fixed pane width (check every ~10 seconds)
-    now=$(date +%s)
-    if (( now - LAST_WIDTH_CHECK >= 10 )); then
+    # Enforce fixed pane width (check every ~30 seconds).
+    # ±5 col tolerance prevents cascading from layout nudges.
+    # 10s lockfile cooldown serializes resizes system-wide.
+    local now=$(date +%s)
+    if (( now - LAST_WIDTH_CHECK >= 30 )); then
         LAST_WIDTH_CHECK=$now
-        current_cols=$(tput cols 2>/dev/null)
-        if [[ -n "$current_cols" && "$current_cols" != "$TARGET_COLS" ]]; then
+        local current_cols=$(tput cols 2>/dev/null)
+        if [[ -n "$current_cols" ]] && (( current_cols < TARGET_COLS - 5 || current_cols > TARGET_COLS + 5 )); then
+            local lockfile="/tmp/lcars-resize-lock"
+            if [[ -f "$lockfile" ]]; then
+                local lock_age=$(( now - $(stat -f %m "$lockfile" 2>/dev/null || echo 0) ))
+                if (( lock_age < 10 )); then
+                    continue
+                fi
+            fi
+            touch "$lockfile"
             python3 "$WINDOW_MGR" -a resize-pane --target-cols "$TARGET_COLS" &>/dev/null
         fi
     fi

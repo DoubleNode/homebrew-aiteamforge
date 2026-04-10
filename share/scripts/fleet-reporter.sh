@@ -1,7 +1,7 @@
-#!/usr/bin/env bash
+#!/bin/bash
 # Fleet Status Reporter
 # Collects tmux session data and reports to central monitoring server
-# Run via cron every 60 seconds: * * * * * ~/aiteamforge/fleet-monitor/client/fleet-reporter.sh
+# Run via cron every 60 seconds: * * * * * ~/dev-team/fleet-monitor/client/fleet-reporter.sh
 
 # Ensure PATH includes common locations (cron has minimal PATH)
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"
@@ -12,12 +12,27 @@ set -euo pipefail
 # CONFIGURATION
 # ============================================================================
 
-# Configuration file locations (new XACA-0024 system)
-FLEET_CONFIG_FILE="$HOME/.aiteamforge/fleet-config.json"
-MACHINE_CONFIG_FILE="$HOME/.aiteamforge/machine.json"
+# Configuration file locations
+# Primary: written by install-fleet-monitor.sh to $HOME/.aiteamforge/
+# Fallback: legacy path $HOME/.dev-team/ for pre-existing installs
+if [ -f "$HOME/.aiteamforge/fleet-config.json" ]; then
+    FLEET_CONFIG_FILE="$HOME/.aiteamforge/fleet-config.json"
+elif [ -f "$HOME/.dev-team/fleet-config.json" ]; then
+    FLEET_CONFIG_FILE="$HOME/.dev-team/fleet-config.json"
+else
+    FLEET_CONFIG_FILE="$HOME/.aiteamforge/fleet-config.json"
+fi
+
+if [ -f "$HOME/.aiteamforge/machine.json" ]; then
+    MACHINE_CONFIG_FILE="$HOME/.aiteamforge/machine.json"
+else
+    MACHINE_CONFIG_FILE="$HOME/.dev-team/machine.json"
+fi
 
 # Machine GUID - persistent unique identifier for this machine
-# Stored in ~/.fleet-machine-id, created on first run
+# Primary source: machine-identity.json written by installer
+# Fallback: ~/.fleet-machine-id created on first run
+MACHINE_IDENTITY_FILE="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/config/machine-identity.json"
 MACHINE_ID_FILE="$HOME/.fleet-machine-id"
 
 # ============================================================================
@@ -101,20 +116,34 @@ load_config
 API_ENDPOINT="${API_ENDPOINTS[0]:-http://localhost:3000/api/status}"
 
 get_machine_id() {
+    # Priority 1: machine-identity.json written by installer (authoritative ID)
+    if [ -f "$MACHINE_IDENTITY_FILE" ] && command -v jq &>/dev/null; then
+        local id_from_identity
+        id_from_identity=$(jq -r '.machineId // empty' "$MACHINE_IDENTITY_FILE" 2>/dev/null)
+        if [ -n "$id_from_identity" ] && [ "$id_from_identity" != "null" ]; then
+            # Mirror into the simple ID file so legacy tools stay consistent
+            echo "$id_from_identity" > "$MACHINE_ID_FILE"
+            echo "$id_from_identity"
+            return
+        fi
+    fi
+
+    # Priority 2: simple ID file from a prior reporter run
     if [ -f "$MACHINE_ID_FILE" ]; then
         cat "$MACHINE_ID_FILE"
-    else
-        # Generate new UUID and save it
-        local new_id
-        if command -v uuidgen &> /dev/null; then
-            new_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
-        else
-            # Fallback: generate pseudo-UUID from hostname + timestamp + random
-            new_id=$(echo "$(hostname)-$(date +%s)-$RANDOM" | shasum | cut -c1-36)
-        fi
-        echo "$new_id" > "$MACHINE_ID_FILE"
-        echo "$new_id"
+        return
     fi
+
+    # Priority 3: generate new UUID and save it (first run, no installer)
+    local new_id
+    if command -v uuidgen &> /dev/null; then
+        new_id=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    else
+        # Fallback: generate pseudo-UUID from hostname + timestamp + random
+        new_id=$(echo "$(hostname)-$(date +%s)-$RANDOM" | shasum | cut -c1-36)
+    fi
+    echo "$new_id" > "$MACHINE_ID_FILE"
+    echo "$new_id"
 }
 
 MACHINE_ID=$(get_machine_id)
@@ -156,17 +185,21 @@ OS_TYPE=$(uname -s)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
 # LCARS port files directory
-LCARS_PORTS_DIR="$HOME/aiteamforge/lcars-ports"
+LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
 
 # Backup status file location
-BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"
+BACKUP_STATUS_FILE="$HOME/dev-team-backups/kanban/backup-status.json"
+
+# Registration sentinel file — presence means machine has been registered
+# with at least one server endpoint. Stored per-machine alongside the ID file.
+REGISTRATION_SENTINEL="$HOME/.fleet-registered"
 
 # ============================================================================
 # FUNCTIONS
 # ============================================================================
 
 # Get LCARS port for a session (if available)
-# Looks for port file at ~/aiteamforge/lcars-ports/{session_name}.port
+# Looks for port file at ~/dev-team/lcars-ports/{session_name}.port
 get_lcars_port() {
     local session_name="$1"
     local port_file="$LCARS_PORTS_DIR/${session_name}.port"
@@ -179,7 +212,7 @@ get_lcars_port() {
 }
 
 # Get theme color for a session (if available)
-# Looks for theme file at ~/aiteamforge/lcars-ports/{session_name}.theme
+# Looks for theme file at ~/dev-team/lcars-ports/{session_name}.theme
 get_theme_color() {
     local session_name="$1"
     local theme_file="$LCARS_PORTS_DIR/${session_name}.theme"
@@ -192,7 +225,7 @@ get_theme_color() {
 }
 
 # Get tab order for a session (if available)
-# Looks for order file at ~/aiteamforge/lcars-ports/{session_name}.order
+# Looks for order file at ~/dev-team/lcars-ports/{session_name}.order
 get_tab_order() {
     local session_name="$1"
     local order_file="$LCARS_PORTS_DIR/${session_name}.order"
@@ -219,6 +252,32 @@ get_backup_status() {
         cat "$BACKUP_STATUS_FILE" 2>/dev/null || echo ""
     else
         echo ""
+    fi
+}
+
+# Escape a string for safe inclusion in a JSON string value.
+# Handles: backslash, double-quote, newline, carriage return, tab,
+# and other ASCII control characters (U+0000–U+001F).
+# Prefers jq (handles full Unicode and all control chars correctly);
+# falls back to a sed+awk pipeline when jq is unavailable.
+json_escape() {
+    local input="$1"
+    if command -v jq &>/dev/null; then
+        # jq @json produces a quoted JSON string; strip the outer quotes
+        # to return just the escaped content for interpolation.
+        jq -rn --arg v "$input" '$v | @json' | sed 's/^"\(.*\)"$/\1/'
+    else
+        # Fallback: sed pipeline — order is critical:
+        # 1. Backslashes first (must precede all other substitutions)
+        # 2. Double-quotes
+        # 3. Tab, carriage return
+        # 4. Newlines via awk (BSD sed lacks multi-line GNU extensions)
+        printf '%s' "$input" \
+            | sed 's/\\/\\\\/g' \
+            | sed 's/"/\\"/g' \
+            | sed $'s/\t/\\\\t/g' \
+            | sed $'s/\r/\\\\r/g' \
+            | awk '{if(NR>1) printf "\\n"; printf "%s", $0} END{printf "\n"}'
     fi
 }
 
@@ -266,16 +325,67 @@ parse_session_name() {
     echo "$division|$project|$team"
 }
 
-# Find all tmux sockets (team-specific sockets in /tmp/)
-# Outputs one socket path per line; no output if none found.
-# Avoids bash arrays entirely for bash 3.2 compatibility with set -u.
-find_tmux_sockets() {
-    # Check for team-specific sockets directly in /tmp/
-    for socket in /tmp/academy /tmp/android /tmp/command /tmp/dns /tmp/firebase /tmp/freelance /tmp/ios /tmp/legal /tmp/mainevent /tmp/medical; do
-        if [ -S "$socket" ]; then
-            echo "$socket"
+# Auto-discover team names from available sources.
+# Priority order:
+#   1. .aiteamforge-config team_paths keys (authoritative for this install)
+#   2. Directories under $AITEAMFORGE_DIR/ that contain a kanban board
+#   3. Hardcoded fallback list (covers pre-config and legacy installs)
+discover_team_names() {
+    local teams=()
+    local config_file="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/.aiteamforge-config"
+
+    # Strategy 1: read team_paths keys from .aiteamforge-config
+    if [ -f "$config_file" ] && command -v jq &>/dev/null; then
+        while IFS= read -r team; do
+            [ -n "$team" ] && teams+=("$team")
+        done < <(jq -r '.team_paths // {} | keys[]' "$config_file" 2>/dev/null)
+    fi
+
+    # Strategy 2: scan AITEAMFORGE_DIR subdirectories for kanban boards
+    if [ ${#teams[@]} -eq 0 ]; then
+        local forge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+        if [ -d "$forge_dir" ]; then
+            for dir in "$forge_dir"/*/; do
+                [ -d "$dir" ] || continue
+                local team_name
+                team_name=$(basename "$dir")
+                # Skip known non-team directories
+                case "$team_name" in
+                    config|logs|backups|tmp|cache|crews|Formula|libexec|tests) continue ;;
+                esac
+                # Presence of a kanban board is a strong signal this is a team dir
+                if [ -f "${dir}kanban/kanban-board.json" ] || [ -f "${dir}kanban-board.json" ]; then
+                    teams+=("$team_name")
+                fi
+            done
         fi
-    done
+    fi
+
+    # Strategy 3: hardcoded fallback — used when config and dir scan both come up empty
+    if [ ${#teams[@]} -eq 0 ]; then
+        teams=(academy android command dns firebase freelance ios legal mainevent medical)
+    fi
+
+    printf '%s\n' "${teams[@]}"
+}
+
+# Find all tmux sockets (team-specific sockets in /tmp/)
+find_tmux_sockets() {
+    local sockets=()
+
+    # Discover team names dynamically; fall back to hardcoded list if needed
+    local team_names
+    team_names=$(discover_team_names)
+
+    # Check for team-specific sockets directly in /tmp/
+    # These are socket files (type 's') owned by current user
+    while IFS= read -r team; do
+        [ -n "$team" ] || continue
+        local socket="/tmp/${team}"
+        if [ -S "$socket" ]; then
+            sockets+=("$socket")
+        fi
+    done <<< "$team_names"
 
     # Also check standard tmux socket directory
     local uid
@@ -283,10 +393,13 @@ find_tmux_sockets() {
     if [ -d "/tmp/tmux-${uid}" ]; then
         for socket in /tmp/tmux-${uid}/*; do
             if [ -S "$socket" ]; then
-                echo "$socket"
+                sockets+=("$socket")
             fi
         done
     fi
+
+    # Return sockets, one per line
+    printf '%s\n' "${sockets[@]}"
 }
 
 # Get tmux session information from all sockets
@@ -343,6 +456,12 @@ get_tmux_sessions() {
             # Parse session name
             IFS='|' read -r division project team <<< "$(parse_session_name "$session_name")"
 
+            # Escape user-controllable string values before JSON interpolation
+            local session_name_esc division_esc team_esc
+            session_name_esc=$(json_escape "$session_name")
+            division_esc=$(json_escape "$division")
+            team_esc=$(json_escape "$team")
+
             # Build JSON object for this session
             if [ "$first" = true ]; then
                 first=false
@@ -355,7 +474,7 @@ get_tmux_sessions() {
             if [ -z "$project" ]; then
                 project_json="null"
             else
-                project_json="\"$project\""
+                project_json="\"$(json_escape "$project")\""
             fi
 
             # Check for LCARS port (for LCARS terminals)
@@ -371,7 +490,7 @@ get_tmux_sessions() {
             theme_color_json=""
             theme_color=$(get_theme_color "$session_name")
             if [ -n "$theme_color" ]; then
-                theme_color_json=",\"theme_color\":\"$theme_color\""
+                theme_color_json=",\"theme_color\":\"$(json_escape "$theme_color")\""
             fi
 
             # Check for tab order (for sorting in Fleet Monitor)
@@ -381,7 +500,7 @@ get_tmux_sessions() {
                 tab_order_json=",\"tab_order\":$tab_order"
             fi
 
-            sessions="${sessions}{\"name\":\"$session_name\",\"division\":\"$division\",\"project\":$project_json,\"team\":\"$team\",\"windows\":$windows,\"attached\":$attached,\"created\":\"$created_timestamp\",\"uptime_seconds\":$uptime_seconds${lcars_port_json}${theme_color_json}${tab_order_json}}"
+            sessions="${sessions}{\"name\":\"$session_name_esc\",\"division\":\"$division_esc\",\"project\":$project_json,\"team\":\"$team_esc\",\"windows\":$windows,\"attached\":$attached,\"created\":\"$created_timestamp\",\"uptime_seconds\":$uptime_seconds${lcars_port_json}${theme_color_json}${tab_order_json}}"
 
         done < <(tmux -S "$socket" list-sessions 2>/dev/null || true)
     done <<< "$sockets"
@@ -404,26 +523,34 @@ build_payload() {
         backup_json="$backup_status"
     fi
 
+    # Escape machine-level string fields sourced from config files / environment
+    local machine_id_esc hostname_esc ip_esc os_esc timestamp_esc
+    machine_id_esc=$(json_escape "$MACHINE_ID")
+    hostname_esc=$(json_escape "$HOSTNAME")
+    ip_esc=$(json_escape "$IP_ADDRESS")
+    os_esc=$(json_escape "$OS_TYPE")
+    timestamp_esc=$(json_escape "$TIMESTAMP")
+
     # Include dashboard_group if set (XACA-0024)
     local dashboard_group_json=""
     if [ -n "$DASHBOARD_GROUP" ]; then
-        dashboard_group_json=",\"dashboard_group\":\"$DASHBOARD_GROUP\""
+        dashboard_group_json=",\"dashboard_group\":\"$(json_escape "$DASHBOARD_GROUP")\""
     fi
 
     # Include fleet_mode in payload (XACA-0024)
     local fleet_mode_json=""
     if [ -n "$FLEET_MODE" ]; then
-        fleet_mode_json=",\"fleet_mode\":\"$FLEET_MODE\""
+        fleet_mode_json=",\"fleet_mode\":\"$(json_escape "$FLEET_MODE")\""
     fi
 
     cat <<EOF
 {
   "machine": {
-    "machine_id": "$MACHINE_ID",
-    "hostname": "$HOSTNAME",
-    "ip": "$IP_ADDRESS",
-    "os": "$OS_TYPE",
-    "timestamp": "$TIMESTAMP"$dashboard_group_json$fleet_mode_json
+    "machine_id": "$machine_id_esc",
+    "hostname": "$hostname_esc",
+    "ip": "$ip_esc",
+    "os": "$os_esc",
+    "timestamp": "$timestamp_esc"$dashboard_group_json$fleet_mode_json
   },
   "sessions": $sessions,
   "backup_status": $backup_json
@@ -488,6 +615,110 @@ send_to_endpoint() {
     return 1
 }
 
+# Attempt machine registration with a single server endpoint.
+# The server's /api/register endpoint accepts the machine-identity payload.
+# Returns 0 on success (HTTP 200/201), 1 on failure.
+register_with_endpoint() {
+    local endpoint="$1"
+    local auth_token="$2"
+
+    # Derive the registration URL from the status endpoint
+    # e.g. http://host/api/status  ->  http://host/api/register
+    local register_url
+    register_url=$(echo "$endpoint" | sed 's|/api/status$|/api/register|')
+
+    # Build registration payload from machine-identity.json if available,
+    # otherwise construct a minimal payload from what we know.
+    local reg_payload
+    if [ -f "$MACHINE_IDENTITY_FILE" ] && command -v jq &>/dev/null; then
+        # Merge identity file with current timestamps and IP
+        reg_payload=$(jq -c \
+            --arg ip "$IP_ADDRESS" \
+            --arg ts "$TIMESTAMP" \
+            '. + {"registeredAt": $ts, "lastSeen": $ts, "ip": $ip}' \
+            "$MACHINE_IDENTITY_FILE" 2>/dev/null)
+    fi
+
+    # Fall back to a minimal JSON payload if identity file is missing/broken
+    if [ -z "$reg_payload" ]; then
+        reg_payload="{\"machineId\":\"$MACHINE_ID\",\"hostname\":\"$HOSTNAME\",\"ip\":\"$IP_ADDRESS\",\"registeredAt\":\"$TIMESTAMP\",\"lastSeen\":\"$TIMESTAMP\"}"
+    fi
+
+    local response http_code
+    if [ -n "$auth_token" ]; then
+        response=$(curl -s -w "\n%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $auth_token" \
+            -d "$reg_payload" \
+            "$register_url" 2>&1)
+    else
+        response=$(curl -s -w "\n%{http_code}" \
+            --connect-timeout 10 \
+            --max-time 30 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -d "$reg_payload" \
+            "$register_url" 2>&1)
+    fi
+
+    http_code=$(echo "$response" | tail -1)
+    if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
+        echo "  ✓ Registered with $register_url"
+        return 0
+    else
+        echo "  ✗ Registration failed at $register_url (HTTP $http_code)"
+        return 1
+    fi
+}
+
+# Ensure this machine is registered with all configured endpoints.
+# Only runs when the registration sentinel file is absent (i.e. fresh install or
+# after sentinel is manually deleted).  On success it writes the sentinel so
+# subsequent runs skip this step entirely.
+ensure_registered() {
+    if [ -f "$REGISTRATION_SENTINEL" ]; then
+        return 0
+    fi
+
+    echo "First-run registration: registering machine with fleet server(s)..."
+
+    local registered=false
+    for endpoint in "${API_ENDPOINTS[@]}"; do
+        local auth=""
+        if [[ "$endpoint" != *"localhost"* ]] && [ -n "${CENTRAL_AUTH_TOKEN:-}" ]; then
+            auth="$CENTRAL_AUTH_TOKEN"
+        fi
+
+        # Retry registration up to 5 times with a short backoff.
+        # The server may not be ready on the very first LaunchAgent fire.
+        local attempt=1
+        local max_attempts=5
+        while [ $attempt -le $max_attempts ]; do
+            if register_with_endpoint "$endpoint" "$auth"; then
+                registered=true
+                break
+            fi
+            if [ $attempt -lt $max_attempts ]; then
+                echo "  Retrying registration in 10s (attempt $attempt/$max_attempts)..."
+                sleep 10
+            fi
+            attempt=$((attempt + 1))
+        done
+    done
+
+    if [ "$registered" = true ]; then
+        # Write sentinel so we skip registration on future runs
+        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$REGISTRATION_SENTINEL"
+        echo "Registration complete. Sentinel written to $REGISTRATION_SENTINEL"
+    else
+        echo "Warning: registration failed for all endpoints. Will retry on next run."
+        # Do NOT write the sentinel — the next run will try again.
+    fi
+}
+
 # Send status to all configured endpoints (XACA-0024 hybrid support)
 send_status() {
     local payload="$1"
@@ -505,9 +736,9 @@ send_status() {
         fi
 
         if send_to_endpoint "$payload" "$endpoint" "$auth"; then
-            success_count=$((success_count + 1))
+            ((success_count++))
         else
-            fail_count=$((fail_count + 1))
+            ((fail_count++))
         fi
     done
 
@@ -530,6 +761,9 @@ main() {
     echo "Machine: $HOSTNAME ($IP_ADDRESS)"
     echo "Timestamp: $TIMESTAMP"
     echo ""
+
+    # Ensure machine is registered before sending status (first-run only)
+    ensure_registered
 
     # Build payload
     echo "Collecting tmux session data..."

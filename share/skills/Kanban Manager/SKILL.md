@@ -40,7 +40,7 @@ status: production-ready
 **Version:** 1.8.2
 **Author:** Commander Jett Reno (Starfleet Academy)
 **Command Shortcut:** `kb-backlog`
-**Platforms:** All aiteamforge platforms
+**Platforms:** All dev-team platforms
 **Last Updated:** February 17, 2026
 **New in 1.8.2:** `kb-release create` command - create releases from CLI via LCARS server API
 
@@ -48,7 +48,7 @@ status: production-ready
 
 ## Purpose
 
-This skill provides comprehensive kanban board management for all aiteamforge projects. It handles:
+This skill provides comprehensive kanban board management for all dev-team projects. It handles:
 
 - **Backlog Management:** Add, modify, remove, and prioritize backlog items
 - **Subitem Hierarchies:** Break down tasks into trackable subitems
@@ -64,24 +64,24 @@ This skill provides comprehensive kanban board management for all aiteamforge pr
 The `kb*` commands are shell functions from `kanban-helpers.sh`. To run them from Claude Code, you **MUST source the file first**:
 
 ```bash
-source ~/aiteamforge/kanban-helpers.sh && kb-backlog sub start XACA-0013-001
+source ~/dev-team/kanban-helpers.sh && kb-backlog sub start XACA-0013-001
 ```
 
 **Always use this pattern:**
 ```bash
-source ~/aiteamforge/kanban-helpers.sh && <kb-command>
+source ~/dev-team/kanban-helpers.sh && <kb-command>
 ```
 
 **Examples:**
 ```bash
 # Start a subitem
-source ~/aiteamforge/kanban-helpers.sh && kb-backlog sub start XFIR-0001-001
+source ~/dev-team/kanban-helpers.sh && kb-backlog sub start XFIR-0001-001
 
 # Mark subitem done
-source ~/aiteamforge/kanban-helpers.sh && kb-backlog sub done XFIR-0001-001
+source ~/dev-team/kanban-helpers.sh && kb-backlog sub done XFIR-0001-001
 
 # List backlog
-source ~/aiteamforge/kanban-helpers.sh && kb-backlog list
+source ~/dev-team/kanban-helpers.sh && kb-backlog list
 ```
 
 **DO NOT** directly edit the board JSON files. Always use the commands.
@@ -375,11 +375,11 @@ Location: Each team's board is in their own repository under `kanban/`:
 
 | Team | Board Location |
 |------|----------------|
-| Academy | `~/aiteamforge/kanban/academy-board.json` |
+| Academy | `~/dev-team/kanban/academy-board.json` |
 | iOS | `/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/ios-board.json` |
 | Android | `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/android-board.json` |
 | Firebase | `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/firebase-board.json` |
-| Command | `/Users/Shared/Development/Main Event/aiteamforge/kanban/command-board.json` |
+| Command | `/Users/Shared/Development/Main Event/dev-team/kanban/command-board.json` |
 | DNS | `/Users/Shared/Development/DNSFramework/kanban/dns-board.json` |
 | Starwords | `/Users/Shared/Development/DoubleNode/Starwords/kanban/freelance-doublenode-starwords-board.json` |
 | appPlanning | `/Users/Shared/Development/DoubleNode/appPlanning/kanban/freelance-doublenode-appplanning-board.json` |
@@ -621,11 +621,11 @@ Each team has their own kanban directory in their repository:
 
 | Team | Kanban Directory | Focus |
 |------|------------------|-------|
-| Academy | `~/aiteamforge/kanban/` | Dev Team Infrastructure |
+| Academy | `~/dev-team/kanban/` | Dev Team Infrastructure |
 | iOS | `.../MainEventApp-iOS/kanban/` | Main Event iOS App |
 | Android | `.../MainEventApp-Android/kanban/` | Main Event Android App |
 | Firebase | `.../MainEventApp-Functions/kanban/` | Firebase Functions/Rules |
-| Command | `.../Main Event/aiteamforge/kanban/` | Strategic Operations |
+| Command | `.../Main Event/dev-team/kanban/` | Strategic Operations |
 | DNS | `.../DNSFramework/kanban/` | DNS Framework Packages |
 | Starwords | `.../DoubleNode/Starwords/kanban/` | Starwords Freelance Project |
 | appPlanning | `.../DoubleNode/appPlanning/kanban/` | AppPlanning Freelance Project |
@@ -776,11 +776,11 @@ Plan documents are stored in each team's `kanban/` directory (same as board file
 
 | Team | Plan Doc Directory |
 |------|-------------------|
-| Academy | `~/aiteamforge/kanban/` |
+| Academy | `~/dev-team/kanban/` |
 | iOS | `.../MainEventApp-iOS/kanban/` |
 | Android | `.../MainEventApp-Android/kanban/` |
 | Firebase | `.../MainEventApp-Functions/kanban/` |
-| Command | `.../Main Event/aiteamforge/kanban/` |
+| Command | `.../Main Event/dev-team/kanban/` |
 | DNS | `.../DNSFramework/kanban/` |
 | Starwords | `.../DoubleNode/Starwords/kanban/` |
 | appPlanning | `.../DoubleNode/appPlanning/kanban/` |
@@ -1026,10 +1026,10 @@ kb-backlog tag <id> add feature planning
 **For Epics:**
 ```bash
 # 1. Create the epic using kb-epic command
-source ~/aiteamforge/kanban-helpers.sh && kb-epic create "Epic Title" "Description" high feature
+source ~/dev-team/kanban-helpers.sh && kb-epic create "Epic Title" "Description" high feature
 
 # 2. Add items to epic
-source ~/aiteamforge/kanban-helpers.sh && kb-epic add-item EPIC-0001 XIOS-0001
+source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0001 XIOS-0001
 
 # 3. Create plan document
 # Location: <team-kanban>/EPIC-xxxx_<description>.md
@@ -1057,7 +1057,7 @@ Epics group multiple kanban items into high-level objectives. Each team has thei
 
 > **⚠️ Remember:** Always source kanban-helpers.sh first:
 > ```bash
-> source ~/aiteamforge/kanban-helpers.sh && kb-epic <command>
+> source ~/dev-team/kanban-helpers.sh && kb-epic <command>
 > ```
 
 | Command | Description |
@@ -1082,23 +1082,23 @@ Epics group multiple kanban items into high-level objectives. Each team has thei
 
 ```bash
 # Create an epic
-source ~/aiteamforge/kanban-helpers.sh && kb-epic create "Q1 Infrastructure" "Infrastructure improvements" high project
+source ~/dev-team/kanban-helpers.sh && kb-epic create "Q1 Infrastructure" "Infrastructure improvements" high project
 
 # List all epics
-source ~/aiteamforge/kanban-helpers.sh && kb-epic list
+source ~/dev-team/kanban-helpers.sh && kb-epic list
 
 # Add items to epic
-source ~/aiteamforge/kanban-helpers.sh && kb-epic add-item EPIC-0001 XACA-0015
-source ~/aiteamforge/kanban-helpers.sh && kb-epic add-item EPIC-0001 XACA-0016
+source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0001 XACA-0015
+source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0001 XACA-0016
 
 # View epic details and progress
-source ~/aiteamforge/kanban-helpers.sh && kb-epic show EPIC-0001
+source ~/dev-team/kanban-helpers.sh && kb-epic show EPIC-0001
 
 # Update epic status
-source ~/aiteamforge/kanban-helpers.sh && kb-epic update EPIC-0001 status active
+source ~/dev-team/kanban-helpers.sh && kb-epic update EPIC-0001 status active
 
 # Set due date
-source ~/aiteamforge/kanban-helpers.sh && kb-epic update EPIC-0001 dueDate 2026-03-31
+source ~/dev-team/kanban-helpers.sh && kb-epic update EPIC-0001 dueDate 2026-03-31
 ```
 
 ### Epic Data Structure
@@ -1147,11 +1147,11 @@ Manifest files are stored in each team's `kanban/releases/` directory:
 
 | Team | Manifest Path |
 |------|---------------|
-| **Academy** | `~/aiteamforge/kanban/releases/<release-id>/manifest.json` |
+| **Academy** | `~/dev-team/kanban/releases/<release-id>/manifest.json` |
 | **iOS** | `.../MainEventApp-iOS/kanban/releases/<release-id>/manifest.json` |
 | **Android** | `.../MainEventApp-Android/kanban/releases/<release-id>/manifest.json` |
 | **Firebase** | `.../MainEventApp-Functions/kanban/releases/<release-id>/manifest.json` |
-| **Command** | `.../Main Event/aiteamforge/kanban/releases/<release-id>/manifest.json` |
+| **Command** | `.../Main Event/dev-team/kanban/releases/<release-id>/manifest.json` |
 | **DNS** | `.../DNSFramework/kanban/releases/<release-id>/manifest.json` |
 | **Starwords** | `.../DoubleNode/Starwords/kanban/releases/<release-id>/manifest.json` |
 | **appPlanning** | `.../DoubleNode/appPlanning/kanban/releases/<release-id>/manifest.json` |
@@ -1160,13 +1160,13 @@ Manifest files are stored in each team's `kanban/releases/` directory:
 
 **Pattern:** `<team-repo>/kanban/releases/<release-id>/manifest.json`
 
-> **Note:** During migration, the server can still read from the legacy central path (`~/aiteamforge/releases/`) for backward compatibility
+> **Note:** During migration, the server can still read from the legacy central path (`~/dev-team/releases/`) for backward compatibility
 
 ### Release Commands
 
 > **⚠️ Remember:** Always source kanban-helpers.sh first:
 > ```bash
-> source ~/aiteamforge/kanban-helpers.sh && kb-release <command>
+> source ~/dev-team/kanban-helpers.sh && kb-release <command>
 > ```
 
 > **⚠️ TEAM BOUNDARY ENFORCEMENT:** All `kb-release` commands operate **only on the current team's kanban**. Items must exist in your team's backlog to be assigned to releases. You cannot manage releases for items belonging to other teams.
@@ -1197,28 +1197,28 @@ Manifest files are stored in each team's `kanban/releases/` directory:
 
 ```bash
 # Create a basic release (defaults to feature type, ios+android platforms)
-source ~/aiteamforge/kanban-helpers.sh && kb-release create "Q1 2026 Feature Release"
+source ~/dev-team/kanban-helpers.sh && kb-release create "Q1 2026 Feature Release"
 
 # Create a hotfix release for iOS only
-source ~/aiteamforge/kanban-helpers.sh && kb-release create "iOS Hotfix 2.8.1" --type hotfix --platforms ios
+source ~/dev-team/kanban-helpers.sh && kb-release create "iOS Hotfix 2.8.1" --type hotfix --platforms ios
 
 # Create a multi-platform release with target date
-source ~/aiteamforge/kanban-helpers.sh && kb-release create "March Update" --platforms ios,android,firebase --target-date 2026-03-15
+source ~/dev-team/kanban-helpers.sh && kb-release create "March Update" --platforms ios,android,firebase --target-date 2026-03-15
 
 # Create a project-specific release with short title
-source ~/aiteamforge/kanban-helpers.sh && kb-release create "Starwords 1.2.0" --project Starwords --short-title "SW 1.2"
+source ~/dev-team/kanban-helpers.sh && kb-release create "Starwords 1.2.0" --project Starwords --short-title "SW 1.2"
 
 # List all releases
-source ~/aiteamforge/kanban-helpers.sh && kb-release list
+source ~/dev-team/kanban-helpers.sh && kb-release list
 
 # Assign item to a release
-source ~/aiteamforge/kanban-helpers.sh && kb-release assign XFIR-0001 REL-2026-Q1-001 firebase
+source ~/dev-team/kanban-helpers.sh && kb-release assign XFIR-0001 REL-2026-Q1-001 firebase
 
 # Check item's release assignment
-source ~/aiteamforge/kanban-helpers.sh && kb-release show XFIR-0001
+source ~/dev-team/kanban-helpers.sh && kb-release show XFIR-0001
 
 # Remove release assignment
-source ~/aiteamforge/kanban-helpers.sh && kb-release unassign XFIR-0001
+source ~/dev-team/kanban-helpers.sh && kb-release unassign XFIR-0001
 ```
 
 ### Release Data Structure
@@ -1254,7 +1254,7 @@ Releases are stored in the team's board JSON under the `releases` array:
 
 #### Manifest Fields
 
-Each release has a manifest file in the team's repository at `<team-repo>/aiteamforge/kanban/releases/<release-id>/manifest.json`:
+Each release has a manifest file in the team's repository at `<team-repo>/dev-team/kanban/releases/<release-id>/manifest.json`:
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -1296,13 +1296,13 @@ If manifests get out of sync (e.g., items show `releaseAssignment` but manifest 
 
 ```bash
 # Sync all teams
-python3 ~/aiteamforge/scripts/sync-release-manifests.py
+python3 ~/dev-team/scripts/sync-release-manifests.py
 
 # Sync specific team
-python3 ~/aiteamforge/scripts/sync-release-manifests.py --team firebase
+python3 ~/dev-team/scripts/sync-release-manifests.py --team firebase
 
 # Dry run (show what would change)
-python3 ~/aiteamforge/scripts/sync-release-manifests.py --dry-run
+python3 ~/dev-team/scripts/sync-release-manifests.py --dry-run
 ```
 
 ### Environment Promotion
@@ -1340,10 +1340,10 @@ The LCARS UI Releases tab provides:
 **Solution:**
 ```bash
 # Sync manifests from board data
-python3 ~/aiteamforge/scripts/sync-release-manifests.py --team <team>
+python3 ~/dev-team/scripts/sync-release-manifests.py --team <team>
 
 # Example for Firebase
-python3 ~/aiteamforge/scripts/sync-release-manifests.py --team firebase
+python3 ~/dev-team/scripts/sync-release-manifests.py --team firebase
 ```
 
 ### Cross-Team Assignment Errors
@@ -1370,8 +1370,8 @@ python3 ~/aiteamforge/scripts/sync-release-manifests.py --team firebase
 
 **Solution:** Remove from current epic first:
 ```bash
-source ~/aiteamforge/kanban-helpers.sh && kb-epic remove-item EPIC-0001 XACA-0015
-source ~/aiteamforge/kanban-helpers.sh && kb-epic add-item EPIC-0002 XACA-0015
+source ~/dev-team/kanban-helpers.sh && kb-epic remove-item EPIC-0001 XACA-0015
+source ~/dev-team/kanban-helpers.sh && kb-epic add-item EPIC-0002 XACA-0015
 ```
 
 ### Release Not Showing in List

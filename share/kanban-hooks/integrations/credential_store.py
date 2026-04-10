@@ -44,9 +44,9 @@ ITERATIONS = 480000  # OWASP 2023 recommendation for PBKDF2-SHA256
 # Credentials are intentionally centralized (shared across all teams), unlike
 # team-specific configs (releases.json, integrations.json, calendar-config.json)
 # which live in each team's kanban/config/ directory.
-CONFIG_DIR = Path.home() / "aiteamforge" / "config"
+CONFIG_DIR = Path.home() / "dev-team" / "config"
 CREDENTIAL_FILE = CONFIG_DIR / "credentials.enc"
-LOG_DIR = Path.home() / "aiteamforge" / "logs" / "credential-access"
+LOG_DIR = Path.home() / "dev-team" / "logs" / "credential-access"
 
 # Configure logging
 logger = logging.getLogger(__name__)

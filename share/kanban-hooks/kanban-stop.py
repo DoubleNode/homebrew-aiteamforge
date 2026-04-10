@@ -15,8 +15,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kanban_utils import get_board_file, update_board_safely, parse_session_name
 
-KANBAN_DIR = os.path.expanduser("~/aiteamforge/kanban")
-LOG_FILE = os.path.expanduser("~/aiteamforge/kanban/stop-hook-debug.log")
+KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
+LOG_FILE = os.path.expanduser("~/dev-team/kanban/stop-hook-debug.log")
 
 def log_debug(message):
     """Write debug message to log file."""

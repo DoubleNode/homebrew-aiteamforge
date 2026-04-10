@@ -10,81 +10,22 @@ to prevent corruption from concurrent writes.
 import json
 import os
 import fcntl
+import subprocess
+import tempfile
+import warnings
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
 
-
-def _get_aiteamforge_dir() -> Path:
-    """
-    Resolve the AITeamForge installation directory.
-
-    Priority:
-    1. AITEAMFORGE_DIR environment variable (set in installed kanban-helpers.sh)
-    2. install_dir field in ~/.aiteamforge-config / ~/aiteamforge/.aiteamforge-config
-    3. Fallback to ~/aiteamforge
-
-    This allows hooks to work correctly even when the install dir is non-default.
-    """
-    # 1. Environment variable (most reliable — set by the sourced kanban-helpers.sh)
-    env_dir = os.environ.get("AITEAMFORGE_DIR", "").strip()
-    if env_dir:
-        return Path(env_dir)
-
-    # 2. Read from config file
-    for config_candidate in [
-        Path.home() / "aiteamforge" / ".aiteamforge-config",
-        Path.home() / ".aiteamforge-config",
-    ]:
-        if config_candidate.exists():
-            try:
-                with open(config_candidate) as f:
-                    cfg = json.load(f)
-                install_dir = cfg.get("install_dir", "").strip()
-                if install_dir:
-                    return Path(install_dir)
-            except (json.JSONDecodeError, IOError):
-                pass
-
-    # 3. Default
-    return Path.home() / "aiteamforge"
-
-
-def _get_team_kanban_dir_from_config(team: str) -> Optional[Path]:
-    """
-    Look up a team's kanban directory from .aiteamforge-config.
-
-    Returns None if the config is missing or the team is not found.
-    """
-    aiteamforge_dir = _get_aiteamforge_dir()
-    config_file = aiteamforge_dir / ".aiteamforge-config"
-    if not config_file.exists():
-        return None
-    try:
-        with open(config_file) as f:
-            cfg = json.load(f)
-        working_dir = cfg.get("team_paths", {}).get(team, {}).get("working_dir", "")
-        if working_dir:
-            return Path(working_dir) / "kanban"
-    except (json.JSONDecodeError, IOError, AttributeError):
-        pass
-    return None
-
-
-# Resolve installation root once at import time
-_AITEAMFORGE_DIR = _get_aiteamforge_dir()
-
-KANBAN_DIR = str(_AITEAMFORGE_DIR / "kanban")
+KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
 
 # Distributed kanban directories - must match server.py TEAM_KANBAN_DIRS
-# NOTE: Academy uses the aiteamforge install directory, which is resolved
-# dynamically. Other well-known teams have fixed paths from their repositories.
 TEAM_KANBAN_DIRS = {
     # Main Event Teams
-    "academy": _AITEAMFORGE_DIR / "kanban",
+    "academy": Path.home() / "dev-team" / "kanban",
     "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
     "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
     "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/aiteamforge/kanban"),
+    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
     "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
 
     # Freelance Projects
@@ -102,16 +43,16 @@ TEAM_KANBAN_DIRS = {
     # Legal Projects
     "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
 
-    # Finance Projects
-    "finance-personal": Path.home() / "finance" / "personal" / "kanban",
-
     # Medical Projects
     "medical-general": Path.home() / "medical" / "general" / "kanban",
     "medical": Path.home() / "medical" / "general" / "kanban",  # alias
 
+    # Finance Projects
+    "finance-personal": Path.home() / "finance" / "personal" / "kanban",
+
     # Aliases (shell helper has these via case-statement pipe syntax)
-    "mainevent": Path("/Users/Shared/Development/Main Event/aiteamforge/kanban"),
-    "freelance": _AITEAMFORGE_DIR / "kanban",  # generic fallback
+    "mainevent": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+    "freelance": Path.home() / "dev-team" / "kanban",  # generic fallback
 }
 
 
@@ -143,20 +84,7 @@ def parse_session_name(session_name):
 
 
 def get_board_file(team):
-    """
-    Get path to team's kanban board file using distributed directories.
-
-    Resolution order:
-    1. .aiteamforge-config team_paths (set during install wizard)
-    2. TEAM_KANBAN_DIRS static mapping (known platform/team paths)
-    3. Default KANBAN_DIR fallback
-    """
-    # Priority 1: config-based lookup (authoritative for fresh installs)
-    config_dir = _get_team_kanban_dir_from_config(team)
-    if config_dir is not None:
-        return os.path.join(str(config_dir), f"{team}-board.json")
-
-    # Priority 2: static mapping
+    """Get path to team's kanban board file using distributed directories."""
     kanban_dir = str(TEAM_KANBAN_DIRS.get(team, KANBAN_DIR))
     return os.path.join(kanban_dir, f"{team}-board.json")
 
@@ -359,3 +287,314 @@ def update_board_safely(board_file, update_func):
         except:
             pass
         return False
+
+
+# ---------------------------------------------------------------------------
+# Activity Logging
+# ---------------------------------------------------------------------------
+
+# Maps the 3-letter team code (positions 1-3 of an item ID like XACA-0001)
+# to the team name used in TEAM_KANBAN_DIRS.
+# Mirrors _kb_get_team_from_code() in kanban-helpers.sh.
+_TEAM_CODE_MAP = {
+    "IOS": "ios",
+    "AND": "android",
+    "FIR": "firebase",
+    "FRE": "freelance",
+    "FSW": "freelance-doublenode-starwords",
+    "FWS": "freelance-doublenode-workstats",
+    "FAP": "freelance-doublenode-appplanning",
+    "FLB": "freelance-doublenode-lifeboard",
+    "VAN": "freelance-doublenode-caravan",
+    "FAS": "freelance-doublenode-awaysentry",
+    "FLA": "freelance-liquidstyle-agentbadges-app",
+    "FLI": "freelance-liquidstyle-agentbadges-ios",
+    "ACA": "academy",
+    "DNS": "dns",
+    "CMD": "command",
+    "MEV": "mainevent",
+    "LCP": "legal-coparenting",
+    "MED": "medical-general",
+    "FIN": "finance-personal",
+}
+
+
+def get_parent_item_id(item_or_subitem_id: str) -> str:
+    """
+    Return the parent item ID for a subitem ID, or the ID itself for an item.
+
+    Item IDs have the form:    PREFIX-NNNN        (e.g. XACA-0117)
+    Subitem IDs have the form: PREFIX-NNNN-NNN   (e.g. XACA-0117-003)
+
+    Args:
+        item_or_subitem_id: An item or subitem ID string.
+
+    Returns:
+        The parent item ID (PREFIX-NNNN).
+    """
+    parts = item_or_subitem_id.split("-")
+    # Subitem IDs have three dash-separated segments; strip the last one.
+    if len(parts) == 3:
+        return f"{parts[0]}-{parts[1]}"
+    return item_or_subitem_id
+
+
+def get_team_from_item_id(item_id: str) -> str:
+    """
+    Map an item or subitem ID to its team name.
+
+    Resolves subitem IDs to their parent item ID first, then extracts the
+    3-letter team code from the prefix (characters at positions 1-3).
+
+    Args:
+        item_id: An item ID (XACA-0117) or subitem ID (XACA-0117-003).
+
+    Returns:
+        The team name string (e.g. "academy"), or "" if the code is unknown.
+    """
+    parent_id = get_parent_item_id(item_id)
+    # Extract the 3-letter code: "XACA-0117" -> code = "ACA"
+    if len(parent_id) >= 4 and parent_id[0] == "X":
+        code = parent_id[1:4].upper()
+        return _TEAM_CODE_MAP.get(code, "")
+    return ""
+
+
+def get_activity_dir(item_id: str) -> str:
+    """
+    Return the path to the activity/ subdirectory for the given item's team.
+
+    Creates the directory if it does not already exist.
+
+    Args:
+        item_id: An item or subitem ID.
+
+    Returns:
+        Absolute path string to the activity directory.
+    """
+    team = get_team_from_item_id(item_id)
+    kanban_dir = TEAM_KANBAN_DIRS.get(team)
+    if kanban_dir is None:
+        # Fall back to the default academy directory so logging never crashes
+        # callers entirely, but surface a warning.
+        warnings.warn(
+            f"get_activity_dir: unknown team for item_id={item_id!r}, "
+            f"falling back to default KANBAN_DIR",
+            stacklevel=2,
+        )
+        kanban_dir = Path(KANBAN_DIR)
+
+    activity_dir = Path(kanban_dir) / "activity"
+    activity_dir.mkdir(parents=True, exist_ok=True)
+    return str(activity_dir)
+
+
+def _resolve_agent_from_tmux():
+    """Resolve agent handle from tmux session name via amb-session-map.json.
+
+    Returns the agent handle string, or None if resolution fails.
+    """
+    try:
+        pane_target = os.environ.get("TMUX_PANE", "")
+        if not pane_target and not os.environ.get("TMUX"):
+            return None
+        tmux_cmd = ["tmux", "display-message"]
+        if pane_target:
+            tmux_cmd.extend(["-t", pane_target])
+        tmux_cmd.extend(["-p", "#S"])
+        result = subprocess.run(tmux_cmd, capture_output=True, text=True, timeout=2)
+        if result.returncode != 0:
+            return None
+        session_name = result.stdout.strip()
+        if not session_name:
+            return None
+        session_map_file = os.path.expanduser("~/dev-team/amb-session-map.json")
+        if not os.path.isfile(session_map_file):
+            return None
+        with open(session_map_file) as f:
+            session_map = json.load(f)
+        return session_map.get(session_name)
+    except Exception:
+        return None
+
+
+def log_activity(
+    action: str,
+    target_id: str,
+    target_type: str,
+    field: str = None,
+    old_value: str = None,
+    new_value: str = None,
+    context: str = None,
+) -> None:
+    """
+    Append an activity entry to the item's activity log file.
+
+    The log file lives at:
+        <team-kanban-dir>/activity/<parent-item-id>.json
+
+    File writes use exclusive fcntl locking and an atomic temp-file rename so
+    concurrent callers never corrupt the log.  All exceptions are swallowed
+    and surfaced as warnings — this function is fire-and-forget and must never
+    raise.
+
+    Args:
+        action:      Short action label (e.g. "status_change", "created").
+        target_id:   The item or subitem ID being acted on.
+        target_type: "item" or "subitem".
+        field:       Optional field name that changed.
+        old_value:   Optional previous value of the field.
+        new_value:   Optional new value of the field.
+        context:     Optional free-form context string.
+    """
+    try:
+        # Resolve agent identity from environment variables in priority order.
+        agent = (
+            os.environ.get("CLAUDE_AGENT_HANDLE")
+            or os.environ.get("CLAUDE_CODENAME")
+            or os.environ.get("LCARS_SESSION_NAME")
+            or _resolve_agent_from_tmux()
+            or "unknown"
+        )
+
+        parent_id = get_parent_item_id(target_id)
+        activity_dir = get_activity_dir(target_id)
+        activity_file = os.path.join(activity_dir, f"{parent_id}.json")
+        lock_file = activity_file + ".lock"
+
+        now = datetime.now(timezone.utc)
+        timestamp = now.strftime("%Y-%m-%dT%H:%M:%S.") + f"{now.microsecond // 1000:03d}Z"
+
+        # Build entry dict, omitting None/null fields.
+        entry = {
+            "timestamp": timestamp,
+            "agent": agent,
+            "action": action,
+            "target": target_id,
+            "targetType": target_type,
+        }
+        if field is not None:
+            entry["field"] = field
+        if old_value is not None:
+            entry["oldValue"] = old_value
+        if new_value is not None:
+            entry["newValue"] = new_value
+        if context is not None:
+            entry["context"] = context
+
+        # Create lock file if needed.
+        Path(lock_file).touch(exist_ok=True)
+
+        with open(lock_file, "r+") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # Load or initialise the activity document.
+                if os.path.exists(activity_file):
+                    with open(activity_file, "r") as f:
+                        doc = json.load(f)
+                else:
+                    doc = {
+                        "entries": [],
+                        "itemId": parent_id,
+                        "created": timestamp,
+                        "lastUpdated": timestamp,
+                    }
+
+                doc["entries"].append(entry)
+                doc["lastUpdated"] = timestamp
+
+                # Atomic write: temp file then rename.
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=activity_dir, prefix=f"{parent_id}_", suffix=".tmp"
+                )
+                try:
+                    with os.fdopen(tmp_fd, "w") as f:
+                        json.dump(doc, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.rename(tmp_path, activity_file)
+                except Exception:
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    except Exception as exc:
+        warnings.warn(f"log_activity failed for {target_id!r}: {exc}", stacklevel=2)
+
+
+def read_activity_log(
+    item_id: str,
+    limit: int = None,
+    offset: int = 0,
+    action_filter: str = None,
+    agent_filter: str = None,
+    subitem_filter: str = None,
+) -> dict:
+    """
+    Read and optionally filter/paginate an activity log for an item.
+
+    Args:
+        item_id:        Item or subitem ID whose log to read.
+        limit:          Maximum number of entries to return (None = all).
+        offset:         Number of entries to skip from the beginning.
+        action_filter:  If set, return only entries where action == action_filter.
+        agent_filter:   If set, return only entries where agent == agent_filter.
+        subitem_filter: If set, return only entries where target == subitem_filter.
+
+    Returns:
+        The activity document dict with a filtered ``entries`` list.
+        Returns ``{"entries": [], "itemId": <parent_id>}`` if no log exists.
+    """
+    parent_id = get_parent_item_id(item_id)
+
+    try:
+        activity_dir = get_activity_dir(item_id)
+    except Exception:
+        return {"entries": [], "itemId": parent_id}
+
+    activity_file = os.path.join(activity_dir, f"{parent_id}.json")
+
+    if not os.path.exists(activity_file):
+        return {"entries": [], "itemId": parent_id}
+
+    lock_file = activity_file + ".lock"
+
+    try:
+        Path(lock_file).touch(exist_ok=True)
+
+        with open(lock_file, "r") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+            try:
+                with open(activity_file, "r") as f:
+                    doc = json.load(f)
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    except (json.JSONDecodeError, IOError):
+        return {"entries": [], "itemId": parent_id}
+
+    entries = doc.get("entries", [])
+
+    # Apply filters.
+    if action_filter is not None:
+        entries = [e for e in entries if e.get("action") == action_filter]
+    if agent_filter is not None:
+        entries = [e for e in entries if e.get("agent") == agent_filter]
+    if subitem_filter is not None:
+        entries = [e for e in entries if e.get("target") == subitem_filter]
+
+    # Newest first for display.
+    entries = list(reversed(entries))
+
+    # Apply pagination.
+    entries = entries[offset:]
+    if limit is not None:
+        entries = entries[:limit]
+
+    result = dict(doc)
+    result["entries"] = entries
+    return result
