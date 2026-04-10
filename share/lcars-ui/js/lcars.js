@@ -904,6 +904,12 @@ function toggleHomeFullscreen() {
         switchSection('home', true);
     }
 
+    // Ensure home section is active before entering fullscreen.
+    // switchSection uses setTimeout for entrance — force it synchronously here
+    // so the Fullscreen API captures the HOME content, not the previous tab.
+    const homeEl = document.querySelector('.home-section');
+    if (homeEl) homeEl.classList.add('active');
+
     const container = document.querySelector('.lcars-container');
     if (!container) return;
 

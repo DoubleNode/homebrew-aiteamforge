@@ -306,6 +306,13 @@ install_shell_environment() {
         success "iTerm2 shell integration already installed"
     fi
 
+    # Suppress "Allow terminal-initiated display?" prompts globally.
+    # Shell integration alone isn't enough — iTerm2 also needs this pref
+    # set so inline images (imgcat) and title changes work without prompts.
+    if command -v defaults &>/dev/null; then
+        defaults write com.googlecode.iterm2 NoSyncSuppressBroadcastInputWarning -bool true 2>/dev/null
+    fi
+
     # Add zshrc integration
     add_zshrc_integration || return 1
 

@@ -66,6 +66,8 @@ def create_profiles(url: str) -> bool:
             "Custom Command": "Browser",
             "Initial URL": url,
             "Tags": ["aiteamforge"],
+            "Allow Title Setting": True,
+            "Allow Title Reporting": True,
             "Background Color": {
                 "Alpha Component": 1.0,
                 "Blue Component": 0.0,
@@ -87,6 +89,8 @@ def create_profiles(url: str) -> bool:
             "Name": "Agent Panel",
             "Guid": AGENT_PANEL_GUID,
             "Tags": ["aiteamforge"],
+            "Allow Title Setting": True,
+            "Allow Title Reporting": True,
         })
 
     # Strip parent profile references from ALL profiles (causes errors on clean installs)

@@ -6567,29 +6567,37 @@ end tell
         raw_edges = raw.get('edges') or raw.get('relationships') or []
 
         for i, n in enumerate(raw_nodes[:limit]):
-            node_id = str(n.get('id') or n.get('entity_name') or f'n{i}')
+            # LightRAG nests entity_type, description, etc. inside a 'properties' sub-dict.
+            # Flatten so we can extract fields uniformly.
+            inner = n.get('properties', {}) if isinstance(n.get('properties'), dict) else {}
+            flat = {**inner, **{k: v for k, v in n.items() if k != 'properties'}}
+            node_id = str(flat.get('id') or flat.get('entity_name') or flat.get('entity_id') or f'n{i}')
+            skip = {'id', 'entity_name', 'entity_id', 'label', 'labels',
+                    'type', 'entity_type', 'group', 'cluster', 'name'}
             nodes.append({
                 'id': node_id,
-                'label': str(n.get('label') or n.get('entity_name') or n.get('name') or node_id),
-                'type': str(n.get('type') or n.get('entity_type') or 'entity'),
-                'group': str(n.get('group') or n.get('cluster') or 'default'),
-                'properties': {k: v for k, v in n.items()
-                               if k not in ('id', 'entity_name', 'label', 'type', 'group')},
+                'label': str(flat.get('label') or flat.get('entity_name') or flat.get('name') or node_id),
+                'type': str(flat.get('type') or flat.get('entity_type') or 'entity'),
+                'group': str(flat.get('group') or flat.get('cluster') or 'default'),
+                'properties': {k: v for k, v in flat.items() if k not in skip},
             })
 
         for i, e in enumerate(raw_edges[:limit]):
-            src = str(e.get('source') or e.get('src') or e.get('src_id') or '')
-            tgt = str(e.get('target') or e.get('dst') or e.get('tgt_id') or '')
+            # Flatten nested properties (same pattern as nodes)
+            inner_e = e.get('properties', {}) if isinstance(e.get('properties'), dict) else {}
+            flat_e = {**inner_e, **{k: v for k, v in e.items() if k != 'properties'}}
+            src = str(flat_e.get('source') or flat_e.get('src') or flat_e.get('src_id') or '')
+            tgt = str(flat_e.get('target') or flat_e.get('dst') or flat_e.get('tgt_id') or '')
             if not src or not tgt:
                 continue
+            skip_e = {'id', 'source', 'src', 'src_id', 'target', 'dst',
+                      'tgt_id', 'label', 'relation', 'type'}
             edges.append({
-                'id': str(e.get('id') or f'e{i}'),
+                'id': str(flat_e.get('id') or f'e{i}'),
                 'source': src,
                 'target': tgt,
-                'label': str(e.get('label') or e.get('relation') or e.get('type') or 'RELATED'),
-                'properties': {k: v for k, v in e.items()
-                               if k not in ('id', 'source', 'src', 'src_id', 'target', 'dst',
-                                            'tgt_id', 'label', 'relation', 'type')},
+                'label': str(flat_e.get('label') or flat_e.get('relation') or flat_e.get('type') or 'RELATED'),
+                'properties': {k: v for k, v in flat_e.items() if k not in skip_e},
             })
 
         return {
@@ -6900,10 +6908,11 @@ end tell
                     self._send_json_response({'node': None, 'error': f'Bolt lookup failed: {e}'})
                     return
 
-            # LightRAG: no direct node lookup endpoint, return what we know
+            # LightRAG: use /graphs?label=<node_id> to fetch the node's neighborhood
             if engine_type in ('lightrag', 'light_rag') and port:
                 try:
-                    url = f'http://localhost:{port}/graphs'
+                    label_param = urllib.parse.quote(str(node_id))
+                    url = f'http://localhost:{port}/graphs?label={label_param}&max_depth=1'
                     req = urllib.request.Request(url, headers={'Accept': 'application/json'})
                     with urllib.request.urlopen(req, timeout=10) as resp:
                         raw = json.loads(resp.read().decode('utf-8'))
