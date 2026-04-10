@@ -90,6 +90,13 @@ _get_lcars_tmp_dir() {
         return 1
     fi
 
+    # If KANBAN_DIR is set by the startup script, use it directly
+    # (avoids hardcoded path mismatches on homebrew installs)
+    if [[ -n "${KANBAN_DIR:-}" && -d "${KANBAN_DIR}" ]]; then
+        local env_tmp="${KANBAN_DIR}/tmp"
+        mkdir -p "$env_tmp" 2>/dev/null && { echo "${env_tmp}/"; return 0; }
+    fi
+
     # Extract team and terminal.
     # terminal = last segment after final dash
     # team     = everything before the final dash
