@@ -223,18 +223,6 @@ if pgrep -f "iTerm.app" > /dev/null; then
 fi
 
 # ============================================================================
-# Configure tmux for iTerm2 compatibility
-# ============================================================================
-# allow-passthrough: Required for imgcat inline images through tmux panes.
-# Without this, iTerm2 image escape sequences are blocked and show as popups.
-# mouse: Enables mouse clicking on tmux tabs/panes.
-# allow-rename off: Prevents tmux from overwriting our custom window names.
-tmux -L "$TMUX_SOCKET" set -g allow-passthrough on 2>/dev/null
-tmux -L "$TMUX_SOCKET" set -g mouse on 2>/dev/null
-tmux -L "$TMUX_SOCKET" set-option -g allow-rename off 2>/dev/null
-tmux -L "$TMUX_SOCKET" set-window-option -g automatic-rename off 2>/dev/null
-
-# ============================================================================
 # LCARS tmux session (created synchronously — used by fleet monitor)
 # ============================================================================
 LCARS_SESSION="${TEAM_ID}-lcars"
@@ -247,6 +235,18 @@ if ! tmux -L "$TMUX_SOCKET" has-session -t "$LCARS_SESSION" 2>/dev/null; then
 else
     echo "  LCARS session already exists: $LCARS_SESSION"
 fi
+
+# ============================================================================
+# Configure tmux for iTerm2 compatibility
+# ============================================================================
+# MUST run AFTER new-session so the tmux server exists on this socket.
+# allow-passthrough: Required for imgcat inline images through tmux panes.
+# mouse: Enables mouse clicking on tmux tabs/panes.
+# allow-rename off: Prevents tmux from overwriting our custom window names.
+tmux -L "$TMUX_SOCKET" set -g allow-passthrough on 2>/dev/null
+tmux -L "$TMUX_SOCKET" set -g mouse on 2>/dev/null
+tmux -L "$TMUX_SOCKET" set-option -g allow-rename off 2>/dev/null
+tmux -L "$TMUX_SOCKET" set-window-option -g automatic-rename off 2>/dev/null
 
 # ============================================================================
 # Pre-initialize agent panel JSON files
