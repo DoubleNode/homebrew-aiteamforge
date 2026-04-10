@@ -319,10 +319,11 @@ install_shell_environment() {
         success "iTerm2 shell integration already installed"
     fi
 
-    # Suppress "Allow terminal-initiated display?" prompts globally.
-    # Shell integration alone isn't enough — iTerm2 also needs this pref
-    # set so inline images (imgcat) and title changes work without prompts.
+    # Suppress iTerm2 permission prompts for inline images and display changes.
+    # imgcat uses the 1337;File= protocol which iTerm2 treats as a "download" —
+    # without these prefs, every imgcat call triggers "Allow?" dialogs.
     if command -v defaults &>/dev/null; then
+        defaults write com.googlecode.iterm2 NoSyncSuppressDownloadConfirmation -bool true 2>/dev/null
         defaults write com.googlecode.iterm2 NoSyncSuppressBroadcastInputWarning -bool true 2>/dev/null
     fi
 
