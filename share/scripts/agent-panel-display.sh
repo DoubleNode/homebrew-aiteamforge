@@ -7,16 +7,19 @@
 # Example: agent-panel-display.sh firebase-ops
 
 SESSION_CODE="${1:?Usage: agent-panel-display.sh <session-code>}"
-# Resolve avatars directory: installed env → dev-team source → homebrew cellar → empty
-if [[ -n "$AITEAMFORGE_DIR" && -d "$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars" ]]; then
-    AVATARS_DIR="$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars"
-elif [[ -d "$HOME/dev-team/fleet-monitor/server/public/avatars" ]]; then
-    AVATARS_DIR="$HOME/dev-team/fleet-monitor/server/public/avatars"
-elif [[ -n "$AITEAMFORGE_HOME" && -d "$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars" ]]; then
-    AVATARS_DIR="$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars"
-else
-    AVATARS_DIR=""
-fi
+# Resolve avatars directory (checked in priority order):
+#   1. Flat avatars pool created by install-team.sh ($AITEAMFORGE_DIR/avatars/)
+#   2. Fleet monitor avatars in installed env ($AITEAMFORGE_DIR/fleet-monitor/...)
+#   3. Dev-team source tree (development machines)
+#   4. Homebrew cellar (AITEAMFORGE_HOME)
+AVATARS_DIR=""
+for _candidate in \
+    "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/avatars}" \
+    "${AITEAMFORGE_DIR:+$AITEAMFORGE_DIR/fleet-monitor/server/public/avatars}" \
+    "$HOME/dev-team/fleet-monitor/server/public/avatars" \
+    "${AITEAMFORGE_HOME:+$AITEAMFORGE_HOME/fleet-monitor/server/public/avatars}"; do
+    [[ -n "$_candidate" && -d "$_candidate" ]] && { AVATARS_DIR="$_candidate"; break; }
+done
 # Resolve imgcat from multiple possible locations:
 #   1. iTerm2 shell integration (standard install path)
 #   2. System-installed imgcat (e.g., via homebrew or manual install)

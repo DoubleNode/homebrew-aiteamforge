@@ -177,6 +177,19 @@ install_helper_scripts() {
         warning "update_claude_agent.sh not found at: $agent_script_src (skipping)"
     fi
 
+    # Copy scripts/ directory so team startup scripts can find agent-panel-display.sh,
+    # iterm2_window_manager.py, and other runtime helpers at $AITEAMFORGE_DIR/scripts/
+    local scripts_dest="$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$scripts_dest"
+    for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
+                  set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
+                  kanban-backup.py fleet-reporter.sh init-agent-panel-json.py; do
+        if [ -f "$scripts_src/$helper" ]; then
+            cp "$scripts_src/$helper" "$scripts_dest/$helper"
+            chmod +x "$scripts_dest/$helper"
+        fi
+    done
+
     success "Installed helper scripts"
 }
 
