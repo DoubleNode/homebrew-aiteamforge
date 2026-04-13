@@ -335,6 +335,45 @@ EOF
     echo "  ✓ $TEAM_STARTUP_SCRIPT (basic version)"
 fi
 
+CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
+CONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
+
+if [[ -f "$CONNECT_TEMPLATE" ]]; then
+    # Step 1: single-line substitutions via sed
+    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+        -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+        -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
+        -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+        -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+        -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
+
+    # Step 2: multi-line substitution for per-agent window names via Python
+    # {{TEAM_AGENT_WINDOWS_CONFIG}} may contain newlines which sed cannot handle
+    python3 - "${CONNECT_SCRIPT}.tmp" "$CONNECT_SCRIPT" <<PYEOF
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+# Strip trailing newline then re-add one so the placeholder line is cleanly replaced
+windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
+if windows_config:
+    windows_config += '\n'
+with open(src) as f:
+    content = f.read()
+content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
+# Fallback: replace without trailing newline in case template line ending differs
+if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
+    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
+with open(dst, 'w') as f:
+    f.write(content)
+PYEOF
+    rm -f "${CONNECT_SCRIPT}.tmp"
+    chmod +x "$CONNECT_SCRIPT"
+    echo "  ✓ ${TEAM_ID}-connect.sh"
+else
+    echo "  ⚠️  Template not found: team-connect.sh.template (skipping connect script)"
+fi
+
 if [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
     sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
@@ -1733,6 +1772,7 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "Team directory: $TEAM_DIR"
 echo "Startup script: $AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
+echo "Connect script: $AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
 echo "Shutdown script: $AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 echo "Kanban board: $TEAM_BOARD"
 echo ""

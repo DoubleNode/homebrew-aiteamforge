@@ -2,9 +2,9 @@ class Aiteamforge < Formula
   desc "AITeamForge - AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
-      tag: "v0.8.25"
+      tag: "v0.8.26"
   license "MIT"
-  version "0.8.25"
+  version "0.8.26"
 
   # Core dependencies required for aiteamforge to function
   depends_on "python@3"
@@ -106,6 +106,7 @@ class Aiteamforge < Formula
     assert_predicate libexec/"libexec/installers", :exist?
     assert_predicate libexec/"libexec/lib", :exist?
     assert_predicate libexec/"share/templates", :exist?
+    assert_predicate libexec/"share/templates/team-connect.sh.template", :exist?
     assert_predicate libexec/"share/teams", :exist?
 
     # Verify library files exist
