@@ -5,6 +5,7 @@
       "Guid": "AITEAMFORGE-LCARS-WEB-0001-000000000001",
       "Custom Command": "Browser",
       "Initial URL": "http://localhost:8080",
+      "Mouse Reporting": true,
       "Tags": [
         "aiteamforge"
       ],
@@ -19,6 +20,7 @@
     {
       "Name": "Agent Panel",
       "Guid": "AITEAMFORGE-AGENT-PANEL-0001-000000000001",
+      "Mouse Reporting": true,
       "Tags": [
         "aiteamforge"
       ]
