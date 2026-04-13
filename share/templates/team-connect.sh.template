@@ -136,7 +136,7 @@ _first_agent="${AGENTS[1]}"
 echo "  Checking tmux:   ${TEAM_ID}-${_first_agent} on socket ${TMUX_SOCKET} ..."
 # shellcheck disable=SC2029
 if ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
-    "tmux -L ${TMUX_SOCKET} has-session -t ${TEAM_ID}-${_first_agent}" 2>/dev/null; then
+    "/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} has-session -t ${TEAM_ID}-${_first_agent}'" 2>/dev/null; then
     _tmux_ok=true
     echo "    ✓ tmux session found"
 else
@@ -208,7 +208,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             --window-title "$ITERM_WINDOW_NAME" \
             --profile "LCARS Web" \
             --tab-name "LCARS" \
-            --command "export ITERM_TAB_TITLE='LCARS' && ssh -t ${HOST} \"tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars\"" \
+            --command "export ITERM_TAB_TITLE='LCARS' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars'\"" \
             2>&1 )
         _lcars_tab_exit=$?
         if [[ $_lcars_tab_exit -eq 0 ]]; then
@@ -233,7 +233,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
             --tab-name "LCARS" \
-            --command "export ITERM_TAB_TITLE='LCARS' && ssh -t ${HOST} \"tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars\"" \
+            --command "export ITERM_TAB_TITLE='LCARS' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars'\"" \
             2>>"$ITERM_CONNECT_LOG" || true
     fi
     sleep 0.3
@@ -249,7 +249,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
             --tab-name "$agent" \
-            --command "export ITERM_TAB_TITLE='${agent}' && ssh -t ${HOST} \"tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}\"" \
+            --command "export ITERM_TAB_TITLE='${agent}' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}'\"" \
             2>>"$ITERM_CONNECT_LOG"
         # shellcheck disable=SC2181
         if [[ $? -ne 0 ]]; then
@@ -297,7 +297,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
                 --action split-agent-panel \
                 --window-title "$ITERM_WINDOW_NAME" \
                 --tab-name "$agent" \
-                --command "ssh -t ${HOST} \"AITEAMFORGE_DIR=${AITEAMFORGE_DIR} KANBAN_DIR=${AITEAMFORGE_DIR}/kanban ${AITEAMFORGE_DIR}/scripts/agent-panel-display.sh ${TEAM_ID}-${agent}\"" \
+                --command "ssh -t ${HOST} \"/bin/zsh -lc 'AITEAMFORGE_DIR=${AITEAMFORGE_DIR} KANBAN_DIR=${AITEAMFORGE_DIR}/kanban ${AITEAMFORGE_DIR}/scripts/agent-panel-display.sh ${TEAM_ID}-${agent}'\"" \
                 2>>"$ITERM_CONNECT_LOG"
             # shellcheck disable=SC2181
             if [[ $? -eq 0 ]]; then
@@ -338,7 +338,7 @@ tell application "Terminal"
         end tell
     end tell
     delay 0.5
-    do script "printf '\\\\033]0;LCARS\\\\007' && ssh -t ${HOST} tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars" in front window
+    do script "printf '\\\\033]0;LCARS\\\\007' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars'\"" in front window
 end tell
 APPLESCRIPT
     sleep 0.5
@@ -353,7 +353,7 @@ tell application "Terminal"
         end tell
     end tell
     delay 0.5
-    do script "printf '\\\\033]0;${agent}\\\\007' && ssh -t ${HOST} tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}" in front window
+    do script "printf '\\\\033]0;${agent}\\\\007' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}'\"" in front window
 end tell
 APPLESCRIPT
         sleep 0.5
