@@ -197,7 +197,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     LCARS_BROWSER_SCRIPT="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
     if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
         echo "  Updating LCARS profile URL to http://${HOST}:${LCARS_PORT} ..."
-        python3 "$LCARS_BROWSER_SCRIPT" "http://${HOST}:${LCARS_PORT}" 2>/dev/null
+        "$VENV_PYTHON" "$LCARS_BROWSER_SCRIPT" "http://${HOST}:${LCARS_PORT}" 2>/dev/null
     fi
 
     LCARS_OPENED=false

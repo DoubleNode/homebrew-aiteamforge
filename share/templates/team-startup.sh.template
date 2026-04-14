@@ -131,16 +131,81 @@ VENV_PYTHON="$HOME/.aiteamforge/venv/bin/python3"
 [[ ! -x "$VENV_PYTHON" ]] && VENV_PYTHON="python3"
 
 # ============================================================================
+# Helper: ensure iTerm2 is running and its Python API is ready.
+# Returns 0 if API is ready, 1 if iTerm2 is unavailable or timed out.
+# Sets ITERM2_AVAILABLE=true|false for callers.
+# ============================================================================
+ensure_iterm2_ready() {
+    # Already inside iTerm2 — nothing to launch.
+    if [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
+        ITERM2_AVAILABLE=true
+        return 0
+    fi
+
+    # iTerm2 not installed — can't launch it.
+    if [[ ! -d "/Applications/iTerm.app" ]]; then
+        echo "  iTerm2 not installed — skipping iTerm2 tab creation."
+        ITERM2_AVAILABLE=false
+        return 1
+    fi
+
+    # Launch iTerm2 if it isn't already running.
+    if ! pgrep -f "iTerm.app" > /dev/null 2>&1; then
+        echo "  iTerm2 not running — launching..."
+        open -a iTerm.app
+        # Poll until the process appears (max 10s).
+        local _elapsed=0
+        while ! pgrep -f "iTerm.app" > /dev/null 2>&1; do
+            sleep 1
+            _elapsed=$((_elapsed + 1))
+            if [[ $_elapsed -ge 10 ]]; then
+                echo "  iTerm2 did not start within 10s — falling back to Terminal.app."
+                ITERM2_AVAILABLE=false
+                return 1
+            fi
+        done
+        echo "  iTerm2 process running (${_elapsed}s)."
+    fi
+
+    # Probe the Python API: attempt a minimal connection and exit.
+    # Retry for up to ~15s total (5 attempts x ~3s each).
+    echo "  Waiting for iTerm2 Python API..."
+    local _attempt=0
+    while [[ $_attempt -lt 5 ]]; do
+        if "$VENV_PYTHON" - <<'PYEOF' 2>/dev/null
+import asyncio, iterm2
+async def _probe(c): pass
+iterm2.run_until_complete(_probe, retry=False)
+PYEOF
+        then
+            echo "  iTerm2 API ready."
+            ITERM2_AVAILABLE=true
+            ITERM2_API_PROBED=true
+            return 0
+        fi
+        _attempt=$((_attempt + 1))
+        echo "  API not ready yet (attempt ${_attempt}/5) — retrying in 3s..."
+        sleep 3
+    done
+
+    echo "  iTerm2 API did not become ready — falling back to Terminal.app."
+    ITERM2_AVAILABLE=false
+    return 1
+}
+
+# ============================================================================
 # Start
 # ============================================================================
 [[ -t 1 ]] && clear
 
 # ============================================================================
-# FIRST: Capture the current iTerm2 window IMMEDIATELY before user can switch.
-# This prevents race conditions if the user switches windows during startup.
-# Must happen before the banner so there is minimal delay after script launch.
+# FIRST: Ensure iTerm2 is running and its Python API is ready.
+# This launches iTerm2 if needed and waits for the API before any tab ops.
+# Falls back gracefully — sets ITERM2_AVAILABLE for the tab-creation block.
 # ============================================================================
-if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+ensure_iterm2_ready
+
+if [[ "$ITERM2_AVAILABLE" == "true" ]]; then
     echo "  Capturing current window..."
     "$VENV_PYTHON" "$WM" --action init-team-window --window-title "$ITERM_WINDOW_NAME" 2>>"$ITERM_STARTUP_LOG"
     if [[ $? -ne 0 ]]; then
@@ -164,7 +229,7 @@ echo ""
 # Ensure LCARS Web profile exists in iTerm2
 LCARS_PROFILE_SCRIPT="$AITEAMFORGE_DIR/scripts/create-lcars-profile.py"
 if [[ -f "$LCARS_PROFILE_SCRIPT" ]]; then
-    python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
+    "$VENV_PYTHON" "$LCARS_PROFILE_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
 fi
 
 # ============================================================================
@@ -285,12 +350,12 @@ fi
 echo ""
 echo "  Creating terminal tabs..."
 
-if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+if [[ "$ITERM2_AVAILABLE" == "true" ]]; then
 
     # Set the LCARS Web profile URL for the inline browser tab
     LCARS_BROWSER_SCRIPT="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
     if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
-        python3 "$LCARS_BROWSER_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
+        "$VENV_PYTHON" "$LCARS_BROWSER_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
     fi
 
     # LCARS kanban dashboard — prefer iTerm2 inline browser, fall back to system browser
@@ -354,9 +419,17 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     echo ""
     echo "  Adding agent panels..."
 
-    # Wait for iTerm2 Python API to become ready (may lag after launch)
+    # Wait for iTerm2 Python API to become ready (may lag after launch).
+    # Short-circuit to 2 attempts if ensure_iterm2_ready already confirmed
+    # the API via its probe-success branch — avoids redundant ~10s wait on
+    # the common fresh-launch happy path. Tab creation can still race, so
+    # we don't skip the probe entirely.
     _api_ready=false
-    for _wait in 1 2 3 4 5; do
+    _probe_max=5
+    if [[ "${ITERM2_API_PROBED:-false}" == "true" ]]; then
+        _probe_max=2
+    fi
+    for _wait in $(seq 1 "$_probe_max"); do
         if "$VENV_PYTHON" "$WM" \
             --action select-tab \
             --window-title "$ITERM_WINDOW_NAME" \
@@ -365,11 +438,11 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             _api_ready=true
             break
         fi
-        echo "    ⏳ Waiting for iTerm2 API (attempt $_wait/5)..."
+        echo "    ⏳ Waiting for iTerm2 API (attempt $_wait/${_probe_max})..."
         sleep 2
     done
     if [[ "$_api_ready" != "true" ]]; then
-        echo "    ⚠️  iTerm2 API not ready after 10s — agent panels may not open"
+        echo "    ⚠️  iTerm2 API not ready after $((_probe_max * 2))s — agent panels may not open"
     fi
 
     for agent in "${AGENTS[@]}"; do
@@ -408,6 +481,10 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
 else
     # Terminal.app fallback: attach to each tmux session in a new tab
     echo "  iTerm2 not running — using Terminal.app"
+    echo "  Note: LCARS inline web tab is unavailable without iTerm2."
+    echo "        Opening LCARS in your default browser instead..."
+    open "http://localhost:$LCARS_PORT" 2>/dev/null || \
+        echo "        (open failed — visit http://localhost:$LCARS_PORT manually)"
     for agent in "${AGENTS[@]}"; do
         session_name="${TEAM_ID}-${agent}"
         echo "  Opening tab: $agent"

@@ -659,9 +659,78 @@ async def main_async(args):
         if args.action == "create-tab":
             print("Using AppleScript-only fallback for tab creation...")
             tab = await _create_tab_applescript(None, None, args.profile, args.tab_name, args.command, args.window_title)
-            if tab is not None:
-                return
-            sys.exit(1)
+            if tab is None:
+                sys.exit(1)
+
+            # AppleScript succeeded.  Try to reconnect the Python API so we can
+            # back-fill user.tab_name on the newly created tab — this lets later
+            # select-tab and split-agent-panel calls find the tab by name.
+            # Simple retry: up to 5 attempts, 1 s apart.  Give up silently if
+            # the API is still unavailable (the tab still exists, lookups will
+            # fall back to titleOverride / session-name strategies).
+            if args.tab_name:
+                reconnected = None
+                for _retry in range(5):
+                    await asyncio.sleep(1)
+                    try:
+                        reconnected = await asyncio.wait_for(
+                            iterm2.Connection.async_create(),
+                            timeout=3.0
+                        )
+                        break
+                    except Exception:
+                        pass
+
+                if reconnected:
+                    try:
+                        app = await iterm2.async_get_app(reconnected)
+                        # Walk all tabs in all windows to find the newly created one.
+                        # We identify it by titleOverride or session name matching
+                        # args.tab_name (AppleScript set the session name above).
+                        # Skip tabs that already have user.tab_name set — they are
+                        # pre-existing tabs with the same display name, not the new one.
+                        # Collect all candidates first, then pick the last one (newest).
+                        candidates_found = []
+                        for window in app.windows:
+                            for candidate in window.tabs:
+                                matched = False
+                                already_labelled = False
+                                try:
+                                    existing = await candidate.async_get_variable("user.tab_name")
+                                    if existing == args.tab_name:
+                                        already_labelled = True
+                                except Exception:
+                                    pass
+                                if already_labelled:
+                                    continue
+                                try:
+                                    ov = await candidate.async_get_variable("titleOverride")
+                                    if ov == args.tab_name:
+                                        matched = True
+                                except Exception:
+                                    pass
+                                if not matched and candidate.current_session:
+                                    try:
+                                        sn = await candidate.current_session.async_get_variable("name")
+                                        if sn == args.tab_name:
+                                            matched = True
+                                    except Exception:
+                                        pass
+                                if matched:
+                                    candidates_found.append(candidate)
+                        # Use the last match — iTerm2 appends new tabs at the end.
+                        if candidates_found:
+                            target = candidates_found[-1]
+                            try:
+                                await target.async_set_variable("user.tab_name", args.tab_name)
+                                print(f"Back-filled user.tab_name='{args.tab_name}' after AppleScript tab creation")
+                            except Exception as _e:
+                                print(f"Warning: could not back-fill user.tab_name: {_e}", file=sys.stderr)
+                    except Exception as _e:
+                        print(f"Warning: API reconnect succeeded but backfill failed: {_e}", file=sys.stderr)
+                else:
+                    print(f"Warning: iTerm2 API unavailable after AppleScript tab creation — user.tab_name not set", file=sys.stderr)
+            return
         else:
             print("Error: iTerm2 API unavailable and no fallback for this action.", file=sys.stderr)
             sys.exit(1)

@@ -1115,7 +1115,7 @@ if [ $? != 0 ]; then
     # Set session-specific variables for dynamic status-right
     $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
     $TMUX_CMD set -t $SESSION_CODE @claude_agent "{terminal_id}"
-    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | #{{@developer}}  "
+    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  #h  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
     $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"

@@ -27,6 +27,7 @@ Exit codes:
 import json
 import os
 import re
+import socket
 import sys
 import time
 from pathlib import Path
@@ -748,6 +749,7 @@ def main():
             "avatar":       character,
             "worktree":     "",
             "amb_handle":   amb_handle,
+            "hostname":     socket.gethostname().split(".")[0],
             "timestamp":    timestamp,
         }
 

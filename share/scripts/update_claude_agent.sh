@@ -13,9 +13,9 @@ if [ -n "$TMUX" ]; then
     # Update status-right to show both agent and worktree
     worktree=$(tmux show-options -v @current_worktree 2>/dev/null)
     if [ -n "$worktree" ]; then
-        tmux set-option status-right "🌿 $worktree | 🤖 $AGENT_NAME  "
+        tmux set-option status-right "🌿 $worktree | 🤖 $AGENT_NAME | 🖥  #h  "
     else
-        tmux set-option status-right "🤖 $AGENT_NAME  "
+        tmux set-option status-right "🤖 $AGENT_NAME | 🖥  #h  "
     fi
 
     # Also write to file for persistence

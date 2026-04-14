@@ -194,13 +194,76 @@ if [[ $PREFLIGHT_ERRORS -gt 0 ]]; then
 fi
 
 # ============================================================================
+# Helper: ensure iTerm2 is running and its Python API is ready.
+# Returns 0 if API is ready, 1 if iTerm2 is unavailable or timed out.
+# Sets ITERM2_AVAILABLE=true|false for callers.
+# ============================================================================
+ensure_iterm2_ready() {
+    # Already inside iTerm2 — nothing to launch.
+    if [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
+        ITERM2_AVAILABLE=true
+        return 0
+    fi
+
+    # iTerm2 not installed — can't launch it.
+    if [[ ! -d "/Applications/iTerm.app" ]]; then
+        echo "  iTerm2 not installed — skipping iTerm2 tab creation."
+        ITERM2_AVAILABLE=false
+        return 1
+    fi
+
+    # Launch iTerm2 if it isn't already running.
+    if ! pgrep -f "iTerm.app" > /dev/null 2>&1; then
+        echo "  iTerm2 not running — launching..."
+        open -a iTerm.app
+        # Poll until the process appears (max 10s).
+        local _elapsed=0
+        while ! pgrep -f "iTerm.app" > /dev/null 2>&1; do
+            sleep 1
+            _elapsed=$((_elapsed + 1))
+            if [[ $_elapsed -ge 10 ]]; then
+                echo "  iTerm2 did not start within 10s — falling back to Terminal.app."
+                ITERM2_AVAILABLE=false
+                return 1
+            fi
+        done
+        echo "  iTerm2 process running (${_elapsed}s)."
+    fi
+
+    # Probe the Python API: attempt a minimal connection and exit.
+    # Retry for up to ~15s total (5 attempts x ~3s each).
+    echo "  Waiting for iTerm2 Python API..."
+    local _attempt=0
+    while [[ $_attempt -lt 5 ]]; do
+        if "$VENV_PYTHON" - <<'PYEOF' 2>/dev/null
+import asyncio, iterm2
+async def _probe(c): pass
+iterm2.run_until_complete(_probe, retry=False)
+PYEOF
+        then
+            echo "  iTerm2 API ready."
+            ITERM2_AVAILABLE=true
+            ITERM2_API_PROBED=true
+            return 0
+        fi
+        _attempt=$((_attempt + 1))
+        echo "  API not ready yet (attempt ${_attempt}/5) — retrying in 3s..."
+        sleep 3
+    done
+
+    echo "  iTerm2 API did not become ready — falling back to Terminal.app."
+    ITERM2_AVAILABLE=false
+    return 1
+}
+
+# ============================================================================
 # Start
 # ============================================================================
 
 # Set LCARS Web profile URL for inline browser tab
 LCARS_PROFILE_SCRIPT="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
 if [[ -f "$LCARS_PROFILE_SCRIPT" ]]; then
-    python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
+    "$VENV_PYTHON" "$LCARS_PROFILE_SCRIPT" "http://localhost:$LCARS_PORT" 2>/dev/null
 fi
 
 [[ -t 1 ]] && clear
@@ -216,8 +279,14 @@ echo "   tmux socket: $TMUX_SOCKET"
 echo "   Agents:      ${AGENTS[*]}"
 echo ""
 
-# Capture iTerm2 window
-if pgrep -f "iTerm.app" > /dev/null; then
+# ============================================================================
+# Ensure iTerm2 is running and its Python API is ready.
+# Launches iTerm2 if needed and waits for the API before any tab ops.
+# Falls back gracefully — sets ITERM2_AVAILABLE for the tab-creation block.
+# ============================================================================
+ensure_iterm2_ready
+
+if [[ "$ITERM2_AVAILABLE" == "true" ]]; then
     echo "  Capturing current window..."
     "$VENV_PYTHON" "$WM" --action init-team-window --window-title "$ITERM_WINDOW_NAME" 2>>"$ITERM_STARTUP_LOG"
 fi
@@ -335,14 +404,14 @@ fi
 echo ""
 echo "⭐ Creating terminal tabs..."
 
-if pgrep -f "iTerm.app" > /dev/null; then
+if [[ "$ITERM2_AVAILABLE" == "true" ]]; then
 
     # LCARS kanban dashboard — prefer iTerm2 inline browser, fall back to system browser
     LCARS_SETTER="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
     LCARS_OPENED=false
 
     if [[ -f "$LCARS_SETTER" ]]; then
-        python3 "$LCARS_SETTER" "http://localhost:$LCARS_PORT" 2>/dev/null
+        "$VENV_PYTHON" "$LCARS_SETTER" "http://localhost:$LCARS_PORT" 2>/dev/null
 
         # Write target team for LCARS auto-redirect
         if [[ -d "$AITEAMFORGE_DIR/lcars-ui" ]]; then
@@ -407,12 +476,24 @@ if pgrep -f "iTerm.app" > /dev/null; then
     for agent in "${AGENTS[@]}"; do
         agent_panel_script="$AITEAMFORGE_DIR/scripts/agent-panel-display.sh"
         if [[ -f "$agent_panel_script" ]]; then
-            "$VENV_PYTHON" "$WM" \
-                --action split-agent-panel \
-                --window-title "$ITERM_WINDOW_NAME" \
-                --tab-name "$agent" \
-                --command "AITEAMFORGE_DIR='${AITEAMFORGE_DIR}' KANBAN_DIR='${KANBAN_DIR}' $agent_panel_script ${TEAM_ID}-${agent}" \
-                2>>"$ITERM_STARTUP_LOG"
+            _panel_ok=false
+            for _attempt in 1 2 3; do
+                "$VENV_PYTHON" "$WM" \
+                    --action split-agent-panel \
+                    --window-title "$ITERM_WINDOW_NAME" \
+                    --tab-name "$agent" \
+                    --command "AITEAMFORGE_DIR='${AITEAMFORGE_DIR}' KANBAN_DIR='${KANBAN_DIR}' $agent_panel_script ${TEAM_ID}-${agent}" \
+                    2>>"$ITERM_STARTUP_LOG"
+                if [[ $? -eq 0 ]]; then
+                    _panel_ok=true
+                    break
+                fi
+                echo "    ⚠️  Panel split attempt $_attempt failed for $agent, retrying..." >&2
+                sleep 2
+            done
+            if [[ "$_panel_ok" != "true" ]]; then
+                echo "    ❌ Failed to create agent panel: $agent (see $ITERM_STARTUP_LOG)"
+            fi
         fi
         sleep 0.3
     done
@@ -427,7 +508,10 @@ if pgrep -f "iTerm.app" > /dev/null; then
         2>>"$ITERM_STARTUP_LOG"
 else
     # No iTerm2 — sessions are ready, print attach commands for manual use
-    echo "  iTerm2 not running — attach manually with:"
+    echo "  iTerm2 not running — using Terminal.app fallback."
+    echo "  Note: LCARS inline web tab is unavailable without iTerm2."
+    echo "        LCARS is available at: http://localhost:$LCARS_PORT"
+    echo "  Attach manually with:"
     for agent in "${AGENTS[@]}"; do
         echo "    tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}"
     done
