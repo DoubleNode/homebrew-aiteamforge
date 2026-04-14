@@ -29,14 +29,46 @@ Usage: python3 create-lcars-profile.py [url]
 """
 
 import json
+import plistlib
+import subprocess
 import sys
 from pathlib import Path
 
 DYNAMIC_PROFILES_DIR = Path.home() / "Library" / "Application Support" / "iTerm2" / "DynamicProfiles"
 PROFILE_FILE = DYNAMIC_PROFILES_DIR / "aiteamforge-lcars.json"
+ITERM_PLIST = Path.home() / "Library" / "Preferences" / "com.googlecode.iterm2.plist"
 
 LCARS_WEB_GUID = "AITEAMFORGE-LCARS-WEB-0001-000000000001"
 AGENT_PANEL_GUID = "AITEAMFORGE-AGENT-PANEL-0001-000000000001"
+
+
+def _strip_stale_plist_entry() -> None:
+    """Self-heal installs that were hit by an earlier workaround which
+    injected LCARS Web directly into the plist's 'New Bookmarks'. If the
+    GUID exists in both the plist and the Dynamic Profile file, iTerm2
+    pops a 'Dynamic Profiles Error — GUID collision' dialog on every
+    team startup. Strip the plist copy here so the installer alone can
+    clean up, without requiring a team startup to trigger it.
+    """
+    if not ITERM_PLIST.exists():
+        return
+    try:
+        data = plistlib.loads(ITERM_PLIST.read_bytes())
+    except Exception:
+        return
+    bookmarks = data.get("New Bookmarks", []) or []
+    filtered = [
+        b for b in bookmarks
+        if b.get("Guid") != LCARS_WEB_GUID and b.get("Name") != "LCARS Web"
+    ]
+    if len(filtered) == len(bookmarks):
+        return
+    data["New Bookmarks"] = filtered
+    tmp = ITERM_PLIST.with_suffix(ITERM_PLIST.suffix + ".aiteamforge.tmp")
+    tmp.write_bytes(plistlib.dumps(data))
+    tmp.replace(ITERM_PLIST)
+    subprocess.run(["killall", "cfprefsd"], check=False, stderr=subprocess.DEVNULL)
+    print("cleaned up stale LCARS Web from plist (legacy workaround)")
 
 
 def create_profiles(url: str) -> bool:
@@ -47,6 +79,7 @@ def create_profiles(url: str) -> bool:
     installs (verified against M1Pro and M3Pro setups).
     """
     DYNAMIC_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    _strip_stale_plist_entry()
 
     data = {
         "Profiles": [

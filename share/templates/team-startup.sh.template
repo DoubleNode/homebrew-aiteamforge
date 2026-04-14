@@ -136,6 +136,21 @@ VENV_PYTHON="$HOME/.aiteamforge/venv/bin/python3"
 # Sets ITERM2_AVAILABLE=true|false for callers.
 # ============================================================================
 ensure_iterm2_ready() {
+    # Headless / SSH context — skip iTerm2 tab creation entirely.
+    # If SSH_CONNECTION is set we are running in a remote shell; even
+    # though iTerm2 may be running locally on this Mac, the SSH session
+    # cannot bind to visible window state and operations like
+    # init-team-window hang waiting for a GUI context that never exists.
+    # The backend pieces (tmux sessions, LCARS server) still run — they
+    # don't need iTerm2 — so team-connect.sh from another machine can
+    # attach to them after this completes.
+    if [[ -n "$SSH_CONNECTION" ]]; then
+        echo "  SSH session detected — skipping iTerm2 tab creation."
+        echo "  (Backend tmux sessions and LCARS server will still start.)"
+        ITERM2_AVAILABLE=false
+        return 1
+    fi
+
     # Already inside iTerm2 — nothing to launch.
     if [[ "$TERM_PROGRAM" == "iTerm.app" ]]; then
         ITERM2_AVAILABLE=true
