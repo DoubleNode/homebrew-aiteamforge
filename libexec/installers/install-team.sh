@@ -374,6 +374,25 @@ else
     echo "  ⚠️  Template not found: team-connect.sh.template (skipping connect script)"
 fi
 
+# Disconnect script — symmetric counterpart to connect. Purely local
+# cleanup: closes the iTerm2 connect window and resets the LCARS Web
+# profile URL back to localhost. Simple single-pass sed substitution —
+# no per-agent windows config needed.
+DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
+DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-disconnect.sh"
+
+if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
+    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+        -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+        -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
+    chmod +x "$DISCONNECT_SCRIPT"
+    echo "  ✓ ${TEAM_ID}-disconnect.sh"
+else
+    echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping disconnect script)"
+fi
+
 if [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
     sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
