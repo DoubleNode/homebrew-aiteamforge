@@ -12325,9 +12325,7 @@ async function updateEpic() {
         populateEpicFilterOptions();
 
         // Also reload the queue to update epic names on assigned items
-        if (typeof loadMissionQueue === 'function') {
-            loadMissionQueue();
-        }
+        refreshData();
     } catch (e) {
         showEpicError('epic-edit-error', e.message);
     }
@@ -12355,9 +12353,7 @@ async function confirmDeleteEpic(epicId) {
         populateEpicFilterOptions();
 
         // Reload queue to remove deleted epic badges from items
-        if (typeof loadMissionQueue === 'function') {
-            loadMissionQueue();
-        }
+        refreshData();
     } catch (e) {
         alert(`Error deleting epic: ${e.message}`);
     }
@@ -12652,10 +12648,8 @@ async function selectEpicForItem(epicId, epicName) {
 
         hideEpicAssignModal();
 
-        // Refresh the queue to show new badge (await for immediate update)
-        if (typeof loadMissionQueue === 'function') {
-            await loadMissionQueue();
-        }
+        // Refresh the queue to show new badge
+        refreshData();
 
         // Refresh epics if on that section
         const epicsSection = document.querySelector('.epics-section');
@@ -12695,10 +12689,8 @@ async function removeEpicFromItem() {
 
         hideEpicAssignModal();
 
-        // Refresh the queue (await for immediate update)
-        if (typeof loadMissionQueue === 'function') {
-            await loadMissionQueue();
-        }
+        // Refresh the queue
+        refreshData();
 
         // Refresh epics if on that section
         const epicsSection = document.querySelector('.epics-section');
@@ -16508,6 +16500,12 @@ async function loadServerConfig() {
                 CONFIG.team = data.team;
                 CONFIG.dataPath = `data/${data.team}-board.json`;
                 console.log(`LCARS configured for team: ${data.team}`);
+            }
+            if (data.hostname) {
+                const hostnameEl = document.getElementById('server-hostname');
+                if (hostnameEl) {
+                    hostnameEl.textContent = data.hostname.toUpperCase();
+                }
             }
         }
     } catch (e) {

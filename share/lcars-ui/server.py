@@ -18,6 +18,7 @@ import socketserver
 import json
 import os
 import re
+import socket
 import subprocess
 import sys
 import time
@@ -300,6 +301,7 @@ UI_DIR = Path(__file__).parent
 CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
+SERVER_HOSTNAME = socket.gethostname().removesuffix(".local")
 # Team-specific tmp directory — resolved from SESSION_NAME via kanban_utils.
 # Falls back to /tmp/ for unknown sessions.
 LCARS_TMP_DIR = Path(get_lcars_tmp_dir(SESSION_NAME))
@@ -4241,7 +4243,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Error removing item from epic: {e}")
 
     def _update_item_epic_assignment(self, team, item_id, epic_id, epic_name=''):
-        """Update a kanban item with epic assignment"""
+        """Update a kanban item with epic assignment and sync epic itemIds."""
         import fcntl
         board_file = get_board_file(team)
         if not board_file.exists():
@@ -4260,13 +4262,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         item['epicName'] = epic_name
                         break
 
+                # Keep each epic's itemIds list in sync with item.epicId.
+                # Remove from any other epic that still lists it, then add to the target.
+                for epic in data.get('epics', []):
+                    ids = epic.get('itemIds', [])
+                    if epic.get('id') == epic_id:
+                        if item_id not in ids:
+                            ids.append(item_id)
+                            epic['itemIds'] = ids
+                    elif item_id in ids:
+                        epic['itemIds'] = [i for i in ids if i != item_id]
+
                 data['lastUpdated'] = self._get_timestamp()
                 self._atomic_write_json(board_file, data)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _clear_item_epic_assignment(self, team, item_id):
-        """Clear epic assignment from a kanban item"""
+        """Clear epic assignment from a kanban item and sync epic itemIds."""
         import fcntl
         board_file = get_board_file(team)
         if not board_file.exists():
@@ -4286,6 +4299,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         if 'epicName' in item:
                             del item['epicName']
                         break
+
+                for epic in data.get('epics', []):
+                    ids = epic.get('itemIds', [])
+                    if item_id in ids:
+                        epic['itemIds'] = [i for i in ids if i != item_id]
 
                 data['lastUpdated'] = self._get_timestamp()
                 self._atomic_write_json(board_file, data)
@@ -5652,6 +5670,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             "status": "online",
             "session_name": SESSION_NAME,
             "team": LCARS_TEAM,
+            "hostname": SERVER_HOSTNAME,
             "kanban_dir": str(team_kanban_dir),
             "kanban_dir_exists": team_kanban_dir.exists(),
             "ui_dir": str(UI_DIR)

@@ -126,11 +126,6 @@ class RAGEngineManager:
             print("[RAGEngineManager] No config file found, using defaults")
             self._config_data = {}
 
-        # Resolve team rag-data root inside the kanban directory
-        lcars_team = os.environ.get("LCARS_TEAM", "academy")
-        kanban_dir = _TEAM_KANBAN_DIRS.get(lcars_team, Path.home() / "dev-team" / "kanban")
-        rag_data_root = kanban_dir / "rag-data"
-
         # Load engines from config
         engines = self._config_data.get('engines', [])
 
@@ -145,10 +140,6 @@ class RAGEngineManager:
                 if engine_type not in self._engine_registry:
                     print(f"[RAGEngineManager] Unknown engine type: {engine_type}")
                     continue
-
-                # Default data_dir to {kanban_dir}/rag-data/{engine_type}
-                if not config.data_dir:
-                    config.data_dir = str(rag_data_root / engine_type)
 
                 engine_class = self._engine_registry[engine_type]
                 engine = engine_class(config)

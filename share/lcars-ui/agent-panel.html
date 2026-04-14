@@ -94,6 +94,13 @@
         font-weight: 700;
         padding: 3px 10px;
         border-radius: 4px;
+        margin-bottom: 4px;
+    }
+    .hostname-label {
+        font-size: 9px;
+        color: var(--text-secondary);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
         margin-bottom: 12px;
     }
     .waiting {
@@ -138,6 +145,7 @@
             <div class="badge-names" id="badge-names"></div>
         </div>
         <span class="terminal-badge" id="terminal-badge"></span>
+        <div class="hostname-label" id="hostname-label"></div>
     </div>
     <div id="waiting" class="waiting">
         <div class="pulse"></div>
@@ -208,6 +216,8 @@
         }
 
         document.getElementById('terminal-badge').textContent = data.terminal || '';
+        const hostLabel = document.getElementById('hostname-label');
+        hostLabel.textContent = data.hostname ? '@ ' + data.hostname : '';
 
         if (data.avatar && data.team) {
             const img = document.getElementById('avatar');
@@ -231,7 +241,8 @@
             terminal: params.get('terminal'),
             theme: params.get('theme'),
             avatar: params.get('avatar'),
-            amb_handle: params.get('amb_handle')
+            amb_handle: params.get('amb_handle'),
+            hostname: params.get('hostname')
         };
         currentDataStr = JSON.stringify(data);
         applyData(data);

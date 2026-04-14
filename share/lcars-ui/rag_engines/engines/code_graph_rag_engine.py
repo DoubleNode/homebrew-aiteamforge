@@ -14,6 +14,7 @@ from ..provider import RAGEngineProvider, RAGEngineConfig, RAGEngineStatus, Inst
 
 # Code-Graph-RAG defaults
 _DEFAULT_PORT = 9622
+_DEFAULT_DATA_DIR = str(Path.home() / "rag-data" / "code-graph")
 
 
 class CodeGraphRAGEngine(RAGEngineProvider):
@@ -39,6 +40,8 @@ class CodeGraphRAGEngine(RAGEngineProvider):
         """
         if not config.port:
             config.port = _DEFAULT_PORT
+        if not config.data_dir:
+            config.data_dir = _DEFAULT_DATA_DIR
 
         super().__init__(config)
 

@@ -14,6 +14,7 @@ from ..provider import RAGEngineProvider, RAGEngineConfig, RAGEngineStatus, Inst
 
 # LightRAG defaults
 _DEFAULT_PORT = 9621
+_DEFAULT_DATA_DIR = str(Path.home() / "rag-data" / "lightrag")
 
 
 class LightRAGEngine(RAGEngineProvider):
@@ -42,14 +43,8 @@ class LightRAGEngine(RAGEngineProvider):
         # Apply defaults if not set in config
         if not config.port:
             config.port = _DEFAULT_PORT
-
-        # Default to Ollama bindings so fresh installs work without API keys
-        if not config.settings:
-            config.settings = {}
-        config.settings.setdefault("llmBinding", "ollama")
-        config.settings.setdefault("embeddingBinding", "ollama")
-        config.settings.setdefault("llmModel", "mistral-nemo:latest")
-        config.settings.setdefault("embeddingModel", "nomic-embed-text:latest")
+        if not config.data_dir:
+            config.data_dir = _DEFAULT_DATA_DIR
 
         super().__init__(config)
 
@@ -131,22 +126,13 @@ class LightRAGEngine(RAGEngineProvider):
         # Build start command — use the venv's lightrag-server entry point
         venv_bin = str(Path(self._venv_python()).parent)
         data_dir = str(Path(self.config.data_dir).expanduser())
-        settings = self.config.settings or {}
-
         cmd = [
             os.path.join(venv_bin, "lightrag-server"),
             "--port", str(self.config.port),
-            "--working-dir", data_dir,
-            "--llm-binding", settings.get("llmBinding", "ollama"),
-            "--embedding-binding", settings.get("embeddingBinding", "ollama"),
+            "--working-dir", data_dir
         ]
 
-        # LLM backend host is controlled via env var, not CLI flag
-        env = os.environ.copy()
-        if settings.get("llmBindingHost"):
-            env["LLM_BINDING_HOST"] = settings["llmBindingHost"]
-
-        pid = self._spawn_server(cmd, env=env)
+        pid = self._spawn_server(cmd)
         if pid is None:
             return RAGEngineStatus(
                 engine_id=self.id, status="error", health="unhealthy",

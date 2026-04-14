@@ -297,6 +297,17 @@ body {
     z-index: 25;
 }
 
+/* Server hostname nests inside .lcars-version on the same line — no room for a new row */
+.top-sidebar-content .lcars-version .server-hostname {
+    color: var(--lcars-peach);
+    margin-left: 6px;
+    letter-spacing: 1px;
+}
+.top-sidebar-content .lcars-version .server-hostname:not(:empty)::before {
+    content: '· ';
+    color: var(--lcars-blue);
+}
+
 /* Team name inside sidebar, single line, top-right aligned */
 /* Same size/font as stardate, but black. Aligned with stardate vertically */
 .top-sidebar-content .team-name {

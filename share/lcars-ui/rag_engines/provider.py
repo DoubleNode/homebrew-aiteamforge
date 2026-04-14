@@ -136,6 +136,9 @@ class RAGEngineProvider(ABC):
     - to_dict() - Serialize provider info for API responses
     """
 
+    # Shared venv location for all RAG engine packages
+    _VENV_DIR = Path.home() / "rag-data" / "venv"
+
     def __init__(self, config: RAGEngineConfig):
         """
         Initialize the provider with configuration.
@@ -145,36 +148,27 @@ class RAGEngineProvider(ABC):
         """
         self.config = config
 
-    def _rag_data_root(self) -> Path:
-        """Derive the rag-data root from this engine's data_dir (its parent)."""
-        return Path(self.config.data_dir).expanduser().parent
-
-    def _venv_dir(self) -> Path:
-        """Shared venv lives alongside engine data dirs under rag-data/venv."""
-        return self._rag_data_root() / "venv"
-
-    def _venv_python(self) -> str:
+    @classmethod
+    def _venv_python(cls) -> str:
         """Get the path to the venv Python executable, creating the venv if needed."""
-        venv_dir = self._venv_dir()
-        venv_python = venv_dir / "bin" / "python3"
+        venv_python = cls._VENV_DIR / "bin" / "python3"
         if not venv_python.exists():
-            self._ensure_venv()
+            cls._ensure_venv()
         return str(venv_python)
 
-    def _ensure_venv(self) -> bool:
+    @classmethod
+    def _ensure_venv(cls) -> bool:
         """Create the shared RAG engine venv if it doesn't exist."""
-        venv_dir = self._venv_dir()
-        if (venv_dir / "bin" / "python3").exists():
+        if (cls._VENV_DIR / "bin" / "python3").exists():
             return True
         try:
-            venv_dir.parent.mkdir(parents=True, exist_ok=True)
             subprocess.run(
-                [sys.executable, "-m", "venv", str(venv_dir)],
+                [sys.executable, "-m", "venv", str(cls._VENV_DIR)],
                 capture_output=True,
                 text=True,
                 timeout=60
             )
-            return (venv_dir / "bin" / "python3").exists()
+            return (cls._VENV_DIR / "bin" / "python3").exists()
         except (subprocess.TimeoutExpired, OSError):
             return False
 
@@ -299,7 +293,7 @@ class RAGEngineProvider(ABC):
         """
         try:
             # Log stderr to a file so startup failures can be diagnosed
-            log_dir = self._rag_data_root() / "logs"
+            log_dir = Path.home() / "rag-data" / "logs"
             log_dir.mkdir(parents=True, exist_ok=True)
             log_path = log_dir / f"{self.config.id}-stderr.log"
             stderr_file = open(log_path, "a")

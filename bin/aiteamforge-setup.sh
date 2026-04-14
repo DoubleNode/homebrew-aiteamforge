@@ -759,12 +759,98 @@ fi
 # Create LCARS Web profile in iTerm2 (before iTerm2 is started with team scripts)
 # This profile uses iTerm2's built-in browser mode for inline kanban display.
 # Must be created before the user launches team startup scripts.
+#
+# IMPORTANT: Source the script directly from the tap (AITEAMFORGE_HOME) rather
+# than INSTALL_DIR/scripts/. The installers that populate INSTALL_DIR/scripts/
+# run later in this file (install-kanban.sh, install-fleet-monitor.sh), and
+# Fleet Monitor is optional — so relying on INSTALL_DIR caused the profile to
+# be silently skipped on fresh installs. The tap copy is always present.
 if [ -d "/Applications/iTerm.app" ]; then
-  LCARS_PROFILE_SCRIPT="${INSTALL_DIR}/scripts/create-lcars-profile.py"
+  # --------------------------------------------------------------------
+  # iTerm2 Browser Plugin — prerequisite for the LCARS inline tab
+  # --------------------------------------------------------------------
+  # iTerm2 3.5+ ships browser mode as a separately-downloaded bundle
+  # (iTermBrowserPlugin.app, bundle id com.googlecode.iterm2.iTermBrowserPlugin).
+  # Without it, the LCARS Web profile appears in the Profiles menu but
+  # browser-type tabs silently fail to render pages, and the Dynamic
+  # Profile loader drops browser-type profiles tagged internally as
+  # 'Profile Type (Phony)'. Detect-and-install here so fresh installs
+  # get a fully working LCARS tab without the user having to chase
+  # down a popup the first time iTerm2 tries to open a browser tab.
+  _plugin_bundle_id="com.googlecode.iterm2.iTermBrowserPlugin"
+  _plugin_app=""
+  if command -v mdfind >/dev/null 2>&1; then
+    _plugin_app=$(mdfind "kMDItemCFBundleIdentifier == '${_plugin_bundle_id}'" 2>/dev/null | head -1)
+  fi
+  if [ -z "$_plugin_app" ]; then
+    for _candidate in "/Applications/iTermBrowserPlugin.app" "$HOME/Applications/iTermBrowserPlugin.app"; do
+      [ -d "$_candidate" ] && _plugin_app="$_candidate" && break
+    done
+  fi
+
+  if [ -n "$_plugin_app" ]; then
+    echo -e "${GREEN}✓${NC} iTerm2 Browser Plugin (already installed: $_plugin_app)"
+  else
+    echo -e "${BOLD}Downloading iTerm2 Browser Plugin...${NC}"
+    _plugin_url="https://iterm2.com/downloads/browser-plugin/iTermBrowserPlugin-1.0.zip"
+    _plugin_tmpdir=$(mktemp -d -t iterm2-browser-plugin.XXXXXX)
+    _plugin_zip="$_plugin_tmpdir/iTermBrowserPlugin.zip"
+    _plugin_installed=no
+
+    if curl -fsSL --connect-timeout 15 -o "$_plugin_zip" "$_plugin_url"; then
+      # ditto is macOS-native and handles resource forks / xattrs
+      # correctly, unlike unzip, when extracting .app bundles.
+      if ditto -x -k "$_plugin_zip" "$_plugin_tmpdir" 2>/dev/null && \
+         [ -d "$_plugin_tmpdir/iTermBrowserPlugin.app" ]; then
+        # Prefer /Applications if writable, otherwise ~/Applications.
+        # iTerm2 locates the plugin via LaunchServices (mdfind), so any
+        # indexed Applications directory works.
+        _target_dir=""
+        if [ -w "/Applications" ]; then
+          _target_dir="/Applications"
+        else
+          mkdir -p "$HOME/Applications"
+          _target_dir="$HOME/Applications"
+        fi
+        _target="$_target_dir/iTermBrowserPlugin.app"
+        # Remove any stale prior install before copying
+        rm -rf "$_target" 2>/dev/null || true
+        if cp -R "$_plugin_tmpdir/iTermBrowserPlugin.app" "$_target" 2>/dev/null; then
+          # Strip the Gatekeeper quarantine bit or macOS will block
+          # launch with "can't be opened because Apple cannot check".
+          xattr -dr com.apple.quarantine "$_target" 2>/dev/null || true
+          _plugin_installed=yes
+          echo -e "${GREEN}✓${NC} iTerm2 Browser Plugin installed at $_target"
+        else
+          echo -e "${YELLOW}⚠${NC} Could not copy plugin to $_target_dir (permissions?)"
+        fi
+      else
+        echo -e "${YELLOW}⚠${NC} Downloaded plugin zip was malformed or missing .app"
+      fi
+    else
+      echo -e "${YELLOW}⚠${NC} Could not download iTerm2 Browser Plugin from $_plugin_url"
+    fi
+
+    rm -rf "$_plugin_tmpdir" 2>/dev/null || true
+
+    if [ "$_plugin_installed" != "yes" ]; then
+      echo -e "   ${YELLOW}Manual fallback:${NC} download from https://iterm2.com/browser-plugin.html"
+      echo -e "   and drag iTermBrowserPlugin.app into /Applications."
+    fi
+  fi
+
+  # --------------------------------------------------------------------
+  # LCARS Web Dynamic Profile (depends on Browser Plugin being present)
+  # --------------------------------------------------------------------
+  LCARS_PROFILE_SCRIPT="${AITEAMFORGE_HOME}/share/scripts/create-lcars-profile.py"
   if [ -f "$LCARS_PROFILE_SCRIPT" ]; then
-    python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:8080" 2>/dev/null && \
-      echo -e "${GREEN}✓${NC} LCARS Web profile (iTerm2 inline browser)" || \
+    if python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:8080" >/dev/null 2>&1; then
+      echo -e "${GREEN}✓${NC} LCARS Web profile (iTerm2 inline browser)"
+    else
       echo -e "${YELLOW}⚠${NC} Could not create LCARS Web profile"
+    fi
+  else
+    echo -e "${YELLOW}⚠${NC} LCARS profile script missing from tap (skipping)"
   fi
 fi
 
