@@ -42,6 +42,43 @@ LCARS_WEB_GUID = "AITEAMFORGE-LCARS-WEB-0001-000000000001"
 AGENT_PANEL_GUID = "AITEAMFORGE-AGENT-PANEL-0001-000000000001"
 
 
+def _quarantine_stale_dynamic_profile_backups() -> None:
+    """iTerm2's Dynamic Profile loader scans every file in the
+    DynamicProfiles directory, regardless of extension, and parses
+    anything that looks like valid JSON. If the user (or a previous
+    installer version, or a backup tool) leaves a file named
+    'aiteamforge-lcars.json.bak-<timestamp>' alongside the live file,
+    iTerm2 loads BOTH, finds the same GUID declared twice, and raises
+    a 'Dynamic Profiles Error — GUID collision' dialog on every start.
+
+    Move any aiteamforge-lcars.json.* sibling out of the scan path into
+    ~/Documents, preserving the original filename so the user can
+    inspect or restore it later. Silent no-op if no backups found.
+    """
+    if not DYNAMIC_PROFILES_DIR.exists():
+        return
+    backups = [
+        p for p in DYNAMIC_PROFILES_DIR.iterdir()
+        if p.name.startswith("aiteamforge-lcars.json.") and p.is_file()
+    ]
+    if not backups:
+        return
+    quarantine_dir = Path.home() / "Documents"
+    quarantine_dir.mkdir(parents=True, exist_ok=True)
+    for b in backups:
+        target = quarantine_dir / b.name
+        # Avoid clobbering an existing quarantined copy
+        counter = 1
+        while target.exists():
+            target = quarantine_dir / f"{b.name}.{counter}"
+            counter += 1
+        try:
+            b.rename(target)
+            print(f"quarantined stale dynamic profile backup: {b.name} → {target}")
+        except OSError:
+            pass
+
+
 def _strip_stale_plist_entry() -> None:
     """Self-heal installs that were hit by an earlier workaround which
     injected LCARS Web directly into the plist's 'New Bookmarks'. If the
@@ -79,6 +116,7 @@ def create_profiles(url: str) -> bool:
     installs (verified against M1Pro and M3Pro setups).
     """
     DYNAMIC_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    _quarantine_stale_dynamic_profile_backups()
     _strip_stale_plist_entry()
 
     data = {
