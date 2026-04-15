@@ -303,11 +303,18 @@ CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
 def _resolve_server_hostname() -> str:
-    """Prefer the Tailscale machine name for display — it is stable,
+    """Prefer the Tailscale MagicDNS short name — it is stable,
     user-controlled, and matches the host argument users pass to
-    team-connect.sh when attaching to a remote team. Fall back to
-    `socket.gethostname()` (with .local stripped) if Tailscale is
-    missing, tailscaled is stopped, or the query times out.
+    team-connect.sh when attaching to a remote team (e.g. the
+    first label of Self.DNSName, "darren-m4-mini"). Falls back in
+    order: Self.HostName → socket.gethostname() with .local stripped.
+
+    Why DNSName, not HostName: Self.HostName is the raw OS hostname
+    Tailscale captured when the node first authed, and does NOT update
+    when the user renames the machine in the Tailscale control panel.
+    Self.DNSName is the MagicDNS FQDN which DOES update on rename.
+    Taking the first label of DNSName gives us the name the user
+    actually types.
 
     Resolved once at module load; downstream API handlers read the
     cached SERVER_HOSTNAME constant so we do not fork tailscale per
@@ -327,7 +334,14 @@ def _resolve_server_hostname() -> str:
             )
             if result.returncode == 0 and result.stdout:
                 data = json.loads(result.stdout)
-                ts_name = (data.get("Self") or {}).get("HostName")
+                self_info = data.get("Self") or {}
+                dns = (self_info.get("DNSName") or "").rstrip(".")
+                if dns:
+                    short = dns.split(".", 1)[0]
+                    if short:
+                        return short
+                # Fallback: raw HostName if DNSName unavailable
+                ts_name = self_info.get("HostName")
                 if ts_name:
                     return ts_name
         except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
