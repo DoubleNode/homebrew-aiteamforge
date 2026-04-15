@@ -1079,6 +1079,18 @@ THEME_PORTS_DIR="$AITEAMFORGE_DIR/lcars-ports"
 # Use team-specific tmux socket if set, otherwise use default server
 TMUX_CMD="tmux${{TMUX_SOCKET:+ -L $TMUX_SOCKET}}"
 
+# Resolve display hostname for tmux status-right.
+# Prefers Tailscale machine name (consistent across Macs, matches the
+# host argument passed to team-connect.sh on the client side) and falls
+# back to `hostname -s` if the resolver is missing or tailscaled is down.
+_HOSTNAME_RESOLVER="$AITEAMFORGE_DIR/scripts/aiteamforge-resolve-hostname.sh"
+if [ -x "$_HOSTNAME_RESOLVER" ]; then
+    DISPLAY_HOST=$("$_HOSTNAME_RESOLVER" 2>/dev/null)
+fi
+if [ -z "${{DISPLAY_HOST:-}}" ]; then
+    DISPLAY_HOST=$(hostname -s 2>/dev/null | sed 's/\\.local$//')
+fi
+
 # ============================================================================
 # Function: setup_window
 # Executes the common setup commands for each tmux window
@@ -1115,7 +1127,7 @@ if [ $? != 0 ]; then
     # Set session-specific variables for dynamic status-right
     $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
     $TMUX_CMD set -t $SESSION_CODE @claude_agent "{terminal_id}"
-    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  #h  "
+    $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  $DISPLAY_HOST  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
     $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour{bg_code},fg=colour255"

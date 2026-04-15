@@ -10125,19 +10125,22 @@ async function loadReleases() {
 
         // Load flow config for progress calculation
         let flowConfig = null;
+        let projectEnvironments = {};
         if (configResponse.ok) {
             const configData = await configResponse.json();
             flowConfig = configData.flowConfig || null;
+            projectEnvironments = configData.projectEnvironments || {};
             // Update global flowConfigState
             if (flowConfig && flowConfig.stages) {
                 flowConfigState.stages = flowConfig.stages;
             }
+            flowConfigState.projectEnvironments = projectEnvironments;
         }
 
         // Update the current flow display in header
         updateCurrentFlowDisplay(flowConfig);
 
-        displayReleases(data.releases || [], flowConfig);
+        displayReleases(data.releases || [], flowConfig, projectEnvironments);
     } catch (e) {
         console.log('Could not load releases:', e);
         dashboard.innerHTML = `
@@ -10154,8 +10157,9 @@ async function loadReleases() {
  * Display releases in the dashboard
  * @param {Array} releases - Array of release objects
  * @param {Object} flowConfig - Optional flow configuration (XACA-0027)
+ * @param {Object} projectEnvironments - Optional per-project stage overrides (XACA-0163)
  */
-function displayReleases(releases, flowConfig = null) {
+function displayReleases(releases, flowConfig = null, projectEnvironments = {}) {
     const dashboard = document.getElementById('releases-dashboard');
     if (!dashboard) return;
 
@@ -10200,7 +10204,7 @@ function displayReleases(releases, flowConfig = null) {
         return aLabel.localeCompare(bLabel);
     });
 
-    const html = releases.map(release => renderReleaseCard(release, flowConfig)).join('');
+    const html = releases.map(release => renderReleaseCard(release, flowConfig, projectEnvironments)).join('');
     dashboard.innerHTML = html;
 
     // XACA-0045: Check plan existence for DOCS buttons
@@ -10219,8 +10223,9 @@ function displayReleases(releases, flowConfig = null) {
  * Render a single release card
  * @param {Object} release - Release object
  * @param {Object} flowConfig - Optional flow configuration (XACA-0027)
+ * @param {Object} projectEnvironments - Optional per-project stage overrides (XACA-0163)
  */
-function renderReleaseCard(release, flowConfig = null) {
+function renderReleaseCard(release, flowConfig = null, projectEnvironments = {}) {
     const typeClass = release.type ? `type-${release.type}` : '';
     const targetDate = release.targetDate ? formatTargetDate(release.targetDate) : 'No target';
     const isExpanded = releasesState.expandedReleases.has(release.id);
@@ -10229,13 +10234,8 @@ function renderReleaseCard(release, flowConfig = null) {
     const isArchived = release.status === 'archived';
     const archivedClass = isArchived ? 'archived' : '';
 
-    // Get enabled environments based on flowConfig (XACA-0027)
-    const allEnvironments = release.environments || ['DEV', 'QA', 'ALPHA', 'BETA', 'GAMMA', 'PROD'];
-    const stages = flowConfig?.stages || {};
-    const enabledEnvironments = allEnvironments.filter(env => {
-        if (env === 'DEV' || env === 'PROD') return true;
-        return stages[env]?.enabled !== false;
-    });
+    // Get enabled environments based on flowConfig (XACA-0027, XACA-0163)
+    const enabledEnvironments = getReleaseEnvironments(release, flowConfig, projectEnvironments);
 
     // Build platform progress rows with progress based on enabled stages
     let totalProgress = 0;
@@ -10620,6 +10620,8 @@ async function promoteRelease(releaseId) {
         if (configResponse.ok) {
             const configData = await configResponse.json();
             promoteModalState.flowConfig = configData.flowConfig || null;
+            // XACA-0163: per-project stage overrides from the same response
+            promoteModalState.projectEnvironments = configData.projectEnvironments || {};
         }
     } catch (error) {
         console.error('Error loading release for promotion:', error);
@@ -10666,17 +10668,10 @@ function populatePromoteStep1() {
     // Build platform checkboxes
     const platformsContainer = document.getElementById('promote-platforms');
     const platforms = release.platforms || {};
-    const allEnvironments = release.environments || ['DEV', 'QA', 'ALPHA', 'BETA', 'GAMMA', 'PROD'];
 
-    // Filter environments based on flowConfig (XACA-0027)
+    // Filter environments based on flowConfig (XACA-0027, XACA-0163)
     const flowConfig = promoteModalState.flowConfig;
-    const stages = flowConfig?.stages || {};
-    const environments = allEnvironments.filter(env => {
-        // DEV and PROD are always enabled
-        if (env === 'DEV' || env === 'PROD') return true;
-        // Check flowConfig for other stages
-        return stages[env]?.enabled !== false;
-    });
+    const environments = getReleaseEnvironments(release, flowConfig, promoteModalState.projectEnvironments);
 
     let html = '';
     for (const [platform, data] of Object.entries(platforms)) {
@@ -10846,7 +10841,13 @@ function clearPromoteError(step) {
 function populatePromoteStep2() {
     const release = promoteModalState.releaseData;
     const platforms = release.platforms || {};
-    const environments = release.environments || ['DEV', 'QA', 'ALPHA', 'BETA', 'GAMMA', 'PROD'];
+    // XACA-0163: honor flowConfig and projectEnvironments so Step 2
+    // matches Step 1's filtered list.
+    const environments = getReleaseEnvironments(
+        release,
+        promoteModalState.flowConfig,
+        promoteModalState.projectEnvironments
+    );
     const selected = promoteModalState.selectedPlatforms;
 
     // Build preview list
@@ -11178,7 +11179,13 @@ async function generateReleaseNotes() {
  */
 function generateRelnotesContent(release, items) {
     const platforms = release.platforms || {};
-    const environments = release.environments || ['DEV', 'QA', 'ALPHA', 'BETA', 'GAMMA', 'PROD'];
+    // XACA-0163: honor current flowConfig and projectEnvironments (via
+    // module-level flowConfigState) instead of the frozen stage snapshot.
+    const environments = getReleaseEnvironments(
+        release,
+        flowConfigState,
+        flowConfigState.projectEnvironments
+    );
 
     // XACA-0037: Filter items by team as a safeguard against cross-team contamination
     // This catches any legacy cross-team assignments that predate validation
@@ -12960,7 +12967,11 @@ let flowConfigState = {
         BETA: { enabled: true, required: false },
         GAMMA: { enabled: true, required: false },
         PROD: { enabled: true, required: true }
-    }
+    },
+    // XACA-0163: per-project stage overrides from /api/release-config.
+    // Keyed by project name; value is an ordered list of stages valid
+    // for that project. Empty when no project overrides are configured.
+    projectEnvironments: {}
 };
 
 /**
@@ -12980,6 +12991,8 @@ async function showFlowConfigModal() {
             if (config.flowConfig && config.flowConfig.stages) {
                 flowConfigState.stages = config.flowConfig.stages;
             }
+            // XACA-0163: keep per-project stage overrides in sync
+            flowConfigState.projectEnvironments = config.projectEnvironments || {};
         }
     } catch (error) {
         console.error('Error loading flow config:', error);
@@ -13105,14 +13118,45 @@ async function saveFlowConfig() {
     }
 }
 
+// XACA-0163: canonical stage list. Used as the source of truth for any
+// rendering that needs to honor the current flowConfig, so that toggling
+// a stage in Configure Flow re-introduces it even for releases that were
+// created when that stage was not in defaultEnvironments.
+const CANONICAL_STAGES = ['DEV', 'QA', 'ALPHA', 'BETA', 'GAMMA', 'PROD'];
+
 /**
  * Get enabled environments based on flow config
  */
 function getEnabledEnvironments() {
-    const allStages = ['DEV', 'QA', 'ALPHA', 'BETA', 'GAMMA', 'PROD'];
-    return allStages.filter(stage => {
+    return CANONICAL_STAGES.filter(stage => {
         if (stage === 'DEV' || stage === 'PROD') return true;
         return flowConfigState.stages[stage]?.enabled !== false;
+    });
+}
+
+/**
+ * Get the stage list for a release, honoring the current flowConfig.
+ * XACA-0163: release.environments is a frozen snapshot captured at
+ * creation time, so filtering it would prevent flowConfig toggles from
+ * re-adding previously disabled stages. Seed from CANONICAL_STAGES
+ * (or projectEnvironments[release.project] if the board defines a
+ * per-project override) and filter by flowConfig, so Configure Flow
+ * is always authoritative for display and projectEnvironments is
+ * honored as the hard per-project constraint.
+ */
+function getReleaseEnvironments(release, flowConfig, projectEnvironments) {
+    const stages = flowConfig?.stages || {};
+    const projectOverride =
+        projectEnvironments && release && release.project
+            ? projectEnvironments[release.project]
+            : null;
+    const baseStages =
+        Array.isArray(projectOverride) && projectOverride.length > 0
+            ? projectOverride
+            : CANONICAL_STAGES;
+    return baseStages.filter(stage => {
+        if (stage === 'DEV' || stage === 'PROD') return true;
+        return stages[stage]?.enabled !== false;
     });
 }
 
@@ -16504,7 +16548,12 @@ async function loadServerConfig() {
             if (data.hostname) {
                 const hostnameEl = document.getElementById('server-hostname');
                 if (hostnameEl) {
-                    hostnameEl.textContent = data.hostname.toUpperCase();
+                    // Use as-is — Tailscale machine names are already in
+                    // canonical kebab-case (e.g. "darren-m4-mini") and
+                    // read better without forced uppercasing. Fallback
+                    // hostnames (`hostname -s` output) also display more
+                    // naturally without case mangling.
+                    hostnameEl.textContent = data.hostname;
                 }
             }
         }

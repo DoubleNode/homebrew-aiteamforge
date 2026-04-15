@@ -546,6 +546,18 @@ install_lcars_profile_script() {
         warning "set-lcars-profile-browser.py not found (skipping)"
     fi
 
+    # Install shared hostname resolver (Tailscale → hostname fallback).
+    # Used by per-agent tmux scripts to set status-right consistent with
+    # the LCARS header's server hostname display.
+    local hostname_src="$INSTALL_ROOT/share/scripts/aiteamforge-resolve-hostname.sh"
+    if [ -f "$hostname_src" ]; then
+        cp "$hostname_src" "$scripts_dest/aiteamforge-resolve-hostname.sh"
+        chmod +x "$scripts_dest/aiteamforge-resolve-hostname.sh"
+        info "Installed: aiteamforge-resolve-hostname.sh"
+    else
+        warning "aiteamforge-resolve-hostname.sh not found (skipping)"
+    fi
+
     # Install Dynamic Profile JSON to iTerm2's hot-load directory.
     # iTerm2 reads this directory automatically — no restart required.
     # The profile uses 'Initial URL' (correct key for browser-mode tabs).

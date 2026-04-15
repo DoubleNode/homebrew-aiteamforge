@@ -15,6 +15,7 @@ Usage:
 
 import http.server
 import socketserver
+import copy
 import json
 import os
 import re
@@ -301,7 +302,40 @@ UI_DIR = Path(__file__).parent
 CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
-SERVER_HOSTNAME = socket.gethostname().removesuffix(".local")
+def _resolve_server_hostname() -> str:
+    """Prefer the Tailscale machine name for display — it is stable,
+    user-controlled, and matches the host argument users pass to
+    team-connect.sh when attaching to a remote team. Fall back to
+    `socket.gethostname()` (with .local stripped) if Tailscale is
+    missing, tailscaled is stopped, or the query times out.
+
+    Resolved once at module load; downstream API handlers read the
+    cached SERVER_HOSTNAME constant so we do not fork tailscale per
+    request.
+    """
+    import shutil
+    tailscale = shutil.which("tailscale")
+    if not tailscale:
+        _app_cli = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+        if Path(_app_cli).exists():
+            tailscale = _app_cli
+    if tailscale:
+        try:
+            result = subprocess.run(
+                [tailscale, "status", "--json", "--self=true"],
+                capture_output=True, text=True, timeout=3, check=False,
+            )
+            if result.returncode == 0 and result.stdout:
+                data = json.loads(result.stdout)
+                ts_name = (data.get("Self") or {}).get("HostName")
+                if ts_name:
+                    return ts_name
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            pass
+    return socket.gethostname().removesuffix(".local")
+
+
+SERVER_HOSTNAME = _resolve_server_hostname()
 # Team-specific tmp directory — resolved from SESSION_NAME via kanban_utils.
 # Falls back to /tmp/ for unknown sessions.
 LCARS_TMP_DIR = Path(get_lcars_tmp_dir(SESSION_NAME))
@@ -1983,6 +2017,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 # Build releases data structure from board
                 release_config = data.get('releaseConfig', self.DEFAULT_RELEASE_CONFIG)
+                # XACA-0163: deepcopy when falling back to class-level
+                # DEFAULT_RELEASE_CONFIG. handle_update_flow_config mutates
+                # data['flowConfig'] in place, which would otherwise pollute
+                # the class default for every subsequent team that has not
+                # yet persisted its own flowConfig.
+                flow_config = release_config.get('flowConfig')
+                if flow_config is None:
+                    flow_config = copy.deepcopy(self.DEFAULT_RELEASE_CONFIG['flowConfig'])
                 return {
                     "version": "1.0",
                     "team": data.get('team', LCARS_TEAM),
@@ -1992,7 +2034,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "defaultEnvironments": release_config.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments']),
                     "platforms": release_config.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
                     "releaseTypes": release_config.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
-                    "flowConfig": release_config.get('flowConfig', self.DEFAULT_RELEASE_CONFIG['flowConfig']),
+                    "flowConfig": flow_config,
                     "projectEnvironments": release_config.get('projectEnvironments', {})
                 }
             finally:
@@ -2627,7 +2669,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
-            self.send_header('Cache-Control', 'max-age=60')
+            # XACA-0163: no-store — this endpoint's response is invalidated by
+            # POST /api/releases/flow-config. Caching it made flow-config saves
+            # appear successful but leave the UI rendering stale stages.
+            self.send_header('Cache-Control', 'no-store')
             self.end_headers()
             self.wfile.write(json.dumps(config, indent=2).encode())
         except Exception as e:
