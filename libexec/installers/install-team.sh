@@ -1091,6 +1091,21 @@ if [ -z "${{DISPLAY_HOST:-}}" ]; then
     DISPLAY_HOST=$(hostname -s 2>/dev/null | sed 's/\\.local$//')
 fi
 
+# Refresh the agent panel JSON for THIS agent every time this script
+# runs — so any path that creates the tmux session (master startup,
+# manual per-agent run, Ctrl+C recovery) refreshes its own panel data.
+# If the master startup's preamble init already wrote it, this
+# refreshes; if the preamble was skipped, this is the only path that
+# will write the JSON at all. Best-effort — warnings go to stderr,
+# non-fatal if init-agent-panel-json.py is missing or the persona
+# cannot be parsed.
+_PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/scripts/init-agent-panel-json.py"
+if [ -f "$_PANEL_JSON_SCRIPT" ]; then
+    KANBAN_TMP_DIR="$AITEAMFORGE_DIR/kanban/tmp" \
+        python3 "$_PANEL_JSON_SCRIPT" "$SESSION_TYPE" "$AITEAMFORGE_DIR" \
+        --agent "$SESSION_NAME" 2>/dev/null || true
+fi
+
 # ============================================================================
 # Function: setup_window
 # Executes the common setup commands for each tmux window

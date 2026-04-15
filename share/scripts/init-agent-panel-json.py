@@ -528,12 +528,32 @@ def infer_session_desc(team_id: str, terminal_id: str, role: str, frontmatter_de
 # ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 3:
-        print(f"Usage: {sys.argv[0]} <team_id> <aiteamforge_dir>", file=sys.stderr)
+    # Positional args: <team_id> <aiteamforge_dir>
+    # Optional flag:   --agent <terminal_id>
+    #
+    # When --agent is supplied, process only the persona whose frontmatter
+    # 'name:' field matches (case-insensitive). Used by per-agent startup
+    # scripts so every tmux-session creation path refreshes its own JSON,
+    # even when the master team-startup.sh preamble was bypassed (manual
+    # per-agent runs, Ctrl+C recovery, partial startup after a crash).
+    args = list(sys.argv[1:])
+    target_agent: str | None = None
+    if "--agent" in args:
+        _idx = args.index("--agent")
+        if _idx + 1 >= len(args):
+            print(f"Usage: {sys.argv[0]} <team_id> <aiteamforge_dir> [--agent <terminal_id>]",
+                  file=sys.stderr)
+            sys.exit(1)
+        target_agent = args[_idx + 1].strip().lower()
+        del args[_idx:_idx + 2]
+
+    if len(args) < 2:
+        print(f"Usage: {sys.argv[0]} <team_id> <aiteamforge_dir> [--agent <terminal_id>]",
+              file=sys.stderr)
         sys.exit(1)
 
-    team_id = sys.argv[1].lower()
-    aiteamforge_dir = Path(sys.argv[2]).expanduser()
+    team_id = args[0].lower()
+    aiteamforge_dir = Path(args[1]).expanduser()
 
     # Persona files may be in either of two layouts:
     #   Installed layout:  {AITEAMFORGE_DIR}/{team_id}/personas/agents/
@@ -611,6 +631,10 @@ def main():
         terminal_id = frontmatter.get("name", "").strip()
         if not terminal_id:
             print(f"Warning: No 'name' field in frontmatter of {pfile.name}", file=sys.stderr)
+            continue
+
+        # --agent filter: skip personas whose terminal_id doesn't match
+        if target_agent is not None and terminal_id.lower() != target_agent:
             continue
 
         # Extract initial character hint from filename (used as avatar fallback)
@@ -780,11 +804,22 @@ def main():
             written += 1
 
     if written == 0:
-        print(f"Warning: No agent JSON files written for team '{team_id}'", file=sys.stderr)
+        if target_agent is not None:
+            print(
+                f"Warning: No persona file matching --agent '{target_agent}' "
+                f"for team '{team_id}'",
+                file=sys.stderr,
+            )
+        else:
+            print(f"Warning: No agent JSON files written for team '{team_id}'",
+                  file=sys.stderr)
         sys.exit(1)
 
     kanban_tmp = get_kanban_tmp_dir(team_id)
-    print(f"  Agent panel JSON: {written} file(s) initialized for '{team_id}' → {kanban_tmp}")
+    if target_agent is not None:
+        print(f"  Agent panel JSON: refreshed '{team_id}-{target_agent}' → {kanban_tmp}")
+    else:
+        print(f"  Agent panel JSON: {written} file(s) initialized for '{team_id}' → {kanban_tmp}")
 
 
 if __name__ == "__main__":
