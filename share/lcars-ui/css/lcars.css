@@ -14531,6 +14531,10 @@ body {
    ARCHIVE / TRANSFER SECTION (XACA-0128)
    ═══════════════════════════════════════════════════════════════════════════════ */
 
+.export-import-section > * {
+    margin-right: 60px;
+}
+
 .export-overview {
     display: flex;
     gap: 20px;
