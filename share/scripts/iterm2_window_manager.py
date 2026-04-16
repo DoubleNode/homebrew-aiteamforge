@@ -495,7 +495,7 @@ async def split_agent_panel(connection, window_title, tab_name, command):
     return agent_session
 
 
-async def ensure_agent_panel_profile(connection, font_spec="FiraCodeNFM-Light 9"):
+async def ensure_agent_panel_profile(connection, font_spec="FiraCodeNFM-Light 8"):
     """Ensure the 'Agent Panel' iTerm2 profile exists and has the correct font.
 
     If the profile doesn't exist, falls back to 'Default'.
@@ -622,7 +622,7 @@ async def set_default_profile_font(connection, font_spec):
 async def set_session_font(connection, font_spec):
     """Set the font for the current session (identified by ITERM_SESSION_ID env var).
 
-    font_spec: Font name and size, e.g. "FiraCodeNFM-Light 9"
+    font_spec: Font name and size, e.g. "FiraCodeNFM-Light 8"
     """
     import os
     app = await iterm2.async_get_app(connection)
@@ -789,7 +789,7 @@ async def main_async(args):
         await resize_pane_by_env(connection, target)
 
     elif args.action == "set-font":
-        font_name = args.font or "FiraCodeNFM-Light 9"
+        font_name = args.font or "FiraCodeNFM-Light 8"
         await set_session_font(connection, font_name)
 
     elif args.action == "set-default-font":
@@ -822,7 +822,7 @@ def main():
     parser.add_argument("--command", "-c", help="Command to execute in the tab")
     parser.add_argument("--url", "-u", help="(deprecated) URL for agent panel")
     parser.add_argument("--target-cols", help="Target column width for resize-pane action (default: 30)")
-    parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'FiraCodeNFM-Light 9')")
+    parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'FiraCodeNFM-Light 8')")
     parser.add_argument(
         "--action", "-a",
         choices=["create-window", "init-team-window", "create-tab", "set-title", "select-tab", "split-agent-panel", "resize-pane", "reset-panels", "set-font", "set-default-font", "list-windows"],
