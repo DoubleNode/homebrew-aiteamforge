@@ -1027,16 +1027,23 @@ def generate_script(terminal_id, identity, windows, frontmatter, session_desc, l
         base_windows.append(f"window-{len(base_windows)}")
     win_names = base_windows[:4]
 
-    # Build 4-window block
-    window_blocks = []
+    # Build set_window_metadata case branches (reused by panel-regen loop
+    # and session-creation loop below).
+    metadata_cases = []
     for i, wname in enumerate(win_names):
         wdesc = window_desc(wname, terminal_id, i)
+        metadata_cases.append(
+            f'        {i}) TERMINAL_NUMBER={i}; TERMINAL_NAME="{wname}"; TERMINAL_DESCRIPTION="{wdesc}" ;;'
+        )
+    window_metadata_section = "\n".join(metadata_cases)
+
+    # Build 4-window block — now uses set_window_metadata instead of inlining
+    window_blocks = []
+    for i, wname in enumerate(win_names):
         if i == 0:
             window_blocks.append(
                 f'    # Window 0: Primary\n'
-                f'    TERMINAL_NUMBER=0\n'
-                f'    TERMINAL_NAME="{wname}"\n'
-                f'    TERMINAL_DESCRIPTION="{wdesc}"\n'
+                f'    set_window_metadata 0\n'
                 f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
                 f'    $TMUX_CMD new-session -d -s $SESSION_CODE -n $TERMINAL_NAME -c "$SESSION_DIRECTORY"\n'
                 f'    setup_window\n'
@@ -1046,9 +1053,7 @@ def generate_script(terminal_id, identity, windows, frontmatter, session_desc, l
         else:
             window_blocks.append(
                 f'    # Window {i}\n'
-                f'    TERMINAL_NUMBER={i}\n'
-                f'    TERMINAL_NAME="{wname}"\n'
-                f'    TERMINAL_DESCRIPTION="{wdesc}"\n'
+                f'    set_window_metadata {i}\n'
                 f'    echo -n "- Connecting to $TERMINAL_DESCRIPTION..."\n'
                 f'    $TMUX_CMD new-window -t $SESSION_CODE:$TERMINAL_NUMBER -n $TERMINAL_NAME\n'
                 f'    setup_window\n'
@@ -1096,20 +1101,16 @@ if [ -z "${{DISPLAY_HOST:-}}" ]; then
     DISPLAY_HOST=$(hostname -s 2>/dev/null | sed 's/\\.local$//')
 fi
 
-# Refresh the agent panel JSON for THIS agent every time this script
-# runs — so any path that creates the tmux session (master startup,
-# manual per-agent run, Ctrl+C recovery) refreshes its own panel data.
-# If the master startup's preamble init already wrote it, this
-# refreshes; if the preamble was skipped, this is the only path that
-# will write the JSON at all. Best-effort — warnings go to stderr,
-# non-fatal if init-agent-panel-json.py is missing or the persona
-# cannot be parsed.
-_PANEL_JSON_SCRIPT="$AITEAMFORGE_DIR/scripts/init-agent-panel-json.py"
-if [ -f "$_PANEL_JSON_SCRIPT" ]; then
-    KANBAN_TMP_DIR="$AITEAMFORGE_DIR/kanban/tmp" \
-        python3 "$_PANEL_JSON_SCRIPT" "$SESSION_TYPE" "$AITEAMFORGE_DIR" \
-        --agent "$SESSION_NAME" 2>/dev/null || true
-fi
+# ============================================================================
+# Function: set_window_metadata
+# Sets TERMINAL_NUMBER / TERMINAL_NAME / TERMINAL_DESCRIPTION for a window.
+# Factored out so the panel-regen loop AND session-creation loop can reuse it.
+# ============================================================================
+set_window_metadata() {{
+    case "$1" in
+{window_metadata_section}
+    esac
+}}
 
 # ============================================================================
 # Function: setup_window
@@ -1124,6 +1125,31 @@ setup_window() {{
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $KANBAN_HELPERS" C-m
     $TMUX_CMD send-keys -t $SESSION_CODE:$TERMINAL_NUMBER ". $AITEAMFORGE_DIR/$SESSION_TYPE/scripts/$SESSION_TYPE-banner.sh \\"$SESSION_THEME\\" \\"$SESSION_TYPE\\" \\"$SESSION_NAME\\" \\"$TERMINAL_NUMBER\\" \\"$TERMINAL_NAME\\" \\"$SESSION_DESCRIPTION\\" \\"$SESSION_LOCATION\\" \\"$SESSION_DEVELOPER\\" \\"$SESSION_ROLE\\" \\"$TERMINAL_DESCRIPTION\\"" C-m
 }}
+
+# ============================================================================
+# Refresh agent panel JSON for every window — UNCONDITIONAL.
+# The has-session block below only fires on first tmux session creation;
+# the banner that writes panel JSON via display_agent_avatar only runs then.
+# Panel JSON lives outside tmux, so we regenerate it on every invocation of
+# this script — protects against iTerm restarts, tmux socket reboots, and
+# infrastructure upgrades leaving panels stuck on "Awaiting agent...".
+#
+# Replaces an earlier init-agent-panel-json.py call that wrote persona-named
+# files (e.g. lcars-agent-legal-advocate.json) which the display panels
+# (keyed on session names like lcars-agent-legal-coparenting-chambers.json)
+# never read.
+# ============================================================================
+_AVATAR_HELPER="$AITEAMFORGE_DIR/scripts/display-agent-avatar.sh"
+[ ! -f "$_AVATAR_HELPER" ] && _AVATAR_HELPER="$AITEAMFORGE_DIR/share/scripts/display-agent-avatar.sh"
+if [ -f "$_AVATAR_HELPER" ]; then
+    source "$_AVATAR_HELPER"
+    for _i in 0 1 2 3; do
+        set_window_metadata "$_i"
+        export SESSION_THEME SESSION_DESCRIPTION SESSION_LOCATION SESSION_ROLE
+        export SESSION_CODE TERMINAL_NUMBER TERMINAL_NAME TERMINAL_DESCRIPTION
+        display_agent_avatar "$SESSION_TYPE" "$SESSION_DEVELOPER" >/dev/null 2>&1
+    done
+fi
 
 $TMUX_CMD has-session -t $SESSION_CODE
 

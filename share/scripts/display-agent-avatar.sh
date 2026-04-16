@@ -18,8 +18,17 @@
 #   0 - Success
 #   1 - Error (invalid arguments)
 
-# Source the shared LCARS tmp dir helper (resolve path relative to this script)
-SCRIPT_DIR="${0:A:h}"
+# Source the shared LCARS tmp dir helper (resolve path relative to this script).
+# Must work whether sourced from zsh or bash — zsh's ${0:A:h} modifier isn't
+# valid bash syntax and silently resolves to empty, which used to break this
+# helper when legal/finance/etc. bash-shebang scripts sourced it.
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+    # Bash: BASH_SOURCE[0] is this file's path, even when sourced
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+else
+    # zsh: ${(%):-%N} or ${0:A:h} give the sourced script's path
+    SCRIPT_DIR="${0:A:h}"
+fi
 source "${SCRIPT_DIR}/lcars-tmp-dir.sh"
 
 display_agent_avatar() {
