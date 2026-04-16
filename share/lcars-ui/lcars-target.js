@@ -1,1 +1,1 @@
-window.LCARS_TARGET_TEAM = 'legal-coparenting';
+window.LCARS_TARGET_TEAM = 'firebase';

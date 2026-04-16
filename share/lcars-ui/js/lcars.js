@@ -16758,10 +16758,9 @@ let importPollingInterval = null;
 let stagedImportFile = null;
 
 function initExportImportPanel() {
-    // Populate team label from serverConfig if available
     const teamEl = document.getElementById('export-team-label');
-    if (teamEl && typeof serverConfig !== 'undefined' && serverConfig.team) {
-        teamEl.textContent = serverConfig.team;
+    if (teamEl && CONFIG.team) {
+        teamEl.textContent = CONFIG.team;
     }
 }
 
