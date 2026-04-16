@@ -504,8 +504,13 @@ _val_check_launchagents() {
         elif launchctl list 2>/dev/null | grep -q "$agent"; then
             _val_pass "${agent} loaded"
         else
-            _val_warn "${agent} plist exists but not loaded" \
-                "Run: launchctl load '${plist}'"
+            # Auto-fix: load the plist instead of just warning
+            if launchctl load "$plist" 2>/dev/null; then
+                _val_pass "${agent} loaded (was unloaded — auto-fixed)"
+            else
+                _val_warn "${agent} plist exists but could not load" \
+                    "Run: launchctl load '${plist}'"
+            fi
         fi
     done
 }
