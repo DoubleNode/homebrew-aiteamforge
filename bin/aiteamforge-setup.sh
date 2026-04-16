@@ -296,18 +296,39 @@ else
 fi
 
 # Check for Fira Code Nerd Font (used by Default + Agent Panel iTerm2 profiles).
-# Direct file check — fc-list requires fontconfig and its cache may not see
-# cask-installed fonts immediately, causing a false-negative install loop.
+# macOS only sees fonts in ~/Library/Fonts/ or /Library/Fonts/. Homebrew cask
+# installs to Caskroom but sometimes fails to link them into ~/Library/Fonts/.
+_font_found=false
 if ls ~/Library/Fonts/FiraCodeNerdFontMono-*.ttf /Library/Fonts/FiraCodeNerdFontMono-*.ttf 2>/dev/null | grep -q .; then
+  _font_found=true
+fi
+
+if [ "$_font_found" = "true" ]; then
   echo -e "${GREEN}✓${NC} Fira Code Nerd Font"
 else
-  echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font ${YELLOW}(not found — installing)${NC}"
-  if brew install --cask font-fira-code-nerd-font 2>&1 | tail -3; then
-    echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed)"
+  # Check if brew already has it in Caskroom but didn't link
+  _caskroom_fonts="$(find "$(brew --prefix 2>/dev/null)/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" 2>/dev/null | head -1)"
+  if [ -n "$_caskroom_fonts" ]; then
+    echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font in Caskroom but not registered — copying to ~/Library/Fonts/"
+    _cask_dir="$(dirname "$_caskroom_fonts")"
+    cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null
+    echo -e "${GREEN}✓${NC} Fira Code Nerd Font (copied to ~/Library/Fonts/)"
   else
-    echo -e "${YELLOW}⚠${NC} Could not install Fira Code Nerd Font"
-    echo -e "   Manual install: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
-    echo -e "   Agent panels will use the system default font until installed."
+    echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font ${YELLOW}(not found — installing)${NC}"
+    brew install --cask font-fira-code-nerd-font 2>&1 | tail -3
+    # Verify the install linked to ~/Library/Fonts; copy from Caskroom if not
+    if ! ls ~/Library/Fonts/FiraCodeNerdFontMono-*.ttf 2>/dev/null | grep -q .; then
+      _cask_dir="$(find "$(brew --prefix 2>/dev/null)/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" -exec dirname {} \; 2>/dev/null | head -1)"
+      if [ -n "$_cask_dir" ]; then
+        cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null
+        echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed + copied to ~/Library/Fonts/)"
+      else
+        echo -e "${YELLOW}⚠${NC} Could not install Fira Code Nerd Font"
+        echo -e "   Manual: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
+      fi
+    else
+      echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed)"
+    fi
   fi
 fi
 
