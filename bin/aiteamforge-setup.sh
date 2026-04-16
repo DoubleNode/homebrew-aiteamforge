@@ -295,12 +295,15 @@ else
   MISSING_DEPS+=("iTerm2:brew install --cask iterm2")
 fi
 
-# Check for Fira Code Nerd Font (used by Default + Agent Panel iTerm2 profiles)
-if fc-list 2>/dev/null | grep -q "FiraCode Nerd Font Mono"; then
+# Check for Fira Code Nerd Font (used by Default + Agent Panel iTerm2 profiles).
+# Direct file check — fc-list requires fontconfig and its cache may not see
+# cask-installed fonts immediately, causing a false-negative install loop.
+if ls ~/Library/Fonts/FiraCodeNerdFontMono-*.ttf /Library/Fonts/FiraCodeNerdFontMono-*.ttf 2>/dev/null | grep -q .; then
   echo -e "${GREEN}✓${NC} Fira Code Nerd Font"
 else
-  echo -e "${RED}✗${NC} Fira Code Nerd Font ${YELLOW}(missing)${NC}"
-  MISSING_DEPS+=("Fira Code Nerd Font:brew install --cask font-fira-code-nerd-font")
+  echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font ${YELLOW}(not found)${NC}"
+  echo -e "   Install: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
+  echo -e "   Agent panels will use the system default font until installed."
 fi
 
 # Check for Claude Code
