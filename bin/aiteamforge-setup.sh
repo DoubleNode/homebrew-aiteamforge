@@ -301,9 +301,14 @@ fi
 if ls ~/Library/Fonts/FiraCodeNerdFontMono-*.ttf /Library/Fonts/FiraCodeNerdFontMono-*.ttf 2>/dev/null | grep -q .; then
   echo -e "${GREEN}✓${NC} Fira Code Nerd Font"
 else
-  echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font ${YELLOW}(not found)${NC}"
-  echo -e "   Install: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
-  echo -e "   Agent panels will use the system default font until installed."
+  echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font ${YELLOW}(not found — installing)${NC}"
+  if brew install --cask font-fira-code-nerd-font 2>&1 | tail -3; then
+    echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed)"
+  else
+    echo -e "${YELLOW}⚠${NC} Could not install Fira Code Nerd Font"
+    echo -e "   Manual install: ${CYAN}brew install --cask font-fira-code-nerd-font${NC}"
+    echo -e "   Agent panels will use the system default font until installed."
+  fi
 fi
 
 # Check for Claude Code
