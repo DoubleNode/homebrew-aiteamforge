@@ -140,6 +140,7 @@ def create_profiles(url: str) -> bool:
                 "Name": "Agent Panel",
                 "Guid": AGENT_PANEL_GUID,
                 "Mouse Reporting": True,
+                "Normal Font": "FiraCodeNFM-Light 9",
                 "Tags": ["aiteamforge"],
             },
         ]

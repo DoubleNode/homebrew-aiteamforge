@@ -295,6 +295,14 @@ else
   MISSING_DEPS+=("iTerm2:brew install --cask iterm2")
 fi
 
+# Check for Fira Code Nerd Font (used by Default + Agent Panel iTerm2 profiles)
+if fc-list 2>/dev/null | grep -q "FiraCode Nerd Font Mono"; then
+  echo -e "${GREEN}✓${NC} Fira Code Nerd Font"
+else
+  echo -e "${RED}✗${NC} Fira Code Nerd Font ${YELLOW}(missing)${NC}"
+  MISSING_DEPS+=("Fira Code Nerd Font:brew install --cask font-fira-code-nerd-font")
+fi
+
 # Check for Claude Code
 if command -v claude &>/dev/null; then
   echo -e "${GREEN}✓${NC} Claude Code"
@@ -851,6 +859,20 @@ if [ -d "/Applications/iTerm.app" ]; then
     fi
   else
     echo -e "${YELLOW}⚠${NC} LCARS profile script missing from tap (skipping)"
+  fi
+
+  # Set iTerm2 Default profile font to FiraCodeNFM-Light 10.
+  # Team agent tabs are created without an explicit --profile, so they inherit
+  # the Default profile. This call requires iTerm2 running with Python API;
+  # it is non-fatal if unavailable (user can re-run setup later).
+  WINDOW_MGR="${AITEAMFORGE_HOME}/share/scripts/iterm2_window_manager.py"
+  if [ -f "$WINDOW_MGR" ] && [ -d "/Applications/iTerm.app" ]; then
+    if python3 "$WINDOW_MGR" -a set-default-font -f "FiraCodeNFM-Light 10" >/dev/null 2>&1; then
+      echo -e "${GREEN}✓${NC} iTerm2 Default profile font (FiraCodeNFM-Light 10)"
+    else
+      echo -e "${YELLOW}⚠${NC} Could not set iTerm2 Default profile font (iTerm2 not running or Python API unavailable)"
+      echo -e "   Re-run: ${CYAN}python3 $WINDOW_MGR -a set-default-font${NC}"
+    fi
   fi
 fi
 

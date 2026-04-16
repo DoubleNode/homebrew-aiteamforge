@@ -495,7 +495,7 @@ async def split_agent_panel(connection, window_title, tab_name, command):
     return agent_session
 
 
-async def ensure_agent_panel_profile(connection, font_spec="JetBrainsMonoNF-Light 9"):
+async def ensure_agent_panel_profile(connection, font_spec="FiraCodeNFM-Light 9"):
     """Ensure the 'Agent Panel' iTerm2 profile exists and has the correct font.
 
     If the profile doesn't exist, falls back to 'Default'.
@@ -598,10 +598,31 @@ async def reset_all_agent_panels(connection, target_cols=30):
     print(f"Reset {fixed} panels, {skipped} already correct")
 
 
+async def set_default_profile_font(connection, font_spec):
+    """Set the Normal Font on iTerm2's built-in 'Default' profile.
+
+    Team agent tabs are created without an explicit --profile, so they inherit
+    Default. Calling this once at install time ensures every future agent tab
+    uses the intended font/size without per-tab overrides.
+    """
+    all_profiles = await iterm2.PartialProfile.async_query(connection)
+    for p in all_profiles:
+        if p.name == "Default":
+            full = await p.async_get_full_profile()
+            if full.normal_font != font_spec:
+                await full.async_set_normal_font(font_spec)
+                print(f"Set Default profile font to '{font_spec}'")
+            else:
+                print(f"Default profile font already '{font_spec}'")
+            return True
+    print("Default profile not found", file=sys.stderr)
+    return False
+
+
 async def set_session_font(connection, font_spec):
     """Set the font for the current session (identified by ITERM_SESSION_ID env var).
 
-    font_spec: Font name and size, e.g. "JetBrainsMonoNF-Light 9"
+    font_spec: Font name and size, e.g. "FiraCodeNFM-Light 9"
     """
     import os
     app = await iterm2.async_get_app(connection)
@@ -768,8 +789,12 @@ async def main_async(args):
         await resize_pane_by_env(connection, target)
 
     elif args.action == "set-font":
-        font_name = args.font or "JetBrainsMonoNF-Light 9"
+        font_name = args.font or "FiraCodeNFM-Light 9"
         await set_session_font(connection, font_name)
+
+    elif args.action == "set-default-font":
+        font_name = args.font or "FiraCodeNFM-Light 10"
+        await set_default_profile_font(connection, font_name)
 
     elif args.action == "reset-panels":
         target = int(args.target_cols) if args.target_cols else 30
@@ -797,10 +822,10 @@ def main():
     parser.add_argument("--command", "-c", help="Command to execute in the tab")
     parser.add_argument("--url", "-u", help="(deprecated) URL for agent panel")
     parser.add_argument("--target-cols", help="Target column width for resize-pane action (default: 30)")
-    parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'JetBrainsMonoNF-Light 9')")
+    parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'FiraCodeNFM-Light 9')")
     parser.add_argument(
         "--action", "-a",
-        choices=["create-window", "init-team-window", "create-tab", "set-title", "select-tab", "split-agent-panel", "resize-pane", "reset-panels", "set-font", "list-windows"],
+        choices=["create-window", "init-team-window", "create-tab", "set-title", "select-tab", "split-agent-panel", "resize-pane", "reset-panels", "set-font", "set-default-font", "list-windows"],
         default="create-window",
         help="Action to perform (init-team-window should be called FIRST in startup scripts, select-tab after all tabs created)"
     )
