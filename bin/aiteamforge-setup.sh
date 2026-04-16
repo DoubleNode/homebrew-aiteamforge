@@ -890,14 +890,14 @@ if [ -d "/Applications/iTerm.app" ]; then
     echo -e "${YELLOW}⚠${NC} LCARS profile script missing from tap (skipping)"
   fi
 
-  # Set iTerm2 Default profile font to FiraCodeNFM-Light 10.
+  # Set iTerm2 Default profile font to FiraCodeNFM-Reg 10.
   # Team agent tabs are created without an explicit --profile, so they inherit
   # the Default profile. This call requires iTerm2 running with Python API;
   # it is non-fatal if unavailable (user can re-run setup later).
   WINDOW_MGR="${AITEAMFORGE_HOME}/share/scripts/iterm2_window_manager.py"
   if [ -f "$WINDOW_MGR" ] && [ -d "/Applications/iTerm.app" ]; then
-    if python3 "$WINDOW_MGR" -a set-default-font -f "FiraCodeNFM-Light 10" >/dev/null 2>&1; then
-      echo -e "${GREEN}✓${NC} iTerm2 Default profile font (FiraCodeNFM-Light 10)"
+    if python3 "$WINDOW_MGR" -a set-default-font -f "FiraCodeNFM-Reg 10" >/dev/null 2>&1; then
+      echo -e "${GREEN}✓${NC} iTerm2 Default profile font (FiraCodeNFM-Reg 10)"
     else
       echo -e "${YELLOW}⚠${NC} Could not set iTerm2 Default profile font (iTerm2 not running or Python API unavailable)"
       echo -e "   Re-run: ${CYAN}python3 $WINDOW_MGR -a set-default-font${NC}"

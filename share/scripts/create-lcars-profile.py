@@ -40,6 +40,7 @@ ITERM_PLIST = Path.home() / "Library" / "Preferences" / "com.googlecode.iterm2.p
 
 LCARS_WEB_GUID = "AITEAMFORGE-LCARS-WEB-0001-000000000001"
 AGENT_PANEL_GUID = "AITEAMFORGE-AGENT-PANEL-0001-000000000001"
+DEFAULT_PROFILE_GUID = "AITEAMFORGE-DEFAULT-PROF-0001-000000000001"
 
 
 def _quarantine_stale_dynamic_profile_backups() -> None:
@@ -109,11 +110,15 @@ def _strip_stale_plist_entry() -> None:
 
 
 def create_profiles(url: str) -> bool:
-    """Write LCARS Web + Agent Panel as Dynamic Profiles.
+    """Write LCARS Web, Agent Panel, and Default profiles as Dynamic Profiles.
 
     Minimal delta-key form: iTerm2 merges parent defaults automatically
     at load time. This matches the shape that works on production
-    installs (verified against M1Pro and M3Pro setups).
+    installs (verified against M1Pro, M3Pro, and M4Mini setups).
+
+    The Default profile is created with FiraCodeNFM-Reg 10 and set as
+    iTerm2's default bookmark so new tabs/windows use the correct font
+    without manual profile configuration.
     """
     DYNAMIC_PROFILES_DIR.mkdir(parents=True, exist_ok=True)
     _quarantine_stale_dynamic_profile_backups()
@@ -121,6 +126,12 @@ def create_profiles(url: str) -> bool:
 
     data = {
         "Profiles": [
+            {
+                "Name": "Default",
+                "Guid": DEFAULT_PROFILE_GUID,
+                "Normal Font": "FiraCodeNFM-Reg 10",
+                "Tags": ["aiteamforge"],
+            },
             {
                 "Name": "LCARS Web",
                 "Guid": LCARS_WEB_GUID,
@@ -147,8 +158,17 @@ def create_profiles(url: str) -> bool:
     }
 
     PROFILE_FILE.write_text(json.dumps(data, indent=2))
+    print(f"Wrote Default profile: FiraCodeNFM-Reg 10")
     print(f"Wrote LCARS Web profile: Initial URL={url}")
     print(f"Wrote Agent Panel profile")
+
+    # Set our Default profile as iTerm2's default bookmark
+    subprocess.run(
+        ["defaults", "write", "com.googlecode.iterm2",
+         "Default Bookmark Guid", DEFAULT_PROFILE_GUID],
+        check=False, stderr=subprocess.DEVNULL
+    )
+    print(f"Set Default profile as iTerm2 default bookmark")
     return True
 
 

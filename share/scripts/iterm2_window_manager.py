@@ -793,7 +793,7 @@ async def main_async(args):
         await set_session_font(connection, font_name)
 
     elif args.action == "set-default-font":
-        font_name = args.font or "FiraCodeNFM-Light 10"
+        font_name = args.font or "FiraCodeNFM-Reg 10"
         await set_default_profile_font(connection, font_name)
 
     elif args.action == "reset-panels":
