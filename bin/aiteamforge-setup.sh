@@ -981,6 +981,45 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
 done
 
 # -----------------------------------------------------------------------
+# Detect and regenerate stale per-agent startup scripts
+# -----------------------------------------------------------------------
+# Per-agent startup scripts are generated from templates at install time.
+# If the tap was upgraded (new template features like tmux hostname), the
+# existing scripts become stale. This block scans ALL installed teams
+# (not just SELECTED_TEAMS) and regenerates scripts whose embedded
+# AITEAMFORGE_GENERATED_VERSION doesn't match the current tap version.
+_CURRENT_TAP_VERSION="$(cat "${AITEAMFORGE_HOME}/VERSION" 2>/dev/null || cat "${INSTALL_DIR}/../homebrew-tap/VERSION" 2>/dev/null || echo "unknown")"
+
+_stale_teams=()
+for _team_dir in "${INSTALL_DIR}"/*/scripts; do
+  [ -d "$_team_dir" ] || continue
+  _team_name="$(basename "$(dirname "$_team_dir")")"
+  # Check any per-agent startup script for the version marker
+  _any_script="$(find "$_team_dir" -name "${_team_name}-*-startup.sh" -maxdepth 1 2>/dev/null | head -1)"
+  if [ -n "$_any_script" ]; then
+    _script_version="$(grep '^# AITEAMFORGE_GENERATED_VERSION=' "$_any_script" 2>/dev/null | head -1 | cut -d= -f2)"
+    if [ "$_script_version" != "$_CURRENT_TAP_VERSION" ]; then
+      _stale_teams+=("$_team_name")
+    fi
+  fi
+done
+
+if [ ${#_stale_teams[@]} -gt 0 ]; then
+  echo -e "${YELLOW}⚠${NC} Stale startup scripts detected for: ${_stale_teams[*]}"
+  echo -e "  Regenerating from current templates (v${_CURRENT_TAP_VERSION})..."
+  for _stale_team in "${_stale_teams[@]}"; do
+    _wdir_var="_WORKDIR_${_stale_team}"
+    _stale_wdir="${!_wdir_var:-${INSTALL_DIR}/${_stale_team}}"
+    if [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
+      echo -e "  ${CYAN}Regenerating: ${_stale_team}${NC}"
+      AITEAMFORGE_DIR="${INSTALL_DIR}" TEAM_WORKING_DIR="${_stale_wdir}" \
+        bash "${INSTALLERS_DIR}/install-team.sh" "$_stale_team" --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/    /' || true
+    fi
+  done
+  echo ""
+fi
+
+# -----------------------------------------------------------------------
 # Install Shell Environment
 # -----------------------------------------------------------------------
 if [ "$INSTALL_SHELL" = "yes" ]; then
