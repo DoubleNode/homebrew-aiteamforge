@@ -354,14 +354,25 @@ fi
 # project directory rather than the default team working directory.
 # ============================================================================
 echo "  Creating tmux sessions (async for speed)..."
+# Log child output to a file so we can debug failures without SIGPIPE'ing the
+# children mid-tmux-setup (piping through head/grep has burned us before).
+_SESSION_LOG="/tmp/${TEAM_ID}-startup-sessions-$(date +%Y%m%d-%H%M%S).log"
+echo "  (Session log: $_SESSION_LOG)"
 _tmux_pids=()
+_expected_agents=()
 
 for _agent_script in "$AITEAMFORGE_DIR/${TEAM_ID}/scripts/${TEAM_ID}"-*-startup.sh; do
     [[ ! -f "$_agent_script" ]] && continue
-    echo "  Launching $(basename "$_agent_script")..."
+    # Derive agent name: "<team>-<agent>-startup.sh" → "<agent>"
+    _agent_base="$(basename "$_agent_script")"
+    _agent_name="${_agent_base#${TEAM_ID}-}"
+    _agent_name="${_agent_name%-startup.sh}"
+    _expected_agents+=("$_agent_name")
+
+    echo "  Launching $_agent_base..."
     SKIP_ATTACH=1 SKIP_SERVER_START=1 TMUX_SOCKET="$TMUX_SOCKET" \
         PROJECT_DIR="$PROJECT_DIR" \
-        bash "$_agent_script" &
+        bash "$_agent_script" >>"$_SESSION_LOG" 2>&1 &
     _tmux_pids+=($!)
     sleep 0.3
 done
@@ -373,6 +384,33 @@ if [[ ${#_tmux_pids[@]} -gt 0 ]]; then
         wait "$_pid" 2>/dev/null
     done
 fi
+
+# Verify each expected session exists; retry missing ones serially.
+# Parallel tmux ops on the same socket can race — retry is our safety net.
+echo "  Verifying sessions..."
+_missing_agents=()
+for _agent in "${_expected_agents[@]}"; do
+    if ! tmux -L "$TMUX_SOCKET" has-session -t "${TEAM_ID}-${_agent}" 2>/dev/null; then
+        _missing_agents+=("$_agent")
+    fi
+done
+
+if [[ ${#_missing_agents[@]} -gt 0 ]]; then
+    echo "  ⚠️  ${#_missing_agents[@]} session(s) failed to create, retrying serially..."
+    for _agent in "${_missing_agents[@]}"; do
+        _agent_script="$AITEAMFORGE_DIR/${TEAM_ID}/scripts/${TEAM_ID}-${_agent}-startup.sh"
+        echo "    Retrying ${TEAM_ID}-${_agent}..."
+        SKIP_ATTACH=1 SKIP_SERVER_START=1 TMUX_SOCKET="$TMUX_SOCKET" \
+            PROJECT_DIR="$PROJECT_DIR" \
+            bash "$_agent_script" >>"$_SESSION_LOG" 2>&1
+        if tmux -L "$TMUX_SOCKET" has-session -t "${TEAM_ID}-${_agent}" 2>/dev/null; then
+            echo "    ✓ ${TEAM_ID}-${_agent} created on retry"
+        else
+            echo "    ❌ ${TEAM_ID}-${_agent} still missing (see $_SESSION_LOG)"
+        fi
+    done
+fi
+
 echo "  All sessions initialized"
 echo ""
 
