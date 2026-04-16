@@ -45,6 +45,8 @@
                     <span class="top-divider">•</span>
                     <span class="lcars-version">LCARS 02-047<span class="server-hostname" id="server-hostname"></span></span>
                     <span class="top-divider">•</span>
+                    <span class="tap-version" id="tap-version" title="AITeamForge tap version">AITF 0.0.0</span>
+                    <span class="top-divider">•</span>
                     <span class="team-name" id="team-name">--</span>
                     <span class="group-id" id="group-id">--</span>
                 </div>
@@ -111,7 +113,7 @@
                             <div class="sidebar-submenu-item" data-section="integrations">INTEGRATIONS</div>
                             <div class="sidebar-submenu-item" data-section="rag-engines">RAG ENGINES</div>
                             <div class="sidebar-submenu-item" data-section="backups">BACKUPS</div>
-                            <div class="sidebar-submenu-item" data-section="archive">ARCHIVE / TRANSFER</div>
+                            <div class="sidebar-submenu-item" data-section="export-import">EXPORT / IMPORT</div>
                         </div>
                     </div>
                 </div>
@@ -726,117 +728,113 @@
                     </div>
                 </section>
 
-                <!-- Archive / Transfer -->
-                <section class="archive-section">
+                <!-- Export / Import -->
+                <section class="export-import-section">
                     <div class="section-header amber">
-                        <span class="section-title">ARCHIVE / TRANSFER</span>
+                        <span class="section-title">EXPORT / IMPORT</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div class="archive-overview" id="archive-overview">
-                        <div class="archive-stat">
-                            <span class="stat-label">TARGET</span>
-                            <span class="stat-value">~/dev-team/</span>
+                    <div class="export-overview">
+                        <div class="export-stat">
+                            <span class="stat-label">TEAM</span>
+                            <span class="stat-value" id="export-team-label">--</span>
                         </div>
-                        <div class="archive-stat">
+                        <div class="export-stat">
                             <span class="stat-label">STATUS</span>
-                            <span class="stat-value" id="archive-status">READY</span>
-                        </div>
-                        <div class="archive-stat">
-                            <span class="stat-label">LAST EXPORT</span>
-                            <span class="stat-value" id="archive-last-export">--</span>
+                            <span class="stat-value" id="export-status-label">READY</span>
                         </div>
                     </div>
 
-                    <!-- Archive Options -->
+                    <!-- EXPORT SUBSECTION -->
                     <div class="section-header cyan" style="margin-top: 20px;">
-                        <span class="section-title">EXPORT OPTIONS</span>
+                        <span class="section-title">EXPORT THIS TEAM</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div class="archive-options" id="archive-options">
-                        <div class="archive-option">
-                            <label class="lcars-toggle">
-                                <input type="checkbox" id="archive-include-git">
-                                <span class="toggle-slider"></span>
-                            </label>
-                            <div class="option-info">
-                                <span class="option-label">INCLUDE GIT HISTORY</span>
-                                <span class="option-desc">Include .git directories (increases archive size significantly)</span>
-                            </div>
-                        </div>
-                        <div class="archive-option">
-                            <label class="lcars-toggle">
-                                <input type="checkbox" id="archive-include-node-modules">
-                                <span class="toggle-slider"></span>
-                            </label>
-                            <div class="option-info">
-                                <span class="option-label">INCLUDE NODE MODULES</span>
-                                <span class="option-desc">Include node_modules directories (can be reinstalled via npm install)</span>
-                            </div>
-                        </div>
+                    <div class="export-description">
+                        Package this team's kanban data (and out-of-tree base-team knowledge, if applicable)
+                        into a single ZIP file for transfer to another system. Base-team knowledge files are
+                        merged on import, so nothing is overwritten in shared locations.
                     </div>
-
-                    <!-- Smart Exclusions Display -->
-                    <div class="section-header cyan" style="margin-top: 20px;">
-                        <span class="section-title">SMART EXCLUSIONS</span>
-                        <div class="section-bar"></div>
-                    </div>
-                    <div class="archive-exclusions" id="archive-exclusions">
-                        <div class="exclusion-item">__pycache__/, *.pyc</div>
-                        <div class="exclusion-item">.DS_Store</div>
-                        <div class="exclusion-item">.claude/ (tokens/secrets)</div>
-                        <div class="exclusion-item">worktrees/ (recreated per-machine)</div>
-                        <div class="exclusion-item">dev-team-backups/</div>
-                        <div class="exclusion-item">*.egg-info/</div>
-                        <div class="exclusion-item conditional" id="exclusion-git">.git/ directories</div>
-                        <div class="exclusion-item conditional" id="exclusion-node">node_modules/</div>
-                    </div>
-
-                    <!-- Generate Button + Progress -->
-                    <div class="archive-actions" id="archive-actions">
-                        <button class="lcars-button archive-generate-btn" id="archive-generate-btn" onclick="startArchiveGeneration()" aria-label="Generate dev-team archive">
-                            GENERATE ARCHIVE
+                    <div class="export-actions">
+                        <button class="lcars-button export-btn" id="export-btn" onclick="startTeamExport()" aria-label="Export this team">
+                            EXPORT TEAM
                         </button>
                     </div>
 
-                    <!-- Progress Display (hidden by default) -->
-                    <div class="archive-progress" id="archive-progress" style="display: none;">
+                    <div class="export-progress" id="export-progress" style="display: none;">
                         <div class="progress-header">
-                            <span class="progress-label" id="archive-progress-label">GENERATING...</span>
-                            <span class="progress-percent" id="archive-progress-percent">0%</span>
+                            <span class="progress-label" id="export-progress-label">EXPORTING...</span>
+                            <span class="progress-percent" id="export-progress-percent">0%</span>
                         </div>
-                        <div class="progress-bar-container" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Archive generation progress">
-                            <div class="progress-bar" id="archive-progress-bar" style="width: 0%"></div>
+                        <div class="progress-bar-container" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Export progress">
+                            <div class="progress-bar" id="export-progress-bar" style="width: 0%"></div>
                         </div>
-                        <div class="progress-message" id="archive-progress-message">Initializing...</div>
+                        <div class="progress-message" id="export-progress-message">Initializing...</div>
                     </div>
 
-                    <!-- Download Section (hidden by default) -->
-                    <div class="archive-download" id="archive-download" style="display: none;">
+                    <div class="export-download" id="export-download" style="display: none;">
                         <div class="download-info">
-                            <span class="download-filename" id="archive-download-filename">--</span>
-                            <span class="download-size" id="archive-download-size">--</span>
-                            <span class="download-files" id="archive-download-files">-- files</span>
+                            <span class="download-filename" id="export-download-filename">--</span>
+                            <span class="download-size" id="export-download-size">--</span>
+                            <span class="download-files" id="export-download-files">-- files</span>
                         </div>
-                        <button class="lcars-button archive-download-btn" id="archive-download-btn" onclick="downloadArchive()" aria-label="Download generated archive">
+                        <button class="lcars-button export-download-btn" id="export-download-btn" onclick="downloadTeamExport()" aria-label="Download team export">
                             DOWNLOAD
                         </button>
                     </div>
 
-                    <!-- Deployment Checklist Section -->
+                    <!-- IMPORT SUBSECTION -->
                     <div class="section-header cyan" style="margin-top: 20px;">
-                        <span class="section-title">DEPLOYMENT CHECKLIST</span>
+                        <span class="section-title">IMPORT INTO THIS TEAM</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div class="archive-checklist" id="archive-checklist">
-                        <div class="checklist-description">
-                            Generate a deployment checklist for the target machine after creating an archive.
-                        </div>
-                        <button class="lcars-button archive-checklist-btn" id="archive-checklist-btn" onclick="generateDeploymentChecklist()" disabled aria-label="Generate deployment checklist">
-                            GENERATE CHECKLIST
+                    <div class="import-description">
+                        Upload a team export ZIP. The source team's base-team must match this team's base
+                        (e.g., <code>finance-personal</code> → <code>finance-budget</code>, not
+                        <code>finance-personal</code> → <code>legal-coparenting</code>). Project kanban
+                        data is <strong>overwritten</strong>. Out-of-tree base-team knowledge is
+                        <strong>merged</strong>; conflicts are renamed with an <code>.imported-&lt;host&gt;-&lt;ts&gt;</code> suffix.
+                    </div>
+                    <div class="import-actions">
+                        <input type="file" id="import-file-input" accept=".zip" style="display: none;" onchange="handleImportFileSelected(event)">
+                        <button class="lcars-button import-btn" id="import-btn" onclick="document.getElementById('import-file-input').click()" aria-label="Select team export file to import">
+                            SELECT EXPORT FILE
                         </button>
-                        <div class="checklist-content" id="archive-checklist-content" style="display: none;">
-                            <!-- Populated by JavaScript -->
+                    </div>
+
+                    <div class="import-preflight" id="import-preflight" style="display: none;">
+                        <div class="preflight-header">PRE-FLIGHT</div>
+                        <div class="preflight-grid">
+                            <div class="preflight-row"><span class="preflight-key">Source Team</span><span class="preflight-value" id="preflight-source-team">--</span></div>
+                            <div class="preflight-row"><span class="preflight-key">Source Host</span><span class="preflight-value" id="preflight-source-host">--</span></div>
+                            <div class="preflight-row"><span class="preflight-key">Target Team</span><span class="preflight-value" id="preflight-target-team">--</span></div>
+                            <div class="preflight-row"><span class="preflight-key">Base Match</span><span class="preflight-value" id="preflight-base-match">--</span></div>
+                            <div class="preflight-row"><span class="preflight-key">ID Rename</span><span class="preflight-value" id="preflight-id-rename">--</span></div>
+                            <div class="preflight-row"><span class="preflight-key">Files (in-tree / out-of-tree)</span><span class="preflight-value" id="preflight-file-counts">--</span></div>
                         </div>
+                        <div class="preflight-warning">
+                            ⚠ Project kanban data on this machine will be <strong>overwritten</strong>. This cannot be undone.
+                        </div>
+                        <div class="import-confirm-actions">
+                            <button class="lcars-button import-cancel-btn" onclick="cancelImport()" aria-label="Cancel import">CANCEL</button>
+                            <button class="lcars-button import-apply-btn" id="import-apply-btn" onclick="applyTeamImport()" aria-label="Apply import">APPLY IMPORT</button>
+                        </div>
+                    </div>
+
+                    <div class="import-progress" id="import-progress" style="display: none;">
+                        <div class="progress-header">
+                            <span class="progress-label" id="import-progress-label">IMPORTING...</span>
+                            <span class="progress-percent" id="import-progress-percent">0%</span>
+                        </div>
+                        <div class="progress-bar-container" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100" aria-label="Import progress">
+                            <div class="progress-bar" id="import-progress-bar" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-message" id="import-progress-message">Initializing...</div>
+                    </div>
+
+                    <div class="import-result" id="import-result" style="display: none;">
+                        <div class="result-title" id="import-result-title">IMPORT COMPLETE</div>
+                        <div class="result-stats" id="import-result-stats"></div>
                     </div>
                 </section>
 

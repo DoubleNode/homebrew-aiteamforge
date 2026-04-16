@@ -131,11 +131,13 @@ TEAM_KANBAN_DIRS = {
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 
 # Archive job tracking
-ARCHIVE_JOBS = {}  # {job_id: {status, progress, message, filename, fileSize, error}}
-ARCHIVE_DIR = Path("/tmp/lcars-archives")
+EXPORT_JOBS = {}   # {job_id: {status, progress, message, filename, fileSize, error, ...}}
+IMPORT_JOBS = {}   # {job_id: {status, progress, message, manifest, stagedPath, ...}}
+EXPORT_DIR = Path("/tmp/lcars-exports")
+IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
 
 
-def format_bytes_archive(size):
+def format_bytes_export(size):
     """Format bytes to human-readable string"""
     for unit in ['B', 'KB', 'MB', 'GB']:
         if size < 1024:
@@ -144,151 +146,393 @@ def format_bytes_archive(size):
     return f"{size:.1f} TB"
 
 
-def generate_archive(job_id, options):
-    """Generate a tar.gz archive of the dev-team directory (runs in background thread)"""
-    import tarfile
-    from datetime import datetime
+# File exclusion rules — match kanban-backup.py create_directory_backup_zip
+EXPORT_EXCLUDE_SUFFIXES = {'.lock'}
+EXPORT_EXCLUDE_NAMES = {'.DS_Store', 'firebase-debug.log'}
+EXPORT_EXCLUDE_PATTERNS = {'*-debug.log'}
 
-    DEV_TEAM_DIR = Path.home() / "dev-team"
+
+def _export_should_exclude(filepath):
+    """Return True if a file should be skipped from export. Mirrors backup logic."""
+    name = filepath.name
+    if name in EXPORT_EXCLUDE_NAMES:
+        return True
+    if filepath.suffix in EXPORT_EXCLUDE_SUFFIXES:
+        return True
+    for pattern in EXPORT_EXCLUDE_PATTERNS:
+        if filepath.match(pattern):
+            return True
+    return False
+
+
+def _split_team_id(team_id):
+    """Split a team ID into (base_team, project_params).
+
+    Examples:
+        academy                        -> ("academy", [])
+        ios                            -> ("ios", [])
+        finance-personal               -> ("finance", ["personal"])
+        legal-coparenting              -> ("legal", ["coparenting"])
+        freelance-doublenode-starwords -> ("freelance", ["doublenode", "starwords"])
+    """
+    if '-' not in team_id:
+        return team_id, []
+    parts = team_id.split('-')
+    return parts[0], parts[1:]
+
+
+# Multi-project base teams whose out-of-tree knowledge lives under
+# ~/dev-team/kanban/<base>/knowledge/. Academy's kanban dir is
+# ~/dev-team/kanban/ itself, so it physically contains these subdirs —
+# they must be excluded from the academy export walk to prevent academy
+# archives from overwriting other teams' knowledge on restore.
+MULTI_PROJECT_BASE_TEAMS = frozenset({'finance', 'legal', 'medical', 'freelance'})
+
+
+def _base_team_knowledge_dir(base_team):
+    """Return the canonical out-of-tree knowledge dir for a base team.
+
+    Only applies to multi-project teams (finance, legal, medical, freelance).
+    Single-project teams (ios, android, etc.) keep their knowledge inside
+    their own kanban dir and don't need out-of-tree handling.
+    Academy is special — its kanban dir IS ~/dev-team/kanban/ so its own
+    knowledge is already in-tree, but other base teams' knowledge also
+    lives there and must be excluded from academy's walk.
+    """
+    if base_team not in MULTI_PROJECT_BASE_TEAMS:
+        return None
+    return Path.home() / "dev-team" / "kanban" / base_team / "knowledge"
+
+
+def generate_export(job_id, team_id):
+    """Generate a per-team export zip (runs in background thread).
+
+    Archive contents:
+    - All files under TEAM_KANBAN_DIRS[team_id] (the project kanban tree)
+    - For multi-project teams, also ~/dev-team/kanban/<base>/knowledge/
+      (out-of-tree knowledge, placed under __out_of_tree__/knowledge/ in the zip)
+    - export-manifest.json at the zip root
+
+    Matches kanban-backup.py exclusion rules: *.lock, *-debug.log, .DS_Store,
+    firebase-debug.log.
+    """
+    import zipfile
+    import socket
+    from datetime import datetime, timezone
 
     try:
-        ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
 
+        base_team, project_params = _split_team_id(team_id)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        filename = f"dev-team-export-{timestamp}.tar.gz"
-        output_path = ARCHIVE_DIR / filename
+        filename = f"lcars-export-{team_id}-{timestamp}.zip"
+        output_path = EXPORT_DIR / filename
 
-        ARCHIVE_JOBS[job_id]['message'] = 'Scanning files...'
-        ARCHIVE_JOBS[job_id]['progress'] = 5
+        kanban_dir = TEAM_KANBAN_DIRS.get(team_id)
+        if kanban_dir is None or not kanban_dir.exists():
+            EXPORT_JOBS[job_id].update({
+                'status': 'failed',
+                'progress': 0,
+                'message': f'Kanban directory not found for team {team_id}',
+                'error': f'TEAM_KANBAN_DIRS has no entry for {team_id} or path does not exist',
+            })
+            return
 
-        # Build exclusion sets
-        always_exclude_dirs = {'__pycache__', '.DS_Store', '.claude', 'worktrees', 'dev-team-backups'}
+        out_of_tree_dir = _base_team_knowledge_dir(base_team)
 
-        exclude_dirs = set(always_exclude_dirs)
-        if not options.get('includeNodeModules'):
-            exclude_dirs.add('node_modules')
+        EXPORT_JOBS[job_id]['message'] = 'Scanning files...'
+        EXPORT_JOBS[job_id]['progress'] = 5
 
-        # Collect files first for progress tracking
-        files_to_archive = []
-        for root, dirs, files in os.walk(DEV_TEAM_DIR):
-            rel_root = Path(root).relative_to(DEV_TEAM_DIR)
+        # Collect in-tree files (project kanban directory).
+        # For academy: skip ~/dev-team/kanban/<base>/ subdirs for other
+        # multi-project base teams — those belong to the finance/legal/medical/
+        # freelance teams and get handled as their own out-of-tree knowledge.
+        # Including them here would let an academy restore stomp other teams'
+        # knowledge, which violates the merge-not-overwrite policy.
+        skip_top_segments = MULTI_PROJECT_BASE_TEAMS if team_id == 'academy' else frozenset()
 
-            # Skip excluded directories
-            dirs[:] = [
-                d for d in dirs
-                if d not in exclude_dirs
-                and not d.endswith('.egg-info')
-                and not (d == '.git' and not options.get('includeGitHistory'))
-            ]
+        in_tree_files = []
+        for item in kanban_dir.rglob("*"):
+            if not item.is_file() or _export_should_exclude(item):
+                continue
+            rel = item.relative_to(kanban_dir)
+            if rel.parts and rel.parts[0] in skip_top_segments:
+                continue
+            in_tree_files.append((item, rel))
 
-            for fname in files:
-                if fname == '.DS_Store':
-                    continue
-                if fname.endswith('.pyc'):
-                    continue
-                rel_path = str(rel_root / fname)
-                # Skip archives directory itself
-                abs_path = os.path.join(root, fname)
-                if abs_path.startswith(str(ARCHIVE_DIR)):
-                    continue
-                # Check custom exclusions
-                skip = False
-                for pattern in options.get('customExclusions', []):
-                    if pattern in rel_path:
-                        skip = True
-                        break
-                if not skip:
-                    files_to_archive.append((abs_path, rel_path))
+        # Collect out-of-tree knowledge files (multi-project teams only)
+        out_of_tree_files = []
+        if out_of_tree_dir and out_of_tree_dir.exists():
+            for item in out_of_tree_dir.rglob("*"):
+                if item.is_file() and not _export_should_exclude(item):
+                    out_of_tree_files.append((item, item.relative_to(out_of_tree_dir)))
 
-        total_files = len(files_to_archive)
-        ARCHIVE_JOBS[job_id]['message'] = f'Compressing {total_files} files...'
-        ARCHIVE_JOBS[job_id]['progress'] = 10
+        total_files = len(in_tree_files) + len(out_of_tree_files)
+        if total_files == 0:
+            EXPORT_JOBS[job_id].update({
+                'status': 'failed',
+                'progress': 0,
+                'message': 'No files to export',
+                'error': 'Kanban directory is empty',
+            })
+            return
 
-        # Create tar.gz
-        with tarfile.open(output_path, 'w:gz') as tar:
-            for i, (abs_path, rel_path) in enumerate(files_to_archive):
+        EXPORT_JOBS[job_id]['message'] = f'Compressing {total_files} files...'
+        EXPORT_JOBS[job_id]['progress'] = 10
+
+        with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            processed = 0
+
+            # In-tree project data → kanban/ prefix inside zip
+            for src, rel in in_tree_files:
                 try:
-                    tar.add(abs_path, arcname=f"dev-team/{rel_path}")
+                    zipf.write(src, f"kanban/{rel}")
                 except (PermissionError, FileNotFoundError) as e:
-                    print(f"[LCARS Archive] Skipped: {rel_path} ({e.__class__.__name__})")
+                    print(f"[LCARS Export] Skipped: {rel} ({e.__class__.__name__})")
+                processed += 1
+                if processed % 50 == 0:
+                    EXPORT_JOBS[job_id]['progress'] = 10 + int((processed / total_files) * 80)
+                    EXPORT_JOBS[job_id]['message'] = f'Compressing... ({processed}/{total_files} files)'
 
-                # Update progress (10% to 90% range)
-                if total_files > 0:
-                    progress = 10 + int((i / total_files) * 80)
-                    if progress != ARCHIVE_JOBS[job_id]['progress']:
-                        ARCHIVE_JOBS[job_id]['progress'] = progress
-                    if i % 500 == 0:
-                        ARCHIVE_JOBS[job_id]['message'] = f'Compressing... ({i}/{total_files} files)'
+            # Out-of-tree knowledge → __out_of_tree__/knowledge/ prefix
+            for src, rel in out_of_tree_files:
+                try:
+                    zipf.write(src, f"__out_of_tree__/knowledge/{rel}")
+                except (PermissionError, FileNotFoundError) as e:
+                    print(f"[LCARS Export] Skipped: {rel} ({e.__class__.__name__})")
+                processed += 1
+                if processed % 50 == 0:
+                    EXPORT_JOBS[job_id]['progress'] = 10 + int((processed / total_files) * 80)
+                    EXPORT_JOBS[job_id]['message'] = f'Compressing... ({processed}/{total_files} files)'
 
-            # Add manifest.json to archive
-            ARCHIVE_JOBS[job_id]['message'] = 'Writing manifest...'
-            ARCHIVE_JOBS[job_id]['progress'] = 92
+            # Write manifest
+            EXPORT_JOBS[job_id]['message'] = 'Writing manifest...'
+            EXPORT_JOBS[job_id]['progress'] = 92
 
-            import socket
-            import io
             manifest = {
                 "version": "1.0",
-                "createdAt": datetime.now().astimezone().isoformat(),
+                "kind": "lcars-team-export",
+                "team": team_id,
+                "baseTeam": base_team,
+                "projectParams": project_params,
                 "sourceHost": socket.gethostname(),
-                "sourcePath": str(DEV_TEAM_DIR),
-                "totalFiles": total_files,
-                "options": {
-                    "includeGitHistory": options.get('includeGitHistory', False),
-                    "includeNodeModules": options.get('includeNodeModules', False),
-                    "customExclusions": options.get('customExclusions', []),
+                "sourceKanbanDir": str(kanban_dir),
+                "sourceOutOfTreeKnowledgeDir": str(out_of_tree_dir) if out_of_tree_dir else None,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "fileCount": {
+                    "inTree": len(in_tree_files),
+                    "outOfTree": len(out_of_tree_files),
+                    "total": total_files,
                 },
-                "pathRemapping": {
-                    "~/dev-team/": "Target dev-team root directory",
-                    "~/dev-team/kanban/": "Academy kanban board data",
-                    "~/dev-team/lcars-ui/": "LCARS web interface",
-                    "~/dev-team/scripts/": "Shell scripts and automation",
-                    "~/dev-team/config/": "Team configuration files",
-                    "~/dev-team/kanban-helpers.sh": "Kanban CLI helper functions",
-                    "~/dev-team/home-scripts/": "Shell profile configurations",
-                },
-                "externalDependencies": {
-                    "distributedKanbanDirs": {
-                        "description": "Teams with kanban data in external directories (not included)",
-                        "dirs": [str(p) for p in TEAM_KANBAN_DIRS.values()
-                                 if not str(p).startswith(str(DEV_TEAM_DIR))]
-                    },
-                    "backupDir": "~/dev-team-backups/kanban (not included)",
-                    "claudeConfig": "~/.claude/ (not included - contains auth tokens)",
-                },
-                "environment": {
-                    "python": "3.x required",
-                    "node": "Required if using integrations",
-                    "homebrew": "Recommended package manager (macOS)",
-                    "tools": ["git", "tmux", "jq", "gh (GitHub CLI)", "claude (Claude Code CLI)"],
-                },
+                "excludePatterns": sorted(EXPORT_EXCLUDE_NAMES | {f'*{s}' for s in EXPORT_EXCLUDE_SUFFIXES} | EXPORT_EXCLUDE_PATTERNS),
             }
+            zipf.writestr("export-manifest.json", json.dumps(manifest, indent=2))
 
-            manifest_json = json.dumps(manifest, indent=2)
-            manifest_bytes = manifest_json.encode('utf-8')
-
-            manifest_info = tarfile.TarInfo(name="dev-team/ARCHIVE_MANIFEST.json")
-            manifest_info.size = len(manifest_bytes)
-            manifest_info.mtime = int(datetime.now().timestamp())
-            tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
-
-        # Finalize
         file_size = output_path.stat().st_size
-        ARCHIVE_JOBS[job_id].update({
+        EXPORT_JOBS[job_id].update({
             'status': 'completed',
             'progress': 100,
-            'message': 'Archive ready for download',
+            'message': 'Export ready for download',
             'filename': filename,
-            'fileSize': format_bytes_archive(file_size),
+            'fileSize': format_bytes_export(file_size),
             'fileSizeBytes': file_size,
             'totalFiles': total_files,
             'manifest': manifest,
         })
 
     except Exception as e:
-        ARCHIVE_JOBS[job_id].update({
+        EXPORT_JOBS[job_id].update({
             'status': 'failed',
             'progress': 0,
-            'message': f'Archive failed: {str(e)}',
+            'message': f'Export failed: {str(e)}',
+            'error': str(e),
+        })
+
+
+def _rewrite_team_ids_in_file(filepath, old_team_id, new_team_id):
+    """Rewrite occurrences of old_team_id → new_team_id inside a text file.
+
+    Used during import when source and target team IDs differ (e.g.,
+    finance-personal → finance-budget). Scoped to JSON and MD files in
+    the project kanban tree. Out-of-tree knowledge is NOT rewritten —
+    it's base-team scoped and shared across project instances.
+    """
+    try:
+        text = filepath.read_text(encoding='utf-8')
+    except (UnicodeDecodeError, OSError):
+        return False
+    if old_team_id not in text:
+        return False
+    new_text = text.replace(old_team_id, new_team_id)
+    filepath.write_text(new_text, encoding='utf-8')
+    return True
+
+
+def apply_import(job_id):
+    """Apply a staged import to the target team's kanban dir (background thread).
+
+    Steps:
+    1. Extract staged zip to a temp scratch dir
+    2. Validate manifest (should already be validated at upload time)
+    3. Overwrite target kanban dir with contents of kanban/ from zip
+    4. If source team ID ≠ target team ID, rewrite references in JSON/MD files
+       and rename <old>-board.json → <new>-board.json
+    5. Merge out-of-tree knowledge (if present) into ~/dev-team/kanban/<base>/knowledge/
+       with rename-on-conflict semantics for knowledge files and INDEX.md
+    """
+    import zipfile
+    import shutil
+    import socket
+    from datetime import datetime, timezone
+
+    job = IMPORT_JOBS.get(job_id)
+    if not job:
+        return
+
+    try:
+        staged_path = Path(job['stagedPath'])
+        if not staged_path.exists():
+            raise FileNotFoundError(f'Staged archive missing: {staged_path}')
+
+        source_team = job['manifest']['team']
+        target_team = job['targetTeam']
+        source_base, _ = _split_team_id(source_team)
+        target_base, _ = _split_team_id(target_team)
+
+        if source_base != target_base:
+            raise ValueError(
+                f'Base team mismatch: source={source_base}, target={target_base}. '
+                f'Archive can only be imported into the same base team.'
+            )
+
+        target_kanban_dir = TEAM_KANBAN_DIRS.get(target_team)
+        if target_kanban_dir is None:
+            raise ValueError(f'No kanban directory configured for target team {target_team}')
+        if not target_kanban_dir.exists():
+            raise FileNotFoundError(
+                f'Target kanban directory does not exist: {target_kanban_dir}. '
+                f'Install the team via AITeamForge before importing.'
+            )
+
+        scratch_dir = IMPORT_STAGING_DIR / f"extract-{job_id}"
+        if scratch_dir.exists():
+            shutil.rmtree(scratch_dir)
+        scratch_dir.mkdir(parents=True)
+
+        IMPORT_JOBS[job_id]['message'] = 'Extracting archive...'
+        IMPORT_JOBS[job_id]['progress'] = 10
+
+        with zipfile.ZipFile(staged_path, 'r') as zipf:
+            zipf.extractall(scratch_dir)
+
+        # --- Step 1: Overwrite project kanban tree ---
+        IMPORT_JOBS[job_id]['message'] = 'Overwriting project kanban tree...'
+        IMPORT_JOBS[job_id]['progress'] = 30
+
+        extracted_kanban = scratch_dir / "kanban"
+        if not extracted_kanban.exists():
+            raise FileNotFoundError('Archive missing kanban/ directory')
+
+        # Clear target kanban contents (except the dir itself) then copy extracted
+        for item in list(target_kanban_dir.iterdir()):
+            if item.is_dir():
+                shutil.rmtree(item)
+            else:
+                item.unlink()
+
+        for src in extracted_kanban.rglob("*"):
+            if src.is_file():
+                rel = src.relative_to(extracted_kanban)
+                dest = target_kanban_dir / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dest)
+
+        # --- Step 2: Team ID rewrite if source ≠ target ---
+        renames = 0
+        if source_team != target_team:
+            IMPORT_JOBS[job_id]['message'] = f'Rewriting team IDs ({source_team} → {target_team})...'
+            IMPORT_JOBS[job_id]['progress'] = 55
+
+            # Rename board file if present
+            old_board = target_kanban_dir / f"{source_team}-board.json"
+            new_board = target_kanban_dir / f"{target_team}-board.json"
+            if old_board.exists():
+                old_board.rename(new_board)
+                renames += 1
+
+            # Grep-rewrite JSON and MD files
+            for f in target_kanban_dir.rglob("*"):
+                if f.is_file() and f.suffix in ('.json', '.md'):
+                    if _rewrite_team_ids_in_file(f, source_team, target_team):
+                        renames += 1
+
+        # --- Step 3: Merge out-of-tree knowledge ---
+        merged_files = 0
+        renamed_conflicts = 0
+        extracted_oot = scratch_dir / "__out_of_tree__" / "knowledge"
+        if extracted_oot.exists():
+            IMPORT_JOBS[job_id]['message'] = 'Merging out-of-tree knowledge...'
+            IMPORT_JOBS[job_id]['progress'] = 75
+
+            target_oot = _base_team_knowledge_dir(target_base)
+            if target_oot is None:
+                # Single-project team on target — shouldn't have out-of-tree data
+                # but the source sent some. Log and skip.
+                print(f'[LCARS Import] Warning: source has out-of-tree knowledge but target '
+                      f'base team {target_base} is single-project. Skipping merge.')
+            else:
+                target_oot.mkdir(parents=True, exist_ok=True)
+                source_host = job['manifest'].get('sourceHost', 'unknown')
+                import_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+                for src in extracted_oot.rglob("*"):
+                    if not src.is_file():
+                        continue
+                    rel = src.relative_to(extracted_oot)
+                    dest = target_oot / rel
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+
+                    if not dest.exists():
+                        shutil.copy2(src, dest)
+                        merged_files += 1
+                    else:
+                        # Conflict: keep both with rename suffix
+                        suffix = dest.suffix
+                        stem = dest.stem
+                        if stem == "INDEX":
+                            # INDEX.md → INDEX.imported-<host>-<ts>.md
+                            rename_target = dest.with_name(
+                                f"INDEX.imported-{source_host}-{import_ts}{suffix}"
+                            )
+                        else:
+                            rename_target = dest.with_name(
+                                f"{stem}.imported-{source_host}-{import_ts}{suffix}"
+                            )
+                        shutil.copy2(src, rename_target)
+                        renamed_conflicts += 1
+
+        IMPORT_JOBS[job_id].update({
+            'status': 'completed',
+            'progress': 100,
+            'message': 'Import complete',
+            'stats': {
+                'inTreeRenames': renames,
+                'outOfTreeMerged': merged_files,
+                'outOfTreeConflicts': renamed_conflicts,
+            },
+        })
+
+        # Cleanup scratch + staged zip
+        try:
+            shutil.rmtree(scratch_dir)
+        except Exception:
+            pass
+
+    except Exception as e:
+        IMPORT_JOBS[job_id].update({
+            'status': 'failed',
+            'progress': 0,
+            'message': f'Import failed: {str(e)}',
             'error': str(e),
         })
 
@@ -504,11 +748,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_resolve_calendar_conflict()
         elif path == '/api/terminal/activate':
             self.handle_terminal_activate()
-        # Archive API endpoints
-        elif path == '/api/archive/create':
-            self.handle_create_archive()
-        elif path == '/api/archive/checklist':
-            self.handle_generate_checklist()
+        # Team Export/Import API endpoints
+        elif path == '/api/export/create':
+            self.handle_create_export()
+        elif path == '/api/import/upload':
+            self.handle_import_upload()
+        elif path.startswith('/api/import/apply/'):
+            job_id = path.replace('/api/import/apply/', '')
+            self.handle_import_apply(job_id)
         # RAG Engine API endpoints
         elif path == '/api/rag-engines/save':
             self.handle_rag_engine_save()
@@ -5509,13 +5756,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Knowledge Base analytics endpoint
         elif path == '/api/knowledge-stats':
             self.serve_knowledge_stats()
-        # Archive API endpoints
-        elif path.startswith('/api/archive/status/'):
-            job_id = path.replace('/api/archive/status/', '')
-            self.serve_archive_status(job_id)
-        elif path.startswith('/api/archive/download/'):
-            job_id = path.replace('/api/archive/download/', '')
-            self.serve_archive_download(job_id)
+        # Team Export/Import API endpoints
+        elif path.startswith('/api/export/status/'):
+            job_id = path.replace('/api/export/status/', '')
+            self.serve_export_status(job_id)
+        elif path.startswith('/api/export/download/'):
+            job_id = path.replace('/api/export/download/', '')
+            self.serve_export_download(job_id)
+        elif path.startswith('/api/import/status/'):
+            job_id = path.replace('/api/import/status/', '')
+            self.serve_import_status(job_id)
+        elif path == '/api/tap-version':
+            self.serve_tap_version()
         # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
         # This allows the router to work from ANY port - startup scripts write
         # the target team to the static file, and all servers serve the same file.
@@ -7024,220 +7276,85 @@ end tell
         except Exception as e:
             self._send_json_response({'node': None, 'error': str(e)})
 
-    def handle_create_archive(self):
-        """Handle POST /api/archive/create — start archive generation in background"""
+    def handle_create_export(self):
+        """POST /api/export/create — start a team export in the background.
+
+        The team is determined by LCARS_TEAM env var (set when the server starts).
+        No team parameter is accepted from the client — export is always scoped
+        to whichever team's LCARS server you hit.
+        """
         import uuid
         import threading
         from datetime import datetime, timezone
 
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
+        if not LCARS_TEAM:
+            self._send_json_response(
+                {'error': 'LCARS_TEAM not configured on this server'}, status=500
+            )
+            return
 
-        # Prune old completed/failed jobs (older than 1 hour)
+        # Prune old jobs (>1 hr) and old files
         now = datetime.now(timezone.utc)
-        stale_ids = []
-        for jid, jdata in ARCHIVE_JOBS.items():
-            if jdata.get('status') in ('completed', 'failed'):
-                created = jdata.get('createdAt', '')
-                try:
-                    created_dt = datetime.fromisoformat(created.replace('Z', '+00:00'))
-                    if (now - created_dt).total_seconds() > 3600:
-                        stale_ids.append(jid)
-                except (ValueError, AttributeError):
-                    stale_ids.append(jid)
+        stale_ids = [
+            jid for jid, jdata in EXPORT_JOBS.items()
+            if jdata.get('status') in ('completed', 'failed')
+            and (now - datetime.fromisoformat(jdata.get('createdAt', now.isoformat()).replace('Z', '+00:00'))).total_seconds() > 3600
+        ]
         for jid in stale_ids:
-            del ARCHIVE_JOBS[jid]
+            del EXPORT_JOBS[jid]
 
-        # Cleanup old archive files (older than 1 hour)
-        if ARCHIVE_DIR.exists():
-            for archive_file in ARCHIVE_DIR.glob('dev-team-export-*.tar.gz'):
+        if EXPORT_DIR.exists():
+            for old in EXPORT_DIR.glob('lcars-export-*.zip'):
                 try:
-                    age = (now - datetime.fromtimestamp(archive_file.stat().st_mtime, tz=timezone.utc)).total_seconds()
+                    age = (now - datetime.fromtimestamp(old.stat().st_mtime, tz=timezone.utc)).total_seconds()
                     if age > 3600:
-                        archive_file.unlink()
+                        old.unlink()
                 except Exception:
                     pass
 
         job_id = str(uuid.uuid4())
-
-        # Sanitize custom exclusions — only allow simple path patterns
-        raw_exclusions = body.get('customExclusions', [])
-        options = {
-            'includeGitHistory': body.get('includeGitHistory', False),
-            'includeNodeModules': body.get('includeNodeModules', False),
-            'customExclusions': [
-                p for p in raw_exclusions
-                if isinstance(p, str) and len(p) < 200 and '..' not in p and not p.startswith('/')
-            ],
-        }
-
-        ARCHIVE_JOBS[job_id] = {
+        EXPORT_JOBS[job_id] = {
             'status': 'generating',
             'progress': 0,
-            'message': 'Initializing archive...',
+            'message': 'Initializing export...',
             'filename': None,
             'fileSize': None,
             'error': None,
+            'team': LCARS_TEAM,
             'createdAt': datetime.now(timezone.utc).isoformat(),
         }
 
         thread = threading.Thread(
-            target=generate_archive,
-            args=(job_id, options),
+            target=generate_export,
+            args=(job_id, LCARS_TEAM),
             daemon=True
         )
         thread.start()
 
-        self._send_json_response({'jobId': job_id, 'status': 'generating'})
+        self._send_json_response({'jobId': job_id, 'status': 'generating', 'team': LCARS_TEAM})
 
-    def handle_generate_checklist(self):
-        """Generate a deployment checklist based on current system state"""
-        import platform
-        import shutil
-        from datetime import datetime, timezone
-
-        content_length = int(self.headers.get('Content-Length', 0))
-        body = json.loads(self.rfile.read(content_length)) if content_length > 0 else {}
-
-        job_id = body.get('jobId')
-
-        # Gather system info
-        DEV_TEAM_DIR = Path.home() / "dev-team"
-
-        # Check what tools are installed
-        tools = {}
-        for tool in ['python3', 'node', 'npm', 'git', 'tmux', 'jq', 'gh', 'claude']:
-            tools[tool] = shutil.which(tool) is not None
-
-        # Check Python version
-        python_version = platform.python_version()
-
-        # Check Node version
-        node_version = None
-        try:
-            result = subprocess.run(['node', '--version'], capture_output=True, text=True, timeout=5)
-            if result.returncode == 0:
-                node_version = result.stdout.strip()
-        except Exception:
-            pass
-
-        # Get git remote info
-        git_remotes = []
-        try:
-            result = subprocess.run(['git', 'remote', '-v'], capture_output=True, text=True,
-                                    cwd=str(DEV_TEAM_DIR), timeout=5)
-            if result.returncode == 0:
-                for line in result.stdout.strip().split('\n'):
-                    if line and '(fetch)' in line:
-                        parts = line.split()
-                        if len(parts) >= 2:
-                            git_remotes.append({'name': parts[0], 'url': parts[1]})
-        except Exception:
-            pass
-
-        # Check which kanban dirs exist outside dev-team
-        external_kanban = []
-        for team, path in TEAM_KANBAN_DIRS.items():
-            if not str(path).startswith(str(DEV_TEAM_DIR)):
-                external_kanban.append({
-                    'team': team,
-                    'path': str(path),
-                    'exists': path.exists(),
-                })
-
-        # Get archive info if job_id provided
-        archive_info = None
-        if job_id and job_id in ARCHIVE_JOBS:
-            job = ARCHIVE_JOBS[job_id]
-            archive_info = {
-                'filename': job.get('filename'),
-                'fileSize': job.get('fileSize'),
-                'totalFiles': job.get('totalFiles'),
-            }
-
-        # Get shell scripts that need to be sourced
-        shell_scripts = []
-        for script in ['kanban-helpers.sh', 'scripts/prompts/academy.sh']:
-            script_path = DEV_TEAM_DIR / script
-            if script_path.exists():
-                shell_scripts.append(f"~/dev-team/{script}")
-
-        # Get LCARS server ports from config
-        lcars_ports = {
-            'academy': 8203,
-            'command': 8234,
-            'firebase': 8240,
-            'ios': 8260,
-            'legal-coparenting': 8427,
-            'finance-personal': 8230,
-        }
-
-        checklist = {
-            'generated': True,
-            'generatedAt': datetime.now(timezone.utc).isoformat(),
-            'sourceSystem': {
-                'hostname': platform.node(),
-                'os': platform.system(),
-                'osVersion': platform.release(),
-                'pythonVersion': python_version,
-                'nodeVersion': node_version,
-            },
-            'prerequisites': [
-                {'name': 'Homebrew', 'command': '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"', 'required': True},
-                {'name': 'Python 3', 'command': 'brew install python3', 'version': python_version, 'required': True},
-                {'name': 'Node.js', 'command': 'brew install node', 'version': node_version, 'required': True},
-                {'name': 'Git', 'command': 'brew install git', 'installed': tools.get('git', False), 'required': True},
-                {'name': 'tmux', 'command': 'brew install tmux', 'installed': tools.get('tmux', False), 'required': True},
-                {'name': 'jq', 'command': 'brew install jq', 'installed': tools.get('jq', False), 'required': True},
-                {'name': 'GitHub CLI', 'command': 'brew install gh', 'installed': tools.get('gh', False), 'required': True},
-                {'name': 'Claude Code', 'command': 'npm install -g @anthropic-ai/claude-code', 'installed': tools.get('claude', False), 'required': True},
-            ],
-            'extractionSteps': [
-                'mkdir -p ~/dev-team',
-                'tar -xzf [archive-file].tar.gz -C ~/',
-                'ls ~/dev-team/',
-            ],
-            'authSteps': [
-                {'name': 'GitHub CLI', 'command': 'gh auth login'},
-                {'name': 'Claude Code', 'command': 'claude login'},
-            ],
-            'shellSetup': {
-                'scripts': shell_scripts,
-                'profileLine': 'source ~/dev-team/kanban-helpers.sh',
-            },
-            'gitRemotes': git_remotes,
-            'externalKanban': external_kanban,
-            'lcarsServers': lcars_ports,
-            'archiveInfo': archive_info,
-        }
-
-        self._send_json_response(checklist)
-
-    def serve_archive_status(self, job_id):
-        """Handle GET /api/archive/status/<job_id> — return job progress"""
-        job = ARCHIVE_JOBS.get(job_id)
+    def serve_export_status(self, job_id):
+        """GET /api/export/status/<job_id>"""
+        job = EXPORT_JOBS.get(job_id)
         if not job:
             self._send_json_response({'error': 'Job not found'}, status=404)
             return
-
-        # Use _send_json_response for consistency; Cache-Control is not needed here
-        # because the frontend polls every 1s and does not cache status responses.
         self._send_json_response({**job, 'jobId': job_id})
 
-    def serve_archive_download(self, job_id):
-        """Handle GET /api/archive/download/<job_id> — stream tar.gz to client"""
-        job = ARCHIVE_JOBS.get(job_id)
+    def serve_export_download(self, job_id):
+        """GET /api/export/download/<job_id> — stream the zip"""
+        job = EXPORT_JOBS.get(job_id)
         if not job or job['status'] != 'completed' or not job.get('filename'):
-            self._send_json_response({'error': 'Archive not ready'}, status=404)
+            self._send_json_response({'error': 'Export not ready'}, status=404)
             return
 
-        file_path = ARCHIVE_DIR / job['filename']
+        file_path = EXPORT_DIR / job['filename']
         if not file_path.exists():
-            self._send_json_response({'error': 'Archive file not found'}, status=404)
+            self._send_json_response({'error': 'Export file not found'}, status=404)
             return
 
         self.send_response(200)
-        self.send_header('Content-Type', 'application/gzip')
+        self.send_header('Content-Type', 'application/zip')
         self.send_header('Content-Disposition', f'attachment; filename="{job["filename"]}"')
         self.send_header('Content-Length', str(file_path.stat().st_size))
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -7249,6 +7366,200 @@ end tell
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+
+    def handle_import_upload(self):
+        """POST /api/import/upload — receive a team export zip, validate, stage.
+
+        Expects multipart/form-data with a single 'file' field. Returns a pre-flight
+        response with the parsed manifest + base-team compatibility check. The client
+        then calls /api/import/apply/<job_id> to actually perform the import.
+        """
+        import uuid
+        import zipfile
+        from datetime import datetime, timezone
+
+        if not LCARS_TEAM:
+            self._send_json_response(
+                {'error': 'LCARS_TEAM not configured on this server'}, status=500
+            )
+            return
+
+        content_type = self.headers.get('Content-Type', '')
+        if not content_type.startswith('multipart/form-data'):
+            self._send_json_response(
+                {'error': 'Expected multipart/form-data upload'}, status=400
+            )
+            return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0 or content_length > 500 * 1024 * 1024:
+            self._send_json_response(
+                {'error': 'Invalid or too-large upload (max 500 MB)'}, status=400
+            )
+            return
+
+        # Parse multipart boundary
+        boundary_match = re.search(r'boundary=(.+)', content_type)
+        if not boundary_match:
+            self._send_json_response({'error': 'Missing multipart boundary'}, status=400)
+            return
+        boundary = boundary_match.group(1).strip().strip('"').encode('utf-8')
+
+        raw = self.rfile.read(content_length)
+
+        # Split into parts, find the one with filename
+        delim = b'--' + boundary
+        parts = raw.split(delim)
+        file_bytes = None
+        for part in parts:
+            if b'filename=' not in part:
+                continue
+            # Strip headers/body separator
+            if b'\r\n\r\n' not in part:
+                continue
+            _, body = part.split(b'\r\n\r\n', 1)
+            # Trim trailing CRLF that precedes the next boundary
+            if body.endswith(b'\r\n'):
+                body = body[:-2]
+            file_bytes = body
+            break
+
+        if not file_bytes:
+            self._send_json_response({'error': 'No file found in upload'}, status=400)
+            return
+
+        IMPORT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        job_id = str(uuid.uuid4())
+        staged_path = IMPORT_STAGING_DIR / f"{job_id}.zip"
+        staged_path.write_bytes(file_bytes)
+
+        # Validate the zip and extract manifest
+        try:
+            with zipfile.ZipFile(staged_path, 'r') as zipf:
+                names = zipf.namelist()
+                if 'export-manifest.json' not in names:
+                    raise ValueError('Archive missing export-manifest.json')
+                manifest_raw = zipf.read('export-manifest.json').decode('utf-8')
+                manifest = json.loads(manifest_raw)
+                if manifest.get('kind') != 'lcars-team-export':
+                    raise ValueError(f'Unexpected archive kind: {manifest.get("kind")}')
+        except (zipfile.BadZipFile, ValueError, json.JSONDecodeError) as e:
+            try:
+                staged_path.unlink()
+            except Exception:
+                pass
+            self._send_json_response(
+                {'error': f'Invalid archive: {e}'}, status=400
+            )
+            return
+
+        source_team = manifest.get('team', '')
+        source_base = manifest.get('baseTeam', '')
+        target_base, _ = _split_team_id(LCARS_TEAM)
+        base_match = (source_base == target_base)
+
+        IMPORT_JOBS[job_id] = {
+            'status': 'staged',
+            'progress': 0,
+            'message': 'Archive staged. Review pre-flight and apply.',
+            'manifest': manifest,
+            'stagedPath': str(staged_path),
+            'targetTeam': LCARS_TEAM,
+            'targetBase': target_base,
+            'baseMatch': base_match,
+            'idRenameRequired': (source_team != LCARS_TEAM),
+            'createdAt': datetime.now(timezone.utc).isoformat(),
+        }
+
+        self._send_json_response({
+            'jobId': job_id,
+            'status': 'staged',
+            'manifest': manifest,
+            'targetTeam': LCARS_TEAM,
+            'baseMatch': base_match,
+            'idRenameRequired': (source_team != LCARS_TEAM),
+        })
+
+    def handle_import_apply(self, job_id):
+        """POST /api/import/apply/<job_id> — actually perform the import."""
+        import threading
+
+        job = IMPORT_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Import job not found'}, status=404)
+            return
+        if job['status'] != 'staged':
+            self._send_json_response(
+                {'error': f'Job is in state {job["status"]}, not staged'}, status=400
+            )
+            return
+        if not job.get('baseMatch'):
+            self._send_json_response(
+                {'error': f'Base team mismatch: cannot import {job["manifest"].get("baseTeam")} '
+                          f'into {job.get("targetBase")}'}, status=400
+            )
+            return
+
+        IMPORT_JOBS[job_id]['status'] = 'applying'
+        IMPORT_JOBS[job_id]['progress'] = 5
+        IMPORT_JOBS[job_id]['message'] = 'Starting import...'
+
+        thread = threading.Thread(target=apply_import, args=(job_id,), daemon=True)
+        thread.start()
+
+        self._send_json_response({'jobId': job_id, 'status': 'applying'})
+
+    def serve_import_status(self, job_id):
+        """GET /api/import/status/<job_id>"""
+        job = IMPORT_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Job not found'}, status=404)
+            return
+        # Strip staged path from public response
+        public = {k: v for k, v in job.items() if k != 'stagedPath'}
+        self._send_json_response({**public, 'jobId': job_id})
+
+    def serve_tap_version(self):
+        """GET /api/tap-version — return the AITeamForge tap version.
+
+        Resolution order:
+          1. Homebrew install marker: $(brew --prefix)/var/aiteamforge/.installed
+             (written by Formula at install time; first line is the version)
+          2. Dev checkout: ~/dev-team/homebrew-tap/VERSION
+          3. "unknown"
+        """
+        version = None
+        source = None
+
+        # 1. Installed marker
+        try:
+            result = subprocess.run(
+                ['brew', '--prefix'], capture_output=True, text=True, timeout=3
+            )
+            if result.returncode == 0:
+                marker = Path(result.stdout.strip()) / 'var' / 'aiteamforge' / '.installed'
+                if marker.exists():
+                    first_line = marker.read_text(encoding='utf-8').splitlines()
+                    if first_line:
+                        version = first_line[0].strip()
+                        source = 'installed'
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass
+
+        # 2. Dev checkout VERSION file
+        if not version:
+            version_file = Path.home() / 'dev-team' / 'homebrew-tap' / 'VERSION'
+            if version_file.exists():
+                try:
+                    version = version_file.read_text(encoding='utf-8').strip()
+                    source = 'checkout'
+                except OSError:
+                    pass
+
+        self._send_json_response({
+            'version': version or 'unknown',
+            'source': source or 'unknown',
+        })
 
     def serve_backup_status(self):
         """Serve kanban backup system status"""

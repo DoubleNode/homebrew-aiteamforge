@@ -308,6 +308,18 @@ body {
     color: var(--lcars-blue);
 }
 
+/* AITeamForge tap version — sits below LCARS/hostname row, matches the
+   same lavender-purple tone as stardate and the LCARS version label. */
+.top-sidebar-content .tap-version {
+    position: fixed;
+    top: 58px;
+    left: calc(var(--sidebar-width) + 20px);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--lcars-blue);
+    z-index: 25;
+}
+
 /* Team name inside sidebar, single line, top-right aligned */
 /* Same size/font as stardate, but black. Aligned with stardate vertically */
 .top-sidebar-content .team-name {
@@ -1375,7 +1387,7 @@ body {
 .lcars-content > .rag-engines-section,
 .lcars-content > .knowledge-graph-section,
 .lcars-content > .team-config-section,
-.lcars-content > .archive-section {
+.lcars-content > .export-import-section {
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
@@ -1404,7 +1416,7 @@ body {
 .lcars-content > .rag-engines-section.active,
 .lcars-content > .knowledge-graph-section.active,
 .lcars-content > .team-config-section.active,
-.lcars-content > .archive-section.active {
+.lcars-content > .export-import-section.active {
     display: block;
     overflow-y: auto !important;
     padding-top: 5px; /* Minimal padding - status-legend is above content area */
@@ -1470,7 +1482,7 @@ body {
 .commands-section.active .section-bar,
 .backups-section.active .section-bar,
 .integrations-section.active .section-bar,
-.archive-section.active .section-bar {
+.export-import-section.active .section-bar {
     transform: scaleX(1);
 }
 
@@ -1485,7 +1497,7 @@ body {
 .commands-section.active .section-title,
 .backups-section.active .section-title,
 .integrations-section.active .section-title,
-.archive-section.active .section-title {
+.export-import-section.active .section-title {
     opacity: 1;
     transform: translateX(0);
 }
@@ -1507,8 +1519,8 @@ body {
 .integrations-section.active .section-bar { transition-delay: 0.10s; }
 .rag-engines-section.active .section-title { transition-delay: 0.05s; }
 .rag-engines-section.active .section-bar { transition-delay: 0.10s; }
-.archive-section.active .section-title { transition-delay: 0.05s; }
-.archive-section.active .section-bar { transition-delay: 0.10s; }
+.export-import-section.active .section-title { transition-delay: 0.05s; }
+.export-import-section.active .section-bar { transition-delay: 0.10s; }
 .releases-section.active .section-title { transition-delay: 0.05s; }
 .releases-section.active .section-bar { transition-delay: 0.10s; }
 .epics-section.active .section-title { transition-delay: 0.05s; }
@@ -14519,21 +14531,21 @@ body {
    ARCHIVE / TRANSFER SECTION (XACA-0128)
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-.archive-overview {
+.export-overview {
     display: flex;
     gap: 20px;
     padding: 15px 0;
     flex-wrap: wrap;
 }
 
-.archive-stat {
+.export-stat {
     display: flex;
     flex-direction: column;
     gap: 4px;
     min-width: 120px;
 }
 
-.archive-stat .stat-label {
+.export-stat .stat-label {
     font-family: 'Antonio', sans-serif;
     font-size: 11px;
     color: var(--lcars-text-muted, #8899aa);
@@ -14541,7 +14553,7 @@ body {
     letter-spacing: 1px;
 }
 
-.archive-stat .stat-value {
+.export-stat .stat-value {
     font-family: 'Antonio', sans-serif;
     font-size: 18px;
     color: var(--lcars-text, #ff9944);
@@ -14666,11 +14678,11 @@ body {
 }
 
 /* Archive Actions */
-.archive-actions {
+.export-actions {
     padding: 20px 0;
 }
 
-.archive-generate-btn {
+.export-btn {
     font-family: 'Antonio', sans-serif;
     font-size: 16px;
     padding: 12px 30px;
@@ -14684,19 +14696,19 @@ body {
     transition: all 0.2s;
 }
 
-.archive-generate-btn:hover {
+.export-btn:hover {
     background: #ffaa55;
     transform: scale(1.02);
 }
 
-.archive-generate-btn:disabled {
+.export-btn:disabled {
     opacity: 0.5;
     cursor: not-allowed;
     transform: none;
 }
 
 /* Progress Display */
-.archive-progress {
+.export-progress {
     padding: 15px 0;
 }
 
@@ -14742,7 +14754,7 @@ body {
 }
 
 /* Download Section */
-.archive-download {
+.export-download {
     padding: 15px;
     background: rgba(68, 204, 68, 0.08);
     border: 1px solid rgba(68, 204, 68, 0.3);
@@ -14778,7 +14790,7 @@ body {
     color: var(--lcars-text-muted, #8899aa);
 }
 
-.archive-download-btn {
+.export-download-btn {
     font-family: 'Antonio', sans-serif;
     font-size: 14px;
     padding: 10px 25px;
@@ -14791,7 +14803,7 @@ body {
     text-transform: uppercase;
 }
 
-.archive-download-btn:hover {
+.export-download-btn:hover {
     background: #55dd55;
 }
 
@@ -14844,6 +14856,137 @@ body {
 .team-config-placeholder,
 .archive-placeholder {
     display: none;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   EXPORT / IMPORT — Per-team archive UI (import-specific elements)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.export-description,
+.import-description {
+    font-size: 13px;
+    line-height: 1.5;
+    color: #cfd6e4;
+    margin: 12px 0;
+    padding: 0 8px;
+}
+.export-description code,
+.import-description code {
+    background: rgba(255, 204, 102, 0.12);
+    color: #ffcc66;
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+}
+
+.import-actions {
+    display: flex;
+    gap: 12px;
+    margin: 16px 0;
+}
+.import-btn {
+    min-width: 220px;
+}
+
+.import-preflight {
+    margin: 20px 0;
+    padding: 16px;
+    background: rgba(255, 204, 102, 0.05);
+    border: 1px solid rgba(255, 204, 102, 0.3);
+    border-radius: 4px;
+}
+.preflight-header {
+    font-size: 14px;
+    font-weight: 700;
+    color: #ffcc66;
+    letter-spacing: 2px;
+    margin-bottom: 12px;
+    text-transform: uppercase;
+}
+.preflight-grid {
+    display: grid;
+    gap: 8px;
+    margin-bottom: 16px;
+}
+.preflight-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 3px;
+    font-size: 13px;
+}
+.preflight-key {
+    color: #8a94a8;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    font-size: 11px;
+}
+.preflight-value {
+    color: #e8e8e8;
+    font-family: 'SF Mono', 'Menlo', monospace;
+}
+.preflight-warning {
+    padding: 10px 12px;
+    background: rgba(255, 102, 102, 0.1);
+    border-left: 3px solid #ff6666;
+    color: #ffb3b3;
+    font-size: 13px;
+    margin-bottom: 16px;
+}
+.import-confirm-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: flex-end;
+}
+.import-cancel-btn {
+    background: rgba(138, 148, 168, 0.2);
+    border-color: #8a94a8;
+    color: #8a94a8;
+}
+.import-cancel-btn:hover {
+    background: rgba(138, 148, 168, 0.35);
+}
+.import-apply-btn {
+    background: rgba(255, 102, 102, 0.2);
+    border-color: #ff6666;
+    color: #ffb3b3;
+}
+.import-apply-btn:hover:not(:disabled) {
+    background: rgba(255, 102, 102, 0.35);
+}
+.import-apply-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+.import-progress {
+    margin: 16px 0;
+}
+
+.import-result {
+    margin: 16px 0;
+    padding: 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+}
+.result-title {
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 2px;
+    margin-bottom: 10px;
+    text-transform: uppercase;
+    color: #9f9;
+}
+.result-stats {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-size: 13px;
+    color: #cfd6e4;
+    font-family: 'SF Mono', 'Menlo', monospace;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

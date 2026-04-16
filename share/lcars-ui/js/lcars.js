@@ -103,7 +103,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'archive'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Queue filter state
@@ -9131,9 +9131,10 @@ function switchSection(sectionName, skipAnimation = false) {
         stopCarousel();
     }
 
-    // Stop archive polling when leaving ARCHIVE tab (XACA-0128)
-    if (previousSection === 'archive') {
-        stopArchivePolling();
+    // Stop export/import polling when leaving EXPORT/IMPORT tab
+    if (previousSection === 'export-import') {
+        stopExportPolling();
+        stopImportPolling();
     }
 
     // Stop RAG engines health polling when leaving RAG ENGINES tab
@@ -9248,9 +9249,9 @@ function switchSection(sectionName, skipAnimation = false) {
         }
     }
 
-    // Load archive status when switching to archive section
-    if (sectionName === 'archive') {
-        loadArchiveStatus();
+    // Initialize Export/Import panel when switching to section
+    if (sectionName === 'export-import') {
+        initExportImportPanel();
     }
 
     // Load todos when switching to todos section (XACA-0101)
@@ -16560,6 +16561,21 @@ async function loadServerConfig() {
     } catch (e) {
         console.log('Could not load server config, using defaults');
     }
+
+    // Fetch AITeamForge tap version — best-effort, non-blocking.
+    try {
+        const resp = await fetch('/api/tap-version');
+        if (resp.ok) {
+            const { version, source } = await resp.json();
+            const el = document.getElementById('tap-version');
+            if (el && version) {
+                el.textContent = `AITF ${version}`;
+                el.title = `AITeamForge tap version (${source})`;
+            }
+        }
+    } catch (e) {
+        // Non-fatal — header just shows "AITF --"
+    }
 }
 
 /**
@@ -16731,328 +16747,336 @@ const avatarTooltip = {
 // ARCHIVE / TRANSFER (XACA-0128)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let currentArchiveJobId = null;
-let archivePollingInterval = null;
-let archiveManifest = null;
+// ═══════════════════════════════════════════════════════════════════
+// Team EXPORT / IMPORT — per-team archive with merge-aware restore
+// ═══════════════════════════════════════════════════════════════════
 
-function loadArchiveStatus() {
-    // Update toggle exclusion display based on checkbox states
-    updateExclusionDisplay();
+let currentExportJobId = null;
+let exportPollingInterval = null;
+let currentImportJobId = null;
+let importPollingInterval = null;
+let stagedImportFile = null;
 
-    // Wire up toggle change listeners
-    const gitToggle = document.getElementById('archive-include-git');
-    const nodeToggle = document.getElementById('archive-include-node-modules');
-
-    if (gitToggle && !gitToggle.dataset.listenerAdded) {
-        gitToggle.addEventListener('change', updateExclusionDisplay);
-        gitToggle.dataset.listenerAdded = 'true';
-    }
-    if (nodeToggle && !nodeToggle.dataset.listenerAdded) {
-        nodeToggle.addEventListener('change', updateExclusionDisplay);
-        nodeToggle.dataset.listenerAdded = 'true';
+function initExportImportPanel() {
+    // Populate team label from serverConfig if available
+    const teamEl = document.getElementById('export-team-label');
+    if (teamEl && typeof serverConfig !== 'undefined' && serverConfig.team) {
+        teamEl.textContent = serverConfig.team;
     }
 }
 
-function updateExclusionDisplay() {
-    const gitChecked = document.getElementById('archive-include-git')?.checked || false;
-    const nodeChecked = document.getElementById('archive-include-node-modules')?.checked || false;
+// ───── EXPORT ─────
 
-    const gitExclusion = document.getElementById('exclusion-git');
-    const nodeExclusion = document.getElementById('exclusion-node');
+async function startTeamExport() {
+    if (exportPollingInterval) return;
 
-    if (gitExclusion) {
-        gitExclusion.classList.toggle('included', gitChecked);
-    }
-    if (nodeExclusion) {
-        nodeExclusion.classList.toggle('included', nodeChecked);
-    }
-}
+    const btn = document.getElementById('export-btn');
+    const progressSection = document.getElementById('export-progress');
+    const downloadSection = document.getElementById('export-download');
+    const statusEl = document.getElementById('export-status-label');
 
-async function startArchiveGeneration() {
-    // Prevent double-click — if already generating, ignore
-    if (archivePollingInterval) return;
-
-    const generateBtn = document.getElementById('archive-generate-btn');
-    const progressSection = document.getElementById('archive-progress');
-    const downloadSection = document.getElementById('archive-download');
-    const statusEl = document.getElementById('archive-status');
-
-    // Disable button and show progress
-    if (generateBtn) generateBtn.disabled = true;
+    if (btn) btn.disabled = true;
     if (progressSection) progressSection.style.display = 'block';
     if (downloadSection) downloadSection.style.display = 'none';
-    if (statusEl) statusEl.textContent = 'GENERATING...';
+    if (statusEl) statusEl.textContent = 'EXPORTING';
 
-    // Reset progress display
-    updateArchiveProgress(0, 'GENERATING...', 'Initializing...');
-
-    // Get options from toggles
-    const includeGitHistory = document.getElementById('archive-include-git')?.checked || false;
-    const includeNodeModules = document.getElementById('archive-include-node-modules')?.checked || false;
+    updateExportProgress(0, 'EXPORTING...', 'Initializing...');
 
     try {
-        const response = await fetch('/api/archive/create', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                includeGitHistory,
-                includeNodeModules,
-                customExclusions: [],
-            }),
-        });
-
+        const response = await fetch('/api/export/create', { method: 'POST' });
         const data = await response.json();
         if (!response.ok) {
-            console.error('Archive creation failed:', data);
             if (statusEl) statusEl.textContent = 'ERROR';
-            if (generateBtn) generateBtn.disabled = false;
+            if (btn) btn.disabled = false;
+            alert(`Export failed: ${data.error || 'unknown error'}`);
             return;
         }
-
-        currentArchiveJobId = data.jobId;
-
-        // Start polling for progress
-        archivePollingInterval = setInterval(() => pollArchiveStatus(data.jobId), 1000);
-
+        currentExportJobId = data.jobId;
+        exportPollingInterval = setInterval(() => pollExportStatus(data.jobId), 1000);
     } catch (error) {
-        console.error('Archive request failed:', error);
+        console.error('Export request failed:', error);
         if (statusEl) statusEl.textContent = 'ERROR';
-        if (generateBtn) generateBtn.disabled = false;
+        if (btn) btn.disabled = false;
     }
 }
 
-async function pollArchiveStatus(jobId) {
+async function pollExportStatus(jobId) {
     try {
-        const response = await fetch(`/api/archive/status/${jobId}`);
+        const response = await fetch(`/api/export/status/${jobId}`);
         const data = await response.json();
-
         if (!response.ok) {
-            console.error('Archive status check failed:', data);
-            stopArchivePolling();
-            const generateBtn = document.getElementById('archive-generate-btn');
-            if (generateBtn) generateBtn.disabled = false;
-            const statusEl = document.getElementById('archive-status');
-            if (statusEl) statusEl.textContent = 'ERROR';
+            stopExportPolling();
+            const btn = document.getElementById('export-btn');
+            if (btn) btn.disabled = false;
             return;
         }
-
-        updateArchiveProgress(data.progress, 'GENERATING...', data.message);
-
+        updateExportProgress(data.progress, 'EXPORTING...', data.message);
         if (data.status === 'completed') {
-            stopArchivePolling();
-            onArchiveComplete(data);
+            stopExportPolling();
+            onExportComplete(data);
         } else if (data.status === 'failed') {
-            stopArchivePolling();
-            onArchiveFailed(data);
+            stopExportPolling();
+            onExportFailed(data);
         }
-
     } catch (error) {
-        console.error('Archive poll error:', error);
-        // Don't stop polling on network errors — might be transient
+        console.error('Export poll error:', error);
     }
 }
 
-function stopArchivePolling() {
-    if (archivePollingInterval) {
-        clearInterval(archivePollingInterval);
-        archivePollingInterval = null;
+function stopExportPolling() {
+    if (exportPollingInterval) {
+        clearInterval(exportPollingInterval);
+        exportPollingInterval = null;
     }
 }
 
-function updateArchiveProgress(percent, label, message) {
-    const progressBar = document.getElementById('archive-progress-bar');
-    const percentEl = document.getElementById('archive-progress-percent');
-    const labelEl = document.getElementById('archive-progress-label');
-    const messageEl = document.getElementById('archive-progress-message');
-
-    if (progressBar) progressBar.style.width = `${percent}%`;
-    if (percentEl) percentEl.textContent = `${percent}%`;
+function updateExportProgress(percent, label, message) {
+    const bar = document.getElementById('export-progress-bar');
+    const pctEl = document.getElementById('export-progress-percent');
+    const labelEl = document.getElementById('export-progress-label');
+    const msgEl = document.getElementById('export-progress-message');
+    if (bar) bar.style.width = `${percent}%`;
+    if (pctEl) pctEl.textContent = `${percent}%`;
     if (labelEl) labelEl.textContent = label;
-    if (messageEl) messageEl.textContent = message;
-    const container = document.querySelector('.progress-bar-container');
-    if (container) container.setAttribute('aria-valuenow', percent);
+    if (msgEl) msgEl.textContent = message;
 }
 
-function onArchiveComplete(data) {
-    const generateBtn = document.getElementById('archive-generate-btn');
-    const progressSection = document.getElementById('archive-progress');
-    const downloadSection = document.getElementById('archive-download');
-    const statusEl = document.getElementById('archive-status');
-    const lastExportEl = document.getElementById('archive-last-export');
-    const checklistBtn = document.getElementById('archive-checklist-btn');
+function onExportComplete(data) {
+    const btn = document.getElementById('export-btn');
+    const downloadSection = document.getElementById('export-download');
+    const statusEl = document.getElementById('export-status-label');
 
-    // Update progress to 100%
-    updateArchiveProgress(100, 'COMPLETE', data.message || 'Archive ready for download');
+    updateExportProgress(100, 'COMPLETE', data.message || 'Export ready');
 
-    // Show download section
     if (downloadSection) {
         downloadSection.style.display = 'flex';
-        document.getElementById('archive-download-filename').textContent = data.filename || '--';
-        document.getElementById('archive-download-size').textContent = data.fileSize || '--';
-        document.getElementById('archive-download-files').textContent = `${data.totalFiles || 0} files`;
+        document.getElementById('export-download-filename').textContent = data.filename || '--';
+        document.getElementById('export-download-size').textContent = data.fileSize || '--';
+        document.getElementById('export-download-files').textContent = `${data.totalFiles || 0} files`;
     }
-
-    // Update status
     if (statusEl) statusEl.textContent = 'READY';
-    if (lastExportEl) lastExportEl.textContent = new Date().toLocaleString();
-    if (generateBtn) generateBtn.disabled = false;
-    if (checklistBtn) checklistBtn.disabled = false;
-
-    // Store manifest for checklist generation
-    if (data.manifest) {
-        archiveManifest = data.manifest;
-    }
+    if (btn) btn.disabled = false;
 }
 
-function onArchiveFailed(data) {
-    const generateBtn = document.getElementById('archive-generate-btn');
-    const statusEl = document.getElementById('archive-status');
-
-    updateArchiveProgress(0, 'FAILED', data.message || 'Archive generation failed');
-
+function onExportFailed(data) {
+    const btn = document.getElementById('export-btn');
+    const statusEl = document.getElementById('export-status-label');
+    updateExportProgress(0, 'FAILED', data.message || 'Export failed');
     if (statusEl) statusEl.textContent = 'ERROR';
-    if (generateBtn) generateBtn.disabled = false;
+    if (btn) btn.disabled = false;
+    alert(`Export failed: ${data.error || data.message || 'unknown error'}`);
 }
 
-function downloadArchive() {
-    if (!currentArchiveJobId) {
-        console.error('No archive job ID available');
-        return;
-    }
-
-    // Trigger browser download via a hidden link
+function downloadTeamExport() {
+    if (!currentExportJobId) return;
     const link = document.createElement('a');
-    link.href = `/api/archive/download/${currentArchiveJobId}`;
-    link.download = '';  // Let server set filename via Content-Disposition
+    link.href = `/api/export/download/${currentExportJobId}`;
+    link.download = '';
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
 }
 
-async function generateDeploymentChecklist() {
-    const checklistContent = document.getElementById('archive-checklist-content');
-    const checklistBtn = document.getElementById('archive-checklist-btn');
-    if (!checklistContent) return;
+// ───── IMPORT ─────
 
-    if (checklistBtn) checklistBtn.disabled = true;
+function handleImportFileSelected(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    stagedImportFile = file;
+    uploadImportFile(file);
+}
+
+async function uploadImportFile(file) {
+    const btn = document.getElementById('import-btn');
+    if (btn) btn.disabled = true;
+
+    const formData = new FormData();
+    formData.append('file', file);
 
     try {
-        const response = await fetch('/api/archive/checklist', {
+        const response = await fetch('/api/import/upload', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ jobId: currentArchiveJobId }),
+            body: formData,
         });
-
+        const data = await response.json();
         if (!response.ok) {
-            checklistContent.textContent = 'Failed to generate checklist. Try again.';
-            checklistContent.style.display = 'block';
-            if (checklistBtn) checklistBtn.disabled = false;
+            alert(`Import upload failed: ${data.error || 'unknown error'}`);
+            if (btn) btn.disabled = false;
             return;
         }
-
-        const data = await response.json();
-
-        // Render structured checklist from server data
-        const manifest = archiveManifest || {};
-        const lines = [];
-        lines.push('DEPLOYMENT CHECKLIST — DEV-TEAM ECOSYSTEM TRANSFER');
-        lines.push('═══════════════════════════════════════════════════');
-        lines.push('');
-        lines.push(`SOURCE: ${data.sourceSystem?.hostname || 'unknown'}`);
-        lines.push(`OS: ${data.sourceSystem?.os || 'unknown'} ${data.sourceSystem?.osVersion || ''}`);
-        lines.push(`PYTHON: ${data.sourceSystem?.pythonVersion || 'unknown'}`);
-        lines.push(`NODE: ${data.sourceSystem?.nodeVersion || 'unknown'}`);
-        if (data.archiveInfo) {
-            lines.push(`ARCHIVE: ${data.archiveInfo.filename || 'unknown'} (${data.archiveInfo.fileSize || '?'}, ${data.archiveInfo.totalFiles || '?'} files)`);
-        }
-        lines.push('');
-
-        lines.push('STEP 1: PREREQUISITES');
-        lines.push('─────────────────────');
-        if (data.prerequisites) {
-            for (const prereq of data.prerequisites) {
-                const status = prereq.installed ? '✓' : '☐';
-                const version = prereq.version ? ` (source: v${prereq.version})` : '';
-                lines.push(`${status} ${prereq.name}: ${prereq.command}${version}`);
-            }
-        }
-        lines.push('');
-
-        lines.push('STEP 2: EXTRACT ARCHIVE');
-        lines.push('────────────────────────');
-        if (data.extractionSteps) {
-            for (const step of data.extractionSteps) {
-                lines.push(`☐ ${step}`);
-            }
-        }
-        lines.push('');
-
-        lines.push('STEP 3: AUTHENTICATION');
-        lines.push('──────────────────────');
-        if (data.authSteps) {
-            for (const step of data.authSteps) {
-                lines.push(`☐ ${step.name}: ${step.command}`);
-            }
-        }
-        lines.push('');
-
-        lines.push('STEP 4: SHELL CONFIGURATION');
-        lines.push('────────────────────────────');
-        if (data.shellSetup?.profileLine) {
-            lines.push(`☐ Add to ~/.zshrc: ${data.shellSetup.profileLine}`);
-        }
-        if (data.shellSetup?.scripts) {
-            for (const script of data.shellSetup.scripts) {
-                lines.push(`☐ Verify: ${script}`);
-            }
-        }
-        lines.push('');
-
-        lines.push('STEP 5: GIT REMOTES');
-        lines.push('────────────────────');
-        if (data.gitRemotes && data.gitRemotes.length > 0) {
-            for (const remote of data.gitRemotes) {
-                lines.push(`☐ Configure: git remote add ${remote.name} ${remote.url}`);
-            }
-        } else {
-            lines.push('☐ Configure git remotes as needed');
-        }
-        lines.push('');
-
-        lines.push('STEP 6: LCARS SERVERS');
-        lines.push('─────────────────────');
-        if (data.lcarsServers) {
-            for (const [team, port] of Object.entries(data.lcarsServers)) {
-                lines.push(`☐ ${team}: python3 server.py ${port} → http://localhost:${port}`);
-            }
-        }
-        lines.push('');
-
-        lines.push('STEP 7: EXTERNAL KANBAN DIRECTORIES');
-        lines.push('────────────────────────────────────');
-        if (data.externalKanban && data.externalKanban.length > 0) {
-            for (const ext of data.externalKanban) {
-                const exists = ext.exists ? '(exists on source)' : '(not found on source)';
-                lines.push(`☐ ${ext.team}: ${ext.path} ${exists}`);
-            }
-        } else {
-            lines.push('No external kanban directories detected.');
-        }
-        lines.push('');
-
-        lines.push('═══════════════════════════════════════════════════');
-        lines.push(`GENERATED: ${data.generatedAt || new Date().toISOString()}`);
-
-        checklistContent.textContent = lines.join('\n');
-        checklistContent.style.display = 'block';
-
+        currentImportJobId = data.jobId;
+        renderImportPreflight(data);
     } catch (error) {
-        console.error('Checklist generation failed:', error);
-        checklistContent.textContent = 'Failed to generate checklist. Server may be unavailable.';
-        checklistContent.style.display = 'block';
+        console.error('Import upload failed:', error);
+        alert('Import upload failed — see console');
+        if (btn) btn.disabled = false;
+    }
+}
+
+function renderImportPreflight(data) {
+    const preflightEl = document.getElementById('import-preflight');
+    if (!preflightEl) return;
+
+    const manifest = data.manifest || {};
+    document.getElementById('preflight-source-team').textContent = manifest.team || '--';
+    document.getElementById('preflight-source-host').textContent = manifest.sourceHost || '--';
+    document.getElementById('preflight-target-team').textContent = data.targetTeam || '--';
+
+    const baseMatchEl = document.getElementById('preflight-base-match');
+    if (data.baseMatch) {
+        baseMatchEl.textContent = '✓ MATCH';
+        baseMatchEl.style.color = '#9f9';
+    } else {
+        baseMatchEl.textContent = `✗ MISMATCH (${manifest.baseTeam} → ${(data.targetTeam || '').split('-')[0]})`;
+        baseMatchEl.style.color = '#f99';
     }
 
-    if (checklistBtn) checklistBtn.disabled = false;
+    document.getElementById('preflight-id-rename').textContent = data.idRenameRequired
+        ? `Required: ${manifest.team} → ${data.targetTeam}`
+        : 'Not required (same team ID)';
+
+    const counts = manifest.fileCount || {};
+    document.getElementById('preflight-file-counts').textContent =
+        `${counts.inTree || 0} / ${counts.outOfTree || 0}`;
+
+    const applyBtn = document.getElementById('import-apply-btn');
+    if (applyBtn) applyBtn.disabled = !data.baseMatch;
+
+    preflightEl.style.display = 'block';
+}
+
+function cancelImport() {
+    currentImportJobId = null;
+    stagedImportFile = null;
+    const preflightEl = document.getElementById('import-preflight');
+    if (preflightEl) preflightEl.style.display = 'none';
+    const btn = document.getElementById('import-btn');
+    if (btn) btn.disabled = false;
+    const input = document.getElementById('import-file-input');
+    if (input) input.value = '';
+}
+
+async function applyTeamImport() {
+    if (!currentImportJobId) return;
+
+    const preflightEl = document.getElementById('import-preflight');
+    const progressEl = document.getElementById('import-progress');
+    const resultEl = document.getElementById('import-result');
+    if (preflightEl) preflightEl.style.display = 'none';
+    if (progressEl) progressEl.style.display = 'block';
+    if (resultEl) resultEl.style.display = 'none';
+
+    updateImportProgress(0, 'IMPORTING...', 'Starting...');
+
+    try {
+        const response = await fetch(`/api/import/apply/${currentImportJobId}`, { method: 'POST' });
+        const data = await response.json();
+        if (!response.ok) {
+            alert(`Import failed: ${data.error || 'unknown error'}`);
+            if (progressEl) progressEl.style.display = 'none';
+            return;
+        }
+        importPollingInterval = setInterval(() => pollImportStatus(currentImportJobId), 1000);
+    } catch (error) {
+        console.error('Apply import failed:', error);
+    }
+}
+
+async function pollImportStatus(jobId) {
+    try {
+        const response = await fetch(`/api/import/status/${jobId}`);
+        const data = await response.json();
+        if (!response.ok) {
+            stopImportPolling();
+            return;
+        }
+        updateImportProgress(data.progress, 'IMPORTING...', data.message);
+        if (data.status === 'completed') {
+            stopImportPolling();
+            onImportComplete(data);
+        } else if (data.status === 'failed') {
+            stopImportPolling();
+            onImportFailed(data);
+        }
+    } catch (error) {
+        console.error('Import poll error:', error);
+    }
+}
+
+function stopImportPolling() {
+    if (importPollingInterval) {
+        clearInterval(importPollingInterval);
+        importPollingInterval = null;
+    }
+}
+
+function updateImportProgress(percent, label, message) {
+    const bar = document.getElementById('import-progress-bar');
+    const pctEl = document.getElementById('import-progress-percent');
+    const labelEl = document.getElementById('import-progress-label');
+    const msgEl = document.getElementById('import-progress-message');
+    if (bar) bar.style.width = `${percent}%`;
+    if (pctEl) pctEl.textContent = `${percent}%`;
+    if (labelEl) labelEl.textContent = label;
+    if (msgEl) msgEl.textContent = message;
+}
+
+function renderImportStatsDOM(statsEl, stats) {
+    while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+    const rows = [
+        'Project kanban tree: overwritten',
+        `Team ID rewrites: ${stats.inTreeRenames || 0}`,
+        `Out-of-tree knowledge merged: ${stats.outOfTreeMerged || 0} new files`,
+        `Out-of-tree conflicts (renamed): ${stats.outOfTreeConflicts || 0}`,
+    ];
+    for (const text of rows) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        statsEl.appendChild(div);
+    }
+}
+
+function onImportComplete(data) {
+    const progressEl = document.getElementById('import-progress');
+    const resultEl = document.getElementById('import-result');
+    const titleEl = document.getElementById('import-result-title');
+    const statsEl = document.getElementById('import-result-stats');
+
+    updateImportProgress(100, 'COMPLETE', 'Import applied successfully');
+    if (progressEl) progressEl.style.display = 'none';
+    if (resultEl) resultEl.style.display = 'block';
+    if (titleEl) titleEl.textContent = '✓ IMPORT COMPLETE';
+
+    if (statsEl) renderImportStatsDOM(statsEl, data.stats || {});
+
+    setTimeout(() => {
+        if (typeof loadBoardData === 'function') loadBoardData();
+    }, 500);
+
+    const btn = document.getElementById('import-btn');
+    if (btn) btn.disabled = false;
+    const input = document.getElementById('import-file-input');
+    if (input) input.value = '';
+}
+
+function onImportFailed(data) {
+    const progressEl = document.getElementById('import-progress');
+    const resultEl = document.getElementById('import-result');
+    const titleEl = document.getElementById('import-result-title');
+    const statsEl = document.getElementById('import-result-stats');
+
+    if (progressEl) progressEl.style.display = 'none';
+    if (resultEl) resultEl.style.display = 'block';
+    if (titleEl) titleEl.textContent = '✗ IMPORT FAILED';
+    if (statsEl) {
+        while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+        const div = document.createElement('div');
+        div.textContent = data.error || data.message || 'unknown error';
+        statsEl.appendChild(div);
+    }
+
+    const btn = document.getElementById('import-btn');
+    if (btn) btn.disabled = false;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {
