@@ -306,11 +306,19 @@ fi
 if [ "$_font_found" = "true" ]; then
   echo -e "${GREEN}✓${NC} Fira Code Nerd Font"
 else
-  # Check if brew already has it in Caskroom but didn't link
-  _caskroom_fonts="$(find "$(brew --prefix 2>/dev/null)/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" 2>/dev/null | head -1)"
+  # Check if brew already has it in Caskroom but didn't link.
+  # Every subshell/find must be guarded with || true — set -eo pipefail
+  # kills the script on any non-zero exit inside $() substitutions.
+  _brew_prefix="$(brew --prefix 2>/dev/null || true)"
+  _caskroom_fonts=""
+  if [ -d "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" ]; then
+    _caskroom_fonts="$(find "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" 2>/dev/null | head -1 || true)"
+  fi
+
   if [ -n "$_caskroom_fonts" ]; then
     echo -e "${YELLOW}⚠${NC} Fira Code Nerd Font in Caskroom but not registered — copying to ~/Library/Fonts/"
     _cask_dir="$(dirname "$_caskroom_fonts")"
+    mkdir -p ~/Library/Fonts
     cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null || true
     echo -e "${GREEN}✓${NC} Fira Code Nerd Font (copied to ~/Library/Fonts/)"
   else
@@ -318,8 +326,12 @@ else
     brew install --cask font-fira-code-nerd-font 2>&1 | tail -3 || true
     # Verify the install linked to ~/Library/Fonts; copy from Caskroom if not
     if [ ! -f "$HOME/Library/Fonts/FiraCodeNerdFontMono-Light.ttf" ]; then
-      _cask_dir="$(find "$(brew --prefix 2>/dev/null)/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" -exec dirname {} \; 2>/dev/null | head -1)"
+      _cask_dir=""
+      if [ -d "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" ]; then
+        _cask_dir="$(find "${_brew_prefix}/Caskroom/font-fira-code-nerd-font" -name "FiraCodeNerdFontMono-*.ttf" -exec dirname {} \; 2>/dev/null | head -1 || true)"
+      fi
       if [ -n "$_cask_dir" ]; then
+        mkdir -p ~/Library/Fonts
         cp "$_cask_dir"/FiraCodeNerdFont*.ttf ~/Library/Fonts/ 2>/dev/null || true
         echo -e "${GREEN}✓${NC} Fira Code Nerd Font (installed + copied to ~/Library/Fonts/)"
       else
