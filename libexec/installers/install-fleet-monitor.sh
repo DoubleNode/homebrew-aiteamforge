@@ -646,10 +646,26 @@ install_iterm_integration() {
     if [ -f "$dynamic_profile_src" ]; then
         mkdir -p "$dynamic_profiles_dir"
         if [ ! -f "$dynamic_profile_dest" ]; then
+            # Fresh install: live file absent — copy source unconditionally
             cp "$dynamic_profile_src" "$dynamic_profile_dest"
-            info "Installed iTerm2 Dynamic Profile: aiteamforge-lcars.json"
+            info "Installed fresh dynamic profile at $dynamic_profile_dest"
+        elif [ "${AITEAMFORGE_REFRESH_PROFILES:-}" = "1" ]; then
+            # Refresh requested: merge AITeamForge-managed keys, preserve user customizations
+            local merge_script="$SCRIPT_DIR/merge-dynamic-profile.py"
+            if [ ! -f "$merge_script" ]; then
+                warning "merge-dynamic-profile.py not found at $merge_script — cannot refresh profile"
+                return 1
+            fi
+            python3 "$merge_script" "$dynamic_profile_src" "$dynamic_profile_dest"
+            local merge_exit=$?
+            if [ $merge_exit -ne 0 ]; then
+                warning "Dynamic profile merge failed (exit code $merge_exit)"
+                return 1
+            fi
+            info "Refreshed dynamic profile (user customizations preserved)"
         else
-            info "iTerm2 Dynamic Profile already present (skipping overwrite)"
+            # Live file exists and refresh not requested — leave it alone
+            info "Dynamic profile already exists — skipping. Use --refresh-profiles to update AITeamForge-managed keys."
         fi
     fi
 

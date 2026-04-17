@@ -311,6 +311,55 @@ brew upgrade aiteamforge
 aiteamforge setup --upgrade
 ```
 
+### Refreshing Dynamic Profiles After Upgrade
+
+**Why this exists:** When AITeamForge installs its iTerm2 dynamic profiles for the
+first time, the installer skips the file on subsequent runs to protect your
+customizations. This means bug fixes shipped in the profile (such as the v0.8.27
+Mouse Reporting and Dynamic Profile Parent Name corrections) do not propagate
+automatically when you run `brew upgrade aiteamforge`.
+
+**When to use it:** After `brew upgrade aiteamforge` when the release notes mention
+dynamic profile changes — for example, a fix to click-to-navigate in the LCARS Web
+browser tab, or a correction to profile inheritance.
+
+**How to run it:**
+
+```bash
+aiteamforge setup --refresh-profiles
+```
+
+**What gets refreshed (AITeamForge-owned keys):**
+- `Name` — profile identity used by iTerm2 for lookups
+- `Guid` — immutable profile anchor
+- `Tags` — AITeamForge visibility tag (`["aiteamforge"]`)
+- `Custom Command` — must be `"Browser"` for LCARS Web inline browser mode
+- `Mouse Reporting` — required for click-to-navigate in the browser tab
+- `Dynamic Profile Parent Name` — links the profile to its parent for font/color inheritance
+- `Background Color` — functional pure-black background behind the browser view
+- `Initial URL` — source placeholder URL (overwritten at team start with the correct port)
+
+**What is preserved (your settings):**
+- Fonts (`Normal Font`, `Non Ascii Font`, and related rendering flags)
+- Colors (`Foreground Color` and any other color customizations)
+- Window geometry (`Columns`, `Rows`, `Window Type`)
+- Transparency and blur settings
+- Scrollback buffer size
+- Key mappings and triggers
+- All other personal preferences
+
+**Rollback:** Before writing changes the merge tool creates a timestamped backup of
+your existing profiles file at the same location:
+
+```
+~/Library/Application Support/iTerm2/DynamicProfiles/aiteamforge-lcars.json.bak-<timestamp>
+```
+
+Restore it by copying it back over the live file and letting iTerm2 hot-reload.
+
+For maintainers who want to know which keys are in which bucket and why, see
+[docs/refresh-profiles-design.md](docs/refresh-profiles-design.md).
+
 ### Uninstall
 
 ```bash

@@ -67,6 +67,10 @@ Options:
   --uninstall            Remove aiteamforge configuration
   --non-interactive      Run in non-interactive mode
   --dry-run              Preview what would be installed without making changes
+  --refresh-profiles     Refresh AITeamForge-managed keys in the iTerm2 dynamic
+                         profile while preserving your custom colors, fonts, and
+                         window layout. Use after upgrades that include profile
+                         changes (e.g., Mouse Reporting or Parent Name fixes).
   -h, --help             Show this help
 
 Interactive Mode:
@@ -79,6 +83,7 @@ Examples:
   aiteamforge setup --upgrade                # Upgrade existing
   aiteamforge setup --uninstall              # Clean removal
   aiteamforge setup --dry-run                # Preview without changes
+  aiteamforge setup --refresh-profiles       # Re-apply profile fixes while keeping your customizations
 EOF
 }
 
@@ -90,6 +95,7 @@ INSTALL_DIR="$HOME/aiteamforge"
 MODE="interactive"
 IS_UPGRADE="false"
 DRY_RUN="false"
+REFRESH_PROFILES="false"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -111,6 +117,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --dry-run)
       DRY_RUN="true"
+      shift
+      ;;
+    --refresh-profiles)
+      REFRESH_PROFILES="true"
       shift
       ;;
     -h|--help)
@@ -1088,8 +1098,9 @@ if [ "$INSTALL_KANBAN" = "yes" ]; then
     (
       export AITEAMFORGE_DIR="${INSTALL_DIR}"
       export INSTALL_ROOT="${AITEAMFORGE_HOME}"
-      export SELECTED_TEAMS="${SELECTED_TEAMS[*]}"
+      export SELECTED_TEAMS_STR="${SELECTED_TEAMS[*]}"
       export TEAM_WORKING_DIRS_STR="${_team_dirs}"
+      [ "$REFRESH_PROFILES" = "true" ] && export AITEAMFORGE_REFRESH_PROFILES=1
       source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
       source "${INSTALLERS_DIR}/install-kanban.sh"
       install_kanban_system
@@ -1117,6 +1128,7 @@ if [ "$INSTALL_FLEET" = "yes" ]; then
       export FLEET_SERVER_URL="${FLEET_SERVER_URL}"
       export NON_INTERACTIVE="true"
       export INSTALL_FLEET_MONITOR="true"
+      [ "$REFRESH_PROFILES" = "true" ] && export AITEAMFORGE_REFRESH_PROFILES=1
       source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
       source "${INSTALLERS_DIR}/install-fleet-monitor.sh"
       install_fleet_monitor

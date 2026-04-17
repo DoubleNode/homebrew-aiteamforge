@@ -1,1 +1,1 @@
-window.LCARS_TARGET_TEAM = 'command';
+window.LCARS_TARGET_TEAM = 'android';

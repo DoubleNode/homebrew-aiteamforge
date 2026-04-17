@@ -108,7 +108,7 @@ const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details',
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Mode state machine (XACA-0164)
-let activeMode = 'kanban';  // default mode per spec A1.1
+let activeMode = null;  // no mode applied yet — first switchMode() call must run full setup
 const MODES = ['team', 'kanban', 'data', 'settings'];
 const MODE_KEY = 'lcars.activeMode';
 // Per-mode section memory — XACA-0164-013

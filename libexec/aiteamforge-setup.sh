@@ -623,6 +623,38 @@ install_team_configs() {
   for team in "${SELECTED_TEAMS[@]}"; do
     bash "$installer" "$team" --install-dir "$AITEAMFORGE_DIR"
   done
+
+  # ── Connect-script pass for non-selected teams ──────────────────────────
+  # Every team's connect + disconnect scripts must exist in AITEAMFORGE_DIR
+  # regardless of which teams were selected for full installation.  This lets
+  # a local operator connect to a remote team's tmux sessions even when that
+  # team's heavy infrastructure was not installed locally.
+  local teams_dir="${SCRIPT_DIR}/share/teams"
+  local rendered_any_remote=false
+  if [[ -d "$teams_dir" ]]; then
+    print_info "📡 Rendering connect scripts for remote-only teams..."
+    for conf in "$teams_dir"/*.conf; do
+      [[ -f "$conf" ]] || continue
+      local remote_team
+      remote_team=$(basename "$conf" .conf)
+      # Skip teams that were already fully installed above
+      local already_installed=false
+      for selected in "${SELECTED_TEAMS[@]}"; do
+        if [[ "$selected" == "$remote_team" ]]; then
+          already_installed=true
+          break
+        fi
+      done
+      if [[ "$already_installed" == "true" ]]; then
+        continue
+      fi
+      bash "$installer" "$remote_team" --connect-only --install-dir "$AITEAMFORGE_DIR"
+      rendered_any_remote=true
+    done
+    if [[ "$rendered_any_remote" == "false" ]]; then
+      print_info "  (no remote-only teams found)"
+    fi
+  fi
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -641,11 +673,46 @@ stage_summary() {
   echo "  User: $USER_NAME"
   echo ""
 
-  # Teams
+  # Teams installed locally
   if [ ${#SELECTED_TEAMS[@]} -gt 0 ]; then
-    print_color "${COLOR_BLUE}" "Configured Teams:"
+    print_color "${COLOR_BLUE}" "Installed locally:"
     for team in "${SELECTED_TEAMS[@]}"; do
-      echo "  • $team"
+      echo "  ✓ $team"
+    done
+    echo ""
+  fi
+
+  # Remote-only teams (connect scripts rendered)
+  local teams_dir="${SCRIPT_DIR}/share/teams"
+  local remote_teams=()
+  if [[ -d "$teams_dir" ]]; then
+    for conf in "$teams_dir"/*.conf; do
+      [[ -f "$conf" ]] || continue
+      local rt_name
+      rt_name=$(basename "$conf" .conf)
+      local is_selected=false
+      for sel in "${SELECTED_TEAMS[@]}"; do
+        [[ "$sel" == "$rt_name" ]] && is_selected=true && break
+      done
+      [[ "$is_selected" == "true" ]] && continue
+      # Source into subshell to avoid polluting parent scope
+      local rt_port rt_socket
+      rt_port=$(bash -c "source \"$conf\" 2>/dev/null; echo \"\${TEAM_LCARS_PORT:-}\"")
+      rt_socket=$(bash -c "source \"$conf\" 2>/dev/null; echo \"\${TEAM_TMUX_SOCKET:-}\"")
+      remote_teams+=("$rt_name|$rt_port|$rt_socket")
+    done
+  fi
+  if [ ${#remote_teams[@]} -gt 0 ]; then
+    print_color "${COLOR_BLUE}" "Connect scripts rendered (remote-only):"
+    for entry in "${remote_teams[@]}"; do
+      local rt_n rt_p rt_s
+      rt_n="${entry%%|*}"
+      rt_p="${entry#*|}"; rt_p="${rt_p%|*}"
+      rt_s="${entry##*|}"
+      local detail=""
+      [[ -n "$rt_p" ]] && detail="port $rt_p"
+      [[ -n "$rt_s" ]] && detail="${detail:+$detail, }socket $rt_s"
+      [[ -n "$detail" ]] && echo "  • $rt_n  ($detail)" || echo "  • $rt_n"
     done
     echo ""
   fi

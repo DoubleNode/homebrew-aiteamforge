@@ -6,6 +6,7 @@
       "Custom Command": "Browser",
       "Initial URL": "http://localhost:8080",
       "Mouse Reporting": true,
+      "Dynamic Profile Parent Name": "Default",
       "Tags": [
         "aiteamforge"
       ],
@@ -21,6 +22,7 @@
       "Name": "Agent Panel",
       "Guid": "AITEAMFORGE-AGENT-PANEL-0001-000000000001",
       "Mouse Reporting": true,
+      "Dynamic Profile Parent Name": "Default",
       "Tags": [
         "aiteamforge"
       ]

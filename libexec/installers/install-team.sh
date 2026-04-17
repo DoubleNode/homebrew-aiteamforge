@@ -21,11 +21,16 @@ AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 # ============================================================================
 
 TEAM_ID=""
+CONNECT_ONLY=false
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir|--aiteamforge-dir)
             AITEAMFORGE_DIR="$2"
             shift 2
+            ;;
+        --connect-only)
+            CONNECT_ONLY=true
+            shift
             ;;
         *)
             if [[ -z "$TEAM_ID" ]]; then
@@ -40,7 +45,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$TEAM_ID" ]]; then
-    echo "Usage: install-team.sh <team-id> [--install-dir <path>]"
+    echo "Usage: install-team.sh <team-id> [--install-dir <path>] [--connect-only]"
     echo ""
     echo "Available teams:"
     for conf in "$TEAMS_DIR"/*.conf; do
@@ -127,6 +132,82 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "  Installing Team: $TEAM_ID"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
+
+# Pre-build template substitution variables now so the --connect-only path
+# can use them before the heavy install sections run.
+TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]+"${TEAM_AGENTS[*]}"}"
+TEAM_AGENT_WINDOWS_CONFIG=""
+for _agent in "${TEAM_AGENTS[@]}"; do
+    _agent_key="${_agent//-/_}"
+    _var="AGENT_WINDOWS_${_agent_key}"
+    _val="${!_var:-}"
+    if [[ -n "$_val" ]]; then
+        TEAM_AGENT_WINDOWS_CONFIG+="AGENT_WINDOWS_${_agent_key}=\"${_val}\""$'\n'
+    fi
+done
+
+# ============================================================================
+# CONNECT-ONLY EARLY EXIT
+# Renders only the connect + disconnect scripts and exits.  Used by the
+# setup wizard to generate connect scripts for ALL teams regardless of which
+# teams were selected for full installation.
+# ============================================================================
+
+if [[ "$CONNECT_ONLY" == "true" ]]; then
+    echo "🔗 Rendering connect scripts for $TEAM_ID (connect-only mode)..."
+    mkdir -p "$AITEAMFORGE_DIR"
+
+    CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
+    CONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
+
+    if [[ -f "$CONNECT_TEMPLATE" ]]; then
+        sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+            -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+            -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
+            -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+            -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+            -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+            "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
+
+        python3 - "${CONNECT_SCRIPT}.tmp" "$CONNECT_SCRIPT" <<PYEOF
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
+if windows_config:
+    windows_config += '\n'
+with open(src) as f:
+    content = f.read()
+content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
+if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
+    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
+with open(dst, 'w') as f:
+    f.write(content)
+PYEOF
+        rm -f "${CONNECT_SCRIPT}.tmp"
+        chmod +x "$CONNECT_SCRIPT"
+        echo "  ✓ ${TEAM_ID}-connect.sh"
+    else
+        echo "  ⚠️  Template not found: team-connect.sh.template (skipping)"
+    fi
+
+    DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
+    DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-disconnect.sh"
+
+    if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
+        sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+            -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+            -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+            "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
+        chmod +x "$DISCONNECT_SCRIPT"
+        echo "  ✓ ${TEAM_ID}-disconnect.sh"
+    else
+        echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping)"
+    fi
+
+    exit 0
+fi
 
 # Save the base working dir from conf (before env override)
 # For project-based teams, this is the parent dir (e.g., ~/medical)
@@ -242,24 +323,6 @@ echo "🚀 Creating startup/shutdown scripts..."
 STARTUP_SCRIPT="$AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
 SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 
-# Build space-separated terminal list from agents (for template substitution)
-TEAM_TERMINAL_LIST="${TEAM_AGENTS[*]+"${TEAM_AGENTS[*]}"}"
-
-# Build per-agent window name declarations for template substitution.
-# Each agent in TEAM_AGENTS may have a corresponding AGENT_WINDOWS_<agent> variable
-# defined in the .conf file (hyphens in agent names are stored with underscores).
-# This emits shell variable assignment lines that get embedded verbatim into the
-# generated startup script so the tmux loop can resolve window names at runtime.
-TEAM_AGENT_WINDOWS_CONFIG=""
-for _agent in "${TEAM_AGENTS[@]}"; do
-    # Sanitize: replace hyphens with underscores for valid shell variable name
-    _agent_key="${_agent//-/_}"
-    _var="AGENT_WINDOWS_${_agent_key}"
-    _val="${!_var:-}"
-    if [[ -n "$_val" ]]; then
-        TEAM_AGENT_WINDOWS_CONFIG+="AGENT_WINDOWS_${_agent_key}=\"${_val}\""$'\n'
-    fi
-done
 
 # Determine if this is a project-based team (values already imported from conf)
 IS_PROJECT_TEAM="$TEAM_HAS_PROJECTS"

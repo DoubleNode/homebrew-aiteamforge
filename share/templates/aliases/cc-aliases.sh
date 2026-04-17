@@ -19,13 +19,31 @@ unalias ccc 2>/dev/null
 # /Users/darrenehlers/dev-team → -Users-darrenehlers-dev-team
 _cc_encode_project_dir() {
     local dir="${1:-$(pwd)}"
-    echo "$dir" | sed 's|/|-|g; s|^-||'
+    echo "$dir" | sed 's|[/ ]|-|g; s|^-||'
 }
 
-# Save the most recent Claude session ID for the current terminal
-# Enables per-terminal session resume via ccc
+# Print "-w<window_index>" when running inside tmux; return non-zero otherwise.
+# Scopes saved session files to a specific tmux window so two windows running
+# the same persona don't clobber each other's resume state.
+_cc_window_suffix() {
+    [[ -z "$TMUX" ]] && return 1
+    local idx
+    if [[ -n "$TMUX_PANE" ]]; then
+        idx=$(tmux display-message -t "$TMUX_PANE" -p '#I' 2>/dev/null)
+    else
+        idx=$(tmux display-message -p '#I' 2>/dev/null)
+    fi
+    [[ -z "$idx" ]] && return 1
+    echo "-w${idx}"
+}
+
+# Save the most recent Claude session ID for the current tmux window.
+# Skipped outside tmux — no per-window scope to attach to.
 _cc_save_session() {
     [[ -z "$SESSION_CODE" ]] && return 0
+
+    local window_suffix
+    window_suffix=$(_cc_window_suffix) || return 0
 
     local encoded_dir
     encoded_dir=$(_cc_encode_project_dir)
@@ -38,24 +56,13 @@ _cc_save_session() {
     latest_file=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
     [[ -z "$latest_file" ]] && return 0
 
-    # Staleness guard: only save if file was modified in the last 60 seconds
-    local now file_mtime age
-    now=$(date +%s)
-    file_mtime=$(stat -f %m "$latest_file" 2>/dev/null)
-    if [[ -n "$file_mtime" ]]; then
-        age=$(( now - file_mtime ))
-        if (( age > 60 )); then
-            return 0
-        fi
-    fi
-
     local session_id
     session_id=$(basename "$latest_file" .jsonl)
 
     # Validate UUID format
     if [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
         mkdir -p "$HOME/.claude/terminal-sessions"
-        echo "$session_id" > "$HOME/.claude/terminal-sessions/${SESSION_CODE}"
+        echo "$session_id" > "$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
     fi
 }
 
@@ -120,9 +127,11 @@ cc() {
 # Resume the most recent Claude session for THIS terminal
 # Uses stored session ID instead of --continue (which picks most recent globally)
 ccc() {
-    local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}"
+    local window_suffix
+    window_suffix=$(_cc_window_suffix) || window_suffix=""
+    local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
 
-    if [[ -n "$SESSION_CODE" && -f "$session_file" ]]; then
+    if [[ -n "$SESSION_CODE" && -n "$window_suffix" && -f "$session_file" ]]; then
         local session_id
         session_id=$(<"$session_file")
         if [[ -n "$session_id" ]]; then
