@@ -18,42 +18,63 @@ from pathlib import Path
 
 KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
 
-# Distributed kanban directories - must match server.py TEAM_KANBAN_DIRS
-TEAM_KANBAN_DIRS = {
-    # Main Event Teams
-    "academy": Path.home() / "dev-team" / "kanban",
-    "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-    "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-    "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+# ---------------------------------------------------------------------------
+# Distributed kanban directories — XACA-0168
+#
+# Loaded from aiteamforge_paths (the single source of truth).  The dict is
+# built eagerly at import time so callers can continue to do:
+#
+#     from kanban_utils import TEAM_KANBAN_DIRS
+#     kanban_dir = TEAM_KANBAN_DIRS.get(team)
+#     TEAM_KANBAN_DIRS["new-team"] = Path(...)   # runtime additions
+#
+# Tests that mutate this dict in-place (clear/update) still work because it
+# is a plain mutable dict — not a proxy or property.
+#
+# To add a new team, edit aiteamforge_paths.DEFAULT_TEAMS (and run the
+# Initialize Team skill which handles all downstream registrations).
+# ---------------------------------------------------------------------------
 
-    # Freelance Projects
-    "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-    "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-    "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-    "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-    "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
-    "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+def _build_team_kanban_dirs() -> dict:
+    """Build TEAM_KANBAN_DIRS from aiteamforge_paths.DEFAULT_TEAMS."""
+    try:
+        # kanban-hooks/ is always on sys.path when this module is imported
+        from aiteamforge_paths import DEFAULT_TEAMS  # noqa: PLC0415
+        return {
+            team: Path(entry["kanban_dir"]).expanduser()
+            for team, entry in DEFAULT_TEAMS.items()
+        }
+    except Exception as _exc:
+        warnings.warn(
+            f"kanban_utils: could not load aiteamforge_paths ({_exc}); "
+            "falling back to hardcoded TEAM_KANBAN_DIRS",
+            stacklevel=2,
+        )
+        _h = Path.home()
+        return {
+            "academy":     _h / "dev-team" / "kanban",
+            "ios":         Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
+            "android":     Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
+            "firebase":    Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
+            "command":     Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+            "dns":         Path("/Users/Shared/Development/DNSFramework/kanban"),
+            "freelance-doublenode-starwords":      Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
+            "freelance-doublenode-appplanning":    Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
+            "freelance-doublenode-workstats":      Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
+            "freelance-doublenode-lifeboard":      Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+            "freelance-doublenode-caravan":        Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+            "freelance-doublenode-awaysentry":     Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+            "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
+            "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
+            "legal-coparenting": _h / "legal" / "coparenting" / "kanban",
+            "medical-general":   _h / "medical" / "general" / "kanban",
+            "medical":           _h / "medical" / "general" / "kanban",
+            "finance-personal":  _h / "finance" / "personal" / "kanban",
+            "mainevent": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+            "freelance":  _h / "dev-team" / "kanban",
+        }
 
-    # Liquidstyle Freelance Projects
-    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
-    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
-
-    # Legal Projects
-    "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
-
-    # Medical Projects
-    "medical-general": Path.home() / "medical" / "general" / "kanban",
-    "medical": Path.home() / "medical" / "general" / "kanban",  # alias
-
-    # Finance Projects
-    "finance-personal": Path.home() / "finance" / "personal" / "kanban",
-
-    # Aliases (shell helper has these via case-statement pipe syntax)
-    "mainevent": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "freelance": Path.home() / "dev-team" / "kanban",  # generic fallback
-}
+TEAM_KANBAN_DIRS: dict = _build_team_kanban_dirs()
 
 
 def parse_session_name(session_name):
@@ -94,8 +115,10 @@ def get_lcars_tmp_dir(session_name: str) -> str:
     Map a tmux session name to the correct kanban/tmp/ directory for that team.
 
     Mirrors _get_lcars_tmp_dir() in scripts/lcars-tmp-dir.sh.
-    All three sources of truth (this function, lcars-tmp-dir.sh, and
-    TEAM_KANBAN_DIRS) must be kept in sync when adding new teams.
+    This function reads paths from TEAM_KANBAN_DIRS (built from
+    aiteamforge_paths.DEFAULT_TEAMS).  Adding a new team to DEFAULT_TEAMS
+    automatically updates this function's behaviour.  The shell counterpart
+    lcars-tmp-dir.sh must still be updated by hand until Wave 4 lands.
 
     Session name format: <team>-<terminal>
       Simple:        "academy-reno"                      -> team=academy
@@ -120,7 +143,7 @@ def get_lcars_tmp_dir(session_name: str) -> str:
         if not team:
             return "/tmp/"
 
-        # Use TEAM_KANBAN_DIRS; fall back to default academy kanban dir
+        # Look up team in TEAM_KANBAN_DIRS (built from aiteamforge_paths)
         kanban_dir = TEAM_KANBAN_DIRS.get(team)
         if kanban_dir is None:
             # Unknown team — use the default
@@ -294,7 +317,7 @@ def update_board_safely(board_file, update_func):
 # ---------------------------------------------------------------------------
 
 # Maps the 3-letter team code (positions 1-3 of an item ID like XACA-0001)
-# to the team name used in TEAM_KANBAN_DIRS.
+# to the team name used in TEAM_KANBAN_DIRS (built from aiteamforge_paths).
 # Mirrors _kb_get_team_from_code() in kanban-helpers.sh.
 _TEAM_CODE_MAP = {
     "IOS": "ios",

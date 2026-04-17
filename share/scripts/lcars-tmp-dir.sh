@@ -17,17 +17,51 @@
 #   - _get_team_kanban_dir() in claude/statusline-command.sh (shell)
 #   - TEAM_KANBAN_DIRS + get_lcars_tmp_dir() in kanban-hooks/kanban_utils.py (Python)
 #
-# All three must be kept in sync when adding new teams.
+# XACA-0168: Team→path resolution now delegates to aiteamforge-paths.sh loader
+# when available. The built-in case statement is kept as a fallback.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Load the canonical team-path config loader (XACA-0168).
+# Provides aiteamforge_team_kanban_dir() for dynamic team→path resolution.
+# Guard against double-sourcing is built into the loader itself.
+# ─────────────────────────────────────────────────────────────────────────────
+if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
+    _lctd_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    for _lctd_candidate in \
+        "${HOME}/dev-team/homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
+        "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh" \
+        "${_lctd_script_dir}/../homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
+        "${HOME}/.aiteamforge/lib/aiteamforge-paths.sh"; do
+        if [ -f "$_lctd_candidate" ]; then
+            # shellcheck source=/dev/null
+            source "$_lctd_candidate"
+            break
+        fi
+    done
+    unset _lctd_script_dir _lctd_candidate
+fi
 
 # ---------------------------------------------------------------------------
 # _get_team_kanban_dir_for_tmp()
 #
 # Internal helper: map a team name to its kanban directory path.
-# Mirrors _get_team_kanban_dir() in statusline-command.sh exactly, plus
-# additional entries from TEAM_KANBAN_DIRS in kanban_utils.py.
+# Delegates to aiteamforge_team_kanban_dir() (XACA-0168) when available;
+# falls back to a built-in case statement for environments without the loader.
 # ---------------------------------------------------------------------------
 _get_team_kanban_dir_for_tmp() {
     local team="$1"
+
+    # Prefer the canonical loader
+    if command -v aiteamforge_team_kanban_dir &>/dev/null 2>&1; then
+        local _result
+        _result=$(aiteamforge_team_kanban_dir "$team" 2>/dev/null)
+        if [ -n "$_result" ]; then
+            echo "$_result"
+            return 0
+        fi
+    fi
+
+    # Fallback: built-in case statement (kept for environments without the loader)
     case "$team" in
         # Core teams
         academy)                               echo "${HOME}/dev-team/kanban" ;;

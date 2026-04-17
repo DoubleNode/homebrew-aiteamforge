@@ -10,21 +10,42 @@ Usage: python3 sync_release_manifests.py [--dry-run]
 
 import json
 import os
+import sys
 from pathlib import Path
 from datetime import datetime, timezone
+
+# Add kanban-hooks to path for shared modules (XACA-0168)
+_KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
+if _KANBAN_HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _KANBAN_HOOKS_DIR)
+
+try:
+    from aiteamforge_paths import get_team_kanban_dir, list_teams
+    _AITEAMFORGE_PATHS_AVAILABLE = True
+except ImportError:
+    _AITEAMFORGE_PATHS_AVAILABLE = False
 
 # Legacy fallback kanban directory
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 
-# Distributed kanban directories - must match server.py TEAM_KANBAN_DIRS
-TEAM_KANBAN_DIRS = {
-    "academy": Path.home() / "dev-team" / "kanban",
-    "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-    "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-    "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
-}
+# Distributed kanban directories — loaded from aiteamforge_paths (XACA-0168)
+def _build_team_kanban_dirs() -> dict:
+    if _AITEAMFORGE_PATHS_AVAILABLE:
+        try:
+            return {team: get_team_kanban_dir(team) for team in list_teams()}
+        except Exception:
+            pass
+    # Fallback: hardcoded subset (main teams used by this script)
+    return {
+        "academy": Path.home() / "dev-team" / "kanban",
+        "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
+        "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
+        "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
+        "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+        "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+    }
+
+TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 
 # Team configurations
 TEAMS = {

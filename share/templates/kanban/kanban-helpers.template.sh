@@ -22,12 +22,45 @@ AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
 # Legacy centralized path (kept for reference, no longer used)
 # KANBAN_DIR="${AITEAMFORGE_DIR}/kanban"
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Load the canonical team-path config loader (XACA-0168).
+# This provides aiteamforge_team_kanban_dir(), aiteamforge_team_lcars_port(), etc.
+# The loader is guarded against double-sourcing so it is safe to call repeatedly.
+# ─────────────────────────────────────────────────────────────────────────────
+if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
+    _kb_loader_sourced=0
+    for _kb_loader_candidate in \
+        "${HOME}/dev-team/homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
+        "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh" \
+        "${HOME}/.aiteamforge/lib/aiteamforge-paths.sh"; do
+        if [ -f "$_kb_loader_candidate" ]; then
+            # shellcheck source=/dev/null
+            source "$_kb_loader_candidate"
+            _kb_loader_sourced=1
+            break
+        fi
+    done
+    unset _kb_loader_candidate _kb_loader_sourced
+fi
+
 # Get the kanban directory for a specific team
 # Each team has their own kanban/ directory in their repository
+# Delegates to aiteamforge_team_kanban_dir() when the loader is available;
+# falls back to a built-in case statement for environments without the loader.
 _kb_get_kanban_dir() {
     local team="$1"
     local _atf_dir="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
     local _config_file="${_atf_dir}/.aiteamforge-config"
+
+    # Strategy 0: Prefer the canonical loader (XACA-0168 migration)
+    if command -v aiteamforge_team_kanban_dir &>/dev/null 2>&1; then
+        local _result
+        _result=$(aiteamforge_team_kanban_dir "$team" 2>/dev/null)
+        if [[ -n "$_result" ]]; then
+            echo "$_result"
+            return 0
+        fi
+    fi
 
     # Strategy 1: Read working_dir from .aiteamforge-config (authoritative)
     # Config format: { "team_paths": { "<team>": { "working_dir": "<path>" } } }
@@ -63,7 +96,7 @@ _kb_get_kanban_dir() {
             echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"
             ;;
         command)
-            echo "/Users/Shared/Development/Main Event/aiteamforge/kanban"
+            echo "/Users/Shared/Development/Main Event/dev-team/kanban"
             ;;
         dns)
             echo "/Users/Shared/Development/DNSFramework/kanban"
@@ -7179,7 +7212,7 @@ kb-knowledge-search() {
         "mainevent:/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/knowledge"
         "android:/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/knowledge"
         "firebase:/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge"
-        "command:/Users/Shared/Development/Main Event/aiteamforge/kanban/knowledge"
+        "command:/Users/Shared/Development/Main Event/dev-team/kanban/knowledge"
         "dns:/Users/Shared/Development/DNSFramework/kanban/knowledge"
         "freelance-starwords:/Users/Shared/Development/DoubleNode/Starwords/kanban/knowledge"
         "freelance-appplanning:/Users/Shared/Development/DoubleNode/appPlanning/kanban/knowledge"

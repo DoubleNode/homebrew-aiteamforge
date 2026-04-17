@@ -32,12 +32,21 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
 
+# Add kanban-hooks to path (shared modules: kanban_utils, aiteamforge_paths)
+_KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
+if _KANBAN_HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _KANBAN_HOOKS_DIR)
+
+# Import team path config from shared module (XACA-0168)
+try:
+    from aiteamforge_paths import get_team_kanban_dir, get_team_lcars_port, list_teams
+    _AITEAMFORGE_PATHS_AVAILABLE = True
+except ImportError as e:
+    _AITEAMFORGE_PATHS_AVAILABLE = False
+    print(f"[LCARS] Warning: aiteamforge_paths not available, using hardcoded dirs: {e}")
+
 # Import kanban activity logging from kanban-hooks
 try:
-    import sys as _sys
-    _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
-    if _KANBAN_HOOKS_DIR not in _sys.path:
-        _sys.path.insert(0, _KANBAN_HOOKS_DIR)
     from kanban_utils import log_activity, read_activity_log, get_lcars_tmp_dir
     LOG_ACTIVITY_AVAILABLE = True
 except ImportError as e:
@@ -93,39 +102,40 @@ except ImportError as e:
 
 # Configuration
 DEFAULT_PORT = 8080
-BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
+BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 
-# Distributed kanban directories - each team has their own
-TEAM_KANBAN_DIRS = {
-    # Main Event Teams
-    "academy": Path.home() / "dev-team" / "kanban",
-    "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-    "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-    "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+# Distributed kanban directories — loaded from aiteamforge_paths (XACA-0168).
+# Build a dict from the shared module so existing code using TEAM_KANBAN_DIRS[team]
+# continues to work without change.
+def _build_team_kanban_dirs() -> dict:
+    if _AITEAMFORGE_PATHS_AVAILABLE:
+        try:
+            return {team: get_team_kanban_dir(team) for team in list_teams()}
+        except Exception:
+            pass
+    # Fallback: hardcoded values (kept in sync with aiteamforge_paths.DEFAULT_TEAMS)
+    _home = Path.home()
+    return {
+        "academy": _home / "dev-team" / "kanban",
+        "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
+        "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
+        "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
+        "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+        "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+        "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
+        "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
+        "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
+        "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+        "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
+        "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
+        "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
+        "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
+        "legal-coparenting": _home / "legal" / "coparenting" / "kanban",
+        "medical-general": _home / "medical" / "general" / "kanban",
+        "finance-personal": _home / "finance" / "personal" / "kanban",
+    }
 
-    # Freelance Projects
-    "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-    "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-    "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-    "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-    "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
-    "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
-
-    # Liquidstyle Freelance Projects
-    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
-    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
-
-    # Legal Projects
-    "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
-
-    # Medical Projects
-    "medical-general": Path.home() / "medical" / "general" / "kanban",
-
-    # Finance Projects
-    "finance-personal": Path.home() / "finance" / "personal" / "kanban",
-}
+TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 
 # Legacy fallback for backwards compatibility
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
@@ -7672,7 +7682,7 @@ end tell
                             'filename': backup_file.name,
                             'timestamp': timestamp,
                             'size': stat.st_size,
-                            'sizeFormatted': format_bytes_archive(stat.st_size),
+                            'sizeFormatted': format_bytes_export(stat.st_size),
                             'path': str(backup_file)
                         })
                         total_size += stat.st_size
@@ -7686,7 +7696,7 @@ end tell
                 'teams': files_by_team,
                 'totalFiles': total_count,
                 'totalSize': total_size,
-                'totalSizeFormatted': format_bytes_archive(total_size)
+                'totalSizeFormatted': format_bytes_export(total_size)
             }
 
             self.send_response(200)

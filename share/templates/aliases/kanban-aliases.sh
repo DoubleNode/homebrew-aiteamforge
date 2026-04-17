@@ -54,7 +54,7 @@ _kb_get_kanban_dir() {
         ios)          echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
         android)      echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
         firebase)     echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        command)      echo "/Users/Shared/Development/Main Event/aiteamforge/kanban" ;;
+        command)      echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
         dns)          echo "/Users/Shared/Development/DNSFramework/kanban" ;;
         legal-*)
             local _suffix="${team#legal-}"

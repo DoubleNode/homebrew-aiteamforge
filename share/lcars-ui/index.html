@@ -41,11 +41,9 @@
         <header class="lcars-top-frame">
             <div class="top-sidebar">
                 <div class="top-sidebar-content">
-                    <span class="stardate" id="stardate">2025.362</span>
+                    <span class="stardate" id="stardate">2025.362<span class="tap-version" id="tap-version" title="AITeamForge tap version">AITF 0.0.0</span></span>
                     <span class="top-divider">•</span>
                     <span class="lcars-version">LCARS 02-047<span class="server-hostname" id="server-hostname"></span></span>
-                    <span class="top-divider">•</span>
-                    <span class="tap-version" id="tap-version" title="AITeamForge tap version">AITF 0.0.0</span>
                     <span class="top-divider">•</span>
                     <span class="team-name" id="team-name">--</span>
                     <span class="group-id" id="group-id">--</span>
@@ -67,59 +65,89 @@
             <!-- Sidebar -->
             <nav class="lcars-sidebar">
                 <div class="sidebar-label">WORKFLOW STATUS</div>
-                <div class="sidebar-button active" data-section="home">
-                    <span>HOME</span>
-                </div>
-                <div class="sidebar-split-row">
-                    <div class="sidebar-button" data-section="todos">
-                        <span>TODOS</span>
+
+                <!-- TEAM mode sidebar — XACA-0164-005/010/011 -->
+                <div class="sidebar-mode-items" data-mode="team">
+                    <div class="sidebar-button" data-section="home">
+                        <span>HOME</span>
                     </div>
-                    <div class="sidebar-button" data-section="calendar">
-                        <span>CALENDAR</span>
+                    <div class="sidebar-button" data-section="persona-browser">
+                        <span>PERSONA BROWSER</span>
                     </div>
-                </div>
-                <div class="sidebar-split-row">
-                    <div class="sidebar-button" data-section="workflow">
-                        <span>WORKFLOW</span>
+                    <div class="sidebar-button" data-section="role-matcher">
+                        <span>ROLE MATCHER</span>
                     </div>
-                    <div class="sidebar-button" data-section="details">
-                        <span>DETAILS</span>
+                    <div class="sidebar-button" data-section="change-history">
+                        <span>CHANGE HISTORY</span>
                     </div>
                 </div>
-                <div class="sidebar-button" data-section="queue">
-                    <span>QUEUE</span>
-                </div>
-                <div class="sidebar-split-row">
-                    <div class="sidebar-button" data-section="epics">
-                        <span>EPICS</span>
+
+                <!-- KANBAN mode sidebar — XACA-0164-005 -->
+                <div class="sidebar-mode-items" data-mode="kanban">
+                    <div class="sidebar-button active" data-section="home">
+                        <span>HOME</span>
                     </div>
-                    <div class="sidebar-button" data-section="releases">
-                        <span>RELEASES</span>
-                    </div>
-                </div>
-                <div class="sidebar-button" data-section="knowledge-graph">
-                    <span>KNOWLEDGE GRAPH</span>
-                </div>
-                <div class="sidebar-button has-submenu" id="settings-button">
-                    <span>SETTINGS</span>
-                    <div class="sidebar-submenu">
-                        <div class="sidebar-submenu-hbar"></div>
-                        <div class="sidebar-submenu-vbar">
-                            <div class="sidebar-submenu-spine"></div>
-                            <div class="sidebar-submenu-curve"></div>
+                    <div class="sidebar-split-row">
+                        <div class="sidebar-button" data-section="todos">
+                            <span>TODOS</span>
                         </div>
-                        <div class="sidebar-submenu-items">
-                            <div class="sidebar-submenu-item" data-section="team-config">TEAM CONFIG</div>
-                            <div class="sidebar-submenu-item" data-section="integrations">INTEGRATIONS</div>
-                            <div class="sidebar-submenu-item" data-section="rag-engines">RAG ENGINES</div>
-                            <div class="sidebar-submenu-item" data-section="backups">BACKUPS</div>
-                            <div class="sidebar-submenu-item" data-section="export-import">EXPORT / IMPORT</div>
+                        <div class="sidebar-button" data-section="calendar">
+                            <span>CALENDAR</span>
                         </div>
                     </div>
+                    <div class="sidebar-split-row">
+                        <div class="sidebar-button" data-section="workflow">
+                            <span>WORKFLOW</span>
+                        </div>
+                        <div class="sidebar-button" data-section="details">
+                            <span>DETAILS</span>
+                        </div>
+                    </div>
+                    <div class="sidebar-button" data-section="queue">
+                        <span>QUEUE</span>
+                    </div>
+                    <div class="sidebar-split-row">
+                        <div class="sidebar-button" data-section="epics">
+                            <span>EPICS</span>
+                        </div>
+                        <div class="sidebar-button" data-section="releases">
+                            <span>RELEASES</span>
+                        </div>
+                    </div>
+                    <div class="sidebar-button" data-section="commands">
+                        <span>HELP</span>
+                    </div>
                 </div>
-                <div class="sidebar-button" data-section="commands">
-                    <span>HELP</span>
+
+                <!-- DATA mode sidebar — XACA-0164-010 -->
+                <div class="sidebar-mode-items" data-mode="data">
+                    <div class="sidebar-button" data-section="home">
+                        <span>HOME</span>
+                    </div>
+                    <div class="sidebar-button" data-section="knowledge-graph">
+                        <span>KNOWLEDGE GRAPH</span>
+                    </div>
+                    <div class="sidebar-button" data-section="rag-engines">
+                        <span>RAG ENGINES</span>
+                    </div>
                 </div>
+
+                <!-- SETTINGS mode sidebar — XACA-0164-011 (no HOME per spec) -->
+                <div class="sidebar-mode-items" data-mode="settings">
+                    <div class="sidebar-button" data-section="team-config">
+                        <span>TEAM CONFIG</span>
+                    </div>
+                    <div class="sidebar-button" data-section="integrations">
+                        <span>INTEGRATIONS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="backups">
+                        <span>BACKUPS</span>
+                    </div>
+                    <div class="sidebar-button" data-section="export-import">
+                        <span>EXPORT / IMPORT</span>
+                    </div>
+                </div>
+
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
                     <div class="info-row">
@@ -141,14 +169,20 @@
                     <img class="watermark-logo" id="content-watermark-logo" src="" alt="">
                 </div>
 
-                <!-- LCARS Data Display Bar -->
-                <section class="status-legend">
-                    <div class="legend-pill candy-1" id="candy-1">00000</div>
-                    <div class="legend-pill candy-2" id="candy-2">0000</div>
-                    <div class="legend-pill candy-3" id="candy-3">000.00</div>
-                    <div class="legend-pill candy-4" id="candy-4">0000</div>
-                    <div class="legend-pill candy-5 viewscreen-pill" id="carousel-fullscreen" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">VIEWSCREEN</div>
-                    <div class="legend-pill candy-6 sound-pill" id="sound-toggle" role="button" tabindex="0" onclick="LCARSSound.toggleMute()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}"><span id="sound-status">SOUND</span></div>
+                <!-- LCARS Mode Bar (starts hidden so splash-screen clicks fall through to skipStartup) -->
+                <section class="mode-bar hidden" id="mode-bar">
+                    <div class="mode-cluster">
+                        <div class="legend-pill mode-pill" data-mode-target="team" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">TEAM</div>
+                        <div class="legend-pill mode-pill" data-mode-target="kanban" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">KANBAN</div>
+                        <div class="legend-pill mode-pill" data-mode-target="data" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">DATA</div>
+                        <div class="legend-pill mode-pill" data-mode-target="settings" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">SETTINGS</div>
+                    </div>
+                    <div class="mode-bar-spacer"></div>
+                    <div class="mode-bar-separator">&#9482;</div>
+                    <div class="utility-cluster">
+                        <div class="legend-pill viewscreen-pill" id="carousel-fullscreen" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">VIEWSCREEN</div>
+                        <div class="legend-pill sound-pill" id="sound-toggle" role="button" tabindex="0" onclick="LCARSSound.toggleMute()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}"><span id="sound-status">SOUND</span></div>
+                    </div>
                 </section>
 
                 <!-- Startup Splash Screen -->
@@ -173,14 +207,14 @@
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <!-- SECTION: HOME - Team Analytics Dashboard (4-panel carousel)        -->
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
-                <section class="home-section">
+                <section class="home-section" data-mode="team kanban data">
 
                     <!-- Carousel Viewport -->
                     <div class="carousel-viewport">
                         <div class="carousel-track">
 
                             <!-- Panel 0: MISSION STATUS (metrics only, 2×2 grid) -->
-                            <div class="carousel-panel" data-panel-index="0">
+                            <div class="carousel-panel" data-panel-index="0" data-home-mode="kanban">
                                 <div class="section-header cyan">
                                     <span class="section-title">MISSION STATUS</span>
                                     <div class="section-bar"></div>
@@ -191,7 +225,7 @@
                             </div>
 
                             <!-- Panel 1: MISSION CHARTS (doughnut + bar) -->
-                            <div class="carousel-panel" data-panel-index="1">
+                            <div class="carousel-panel" data-panel-index="1" data-home-mode="kanban">
                                 <div class="section-header cyan">
                                     <span class="section-title">MISSION CHARTS</span>
                                     <div class="section-bar"></div>
@@ -211,7 +245,7 @@
                             </div>
 
                             <!-- Panel 2: EPIC PROGRESS -->
-                            <div class="carousel-panel" data-panel-index="2">
+                            <div class="carousel-panel" data-panel-index="2" data-home-mode="kanban">
                                 <div class="section-header purple">
                                     <span class="section-title">EPIC PROGRESS</span>
                                     <div class="section-bar"></div>
@@ -222,7 +256,7 @@
                             </div>
 
                             <!-- Panel 3: SUBITEM INTELLIGENCE -->
-                            <div class="carousel-panel" data-panel-index="3">
+                            <div class="carousel-panel" data-panel-index="3" data-home-mode="kanban">
                                 <div class="section-header green">
                                     <span class="section-title">SUBITEM INTELLIGENCE</span>
                                     <div class="section-bar"></div>
@@ -240,7 +274,7 @@
                             </div>
 
                             <!-- Panel 4: KNOWLEDGE BASE -->
-                            <div class="carousel-panel" data-panel-index="4">
+                            <div class="carousel-panel" data-panel-index="4" data-home-mode="data">
                                 <div class="section-header gold">
                                     <span class="section-title">KNOWLEDGE BASE</span>
                                     <div class="section-bar"></div>
@@ -259,7 +293,7 @@
                             </div>
 
                             <!-- Panel 5: RETROSPECTIVE COVERAGE -->
-                            <div class="carousel-panel" data-panel-index="5">
+                            <div class="carousel-panel" data-panel-index="5" data-home-mode="kanban">
                                 <div class="section-header gold">
                                     <span class="section-title">RETROSPECTIVE COVERAGE</span>
                                     <div class="section-bar"></div>
@@ -287,7 +321,7 @@
                 </section>
 
                 <!-- Kanban Board -->
-                <section class="kanban-section">
+                <section class="kanban-section" data-mode="kanban">
                     <div class="section-header crimson">
                         <span class="section-title">ACTIVE ASSIGNMENTS</span>
                         <div class="section-bar"></div>
@@ -325,7 +359,7 @@
                 </section>
 
                 <!-- Terminal Details -->
-                <section class="details-section">
+                <section class="details-section" data-mode="kanban">
                     <div class="section-header blue">
                         <span class="section-title">TERMINAL STATUS MATRIX</span>
                         <div class="section-bar"></div>
@@ -336,7 +370,7 @@
                 </section>
 
                 <!-- Mission Queue -->
-                <section class="queue-section">
+                <section class="queue-section" data-mode="kanban">
                     <div class="section-header purple">
                         <span class="section-title">MISSION QUEUE</span>
                         <span class="section-count" id="queue-count">0 PENDING</span>
@@ -420,7 +454,7 @@
                 </section>
 
                 <!-- Release Command -->
-                <section class="releases-section">
+                <section class="releases-section" data-mode="kanban">
                     <div class="section-header green">
                         <span class="section-title">RELEASE COMMAND</span>
                         <span class="section-action" id="release-new-btn" title="Create New Release">+ NEW</span>
@@ -439,7 +473,7 @@
                 </section>
 
                 <!-- Epics Management -->
-                <section class="epics-section">
+                <section class="epics-section" data-mode="kanban">
                     <div class="section-header purple">
                         <span class="section-title">EPIC MANAGEMENT</span>
                         <span class="section-action" id="epic-new-btn" title="Create New Epic">+ NEW</span>
@@ -451,7 +485,7 @@
                 </section>
 
                 <!-- Calendar -->
-                <section class="calendar-section">
+                <section class="calendar-section" data-mode="kanban">
                     <div class="section-header amber">
                         <span class="section-title">CALENDAR</span>
                         <div class="section-bar"></div>
@@ -465,7 +499,7 @@
                 </section>
 
                 <!-- Command Interface -->
-                <section class="commands-section">
+                <section class="commands-section" data-mode="kanban">
                     <div class="section-header crimson">
                         <span class="section-title">COMMAND INTERFACE</span>
                         <div class="section-bar"></div>
@@ -484,7 +518,7 @@
                 </section>
 
                 <!-- Backup Status -->
-                <section class="backups-section">
+                <section class="backups-section" data-mode="settings">
                     <div class="section-header amber">
                         <span class="section-title">BACKUP SYSTEM STATUS</span>
                         <div class="section-bar"></div>
@@ -546,7 +580,7 @@
                 </section>
 
                 <!-- Team Config -->
-                <section class="team-config-section">
+                <section class="team-config-section" data-mode="settings">
                     <div class="section-header orange">
                         <span class="section-title">TEAM CONFIGURATION</span>
                         <div class="section-bar"></div>
@@ -557,7 +591,7 @@
                 </section>
 
                 <!-- Integrations -->
-                <section class="integrations-section">
+                <section class="integrations-section" data-mode="settings">
                     <div class="section-header green">
                         <span class="section-title">EXTERNAL INTEGRATIONS</span>
                         <div class="section-bar"></div>
@@ -596,7 +630,7 @@
                 </section>
 
                 <!-- RAG Engines -->
-                <section class="rag-engines-section">
+                <section class="rag-engines-section" data-mode="data">
                     <div class="section-header green">
                         <span class="section-title">RAG ENGINES</span>
                         <div class="section-bar"></div>
@@ -638,7 +672,7 @@
                 </section>
 
                 <!-- Knowledge Graph Visualizer -->
-                <section class="knowledge-graph-section">
+                <section class="knowledge-graph-section" data-mode="data">
                     <div class="section-header cyan">
                         <span class="section-title">KNOWLEDGE GRAPH</span>
                         <div class="section-bar"></div>
@@ -729,7 +763,7 @@
                 </section>
 
                 <!-- Export / Import -->
-                <section class="export-import-section">
+                <section class="export-import-section" data-mode="settings">
                     <div class="section-header amber">
                         <span class="section-title">EXPORT / IMPORT</span>
                         <div class="section-bar"></div>
@@ -841,7 +875,7 @@
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <!-- SECTION: TODOS - Team Quick Todo List (XACA-0101)                  -->
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
-                <section class="todos-section">
+                <section class="todos-section" data-mode="kanban">
                     <div class="section-header orange">
                         <span class="section-title">TEAM TODO LIST</span>
                         <div class="todo-header-controls">
@@ -867,6 +901,36 @@
                     <!-- Loading state -->
                     <div id="todo-loading" class="todo-loading">
                         <p>LOADING...</p>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: PERSONA BROWSER - Team mode placeholder (XACA-0164-009)   -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="persona-browser-section" data-mode="team">
+                    <div class="team-shell-placeholder">
+                        <h2>PERSONA BROWSER</h2>
+                        <p>Coming in A2 — browse openpersona.io teams and personas.</p>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: ROLE MATCHER - Team mode placeholder (XACA-0164-009)      -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="role-matcher-section" data-mode="team">
+                    <div class="team-shell-placeholder">
+                        <h2>ROLE MATCHER</h2>
+                        <p>Coming in A2 — match downloaded personas to crew specialties.</p>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: CHANGE HISTORY - Team mode placeholder (XACA-0164-009)    -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="change-history-section" data-mode="team">
+                    <div class="team-shell-placeholder">
+                        <h2>CHANGE HISTORY</h2>
+                        <p>Coming in A2 — history of persona swaps.</p>
                     </div>
                 </section>
 

@@ -96,6 +96,17 @@
           },
           {
             "type": "command",
+            "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py cleanup_if_empty",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
             "command": "python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py cleanup",
             "timeout": 3
           }

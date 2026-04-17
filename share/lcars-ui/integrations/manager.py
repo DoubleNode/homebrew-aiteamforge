@@ -7,6 +7,7 @@ a unified interface for the server to interact with integrations.
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Type, Any
 from .provider import (
@@ -19,24 +20,26 @@ from .provider import (
     ImportedIssue
 )
 
+# Add kanban-hooks to path for shared modules (XACA-0168)
+_KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent.parent / "kanban-hooks")
+if _KANBAN_HOOKS_DIR not in sys.path:
+    sys.path.insert(0, _KANBAN_HOOKS_DIR)
 
-# Team kanban directory mapping (mirrors server.py TEAM_KANBAN_DIRS and kanban-helpers.sh)
-# Used to locate team-specific config files in kanban/config/
-_TEAM_KANBAN_DIRS = {
-    "academy": Path.home() / "dev-team" / "kanban",
-    "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-    "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-    "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
-    "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-    "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-    "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-    "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-    "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
-    "medical-general": Path.home() / "medical" / "general" / "kanban",
-    "finance-personal": Path.home() / "finance" / "personal" / "kanban",
-}
+try:
+    from aiteamforge_paths import get_team_kanban_dir
+    _AITEAMFORGE_PATHS_AVAILABLE = True
+except ImportError:
+    _AITEAMFORGE_PATHS_AVAILABLE = False
+
+
+def _get_team_kanban_dir(team: str, default: Path) -> Path:
+    """Resolve team kanban dir via shared module, falling back to default."""
+    if _AITEAMFORGE_PATHS_AVAILABLE:
+        try:
+            return get_team_kanban_dir(team)
+        except KeyError:
+            pass
+    return default
 
 
 class IntegrationManager:
@@ -86,7 +89,7 @@ class IntegrationManager:
         lcars_team = os.environ.get("LCARS_TEAM", "freelance")
 
         # Resolve team kanban directory (fallback to academy)
-        kanban_dir = _TEAM_KANBAN_DIRS.get(lcars_team, Path.home() / "dev-team" / "kanban")
+        kanban_dir = _get_team_kanban_dir(lcars_team, Path.home() / "dev-team" / "kanban")
 
         search_paths = [
             # Explicit path

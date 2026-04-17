@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+# aiteamforge-paths — CLI wrapper for team-paths config management
+#
+# XACA-0168-002 — Wave 2: Setup wizard CLI entry point
+#
+# Subcommands:
+#   init    Run the interactive team-paths wizard
+#   show    Print the current config (~/.aiteamforge/team-paths.json)
+#   reset   Re-run the wizard (same as init, but explicit about overwriting)
+#
+# USAGE:
+#   aiteamforge-paths init [--accept-defaults] [--dry-run] [--config PATH]
+#   aiteamforge-paths show
+#   aiteamforge-paths reset [--dry-run] [--config PATH]
+#   aiteamforge-paths --help
+#
+# ENVIRONMENT:
+#   AITEAMFORGE_CONFIG  Override config file path
+#
+# This script delegates all interactive logic to:
+#   scripts/aiteamforge-team-paths-wizard.py
+
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Locate wizard script
+# ─────────────────────────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WIZARD_PY="${SCRIPT_DIR}/aiteamforge-team-paths-wizard.py"
+
+if [[ ! -f "$WIZARD_PY" ]]; then
+    echo "ERROR: Wizard not found at: $WIZARD_PY" >&2
+    exit 1
+fi
+
+if ! command -v python3 &>/dev/null; then
+    echo "ERROR: python3 is required but not found in PATH." >&2
+    exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Config path helper (mirrors wizard logic)
+# ─────────────────────────────────────────────────────────────────────────────
+
+_config_path() {
+    if [[ -n "${AITEAMFORGE_CONFIG:-}" ]]; then
+        echo "$AITEAMFORGE_CONFIG"
+    else
+        echo "${HOME}/.aiteamforge/team-paths.json"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: show
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_show() {
+    local config_path
+    config_path=$(_config_path)
+
+    if [[ ! -f "$config_path" ]]; then
+        echo "No config found at: $config_path"
+        echo "Run 'aiteamforge-paths init' to create it."
+        exit 1
+    fi
+
+    echo "Config: $config_path"
+    echo "──────────────────────────────────────────────────────────────────────"
+
+    if command -v jq &>/dev/null; then
+        jq '.' "$config_path"
+    else
+        cat "$config_path"
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: init / reset
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_init() {
+    # Pass all remaining args to the Python wizard
+    python3 "$WIZARD_PY" "$@"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Help text
+# ─────────────────────────────────────────────────────────────────────────────
+
+usage() {
+    cat <<EOF
+aiteamforge-paths — Team paths config management
+
+USAGE:
+  aiteamforge-paths <subcommand> [OPTIONS]
+
+SUBCOMMANDS:
+  init    Run the interactive setup wizard to create/update
+          ~/.aiteamforge/team-paths.json.
+          Prompts before overwriting an existing config.
+
+  show    Print the current config file contents.
+
+  reset   Re-run the wizard (same as init; makes overwrite intent explicit).
+
+OPTIONS (for init / reset):
+  --accept-defaults   Write DEFAULT_TEAMS as-is, no prompts
+  --dry-run           Show what would be written without writing
+  --config PATH       Write to PATH instead of default location
+
+ENVIRONMENT:
+  AITEAMFORGE_CONFIG  Override default config path
+
+EXAMPLES:
+  # Interactive setup (first time or reconfigure)
+  aiteamforge-paths init
+
+  # Accept all defaults with no prompts
+  aiteamforge-paths init --accept-defaults
+
+  # Preview what would be written without touching disk
+  aiteamforge-paths init --accept-defaults --dry-run
+
+  # View current config
+  aiteamforge-paths show
+
+  # Re-run wizard (same as init)
+  aiteamforge-paths reset
+
+  # Test against a temporary config file
+  AITEAMFORGE_CONFIG=/tmp/test-paths.json aiteamforge-paths init --accept-defaults
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main dispatch
+# ─────────────────────────────────────────────────────────────────────────────
+
+if [[ $# -eq 0 ]]; then
+    usage
+    exit 0
+fi
+
+SUBCOMMAND="$1"
+shift
+
+case "$SUBCOMMAND" in
+    init)
+        cmd_init "$@"
+        ;;
+    reset)
+        # reset is init with the understanding you're overwriting
+        # The wizard already handles the "reconfigure?" prompt
+        cmd_init "$@"
+        ;;
+    show)
+        cmd_show
+        ;;
+    --help|-h)
+        usage
+        exit 0
+        ;;
+    *)
+        echo "Unknown subcommand: $SUBCOMMAND" >&2
+        echo "Run 'aiteamforge-paths --help' for usage." >&2
+        exit 1
+        ;;
+esac

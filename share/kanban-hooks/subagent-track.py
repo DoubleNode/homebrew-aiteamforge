@@ -15,10 +15,15 @@ Background agents persist until session cleanup since their completion
 notification doesn't trigger a PostToolUse hook.
 
 Actions:
-  start   - PreToolUse: add subagent_type to tracking file (deduplicated)
-  stop    - PostToolUse: remove subagent_type (skipped for background agents)
-  remove  - CLI: remove agent_type passed as argv[2] (for subagent self-removal)
-  cleanup - Stop event: remove tracking file for this window
+  start            - PreToolUse: add subagent_type to tracking file (deduplicated)
+  stop             - PostToolUse: remove subagent_type (skipped for background agents)
+  remove           - CLI: remove agent_type passed as argv[2] (for subagent self-removal)
+  cleanup_if_empty - Stop event: remove tracking file ONLY if it has no
+                     active entries. Background agents launched in the turn
+                     that is now ending will still be tracked and must stay
+                     visible on the panel until they actually complete.
+  cleanup          - SessionEnd event (and legacy Stop fallback): force-remove
+                     the tracking file and its sidecars regardless of contents.
 """
 
 import json
@@ -116,14 +121,53 @@ def remove_agent(filepath, agent_type):
     locked_update(filepath, updater)
 
 
-def cleanup_window(session_name, window_index):
-    """Remove tracking file for this specific session/window only."""
-    filepath = tracking_file_path(session_name, window_index)
+def cleanup_window_path(filepath):
+    """Force-remove a tracking file and its lock/tmp sidecars.
+
+    Used by SessionEnd (and the legacy ``cleanup`` action) when the Claude
+    session is actually going away. Ignores active entries — nothing should
+    still be reading the file after this point.
+    """
     for f in [filepath, filepath + ".lock", filepath + ".tmp"]:
         try:
             os.remove(f)
         except OSError:
             pass
+
+
+def cleanup_window_if_empty_path(filepath):
+    """Remove the tracking file only if it holds no active subagent entries.
+
+    Used by the Stop hook, which fires at the end of every assistant turn.
+    A long-running background subagent launched during the turn that is now
+    ending MUST stay tracked — deleting its entry here would hide it from the
+    agent panel for the rest of its lifetime. So we only clean up when the
+    file is empty (all tracked subagents already completed via the normal
+    PostToolUse remove path) or when the file is unreadable garbage.
+    """
+    try:
+        with open(filepath, "r") as f:
+            data = json.load(f)
+        if isinstance(data, list) and len(data) > 0:
+            return  # Active entries — Stop hook must leave them alone.
+    except (OSError, json.JSONDecodeError):
+        # OSError covers FileNotFoundError, PermissionError, and other fs
+        # failures — consistent with cleanup_window_path. Missing file is
+        # fine; unreadable file is garbage we should sweep.
+        pass
+    cleanup_window_path(filepath)
+
+
+def cleanup_window(session_name, window_index):
+    """Force-remove the tracking file for this session/window."""
+    cleanup_window_path(tracking_file_path(session_name, window_index))
+
+
+def cleanup_window_if_empty(session_name, window_index):
+    """Remove the tracking file only if no active subagent entries remain."""
+    cleanup_window_if_empty_path(
+        tracking_file_path(session_name, window_index)
+    )
 
 
 def is_background_launch(tool_response):
@@ -169,7 +213,14 @@ def main():
         if agent_type:
             remove_agent(tracking_file_path(session_name, window_index), agent_type)
 
+    elif action == "cleanup_if_empty":
+        # Stop-hook path: only prune the file if no background agents are
+        # still tracked. Preserves long-running test/review bots that will
+        # outlive the parent's current turn.
+        cleanup_window_if_empty(session_name, window_index)
+
     elif action == "cleanup":
+        # SessionEnd-hook path (and legacy Stop fallback): force-remove.
         cleanup_window(session_name, window_index)
 
     print(json.dumps({}))

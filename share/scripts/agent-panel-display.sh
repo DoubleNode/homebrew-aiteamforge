@@ -253,10 +253,13 @@ get_crew_avatars() {
     local subagent_file="${LCARS_TMP}lcars-subagents-${SESSION_CODE}-w${win_idx}.json"
     [[ ! -f "$subagent_file" ]] && return
 
-    # Skip stale files (>10 min old = likely orphaned)
+    # Skip stale files (>1 hour old = likely orphaned).
+    # Long-running background test/review bots can run 10-30+ min, and the
+    # file's mtime only updates when add/remove runs — so the 10-min cap we
+    # used to have here would hide still-active bots (XACA-0170).
     local file_mtime=$(stat -f %m "$subagent_file" 2>/dev/null || echo 0)
     local file_age=$(( $(date +%s) - file_mtime ))
-    (( file_age > 600 )) && return
+    (( file_age > 3600 )) && return
 
     # Extract unique agent types from tracking file
     # Handles both legacy string format and current object format

@@ -308,16 +308,17 @@ body {
     color: var(--lcars-blue);
 }
 
-/* AITeamForge tap version — sits below LCARS/hostname row, matches the
-   same lavender-purple tone as stardate and the LCARS version label. */
-.top-sidebar-content .tap-version {
-    position: fixed;
-    top: 58px;
-    left: calc(var(--sidebar-width) + 20px);
-    font-size: 12px;
-    font-weight: 600;
+/* AITeamForge tap version — appended inline to the stardate line with a " - "
+   separator so it shares line 1 with the stardate. */
+.top-sidebar-content .stardate .tap-version {
+    margin-left: 6px;
     color: var(--lcars-blue);
-    z-index: 25;
+    letter-spacing: 1px;
+}
+
+.top-sidebar-content .stardate .tap-version:not(:empty)::before {
+    content: '- ';
+    color: var(--lcars-blue);
 }
 
 /* Team name inside sidebar, single line, top-right aligned */
@@ -582,7 +583,20 @@ body {
     justify-content: flex-end;
     position: relative;
     border-top: 2px solid var(--lcars-black);
-    border-bottom: none;
+    border-bottom: 2px solid var(--lcars-black);
+}
+
+/* Overlap adjacent borders between stacked items in each mode's sidebar so
+   the gap between two buttons renders as a single 2px line instead of 4px.
+   First child keeps its top border, last child keeps its bottom border. */
+.sidebar-mode-items > .sidebar-button,
+.sidebar-mode-items > .sidebar-split-row {
+    margin-bottom: -2px;
+}
+
+.sidebar-mode-items > .sidebar-button:last-child,
+.sidebar-mode-items > .sidebar-split-row:last-child {
+    margin-bottom: 0;
 }
 
 /* Split row - two buttons sharing one row */
@@ -626,8 +640,26 @@ body {
 .sidebar-button[data-section="backups"] { background: var(--lcars-tan); }
 .sidebar-button[data-section="commands"] {
     background: var(--lcars-crimson);
-    border-top: none;
-    border-bottom: 2px solid var(--lcars-black);
+}
+
+/* Default colors for sections that previously rendered transparent — each
+   chosen to contrast with its mode's chrome so the button never camouflages.
+   Active-state rules follow below matching the invert-color pattern. */
+.sidebar-button[data-section="persona-browser"] { background: var(--lcars-purple); }
+.sidebar-button[data-section="role-matcher"]    { background: var(--lcars-cyan); }
+.sidebar-button[data-section="change-history"]  { background: var(--lcars-green); }
+.sidebar-button[data-section="knowledge-graph"] { background: var(--lcars-cyan); }
+.sidebar-button[data-section="rag-engines"]     { background: var(--lcars-orange); }
+.sidebar-button[data-section="team-config"]     { background: var(--lcars-cyan); }
+.sidebar-button[data-section="export-import"]   { background: var(--lcars-green); }
+
+/* Per-mode overrides — avoid camouflage when a button's default color equals
+   the active mode's chrome background. */
+.lcars-container[data-mode="kanban"] .sidebar-button[data-section="todos"] {
+    background: var(--lcars-tan);
+}
+.lcars-container[data-mode="data"] .sidebar-button[data-section="home"] {
+    background: var(--lcars-lavender);
 }
 
 /* Active state - invert colors (black background, original color text) */
@@ -678,6 +710,41 @@ body {
 .sidebar-button[data-section="knowledge-graph"].active {
     background: var(--lcars-black);
     color: var(--lcars-cyan);
+}
+
+/* Active-state inversion text colors for the sections whose base bg was
+   added above (must match their base colors to preserve the invert pattern). */
+.sidebar-button[data-section="persona-browser"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-purple);
+}
+.sidebar-button[data-section="role-matcher"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
+.sidebar-button[data-section="change-history"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-green);
+}
+.sidebar-button[data-section="rag-engines"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-orange);
+}
+.sidebar-button[data-section="team-config"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
+.sidebar-button[data-section="export-import"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-green);
+}
+
+/* Per-mode active-state overrides to match the per-mode base recolor above. */
+.lcars-container[data-mode="kanban"] .sidebar-button[data-section="todos"].active {
+    color: var(--lcars-tan);
+}
+.lcars-container[data-mode="data"] .sidebar-button[data-section="home"].active {
+    color: var(--lcars-lavender);
 }
 
 /* Active state left bar - rectangle with no curve */
@@ -751,167 +818,18 @@ body {
     z-index: 101;
 }
 
-/* Submenu container - positioned to the right of sidebar */
-/* Hidden by default, shown when SETTINGS is clicked */
-.sidebar-submenu {
-    position: absolute;
-    left: 100%;
-    top: 0;
-    z-index: 9999;
-    pointer-events: none;
-    opacity: 0;
-    visibility: hidden;
-    transition: opacity 0.2s ease, visibility 0.2s ease;
+/* Mode-aware sidebar containers — XACA-0164-005/010/011
+   Hide all mode item groups by default; show only the active mode's group.
+   The .lcars-container[data-mode="x"] attribute is set by switchMode() in lcars.js. */
+.sidebar-mode-items {
+    display: none;
 }
 
-/* Submenu open state - shown when SETTINGS is clicked */
-.sidebar-submenu.open {
-    pointer-events: auto;
-    opacity: 1;
-    visibility: visible;
-}
-
-/* Horizontal bar - extends right from SETTINGS to meet spine */
-.sidebar-submenu-hbar {
-    position: absolute;
-    top: 0;
-    left: 0;
-    height: calc(var(--bar-height) - 2px);
-    width: calc(var(--bar-height) - 10px);
-    background: var(--lcars-cyan);
-}
-
-/* Container for vertical elements */
-.sidebar-submenu-vbar {
-    position: absolute;
-    left: calc(var(--bar-height) - 30px);
-    top: calc(-1 * (var(--bar-height) * 2 + 6px) - 5px - 3px);
-    width: 30px;
-}
-
-/* Spine - vertical bar */
-.sidebar-submenu-spine {
-    width: 20px;
-    height: calc(var(--bar-height) * 3 + 6px - 26px);
-    background: var(--lcars-cyan);
-    position: relative;
-}
-
-/* Outside curve at top-left of spine */
-.sidebar-submenu-spine::before {
-    content: '';
-    position: absolute;
-    top: -18px;
-    left: 0px;
-    width: 20px;
-    height: 20px;
-    background: radial-gradient(
-        circle at 20px 20px,
-        var(--lcars-cyan) 20px,
-        transparent 20px
-    );
-}
-
-/* Inside curve - concave LCARS elbow at inner corner of L */
-/* Positioned at inner corner where hbar top meets spine bottom */
-.sidebar-submenu-curve {
-    position: absolute;
-    left: -10px;
-    top: calc(var(--bar-height) * 2 + 6px);
-    width: 10px;
-    height: 10px;
-    background: radial-gradient(
-        circle at 0px 0px,
-        var(--lcars-black) 10px,
-        var(--lcars-cyan) 10px
-    );
-    z-index: 10;
-}
-
-/* Button container - buttons overlap spine to connect */
-.sidebar-submenu-items {
-    position: absolute;
-    left: calc(var(--bar-height) - 10px);
-    top: calc(-1 * (var(--bar-height) * 2 + 6px) - 26px);
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    pointer-events: none; /* Pass through to individual items */
-}
-
-/* Individual submenu buttons */
-.sidebar-submenu-item {
-    min-height: calc(var(--bar-height) - 4px);
-    width: 170px;
-    background: linear-gradient(to right, var(--lcars-tan) calc(100% - 20px), var(--lcars-cyan) calc(100% - 20px));
-    color: var(--lcars-black);
-    padding: 4px 30px 4px 10px;
-    font-size: 12px;
-    font-weight: 600;
-    letter-spacing: 1px;
-    cursor: pointer;
-    display: flex;
-    align-items: flex-end;
-    justify-content: flex-end;
-    white-space: nowrap;
-    border-radius: 0 20px 20px 0;
-    position: relative;
-    pointer-events: auto !important; /* Enable individual hover */
-    isolation: isolate; /* Create stacking context for hover */
-    transition: background 0.15s ease;
-}
-
-/* INTEGRATIONS button - purple background with cyan endcap */
-.sidebar-submenu-item[data-section="integrations"] {
-    background: linear-gradient(to right, var(--lcars-purple) calc(100% - 20px), var(--lcars-cyan) calc(100% - 20px));
-}
-
-/* BACKUPS button - red background with cyan endcap */
-.sidebar-submenu-item[data-section="backups"] {
-    background: linear-gradient(to right, var(--lcars-red) calc(100% - 20px), var(--lcars-cyan) calc(100% - 20px));
-}
-
-/* Vertical black bar before the end cap */
-.sidebar-submenu-item::after {
-    content: '';
-    position: absolute;
-    right: 20px;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--lcars-black);
-}
-
-/* Vertical black bar at the beginning (left side) of buttons */
-.sidebar-submenu-item::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0;
-    bottom: 0;
-    width: 3px;
-    background: var(--lcars-black);
-}
-
-/* Submenu item hover - brighten main color only, not endcap */
-/* COMMANDS (tan) hover - use peach as lighter tan */
-.sidebar-submenu-item:hover {
-    background: linear-gradient(to right, var(--lcars-peach) calc(100% - 20px), var(--lcars-cyan) calc(100% - 20px));
-}
-
-/* INTEGRATIONS (purple) hover */
-.sidebar-submenu-item[data-section="integrations"]:hover {
-    background: linear-gradient(to right, var(--lcars-lavender) calc(100% - 20px), var(--lcars-cyan) calc(100% - 20px));
-}
-
-/* BACKUPS (red) hover - use orange as lighter red */
-.sidebar-submenu-item[data-section="backups"]:hover {
-    background: linear-gradient(to right, var(--lcars-orange) calc(100% - 20px), var(--lcars-cyan) calc(100% - 20px));
-}
-
-/* Submenu item active state */
-.sidebar-submenu-item.active {
-    filter: brightness(0.9);
+.lcars-container[data-mode="team"] .sidebar-mode-items[data-mode="team"],
+.lcars-container[data-mode="kanban"] .sidebar-mode-items[data-mode="kanban"],
+.lcars-container[data-mode="data"] .sidebar-mode-items[data-mode="data"],
+.lcars-container[data-mode="settings"] .sidebar-mode-items[data-mode="settings"] {
+    display: block;
 }
 
 /* Spacer - shows black gap */
@@ -1058,39 +976,6 @@ body {
     display: none;
 }
 
-/* ─────────────────────────────────────────────────────────────────────────────
-   STATUS LEGEND - Fixed position ON the horizontal crimson bar
-   Calculation: 10px (padding) + 115px (top frame) + 4px (margin) = 129px
-   ───────────────────────────────────────────────────────────────────────────── */
-.status-legend {
-    position: fixed;
-    top: 129px;
-    left: calc(var(--sidebar-width) + 60px);
-    right: 20px;
-    height: var(--bar-height);
-    display: flex;
-    gap: 0;
-    z-index: 10;
-}
-
-/* Black spacer before READY - narrow like dividers between pills */
-.status-legend::before {
-    content: '';
-    width: 3px;
-    height: 100%;
-    background: var(--lcars-black);
-    flex-shrink: 0;
-}
-
-/* Black spacer after COMPLETE - narrow like dividers between pills */
-.status-legend::after {
-    content: '';
-    width: 3px;
-    height: 100%;
-    background: var(--lcars-black);
-    flex-shrink: 0;
-}
-
 .legend-pill {
     flex: 1;
     height: 100%;
@@ -1116,131 +1001,23 @@ body {
     border-radius: 0;
 }
 
-/* Default candy colors before JS loads - Red/Blue emphasis */
-.legend-pill.candy-1 { background: var(--lcars-blue); }
-.legend-pill.candy-2 { background: var(--lcars-cyan); }
-.legend-pill.candy-3 { background: var(--lcars-crimson); }
-.legend-pill.candy-4 { background: var(--lcars-purple); }
-.legend-pill.candy-5 { background: var(--lcars-lavender); }
-.legend-pill.candy-6 { background: var(--lcars-rose); }
-
-/* LCARS candy data display - dynamic colors per section (higher specificity) */
-.status-legend .legend-pill.candy-color-peach { background: var(--lcars-peach); }
-.status-legend .legend-pill.candy-color-orange { background: var(--lcars-orange); }
-.status-legend .legend-pill.candy-color-brown { background: var(--lcars-brown); }
-.status-legend .legend-pill.candy-color-mauve { background: var(--lcars-mauve); }
-.status-legend .legend-pill.candy-color-tan { background: var(--lcars-tan); }
-.status-legend .legend-pill.candy-color-blue { background: var(--lcars-blue); }
-.status-legend .legend-pill.candy-color-lavender { background: var(--lcars-lavender); }
-.status-legend .legend-pill.candy-color-cyan { background: var(--lcars-cyan); }
-.status-legend .legend-pill.candy-color-purple { background: var(--lcars-purple); }
-.status-legend .legend-pill.candy-color-crimson { background: var(--lcars-crimson); }
-.status-legend .legend-pill.candy-color-rose { background: var(--lcars-rose); }
-.status-legend .legend-pill.candy-color-teal { background: var(--lcars-teal, #66cccc); }
-.status-legend .legend-pill.candy-color-red { background: var(--lcars-red); }
-
-/* Base candy pill transitions for smooth animations */
-.legend-pill {
-    transition:
-        background-color 0.15s ease,
-        transform 0.15s ease,
-        box-shadow 0.15s ease,
-        filter 0.1s ease;
-}
-
-/* Candy button inversion effect - random power fluctuation */
-.legend-pill.candy-inverted {
-    background: var(--lcars-black) !important;
-    color: var(--lcars-peach);
-    transition: all 0.15s ease-in-out;
-}
-.legend-pill.candy-inverted.candy-color-peach { color: var(--lcars-peach); }
-.legend-pill.candy-inverted.candy-color-orange { color: var(--lcars-orange); }
-.legend-pill.candy-inverted.candy-color-brown { color: var(--lcars-brown); }
-.legend-pill.candy-inverted.candy-color-mauve { color: var(--lcars-mauve); }
-.legend-pill.candy-inverted.candy-color-tan { color: var(--lcars-tan); }
-.legend-pill.candy-inverted.candy-color-blue { color: var(--lcars-blue); }
-.legend-pill.candy-inverted.candy-color-lavender { color: var(--lcars-lavender); }
-.legend-pill.candy-inverted.candy-color-cyan { color: var(--lcars-cyan); }
-.legend-pill.candy-inverted.candy-color-purple { color: var(--lcars-purple); }
-.legend-pill.candy-inverted.candy-color-crimson { color: var(--lcars-crimson); }
-.legend-pill.candy-inverted.candy-color-rose { color: var(--lcars-rose); }
-.legend-pill.candy-inverted.candy-color-teal { color: var(--lcars-teal, #66cccc); }
-.legend-pill.candy-inverted.candy-color-red { color: var(--lcars-red); }
-
-/* ─────────────────────────────────────────────────────────────────────────────
-   CANDY PILL ANIMATIONS
-   State-change pulses, inversion effects, and tap feedback
-   ───────────────────────────────────────────────────────────────────────────── */
-
-/* State-change pulse animation - subtle scale and brightness */
-@keyframes candy-pulse {
-    0% {
-        transform: scale(1);
-        filter: brightness(1);
-    }
-    50% {
-        transform: scale(1.05);
-        filter: brightness(1.3);
-    }
-    100% {
-        transform: scale(1);
-        filter: brightness(1);
-    }
-}
-
-.legend-pill.candy-pulse {
-    animation: candy-pulse 0.3s ease-out;
-}
-
-/* Inversion effect - simulates power fluctuation with filter animation */
-@keyframes candy-invert {
-    0% {
-        filter: invert(0) brightness(1);
-    }
-    25% {
-        filter: invert(1) brightness(1.2);
-    }
-    75% {
-        filter: invert(1) brightness(0.9);
-    }
-    100% {
-        filter: invert(0) brightness(1);
-    }
-}
-
-.legend-pill.candy-inverted-animated {
-    animation: candy-invert 0.3s ease-in-out;
-}
-
-/* Candy tap pulse animation - visual feedback on click/tap */
-@keyframes candy-tap-pulse {
-    0% {
-        transform: scale(1);
-        filter: brightness(1);
-    }
-    50% {
-        transform: scale(0.95);
-        filter: brightness(1.3);
-    }
-    100% {
-        transform: scale(1);
-        filter: brightness(1);
-    }
-}
-
-.legend-pill.candy-tapped {
-    animation: candy-tap-pulse 0.2s ease-out;
-    cursor: pointer;
-}
-
-.legend-pill {
-    cursor: pointer;
-}
-
-/* Status legend hidden state */
-.status-legend.hidden {
+/* Mode bar hidden state */
+.mode-bar.hidden {
     display: none;
+}
+
+/* Mode router — sections not belonging to the active mode are hidden — XACA-0164-007 */
+.hidden-by-mode {
+    display: none !important;
+}
+
+/* Carousel mode filter — panels/dots not in the active mode are hidden — XACA-0164-008 */
+.carousel-panel.hidden-by-mode {
+    display: none !important;
+}
+
+.carousel-dot.hidden-by-mode {
+    display: none !important;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -1419,7 +1196,7 @@ body {
 .lcars-content > .export-import-section.active {
     display: block;
     overflow-y: auto !important;
-    padding-top: 5px; /* Minimal padding - status-legend is above content area */
+    padding-top: 5px; /* Minimal padding - mode-bar is above content area */
     padding-bottom: 60px;
 }
 
@@ -6807,16 +6584,6 @@ body {
         border-left-width: 1px;
     }
 
-    .status-legend::before,
-    .status-legend::after {
-        width: 1px;
-    }
-
-    /* Match candy bar height to sidebar buttons */
-    .status-legend {
-        height: 32px;
-    }
-
     /* Center sidebar text between the 2 black bars - match button label font */
     .top-sidebar-content .team-name {
         top: -25px;
@@ -7068,10 +6835,6 @@ body {
         display: none;
     }
 
-    /* Status legend adjusts for no sidebar */
-    .status-legend {
-        left: 20px;
-    }
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
@@ -13826,7 +13589,6 @@ body {
 
 .home-fullscreen .lcars-top-frame,
 .home-fullscreen .lcars-sidebar,
-.home-fullscreen .status-legend,
 .home-fullscreen .mobile-tabbar,
 .home-fullscreen .scanline,
 .home-fullscreen .content-watermark {
@@ -15443,6 +15205,7 @@ body {
    ============================================================================ */
 
 .legend-pill.sound-pill {
+    background: var(--lcars-rose);
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
@@ -15470,6 +15233,7 @@ body {
    ============================================================================ */
 
 .legend-pill.viewscreen-pill {
+    background: var(--lcars-lavender);
     cursor: pointer;
     user-select: none;
     -webkit-user-select: none;
@@ -15485,4 +15249,194 @@ body {
 
 .legend-pill.viewscreen-pill:active {
     filter: brightness(0.7);
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   XACA-0164-003: Per-mode body palettes
+   Override --fleet-body-primary and --fleet-body-accent per mode.
+   Header palette uses separate --fleet-header-* vars and is NOT affected.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Mode palettes — tint sidebar, mode bar, and content only (header untouched) */
+[data-mode="team"] {
+    --fleet-body-primary: #FFCC66;
+    --fleet-body-accent:  #FF9900;
+}
+
+[data-mode="kanban"] {
+    --fleet-body-primary: #FF9966;
+    --fleet-body-accent:  #CC6699;
+}
+
+[data-mode="data"] {
+    --fleet-body-primary: #99CCFF;
+    --fleet-body-accent:  #6699CC;
+}
+
+[data-mode="settings"] {
+    --fleet-body-primary: #9999FF;
+    --fleet-body-accent:  #CC99CC;
+}
+
+/* Per-mode sidebar + swoop recoloring — sidebar L-shape follows the active mode.
+   Maps each mode's attr to its corresponding mode-pill color so the chrome
+   matches the clicked pill. */
+.lcars-container[data-mode="team"]     { --mode-chrome: var(--lcars-amber); }
+.lcars-container[data-mode="kanban"]   { --mode-chrome: var(--lcars-orange); }
+.lcars-container[data-mode="data"]     { --mode-chrome: var(--lcars-blue); }
+.lcars-container[data-mode="settings"] { --mode-chrome: var(--lcars-purple); }
+
+.lcars-container[data-mode] .lcars-sidebar,
+.lcars-container[data-mode] .lcars-sidebar::before {
+    background: var(--mode-chrome) !important;
+}
+
+.lcars-container[data-mode] .lcars-sidebar::after {
+    background: radial-gradient(
+        circle at 30px 30px,
+        var(--lcars-black) 30px,
+        var(--mode-chrome) 30px
+    ) !important;
+}
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   XACA-0164-012: Mode bar layout — separator pill + flex gap
+   Replaced .status-legend row with .mode-bar, .mode-cluster, .utility-cluster.
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* Mode bar — top-level flex row (sits where .status-legend was) */
+.mode-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    position: fixed;
+    top: 129px;
+    left: calc(var(--sidebar-width) + 60px);
+    right: 20px;
+    height: var(--bar-height);
+    z-index: 10;
+}
+
+/* Clusters — left (modes) and right (utilities).
+   No gap — each pill carries its own 2px black border on BOTH sides
+   (see .mode-bar .legend-pill rule below). */
+.mode-cluster,
+.utility-cluster {
+    display: flex;
+    gap: 0;
+    align-items: center;
+    height: 100%;
+}
+
+/* All 6 mode-bar pills — uniform 100px width with thin black verticals
+   on both sides of each button. Overrides .legend-pill { flex: 1 } and
+   .legend-pill:first-child { border-left: none } base rules.
+   Negative margin-right collapses adjacent borders so touching pills show
+   a single 2px separator instead of 4px (border-right + border-left). */
+.mode-bar .legend-pill {
+    flex: 0 0 100px;
+    width: 100px;
+    min-width: 100px;
+    border-left: 2px solid var(--lcars-black);
+    border-right: 2px solid var(--lcars-black);
+    margin-right: -2px;
+}
+
+.mode-bar .legend-pill:last-child {
+    margin-right: 0;
+}
+
+/* VIEWSCREEN + SOUND are wider than the 4 mode pills */
+.mode-bar .legend-pill.viewscreen-pill,
+.mode-bar .legend-pill.sound-pill {
+    flex: 0 0 120px;
+    width: 120px;
+    min-width: 120px;
+}
+
+/* Spacer pushes utility cluster to the right */
+.mode-bar-spacer {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+/* Separator pill — purely decorative vertical tick */
+.mode-bar-separator {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 8px;
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.9em;
+    user-select: none;
+    -webkit-user-select: none;
+}
+
+/* Mode pills — reuse .legend-pill pattern (rectangular, flush, brightness state).
+   State behaviour mirrors .sidebar-button: hover = brightness boost, active =
+   inverted (black background, mode color text) + 6px colored left bar. */
+.legend-pill.mode-pill {
+    position: relative;
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition:
+        background-color 0.15s ease,
+        color 0.15s ease,
+        filter 0.15s ease;
+}
+
+/* Fixed per-button colors so all 4 modes read visually at once */
+.legend-pill.mode-pill[data-mode-target="team"]     { background: var(--lcars-amber); }
+.legend-pill.mode-pill[data-mode-target="kanban"]   { background: var(--lcars-orange); }
+.legend-pill.mode-pill[data-mode-target="data"]     { background: var(--lcars-blue); }
+.legend-pill.mode-pill[data-mode-target="settings"] { background: var(--lcars-purple); }
+
+.legend-pill.mode-pill:hover {
+    filter: brightness(1.2);
+}
+
+/* Active state — invert colours like .sidebar-button.active does */
+.legend-pill.mode-pill.active {
+    filter: none;
+    background: var(--lcars-black);
+}
+.legend-pill.mode-pill[data-mode-target="team"].active     { color: var(--lcars-amber); }
+.legend-pill.mode-pill[data-mode-target="kanban"].active   { color: var(--lcars-orange); }
+.legend-pill.mode-pill[data-mode-target="data"].active     { color: var(--lcars-blue); }
+.legend-pill.mode-pill[data-mode-target="settings"].active { color: var(--lcars-purple); }
+
+.legend-pill.mode-pill:focus-visible {
+    outline: 2px solid var(--lcars-black);
+    outline-offset: -2px;
+}
+
+/* 6px colored left bar on active pill — mirrors .sidebar-button[data-section].active::after */
+.legend-pill.mode-pill.active::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 6px;
+    background: currentColor;
+}
+
+/* Team-mode shell placeholders (XACA-0164-009, filled by A2) */
+.team-shell-placeholder {
+    padding: 48px;
+    text-align: center;
+    color: var(--fleet-body-primary, #99CCFF);
+    opacity: 0.6;
+}
+
+.team-shell-placeholder h2 {
+    font-size: 1.8em;
+    letter-spacing: 3px;
+    margin-bottom: 12px;
+}
+
+.team-shell-placeholder p {
+    font-size: 1em;
+    color: rgba(255, 255, 255, 0.4);
 }

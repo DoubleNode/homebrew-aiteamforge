@@ -1,1 +1,1 @@
-window.LCARS_TARGET_TEAM = 'firebase';
+window.LCARS_TARGET_TEAM = 'command';

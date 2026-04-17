@@ -37,29 +37,89 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
-# Configuration
-# Distributed kanban directories - each team has their own
-TEAM_KANBAN_DIRS = {
-    # Main Event Teams
-    "academy": Path.home() / "dev-team" / "kanban",
-    "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-    "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-    "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+# ---------------------------------------------------------------------------
+# Shared path config — XACA-0168-007
+# Import team directories and exclusion rules from the canonical shared module.
+# ---------------------------------------------------------------------------
+try:
+    # kanban-hooks/ must be on sys.path; add it relative to this file if needed.
+    _hooks_dir = Path(__file__).parent / "kanban-hooks"
+    if str(_hooks_dir) not in sys.path:
+        sys.path.insert(0, str(_hooks_dir))
+    from aiteamforge_paths import (
+        list_teams,
+        get_team_kanban_dir,
+        EXPORT_EXCLUSION_SUFFIXES,
+        EXPORT_EXCLUSION_NAMES,
+        EXPORT_EXCLUSION_PATTERNS,
+        is_excluded_from_export,
+    )
+    _USE_SHARED_PATHS = True
+except ImportError:
+    _USE_SHARED_PATHS = False
+    # Fallback: hardcoded dirs retained for resilience when module is absent.
+    # Remove this block once all installations have kanban-hooks/ in place.
+    def list_teams():  # type: ignore[misc]
+        return list(_FALLBACK_TEAM_DIRS.keys())
 
-    # Freelance Projects
-    "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-    "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-    "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-    "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+    def get_team_kanban_dir(team):  # type: ignore[misc]
+        d = _FALLBACK_TEAM_DIRS.get(team)
+        if d is None:
+            raise KeyError(f"Team '{team}' not found in fallback dirs")
+        return d
 
-    # Legal Projects
-    "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
-}
+    EXPORT_EXCLUSION_SUFFIXES = frozenset({".lock"})
+    EXPORT_EXCLUSION_NAMES = frozenset({".DS_Store", "firebase-debug.log"})
+    EXPORT_EXCLUSION_PATTERNS = ("*-debug.log",)
+
+    def is_excluded_from_export(filepath):  # type: ignore[misc]
+        name = filepath.name
+        if name in EXPORT_EXCLUSION_NAMES:
+            return True
+        if filepath.suffix in EXPORT_EXCLUSION_SUFFIXES:
+            return True
+        for pattern in EXPORT_EXCLUSION_PATTERNS:
+            if filepath.match(pattern):
+                return True
+        return False
+
+    _FALLBACK_TEAM_DIRS = {
+        "academy": Path.home() / "dev-team" / "kanban",
+        "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
+        "android": Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
+        "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
+        "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+        "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
+        "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
+        "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
+        "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
+        "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
+        "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
+    }
+
+# ---------------------------------------------------------------------------
+# Migration safety check — XACA-0168-005
+# Warn once if the old backup directory exists but the new one does not.
+# ---------------------------------------------------------------------------
+_OLD_BACKUP_ROOT = Path.home() / "dev-team-backups"
+_NEW_BACKUP_ROOT = Path.home() / "aiteamforge-backups"
+if _OLD_BACKUP_ROOT.exists() and not _NEW_BACKUP_ROOT.exists():
+    print(
+        "\n"
+        "[kanban-backup] MIGRATION REQUIRED: Your backup data is still in the old directory.\n"
+        "  Old path: ~/dev-team-backups\n"
+        "  New path: ~/aiteamforge-backups\n"
+        "\n"
+        "  Please run the following command ONCE to move your backups:\n"
+        "    mv ~/dev-team-backups ~/aiteamforge-backups\n"
+        "\n"
+        "  This script will continue using ~/aiteamforge-backups going forward.\n"
+        "  Your existing backups will NOT be found until you move them.\n",
+        file=sys.stderr,
+    )
 
 # Centralized backup destination
-BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
+BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 STATUS_FILE = BACKUP_DIR / "backup-status.json"
 HASH_FILE = BACKUP_DIR / "file-hashes.json"
 
@@ -99,26 +159,6 @@ def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Pat
         print(f"  [ERROR] {team_name}: Source directory does not exist: {source_dir}")
         return False
 
-    # Files/patterns to exclude
-    exclude_suffixes = {'.lock'}
-    exclude_names = {'.DS_Store', 'firebase-debug.log'}
-    exclude_patterns = {'*-debug.log'}
-
-    def should_exclude(filepath: Path) -> bool:
-        """Check if a file should be excluded from backup."""
-        name = filepath.name
-        # Check exact name matches
-        if name in exclude_names:
-            return True
-        # Check suffix matches
-        if filepath.suffix in exclude_suffixes:
-            return True
-        # Check pattern matches
-        for pattern in exclude_patterns:
-            if filepath.match(pattern):
-                return True
-        return False
-
     try:
         # Create destination directory if needed
         dest_file.parent.mkdir(parents=True, exist_ok=True)
@@ -129,7 +169,7 @@ def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Pat
 
             # Recursively add ALL files in the kanban directory
             for item in source_dir.rglob("*"):
-                if item.is_file() and not should_exclude(item):
+                if item.is_file() and not is_excluded_from_export(item):
                     # Use relative path to maintain directory structure
                     arcname = item.relative_to(source_dir)
                     zipf.write(item, str(arcname))
@@ -168,32 +208,16 @@ def get_directory_hash(kanban_dir: Path, team: str) -> Optional[str]:
 
     Includes: ALL files in the kanban directory recursively.
     Excludes: .lock files, debug logs, .DS_Store (same as backup).
+    Uses is_excluded_from_export() from aiteamforge_paths for consistency.
     """
-    # Same exclusion logic as create_directory_backup_zip
-    exclude_suffixes = {'.lock'}
-    exclude_names = {'.DS_Store', 'firebase-debug.log'}
-    exclude_patterns = {'*-debug.log'}
-
-    def should_exclude(filepath: Path) -> bool:
-        """Check if a file should be excluded from hash."""
-        name = filepath.name
-        if name in exclude_names:
-            return True
-        if filepath.suffix in exclude_suffixes:
-            return True
-        for pattern in exclude_patterns:
-            if filepath.match(pattern):
-                return True
-        return False
-
     try:
         if not kanban_dir.exists():
             return None
 
-        # Collect ALL files to hash (same logic as create_directory_backup_zip)
+        # Collect ALL files to hash (same exclusion rules as create_directory_backup_zip)
         files_to_hash = []
         for item in kanban_dir.rglob("*"):
-            if item.is_file() and not should_exclude(item):
+            if item.is_file() and not is_excluded_from_export(item):
                 files_to_hash.append(item)
 
         if not files_to_hash:
@@ -232,10 +256,22 @@ def is_valid_json(filepath: Path) -> bool:
         return False
 
 
+def _get_team_kanban_dirs() -> dict:
+    """Build a team -> kanban_dir mapping from the shared path module."""
+    result = {}
+    for team in list_teams():
+        try:
+            d = get_team_kanban_dir(team)
+            result[team] = d
+        except KeyError:
+            pass
+    return result
+
+
 def get_board_files() -> list[Path]:
     """Get all kanban board files from all team directories."""
     board_files = []
-    for team, kanban_dir in TEAM_KANBAN_DIRS.items():
+    for team, kanban_dir in _get_team_kanban_dirs().items():
         if kanban_dir.exists():
             board_file = kanban_dir / f"{team}-board.json"
             if board_file.exists():
@@ -382,7 +418,10 @@ def backup_board(board_file: Path, stored_hashes: dict, status: dict, force: boo
     Returns a result dict with status info.
     """
     team = board_file.stem.replace("-board", "")
-    kanban_dir = TEAM_KANBAN_DIRS.get(team)
+    try:
+        kanban_dir = get_team_kanban_dir(team)
+    except KeyError:
+        kanban_dir = None
     result = {
         "team": team,
         "action": "none",
@@ -691,12 +730,13 @@ def run_restore(team: str):
     print(f"\nRestoring {team} board...")
 
     # Get board file location from distributed directory mapping
-    if team not in TEAM_KANBAN_DIRS:
+    try:
+        kanban_dir = get_team_kanban_dir(team)
+    except KeyError:
+        available = ", ".join(sorted(list_teams()))
         print(f"ERROR: Unknown team '{team}'")
-        print(f"Available teams: {', '.join(sorted(TEAM_KANBAN_DIRS.keys()))}")
+        print(f"Available teams: {available}")
         sys.exit(1)
-
-    kanban_dir = TEAM_KANBAN_DIRS[team]
     board_file = kanban_dir / f"{team}-board.json"
     latest = get_latest_backup(team)
 

@@ -77,7 +77,8 @@ let homeCharts = {
 };
 
 // HOME tab carousel state
-let currentHomePanel = 0;
+let currentHomePanel = 0;      // Physical panel index (data-panel-index value) of the active panel
+let currentLogicalPanel = 0;   // Logical index within the visible (mode-filtered) panel set — XACA-0164-008
 let TOTAL_HOME_PANELS = 6; // Base panels; increases dynamically with RAG engines
 let carouselAutoTimer = null;
 const CAROUSEL_AUTO_INTERVAL = 10000; // 10 seconds
@@ -103,8 +104,15 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history'];
 const STARTUP_DELAY = 4000; // 4 seconds
+
+// Mode state machine (XACA-0164)
+let activeMode = 'kanban';  // default mode per spec A1.1
+const MODES = ['team', 'kanban', 'data', 'settings'];
+const MODE_KEY = 'lcars.activeMode';
+// Per-mode section memory — XACA-0164-013
+const MODE_SECTIONS_KEY = 'lcars.modeSections'; // JSON: { team, kanban, data, settings }
 
 // Queue filter state
 const QUEUE_FILTER_KEY = 'lcars-queue-filter';
@@ -568,21 +576,39 @@ function renderBoard() {
  * Clamps index to valid range [0, TOTAL_HOME_PANELS-1] with wraparound.
  * Updates track transform, dot/panel active classes, and resets auto-advance timer.
  */
-function navigateToPanel(index) {
-    // Wrap around: -1 goes to last panel, TOTAL_HOME_PANELS goes to first
-    if (index < 0) {
-        index = TOTAL_HOME_PANELS - 1;
-    } else if (index >= TOTAL_HOME_PANELS) {
-        index = 0;
+function navigateToPanel(logicalIndex) {
+    // Build the ordered list of visible (non-hidden) panels — XACA-0164-008
+    // When homeFullscreen is active, ALL panels are visible regardless of mode.
+    const visiblePanels = Array.from(document.querySelectorAll('.carousel-panel'))
+        .filter(p => !p.classList.contains('hidden-by-mode'));
+
+    const visibleCount = visiblePanels.length;
+
+    // With no visible panels (e.g. TEAM mode), nothing to do
+    if (visibleCount === 0) {
+        currentLogicalPanel = 0;
+        currentHomePanel = 0;
+        return;
+    }
+
+    // Wrap around within the visible set
+    if (logicalIndex < 0) {
+        logicalIndex = visibleCount - 1;
+    } else if (logicalIndex >= visibleCount) {
+        logicalIndex = 0;
         // Refresh RAG engine data on carousel wrap-around (once per full cycle)
         _refreshRAGEnginePanels();
     }
+
+    // Resolve physical panel index from the visible panel at this logical position
+    const targetPanel = visiblePanels[logicalIndex];
+    const physicalIndex = parseInt(targetPanel.dataset.panelIndex, 10);
 
     // If leaving a knowledge/adoption panel (4 or 5), cancel any pending debounce
     // or in-flight fetch so the async continuation cannot inject stale DOM content.
     // Both panels share the same /api/knowledge-stats fetch infrastructure.
     const leavingKnowledgePanel = (currentHomePanel === 4 || currentHomePanel === 5)
-        && (index !== 4 && index !== 5);
+        && (physicalIndex !== 4 && physicalIndex !== 5);
     if (leavingKnowledgePanel) {
         if (_knowledgeDebounceTimer !== null) {
             clearTimeout(_knowledgeDebounceTimer);
@@ -594,27 +620,28 @@ function navigateToPanel(index) {
         }
     }
 
-    currentHomePanel = index;
+    currentLogicalPanel = logicalIndex;
+    currentHomePanel = physicalIndex;
 
-    // Slide the track
+    // Slide the track using logical position (visible panels occupy sequential flex slots)
     const track = document.querySelector('.carousel-track');
     if (track) {
-        track.style.transform = `translateX(-${index * 100}%)`;
+        track.style.transform = `translateX(-${logicalIndex * 100}%)`;
     }
 
-    // Update active dot
-    document.querySelectorAll('.carousel-dot').forEach((dot, i) => {
-        dot.classList.toggle('active', i === index);
+    // Update active dot (dots are rebuilt to match only visible panels, so dot index = logical index)
+    document.querySelectorAll('.carousel-dot:not(.hidden-by-mode)').forEach((dot, i) => {
+        dot.classList.toggle('active', i === logicalIndex);
     });
 
-    // Update active panel
-    document.querySelectorAll('.carousel-panel').forEach((panel, i) => {
-        panel.classList.toggle('active', i === index);
+    // Update active panel (among visible panels only)
+    visiblePanels.forEach((panel, i) => {
+        panel.classList.toggle('active', i === logicalIndex);
     });
 
     // Lazy-render panel content (always re-render on navigate for fresh data;
     // the _renderHome* functions handle create-vs-update via homeCharts checks)
-    renderHomePanel(index);
+    renderHomePanel(physicalIndex);
 
     // Trigger chart resize for the newly visible panel after CSS transition completes
     // Chart.js canvases need explicit resize when their container transitions from hidden
@@ -628,7 +655,7 @@ function navigateToPanel(index) {
         5: []
     };
     setTimeout(() => {
-        (panelChartKeys[index] || []).forEach(key => {
+        (panelChartKeys[physicalIndex] || []).forEach(key => {
             if (homeCharts[key]) {
                 homeCharts[key].resize();
             }
@@ -647,7 +674,7 @@ function _startCarouselAutoTimer() {
     _stopCarouselAutoTimer();
     carouselAutoTimer = setInterval(() => {
         if (!carouselPaused) {
-            navigateToPanel(currentHomePanel + 1);
+            navigateToPanel(currentLogicalPanel + 1);
         }
     }, CAROUSEL_AUTO_INTERVAL);
 }
@@ -677,8 +704,8 @@ function _resetCarouselAutoTimer() {
  */
 function initCarousel() {
     if (carouselInitialized) {
-        // Already initialized — just make sure we're on panel 0 and timer is running
-        navigateToPanel(0);
+        // Already initialized — re-apply mode filter and reset to panel 0
+        applyCarouselModeFilter(activeMode, homeFullscreen);
         _startCarouselAutoTimer();
         return;
     }
@@ -691,13 +718,13 @@ function initCarousel() {
 
     if (prevBtn) {
         prevBtn.addEventListener('click', () => {
-            navigateToPanel(currentHomePanel - 1);
+            navigateToPanel(currentLogicalPanel - 1);
         });
     }
 
     if (nextBtn) {
         nextBtn.addEventListener('click', () => {
-            navigateToPanel(currentHomePanel + 1);
+            navigateToPanel(currentLogicalPanel + 1);
         });
     }
 
@@ -724,11 +751,14 @@ function initCarousel() {
 
     // Fetch RAG engine data for dynamic panels
     _refreshRAGEnginePanels();
-    // Generate initial dots for base 6 panels (RAG fetch may be slow)
-    _rebuildCarouselDots();
 
-    // Set first panel active and start timer
-    navigateToPanel(0);
+    // Apply mode filter before generating dots — panels tagged data-home-mode get hidden-by-mode
+    // applied immediately so the initial dot build and navigateToPanel(0) see the right set
+    // XACA-0164-008
+    applyCarouselModeFilter(activeMode, homeFullscreen);
+
+    // applyCarouselModeFilter calls _rebuildCarouselDots and navigateToPanel(0), so no need
+    // to call them again. Just start the timer.
     _startCarouselAutoTimer();
 }
 
@@ -813,6 +843,7 @@ function _rebuildRAGPanelsDOM(engines) {
         const panel = document.createElement('div');
         panel.className = 'carousel-panel';
         panel.dataset.panelIndex = panelIndex;
+        panel.dataset.homeMode = 'data'; // RAG engine panels belong to DATA mode — XACA-0164-008
 
         const header = document.createElement('div');
         header.className = 'section-header cyan';
@@ -871,21 +902,64 @@ function _rebuildRAGPanelsDOM(engines) {
 
 /**
  * Rebuild carousel dots to match current TOTAL_HOME_PANELS count.
+ * Dots are created for ALL panels, then hidden-by-mode is applied for filtered-out ones.
+ * Only visible dots get click handlers that use logical indices — XACA-0164-008.
  */
 function _rebuildCarouselDots() {
     const dotsContainer = document.getElementById('carousel-dots');
     if (!dotsContainer) return;
     dotsContainer.textContent = '';
 
+    // Collect all panels and the visible subset for logical → physical mapping
+    const allPanels = Array.from(document.querySelectorAll('.carousel-panel'));
+    const visiblePanels = allPanels.filter(p => !p.classList.contains('hidden-by-mode'));
+
     for (let i = 0; i < TOTAL_HOME_PANELS; i++) {
         const dot = document.createElement('span');
-        dot.className = 'carousel-dot' + (i === currentHomePanel ? ' active' : '');
+        const panel = allPanels[i];
+        const isHidden = panel && panel.classList.contains('hidden-by-mode');
+
+        const logicalIndex = visiblePanels.indexOf(panel);
+        dot.className = 'carousel-dot' + (!isHidden && logicalIndex === currentLogicalPanel ? ' active' : '') + (isHidden ? ' hidden-by-mode' : '');
         dot.dataset.panel = i;
-        dot.addEventListener('click', () => navigateToPanel(i));
+        if (!isHidden && logicalIndex !== -1) {
+            dot.addEventListener('click', () => navigateToPanel(logicalIndex));
+        }
         dotsContainer.appendChild(dot);
     }
 }
 
+
+/**
+ * Apply carousel mode filter — show only panels matching activeMode (or all when fullscreen).
+ * Toggles .hidden-by-mode on panels and dots, rebuilds dot active state,
+ * and navigates to the first visible panel. — XACA-0164-008
+ *
+ * @param {string} mode - The current active mode ('kanban', 'data', 'team', 'settings')
+ * @param {boolean} [showAll=false] - When true (VIEWSCREEN), show all panels regardless of mode
+ */
+function applyCarouselModeFilter(mode, showAll) {
+    const allPanels = document.querySelectorAll('.carousel-panel');
+    allPanels.forEach(panel => {
+        if (showAll) {
+            panel.classList.remove('hidden-by-mode');
+        } else {
+            const panelMode = panel.dataset.homeMode;
+            if (panelMode && panelMode !== mode) {
+                panel.classList.add('hidden-by-mode');
+            } else {
+                panel.classList.remove('hidden-by-mode');
+            }
+        }
+    });
+
+    // Rebuild dots to reflect updated visibility
+    _rebuildCarouselDots();
+
+    // Reset to first visible panel
+    currentLogicalPanel = 0;
+    navigateToPanel(0);
+}
 
 /**
  * Toggle fullscreen mode for the HOME dashboard.
@@ -915,6 +989,9 @@ function toggleHomeFullscreen() {
 
     homeFullscreen = true;
     container.classList.add('home-fullscreen');
+
+    // VIEWSCREEN shows ALL panels regardless of mode — XACA-0164-008
+    applyCarouselModeFilter(activeMode, true /* showAll */);
 
     // Request true device fullscreen via Fullscreen API
     const el = document.documentElement;
@@ -965,6 +1042,9 @@ function _exitHomeFullscreen() {
         exitFS.call(document);
     }
 
+    // Re-apply mode filter now that we're back to normal HOME (not VIEWSCREEN) — XACA-0164-008
+    applyCarouselModeFilter(activeMode, false);
+
     // Force full re-render of current panel after layout settles.
     // Simple resize() doesn't always work because Chart.js caches fullscreen dimensions.
     // Destroying and re-creating via renderHomePanel ensures correct sizing.
@@ -985,6 +1065,8 @@ document.addEventListener('fullscreenchange', () => {
         const container = document.querySelector('.lcars-container');
         if (container) container.classList.remove('home-fullscreen');
         document.removeEventListener('click', _fullscreenClickHandler, { capture: true });
+        // Re-apply mode filter on browser-native fullscreen exit — XACA-0164-008
+        applyCarouselModeFilter(activeMode, false);
         setTimeout(() => { renderHomePanel(currentHomePanel); }, 300);
     }
 });
@@ -1002,10 +1084,10 @@ document.addEventListener('keydown', (e) => {
         _exitHomeFullscreen();
     } else if (e.key === 'ArrowLeft') {
         e.preventDefault();
-        navigateToPanel(currentHomePanel - 1);
+        navigateToPanel(currentLogicalPanel - 1);
     } else if (e.key === 'ArrowRight') {
         e.preventDefault();
-        navigateToPanel(currentHomePanel + 1);
+        navigateToPanel(currentLogicalPanel + 1);
     }
 });
 
@@ -6066,7 +6148,14 @@ function updateStardate() {
     const oneDay = 1000 * 60 * 60 * 24;
     const dayOfYear = Math.floor(diff / oneDay);
     const stardate = `${now.getFullYear()}.${String(dayOfYear).padStart(3, '0')}`;
-    document.getElementById('stardate').textContent = stardate;
+    const el = document.getElementById('stardate');
+    if (!el) return;
+    // Only replace the leading text node so nested #tap-version span survives.
+    if (el.firstChild && el.firstChild.nodeType === Node.TEXT_NODE) {
+        el.firstChild.nodeValue = stardate;
+    } else {
+        el.textContent = stardate;
+    }
 }
 
 function updateTimestamp() {
@@ -8914,173 +9003,6 @@ function initCommandSectionBar() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// LCARS CANDY DATA DISPLAY
-// Random animated data for visual immersion
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const candyState = {
-    counter1: 0,
-    counter4: 99999,
-    values: ['00000', '0000', '00.00', '00-000', '00000', '0000'],
-    timers: [],
-    currentSection: 'workflow'
-};
-
-// Data slot order and colors for each section
-const candySchemes = {
-    workflow: { order: [0, 1, 2, 3, 4, 5], colors: ['peach', 'orange', 'brown', 'mauve', 'tan', 'orange'] },
-    details:  { order: [2, 4, 0, 5, 1, 3], colors: ['cyan', 'blue', 'lavender', 'blue', 'cyan', 'lavender'] },
-    queue:    { order: [5, 3, 1, 4, 0, 2], colors: ['lavender', 'purple', 'mauve', 'lavender', 'purple', 'mauve'] },
-    releases: { order: [3, 0, 4, 1, 5, 2], colors: ['green', 'teal', 'green', 'cyan', 'teal', 'green'] },
-    commands: { order: [1, 5, 3, 0, 2, 4], colors: ['orange', 'tan', 'brown', 'peach', 'orange', 'tan'] }
-};
-
-function updateCandyDisplay() {
-    const scheme = candySchemes[candyState.currentSection] || candySchemes.workflow;
-    for (let i = 0; i < 6; i++) {
-        const el = document.getElementById(`candy-${i + 1}`);
-        if (el) {
-            el.textContent = candyState.values[scheme.order[i]];
-        }
-    }
-}
-
-function initCandyDisplays() {
-    // Speed distribution: 50, 340, 630, 920, 1210, 1500ms
-
-    // Slot 0: Fast incrementing hex counter (50ms - fastest)
-    candyState.timers.push(setInterval(() => {
-        candyState.counter1 = (candyState.counter1 + 7) % 0xFFFFF;
-        candyState.values[0] = candyState.counter1.toString(16).toUpperCase().padStart(5, '0');
-        updateCandyDisplay();
-    }, 50));
-
-    // Slot 1: Random 4-digit hex (340ms)
-    candyState.timers.push(setInterval(() => {
-        candyState.values[1] = Math.floor(Math.random() * 0xFFFF).toString(16).toUpperCase().padStart(4, '0');
-    }, 340));
-
-    // Slot 2: Fluctuating decimal reading (630ms)
-    candyState.timers.push(setInterval(() => {
-        const base = 47.5 + Math.sin(Date.now() / 1000) * 15;
-        const jitter = (Math.random() - 0.5) * 2;
-        candyState.values[2] = (base + jitter).toFixed(2);
-    }, 630));
-
-    // Slot 3: Random sector identifier XX-XXX (920ms)
-    candyState.timers.push(setInterval(() => {
-        const sector = Math.floor(Math.random() * 99).toString().padStart(2, '0');
-        const subsector = Math.floor(Math.random() * 999).toString().padStart(3, '0');
-        candyState.values[3] = `${sector}-${subsector}`;
-    }, 920));
-
-    // Slot 4: Slow decrementing counter that resets (1210ms)
-    candyState.timers.push(setInterval(() => {
-        candyState.counter4 -= Math.floor(Math.random() * 50) + 10;
-        if (candyState.counter4 < 1000) candyState.counter4 = 99999;
-        candyState.values[4] = candyState.counter4.toString().padStart(5, '0');
-    }, 1210));
-
-    // Slot 5: Slow random 4-digit (1500ms - slowest)
-    candyState.timers.push(setInterval(() => {
-        candyState.values[5] = Math.floor(Math.random() * 10000).toString().padStart(4, '0');
-    }, 1500));
-}
-
-// Update candy bar colors and order based on active section
-function updateCandyColors(section) {
-    candyState.currentSection = section;
-    const scheme = candySchemes[section] || candySchemes.workflow;
-
-    for (let i = 1; i <= 6; i++) {
-        const el = document.getElementById(`candy-${i}`);
-        if (el) {
-            // Remove old color classes
-            el.className = el.className.replace(/candy-color-\w+/g, '').trim();
-            el.classList.add(`candy-color-${scheme.colors[i-1]}`);
-        }
-    }
-
-    // Immediately update display with new order
-    updateCandyDisplay();
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// CANDY BUTTON INVERSION EFFECT
-// Random power fluctuation - inverts a random button occasionally
-// ═══════════════════════════════════════════════════════════════════════════════
-
-const candyInversionState = {
-    lastInvertedIndex: -1,
-    inversionTimer: null,
-    revertTimer: null
-};
-
-function invertRandomCandy() {
-    // Pick a random candy button (1-6), but not the same as last time
-    let randomIndex;
-    do {
-        randomIndex = Math.floor(Math.random() * 6) + 1;
-    } while (randomIndex === candyInversionState.lastInvertedIndex);
-
-    candyInversionState.lastInvertedIndex = randomIndex;
-
-    const el = document.getElementById(`candy-${randomIndex}`);
-    if (el) {
-        // Invert the button
-        el.classList.add('candy-inverted');
-
-        // Revert after 5-20 seconds (random)
-        const revertDelay = (Math.random() * 15 + 5) * 1000;
-        candyInversionState.revertTimer = setTimeout(() => {
-            el.classList.remove('candy-inverted');
-        }, revertDelay);
-    }
-}
-
-function initCandyInversion() {
-    // Start the inversion cycle after a short initial delay (5-10 seconds)
-    const initialDelay = (Math.random() * 5 + 5) * 1000;
-
-    setTimeout(() => {
-        // First inversion
-        invertRandomCandy();
-
-        // Then repeat every 50-70 seconds (roughly once a minute)
-        candyInversionState.inversionTimer = setInterval(() => {
-            invertRandomCandy();
-        }, (Math.random() * 20 + 50) * 1000);
-    }, initialDelay);
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// CANDY BUTTON TAP RESPONSE
-// Visual feedback when user taps/clicks a candy button
-// ═══════════════════════════════════════════════════════════════════════════════
-
-function initCandyTapHandlers() {
-    // Add click handlers to all candy pills
-    for (let i = 1; i <= 6; i++) {
-        const el = document.getElementById(`candy-${i}`);
-        if (el) {
-            el.addEventListener('click', function() {
-                // Remove class first in case of rapid clicks
-                this.classList.remove('candy-tapped');
-                // Force reflow to restart animation
-                void this.offsetWidth;
-                // Add tap class to trigger animation
-                this.classList.add('candy-tapped');
-            });
-
-            // Clean up animation class when done
-            el.addEventListener('animationend', function() {
-                this.classList.remove('candy-tapped');
-            });
-        }
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════════════════
 // SECTION NAVIGATION
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -9089,6 +9011,198 @@ function getSectionClass(section) {
     return `${section}-section`;
 }
 
+
+// Mode state machine — XACA-0164-004
+// Switches the active UI mode (team | kanban | data | settings).
+// Routing and sidebar swapping are handled by later subitems (007, 005).
+function switchMode(newMode) {
+    if (!MODES.includes(newMode)) return;
+    if (newMode === activeMode) return;
+
+    const previousMode = activeMode;
+    activeMode = newMode;
+
+    // Apply data-mode attribute to .lcars-container (or <html> as fallback)
+    const container = document.querySelector('.lcars-container') || document.documentElement;
+    container.setAttribute('data-mode', newMode);
+
+    // Update mode-pill active classes
+    document.querySelectorAll('.mode-pill[data-mode-target]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.modeTarget === newMode);
+    });
+
+    // Persist selection
+    try {
+        localStorage.setItem(MODE_KEY, newMode);
+    } catch (e) {
+        console.warn('lcars: Could not persist mode to localStorage', e);
+    }
+
+    // Notify listeners — routing wired up in XACA-0164-007
+    document.dispatchEvent(new CustomEvent('modechange', {
+        detail: { mode: newMode, previous: previousMode }
+    }));
+}
+
+// ─── Mode Router Helpers — XACA-0164-007 ─────────────────────────────────────
+
+/**
+ * Show/hide content sections based on the active mode.
+ * Each <section data-mode="..."> element lists the modes it belongs to
+ * as a space-separated string (e.g. "team kanban"). Sections not in the
+ * current mode are hidden with .hidden-by-mode.
+ */
+function filterSectionsByMode(mode) {
+    document.querySelectorAll('section[data-mode]').forEach(section => {
+        const allowedModes = section.dataset.mode.split(/\s+/);
+        if (allowedModes.includes(mode)) {
+            section.classList.remove('hidden-by-mode');
+        } else {
+            section.classList.add('hidden-by-mode');
+        }
+    });
+}
+
+/**
+ * Returns the canonical default section name for a given mode.
+ * Per spec A1.3:
+ *   TEAM, KANBAN, DATA  → 'home' (first sidebar item is HOME)
+ *   SETTINGS            → 'team-config' (no HOME in settings sidebar)
+ */
+function pickDefaultSectionForMode(mode) {
+    switch (mode) {
+        case 'team':
+        case 'kanban':
+        case 'data':
+            return 'home';
+        case 'settings':
+            return 'team-config';
+        default:
+            return 'home';
+    }
+}
+
+// ─── Per-mode section persistence helpers — XACA-0164-013 ────────────────────
+
+/**
+ * Load per-mode section map from localStorage.
+ * Returns an object with defaults if nothing is stored yet.
+ */
+function loadModeSections() {
+    const defaults = { team: 'home', kanban: 'home', data: 'home', settings: 'team-config' };
+    try {
+        const raw = localStorage.getItem(MODE_SECTIONS_KEY);
+        if (raw) {
+            const parsed = JSON.parse(raw);
+            // Merge with defaults so any missing mode gets a sane fallback
+            return Object.assign({}, defaults, parsed);
+        }
+    } catch (e) {
+        console.warn('lcars: Could not read modeSections from localStorage', e);
+    }
+    return defaults;
+}
+
+/**
+ * Persist the per-mode section map to localStorage.
+ */
+function saveModeSections(modeSectionsObj) {
+    try {
+        localStorage.setItem(MODE_SECTIONS_KEY, JSON.stringify(modeSectionsObj));
+    } catch (e) {
+        console.warn('lcars: Could not persist modeSections to localStorage', e);
+    }
+}
+
+/**
+ * Sync URL hash to reflect current mode and section.
+ * Uses history.replaceState so every navigation doesn't pollute browser history.
+ */
+function updateURLHash(mode, section) {
+    if (section === 'startup') return; // never expose startup in hash
+    try {
+        const newHash = `#mode=${encodeURIComponent(mode)}&section=${encodeURIComponent(section)}`;
+        history.replaceState(null, '', newHash);
+    } catch (e) {
+        // replaceState can fail in file:// protocol; silently ignore
+    }
+}
+
+/**
+ * Parse mode and section from location.hash.
+ * Returns null if hash is absent or invalid.
+ */
+function parseURLHash() {
+    try {
+        const hash = location.hash.slice(1); // remove leading '#'
+        if (!hash) return null;
+        const params = {};
+        hash.split('&').forEach(part => {
+            const [k, v] = part.split('=');
+            if (k && v) params[decodeURIComponent(k)] = decodeURIComponent(v);
+        });
+        const mode = params.mode;
+        const section = params.section;
+        if (mode && MODES.includes(mode) && section && SECTIONS.includes(section)) {
+            return { mode, section };
+        }
+    } catch (e) {
+        // Malformed hash — ignore
+    }
+    return null;
+}
+
+// ─── Migration — XACA-0164-014 ───────────────────────────────────────────────
+
+/**
+ * One-time migration from the old single SECTION_KEY to the new per-mode map.
+ * Safe to call on every boot: bails immediately if new schema already exists.
+ */
+function runMigration() {
+    try {
+        // Already migrated — nothing to do
+        if (localStorage.getItem(MODE_SECTIONS_KEY) !== null) return;
+
+        const OLD_SECTION_TO_MODE = {
+            'home': { mode: 'kanban', section: 'home' },
+            'workflow': { mode: 'kanban', section: 'workflow' },
+            'kanban': { mode: 'kanban', section: 'workflow' },
+            'queue': { mode: 'kanban', section: 'queue' },
+            'details': { mode: 'kanban', section: 'details' },
+            'epics': { mode: 'kanban', section: 'epics' },
+            'releases': { mode: 'kanban', section: 'releases' },
+            'todos': { mode: 'kanban', section: 'todos' },
+            'calendar': { mode: 'kanban', section: 'calendar' },
+            'commands': { mode: 'kanban', section: 'commands' },
+            'knowledge-graph': { mode: 'data', section: 'knowledge-graph' },
+            'rag-engines': { mode: 'data', section: 'rag-engines' },
+            'team-config': { mode: 'settings', section: 'team-config' },
+            'integrations': { mode: 'settings', section: 'integrations' },
+            'backups': { mode: 'settings', section: 'backups' },
+            'export-import': { mode: 'settings', section: 'export-import' },
+            'startup': { mode: 'kanban', section: 'home' } // startup is not a restore target
+        };
+
+        const defaultModeSections = { team: 'home', kanban: 'home', data: 'home', settings: 'team-config' };
+
+        const oldSection = localStorage.getItem(SECTION_KEY);
+        if (oldSection) {
+            const mapped = OLD_SECTION_TO_MODE[oldSection] || { mode: 'kanban', section: 'home' };
+            defaultModeSections[mapped.mode] = mapped.section;
+            // Seed MODE_KEY so the existing user lands on the right mode
+            try { localStorage.setItem(MODE_KEY, mapped.mode); } catch (e) {}
+        }
+
+        saveModeSections(defaultModeSections);
+        // Mark migration complete (belt-and-suspenders — modeSections presence is the real guard)
+        try { localStorage.setItem('lcars.migration.v1', 'done'); } catch (e) {}
+        // Keep SECTION_KEY in place for rollback safety — do not delete it
+    } catch (e) {
+        console.warn('lcars: Migration error', e);
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 function switchSection(sectionName, skipAnimation = false) {
     const newIndex = SECTIONS.indexOf(sectionName);
@@ -9100,6 +9214,17 @@ function switchSection(sectionName, skipAnimation = false) {
     // If same section, do nothing
     if (previousSection === sectionName) return;
 
+    // Guard: section must be valid for current mode — XACA-0164-007
+    // Startup is always allowed regardless of mode (boot sequence).
+    const sectionEl = document.querySelector(`.${getSectionClass(sectionName)}`);
+    if (sectionEl && sectionEl.dataset.mode && activeMode && sectionName !== 'startup') {
+        const allowedModes = sectionEl.dataset.mode.split(/\s+/);
+        if (!allowedModes.includes(activeMode)) {
+            console.warn(`[router] section "${sectionName}" not available in mode "${activeMode}"`);
+            return;
+        }
+    }
+
     // Update state
     activeSection = sectionName;
     activeSectionIndex = newIndex;
@@ -9109,16 +9234,17 @@ function switchSection(sectionName, skipAnimation = false) {
         try {
             localStorage.setItem(SECTION_KEY, sectionName);
         } catch (e) {}
+        // Per-mode section memory — XACA-0164-013
+        const modeSections = loadModeSections();
+        modeSections[activeMode] = sectionName;
+        saveModeSections(modeSections);
+        // Sync URL hash
+        updateURLHash(activeMode, sectionName);
     }
 
     // Update sidebar buttons (startup has no button)
     document.querySelectorAll('.sidebar-button[data-section]').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.section === sectionName);
-    });
-
-    // Update sidebar sub-menu items
-    document.querySelectorAll('.sidebar-submenu-item[data-section]').forEach(item => {
-        item.classList.toggle('active', item.dataset.section === sectionName);
     });
 
     // Update mobile tab bar buttons (mirrors sidebar state)
@@ -9168,7 +9294,7 @@ function switchSection(sectionName, skipAnimation = false) {
             // Delay entrance if we're animating exit
             const entranceDelay = (!skipAnimation && previousSection !== 'startup') ? 100 : 0;
 
-            setTimeout(() => {
+            const applyEntrance = () => {
                 el.classList.add('active');
                 // Render charts AFTER section is visible (Canvas needs dimensions)
                 if (section === 'home') {
@@ -9176,22 +9302,27 @@ function switchSection(sectionName, skipAnimation = false) {
                     // Initialize carousel (idempotent) and start auto-advance
                     initCarousel();
                 }
-            }, entranceDelay);
+            };
+
+            // When there's no delay, apply synchronously — using setTimeout(0) here
+            // creates a race where a follow-up switchSection call can queue its own
+            // .active toggle before this one fires, leaving two sections active
+            // simultaneously (XACA-0164 debug: home content bleeding through splash).
+            if (entranceDelay === 0) {
+                applyEntrance();
+            } else {
+                setTimeout(applyEntrance, entranceDelay);
+            }
         } else if (section !== previousSection) {
             // Other sections stay hidden
             el.classList.remove('active');
         }
     });
 
-    // Toggle status legend (show on all tabs except startup)
-    const legend = document.querySelector('.status-legend');
-    if (legend) {
-        legend.classList.toggle('hidden', sectionName === 'startup');
-    }
-
-    // Update candy bar colors for this section
-    if (sectionName !== 'startup') {
-        updateCandyColors(sectionName);
+    // Toggle mode bar (show on all tabs except startup) — XACA-0164
+    const modeBar = document.querySelector('.mode-bar');
+    if (modeBar) {
+        modeBar.classList.toggle('hidden', sectionName === 'startup');
     }
 
     // Note: renderHomeAnalytics() is called inside the entrance setTimeout above (line ~8759)
@@ -9261,8 +9392,9 @@ function switchSection(sectionName, skipAnimation = false) {
 }
 
 function loadSavedSection() {
-    // Always start on HOME tab - don't restore last viewed section
-    return 'home';
+    // Restore the last-active section for the current mode — XACA-0164-013
+    const modeSections = loadModeSections();
+    return modeSections[activeMode] || pickDefaultSectionForMode(activeMode);
 }
 
 /**
@@ -9387,9 +9519,9 @@ function initStartupScreen() {
     // Show startup section
     switchSection('startup', true);
 
-    // Hide status legend during startup
-    const legend = document.querySelector('.status-legend');
-    if (legend) legend.classList.add('hidden');
+    // Hide mode bar during startup — XACA-0164
+    const modeBar = document.querySelector('.mode-bar');
+    if (modeBar) modeBar.classList.add('hidden');
 
     // Add tap/click to skip functionality
     const startupSection = document.querySelector('.startup-section');
@@ -17093,9 +17225,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     updateStardate();
     renderCommands();
     avatarTooltip.init();
-    initCandyDisplays();
-    initCandyInversion();
-    initCandyTapHandlers();
     initQueueFilterBar();
     initViewToggle();
     initCommandSectionBar();
@@ -17109,49 +17238,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 
-    // SETTINGS button sub-menu toggle
-    const settingsButton = document.getElementById('settings-button');
-    const settingsSubmenu = settingsButton ? settingsButton.querySelector('.sidebar-submenu') : null;
-
-    if (settingsButton && settingsSubmenu) {
-        // Toggle sub-menu when SETTINGS button is clicked
-        settingsButton.addEventListener('click', (e) => {
-            // Don't allow clicks during startup
+    // Mode bar button interactions — XACA-0164-004
+    document.querySelectorAll('.mode-pill[data-mode-target]').forEach(btn => {
+        btn.addEventListener('click', () => {
+            // Don't allow clicks during startup — mirrors sidebar-button guard above
             if (activeSection === 'startup') return;
-
-            // Prevent this click from triggering section switch
-            e.stopPropagation();
-
-            // Toggle the submenu
-            const isOpen = settingsSubmenu.classList.contains('open');
-            settingsSubmenu.classList.toggle('open');
+            switchMode(btn.dataset.modeTarget);
         });
-
-        // Handle sub-menu item clicks
-        const submenuItems = settingsSubmenu.querySelectorAll('.sidebar-submenu-item[data-section]');
-        submenuItems.forEach(item => {
-            item.addEventListener('click', (e) => {
-                e.stopPropagation(); // Prevent bubble to settings button
-
-                // Close the submenu
-                settingsSubmenu.classList.remove('open');
-
-                // Navigate to the section
-                const section = item.dataset.section;
-                if (section) {
-                    switchSection(section);
-                }
-            });
-        });
-
-        // Close sub-menu when clicking outside
-        document.addEventListener('click', (e) => {
-            // Check if click is outside the settings button and submenu
-            if (!settingsButton.contains(e.target)) {
-                settingsSubmenu.classList.remove('open');
-            }
-        });
-    }
+    });
 
     // Mobile tab bar button interactions - TAB SWITCHING
     document.querySelectorAll('.tabbar-button[data-section]').forEach(btn => {
@@ -17232,12 +17326,68 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (!isInput) {
                 if (e.key === 'ArrowLeft') {
                     e.preventDefault();
-                    navigateToPanel(currentHomePanel - 1);
+                    navigateToPanel(currentLogicalPanel - 1);
                 } else if (e.key === 'ArrowRight') {
                     e.preventDefault();
-                    navigateToPanel(currentHomePanel + 1);
+                    navigateToPanel(currentLogicalPanel + 1);
                 }
             }
+        }
+    });
+
+    // Mode-change routing — XACA-0164-007 / XACA-0164-013
+    // Wired here (inside DOMContentLoaded) so all section elements exist.
+    document.addEventListener('modechange', (e) => {
+        const newMode = e.detail.mode;
+        filterSectionsByMode(newMode);
+        // Restore the last-active section for this mode, falling back to the canonical default
+        const modeSections = loadModeSections();
+        const targetSection = modeSections[newMode] || pickDefaultSectionForMode(newMode);
+        if (targetSection) {
+            switchSection(targetSection, true); // skipAnimation=true on mode switch
+        }
+        // Re-filter carousel panels to match the new mode — XACA-0164-008
+        // showAll only in fullscreen/VIEWSCREEN; mode switch always exits fullscreen context
+        applyCarouselModeFilter(newMode, homeFullscreen);
+    });
+
+    // Migration must run before any restore logic — XACA-0164-014
+    runMigration();
+
+    // Resolve initial mode + section: URL hash > localStorage > defaults — XACA-0164-013
+    const hashParams = parseURLHash();
+    let initialMode, _hashSection;
+    if (hashParams) {
+        initialMode = hashParams.mode;
+        _hashSection = hashParams.section;
+    } else {
+        const storedMode = (() => { try { return localStorage.getItem(MODE_KEY); } catch (e) { return null; } })();
+        initialMode = (storedMode && MODES.includes(storedMode)) ? storedMode : 'kanban';
+        _hashSection = null;
+    }
+
+    // If the hash specified a section, pre-seed modeSections so the modechange
+    // listener restores it when switchMode fires.
+    if (_hashSection) {
+        const modeSections = loadModeSections();
+        modeSections[initialMode] = _hashSection;
+        saveModeSections(modeSections);
+    }
+
+    switchMode(initialMode);
+    // filterSectionsByMode runs via the modechange listener that switchMode dispatches.
+
+    // Wire hashchange listener so back/forward and direct URL edits work — XACA-0164-013
+    window.addEventListener('hashchange', () => {
+        const parsed = parseURLHash();
+        if (!parsed) return;
+        const { mode, section } = parsed;
+        // Avoid double-work if already in correct state
+        if (mode !== activeMode) {
+            switchMode(mode);
+        }
+        if (section !== activeSection) {
+            switchSection(section, true);
         }
     });
 

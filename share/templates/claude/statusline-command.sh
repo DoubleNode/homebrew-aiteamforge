@@ -31,26 +31,62 @@ short_dir=$(basename "$dir")
 # ============================================================================
 # Get the current kanban item being worked on from the board file
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Load the canonical team-path config loader (XACA-0168).
+# Provides aiteamforge_team_kanban_dir() for dynamic team→path resolution.
+# Guard against double-sourcing is built into the loader itself.
+# ─────────────────────────────────────────────────────────────────────────────
+if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
+    for _sl_loader_candidate in \
+        "${HOME}/dev-team/homebrew-tap/libexec/lib/aiteamforge-paths.sh" \
+        "$(brew --prefix 2>/dev/null)/share/aiteamforge/libexec/lib/aiteamforge-paths.sh" \
+        "${HOME}/.aiteamforge/lib/aiteamforge-paths.sh"; do
+        if [ -f "$_sl_loader_candidate" ]; then
+            # shellcheck source=/dev/null
+            source "$_sl_loader_candidate"
+            break
+        fi
+    done
+    unset _sl_loader_candidate
+fi
+
 # Return the kanban directory for a given team.
-# Mirrors TEAM_KANBAN_DIRS in kanban-hooks/kanban_utils.py.
+# Delegates to aiteamforge_team_kanban_dir() (XACA-0168) when available;
+# falls back to a built-in case statement for environments without the loader.
 _get_team_kanban_dir() {
     local team="$1"
+
+    # Prefer the canonical loader
+    if command -v aiteamforge_team_kanban_dir &>/dev/null 2>&1; then
+        local _result
+        _result=$(aiteamforge_team_kanban_dir "$team" 2>/dev/null)
+        if [ -n "$_result" ]; then
+            echo "$_result"
+            return 0
+        fi
+    fi
+
+    # Fallback: built-in case statement (kept for environments without the loader)
     case "$team" in
-        academy)                        echo "${HOME}/aiteamforge/kanban" ;;
+        academy)                        echo "${HOME}/dev-team/kanban" ;;
         ios)                            echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
         android)                        echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
         firebase)                       echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        command|mainevent)              echo "/Users/Shared/Development/Main Event/aiteamforge/kanban" ;;
+        command|mainevent)              echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
         dns)                            echo "/Users/Shared/Development/DNSFramework/kanban" ;;
-        freelance)                      echo "${HOME}/aiteamforge/kanban" ;;
+        freelance)                      echo "${HOME}/dev-team/kanban" ;;
         freelance-doublenode-starwords) echo "/Users/Shared/Development/DoubleNode/Starwords/kanban" ;;
         freelance-doublenode-appplanning) echo "/Users/Shared/Development/DoubleNode/appPlanning/kanban" ;;
         freelance-doublenode-workstats) echo "/Users/Shared/Development/DoubleNode/WorkStats/kanban" ;;
         freelance-doublenode-lifeboard) echo "/Users/Shared/Development/DoubleNode/LifeBoard/kanban" ;;
+        freelance-doublenode-caravan)   echo "/Users/Shared/Development/DoubleNode/Caravan/kanban" ;;
+        freelance-doublenode-awaysentry) echo "/Users/Shared/Development/DoubleNode/AwaySentry/kanban" ;;
+        freelance-liquidstyle-agentbadges-app) echo "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban" ;;
+        freelance-liquidstyle-agentbadges-ios) echo "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban" ;;
         legal-coparenting)              echo "${HOME}/legal/coparenting/kanban" ;;
         finance-personal)               echo "${HOME}/finance/personal/kanban" ;;
-        medical)                        echo "${HOME}/medical/kanban" ;;
-        *)                              echo "${HOME}/aiteamforge/kanban" ;;
+        medical|medical-general)        echo "${HOME}/medical/general/kanban" ;;
+        *)                              echo "${HOME}/dev-team/kanban" ;;
     esac
 }
 
