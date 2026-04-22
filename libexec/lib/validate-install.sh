@@ -14,6 +14,13 @@ if [[ -n "${_VALIDATE_INSTALL_SH_LOADED:-}" ]]; then
 fi
 _VALIDATE_INSTALL_SH_LOADED=1
 
+# Resolve tap-owned Python venv interpreter ($AITEAMFORGE_PYTHON).
+# python-env.sh lives alongside this file in the same lib/ directory.
+_atf_validate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+# shellcheck source=./python-env.sh
+[ -f "$_atf_validate_script_dir/python-env.sh" ] && . "$_atf_validate_script_dir/python-env.sh" 2>/dev/null || true
+unset _atf_validate_script_dir
+
 # ─── Colors (safe to redefine if not already set) ───────────────────────────
 
 _VAL_RED='\033[0;31m'
@@ -360,44 +367,40 @@ _val_check_lcars() {
     fi
 }
 
-# ─── Check: Python venv with iterm2 module ───────────────────────────────────
+# ─── Check: Python venv (tap-owned) ─────────────────────────────────────────
 
 _val_check_python_venv() {
+    # install_dir kept as parameter for call-site compatibility; not used here —
+    # Python deps now live in the tap-owned venv, not in ~/aiteamforge/.venv.
     local install_dir="$1"
 
-    _val_section "Python Virtual Environment"
+    _val_section "Python Virtual Environment (tap-owned)"
 
-    local venv_dir="${install_dir}/.venv"
-    if [ ! -d "$venv_dir" ]; then
-        _val_warn "Python venv missing — iTerm2 tab management may not work" \
-            "Run: python3 -m venv '${venv_dir}' && '${venv_dir}/bin/pip' install iterm2"
-        return
-    fi
-    _val_pass "Python venv: ${venv_dir}"
+    # AITEAMFORGE_PYTHON is resolved at file-source time via python-env.sh.
+    if [ -n "${AITEAMFORGE_PYTHON:-}" ] && [ "$AITEAMFORGE_PYTHON" != "python3" ] \
+       && [ -x "$AITEAMFORGE_PYTHON" ]; then
+        local atf_py_version
+        atf_py_version=$("$AITEAMFORGE_PYTHON" --version 2>&1 | awk '{print $2}')
+        _val_pass "Tap-owned venv Python (${atf_py_version:-unknown}) — ${AITEAMFORGE_PYTHON}"
 
-    local pip="${venv_dir}/bin/pip"
-    local python="${venv_dir}/bin/python3"
-
-    if [ ! -x "$python" ]; then
-        _val_warn "Python venv binary missing or not executable" \
-            "Recreate: rm -rf '${venv_dir}' && python3 -m venv '${venv_dir}'"
-        return
-    fi
-    _val_pass "venv python3 binary"
-
-    if [ -x "$pip" ]; then
-        # Check if iterm2 package is installed
-        if "$pip" show iterm2 &>/dev/null 2>&1; then
-            local iterm2_ver
-            iterm2_ver="$("$pip" show iterm2 2>/dev/null | grep '^Version:' | awk '{print $2}')"
-            _val_pass "iterm2 package installed (${iterm2_ver:-unknown version})"
+        local venv_pip
+        venv_pip="$(dirname "$AITEAMFORGE_PYTHON")/pip"
+        if [ -x "$venv_pip" ]; then
+            if "$venv_pip" show iterm2 &>/dev/null 2>&1; then
+                local iterm2_ver
+                iterm2_ver="$("$venv_pip" show iterm2 2>/dev/null | grep '^Version:' | awk '{print $2}')"
+                _val_pass "iterm2 package installed (${iterm2_ver:-unknown version})"
+            else
+                _val_warn "iterm2 package not in tap venv" \
+                    "Run: brew reinstall aiteamforge (provisions the tap-owned venv with all Python deps)"
+            fi
         else
-            _val_warn "iterm2 package not installed in venv" \
-                "Run: '${pip}' install iterm2"
+            _val_warn "pip not found in tap venv — venv may be incomplete" \
+                "Run: brew reinstall aiteamforge (provisions the tap-owned venv with all Python deps)"
         fi
     else
-        _val_warn "pip not found in venv" \
-            "Recreate venv: rm -rf '${venv_dir}' && python3 -m venv '${venv_dir}' && '${venv_dir}/bin/pip' install iterm2"
+        _val_warn "Tap-owned Python venv not found — Python deps unavailable" \
+            "Run: brew reinstall aiteamforge (provisions the tap-owned venv with all Python deps)"
     fi
 }
 
@@ -525,22 +528,64 @@ validate_installation() {
 
     _val_reset
 
+    # Detect install profile — read marker file to suppress cockpit-irrelevant checks
+    local _val_profile="full"
+    if [ -f "${install_dir}/.install-profile" ]; then
+        _val_profile="$(tr -d '[:space:]' < "${install_dir}/.install-profile")"
+    fi
+
     echo ""
     echo -e "${_VAL_BOLD}╔════════════════════════════════════════════════════════════╗${_VAL_NC}"
     echo -e "${_VAL_BOLD}║         AITeamForge - Post-Install Validation              ║${_VAL_NC}"
     echo -e "${_VAL_BOLD}╚════════════════════════════════════════════════════════════╝${_VAL_NC}"
     echo ""
     echo -e "  Validating install at: ${_VAL_CYAN}${install_dir}${_VAL_NC}"
+    echo -e "  Install profile:       ${_VAL_CYAN}${_val_profile}${_VAL_NC}"
 
     _val_check_config      "$install_dir"
     _val_check_install_dir "$install_dir"
     _val_check_scripts     "$install_dir"
-    _val_check_teams       "$install_dir"
-    _val_check_lcars       "$install_dir"
-    _val_check_python_venv "$install_dir"
-    _val_check_shell_integration "$install_dir"
-    _val_check_fleet       "$install_dir"
-    _val_check_launchagents
+
+    if [ "$_val_profile" = "cockpit" ]; then
+        # Cockpit profile: skip team dirs, LCARS server, shell integration,
+        # fleet monitor, and LaunchAgents — they are not installed by design.
+        # Instead validate cockpit-critical components.
+        _val_section "Teams"
+        _val_pass "Team directories (not installed — cockpit profile)"
+
+        _val_section "LCARS Kanban UI"
+        _val_pass "LCARS server (not installed — cockpit profile; runs on remote host)"
+
+        _val_check_python_venv "$install_dir"
+
+        _val_section "Shell Profile Integration"
+        _val_pass "Shell aliases (not installed — cockpit profile)"
+
+        _val_section "Fleet Monitor"
+        _val_pass "Fleet monitor (not installed — cockpit profile)"
+
+        _val_section "LaunchAgents"
+        _val_pass "LaunchAgents (not installed — cockpit profile)"
+
+        # Cockpit-specific: verify connect scripts exist
+        _val_section "Connect Scripts (cockpit)"
+        local _cs_count=0
+        for _cs in "${install_dir}"/*-connect.sh; do
+            [ -f "$_cs" ] && _cs_count=$((_cs_count + 1))
+        done
+        if [ "$_cs_count" -gt 0 ]; then
+            _val_pass "Connect scripts installed (${_cs_count} team(s))"
+        else
+            _val_fail "No connect scripts found — re-run: aiteamforge setup --cockpit-only"
+        fi
+    else
+        _val_check_teams       "$install_dir"
+        _val_check_lcars       "$install_dir"
+        _val_check_python_venv "$install_dir"
+        _val_check_shell_integration "$install_dir"
+        _val_check_fleet       "$install_dir"
+        _val_check_launchagents
+    fi
 
     # ── Summary ───────────────────────────────────────────────────────────────
     echo ""

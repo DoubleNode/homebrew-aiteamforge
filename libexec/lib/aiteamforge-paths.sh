@@ -36,6 +36,13 @@ if [ -n "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
 fi
 _AITEAMFORGE_PATHS_LOADED=1
 
+# Resolve tap-owned Python venv interpreter ($AITEAMFORGE_PYTHON).
+# python-env.sh lives alongside this file in the same lib/ directory.
+_atf_paths_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+# shellcheck source=./python-env.sh
+[ -f "$_atf_paths_script_dir/python-env.sh" ] && . "$_atf_paths_script_dir/python-env.sh" 2>/dev/null || true
+unset _atf_paths_script_dir
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Config path
 # ─────────────────────────────────────────────────────────────────────────────
@@ -102,7 +109,7 @@ _aiteamforge_write_defaults() {
     mkdir -p "$config_dir" 2>/dev/null || true
 
     # Build JSON from the default data using python3 (always available on macOS)
-    python3 - "$config_path" <<'PYEOF'
+    "${AITEAMFORGE_PYTHON:-python3}" - "$config_path" <<'PYEOF'
 import sys, json
 from pathlib import Path
 import os
@@ -171,7 +178,7 @@ _aiteamforge_get_field() {
     # ── Try python3 (jq unavailable) ─────────────────────────────────────
     if [ -f "$config_path" ] && command -v python3 &>/dev/null; then
         local value
-        value=$(python3 - "$config_path" "$team" "$field" <<'PYEOF' 2>/dev/null
+        value=$("${AITEAMFORGE_PYTHON:-python3}" - "$config_path" "$team" "$field" <<'PYEOF' 2>/dev/null
 import sys, json
 from pathlib import Path
 config_path, team, field = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -313,7 +320,7 @@ aiteamforge_list_teams() {
     fi
 
     if [ -f "$config_path" ] && command -v python3 &>/dev/null; then
-        python3 - "$config_path" <<'PYEOF' 2>/dev/null
+        "${AITEAMFORGE_PYTHON:-python3}" - "$config_path" <<'PYEOF' 2>/dev/null
 import sys, json
 from pathlib import Path
 config = json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'))
