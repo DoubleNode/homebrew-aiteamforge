@@ -1,0 +1,45 @@
+#!/bin/bash
+# Pre-commit hook: AITeamForge setup-wizard drift guard (XACA-0173).
+#
+# Enable on your clone with:
+#   git config core.hooksPath .githooks
+#
+# Only runs the guard when the commit actually touches files the guard cares
+# about; other commits pass through instantly.
+
+set -eo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+
+# Determine whether this tap lives at the repo root (standalone tap clone) or
+# as a subdirectory of a larger repo (e.g., dev-team monorepo). The guard
+# script's own location tells us which, and we restrict both the trigger-path
+# check and the check invocation to that directory.
+if [ -f "${REPO_ROOT}/scripts/check-no-setup-drift.sh" ]; then
+  TAP_PREFIX=""
+elif [ -f "${REPO_ROOT}/homebrew-tap/scripts/check-no-setup-drift.sh" ]; then
+  TAP_PREFIX="homebrew-tap/"
+else
+  # Guard script not present — nothing to do.
+  exit 0
+fi
+
+trigger_paths=(
+  "${TAP_PREFIX}bin/aiteamforge-setup.sh"
+  "${TAP_PREFIX}libexec/aiteamforge-setup.sh"
+  "${TAP_PREFIX}tests/test-setup-wizard.sh"
+  "${TAP_PREFIX}scripts/check-no-setup-drift.sh"
+)
+
+staged="$(git diff --cached --name-only --diff-filter=ACMRTD)"
+relevant=false
+for p in "${trigger_paths[@]}"; do
+  if echo "$staged" | grep -Fxq "$p"; then
+    relevant=true
+    break
+  fi
+done
+
+[ "$relevant" = false ] && exit 0
+
+exec "${REPO_ROOT}/${TAP_PREFIX}scripts/check-no-setup-drift.sh"

@@ -12246,8 +12246,12 @@ async function loadEpicItems(epicId) {
             return;
         }
 
-        const itemsHtml = data.items.map(item => `
-            <div class="epic-item" data-item-id="${item.itemId}">
+        const itemsHtml = data.items.map(item => {
+            const isCompleted = item.status === 'done' || item.status === 'completed';
+            const isCancelled = item.status === 'cancelled';
+            const stateClass = isCompleted ? 'completed' : (isCancelled ? 'cancelled' : '');
+            return `
+            <div class="epic-item ${stateClass}" data-item-id="${item.itemId}">
                 <span class="epic-item-id">${item.itemId}</span>
                 <span class="epic-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="epic-item-title">${escapeHtml(item.title)}</span>
@@ -12255,7 +12259,8 @@ async function loadEpicItems(epicId) {
                 <button class="epic-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="epic-item-remove" onclick="removeItemFromEpic('${epicId}', '${item.itemId}')" title="Remove from epic">✕</button>
             </div>
-        `).join('');
+        `;
+        }).join('');
 
         itemsContainer.innerHTML = itemsHtml;
 

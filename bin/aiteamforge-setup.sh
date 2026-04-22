@@ -13,15 +13,28 @@ CYAN='\033[0;36m'
 BOLD='\033[1m'
 NC='\033[0m'
 
-# Get framework location
+# Get framework location. In production, Homebrew's dispatch shim exports
+# AITEAMFORGE_HOME. In source/dev mode, derive it from this script's location —
+# the tap root is always one level above bin/, so the same ${AITEAMFORGE_HOME}/libexec/*
+# references work in both environments (brew layout: libexec/libexec/..., source
+# layout: tap/libexec/...).
 if [ -z "$AITEAMFORGE_HOME" ]; then
-  if command -v brew &>/dev/null; then
+  _self_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  _candidate="$(cd "$_self_dir/.." && pwd)"
+  if [ -f "$_candidate/libexec/lib/common.sh" ]; then
+    AITEAMFORGE_HOME="$_candidate"
+  elif command -v brew &>/dev/null; then
     AITEAMFORGE_HOME="$(brew --prefix)/opt/aiteamforge/libexec"
   else
-    echo -e "${RED}ERROR: AITEAMFORGE_HOME not set${NC}" >&2
+    echo -e "${RED}ERROR: AITEAMFORGE_HOME not set and framework not locatable${NC}" >&2
     exit 1
   fi
 fi
+
+# Resolve tap-owned Python venv interpreter ($AITEAMFORGE_PYTHON).
+# AITEAMFORGE_HOME is set above; python-env.sh lives in its libexec/lib/ subdir.
+# shellcheck source=/dev/null
+[ -f "$AITEAMFORGE_HOME/libexec/lib/python-env.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/python-env.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -71,7 +84,19 @@ Options:
                          profile while preserving your custom colors, fonts, and
                          window layout. Use after upgrades that include profile
                          changes (e.g., Mouse Reporting or Parent Name fixes).
+  --cockpit-only         Install only the components needed to connect to remote
+  --connect-only         AITeamForge hosts over Tailscale (alias for --cockpit-only).
+                         Installs all <team>-connect.sh scripts, the Python venv,
+                         iTerm2 window manager, and dynamic profile. Skips team
+                         working directories, kanban boards, LCARS server, personas,
+                         shell aliases, and other local-only infrastructure. Ideal
+                         for laptops or secondary machines that drive remote teams
+                         without hosting any team state locally.
   -h, --help             Show this help
+
+Install Profiles:
+  full (default)   Full installation: teams, kanban, LCARS, aliases, personas
+  cockpit          Connect-only: remote connect scripts + iTerm2 glue, nothing local
 
 Interactive Mode:
   When run without options, launches interactive setup wizard
@@ -84,6 +109,7 @@ Examples:
   aiteamforge setup --uninstall              # Clean removal
   aiteamforge setup --dry-run                # Preview without changes
   aiteamforge setup --refresh-profiles       # Re-apply profile fixes while keeping your customizations
+  aiteamforge setup --cockpit-only           # Cockpit install (connect to remote teams only)
 EOF
 }
 
@@ -91,11 +117,14 @@ EOF
 ORIGINAL_ARGS=("$@")
 
 # Parse arguments
-INSTALL_DIR="$HOME/aiteamforge"
+# Honor AITEAMFORGE_DIR env override (used by tests + alt-install workflows);
+# --install-dir CLI flag wins if both are provided (handled in arg loop below).
+INSTALL_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 MODE="interactive"
 IS_UPGRADE="false"
 DRY_RUN="false"
 REFRESH_PROFILES="false"
+INSTALL_PROFILE="full"
 
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -123,6 +152,10 @@ while [[ $# -gt 0 ]]; do
       REFRESH_PROFILES="true"
       shift
       ;;
+    --cockpit-only|--connect-only)
+      INSTALL_PROFILE="cockpit"
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -136,8 +169,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 export DRY_RUN
+export INSTALL_PROFILE
 if [ "$DRY_RUN" = "true" ]; then
   echo -e "${YELLOW}DRY RUN MODE: No changes will be made${NC}"
+  echo ""
+fi
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo -e "${CYAN}COCKPIT MODE: Installing connect scripts + iTerm2 glue only${NC}"
+  echo -e "${CYAN}  Skipping: teams, kanban, LCARS server, personas, shell aliases${NC}"
   echo ""
 fi
 
@@ -472,8 +511,11 @@ if is_configured; then
   fi
 fi
 
-# Create installation directory
-mkdir -p "${INSTALL_DIR}"
+# Create installation directory (skipped in dry-run — creating it would be
+# a disk-visible side effect that violates "preview without making changes").
+if [ "$DRY_RUN" != "true" ]; then
+  mkdir -p "${INSTALL_DIR}"
+fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # EXPORT VARIABLES FOR INSTALLER MODULES
@@ -511,7 +553,18 @@ echo -e "${GREEN}✓${NC} Machine name: ${MACHINE_NAME}"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # STEP 2: TEAM SELECTION
+# Skipped in cockpit mode — all connect scripts render for ALL teams
+# unconditionally; no team working dirs are installed.
 # ═══════════════════════════════════════════════════════════════════════════
+
+SELECTED_TEAMS=()
+
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo ""
+  echo -e "${BOLD}Step 2: Team Selection${NC}"
+  echo -e "  ${CYAN}[COCKPIT MODE] Skipping team selection — all connect scripts will be rendered${NC}"
+  echo ""
+else
 
 echo ""
 echo -e "${BOLD}Step 2: Select Teams${NC}"
@@ -552,7 +605,6 @@ else
   read -p "Teams to install: " team_choices
 fi
 
-SELECTED_TEAMS=()
 if [ "$team_choices" = "all" ]; then
   SELECTED_TEAMS=("${AVAILABLE_TEAMS[@]}")
 else
@@ -650,15 +702,31 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
   fi
 done
 
+fi  # end: if INSTALL_PROFILE != cockpit (team selection block)
+
 # ═══════════════════════════════════════════════════════════════════════════
 # STEP 3: FEATURE SELECTION
+# Skipped in cockpit mode — all heavy features are off; only cockpit-required
+# components (venv, iterm2 scripts, dynamic profile) are installed via the
+# pre-installer block that runs unconditionally before this section.
 # ═══════════════════════════════════════════════════════════════════════════
 
-echo ""
-echo -e "${BOLD}Step 3: Choose Features${NC}"
-echo ""
+INSTALL_SHELL="no"
+INSTALL_CLAUDE="no"
+INSTALL_KANBAN="no"
+INSTALL_FLEET="no"
+FLEET_MODE="standalone"
+FLEET_SERVER_URL=""
 
-if [ "$MODE" = "non-interactive" ]; then
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo ""
+  echo -e "${BOLD}Step 3: Feature Selection${NC}"
+  echo -e "  ${CYAN}[COCKPIT MODE] Skipping feature selection — no local team features needed${NC}"
+  echo ""
+elif [ "$MODE" = "non-interactive" ]; then
+  echo ""
+  echo -e "${BOLD}Step 3: Choose Features${NC}"
+  echo ""
   INSTALL_SHELL="yes"
   INSTALL_CLAUDE="yes"
   INSTALL_KANBAN="yes"
@@ -667,10 +735,9 @@ if [ "$MODE" = "non-interactive" ]; then
   FLEET_SERVER_URL=""
   echo -e "${GREEN}✓${NC} Features: shell=yes, claude=yes, kanban=yes, fleet=skip (defaults)"
 else
-  INSTALL_SHELL="no"
-  INSTALL_CLAUDE="no"
-  INSTALL_KANBAN="no"
-  INSTALL_FLEET="no"
+  echo ""
+  echo -e "${BOLD}Step 3: Choose Features${NC}"
+  echo ""
 
   # Shell Environment
   echo -e "${CYAN}Shell Environment${NC} — Terminal aliases, prompts, and helpers"
@@ -744,24 +811,32 @@ echo -e "${BOLD}Installation Summary${NC}"
 echo ""
 echo "  Machine:    ${MACHINE_NAME}"
 echo "  Directory:  ${INSTALL_DIR}"
-echo "  Teams:      ${SELECTED_TEAMS[*]}"
-echo "  Features:"
-echo "    Shell Environment:   ${INSTALL_SHELL}"
-echo "    Claude Code Config:  ${INSTALL_CLAUDE}"
-echo "    LCARS Kanban:        ${INSTALL_KANBAN}"
-if [ "$INSTALL_FLEET" = "yes" ]; then
-  if [ "$FLEET_MODE" = "client" ]; then
-    echo "    Fleet Monitor:       Connect to ${FLEET_SERVER_URL}"
-  else
-    echo "    Fleet Monitor:       New server (${FLEET_MODE} mode)"
-  fi
+echo "  Profile:    ${INSTALL_PROFILE}"
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo "  Teams:      (none — cockpit mode renders connect scripts for all teams)"
+  echo "  Features:   iTerm2 scripts + dynamic profile + connect scripts"
 else
-  echo "    Fleet Monitor:       skip"
+  echo "  Teams:      ${SELECTED_TEAMS[*]}"
+  echo "  Features:"
+  echo "    Shell Environment:   ${INSTALL_SHELL}"
+  echo "    Claude Code Config:  ${INSTALL_CLAUDE}"
+  echo "    LCARS Kanban:        ${INSTALL_KANBAN}"
+  if [ "$INSTALL_FLEET" = "yes" ]; then
+    if [ "$FLEET_MODE" = "client" ]; then
+      echo "    Fleet Monitor:       Connect to ${FLEET_SERVER_URL}"
+    else
+      echo "    Fleet Monitor:       New server (${FLEET_MODE} mode)"
+    fi
+  else
+    echo "    Fleet Monitor:       skip"
+  fi
 fi
 echo ""
 
 if [ "$MODE" = "non-interactive" ]; then
-  echo "Proceeding with installation (non-interactive mode)..."
+  echo "Proceeding with installation (Non-interactive mode)..."
+elif [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo "Proceeding with cockpit installation..."
 else
   read -p "Proceed with installation? (yes/no): " confirm
 
@@ -769,6 +844,37 @@ else
     echo "Setup cancelled."
     exit 0
   fi
+fi
+
+# In dry-run mode, stop here: user has seen the configuration summary and
+# any interactive prompts. Skipping installer invocations keeps the filesystem
+# untouched (no venv, no team dirs, no kanban boards, no zshrc edits).
+if [ "$DRY_RUN" = "true" ]; then
+  echo ""
+  echo -e "${BOLD}Dry-run preview — what Would be installed:${NC}"
+  echo "  Framework version: ${VERSION}"
+  echo "  Would install framework to: ${INSTALL_DIR}"
+  if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+    echo "  Would install cockpit profile (connect scripts for all teams)"
+  else
+    for _dry_team in "${SELECTED_TEAMS[@]}"; do
+      echo "  Would install team: ${_dry_team}"
+    done
+    [ "$INSTALL_SHELL"  = "yes" ] && echo "  Would install shell environment (zshrc integration)"
+    [ "$INSTALL_CLAUDE" = "yes" ] && echo "  Would install Claude Code config (agents, skills, personas)"
+    [ "$INSTALL_KANBAN" = "yes" ] && echo "  Would install LCARS kanban boards and UI"
+    if [ "$INSTALL_FLEET" = "yes" ]; then
+      if [ "$FLEET_MODE" = "client" ]; then
+        echo "  Would install Fleet Monitor (client → ${FLEET_SERVER_URL})"
+      else
+        echo "  Would install Fleet Monitor (${FLEET_MODE} mode)"
+      fi
+    fi
+  fi
+  echo ""
+  echo -e "${YELLOW}DRY RUN COMPLETE — no installation performed.${NC}"
+  echo -e "${YELLOW}Re-run without --dry-run to install the above configuration.${NC}"
+  exit 0
 fi
 
 echo ""
@@ -801,19 +907,9 @@ if [ -d "${AITEAMFORGE_HOME}/share/scripts" ]; then
   echo -e "${GREEN}✓${NC} Scripts (window manager, agent panel, helpers)"
 fi
 
-# Create Python venv with iterm2 package (required for tab management)
-if [ ! -d "${INSTALL_DIR}/.venv" ]; then
-  echo -e "${BOLD}Creating Python virtual environment...${NC}"
-  if python3 -m venv "${INSTALL_DIR}/.venv" 2>/dev/null; then
-    "${INSTALL_DIR}/.venv/bin/pip" install --quiet iterm2 2>/dev/null && \
-      echo -e "${GREEN}✓${NC} Python venv with iterm2 package" || \
-      echo -e "${YELLOW}⚠${NC} Python venv created but iterm2 install failed"
-  else
-    echo -e "${YELLOW}⚠${NC} Could not create Python venv (iTerm2 tab management may not work)"
-  fi
-else
-  echo -e "${GREEN}✓${NC} Python venv (already exists)"
-fi
+# Python deps (iterm2, pyzipper, etc.) now live in the tap-owned venv managed by
+# the Formula post_install. The per-user ~/aiteamforge/.venv is no longer created here.
+# Run: brew reinstall aiteamforge  — to provision or refresh the tap-owned venv.
 
 # Create LCARS Web profile in iTerm2 (before iTerm2 is started with team scripts)
 # This profile uses iTerm2's built-in browser mode for inline kanban display.
@@ -903,7 +999,7 @@ if [ -d "/Applications/iTerm.app" ]; then
   # --------------------------------------------------------------------
   LCARS_PROFILE_SCRIPT="${AITEAMFORGE_HOME}/share/scripts/create-lcars-profile.py"
   if [ -f "$LCARS_PROFILE_SCRIPT" ]; then
-    if python3 "$LCARS_PROFILE_SCRIPT" "http://localhost:8080" >/dev/null 2>&1; then
+    if "${AITEAMFORGE_PYTHON:-python3}" "$LCARS_PROFILE_SCRIPT" "http://localhost:8080" >/dev/null 2>&1; then
       echo -e "${GREEN}✓${NC} LCARS Web profile (iTerm2 inline browser)"
     else
       echo -e "${YELLOW}⚠${NC} Could not create LCARS Web profile"
@@ -918,11 +1014,11 @@ if [ -d "/Applications/iTerm.app" ]; then
   # it is non-fatal if unavailable (user can re-run setup later).
   WINDOW_MGR="${AITEAMFORGE_HOME}/share/scripts/iterm2_window_manager.py"
   if [ -f "$WINDOW_MGR" ] && [ -d "/Applications/iTerm.app" ]; then
-    if python3 "$WINDOW_MGR" -a set-default-font -f "FiraCodeNFM-Reg 10" >/dev/null 2>&1; then
+    if "${AITEAMFORGE_PYTHON:-python3}" "$WINDOW_MGR" -a set-default-font -f "FiraCodeNFM-Reg 10" >/dev/null 2>&1; then
       echo -e "${GREEN}✓${NC} iTerm2 Default profile font (FiraCodeNFM-Reg 10)"
     else
       echo -e "${YELLOW}⚠${NC} Could not set iTerm2 Default profile font (iTerm2 not running or Python API unavailable)"
-      echo -e "   Re-run: ${CYAN}python3 $WINDOW_MGR -a set-default-font${NC}"
+      echo -e "   Re-run: ${CYAN}\"${AITEAMFORGE_PYTHON:-python3}\" $WINDOW_MGR -a set-default-font${NC}"
     fi
   fi
 fi
@@ -936,6 +1032,7 @@ fi
 # Copy agent personas, avatars, and terminal logos for selected teams
 # Also populate the flat avatars/ pool so agent-panel-display.sh can find them
 # without needing fleet-monitor installed.
+# Skipped in cockpit mode — no team working dirs, no personas needed locally.
 _personas_copied=0
 _logos_copied=0
 mkdir -p "${INSTALL_DIR}/avatars"
@@ -965,8 +1062,12 @@ done
 echo ""
 
 # -----------------------------------------------------------------------
-# Install selected teams
+# Install selected teams (full profile only)
+# In cockpit mode, no teams are installed locally. Connect scripts for ALL
+# teams are rendered in the cockpit connect-scripts pass below.
 # -----------------------------------------------------------------------
+if [ "$INSTALL_PROFILE" != "cockpit" ]; then
+
 echo -e "${BOLD}Installing teams...${NC}"
 echo ""
 
@@ -1026,6 +1127,94 @@ if [ ${#_stale_teams[@]} -gt 0 ]; then
         bash "${INSTALLERS_DIR}/install-team.sh" "$_stale_team" --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/    /' || true
     fi
   done
+  echo ""
+fi
+
+fi  # end: if INSTALL_PROFILE != cockpit (team install + stale scripts block)
+
+# -----------------------------------------------------------------------
+# Full-mode post-selected-teams pass (XACA-0160, ported from libexec
+# stage_installation during XACA-0173 consolidation).
+# After selected teams are fully installed, render connect scripts for
+# every UNSELECTED team so users can still reach those teams remotely.
+# Cockpit mode handles all teams via the dedicated pass below, so this
+# block only runs when INSTALL_PROFILE = full.
+# -----------------------------------------------------------------------
+if [ "$INSTALL_PROFILE" = "full" ]; then
+  _post_teams_dir="${AITEAMFORGE_HOME}/share/teams"
+  if [ -d "$_post_teams_dir" ] && [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
+    _post_rendered=0
+    _post_failed=0
+    for _conf in "$_post_teams_dir"/*.conf; do
+      [ -f "$_conf" ] || continue
+      _pt="$(basename "$_conf" .conf)"
+      # Skip teams already fully installed in the SELECTED_TEAMS loop above.
+      _already_selected="false"
+      for _sel in "${SELECTED_TEAMS[@]}"; do
+        if [ "$_sel" = "$_pt" ]; then
+          _already_selected="true"
+          break
+        fi
+      done
+      [ "$_already_selected" = "true" ] && continue
+
+      if [ "$_post_rendered" -eq 0 ] && [ "$_post_failed" -eq 0 ]; then
+        echo -e "${BOLD}Rendering connect scripts for unselected teams...${NC}"
+        echo ""
+      fi
+      if AITEAMFORGE_DIR="${INSTALL_DIR}" bash "${INSTALLERS_DIR}/install-team.sh" \
+          "$_pt" --connect-only --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/  /'; then
+        _post_rendered=$((_post_rendered + 1))
+      else
+        _post_failed=$((_post_failed + 1))
+        echo -e "  ${YELLOW}⚠ ${_pt}: connect script render had errors (continuing)${NC}"
+      fi
+    done
+    if [ "$_post_rendered" -gt 0 ] || [ "$_post_failed" -gt 0 ]; then
+      echo ""
+      if [ "$_post_failed" -gt 0 ]; then
+        echo -e "${GREEN}✓${NC} Connect scripts rendered for ${_post_rendered} unselected team(s); ${YELLOW}${_post_failed} failed${NC}"
+      else
+        echo -e "${GREEN}✓${NC} Connect scripts rendered for ${_post_rendered} unselected team(s)"
+      fi
+      echo ""
+    fi
+  fi
+fi
+
+# -----------------------------------------------------------------------
+# Cockpit connect-scripts pass
+# Render connect + disconnect scripts for EVERY team when in cockpit mode.
+# In full mode, install-team.sh handles connect scripts for selected teams
+# and the post-selected-teams pass above handles the rest.
+# -----------------------------------------------------------------------
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo -e "${BOLD}Rendering connect scripts for all teams (cockpit mode)...${NC}"
+  echo ""
+  _cockpit_teams_dir="${AITEAMFORGE_HOME}/share/teams"
+  _cockpit_rendered=0
+  _cockpit_failed=0
+  if [ -d "$_cockpit_teams_dir" ] && [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
+    for _conf in "$_cockpit_teams_dir"/*.conf; do
+      [ -f "$_conf" ] || continue
+      _ct="$(basename "$_conf" .conf)"
+      if AITEAMFORGE_DIR="${INSTALL_DIR}" bash "${INSTALLERS_DIR}/install-team.sh" \
+          "$_ct" --connect-only --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/  /'; then
+        _cockpit_rendered=$((_cockpit_rendered + 1))
+      else
+        _cockpit_failed=$((_cockpit_failed + 1))
+        echo -e "  ${YELLOW}⚠ ${_ct}: connect script render had errors (continuing)${NC}"
+      fi
+    done
+    echo ""
+    if [ "$_cockpit_failed" -gt 0 ]; then
+      echo -e "${GREEN}✓${NC} Connect scripts rendered for ${_cockpit_rendered} team(s); ${YELLOW}${_cockpit_failed} failed${NC}"
+    else
+      echo -e "${GREEN}✓${NC} Connect scripts rendered for ${_cockpit_rendered} team(s)"
+    fi
+  else
+    echo -e "${YELLOW}⚠ No team configs found or install-team.sh missing — skipping connect scripts${NC}"
+  fi
   echo ""
 fi
 
@@ -1145,7 +1334,10 @@ fi
 # -----------------------------------------------------------------------
 # Load LaunchAgents (must run at TOP LEVEL, not in subshells)
 # launchctl fails silently when run inside pipes or subshells
+# Skipped in cockpit mode — no LaunchAgents are installed (no LCARS server,
+# no kanban backup, no fleet reporter).
 # -----------------------------------------------------------------------
+if [ "$INSTALL_PROFILE" != "cockpit" ]; then
 echo -e "${BOLD}Loading LaunchAgents...${NC}"
 _loaded_agents=0
 for _plist in \
@@ -1169,6 +1361,7 @@ if [ "$_loaded_agents" -eq 0 ]; then
     echo -e "  ${YELLOW}⚠${NC} No LaunchAgents found to load"
 fi
 echo ""
+fi  # end: if INSTALL_PROFILE != cockpit (LaunchAgents block)
 
 # ═══════════════════════════════════════════════════════════════════════════
 # WRITE CONFIGURATION FILE
@@ -1212,6 +1405,7 @@ cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
   )},
   "installed_features": [$(_build_installed_features)],
   "fleet_registration_status": "$([ "$INSTALL_FLEET" = "yes" ] && echo "pending" || echo "not_configured")",
+  "install_profile": "${INSTALL_PROFILE}",
   "features": {
     "shell_environment": $(to_json_bool "$INSTALL_SHELL"),
     "claude_code_config": $(to_json_bool "$INSTALL_CLAUDE"),
@@ -1222,6 +1416,11 @@ cat > "${INSTALL_DIR}/.aiteamforge-config" <<EOF
   }
 }
 EOF
+
+# Write install profile marker — used by aiteamforge doctor to skip checks
+# for components that are deliberately absent in cockpit mode.
+printf '%s\n' "${INSTALL_PROFILE}" > "${INSTALL_DIR}/.install-profile"
+echo -e "${GREEN}✓${NC} Install profile marker written (${INSTALL_PROFILE})"
 
 # ═══════════════════════════════════════════════════════════════════════════
 # COMPLETION
@@ -1242,7 +1441,12 @@ fi
 echo ""
 echo "  Machine:    ${MACHINE_NAME}"
 echo "  Directory:  ${INSTALL_DIR}"
-echo "  Teams:      ${SELECTED_TEAMS[*]}"
+echo "  Profile:    ${INSTALL_PROFILE}"
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo "  Teams:      (cockpit — connect scripts for all teams installed)"
+else
+  echo "  Teams:      ${SELECTED_TEAMS[*]}"
+fi
 echo ""
 
 # -----------------------------------------------------------------------
@@ -1396,13 +1600,15 @@ if [ -d "/Applications/iTerm.app" ]; then
   fi
 fi
 
-# Shell integration
-if [ -f "$HOME/.zshrc" ] && grep -q "aiteamforge" "$HOME/.zshrc" 2>/dev/null; then
-  echo -e "  ${GREEN}✓${NC} Shell integration in .zshrc"
-else
-  echo -e "  ${YELLOW}○${NC} Shell not yet reloaded"
-  echo -e "    Run: ${CYAN}source ~/.zshrc${NC}"
-  CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+# Shell integration (not applicable in cockpit mode)
+if [ "$INSTALL_PROFILE" != "cockpit" ]; then
+  if [ -f "$HOME/.zshrc" ] && grep -q "aiteamforge" "$HOME/.zshrc" 2>/dev/null; then
+    echo -e "  ${GREEN}✓${NC} Shell integration in .zshrc"
+  else
+    echo -e "  ${YELLOW}○${NC} Shell not yet reloaded"
+    echo -e "    Run: ${CYAN}source ~/.zshrc${NC}"
+    CHECKLIST_ITEMS=$((CHECKLIST_ITEMS + 1))
+  fi
 fi
 
 echo ""
@@ -1416,14 +1622,33 @@ fi
 echo ""
 echo -e "${BOLD}Getting Started${NC}"
 echo ""
-echo "  Launch a team:"
-for team_id in "${SELECTED_TEAMS[@]}"; do
-  [ -z "$team_id" ] && continue
-  echo -e "    ${CYAN}${INSTALL_DIR}/${team_id}-startup.sh${NC}"
-  break  # Just show the first one as example
-done
-if [ ${#SELECTED_TEAMS[@]} -gt 1 ]; then
-  echo "    (${#SELECTED_TEAMS[@]} teams available)"
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo "  Connect to a remote team:"
+  # Show first available connect script as example
+  _first_connect=""
+  for _cs in "${INSTALL_DIR}"/*-connect.sh; do
+    [ -f "$_cs" ] && _first_connect="$_cs" && break
+  done
+  if [ -n "$_first_connect" ]; then
+    echo -e "    ${CYAN}${_first_connect} <remote-hostname>${NC}"
+    echo ""
+    echo "  All connect scripts:"
+    for _cs in "${INSTALL_DIR}"/*-connect.sh; do
+      [ -f "$_cs" ] && echo -e "    ${CYAN}$(basename "$_cs")${NC}"
+    done
+  else
+    echo -e "    ${CYAN}${INSTALL_DIR}/<team>-connect.sh <remote-hostname>${NC}"
+  fi
+else
+  echo "  Launch a team:"
+  for team_id in "${SELECTED_TEAMS[@]}"; do
+    [ -z "$team_id" ] && continue
+    echo -e "    ${CYAN}${INSTALL_DIR}/${team_id}-startup.sh${NC}"
+    break  # Just show the first one as example
+  done
+  if [ ${#SELECTED_TEAMS[@]} -gt 1 ]; then
+    echo "    (${#SELECTED_TEAMS[@]} teams available)"
+  fi
 fi
 echo ""
 echo "  Other commands:"

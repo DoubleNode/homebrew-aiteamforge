@@ -67,15 +67,18 @@ Tests team definitions (`share/teams/`):
 
 ### Workflow Tests
 
-#### `test-setup-wizard.sh` - Setup Wizard Tests
+#### `test-e2e-setup-launch.sh` - Setup Wizard E2E Tests
 Tests the interactive setup wizard (`bin/aiteamforge-setup.sh`):
 - Command-line flags (--help, --dry-run, etc.)
 - Non-interactive mode
-- All 7 setup stages execute
+- Dry-run preview output
 - Config generation
 - Prerequisite checking
 
-**Run:** `./test-runner.sh test-setup-wizard.sh`
+Replaces the earlier `test-setup-wizard.sh`, which targeted the now-deleted
+`libexec/aiteamforge-setup.sh` architecture (removed in XACA-0173).
+
+**Run:** `./test-runner.sh test-e2e-setup-launch.sh`
 
 #### `test-lifecycle.sh` - Lifecycle Command Tests
 Tests daily-use commands (`libexec/commands/`):
@@ -227,7 +230,7 @@ Every test gets a clean environment:
 | UI Library | `test-wizard-ui.sh` | ✓ All output functions |
 | Config Loader | `test-config.sh` | ✓ Reading, validation, fallbacks |
 | Team Definitions | `test-teams.sh` | ✓ All .conf files, registry |
-| Setup Wizard | `test-setup-wizard.sh` | ✓ All stages, modes |
+| Setup Wizard | `test-e2e-setup-launch.sh` | ✓ Flags, dry-run, non-interactive, config generation |
 | Lifecycle Commands | `test-lifecycle.sh` | ✓ Doctor, status, start, stop, upgrade, uninstall |
 | Migration | `test-migration.sh` | ✓ Check, migrate, dry-run |
 | Installers | `test-installers.sh` | ✓ All installer modules |

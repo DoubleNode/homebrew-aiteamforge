@@ -563,24 +563,14 @@ test_pass
 
 test_start "aiteamforge-setup.sh sources install-shell.sh"
 setup_script="$TAP_ROOT/bin/aiteamforge-setup.sh"
-if [ -f "$setup_script" ]; then
-  output=$(grep "install-shell\|install_shell" "$setup_script" 2>/dev/null || echo "")
-  assert_not_empty "$output" \
-    "aiteamforge-setup.sh does not reference install-shell.sh"
-  test_pass
-else
-  # Some builds point to libexec/aiteamforge-setup.sh
-  setup_script="$TAP_ROOT/libexec/aiteamforge-setup.sh"
-  assert_file_exists "$setup_script"
-  output=$(grep "install-shell\|install_shell" "$setup_script" 2>/dev/null || echo "")
-  assert_not_empty "$output" \
-    "aiteamforge-setup.sh does not reference install-shell.sh"
-  test_pass
-fi
+assert_file_exists "$setup_script"
+output=$(grep "install-shell\|install_shell" "$setup_script" 2>/dev/null || echo "")
+assert_not_empty "$output" \
+  "aiteamforge-setup.sh does not reference install-shell.sh"
+test_pass
 
 test_start "aiteamforge-setup.sh --dry-run does not create real venv"
 setup_script="$TAP_ROOT/bin/aiteamforge-setup.sh"
-[ -f "$setup_script" ] || setup_script="$TAP_ROOT/libexec/aiteamforge-setup.sh"
 
 dry_run_home="$TEST_TMP_DIR/dry-run-home"
 mkdir -p "$dry_run_home"
@@ -588,7 +578,7 @@ mkdir -p "$dry_run_home"
 (
   export HOME="$dry_run_home"
   export AITEAMFORGE_DIR="$dry_run_home/.aiteamforge"
-  zsh "$setup_script" --dry-run --non-interactive 2>/dev/null
+  bash "$setup_script" --dry-run --non-interactive 2>/dev/null
   exit 0
 )
 

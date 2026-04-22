@@ -137,6 +137,18 @@ jobs:
           brew install --quiet rubocop
           rubocop Formula/dev-team.rb
 
+  drift-guard:
+    name: Setup-Wizard Drift Guard (XACA-0173)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run setup-wizard drift guard
+        run: |
+          bash homebrew-tap/scripts/check-no-setup-drift.sh
+
   test-scripts:
     name: Test Core Scripts
     runs-on: macos-latest

@@ -11,6 +11,14 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
   - Updated SECTIONS array, sidebar buttons, mobile tabbar, and Alt+1-8 keyboard shortcuts
 
 ### Fixed
+- **Epics Item Display Parity with Releases** (XACA-0211) - Epics screen now dims and
+  strikes through completed and cancelled items, matching the existing Releases
+  behavior. `loadEpicItems` computes `isCompleted`/`isCancelled`/`stateClass` and
+  applies the resulting class to `.epic-item`; CSS adds `.epic-item.completed` and
+  `.epic-item.cancelled` rules mirroring `.release-item.completed`/`.cancelled`
+  (opacity 0.7/0.6, `line-through` title, `var(--lcars-muted)` title color,
+  `var(--lcars-red)` id color on cancelled). Pure display change — no behavioral
+  differences, no changes to data flow or click handling.
 - **Terminal Activation tmux Socket Fix** (XACA-0102) - Terminal click-to-activate was
   non-functional because the tmux command used the default socket (which doesn't exist) and
   bare terminal names (which don't match). Fix adds `-L {team}` for per-team sockets and

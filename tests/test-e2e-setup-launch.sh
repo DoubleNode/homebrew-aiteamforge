@@ -21,7 +21,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 COMMANDS_DIR="$TAP_ROOT/libexec/commands"
-SETUP_SCRIPT="$TAP_ROOT/libexec/aiteamforge-setup.sh"
+SETUP_SCRIPT="$TAP_ROOT/bin/aiteamforge-setup.sh"
 BIN_SETUP_SCRIPT="$TAP_ROOT/bin/aiteamforge-setup.sh"
 START_SCRIPT="$COMMANDS_DIR/aiteamforge-start.sh"
 STOP_SCRIPT="$COMMANDS_DIR/aiteamforge-stop.sh"
@@ -310,7 +310,7 @@ assert_file_exists "$BIN_SETUP_SCRIPT"
 test_pass
 
 test_start "E2E Setup: Setup wizard --help exits cleanly"
-output=$(zsh "$SETUP_SCRIPT" --help 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --help 2>&1 || true)
 exit_code=$?
 # --help should exit 0 and mention setup
 assert_contains "$output" "setup"
@@ -318,7 +318,7 @@ test_pass
 
 test_start "E2E Setup: Dry-run mode produces output without filesystem changes"
 rm -rf "$TEST_TMP_DIR/home/.aiteamforge"
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 assert_not_empty "$output"
 assert_contains "$output" "DRY RUN"
 # In dry-run mode, no real config should be written to the test home
@@ -326,20 +326,20 @@ assert_contains "$output" "DRY RUN"
 test_pass
 
 test_start "E2E Setup: Dry-run mentions what would be installed"
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 assert_not_empty "$output"
 # Should mention at least one installation phase
 assert_contains "$output" "Would"
 test_pass
 
 test_start "E2E Setup: Non-interactive mode skips team selection"
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 assert_contains "$output" "Non-interactive"
 test_pass
 
 test_start "E2E Setup: Setup wizard completes without crash (dry-run)"
 exit_code=0
-zsh "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || exit_code=$?
+bash "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || exit_code=$?
 # Exit 0 = success, exit 1 = optional dep warning; both acceptable
 [ "$exit_code" -eq 0 ] || [ "$exit_code" -eq 1 ]
 assert_exit_success $?
@@ -356,7 +356,7 @@ rm -rf "$TEST_TMP_DIR/home/.aiteamforge"
 # Run non-interactive (non-dry-run) to get actual file creation
 # NOTE: This will try to run real installers; we run in dry-run to avoid side effects
 # but verify that the config output is shown
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 # In dry-run mode, the config is printed but not saved — verify the output contains config content
 assert_contains "$output" "config"
 test_pass
@@ -817,25 +817,35 @@ test_start "E2E DryRun: Setup --dry-run does not write config.json to disk"
 rm -rf "$TEST_TMP_DIR/home/.aiteamforge"
 export HOME="$TEST_TMP_DIR/home"
 
-zsh "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || true
+bash "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || true
 
 # In dry-run, wizard config.json should NOT be written
 assert_file_not_exists "$TEST_TMP_DIR/home/.aiteamforge/config.json"
 test_pass
 
+test_start "E2E DryRun: Setup --dry-run does not create INSTALL_DIR on disk"
+rm -rf "$TEST_TMP_DIR/home/.aiteamforge"
+export HOME="$TEST_TMP_DIR/home"
+
+bash "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || true
+
+# Dry-run must not pre-create the install directory — that's a side effect.
+assert_dir_not_exists "$TEST_TMP_DIR/home/.aiteamforge"
+test_pass
+
 test_start "E2E DryRun: Setup --dry-run shows preview of what would be installed"
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 assert_contains "$output" "DRY RUN"
 test_pass
 
 test_start "E2E DryRun: Setup --dry-run does not invoke real installers"
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 # Dry run should say "Would install" not actually install
 assert_contains "$output" "Would"
 test_pass
 
 test_start "E2E DryRun: Setup --dry-run shows config preview"
-output=$(zsh "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
+output=$(bash "$SETUP_SCRIPT" --dry-run --non-interactive 2>&1 || true)
 # Config preview should appear in output
 assert_contains "$output" "version"
 test_pass
@@ -922,7 +932,7 @@ scaffold_install_dir
 config_before=$(cat "$AITEAMFORGE_DIR/.aiteamforge-config")
 
 # Run setup in dry-run (simulates a user reviewing setup again)
-zsh "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || true
+bash "$SETUP_SCRIPT" --dry-run --non-interactive >/dev/null 2>&1 || true
 
 # Config should be unchanged
 config_after=$(cat "$AITEAMFORGE_DIR/.aiteamforge-config")

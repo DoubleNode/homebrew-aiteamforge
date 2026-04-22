@@ -138,6 +138,20 @@
 
 ---
 
+## Python Dependencies
+
+Python library dependencies are installed into a tap-owned virtual environment
+at `$HOMEBREW_PREFIX/var/aiteamforge/venv`. The venv is provisioned by the
+Formula's `post_install` step from the pinned dep list in
+`share/requirements.txt`. All bin stubs and libexec scripts that require
+third-party Python libraries invoke Python via the `$AITEAMFORGE_PYTHON`
+environment variable, which `post_install` resolves to the venv interpreter.
+
+- How to add a new dependency: [`docs/adding-a-python-dep.md`](adding-a-python-dep.md)
+- Design rationale and channel selection: [`docs/python-dep-channel-design.md`](python-dep-channel-design.md)
+
+---
+
 ## Directory Structure
 
 ### Framework Directory
@@ -581,6 +595,94 @@ Templates in `share/templates/` are processed by installers:
 # - ${TEAM_LCARS_PORT}
 # - ${INSTALL_DIR}
 ```
+
+---
+
+## Install Profiles
+
+`aiteamforge setup` supports two mutually exclusive install profiles: `full` (the
+default) and `cockpit`. The profile controls which installer steps run and which
+components are written to the working layer.
+
+### Profile Selection
+
+```bash
+aiteamforge setup               # full profile (default)
+aiteamforge setup --cockpit-only  # cockpit profile
+aiteamforge setup --connect-only  # alias for --cockpit-only
+```
+
+### Profile Marker File
+
+At the end of setup, the installer writes a single-word marker to
+`$AITEAMFORGE_DIR/.install-profile` containing either `full` or `cockpit`. This
+file is the authoritative record of how the working directory was provisioned.
+
+```
+~/aiteamforge/
+└── .install-profile    # contains "cockpit" or "full"
+```
+
+### Component Matrix
+
+The table below shows which components are installed by each profile.
+
+| Component | full | cockpit |
+|-----------|------|---------|
+| `<team>-connect.sh` scripts (all teams) | Yes | Yes |
+| Python venv with `iterm2` package | Yes | Yes |
+| `iterm2_window_manager.py` | Yes | Yes |
+| `aiteamforge-lcars.json` dynamic profile | Yes | Yes |
+| `set-lcars-profile-browser.py` (iTerm2 plugin) | Yes | Yes |
+| Team working directories (`~/aiteamforge/<team>/`) | Yes | No |
+| Kanban boards and `kb-*` helpers | Yes | No |
+| LCARS UI server | Yes | No |
+| Persona markdown files and agent avatars | Yes | No |
+| Shell aliases, cc-aliases, worktree-aliases | Yes | No |
+| Statusline scripts | Yes | No |
+| Knowledge base directories | Yes | No |
+| Team zshrc fragments | Yes | No |
+| Fleet Monitor | Yes | No |
+
+The connect scripts for every available team are always installed regardless of
+profile. This depends on XACA-0160, which renders connect scripts universally rather
+than only for selected teams.
+
+### Doctor Integration
+
+`aiteamforge doctor` reads `.install-profile` before running its component checks.
+When the profile is `cockpit`, checks for kanban boards, LCARS servers, team
+directories, and other cockpit-excluded components are skipped entirely — they are
+absent by design, not by error.
+
+```
+aiteamforge doctor (cockpit install)
+  ✓ Dependencies
+  ✓ Framework installation
+  ✓ Connect scripts
+  ✓ Python venv (iterm2)
+  ✓ Dynamic profile
+  — Kanban boards        [skipped: cockpit profile]
+  — LCARS server         [skipped: cockpit profile]
+  — Team directories     [skipped: cockpit profile]
+```
+
+### Design Rationale
+
+**Why cockpit exists:** Some machines — laptops, second workstations, thin clients —
+only ever connect *into* teams running on a primary dev machine over Tailscale. A
+full install on these machines creates ~300 MB of team infrastructure that is never
+used locally. The cockpit profile ships only what is needed to open a remote
+session.
+
+**Why the profile is immutable per install:** Mixing partial and full components in
+the same working directory risks inconsistent state. If a cockpit user later needs
+full capabilities, they re-run `aiteamforge setup` without `--cockpit-only`. There is
+no in-place migration path.
+
+**XACA-0160 dependency:** The cockpit profile relies on XACA-0160 (always render all
+connect scripts for every team) so that cockpit machines receive a complete set of
+`<team>-connect.sh` scripts without requiring team selection during setup.
 
 ---
 
