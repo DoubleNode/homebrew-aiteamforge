@@ -286,12 +286,32 @@ if [[ -d "$PERSONAS_TEMPLATE_DIR" ]]; then
     echo "👤 Installing team personas..."
     cp -R "$PERSONAS_TEMPLATE_DIR"/* "$TEAM_DIR/personas/" || true
     echo "  ✓ Personas copied to $TEAM_DIR/personas/"
-    # Also copy to the team working directory if it differs from TEAM_DIR
-    if [[ -n "${TEAM_WORKING_DIR:-}" ]] && [[ "${TEAM_WORKING_DIR/\$HOME/$HOME}" != "$TEAM_DIR" ]]; then
+    # Also copy to the team working directory if it differs from TEAM_DIR,
+    # but skip when TEAM_DIR is inside TEAM_WORKING_DIR (e.g. Command team
+    # where TEAM_WORKING_DIR is the monorepo root that contains TEAM_DIR),
+    # and skip when the destination would pollute an existing git work tree.
+    if [[ -n "${TEAM_WORKING_DIR:-}" ]]; then
         _WORKING_DIR_RESOLVED="${TEAM_WORKING_DIR/\$HOME/$HOME}"
-        mkdir -p "$_WORKING_DIR_RESOLVED/personas"
-        cp -R "$PERSONAS_TEMPLATE_DIR"/* "$_WORKING_DIR_RESOLVED/personas/" || true
-        echo "  ✓ Personas copied to $_WORKING_DIR_RESOLVED/personas/"
+        _SHOULD_COPY=1
+        # Skip: identical path
+        if [[ "$_WORKING_DIR_RESOLVED" == "$TEAM_DIR" ]]; then
+            _SHOULD_COPY=0
+        fi
+        # Skip: TEAM_DIR is inside TEAM_WORKING_DIR (Command case — parent dir)
+        if [[ "$TEAM_DIR" == "$_WORKING_DIR_RESOLVED"/* ]]; then
+            _SHOULD_COPY=0
+        fi
+        # Skip: destination parent is a git work tree we'd pollute
+        if [[ $_SHOULD_COPY -eq 1 ]] && git -C "$_WORKING_DIR_RESOLVED" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            _SHOULD_COPY=0
+            echo "  ⏭  Skipping working-dir persona copy (would pollute git repo at $_WORKING_DIR_RESOLVED)"
+        fi
+        if [[ $_SHOULD_COPY -eq 1 ]]; then
+            mkdir -p "$_WORKING_DIR_RESOLVED/personas"
+            cp -R "$PERSONAS_TEMPLATE_DIR"/* "$_WORKING_DIR_RESOLVED/personas/" || true
+            echo "  ✓ Personas copied to $_WORKING_DIR_RESOLVED/personas/"
+        fi
+        unset _WORKING_DIR_RESOLVED _SHOULD_COPY
     fi
     # Also copy avatar images into the flat avatars/ pool so agent-panel-display.sh
     # can find them without fleet-monitor installed.
