@@ -10409,8 +10409,12 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     // Get item count from progress if available
     const itemCount = release.progress?.total || 0;
     const completedCount = release.progress?.completed || 0;
+    const cancelledCount = release.progress?.cancelled || 0;
     // A release with zero items has nothing left to do — it's 100% complete
     const itemProgress = itemCount > 0 ? Math.round((completedCount / itemCount) * 100) : 100;
+    // XACA-0206-001: Surface cancelled count so users see why denominator shrank.
+    // "excluded" avoids the math-additive read of a leading + sign.
+    const cancelledSuffix = cancelledCount > 0 ? ` <span class="release-item-cancelled-count">(${cancelledCount} cancelled, excluded)</span>` : '';
 
     // XACA-0056-007: Add archived badge for archived releases
     const archivedBadge = isArchived ? '<span class="archived-badge">ARCHIVED</span>' : '';
@@ -10428,7 +10432,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 </div>
                 <div class="release-card-meta">
                     <span class="release-card-date">${targetDate}</span>
-                    <span class="release-item-count">${completedCount}/${itemCount} items</span>
+                    <span class="release-item-count">${completedCount}/${itemCount} items${cancelledSuffix}</span>
                     <span class="release-card-progress">${itemProgress}%</span>
                     <span class="release-expand-icon">${isExpanded ? '▼' : '▶'}</span>
                 </div>
@@ -10512,9 +10516,10 @@ async function loadReleaseItems(releaseId) {
 
         const itemsHtml = data.items.map(item => {
             const isCompleted = item.status === 'done' || item.status === 'completed';
-            const completedClass = isCompleted ? 'completed' : '';
+            const isCancelled = item.status === 'cancelled';
+            const stateClass = isCompleted ? 'completed' : (isCancelled ? 'cancelled' : '');
             return `
-            <div class="release-item ${completedClass}" data-item-id="${item.itemId}" onclick="navigateToQueueItemById('${item.itemId}')">
+            <div class="release-item ${stateClass}" data-item-id="${item.itemId}" onclick="navigateToQueueItemById('${item.itemId}')">
                 <span class="release-item-id">${item.itemId}</span>
                 <span class="release-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="release-item-title">${escapeHtml(item.title)}</span>
@@ -10585,9 +10590,10 @@ function getPlatformName(key) {
 function formatTargetDate(dateStr) {
     if (!dateStr) return 'No target';
     try {
-        const date = new Date(dateStr);
+        const date = parseLocalDate(dateStr);
         const now = new Date();
-        const diffDays = Math.ceil((date - now) / (1000 * 60 * 60 * 24));
+        now.setHours(0, 0, 0, 0);
+        const diffDays = Math.round((date - now) / (1000 * 60 * 60 * 24));
 
         const formatted = date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
 
@@ -10639,7 +10645,7 @@ function formatTimestamp(timestamp) {
 function formatDate(dateString) {
     if (!dateString) return null;
     try {
-        const date = new Date(dateString);
+        const date = parseLocalDate(dateString);
         return date.toLocaleDateString('en-US', {
             month: 'short',
             day: 'numeric',

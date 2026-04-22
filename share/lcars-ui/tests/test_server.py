@@ -1006,5 +1006,168 @@ class TestModuleLevelConfig(unittest.TestCase):
             self.assertIn(expected_team, server.TEAM_KANBAN_DIRS)
 
 
+# ---------------------------------------------------------------------------
+# Tests: handle_archive_release — on-disk manifest directory cleanup (XACA-0183)
+# ---------------------------------------------------------------------------
+
+class TestHandleArchiveReleaseCleanup(unittest.TestCase):
+    """
+    After handle_archive_release runs:
+      - releases-archive/<id>.json must exist
+      - releases/<id>/ directory must be gone
+    Both assertions hold whether or not the manifest directory existed up front.
+    """
+
+    def _run_archive(self, release_id, kanban_dir, team=None):
+        """
+        Wire up a minimal handler and invoke handle_archive_release.
+
+        kanban_dir:  a real (temp) directory that acts as the team's kanban root.
+        team:        if provided, appended as a ?team= query param.
+        Returns the handler after the call completes.
+        """
+        path = f"/api/releases/{release_id}"
+        if team:
+            path += f"?team={team}"
+        handler, buf = _make_handler(path=path, method="DELETE")
+
+        # Patch TEAM_KANBAN_DIRS so our temp dir is used for the effective team
+        effective_team = team or server.LCARS_TEAM
+
+        # Build a minimal releases config with our release in it
+        releases_data = {
+            "releases": [
+                {"id": release_id, "name": f"Test {release_id}", "status": "complete"}
+            ]
+        }
+
+        def fake_load_releases_config(t=None):
+            return {
+                "releases": [
+                    {"id": release_id, "name": f"Test {release_id}", "status": "complete"}
+                ]
+            }
+
+        def fake_save_releases_config(data, t=None):
+            pass  # no-op; we only care about the filesystem side-effects
+
+        def fake_get_timestamp():
+            return "2026-01-01T00:00:00Z"
+
+        def fake_atomic_write_json(path, data):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            with open(path, "w") as fh:
+                _json.write = None  # defensive; use stdlib directly
+                import json as _j
+                fh.write(_j.dumps(data))
+
+        # Patch the methods that touch the real filesystem or config
+        handler._load_releases_config = fake_load_releases_config
+        handler._save_releases_config = fake_save_releases_config
+        handler._get_timestamp = fake_get_timestamp
+        handler._atomic_write_json = fake_atomic_write_json
+
+        # Point TEAM_KANBAN_DIRS at our temp dir and make _get_release_manifest_path
+        # return a path within it.
+        releases_dir = kanban_dir / "releases" / release_id
+        releases_dir.mkdir(parents=True, exist_ok=True)
+        manifest_file = releases_dir / "manifest.json"
+        manifest_file.write_text('{"items": []}')
+
+        archive_dir = kanban_dir / "releases-archive"
+
+        def fake_get_release_manifest_path(rid, t=None):
+            return kanban_dir / "releases" / rid / "manifest.json"
+
+        handler._get_release_manifest_path = fake_get_release_manifest_path
+
+        with patch.dict(server.TEAM_KANBAN_DIRS, {effective_team: kanban_dir}), \
+             patch.object(server, "KANBAN_DIR", kanban_dir):
+            handler.handle_archive_release(release_id)
+
+        return handler
+
+    def test_archive_json_written_and_manifest_dir_removed(self):
+        """Core contract: archive file exists, manifest directory is gone."""
+        release_id = "REL-2026-TEST-001"
+        with tempfile.TemporaryDirectory() as tmp:
+            kanban_dir = Path(tmp)
+            handler = self._run_archive(release_id, kanban_dir)
+
+            self.assertEqual(handler._response_code, 200,
+                             "Expected HTTP 200 from handle_archive_release")
+
+            archive_file = kanban_dir / "releases-archive" / f"{release_id}.json"
+            self.assertTrue(archive_file.exists(),
+                            f"Archive JSON not found: {archive_file}")
+
+            manifest_dir = kanban_dir / "releases" / release_id
+            self.assertFalse(manifest_dir.exists(),
+                             f"Manifest directory should have been removed: {manifest_dir}")
+
+    def test_archive_succeeds_when_manifest_dir_absent(self):
+        """If the manifest directory never existed, archive still succeeds (no-op cleanup)."""
+        release_id = "REL-2026-TEST-002"
+        with tempfile.TemporaryDirectory() as tmp:
+            kanban_dir = Path(tmp)
+
+            # Override the helper to return a path that does NOT exist on disk
+            path = f"/api/releases/{release_id}"
+            handler, buf = _make_handler(path=path, method="DELETE")
+
+            effective_team = server.LCARS_TEAM
+
+            def fake_load_releases_config(t=None):
+                return {"releases": [{"id": release_id, "name": "Ghost", "status": "complete"}]}
+
+            def fake_save_releases_config(data, t=None):
+                pass
+
+            def fake_get_timestamp():
+                return "2026-01-01T00:00:00Z"
+
+            def fake_atomic_write_json(path, data):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                import json as _j
+                with open(path, "w") as fh:
+                    fh.write(_j.dumps(data))
+
+            handler._load_releases_config = fake_load_releases_config
+            handler._save_releases_config = fake_save_releases_config
+            handler._get_timestamp = fake_get_timestamp
+            handler._atomic_write_json = fake_atomic_write_json
+
+            # Manifest path points to a directory that DOES NOT EXIST
+            nonexistent_dir = kanban_dir / "releases" / release_id
+            handler._get_release_manifest_path = lambda rid, t=None: nonexistent_dir / "manifest.json"
+
+            with patch.dict(server.TEAM_KANBAN_DIRS, {effective_team: kanban_dir}), \
+                 patch.object(server, "KANBAN_DIR", kanban_dir):
+                handler.handle_archive_release(release_id)
+
+            self.assertEqual(handler._response_code, 200,
+                             "Archive should succeed even when manifest dir is absent")
+
+            archive_file = kanban_dir / "releases-archive" / f"{release_id}.json"
+            self.assertTrue(archive_file.exists(),
+                            "Archive JSON must be written regardless of manifest dir presence")
+
+    def test_team_query_param_routes_to_correct_directory(self):
+        """?team=academy routes cleanup to the academy kanban directory."""
+        release_id = "REL-2026-TEST-003"
+        with tempfile.TemporaryDirectory() as tmp:
+            kanban_dir = Path(tmp)
+            handler = self._run_archive(release_id, kanban_dir, team="academy")
+
+            self.assertEqual(handler._response_code, 200)
+
+            archive_file = kanban_dir / "releases-archive" / f"{release_id}.json"
+            self.assertTrue(archive_file.exists(), "Archive JSON should be in team's kanban dir")
+
+            manifest_dir = kanban_dir / "releases" / release_id
+            self.assertFalse(manifest_dir.exists(), "Manifest dir should be gone after archive")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

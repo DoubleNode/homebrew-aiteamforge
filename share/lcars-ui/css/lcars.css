@@ -8843,6 +8843,21 @@ body {
     text-decoration: line-through;
 }
 
+/* Cancelled release items — red strikethrough, mirrors queue-item.cancelled */
+.release-item.cancelled {
+    opacity: 0.6;
+}
+
+.release-item.cancelled .release-item-title {
+    text-decoration: line-through;
+    color: var(--lcars-muted);
+}
+
+.release-item.cancelled .release-item-id {
+    text-decoration: line-through;
+    color: var(--lcars-red);
+}
+
 .release-item-id {
     font-size: 10px;
     font-weight: 700;
@@ -8874,6 +8889,11 @@ body {
 .release-item-status.status-done {
     background: rgba(153, 255, 153, 0.2);
     color: var(--lcars-green);
+}
+
+.release-item-status.status-cancelled {
+    background: rgba(204, 102, 102, 0.2);
+    color: var(--lcars-red);
 }
 
 .release-item-title {
@@ -8936,6 +8956,13 @@ body {
     font-size: 11px;
     color: var(--lcars-muted);
     margin-right: 10px;
+}
+
+/* Cancelled count suffix in release card header (XACA-0206-001) */
+.release-item-cancelled-count {
+    color: var(--lcars-red);
+    font-size: 10px;
+    font-weight: 500;
 }
 
 /* Section Header Action Button */

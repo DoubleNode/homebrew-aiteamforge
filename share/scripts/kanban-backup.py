@@ -97,29 +97,8 @@ except ImportError:
         "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
     }
 
-# ---------------------------------------------------------------------------
-# Migration safety check — XACA-0168-005
-# Warn once if the old backup directory exists but the new one does not.
-# ---------------------------------------------------------------------------
-_OLD_BACKUP_ROOT = Path.home() / "dev-team-backups"
-_NEW_BACKUP_ROOT = Path.home() / "aiteamforge-backups"
-if _OLD_BACKUP_ROOT.exists() and not _NEW_BACKUP_ROOT.exists():
-    print(
-        "\n"
-        "[kanban-backup] MIGRATION REQUIRED: Your backup data is still in the old directory.\n"
-        "  Old path: ~/dev-team-backups\n"
-        "  New path: ~/aiteamforge-backups\n"
-        "\n"
-        "  Please run the following command ONCE to move your backups:\n"
-        "    mv ~/dev-team-backups ~/aiteamforge-backups\n"
-        "\n"
-        "  This script will continue using ~/aiteamforge-backups going forward.\n"
-        "  Your existing backups will NOT be found until you move them.\n",
-        file=sys.stderr,
-    )
-
 # Centralized backup destination
-BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
+BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
 STATUS_FILE = BACKUP_DIR / "backup-status.json"
 HASH_FILE = BACKUP_DIR / "file-hashes.json"
 
@@ -632,7 +611,7 @@ def run_backup(force: bool = False):
     print("KANBAN BACKUP SYSTEM")
     print(f"{'='*60}")
     print(f"Time: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}")
-    print(f"Source: Distributed ({len(TEAM_KANBAN_DIRS)} team directories)")
+    print(f"Source: Distributed ({len(_get_team_kanban_dirs())} team directories)")
     print(f"Destination: {BACKUP_DIR}")
     print(f"{'='*60}\n")
 

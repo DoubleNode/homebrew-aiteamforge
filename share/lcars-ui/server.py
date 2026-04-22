@@ -102,7 +102,7 @@ except ImportError as e:
 
 # Configuration
 DEFAULT_PORT = 8080
-BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
+BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
 
 # Distributed kanban directories — loaded from aiteamforge_paths (XACA-0168).
 # Build a dict from the shared module so existing code using TEAM_KANBAN_DIRS[team]
@@ -733,6 +733,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_update_flow_config()
         elif path == '/api/releases/sync-item':
             self.handle_sync_item_to_release()
+        elif path == '/api/releases/sync-all':
+            self.handle_sync_all_to_releases()
         # Epic API endpoints
         elif path == '/api/epics':
             self.handle_create_epic()
@@ -2635,22 +2637,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] Warning: Could not load board for release progress: {e}")
 
         progress = {
-            "total": len(manifest_items),
+            "total": 0,
             "completed": 0,
+            "cancelled": 0,
             "byPlatform": {}
         }
 
-        # Group items by platform, using board status as source of truth
+        # Group items by platform, using board status as source of truth.
+        # Cancelled items are excluded from total/completed (XACA-0206) — they
+        # preserve history in the manifest but don't count toward delivery math.
         platform_items = {}
         for item in manifest_items:
             platform = item.get('platform', 'unknown')
             if platform not in platform_items:
-                platform_items[platform] = {"total": 0, "completed": 0}
-            platform_items[platform]["total"] += 1
+                platform_items[platform] = {"total": 0, "completed": 0, "cancelled": 0}
 
             # Get status from board (source of truth), fall back to manifest status
             item_id = item.get('itemId')
             current_status = board_status.get(item_id, item.get('status'))
+
+            if current_status == 'cancelled':
+                platform_items[platform]["cancelled"] += 1
+                progress["cancelled"] += 1
+                continue
+
+            platform_items[platform]["total"] += 1
+            progress["total"] += 1
 
             # Check if item is completed (supports both 'done' and 'completed' status values)
             if current_status in ('done', 'completed'):
@@ -2874,7 +2886,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             "title": item.get('title'),
                             "status": item.get('status'),
                             "team": LCARS_TEAM,
-                            "priority": item.get('priority')
+                            "priority": item.get('priority'),
+                            "subRepo": item.get('subRepo', '')
                         })
 
             self.send_response(200)
@@ -2979,8 +2992,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 environments = post_data.get('environments') or data.get('defaultEnvironments', [])
 
-            # Extract default version from release name
-            default_version = self._extract_version_from_name(name)
+            # Extract default version: prefer shortTitle (the user-facing
+            # version label, e.g. "v2.10.0"), fall back to name.
+            default_version = self._extract_version_from_name(
+                post_data.get('shortTitle') or name
+            )
 
             # Build platforms configuration
             platforms_input = post_data.get('platforms', ['ios', 'android'])
@@ -3144,37 +3160,60 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
     def _sync_item_to_release_manifest(self, release_id, item_id, item_data):
-        """Sync item changes to release manifest when item is updated in queue.
+        """Upsert kanban item into a release manifest.
 
-        This ensures the release manifest stays in sync with the kanban board
-        when title, status, or other fields change.
+        If the item already exists in manifest.items[], its fields are updated.
+        If it does not exist, it is appended using the same schema as
+        handle_assign_item_to_release (itemId, platform, team, title, status,
+        assignedAt). This is the single sync path used by queue updates,
+        shell-driven assigns (via /api/releases/sync-item), and full-board
+        reconciliation (/api/releases/sync-all).
         """
         try:
             manifest = self._load_release_manifest(release_id)
             items = manifest.get('items', [])
 
-            # Find and update the item in the manifest
-            updated = False
+            existing = None
             for manifest_item in items:
                 if manifest_item.get('itemId') == item_id:
-                    # Sync relevant fields from the kanban item
-                    if 'title' in item_data:
-                        manifest_item['title'] = item_data['title']
-                    if 'status' in item_data:
-                        manifest_item['status'] = item_data['status']
-                    if 'priority' in item_data:
-                        manifest_item['priority'] = item_data['priority']
-                    manifest_item['lastSynced'] = self._get_timestamp()
-                    updated = True
+                    existing = manifest_item
                     break
 
-            if updated:
-                manifest['items'] = items
-                self._save_release_manifest(release_id, manifest)
-                print(f"[LCARS] Synced item {item_id} to release {release_id}")
+            if existing is not None:
+                if 'title' in item_data:
+                    existing['title'] = item_data['title']
+                status_val = item_data.get('status') or self._derive_item_status(item_data)
+                if status_val:
+                    existing['status'] = status_val
+                if 'priority' in item_data:
+                    existing['priority'] = item_data['priority']
+                assignment = item_data.get('releaseAssignment') or {}
+                if assignment.get('platform'):
+                    existing['platform'] = assignment['platform']
+                existing['lastSynced'] = self._get_timestamp()
+                action = 'updated'
+            else:
+                assignment = item_data.get('releaseAssignment') or {}
+                platform = assignment.get('platform') or 'other'
+                team = item_data.get('team') or manifest.get('team') or self._extract_team_from_item_id(item_id)
+                items.append({
+                    "itemId": item_id,
+                    "platform": platform,
+                    "team": team,
+                    "title": item_data.get('title', item_id),
+                    "status": item_data.get('status') or self._derive_item_status(item_data) or 'todo',
+                    "assignedAt": assignment.get('assignedAt') or self._get_timestamp(),
+                    "lastSynced": self._get_timestamp()
+                })
+                action = 'added'
+
+            manifest['items'] = items
+            self._save_release_manifest(release_id, manifest)
+            print(f"[LCARS] Synced item {item_id} to release {release_id} ({action})")
+            return action
         except Exception as e:
-            # Don't fail the main update if release sync fails
             print(f"[LCARS] Warning: Failed to sync item to release manifest: {e}")
+            return None
 
     def _remove_item_from_release_manifest(self, release_id, item_id):
         """Remove item from release manifest when item is unassigned from release.
@@ -3334,6 +3373,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if field in post_data:
                     release[field] = post_data[field]
 
+            # When shortTitle changes, keep platform versions in lockstep with
+            # the release version label (e.g. shortTitle "v2.10.0" → every
+            # platform.version becomes "2.10.0"). Explicit per-platform
+            # versions in the same request still win (handled below).
+            if 'shortTitle' in post_data and post_data.get('shortTitle'):
+                import re
+                m = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', post_data['shortTitle'], re.IGNORECASE)
+                if m:
+                    synced_version = m.group(1)
+                    for plat in release.get('platforms', {}).values():
+                        plat['version'] = synced_version
+
             # Update platform versions/builds if provided
             if 'platforms' in post_data:
                 for platform, updates in post_data['platforms'].items():
@@ -3342,10 +3393,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             if key in updates:
                                 release['platforms'][platform][key] = updates[key]
 
-            # Add new platforms if requested (cannot remove existing ones)
+            # Add new platforms if requested (cannot remove existing ones).
+            # Newly-added platforms inherit the release's current version
+            # (parsed from shortTitle, falling back to name).
             if 'addPlatforms' in post_data:
                 existing_platforms = release.get('platforms', {})
-                release_version = release.get('name', '1.0.0')
+                release_version = self._extract_version_from_name(
+                    release.get('shortTitle') or release.get('name') or ''
+                )
                 for platform in post_data['addPlatforms']:
                     if platform not in existing_platforms:
                         existing_platforms[platform] = {
@@ -3478,23 +3533,40 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, f"Item not found in board: {item_id}")
                 return
 
-            # Check if item has release assignment
-            release_assignment = item_data.get('releaseAssignment')
-            if not release_assignment or not release_assignment.get('releaseId'):
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "success": True,
-                    "synced": False,
-                    "reason": "no release assignment"
-                }).encode())
-                return
+            # Ensure item_data carries team (used by _sync_item_to_release_manifest)
+            item_data.setdefault('team', team)
 
-            # Sync to release manifest
-            release_id = release_assignment['releaseId']
-            self._sync_item_to_release_manifest(release_id, item_id, item_data)
+            release_assignment = item_data.get('releaseAssignment') or {}
+            assigned_release_id = release_assignment.get('releaseId')
+
+            # Reconcile across every release in this team's board. Per-item sync
+            # must be a fixed-point: any manifest other than the currently
+            # assigned one must NOT list this item.
+            all_releases = board_data.get('releases', []) or []
+            upserted_in = None
+            removed_from = []
+            for release in all_releases:
+                rid = release.get('id') or release.get('releaseId')
+                if not rid:
+                    continue
+                if assigned_release_id and rid == assigned_release_id:
+                    if self._sync_item_to_release_manifest(rid, item_id, item_data):
+                        upserted_in = rid
+                else:
+                    try:
+                        manifest = self._load_release_manifest(rid)
+                        if any(it.get('itemId') == item_id for it in manifest.get('items', [])):
+                            self._remove_item_from_release_manifest(rid, item_id)
+                            removed_from.append(rid)
+                    except Exception as e:
+                        print(f"[LCARS] Warning: scan of {rid} during sync-item failed: {e}")
+
+            # If the item references a release that isn't present in this
+            # team's board releases list (drift), still upsert it directly —
+            # matches the implicit contract kb-release-assign enforced before.
+            if assigned_release_id and upserted_in != assigned_release_id:
+                if self._sync_item_to_release_manifest(assigned_release_id, item_id, item_data):
+                    upserted_in = assigned_release_id
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -3502,12 +3574,109 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({
                 "success": True,
-                "synced": True,
-                "releaseId": release_id
+                "synced": bool(upserted_in) or bool(removed_from),
+                "releaseId": upserted_in,
+                "removedFrom": removed_from,
+                "reason": None if (upserted_in or removed_from) else "no release assignment"
             }).encode())
 
         except Exception as e:
             self.send_error(500, f"Error syncing item to release: {e}")
+
+    def handle_sync_all_to_releases(self):
+        """POST /api/releases/sync-all — reconcile entire team board against release manifests.
+
+        Request body (optional): { "team": "android" }
+        Walks every item in backlog, then calls the same per-item reconcile
+        used by handle_sync_item_to_release. This is the repair command for
+        drift cases like XAND-0619 → REL-2026-Q2-009 where the board had the
+        assignment but the manifest never got the item.
+        """
+        try:
+            try:
+                content_length = int(self.headers.get('Content-Length') or 0)
+            except (TypeError, ValueError):
+                content_length = 0
+            post_data = {}
+            if content_length:
+                post_data = json.loads(self.rfile.read(content_length))
+
+            team = post_data.get('team') or LCARS_TEAM
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self.send_error(404, f"Board file not found for team: {team}")
+                return
+
+            with open(board_file, 'r') as f:
+                board_data = json.load(f)
+
+            backlog = board_data.get('backlog', []) or []
+            all_releases = board_data.get('releases', []) or []
+            release_ids = [r.get('id') or r.get('releaseId') for r in all_releases if r.get('id') or r.get('releaseId')]
+
+            added = []     # [(item_id, release_id)] — item was new to manifest
+            updated = []   # [(item_id, release_id)] — item existed, fields refreshed
+            removes = []   # [(item_id, release_id)] — stale entry pruned
+            assigned_by_release = {}  # release_id -> set(item_id) from board
+
+            # First pass: push board assignments into their manifests
+            for item in backlog:
+                item_id = item.get('id')
+                if not item_id:
+                    continue
+                item.setdefault('team', team)
+                assignment = item.get('releaseAssignment') or {}
+                rid = assignment.get('releaseId')
+                if not rid:
+                    continue
+                assigned_by_release.setdefault(rid, set()).add(item_id)
+                action = self._sync_item_to_release_manifest(rid, item_id, item)
+                if action == 'added':
+                    added.append((item_id, rid))
+                elif action == 'updated':
+                    updated.append((item_id, rid))
+
+            # Second pass: prune manifest entries whose board item no longer
+            # points at this release (or no longer exists).
+            #
+            # NOTE: This pass iterates board.releases[] only. On-disk manifest
+            # directories whose releaseId is no longer in board.releases[] are
+            # NOT pruned here. This is intentional: the deletion path
+            # (handle_archive_release) is responsible for removing the manifest
+            # directory when a release is archived — it does so via
+            # _get_release_manifest_path (XACA-0056 team-isolation contract) and
+            # shutil.rmtree with a best-effort log-on-failure wrapper (XACA-0183).
+            # Adding a filesystem scan here instead would risk cross-team manifest
+            # collisions when multiple boards share a releases/ root, so avoid it.
+            for rid in release_ids:
+                try:
+                    manifest = self._load_release_manifest(rid)
+                except Exception as e:
+                    print(f"[LCARS] Warning: sync-all skipped {rid}: {e}")
+                    continue
+                assigned_ids = assigned_by_release.get(rid, set())
+                stale = [it.get('itemId') for it in manifest.get('items', []) if it.get('itemId') and it.get('itemId') not in assigned_ids]
+                for sid in stale:
+                    self._remove_item_from_release_manifest(rid, sid)
+                    removes.append((sid, rid))
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "success": True,
+                "team": team,
+                "added": [{"itemId": i, "releaseId": r} for (i, r) in added],
+                "updated": [{"itemId": i, "releaseId": r} for (i, r) in updated],
+                "removes": [{"itemId": i, "releaseId": r} for (i, r) in removes],
+                "addedCount": len(added),
+                "updatedCount": len(updated),
+                "removeCount": len(removes)
+            }).encode())
+
+        except Exception as e:
+            self.send_error(500, f"Error syncing board to releases: {e}")
 
     # --- PATCH Handlers ---
 
@@ -3603,7 +3772,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_archive_release(self, release_id):
         """DELETE /api/releases/<id> - Archive release"""
         try:
-            data = self._load_releases_config()
+            # Mirror handle_toggle_release_archive: honour ?team= so that the
+            # archive JSON and manifest cleanup land in the right team directory
+            # rather than always defaulting to the current LCARS_TEAM.
+            parsed = urlparse(self.path)
+            query_params = parse_qs(parsed.query)
+            team = query_params.get('team', [None])[0]
+            effective_team = team or LCARS_TEAM
+
+            data = self._load_releases_config(effective_team)
             release = self._find_release_by_id(data, release_id)
             if not release:
                 self.send_error(404, f"Release not found: {release_id}")
@@ -3612,17 +3789,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Remove from active releases
             data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
-            # Move to archive (optional: could save to releases-archive directory)
+            # Move to archive
             release['archivedAt'] = self._get_timestamp()
             release['status'] = 'archived'
 
-            kanban_dir = TEAM_KANBAN_DIRS.get(LCARS_TEAM, KANBAN_DIR)
+            kanban_dir = TEAM_KANBAN_DIRS.get(effective_team, KANBAN_DIR)
             archive_dir = kanban_dir / "releases-archive"
             archive_dir.mkdir(parents=True, exist_ok=True)
             archive_file = archive_dir / f"{release_id}.json"
             self._atomic_write_json(archive_file, release)
 
-            self._save_releases_config(data)
+            self._save_releases_config(data, effective_team)
+
+            # XACA-0183: Remove the on-disk manifest directory now that the
+            # archive write is authoritative.  Use _get_release_manifest_path
+            # to preserve the XACA-0056 team-isolation contract — do NOT
+            # hand-roll the path.  A filesystem failure must not 500 the
+            # request after the archive has already succeeded.
+            release_dir = None
+            try:
+                import shutil
+                manifest_path = self._get_release_manifest_path(release_id, effective_team)
+                release_dir = manifest_path.parent
+                if release_dir.exists():
+                    shutil.rmtree(release_dir)
+            except Exception as cleanup_err:
+                print(f"[LCARS] Warning: archived {release_id} but failed to remove "
+                      f"{release_dir}: {cleanup_err}")
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -3835,7 +4028,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         "status": item.get('status', 'todo'),
                         "priority": item.get('priority', 'medium'),
                         "team": LCARS_TEAM,
-                        "tags": item.get('tags', [])
+                        "tags": item.get('tags', []),
+                        "subRepo": item.get('subRepo', '')
                     })
         except Exception as e:
             print(f"[LCARS] Error reading {board_file}: {e}")
@@ -8065,6 +8259,78 @@ end tell
         print(f"[LCARS] {args[0]}")
 
 
+# XACA-0180 guardrail: legacy stub paths that should no longer coexist with
+# the canonical board files managed by the distributed kanban layout.
+LEGACY_STUB_PATHS = {
+    "legal-coparenting": [
+        Path.home() / "legal" / "kanban" / "legal-board.json",
+        Path.home() / "legal" / "default" / "kanban" / "legal-default-board.json",
+    ],
+    "medical-general": [
+        Path.home() / "medical" / "kanban" / "medical-board.json",
+    ],
+    "finance-personal": [
+        Path.home() / "finance" / "kanban" / "finance-board.json",
+    ],
+    "command": [
+        Path.home() / "dev-team" / "kanban" / "command-board.json",
+    ],
+}
+
+
+def check_dual_boards_or_die(team: str) -> None:
+    """XACA-0180 guardrail: refuse to start if a legacy stub board coexists
+    with the canonical board for *team*.  Other teams' stubs emit warnings.
+    Set LCARS_SKIP_DUAL_BOARD_CHECK=1 to bypass (e.g. for automated tests).
+    """
+    if os.environ.get("LCARS_SKIP_DUAL_BOARD_CHECK") == "1":
+        print("[LCARS] Dual-board check skipped (LCARS_SKIP_DUAL_BOARD_CHECK=1)")
+        return
+
+    canonical = get_board_file(team)
+    canonical_resolved = canonical.resolve() if canonical.exists() else canonical
+
+    fatal_legacy: Path | None = None
+
+    for check_team, legacy_paths in LEGACY_STUB_PATHS.items():
+        for legacy in legacy_paths:
+            if not legacy.exists():
+                continue
+            if check_team == team:
+                # Canonical must also exist for a true dual-board condition.
+                if canonical.exists() and legacy.resolve() != canonical_resolved:
+                    fatal_legacy = legacy
+            else:
+                # Different team — warn but don't exit.
+                print(
+                    f"[LCARS] WARNING: Legacy stub exists for team '{check_team}': {legacy}",
+                    file=sys.stderr,
+                )
+
+    if fatal_legacy is not None:
+        print(
+            "\n"
+            "================================================================================" + "\n"
+            f"FATAL: Dual kanban board files detected for team '{team}'" + "\n"
+            "================================================================================" + "\n"
+            f"  Canonical:   {canonical}" + "\n"
+            f"  Legacy stub: {fatal_legacy}" + "\n"
+            "\n"
+            "  Refusing to start — silent ID collisions are likely if both files coexist." + "\n"
+            "\n"
+            "  To resolve:" + "\n"
+            "    1. Verify which is correct (canonical is the source of truth)" + "\n"
+            "    2. Quarantine the stub via: kb-quarantine-stub " + team + "\n"
+            "       (See XACA-0180 for context)" + "\n"
+            "    3. Restart this server" + "\n"
+            "================================================================================",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"[LCARS] Dual-board check OK for team '{team}'")
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
 
@@ -8086,6 +8352,9 @@ def main():
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 """)
+
+    # XACA-0180: refuse to start if a legacy stub board coexists with canonical.
+    check_dual_boards_or_die(LCARS_TEAM)
 
     # Allow port reuse to avoid "Address already in use" errors
     socketserver.TCPServer.allow_reuse_address = True

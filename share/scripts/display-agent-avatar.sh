@@ -187,13 +187,14 @@ data = {
     'avatar': sys.argv[9],
     'worktree': sys.argv[10],
     'amb_handle': sys.argv[11],
-    'timestamp': sys.argv[12]
+    'hostname': sys.argv[12],
+    'timestamp': sys.argv[13]
 }
 json_str = json.dumps(data, indent=4)
-with open(sys.argv[13], 'w') as f:
+with open(sys.argv[14], 'w') as f:
     f.write(json_str)
-if len(sys.argv) > 14 and sys.argv[14]:
-    with open(sys.argv[14], 'w') as f:
+if len(sys.argv) > 15 and sys.argv[15]:
+    with open(sys.argv[15], 'w') as f:
         f.write(json_str)
 " \
     "${team}" \
@@ -207,6 +208,7 @@ if len(sys.argv) > 14 and sys.argv[14]:
     "${avatar_codename}" \
     "${worktree_info}" \
     "${amb_handle}" \
+    "$(hostname -s 2>/dev/null || hostname)" \
     "$(date +%s)" \
     "${json_file}" \
     "${TERMINAL_NUMBER:+${tmp_dir}lcars-agent-${session_key}-w${TERMINAL_NUMBER}.json}"

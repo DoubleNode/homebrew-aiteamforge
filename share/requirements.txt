@@ -1,0 +1,9 @@
+# AITeamForge Python library dependencies
+# Add deps as: <package>==<version>
+# After adding, bump Formula version and run: brew reinstall aiteamforge
+
+# AES-256 zip support (XACA-0172 secrets-zip workflow)
+pyzipper==0.3.6
+
+# iTerm2 Python API (window/tab/profile automation for cockpit mode)
+iterm2==2.15

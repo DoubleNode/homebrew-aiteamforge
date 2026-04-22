@@ -352,6 +352,13 @@ _kb_release_sync() {
     # Skip if no item_id provided
     [[ -z "$item_id" ]] && return 0
 
+    # XACA-0182: Subitem IDs (e.g., XACA-0179-002) are not top-level board
+    # items. Release manifests track parent items only, so skip the round-trip
+    # to LCARS — the parent syncs separately when kb-done runs on it.
+    if [[ "$item_id" =~ ^X[A-Z]{2,4}-[0-9]+-[0-9]+$ ]]; then
+        return 0
+    fi
+
     # Determine LCARS port from config file or default
     local _lcars_port="8080"
     local _port_file="${AITEAMFORGE_DIR}/lcars-ui/.lcars-port"

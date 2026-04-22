@@ -27,7 +27,7 @@
 #   restore_board_from_backup "academy" "/path/to/backup.zip"
 #
 # Backup directory structure:
-#   ~/aiteamforge-backups/kanban/
+#   ~/dev-team-backups/kanban/
 #     {team}/
 #       backup_YYYYMMDD_HHMMSS.zip    (preferred format)
 #       backup_YYYYMMDD_HHMMSS.json   (legacy format)
@@ -90,7 +90,7 @@ unset _KANBAN_PATHS_SCRIPT
 # ---------------------------------------------------------------------------
 
 # Root directory where all kanban backups are stored.
-KANBAN_BACKUP_ROOT="${HOME}/aiteamforge-backups/kanban"
+KANBAN_BACKUP_ROOT="${HOME}/dev-team-backups/kanban"
 
 # Maximum number of backups to display in the interactive menu.
 KANBAN_RESTORE_MENU_LIMIT=10
