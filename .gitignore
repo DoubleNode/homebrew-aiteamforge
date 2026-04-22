@@ -22,6 +22,11 @@
 __pycache__/
 *.pyc
 *.pyo
+# Python virtual environments — never commit venvs to the repo.
+# AITeamForge uses a tap-owned venv at $HOMEBREW_PREFIX/var/aiteamforge/venv.
+# See docs/adding-a-python-dep.md for the how-to guide.
+.venv/
+venv/
 
 # Temporary files
 *.tmp
