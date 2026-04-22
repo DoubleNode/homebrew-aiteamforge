@@ -686,7 +686,7 @@ install_kanban_backup() {
     chmod +x "$backup_script_dest"
 
     # Create backup directory
-    mkdir -p "$HOME/aiteamforge-backups/kanban"
+    mkdir -p "$HOME/dev-team-backups/kanban"
 
     success "Installed backup script: $backup_script_dest"
 }
@@ -916,7 +916,7 @@ uninstall_kanban_system() {
         warning "This will delete all kanban boards and history!"
         if prompt_yes_no "Are you SURE?" "n"; then
             rm -rf "$AITEAMFORGE_DIR/kanban"
-            rm -rf "$HOME/aiteamforge-backups/kanban"
+            rm -rf "$HOME/dev-team-backups/kanban"
             success "Removed all kanban data"
         fi
     else

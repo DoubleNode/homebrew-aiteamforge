@@ -360,6 +360,65 @@ Restore it by copying it back over the live file and letting iTerm2 hot-reload.
 For maintainers who want to know which keys are in which bucket and why, see
 [docs/refresh-profiles-design.md](docs/refresh-profiles-design.md).
 
+### Cockpit Install (Remote Connect Only)
+
+The **cockpit profile** is a minimal install for machines that connect *into* teams
+running on a primary dev machine over Tailscale — without running any team
+infrastructure locally.
+
+**Who it is for:** Laptop users, second workstations, or thin clients that need to
+drive a remote AITeamForge session without maintaining local kanban boards, LCARS
+servers, or team directories.
+
+**How to install:**
+
+```bash
+aiteamforge setup --cockpit-only
+# --connect-only is an accepted alias
+```
+
+The setup wizard skips team selection entirely — all connect scripts are installed
+unconditionally.
+
+**What a cockpit install includes:**
+
+| Component | Included |
+|-----------|----------|
+| `<team>-connect.sh` scripts (all teams) | Yes |
+| Python venv with `iterm2` package | Yes |
+| `iterm2_window_manager.py` | Yes |
+| LCARS dynamic profile JSON | Yes |
+| `set-lcars-profile-browser.py` (iTerm2 plugin) | Yes |
+
+**What a cockpit install excludes:**
+
+| Component | Excluded |
+|-----------|----------|
+| Team working directories (`~/aiteamforge/<team>/`) | Omitted |
+| Kanban boards and `kb-*` helpers | Omitted |
+| LCARS UI server | Omitted |
+| Persona markdown files and agent avatars | Omitted |
+| Shell aliases, cc-aliases, statusline scripts | Omitted |
+| Team zshrc fragments | Omitted |
+
+**Typical workflow:**
+
+```bash
+# On cockpit machine: connect into a remote team running on another host
+academy-connect.sh darren-m4-mini
+
+# The remote team's full environment opens in iTerm2 over Tailscale
+# Your local machine stays clean — no team state is created or maintained here
+```
+
+**Switching to a full install:** There is no in-place migration from cockpit to full.
+Re-run `aiteamforge setup` (without `--cockpit-only`) on the machine to perform a
+complete installation.
+
+**Health checks:** `aiteamforge doctor` recognizes the cockpit profile via a
+`.install-profile` marker file and does not report missing kanban boards, LCARS
+servers, or team directories as errors.
+
 ### Uninstall
 
 ```bash

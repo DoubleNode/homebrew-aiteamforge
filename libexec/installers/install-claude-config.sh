@@ -320,6 +320,39 @@ install_statusline() {
     fi
 }
 
+# Install tmux configuration
+install_tmux_conf() {
+    log_info "Installing tmux configuration..."
+
+    local template="${TEMPLATE_DIR}/claude/tmux.conf"
+    local target="${HOME}/.tmux.conf"
+
+    if [[ ! -f "$template" ]]; then
+        log_warning "tmux.conf template not found, skipping"
+        return 0
+    fi
+
+    # Backup existing file (plain file only — leave existing symlinks alone)
+    if [[ -f "$target" && ! -L "$target" ]]; then
+        local backup_path="${BACKUP_DIR}/$(basename "$target")"
+        mkdir -p "$(dirname "$backup_path")"
+        cp "$target" "$backup_path"
+        log_info "Backed up: $(basename "$target")"
+    fi
+
+    # If target is a symlink (e.g. from a prior deploy-to-production.sh run),
+    # remove it so apply_template writes a fresh plain file. Without this, the
+    # shell `>` redirection inside apply_template follows the link and writes
+    # into the repo's tracked source instead of the user's live config.
+    if [[ -L "$target" ]]; then
+        rm -f "$target"
+    fi
+
+    # Apply template substitution (handles {{HOME}} etc. placeholders)
+    apply_template "$template" "$target"
+    log_success "tmux.conf installed"
+}
+
 # Install agent tracking script
 install_agent_tracking() {
     log_info "Installing agent tracking script..."
@@ -404,6 +437,7 @@ install_claude_config() {
     install_global_claude_md
     install_statusline
     install_agent_tracking
+    install_tmux_conf
     install_hooks
     install_skills
 

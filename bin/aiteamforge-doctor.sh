@@ -23,8 +23,19 @@ if [ -z "$AITEAMFORGE_HOME" ]; then
   fi
 fi
 
+# Resolve tap-owned Python venv interpreter ($AITEAMFORGE_PYTHON).
+# AITEAMFORGE_HOME is set above; python-env.sh lives in its libexec/lib/ subdir.
+# shellcheck source=/dev/null
+[ -f "$AITEAMFORGE_HOME/libexec/lib/python-env.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/python-env.sh"
+
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+
+# Install profile — read from marker file; defaults to "full" if absent
+INSTALL_PROFILE="full"
+if [ -f "${AITEAMFORGE_DIR}/.install-profile" ]; then
+  INSTALL_PROFILE="$(tr -d '[:space:]' < "${AITEAMFORGE_DIR}/.install-profile")"
+fi
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -136,18 +147,38 @@ echo -e "${BOLD}╔════════════════════�
 echo -e "${BOLD}║           AITeamForge Doctor - Health Check                  ║${NC}"
 echo -e "${BOLD}╚════════════════════════════════════════════════════════════╝${NC}"
 echo ""
+echo -e "  Install Profile: ${CYAN}${INSTALL_PROFILE}${NC}"
+if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  echo -e "  ${YELLOW}Cockpit mode: checks for local-only components (teams, kanban,${NC}"
+  echo -e "  ${YELLOW}LCARS server, personas, aliases) are suppressed.${NC}"
+fi
+echo ""
 
 # Check dependencies
 check_dependencies() {
   echo -e "${CYAN}Checking external dependencies...${NC}"
   echo ""
 
-  # Python
+  # Python — presence check (bare python3 from PATH)
   if command -v python3 &>/dev/null; then
     py_version=$(python3 --version 2>&1 | awk '{print $2}')
     check_result pass "Python 3 (${py_version})"
   else
     check_result fail "Python 3 not found" "Install: brew install python@3.13"
+  fi
+
+  # Python — tap-owned venv status check
+  if [ -n "${AITEAMFORGE_PYTHON:-}" ] && [ "$AITEAMFORGE_PYTHON" != "python3" ]; then
+    if [ -x "$AITEAMFORGE_PYTHON" ]; then
+      atf_py_version=$("$AITEAMFORGE_PYTHON" --version 2>&1 | awk '{print $2}')
+      check_result pass "AITeamForge venv Python (${atf_py_version:-unknown}) — ${AITEAMFORGE_PYTHON}"
+    else
+      check_result fail "AITeamForge venv Python not executable: ${AITEAMFORGE_PYTHON}" \
+        "Run: brew reinstall aiteamforge"
+    fi
+  else
+    check_result fail "AITeamForge tap-owned venv not found — Python deps unavailable" \
+      "Run: brew reinstall aiteamforge"
   fi
 
   # Node.js
@@ -348,21 +379,66 @@ check_config() {
   fi
 
   # Deployed alias files (installed by install-shell.sh)
-  local deployed_aliases=(
-    "share/aliases/agent-aliases.sh"
-    "share/aliases/cc-aliases.sh"
-    "share/aliases/worktree-aliases.sh"
-  )
+  # Not installed in cockpit mode — skip these checks to avoid false failures.
+  if [ "$INSTALL_PROFILE" != "cockpit" ]; then
+    local deployed_aliases=(
+      "share/aliases/agent-aliases.sh"
+      "share/aliases/cc-aliases.sh"
+      "share/aliases/worktree-aliases.sh"
+    )
 
-  for alias_file in "${deployed_aliases[@]}"; do
-    local alias_name
-    alias_name="$(basename "$alias_file")"
-    if [ -f "${AITEAMFORGE_DIR}/${alias_file}" ]; then
-      check_result pass "${alias_name} (deployed)"
+    for alias_file in "${deployed_aliases[@]}"; do
+      local alias_name
+      alias_name="$(basename "$alias_file")"
+      if [ -f "${AITEAMFORGE_DIR}/${alias_file}" ]; then
+        check_result pass "${alias_name} (deployed)"
+      else
+        check_result warn "${alias_name} missing" "Run: aiteamforge setup --shell"
+      fi
+    done
+  else
+    check_result pass "Alias files (not installed — cockpit profile)"
+  fi
+
+  # Cockpit-critical components: tap venv, iterm2_window_manager.py, connect scripts
+  if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+    # Tap-owned venv (shared across all profiles, but cockpit hard-depends on it for iTerm2 scripts)
+    if [ -n "${AITEAMFORGE_PYTHON:-}" ] && [ "$AITEAMFORGE_PYTHON" != "python3" ] && [ -x "$AITEAMFORGE_PYTHON" ]; then
+      check_result pass "Tap-owned Python venv"
     else
-      check_result warn "${alias_name} missing" "Run: aiteamforge setup --shell"
+      check_result fail "Tap-owned Python venv not provisioned" "Run: brew reinstall aiteamforge"
     fi
-  done
+    # Window manager script
+    if [ -f "${AITEAMFORGE_DIR}/iterm2_window_manager.py" ] || \
+       [ -f "${AITEAMFORGE_DIR}/scripts/iterm2_window_manager.py" ]; then
+      check_result pass "iterm2_window_manager.py"
+    else
+      check_result warn "iterm2_window_manager.py missing" "Re-run: aiteamforge setup --cockpit-only"
+    fi
+    # set-lcars-profile-browser.py
+    if [ -f "${AITEAMFORGE_DIR}/scripts/set-lcars-profile-browser.py" ]; then
+      check_result pass "set-lcars-profile-browser.py"
+    else
+      check_result warn "set-lcars-profile-browser.py missing"
+    fi
+    # Dynamic profile JSON
+    local _dyn_profile="$HOME/Library/Application Support/iTerm2/DynamicProfiles/aiteamforge-lcars.json"
+    if [ -f "$_dyn_profile" ]; then
+      check_result pass "aiteamforge-lcars.json dynamic profile"
+    else
+      check_result warn "aiteamforge-lcars.json dynamic profile missing" "Re-run: aiteamforge setup --cockpit-only"
+    fi
+    # Connect scripts
+    local _connect_count=0
+    for _cs in "${AITEAMFORGE_DIR}"/*-connect.sh; do
+      [ -f "$_cs" ] && _connect_count=$((_connect_count + 1))
+    done
+    if [ "$_connect_count" -gt 0 ]; then
+      check_result pass "Connect scripts installed (${_connect_count} team(s))"
+    else
+      check_result fail "No connect scripts found" "Re-run: aiteamforge setup --cockpit-only"
+    fi
+  fi
 
   echo ""
 }
@@ -371,6 +447,16 @@ check_config() {
 check_services() {
   echo -e "${CYAN}Checking services...${NC}"
   echo ""
+
+  # In cockpit mode, no local services are expected — LCARS runs on the remote host.
+  # Skip LCARS/fleet checks to avoid false "not running" warnings.
+  if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+    check_result pass "LCARS Kanban server (not applicable — cockpit profile, runs on remote host)"
+    check_result pass "Fleet Monitor (not applicable — cockpit profile)"
+    check_result pass "LaunchAgents (not installed — cockpit profile)"
+    echo ""
+    return
+  fi
 
   # LCARS Kanban server — read port from config, check root URL (no /health endpoint)
   local lcars_port=8080

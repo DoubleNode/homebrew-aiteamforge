@@ -13,7 +13,7 @@ echo ""
 # Test 1: Help output
 echo "Test 1: Help output"
 echo "-------------------"
-./bin/aiteamforge-setup --help
+./bin/aiteamforge-setup.sh --help
 if [ $? -eq 0 ]; then
   echo "✓ Help output works"
 else
@@ -27,13 +27,13 @@ echo "Test 2: Dry run mode"
 echo "--------------------"
 echo "Running wizard in dry-run mode (no changes will be made)..."
 echo ""
-./bin/aiteamforge-setup --dry-run --non-interactive > /dev/null 2>&1
+./bin/aiteamforge-setup.sh --dry-run --non-interactive > /dev/null 2>&1
 exit_code=$?
 if [ $exit_code -eq 0 ]; then
   echo "✓ Dry run mode works"
 else
   echo "✗ Dry run mode failed (exit code: $exit_code)"
-  echo "  Run './bin/aiteamforge-setup --dry-run --non-interactive' to see output"
+  echo "  Run './bin/aiteamforge-setup.sh --dry-run --non-interactive' to see output"
   exit 1
 fi
 echo ""
@@ -43,8 +43,8 @@ echo "Test 3: File structure"
 echo "----------------------"
 files_ok=true
 
-if [ ! -f "./libexec/aiteamforge-setup.sh" ]; then
-  echo "✗ Missing: libexec/aiteamforge-setup.sh"
+if [ ! -f "./bin/aiteamforge-setup.sh" ]; then
+  echo "✗ Missing: bin/aiteamforge-setup.sh"
   files_ok=false
 fi
 
@@ -53,13 +53,8 @@ if [ ! -f "./libexec/lib/wizard-ui.sh" ]; then
   files_ok=false
 fi
 
-if [ ! -f "./bin/aiteamforge-setup" ]; then
-  echo "✗ Missing: bin/aiteamforge-setup"
-  files_ok=false
-fi
-
-if [ ! -x "./bin/aiteamforge-setup" ]; then
-  echo "✗ Not executable: bin/aiteamforge-setup"
+if [ ! -x "./bin/aiteamforge-setup.sh" ]; then
+  echo "✗ Not executable: bin/aiteamforge-setup.sh"
   files_ok=false
 fi
 
@@ -96,6 +91,6 @@ echo ""
 echo "Setup wizard is ready for use!"
 echo ""
 echo "Try it:"
-echo "  ./bin/aiteamforge-setup --help"
-echo "  ./bin/aiteamforge-setup --dry-run"
+echo "  ./bin/aiteamforge-setup.sh --help"
+echo "  ./bin/aiteamforge-setup.sh --dry-run"
 echo ""

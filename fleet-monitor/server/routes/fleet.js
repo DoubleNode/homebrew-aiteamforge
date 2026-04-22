@@ -504,7 +504,7 @@ router.get('/backup-status', (req, res) => {
             }
         } else {
             // Fallback: try to read from local file (for backwards compatibility)
-            const backupStatusFile = path.join(process.env.HOME || '/Users/darrenehlers', 'aiteamforge-backups', 'kanban', 'backup-status.json');
+            const backupStatusFile = path.join(process.env.HOME || '/Users/darrenehlers', 'dev-team-backups', 'kanban', 'backup-status.json');
             if (require('fs').existsSync(backupStatusFile)) {
                 const stored = JSON.parse(require('fs').readFileSync(backupStatusFile, 'utf8'));
                 status = { ...status, ...stored, status: 'configured', sources: [{ hostname: 'local', lastRun: stored.lastRun }] };
