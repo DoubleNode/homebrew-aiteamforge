@@ -6,6 +6,9 @@ on:
     paths:
       - 'Formula/**'
       - '.github/workflows/tests.yml'
+      - 'homebrew-tap/bin/**'
+      - 'homebrew-tap/libexec/**'
+      - 'homebrew-tap/scripts/**'
       - 'homebrew-tap/tests/**'
       - 'scripts/tests/**'
       - 'fleet-monitor/**'
@@ -16,6 +19,9 @@ on:
     paths:
       - 'Formula/**'
       - '.github/workflows/tests.yml'
+      - 'homebrew-tap/bin/**'
+      - 'homebrew-tap/libexec/**'
+      - 'homebrew-tap/scripts/**'
       - 'homebrew-tap/tests/**'
       - 'scripts/tests/**'
       - 'fleet-monitor/**'
