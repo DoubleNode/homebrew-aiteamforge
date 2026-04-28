@@ -4,6 +4,284 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+### Fixed
+- **XACA-0249: Team param now injected by UI for all team-scoped API calls** -
+  Extended the existing `apiUrl()` helper to automatically append `?team=<CONFIG.team>`
+  for known team-scoped endpoints (`/api/epics`, `/api/releases`, `/api/todos`,
+  `/api/items`, `/api/release-config`, `/api/calendar/items`). The injection is
+  guarded: only fires when `CONFIG.team` is truthy and the URL doesn't already
+  carry a `team=` param, so no double-encoding or breakage on already-correct call
+  sites. Fixes the bug where an academy server restarted without `LCARS_TEAM` env
+  would silently serve freelance epics/releases to the academy UI.
+- **XACA-0249: `/api/team` dedicated endpoint added** -
+  New `GET /api/team` returns `{"team": "...", "team_was_explicit": bool,
+  "default_used": bool}`. The UI's `loadServerConfig()` now falls back to this
+  endpoint if `/api/status` fails or returns no team — guaranteeing `CONFIG.team`
+  is always populated before the first team-scoped fetch fires. Includes a browser
+  console warning when `default_used` is true so misconfiguration is visible to
+  developers without digging into server logs.
+- **XACA-0249: Server WARN log when team defaults silently to "freelance"** -
+  `_get_board_file()` now detects the bad condition (no `?team=` from UI AND
+  `LCARS_TEAM` env was unset at server start) and emits a throttled `[LCARS] WARN`
+  log line — at most once per minute per endpoint path — so misconfiguration is
+  unmissable in logs without flooding them under normal operation.
+
+### Changed
+- **ccusage collector cadence tuned for slow scans** (XACA-0243 follow-up) -
+  Bumped `POLL_INTERVAL_S` from 30s to 180s and extracted/raised the
+  ccusage subprocess timeout from a hardcoded 120s to a `CCUSAGE_TIMEOUT_S`
+  constant of 240s in `ccusage_collector.py`. Direct measurement on a
+  populated transcript dataset showed `ccusage blocks --json --since`
+  taking ~65s typical and occasionally cresting 120s under disk/CPU
+  contention, which polluted the cache with "ccusage timed out after 120s"
+  failure entries (UI sees those as `ok:false`). The poll loop is
+  sequential — `do_collection()` blocks for the scan, then sleeps
+  `POLL_INTERVAL_S` — so polls never stack regardless of scan duration;
+  the prior 30s interval just meant the loop spent more wall-clock waking
+  up than waiting. Net effect: a fresh data point every ~3.5–4.5 min on a
+  healthy system instead of bursts of timeouts. Dashboard "refresh"
+  button (`?refresh=1`) stays as-is — it's an on-demand path, not bound
+  by the daemon's polling cadence.
+
+### Added
+- **Claude Usage Monitor — full integration** (XACA-0243) -
+  Surfaces real-time API token consumption from `ccusage` on the LCARS
+  dashboard and every agent panel. Includes cached collector daemon
+  (`ccusage_collector.py`), heuristics layer with GREEN/AMBER/RED band
+  thresholds, new `/api/usage/current` endpoint, compact agent-panel
+  indicator (top-of-panel, polls every 30s), full dashboard widget
+  (current window progress, 7-day history, daily/weekly totals, calibration
+  confidence), stale-data detection (hatched bars, untrustworthy overlays),
+  and theme-aware styling (terminal accent color tints on agent panels).
+  Projection math uses ccusage's own burn-rate smoothing; refreshes every
+  ~30s cached, or on-demand via `?refresh=1` query param (slow, ~2 min).
+  Band thresholds (60%/85%) calibrated against 30-day rolling max-window
+  baseline; UNKNOWN until samples >= 5. See LCARS-README § Claude Usage
+  Monitor for operations and troubleshooting.
+
+- **Claude usage cache collector daemon** (XACA-0243-001) - New
+  `ccusage_collector.py` daemon polls `ccusage blocks --json` every 30s
+  and writes a normalised JSON cache to `/tmp/lcars-ccusage-cache.json`
+  atomically. Cache includes active window (burn rate, projection,
+  elapsed/remaining minutes), last 50 non-gap history windows, 30-day
+  calibration stats (max + p90 token counts for UI progress-bar scaling),
+  and today/7d cost totals. Error handling preserves last known good
+  values on ccusage failure so UI can show stale-data warnings.
+  `launch-ccusage-collector.sh` wrapper provided for launchd/supervisord
+  integration.
+
+### Fixed
+- **ccusage collector daemon now self-heals** (XACA-0243 follow-up) - When
+  `ccusage_collector.py` died (e.g. crash, fnm-multishells PATH drift,
+  manual kill) nothing restarted it, so `/api/usage/current` would return
+  `ok:false, stale:true` indefinitely until the LCARS server itself was
+  restarted. Added `_ensure_collector_running()` watchdog in `server.py`
+  invoked on every `/api/usage/current` request: cheap `kill(pid, 0)` fast
+  path when healthy, throttled detached `Popen` (30s cooldown to prevent
+  fork-bombing on crash-loop) when the PID is missing or dead. The
+  dashboard "refresh" button (`?refresh=1`) also benefits — pressing it
+  now resurrects a dead daemon in addition to running the synchronous
+  `--once` scan, so a single click recovers from any collector outage.
+  Adds 6 unit tests covering PID-alive detection (missing file, malformed
+  contents, dead PID, live PID, cross-user `PermissionError`) and respawn
+  throttling. Also extracts a `dim_color()` helper in
+  `agent-panel-display.sh::render_usage_indicator` so the stale/offline
+  branches no longer compound SGR escapes by raw string concatenation.
+
+- **USAGE section displayed under other content + button moved to utility
+  cluster** (XACA-0243 follow-up) - The USAGE section was missing from the
+  `.lcars-content > *` hide-by-default and active-show CSS rule sets in
+  `lcars.css`, so it was never given `position:absolute; display:none`
+  treatment and rendered in normal document flow underneath whatever
+  section was active. Also added `'usage'` to the `SECTIONS` array in
+  `lcars.js` (without it, `switchSection('usage')` returned at the
+  `indexOf === -1` guard before doing anything). Per UX feedback, the
+  USAGE button has been moved out of the kanban-mode sidebar into the
+  mode-bar utility cluster (next to VIEWSCREEN/SOUND) so it is globally
+  available across all modes; widened the section's `data-mode` to
+  `team kanban data settings`. Mobile tabbar entry retained.
+- **Overlay modals: header/footer rendered as content-width pills above
+  full-width body** (XACA-0246) - The base `.lcars-modal` rule at
+  `lcars-ui/css/lcars.css:5988` declares `display: flex; align-items:
+  center; justify-content: center` (intent: center the modal as a
+  full-screen backdrop). The overlay-scoped rule
+  `.lcars-modal-overlay .lcars-modal` overrides `display`/
+  `flex-direction` to `flex` + `column` for vertical stacking but does
+  not override `align-items`. Result: in column-flex mode,
+  `align-items: center` makes header and footer shrink to their content
+  width and render centered, producing a small pill-shaped header
+  floating above full-width body content (visible on epic-assign,
+  status-change, and any overlay modal whose body has explicit width).
+  Fix: declare `align-items: stretch` explicitly on
+  `.lcars-modal-overlay .lcars-modal` so cross-axis children fill the
+  modal width.
+
+### Changed
+- **Plan/Retro doc popup widened to 1200px max-width** (XACA-0246) -
+  Plan and retrospective markdown content (tables, code blocks, the
+  Subitems table) was cramped at the previous effective max-width of
+  500px. The `.plan-doc-modal { max-width: 800px }` declaration was
+  losing on specificity (0,1,0) to
+  `.lcars-modal-overlay .lcars-modal { max-width: 500px }` (0,2,0).
+  New rule `#plan-doc-modal-overlay .lcars-modal { max-width: 1200px }`
+  uses the unique overlay ID for specificity (1,1,0) so it wins cleanly
+  without touching the broad rule's defaults for other modals — about
+  50% wider than the prior effective rendering, on viewports that
+  support it (still scales down via `width: 90%` on smaller windows).
+
+### Reverted
+- **Reverted PR #273 (XACA-0240 plan-doc popup fix)** -
+  The scope-narrowing fix for plan-doc popup layout regressed worse than the
+  original symptom. Root cause of the regression: the base `.lcars-modal`
+  rule at `lcars-ui/css/lcars.css:5988` declares `display: flex` *without*
+  `flex-direction: column` (defaulting to `row`). Before XACA-0240, the
+  overlay-scoped rule `.lcars-modal-overlay .lcars-modal` overrode that
+  with `display: flex; flex-direction: column` (added by `bd96cd07`).
+  XACA-0240 removed that override under the assumption it was bd96cd07-new
+  and therefore safe to scope-narrow — but the underlying base rule made
+  `flex-direction: column` load-bearing for *every* overlay modal, not just
+  the release-flow modal. Without the override, header and body laid out
+  horizontally and content collapsed to a thin vertical strip on the right
+  edge. Reverting restores the working state. The original plan-doc bug
+  needs re-diagnosis before a new fix attempt.
+
+### Added
+- **PLANNED state as initial release platform state** (XACA-0238) -
+  New release platforms now start in `PLANNED` state instead of `DEV`, signifying
+  "created but not yet started." The full pipeline is now
+  `PLANNED → DEV → QA → ALPHA → BETA → GAMMA → PROD`. First promotion advances
+  a platform from PLANNED to DEV. The LCARS releases dashboard gains a third tab
+  (**Planned / Active / Archived**); Planned tab shows releases where all platforms
+  are still at PLANNED, Active tab shows releases with any platform at DEV+.
+  PLANNED renders as neutral gray in platform badges and env-badge elements.
+
+### Fixed
+- **Collapsed release cards rendered invisible text after tab backgrounding** -
+  `.release-card` gained `transform: translateZ(0)` to force an independent
+  paint layer. On the Firebase releases view (and any board with ≥2 collapsed
+  releases), cards after the first rendered as empty black regions with the
+  team watermark bleeding through after the browser tab was hidden and
+  restored; selecting text forced a repaint and content reappeared until the
+  next tab backgrounding. Root cause is a Chromium/WebKit paint-invalidation
+  bug triggered by `.release-card-items`'s idle `transition: max-height`
+  inside the card's `overflow: hidden` container — the compositor
+  deprioritized the layer while the tab was hidden and failed to re-rasterize
+  text on return. Expanded cards were unaffected because `overflow-y: auto`
+  on the items panel forced its own paint layer. Promoting every card to its
+  own layer up front sidesteps the bug without changing the expand/collapse
+  animation.
+
+### Changed
+- **Epic + Release card headers: tag pill relocated into header, right cluster stacked below, tighter section spacing** (XACA-0226) -
+  The free-standing `queue-tags-row` that rendered below each Epic/Release card header was removed and
+  the tag pill is now injected inside the header's right column, directly above whatever already sat
+  on the right side of the header (Epics: DOCS/✎/✕/▶ action cluster; Releases: date/count/progress/expand
+  meta row). New `.epic-card-header-right` / `.release-card-header-right` flex columns (`flex-direction:
+  column`, `align-items: flex-end`, `align-self: stretch`) span the full header height; the bottom
+  cluster uses `margin-top: auto` so it still bottoms out on tag-less cards (a `justify-content:
+  space-between` approach would pin the lone child to the top). `.epic-search-bar` / `.release-search-bar`
+  top padding reduced 6px → 2px and `.epics-section` / `.releases-section` top padding reduced to 8px
+  so the search field hugs the section header. Archived-release `::before` 📦 badge at `right: 8px`
+  would have overlapped the new tag pill's top-right corner, so `.release-card.archived
+  .release-card-header-right` gained `padding-right: 16px` to clear the badge zone. The bottom
+  `.release-card-actions` bar (DOCS/PROMOTE/RELNOTES/EDIT/ARCHIVE/DELETE) was explicitly out of scope
+  and is unchanged. Tag click-to-populate-search and header click-to-expand both still work — click
+  delegation is on `dashboardEl` (unchanged by DOM restructuring) and `e.stopPropagation()` on tag
+  clicks keeps the header's `onclick` from firing.
+- **Release/Epic tag filter replaced with Queue-parity search + clickable item tag pills** (XACA-0209 round 5) -
+  The pill filter bar from rounds 3–4 was removed entirely. Each section now has a single search input
+  that filters across id/title/shortTitle/description/tags. Every Release and Epic card shows a
+  Queue-style purple tag-pill row between the card header and body; clicking a pill populates the
+  section's search input, exactly like clicking a tag on a Queue item. `/api/releases/tags` and
+  `/api/epics/tags` endpoints removed; `?tags=` query filter removed from the list endpoints; all
+  client-side pill-filter machinery + 43 endpoint tests deleted. New localStorage keys
+  (`lcars-release-search` / `lcars-epic-search`) persist the search string; old `*-tags-filter`
+  keys orphaned (harmless) rather than migrated. `.queue-tag` gained `max-width: 180px` +
+  `text-overflow: ellipsis` so legacy 200-char test tags don't bloat any pill row. Net: 5 files
+  changed, +209 / −904 (−695 lines). Backend suite: 155 → 112 pass.
+- **Release/Epic tag filter rebuilt on Queue-parity pill UI** (XACA-0209 round 4) -
+  The original spec was "mirror the Queue tab's filter UI/UX". The feature had
+  shipped as a `<select multiple>` control, which three debug rounds patched
+  around but never brought into spec. This round replaces the select with
+  click-to-toggle pill divs (`.filter-pill` variants) that structurally match
+  the Queue filter pills — teal for Releases, purple for Epics. Keyboard
+  accessible (Enter/Space), `role=button` / `aria-pressed`, empty-state
+  "NO TAGS" placeholder when a section has zero tags. State persistence and
+  stale-tag auto-heal from round 3 are retained. Dead code removed:
+  `applyReleaseTagFilter`, `applyEpicTagFilter`,
+  `updateReleaseTagFilterDropdownStyle`, `updateEpicTagFilterDropdownStyle`,
+  `enableClickToggleOnMultiSelect`, and their CSS/HTML counterparts.
+  Review follow-ups folded in: shared `renderTagFilterPills` /
+  `populateTagFilterOptions` helpers; toggles renamed
+  `toggle{Release,Epic}TagFilter` for Queue parity; module-scope
+  `{release,epic}AvailableTags` replaces `dataset.tags` caching;
+  `.filter-pill:focus-visible` adds a keyboard focus outline on the
+  shared pill base (benefits Queue filters too).
+
+### Fixed
+- **Epic `completedCount` now matches release convention** (XACA-0218) -
+  `GET /api/epics` under-reported `completedCount` because it checked only
+  `status == 'completed'`, missing items marked `status == 'done'`. Aligned with
+  the dual-check already used in `serve_release_progress` (server.py:2685) and
+  frontend `loadEpicItems`/`loadReleaseItems`: `status in ('done', 'completed')`.
+  One-line fix at `server.py:4087`.
+- **Release/Epic tag filter — three compounding bugs** (XACA-0209 debug round 3) -
+  (1) Dropdowns only displayed the first sorted tag because `<select multiple size="1">`
+  renders as a one-row listbox; bumped `size="5"` on both filters so multiple
+  tags are visible without scrolling. (2) Selecting a tag stored with padding
+  (e.g. `"  spaced  "`) hid every release/epic because the backend stripped the
+  incoming filter but compared it against unstripped stored tag values;
+  `serve_releases_list`, `serve_releases_tags`, `serve_epics_list`, and
+  `serve_epics_tags` now normalize stored tag values via `.strip()` on compare
+  and list-build. The four write-path handlers (`handle_create_release`,
+  `handle_update_release`, `handle_create_epic`, `handle_update_epic`) also
+  `.strip()` individual tag values so new data is stored clean and the
+  read-path normalization becomes defensive rather than load-bearing.
+  (3) A `selectedTags` value left in localStorage from a tag the
+  user later removed (or one that exists on another team) had no dropdown option
+  to click, so the user could not deselect it and every release/epic stayed
+  hidden; `populateReleaseTagOptions` / `populateEpicTagOptions` now prune
+  `selectedTags` to the intersection with the server's current tag set, persist
+  the pruned state, and re-run the list loader when pruning occurs.
+- **Release/Epic tag filter click-to-deselect** (XACA-0209 debug) - Tags in the
+  Releases and Epics tag filter dropdowns could be selected but a plain click on
+  a selected tag would not deselect it. Native `<select multiple>` requires
+  Ctrl/Cmd-click to toggle, contradicting the "Click selected to deselect" hint.
+  Added a shared `mousedown` interceptor that toggles `option.selected` manually,
+  giving true checkbox-style click-to-toggle behavior on both filters.
+- **Release/Epic tag API parity cleanups** (XACA-0209 review follow-up) - Addressed 4 review subitems before merge.
+  - `serve_epics_tags` now sends `Cache-Control: no-cache` (mirrors `serve_releases_tags`).
+  - Added `test_route_dispatch_to_serve_epics_tags` symmetric to the releases equivalent.
+  - Documented no-comma-in-tag-value constraint in filter docstrings (both releases and epics).
+  - `handle_create_release` / `handle_update_release` now apply `isinstance` + `strip` validation to the `tags` field, matching the epic handlers (filters out non-string and blank entries server-side).
+  - 10 new tests (`TestHandleCreateReleaseTagsValidation`, `TestHandleUpdateReleaseTagsValidation`), 147 total passing.
+
+### Added
+- **Tap-to-copy for Release and Epic IDs** (XACA-0213) - Release and Epic badges on
+  queue items now include a clickable monospace ID chip (e.g. `[XIOS-0042]`) next to
+  the shortTitle. Clicking the chip copies the ID to clipboard with toast feedback —
+  mirroring the existing Item ID click-to-copy pattern. The badge body continues to
+  open the assignment modal; `stopPropagation` on the chip prevents modal hijacking.
+  - New spans: `.queue-epic-badge-name`, `.queue-epic-badge-id`,
+    `.queue-release-badge-name`, `.queue-release-badge-id`
+  - ARIA: `role=button`, `tabindex=0`, descriptive `aria-label` for screen readers
+  - Keyboard: Enter/Space triggers the copy
+  - Chip only rendered when a release/epic is assigned (unassigned `+REL`/`+EPIC`
+    states are unchanged)
+  - Visual: 87% font-size, Courier New monospace, opacity 0.72 idle → 1.0 on hover,
+    subtle scale + tinted background matching each badge's accent color
+  - Mobile: font scales to 80% inside `@media (max-width: 1024px)` to stay within
+    the tracking-zone row
+- **Release tag filtering API** (XACA-0209) - New backend endpoints for tag-based filtering on Releases.
+  - `GET /api/releases/tags` — returns distinct sorted list of tags across all active releases for the team; respects `?team=<slug>` param; response shape `{"tags": [...]}`.
+  - `GET /api/releases?tags=tag1,tag2` — filters returned releases to those whose `tags` array contains ANY of the requested tags (OR semantics, matching epics behaviour). Omitting `?tags` leaves existing behaviour unchanged.
+- **Release tab tag filter dropdown** (XACA-0209-002) - Tag filter UI above the Releases dashboard.
+  - Separate `releaseTagFilterState` object and `RELEASE_TAG_FILTER_KEY = 'lcars-release-tags-filter'` localStorage key — no coupling to `queueFilterState`.
+  - Multi-select dropdown populated from `GET /api/releases/tags` when entering the Releases tab.
+  - Filter persists across sessions via `loadReleaseTagFilterState()` / `saveReleaseTagFilterState()`.
+  - `applyReleaseTagFilter()` passes `?tags=…` to `loadReleases()` on change; control highlights when filter is active.
+  - New CSS classes with `release-tag-filter-*` prefix appended to `lcars.css`.
+
 ### Changed
 - **LCARS Tab Order Reorder** (XACA-0115) - Reordered all tab navigation for improved workflow
   - New order: HOME → TODOS → CALENDAR → WORKFLOW → DETAILS → QUEUE → EPICS → RELEASES → SETTINGS

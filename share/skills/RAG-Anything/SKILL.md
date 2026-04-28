@@ -25,6 +25,7 @@ tags:
 command_shortcut: /rag-anything
 last_updated: 2026-04-07
 status: skeleton
+model: sonnet
 ---
 
 # RAG-Anything

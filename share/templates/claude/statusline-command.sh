@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# This file is a template — {{ORG_NAME}}, {{ORG_SLUG}}, {{SHARED_DEV_ROOT}},
+# etc. are substituted at install time by the AITeamForge installer.
+# Do not edit the rendered copy directly.
 
 # TNG-Themed Status Line for Claude Code
 # Matches the exact zsh prompt structure and colors
@@ -69,20 +72,19 @@ _get_team_kanban_dir() {
     # Fallback: built-in case statement (kept for environments without the loader)
     case "$team" in
         academy)                        echo "${HOME}/dev-team/kanban" ;;
-        ios)                            echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
-        android)                        echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
-        firebase)                       echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        command|mainevent)              echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
-        dns)                            echo "/Users/Shared/Development/DNSFramework/kanban" ;;
+        # TODO(installer): {{SHARED_DEV_ROOT}} and {{ORG_NAME}} resolved at install time
+        ios)                            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/kanban" ;;
+        android)                        echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/kanban" ;;
+        firebase)                       echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban" ;;
+        command|{{ORG_SLUG}})           echo "{{SHARED_DEV_ROOT}}/dev-team/kanban" ;;
+        dns)                            echo "${HOME}/dns-framework/kanban" ;;
         freelance)                      echo "${HOME}/dev-team/kanban" ;;
-        freelance-doublenode-starwords) echo "/Users/Shared/Development/DoubleNode/Starwords/kanban" ;;
-        freelance-doublenode-appplanning) echo "/Users/Shared/Development/DoubleNode/appPlanning/kanban" ;;
-        freelance-doublenode-workstats) echo "/Users/Shared/Development/DoubleNode/WorkStats/kanban" ;;
-        freelance-doublenode-lifeboard) echo "/Users/Shared/Development/DoubleNode/LifeBoard/kanban" ;;
-        freelance-doublenode-caravan)   echo "/Users/Shared/Development/DoubleNode/Caravan/kanban" ;;
-        freelance-doublenode-awaysentry) echo "/Users/Shared/Development/DoubleNode/AwaySentry/kanban" ;;
-        freelance-liquidstyle-agentbadges-app) echo "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban" ;;
-        freelance-liquidstyle-agentbadges-ios) echo "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban" ;;
+        # NOTE: Specific freelance-<client>-<project> team IDs are registered at
+        # install time and resolved via aiteamforge_team_kanban_dir() above.
+        # The dynamic loader handles per-install team routing without hardcoding
+        # client or project names here. If the loader is unavailable, freelance
+        # teams fall through to the generic freelance arm above.
+        # TODO(installer): add registered team ID arms here during install if needed.
         legal-coparenting)              echo "${HOME}/legal/coparenting/kanban" ;;
         finance-personal)               echo "${HOME}/finance/personal/kanban" ;;
         medical|medical-general)        echo "${HOME}/medical/general/kanban" ;;
@@ -289,7 +291,7 @@ get_theme_data() {
         INTELLIGENCE)
             echo "240:250:🔍:INTELLIGENCE"
             ;;
-        # MainEvent (VOY) themes
+        # {{ORG_NAME}} (VOY) themes — org-specific theme set, installed by org plugin
         VOY-COMMAND)
             echo "160:196:⭐:VOY COMMAND"
             ;;
@@ -388,7 +390,9 @@ detect_theme() {
         fi
     fi
 
+    # xaca-0139:allowed — env var naming follows CLAUDE_<TEAM_SLUG>_THEME convention; mainevent is a stable team slug
     if [ -n "$CLAUDE_MAINEVENT_THEME" ]; then
+        # xaca-0139:allowed — stable team-slug constant (see CLAUDE_MAINEVENT_THEME above)
         theme_data=$(get_theme_data "VOY-$CLAUDE_MAINEVENT_THEME")
         if [ "$theme_data" != "240:250:💻:SYSTEM" ]; then
             echo "$theme_data"

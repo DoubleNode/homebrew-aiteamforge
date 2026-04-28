@@ -46,17 +46,71 @@ function getBasePath() {
 }
 
 /**
- * Convert an API path to include the base path prefix.
- * e.g., '/api/status' -> '/academy/api/status' when at /academy/
+ * Convert an API path to include the base path prefix and, for team-scoped
+ * endpoints, inject ?team=<CONFIG.team> so the server never silently falls
+ * back to its LCARS_TEAM env default (or hard-coded "freelance").
+ *
+ * XACA-0249: team param injection
+ *   - Only injects when CONFIG.team is truthy (set by loadServerConfig()).
+ *   - Only injects for known team-scoped API prefixes — leaves unscoped
+ *     endpoints (status, backup, integrations, rag-engines …) untouched.
+ *   - Extra params can be passed as a plain object; they are merged after
+ *     the team param so callers don't have to rebuild query strings by hand.
+ *   - Does NOT overwrite an already-present ?team= in the raw path string
+ *     (e.g. the calendar/items call that builds its own ?team=).
+ *
+ * e.g., '/api/epics' -> '/academy/api/epics?team=academy' when at /academy/
  */
-function apiUrl(path) {
+// MAINTENANCE CONTRACT (XACA-0249):
+//   When adding a new team-scoped endpoint to server.py (one that reads the
+//   `team` query param and serves data per-team), add its path prefix here
+//   so apiUrl() auto-injects ?team=<CONFIG.team>. Forgetting this step
+//   reintroduces the silent-misrouting bug XACA-0249 fixed: the UI will
+//   call without team= and the server will fall back to LCARS_TEAM env
+//   (or hardcoded "freelance" when env is unset). The smoke test
+//   (lcars-smoke-test.sh) catches the worst case but not per-endpoint drift.
+const TEAM_SCOPED_PREFIXES = [
+    '/api/epics',
+    '/api/releases',
+    '/api/todos',
+    '/api/items',
+    '/api/release-config',
+    '/api/calendar/items',
+];
+
+function apiUrl(path, extraParams) {
     const base = getBasePath();
-    // If path starts with /, prepend base path
-    if (path.startsWith('/')) {
-        return base + path;
+    const withBase = path.startsWith('/') ? base + path : path;
+
+    // Only inject team for known team-scoped paths, and only when CONFIG.team
+    // is populated and the URL doesn't already carry a team= query param.
+    const needsTeam = CONFIG.team &&
+        TEAM_SCOPED_PREFIXES.some(p => path.startsWith(p)) &&
+        !path.includes('team=');
+
+    if (!needsTeam && !extraParams) {
+        return withBase;
     }
-    // Otherwise return as-is (already relative)
-    return path;
+
+    // Build URLSearchParams from any existing query string in path.
+    const qmark = withBase.indexOf('?');
+    const pathname = qmark === -1 ? withBase : withBase.slice(0, qmark);
+    const existing = qmark === -1 ? '' : withBase.slice(qmark + 1);
+    const sp = new URLSearchParams(existing);
+
+    if (needsTeam) {
+        sp.set('team', CONFIG.team);
+    }
+    if (extraParams) {
+        for (const [k, v] of Object.entries(extraParams)) {
+            if (v !== undefined && v !== null) {
+                sp.set(k, String(v));
+            }
+        }
+    }
+
+    const qs = sp.toString();
+    return qs ? pathname + '?' + qs : pathname;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -104,7 +158,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Mode state machine (XACA-0164)
@@ -117,6 +171,15 @@ const MODE_SECTIONS_KEY = 'lcars.modeSections'; // JSON: { team, kanban, data, s
 // Queue filter state
 const QUEUE_FILTER_KEY = 'lcars-queue-filter';
 let queueFilterState = { activeFilters: ['all'], searchText: '', sortBy: 'priority', osFilter: 'all', releaseFilter: 'all', epicFilter: 'all', categoryFilter: 'all' };
+
+// Release/Epic search state (XACA-0209 round 5 — replaces pill-filter bars).
+// Client-side substring search over id/title/shortTitle/description/tags.
+// Storage keys are NEW (not the round-3/4 "*-tags-filter" keys) so legacy
+// selectedTags arrays sitting in user localStorage are orphaned, not loaded.
+const RELEASE_SEARCH_KEY = 'lcars-release-search';
+let releaseSearchText = '';
+const EPIC_SEARCH_KEY = 'lcars-epic-search';
+let epicSearchText = '';
 
 // Calendar state
 const CALENDAR_VIEW_KEY = 'lcars-calendar-view';
@@ -305,11 +368,21 @@ function showToast(message, type = 'info', duration = null) {
         info: 'ℹ'
     };
 
-    toast.innerHTML = `
-        <span class="toast-icon">${icons[type] || icons.info}</span>
-        <span class="toast-message">${message}</span>
-        <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
-    `;
+    // XACA-0217: build with textContent — message is untrusted (server errors, IDs, user input)
+    const iconSpan = document.createElement('span');
+    iconSpan.className = 'toast-icon';
+    iconSpan.textContent = icons[type] || icons.info;
+
+    const messageSpan = document.createElement('span');
+    messageSpan.className = 'toast-message';
+    messageSpan.textContent = message;
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'toast-close';
+    closeBtn.textContent = '×';
+    closeBtn.addEventListener('click', () => toast.remove());
+
+    toast.append(iconSpan, messageSpan, closeBtn);
 
     // Add to container
     container.appendChild(toast);
@@ -1319,10 +1392,15 @@ function _renderHomeEpicProgress(backlog, epics) {
 
     const rows = epics.map(epic => {
         const ids       = epic.itemIds || [];
-        const epicTotal = ids.length;
-        const done      = ids.filter(id => itemStatusMap[id] === 'completed').length;
-        const pct       = epicTotal > 0 ? Math.round((done / epicTotal) * 100) : 0;
-        const title     = (epic.title || epic.name || epic.id || 'UNKNOWN').toUpperCase();
+        // Exclude cancelled items from the denominator (XACA-0206 parity).
+        // An epic with only cancelled items has nothing left to do — show 100%.
+        const activeIds  = ids.filter(id => itemStatusMap[id] !== 'cancelled');
+        const cancelled  = ids.length - activeIds.length;
+        const epicTotal  = activeIds.length;
+        const done       = activeIds.filter(id => itemStatusMap[id] === 'completed').length;
+        const pct        = epicTotal > 0 ? Math.round((done / epicTotal) * 100) : 100;
+        const cancelTag  = cancelled > 0 ? ` <span style="color:var(--lcars-red);">(${cancelled} cx)</span>` : '';
+        const title      = (epic.title || epic.name || epic.id || 'UNKNOWN').toUpperCase();
 
         // Color based on completion percentage
         let barColor;
@@ -1340,7 +1418,7 @@ function _renderHomeEpicProgress(backlog, epics) {
             <div class="epic-progress-row" style="margin-bottom: 8px;">
                 <div style="display: flex; justify-content: space-between; align-items: baseline; color: #FFCC99; font-family: 'Antonio', sans-serif; font-size: 13px; margin-bottom: 5px;">
                     <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 75%;">${escapeHtml(title)}</span>
-                    <span style="color: rgba(255,204,153,0.7); font-size: 12px; flex-shrink: 0; margin-left: 8px;">${done}/${epicTotal} &bull; ${pct}%</span>
+                    <span style="color: rgba(255,204,153,0.7); font-size: 12px; flex-shrink: 0; margin-left: 8px;">${done}/${epicTotal}${cancelTag} &bull; ${pct}%</span>
                 </div>
                 <div style="background: rgba(255,255,255,0.08); border-radius: 4px; height: 10px; overflow: hidden;">
                     <div style="background: ${barColor}; height: 100%; width: ${pct}%; border-radius: 4px; transition: width 1s ease;"></div>
@@ -2269,7 +2347,7 @@ function createDetailRow(win) {
     const currentColor = getStatusColor(win.status);
 
     // Half pill for current status (rounded left, straight right)
-    const currentStatusPill = `<span class="status-half-pill-left" style="background-color: ${currentColor}">${win.status.toUpperCase()}</span>`;
+    const currentStatusPill = `<span class="status-half-pill-left" style="background-color: ${currentColor}">${escapeHtml(String(win.status).toUpperCase())}</span>`;
     // Black divider
     const divider = '<span class="status-pill-divider"></span>';
     // Half pill for time (straight left, rounded right)
@@ -2284,7 +2362,7 @@ function createDetailRow(win) {
         const wasTrimmed = win.statusHistory.length > 8;
         // Color each status with its swimlane color
         const coloredHistory = trimmedHistory.map(s =>
-            `<span style="color: ${getStatusColor(s)}">${s.toUpperCase()}</span>`
+            `<span style="color: ${getStatusColor(s)}">${escapeHtml(String(s).toUpperCase())}</span>`
         ).join(' <span style="color: #666">←</span> ');
         const suffix = wasTrimmed ? ' <span style="color: #666">←</span>' : '';
         history.innerHTML = `${currentDisplay} <span style="color: #666">←</span> ${coloredHistory}${suffix}`;
@@ -2418,7 +2496,13 @@ function createDetailRow(win) {
     if (win.gitLines && (win.gitLines.added > 0 || win.gitLines.deleted > 0)) {
         const lines = document.createElement('span');
         lines.className = 'detail-lines-changed';
-        lines.innerHTML = `<span class="lines-added">+${win.gitLines.added}</span> <span class="lines-deleted">-${win.gitLines.deleted}</span>`;
+        const added = document.createElement('span');
+        added.className = 'lines-added';
+        added.textContent = `+${win.gitLines.added}`;
+        const deleted = document.createElement('span');
+        deleted.className = 'lines-deleted';
+        deleted.textContent = `-${win.gitLines.deleted}`;
+        lines.append(added, document.createTextNode(' '), deleted);
         line6.appendChild(lines);
     }
 
@@ -3162,7 +3246,11 @@ function createQueueItem(item, index) {
             displayName = fallbackName.length > 15 ? fallbackName.substring(0, 15) + '…' : fallbackName;
         }
         epicBadge.className = 'queue-epic-badge assigned';
-        epicBadge.textContent = displayName;
+        const epicNameSpan = document.createElement('span');
+        epicNameSpan.className = 'queue-epic-badge-name';
+        epicNameSpan.textContent = displayName;
+        epicBadge.appendChild(epicNameSpan);
+        epicBadge.appendChild(createCopyableIdChip(item.epicId, 'queue-epic-badge-id', 'Epic'));
         epicBadge.title = `Epic: ${epicFullTitle}\nID: ${item.epicId}\nClick to change`;
         epicBadge.setAttribute('aria-label', `Epic: ${epicFullTitle}`);
     } else {
@@ -3225,7 +3313,11 @@ function createQueueItem(item, index) {
         }
 
         releaseBadge.className = 'queue-release-badge assigned';
-        releaseBadge.textContent = displayName;
+        const releaseNameSpan = document.createElement('span');
+        releaseNameSpan.className = 'queue-release-badge-name';
+        releaseNameSpan.textContent = displayName;
+        releaseBadge.appendChild(releaseNameSpan);
+        releaseBadge.appendChild(createCopyableIdChip(releaseId, 'queue-release-badge-id', 'Release'));
         releaseBadge.title = `Release: ${releaseName}\nID: ${releaseId}\nPlatform: ${item.releaseAssignment.platform}\nClick to change`;
         releaseBadge.setAttribute('aria-label', `Release: ${releaseName}, Platform: ${item.releaseAssignment.platform}`);
     } else {
@@ -4929,7 +5021,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
             const data = await response.json();
 
             if (data.error) {
-                resultsContainer.innerHTML = `<div class="jira-search-error">${data.error}</div>`;
+                resultsContainer.innerHTML = `<div class="jira-search-error">${escapeHtml(data.error)}</div>`;
                 return;
             }
 
@@ -5058,7 +5150,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
 
             if (!data.valid) {
                 // Ticket doesn't exist or invalid format - show error
-                resultsContainer.innerHTML = `<div class="jira-search-error">❌ ${data.error}</div>`;
+                resultsContainer.innerHTML = `<div class="jira-search-error">❌ ${escapeHtml(data.error)}</div>`;
                 saveBtn.disabled = false;
                 input.disabled = false;
                 return;
@@ -5066,9 +5158,9 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
 
             // Valid - show success and proceed
             if (data.exists) {
-                resultsContainer.innerHTML = `<div class="jira-search-success">✓ ${data.ticketId}: ${data.summary || 'Verified'}</div>`;
+                resultsContainer.innerHTML = `<div class="jira-search-success">✓ ${escapeHtml(data.ticketId)}: ${escapeHtml(data.summary || 'Verified')}</div>`;
             } else if (data.warning) {
-                resultsContainer.innerHTML = `<div class="jira-search-warning">⚠️ ${data.warning}</div>`;
+                resultsContainer.innerHTML = `<div class="jira-search-warning">⚠️ ${escapeHtml(data.warning)}</div>`;
             }
 
             // Brief pause to show success feedback
@@ -5180,7 +5272,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
             const ticketId = data.ticketId || data.key || data.id;
             const ticketUrl = data.url;
 
-            resultsContainer.innerHTML = `<div class="jira-search-success">✓ Created ${ticketId}</div>`;
+            resultsContainer.innerHTML = `<div class="jira-search-success">✓ Created ${escapeHtml(ticketId)}</div>`;
 
             // Update the kanban item
             if (isSubitem) {
@@ -5196,7 +5288,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
 
         } catch (error) {
             console.error('Create item error:', error);
-            resultsContainer.innerHTML = `<div class="jira-search-error">❌ ${error.message || 'Failed to create item'}</div>`;
+            resultsContainer.innerHTML = `<div class="jira-search-error">❌ ${escapeHtml(error.message || 'Failed to create item')}</div>`;
             createBtn.disabled = false;
             titleInput.disabled = false;
             descInput.disabled = false;
@@ -6063,6 +6155,31 @@ function copyToClipboard(text) {
  * @param {string} type - Type: 'success', 'error', 'info'
  */
 // NOTE: showToast() is defined at line 229 with close button, configurable duration, and proper LCARS styling
+
+// XACA-0213: Shared builder for clickable, copyable ID chips inside badges.
+// stopPropagation on click/keydown prevents the chip from bubbling to the
+// parent badge's assign-modal handler. Used by the Epic and Release badges.
+function createCopyableIdChip(id, className, labelPrefix) {
+    const chip = document.createElement('span');
+    chip.className = className;
+    chip.textContent = `[${id}]`;
+    chip.setAttribute('role', 'button');
+    chip.setAttribute('tabindex', '0');
+    chip.setAttribute('aria-label', `${labelPrefix} ID: ${id}. Click to copy.`);
+    chip.title = `Click to copy ${labelPrefix} ID to clipboard`;
+    chip.addEventListener('click', (e) => {
+        e.stopPropagation();
+        copyToClipboard(id);
+    });
+    chip.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            copyToClipboard(id);
+        }
+    });
+    return chip;
+}
 
 function formatRelativeTime(isoString) {
     if (!isoString) return '-';
@@ -8369,6 +8486,158 @@ function saveQueueFilterState() {
     }
 }
 
+// ─── Release Tag Filter (XACA-0209) ──────────────────────────────────────────
+
+// ─── Release / Epic search + item-tag helpers (XACA-0209 round 5) ─────────────
+
+/** Shared: load a persisted search string from localStorage. */
+function loadSearchText(storageKey) {
+    try {
+        const saved = localStorage.getItem(storageKey);
+        return typeof saved === 'string' ? saved : '';
+    } catch (e) {
+        return '';
+    }
+}
+
+/** Shared: persist a search string to localStorage. */
+function saveSearchText(storageKey, text) {
+    try {
+        localStorage.setItem(storageKey, text);
+    } catch (e) {
+        /* noop — non-fatal */
+    }
+}
+
+/** Substring matcher shared by release and epic search.
+ *  Matches across id, title, shortTitle, description, and tags. Empty text → always true. */
+function itemMatchesSearch(item, searchText) {
+    if (!searchText) return true;
+    const needle = searchText.toLowerCase().trim();
+    if (!needle) return true;
+    const hay = [
+        item.id || '',
+        item.title || '',
+        item.name || '',
+        item.shortTitle || '',
+        item.description || '',
+    ].join(' ').toLowerCase();
+    if (hay.includes(needle)) return true;
+    if (Array.isArray(item.tags)) {
+        for (const tag of item.tags) {
+            if (typeof tag === 'string' && tag.toLowerCase().includes(needle)) return true;
+        }
+    }
+    return false;
+}
+
+/** Release search state mutator. Updates input value (if different), persists, and reloads. */
+function setReleaseSearchFilter(text) {
+    releaseSearchText = text || '';
+    saveSearchText(RELEASE_SEARCH_KEY, releaseSearchText);
+    const input = document.getElementById('release-filter-text');
+    if (input && input.value !== releaseSearchText) input.value = releaseSearchText;
+    const clearBtn = document.getElementById('release-filter-clear');
+    if (clearBtn) clearBtn.style.display = releaseSearchText ? 'block' : 'none';
+    loadReleases();
+}
+
+/** Epic search state mutator. Updates input value (if different), persists, and reloads. */
+function setEpicSearchFilter(text) {
+    epicSearchText = text || '';
+    saveSearchText(EPIC_SEARCH_KEY, epicSearchText);
+    const input = document.getElementById('epic-filter-text');
+    if (input && input.value !== epicSearchText) input.value = epicSearchText;
+    const clearBtn = document.getElementById('epic-filter-clear');
+    if (clearBtn) clearBtn.style.display = epicSearchText ? 'block' : 'none';
+    loadEpics();
+}
+
+/** Wire the search input + clear button for a section. Shared between Releases and Epics. */
+function initSectionSearchBar(config) {
+    const input = document.getElementById(config.inputId);
+    const clearBtn = document.getElementById(config.clearId);
+    if (!input || !clearBtn) return;
+
+    // Restore persisted value before binding events (so the initial input event
+    // we fire with setter below doesn't double-run).
+    input.value = config.currentText();
+    clearBtn.style.display = config.currentText() ? 'block' : 'none';
+
+    let debounceTimer = null;
+    input.addEventListener('input', (e) => {
+        const v = e.target.value;
+        clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => config.setFilter(v), 150);
+    });
+
+    clearBtn.addEventListener('click', () => {
+        input.value = '';
+        config.setFilter('');
+        input.focus();
+    });
+}
+
+/**
+ * Build a Queue-style purple tag-pill row for a Release or Epic card.
+ * Returns an HTML string (for inline injection into card template literals), but
+ * the pill DOM is built via createElement/textContent/dataset (matching Queue's
+ * createTagsElement) so no tag value ever reaches an attribute-context
+ * interpolation — attribute-quote or HTML-delimiter characters in tag values
+ * cannot escape their context regardless of escapeHtml's scope. Returns '' when
+ * the tag list is empty.
+ *
+ * @param {string[]} tags
+ * @param {string} searchScope   'release' | 'epic' — stored on dataset.searchScope
+ */
+function buildItemTagsHtml(tags, searchScope) {
+    if (!Array.isArray(tags) || tags.length === 0) return '';
+    const displayTags = tags.filter(t => typeof t === 'string' && t.trim());
+    if (displayTags.length === 0) return '';
+
+    const row = document.createElement('div');
+    row.className = 'queue-tags-row';
+    const container = document.createElement('div');
+    container.className = 'queue-tags';
+    row.appendChild(container);
+
+    displayTags.forEach((tag, idx) => {
+        if (idx > 0) {
+            const sep = document.createElement('div');
+            sep.className = 'queue-tag-separator';
+            container.appendChild(sep);
+        }
+        const trimmed = tag.trim();
+        const pill = document.createElement('div');
+        pill.className = 'queue-tag';
+        pill.textContent = trimmed;
+        pill.title = `Filter by: ${trimmed}`;
+        pill.dataset.tag = trimmed;
+        pill.dataset.searchScope = searchScope;
+        container.appendChild(pill);
+    });
+
+    return row.outerHTML;
+}
+
+/** Delegated click wiring for item tag pills inside a dashboard container.
+ *  Called once per displayReleases / displayEpics so click handlers survive re-render. */
+function bindItemTagClicks(dashboardEl) {
+    if (!dashboardEl || dashboardEl.dataset.tagClicksWired === '1') return;
+    dashboardEl.addEventListener('click', (e) => {
+        const pill = e.target.closest('.queue-tag[data-search-scope]');
+        if (!pill) return;
+        e.stopPropagation();
+        const tag = pill.dataset.tag || '';
+        const scope = pill.dataset.searchScope;
+        if (scope === 'release') setReleaseSearchFilter(tag);
+        else if (scope === 'epic') setEpicSearchFilter(tag);
+    });
+    dashboardEl.dataset.tagClicksWired = '1';
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
  * Toggle a filter pill
  * @param {string} filterName - The filter to toggle
@@ -9200,6 +9469,16 @@ function runMigration() {
     } catch (e) {
         console.warn('lcars: Migration error', e);
     }
+
+    // XACA-0209 round 5: one-shot cleanup of the round-3/4 pill-filter localStorage
+    // keys. Shape is incompatible with the new search model, so stale values would
+    // sit forever. removeItem is idempotent — safe to call on every session.
+    try {
+        localStorage.removeItem('lcars-release-tags-filter');
+        localStorage.removeItem('lcars-epic-tags-filter');
+    } catch (e) {
+        /* noop — non-fatal */
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -9249,6 +9528,11 @@ function switchSection(sectionName, skipAnimation = false) {
 
     // Update mobile tab bar buttons (mirrors sidebar state)
     document.querySelectorAll('.tabbar-button[data-section]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.section === sectionName);
+    });
+
+    // Update mode-bar utility pills that navigate to sections (e.g. USAGE — XACA-0243)
+    document.querySelectorAll('.legend-pill[data-section]').forEach(btn => {
         btn.classList.toggle('active', btn.dataset.section === sectionName);
     });
 
@@ -10246,10 +10530,13 @@ async function loadReleases() {
 
     try {
         // XACA-0056: Include status filter in API call
-        const statusParam = releasesState.statusFilter || 'active';
+        // 'planned' and 'active' tabs both fetch non-archived releases from backend;
+        // client-side filtering in displayReleases() splits them by platform state.
+        const statusParam = releasesState.statusFilter === 'archived' ? 'archived' : 'active';
+        // XACA-0209 round 5: tag filtering moved fully client-side — see displayReleases.
         // Fetch releases and flow config in parallel (include team for correct scoping)
         const [releasesResponse, configResponse] = await Promise.all([
-            fetch(apiUrl(`/api/releases?status=${statusParam}`)),
+            fetch(apiUrl('/api/releases?status=' + statusParam)),
             fetch(apiUrl(`/api/release-config?team=${encodeURIComponent(CONFIG.team)}`))
         ]);
 
@@ -10296,17 +10583,55 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
     const dashboard = document.getElementById('releases-dashboard');
     if (!dashboard) return;
 
+    // XACA-0238: Client-side split for Planned vs Active tabs.
+    // Backend returns all non-archived releases for both tabs; we filter here.
+    // Planned: ALL platforms in PLANNED state.
+    // Active:  ANY platform in DEV+ state (i.e. not ALL platforms PLANNED).
+    if (releasesState.statusFilter === 'planned') {
+        releases = releases.filter(r => {
+            const platforms = Object.values(r.platforms || {});
+            return platforms.length > 0 && platforms.every(p => (p.environment || '') === 'PLANNED');
+        });
+    } else if (releasesState.statusFilter === 'active') {
+        releases = releases.filter(r => {
+            const platforms = Object.values(r.platforms || {});
+            return platforms.some(p => (p.environment || '') !== 'PLANNED');
+        });
+    }
+
     if (!releases || releases.length === 0) {
-        // XACA-0056: Context-aware empty state message
-        const isArchived = releasesState.statusFilter === 'archived';
+        // XACA-0056 / XACA-0238: Context-aware empty state message for all three tabs
+        const filter = releasesState.statusFilter;
+        const icon = filter === 'archived' ? '📁' : filter === 'planned' ? '🗓' : '📦';
+        const title = filter === 'archived' ? 'No Archived Releases'
+            : filter === 'planned' ? 'No Planned Releases'
+            : 'No Active Releases';
+        const hint = filter === 'archived' ? 'Completed releases will appear here when archived'
+            : filter === 'planned' ? 'Create a release to see it here'
+            : 'Promote a release platform to DEV to see it here';
         dashboard.innerHTML = `
             <div class="releases-empty">
-                <div class="releases-empty-icon">${isArchived ? '📁' : '📦'}</div>
-                <div class="releases-empty-text">No ${isArchived ? 'Archived' : 'Active'} Releases</div>
-                <div class="releases-empty-hint">${isArchived ? 'Completed releases will appear here when archived' : 'Click "+ NEW" to create a release'}</div>
+                <div class="releases-empty-icon">${icon}</div>
+                <div class="releases-empty-text">${title}</div>
+                <div class="releases-empty-hint">${hint}</div>
             </div>
         `;
         return;
+    }
+
+    // XACA-0209 round 5: client-side search filter over id/title/shortTitle/description/tags.
+    if (releaseSearchText) {
+        releases = releases.filter(r => itemMatchesSearch(r, releaseSearchText));
+        if (releases.length === 0) {
+            dashboard.innerHTML = `
+                <div class="releases-empty">
+                    <div class="releases-empty-icon">🔍</div>
+                    <div class="releases-empty-text">No releases match "${escapeHtml(releaseSearchText)}"</div>
+                    <div class="releases-empty-hint">Try a different search term, or clear the filter.</div>
+                </div>
+            `;
+            return;
+        }
     }
 
     // XACA-0056: Sort releases
@@ -10339,6 +10664,9 @@ function displayReleases(releases, flowConfig = null, projectEnvironments = {}) 
 
     const html = releases.map(release => renderReleaseCard(release, flowConfig, projectEnvironments)).join('');
     dashboard.innerHTML = html;
+
+    // XACA-0209 round 5: delegated click handler for item tag pills — set once per dashboard.
+    bindItemTagClicks(dashboard);
 
     // XACA-0045: Check plan existence for DOCS buttons
     checkPlanDocsButtons(dashboard);
@@ -10423,6 +10751,10 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     const releaseType = release.type || 'feature';
     const typeBadge = `<span class="release-type-badge type-${releaseType}">${releaseType.toUpperCase()}</span>`;
 
+    // XACA-0209 round 5: purple tag pills on each release card — clicking a pill
+    // sets the release search input (handler wired via bindItemTagClicks).
+    const tagsHtml = buildItemTagsHtml(release.tags, 'release');
+
     return `
         <div class="release-card ${typeClass} ${expandedClass} ${archivedClass}" data-release-id="${release.id}">
             <div class="release-card-header" onclick="toggleReleaseExpanded('${release.id}')">
@@ -10430,11 +10762,14 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                     <span class="release-card-id">${release.id} ${typeBadge}</span>
                     <span class="release-card-name">${release.shortTitle ? escapeHtml(release.shortTitle) + ' — ' + escapeHtml(release.name) : escapeHtml(release.name)}${archivedBadge}</span>
                 </div>
-                <div class="release-card-meta">
-                    <span class="release-card-date">${targetDate}</span>
-                    <span class="release-item-count">${completedCount}/${itemCount} items${cancelledSuffix}</span>
-                    <span class="release-card-progress">${itemProgress}%</span>
-                    <span class="release-expand-icon">${isExpanded ? '▼' : '▶'}</span>
+                <div class="release-card-header-right">
+                    ${tagsHtml}
+                    <div class="release-card-meta">
+                        <span class="release-card-date">${targetDate}</span>
+                        <span class="release-item-count">${completedCount}/${itemCount} items${cancelledSuffix}</span>
+                        <span class="release-card-progress">${itemProgress}%</span>
+                        <span class="release-expand-icon">${isExpanded ? '▼' : '▶'}</span>
+                    </div>
                 </div>
             </div>
             <div class="release-card-body">
@@ -10533,7 +10868,7 @@ async function loadReleaseItems(releaseId) {
         // Check for plan documents on each item
         checkReleaseItemsDocs(data.items);
     } catch (e) {
-        itemsContainer.innerHTML = `<div class="release-items-error">Error loading items: ${e.message}</div>`;
+        itemsContainer.innerHTML = `<div class="release-items-error">Error loading items: ${escapeHtml(e.message)}</div>`;
     }
 }
 
@@ -12012,6 +12347,7 @@ function showCreateReleaseModal() {
     document.getElementById('new-release-type').value = 'feature';
     document.getElementById('new-release-target-date').value = '';
     document.getElementById('new-release-description').value = '';
+    document.getElementById('new-release-tags').value = '';  // XACA-0209
 
     // Reset platform checkboxes to all checked
     const checkboxes = document.querySelectorAll('#new-release-platforms input[type="checkbox"]');
@@ -12054,7 +12390,7 @@ function hideCreateReleaseModal() {
  */
 let releasesState = {
     expandedReleases: new Set(),
-    statusFilter: 'active'  // XACA-0056: 'active' or 'archived'
+    statusFilter: 'active'  // XACA-0056: 'planned', 'active', or 'archived'
 };
 
 /**
@@ -12069,17 +12405,21 @@ function toggleReleasesStatusFilter(status) {
  * XACA-0056: Update toggle button UI to reflect current filter
  */
 function updateReleasesStatusToggle() {
+    const plannedBtn = document.getElementById('releases-planned-btn');
     const activeBtn = document.getElementById('releases-active-btn');
     const archivedBtn = document.getElementById('releases-archived-btn');
 
-    if (activeBtn && archivedBtn) {
-        if (releasesState.statusFilter === 'archived') {
-            activeBtn.classList.remove('active');
-            archivedBtn.classList.add('active');
-        } else {
-            activeBtn.classList.add('active');
-            archivedBtn.classList.remove('active');
-        }
+    [plannedBtn, activeBtn, archivedBtn].forEach(btn => {
+        if (btn) btn.classList.remove('active');
+    });
+
+    const filter = releasesState.statusFilter;
+    if (filter === 'planned' && plannedBtn) {
+        plannedBtn.classList.add('active');
+    } else if (filter === 'archived' && archivedBtn) {
+        archivedBtn.classList.add('active');
+    } else if (activeBtn) {
+        activeBtn.classList.add('active');
     }
 }
 
@@ -12102,6 +12442,7 @@ async function loadEpics() {
     dashboard.innerHTML = '<div class="epics-loading">Loading epics...</div>';
 
     try {
+        // XACA-0209 round 5: tag filtering moved fully client-side — see displayEpics.
         const response = await fetch(apiUrl('/api/epics'));
         if (!response.ok) {
             const errorText = await response.text();
@@ -12144,8 +12485,26 @@ function displayEpics(epics) {
         return;
     }
 
+    // XACA-0209 round 5: client-side search filter over id/title/shortTitle/description/tags.
+    if (epicSearchText) {
+        epics = epics.filter(e => itemMatchesSearch(e, epicSearchText));
+        if (epics.length === 0) {
+            dashboard.innerHTML = `
+                <div class="epics-empty">
+                    <div class="epics-empty-icon">🔍</div>
+                    <div class="epics-empty-text">No epics match "${escapeHtml(epicSearchText)}"</div>
+                    <div class="epics-empty-hint">Try a different search term, or clear the filter.</div>
+                </div>
+            `;
+            return;
+        }
+    }
+
     const html = epics.map(epic => renderEpicCard(epic)).join('');
     dashboard.innerHTML = html;
+
+    // XACA-0209 round 5: delegated click handler for item tag pills.
+    bindItemTagClicks(dashboard);
 
     // XACA-0045: Check plan existence for DOCS buttons
     checkPlanDocsButtons(dashboard);
@@ -12161,7 +12520,16 @@ function renderEpicCard(epic) {
     const expandedClass = isExpanded ? 'expanded' : '';
     const completedCount = epic.completedCount || 0;
     const itemCount = epic.itemCount || 0;
-    const progressPercent = itemCount > 0 ? Math.round((completedCount / itemCount) * 100) : 0;
+    const cancelledCount = epic.cancelledCount || 0;
+    // Empty (or fully-cancelled) epic has nothing left to do — show 100%.
+    const progressPercent = itemCount > 0 ? Math.round((completedCount / itemCount) * 100) : 100;
+    // Mirror release-card behavior (XACA-0206-001): surface cancelled count so
+    // users see why the denominator shrank.
+    const cancelledSuffix = cancelledCount > 0 ? ` <span class="epic-item-cancelled-count">(${cancelledCount} cancelled, excluded)</span>` : '';
+
+    // XACA-0209 round 5: purple tag pills on each epic card — clicking a pill
+    // sets the epic search input (handler wired via bindItemTagClicks).
+    const tagsHtml = buildItemTagsHtml(epic.tags, 'epic');
 
     return `
         <div class="epic-card ${expandedClass}" data-epic-id="${epic.id}" style="--epic-color: ${colorHex}">
@@ -12174,14 +12542,17 @@ function renderEpicCard(epic) {
                     </div>
                     <div class="epic-card-meta">
                         <span class="epic-item-count">${itemCount} items</span>
-                        <span class="epic-progress-text">${completedCount}/${itemCount} complete</span>
+                        <span class="epic-progress-text">${completedCount}/${itemCount} complete${cancelledSuffix}</span>
                     </div>
                 </div>
-                <div class="epic-card-actions">
-                    <button class="epic-action-btn docs" data-item-id="${epic.id}" onclick="event.stopPropagation(); showPlanDocModal('${epic.id}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
-                    <button class="epic-action-btn edit" onclick="event.stopPropagation(); showEditEpicModal('${epic.id}')" title="Edit Epic">✎</button>
-                    <button class="epic-action-btn delete" onclick="event.stopPropagation(); confirmDeleteEpic('${epic.id}')" title="Delete Epic">✕</button>
-                    <span class="epic-expand-icon">${isExpanded ? '▼' : '▶'}</span>
+                <div class="epic-card-header-right">
+                    ${tagsHtml}
+                    <div class="epic-card-actions">
+                        <button class="epic-action-btn docs" data-item-id="${epic.id}" onclick="event.stopPropagation(); showPlanDocModal('${epic.id}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
+                        <button class="epic-action-btn edit" onclick="event.stopPropagation(); showEditEpicModal('${epic.id}')" title="Edit Epic">✎</button>
+                        <button class="epic-action-btn delete" onclick="event.stopPropagation(); confirmDeleteEpic('${epic.id}')" title="Delete Epic">✕</button>
+                        <span class="epic-expand-icon">${isExpanded ? '▼' : '▶'}</span>
+                    </div>
                 </div>
             </div>
             <div class="epic-progress-bar">
@@ -12267,7 +12638,7 @@ async function loadEpicItems(epicId) {
         // Check for plan documents on each item
         checkEpicItemsDocs(data.items);
     } catch (e) {
-        itemsContainer.innerHTML = `<div class="epic-items-error">Error loading items: ${e.message}</div>`;
+        itemsContainer.innerHTML = `<div class="epic-items-error">Error loading items: ${escapeHtml(e.message)}</div>`;
     }
 }
 
@@ -12316,6 +12687,8 @@ function showCreateEpicModal() {
     if (colorSelect) colorSelect.value = 'blue';
     if (prioritySelect) prioritySelect.value = 'medium';
     if (statusSelect) statusSelect.value = 'planning';
+    const tagsInput = document.getElementById('new-epic-tags');  // XACA-0209
+    if (tagsInput) tagsInput.value = '';
 
     // Clear errors
     const errorDiv = document.getElementById('epic-create-error');
@@ -12369,6 +12742,10 @@ async function createEpic() {
             epicData.shortTitle = shortTitle;
         }
 
+        // XACA-0209: Parse comma-separated tags, trim whitespace, drop empty strings
+        const tagsRaw = document.getElementById('new-epic-tags')?.value || '';
+        epicData.tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t.length > 0);
+
         const response = await fetch(apiUrl('/api/epics'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -12415,6 +12792,10 @@ async function showEditEpicModal(epicId) {
         document.getElementById('edit-epic-priority').value = epic.priority || 'medium';
         document.getElementById('edit-epic-status').value = epic.status || 'planning';
 
+        // XACA-0209: Pre-populate tags as comma-separated string
+        const existingTags = Array.isArray(epic.tags) ? epic.tags : [];
+        document.getElementById('edit-epic-tags').value = existingTags.join(', ');
+
         const modalEl = document.getElementById('epic-edit-modal');
         if (modalEl) {
             modalEl.style.display = 'flex';
@@ -12457,6 +12838,11 @@ async function updateEpic() {
         // XACA-0050: Include shortTitle in update (can be empty to clear it)
         const epicData = { name, description, color, priority, status };
         epicData.shortTitle = shortTitle || null;
+
+        // XACA-0209: Parse comma-separated tags, trim whitespace, drop empty strings
+        // Always send tags (even empty array) so users can clear all tags on edit
+        const tagsRaw = document.getElementById('edit-epic-tags')?.value || '';
+        epicData.tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t.length > 0);
 
         const response = await fetch(apiUrl(`/api/epics/${epicId}`), {
             method: 'PUT',
@@ -12597,6 +12983,10 @@ function createEpicModals() {
                             ${colorOptions}
                         </select>
                     </div>
+                    <div class="modal-field">
+                        <label class="modal-label">TAGS (OPTIONAL) <span class="modal-label-hint">Comma-separated, e.g. main-event, admin, ios</span></label>
+                        <input type="text" class="modal-input" id="new-epic-tags" placeholder="e.g. main-event, admin (comma-separated)" autocomplete="off" data-lpignore="true" data-form-type="other" data-1p-ignore="true">
+                    </div>
                     <div class="modal-error" id="epic-create-error" style="display: none;"></div>
                 </div>
                 <div class="lcars-modal-footer">
@@ -12646,6 +13036,10 @@ function createEpicModals() {
                         <select id="edit-epic-color" class="modal-select">
                             ${colorOptions}
                         </select>
+                    </div>
+                    <div class="modal-field">
+                        <label class="modal-label">TAGS (OPTIONAL) <span class="modal-label-hint">Comma-separated, e.g. main-event, admin, ios</span></label>
+                        <input type="text" class="modal-input" id="edit-epic-tags" placeholder="e.g. main-event, admin (comma-separated)" autocomplete="off" data-lpignore="true" data-form-type="other" data-1p-ignore="true">
                     </div>
                     <div class="modal-error" id="epic-edit-error" style="display: none;"></div>
                 </div>
@@ -12759,7 +13153,7 @@ async function showEpicAssignModal(itemId, itemTitle, team, currentEpicId) {
             listEl.innerHTML = html + noEpicHtml;
         }
     } catch (e) {
-        listEl.innerHTML = `<div class="epic-select-error">Error: ${e.message}</div>`;
+        listEl.innerHTML = `<div class="epic-select-error">Error: ${escapeHtml(e.message)}</div>`;
     }
 
     // Show modal
@@ -13350,6 +13744,7 @@ async function submitCreateRelease() {
     const typeSelect = document.getElementById('new-release-type');
     const targetDateInput = document.getElementById('new-release-target-date');
     const descriptionInput = document.getElementById('new-release-description');
+    const tagsInput = document.getElementById('new-release-tags');  // XACA-0209
     const platformCheckboxes = document.querySelectorAll('#new-release-platforms input[type="checkbox"]:checked');
     const errorDiv = document.getElementById('release-create-error');
 
@@ -13391,6 +13786,12 @@ async function submitCreateRelease() {
     }
     if (descriptionInput.value.trim()) {
         releaseData.description = descriptionInput.value.trim();
+    }
+
+    // XACA-0209: Parse comma-separated tags, trim whitespace, drop empty strings
+    const tags = tagsInput.value.split(',').map(t => t.trim()).filter(t => t.length > 0);
+    if (tags.length > 0) {
+        releaseData.tags = tags;
     }
 
     try {
@@ -13470,6 +13871,10 @@ async function showEditReleaseModal(releaseId) {
         document.getElementById('edit-release-type').value = release.type || 'feature';
         document.getElementById('edit-release-target-date').value = release.targetDate || '';
 
+        // XACA-0209: Pre-populate tags as comma-separated string
+        const existingTags = Array.isArray(release.tags) ? release.tags : [];
+        document.getElementById('edit-release-tags').value = existingTags.join(', ');
+
         // Set platform checkboxes - platforms is an object with keys like {ios: {...}, android: {...}}
         // Existing platforms: checked AND disabled (cannot remove)
         // New platforms: unchecked AND enabled (can add)
@@ -13532,6 +13937,7 @@ async function submitEditRelease() {
     const shortTitleInput = document.getElementById('edit-release-short-title');  // XACA-0050
     const typeSelect = document.getElementById('edit-release-type');
     const targetDateInput = document.getElementById('edit-release-target-date');
+    const tagsInput = document.getElementById('edit-release-tags');  // XACA-0209
     const errorDiv = document.getElementById('release-edit-error');
 
     // Clear previous errors
@@ -13567,6 +13973,10 @@ async function submitEditRelease() {
     // XACA-0050: Include shortTitle (can be empty to clear it)
     const shortTitle = shortTitleInput.value.trim();
     updateData.shortTitle = shortTitle || null;
+
+    // XACA-0209: Parse comma-separated tags, trim whitespace, drop empty strings
+    // Always send tags (even empty array) so users can clear all tags on edit
+    updateData.tags = tagsInput.value.split(',').map(t => t.trim()).filter(t => t.length > 0);
 
     // Include new platforms if any were added
     if (newPlatforms.length > 0) {
@@ -13861,7 +14271,7 @@ function displayBackupFiles(data, sortOrder = 'desc') {
     if (!container) return;
 
     if (data.error) {
-        container.innerHTML = `<div class="backup-error">Error: ${data.error}</div>`;
+        container.innerHTML = `<div class="backup-error">Error: ${escapeHtml(data.error)}</div>`;
         return;
     }
 
@@ -14106,7 +14516,7 @@ async function loadIntegrations() {
         }
 
         if (listEl) {
-            listEl.innerHTML = `<div class="integrations-error">Failed to load integrations: ${error.message}</div>`;
+            listEl.innerHTML = `<div class="integrations-error">Failed to load integrations: ${escapeHtml(error.message)}</div>`;
         }
     }
 }
@@ -16705,6 +17115,29 @@ async function loadServerConfig() {
         console.log('Could not load server config, using defaults');
     }
 
+    // XACA-0249: If /api/status did not populate CONFIG.team (network error,
+    // server restart race, etc.), fall back to the dedicated /api/team endpoint
+    // which is a cheaper, focused call.  This ensures CONFIG.team is always
+    // authoritative before any team-scoped fetch fires.
+    if (!CONFIG.team) {
+        try {
+            const teamResp = await fetch(apiUrl('/api/team'));
+            if (teamResp.ok) {
+                const teamData = await teamResp.json();
+                if (teamData.team) {
+                    CONFIG.team = teamData.team;
+                    CONFIG.dataPath = `data/${teamData.team}-board.json`;
+                    console.log(`LCARS team (fallback /api/team): ${teamData.team}`);
+                    if (teamData.default_used) {
+                        console.warn('LCARS: server is using hardcoded "freelance" team default — LCARS_TEAM env is unset. See XACA-0249.');
+                    }
+                }
+            }
+        } catch (e) {
+            console.log('Could not load team from /api/team fallback');
+        }
+    }
+
     // Fetch AITeamForge tap version — best-effort, non-blocking.
     try {
         const resp = await fetch('/api/tap-version');
@@ -17237,6 +17670,22 @@ document.addEventListener('DOMContentLoaded', async () => {
     renderCommands();
     avatarTooltip.init();
     initQueueFilterBar();
+    // XACA-0209 round 5: restore persisted search strings and wire each section's
+    // search input/clear button (debounced input → set filter → re-render).
+    releaseSearchText = loadSearchText(RELEASE_SEARCH_KEY);
+    epicSearchText = loadSearchText(EPIC_SEARCH_KEY);
+    initSectionSearchBar({
+        inputId: 'release-filter-text',
+        clearId: 'release-filter-clear',
+        currentText: () => releaseSearchText,
+        setFilter: setReleaseSearchFilter,
+    });
+    initSectionSearchBar({
+        inputId: 'epic-filter-text',
+        clearId: 'epic-filter-clear',
+        currentText: () => epicSearchText,
+        setFilter: setEpicSearchFilter,
+    });
     initViewToggle();
     initCommandSectionBar();
 

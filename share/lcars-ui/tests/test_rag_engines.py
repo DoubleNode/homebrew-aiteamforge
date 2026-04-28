@@ -202,7 +202,10 @@ class TestRAGEngineStatus(unittest.TestCase):
         """All expected keys are always present in the serialized dict."""
         status = RAGEngineStatus(engine_id="x", status="error")
         d = status.to_dict()
-        expected_keys = {"engineId", "status", "health", "message", "lastCheck", "version", "port", "pid"}
+        expected_keys = {
+            "engineId", "status", "health", "message", "lastCheck",
+            "version", "port", "pid", "latestVersion", "updateAvailable",
+        }
         self.assertEqual(set(d.keys()), expected_keys)
 
 

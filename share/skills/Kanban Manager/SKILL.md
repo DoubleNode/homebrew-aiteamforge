@@ -30,6 +30,7 @@ tags:
 command_shortcut: kb-backlog
 last_updated: 2026-02-17
 status: production-ready
+model: sonnet
 ---
 
 # Kanban Manager

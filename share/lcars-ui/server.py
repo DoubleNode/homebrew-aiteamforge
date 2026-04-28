@@ -100,6 +100,15 @@ except ImportError as e:
     CalendarCredentials = None
     print(f"[LCARS] Warning: Calendar sync module not available: {e}")
 
+# Import ccusage heuristics (XACA-0243-003) — same directory as server.py
+try:
+    import ccusage_heuristics as _ccusage_heuristics
+    CCUSAGE_HEURISTICS_AVAILABLE = True
+except ImportError as e:
+    _ccusage_heuristics = None  # type: ignore[assignment]
+    CCUSAGE_HEURISTICS_AVAILABLE = False
+    print(f"[LCARS] Warning: ccusage_heuristics not available: {e}")
+
 # Configuration
 DEFAULT_PORT = 8080
 BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
@@ -107,13 +116,8 @@ BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
 # Distributed kanban directories — loaded from aiteamforge_paths (XACA-0168).
 # Build a dict from the shared module so existing code using TEAM_KANBAN_DIRS[team]
 # continues to work without change.
-def _build_team_kanban_dirs() -> dict:
-    if _AITEAMFORGE_PATHS_AVAILABLE:
-        try:
-            return {team: get_team_kanban_dir(team) for team in list_teams()}
-        except Exception:
-            pass
-    # Fallback: hardcoded values (kept in sync with aiteamforge_paths.DEFAULT_TEAMS)
+def _hardcoded_team_kanban_dirs() -> dict:
+    """Baked-in team paths (kept in sync with aiteamforge_paths.DEFAULT_TEAMS)."""
     _home = Path.home()
     return {
         "academy": _home / "dev-team" / "kanban",
@@ -135,6 +139,28 @@ def _build_team_kanban_dirs() -> dict:
         "finance-personal": _home / "finance" / "personal" / "kanban",
     }
 
+
+def _build_team_kanban_dirs() -> dict:
+    # Empty result from list_teams() is treated as a load failure and triggers the
+    # fallback — otherwise a server started during a config write-race caches {}
+    # for its lifetime and every team lookup 404s until manual restart. (Bug found
+    # 2026-04-22: Android LCARS served empty board after config briefly had no teams.)
+    if _AITEAMFORGE_PATHS_AVAILABLE:
+        try:
+            teams = list_teams()
+            if teams:
+                return {team: get_team_kanban_dir(team) for team in teams}
+            print(
+                "[LCARS] WARNING: aiteamforge_paths.list_teams() returned empty — using hardcoded team dirs",
+                file=sys.stderr,
+            )
+        except Exception as e:
+            print(
+                f"[LCARS] WARNING: aiteamforge_paths.list_teams() raised {e!r} — using hardcoded team dirs",
+                file=sys.stderr,
+            )
+    return _hardcoded_team_kanban_dirs()
+
 TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 
 # Legacy fallback for backwards compatibility
@@ -145,6 +171,88 @@ EXPORT_JOBS = {}   # {job_id: {status, progress, message, filename, fileSize, er
 IMPORT_JOBS = {}   # {job_id: {status, progress, message, manifest, stagedPath, ...}}
 EXPORT_DIR = Path("/tmp/lcars-exports")
 IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
+
+# ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
+CCUSAGE_CACHE_PATH = "/tmp/lcars-ccusage-cache.json"
+CCUSAGE_PID_PATH = "/tmp/lcars-ccusage-collector.pid"
+CCUSAGE_COLLECTOR_LOG = "/tmp/lcars-ccusage-collector.log"
+
+# Per-process flag: emit the "collector not running" warning only once.
+_ccusage_missing_warned = False
+
+# XACA-0249: Throttle the "silent team fallback" warning to once per minute
+# per endpoint path, so log files don't flood under high traffic while still
+# making the misconfiguration unmissable on first hit per server boot.
+_team_fallback_warn_times: dict = {}  # endpoint_path -> last_warn_epoch_float
+_TEAM_FALLBACK_WARN_INTERVAL_SECONDS = 60
+# True when LCARS_TEAM was explicitly set in the environment at module load.
+_LCARS_TEAM_WAS_EXPLICIT: bool = bool(os.environ.get("LCARS_TEAM", "").strip())
+
+# Throttle: track last respawn attempt so a flapping daemon can't fork-bomb us.
+_ccusage_last_respawn_at = 0.0
+_CCUSAGE_RESPAWN_COOLDOWN_SECONDS = 30
+
+
+def _collector_pid_alive() -> bool:
+    """Return True if the PID in CCUSAGE_PID_PATH names a live process.
+
+    Uses kill(pid, 0) which never delivers a signal — it just probes whether
+    the kernel can reach that PID. Returns False if the file is missing,
+    unreadable, malformed, or the PID is gone.
+    """
+    try:
+        with open(CCUSAGE_PID_PATH, "r", encoding="utf-8") as _f:
+            pid = int(_f.read().strip())
+    except (OSError, ValueError):
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except (ProcessLookupError, PermissionError, OSError):
+        return False
+
+
+def _ensure_collector_running() -> bool:
+    """Re-launch ccusage_collector.py --foreground if it is not currently alive.
+
+    Cheap fast path: just a kill(pid, 0) when the daemon is healthy.
+    Slow path: detached Popen so the request handler returns immediately.
+    Throttled to one respawn attempt per _CCUSAGE_RESPAWN_COOLDOWN_SECONDS to
+    avoid fork-bombing if the collector is crash-looping (e.g. ccusage missing).
+
+    Returns True if the daemon is (now) considered running, False if the
+    respawn was throttled or skipped (e.g. heuristics module unavailable).
+    """
+    global _ccusage_last_respawn_at  # noqa: PLW0603
+
+    if not CCUSAGE_HEURISTICS_AVAILABLE:
+        return False
+    if _collector_pid_alive():
+        return True
+
+    now = time.time()
+    if now - _ccusage_last_respawn_at < _CCUSAGE_RESPAWN_COOLDOWN_SECONDS:
+        return False
+    _ccusage_last_respawn_at = now
+
+    server_dir = str(Path(__file__).parent)
+    collector = str(Path(__file__).parent / "ccusage_collector.py")
+    try:
+        log_fh = open(CCUSAGE_COLLECTOR_LOG, "a", encoding="utf-8")
+        subprocess.Popen(  # noqa: S603 — fixed argv, not user input
+            [sys.executable, collector, "--foreground"],
+            cwd=server_dir,
+            stdin=subprocess.DEVNULL,
+            stdout=log_fh,
+            stderr=log_fh,
+            start_new_session=True,
+            close_fds=True,
+        )
+        print(f"[LCARS] ccusage collector was not running — respawned (log: {CCUSAGE_COLLECTOR_LOG})")
+        return True
+    except (FileNotFoundError, OSError) as exc:
+        print(f"[LCARS] WARNING: failed to respawn ccusage collector: {exc}")
+        return False
 
 
 def format_bytes_export(size):
@@ -655,6 +763,130 @@ def _fetch_amb_badges(handle):
         if cached:
             return cached["badges"]
         return []
+
+
+def _build_usage_response(
+    cache_path: str = CCUSAGE_CACHE_PATH,
+    history_limit: int = 7,
+    force_refresh: bool = False,
+) -> tuple:
+    """Build the response payload for GET /api/usage/current.
+
+    Pure function (no HTTP machinery) so unit tests can call it directly.
+
+    Args:
+        cache_path:     Path to the JSON cache file written by ccusage_collector.
+        history_limit:  Maximum number of history entries to return (clamped 1-50).
+        force_refresh:  If True, attempt to spawn ccusage_collector --once first.
+                        Default (False) must NEVER spawn ccusage — endpoint stays <50ms.
+
+    Returns:
+        (status_code, response_dict) tuple.
+        status_code is always 200; callers must not 500 on errors so the UI
+        always has something to render.
+    """
+    global _ccusage_missing_warned  # noqa: PLW0603
+
+    # Clamp history_limit.
+    history_limit = max(1, min(50, history_limit))
+
+    # Self-heal: respawn the collector daemon if it has died. Cheap fast path
+    # (kill -0 on the PID) when healthy; throttled detached Popen when not.
+    # Runs on every request so panel polls keep the daemon alive without
+    # needing a separate launchd/cron watchdog.
+    _ensure_collector_running()
+
+    # Optional: attempt a single synchronous ccusage run before reading cache.
+    # Used by the dashboard "refresh" button (?refresh=1). The respawn above
+    # already restarted the daemon if it was dead; --once gives the user
+    # instant feedback while the daemon's first poll catches up.
+    if force_refresh and CCUSAGE_HEURISTICS_AVAILABLE:
+        _server_dir = str(Path(__file__).parent)
+        _collector = str(Path(__file__).parent / "ccusage_collector.py")
+        try:
+            subprocess.run(
+                [sys.executable, _collector, "--once"],
+                timeout=5,
+                capture_output=True,
+                cwd=_server_dir,
+            )
+        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+            pass  # Fall through to existing cache
+
+    # Unavailable-weekly sentinel emitted when we cannot reach evaluate_weekly.
+    # Always include a "weekly" key so both UIs can unconditionally check
+    # d.weekly.available rather than guarding against undefined.
+    def _unavailable_weekly(reason: str) -> dict:
+        return {"available": False, "reason": reason}
+
+    # Case 1: heuristics module not importable (should not happen in prod).
+    if not CCUSAGE_HEURISTICS_AVAILABLE:
+        return 200, {
+            "ok": False,
+            "stale": True,
+            "current": None,
+            "projection": None,
+            "calibration": None,
+            "history": [],
+            "totals": None,
+            "weekly": _unavailable_weekly("ccusage_heuristics module not available"),
+            "error": "ccusage_heuristics module not available",
+        }
+
+    # Case 2: cache file missing (daemon not started yet).
+    if not os.path.exists(cache_path):
+        if not _ccusage_missing_warned:
+            print(f"[LCARS] WARNING: ccusage cache not found at {cache_path} — is the collector running?")
+            _ccusage_missing_warned = True
+        return 200, {
+            "ok": False,
+            "stale": True,
+            "current": None,
+            "projection": None,
+            "calibration": None,
+            "history": [],
+            "totals": None,
+            "weekly": _unavailable_weekly("collector not running"),
+            "error": "collector not running",
+        }
+
+    # Cache file found — reset the "missing" warning flag so it fires again
+    # if the collector ever stops after having run.
+    _ccusage_missing_warned = False
+
+    # Case 3: JSON parse failure.
+    try:
+        with open(cache_path, "r", encoding="utf-8") as _f:
+            cache = json.load(_f)
+    except (OSError, json.JSONDecodeError) as exc:
+        print(f"[LCARS] WARNING: ccusage cache parse error: {exc}")
+        return 200, {
+            "ok": False,
+            "stale": True,
+            "current": None,
+            "projection": None,
+            "calibration": None,
+            "history": [],
+            "totals": None,
+            "weekly": _unavailable_weekly(f"cache parse error: {exc}"),
+            "error": str(exc),
+        }
+
+    # Case 4: evaluate through heuristics layer.
+    result = _ccusage_heuristics.evaluate(cache)
+
+    # Apply history_limit trim.
+    if "history" in result and isinstance(result["history"], list):
+        result = dict(result)
+        result["history"] = result["history"][-history_limit:]
+
+    # XACA-0250-003: append weekly heuristics as a top-level key.
+    # evaluate_weekly() returns either a full weekly status dict (available=True)
+    # or an unavailability sentinel (available=False).  Existing 5h consumers
+    # are unaffected because we only ADD a key, never modify existing ones.
+    result["weekly"] = _ccusage_heuristics.evaluate_weekly(cache)
+
+    return 200, result
 
 
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
@@ -2241,7 +2473,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     # Default release configuration (used when board doesn't have releaseConfig)
     DEFAULT_RELEASE_CONFIG = {
-        "defaultEnvironments": ["DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"],
+        "defaultEnvironments": ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"],
         "platforms": {
             "ios": {"name": "iOS", "store": "App Store", "icon": "apple"},
             "android": {"name": "Android", "store": "Play Store", "icon": "android"},
@@ -2257,6 +2489,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         },
         "flowConfig": {
             "stages": {
+                "PLANNED": {"enabled": True, "required": True},
                 "DEV": {"enabled": True, "required": True},
                 "QA": {"enabled": True, "required": False},
                 "ALPHA": {"enabled": True, "required": False},
@@ -2688,6 +2921,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         - android
         - firebase
 
+        Platforms at "PLANNED" (the initial holding state, before development
+        begins) are explicitly NOT complete — PLANNED != PROD, so they block
+        completion just like DEV, QA, ALPHA, BETA, or GAMMA would.
+
         Args:
             release: Release object with platforms dict
 
@@ -2721,6 +2958,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Query parameters:
             team: Filter releases by team (XACA-0037: prevents cross-team contamination)
             status: Filter by status - 'active' (default), 'archived', or 'all'
+
+        XACA-0209 round 5: server-side tag filtering removed. All tag/search
+        filtering is now client-side in the LCARS UI.
         """
         from urllib.parse import parse_qs
         try:
@@ -2759,8 +2999,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     release['team'] = config_team
 
                 # XACA-0037: Apply team filter if specified
-                if filter_team is None or release['team'] == filter_team:
-                    filtered_releases.append(release)
+                if filter_team is not None and release['team'] != filter_team:
+                    continue
+
+                filtered_releases.append(release)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -2933,6 +3175,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if 'flowConfig' not in data:
                 data['flowConfig'] = {
                     'stages': {
+                        'PLANNED': {'enabled': True, 'required': True},
                         'DEV': {'enabled': True, 'required': True},
                         'QA': {'enabled': True, 'required': False},
                         'ALPHA': {'enabled': True, 'required': False},
@@ -3008,7 +3251,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 platforms[platform] = {
                     "version": post_data.get(f'{platform}Version', default_version),
                     "buildNumber": post_data.get(f'{platform}Build', 1),
-                    "environment": environments[0] if environments else "DEV",
+                    "environment": environments[0] if environments else "PLANNED",
                     "environmentHistory": []
                 }
 
@@ -3023,7 +3266,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "createdAt": self._get_timestamp(),
                 "environments": environments,
                 "platforms": platforms,
-                "tags": post_data.get('tags', []),
+                "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
                 "team": LCARS_TEAM  # Track owning team for validation
             }
 
@@ -3322,9 +3565,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 new_env = env
                                 break
                         else:
-                            new_env = environments[0] if environments else "DEV"
+                            new_env = environments[0] if environments else "PLANNED"
                     except ValueError:
-                        new_env = environments[0] if environments else "DEV"
+                        new_env = environments[0] if environments else "PLANNED"
 
             # Record history and update
             history = platform_data.get('environmentHistory', [])
@@ -3368,10 +3611,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # Update allowed fields
-            allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'tags', 'project']  # XACA-0050: Added shortTitle
+            allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'project']  # XACA-0050: Added shortTitle
             for field in allowed_fields:
                 if field in post_data:
                     release[field] = post_data[field]
+
+            # XACA-0209: tags field needs type/strip validation (matches epic handlers).
+            # XACA-0209 round 3: also strip individual values so new data is clean.
+            if 'tags' in post_data:
+                release['tags'] = [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()]
 
             # When shortTitle changes, keep platform versions in lockstep with
             # the release version label (e.g. shortTitle "v2.10.0" → every
@@ -3406,7 +3654,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         existing_platforms[platform] = {
                             "version": release_version,
                             "buildNumber": 1,
-                            "environment": "DEV",
+                            "environment": "PLANNED",
                             "environmentHistory": []
                         }
                 release['platforms'] = existing_platforms
@@ -3444,7 +3692,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 log.write(f"[{self._get_timestamp()}] Flow config update - team from request: {team}\n")
                 log.write(f"[{self._get_timestamp()}] Flow config update - stages: {stages}\n")
 
-            # Validate that DEV and PROD are enabled (required stages)
+            # Validate that PLANNED, DEV, and PROD are enabled (required stages)
+            if not stages.get('PLANNED', {}).get('enabled', True):
+                self.send_error(400, "PLANNED stage cannot be disabled")
+                return
             if not stages.get('DEV', {}).get('enabled', False):
                 self.send_error(400, "DEV stage cannot be disabled")
                 return
@@ -3459,6 +3710,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if 'flowConfig' not in data:
                 data['flowConfig'] = {
                     'stages': {
+                        'PLANNED': {'enabled': True, 'required': True},
                         'DEV': {'enabled': True, 'required': True},
                         'QA': {'enabled': True, 'required': False},
                         'ALPHA': {'enabled': True, 'required': False},
@@ -3938,7 +4190,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return team[:3].upper()
 
     def _get_board_file(self, team=None):
-        """Get the board file path for a team"""
+        """Get the board file path for a team.
+
+        XACA-0249: When no team was supplied by the caller AND LCARS_TEAM env
+        was not explicitly set at server start, we are silently serving data
+        for the hardcoded 'freelance' default.  Emit a throttled WARN so the
+        misconfiguration is impossible to miss in the logs.
+        """
+        if not team and not _LCARS_TEAM_WAS_EXPLICIT:
+            endpoint = getattr(self, 'path', '<unknown>')
+            now = time.monotonic()
+            last = _team_fallback_warn_times.get(endpoint, 0.0)
+            if now - last >= _TEAM_FALLBACK_WARN_INTERVAL_SECONDS:
+                _team_fallback_warn_times[endpoint] = now
+                print(
+                    f"[LCARS] WARN: Team-scoped endpoint '{endpoint}' served with "
+                    f"hardcoded 'freelance' default — UI did not pass ?team= and "
+                    f"LCARS_TEAM env is unset. This indicates UI/server "
+                    f"misconfiguration. See XACA-0249."
+                )
         team = team or LCARS_TEAM
         return get_board_file(team)
 
@@ -4036,17 +4306,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         return items
 
-    def serve_epics_list(self):
-        """GET /api/epics - List all epics from kanban board"""
+    def serve_epics_list(self, query_string=''):
+        """GET /api/epics - List all epics from kanban board
+
+        Query parameters:
+            team: Filter epics by team (mirrors other epic endpoints)
+
+        XACA-0209 round 5: server-side tag filtering removed. All tag/search
+        filtering is now client-side in the LCARS UI.
+        """
+        from urllib.parse import parse_qs
         try:
-            data = self._load_board_epics()
+            params = parse_qs(query_string) if query_string else {}
+            filter_team = params.get('team', [None])[0]
+
+            data = self._load_board_epics(filter_team)
             epics = data.get('epics', [])
 
-            # Add item counts and normalize field names for UI compatibility
+            # Add item counts and normalize field names for UI compatibility.
+            # Cancelled items are excluded from itemCount/completedCount so the
+            # progress fraction reflects active work, mirroring release math
+            # (XACA-0206). cancelledCount is surfaced so the UI can show why
+            # the denominator shrank.
             for epic in epics:
                 items = self._get_items_for_epic(epic['id'])
-                epic['itemCount'] = len(items)
-                epic['completedCount'] = len([i for i in items if i['status'] == 'completed'])
+                active = [i for i in items if i['status'] != 'cancelled']
+                epic['itemCount'] = len(active)
+                epic['completedCount'] = len([i for i in active if i['status'] in ('done', 'completed')])
+                epic['cancelledCount'] = len(items) - len(active)
                 # Map 'title' to 'name' for UI compatibility (board uses 'title')
                 if 'title' in epic and 'name' not in epic:
                     epic['name'] = epic['title']
@@ -4534,8 +4821,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if epic_filter and epic.get('id') != epic_filter:
                     continue
 
-                # Count items in this epic
-                item_count = len([i for i in board_data.get('backlog', []) if i.get('epicId') == epic.get('id')])
+                # Count items in this epic, excluding cancelled (XACA-0206 parity).
+                epic_items = [i for i in board_data.get('backlog', []) if i.get('epicId') == epic.get('id')]
+                active_items = [i for i in epic_items if i.get('status') != 'cancelled']
+                item_count = len(active_items)
+                cancelled_count = len(epic_items) - item_count
+                completed_count = len([i for i in active_items if i.get('status') in ('done', 'completed')])
 
                 calendar_epics.append({
                     "id": epic.get('id'),
@@ -4544,6 +4835,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "color": epic.get('color', 'blue'),
                     "type": "epic",
                     "itemCount": item_count,
+                    "completedCount": completed_count,
+                    "cancelledCount": cancelled_count,
                     "status": epic.get('status', 'planning'),
                     "priority": epic.get('priority', 'medium')
                 })
@@ -4587,7 +4880,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "itemIds": [],
                 "addedAt": timestamp,
                 "updatedAt": timestamp,
-                "tags": [],
+                "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
                 "collapsed": False,
                 "description": post_data.get('description', ''),
                 "color": post_data.get('color', 'blue'),  # Keep color for UI
@@ -4637,6 +4930,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 epic['status'] = post_data['status']
             if 'priority' in post_data:
                 epic['priority'] = post_data['priority']
+            if 'tags' in post_data:  # XACA-0209 — round 3: strip on write so new data is clean
+                epic['tags'] = [t.strip() for t in post_data['tags'] if isinstance(t, str) and t.strip()]
 
             epic['updatedAt'] = self._get_timestamp()
 
@@ -5870,6 +6165,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_teams_list()
         elif path == '/api/status':
             self.serve_status()
+        elif path == '/api/team':
+            self.serve_team()
         elif path == '/api/backup-status':
             self.serve_backup_status()
         elif path == '/api/integrations':
@@ -5905,7 +6202,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_release_detail(release_id)
         # Epic API endpoints
         elif path == '/api/epics':
-            self.serve_epics_list()
+            self.serve_epics_list(parsed.query)
         elif path.startswith('/api/epics/') and path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '').replace('/items', '')
             self.serve_epic_items(epic_id)
@@ -5972,6 +6269,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_import_status(job_id)
         elif path == '/api/tap-version':
             self.serve_tap_version()
+        # XACA-0220 Phase 3b: daily artifact audit results
+        elif path == '/api/artifact-audit':
+            self.serve_artifact_audit()
+        # XACA-0243-003: Claude usage monitor
+        elif path == '/api/usage/current':
+            self.serve_usage_current()
         # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
         # This allows the router to work from ANY port - startup scripts write
         # the target team to the static file, and all servers serve the same file.
@@ -6196,6 +6499,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(status, indent=2).encode())
+
+    def serve_team(self):
+        """GET /api/team — Dedicated team-identity endpoint (XACA-0249).
+
+        Returns the effective team this server is serving, along with metadata
+        that lets the UI (and operators) distinguish an explicit configuration
+        from a silent fallback.
+
+        Response shape:
+            {
+                "team": "academy",           // effective team name
+                "team_was_explicit": true,   // LCARS_TEAM env was set
+                "default_used": false        // hardcoded 'freelance' fallback was NOT used
+            }
+
+        UI uses this as a clean, dedicated source of truth when /api/status is
+        unavailable or slow.  Both endpoints return the same 'team' value.
+        """
+        payload = {
+            "team": LCARS_TEAM,
+            "team_was_explicit": _LCARS_TEAM_WAS_EXPLICIT,
+            "default_used": not _LCARS_TEAM_WAS_EXPLICIT,
+        }
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(json.dumps(payload, indent=2).encode())
 
     def handle_terminal_activate(self):
         """POST /api/terminal/activate - Switch tmux window and iTerm2 tab
@@ -7764,6 +8095,96 @@ end tell
             'version': version or 'unknown',
             'source': source or 'unknown',
         })
+
+    def serve_artifact_audit(self):
+        """GET /api/artifact-audit — XACA-0220 Phase 3b.
+
+        Returns the most recent artifact audit report for THIS team's kanban
+        directory.  The report is written nightly by
+        scripts/daily-artifact-audit.py to:
+            <team_kanban_dir>/activity/xaca-0220-audit.json
+
+        If no report exists (never run, or team was clean and file was removed)
+        returns {"clean": true, "team": <team>, "violations": []}.
+
+        The LCARS widget (lcars-artifact-audit.js) polls this endpoint every 5
+        minutes and shows a banner when clean == false.
+        """
+        try:
+            from kanban_utils import TEAM_KANBAN_DIRS  # noqa: PLC0415
+            kanban_dir = TEAM_KANBAN_DIRS.get(LCARS_TEAM)
+        except Exception:
+            kanban_dir = None
+
+        if kanban_dir is None:
+            # Fallback: use the server's own LCARS_KANBAN_DIR constant
+            try:
+                kanban_dir = LCARS_KANBAN_DIR  # noqa: F821 — defined at module level
+            except NameError:
+                kanban_dir = Path.home() / 'dev-team' / 'kanban'
+
+        audit_file = Path(kanban_dir) / 'activity' / 'xaca-0220-audit.json'
+
+        if audit_file.exists():
+            try:
+                with open(audit_file, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                self._send_json_response(data)
+                return
+            except (OSError, json.JSONDecodeError) as exc:
+                print(f'[LCARS] /api/artifact-audit read error: {exc}')
+
+        # No report file — team is clean (or audit hasn't run yet)
+        self._send_json_response({
+            'team': LCARS_TEAM,
+            'clean': True,
+            'violations': [],
+            'scan_time': None,
+            'note': 'No audit report found — either clean or audit has not run yet.',
+        })
+
+    def serve_usage_current(self):
+        """GET /api/usage/current — XACA-0243-003.
+
+        Returns the current Claude usage status from the ccusage collector
+        cache (XACA-0243-001) interpreted through the heuristics layer
+        (XACA-0243-002).
+
+        Query parameters:
+            refresh=1        Spawn ccusage_collector --once (5s timeout) before
+                             reading the cache.  Default behaviour (no param)
+                             never spawns ccusage so the endpoint stays <50ms.
+            history_limit=N  Return at most N history entries (default 7, max 50).
+        """
+        parsed = urlparse(self.path)
+        qs = parse_qs(parsed.query)
+
+        force_refresh = qs.get("refresh", ["0"])[0] == "1"
+        try:
+            history_limit = int(qs.get("history_limit", ["7"])[0])
+        except (ValueError, IndexError):
+            history_limit = 7
+
+        _status_code, payload = _build_usage_response(
+            cache_path=CCUSAGE_CACHE_PATH,
+            history_limit=history_limit,
+            force_refresh=force_refresh,
+        )
+
+        # Send response with Cache-Control: no-store in addition to the
+        # standard CORS + Content-Type headers from _send_json_response.
+        # We cannot piggyback on _send_json_response because it calls
+        # end_headers() internally, so we build the response manually here.
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(_status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_backup_status(self):
         """Serve kanban backup system status"""

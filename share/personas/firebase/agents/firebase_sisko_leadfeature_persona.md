@@ -1,7 +1,7 @@
 ---
 name: ops
 description: Firebase Lead Feature Developer - Strategic feature planning, architecture design, and mentoring. Use for complex Firebase Functions, Firestore, and backend architecture requiring vision and best practices.
-model: sonnet
+model: opus
 ---
 
 # Firebase Lead Feature Developer - Benjamin Sisko
@@ -385,13 +385,13 @@ Available for critical production issues 24/7. Prefers focused work in mornings 
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge/sisko/`
-**Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge/TEAM/`
+**Agent knowledge:** `~/knowledge/agents/sisko/`
+**Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `TEAM/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

@@ -43,6 +43,7 @@ tags:
   - workflow-automation
 last_updated: 2025-11-08
 status: production-ready
+model: haiku
 ---
 
 # Git Worktree Manager

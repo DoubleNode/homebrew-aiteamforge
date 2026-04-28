@@ -96,16 +96,19 @@ Approved. Let's make it so."
 
 ## Knowledge Base Protocol
 
+The knowledge system uses a portable four-tier schema (`agents`/`teams`/`subjects`/`project`).
+See `~/knowledge/SPEC.md` for the full schema and `~/knowledge/docs/USAGE.md` for daily operations.
+
 ### Before Starting Work
-- Read your team's knowledge INDEX: `~/dev-team/kanban/knowledge/TEAM/INDEX.md`
-- Search for relevant prior knowledge: `kb-knowledge-search "<topic>"`
-- Check if similar work has been done before — learn from past patterns
+- Search for relevant prior knowledge: `kb-knowledge-search "<topic>"` (searches all tiers)
+- Read your agent INDEX: `~/knowledge/agents/<your-persona>/INDEX.md`
+- Read your project knowledge: `<repo_root>/kanban/knowledge/project/INDEX.md` (when in a project repo)
 
 ### After Completing Work
-- If you learned something reusable, create a knowledge entry
-- Template: `kanban/knowledge/TEMPLATES/knowledge_entry_template.md`
-- Update your team INDEX.md with the new entry
-- For significant completions, write a retrospective using `kanban/knowledge/TEMPLATES/retrospective_template.md`
+- If you learned something reusable, create an entry: `kb-knowledge-add agent <your-persona> "<title>"`
+- Templates: `~/knowledge/templates/` (knowledge_entry, retrospective, project_index, INDEX)
+- Validate cross-references and INDEXes: `kb-knowledge-validate`
+- For significant completions, write a retrospective using the template at `~/knowledge/templates/retrospective_template.md`
 
 ---
 *"In the vastness of space, a good strategy is your best compass." — Admiral Kathryn Janeway*

@@ -307,6 +307,7 @@ parse_session_name() {
             project="${PARTS[1]}"
             team="${PARTS[2]}"
         else
+            # xaca-0139:allowed — docstring example uses team slug constants (freelance-doublenode-* are stable slugs, not org branding)
             # If 4+ parts: division-group-project-team (e.g., freelance-doublenode-workstats-command)
             # Join middle parts as project name
             project="${PARTS[1]}"
@@ -363,6 +364,7 @@ discover_team_names() {
 
     # Strategy 3: hardcoded fallback — used when config and dir scan both come up empty
     if [ ${#teams[@]} -eq 0 ]; then
+        # xaca-0139:allowed — "mainevent" is a legacy team slug in the hardcoded fallback list (not user-facing org branding)
         teams=(academy android command dns firebase freelance ios legal mainevent medical)
     fi
 

@@ -1169,5 +1169,542 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
             self.assertFalse(manifest_dir.exists(), "Manifest dir should be gone after archive")
 
 
+
+# ---------------------------------------------------------------------------
+# Tests: handle_create_epic tags support (XACA-0209 bug fix)
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateEpicTags(unittest.TestCase):
+    """handle_create_epic must persist the 'tags' field from request body."""
+
+    def _run_create(self, body_dict):
+        """POST /api/epics with the given body; returns (handler, response_json)."""
+        body = json.dumps(body_dict).encode()
+        handler, buf = _make_handler(
+            path="/api/epics",
+            method="POST",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        fake_board_data = {"epics": [], "nextEpicId": 1}
+        handler._load_board_epics = MagicMock(return_value=fake_board_data)
+        handler._save_board_epics = MagicMock(return_value=True)
+        handler._generate_epic_id = MagicMock(return_value="E-001")
+        handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
+        handler.handle_create_epic()
+        return handler, _response_json(buf)
+
+    def test_tags_from_request_body_persisted(self):
+        """Tags supplied in POST body appear in the created epic."""
+        _, data = self._run_create({"name": "Test Epic", "tags": ["backend", "infra"]})
+        self.assertEqual(sorted(data["tags"]), ["backend", "infra"])
+
+    def test_missing_tags_defaults_to_empty_list(self):
+        """When 'tags' is absent from the request body, epic.tags defaults to []."""
+        _, data = self._run_create({"name": "No Tags Epic"})
+        self.assertEqual(data["tags"], [])
+
+    def test_empty_tags_list_stored_as_empty(self):
+        """Explicitly empty tags list [] is stored as []."""
+        _, data = self._run_create({"name": "Empty Tags", "tags": []})
+        self.assertEqual(data["tags"], [])
+
+    def test_blank_string_tags_filtered_out(self):
+        """Empty-string elements in the tags list are excluded."""
+        _, data = self._run_create({"name": "Blank Tag Epic", "tags": ["valid", "", "  "]})
+        self.assertEqual(data["tags"], ["valid"])
+
+    def test_201_status_code(self):
+        handler, _ = self._run_create({"name": "Status Test"})
+        self.assertEqual(handler._response_code, 201)
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_update_epic tags support (XACA-0209 bug fix)
+# ---------------------------------------------------------------------------
+
+class TestHandleUpdateEpicTags(unittest.TestCase):
+    """handle_update_epic must persist the 'tags' field from request body."""
+
+    def _run_update(self, existing_tags, update_body):
+        """PUT /api/epics/E-001 with the given update body; returns (handler, response_json)."""
+        body = json.dumps(update_body).encode()
+        handler, buf = _make_handler(
+            path="/api/epics/E-001",
+            method="PUT",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        existing_epic = {
+            "id": "E-001",
+            "title": "Original Epic",
+            "status": "planning",
+            "priority": "medium",
+            "tags": existing_tags,
+            "itemIds": [],
+            "addedAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+        }
+        fake_board_data = {"epics": [existing_epic], "nextEpicId": 2}
+        handler._load_board_epics = MagicMock(return_value=fake_board_data)
+        handler._save_board_epics = MagicMock(return_value=True)
+        handler._find_epic_by_id = MagicMock(return_value=existing_epic)
+        handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
+        handler.handle_update_epic("E-001")
+        return handler, _response_json(buf)
+
+    def test_tags_updated_when_supplied(self):
+        """Tags in PUT body replace the existing tags."""
+        _, data = self._run_update(["old"], {"tags": ["new-tag", "another"]})
+        self.assertEqual(sorted(data["tags"]), ["another", "new-tag"])
+
+    def test_tags_cleared_when_empty_list_supplied(self):
+        """Sending tags=[] clears all existing tags."""
+        _, data = self._run_update(["existing"], {"tags": []})
+        self.assertEqual(data["tags"], [])
+
+    def test_tags_unchanged_when_not_in_body(self):
+        """When 'tags' key is absent from PUT body, existing tags are preserved."""
+        _, data = self._run_update(["preserved"], {"status": "active"})
+        self.assertEqual(data["tags"], ["preserved"])
+
+    def test_blank_string_tags_filtered_on_update(self):
+        """Empty-string elements in the update tags list are excluded."""
+        _, data = self._run_update([], {"tags": ["valid", "", "  "]})
+        self.assertEqual(data["tags"], ["valid"])
+
+    def test_200_status_code(self):
+        handler, _ = self._run_update([], {"status": "active"})
+        self.assertEqual(handler._response_code, 200)
+
+
+# ---------------------------------------------------------------------------
+# Tests: serve_epics_list completedCount dual-status fix (XACA-0218)
+# ---------------------------------------------------------------------------
+
+class TestServeEpicsListCompletedCount(unittest.TestCase):
+    """serve_epics_list must count both 'done' and 'completed' items (XACA-0218)."""
+
+    def _run_list(self, items):
+        """GET /api/epics; returns the decoded JSON response dict."""
+        handler, buf = _make_handler(path="/api/epics", method="GET")
+        fake_epic = {"id": "E-001", "title": "Test Epic", "itemIds": []}
+        handler._load_board_epics = MagicMock(return_value={"epics": [fake_epic]})
+        handler._get_items_for_epic = MagicMock(return_value=items)
+        handler.serve_epics_list("")
+        return _response_json(buf)
+
+    def test_counts_done_and_completed(self):
+        """Items with status 'done' and 'completed' both contribute to completedCount."""
+        items = [
+            {"itemId": "A-001", "title": "Todo task",        "status": "todo",        "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+            {"itemId": "A-002", "title": "In-progress task", "status": "in_progress", "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+            {"itemId": "A-003", "title": "Done task",        "status": "done",        "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+            {"itemId": "A-004", "title": "Completed task",   "status": "completed",   "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+            {"itemId": "A-005", "title": "Cancelled task",   "status": "cancelled",   "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+        ]
+        data = self._run_list(items)
+        epic = data["epics"][0]
+        # cancelled items are excluded from itemCount per XACA-0206 intent
+        # (cancelled items still show via cancelledCount so the UI can explain
+        # the denominator — they don't inflate active-work progress fractions)
+        self.assertEqual(epic["itemCount"], 4)
+        self.assertEqual(epic["completedCount"], 2)
+
+    def test_all_done_counted(self):
+        """All 'done' items are counted in completedCount."""
+        items = [
+            {"itemId": f"A-00{i}", "title": f"Done {i}", "status": "done", "priority": "medium", "team": "academy", "tags": [], "subRepo": ""}
+            for i in range(3)
+        ]
+        data = self._run_list(items)
+        self.assertEqual(data["epics"][0]["completedCount"], 3)
+
+    def test_all_completed_counted(self):
+        """All 'completed' items are counted in completedCount."""
+        items = [
+            {"itemId": f"A-00{i}", "title": f"Completed {i}", "status": "completed", "priority": "medium", "team": "academy", "tags": [], "subRepo": ""}
+            for i in range(4)
+        ]
+        data = self._run_list(items)
+        self.assertEqual(data["epics"][0]["completedCount"], 4)
+
+    def test_excludes_todo_in_progress_cancelled(self):
+        """Items with status 'todo', 'in_progress', or 'cancelled' are NOT counted."""
+        items = [
+            {"itemId": "A-001", "title": "Todo",        "status": "todo",        "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+            {"itemId": "A-002", "title": "In Progress",  "status": "in_progress", "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+            {"itemId": "A-003", "title": "Cancelled",    "status": "cancelled",   "priority": "medium", "team": "academy", "tags": [], "subRepo": ""},
+        ]
+        data = self._run_list(items)
+        self.assertEqual(data["epics"][0]["completedCount"], 0)
+
+    def test_empty_epic_has_zero_counts(self):
+        """An epic with no items reports itemCount=0 and completedCount=0."""
+        data = self._run_list([])
+        epic = data["epics"][0]
+        self.assertEqual(epic["itemCount"], 0)
+        self.assertEqual(epic["completedCount"], 0)
+
+    def test_response_200_status(self):
+        """serve_epics_list returns HTTP 200."""
+        handler, buf = _make_handler(path="/api/epics", method="GET")
+        fake_epic = {"id": "E-001", "title": "Test Epic", "itemIds": []}
+        handler._load_board_epics = MagicMock(return_value={"epics": [fake_epic]})
+        handler._get_items_for_epic = MagicMock(return_value=[])
+        handler.serve_epics_list("")
+        self.assertEqual(handler._response_code, 200)
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_create_release tags validation (XACA-0209 parity with epics)
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateReleaseTagsValidation(unittest.TestCase):
+    """handle_create_release must filter non-string / blank entries from tags."""
+
+    def _run_create(self, body_dict):
+        body = json.dumps(body_dict).encode()
+        handler, buf = _make_handler(
+            path="/api/releases",
+            method="POST",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        fake_data = {"releases": [], "projectEnvironments": {}, "defaultEnvironments": ["DEV"]}
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._save_releases_config = MagicMock(return_value=True)
+        handler._save_release_manifest = MagicMock(return_value=True)
+        handler._generate_release_id = MagicMock(return_value="REL-001")
+        handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
+        handler._extract_version_from_name = MagicMock(return_value="1.0.0")
+        handler.handle_create_release()
+        return handler, _response_json(buf)
+
+    def test_valid_tags_persisted(self):
+        _, data = self._run_create({"name": "Test Release", "tags": ["main-event", "ios"]})
+        self.assertEqual(sorted(data["tags"]), ["ios", "main-event"])
+
+    def test_blank_string_tags_filtered_out(self):
+        _, data = self._run_create({"name": "Blank Tag Release", "tags": ["valid", "", "  "]})
+        self.assertEqual(data["tags"], ["valid"])
+
+    def test_non_string_tags_filtered_out(self):
+        _, data = self._run_create({"name": "Mixed Tag Release", "tags": ["valid", 42, None, {"bad": "obj"}]})
+        self.assertEqual(data["tags"], ["valid"])
+
+    def test_missing_tags_defaults_to_empty_list(self):
+        _, data = self._run_create({"name": "No Tags Release"})
+        self.assertEqual(data["tags"], [])
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_update_release tags validation (XACA-0209 parity with epics)
+# ---------------------------------------------------------------------------
+
+class TestHandleUpdateReleaseTagsValidation(unittest.TestCase):
+    """handle_update_release must filter non-string / blank entries from tags."""
+
+    def _run_update(self, existing_tags, update_body):
+        body = json.dumps(update_body).encode()
+        handler, buf = _make_handler(
+            path="/api/releases/REL-001",
+            method="PUT",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        existing_release = {
+            "id": "REL-001",
+            "name": "Existing Release",
+            "tags": existing_tags,
+            "platforms": {},
+        }
+        fake_data = {"releases": [existing_release]}
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._save_releases_config = MagicMock(return_value=True)
+        handler._find_release_by_id = MagicMock(return_value=existing_release)
+        handler._update_items_release_name = MagicMock()
+        handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
+        handler._extract_version_from_name = MagicMock(return_value="1.0.0")
+        handler.handle_update_release("REL-001")
+        return handler, _response_json(buf)
+
+    def test_tags_updated_when_supplied(self):
+        _, data = self._run_update(["old"], {"tags": ["new-tag", "another"]})
+        self.assertEqual(sorted(data["tags"]), ["another", "new-tag"])
+
+    def test_blank_string_tags_filtered_on_update(self):
+        _, data = self._run_update([], {"tags": ["valid", "", "  "]})
+        self.assertEqual(data["tags"], ["valid"])
+
+    def test_non_string_tags_filtered_on_update(self):
+        _, data = self._run_update([], {"tags": ["valid", 42, None]})
+        self.assertEqual(data["tags"], ["valid"])
+
+    def test_tags_cleared_when_empty_list_supplied(self):
+        _, data = self._run_update(["existing"], {"tags": []})
+        self.assertEqual(data["tags"], [])
+
+    def test_tags_unchanged_when_not_in_body(self):
+        _, data = self._run_update(["preserved"], {"status": "active"})
+        self.assertEqual(data["tags"], ["preserved"])
+
+
+# ---------------------------------------------------------------------------
+# Tests: is_release_complete — XACA-0238 (PLANNED is NOT complete)
+# ---------------------------------------------------------------------------
+
+class TestIsReleaseComplete(unittest.TestCase):
+    """is_release_complete must treat PLANNED as not-done, only PROD as done."""
+
+    def _make_handler_simple(self):
+        handler, _ = _make_handler()
+        return handler
+
+    def _release(self, **platform_envs):
+        """Build a minimal release dict with the given platform→environment mapping."""
+        return {
+            "platforms": {
+                name: {"environment": env}
+                for name, env in platform_envs.items()
+            }
+        }
+
+    def test_all_platforms_planned_not_complete(self):
+        handler = self._make_handler_simple()
+        release = self._release(ios="PLANNED", android="PLANNED", firebase="PLANNED")
+        self.assertFalse(handler.is_release_complete(release))
+
+    def test_single_platform_planned_not_complete(self):
+        handler = self._make_handler_simple()
+        release = self._release(ios="PLANNED")
+        self.assertFalse(handler.is_release_complete(release))
+
+    def test_all_platforms_at_prod_is_complete(self):
+        handler = self._make_handler_simple()
+        release = self._release(ios="PROD", android="PROD", firebase="PROD")
+        self.assertTrue(handler.is_release_complete(release))
+
+    def test_one_platform_at_dev_blocks_completion(self):
+        handler = self._make_handler_simple()
+        release = self._release(ios="PROD", android="DEV", firebase="PROD")
+        self.assertFalse(handler.is_release_complete(release))
+
+    def test_one_platform_at_planned_blocks_completion(self):
+        """PLANNED blocks completion even when siblings are at PROD — XACA-0238 core invariant."""
+        handler = self._make_handler_simple()
+        release = self._release(ios="PROD", android="PLANNED", firebase="PROD")
+        self.assertFalse(handler.is_release_complete(release))
+
+    def test_empty_platforms_not_complete(self):
+        handler = self._make_handler_simple()
+        self.assertFalse(handler.is_release_complete({"platforms": {}}))
+
+    def test_missing_platforms_key_not_complete(self):
+        handler = self._make_handler_simple()
+        self.assertFalse(handler.is_release_complete({}))
+
+    def test_non_required_platform_alone_not_complete(self):
+        """A platform that isn't in the required list (ios/android/firebase) alone → not complete."""
+        handler = self._make_handler_simple()
+        release = self._release(other_platform="PROD")
+        self.assertFalse(handler.is_release_complete(release))
+
+    def test_partial_required_platforms_all_at_prod_is_complete(self):
+        """Only ios present and at PROD → complete (not all three required; those present are done)."""
+        handler = self._make_handler_simple()
+        release = self._release(ios="PROD")
+        self.assertTrue(handler.is_release_complete(release))
+
+    def test_mid_pipeline_environment_not_complete(self):
+        """Platforms at QA, ALPHA, BETA, GAMMA are all not-done."""
+        handler = self._make_handler_simple()
+        for env in ("QA", "ALPHA", "BETA", "GAMMA"):
+            release = self._release(ios=env, android=env)
+            self.assertFalse(
+                handler.is_release_complete(release),
+                f"Expected not complete when all platforms at {env}",
+            )
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_promote_release — XACA-0238 (PLANNED at index 0 promotes to DEV)
+# ---------------------------------------------------------------------------
+
+class TestHandlePromoteRelease(unittest.TestCase):
+    """
+    handle_promote_release must correctly advance through the pipeline including
+    the new PLANNED stage at index 0.
+    """
+
+    def _run_promote(self, current_env, platform="ios", environments=None, target_env=None):
+        """
+        Wire a handler and call handle_promote_release with the given setup.
+        Returns (handler, response_dict_or_None).
+        """
+        if environments is None:
+            environments = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"]
+
+        body_dict = {"platform": platform}
+        if target_env:
+            body_dict["targetEnvironment"] = target_env
+        body = json.dumps(body_dict).encode()
+
+        handler, buf = _make_handler(
+            path=f"/api/releases/REL-001/promote",
+            method="POST",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+
+        release = {
+            "id": "REL-001",
+            "name": "Test Release",
+            "environments": environments,
+            "platforms": {
+                platform: {
+                    "environment": current_env,
+                    "environmentHistory": [],
+                }
+            },
+        }
+        fake_data = {
+            "releases": [release],
+            "defaultEnvironments": environments,
+            "flowConfig": {
+                "stages": {env: {"enabled": True} for env in environments}
+            },
+        }
+
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._save_releases_config = MagicMock()
+        handler._find_release_by_id = MagicMock(return_value=release)
+        handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
+
+        handler.handle_promote_release("REL-001")
+
+        # If send_error was called, promotion was rejected
+        if handler.send_error.called:
+            return handler, None
+
+        try:
+            result = _response_json(buf)
+        except Exception:
+            result = None
+        return handler, result
+
+    def test_planned_promotes_to_dev(self):
+        """PLANNED (index 0) → promote → DEV (index 1). Core XACA-0238 invariant."""
+        handler, result = self._run_promote("PLANNED")
+        self.assertIsNotNone(result, "Expected a success response, not a send_error")
+        self.assertEqual(result["newEnvironment"], "DEV")
+
+    def test_dev_promotes_to_qa(self):
+        handler, result = self._run_promote("DEV")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["newEnvironment"], "QA")
+
+    def test_qa_promotes_to_alpha(self):
+        handler, result = self._run_promote("QA")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["newEnvironment"], "ALPHA")
+
+    def test_prod_is_final_stage_returns_error(self):
+        """Promoting from PROD must be rejected — already at the final stage."""
+        handler, result = self._run_promote("PROD")
+        self.assertIsNone(result, "Expected send_error, not a success response")
+        handler.send_error.assert_called_once()
+        args = handler.send_error.call_args[0]
+        self.assertEqual(args[0], 400)
+        self.assertIn("final environment", args[1])
+
+    def test_history_records_from_planned_to_dev(self):
+        """environmentHistory must log the PLANNED→DEV transition."""
+        handler, result = self._run_promote("PLANNED")
+        self.assertIsNotNone(result)
+        # Verify save was called and inspect the mutated release
+        save_call_args = handler._save_releases_config.call_args[0][0]
+        history = save_call_args["releases"][0]["platforms"]["ios"]["environmentHistory"]
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0]["from"], "PLANNED")
+        self.assertEqual(history[0]["to"], "DEV")
+
+    def test_missing_platform_in_body_returns_400(self):
+        """Omitting the platform field must produce a 400 error."""
+        body = json.dumps({}).encode()
+        handler, buf = _make_handler(
+            path="/api/releases/REL-001/promote",
+            method="POST",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        environments = ["PLANNED", "DEV", "QA", "PROD"]
+        release = {"id": "REL-001", "name": "R", "environments": environments, "platforms": {}}
+        fake_data = {
+            "releases": [release],
+            "defaultEnvironments": environments,
+            "flowConfig": {"stages": {env: {"enabled": True} for env in environments}},
+        }
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._find_release_by_id = MagicMock(return_value=release)
+        handler._save_releases_config = MagicMock()
+        handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
+
+        handler.handle_promote_release("REL-001")
+        handler.send_error.assert_called_once()
+        args = handler.send_error.call_args[0]
+        self.assertEqual(args[0], 400)
+
+    def test_target_env_direct_promotion(self):
+        """When targetEnvironment is supplied, platform jumps directly to that env."""
+        handler, result = self._run_promote("PLANNED", target_env="QA")
+        self.assertIsNotNone(result)
+        self.assertEqual(result["newEnvironment"], "QA")
+
+
+# ---------------------------------------------------------------------------
+# Tests: handle_create_release default environment — XACA-0238
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateReleaseDefaultEnvironment(unittest.TestCase):
+    """New releases must initialize platforms at PLANNED, not DEV."""
+
+    def _run_create(self, default_environments):
+        body = json.dumps({"name": "XACA-0238 Release", "platforms": ["ios", "android"]}).encode()
+        handler, buf = _make_handler(
+            path="/api/releases",
+            method="POST",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        fake_data = {
+            "releases": [],
+            "projectEnvironments": {},
+            "defaultEnvironments": default_environments,
+        }
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._save_releases_config = MagicMock(return_value=True)
+        handler._save_release_manifest = MagicMock(return_value=True)
+        handler._generate_release_id = MagicMock(return_value="REL-002")
+        handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
+        handler._extract_version_from_name = MagicMock(return_value="1.0.0")
+        handler.handle_create_release()
+        return _response_json(buf)
+
+    def test_ios_platform_starts_at_planned(self):
+        data = self._run_create(["PLANNED", "DEV", "QA", "PROD"])
+        self.assertEqual(data["platforms"]["ios"]["environment"], "PLANNED")
+
+    def test_android_platform_starts_at_planned(self):
+        data = self._run_create(["PLANNED", "DEV", "QA", "PROD"])
+        self.assertEqual(data["platforms"]["android"]["environment"], "PLANNED")
+
+    def test_default_env_is_first_in_pipeline(self):
+        """The initial environment should be the first entry in defaultEnvironments."""
+        data = self._run_create(["PLANNED", "DEV", "QA", "PROD"])
+        for platform_data in data["platforms"].values():
+            self.assertEqual(platform_data["environment"], "PLANNED")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

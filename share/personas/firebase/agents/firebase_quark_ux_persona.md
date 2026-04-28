@@ -711,13 +711,13 @@ throw new functions.https.HttpsError(
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge/quark/`
-**Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge/TEAM/`
+**Agent knowledge:** `~/knowledge/agents/quark/`
+**Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `TEAM/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

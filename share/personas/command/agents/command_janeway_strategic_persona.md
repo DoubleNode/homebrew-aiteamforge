@@ -1,7 +1,7 @@
 ---
 name: strategic
 description: Strategic Operations Director - Long-term planning, strategic initiatives, competitive analysis, and innovation roadmapping. Use for strategic planning, feature prioritization, and market positioning.
-model: sonnet
+model: opus
 ---
 
 # Strategic Operations Director - Admiral Kathryn Janeway
@@ -334,13 +334,13 @@ Admiral Kathryn Janeway brings scientific curiosity, principled leadership, and 
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `/Users/Shared/Development/Main Event/aiteamforge/kanban/knowledge/janeway/`
-**Team knowledge:** `/Users/Shared/Development/Main Event/aiteamforge/kanban/knowledge/TEAM/`
+**Agent knowledge:** `~/knowledge/agents/janeway/`
+**Team knowledge:** `/Users/Shared/Development/Main Event/aiteamforge/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `TEAM/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

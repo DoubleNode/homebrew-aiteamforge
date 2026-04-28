@@ -739,11 +739,16 @@ body {
     color: var(--lcars-green);
 }
 
-/* Per-mode active-state overrides to match the per-mode base recolor above. */
+/* Per-mode active-state overrides to match the per-mode base recolor above.
+   Must re-assert background because the per-mode base selector (0,4,0) has
+   higher specificity than the generic .active selector (0,3,0), otherwise
+   the label goes invisible (tan-on-tan / lavender-on-lavender). */
 .lcars-container[data-mode="kanban"] .sidebar-button[data-section="todos"].active {
+    background: var(--lcars-black);
     color: var(--lcars-tan);
 }
 .lcars-container[data-mode="data"] .sidebar-button[data-section="home"].active {
+    background: var(--lcars-black);
     color: var(--lcars-lavender);
 }
 
@@ -1164,7 +1169,8 @@ body {
 .lcars-content > .rag-engines-section,
 .lcars-content > .knowledge-graph-section,
 .lcars-content > .team-config-section,
-.lcars-content > .export-import-section {
+.lcars-content > .export-import-section,
+.lcars-content > .usage-section {
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
@@ -1193,7 +1199,8 @@ body {
 .lcars-content > .rag-engines-section.active,
 .lcars-content > .knowledge-graph-section.active,
 .lcars-content > .team-config-section.active,
-.lcars-content > .export-import-section.active {
+.lcars-content > .export-import-section.active,
+.lcars-content > .usage-section.active {
     display: block;
     overflow-y: auto !important;
     padding-top: 5px; /* Minimal padding - mode-bar is above content area */
@@ -1259,7 +1266,8 @@ body {
 .commands-section.active .section-bar,
 .backups-section.active .section-bar,
 .integrations-section.active .section-bar,
-.export-import-section.active .section-bar {
+.export-import-section.active .section-bar,
+.usage-section.active .section-bar {
     transform: scaleX(1);
 }
 
@@ -1274,7 +1282,8 @@ body {
 .commands-section.active .section-title,
 .backups-section.active .section-title,
 .integrations-section.active .section-title,
-.export-import-section.active .section-title {
+.export-import-section.active .section-title,
+.usage-section.active .section-title {
     opacity: 1;
     transform: translateX(0);
 }
@@ -2549,6 +2558,14 @@ body {
 .filter-pill:active {
     transform: scale(0.97);
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+/* Visible keyboard focus — the base rule sets border:none which otherwise
+   suppresses the browser default outline on some engines. Mirrors the
+   .blocker-pill:focus pattern used elsewhere in this file. */
+.filter-pill:focus-visible {
+    outline: 2px solid var(--lcars-white, #ffffff);
+    outline-offset: 2px;
 }
 
 /* ALL filter - purple/lavender with separator */
@@ -5014,6 +5031,13 @@ body {
     transition: background 0.15s ease;
     text-transform: uppercase;
     letter-spacing: 0.3px;
+    /* XACA-0209 round 5: truncate absurdly long tags so legacy data (e.g. a
+       200-char test tag) does not bloat the pill bar. Hover title= attribute
+       carries the full string for readability. */
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .queue-tag:hover {
@@ -8528,6 +8552,10 @@ body {
     overflow: hidden;
     border-left: 4px solid var(--lcars-teal, #66cccc);
     position: relative;
+    /* Force independent paint layer — works around a Chromium/WebKit bug where
+       collapsed cards (max-height: 0 transition on .release-card-items) lose
+       their rasterized text after the tab is backgrounded and restored. */
+    transform: translateZ(0);
 }
 
 .release-card.type-feature { border-left-color: var(--lcars-blue, #9999ff); }
@@ -8633,6 +8661,37 @@ body {
     align-items: center;
 }
 
+/* XACA-0226: release header right column — mirrors .epic-card-header-right.
+   Tag pill sits top-right, meta row (date/count/progress/expand) stacks below,
+   bottom-aligned via margin-top:auto so the meta row still bottoms out on
+   tag-less releases (justify-content:space-between would pin a lone child to
+   the top). */
+.release-card-header-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: flex-start;
+    align-self: stretch;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.release-card-header-right .queue-tags-row {
+    margin-top: 0;
+}
+
+.release-card-header-right .release-card-meta {
+    margin-top: auto;
+}
+
+/* XACA-0226: archived releases have a 📦 badge at right:8px; z-index:10 that
+   would otherwise overlap the tag pill's top-right corner. Shift the header
+   right column inward so pills clear the badge zone. Badge (~16px wide) + 8px
+   edge inset means the pill needs ~12-16px of additional right padding. */
+.release-card.archived .release-card-header-right {
+    padding-right: 16px;
+}
+
 .release-card-date {
     font-size: 12px;
     color: var(--lcars-muted, #aaa);
@@ -8706,6 +8765,7 @@ body {
     color: var(--lcars-teal, #66cccc);
 }
 
+.platform-env.env-planned { background: rgba(128, 128, 128, 0.15); color: var(--lcars-grey, #888888); }
 .platform-env.env-dev { background: rgba(153, 153, 255, 0.2); color: var(--lcars-blue, #9999ff); }
 .platform-env.env-qa { background: rgba(255, 204, 0, 0.2); color: var(--lcars-amber, #ffcc00); }
 .platform-env.env-alpha { background: rgba(204, 153, 255, 0.2); color: var(--lcars-purple, #cc99ff); }
@@ -8959,7 +9019,8 @@ body {
 }
 
 /* Cancelled count suffix in release card header (XACA-0206-001) */
-.release-item-cancelled-count {
+.release-item-cancelled-count,
+.epic-item-cancelled-count {
     color: var(--lcars-red);
     font-size: 10px;
     font-weight: 500;
@@ -9423,6 +9484,7 @@ body {
     font-weight: 600;
 }
 
+.env-badge.env-planned { background: rgba(128, 128, 128, 0.15); color: var(--lcars-grey, #888888); }
 .env-badge.env-dev { background: rgba(153, 153, 255, 0.2); color: var(--lcars-blue, #9999ff); }
 .env-badge.env-qa { background: rgba(102, 204, 204, 0.2); color: var(--lcars-teal, #66cccc); }
 .env-badge.env-alpha { background: rgba(255, 204, 0, 0.2); color: var(--lcars-amber, #ffcc00); }
@@ -9867,7 +9929,15 @@ body {
     right: auto;
     bottom: auto;
     z-index: auto;
-    display: block;
+    display: flex;
+    flex-direction: column;
+    /* XACA-0246: explicit cross-axis stretch overrides the base
+       `.lcars-modal { align-items: center }` rule (line 5988). Without
+       this, header/footer shrink to content width and render as small
+       pill shapes centered above/below full-width body content (visible
+       in epic-assign, status-change, and other overlay modals). */
+    align-items: stretch;
+    max-height: 90vh;
     background: var(--lcars-black, #0a0a0f);
     border: 2px solid var(--lcars-teal, #66cccc);
     border-radius: 20px 20px 0 20px;
@@ -9891,6 +9961,7 @@ body {
 
 .lcars-modal-overlay .lcars-modal-header {
     display: flex;
+    flex-shrink: 0;
     align-items: center;
     justify-content: space-between;
     padding: 15px 20px;
@@ -9923,6 +9994,9 @@ body {
 
 .lcars-modal-overlay .lcars-modal-body {
     padding: 20px;
+    overflow-y: auto;
+    flex: 1;
+    min-height: 0;
 }
 
 .modal-item-info {
@@ -10011,6 +10085,7 @@ body {
 
 .lcars-modal-overlay .lcars-modal-footer {
     display: flex;
+    flex-shrink: 0;
     justify-content: flex-end;
     gap: 10px;
     padding: 15px 20px;
@@ -10323,7 +10398,7 @@ body {
     font-family: 'Antonio', sans-serif;
     font-size: 14px;
     color: var(--lcars-text-muted, #6699cc);
-    margin-bottom: 20px;
+    margin-bottom: 12px;
     line-height: 1.4;
 }
 
@@ -10331,8 +10406,8 @@ body {
 .flow-preview-container {
     background: rgba(0, 0, 0, 0.4);
     border-radius: 8px;
-    padding: 15px;
-    margin-bottom: 20px;
+    padding: 10px 12px;
+    margin-bottom: 14px;
 }
 
 .flow-preview-label {
@@ -10375,16 +10450,16 @@ body {
 
 /* Stage Toggles */
 .flow-stages-config {
-    display: flex;
-    flex-direction: column;
-    gap: 12px;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
 }
 
 .flow-stage-item {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 12px 16px;
+    padding: 10px 12px;
     background: rgba(0, 0, 0, 0.3);
     border-radius: 6px;
     border-left: 4px solid var(--lcars-teal, #66cccc);
@@ -10497,6 +10572,43 @@ body {
 
 .queue-release-badge.assigned:hover {
     background: rgba(102, 204, 204, 0.4);
+}
+
+/* XACA-0213: Release badge sub-spans — name text and copyable ID chip */
+.queue-release-badge-name {
+    white-space: nowrap;
+    color: inherit;
+}
+
+.queue-release-badge-id {
+    display: inline-block;
+    font-size: 87%;
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+    margin-left: 0.5em;
+    padding: 1px 5px;
+    min-height: 20px;
+    line-height: 18px;
+    border-radius: 3px;
+    background: rgba(102, 204, 204, 0.12);
+    color: inherit;
+    opacity: 0.72;
+    cursor: pointer;
+    transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
+    vertical-align: middle;
+}
+
+.queue-release-badge-id:hover {
+    opacity: 1;
+    background: rgba(102, 204, 204, 0.3);
+    transform: scale(1.04);
+}
+
+.queue-release-badge-id:focus-visible {
+    outline: 2px solid var(--lcars-green);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(102, 204, 102, 0.5);
+    opacity: 1;
 }
 
 /* XACA-0056: Readonly badges for completed items (XACA-0121: removed epic/release — now always editable) */
@@ -11129,6 +11241,31 @@ body {
     gap: 8px;
 }
 
+/* XACA-0226: right column stacks tag pill on top, action cluster on bottom.
+   align-self:stretch overrides parent header's align-items:center so the column
+   spans full header height. Tags sit flex-start (top); the action cluster uses
+   margin-top:auto to bottom-align whether or not tags are present above it —
+   justify-content:space-between would pin the lone actions child to the top on
+   tag-less cards. .queue-tags-row default margin-top is zeroed since the
+   column's layout handles spacing. */
+.epic-card-header-right {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    justify-content: flex-start;
+    align-self: stretch;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.epic-card-header-right .queue-tags-row {
+    margin-top: 0;
+}
+
+.epic-card-header-right .epic-card-actions {
+    margin-top: auto;
+}
+
 .epic-action-btn {
     width: 24px;
     height: 24px;
@@ -11464,6 +11601,43 @@ body {
 .queue-epic-badge:hover {
     background: rgba(153, 102, 204, 0.5);
     opacity: 1.0; /* Full brightness on hover */
+}
+
+/* XACA-0213: Epic badge sub-spans — name text and copyable ID chip */
+.queue-epic-badge-name {
+    white-space: nowrap;
+    color: inherit;
+}
+
+.queue-epic-badge-id {
+    display: inline-block;
+    font-size: 87%;
+    font-family: 'Courier New', monospace;
+    font-weight: 600;
+    margin-left: 0.5em;
+    padding: 1px 5px;
+    min-height: 20px;
+    line-height: 18px;
+    border-radius: 3px;
+    background: rgba(153, 102, 204, 0.15);
+    color: inherit;
+    opacity: 0.72;
+    cursor: pointer;
+    transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
+    vertical-align: middle;
+}
+
+.queue-epic-badge-id:hover {
+    opacity: 1;
+    background: rgba(153, 102, 204, 0.4);
+    transform: scale(1.04);
+}
+
+.queue-epic-badge-id:focus-visible {
+    outline: 2px solid var(--lcars-purple);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(153, 102, 255, 0.5);
+    opacity: 1;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -12139,6 +12313,14 @@ body {
     .tracking-zone .queue-activity-btn {
         font-size: 10px;
         padding: 2px 5px;
+    }
+
+    /* XACA-0213: ID chips scale down on mobile to stay within badge row */
+    .queue-epic-badge-id,
+    .queue-release-badge-id {
+        font-size: 80%;
+        padding: 1px 4px;
+        margin-left: 0.35em;
     }
 }
 
@@ -13145,10 +13327,25 @@ body {
     width: 90%;
 }
 
-/* Plan document content area */
+/* XACA-0246: Plan/Retro doc modal needs more width for markdown content
+   tables, code blocks, and Subitems table). The broader
+   `.lcars-modal-overlay .lcars-modal` rule (specificity 0,2,0) sets
+   max-width: 500px, which outranks `.plan-doc-modal` (0,1,0). Scoping by
+   the unique overlay ID `#plan-doc-modal-overlay` (specificity 1,1,0)
+   wins cleanly without touching the broad rule's defaults for other
+   modals. */
+#plan-doc-modal-overlay .lcars-modal {
+    max-width: 1200px;
+}
+
+/* Plan document content area.
+   XACA-0246-001: overflow-y and max-height removed — this element also
+   carries .lcars-modal-body (flex:1, overflow-y:auto, min-height:0 via
+   the .lcars-modal-overlay .lcars-modal-body rule at line ~9990).  The
+   parent .lcars-modal already constrains height to 90vh, so the inner
+   max-height:calc(90vh-120px) was a second redundant scroll container
+   that produced a double-scrollbar on long plan docs. */
 .plan-doc-content {
-    overflow-y: auto;
-    max-height: calc(90vh - 120px);
     font-family: 'Antonio', sans-serif;
     line-height: 1.6;
 }
@@ -13325,22 +13522,22 @@ body {
     background: rgba(255, 204, 0, 0.05);
 }
 
-/* Custom scrollbar for plan doc content */
-.plan-doc-content::-webkit-scrollbar {
+/* Custom scrollbar for plan doc content — scoped to actual scroll container */
+.lcars-modal-overlay .lcars-modal-body.plan-doc-content::-webkit-scrollbar {
     width: 8px;
 }
 
-.plan-doc-content::-webkit-scrollbar-track {
+.lcars-modal-overlay .lcars-modal-body.plan-doc-content::-webkit-scrollbar-track {
     background: rgba(0, 0, 0, 0.3);
     border-radius: 4px;
 }
 
-.plan-doc-content::-webkit-scrollbar-thumb {
+.lcars-modal-overlay .lcars-modal-body.plan-doc-content::-webkit-scrollbar-thumb {
     background: var(--lcars-teal, #66cccc);
     border-radius: 4px;
 }
 
-.plan-doc-content::-webkit-scrollbar-thumb:hover {
+.lcars-modal-overlay .lcars-modal-body.plan-doc-content::-webkit-scrollbar-thumb:hover {
     background: var(--lcars-cyan, #99ccff);
 }
 
@@ -15306,6 +15503,51 @@ body {
     filter: brightness(0.7);
 }
 
+/* ============================================================================
+   Usage — candy bar pill button for Claude usage monitor (XACA-0243)
+   ============================================================================ */
+
+.legend-pill.usage-pill {
+    background: var(--lcars-cyan);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    transition:
+        background-color 0.15s ease,
+        opacity 0.15s ease,
+        filter 0.15s ease;
+}
+
+.legend-pill.usage-pill:hover {
+    filter: brightness(1.3);
+}
+
+.legend-pill.usage-pill:active {
+    filter: brightness(0.7);
+}
+
+/* Active state — pill stays bright when USAGE section is the active section */
+.legend-pill.usage-pill.active {
+    filter: brightness(1.2);
+}
+
+/* Band-driven background color — pill mirrors data-band from #usage-widget.
+   JS in index.html copies widget.dataset.band → usagePill.dataset.band each
+   poll cycle (every 30s). 5 states: green / amber / red / unknown / none.
+   `none` (idle, no current window) keeps the cyan default below. */
+.legend-pill.usage-pill[data-band="green"] { background: var(--lcars-green); }
+.legend-pill.usage-pill[data-band="amber"] { background: var(--lcars-amber); }
+.legend-pill.usage-pill[data-band="red"]   { background: var(--lcars-red); }
+.legend-pill.usage-pill[data-band="unknown"] { background: var(--lcars-tan); }
+.legend-pill.usage-pill[data-band="none"]  { background: var(--lcars-cyan); }
+
+/* Stale or offline — desaturate so the band color reads as "not trustworthy".
+   Mirrors the .usage-indicator stale/offline treatment in usage-indicator.css. */
+.legend-pill.usage-pill[data-stale="true"],
+.legend-pill.usage-pill[data-ok="false"] {
+    filter: saturate(0.4) brightness(0.85);
+}
+
 /* ─────────────────────────────────────────────────────────────────────────────
    XACA-0164-003: Per-mode body palettes
    Override --fleet-body-primary and --fleet-body-accent per mode.
@@ -15401,9 +15643,10 @@ body {
     margin-right: 0;
 }
 
-/* VIEWSCREEN + SOUND are wider than the 4 mode pills */
+/* VIEWSCREEN + SOUND + USAGE are wider than the 4 mode pills */
 .mode-bar .legend-pill.viewscreen-pill,
-.mode-bar .legend-pill.sound-pill {
+.mode-bar .legend-pill.sound-pill,
+.mode-bar .legend-pill.usage-pill {
     flex: 0 0 120px;
     width: 120px;
     min-width: 120px;
@@ -15495,3 +15738,42 @@ body {
     font-size: 1em;
     color: rgba(255, 255, 255, 0.4);
 }
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   RELEASE TAG FILTER BAR (XACA-0209)
+   Sits between the Releases section header and the releases dashboard.
+   Mirrors the queue filter dropdown pattern (.release-filter-dropdown).
+   ───────────────────────────────────────────────────────────────────────────── */
+
+/* XACA-0209 round 5: Release/Epic search bars — Queue-parity search UX.
+   The pill-filter bar (rounds 3–4) was removed; each section now has a single
+   search input that matches id/title/shortTitle/description/tags. Tag pills
+   on individual items (see .queue-tag below) are clickable and populate this
+   search input on tap. */
+
+.release-search-bar,
+.epic-search-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    /* XACA-0226: tight top, small bottom so search sits close under section bar */
+    padding: 2px 16px 6px;
+    flex-wrap: wrap;
+}
+
+/* XACA-0226: kill top padding on sections so section-header hugs the top edge */
+.epics-section,
+.releases-section {
+    padding-top: 8px;
+}
+
+.release-search-bar {
+    border-bottom: 1px solid rgba(102, 204, 204, 0.2);
+}
+
+.epic-search-bar {
+    border-bottom: 1px solid rgba(204, 153, 255, 0.2);
+}
+
+/* The search input reuses the shared .filter-search-input / .filter-search-clear
+   styles already defined for the Queue section — no per-section restyling here. */

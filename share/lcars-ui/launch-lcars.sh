@@ -35,11 +35,29 @@ echo "  ║   Launching on port $PORT                    ║"
 echo "  ╚═══════════════════════════════════════════╝"
 echo ""
 
+cd "$SCRIPT_DIR"
+
+# Start the ccusage cache collector daemon (foreground mode, in background process).
+# Provides /api/usage/current with cached data so heavy ccusage scans don't run on every poll.
+COLLECTOR_PID=""
+if command -v ccusage >/dev/null 2>&1; then
+    python3 ccusage_collector.py --foreground >/dev/null 2>&1 &
+    COLLECTOR_PID=$!
+    echo "  Usage collector started (PID $COLLECTOR_PID)"
+fi
+
+# Tear down the collector on exit so the LCARS server and its monitor stop together.
+cleanup() {
+    if [[ -n "$COLLECTOR_PID" ]] && kill -0 "$COLLECTOR_PID" 2>/dev/null; then
+        kill "$COLLECTOR_PID" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT INT TERM
+
 # Open browser after a short delay
 if $OPEN_BROWSER; then
     (sleep 1 && open "http://localhost:$PORT") &
 fi
 
-# Start the server
-cd "$SCRIPT_DIR"
+# Start the server (foreground)
 python3 server.py "$PORT"

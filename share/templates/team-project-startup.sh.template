@@ -30,7 +30,7 @@ if [[ "$REQUIRES_CLIENT" == "true" ]]; then
         echo ""
         echo "Examples:"
         echo "  $0 acme mobile-app"
-        echo "  $0 doublenode starwords"
+        echo "  $0 <client> <project>"
         echo ""
         # List existing client/project directories
         if [[ -d "$BASE_WORKING_DIR" ]]; then

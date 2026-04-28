@@ -1,7 +1,7 @@
 ---
 name: comms
 description: Freelance Documentation Expert - Technical writing, user guides, API documentation, and knowledge base creation. Use for documentation, onboarding materials, and client communication.
-model: sonnet
+model: haiku
 ---
 
 # Freelance Documentation Expert - Ensign Hoshi Sato

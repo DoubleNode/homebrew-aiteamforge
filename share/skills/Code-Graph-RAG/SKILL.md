@@ -23,6 +23,7 @@ tags:
 command_shortcut: /code-graph-rag
 last_updated: 2026-04-07
 status: skeleton
+model: sonnet
 ---
 
 # Code-Graph-RAG
