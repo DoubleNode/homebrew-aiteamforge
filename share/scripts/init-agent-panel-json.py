@@ -32,48 +32,41 @@ import sys
 import time
 from pathlib import Path
 
-
 # ---------------------------------------------------------------------------
-# Team kanban directory mapping (mirrors TEAM_KANBAN_DIRS in kanban_utils.py
-# and the case statement in scripts/lcars-tmp-dir.sh).
-# All three sources must stay in sync when adding new teams.
+# Team kanban directory mapping — loaded from aiteamforge_paths (XACA-0139).
+#
+# aiteamforge_paths is the single source of truth for team→path mappings.
+# kanban-hooks/ is a sibling directory; add it to sys.path so the import works
+# when this script is invoked directly (e.g. python3 scripts/init-agent-panel-json.py).
 # ---------------------------------------------------------------------------
 _HOME = Path.home()
-
-TEAM_KANBAN_DIRS: dict[str, Path] = {
-    # Core teams
-    "academy":    _HOME / "dev-team" / "kanban",
-    "ios":        Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
-    "android":    Path("/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"),
-    "firebase":   Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
-    "command":    Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "mainevent":  Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
-    "dns":        Path("/Users/Shared/Development/DNSFramework/kanban"),
-
-    # Freelance — generic fallback
-    "freelance":  _HOME / "dev-team" / "kanban",
-
-    # Freelance — DoubleNode projects
-    "freelance-doublenode-starwords":    Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-    "freelance-doublenode-appplanning":  Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-    "freelance-doublenode-workstats":    Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-    "freelance-doublenode-lifeboard":    Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-    "freelance-doublenode-caravan":      Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
-    "freelance-doublenode-awaysentry":   Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
-
-    # Freelance — Liquidstyle projects
-    "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
-    "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
-
-    # Personal life teams
-    "legal-coparenting": _HOME / "legal" / "coparenting" / "kanban",
-    "medical":           _HOME / "medical" / "general" / "kanban",
-    "medical-general":   _HOME / "medical" / "general" / "kanban",
-    "finance-personal":  _HOME / "finance" / "personal" / "kanban",
-}
-
-# Default fallback kanban directory (academy's) when team is unknown.
 _DEFAULT_KANBAN_DIR: Path = _HOME / "dev-team" / "kanban"
+
+def _build_team_kanban_dirs() -> dict:
+    """Build TEAM_KANBAN_DIRS from aiteamforge_paths.DEFAULT_TEAMS.
+
+    Falls back to a minimal hardcoded dict (academy only) when the module
+    cannot be imported, so the script degrades gracefully rather than crashing.
+    """
+    try:
+        _hooks_dir = Path(__file__).resolve().parent.parent / "kanban-hooks"
+        if str(_hooks_dir) not in sys.path:
+            sys.path.insert(0, str(_hooks_dir))
+        from aiteamforge_paths import DEFAULT_TEAMS  # noqa: PLC0415
+        return {
+            team: Path(entry["kanban_dir"]).expanduser()
+            for team, entry in DEFAULT_TEAMS.items()
+        }
+    except Exception as _exc:
+        import warnings
+        warnings.warn(
+            f"init-agent-panel-json: could not load aiteamforge_paths ({_exc}); "
+            "falling back to academy-only TEAM_KANBAN_DIRS",
+            stacklevel=2,
+        )
+        return {"academy": _DEFAULT_KANBAN_DIR}
+
+TEAM_KANBAN_DIRS: dict = _build_team_kanban_dirs()
 
 
 def get_kanban_tmp_dir(team_id: str) -> Path:

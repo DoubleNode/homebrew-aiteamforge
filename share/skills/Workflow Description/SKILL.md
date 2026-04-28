@@ -23,6 +23,7 @@ tags:
 command_shortcut: kb-desc
 last_updated: 2026-01-07
 status: production-ready
+model: haiku
 ---
 
 # Workflow Description

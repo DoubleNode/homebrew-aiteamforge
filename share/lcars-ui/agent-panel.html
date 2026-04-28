@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Agent Panel</title>
+<link rel="stylesheet" href="css/lcars.css">
+<link rel="stylesheet" href="css/usage-indicator.css">
 <style>
     :root {
         --theme-color: #b8860b;
@@ -131,8 +133,59 @@
     body.theme-engineering { --theme-color: #a04000; --theme-highlight: #d35400; }
     body.theme-communications { --theme-color: #b8860b; --theme-highlight: #daa520; }
 </style>
+<script src="js/usage-helpers.js"></script>
 </head>
 <body>
+    <!-- Usage Indicator — XACA-0243-004 / XACA-0250-004
+         data-band:        green|amber|red|unknown|none  (dominant band; worst of 5h + weekly)
+         data-band-weekly: green|amber|red|unknown|none  (weekly-only band for row coloring)
+         data-stale:       true|false                    (006 stale visual treatment)
+         data-ok:          true|false                    (006 offline dim/pulse treatment)
+    -->
+    <div id="usage-indicator"
+         class="usage-indicator compact"
+         data-band=""
+         data-band-weekly=""
+         data-stale="false"
+         data-ok="true"
+         aria-live="polite"
+         role="status">
+        <!-- Row 1: 5-hour rolling window (XACA-0243) -->
+        <!-- title updated by JS when weekly row is hidden (006 tooltip) -->
+        <div class="usage-row usage-row-5h" id="ui-row-5h">
+            <div class="usage-label" id="ui-label">[5H WINDOW]</div>
+            <div class="usage-bar">
+                <div class="usage-bar-fill"
+                     id="ui-bar-fill"
+                     role="progressbar"
+                     aria-valuenow="0"
+                     aria-valuemin="0"
+                     aria-valuemax="100"
+                     aria-valuetext="0% used"
+                     style="width: 0%"></div>
+            </div>
+            <div class="usage-stats" id="ui-stats">Loading...</div>
+        </div>
+        <!-- Row 2: Weekly limit (XACA-0250-004) — hidden until data available.
+             Hide conditions: available===false, confidence==='LOW'.
+             Note: band==='UNKNOWN' is always co-incident with confidence==='LOW'
+             in the current heuristics, so the LOW check is sufficient.       -->
+        <div class="usage-row usage-row-weekly" id="ui-weekly-row" style="display:none;">
+            <div class="usage-label usage-label-weekly" id="ui-weekly-label">[WK LIMIT]</div>
+            <div class="usage-bar">
+                <div class="usage-bar-fill usage-bar-fill-weekly"
+                     id="ui-weekly-bar-fill"
+                     role="progressbar"
+                     aria-valuenow="0"
+                     aria-valuemin="0"
+                     aria-valuemax="100"
+                     aria-valuetext="0% used"
+                     style="width: 0%"></div>
+            </div>
+            <div class="usage-stats usage-stats-weekly" id="ui-weekly-stats"></div>
+        </div>
+    </div>
+
     <div id="content" style="display:none; width:100%; display:flex; flex-direction:column; align-items:center;">
         <div class="avatar-frame">
             <img id="avatar" src="" alt="Agent Avatar">
@@ -267,6 +320,250 @@
             }
         } catch (e) { /* server not available, ignore */ }
     }, 2000);
+
+    // ── Usage Indicator polling (XACA-0243-004) ──────────────────────────────
+    (function () {
+        'use strict';
+
+        // Number formatters live in js/usage-helpers.js (shared with index.html).
+        const { formatTokens, formatCost, formatMinutes, formatPct } = window.UsageHelpers;
+
+        // ── DOM references ───────────────────────────────────────────────────
+        const indicator      = document.getElementById('usage-indicator');
+        const row5h          = document.getElementById('ui-row-5h');
+        const labelEl        = document.getElementById('ui-label');
+        const barFill        = document.getElementById('ui-bar-fill');
+        const statsEl        = document.getElementById('ui-stats');
+        // Weekly row DOM
+        const weeklyRow      = document.getElementById('ui-weekly-row');
+        const weeklyLabelEl  = document.getElementById('ui-weekly-label');
+        const weeklyBarFill  = document.getElementById('ui-weekly-bar-fill');
+        const weeklyStatsEl  = document.getElementById('ui-weekly-stats');
+
+        // ── Render helpers ───────────────────────────────────────────────────
+        function setBar(pct) {
+            const clamped = Math.min(100, Math.max(0, pct || 0));
+            barFill.style.width = clamped + '%';
+            barFill.setAttribute('aria-valuenow', Math.round(clamped));
+        }
+
+        function setWeeklyBar(pct) {
+            const clamped = Math.min(100, Math.max(0, pct || 0));
+            weeklyBarFill.style.width = clamped + '%';
+            weeklyBarFill.setAttribute('aria-valuenow', Math.round(clamped));
+        }
+
+        // Band severity ordering: red > amber > green > unknown > none
+        const BAND_SEVERITY = { red: 4, amber: 3, green: 2, unknown: 1, none: 0 };
+        function dominantBand(a, b) {
+            const sa = BAND_SEVERITY[a] !== undefined ? BAND_SEVERITY[a] : 0;
+            const sb = BAND_SEVERITY[b] !== undefined ? BAND_SEVERITY[b] : 0;
+            return sa >= sb ? a : b;
+        }
+
+        function renderProjection(proj) {
+            if (!proj || !proj.trustworthy) return '';
+            if (proj.will_hit_cap && proj.minutes_to_cap != null) {
+                return ' · proj will hit cap in ~' + formatMinutes(proj.minutes_to_cap);
+            }
+            const parts = [];
+            if (proj.projected_cost_usd != null) parts.push(formatCost(proj.projected_cost_usd));
+            if (proj.projected_pct_of_cap != null) parts.push(formatPct(proj.projected_pct_of_cap));
+            return parts.length ? ' · proj ' + parts.join(' ') : '';
+        }
+
+        // ── Weekly row renderer ───────────────────────────────────────────────
+        // Returns the weekly band string rendered (or 'none' if hidden).
+        //
+        // Hide conditions: available===false OR confidence==='LOW'.
+        // (band==='UNKNOWN' is always co-incident with confidence==='LOW' in the
+        // current heuristics, so the LOW check is the canonical guard.)
+        function applyWeeklyRow(w) {
+            // Determine why weekly is hidden so we can set a tooltip on the 5h row.
+            let weeklyHiddenReason = null;
+            if (!w || w.available === false) {
+                weeklyHiddenReason = (w && w.reason)
+                    ? 'Weekly data unavailable: ' + w.reason
+                    : 'Weekly data unavailable (source down)';
+            } else if (w.confidence === 'LOW') {
+                weeklyHiddenReason = 'Weekly data unavailable (low confidence — need 4+ weeks of history)';
+            }
+
+            const shouldShow = weeklyHiddenReason === null;
+
+            if (!shouldShow) {
+                weeklyRow.style.display = 'none';
+                // 006: tooltip on the 5h row so absence is not mysterious
+                if (row5h) row5h.title = weeklyHiddenReason;
+                return 'none';
+            }
+
+            // Weekly row is shown — clear any prior tooltip
+            if (row5h) row5h.title = '';
+
+            weeklyRow.style.display = '';
+
+            const wBand     = w.band ? w.band.toLowerCase() : 'unknown';
+            const isStale   = w.stale === true;
+            const pct       = w.used_pct != null ? w.used_pct : 0;
+
+            // Update weekly bar fill's color via a data attribute on the row
+            weeklyRow.dataset.bandWeekly = wBand;
+
+            // Weekly staleness is independent of 5h staleness: set data-stale-weekly
+            // on the row element so CSS can scope the hatch to weekly's own stale state.
+            weeklyRow.dataset.staleWeekly = isStale ? 'true' : 'false';
+
+            setWeeklyBar(pct);
+            weeklyBarFill.setAttribute('aria-valuetext', formatPct(pct) + ' weekly used');
+
+            // ── Weekly label ────────────────────────────────────────────────
+            weeklyLabelEl.textContent = '[WK LIMIT]';
+
+            // ── Weekly stats ─────────────────────────────────────────────────
+            // Format: PCT · TTR  (or just TTR when pct unknown)
+            // e.g. "18% · 11h 18m" or "18% · 11h 18m (stale)"
+            let statsText = formatPct(pct);
+            if (w.time_to_reset) {
+                statsText += ' · ' + w.time_to_reset;
+            }
+            if (isStale) {
+                statsText += ' <span class="usage-stale-note">(stale)</span>';
+            }
+
+            weeklyStatsEl.innerHTML = statsText;
+
+            return wBand;
+        }
+
+        function applyUsage(d) {
+            const ok      = d.ok !== false;
+            const stale   = d.stale === true;
+            const current = d.current || null;
+            const proj    = d.projection || null;
+            const totals  = d.totals || null;
+            const weekly  = d.weekly || null;
+            const band    = (current && current.band) ? current.band.toLowerCase() : 'none';
+
+            indicator.dataset.ok    = ok ? 'true' : 'false';
+            indicator.dataset.stale = stale ? 'true' : 'false';
+
+            // ── Weekly row ───────────────────────────────────────────────────
+            // Render first so we know the weekly band for dominant-band calc.
+            // When ok===false (collector offline), hide weekly row entirely.
+            let weeklyBand;
+            if (!ok) {
+                weeklyRow.style.display = 'none';
+                weeklyBand = 'none';
+            } else {
+                weeklyBand = applyWeeklyRow(weekly);
+            }
+            indicator.dataset.bandWeekly = weeklyBand;
+
+            // Dominant band: worst of 5h + weekly drives the pill container
+            const fivehBand = ok && current ? band : (ok ? 'none' : 'unknown');
+            indicator.dataset.band = dominantBand(fivehBand, weeklyBand);
+
+            // ── Label (5h row) ────────────────────────────────────────────────
+            let label = '[5H WINDOW';
+            if (!ok) {
+                label += ' · OFFLINE';
+            } else if (!current) {
+                label += ' · IDLE';
+            } else if (stale && d.stale_age_seconds != null) {
+                label += ' · STALE ' + window.UsageHelpers.formatStaleAge(d.stale_age_seconds) + ' ago';
+            }
+            label += ']';
+            labelEl.textContent = label;
+
+            // ── Stats + bar (5h row) ──────────────────────────────────────────
+            if (!ok) {
+                setBar(0);
+                // Show the ccusage error, truncated; fall back to last known cap if available.
+                const errMsg = sanitizeText((d.ccusage_error || d.error || 'unreachable').substring(0, 60));
+                const cal    = d.calibration || null;
+                let offlineText = 'OFFLINE — ' + errMsg;
+                if (cal && cal.max_window_cost_usd) {
+                    offlineText += ' · last cap ~' + formatCost(cal.max_window_cost_usd);
+                }
+                statsEl.innerHTML = offlineText;
+                barFill.setAttribute('aria-valuetext', 'offline');
+            } else if (!current) {
+                setBar(0);
+                statsEl.innerHTML = 'IDLE · awaiting next window';
+                barFill.setAttribute('aria-valuetext', 'idle — between windows');
+            } else {
+                const pct = current.used_pct_of_cap || 0;
+                setBar(pct);
+
+                const staleNote = stale
+                    ? ' <span class="usage-stale-note">(last reading)</span>'
+                    : '';
+
+                const projText = renderProjection(proj);
+
+                let statsText = '';
+                if (band === 'red') {
+                    // RED: pct + projection cap warning dominates
+                    statsText = formatPct(pct) + staleNote + projText;
+                } else if (band === 'amber') {
+                    // AMBER: pct + cost + projection
+                    const costPart = current.cost_usd != null ? ' · ~' + formatCost(current.cost_usd) : '';
+                    statsText = formatPct(pct) + costPart + staleNote + projText;
+                } else {
+                    // GREEN / UNKNOWN: full detail
+                    const elapsed  = current.elapsed_minutes != null ? formatMinutes(current.elapsed_minutes) + ' elapsed' : '';
+                    const remain   = current.remaining_minutes != null ? formatMinutes(current.remaining_minutes) + ' left' : '';
+                    const costPart = current.cost_usd != null ? '~' + formatCost(current.cost_usd) : '';
+                    const parts    = [formatPct(pct), elapsed, remain, costPart].filter(Boolean);
+                    statsText = parts.join(' · ') + staleNote + projText;
+                }
+
+                statsEl.innerHTML = statsText;
+                barFill.setAttribute('aria-valuetext',
+                    formatPct(pct) + ' used' +
+                    (proj && proj.trustworthy && proj.projected_pct_of_cap != null
+                        ? ', projected ' + formatPct(proj.projected_pct_of_cap)
+                        : ''));
+            }
+        }
+
+        // ── Polling loop (setTimeout recursive, visibility-aware) ────────────
+        let usageTimeout = null;
+
+        function scheduleUsagePoll() {
+            const delay = document.visibilityState === 'hidden' ? 60000 : 30000;
+            usageTimeout = setTimeout(pollUsage, delay);
+        }
+
+        async function pollUsage() {
+            try {
+                const resp = await fetch('/api/usage/current');
+                if (resp.ok) {
+                    const data = await resp.json();
+                    applyUsage(data);
+                } else {
+                    applyUsage({ ok: false });
+                }
+            } catch (_) {
+                applyUsage({ ok: false });
+            }
+            scheduleUsagePoll();
+        }
+
+        document.addEventListener('visibilitychange', function () {
+            if (document.visibilityState === 'visible') {
+                clearTimeout(usageTimeout);
+                pollUsage();
+            }
+        });
+
+        document.addEventListener('DOMContentLoaded', pollUsage);
+        // Fire immediately if DOM is already ready (inline scripts run after DOMContentLoaded fires)
+        if (document.readyState !== 'loading') pollUsage();
+
+    }());
+    // ── End Usage Indicator ──────────────────────────────────────────────────
 </script>
 </body>
 </html>

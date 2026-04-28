@@ -3,6 +3,10 @@
 # Kanban Board Helpers
 # Terminal task tracking for AITeamForge installations
 # ============================================================================
+# This file is a template — {{ORG_NAME}}, {{ORG_SLUG}}, {{SHARED_DEV_ROOT}},
+# etc. are substituted at install time by the AITeamForge installer.
+# Do not edit the rendered copy directly.
+# ============================================================================
 # Usage: Source this file in your terminal session
 #   source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
 #
@@ -87,19 +91,21 @@ _kb_get_kanban_dir() {
             echo "${_atf_dir}/kanban"
             ;;
         ios)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"
+            # TODO(installer): replace {{SHARED_DEV_ROOT}} with paths.shared_dev_root at install time
+            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/kanban"
             ;;
         android)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban"
+            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/kanban"
             ;;
         firebase)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"
+            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban"
             ;;
         command)
-            echo "/Users/Shared/Development/Main Event/dev-team/kanban"
+            echo "{{SHARED_DEV_ROOT}}/dev-team/kanban"
             ;;
         dns)
-            echo "/Users/Shared/Development/DNSFramework/kanban"
+            # TODO(installer): replace with org-specific DNS framework path if applicable
+            echo "${HOME}/dns-framework/kanban"
             ;;
         legal-*)
             local _suffix="${team#legal-}"
@@ -114,12 +120,12 @@ _kb_get_kanban_dir() {
             echo "${HOME}/finance/${_suffix}/kanban"
             ;;
         freelance-*)
-            # Try to extract project from team ID (e.g., freelance-doublenode-starwords)
+            # Try to extract project from team ID (e.g., freelance-<client>-<project>)
             local _parts=("${(@s/-/)team}")
             if [[ ${#_parts[@]} -ge 3 ]]; then
                 local _client="${_parts[2]}"
                 local _project="${_parts[3]}"
-                echo "/Users/Shared/Development/${(C)_client}/${(C)_project}/kanban"
+                echo "${HOME}/development/${_client}/${_project}/kanban"
             else
                 echo "${_atf_dir}/kanban"
             fi
@@ -247,7 +253,7 @@ _kb_detect_context() {
     # Extract team/board-prefix and terminal from session name
     # Works for any number of segments:
     #   freelance-command → team=freelance, terminal=command
-    #   freelance-doublenode-starwords-command → team=freelance-doublenode-starwords, terminal=command
+    #   freelance-<client>-<project>-command → team=freelance-<client>-<project>, terminal=command
     #   ios-bridge → team=ios, terminal=bridge
     local team terminal
 
@@ -880,23 +886,28 @@ _kb_get_team_code() {
         android)                           echo "AND" ;;
         firebase)                          echo "FIR" ;;
         freelance)                         echo "FRE" ;;
-        freelance-doublenode-starwords)    echo "FSW" ;;
-        freelance-doublenode-workstats)    echo "FWS" ;;
-        freelance-doublenode-appplanning)  echo "FAP" ;;
-        freelance-doublenode-lifeboard)    echo "FLB" ;;
-        freelance-doublenode-caravan)      echo "VAN" ;;
-        freelance-doublenode-awaysentry)   echo "FAS" ;;
+        # NOTE: freelance-<client>-<project> entries below are examples of registered
+        # team IDs from a specific install. New installations register their own team IDs.
+        freelance-doublenode-starwords)    echo "FSW" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-workstats)    echo "FWS" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-appplanning)  echo "FAP" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-lifeboard)    echo "FLB" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-caravan)      echo "VAN" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-awaysentry)   echo "FAS" ;; # xaca-0139:allowed — stable team slug constant
         freelance-liquidstyle-agentbadges-app) echo "FLA" ;;
         freelance-liquidstyle-agentbadges-ios) echo "FLI" ;;
         academy)                           echo "ACA" ;;
         dns)                               echo "DNS" ;;
         command)                           echo "CMD" ;;
+        # NOTE: "mainevent" is a registered team slug example — xaca-0139:allowed (legacy slug constant, not org branding)
+        # At install time, the org team slug ({{ORG_SLUG}}) would be registered instead.
+        # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
         mainevent)                         echo "MEV" ;;
         legal-coparenting)                 echo "LCP" ;;
         medical-general)                   echo "MED" ;;
         finance-personal)                  echo "FIN" ;;
         *)
-            # Smart fallback for multi-segment names (e.g., freelance-doublenode-newproject)
+            # Smart fallback for multi-segment names (e.g., freelance-<client>-<project>)
             # Uses: first letter of first segment + 2-letter code from last segment
             if [[ "$team" == *-* ]]; then
                 local first_segment="${team%%-*}"   # Everything before first dash
@@ -913,7 +924,7 @@ _kb_get_team_code() {
 }
 
 # Reverse lookup: get team name from 3-letter code
-# Format: X<TeamCode>-#### → team name (e.g., XFSW-0013 → freelance-doublenode-starwords)
+# Format: X<TeamCode>-#### → team name (e.g., XFRE-0013 → freelance, XFSW-0013 → freelance-<client>-<project>)
 # Args: code (3-letter code like "FSW" or full ID like "XFSW-0013")
 # Returns: team name or empty string if not found
 _kb_get_team_from_code() {
@@ -934,17 +945,21 @@ _kb_get_team_from_code() {
         AND) echo "android" ;;
         FIR) echo "firebase" ;;
         FRE) echo "freelance" ;;
-        FSW) echo "freelance-doublenode-starwords" ;;
-        FWS) echo "freelance-doublenode-workstats" ;;
-        FAP) echo "freelance-doublenode-appplanning" ;;
-        FLB) echo "freelance-doublenode-lifeboard" ;;
-        VAN) echo "freelance-doublenode-caravan" ;;
-        FAS) echo "freelance-doublenode-awaysentry" ;;
+        # NOTE: FSW/FWS/FAP/FLB/VAN/FAS are example registered codes from a
+        # specific install. New installations register their own team codes.
+        FSW) echo "freelance-doublenode-starwords" ;; # xaca-0139:allowed — stable team slug constant
+        FWS) echo "freelance-doublenode-workstats" ;; # xaca-0139:allowed — stable team slug constant
+        FAP) echo "freelance-doublenode-appplanning" ;; # xaca-0139:allowed — stable team slug constant
+        FLB) echo "freelance-doublenode-lifeboard" ;; # xaca-0139:allowed — stable team slug constant
+        VAN) echo "freelance-doublenode-caravan" ;; # xaca-0139:allowed — stable team slug constant
+        FAS) echo "freelance-doublenode-awaysentry" ;; # xaca-0139:allowed — stable team slug constant
         FLA) echo "freelance-liquidstyle-agentbadges-app" ;;
         FLI) echo "freelance-liquidstyle-agentbadges-ios" ;;
         ACA) echo "academy" ;;
         DNS) echo "dns" ;;
         CMD) echo "command" ;;
+        # NOTE: MEV is the registered team code example. See _kb_get_team_code above.
+        # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
         MEV) echo "mainevent" ;;
         LCP) echo "legal-coparenting" ;;
         MED) echo "medical-general" ;;
@@ -2277,7 +2292,7 @@ kb-sweep() {
         else
             echo "  🚫 BLOCKING: No knowledge entries found referencing $working_id"
             echo "     Retrospectives should produce at least 1 knowledge entry."
-            echo "     See: kanban/knowledge/TEMPLATES/knowledge_entry_template.md"
+            echo "     See: ~/knowledge/templates/knowledge_entry_template.md"
             retro_blocking=true
         fi
         echo ""
@@ -2460,7 +2475,7 @@ kb-done() {
             printf "  ║  No retrospective found for %-29s║\n" "${working_id}"
             echo "  ║                                                         ║"
             echo "  ║  Consider capturing what you learned:                   ║"
-            echo "  ║  Template: kanban/knowledge/TEMPLATES/retrospective...  ║"
+            echo "  ║  Template: ~/knowledge/templates/retrospective...  ║"
             printf "  ║  Save to:  kanban/%-40s║\n" "${working_id}_*_RETROSPECTIVE.md"
             echo "  ║                                                         ║"
             echo "  ║  Run: kb-retro-check to see all items missing retros    ║"
@@ -3024,9 +3039,9 @@ kb-backlog() {
                 echo "  owner/repo#123    Full format (explicit repo)"
                 echo ""
                 echo "Team default repos:"
-                echo "  academy   -> doublenode/dev-team"
-                echo "  dns       -> doublenode/dns-framework"
-                echo "  freelance -> doublenode/dev-team"
+                echo "  academy   -> {{ORG_SLUG}}/dev-team"
+                echo "  dns       -> {{ORG_SLUG}}/dns-framework"
+                echo "  freelance -> {{ORG_SLUG}}/dev-team"
                 echo ""
                 echo "Examples:"
                 echo "  kb-backlog github XFRE-0001 #42"
@@ -3809,7 +3824,7 @@ kb-backlog() {
                                 echo "   Could not resolve path (no plan document found)."
                             fi
                             echo "   Create the retrospective file before marking this subitem done."
-                            echo "   Template: ${AITEAMFORGE_DIR}/kanban/knowledge/TEMPLATES/retrospective_template.md"
+                            echo "   Template: ${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md"
                             retro_ok=false
                         fi
 
@@ -3828,7 +3843,7 @@ kb-backlog() {
                                 echo ""
                                 echo "🚫 BLOCKING: No knowledge entries referencing $retro_parent_id found."
                                 echo "   Create at least one knowledge entry before marking this subitem done."
-                                echo "   See: kanban/knowledge/TEMPLATES/knowledge_entry_template.md"
+                                echo "   See: ~/knowledge/templates/knowledge_entry_template.md"
                                 retro_ok=false
                             fi
                         fi
@@ -5183,6 +5198,7 @@ _kb_get_persona_delegation_guide() {
             guide+="| Release / CI/CD | obrien | O'Brien |\n"
             guide+="| UX / Developer Experience | quark | Quark |"
             ;;
+        # xaca-0139:allowed — "mainevent" is a legacy team slug constant in guide routing (not user-facing org branding)
         mainevent)
             guide+="| Work Type | subagent_type | Persona |\n"
             guide+="|---|---|---|\n"
@@ -5516,7 +5532,7 @@ kb-run() {
         prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
         prompt+="When delegating this subitem, your prompt MUST include:\n"
         prompt+="1. The retrospective file path: \`kb-retro-path ${item_id}\` (run this to get the exact path)\n"
-        prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/kanban/knowledge/TEMPLATES/retrospective_template.md\`\n"
+        prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md\`\n"
         prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
         prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
 
@@ -5788,7 +5804,7 @@ kb-work() {
         prompt+="**The 'Retrospective and Knowledge Capture' subitem MUST create a retrospective FILE.**\n"
         prompt+="When delegating this subitem, your prompt MUST include:\n"
         prompt+="1. The retrospective file path: \`kb-retro-path ${item_id}\` (run this to get the exact path)\n"
-        prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/kanban/knowledge/TEMPLATES/retrospective_template.md\`\n"
+        prompt+="2. The template to copy from: \`${AITEAMFORGE_DIR}/~/knowledge/templates/retrospective_template.md\`\n"
         prompt+="3. Explicit instruction: 'You MUST create the retrospective file. Knowledge entries alone are NOT sufficient.'\n"
         prompt+="4. The \`kb-backlog sub done\` command will BLOCK completion if the retro file is missing.\n\n"
 
@@ -7214,23 +7230,23 @@ kb-knowledge-search() {
     # Build the map of team label → knowledge directory
     # Each entry: "label:path"
     local -a team_dirs
+    # NOTE: Paths below are populated at install time via the aiteamforge-paths loader.
+    # The static fallbacks here use {{SHARED_DEV_ROOT}} and {{ORG_NAME}} placeholders
+    # that the installer resolves. Canonical path resolution delegates to
+    # aiteamforge_team_kanban_dir() when available (see loader guard above).
     team_dirs=(
         "academy:${AITEAMFORGE_DIR}/kanban/knowledge"
-        "mainevent:/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/knowledge"
-        "android:/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/knowledge"
-        "firebase:/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/knowledge"
-        "command:/Users/Shared/Development/Main Event/dev-team/kanban/knowledge"
-        "dns:/Users/Shared/Development/DNSFramework/kanban/knowledge"
-        "freelance-starwords:/Users/Shared/Development/DoubleNode/Starwords/kanban/knowledge"
-        "freelance-appplanning:/Users/Shared/Development/DoubleNode/appPlanning/kanban/knowledge"
-        "freelance-workstats:/Users/Shared/Development/DoubleNode/WorkStats/kanban/knowledge"
-        "freelance-lifeboard:/Users/Shared/Development/DoubleNode/LifeBoard/kanban/knowledge"
+        "{{ORG_SLUG}}:{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/kanban/knowledge"
+        "android:{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/kanban/knowledge"
+        "firebase:{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban/knowledge"
+        "command:{{SHARED_DEV_ROOT}}/dev-team/kanban/knowledge"
+        "dns:${HOME}/dns-framework/kanban/knowledge"
         "legal-coparenting:${HOME}/legal/coparenting/kanban/knowledge"
         "medical-general:${HOME}/medical/general/kanban/knowledge"
         "finance-personal:${AITEAMFORGE_DIR}/kanban/finance/knowledge"
         "freelance:${AITEAMFORGE_DIR}/kanban/freelance/knowledge"
         "legal:${AITEAMFORGE_DIR}/kanban/legal/knowledge"
-        "mainevent-distributed:${AITEAMFORGE_DIR}/kanban/mainevent/knowledge"
+        "{{ORG_SLUG}}-distributed:${AITEAMFORGE_DIR}/kanban/{{ORG_SLUG}}/knowledge"
         "medical-distributed:${AITEAMFORGE_DIR}/kanban/medical/knowledge"
     )
 
@@ -7846,12 +7862,17 @@ kb-restart() {
         ["academy"]="8203"
         ["dns"]="8180"
         ["freelance"]="8505"
-        ["freelance-doublenode-starwords"]="8505"
-        ["freelance-doublenode-workstats"]="8505"
-        ["freelance-doublenode-appplanning"]="8505"
+        # NOTE: freelance-<client>-<project> keys below are registered team IDs
+        # from a specific install. New installations add their own team IDs here.
+        ["freelance-doublenode-starwords"]="8505"  # xaca-0139:allowed — stable team slug constant
+        ["freelance-doublenode-workstats"]="8505"  # xaca-0139:allowed — stable team slug constant
+        ["freelance-doublenode-appplanning"]="8505"  # xaca-0139:allowed — stable team slug constant
         ["freelance-liquidstyle-agentbadges-app"]="8960"
         ["freelance-liquidstyle-agentbadges-ios"]="8970"
         ["command"]="8234"
+        # NOTE: "mainevent" is a registered team slug from a specific install. xaca-0139:allowed (legacy slug, not org branding)
+        # At install time the org team slug ({{ORG_SLUG}}) would be added here.
+        # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
         ["mainevent"]="8234"
     )
 
@@ -7958,13 +7979,14 @@ _kb_get_releases_dir() {
             echo "${AITEAMFORGE_DIR}/kanban/releases"
             ;;
         ios)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/DEV/dev-team/kanban/releases"
+            # TODO(installer): {{SHARED_DEV_ROOT}} and {{ORG_NAME}} resolved at install time
+            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/DEV/dev-team/kanban/releases"
             ;;
         android)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-Android/develop/dev-team/kanban/releases"
+            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/develop/dev-team/kanban/releases"
             ;;
         firebase)
-            echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/develop/dev-team/kanban/releases"
+            echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/develop/dev-team/kanban/releases"
             ;;
         *)
             # Default to legacy location for unknown teams
@@ -8040,7 +8062,7 @@ kb-release-create() {
                 echo "Options:"
                 echo "  --type <type>          Release type: feature, bugfix, hotfix, maintenance (default: feature)"
                 echo "  --platforms <list>     Comma-separated platforms: ios,android,firebase (default: ios,android)"
-                echo "  --project <name>       Project name (e.g., Starwords, MainEvent)"
+                echo "  --project <name>       Project name (e.g., Starwords, MyProject)"
                 echo "  --target-date <date>   Target date (YYYY-MM-DD)"
                 echo "  --short-title <title>  Short display name for LCARS UI"
                 echo ""

@@ -121,6 +121,154 @@ def get_git_lines_changed():
 
 # parse_session_name is now imported from kanban_utils
 
+def _resolve_pane_tty(session_name, window_name):
+    """Return the full /dev/ttysNNN path of the target pane, or None.
+
+    Explicitly targets session:window.0 so the TTY lookup is correct even
+    when this hook fires from a background or hook-runner context that has
+    a different implicit pane.
+    """
+    if not session_name or not window_name:
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", f"{session_name}:{window_name}.0",
+             "-p", "#{pane_tty}"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            tty = result.stdout.strip()
+            return tty if tty else None
+    except Exception:
+        pass
+    return None
+
+
+def _fire_iterm2_tab_active(session_name=None, window_name=None, session_id=None):
+    """Best-effort: call set_claude_active via iterm2_badge_helper.sh.
+
+    Resolves the helper in preference order:
+      1. $DEV_TEAM_ROOT/iterm2_badge_helper.sh
+      2. ~/dev-team/iterm2_badge_helper.sh
+      3. ~/aiteamforge/iterm2_badge_helper.sh
+
+    The helper's iterm2_set_user_var writes OSC escapes to stdout.  With
+    capture_output=True those bytes are captured by Python and discarded —
+    iTerm2 never sees them.  Fix: resolve the target pane's TTY and append
+    bash's stdout directly to that TTY path so the OSC bytes reach the
+    terminal regardless of how/where this hook runs.
+
+    When session_id is provided, resolves tab_id in the bash child and writes
+    a mapping file at ~/.claude/.iterm_tab_refcount/sessions/<session_id> so
+    the Stop hook (which runs in a different process context) can re-use the
+    exact same tab_id rather than resolving its own — preventing refcount drift.
+
+    Wraps everything in try/except — a failed badge call must never block
+    session startup. Uses a 2-second timeout so a hung shell can't stall Claude.
+    """
+    candidates = []
+    env_root = os.environ.get("DEV_TEAM_ROOT", "")
+    if env_root:
+        candidates.append(os.path.join(env_root, "iterm2_badge_helper.sh"))
+    candidates.append(os.path.expanduser("~/dev-team/iterm2_badge_helper.sh"))
+    candidates.append(os.path.expanduser("~/aiteamforge/iterm2_badge_helper.sh"))
+
+    helper_path = None
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            helper_path = candidate
+            break
+
+    if not helper_path:
+        log_debug("iterm2_badge_helper.sh not found; skipping claude_active set")
+        return
+
+    # Sanitize session_id: reject anything with path separators or null bytes
+    safe_session_id = ""
+    if session_id and "/" not in session_id and "\x00" not in session_id:
+        safe_session_id = session_id
+
+    try:
+        pane_tty = _resolve_pane_tty(session_name, window_name)
+        log_debug(f"Target pane TTY for claude_active: {pane_tty}")
+
+        session_map_dir = os.path.expanduser("~/.claude/.iterm_tab_refcount/sessions")
+        os.makedirs(session_map_dir, exist_ok=True)
+
+        env = os.environ.copy()
+        if safe_session_id:
+            env["SESSION_ID"] = safe_session_id
+            env["SESSION_MAP_DIR"] = session_map_dir
+        if pane_tty:
+            env["PANE_TTY"] = pane_tty
+
+        cmd = f"""source '{helper_path}'
+tab_id=$(_iterm_tab_id)
+if [ "$tab_id" != "unknown" ]; then
+    if [ -n "${{SESSION_ID:-}}" ] && [ -n "${{SESSION_MAP_DIR:-}}" ]; then
+        mkdir -p "$SESSION_MAP_DIR"
+        printf '%s\\n' "$tab_id" > "$SESSION_MAP_DIR/$SESSION_ID.tmp" \\
+            && mv "$SESSION_MAP_DIR/$SESSION_ID.tmp" "$SESSION_MAP_DIR/$SESSION_ID"
+    fi
+    if [ -n "${{PANE_TTY:-}}" ]; then
+        set_claude_active "$tab_id" >> "$PANE_TTY"
+    else
+        set_claude_active "$tab_id"
+    fi
+fi"""
+
+        if not pane_tty:
+            log_debug("Pane TTY not resolved; OSC bytes may be discarded (falling back to captured stdout)")
+
+        subprocess.run(
+            ["bash", "-c", cmd],
+            env=env,
+            timeout=2,
+            capture_output=True,
+        )
+
+        if safe_session_id:
+            mapping_path = os.path.join(session_map_dir, safe_session_id)
+            log_debug(f"Session→tab mapping written to: {mapping_path} (session_id={safe_session_id})")
+        log_debug(f"Fired set_claude_active via {helper_path}")
+    except Exception as e:
+        log_debug(f"set_claude_active failed: {e}")
+
+
+def _sweep_orphan_session_maps(max_age_days: int = 7) -> None:
+    """Delete session→tab_id mapping files older than max_age_days.
+
+    Best-effort cleanup for mapping files orphaned by crashed sessions that
+    never reached the Stop hook. Silent on every failure path — this must
+    never block session startup.
+    """
+    import time
+    map_dir = os.path.expanduser("~/.claude/.iterm_tab_refcount/sessions")
+    if not os.path.isdir(map_dir):
+        return
+    try:
+        cutoff = time.time() - (max_age_days * 86400)
+        scanned = 0
+        deleted = 0
+        errors = 0
+        with os.scandir(map_dir) as it:
+            for entry in it:
+                scanned += 1
+                if scanned > 10000:
+                    break
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                try:
+                    if entry.stat().st_mtime < cutoff:
+                        os.unlink(entry.path)
+                        deleted += 1
+                except Exception:
+                    errors += 1
+        log_debug(f"Orphan session-map sweep: scanned={scanned} deleted={deleted} errors={errors}")
+    except Exception as e:
+        log_debug(f"Orphan session-map sweep failed: {e}")
+
+
 def trigger_health_check():
     """Trigger LCARS health check in background to ensure server is running.
 
@@ -608,6 +756,9 @@ def main():
     log_debug("=" * 50)
     log_debug("Start hook triggered")
 
+    # XACA-0231-004: prune mapping files from crashed sessions (>7d old)
+    _sweep_orphan_session_maps()
+
     try:
         # Read hook input from stdin (SessionStart provides session info)
         try:
@@ -616,6 +767,11 @@ def main():
         except:
             input_data = {}
             log_debug("No input data (empty stdin)")
+
+        # Extract session_id from Claude Code hook payload (UUID-like string).
+        # Used to freeze the tab_id at SessionStart so the Stop hook can
+        # re-use the exact same value — prevents refcount drift across contexts.
+        session_id = input_data.get("session_id", "")
 
         # Get tmux context
         session_name, window_index, window_name = get_tmux_context()
@@ -629,6 +785,11 @@ def main():
 
             # Trigger health check to ensure LCARS server is running
             trigger_health_check()
+
+            # Signal to iTerm2 that Claude is active in this tab.
+            # Pass session_id so the bash child can write the session→tab_id
+            # mapping file before calling set_claude_active.
+            _fire_iterm2_tab_active(session_name=session_name, window_name=window_name, session_id=session_id)
         else:
             log_debug("Skipping - missing context")
 

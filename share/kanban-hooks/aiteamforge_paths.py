@@ -321,10 +321,12 @@ def load_config() -> dict:
             file=sys.stderr,
         )
 
-    # Ensure "teams" key exists
-    if "teams" not in config:
+    # Ensure "teams" is populated — catches both missing key AND empty dict,
+    # the latter being the failure mode that produced a silently-empty team map
+    # (bug found on 2026-04-22 when corrupt config made every team lookup 404).
+    if not config.get("teams"):
         print(
-            "[aiteamforge-paths] WARNING: config has no 'teams' key — using defaults",
+            "[aiteamforge-paths] WARNING: config has no populated 'teams' — using defaults",
             file=sys.stderr,
         )
         config["teams"] = DEFAULT_TEAMS

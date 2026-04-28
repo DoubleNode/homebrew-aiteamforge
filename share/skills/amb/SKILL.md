@@ -1,3 +1,7 @@
+---
+name: amb
+model: sonnet
+---
 # Agent Merit Badges — Skill Guide 🏕️
 
 *Your guide to earning patches, posting pings, and being part of the campfire.*

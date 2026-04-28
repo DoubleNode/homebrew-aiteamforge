@@ -241,7 +241,144 @@ def clear_orphaned_item_fields(team, terminal, window_name):
         return False
 
 
-def delayed_check_and_remove(session_name, window_name, team, terminal):
+def _resolve_pane_tty(session_name, window_name):
+    """Return the full /dev/ttysNNN path of the target pane, or None.
+
+    Explicitly targets session:window.0.  This hook runs inside a double-forked
+    daemon that has closed stdin/stdout/stderr, so there is no controlling
+    terminal and no implicit pane.  We must resolve the TTY explicitly.
+    """
+    if not session_name or not window_name:
+        return None
+    try:
+        result = subprocess.run(
+            ["tmux", "display-message", "-t", f"{session_name}:{window_name}.0",
+             "-p", "#{pane_tty}"],
+            capture_output=True, text=True, timeout=2
+        )
+        if result.returncode == 0:
+            tty = result.stdout.strip()
+            return tty if tty else None
+    except Exception:
+        pass
+    return None
+
+
+def _fire_iterm2_tab_clear(session_name=None, window_name=None, session_id=None):
+    """Best-effort: call clear_claude_active via iterm2_badge_helper.sh.
+
+    Resolves the helper in preference order:
+      1. $DEV_TEAM_ROOT/iterm2_badge_helper.sh
+      2. ~/dev-team/iterm2_badge_helper.sh
+      3. ~/aiteamforge/iterm2_badge_helper.sh
+
+    The helper's iterm2_set_user_var writes OSC escapes to stdout.  This hook
+    runs inside a double-forked daemon with stdin/stdout/stderr closed, so
+    capture_output=True would silently discard the bytes.  Fix: resolve the
+    target pane TTY and redirect bash stdout directly to that TTY so the OSC
+    bytes reach the terminal regardless of daemon stdio state.
+
+    When session_id is provided, reads the session→tab_id mapping written by
+    the SessionStart hook from ~/.claude/.iterm_tab_refcount/sessions/<session_id>
+    and passes that tab_id explicitly to clear_claude_active, eliminating
+    TMUX env drift between SessionStart and Stop daemon contexts.
+
+    Wraps everything in try/except — a failed badge call must never block
+    the stop hook. Uses a 2-second timeout so a hung shell can't stall cleanup.
+    """
+    candidates = []
+    env_root = os.environ.get("DEV_TEAM_ROOT", "")
+    if env_root:
+        candidates.append(os.path.join(env_root, "iterm2_badge_helper.sh"))
+    candidates.append(os.path.expanduser("~/dev-team/iterm2_badge_helper.sh"))
+    candidates.append(os.path.expanduser("~/aiteamforge/iterm2_badge_helper.sh"))
+
+    helper_path = None
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            helper_path = candidate
+            break
+
+    if not helper_path:
+        log_debug("[Background] iterm2_badge_helper.sh not found; skipping claude_active clear")
+        return
+
+    # Resolve tab_id from session mapping file written by SessionStart hook
+    tab_id = None
+    session_map_path = None
+    # Sanitize session_id: reject anything with path separators or null bytes
+    # (mirrors the defensive guard in kanban-session-start.py before path construction)
+    safe_session_id = ""
+    if session_id and "/" not in session_id and "\x00" not in session_id:
+        safe_session_id = session_id
+    if safe_session_id:
+        session_map_path = os.path.expanduser(
+            f"~/.claude/.iterm_tab_refcount/sessions/{safe_session_id}"
+        )
+        try:
+            with open(session_map_path, "r") as f:
+                tab_id = f.read().strip() or None
+            log_debug(f"[Background] Session mapping hit: {session_map_path} → tab_id={tab_id}")
+        except FileNotFoundError:
+            log_debug(f"[Background] Session mapping miss (file not found): {session_map_path}")
+        except Exception as e:
+            log_debug(f"[Background] Session mapping read error: {e}")
+    elif session_id:
+        log_debug(f"[Background] session_id rejected by sanitizer: {session_id!r}")
+    else:
+        log_debug("[Background] No session_id provided; falling back to resolver-based clear")
+
+    try:
+        pane_tty = _resolve_pane_tty(session_name, window_name)
+        log_debug(f"[Background] Target pane TTY for clear_claude_active: {pane_tty}")
+
+        env = os.environ.copy()
+        if tab_id:
+            env["TAB_ID"] = tab_id
+        if pane_tty:
+            env["PANE_TTY"] = pane_tty
+        else:
+            log_debug("[Background] Pane TTY not resolved; OSC bytes may be discarded (falling back to captured stdout)")
+
+        cmd = f"""
+source '{helper_path}'
+if [ -n "${{TAB_ID:-}}" ]; then
+    if [ -n "${{PANE_TTY:-}}" ]; then
+        clear_claude_active "$TAB_ID" >> "$PANE_TTY"
+    else
+        clear_claude_active "$TAB_ID"
+    fi
+else
+    if [ -n "${{PANE_TTY:-}}" ]; then
+        clear_claude_active >> "$PANE_TTY"
+    else
+        clear_claude_active
+    fi
+fi
+"""
+        subprocess.run(
+            ["bash", "-c", cmd],
+            env=env,
+            timeout=2,
+            capture_output=True,
+        )
+        log_debug(f"[Background] Fired clear_claude_active via {helper_path} (tab_id={tab_id})")
+    except Exception as e:
+        log_debug(f"[Background] clear_claude_active failed: {e}")
+
+    # Unconditionally delete the mapping file — the session is terminating and
+    # the mapping will never be re-used. Stragglers are swept by the -004 cleanup.
+    if session_map_path:
+        try:
+            os.unlink(session_map_path)
+            log_debug(f"[Background] Deleted session mapping file: {session_map_path}")
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            log_debug(f"[Background] Failed to delete session mapping file {session_map_path}: {e}")
+
+
+def delayed_check_and_remove(session_name, window_name, team, terminal, session_id=""):
     """
     Background task: wait for Claude to exit, then remove the window if it did.
 
@@ -250,11 +387,20 @@ def delayed_check_and_remove(session_name, window_name, team, terminal):
 
     Uses multiple checks with increasing delays to catch both quick exits
     and slower shutdowns.
+
+    session_id is passed through to _fire_iterm2_tab_clear so it can read
+    the session→tab_id mapping frozen by the SessionStart hook, eliminating
+    TMUX env drift between the two hook contexts.
     """
     try:
-        # Check multiple times with increasing delays
-        # This handles both quick exits and slower Claude shutdowns
-        check_delays = [1.5, 2.0, 3.0]  # Total: 6.5 seconds of checking
+        # XACA-0223: Fibonacci-ish schedule extended to ~32.5 s total.
+        # The original 6.5 s window routinely missed Claude shutdowns that take
+        # longer — transcript flush, MCP-connection close, caffeinate exit — so
+        # the daemon concluded "turn-end Stop" and never fired the tab-prefix
+        # clear. The extended tail catches slow exits; a turn-end Stop stays a
+        # turn-end (Claude is still running for the whole window), just with a
+        # longer idle background daemon. Benign — detached, CPU-cheap.
+        check_delays = [1.5, 2.0, 3.0, 5.0, 8.0, 13.0]  # Total: 32.5 seconds of checking
 
         for i, delay in enumerate(check_delays):
             time.sleep(delay)
@@ -265,6 +411,15 @@ def delayed_check_and_remove(session_name, window_name, team, terminal):
                 log_debug("[Background] Claude has exited - proceeding with window removal")
                 result = remove_window(team, terminal, window_name)
                 log_debug(f"[Background] remove_window result: {result}")
+
+                # Signal to iTerm2 that Claude is no longer active in this tab.
+                # Pass session_id so the helper can read back the frozen tab_id
+                # rather than re-resolving from potentially-drifted TMUX env.
+                _fire_iterm2_tab_clear(
+                    session_name=session_name,
+                    window_name=window_name,
+                    session_id=session_id,
+                )
 
                 # NOTE: We intentionally do NOT auto-clear orphaned item fields here.
                 # This allows the session to resume and restore the workingOnId
@@ -296,6 +451,9 @@ def main():
         except:
             input_data = {}
             log_debug("No input data (empty stdin)")
+
+        session_id = input_data.get("session_id", "")
+        log_debug(f"Extracted session_id: {session_id!r}")
 
         session_name, window_name = get_tmux_context()
         team, terminal = parse_session_name(session_name)
@@ -333,7 +491,7 @@ def main():
                     except:
                         pass
 
-                    delayed_check_and_remove(session_name, window_name, team, terminal)
+                    delayed_check_and_remove(session_name, window_name, team, terminal, session_id)
                     os._exit(0)
                 else:
                     # First child exits immediately, orphaning grandchild to init

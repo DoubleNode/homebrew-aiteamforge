@@ -611,6 +611,123 @@ get_amb_last_ping_display() {
     format_relative_time "$HOME/.claude/.last_ping_time_${handle}" "last ping"
 }
 
+# ═══════════════════════════════════════════════════════════════════════
+# CC-USAGE INDICATOR (XACA-0243 terminal port)
+# Renders 2 lines at the top of every agent panel:
+#   Line 1: [5H · 19% · GREEN]      (band-coloured) or [5H · OFFLINE]
+#   Line 2: ▓▓▓▓▓░░░░░░░░░░░ 19%   (text-mode progress bar)
+# Cached via tmp file with 30s TTL so we don't curl on every panel render.
+# Resolves the team's LCARS port by walking SESSION_CODE prefixes longest
+# to shortest until a matching ${prefix}-lcars.port file is found.
+# ═══════════════════════════════════════════════════════════════════════
+# Compose a "dimmed" SGR sequence by prefixing the dim attribute to a base
+# color. Inputs are ANSI escape strings (e.g. "$GREEN"); standard terminals
+# stack SGR attributes within a single sequence boundary.
+dim_color() {
+    printf '%b' "${DIM}$1"
+}
+
+get_team_lcars_port() {
+    local prefix="$1"
+    while [[ "$prefix" == *-* ]]; do
+        prefix="${prefix%-*}"
+        local port_file="$HOME/dev-team/lcars-ports/${prefix}-lcars.port"
+        if [[ -f "$port_file" ]]; then
+            tr -d '[:space:]' < "$port_file"
+            return 0
+        fi
+    done
+    return 1
+}
+
+render_usage_indicator() {
+    local cache_file="${LCARS_TMP}lcars-usage-panel-${SESSION_CODE}.txt"
+    local now=$(date +%s)
+    local needs_fetch=true
+    if [[ -f "$cache_file" ]]; then
+        local cache_mtime=$(stat -f %m "$cache_file" 2>/dev/null || echo 0)
+        local cache_age=$(( now - cache_mtime ))
+        (( cache_age < 30 )) && needs_fetch=false
+    fi
+
+    if [[ "$needs_fetch" == "true" ]]; then
+        local port
+        port=$(get_team_lcars_port "$SESSION_CODE") || return 0
+        # ok|stale|stale_age|band|pct  — '|' separator, 'ERR' on any failure
+        local resp
+        resp=$(curl -s -m 2 "http://localhost:${port}/api/usage/current" 2>/dev/null) || resp=""
+        if [[ -z "$resp" ]]; then
+            printf 'ERR' > "$cache_file"
+        else
+            printf '%s' "$resp" | jq -r '
+                ((.ok // false) | tostring) + "|" +
+                ((.stale // false) | tostring) + "|" +
+                ((.stale_age_seconds // 0) | tostring) + "|" +
+                (.current.band // "NONE") + "|" +
+                ((.current.used_pct_of_cap // 0) | tostring)
+            ' > "$cache_file" 2>/dev/null || printf 'ERR' > "$cache_file"
+        fi
+    fi
+
+    local cached
+    cached=$(<"$cache_file")
+    [[ -z "$cached" || "$cached" == "ERR" ]] && return 0
+
+    local ok stale stale_age band pct
+    IFS='|' read -r ok stale stale_age band pct <<< "$cached"
+
+    # Pick band colour
+    local band_color="$GRAY"
+    case "$band" in
+        GREEN)   band_color="$GREEN" ;;
+        AMBER)   band_color="$ORANGE" ;;
+        RED)     band_color="$RED" ;;
+        UNKNOWN) band_color="$GOLD" ;;
+        NONE|*)  band_color="$GRAY" ;;
+    esac
+
+    local pct_int=${pct%%.*}
+    [[ -z "$pct_int" ]] && pct_int=0
+
+    # Line 1: status label
+    local label
+    if [[ "$ok" != "true" ]]; then
+        label="[5H · OFFLINE]"
+        band_color=$(dim_color "$GRAY")
+    elif [[ "$stale" == "true" ]]; then
+        # Promote stale_age to h/m if > 60s
+        local age_str
+        if (( stale_age < 60 )); then
+            age_str="${stale_age}s"
+        elif (( stale_age < 3600 )); then
+            age_str="$(( stale_age / 60 ))m"
+        elif (( stale_age < 86400 )); then
+            age_str="$(( stale_age / 3600 ))h"
+        else
+            age_str="$(( stale_age / 86400 ))d"
+        fi
+        label="[5H · STALE ${age_str}]"
+        band_color=$(dim_color "$band_color")
+    else
+        label="[5H · ${pct_int}% · ${band}]"
+    fi
+    printf "%b%s%b\n" "$band_color" "$label" "$RESET"
+
+    # Line 2: text-mode progress bar (only when ok and not offline; show empty on offline)
+    if [[ "$ok" == "true" && "$band" != "NONE" ]]; then
+        local bar_width=20
+        local filled=$(( pct_int * bar_width / 100 ))
+        (( filled > bar_width )) && filled=$bar_width
+        (( filled < 0 )) && filled=0
+        local empty=$(( bar_width - filled ))
+        local bar=""
+        local i
+        for (( i=0; i<filled; i++ )); do bar+="▓"; done
+        for (( i=0; i<empty; i++ )); do bar+="░"; done
+        printf "%b%s%b %b%d%%%b\n" "$band_color" "$bar" "$RESET" "$DIM" "$pct_int" "$RESET"
+    fi
+}
+
 render_panel() {
     # Clear screen + scrollback buffer (needed to wipe iTerm2 inline images)
     printf '\033[H\033[2J\033[3J'
@@ -661,6 +778,14 @@ render_panel() {
     fi
 
     local TC=$(get_theme_color "$theme")
+
+    # ═══════════════════════════════════════
+    # CC-USAGE INDICATOR (XACA-0243)
+    # 2 lines at the top: status label + progress bar.
+    # No-op if the team's LCARS server isn't reachable or has no /api/usage/current.
+    # ═══════════════════════════════════════
+    render_usage_indicator
+    echo ""
 
     # ═══════════════════════════════════════
     # UPPER SECTION: Avatar + Developer Info

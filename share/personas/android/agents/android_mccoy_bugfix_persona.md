@@ -1,7 +1,7 @@
 ---
 name: sickbay
 description: Android Bug Fix Developer - Rapid diagnosis and resolution of Android bugs, crashes, and critical issues. Use for debugging production incidents and emergency fixes.
-model: claude-sonnet-4-5-20250929
+model: sonnet
 ---
 
 # Dr. Leonard "Bones" McCoy - Android Bug Fix Developer
@@ -1398,13 +1398,13 @@ class SafeActivity : AppCompatActivity() {
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/knowledge/mccoy/`
-**Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/knowledge/TEAM/`
+**Agent knowledge:** `~/knowledge/agents/mccoy/`
+**Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `TEAM/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

@@ -1,4 +1,11 @@
 # Default Claude Code Guidelines
+# This file is a template — {{ORG_NAME}}, {{ORG_SLUG}}, {{SHARED_DEV_ROOT}},
+# etc. are substituted at install time by the AITeamForge installer.
+# Do not edit the rendered copy directly.
+#
+# NOTE: Org-specific content (team structures, project paths, custom workflows)
+# belongs in the org plugin (plugins/{{ORG_SLUG}}/), not in this global template.
+# TODO(plugins/{{ORG_SLUG}}/): migrate org-specific CLAUDE.md sections to plugin.
 
 ## 🔐 Git Workflow Rules
 
@@ -105,8 +112,8 @@ When launching subagents (via the Task tool) from within a worktree, you **MUST*
 
 **Example subagent prompt from a worktree:**
 ```
-Work in /Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/feature/xios-0042.
-You are on branch feature/xios-0042 in a git worktree.
+Work in /path/to/your-project/worktrees/feature/xprj-0042.
+You are on branch feature/xprj-0042 in a git worktree.
 Do NOT switch branches. Do NOT checkout develop. All file changes must be in this directory.
 <your actual task description>
 ```
@@ -124,7 +131,7 @@ Background subagents (`run_in_background: true`) do not trigger a PostToolUse ho
 **MANDATORY final instruction for ALL subagent prompts:**
 ```
 MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
-python3 /Users/darrenehlers/aiteamforge/kanban-hooks/subagent-track.py remove <AGENT_TYPE> < /dev/null
+python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py remove <AGENT_TYPE> < /dev/null
 ```
 
 Replace `<AGENT_TYPE>` with the subagent_type you passed to the Task tool (e.g., `reno`, `nahla`, `worf`, etc.).
@@ -134,7 +141,7 @@ Replace `<AGENT_TYPE>` with the subagent_type you passed to the Task tool (e.g.,
 Investigate the crash in PaymentManager.swift and suggest a fix.
 
 MANDATORY FINAL STEP: Before completing, you MUST run this Bash command to remove your crew avatar from the LCARS tracking panel. This is required infrastructure cleanup, not a team-boundary violation:
-python3 /Users/darrenehlers/aiteamforge/kanban-hooks/subagent-track.py remove worf < /dev/null
+python3 {{AITEAMFORGE_DIR}}/kanban-hooks/subagent-track.py remove worf < /dev/null
 ```
 
 **Rules:**
@@ -244,7 +251,7 @@ After creating the PR, generate a concise prompt block the user can copy/paste i
    gh-bot-review --pr <number> --event REQUEST_CHANGES --body-file /tmp/review-<number>.md
 
    # For non-blocking suggestions, create kanban subitems (NOT PR comments):
-   source ~/aiteamforge/kanban-helpers.sh
+   source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
    kb-backlog sub add <ITEM-ID> "[Review] <suggestion> (PR #<number>)"
 
    # After submitting REQUEST_CHANGES, enter the reviewer monitoring loop
@@ -341,17 +348,18 @@ Each Claude agent is assigned to a specific team. You must **ONLY** modify files
 
 We operate with two distinct team organizational models:
 
-#### **Main Event Teams (Platform-Separated)**
-Main Event uses **platform-based separation** where each platform has its own dedicated team:
+#### **{{ORG_NAME}} Teams (Platform-Separated)**
+{{ORG_NAME}} uses **platform-based separation** where each platform has its own dedicated team:
 
 | Team | Repository Scope |
 |------|------------------|
 | `iOS` | iOS app codebase only |
 | `Android` | Android app codebase only |
 | `Firebase` | Firebase functions and backend only |
-| `MainEvent` | Main Event cross-platform coordination |
+| `{{ORG_SLUG}}` | {{ORG_NAME}} cross-platform coordination |
 
-**Cross-team boundaries are STRICTLY enforced** for Main Event teams. An iOS agent cannot modify Firebase code, and vice versa.
+**Cross-team boundaries are STRICTLY enforced** for {{ORG_NAME}} teams. An iOS agent cannot modify Firebase code, and vice versa.
+<!-- TODO(plugins/{{ORG_SLUG}}/): move this section to the org plugin CLAUDE.md contribution -->
 
 #### **Freelance Teams (Project-Based)**
 Freelance uses **project-based organization** where each project has ONE team that owns the entire stack:
@@ -373,7 +381,7 @@ These teams operate across all projects with specific scopes:
 
 ### **⛔ STOP Protocol for Cross-Repository Access**
 
-**For Main Event Teams:**
+**For {{ORG_NAME}} Teams:**
 If you are asked to modify files in **another platform's repository**:
 
 1. **STOP immediately** - Do not begin any work
@@ -392,8 +400,8 @@ If you are asked to modify files in **another platform's repository**:
 All teams **MAY** read files from other repositories for reference or context, but **MUST NOT** modify them (except as permitted by team model above).
 
 **Examples:**
-> Main Event iOS team reading Firebase function code to understand API contracts → ✅ ALLOWED
-> Main Event iOS team modifying Firebase function code → ⛔ NOT ALLOWED
+> {{ORG_NAME}} iOS team reading Firebase function code to understand API contracts → ✅ ALLOWED
+> {{ORG_NAME}} iOS team modifying Firebase function code → ⛔ NOT ALLOWED
 > Freelance team reading their project's iOS AND Firebase code → ✅ ALLOWED
 > Freelance team modifying their project's iOS AND Firebase code → ✅ ALLOWED
 > Freelance team modifying a DIFFERENT freelance project's code → ⛔ NOT ALLOWED
@@ -411,12 +419,12 @@ All teams **MAY** read files from other repositories for reference or context, b
 **Directory Ownership by Team:**
 | Team | Owned Directories |
 |------|-------------------|
-| `Academy` | `~/aiteamforge/` |
-| `iOS` | `/Users/Shared/Development/Main Event/MainEventApp-iOS/` |
-| `Android` | `/Users/Shared/Development/Main Event/MainEventApp-Android/` |
-| `Firebase` | `/Users/Shared/Development/Main Event/MainEventApp-Functions/` |
-| `Command` | `{{AITEAMFORGE_DIR}}/` |
-| `DNS` | `/Users/Shared/Development/DNSFramework/` |
+| `Academy` | `{{AITEAMFORGE_DIR}}/` |
+| `iOS` | `{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/` |
+| `Android` | `{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/` |
+| `Firebase` | `{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/` |
+| `Command` | `{{SHARED_DEV_ROOT}}/dev-team/` |
+| `DNS` | `${HOME}/dns-framework/` |
 
 **⚠️ Academy Team Exception:**
 The Academy team is the **ONLY** team permitted to create or modify files across all team directories. This is because Academy:
@@ -429,8 +437,8 @@ The Academy team is the **ONLY** team permitted to create or modify files across
 2. Ask the user to switch to an Academy agent
 
 **Examples:**
-> iOS agent creating `~/aiteamforge/docs/kanban/XIOS-0001_plan.md` → ⛔ WRONG (Academy directory)
-> iOS agent creating `/Users/Shared/.../MainEventApp-iOS/.../XIOS-0001_plan.md` → ✅ CORRECT
+> iOS agent creating `{{AITEAMFORGE_DIR}}/docs/kanban/XIOS-0001_plan.md` → ⛔ WRONG (Academy directory)
+> iOS agent creating `{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/.../XIOS-0001_plan.md` → ✅ CORRECT
 > Academy agent creating files in iOS directory → ✅ ALLOWED (Academy exception)
 > Firebase agent creating files in Android directory → ⛔ NOT ALLOWED
 
@@ -446,15 +454,15 @@ Each Claude agent is assigned to a specific team. You must **ONLY** work on kanb
 
 Kanban boundaries follow the same team models as repository boundaries:
 
-#### **Main Event Teams (Platform-Separated Boards)**
+#### **{{ORG_NAME}} Teams (Platform-Separated Boards)**
 Each platform has its own kanban board with strict boundaries:
 
 - `iOS` - iOS app development items only
 - `Android` - Android app development items only
 - `Firebase` - Firebase/backend function items only
-- `MainEvent` - Cross-platform coordination items
+- `{{ORG_SLUG}}` - Cross-platform coordination items
 
-**Main Event agents work ONLY on their platform's board items.**
+**{{ORG_NAME}} agents work ONLY on their platform's board items.**
 
 #### **Freelance Teams (Project-Based Boards)**
 Each freelance project has ONE board covering all platforms:
@@ -470,7 +478,7 @@ Each freelance project has ONE board covering all platforms:
 
 ### **⛔ STOP Protocol for Cross-Team Requests**
 
-**For Main Event Teams:**
+**For {{ORG_NAME}} Teams:**
 If you are asked to work on a kanban item from **another platform's board**:
 
 1. **STOP immediately** - Do not begin any work
@@ -569,12 +577,12 @@ Co-Authored-By: Claude <noreply@anthropic.com>
 ### **Examples:**
 ```bash
 # Good
-git commit -m "feat: Add FunCard reload error handling
+git commit -m "feat: Add reload error handling
 
-- Added guard statement to prevent crash when no card selected
-- Implemented proper error reporting with DNSError
-- Added user-facing error popup
-- Fixes critical payment flow crash
+- Added guard statement to prevent crash when no item selected
+- Implemented proper error reporting
+- Added user-facing error notification
+- Fixes critical workflow crash
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
 
@@ -595,9 +603,9 @@ git commit -m "updates"
 ```
 
 Examples:
-- `Feature: Add dictionary access force unwrap fixes`
-- `Bugfix: Fix crash in FunCard reload when no card selected`
-- `Refactor: Eliminate force unwraps in booking interactors`
+- `Feature: Add dictionary access safe access helpers`
+- `Bugfix: Fix crash in data reload when no item selected`
+- `Refactor: Eliminate force unwraps in service layer`
 
 ### **PR Description Required Sections:**
 Summary, Changes Made (per-file), Impact (files/lines changed), Risk Assessment (HIGH/MEDIUM/LOW), Testing Recommendations (manual + regression), Breaking Changes, Checklist (compiles, no lint warnings, follows standards, self-reviewed).
@@ -643,11 +651,12 @@ Summary, Changes Made (per-file), Impact (files/lines changed), Risk Assessment 
 ## 🎨 Code Quality Standards
 
 ### **Swift Safety Rules**
-- **No force unwraps** (`!`) — use `guard let` / `if let` / `??` with `DNSError` reporting
-- **No force casts** (`as!`) — use `guard let x = obj as? Type` with `DNSError.DataObjects.invalidCast`
+- **No force unwraps** (`!`) — use `guard let` / `if let` / `??` with proper error reporting
+- **No force casts** (`as!`) — use `guard let x = obj as? Type` with error handling
 - **No unsafe array access** (`array[0]`) — use `array.first` with optional handling
-- **No `try!`** — use `do/catch` with `DNSCore.reportError(error)`
-- **Error pattern:** `guard let` → create `DNSError` → `DNSCore.reportError()` → `return`
+- **No `try!`** — use `do/catch` with error reporting
+- **Error pattern:** `guard let` → create error → report error → `return`
+<!-- TODO(plugins/{{ORG_SLUG}}/): org-specific error patterns (e.g., DNSError/DNSCore) belong in the org plugin CLAUDE.md section -->
 
 ---
 
@@ -754,7 +763,7 @@ gh-bot-review --pr <N> --event REQUEST_CHANGES --body "<feedback>"
 - **USE `gh-bot-review`** — `gh pr review` cannot approve same-account PRs
 - **DO NOT MERGE** — creating agent's monitoring loop handles merge after bot approval
 - Use `--body-file` for detailed reviews (write to `/tmp/review-<N>.md` first)
-- `ds9-security-review-bot` GitHub App installed on `MainEventEntertainment` and `DoubleNode` orgs
+- `ds9-security-review-bot` GitHub App — install on your org(s) for bot review support
 
 ### **Approval Criteria**
 - **Required:** CI passes, no security issues, no unjustified force unwraps, code follows patterns, PR description adequate
@@ -810,7 +819,7 @@ Instead, create a kanban subitem for each non-blocking suggestion that has merit
 
 **Create one subitem per suggestion:**
 ```bash
-source ~/aiteamforge/kanban-helpers.sh
+source {{AITEAMFORGE_DIR}}/kanban-helpers.sh
 kb-backlog sub add <ITEM-ID> "[Review] <actionable description> (PR #<N>)"
 ```
 
@@ -879,7 +888,7 @@ After completing:
 - **`reviewDecision` always shows `REVIEW_REQUIRED`:** This is expected — GitHub Team plan doesn't count bot reviews. Always check reviews list directly, never `reviewDecision`.
 - **NEVER** store `gh api` JSON in shell variables then pipe through `echo | jq` — control characters break parsing. Always use `gh api --jq` instead.
 - **Manual merge after bot approval:** Verify bot APPROVED review exists, then `gh pr merge <N> --squash --delete-branch --admin && kb-done`
-- **`gh-bot-review` errors:** If alias not loaded, call directly: `bash ~/.config/gh-review-bot/gh-bot-review.sh --pr <N> --event APPROVE --body "text"`. Ref: `MainEventApp-Functions/docs/github-review-bot-handoff.md`
+- **`gh-bot-review` errors:** If alias not loaded, call directly: `bash ~/.config/gh-review-bot/gh-bot-review.sh --pr <N> --event APPROVE --body "text"`. See your org's GitHub review bot setup docs.
 
 ---
 
@@ -895,7 +904,7 @@ After completing:
 **Three Files with Specific Purposes:**
 1. **RELNOTES_DEV.md** - Active development notes (update as work completes)
 2. **RELNOTES_QA.md** - QA build notes (copied from DEV when preparing test builds)
-3. **RELNOTES_PROD.md** - Production notes (copied from QA for App Store releases)
+3. **RELNOTES_PROD.md** - Production notes (copied from QA for production releases)
 
 ### **Standard Format (DEV & QA):**
 ```markdown
@@ -917,25 +926,6 @@ After completing:
 -   Problems or "None identified in this release"
 ```
 
-### **PROD Format (Additional AppStore Sections):**
-```markdown
-## PROD - 1.0.0
-
-**AppStore Promo (en)**
-[Marketing promo text in English]
-
-**AppStore What's New (en)**
--   User-facing change descriptions in English
-
-**AppStore Promo (es-419)**
-[Marketing promo text in Spanish]
-
-**AppStore What's New (es-419)**
--   User-facing change descriptions in Spanish
-
-[Same sections as DEV/QA follow]
-```
-
 ### **⚠️ CRITICAL Rules:**
 
 1. **Update RELNOTES_DEV.md as work completes**
@@ -945,33 +935,23 @@ After completing:
 2. **Copy DEV → QA when preparing test builds**
    - Copy content from RELNOTES_DEV.md to RELNOTES_QA.md
    - Change header from "DEV" to "QA"
-   - Use for TestFlight/internal testing builds
 
-3. **Copy QA → PROD when preparing App Store release**
+3. **Copy QA → PROD when preparing production releases**
    - Copy content from RELNOTES_QA.md to RELNOTES_PROD.md
    - Change header from "QA" to "PROD"
-   - **PRESERVE existing AppStore sections** (en & es-419)
-   - Update AppStore sections with new marketing copy
 
 4. **NEVER modify previous release entries**
    - Previous releases in all RELNOTES files are historical record
    - Only add new releases at the top
 
-5. **NEVER remove AppStore sections from RELNOTES_PROD.md**
-   - The 4 AppStore sections are required and must be preserved
-   - Only update them with new content, never delete
+<!-- TODO(plugins/{{ORG_SLUG}}/): org-specific RELNOTES formats (e.g., AppStore sections,
+     TestFlight workflows, platform-specific DEV/QA/PROD rules) belong in the org plugin. -->
 
 ---
 
 ## 🔧 Additional Notes
 
-- always warn about the context remaining and before starting a new task make sure the left over context is enough for the task or not.  If not, ask the user to use compact
-- We shouldn't commit *Info.plist files that ONLY change the CFBundleVersion
-- When we commit changes and the *info.plist files contain the only change in CFBundleVersion, let's discard that change
-- This command from the Skill, doesn't actually run all the reports....and there should be FOUR reports (not 3)!!# The One Command to Rule Them All
+- Always warn about context remaining before starting a new task. If context is insufficient, ask the user to use compact.
 
-```
-"Generate weekly stakeholder update for week of Nov 6"
-```
-
-**Result:** Creates all three reports simultaneously ✅
+<!-- TODO(plugins/{{ORG_SLUG}}/): org-specific additional notes (platform rules, custom
+     workflows, project-specific reminders) belong in the org plugin CLAUDE.md section. -->

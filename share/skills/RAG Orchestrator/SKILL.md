@@ -23,6 +23,7 @@ tags:
 command_shortcut: /rag
 last_updated: 2026-04-07
 status: production-ready
+model: sonnet
 ---
 
 # RAG Orchestrator

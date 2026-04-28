@@ -26,6 +26,7 @@ tags:
 command_shortcut: /plan-project
 last_updated: 2026-03-18 (v1.10.0)
 status: production-ready
+model: opus
 ---
 
 # Project Planner
@@ -408,7 +409,7 @@ Every project MUST include a dedicated **"Retrospective and Knowledge Capture"**
 │    sections from each subagent's output                                    │
 │  • Create the retrospective document using kb-retro-path:                  │
 │    RETRO_PATH=$(kb-retro-path <ITEM-ID>)                                  │
-│    cp ~/dev-team/kanban/knowledge/TEMPLATES/retrospective_template.md \    │
+│    cp ~/knowledge/templates/retrospective_template.md \    │
 │       "$RETRO_PATH"                                                        │
 │    ⛔ Do NOT manually construct the path — always use kb-retro-path       │
 │  • Fill in the Delegation Map — EVERY Task tool invocation during the     │
@@ -544,7 +545,7 @@ Steps:
 1. Get the retrospective file path:
    RETRO_PATH=$(source ~/dev-team/kanban-helpers.sh && kb-retro-path <ITEM-ID>)
 2. Copy the template:
-   cp ~/dev-team/kanban/knowledge/TEMPLATES/retrospective_template.md "$RETRO_PATH"
+   cp ~/knowledge/templates/retrospective_template.md "$RETRO_PATH"
 3. Fill in ALL sections of the retrospective document
 4. Create knowledge entries (separate files in the knowledge directory)
 5. The `kb-backlog sub done` command will BLOCK completion if the retro file is missing
@@ -640,7 +641,7 @@ For **non-subagent involved parties** (planning agent, reviewer) who run in sepa
 terminals, the implementing agent should note their names in the Cross-Agent Review
 table as "Pending" — those agents review the retrospective in their own sessions.
 
-**Pre-Project Knowledge Review (reinforcement):** Before beginning work on any new project, agents SHOULD read both their personal `INDEX.md` and their team's `TEAM/INDEX.md`. This is specified in each agent's persona under "Knowledge Base," and is reinforced here. Use the Tag Index in both files to surface entries relevant to the current work area. This review should happen before Phase 1 (Requirements Analysis) or at the very start of implementation — not after.
+**Pre-Project Knowledge Review (reinforcement):** Before beginning work on any new project, agents SHOULD read both their personal `INDEX.md` and their team's `project/INDEX.md`. This is specified in each agent's persona under "Knowledge Base," and is reinforced here. Use the Tag Index in both files to surface entries relevant to the current work area. This review should happen before Phase 1 (Requirements Analysis) or at the very start of implementation — not after.
 
 **⚠️ MANDATORY: Sync Local Develop Branch Subitem**
 
@@ -1395,14 +1396,14 @@ Include enough detail that:
 **v1.6.0** (February 20, 2026)
 - **Knowledge directory migration** - Updated all knowledge path references to reflect XACA-0089 migration: knowledge directories moved from `~/dev-team/<team>/knowledge/` to `<repo-kanban>/knowledge/`. `~/.claude/knowledge/<codename>/` entries are now symlinks to primary locations — no dual-write or backup mirroring required
 - **Removed backup mirror instructions** - Retrospective subitem no longer instructs agents to mirror entries to `~/.claude/knowledge/`. The symlinks created by XACA-0089 handle this automatically
-- **Updated TEMPLATES path** - Template reference updated from `~/dev-team/academy/knowledge/TEMPLATES/` to `~/dev-team/kanban/knowledge/TEMPLATES/`
+- **Updated TEMPLATES path** - Template reference updated from `~/dev-team/academy/knowledge/TEMPLATES/` to `~/knowledge/templates/`
 
 **v1.5.3** (February 19, 2026)
 - **Security: NO SECRETS in knowledge files** - Added explicit prohibition in Retrospective subitem box: never include secrets, credentials, or PII in knowledge entries or retrospective documents
 - **Corrected claude backup paths** - Fixed backup location references from `~/dev-team/claude/knowledge/` to `~/.claude/knowledge/` throughout (including version history entries and subitem box)
 
 **v1.5.2** (February 19, 2026)
-- **Retrospective document creation** - The Retrospective subitem now requires creating a project retrospective document at `<kanban-dir>/<ITEM-ID>_<desc>_RETROSPECTIVE.md` using the template at `~/dev-team/kanban/knowledge/TEMPLATES/retrospective_template.md`
+- **Retrospective document creation** - The Retrospective subitem now requires creating a project retrospective document at `<kanban-dir>/<ITEM-ID>_<desc>_RETROSPECTIVE.md` using the template at `~/knowledge/templates/retrospective_template.md`
 - **Subagent knowledge extraction** - Retrospective subitem now explicitly covers reviewing all subagent Task outputs for "Lessons Learned" sections and extracting lessons during the retrospective step
 - **Subagent prompt requirements** - Added mandatory "Lessons Learned" instruction that must be included in every subagent prompt when delegating subitems via the Task tool
 - **Multi-role categorization guidance** - Retrospective subitem references Section 12 of the design doc for how to categorize subagent-sourced lessons (agent vs. team knowledge)
@@ -1414,7 +1415,7 @@ Include enough detail that:
 - **Team-level knowledge categorization in Retrospective subitem** - Agents now categorize each lesson as agent-specific or team domain during the retrospective process
 - Agent-specific lessons go to `<repo-kanban>/knowledge/<codename>/`; team domain lessons go to `<repo-kanban>/knowledge/TEAM/`; a single lesson CAN be written to both if it has both personal and team-wide implications
 - **Claude backup updated for team entries** - Team domain entries mirror to `~/.claude/knowledge/team-<teamname>/` (not just the agent backup) (Note: as of v1.6.0, these are symlinks — no dual-write required)
-- **Pre-project knowledge review reinforced** - Added explicit note that agents SHOULD read both their personal INDEX.md and the team TEAM/INDEX.md before beginning any new project
+- **Pre-project knowledge review reinforced** - Added explicit note that agents SHOULD read both their personal INDEX.md and the team project/INDEX.md before beginning any new project
 - Updated Retrospective subitem box with categorization step and new backup paths
 - Updated prohibition line to cover all appropriate locations (not just "BOTH")
 - References updated design document sections (Sections 10 and 11) for team knowledge and curation guidance

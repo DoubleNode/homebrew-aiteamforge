@@ -28,6 +28,9 @@
     <link rel="stylesheet" href="css/lcars.css?v=31.1">
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
+    <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
+    <link rel="stylesheet" href="css/usage-indicator.css">
+    <script src="js/usage-helpers.js"></script>
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <!-- LCARS Chart Theming Module -->
@@ -180,6 +183,7 @@
                     <div class="mode-bar-spacer"></div>
                     <div class="mode-bar-separator">&#9482;</div>
                     <div class="utility-cluster">
+                        <div class="legend-pill usage-pill" id="usage-toggle" data-section="usage" role="button" tabindex="0" onclick="switchSection('usage')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();switchSection('usage')}">CC-USAGE</div>
                         <div class="legend-pill viewscreen-pill" id="carousel-fullscreen" role="button" tabindex="0" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();this.click()}">VIEWSCREEN</div>
                         <div class="legend-pill sound-pill" id="sound-toggle" role="button" tabindex="0" onclick="LCARSSound.toggleMute()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}"><span id="sound-status">SOUND</span></div>
                     </div>
@@ -458,14 +462,23 @@
                     <div class="section-header green">
                         <span class="section-title">RELEASE COMMAND</span>
                         <span class="section-action" id="release-new-btn" title="Create New Release">+ NEW</span>
-                        <!-- XACA-0056: Status filter toggle -->
+                        <!-- XACA-0056 / XACA-0238: Status filter toggle (Planned | Active | Archived) -->
                         <span class="releases-status-toggle">
+                            <button class="status-toggle-btn" id="releases-planned-btn" onclick="toggleReleasesStatusFilter('planned')" title="Show Planned Releases">PLANNED</button>
                             <button class="status-toggle-btn active" id="releases-active-btn" onclick="toggleReleasesStatusFilter('active')" title="Show Active Releases">ACTIVE</button>
                             <button class="status-toggle-btn" id="releases-archived-btn" onclick="toggleReleasesStatusFilter('archived')" title="Show Archived Releases">ARCHIVED</button>
                         </span>
                         <span class="section-action" id="release-configure-flow-btn" title="Configure Release Flow">⚙ FLOW</span>
                         <span class="current-flow-display" id="current-flow-display"></span>
                         <div class="section-bar"></div>
+                    </div>
+                    <!-- XACA-0209 round 5: Releases search bar -->
+                    <div class="release-search-bar">
+                        <div class="filter-search-container">
+                            <input type="text" id="release-filter-text" class="filter-search-input"
+                                   placeholder="SEARCH RELEASES..." autocomplete="off" spellcheck="false">
+                            <button id="release-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
+                        </div>
                     </div>
                     <div class="releases-dashboard" id="releases-dashboard">
                         <div class="releases-loading">Loading releases...</div>
@@ -478,6 +491,14 @@
                         <span class="section-title">EPIC MANAGEMENT</span>
                         <span class="section-action" id="epic-new-btn" title="Create New Epic">+ NEW</span>
                         <div class="section-bar"></div>
+                    </div>
+                    <!-- XACA-0209 round 5: Epics search bar -->
+                    <div class="epic-search-bar">
+                        <div class="filter-search-container">
+                            <input type="text" id="epic-filter-text" class="filter-search-input"
+                                   placeholder="SEARCH EPICS..." autocomplete="off" spellcheck="false">
+                            <button id="epic-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
+                        </div>
                     </div>
                     <div class="epics-dashboard" id="epics-dashboard">
                         <div class="epics-loading">Loading epics...</div>
@@ -925,6 +946,151 @@
                 </section>
 
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: USAGE - Claude token/cost monitor (XACA-0243-005)         -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="usage-section usage-section-page" data-mode="team kanban data settings">
+                    <div class="section-header cyan">
+                        <span class="section-title">CLAUDE USAGE MONITOR</span>
+                        <div class="section-bar"></div>
+                    </div>
+
+                    <div
+                        id="usage-widget"
+                        class="usage-indicator full"
+                        data-band=""
+                        data-stale="false"
+                        data-ok="true"
+                        aria-live="polite"
+                        role="region"
+                        aria-label="Claude usage status"
+                    >
+                        <!-- HEADER -->
+                        <header class="usage-widget-title">
+                            <span class="usage-widget-title-text">CLAUDE USAGE  ·  5H WINDOW</span>
+                            <span class="usage-stale-badge" id="uw-stale-badge" style="display:none;"></span>
+                            <!-- Refresh button: sends ?refresh=1 which triggers a one-shot collector run (~2min) -->
+                            <button
+                                class="usage-refresh-btn"
+                                id="uw-refresh-btn"
+                                title="Force a fresh ccusage read (takes ~2 min)"
+                                aria-label="Refresh usage data"
+                            >&#9655;</button>
+                            <span class="usage-spinner" id="uw-spinner" aria-hidden="true" style="display:none;">...</span>
+                        </header>
+
+                        <!-- SECTION: CURRENT WINDOW -->
+                        <!-- title set by JS when weekly section is hidden (006 tooltip) -->
+                        <section class="usage-section usage-current" aria-label="Current 5-hour window" id="uw-current-section">
+                            <div class="usage-section-title">CURRENT WINDOW</div>
+                            <div id="uw-offline-msg" class="usage-offline-msg" style="display:none;"></div>
+                            <div id="uw-current-bar-wrap" class="usage-bar-wrap">
+                                <div
+                                    class="usage-bar"
+                                    role="progressbar"
+                                    aria-valuemin="0"
+                                    aria-valuemax="100"
+                                    aria-valuenow="0"
+                                    aria-valuetext="Loading"
+                                    id="uw-current-bar"
+                                >
+                                    <div class="usage-bar-fill" id="uw-current-fill" style="width:0%"></div>
+                                </div>
+                                <span class="usage-bar-pct" id="uw-current-pct">--</span>
+                                <span class="usage-bar-band" id="uw-current-band"></span>
+                            </div>
+                            <div class="usage-detail-row" id="uw-current-detail">--</div>
+                            <div class="usage-burn-row" id="uw-burn-row" style="display:none;"></div>
+                        </section>
+
+                        <!-- SECTION: PROJECTION -->
+                        <section class="usage-section usage-projection" aria-label="End-of-window projection" id="uw-proj-section">
+                            <div class="usage-section-title">PROJECTION</div>
+                            <div id="uw-proj-unavailable" class="usage-proj-unavailable" style="display:none;">
+                                Projection unavailable — need at least 5 min of window data
+                            </div>
+                            <div id="uw-proj-content" style="display:none;">
+                                <div class="usage-bar-wrap">
+                                    <div
+                                        class="usage-bar"
+                                        role="progressbar"
+                                        aria-valuemin="0"
+                                        aria-valuemax="100"
+                                        aria-valuenow="0"
+                                        aria-valuetext="Loading"
+                                        id="uw-proj-bar"
+                                    >
+                                        <div class="usage-bar-fill" id="uw-proj-fill" style="width:0%;"></div>
+                                    </div>
+                                    <span class="usage-bar-pct" id="uw-proj-pct">--</span>
+                                    <span class="usage-bar-band" id="uw-proj-band"></span>
+                                </div>
+                                <div class="usage-detail-row" id="uw-proj-detail"></div>
+                                <div class="usage-cap-alert" id="uw-cap-alert" style="display:none;"></div>
+                            </div>
+                        </section>
+
+                        <!-- SECTION: WEEKLY LIMIT (XACA-0250-005) -->
+                        <section
+                            class="usage-section usage-weekly"
+                            aria-label="Weekly token limit"
+                            id="uw-weekly-section"
+                            style="display:none;"
+                        >
+                            <div class="usage-section-title">WEEKLY LIMIT</div>
+                            <div id="uw-weekly-bar-wrap" class="usage-bar-wrap">
+                                <div
+                                    class="usage-bar"
+                                    role="progressbar"
+                                    aria-valuemin="0"
+                                    aria-valuemax="100"
+                                    aria-valuenow="0"
+                                    aria-valuetext="Loading"
+                                    id="uw-weekly-bar"
+                                >
+                                    <div class="usage-bar-fill" id="uw-weekly-fill" style="width:0%"></div>
+                                </div>
+                                <span class="usage-bar-pct uw-weekly-pct" id="uw-weekly-pct">--</span>
+                                <span class="usage-bar-band uw-weekly-band" id="uw-weekly-band"></span>
+                            </div>
+                            <div class="usage-detail-row" id="uw-weekly-detail">--</div>
+                            <div class="usage-detail-row uw-weekly-reset" id="uw-weekly-reset" style="display:none;"></div>
+                        </section>
+
+                        <!-- SECTION: 7-WINDOW HISTORY -->
+                        <section class="usage-section usage-history" aria-label="Recent window history" id="uw-history-section">
+                            <div class="usage-section-title">7-WINDOW HISTORY</div>
+                            <div class="usage-history-grid" id="uw-history-grid" aria-label="Window history bars">
+                                <!-- Populated by JS -->
+                            </div>
+                        </section>
+
+                        <!-- SECTION: TOTALS -->
+                        <section class="usage-section usage-totals" aria-label="Usage totals">
+                            <div class="usage-section-title">TOTALS</div>
+                            <div class="usage-totals-grid" id="uw-totals-grid">
+                                <div class="usage-total-row">
+                                    <span class="usage-total-label">Today:</span>
+                                    <span class="usage-total-value" id="uw-today-tokens">--</span>
+                                    <span class="usage-total-sep">·</span>
+                                    <span class="usage-total-value usage-total-cost" id="uw-today-cost">--</span>
+                                </div>
+                                <div class="usage-total-row">
+                                    <span class="usage-total-label">7-window:</span>
+                                    <span class="usage-total-value" id="uw-7d-tokens">--</span>
+                                    <span class="usage-total-sep">·</span>
+                                    <span class="usage-total-value usage-total-cost" id="uw-7d-cost">--</span>
+                                </div>
+                            </div>
+                        </section>
+
+                        <!-- FOOTER: CALIBRATION -->
+                        <footer class="usage-calibration" id="uw-calibration">
+                            <span id="uw-cal-text">Calibration: loading...</span>
+                        </footer>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <!-- SECTION: CHANGE HISTORY - Team mode placeholder (XACA-0164-009)    -->
                 <!-- ═══════════════════════════════════════════════════════════════════ -->
                 <section class="change-history-section" data-mode="team">
@@ -976,6 +1142,9 @@
             </div>
             <div class="tabbar-button" data-section="commands">
                 <span class="tabbar-label">COMMANDS</span>
+            </div>
+            <div class="tabbar-button" data-section="usage">
+                <span class="tabbar-label">CC-USAGE</span>
             </div>
         </nav>
 
@@ -1310,6 +1479,10 @@
                     <label class="modal-label">DESCRIPTION (OPTIONAL)</label>
                     <textarea class="modal-textarea" id="new-release-description" placeholder="Brief description of this release..."></textarea>
                 </div>
+                <div class="modal-field">
+                    <label class="modal-label">TAGS (OPTIONAL) <span class="modal-label-hint">Comma-separated, e.g. main-event, admin, ios</span></label>
+                    <input type="text" class="modal-input" id="new-release-tags" placeholder="e.g. main-event, admin, ios" autocomplete="off" data-lpignore="true" data-form-type="other" data-1p-ignore="true">
+                </div>
                 <div class="modal-error" id="release-create-error" style="display: none;"></div>
             </div>
             <div class="lcars-modal-footer">
@@ -1551,6 +1724,10 @@
                     <label class="modal-label">TARGET DATE (OPTIONAL)</label>
                     <input type="date" class="modal-input" id="edit-release-target-date">
                 </div>
+                <div class="modal-field">
+                    <label class="modal-label">TAGS (OPTIONAL) <span class="modal-label-hint">Comma-separated, e.g. main-event, admin, ios</span></label>
+                    <input type="text" class="modal-input" id="edit-release-tags" placeholder="e.g. main-event, admin, ios" autocomplete="off" data-lpignore="true" data-form-type="other" data-1p-ignore="true">
+                </div>
                 <div class="modal-error" id="release-edit-error" style="display: none;"></div>
             </div>
             <div class="lcars-modal-footer">
@@ -1703,5 +1880,412 @@
 <script src="js/lcars.js?v=3.18"></script>
 <!-- Activity Timeline Panel — must load after lcars.js (depends on escapeHtml, apiUrl) -->
 <script src="js/lcars-activity.js"></script>
+<!-- XACA-0220 Phase 3b — daily artifact audit banner (must load after lcars.js for apiUrl) -->
+<script src="js/lcars-artifact-audit.js?v=1.0"></script>
+
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<!-- XACA-0243-005: Full usage widget polling JS                             -->
+<!-- Polling pattern mirrors agent-panel compact indicator (XACA-0243-004). -->
+<!-- ═══════════════════════════════════════════════════════════════════════ -->
+<script>
+(function () {
+    'use strict';
+
+    // Number formatters live in js/usage-helpers.js (shared with agent-panel.html).
+    const { formatTokens, formatCost, formatMinutes, formatPct } = window.UsageHelpers;
+
+    // ── Band → CSS var label (matches data-band attribute values) ───────────
+    function bandLabel(b) {
+        if (!b) return '';
+        return b.toUpperCase();
+    }
+
+    // ── DOM refs ─────────────────────────────────────────────────────────────
+    const widget       = document.getElementById('usage-widget');
+    const staleBadge   = document.getElementById('uw-stale-badge');
+    const refreshBtn   = document.getElementById('uw-refresh-btn');
+    const spinner      = document.getElementById('uw-spinner');
+    const offlineMsg   = document.getElementById('uw-offline-msg');
+    const currentBarWrap = document.getElementById('uw-current-bar-wrap');
+    const currentBar   = document.getElementById('uw-current-bar');
+    const currentFill  = document.getElementById('uw-current-fill');
+    const currentPct   = document.getElementById('uw-current-pct');
+    const currentBand  = document.getElementById('uw-current-band');
+    const currentDetail = document.getElementById('uw-current-detail');
+    const burnRow      = document.getElementById('uw-burn-row');
+    const projSection  = document.getElementById('uw-proj-section');
+    const projUnavail  = document.getElementById('uw-proj-unavailable');
+    const projContent  = document.getElementById('uw-proj-content');
+    const projBar      = document.getElementById('uw-proj-bar');
+    const projFill     = document.getElementById('uw-proj-fill');
+    const projPct      = document.getElementById('uw-proj-pct');
+    const projBand     = document.getElementById('uw-proj-band');
+    const projDetail   = document.getElementById('uw-proj-detail');
+    const capAlert     = document.getElementById('uw-cap-alert');
+    const histGrid     = document.getElementById('uw-history-grid');
+    const todayTokens  = document.getElementById('uw-today-tokens');
+    const todayCost    = document.getElementById('uw-today-cost');
+    const d7Tokens     = document.getElementById('uw-7d-tokens');
+    const d7Cost       = document.getElementById('uw-7d-cost');
+    const calText      = document.getElementById('uw-cal-text');
+    // Weekly limit refs (XACA-0250-005)
+    const weeklySection  = document.getElementById('uw-weekly-section');
+    const weeklyBar      = document.getElementById('uw-weekly-bar');
+    const weeklyFill     = document.getElementById('uw-weekly-fill');
+    const weeklyPct      = document.getElementById('uw-weekly-pct');
+    const weeklyBand     = document.getElementById('uw-weekly-band');
+    const weeklyDetail   = document.getElementById('uw-weekly-detail');
+    const weeklyReset    = document.getElementById('uw-weekly-reset');
+    // 006: tooltip target when weekly is hidden
+    const currentSection = document.getElementById('uw-current-section');
+
+    if (!widget) return;  // section not in DOM (shouldn't happen, defensive)
+
+    // ── Set a bar fill % and aria attrs ─────────────────────────────────────
+    function setBarFill(fillEl, barEl, pct, ariaText) {
+        const clamped = Math.min(100, Math.max(0, pct || 0));
+        fillEl.style.width = clamped + '%';
+        barEl.setAttribute('aria-valuenow', Math.round(clamped));
+        if (ariaText) barEl.setAttribute('aria-valuetext', ariaText);
+    }
+
+    // ── Render a single history column ──────────────────────────────────────
+    function renderHistoryCol(entry) {
+        const pct   = Math.min(100, Math.max(0, entry.used_pct_of_cap || 0));
+        const band  = (entry.band || 'unknown').toLowerCase();
+        const dt    = new Date(entry.start_time);
+        const day   = dt.toLocaleDateString('en-US', { weekday: 'short' });
+        const hour  = dt.toLocaleTimeString('en-US', { hour: '2-digit', hour12: false });
+        const shortLabel = day + ' ' + hour;
+        const cost  = entry.cost_usd != null ? formatCost(entry.cost_usd) : '';
+        const tok   = formatTokens(entry.total_tokens) + ' tokens';
+        const tooltip = shortLabel + ' — ' + formatPct(pct) + ' used · ' + tok + (cost ? ' · ' + cost : '');
+
+        const col = document.createElement('div');
+        col.className = 'uw-hist-col';
+        col.setAttribute('title', tooltip);
+        col.setAttribute('aria-label', shortLabel + ', ' + formatPct(pct) + ' used');
+
+        const barWrap = document.createElement('div');
+        barWrap.className = 'uw-hist-bar-wrap';
+
+        const bar = document.createElement('div');
+        bar.className = 'uw-hist-bar';
+        bar.setAttribute('data-band', band);
+        bar.style.height = pct + '%';
+
+        const label = document.createElement('div');
+        label.className = 'uw-hist-label';
+        label.textContent = shortLabel;
+
+        const pctLabel = document.createElement('div');
+        pctLabel.className = 'uw-hist-pct';
+        pctLabel.textContent = formatPct(pct);
+
+        barWrap.appendChild(bar);
+        col.appendChild(pctLabel);
+        col.appendChild(barWrap);
+        col.appendChild(label);
+        return col;
+    }
+
+    // ── Main render function ─────────────────────────────────────────────────
+    function applyUsage(d) {
+        const ok      = d.ok !== false;
+        const stale   = d.stale === true;
+        const current = d.current || null;
+        const proj    = d.projection || null;
+        const totals  = d.totals || null;
+        const cal     = d.calibration || null;
+        const history = d.history || [];
+        const band    = (current && current.band) ? current.band.toLowerCase() : (ok ? 'none' : 'unknown');
+
+        widget.dataset.ok    = ok ? 'true' : 'false';
+        widget.dataset.stale = stale ? 'true' : 'false';
+        widget.dataset.band  = ok && current ? band : (ok ? 'none' : 'unknown');
+
+        // Mirror band/ok/stale onto the mode-bar CC-USAGE pill so its background
+        // tracks the current usage state (XACA-0243).
+        const usagePill = document.getElementById('usage-toggle');
+        if (usagePill) {
+            usagePill.dataset.band  = widget.dataset.band;
+            usagePill.dataset.ok    = widget.dataset.ok;
+            usagePill.dataset.stale = widget.dataset.stale;
+        }
+
+        // ── Stale badge ──────────────────────────────────────────────────────
+        if (stale && d.stale_age_seconds != null) {
+            staleBadge.textContent = 'STALE ' + window.UsageHelpers.formatStaleAge(d.stale_age_seconds) + ' ago';
+            staleBadge.style.display = '';
+        } else {
+            staleBadge.style.display = 'none';
+        }
+
+        // ── Current window ───────────────────────────────────────────────────
+        if (!ok) {
+            // OFFLINE: show error (truncated to 60 chars) and hide bar
+            const errMsg = (d.ccusage_error || d.error || '').substring(0, 60);
+            offlineMsg.textContent = 'Usage collector unreachable' + (errMsg ? ' — ' + errMsg : '');
+            offlineMsg.style.display = '';
+            currentBarWrap.style.display = 'none';
+            currentDetail.style.display = 'none';
+            burnRow.style.display = 'none';
+        } else {
+            offlineMsg.style.display = 'none';
+            currentBarWrap.style.display = '';
+
+            if (!current) {
+                // Idle state
+                setBarFill(currentFill, currentBar, 0, 'idle — between windows');
+                currentPct.textContent = '0%';
+                currentBand.textContent = 'IDLE';
+                currentDetail.textContent = 'Awaiting next 5-hour window';
+                currentDetail.style.display = '';
+                burnRow.style.display = 'none';
+            } else {
+                const pct = current.used_pct_of_cap || 0;
+                setBarFill(currentFill, currentBar, pct,
+                    formatPct(pct) + ' used — ' +
+                    formatTokens(current.tokens_used) + ' tokens · ' +
+                    formatCost(current.cost_usd));
+
+                currentPct.textContent = formatPct(pct);
+                currentBand.textContent = bandLabel(current.band);
+                currentBand.dataset.band = band;
+
+                const parts = [];
+                if (current.tokens_used != null) parts.push('Used: ' + formatTokens(current.tokens_used) + ' tokens');
+                if (current.cost_usd != null)    parts.push(formatCost(current.cost_usd));
+                if (current.elapsed_minutes != null)   parts.push(formatMinutes(current.elapsed_minutes) + ' elapsed');
+                if (current.remaining_minutes != null) parts.push(formatMinutes(current.remaining_minutes) + ' remaining');
+                currentDetail.textContent = parts.join(' · ');
+                currentDetail.style.display = '';
+
+                // Burn rate row
+                if (current.burn_tokens_per_minute != null) {
+                    const burnTok = formatTokens(current.burn_tokens_per_minute) + ' tok/min';
+                    // derive hourly cost estimate from burn rate × calibration cost ratio
+                    let burnCost = '';
+                    if (cal && cal.max_window_cost_usd && cal.max_window_tokens) {
+                        const costPerTok = cal.max_window_cost_usd / cal.max_window_tokens;
+                        const hrCost = current.burn_tokens_per_minute * 60 * costPerTok;
+                        burnCost = ' · ~' + formatCost(hrCost) + '/hr';
+                    }
+                    burnRow.textContent = 'Burn: ' + burnTok + burnCost;
+                    burnRow.style.display = '';
+                } else {
+                    burnRow.style.display = 'none';
+                }
+            }
+        }
+
+        // ── Projection ───────────────────────────────────────────────────────
+        if (!ok || !current) {
+            projSection.style.display = 'none';
+            projSection.dataset.trustworthy = 'false';
+        } else {
+            projSection.style.display = '';
+            const projTrustworthy = !!(proj && proj.trustworthy);
+            projSection.dataset.trustworthy = projTrustworthy ? 'true' : 'false';
+            if (!projTrustworthy) {
+                projUnavail.style.display = '';
+                projContent.style.display = 'none';
+            } else {
+                projUnavail.style.display = 'none';
+                projContent.style.display = '';
+
+                const projPctVal = proj.projected_pct_of_cap || 0;
+                const projBandVal = (proj.projected_band || 'unknown').toLowerCase();
+
+                setBarFill(projFill, projBar, projPctVal,
+                    'Projected ' + formatPct(projPctVal) + ' by end of window' +
+                    (proj.will_hit_cap ? ' — will hit cap' : ''));
+
+                projPct.textContent = formatPct(projPctVal);
+                projBand.textContent = bandLabel(proj.projected_band) + ' (end-of-window)';
+                projBand.dataset.band = projBandVal;
+
+                const projParts = [];
+                if (proj.projected_tokens != null) projParts.push(formatTokens(proj.projected_tokens) + ' tokens projected');
+                if (proj.projected_cost_usd != null) projParts.push(formatCost(proj.projected_cost_usd) + ' projected');
+                if (!proj.will_hit_cap) projParts.push('will not hit cap');
+                projDetail.textContent = projParts.join(' · ');
+
+                if (proj.will_hit_cap && proj.minutes_to_cap != null) {
+                    capAlert.textContent = 'ALERT: Projected to hit cap in ~' + formatMinutes(proj.minutes_to_cap);
+                    capAlert.style.display = '';
+                } else {
+                    capAlert.style.display = 'none';
+                }
+            }
+        }
+
+        // ── History ──────────────────────────────────────────────────────────
+        histGrid.innerHTML = '';
+        if (history.length === 0) {
+            const empty = document.createElement('div');
+            empty.className = 'uw-hist-empty';
+            empty.textContent = 'No window history available';
+            histGrid.appendChild(empty);
+        } else {
+            history.forEach(function (entry) {
+                histGrid.appendChild(renderHistoryCol(entry));
+            });
+        }
+
+        // ── Totals ───────────────────────────────────────────────────────────
+        if (totals) {
+            todayTokens.textContent = formatTokens(totals.today_tokens) + ' tokens';
+            todayCost.textContent   = formatCost(totals.today_cost_usd);
+            d7Tokens.textContent    = formatTokens(totals.last_7d_tokens) + ' tokens';
+            d7Cost.textContent      = formatCost(totals.last_7d_cost_usd);
+        }
+
+        // ── Calibration footer ───────────────────────────────────────────────
+        if (cal) {
+            const conf = cal.confidence ? cal.confidence.toUpperCase() : 'LOW';
+            const capTok = cal.max_window_tokens ? '~' + formatTokens(cal.max_window_tokens) + ' tokens' : 'unknown';
+            calText.textContent = 'Calibration: ' + (cal.samples || 0) + ' samples (' + conf + ' confidence) · cap ' + capTok;
+        } else {
+            calText.textContent = 'Calibration: no data yet';
+        }
+
+        // ── Weekly limit (XACA-0250-005) ─────────────────────────────────────
+        applyWeekly(d.weekly || null);
+    }
+
+    // ── Weekly limit section render ──────────────────────────────────────────
+    // Hide conditions: available===false OR confidence==='LOW'.
+    // (band==='UNKNOWN' is always co-incident with confidence==='LOW' in the
+    // current heuristics, so the LOW check is the canonical guard and we don't
+    // need a separate band==='UNKNOWN' check here.)
+    // Stale: render with dim styling and "(stale)" suffix.
+    // When hidden: set a tooltip on the current-window section so the absence
+    // is not mysterious if users notice the row is present on another panel.
+    function applyWeekly(weekly) {
+        // Determine why weekly is hidden so we can set a tooltip.
+        let weeklyHiddenReason = null;
+        if (!weekly || weekly.available === false) {
+            weeklyHiddenReason = (weekly && weekly.reason)
+                ? 'Weekly data unavailable: ' + weekly.reason
+                : 'Weekly data unavailable (source down)';
+        } else if (weekly.confidence && weekly.confidence.toUpperCase() === 'LOW') {
+            weeklyHiddenReason = 'Weekly data unavailable (low confidence — need 4+ weeks of history)';
+        }
+
+        if (weeklyHiddenReason !== null) {
+            weeklySection.style.display = 'none';
+            // 006: tooltip on the current-window section so absence is explainable
+            if (currentSection) currentSection.title = weeklyHiddenReason;
+            return;
+        }
+
+        // Weekly row is shown — clear any prior tooltip
+        if (currentSection) currentSection.title = '';
+
+        weeklySection.style.display = '';
+
+        const band    = (weekly.band || 'unknown').toLowerCase();
+        const isStale = weekly.stale === true;
+        const isUnknown = band === 'unknown';
+
+        // Apply band color scoping via data-band on the section element itself.
+        // The CSS uses .usage-weekly[data-band="*"] to set --usage-weekly-color.
+        weeklySection.dataset.band = band;
+
+        // Bar fill
+        if (isUnknown) {
+            setBarFill(weeklyFill, weeklyBar, 0, 'Weekly usage unknown');
+            weeklyPct.textContent = '--';
+            weeklyBand.textContent = 'UNKNOWN';
+        } else {
+            const pct = weekly.used_pct || 0;
+            const ariaLabel = formatPct(pct) + ' of weekly limit used';
+            setBarFill(weeklyFill, weeklyBar, pct, ariaLabel);
+            weeklyPct.textContent = isStale ? formatPct(pct) + '*' : formatPct(pct);
+            weeklyBand.textContent = band.toUpperCase();
+        }
+        weeklyBand.dataset.band = band;
+
+        // Detail row: tokens used / cap
+        const parts = [];
+        if (!isUnknown) {
+            if (weekly.tokens_used != null) parts.push('Used: ' + formatTokens(weekly.tokens_used) + ' tokens');
+            if (weekly.tokens_cap  != null) parts.push('Cap: ' + formatTokens(weekly.tokens_cap));
+        }
+        if (isStale) parts.push('(stale)');
+        weeklyDetail.textContent = parts.length ? parts.join(' · ') : '--';
+        weeklyDetail.style.opacity = isStale ? '0.6' : '';
+
+        // Reset row
+        if (weekly.time_to_reset) {
+            weeklyReset.textContent = 'Resets in ' + weekly.time_to_reset;
+            weeklyReset.style.display = '';
+            weeklyReset.style.opacity = isStale ? '0.5' : '0.65';
+        } else {
+            weeklyReset.style.display = 'none';
+        }
+    }
+
+    // ── Polling loop (setTimeout recursive, visibility-aware) ────────────────
+    let usageTimeout = null;
+
+    function scheduleUsagePoll() {
+        const delay = document.visibilityState === 'hidden' ? 60000 : 30000;
+        usageTimeout = setTimeout(pollUsage, delay);
+    }
+
+    async function pollUsage() {
+        try {
+            const resp = await fetch('/api/usage/current?history_limit=7');
+            if (resp.ok) {
+                applyUsage(await resp.json());
+            } else {
+                applyUsage({ ok: false });
+            }
+        } catch (_) {
+            applyUsage({ ok: false });
+        }
+        scheduleUsagePoll();
+    }
+
+    document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') {
+            clearTimeout(usageTimeout);
+            pollUsage();
+        }
+    });
+
+    // ── Refresh button: ?refresh=1 triggers a one-shot collector run (~2min) ─
+    // NOTE: This is the ONLY place in index.html that uses ?refresh=1.
+    if (refreshBtn) {
+        refreshBtn.addEventListener('click', async function () {
+            if (refreshBtn.disabled) return;
+            refreshBtn.disabled = true;
+            spinner.style.display = '';
+            clearTimeout(usageTimeout);
+            try {
+                const resp = await fetch('/api/usage/current?refresh=1');
+                if (resp.ok) {
+                    applyUsage(await resp.json());
+                } else {
+                    applyUsage({ ok: false });
+                }
+            } catch (_) {
+                applyUsage({ ok: false });
+            }
+            spinner.style.display = 'none';
+            refreshBtn.disabled = false;
+            scheduleUsagePoll();
+        });
+    }
+
+    // ── Initial fetch ─────────────────────────────────────────────────────────
+    document.addEventListener('DOMContentLoaded', pollUsage);
+    // Fire immediately if DOM is already ready (inline scripts run after DOMContentLoaded fires)
+    if (document.readyState !== 'loading') pollUsage();
+
+}());
+</script>
 </body>
 </html>

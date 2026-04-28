@@ -1,0 +1,705 @@
+/* ═══════════════════════════════════════════════════════════════════════════════
+   Usage Indicator — Claude token/cost monitor bar
+   Used by: agent-panel.html (compact variant), index.html dashboard widget (005)
+
+   Hook points for downstream subitems:
+     006 (stale-data styling): [data-stale="true"] .usage-bar-fill { ... }
+                               [data-stale="true"] .usage-label { ... }
+     007 (theme-aware):        [data-band="green"]  { --usage-color: ... }
+                               [data-band="amber"]  { --usage-color: ... }
+                               [data-band="red"]    { --usage-color: ... }
+                               [data-band="unknown"]{ --usage-color: ... }
+                               [data-band="none"]   { --usage-color: ... }
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* --- Base defaults (006/007 override these) -------------------------------- */
+.usage-indicator {
+    --usage-color: var(--lcars-blue);
+    --usage-bar-bg: rgba(255,255,255,0.08);
+    --usage-bar-radius: 3px;
+    --usage-font-size: 11px;
+    --usage-label-font-size: 10px;
+    --usage-padding: 6px 8px;
+    --usage-gap: 8px;
+}
+
+/* --- Band → color mapping (006 adds glow/animation, 007 adds theme tints) - */
+.usage-indicator[data-band="green"]   { --usage-color: var(--lcars-green); }
+.usage-indicator[data-band="amber"]   { --usage-color: var(--lcars-amber); }
+.usage-indicator[data-band="red"]     { --usage-color: var(--lcars-red); }
+.usage-indicator[data-band="unknown"] { --usage-color: var(--lcars-tan); }
+.usage-indicator[data-band="none"]    { --usage-color: var(--lcars-blue); }
+
+/* --- Layout --------------------------------------------------------------- */
+.usage-indicator {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--usage-gap);
+    padding: var(--usage-padding);
+    background: rgba(0, 0, 0, 0.25);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    width: 100%;
+    box-sizing: border-box;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: var(--usage-font-size);
+    color: var(--lcars-white, #ffffff);
+    line-height: 1.3;
+    min-height: 32px;
+}
+
+/* --- Compact variant (agent-panel instance) -------------------------------- */
+.usage-indicator.compact {
+    --usage-font-size: 10px;
+    --usage-label-font-size: 9px;
+    --usage-padding: 5px 8px;
+    --usage-gap: 6px;
+    /* Switch to flex column so each .usage-row is a separate horizontal strip */
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-height: 26px;
+}
+
+/* --- Individual rows inside the compact pill (XACA-0250-004) -------------- */
+.usage-indicator.compact .usage-row {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+    gap: var(--usage-gap);
+    width: 100%;
+}
+
+/* Weekly row uses --usage-weekly-color driven by its own band attribute.
+   Fall back to --usage-color (the dominant band) when no weekly band set.   */
+.usage-indicator.compact .usage-row-weekly {
+    --usage-weekly-color: var(--usage-color);
+}
+.usage-indicator.compact .usage-row-weekly[data-band-weekly="green"]   { --usage-weekly-color: var(--lcars-green); }
+.usage-indicator.compact .usage-row-weekly[data-band-weekly="amber"]   { --usage-weekly-color: var(--lcars-amber); }
+.usage-indicator.compact .usage-row-weekly[data-band-weekly="red"]     { --usage-weekly-color: var(--lcars-red); }
+.usage-indicator.compact .usage-row-weekly[data-band-weekly="unknown"] { --usage-weekly-color: var(--lcars-tan); }
+.usage-indicator.compact .usage-row-weekly[data-band-weekly="none"]    { --usage-weekly-color: var(--lcars-blue); }
+
+/* Weekly label and bar fill use --usage-weekly-color so they are
+   independently colored from the 5h row.                                    */
+.usage-indicator.compact .usage-label-weekly {
+    color: var(--usage-weekly-color);
+}
+.usage-indicator.compact .usage-bar-fill-weekly {
+    background: var(--usage-weekly-color);
+    transition: width 0.6s ease, background-color 0.3s ease;
+}
+.usage-indicator.compact .usage-stats-weekly {
+    color: var(--lcars-white, #ffffff);
+    opacity: 0.85;
+}
+
+/* --- Label cell (left) ----------------------------------------------------- */
+.usage-label {
+    font-size: var(--usage-label-font-size);
+    font-weight: 600;
+    color: var(--usage-color);
+    white-space: nowrap;
+    letter-spacing: 0.3px;
+    text-transform: uppercase;
+    /* 006 targets: .usage-label for stale opacity/color changes */
+}
+
+/* --- Progress bar (center) ------------------------------------------------- */
+.usage-bar {
+    width: 100%;
+    height: 6px;
+    background: var(--usage-bar-bg);
+    border-radius: var(--usage-bar-radius);
+    overflow: hidden;
+    position: relative;
+    /* 006 targets: .usage-bar for stale hatched-pattern overlay */
+}
+
+.usage-indicator.compact .usage-bar {
+    height: 5px;
+}
+
+.usage-bar-fill {
+    height: 100%;
+    background: var(--usage-color);
+    border-radius: var(--usage-bar-radius);
+    transition: width 0.6s ease, background-color 0.3s ease;
+    /* 006 targets: .usage-bar-fill[data-stale="true"] for pattern treatment
+       007 targets: .usage-bar-fill for theme-adjusted color blending */
+}
+
+/* --- Stats cell (right) ---------------------------------------------------- */
+.usage-stats {
+    font-size: var(--usage-font-size);
+    color: var(--lcars-white, #ffffff);
+    white-space: nowrap;
+    opacity: 0.9;
+    text-align: right;
+    /* 006 targets: .usage-stats for stale dim treatment */
+}
+
+.usage-stats .usage-band-label {
+    color: var(--usage-color);
+    font-weight: 600;
+}
+
+.usage-stats .usage-stale-note {
+    color: var(--lcars-amber, #ffcc00);
+    font-style: italic;
+    /* 006 can add animation/flash here */
+}
+
+.usage-stats .usage-proj {
+    opacity: 0.75;
+    /* 007 can tint projection text to match band */
+}
+
+/* --- Offline / idle states ------------------------------------------------- */
+.usage-indicator[data-ok="false"] .usage-label,
+.usage-indicator[data-ok="false"] .usage-stats {
+    opacity: 0.6;
+    /* 006 can add additional offline dim/pulse treatment */
+}
+
+/* No bar shown when ok=false or band=none; JS sets width:0 */
+.usage-indicator[data-ok="false"] .usage-bar-fill {
+    width: 0 !important;
+}
+
+/* --- Stale placeholder (set by 006 to add visual pattern) ----------------- */
+/* .usage-indicator[data-stale="true"] .usage-bar { } -- left for 006 */
+/* .usage-indicator[data-stale="true"] .usage-bar-fill { } -- left for 006 */
+
+
+/* =============================================================================
+   FULL WIDGET VARIANT — .usage-indicator.full (XACA-0243-005)
+   Used by: lcars-ui/index.html #usage-widget
+
+   Hook points for downstream subitems:
+     006 (stale-data styling):
+       .usage-indicator.full[data-stale="true"] .usage-stale-badge — add animation
+       .usage-indicator.full[data-stale="true"] .usage-bar-fill    — add opacity/pattern
+     007 (theme-aware):
+       .usage-indicator.full[data-band="green"]  { --usage-color: <theme-green>; }
+       .usage-indicator.full .uw-hist-bar[data-band="green"] { background: <theme-green>; }
+   ============================================================================= */
+
+/* --- Full widget base -------------------------------------------------------
+   Override the compact grid layout with a flex column for the full panel.    */
+.usage-indicator.full {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0;
+    background: var(--lcars-surface, #252540);
+    border: 1px solid rgba(255, 255, 255, 0.10);
+    border-radius: 6px;
+    overflow: hidden;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 12px;
+    color: var(--lcars-white, #ffffff);
+    max-width: 900px;
+    margin: 16px auto 0;
+    font-variant-numeric: tabular-nums;
+    box-sizing: border-box;
+    min-height: 0;
+}
+
+/* --- Widget title header --------------------------------------------------- */
+.usage-widget-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 16px;
+    background: var(--lcars-darker, #0d0d1a);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--usage-color);
+}
+
+.usage-widget-title-text {
+    flex: 1;
+}
+
+/* --- Stale badge (006 adds pulse animation) -------------------------------- */
+.usage-stale-badge {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--lcars-amber, #ffcc00);
+    letter-spacing: 0.5px;
+    /* 006 targets: .usage-stale-badge for flash/animation treatment */
+}
+
+/* --- Refresh button -------------------------------------------------------- */
+.usage-refresh-btn {
+    background: none;
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+    color: var(--lcars-white, #fff);
+    font-size: 11px;
+    padding: 2px 7px;
+    cursor: pointer;
+    opacity: 0.7;
+    transition: opacity 0.2s;
+}
+.usage-refresh-btn:hover:not(:disabled) {
+    opacity: 1;
+}
+.usage-refresh-btn:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+}
+
+.usage-spinner {
+    font-size: 10px;
+    opacity: 0.7;
+    color: var(--lcars-amber, #ffcc00);
+}
+
+/* --- Inner sections -------------------------------------------------------- */
+.usage-indicator.full .usage-section {
+    padding: 12px 16px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+.usage-indicator.full .usage-section:last-of-type {
+    border-bottom: none;
+}
+
+.usage-section-title {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    color: var(--usage-color);
+    margin-bottom: 8px;
+}
+
+/* --- Offline message ------------------------------------------------------- */
+.usage-offline-msg {
+    color: var(--lcars-red, #cc4444);
+    font-size: 12px;
+    padding: 4px 0;
+}
+
+/* --- Bar row (shared by current and projection) ---------------------------- */
+.usage-bar-wrap {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+}
+
+/* Override compact height for full widget bars */
+.usage-indicator.full .usage-bar {
+    flex: 1;
+    height: 10px;
+    background: var(--lcars-darker, #0d0d1a);
+    border-radius: 5px;
+}
+
+.usage-indicator.full .usage-bar-fill {
+    height: 100%;
+    background: var(--usage-color);
+    border-radius: 5px;
+    transition: width 0.6s ease, background-color 0.3s ease;
+}
+
+.usage-bar-pct {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--usage-color);
+    white-space: nowrap;
+    min-width: 38px;
+    text-align: right;
+}
+
+.usage-bar-band {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--usage-color);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    white-space: nowrap;
+}
+/* Band color applied to inline band labels via data-band attribute on the span */
+.usage-bar-band[data-band="green"]   { color: var(--lcars-green, #99ff99); }
+.usage-bar-band[data-band="amber"]   { color: var(--lcars-amber, #ffcc00); }
+.usage-bar-band[data-band="red"]     { color: var(--lcars-red, #cc4444); }
+.usage-bar-band[data-band="unknown"] { color: var(--lcars-tan, #cc9966); }
+
+/* --- Current window detail rows ------------------------------------------- */
+.usage-detail-row {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.75);
+    margin-top: 2px;
+}
+
+.usage-burn-row {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.55);
+    margin-top: 2px;
+}
+
+/* --- Projection unavailable placeholder ------------------------------------ */
+.usage-proj-unavailable {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.45);
+    font-style: italic;
+}
+
+/* --- Cap alert callout ----------------------------------------------------- */
+.usage-cap-alert {
+    margin-top: 6px;
+    padding: 5px 10px;
+    background: rgba(204, 68, 68, 0.15);
+    border-left: 3px solid var(--lcars-red, #cc4444);
+    border-radius: 2px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--lcars-alert-red, #ff6666);
+    letter-spacing: 0.3px;
+}
+
+/* --- History grid ---------------------------------------------------------- */
+.usage-history-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 6px;
+    min-height: 70px;
+}
+
+.uw-hist-col {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+    cursor: default;
+}
+
+.uw-hist-bar-wrap {
+    flex: 1;
+    width: 100%;
+    max-width: 28px;
+    background: var(--lcars-darker, #0d0d1a);
+    border-radius: 3px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    overflow: hidden;
+    min-height: 48px;
+}
+
+.uw-hist-bar {
+    width: 100%;
+    border-radius: 3px 3px 0 0;
+    background: var(--lcars-blue, #9999ff);
+    transition: height 0.4s ease;
+    /* 007 targets: .uw-hist-bar[data-band="*"] for theme color overrides */
+}
+.uw-hist-bar[data-band="green"]   { background: var(--lcars-green, #99ff99); }
+.uw-hist-bar[data-band="amber"]   { background: var(--lcars-amber, #ffcc00); }
+.uw-hist-bar[data-band="red"]     { background: var(--lcars-red, #cc4444); }
+.uw-hist-bar[data-band="unknown"] { background: var(--lcars-tan, #cc9966); }
+
+.uw-hist-label {
+    font-size: 8px;
+    color: rgba(255, 255, 255, 0.5);
+    text-align: center;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
+}
+
+.uw-hist-pct {
+    font-size: 9px;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 600;
+    text-align: center;
+}
+
+.uw-hist-empty {
+    grid-column: 1 / -1;
+    text-align: center;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    padding: 16px 0;
+}
+
+/* --- Totals grid ----------------------------------------------------------- */
+.usage-totals-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.usage-total-row {
+    display: flex;
+    align-items: baseline;
+    gap: 8px;
+    font-size: 12px;
+}
+
+.usage-total-label {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 11px;
+    min-width: 70px;
+}
+
+.usage-total-value {
+    color: var(--lcars-white, #fff);
+    font-weight: 600;
+}
+
+.usage-total-cost {
+    color: var(--usage-color);
+}
+
+.usage-total-sep {
+    color: rgba(255, 255, 255, 0.3);
+}
+
+/* --- Calibration footer ---------------------------------------------------- */
+.usage-calibration {
+    padding: 8px 16px;
+    background: rgba(0, 0, 0, 0.2);
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.45);
+    letter-spacing: 0.3px;
+}
+
+/* --- Page-level section wrapper -------------------------------------------- */
+.usage-section-page {
+    padding: 0 8px 24px;
+}
+
+/* --- Responsive: narrow screens -------------------------------------------- */
+@media (max-width: 600px) {
+    .usage-indicator.full {
+        margin: 8px 0 0;
+        border-radius: 4px;
+    }
+
+    /* History wraps to two rows of 4 + 3 */
+    .usage-history-grid {
+        grid-template-columns: repeat(4, 1fr);
+        gap: 4px;
+    }
+
+    /* Projection bar collapses band label to its own line */
+    .usage-bar-wrap {
+        flex-wrap: wrap;
+    }
+
+    .usage-bar-band {
+        width: 100%;
+    }
+}
+
+/* === Theme-Aware Styling (XACA-0243-007) === */
+
+/* Named band variables + default accent (documented here; band→--usage-color rules already defined above) */
+.usage-indicator {
+    --usage-band-green:   var(--lcars-green);
+    --usage-band-amber:   var(--lcars-amber);
+    --usage-band-red:     var(--lcars-red);
+    --usage-band-unknown: var(--lcars-tan);
+    --usage-band-none:    var(--lcars-blue);
+    --usage-accent:       var(--lcars-orange); /* Default LCARS accent for borders, glows */
+}
+
+/* Compact variant picks up the terminal theme accent when body.theme-* is set */
+body[class*="theme-"] .usage-indicator.compact {
+    --usage-accent: var(--theme-color, var(--lcars-orange));
+    border-left: 3px solid var(--usage-accent);
+}
+
+body[class*="theme-"] .usage-indicator.compact .usage-bar {
+    /* Subtle theme-tinted ring; doesn't fight the band fill color */
+    box-shadow: 0 0 0 1px var(--theme-color, transparent), inset 0 1px 0 rgba(255,255,255,0.05);
+}
+
+/* Per-theme background tints for the indicator container */
+body.theme-command        .usage-indicator.compact { background: linear-gradient(90deg, rgba(192,57,43,0.08),  transparent 60%); }
+body.theme-operations     .usage-indicator.compact { background: linear-gradient(90deg, rgba(184,134,11,0.08), transparent 60%); }
+body.theme-sciences       .usage-indicator.compact { background: linear-gradient(90deg, rgba(26,82,118,0.10),  transparent 60%); }
+body.theme-science        .usage-indicator.compact { background: linear-gradient(90deg, rgba(26,122,106,0.10), transparent 60%); }
+body.theme-engineering    .usage-indicator.compact { background: linear-gradient(90deg, rgba(160,64,0,0.10),   transparent 60%); }
+body.theme-communications .usage-indicator.compact { background: linear-gradient(90deg, rgba(184,134,11,0.08), transparent 60%); }
+
+/* History bars: hover brightness; band color is already set by uw-hist-bar[data-band] rules above */
+.uw-hist-bar { transition: filter 120ms ease; }
+.uw-hist-bar:hover { filter: brightness(1.15); }
+
+/* Reduce-motion: suppress all animations/transitions this component uses */
+@media (prefers-reduced-motion: reduce) {
+    .usage-indicator,
+    .usage-indicator * {
+        animation: none !important;
+        transition: none !important;
+    }
+}
+
+/* High-contrast: stronger borders, solid fills (no gradients) */
+@media (prefers-contrast: more) {
+    .usage-indicator { border: 2px solid var(--usage-color); background: var(--lcars-darker); }
+    .usage-indicator .usage-bar-fill { background-image: none !important; }
+}
+
+/* === Stale + Offline States (XACA-0243-006) === */
+
+/* --- Compact (agent-panel) stale state ------------------------------------ */
+
+.usage-indicator.compact[data-stale="true"] .usage-bar-fill {
+    /* Diagonal hatch overlay so users see "this is last-known data" at a glance */
+    background-image: repeating-linear-gradient(
+        45deg,
+        var(--usage-color) 0 6px,
+        rgba(0,0,0,0.35) 6px 12px
+    );
+    opacity: 0.75;
+}
+
+/* Weekly bar fill stale: scoped to [data-stale-weekly="true"] on the weekly row
+   itself (set by JS when weekly.stale===true), NOT the container's [data-stale].
+   This prevents 5h staleness from hatching the weekly bar — the two windows
+   have independent staleness; only the weekly window's own stale flag applies. */
+.usage-indicator.compact .usage-row-weekly[data-stale-weekly="true"] .usage-bar-fill-weekly {
+    background-image: repeating-linear-gradient(
+        45deg,
+        var(--usage-weekly-color) 0 6px,
+        rgba(0,0,0,0.35) 6px 12px
+    );
+    opacity: 0.75;
+}
+
+.usage-indicator.compact[data-stale="true"] .usage-label,
+.usage-indicator.compact[data-stale="true"] .usage-stats {
+    opacity: 0.7;
+}
+
+.usage-indicator.compact .usage-stale-note {
+    color: var(--lcars-tan);
+    font-size: 0.85em;
+    margin-left: 0.5em;
+    font-weight: 500;
+}
+
+/* --- Full (dashboard) stale state ----------------------------------------- */
+
+.usage-indicator.full[data-stale="true"] .usage-bar-fill {
+    background-image: repeating-linear-gradient(
+        45deg,
+        var(--usage-color) 0 8px,
+        rgba(0,0,0,0.35) 8px 16px
+    );
+    opacity: 0.8;
+}
+
+.usage-indicator.full .usage-stale-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 8px;
+    background: var(--lcars-tan);
+    color: var(--lcars-darker);
+    font-size: 0.75em;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    margin-left: 1em;
+    vertical-align: middle;
+}
+
+.usage-indicator.full[data-stale="false"] .usage-stale-badge { display: none; }
+
+/* --- Offline state (data-ok="false") -------------------------------------- */
+
+.usage-indicator[data-ok="false"] {
+    filter: saturate(0.4);
+}
+
+.usage-indicator[data-ok="false"] .usage-bar-fill {
+    background: var(--lcars-tan) !important;
+    background-image: none !important;
+}
+
+.usage-indicator.full[data-ok="false"] .usage-section.usage-projection,
+.usage-indicator.full[data-ok="false"] .usage-section.usage-current .usage-bar {
+    opacity: 0.5;
+}
+
+.usage-indicator .usage-offline-msg {
+    color: var(--lcars-tan);
+    font-style: italic;
+}
+
+/* --- Weekly limit section (XACA-0250-005) ----------------------------------
+   Uses --usage-weekly-color scoped to .usage-weekly so it never clobbers
+   the 5h window band color driving --usage-color on the parent widget.       */
+
+.usage-indicator.full .usage-weekly {
+    --usage-weekly-color: var(--lcars-blue, #9999ff);
+}
+
+/* Band → weekly color mapping */
+.usage-indicator.full .usage-weekly[data-band="green"]   { --usage-weekly-color: var(--lcars-green, #99ff99); }
+.usage-indicator.full .usage-weekly[data-band="amber"]   { --usage-weekly-color: var(--lcars-amber, #ffcc00); }
+.usage-indicator.full .usage-weekly[data-band="red"]     { --usage-weekly-color: var(--lcars-red, #cc4444); }
+.usage-indicator.full .usage-weekly[data-band="unknown"] { --usage-weekly-color: var(--lcars-tan, #cc9966); }
+
+/* Section title inherits weekly color */
+.usage-indicator.full .usage-weekly .usage-section-title {
+    color: var(--usage-weekly-color);
+}
+
+/* Bar fill uses weekly color */
+.usage-indicator.full .usage-weekly .usage-bar-fill {
+    background: var(--usage-weekly-color);
+}
+
+/* Pct and band label pick up weekly color */
+.usage-indicator.full .usage-weekly .uw-weekly-pct {
+    color: var(--usage-weekly-color);
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-band {
+    color: var(--usage-weekly-color);
+}
+
+/* Override .usage-bar-band[data-band="*"] rules — weekly uses --usage-weekly-color */
+.usage-indicator.full .usage-weekly .uw-weekly-band[data-band="green"]   { color: var(--lcars-green, #99ff99); }
+.usage-indicator.full .usage-weekly .uw-weekly-band[data-band="amber"]   { color: var(--lcars-amber, #ffcc00); }
+.usage-indicator.full .usage-weekly .uw-weekly-band[data-band="red"]     { color: var(--lcars-red, #cc4444); }
+.usage-indicator.full .usage-weekly .uw-weekly-band[data-band="unknown"] { color: var(--lcars-tan, #cc9966); }
+
+/* Reset row: slightly dimmed, consistent with burn/detail secondary text */
+.usage-indicator.full .usage-weekly .uw-weekly-reset {
+    font-size: 11px;
+    color: var(--usage-weekly-color);
+    opacity: 0.65;
+    margin-top: 2px;
+}
+
+/* Stale: bar fill gets hatch treatment matching other stale bars */
+.usage-indicator.full[data-stale="true"] .usage-weekly .usage-bar-fill,
+.usage-indicator.full .usage-weekly[data-band] .usage-bar-fill[data-weekly-stale="true"] {
+    /* Applied inline by JS (opacity + content suffix) — CSS provides fallback */
+}
+
+/* --- Untrustworthy projection --------------------------------------------- */
+
+.usage-indicator.full .usage-projection[data-trustworthy="false"] {
+    opacity: 0.6;
+}
+
+.usage-indicator.full .usage-projection[data-trustworthy="false"]::before {
+    content: "Projection unavailable";
+    display: block;
+    color: var(--lcars-tan);
+    font-style: italic;
+    font-size: 0.9em;
+    margin-bottom: 0.4em;
+}

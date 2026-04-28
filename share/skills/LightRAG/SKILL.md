@@ -23,6 +23,7 @@ tags:
 command_shortcut: /lightrag
 last_updated: 2026-04-07
 status: production-ready
+model: sonnet
 ---
 
 # LightRAG Skill

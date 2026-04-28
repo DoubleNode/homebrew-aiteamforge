@@ -309,13 +309,13 @@ Lura Thok brings Vulcan logic, systematic rigor, and meticulous attention to det
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/knowledge/thok/`
-**Team knowledge:** `~/aiteamforge/kanban/knowledge/TEAM/`
+**Agent knowledge:** `~/knowledge/agents/thok/`
+**Team knowledge:** `~/aiteamforge/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `TEAM/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

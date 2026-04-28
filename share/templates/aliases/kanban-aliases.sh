@@ -1,6 +1,9 @@
 #!/bin/zsh
 # Kanban Helper Functions
 # Terminal shortcuts for kanban board management via jq (no Python backend needed)
+# This file is a template — {{ORG_NAME}}, {{ORG_SLUG}}, {{SHARED_DEV_ROOT}},
+# etc. are substituted at install time by the AITeamForge installer.
+# Do not edit the rendered copy directly.
 
 # Installation directory (substituted during install)
 AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
@@ -51,10 +54,11 @@ _kb_get_kanban_dir() {
 
     case "$team" in
         academy)      echo "${_atf_dir}/kanban" ;;
-        ios)          echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
-        android)      echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
-        firebase)     echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        command)      echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
+        # TODO(installer): {{SHARED_DEV_ROOT}} and {{ORG_NAME}} resolved at install time
+        ios)          echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/kanban" ;;
+        android)      echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/kanban" ;;
+        firebase)     echo "{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban" ;;
+        command)      echo "{{SHARED_DEV_ROOT}}/dev-team/kanban" ;;
         dns)          echo "/Users/Shared/Development/DNSFramework/kanban" ;;
         legal-*)
             local _suffix="${team#legal-}"
@@ -169,12 +173,13 @@ _kb_get_team_code() {
         android)                           echo "AND" ;;
         firebase)                          echo "FIR" ;;
         freelance)                         echo "FRE" ;;
-        freelance-doublenode-starwords)    echo "FSW" ;;
-        freelance-doublenode-workstats)    echo "FWS" ;;
-        freelance-doublenode-appplanning)  echo "FAP" ;;
-        freelance-doublenode-lifeboard)    echo "FLB" ;;
-        freelance-doublenode-caravan)      echo "VAN" ;;
-        freelance-doublenode-awaysentry)   echo "FAS" ;;
+        # NOTE: freelance-<client>-<project> entries below are stable registered team slugs; DoubleNode is a project-family dir constant # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+        freelance-doublenode-starwords)    echo "FSW" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-workstats)    echo "FWS" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-appplanning)  echo "FAP" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-lifeboard)    echo "FLB" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-caravan)      echo "VAN" ;; # xaca-0139:allowed — stable team slug constant
+        freelance-doublenode-awaysentry)   echo "FAS" ;; # xaca-0139:allowed — stable team slug constant
         academy)                           echo "ACA" ;;
         dns)                               echo "DNS" ;;
         command)                           echo "CMD" ;;
@@ -971,9 +976,7 @@ kb-team() {
         echo ""
         echo "Available teams:"
         echo "  academy, ios, android, firebase, command, dns"
-        echo "  freelance-doublenode-starwords"
-        echo "  freelance-doublenode-appplanning"
-        echo "  freelance-doublenode-workstats"
+        echo "  freelance-<client>-<project>   (e.g., freelance-acme-app)"
         echo "  legal-coparenting"
         echo "  medical-general"
         echo "  finance-personal"

@@ -1,6 +1,8 @@
 #!/bin/bash
 # Claude Code Agent Aliases
 # Quick shortcuts to switch between different agent personas
+# This file is a template — {{ORG_NAME}}, {{ORG_SLUG}}, etc. are substituted
+# at install time by the AITeamForge installer. Do not edit the rendered copy.
 
 # Installation directory (substituted during install)
 AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
@@ -36,8 +38,8 @@ claude-geordi() { claude_agent "geordi"; }      # Release engineer
 claude-data() { claude_agent "data"; }          # Refactoring specialist
 claude-worf() { claude_agent "worf"; }          # Security/Testing
 claude-wesley() { claude_agent "wesley"; }      # UX/Interface
-claude-doctor() { claude_agent "doctor"; }      # Bug fixes
-claude-crusher() { claude_agent "doctor"; }     # Bug fixes (alias)
+claude-beverly() { claude_agent "beverly"; }    # Bug fixes
+claude-crusher() { claude_agent "beverly"; }    # Bug fixes (alias)
 claude-captain() { claude_agent "captain"; }    # Feature development
 claude-picard() { claude_agent "captain"; }     # Feature development (alias)
 claude-counselor() { claude_agent "counselor"; } # Documentation
@@ -75,7 +77,7 @@ claude-archer() { claude_agent "captain"; }     # Lead feature developer
 claude-tucker() { claude_agent "geordi"; }      # Release engineer
 claude-trip() { claude_agent "geordi"; }        # Release engineer (alias)
 claude-tpol() { claude_agent "data"; }          # Refactoring specialist
-claude-phlox() { claude_agent "doctor"; }       # Bug fix developer
+claude-phlox() { claude_agent "phlox"; }        # Bug fix developer
 claude-reed() { claude_agent "worf"; }          # Security/Testing
 claude-sato() { claude_agent "counselor"; }     # Documentation expert
 claude-mayweather() { claude_agent "wesley"; }  # UX expert
@@ -101,7 +103,7 @@ claude-command-janeway() { claude_agent "command-communications"; } # Stakeholde
 claude-command-paris() { claude_agent "command-intelligence"; }     # Analytics
 
 #──────────────────────────────────────────────────────────────────────────────
-# MainEvent Team Aliases (Voyager)
+# {{ORG_NAME}} Team Aliases (Voyager)
 #──────────────────────────────────────────────────────────────────────────────
 
 claude-janeway() { claude_agent "janeway"; }            # Lead feature developer
@@ -179,7 +181,7 @@ claude-help() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
     echo "iOS (TNG):       claude-geordi, claude-data, claude-worf, claude-wesley"
-    echo "                 claude-doctor, claude-captain, claude-counselor"
+    echo "                 claude-beverly, claude-captain, claude-counselor"
     echo ""
     echo "Firebase (DS9):  claude-sisko, claude-kira, claude-odo, claude-dax"
     echo "                 claude-bashir, claude-obrien, claude-quark"
@@ -195,8 +197,8 @@ claude-help() {
     echo "Command (DSC):   claude-vance, claude-ross, claude-nechayev"
     echo "                 claude-command-janeway, claude-command-paris"
     echo ""
-    echo "MainEvent (VOY): claude-janeway, claude-torres, claude-seven"
-    echo "                 claude-emh-doctor, claude-tuvok, claude-kim, claude-paris"
+    echo "{{ORG_NAME}} (VOY): claude-janeway, claude-torres, claude-seven"
+    echo "                  claude-emh-doctor, claude-tuvok, claude-kim, claude-paris"
     echo ""
     echo "DNS (LD):        claude-mariner, claude-tana, claude-shaxs, claude-rutherford"
     echo "                 claude-tendi, claude-boimler, claude-ransom"
