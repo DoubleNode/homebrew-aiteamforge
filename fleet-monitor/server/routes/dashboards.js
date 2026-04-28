@@ -44,6 +44,44 @@ function loadDashboardConfig() {
     return { dashboards: [], divisions: [], meta: { version: '1.0.0' } };
 }
 
+/**
+ * Merge plugin-contributed dashboards/divisions into a base config from the
+ * core data file. Plugin content is read-only (writes go back to the core
+ * file only; plugin entries are tagged with `plugin_slug`).
+ * Accepts the enrichment object published on app.locals.pluginDashboards.
+ */
+function mergePluginDashboards(baseConfig, pluginData) {
+    if (!pluginData) return baseConfig;
+
+    const merged = {
+        dashboards: [...(baseConfig.dashboards || [])],
+        divisions:  [...(baseConfig.divisions  || [])],
+        meta:       baseConfig.meta || { version: '1.0.0' }
+    };
+
+    // Avoid duplicate IDs — plugin entries lose to core entries on id collision.
+    const existingIds = new Set(merged.dashboards.map(d => d.id));
+    for (const d of (pluginData.dashboards || [])) {
+        if (!existingIds.has(d.id)) merged.dashboards.push(d);
+    }
+    const existingDivIds = new Set(merged.divisions.map(d => d.id));
+    for (const d of (pluginData.divisions || [])) {
+        if (!existingDivIds.has(d.id)) merged.divisions.push(d);
+    }
+
+    // Extend "all fleet" dashboard's show_all_fleet_on with plugin-declared ids.
+    const allDash = merged.dashboards.find(d => d.id === 'all');
+    if (allDash && Array.isArray(pluginData.all_fleet_dashboard_ids) && pluginData.all_fleet_dashboard_ids.length > 0) {
+        const existing = new Set(allDash.show_all_fleet_on || []);
+        for (const id of pluginData.all_fleet_dashboard_ids) {
+            existing.add(id);
+        }
+        allDash.show_all_fleet_on = Array.from(existing);
+    }
+
+    return merged;
+}
+
 function saveDashboardConfig(config) {
     try {
         const dataDir = path.dirname(DASHBOARDS_FILE);
@@ -70,11 +108,16 @@ function generateDashboardId(name) {
 
 /**
  * GET /api/dashboards
+ * Returns the merged view: core dashboards + any opt-in plugin dashboards.
+ * Plugin entries are tagged with plugin_slug so the UI can render them
+ * differently (e.g. disable delete).
  */
 router.get('/dashboards', (req, res) => {
     try {
-        const config     = loadDashboardConfig();
-        const dashboards = config.dashboards.sort((a, b) => (a.sort_order || 999) - (b.sort_order || 999));
+        const baseConfig = loadDashboardConfig();
+        const pluginData = req.app.locals.pluginDashboards;
+        const merged     = mergePluginDashboards(baseConfig, pluginData);
+        const dashboards = merged.dashboards.sort((a, b) => (a.sort_order || 999) - (b.sort_order || 999));
         res.json({ dashboards, total: dashboards.length });
     } catch (error) {
         console.error('Error listing dashboards:', error);
@@ -130,8 +173,8 @@ router.put('/dashboards/reorder', (req, res) => {
 router.get('/dashboards/:id', (req, res) => {
     try {
         const { id }    = req.params;
-        const config    = loadDashboardConfig();
-        const dashboard = config.dashboards.find(d => d.id === id);
+        const merged    = mergePluginDashboards(loadDashboardConfig(), req.app.locals.pluginDashboards);
+        const dashboard = merged.dashboards.find(d => d.id === id);
 
         if (!dashboard) return res.status(404).json({ error: 'Dashboard not found' });
         res.json(dashboard);
@@ -202,6 +245,16 @@ router.put('/dashboards/:id', (req, res) => {
         const { id }    = req.params;
         const { name, title, subtitle, description, divisions, machines, org_color, sort_order, show_all_fleet_on, visible_dashboards } = req.body;
 
+        // Plugin-contributed dashboards are read-only from the server's perspective —
+        // their source of truth is the plugin's JSON file on disk.
+        const pluginData = req.app.locals.pluginDashboards;
+        if (pluginData && (pluginData.dashboards || []).some(d => d.id === id)) {
+            return res.status(403).json({
+                error: 'Plugin dashboards are read-only',
+                message: `Dashboard "${id}" is provided by a plugin and cannot be edited via the API.`
+            });
+        }
+
         const config = loadDashboardConfig();
         const index  = config.dashboards.findIndex(d => d.id === id);
 
@@ -240,6 +293,15 @@ router.put('/dashboards/:id', (req, res) => {
 router.delete('/dashboards/:id', (req, res) => {
     try {
         const { id }  = req.params;
+
+        const pluginData = req.app.locals.pluginDashboards;
+        if (pluginData && (pluginData.dashboards || []).some(d => d.id === id)) {
+            return res.status(403).json({
+                error: 'Plugin dashboards are read-only',
+                message: `Dashboard "${id}" is provided by a plugin and cannot be deleted. Disable the plugin to remove it.`
+            });
+        }
+
         const config  = loadDashboardConfig();
         const index   = config.dashboards.findIndex(d => d.id === id);
 
@@ -273,8 +335,8 @@ router.delete('/dashboards/:id', (req, res) => {
  */
 router.get('/divisions', (req, res) => {
     try {
-        const config = loadDashboardConfig();
-        res.json({ divisions: config.divisions || [], total: (config.divisions || []).length });
+        const merged = mergePluginDashboards(loadDashboardConfig(), req.app.locals.pluginDashboards);
+        res.json({ divisions: merged.divisions || [], total: (merged.divisions || []).length });
     } catch (error) {
         console.error('Error listing divisions:', error);
         res.status(500).json({ error: 'Internal server error' });

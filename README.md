@@ -138,6 +138,16 @@ source ~/.zshrc
 aiteamforge doctor
 ```
 
+### Kanban Board Organization
+
+When setting up teams with profiles (e.g., Finance with personal/work profiles), the installer detects existing profile-scoped canonical boards and skips creating a stub board in the parent directory. This prevents dual-board warnings from recurring on subsequent installer runs.
+
+**Example:** If `~/finance/personal/kanban/finance-personal-board.json` already exists, the installer will not create `~/finance/finance-board.json`. If you have an older installation with dual boards, resolve the warning with:
+
+```bash
+kb-quarantine-stub finance  # Disables the stub board warning
+```
+
 ## Usage
 
 ### Main Commands

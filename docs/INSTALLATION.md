@@ -109,7 +109,7 @@ If you plan to use Fleet Monitor across multiple machines:
 ### Step 1: Add Homebrew Tap
 
 ```bash
-brew tap DoubleNode/aiteamforge
+brew tap your-org/aiteamforge
 ```
 
 This adds the AITeamForge formula repository to Homebrew.
@@ -153,7 +153,7 @@ The interactive wizard will:
   - **Platform Development:** iOS, Android, Firebase
   - **Infrastructure:** Academy, DNS Framework
   - **Project-Based:** Freelance
-  - **Coordination:** MainEvent
+  - **Coordination:** Your org's coordination team (e.g., `mainevent`)
   - **Strategic:** Command, Legal, Medical
 - Select teams using comma or space-separated list (e.g., "ios, firebase")
 - Recommended teams are highlighted
@@ -220,7 +220,7 @@ If you have an existing manual aiteamforge installation in `~/aiteamforge/`:
 
 2. **Install via Homebrew:**
    ```bash
-   brew tap DoubleNode/aiteamforge
+   brew tap your-org/aiteamforge
    brew install aiteamforge
    aiteamforge setup
    ```
@@ -240,7 +240,7 @@ If you have an existing manual aiteamforge installation in `~/aiteamforge/`:
 
 1. **Install framework without setup:**
    ```bash
-   brew tap DoubleNode/aiteamforge
+   brew tap your-org/aiteamforge
    brew install aiteamforge
    ```
 
@@ -517,7 +517,7 @@ aiteamforge uninstall
 brew uninstall aiteamforge
 
 # 3. Remove tap
-brew untap DoubleNode/aiteamforge
+brew untap your-org/aiteamforge
 
 # 4. (Optional) Delete working directory
 rm -rf ~/aiteamforge

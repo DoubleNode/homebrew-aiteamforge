@@ -1,0 +1,33 @@
+plugin:
+  slug: "main-event"
+  name: "Main Event Fleet Monitor UI"
+  description: "Opt-in LCARS dashboards for Main Event Entertainment (iOS/Android/Firebase fleet views) and DoubleNode freelance projects. Disabled by default in fleet-monitor."
+  version: "1.0.0"
+
+requires:
+  aiteamforge: ">=0.9.0"
+
+# Server mount points. server.js reads these when the plugin is enabled via
+# ~/.aiteamforge/organization.yaml (`plugins.enabled: [main-event]`).
+mounts:
+  # Static assets served at /plugins/main-event/...
+  # e.g. /plugins/main-event/lcars/lcars-mainevent.html
+  - path: "/plugins/main-event"
+    dir: "./public"
+
+# Dashboard/division definitions merged into GET /api/dashboards response.
+# Top-level key per plugins.js loader (_resolveFromManifest checks manifest[key] first).
+# Paths are resolved relative to the plugin's own directory (.../fleet-monitor/plugins/main-event/).
+dashboards_dir: "./dashboards"
+
+# Convenience page routes surfaced only when the plugin is enabled.
+# Each entry creates app.get(route) -> sendFile(file, { root: plugin public dir }).
+page_routes:
+  - route: "/mainevent"
+    file: "mainevent.html"
+  - route: "/doublenode"
+    file: "doublenode.html"
+  - route: "/lcars/mainevent"
+    redirect: "/lcars/lcars-dashboard.html?dashboard=mainevent"
+  - route: "/lcars/doublenode"
+    redirect: "/lcars/lcars-dashboard.html?dashboard=doublenode"

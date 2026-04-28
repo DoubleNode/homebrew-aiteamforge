@@ -7,6 +7,11 @@
 # team's live kanban directory. All per-script duplicates have been removed
 # in favour of sourcing this file.
 #
+# XACA-0139-002 — De-branding: org-resolver sourced for future callers that
+# need to build display strings or compose paths from organization identity.
+# get_kanban_dir() itself reads from the .aiteamforge-config written by the
+# setup wizard, so it is already org-neutral at runtime.
+#
 # NOTE: install-kanban.sh has its own get_team_kanban_dir() that is
 # intentionally kept separate — it reads from installer wizard env vars and
 # .conf files at installation time, which is a different use-case. Do not
@@ -28,6 +33,15 @@ if [ -n "${_KANBAN_PATHS_LOADED:-}" ]; then
 fi
 _KANBAN_PATHS_LOADED=1
 
+# Source the org-resolver if available.  This file has no hard dependency on
+# it — get_kanban_dir() reads from .aiteamforge-config at runtime — but
+# sourcing it here ensures callers that need org identity can access it after
+# sourcing kanban-paths.sh alone.
+# shellcheck source=./aiteamforge-org-paths.sh
+_kp_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
+[ -f "$_kp_script_dir/aiteamforge-org-paths.sh" ] && . "$_kp_script_dir/aiteamforge-org-paths.sh" 2>/dev/null || true
+unset _kp_script_dir
+
 # ──────────────────────────────────────────────────────────────────────────────
 # get_kanban_dir <team>
 #
@@ -37,20 +51,16 @@ _KANBAN_PATHS_LOADED=1
 # The mapping here must stay in sync with the TEAM_KANBAN_DIRS dictionary in
 # kanban-backup.py (the Python backup system uses the same paths).
 #
-# Known team IDs and their directories:
-#   academy                         ~/aiteamforge/kanban
-#   ios                             /Users/Shared/Development/Main Event/MainEventApp-iOS/kanban
-#   android                         /Users/Shared/Development/Main Event/MainEventApp-Android/kanban
-#   firebase                        /Users/Shared/Development/Main Event/MainEventApp-Functions/kanban
-#   command                         /Users/Shared/Development/Main Event/aiteamforge/kanban
-#   dns                             /Users/Shared/Development/DNSFramework/kanban
-#   freelance-doublenode-starwords  /Users/Shared/Development/DoubleNode/Starwords/kanban
-#   freelance-doublenode-appplanning /Users/Shared/Development/DoubleNode/appPlanning/kanban
-#   freelance-doublenode-workstats  /Users/Shared/Development/DoubleNode/WorkStats/kanban
-#   freelance-doublenode-lifeboard  /Users/Shared/Development/DoubleNode/LifeBoard/kanban
-#   freelance-*                     /Users/Shared/Development/DoubleNode/<suffix>/kanban (generic fallback)
-#   legal-*                         ~/legal/<suffix>/kanban
-#   medical-*                       ~/medical/<suffix>/kanban
+# Actual paths are resolved at runtime from .aiteamforge-config (written by the
+# setup wizard) so they adapt to the installed org's directory layout without
+# hard-coding any client-specific paths here.
+#
+# Well-known team IDs (paths resolved from config or install_dir):
+#   academy                              ~/aiteamforge/kanban  (or configured working_dir)
+#   ios, android, firebase, command      org shared-dev tree (via config working_dir)
+#   dns                                  shared-dev DNS root
+#   freelance-<family>-<project>         project working_dir from config
+#   legal-*, medical-*, finance-*        ~/legal/, ~/medical/, ~/finance/ subtrees
 # ──────────────────────────────────────────────────────────────────────────────
 get_kanban_dir() {
     local team="$1"

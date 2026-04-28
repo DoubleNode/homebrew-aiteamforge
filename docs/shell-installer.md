@@ -74,7 +74,7 @@ export AITEAMFORGE_STARDATE=true           # Enable stardate
 - Freelance (ENT): 8 agents
 - Academy (32nd): 4 agents
 - Command (DSC): 5 agents
-- MainEvent (VOY): 11 agents
+- mainevent coordination (VOY): 11 agents
 - DNS (LD): 11 agents
 - Generic: 6 standard agents
 

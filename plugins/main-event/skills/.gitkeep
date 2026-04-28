@@ -1,0 +1,8 @@
+# Placeholder — keeps the empty plugin skills/ directory tracked in git.
+#
+# When Main-Event-specific skills are productized from ~/dev-team/skills/
+# into this plugin (tracked under XACA-0139), drop their directories here
+# and update ../plugin.yaml installs.skills with the skill names.
+#
+# Until then, this directory is intentionally empty — the 1.0.0 plugin
+# scaffold ships no skills. See ../README.md for full context.

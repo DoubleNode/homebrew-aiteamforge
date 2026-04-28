@@ -73,7 +73,7 @@ TEAM_TMUX_SOCKET="ios"                # Dedicated tmux socket name
 
 # Repository associations
 TEAM_REPOS=(
-    "MainEventApp-iOS"
+    "AcmeCorpApp-iOS"   # replace with your org's repo name
     "DNSFramework"
 )
 
@@ -99,7 +99,7 @@ TEAM_STARTUP_SCRIPT="ios-startup.sh"
 TEAM_SHUTDOWN_SCRIPT="ios-shutdown.sh"
 
 # Organization this team belongs to (used in kanban board)
-TEAM_ORGANIZATION="Main Event Entertainment"
+TEAM_ORGANIZATION="Acme Corp Entertainment"  # replace with your org name (set in organization.yaml)
 
 # Star Trek theme (optional)
 TEAM_THEME="Star Trek: The Next Generation"
@@ -137,7 +137,7 @@ TEAM_SHIP="USS Enterprise-D"
 | `platform` | Platform-specific development teams | iOS, Android, Firebase |
 | `infrastructure` | Dev-team infrastructure and frameworks | Academy, DNS Framework |
 | `project` | Project-based full-stack teams | Freelance |
-| `coordination` | Cross-platform coordination | MainEvent |
+| `coordination` | Cross-platform coordination | `mainevent` (org-specific label via `organization.yaml`) |
 | `strategic` | Planning, legal, research | Command, Legal, Medical |
 
 ---
@@ -317,7 +317,7 @@ That's it. No code changes required - the installer reads your configuration and
 | `command` | Starfleet Command | strategic | 2 | 1 |
 | `legal` | JAG Legal | strategic | 1 | 0 |
 | `medical` | Starfleet Medical | strategic | 1 | 0 |
-| `mainevent` | MainEvent Coordination | coordination | 1 | 2 |
+| `mainevent` | Coordination (org-specific label) | coordination | 1 | 2 |
 
 ---
 

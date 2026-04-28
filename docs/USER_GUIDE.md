@@ -163,7 +163,7 @@ aiteamforge restart fleet-monitor
 | **academy** | Dev-team infrastructure and tooling | Infrastructure |
 | **dns** | DNS framework development | Infrastructure |
 | **freelance** | Full-stack freelance projects | Project-Based |
-| **mainevent** | Cross-platform coordination | Coordination |
+| **mainevent** | Cross-platform coordination (label set via `organization.yaml`) | Coordination |
 | **command** | Strategic planning | Strategic |
 | **legal** | Legal research and documentation | Strategic |
 | **medical** | Medical documentation | Strategic |

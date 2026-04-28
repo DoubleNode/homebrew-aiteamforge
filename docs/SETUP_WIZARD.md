@@ -36,7 +36,7 @@ The wizard guides users through seven stages:
 3. **Team Selection**
    - Presents available teams with descriptions
    - Allows multi-select (comma-separated or space-separated)
-   - Teams: iOS, Android, Firebase, Academy, DNS, Freelance, Command, Legal, Medical, MainEvent
+   - Teams: iOS, Android, Firebase, Academy, DNS, Freelance, Command, Legal, Medical, `mainevent`
 
 4. **Feature Selection**
    - LCARS Kanban System (default: yes)

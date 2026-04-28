@@ -19,7 +19,7 @@ Before installing AITeamForge, you'll need:
 ### Step 1: Install AITeamForge
 
 ```bash
-brew tap DoubleNode/aiteamforge
+brew tap your-org/aiteamforge
 brew install aiteamforge
 ```
 
@@ -254,7 +254,7 @@ aiteamforge uninstall
 
 # Remove framework
 brew uninstall aiteamforge
-brew untap DoubleNode/aiteamforge
+brew untap your-org/aiteamforge
 ```
 
 Your `~/aiteamforge/` directory will be preserved. Delete it manually if desired.

@@ -75,7 +75,7 @@ logic changed.
 Two lines to update (keep them identical):
 
 ```ruby
-  url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
+  url "https://github.com/your-org/homebrew-aiteamforge.git",
       tag: "v0.12.0"   # <-- bump this
   ...
   version "0.12.0"     # <-- and this

@@ -34,7 +34,7 @@ AITeamForge supports multiple specialized teams, each with:
 | **Platform** | Platform-specific development | iOS, Android, Firebase |
 | **Infrastructure** | Dev-team infrastructure | Academy, DNS Framework |
 | **Project-Based** | Full-stack projects | Freelance |
-| **Coordination** | Cross-platform coordination | MainEvent |
+| **Coordination** | Cross-platform coordination | `mainevent` (org-specific label via `organization.yaml`) |
 | **Strategic** | Planning and support | Command, Legal, Medical |
 
 ---
@@ -68,7 +68,7 @@ AITeamForge supports multiple specialized teams, each with:
 - XcodeGen (project generation)
 
 **Repository Associations:**
-- MainEventApp-iOS
+- `{OrgName}App-iOS` (configured via `organization.yaml`)
 - DNSFramework
 
 **Use Cases:**
@@ -106,7 +106,7 @@ AITeamForge supports multiple specialized teams, each with:
 - Android Studio
 
 **Repository Associations:**
-- MainEventApp-Android
+- `{OrgName}App-Android` (configured via `organization.yaml`)
 
 **Use Cases:**
 - Android app feature development
@@ -144,7 +144,7 @@ AITeamForge supports multiple specialized teams, each with:
 - Node.js
 
 **Repository Associations:**
-- MainEventApp-Functions
+- `{OrgName}App-Functions` (configured via `organization.yaml`)
 
 **Use Cases:**
 - Cloud functions development
@@ -269,14 +269,17 @@ AITeamForge supports multiple specialized teams, each with:
 
 ## Coordination Teams
 
-### MainEvent Coordination
+### Coordination Team (`mainevent`)
+
+> **Note:** The `mainevent` team slug is a stable internal identifier. The org-specific name
+> (e.g. "Acme Corp Operations") is configured via `organization.yaml` (XACA-0139).
 
 **Identity:**
 - **ID:** `mainevent`
 - **Category:** Coordination
-- **Description:** Cross-platform coordination for Main Event application
+- **Description:** Cross-platform coordination for the primary org's application suite
 - **Color:** Purple (#9966FF)
-- **Theme:** Main Event Operations
+- **Theme:** Coordination Operations (label set via `organization.yaml`)
 - **Ship:** Coordination Center
 - **Icon:** 🎯
 
@@ -290,9 +293,9 @@ AITeamForge supports multiple specialized teams, each with:
 - GitHub CLI
 
 **Repository Associations:**
-- MainEventApp-iOS
-- MainEventApp-Android
-- MainEventApp-Functions
+- `{OrgName}App-iOS` (configured via `organization.yaml`)
+- `{OrgName}App-Android`
+- `{OrgName}App-Functions`
 
 **Use Cases:**
 - Cross-platform feature coordination
@@ -492,7 +495,7 @@ Each team should use unique port range:
 - **Academy:** 8290-8299
 - **DNS:** 8300-8309
 - **Freelance:** 8310-8319
-- **MainEvent:** 8320-8329
+- **mainevent (coordination):** 8320-8329
 - **Command:** 8330-8339
 - **Legal:** 8340-8349
 - **Medical:** 8350-8359
@@ -544,7 +547,7 @@ You can always add more teams later.
 ### For Team Development
 
 Select all relevant teams:
-- **Main Event app:** `ios`, `android`, `firebase`, `mainevent`
+- **Primary org app:** `ios`, `android`, `firebase`, `mainevent`
 - **Infrastructure work:** `academy`, `dns`
 - **Strategic planning:** `command`
 
@@ -563,7 +566,7 @@ AITeamForge provides **10 pre-configured teams** across **5 categories**:
 - **3 platform teams** (iOS, Android, Firebase)
 - **2 infrastructure teams** (Academy, DNS Framework)
 - **1 project-based team** (Freelance)
-- **1 coordination team** (MainEvent)
+- **1 coordination team** (`mainevent`)
 - **3 strategic teams** (Command, Legal, Medical)
 
 Each team includes:

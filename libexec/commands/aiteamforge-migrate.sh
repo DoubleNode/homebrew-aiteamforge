@@ -25,6 +25,10 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 
+# Source org identity resolver (XACA-0139) — graceful no-op if lib not yet installed
+# shellcheck source=../lib/aiteamforge-org-paths.sh
+source "${LIBEXEC_DIR}/lib/aiteamforge-org-paths.sh" 2>/dev/null || true
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -440,7 +444,28 @@ migrate_user_data() {
 
   # Team data directories
   log "Migrating team data..."
-  TEAMS=("academy" "android" "command" "dns-framework" "firebase" "freelance" "ios" "legal" "mainevent" "medical")
+  # Core team slugs — the baseline set installed by the framework.
+  # xaca-0139:allowed — "mainevent" is a legacy detection slug for backward-compat migration; not user-facing org branding
+  # "mainevent" is kept here as a LEGACY DETECTION slug for existing Main Event
+  # installs pre-XACA-0139.  New installs that enable the main-event plugin will
+  # have the same slug; the loop below handles both cases without duplication.
+  TEAMS=("academy" "android" "command" "dns-framework" "firebase" "freelance" "ios" "legal" "mainevent" "medical") # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+  # Dynamically append any org-specific team directories reported by the
+  # org resolver.  This gives non-Main-Event orgs first-class migration support
+  # without hardcoding their team slugs here.
+  if command -v _aiteamforge_org_slug >/dev/null 2>&1; then
+    _org_slug="$(_aiteamforge_org_slug 2>/dev/null || echo "")"
+    if [ -n "$_org_slug" ] && [ "$_org_slug" != "example-org" ]; then
+      # Add org-slug as a potential team dir if it's not already in the list
+      _already_listed=false
+      for _t in "${TEAMS[@]}"; do
+        [ "$_t" = "$_org_slug" ] && _already_listed=true && break
+      done
+      [ "$_already_listed" = "false" ] && TEAMS+=("$_org_slug")
+      unset _already_listed
+    fi
+    unset _org_slug
+  fi
   for team in "${TEAMS[@]}"; do
     if [[ -d "${OLD_INSTALL_DIR}/${team}" ]]; then
       if [[ "${DRY_RUN}" == "true" ]]; then

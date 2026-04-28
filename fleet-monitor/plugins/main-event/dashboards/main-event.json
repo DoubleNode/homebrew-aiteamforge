@@ -1,0 +1,73 @@
+{
+  "dashboards": [
+    {
+      "id": "mainevent",
+      "name": "Main Event",
+      "title": "MAIN EVENT",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "Main Event app development monitoring",
+      "url_path": "/lcars/mainevent",
+      "html_file": "lcars-dashboard.html?dashboard=mainevent",
+      "divisions": [
+        "mainevent"
+      ],
+      "machines": [],
+      "org_color": "orange",
+      "system": false,
+      "sort_order": 2,
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    },
+    {
+      "id": "doublenode",
+      "name": "DoubleNode",
+      "title": "DOUBLENODE",
+      "subtitle": "OPERATIONS MONITOR",
+      "description": "DoubleNode freelance projects monitoring",
+      "url_path": "/lcars/doublenode",
+      "html_file": "lcars-dashboard.html?dashboard=doublenode",
+      "divisions": [
+        "freelance-doublenode-starwords",
+        "freelance-doublenode-workstats",
+        "freelance-doublenode-appplanning"
+      ],
+      "machines": [],
+      "org_color": "cyan",
+      "system": false,
+      "sort_order": 3,
+      "created_at": "2026-01-01T00:00:00.000Z",
+      "updated_at": "2026-01-01T00:00:00.000Z"
+    }
+  ],
+  "divisions": [
+    {
+      "id": "mainevent",
+      "name": "Main Event",
+      "description": "Main Event mobile app development"
+    },
+    {
+      "id": "freelance-doublenode-starwords",
+      "name": "Freelance: StarWords",
+      "description": "DoubleNode StarWords project"
+    },
+    {
+      "id": "freelance-doublenode-workstats",
+      "name": "Freelance: WorkStats",
+      "description": "DoubleNode WorkStats project"
+    },
+    {
+      "id": "freelance-doublenode-appplanning",
+      "name": "Freelance: AppPlanning",
+      "description": "DoubleNode AppPlanning project"
+    }
+  ],
+  "all_fleet_dashboard_ids": [
+    "mainevent",
+    "doublenode"
+  ],
+  "meta": {
+    "version": "1.0.0",
+    "created_at": "2026-04-23T00:00:00.000Z",
+    "plugin_slug": "main-event"
+  }
+}

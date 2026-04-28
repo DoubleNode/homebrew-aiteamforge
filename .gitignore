@@ -20,6 +20,7 @@
 
 # Python
 __pycache__/
+.pytest_cache/
 *.pyc
 *.pyo
 # Python virtual environments — never commit venvs to the repo.

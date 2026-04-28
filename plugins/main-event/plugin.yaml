@@ -1,0 +1,93 @@
+---
+# AITeamForge Plugin Manifest — Main Event Entertainment
+#
+# Opt-in plugin providing Main-Event-specific skills, templates, and
+# integrations. The default aiteamforge install ships ZERO content from
+# this plugin; it is only activated when the user sets:
+#
+#   plugins:
+#     enabled:
+#       - main-event
+#
+# in ~/.aiteamforge/organization.yaml (or equivalent org config).
+
+plugin:
+  slug: "main-event"
+  name: "Main Event Entertainment"
+  description: >
+    Opt-in skills, templates, and integrations for Main Event Entertainment
+    deployments (iOS/Android/Firebase apps plus operations workflows:
+    change requests, release notes, weekly reports, marketing summaries,
+    and CI integrations).
+  version: "1.0.0"
+  owner: "Main Event Entertainment / Dave & Buster's"
+  license: "Proprietary — internal use only"
+
+# Minimum aiteamforge version required to load this plugin.
+# Plugin-loading infrastructure landed in 0.9.0.
+requires:
+  aiteamforge: ">=0.9.0"
+
+# Items this plugin contributes when enabled. The installer reads this list
+# to know what to copy/symlink into ${INSTALL_DIR}/skills when the plugin
+# is activated. Skills NOT listed here are ignored even if present in the
+# plugins/main-event/skills/ directory.
+installs:
+  skills:
+    # Populated in XACA-0139-005 and subsequent tap releases as ME-specific
+    # skills are productized into the plugin layer. The skills currently
+    # live in the dev-team repo root (~/dev-team/skills/) for local
+    # development only — they are NOT shipped in the tap today.
+    #
+    # Planned skills (from XACA-0139 audit):
+    #   - "Main Event CR"
+    #   - "Main Event RELNOTES Manager"
+    #   - "Main Event Weekly Reports"
+    #   - "Weekly Email Newsletter"
+    #   - "Weekly Product Owner Report"
+    #   - "Scrum of Scrums ME APP"
+    #   - "Marketing Summary"
+    #   - "Center Management App Update"
+    #   - "Create Center"
+    #   - "Bitrise Build Status"
+    []
+
+  # Reserved for future plugin-owned templates (e.g. ME-specific RELNOTES
+  # scaffolds, CR templates). None shipped in the 1.0.0 manifest.
+  templates: []
+
+  # Third-party integrations this plugin's skills depend on. Documented
+  # here so the installer can warn if org credentials are missing.
+  integrations:
+    - jira          # Confluence CR publishing, ticket sync
+    - confluence    # CR docs, weekly reports
+    - bitrise       # iOS/Android CI build status
+
+# ---------------------------------------------------------------------------
+# TODO (coordinated with XACA-0139-003 — install-team.sh / installer wiring):
+#
+# The installer does NOT yet read this manifest. Subitem 003 owns the
+# installer-side changes. The following edits are required OUTSIDE this
+# plugin directory (not made here, per scope discipline):
+#
+#   1. homebrew-tap/bin/aiteamforge-setup.sh (around line 1027):
+#      After copying share/skills/, read organization.yaml, check
+#      plugins.enabled[], and for each enabled plugin slug:
+#        - Load plugins/<slug>/plugin.yaml
+#        - For each skill name in installs.skills, copy
+#          plugins/<slug>/skills/<name>/ to ${INSTALL_DIR}/skills/<name>/
+#
+#   2. homebrew-tap/libexec/installers/install-claude-config.sh
+#      (install_skills function, around line 242):
+#      No change needed — it already walks ${AITEAMFORGE_DIR}/skills/ and
+#      symlinks everything, so plugin skills flow through automatically
+#      once aiteamforge-setup.sh copies them in.
+#
+#   3. homebrew-tap/libexec/commands/aiteamforge-setup-org.sh (or wherever
+#      organization.yaml is generated): add a `plugins:` section with
+#      `enabled: []` default and a commented-out example showing
+#      `- main-event` for discoverability.
+#
+# Until subitem 003 lands, enabling this plugin is a no-op — the installer
+# will not copy anything from plugins/main-event/skills/.
+# ---------------------------------------------------------------------------

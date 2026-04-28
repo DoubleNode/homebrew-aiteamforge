@@ -1,0 +1,159 @@
+# =============================================================================
+# AITeamForge — Organization Identity Configuration (Example/Template)
+# =============================================================================
+#
+# This file is the *template* shipped with the AITeamForge framework.  At
+# install time, `aiteamforge setup` copies it to:
+#
+#     ~/.aiteamforge/organization.yaml
+#
+# and populates the fields from installer prompts (or from `--org-*` CLI
+# flags).  Edit the copy in ~/.aiteamforge — do NOT edit this example in
+# place; it will be overwritten on `brew upgrade aiteamforge`.
+#
+# XACA-0139 introduces organization identity as the *fourth axis* of the
+# Three-Axis Configuration Model (XACA-0130):
+#
+#     Axis 1: Machine      (which box)
+#     Axis 2: Team         (which board / which group of humans)
+#     Axis 3: Role         (which persona an agent is currently wearing)
+#     Axis 4: Organization (which client/company the install belongs to) ← NEW
+#
+# Before XACA-0139 the framework had the client organization ("Main Event")
+# baked into shipped code and doc strings.  That blocked the tap from being
+# installed for other orgs (DoubleNode, Liquidstyle, or any third party).
+# This file + the resolver library (aiteamforge-org-paths.sh / .py) are the
+# single source of truth for "whose install is this?".
+#
+# Resolution order (first hit wins):
+#   1. $AITEAMFORGE_ORG_CONFIG              — env override, for tests / CI
+#   2. $AITEAMFORGE_DIR/organization.yaml   — working dir (multi-install)
+#   3. $HOME/.aiteamforge/organization.yaml — canonical per-user location
+#   4. <framework>/share/config/organization.yaml.example — THIS FILE (fallback)
+#
+# Keep this file valid YAML at all times — downstream consumers parse it with
+# PyYAML / yq.  Stay single-quoted where `${HOME}` expansion is desired; the
+# resolvers expand `${HOME}` and `$HOME` during load.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# organization: WHO this install belongs to.
+#
+# All four subfields are strings.  `slug` and `name` are required; the others
+# are optional and default to sensible fallbacks (see the resolver library).
+# -----------------------------------------------------------------------------
+organization:
+
+  # slug: lowercase-kebab identifier.  Used in filesystem paths, log tags,
+  # config namespaces, and plugin enable-lists.  MUST be [a-z0-9-]+, short
+  # (ideally < 24 chars), and stable across the lifetime of the install —
+  # renaming the slug later will orphan per-org state.  Examples:
+  #   "main-event", "doublenode", "acme-corp", "example-org"
+  slug: "example-org"
+
+  # name: human-readable organization name.  Appears in agent prompts,
+  # LCARS headers, setup wizard banners, and generated documentation.
+  # Free-form UTF-8; prefer the org's own preferred casing ("Main Event",
+  # not "main event"; "DoubleNode", not "Doublenode").
+  name: "Example Organization"
+
+  # display_short: compact label (≤ 12 chars) for statuslines, terminal
+  # breadcrumbs, and narrow UI contexts where the full name does not fit.
+  # Optional — if omitted, the resolver falls back to `name`.
+  display_short: "Example"
+
+  # domain: primary DNS domain associated with the org.  Used as a hint
+  # for integrations that need to construct URLs (Jira, Confluence,
+  # SSO providers).  Optional.  Examples: "mainevent.com", "doublenode.com".
+  domain: "example.com"
+
+# -----------------------------------------------------------------------------
+# paths: where this org's project repos and shared dev dirs live on disk.
+#
+# These paths are hints, not hard requirements.  Tools that need to locate a
+# project repo consult these first, then fall back to per-team working_dir
+# from team-paths.json (the team axis of the config model).
+# -----------------------------------------------------------------------------
+paths:
+
+  # projects_root: top-level directory where this org's project clones live
+  # under a single-user setup (no shared Mac).  `${HOME}` is expanded by the
+  # resolver.  Default: "${HOME}/projects".
+  projects_root: "${HOME}/projects"
+
+  # shared_dev_root: optional top-level directory for shared-Mac installs
+  # where project clones live under /Users/Shared/Development/<Org>/...
+  # Leave unset or empty if the install is single-user only.  Main Event's
+  # existing install uses "/Users/Shared/Development".
+  shared_dev_root: "/Users/Shared/Development"
+
+# -----------------------------------------------------------------------------
+# plugins: opt-in layers that extend the framework with org-specific assets.
+#
+# Each plugin lives in homebrew-tap/plugins/<slug>/ (added by XACA-0139-005)
+# and contributes kanban teams, personas, skills, integration hooks, etc.
+# Plugins are DISABLED by default — an empty `enabled` list means a clean
+# vanilla framework with no org-specific content.
+#
+# Example (Main Event install):
+#     plugins:
+#       enabled:
+#         - "main-event"    # adds ios/android/firebase/command/mainevent teams
+#
+# Example (DoubleNode install):
+#     plugins:
+#       enabled:
+#         - "doublenode"    # adds freelance-doublenode-* teams
+#
+# Example (fresh third-party install — no plugins):
+#     plugins:
+#       enabled: []
+# -----------------------------------------------------------------------------
+plugins:
+  enabled: []
+
+# -----------------------------------------------------------------------------
+# integrations: opt-in per-service configuration blocks.
+#
+# Each block is optional.  If a block is absent (or commented out), the
+# corresponding integration is considered DISABLED and downstream tools
+# skip it silently.  If a block is present, all its required fields must
+# be populated — the resolver returns empty strings for missing keys, so
+# consumers can `if not value: skip` safely.
+#
+# Secrets (API tokens, OAuth client secrets, webhook signatures) MUST NOT
+# go in this file.  Store them in the macOS Keychain, the user's shell
+# env, or a separate untracked file referenced by path.
+# -----------------------------------------------------------------------------
+integrations:
+
+  # ── Jira (Atlassian issue tracker) ─────────────────────────────────────
+  # Uncomment and fill in to enable Jira-backed commands (atlassian:* skills,
+  # kb-jira-link, etc.).  `project_keys` is the list of Jira project keys
+  # this org uses; agents filter search results to these projects.
+  #
+  # jira:
+  #   base_url: "https://example.atlassian.net"
+  #   project_keys:
+  #     - "EXM"
+  #     - "OPS"
+
+  # ── Confluence (Atlassian wiki) ────────────────────────────────────────
+  # Uncomment and fill in to enable Confluence publishing (CR documents,
+  # status reports, release notes).  `space_key` is the primary space for
+  # org docs.
+  #
+  # confluence:
+  #   base_url: "https://example.atlassian.net/wiki"
+  #   space_key: "ENG"
+
+  # ── Bitrise (iOS/Android CI) ───────────────────────────────────────────
+  # Uncomment and fill in to enable Bitrise build-status commands.
+  # `workspace_slug` is the Bitrise workspace the org builds under.
+  #
+  # bitrise:
+  #   workspace_slug: "example-mobile"
+
+# =============================================================================
+# End of organization.yaml.example
+# =============================================================================

@@ -61,7 +61,7 @@ TEAM_SHIP="My Starship Name"
 - Command: 8180+
 - Legal: 8320+
 - Medical: 8340+
-- MainEvent: 8360+
+- mainevent (coordination): 8360+
 - **Your team: Pick an unused range (e.g., 8400+)**
 
 ---
@@ -158,8 +158,8 @@ TEAM_LCARS_PORT="8400"
 TEAM_TMUX_SOCKET="qa"
 
 TEAM_REPOS=(
-    "MainEventApp-iOS"
-    "MainEventApp-Android"
+    "YourOrgApp-iOS"       # replace with your org's repo names
+    "YourOrgApp-Android"
 )
 
 TEAM_BREW_DEPS=(

@@ -542,7 +542,7 @@ TEAM_NAME="iOS Development"
 TEAM_CATEGORY="platform"
 TEAM_COLOR="#FF9500"
 TEAM_LCARS_PORT="8260"
-TEAM_REPOS=("MainEventApp-iOS" "DNSFramework")
+TEAM_REPOS=("AcmeCorpApp-iOS" "DNSFramework")  # repo names configured via organization.yaml
 TEAM_BREW_DEPS=("swiftlint" "xcodegen")
 TEAM_AGENTS=("picard" "beverly" "data")
 ```

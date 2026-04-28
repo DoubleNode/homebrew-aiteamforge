@@ -634,6 +634,37 @@ chmod 644 ~/aiteamforge/kanban/*.json
 aiteamforge setup --upgrade
 ```
 
+### Dual Kanban Board Warning
+
+**Symptoms:**
+- Warning message: "LCARS 404: No plan document directory configured for team: X"
+- Or: "Dual board warning: Both stub and canonical boards exist"
+
+**Cause:**
+
+Teams with profile-scoped boards (e.g., Finance with personal/work profiles) can end up with both a stub board (e.g., `~/finance/finance-board.json`) and a canonical board (e.g., `~/finance/personal/kanban/finance-personal-board.json`). This typically occurs on older installations before the installer's profile-awareness feature was added.
+
+**Solution:**
+
+Disable the stub board warning with:
+```bash
+kb-quarantine-stub <team>
+```
+
+Example for Finance team:
+```bash
+kb-quarantine-stub finance
+```
+
+This marks the stub board as quarantined (disabled) so the warning no longer fires. The canonical profile-scoped board remains active and is the source of truth.
+
+**Verification:**
+
+After running the command, verify the warning is resolved:
+```bash
+kb-list  # Should use canonical board without warnings
+```
+
 ### Backup System Not Running
 
 **Symptoms:**
@@ -792,7 +823,7 @@ curl -X POST http://server:3000/api/heartbeat \
 mv ~/aiteamforge ~/aiteamforge-backup-$(date +%Y%m%d)
 
 # 2. Install via Homebrew
-brew tap DoubleNode/aiteamforge
+brew tap your-org/aiteamforge
 brew install aiteamforge
 aiteamforge setup
 
@@ -883,7 +914,7 @@ tar -xzf ~/aiteamforge-backup.tar.gz
 
 ### Where to Report
 
-- **GitHub Issues:** https://github.com/DoubleNode/aiteamforge/issues
+- **GitHub Issues:** Open an issue in your organization's aiteamforge tap repository
 - **Include:** Diagnostic report, logs, steps to reproduce
 
 ---
@@ -903,12 +934,12 @@ tar -czf ~/aiteamforge-backup.tar.gz \
 # 2. Completely remove aiteamforge
 aiteamforge uninstall
 brew uninstall aiteamforge
-brew untap DoubleNode/aiteamforge
+brew untap your-org/aiteamforge
 rm -rf ~/aiteamforge
 rm -rf ~/.aiteamforge
 
 # 3. Clean reinstall
-brew tap DoubleNode/aiteamforge
+brew tap your-org/aiteamforge
 brew install aiteamforge
 aiteamforge setup
 

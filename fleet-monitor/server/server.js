@@ -28,6 +28,7 @@ const path    = require('path');
 const store   = require('./lib/store');
 const history = require('./lib/history');
 const fleet   = require('./routes/fleet');
+const plugins = require('./lib/plugins');
 
 // ============================================================================
 // CONFIGURATION
@@ -62,6 +63,23 @@ app.use(express.json({ limit: '10mb' }));
 // Disable directory redirect to allow explicit route handlers for /lcars
 app.use(express.static(path.join(__dirname, 'public'), { redirect: false }));
 
+// ============================================================================
+// PLUGINS (opt-in, org-specific dashboards / assets)
+// ============================================================================
+// Plugins live at <repo>/homebrew-tap/fleet-monitor/plugins/<slug>/ and are
+// enabled via ~/.aiteamforge/organization.yaml:
+//     plugins:
+//       enabled:
+//         - main-event
+// Default installs load zero plugins — the UI is org-agnostic.
+const enabledPlugins = plugins.loadEnabledPlugins();
+plugins.mountPlugins(app, enabledPlugins, express);
+
+// Expose loaded plugins to route modules that need to merge plugin content
+// (dashboards.js reads app.locals.enabledPlugins to enrich /api/dashboards).
+app.locals.enabledPlugins = enabledPlugins;
+app.locals.pluginDashboards = plugins.loadPluginDashboards(enabledPlugins);
+
 // Request logging
 app.use((req, res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path} - ${req.ip}`);
@@ -92,16 +110,13 @@ app.get('/all', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'all.html'));
 });
 
-app.get('/mainevent', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'mainevent.html'));
-});
-
-app.get('/doublenode', (req, res) => {
-    res.sendFile(path.join(__dirname, 'public', 'doublenode.html'));
-});
+// NOTE: Client-specific page routes (/mainevent, /doublenode, /lcars/mainevent,
+// /lcars/doublenode, etc.) are no longer hardcoded here. They are contributed
+// by opt-in plugins via each plugin.yaml's `page_routes` list and registered
+// in plugins.mountPlugins() above. Default installs see only the generic routes.
 
 // ============================================================================
-// LCARS DASHBOARD ROUTES
+// LCARS DASHBOARD ROUTES (org-agnostic)
 // ============================================================================
 
 app.get('/lcars', (req, res, next) => {
@@ -113,14 +128,6 @@ app.get('/lcars', (req, res, next) => {
 
 app.get('/lcars/', (req, res) => {
     res.redirect(302, '/lcars/lcars-dashboard.html?dashboard=academy');
-});
-
-app.get('/lcars/mainevent', (req, res) => {
-    res.redirect(302, '/lcars/lcars-dashboard.html?dashboard=mainevent');
-});
-
-app.get('/lcars/doublenode', (req, res) => {
-    res.redirect(302, '/lcars/lcars-dashboard.html?dashboard=doublenode');
 });
 
 app.get('/lcars/all', (req, res) => {
@@ -155,19 +162,27 @@ app.listen(PORT, () => {
     console.log('');
     console.log('  Classic Dashboards:');
     console.log(`    Academy (default): http://localhost:${PORT}/`);
-    console.log(`    Main Event: http://localhost:${PORT}/mainevent`);
-    console.log(`    DoubleNode: http://localhost:${PORT}/doublenode`);
-    console.log(`    All Teams: http://localhost:${PORT}/all`);
+    console.log(`    All Teams:         http://localhost:${PORT}/all`);
     console.log('');
     console.log('  LCARS Unified Dashboard:');
-    console.log(`    Academy: http://localhost:${PORT}/lcars/lcars-dashboard.html?dashboard=academy`);
-    console.log(`    Main Event: http://localhost:${PORT}/lcars/lcars-dashboard.html?dashboard=mainevent`);
-    console.log(`    DoubleNode: http://localhost:${PORT}/lcars/lcars-dashboard.html?dashboard=doublenode`);
+    console.log(`    Academy:   http://localhost:${PORT}/lcars/lcars-dashboard.html?dashboard=academy`);
     console.log(`    All Fleet: http://localhost:${PORT}/lcars/lcars-dashboard.html?dashboard=all`);
     console.log('');
-    console.log('  LCARS Shortcuts (redirect to unified):');
-    console.log(`    /lcars -> Academy  |  /lcars/mainevent  |  /lcars/doublenode  |  /lcars/all`);
-    console.log('');
+    if (enabledPlugins.length > 0) {
+        console.log('  Enabled plugins:');
+        for (const p of enabledPlugins) {
+            const pname = (p.manifest.plugin && p.manifest.plugin.name) || p.slug;
+            console.log(`    - ${p.slug} (${pname})`);
+            for (const pr of p.pageRoutes || []) {
+                if (pr && pr.route) console.log(`        ${pr.route}`);
+            }
+        }
+        console.log('');
+    } else {
+        console.log('  No plugins enabled. To add client-specific dashboards, edit');
+        console.log('  ~/.aiteamforge/organization.yaml and list plugin slugs under plugins.enabled.');
+        console.log('');
+    }
     console.log('  Configuration:');
     console.log(`    - Offline threshold: 180s`);
     console.log(`    - Warning threshold: 120s`);
