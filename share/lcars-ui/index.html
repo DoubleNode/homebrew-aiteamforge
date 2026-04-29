@@ -1053,7 +1053,22 @@
                                 <span class="usage-bar-band uw-weekly-band" id="uw-weekly-band"></span>
                             </div>
                             <div class="usage-detail-row" id="uw-weekly-detail">--</div>
-                            <div class="usage-detail-row uw-weekly-reset" id="uw-weekly-reset" style="display:none;"></div>
+                            <div class="usage-detail-row uw-weekly-reset-row" id="uw-weekly-reset-row" style="display:none;">
+                                <span class="uw-weekly-reset" id="uw-weekly-reset"></span>
+                                <button type="button" class="uw-weekly-edit-btn" id="uw-weekly-edit-btn"
+                                        aria-label="Set manual reset countdown" title="Set manual reset countdown">&#x270E;</button>
+                            </div>
+                            <div class="uw-weekly-freshness" id="uw-weekly-freshness" style="display:none;"></div>
+                            <form class="uw-weekly-editor" id="uw-weekly-editor" style="display:none;" autocomplete="off" novalidate>
+                                <label class="uw-weekly-editor-label">Reset in:
+                                    <input type="number" id="uw-weekly-h" min="0" max="168" value="0" step="1" inputmode="numeric" aria-label="Hours"> h
+                                    <input type="number" id="uw-weekly-m" min="0" max="59"  value="0" step="1" inputmode="numeric" aria-label="Minutes"> m
+                                </label>
+                                <button type="submit" class="uw-weekly-save">SET</button>
+                                <button type="button" class="uw-weekly-cancel" id="uw-weekly-cancel">CANCEL</button>
+                                <button type="button" class="uw-weekly-clear"  id="uw-weekly-clear">CLEAR</button>
+                                <span class="uw-weekly-editor-msg" id="uw-weekly-editor-msg" role="status"></span>
+                            </form>
                         </section>
 
                         <!-- SECTION: 7-WINDOW HISTORY -->
@@ -1929,13 +1944,23 @@
     const d7Cost       = document.getElementById('uw-7d-cost');
     const calText      = document.getElementById('uw-cal-text');
     // Weekly limit refs (XACA-0250-005)
-    const weeklySection  = document.getElementById('uw-weekly-section');
-    const weeklyBar      = document.getElementById('uw-weekly-bar');
-    const weeklyFill     = document.getElementById('uw-weekly-fill');
-    const weeklyPct      = document.getElementById('uw-weekly-pct');
-    const weeklyBand     = document.getElementById('uw-weekly-band');
-    const weeklyDetail   = document.getElementById('uw-weekly-detail');
-    const weeklyReset    = document.getElementById('uw-weekly-reset');
+    const weeklySection    = document.getElementById('uw-weekly-section');
+    const weeklyBar        = document.getElementById('uw-weekly-bar');
+    const weeklyFill       = document.getElementById('uw-weekly-fill');
+    const weeklyPct        = document.getElementById('uw-weekly-pct');
+    const weeklyBand       = document.getElementById('uw-weekly-band');
+    const weeklyDetail     = document.getElementById('uw-weekly-detail');
+    const weeklyResetRow   = document.getElementById('uw-weekly-reset-row');
+    const weeklyReset      = document.getElementById('uw-weekly-reset');
+    const weeklyEditBtn    = document.getElementById('uw-weekly-edit-btn');
+    const weeklyFreshness  = document.getElementById('uw-weekly-freshness');
+    const weeklyEditor     = document.getElementById('uw-weekly-editor');
+    const weeklyHInput     = document.getElementById('uw-weekly-h');
+    const weeklyMInput     = document.getElementById('uw-weekly-m');
+    const weeklySaveBtn    = weeklyEditor.querySelector('.uw-weekly-save');
+    const weeklyCancelBtn  = document.getElementById('uw-weekly-cancel');
+    const weeklyClearBtn   = document.getElementById('uw-weekly-clear');
+    const weeklyEditorMsg  = document.getElementById('uw-weekly-editor-msg');
     // 006: tooltip target when weekly is hidden
     const currentSection = document.getElementById('uw-current-section');
 
@@ -2217,15 +2242,148 @@
         weeklyDetail.textContent = parts.length ? parts.join(' · ') : '--';
         weeklyDetail.style.opacity = isStale ? '0.6' : '';
 
+        // Anchor state (XACA-0253): "manual" | "expired" | "iso-fallback"
+        const anchorState = (weekly.anchor_state || 'iso-fallback');
+        weeklySection.dataset.anchorState = anchorState;
+
         // Reset row
-        if (weekly.time_to_reset) {
-            weeklyReset.textContent = 'Resets in ' + weekly.time_to_reset;
-            weeklyReset.style.display = '';
-            weeklyReset.style.opacity = isStale ? '0.5' : '0.65';
+        if (weekly.time_to_reset || anchorState === 'expired') {
+            if (anchorState === 'expired') {
+                weeklyReset.textContent = 'RE-SEED FROM CLAUDE.AI';
+            } else {
+                weeklyReset.textContent = 'Resets in ' + weekly.time_to_reset;
+            }
+            weeklyResetRow.style.display = '';
+            weeklyResetRow.style.opacity = isStale ? '0.5' : '';
         } else {
-            weeklyReset.style.display = 'none';
+            weeklyResetRow.style.display = 'none';
+        }
+
+        // Pencil button prominence
+        if (anchorState === 'expired') {
+            weeklyEditBtn.classList.add('uw-weekly-edit-btn-prominent');
+        } else {
+            weeklyEditBtn.classList.remove('uw-weekly-edit-btn-prominent');
+        }
+
+        // CLEAR button: only enabled when there IS a manual anchor to clear
+        weeklyClearBtn.disabled = (anchorState === 'iso-fallback');
+
+        // Freshness subtitle (subitem 006): only when anchor_state === "manual"
+        if (anchorState === 'manual' && weekly.anchor_set_at) {
+            weeklyFreshness.textContent = 'Set ' + formatAnchorAge(weekly.anchor_set_at) + ' \xb7 manual';
+            weeklyFreshness.style.display = '';
+        } else {
+            weeklyFreshness.style.display = 'none';
         }
     }
+
+    // ── Anchor age formatter ─────────────────────────────────────────────────
+    function formatAnchorAge(isoString) {
+        const setAt = new Date(isoString);
+        const diffMs = Date.now() - setAt.getTime();
+        if (diffMs < 0) return 'just now';
+        const totalMin = Math.floor(diffMs / 60000);
+        if (totalMin < 1)  return 'just now';
+        if (totalMin < 60) return totalMin + 'm ago';
+        const h = Math.floor(totalMin / 60);
+        const m = totalMin % 60;
+        if (h < 24) return m > 0 ? (h + 'h ' + m + 'm ago') : (h + 'h ago');
+        const d = Math.floor(h / 24);
+        const rh = h % 24;
+        return rh > 0 ? (d + 'd ' + rh + 'h ago') : (d + 'd ago');
+    }
+
+    // ── Weekly anchor editor wiring (XACA-0253) ──────────────────────────────
+
+    function openWeeklyEditor() {
+        weeklyHInput.value = '0';
+        weeklyMInput.value = '0';
+        weeklyEditorMsg.textContent = '';
+        weeklyEditorMsg.className = 'uw-weekly-editor-msg';
+        weeklyEditor.style.display = '';
+        weeklyEditBtn.style.display = 'none';
+        weeklyHInput.focus();
+    }
+
+    function closeWeeklyEditor() {
+        weeklyEditor.style.display = 'none';
+        weeklyEditBtn.style.display = '';
+        weeklyEditorMsg.textContent = '';
+        weeklyEditorMsg.className = 'uw-weekly-editor-msg';
+    }
+
+    weeklyEditBtn.addEventListener('click', function () {
+        openWeeklyEditor();
+    });
+
+    weeklyCancelBtn.addEventListener('click', function () {
+        closeWeeklyEditor();
+    });
+
+    // Escape closes the editor (keyboard UX parity with the CANCEL button).
+    weeklyEditor.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') {
+            e.preventDefault();
+            closeWeeklyEditor();
+        }
+    });
+
+    weeklyEditor.addEventListener('submit', async function (e) {
+        e.preventDefault();
+        const h = parseInt(weeklyHInput.value, 10) || 0;
+        const m = parseInt(weeklyMInput.value, 10) || 0;
+        if (h * 60 + m < 1) {
+            weeklyEditorMsg.textContent = 'Enter at least 1 minute';
+            weeklyEditorMsg.className = 'uw-weekly-editor-msg error';
+            return;
+        }
+        weeklySaveBtn.disabled = true;
+        weeklyEditorMsg.textContent = '';
+        weeklyEditorMsg.className = 'uw-weekly-editor-msg';
+        try {
+            const resp = await fetch('/api/weekly-anchor', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({hours: h, minutes: m})
+            });
+            if (resp.ok) {
+                closeWeeklyEditor();
+                // Immediate refresh so the freshness subtitle shows right away
+                if (usageTimeout !== null) { clearTimeout(usageTimeout); usageTimeout = null; }
+                pollUsage();
+            } else {
+                const errData = await resp.json().catch(function () { return {}; });
+                weeklyEditorMsg.textContent = errData.error || ('Error ' + resp.status);
+                weeklyEditorMsg.className = 'uw-weekly-editor-msg error';
+            }
+        } catch (err) {
+            weeklyEditorMsg.textContent = 'Request failed';
+            weeklyEditorMsg.className = 'uw-weekly-editor-msg error';
+        } finally {
+            weeklySaveBtn.disabled = false;
+        }
+    });
+
+    weeklyClearBtn.addEventListener('click', async function () {
+        weeklyClearBtn.disabled = true;
+        try {
+            const resp = await fetch('/api/weekly-anchor', {method: 'DELETE'});
+            if (resp.ok) {
+                closeWeeklyEditor();
+                if (usageTimeout !== null) { clearTimeout(usageTimeout); usageTimeout = null; }
+                pollUsage();
+            } else {
+                weeklyEditorMsg.textContent = 'Clear failed (' + resp.status + ')';
+                weeklyEditorMsg.className = 'uw-weekly-editor-msg error';
+                weeklyClearBtn.disabled = false;
+            }
+        } catch (err) {
+            weeklyEditorMsg.textContent = 'Request failed';
+            weeklyEditorMsg.className = 'uw-weekly-editor-msg error';
+            weeklyClearBtn.disabled = false;
+        }
+    });
 
     // ── Polling loop (setTimeout recursive, visibility-aware) ────────────────
     let usageTimeout = null;

@@ -1706,5 +1706,162 @@ class TestHandleCreateReleaseDefaultEnvironment(unittest.TestCase):
             self.assertEqual(platform_data["environment"], "PLANNED")
 
 
+# ---------------------------------------------------------------------------
+# Tests: Weekly anchor endpoints (XACA-0253-003)
+# ---------------------------------------------------------------------------
+
+class TestWeeklyAnchorPost(unittest.TestCase):
+    """POST /api/weekly-anchor — validation and success paths."""
+
+    def _post(self, body: dict, heuristics_mod=None) -> tuple:
+        """Run handle_post_weekly_anchor with the given body dict.
+
+        Returns (response_code, response_dict).
+        heuristics_mod defaults to the real _ccusage_heuristics module (via
+        the server-level reference); pass a MagicMock to inject failures.
+        """
+        body_bytes = json.dumps(body).encode()
+        handler, buf = _make_handler(
+            path="/api/weekly-anchor",
+            method="POST",
+            body=body_bytes,
+            headers={"Content-Length": str(len(body_bytes))},
+        )
+
+        if heuristics_mod is not None:
+            with patch.object(server, "_ccusage_heuristics", heuristics_mod):
+                handler.handle_post_weekly_anchor()
+        else:
+            handler.handle_post_weekly_anchor()
+
+        return handler._response_code, _response_json(buf)
+
+    def _make_mock_heuristics(self, hours: int = 5, minutes: int = 30) -> MagicMock:
+        """Build a mock heuristics module whose write_weekly_anchor returns a plausible record."""
+        import datetime
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        reset = now + datetime.timedelta(hours=hours, minutes=minutes)
+        mock_mod = MagicMock()
+        mock_mod.write_weekly_anchor.return_value = {
+            "version": 1,
+            "set_at": now,
+            "reset_at": reset,
+            "set_hours": hours,
+            "set_minutes": minutes,
+            "source": "manual",
+        }
+        return mock_mod
+
+    def test_post_weekly_anchor_valid(self):
+        mock_mod = self._make_mock_heuristics(5, 30)
+        code, data = self._post({"hours": 5, "minutes": 30}, heuristics_mod=mock_mod)
+        self.assertEqual(code, 200)
+        self.assertIn("set_at", data)
+        self.assertIn("reset_at", data)
+        self.assertEqual(data["set_hours"], 5)
+        self.assertEqual(data["set_minutes"], 30)
+        self.assertEqual(data["source"], "manual")
+        mock_mod.write_weekly_anchor.assert_called_once_with(5, 30)
+
+    def test_post_weekly_anchor_invalid_hours(self):
+        """hours > 168 should return 400."""
+        mock_mod = MagicMock()
+        mock_mod.write_weekly_anchor.side_effect = ValueError("hours must be 0..168")
+        code, data = self._post({"hours": 200, "minutes": 0}, heuristics_mod=mock_mod)
+        self.assertEqual(code, 400)
+        self.assertIn("error", data)
+
+    def test_post_weekly_anchor_invalid_minutes(self):
+        """minutes >= 60 should return 400."""
+        mock_mod = MagicMock()
+        mock_mod.write_weekly_anchor.side_effect = ValueError("minutes must be 0..59")
+        code, data = self._post({"hours": 1, "minutes": 60}, heuristics_mod=mock_mod)
+        self.assertEqual(code, 400)
+        self.assertIn("error", data)
+
+    def test_post_weekly_anchor_zero_total(self):
+        """hours=0, minutes=0 should return 400."""
+        mock_mod = MagicMock()
+        mock_mod.write_weekly_anchor.side_effect = ValueError("total duration must be > 0")
+        code, data = self._post({"hours": 0, "minutes": 0}, heuristics_mod=mock_mod)
+        self.assertEqual(code, 400)
+        self.assertIn("error", data)
+
+    def test_post_weekly_anchor_missing_fields(self):
+        """Body missing hours/minutes fields returns 400."""
+        mock_mod = self._make_mock_heuristics()
+        code, data = self._post({"hours": 3}, heuristics_mod=mock_mod)
+        self.assertEqual(code, 400)
+        self.assertIn("error", data)
+
+    def test_post_weekly_anchor_503_when_module_unavailable(self):
+        """If _ccusage_heuristics is None, return 503."""
+        body_bytes = json.dumps({"hours": 1, "minutes": 0}).encode()
+        handler, buf = _make_handler(
+            path="/api/weekly-anchor",
+            method="POST",
+            body=body_bytes,
+            headers={"Content-Length": str(len(body_bytes))},
+        )
+        with patch.object(server, "_ccusage_heuristics", None):
+            handler.handle_post_weekly_anchor()
+        self.assertEqual(handler._response_code, 503)
+        data = _response_json(buf)
+        self.assertIn("error", data)
+
+    def test_post_weekly_anchor_non_integer_hours(self):
+        """Non-integer hours field (e.g. float or string) returns 400."""
+        mock_mod = self._make_mock_heuristics()
+        code, data = self._post({"hours": "5", "minutes": 0}, heuristics_mod=mock_mod)
+        self.assertEqual(code, 400)
+        self.assertIn("error", data)
+
+
+class TestWeeklyAnchorDelete(unittest.TestCase):
+    """DELETE /api/weekly-anchor — removal paths."""
+
+    def _delete(self, heuristics_mod=None) -> tuple:
+        """Run handle_delete_weekly_anchor. Returns (code, dict)."""
+        handler, buf = _make_handler(
+            path="/api/weekly-anchor",
+            method="DELETE",
+            body=b"",
+            headers={"Content-Length": "0"},
+        )
+        if heuristics_mod is not None:
+            with patch.object(server, "_ccusage_heuristics", heuristics_mod):
+                handler.handle_delete_weekly_anchor()
+        else:
+            handler.handle_delete_weekly_anchor()
+        return handler._response_code, _response_json(buf)
+
+    def test_delete_weekly_anchor_file_existed(self):
+        mock_mod = MagicMock()
+        mock_mod.delete_weekly_anchor.return_value = True
+        code, data = self._delete(heuristics_mod=mock_mod)
+        self.assertEqual(code, 200)
+        self.assertTrue(data["deleted"])
+
+    def test_delete_weekly_anchor_file_missing(self):
+        mock_mod = MagicMock()
+        mock_mod.delete_weekly_anchor.return_value = False
+        code, data = self._delete(heuristics_mod=mock_mod)
+        self.assertEqual(code, 200)
+        self.assertFalse(data["deleted"])
+
+    def test_delete_weekly_anchor_503_when_module_unavailable(self):
+        handler, buf = _make_handler(
+            path="/api/weekly-anchor",
+            method="DELETE",
+            body=b"",
+            headers={"Content-Length": "0"},
+        )
+        with patch.object(server, "_ccusage_heuristics", None):
+            handler.handle_delete_weekly_anchor()
+        self.assertEqual(handler._response_code, 503)
+        data = _response_json(buf)
+        self.assertIn("error", data)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

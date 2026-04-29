@@ -543,3 +543,260 @@ class TestResponseShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# Tests: Weekly anchor I/O helpers (XACA-0253-001) — pytest-style
+# ---------------------------------------------------------------------------
+
+import pytest  # noqa: E402 (pytest import for tmp_path / monkeypatch fixtures)
+
+
+class TestReadWeeklyAnchor:
+    """read_weekly_anchor() returns dict on success, None on missing/malformed."""
+
+    def test_read_anchor_missing_returns_none(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        # File does not exist — should return None without raising.
+        result = ch.read_weekly_anchor(_path=path)
+        assert result is None
+
+    def test_read_anchor_malformed_json_returns_none(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        path.write_text("not valid json", encoding="utf-8")
+        result = ch.read_weekly_anchor(_path=path)
+        assert result is None
+
+    def test_read_anchor_wrong_schema_version_returns_none(self, tmp_path):
+        import json as _json
+        path = tmp_path / "weekly-anchor.json"
+        path.write_text(
+            _json.dumps({
+                "version": 99,
+                "set_at": "2026-04-28T23:00:00.000Z",
+                "reset_at": "2026-04-29T05:00:00.000Z",
+                "set_hours": 6,
+                "set_minutes": 0,
+                "source": "manual",
+            }),
+            encoding="utf-8",
+        )
+        result = ch.read_weekly_anchor(_path=path)
+        assert result is None
+
+    def test_read_anchor_missing_timestamps_returns_none(self, tmp_path):
+        import json as _json
+        path = tmp_path / "weekly-anchor.json"
+        path.write_text(_json.dumps({"version": 1}), encoding="utf-8")
+        result = ch.read_weekly_anchor(_path=path)
+        assert result is None
+
+
+class TestWriteWeeklyAnchor:
+    """write_weekly_anchor() atomic round-trip and validation."""
+
+    def test_write_anchor_atomic_roundtrip(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        record = ch.write_weekly_anchor(5, 50, now_utc=now, _path=path)
+
+        # Returns a valid record.
+        assert record["set_hours"] == 5
+        assert record["set_minutes"] == 50
+        assert record["source"] == "manual"
+
+        # reset_at = now + 5h50m
+        expected_reset = now + datetime.timedelta(hours=5, minutes=50)
+        assert record["reset_at"] == expected_reset
+
+        # File was written.
+        assert path.exists()
+
+        # Round-trip: re-read matches what was written.
+        read_back = ch.read_weekly_anchor(_path=path)
+        assert read_back is not None
+        assert read_back["set_hours"] == 5
+        assert read_back["set_minutes"] == 50
+        assert read_back["reset_at"] == expected_reset
+
+    def test_write_anchor_creates_parent_dir(self, tmp_path):
+        nested = tmp_path / "a" / "b" / "weekly-anchor.json"
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        ch.write_weekly_anchor(1, 0, now_utc=now, _path=nested)
+        assert nested.exists()
+
+    def test_write_anchor_validates_hours_too_large(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        with pytest.raises(ValueError, match="hours"):
+            ch.write_weekly_anchor(169, 0, _path=path)
+
+    def test_write_anchor_validates_hours_negative(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        with pytest.raises(ValueError, match="hours"):
+            ch.write_weekly_anchor(-1, 0, _path=path)
+
+    def test_write_anchor_validates_minutes_too_large(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        with pytest.raises(ValueError, match="minutes"):
+            ch.write_weekly_anchor(0, 60, _path=path)
+
+    def test_write_anchor_validates_zero_total(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        with pytest.raises(ValueError, match="total duration"):
+            ch.write_weekly_anchor(0, 0, _path=path)
+
+    def test_write_anchor_168_hours_is_valid(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        now = datetime.datetime(2026, 4, 28, 0, 0, 0, tzinfo=datetime.timezone.utc)
+        record = ch.write_weekly_anchor(168, 0, now_utc=now, _path=path)
+        assert record["set_hours"] == 168
+
+    def test_write_anchor_rejects_bool_hours(self, tmp_path):
+        # bool is a subclass of int in Python — must be rejected explicitly.
+        path = tmp_path / "weekly-anchor.json"
+        with pytest.raises(ValueError, match="must be integers, not bool"):
+            ch.write_weekly_anchor(True, 30, _path=path)
+
+    def test_write_anchor_rejects_bool_minutes(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        with pytest.raises(ValueError, match="must be integers, not bool"):
+            ch.write_weekly_anchor(5, False, _path=path)
+
+    def test_write_anchor_no_temp_file_left_on_success(self, tmp_path):
+        # tempfile.mkstemp creates a unique temp file; verify it's cleaned up
+        # by os.replace() and no stray *.tmp file is left in the directory.
+        path = tmp_path / "weekly-anchor.json"
+        ch.write_weekly_anchor(5, 30, _path=path)
+        leftover = list(tmp_path.glob("*.tmp"))
+        assert leftover == [], f"Stray temp files found: {leftover}"
+
+
+class TestDeleteWeeklyAnchor:
+    """delete_weekly_anchor() removes file and returns correct bool."""
+
+    def test_delete_anchor_removes_file(self, tmp_path):
+        path = tmp_path / "weekly-anchor.json"
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        ch.write_weekly_anchor(1, 0, now_utc=now, _path=path)
+        assert path.exists()
+
+        result = ch.delete_weekly_anchor(_path=path)
+        assert result is True
+        assert not path.exists()
+
+    def test_delete_anchor_missing_returns_false(self, tmp_path):
+        path = tmp_path / "does-not-exist.json"
+        result = ch.delete_weekly_anchor(_path=path)
+        assert result is False
+
+
+# ---------------------------------------------------------------------------
+# Tests: evaluate_weekly anchor state machine (XACA-0253-002) — pytest-style
+# ---------------------------------------------------------------------------
+
+def _make_standard_cache(now: datetime.datetime) -> dict:
+    """Build a v2 cache with 4-week history (HIGH confidence) for anchor tests."""
+    ts = (now - datetime.timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    cap = 1_000_000
+    history = [
+        {"week": "2026-03-30", "totalTokens": cap, "totalCost": 10.0},
+        {"week": "2026-04-06", "totalTokens": cap, "totalCost": 10.0},
+        {"week": "2026-04-13", "totalTokens": cap, "totalCost": 10.0},
+        {"week": "2026-04-20", "totalTokens": cap, "totalCost": 10.0},
+    ]
+    current_week = {
+        "week": "2026-04-27",
+        "totalTokens": 400_000,
+        "totalCost": 4.0,
+        "modelsUsed": ["claude-opus-4"],
+    }
+    return {
+        "schema_version": 2,
+        "collected_at_unix": int(now.timestamp()),
+        "ccusage_ok": True,
+        "ccusage_error": None,
+        "active_window": None,
+        "history": [],
+        "calibration": {"max_window_tokens": 0, "max_window_cost_usd": 0.0,
+                        "max_window_id": "", "p90_window_tokens": 0, "samples": 0},
+        "totals": {},
+        "weekly": {
+            "last_collected_at": ts,
+            "current_week": current_week,
+            "history": history,
+        },
+        "weekly_error": None,
+    }
+
+
+class TestEvaluateWeeklyAnchorStateMachine:
+    """evaluate_weekly consults anchor first, ISO-week only as fallback."""
+
+    def test_evaluate_weekly_uses_manual_anchor_when_present(self, tmp_path, monkeypatch):
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        anchor_path = tmp_path / "weekly-anchor.json"
+
+        # Write anchor with 3h remaining.
+        ch.write_weekly_anchor(3, 0, now_utc=now, _path=anchor_path)
+
+        # Redirect module-level path to tmp file.
+        monkeypatch.setattr(ch, "WEEKLY_ANCHOR_PATH", anchor_path)
+
+        cache = _make_standard_cache(now)
+        out = ch.evaluate_weekly(cache, now_utc=now)
+
+        assert out["available"] is True
+        assert out["anchor_state"] == "manual"
+        assert out["seconds_remaining"] == 3 * 3600
+        assert out["time_to_reset"] == "3h"
+        assert out["anchor_set_at"] is not None
+        assert out["anchor_reset_at"] is not None
+
+    def test_evaluate_weekly_returns_expired_when_anchor_past(self, tmp_path, monkeypatch):
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        anchor_path = tmp_path / "weekly-anchor.json"
+
+        # Write anchor that already expired (set 2h ago with 1h duration).
+        set_at = now - datetime.timedelta(hours=2)
+        ch.write_weekly_anchor(1, 0, now_utc=set_at, _path=anchor_path)
+        monkeypatch.setattr(ch, "WEEKLY_ANCHOR_PATH", anchor_path)
+
+        cache = _make_standard_cache(now)
+        out = ch.evaluate_weekly(cache, now_utc=now)
+
+        assert out["available"] is True
+        assert out["anchor_state"] == "expired"
+        assert out["seconds_remaining"] == 0
+        assert out["anchor_set_at"] is not None
+        assert out["anchor_reset_at"] is not None
+
+    def test_evaluate_weekly_falls_back_to_iso_when_no_anchor(self, tmp_path, monkeypatch):
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        anchor_path = tmp_path / "weekly-anchor.json"
+        # File does not exist — ISO fallback.
+        monkeypatch.setattr(ch, "WEEKLY_ANCHOR_PATH", anchor_path)
+
+        cache = _make_standard_cache(now)
+        out = ch.evaluate_weekly(cache, now_utc=now)
+
+        assert out["available"] is True
+        assert out["anchor_state"] == "iso-fallback"
+        # ISO week 2026-04-27 ends 2026-05-04T00:00:00Z; now is 2026-04-28T20:00:00Z.
+        # remaining = (2026-05-04 - 2026-04-28T20:00) = 5d4h = 5*86400 + 4*3600
+        expected = 5 * 86400 + 4 * 3600
+        assert out["seconds_remaining"] == expected
+        assert out["anchor_set_at"] is None
+        assert out["anchor_reset_at"] is None
+
+    def test_evaluate_weekly_anchor_state_keys_always_present(self, tmp_path, monkeypatch):
+        """All three anchor keys are present in every available response."""
+        now = datetime.datetime(2026, 4, 28, 20, 0, 0, tzinfo=datetime.timezone.utc)
+        anchor_path = tmp_path / "weekly-anchor-missing.json"
+        monkeypatch.setattr(ch, "WEEKLY_ANCHOR_PATH", anchor_path)
+
+        cache = _make_standard_cache(now)
+        out = ch.evaluate_weekly(cache, now_utc=now)
+
+        assert "anchor_state" in out
+        assert "anchor_set_at" in out
+        assert "anchor_reset_at" in out

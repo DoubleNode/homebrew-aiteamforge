@@ -675,12 +675,9 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
 .usage-indicator.full .usage-weekly .uw-weekly-band[data-band="red"]     { color: var(--lcars-red, #cc4444); }
 .usage-indicator.full .usage-weekly .uw-weekly-band[data-band="unknown"] { color: var(--lcars-tan, #cc9966); }
 
-/* Reset row: slightly dimmed, consistent with burn/detail secondary text */
+/* Reset text span — color only; layout/spacing handled by .uw-weekly-reset-row (XACA-0253) */
 .usage-indicator.full .usage-weekly .uw-weekly-reset {
-    font-size: 11px;
     color: var(--usage-weekly-color);
-    opacity: 0.65;
-    margin-top: 2px;
 }
 
 /* Stale: bar fill gets hatch treatment matching other stale bars */
@@ -702,4 +699,171 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
     font-style: italic;
     font-size: 0.9em;
     margin-bottom: 0.4em;
+}
+
+/* --- Weekly anchor edit affordance (XACA-0253) ----------------------------- */
+
+/* Reset row wraps the "Resets in …" text + pencil in one flex row */
+.usage-indicator.full .usage-weekly .uw-weekly-reset-row {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+    font-size: 11px;
+    color: var(--usage-weekly-color);
+    opacity: 0.65;
+    margin-top: 2px;
+}
+
+/* Pencil button — subtle, inline with reset text */
+.usage-indicator.full .usage-weekly .uw-weekly-edit-btn {
+    background: none;
+    border: none;
+    padding: 0 0.2em;
+    cursor: pointer;
+    font-size: 13px;
+    color: var(--usage-weekly-color);
+    opacity: 0.7;
+    line-height: 1;
+    transition: opacity 0.15s, color 0.15s;
+    flex-shrink: 0;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-edit-btn:hover,
+.usage-indicator.full .usage-weekly .uw-weekly-edit-btn:focus {
+    opacity: 1;
+    color: var(--lcars-white, #ffffff);
+    outline: none;
+}
+
+/* Expired / re-seed: make the pencil unmissable */
+.usage-indicator.full .usage-weekly .uw-weekly-edit-btn-prominent {
+    background: var(--lcars-amber, #ffcc00);
+    color: #000;
+    padding: 0.15em 0.5em;
+    border-radius: 0.4em;
+    opacity: 1;
+    animation: uw-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes uw-pulse {
+    0%,100% { opacity: 1; }
+    50%      { opacity: 0.65; }
+}
+
+/* Expired state: reset text is amber + bold to match the "RE-SEED" call-to-action */
+.usage-indicator.full .usage-weekly[data-anchor-state="expired"] .uw-weekly-reset {
+    color: var(--lcars-amber, #ffcc00);
+    font-weight: bold;
+    letter-spacing: 0.05em;
+    opacity: 1;
+}
+
+/* Freshness subtitle (subitem 006) */
+.usage-indicator.full .usage-weekly .uw-weekly-freshness {
+    font-size: 0.85em;
+    opacity: 0.65;
+    color: var(--usage-weekly-color);
+    margin-top: 1px;
+}
+
+/* Editor form — horizontal pill-row layout */
+.usage-indicator.full .usage-weekly .uw-weekly-editor {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35em;
+    margin-top: 4px;
+    padding: 4px 6px;
+    background: var(--lcars-darker, #0d0d1a);
+    border: 1px solid var(--usage-weekly-color);
+    border-radius: 0.4em;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-editor-label {
+    display: flex;
+    align-items: center;
+    gap: 0.25em;
+    font-size: 11px;
+    color: var(--lcars-white, #fff);
+    white-space: nowrap;
+}
+
+/* Number inputs */
+.usage-indicator.full .usage-weekly .uw-weekly-editor input[type="number"] {
+    width: 3em;
+    background: var(--lcars-surface, #252540);
+    border: 1px solid var(--lcars-tan, #cc9966);
+    color: var(--lcars-white, #fff);
+    border-radius: 0.25em;
+    padding: 1px 3px;
+    font-size: 11px;
+    text-align: right;
+    -moz-appearance: textfield;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-editor input[type="number"]::-webkit-inner-spin-button,
+.usage-indicator.full .usage-weekly .uw-weekly-editor input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-editor input[type="number"]:focus {
+    outline: none;
+    border-color: var(--usage-weekly-color);
+}
+
+/* Shared button base */
+.usage-indicator.full .usage-weekly .uw-weekly-editor button {
+    padding: 1px 6px;
+    border: none;
+    border-radius: 0.3em;
+    font-size: 10px;
+    font-weight: bold;
+    cursor: pointer;
+    letter-spacing: 0.04em;
+    transition: opacity 0.15s;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-editor button:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+/* SET — green-on-dark (LCARS green) */
+.usage-indicator.full .usage-weekly .uw-weekly-save {
+    background: var(--lcars-green, #99ff99);
+    color: #000;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-save:hover:not(:disabled) {
+    opacity: 0.85;
+}
+
+/* CANCEL — LCARS tan */
+.usage-indicator.full .usage-weekly .uw-weekly-cancel {
+    background: var(--lcars-tan, #cc9966);
+    color: #000;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-cancel:hover {
+    opacity: 0.85;
+}
+
+/* CLEAR — destructive red */
+.usage-indicator.full .usage-weekly .uw-weekly-clear {
+    background: var(--lcars-red, #cc4444);
+    color: #fff;
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-clear:hover:not(:disabled) {
+    opacity: 0.85;
+}
+
+/* Editor status/error message */
+.usage-indicator.full .usage-weekly .uw-weekly-editor-msg {
+    font-size: 10px;
+    color: var(--lcars-white, #fff);
+}
+
+.usage-indicator.full .usage-weekly .uw-weekly-editor-msg.error {
+    color: var(--lcars-red, #cc4444);
 }

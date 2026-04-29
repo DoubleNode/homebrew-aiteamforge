@@ -66,8 +66,15 @@ cap and ``minutes_to_cap`` is reported as ``None``.
 from __future__ import annotations
 
 import datetime
+import json
+import logging
+import os
+import tempfile
 import time
+from pathlib import Path
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 1
 
@@ -448,6 +455,184 @@ def _format_time_to_reset(seconds_remaining: int) -> str:
     return f"{secs}s"
 
 
+# ---------------------------------------------------------------------------
+# Weekly anchor file I/O (XACA-0253-001)
+# ---------------------------------------------------------------------------
+
+#: Path to the manual weekly-anchor persistence file.
+WEEKLY_ANCHOR_PATH = Path.home() / ".lcars" / "weekly-anchor.json"
+
+# Expected schema version for the anchor file.
+_ANCHOR_SCHEMA_VERSION = 1
+
+
+def read_weekly_anchor(
+    _path: Path | None = None,
+) -> dict | None:
+    """Read and parse the weekly anchor file.
+
+    Returns a dict with parsed ``set_at`` / ``reset_at`` as aware
+    :class:`datetime.datetime` objects on success, or ``None`` on:
+
+    * file missing
+    * JSON parse error
+    * schema version mismatch
+    * any other I/O failure
+
+    Never raises — all errors are swallowed and logged at WARNING level.
+    ``_path`` is an override used by tests to redirect to a tmp file.
+    """
+    path = _path if _path is not None else WEEKLY_ANCHOR_PATH
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        _log.warning("[weekly-anchor] read failed: %s", exc)
+        return None
+
+    try:
+        data = json.loads(raw)
+    except (json.JSONDecodeError, ValueError) as exc:
+        _log.warning("[weekly-anchor] JSON parse error: %s", exc)
+        return None
+
+    if not isinstance(data, dict):
+        _log.warning("[weekly-anchor] expected dict, got %s", type(data).__name__)
+        return None
+
+    if data.get("version") != _ANCHOR_SCHEMA_VERSION:
+        _log.warning(
+            "[weekly-anchor] schema version mismatch: expected %d, got %r",
+            _ANCHOR_SCHEMA_VERSION,
+            data.get("version"),
+        )
+        return None
+
+    # Parse ISO timestamps to aware datetimes.
+    try:
+        set_at_str = data["set_at"]
+        reset_at_str = data["reset_at"]
+        set_at = datetime.datetime.fromisoformat(
+            set_at_str.replace("Z", "+00:00")
+        )
+        reset_at = datetime.datetime.fromisoformat(
+            reset_at_str.replace("Z", "+00:00")
+        )
+    except (KeyError, ValueError, AttributeError, TypeError) as exc:
+        _log.warning("[weekly-anchor] timestamp parse error: %s", exc)
+        return None
+
+    return {
+        "version": data["version"],
+        "set_at": set_at,
+        "reset_at": reset_at,
+        "set_hours": data.get("set_hours", 0),
+        "set_minutes": data.get("set_minutes", 0),
+        "source": data.get("source", "manual"),
+    }
+
+
+def write_weekly_anchor(
+    hours: int,
+    minutes: int,
+    now_utc: datetime.datetime | None = None,
+    _path: Path | None = None,
+) -> dict:
+    """Persist a new manual weekly anchor.
+
+    ``hours`` and ``minutes`` represent the "time until reset" the user read
+    off claude.ai.  ``now_utc`` defaults to the current UTC time; pass an
+    explicit value in tests.
+
+    Validation rules:
+    * ``0 <= hours <= 168``
+    * ``0 <= minutes <= 59``
+    * total duration > 0  (hours*60 + minutes must be positive)
+
+    Returns the written record with ``set_at`` and ``reset_at`` as aware
+    :class:`datetime.datetime` objects.
+
+    Raises :class:`ValueError` on invalid input.
+    Raises :class:`OSError` on write failure (caller should translate to 500).
+    """
+    # bool is a subclass of int in Python; isinstance(True, int) is True.
+    # Reject explicitly so write_weekly_anchor(True, False) doesn't silently
+    # accept hours=1, minutes=0. The server layer also guards this — this is
+    # belt-and-suspenders so the library is self-defensive when called directly.
+    if isinstance(hours, bool) or isinstance(minutes, bool):
+        raise ValueError("hours and minutes must be integers, not bool")
+    if not isinstance(hours, int) or not isinstance(minutes, int):
+        raise ValueError("hours and minutes must be integers")
+    if not (0 <= hours <= 168):
+        raise ValueError(f"hours must be 0..168, got {hours}")
+    if not (0 <= minutes <= 59):
+        raise ValueError(f"minutes must be 0..59, got {minutes}")
+    if hours * 60 + minutes <= 0:
+        raise ValueError("total duration must be > 0 (hours*60 + minutes)")
+
+    now = now_utc if now_utc is not None else datetime.datetime.now(
+        datetime.timezone.utc
+    )
+    reset_at = now + datetime.timedelta(hours=hours, minutes=minutes)
+
+    record = {
+        "version": _ANCHOR_SCHEMA_VERSION,
+        "set_at": now.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "reset_at": reset_at.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        "set_hours": hours,
+        "set_minutes": minutes,
+        "source": "manual",
+    }
+
+    path = _path if _path is not None else WEEKLY_ANCHOR_PATH
+    path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
+
+    # Use a unique temp file (not a fixed .json.tmp) so concurrent writers
+    # cannot last-write-wins clobber each other's temp file. Today's server
+    # is single-threaded, but this future-proofs against a ThreadingTCPServer
+    # upgrade and against multiple LCARS instances racing on the same machine.
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".", suffix=".tmp", dir=str(path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(record, indent=2))
+        os.replace(tmp_name, str(path))
+    except Exception:
+        # Clean up the temp file on any write/replace failure.
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
+
+    # Return a parsed version (datetimes as objects, matching read_weekly_anchor).
+    return {
+        "version": record["version"],
+        "set_at": now,
+        "reset_at": reset_at,
+        "set_hours": hours,
+        "set_minutes": minutes,
+        "source": "manual",
+    }
+
+
+def delete_weekly_anchor(_path: Path | None = None) -> bool:
+    """Remove the weekly anchor file.
+
+    Returns ``True`` if a file was removed, ``False`` if it was already absent.
+    ENOENT is tolerated silently; other errors propagate.
+    ``_path`` is an override used by tests.
+    """
+    path = _path if _path is not None else WEEKLY_ANCHOR_PATH
+    try:
+        path.unlink()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 def _parse_week_anchor(week_str: str) -> datetime.datetime | None:
     """Parse an ISO date string like ``"2026-04-28"`` as a UTC midnight datetime.
 
@@ -559,15 +744,46 @@ def evaluate_weekly(
         else:
             band = classify_band(used_pct)
 
-    # --- Time to reset ---
-    week_str = current_week.get("week") or ""
-    week_start = _parse_week_anchor(week_str)
-    if week_start is not None:
-        week_end = week_start + datetime.timedelta(days=7)
-        delta = (week_end - now).total_seconds()
-        seconds_remaining = max(0, int(delta))
+    # --- Time to reset (XACA-0253-002: manual anchor takes priority) ---
+    #
+    # Priority:
+    #   1. MANUAL  — anchor exists and now < reset_at
+    #   2. EXPIRED — anchor exists but now >= reset_at (no auto-roll)
+    #   3. ISO_FALLBACK — no anchor file; use ISO-week boundary
+    anchor = read_weekly_anchor()
+
+    anchor_state: str
+    anchor_set_at_str: str | None
+    anchor_reset_at_str: str | None
+
+    if anchor is not None:
+        anchor_reset_at: datetime.datetime = anchor["reset_at"]
+        if now < anchor_reset_at:
+            # State 1: MANUAL — anchor is fresh.
+            delta = (anchor_reset_at - now).total_seconds()
+            seconds_remaining = max(0, int(delta))
+            anchor_state = "manual"
+            anchor_set_at_str = anchor["set_at"].strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            anchor_reset_at_str = anchor_reset_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+        else:
+            # State 2: EXPIRED — anchor has passed; user must re-seed.
+            seconds_remaining = 0
+            anchor_state = "expired"
+            anchor_set_at_str = anchor["set_at"].strftime("%Y-%m-%dT%H:%M:%S.000Z")
+            anchor_reset_at_str = anchor_reset_at.strftime("%Y-%m-%dT%H:%M:%S.000Z")
     else:
-        seconds_remaining = 0
+        # State 3: ISO_FALLBACK — no anchor file.
+        week_str = current_week.get("week") or ""
+        week_start = _parse_week_anchor(week_str)
+        if week_start is not None:
+            week_end = week_start + datetime.timedelta(days=7)
+            delta = (week_end - now).total_seconds()
+            seconds_remaining = max(0, int(delta))
+        else:
+            seconds_remaining = 0
+        anchor_state = "iso-fallback"
+        anchor_set_at_str = None
+        anchor_reset_at_str = None
 
     time_to_reset = _format_time_to_reset(seconds_remaining)
 
@@ -582,4 +798,7 @@ def evaluate_weekly(
         "calibrated": calibrated,
         "confidence": confidence,
         "stale": is_stale,
+        "anchor_state": anchor_state,
+        "anchor_set_at": anchor_set_at_str,
+        "anchor_reset_at": anchor_reset_at_str,
     }

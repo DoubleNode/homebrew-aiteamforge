@@ -1028,6 +1028,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.handle_graph_query()
         elif path == '/api/graph/node':
             self.handle_graph_node()
+        # Weekly anchor API endpoints (XACA-0253-003)
+        elif path == '/api/weekly-anchor':
+            self.handle_post_weekly_anchor()
         else:
             self.send_error(404, f"Unknown POST endpoint: {path}")
 
@@ -1112,6 +1115,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Todo API endpoints
         elif path == '/api/todos':
             self.handle_delete_todo()
+        # Weekly anchor API endpoints (XACA-0253-003)
+        elif path == '/api/weekly-anchor':
+            self.handle_delete_weekly_anchor()
         else:
             self.send_error(404, f"Unknown DELETE endpoint: {path}")
 
@@ -4674,6 +4680,117 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Error deleting todo: {e}")
 
     # END TODO API HANDLERS
+    # =========================================================================
+
+    # =========================================================================
+    # WEEKLY ANCHOR API HANDLERS (XACA-0253-003)
+    # =========================================================================
+
+    def handle_post_weekly_anchor(self):
+        """POST /api/weekly-anchor — set a manual weekly-limit reset anchor.
+
+        Request body (JSON):
+            {"hours": int, "minutes": int}
+
+        Both fields are required integers.
+        Validation: 0 <= hours <= 168, 0 <= minutes <= 59, total > 0.
+
+        Response (200):
+            {"set_at": "<ISO>", "reset_at": "<ISO>", "set_hours": int,
+             "set_minutes": int, "source": "manual", "version": 1}
+
+        Response on error:
+            400 {"error": "<msg>"}   — validation failure
+            503 {"error": "..."}     — heuristics module unavailable
+            500 {"error": "..."}     — unexpected failure
+        """
+        if _ccusage_heuristics is None:
+            self._send_json_response(
+                {"error": "ccusage_heuristics module not available"}, 503
+            )
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(content_length)
+            post_data = json.loads(body) if body else {}
+        except (ValueError, json.JSONDecodeError) as exc:
+            self._send_json_response({"error": f"Invalid JSON: {exc}"}, 400)
+            return
+
+        # Validate required fields.
+        if "hours" not in post_data or "minutes" not in post_data:
+            self._send_json_response(
+                {"error": "Missing required fields: hours, minutes"}, 400
+            )
+            return
+
+        hours_raw = post_data["hours"]
+        minutes_raw = post_data["minutes"]
+
+        if not isinstance(hours_raw, int) or isinstance(hours_raw, bool):
+            self._send_json_response({"error": "hours must be an integer"}, 400)
+            return
+        if not isinstance(minutes_raw, int) or isinstance(minutes_raw, bool):
+            self._send_json_response({"error": "minutes must be an integer"}, 400)
+            return
+
+        try:
+            record = _ccusage_heuristics.write_weekly_anchor(
+                int(hours_raw), int(minutes_raw)
+            )
+        except ValueError as exc:
+            self._send_json_response({"error": str(exc)}, 400)
+            return
+        except Exception as exc:
+            print(f"[LCARS] weekly-anchor POST error: {exc}", file=sys.stderr)
+            self._send_json_response({"error": "Failed to write anchor"}, 500)
+            return
+
+        response = {
+            "version": record["version"],
+            "set_at": record["set_at"].strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "reset_at": record["reset_at"].strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "set_hours": record["set_hours"],
+            "set_minutes": record["set_minutes"],
+            "source": record["source"],
+        }
+        print(
+            f"[LCARS] weekly-anchor set: reset_at={response['reset_at']}",
+            file=sys.stderr,
+        )
+        self._send_json_response(response, 200)
+
+    def handle_delete_weekly_anchor(self):
+        """DELETE /api/weekly-anchor — clear the manual weekly-limit reset anchor.
+
+        Response (200):
+            {"deleted": true|false}
+
+        Response on error:
+            503 {"error": "..."}  — heuristics module unavailable
+            500 {"error": "..."}  — unexpected failure
+        """
+        if _ccusage_heuristics is None:
+            self._send_json_response(
+                {"error": "ccusage_heuristics module not available"}, 503
+            )
+            return
+
+        try:
+            deleted = _ccusage_heuristics.delete_weekly_anchor()
+        except Exception as exc:
+            print(f"[LCARS] weekly-anchor DELETE error: {exc}", file=sys.stderr)
+            self._send_json_response({"error": "Failed to delete anchor"}, 500)
+            return
+
+        print(
+            f"[LCARS] weekly-anchor {'deleted' if deleted else 'not found (no-op)'}",
+            file=sys.stderr,
+        )
+        self._send_json_response({"deleted": deleted}, 200)
+
+    # END WEEKLY ANCHOR API HANDLERS
     # =========================================================================
 
     def serve_calendar_items(self, query_string=''):

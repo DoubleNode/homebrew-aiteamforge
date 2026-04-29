@@ -163,6 +163,21 @@ _ensure_org_config() {
         return 0
     fi
 
+    # /dev/tty is required: redirect to /dev/tty bypasses block-buffered stdout when parent pipes through sed.
+    # Use exec to actually open the device — bash -r/-w only check permission bits, which are world-rw on /dev/tty
+    # even when no controlling terminal exists (true on macOS), giving false positives in CI/daemon contexts.
+    if ! (exec 9<>/dev/tty) 2>/dev/null; then
+        echo "" >&2
+        echo "ERROR: install-team.sh needs an interactive terminal to prompt for" >&2
+        echo "organization identity, but /dev/tty is not available." >&2
+        echo "" >&2
+        echo "Fix one of:" >&2
+        echo "  1. Run interactively in a terminal" >&2
+        echo "  2. Pre-populate ~/.aiteamforge/organization.yaml" >&2
+        echo "  3. Set AITEAMFORGE_ORG_CONFIG=/path/to/your-org.yaml before running" >&2
+        return 1
+    fi
+
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo "  Organization Identity Setup"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -176,8 +191,8 @@ _ensure_org_config() {
 
     # Prompt for org slug (lowercase-kebab, stable identifier)
     local _slug _name _short _domain
-    printf "Organization slug (e.g. my-company): "
-    read -r _slug 2>/dev/null || _slug=""
+    printf "Organization slug (e.g. my-company): " > /dev/tty
+    read -r _slug < /dev/tty 2>/dev/null || _slug=""
     _slug="${_slug:-example-org}"
     # Sanitize: lowercase, replace spaces/underscores with hyphens, strip other chars
     _slug="$(echo "$_slug" | tr '[:upper:]' '[:lower:]' | tr ' _' '-' | tr -cd 'a-z0-9-')"
@@ -190,18 +205,18 @@ _ensure_org_config() {
         printf '%s' "$1" | tr -d '|"\\' | tr -d '\000-\037'
     }
 
-    printf "Organization name (e.g. My Company): "
-    read -r _name 2>/dev/null || _name=""
+    printf "Organization name (e.g. My Company): " > /dev/tty
+    read -r _name < /dev/tty 2>/dev/null || _name=""
     _name="$(_sanitize_free_text "$_name")"
     [[ -z "$_name" ]] && _name="Example Organization"
 
-    printf "Display short (<=12 chars, e.g. MyCo) [%s]: " "${_name:0:12}"
-    read -r _short 2>/dev/null || _short=""
+    printf "Display short (<=12 chars, e.g. MyCo) [%s]: " "${_name:0:12}" > /dev/tty
+    read -r _short < /dev/tty 2>/dev/null || _short=""
     _short="$(_sanitize_free_text "$_short")"
     [[ -z "$_short" ]] && _short="${_name:0:12}"
 
-    printf "Primary domain (e.g. mycompany.com): "
-    read -r _domain 2>/dev/null || _domain=""
+    printf "Primary domain (e.g. mycompany.com): " > /dev/tty
+    read -r _domain < /dev/tty 2>/dev/null || _domain=""
     _domain="$(_sanitize_free_text "$_domain")"
     [[ -z "$_domain" ]] && _domain="example.com"
 
