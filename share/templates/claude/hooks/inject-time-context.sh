@@ -13,13 +13,25 @@ set -euo pipefail
 # --- Read session_id from stdin JSON (D1 fix) ---
 # Claude Code passes hook metadata via stdin, not env vars.
 # Consume stdin once; use python3 (already a dependency) for portability.
+# D3 fix: sanitize session_id via positive whitelist [A-Za-z0-9._-] so
+# untrusted input cannot escape STATE_DIR (e.g. session_id="../etc/passwd").
 STDIN_JSON=$(cat)
 SESSION_ID=$(printf '%s' "$STDIN_JSON" | python3 -c \
-  "import sys,json; d=json.load(sys.stdin); print(d.get('session_id','unknown'))" \
-  2>/dev/null || echo "unknown")
+  "import sys,json,re
+try:
+    sid = json.load(sys.stdin).get('session_id','unknown')
+except Exception:
+    sid = 'unknown'
+sid = re.sub(r'[^A-Za-z0-9._-]', '', sid) or 'unknown'
+print(sid)" 2>/dev/null || echo "unknown")
+
 STATE_DIR="${HOME}/.claude/state/time-inject"
 STATE_FILE="${STATE_DIR}/${SESSION_ID}.json"
-mkdir -p "$STATE_DIR"
+# D2 fix: silent exit when state dir cannot be created or is not writable.
+# The hook is best-effort — if we can't persist state, we can't decide whether
+# to inject, so skip rather than spam Claude Code's UI with stderr.
+mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+[[ -w "$STATE_DIR" ]] || exit 0
 
 # --- Current values ---
 NOW_DATE=$(date +%Y-%m-%d)
@@ -67,7 +79,10 @@ fi
 
 # --- Write new state (atomic) ---
 if [[ -n "$INJECT" ]]; then
-  TMP=$(mktemp "${STATE_DIR}/.tmp.XXXXXX")
+  # D2 fix: silent fall-through if mktemp fails (e.g. dir made read-only mid-run).
+  # Trap cleans up the .tmp.* orphan on any abnormal exit path before mv.
+  TMP=$(mktemp "${STATE_DIR}/.tmp.XXXXXX" 2>/dev/null) || exit 0
+  trap 'rm -f "$TMP" 2>/dev/null' EXIT
   python3 - "$TMP" "$NOW_DATE" "${NOW_DATE}T${QH_KEY}" "$NOW_IANA" "$NOW_TZ" "$REASON" <<'PYEOF'
 import json, sys
 _, tmp, date, qh, iana, tz, reason = sys.argv
