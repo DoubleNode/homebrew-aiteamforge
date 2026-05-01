@@ -3250,7 +3250,6 @@ function createQueueItem(item, index) {
         epicNameSpan.className = 'queue-epic-badge-name';
         epicNameSpan.textContent = displayName;
         epicBadge.appendChild(epicNameSpan);
-        epicBadge.appendChild(createCopyableIdChip(item.epicId, 'queue-epic-badge-id', 'Epic'));
         epicBadge.title = `Epic: ${epicFullTitle}\nID: ${item.epicId}\nClick to change`;
         epicBadge.setAttribute('aria-label', `Epic: ${epicFullTitle}`);
     } else {
@@ -3317,7 +3316,6 @@ function createQueueItem(item, index) {
         releaseNameSpan.className = 'queue-release-badge-name';
         releaseNameSpan.textContent = displayName;
         releaseBadge.appendChild(releaseNameSpan);
-        releaseBadge.appendChild(createCopyableIdChip(releaseId, 'queue-release-badge-id', 'Release'));
         releaseBadge.title = `Release: ${releaseName}\nID: ${releaseId}\nPlatform: ${item.releaseAssignment.platform}\nClick to change`;
         releaseBadge.setAttribute('aria-label', `Release: ${releaseName}, Platform: ${item.releaseAssignment.platform}`);
     } else {
@@ -6155,31 +6153,6 @@ function copyToClipboard(text) {
  * @param {string} type - Type: 'success', 'error', 'info'
  */
 // NOTE: showToast() is defined at line 229 with close button, configurable duration, and proper LCARS styling
-
-// XACA-0213: Shared builder for clickable, copyable ID chips inside badges.
-// stopPropagation on click/keydown prevents the chip from bubbling to the
-// parent badge's assign-modal handler. Used by the Epic and Release badges.
-function createCopyableIdChip(id, className, labelPrefix) {
-    const chip = document.createElement('span');
-    chip.className = className;
-    chip.textContent = `[${id}]`;
-    chip.setAttribute('role', 'button');
-    chip.setAttribute('tabindex', '0');
-    chip.setAttribute('aria-label', `${labelPrefix} ID: ${id}. Click to copy.`);
-    chip.title = `Click to copy ${labelPrefix} ID to clipboard`;
-    chip.addEventListener('click', (e) => {
-        e.stopPropagation();
-        copyToClipboard(id);
-    });
-    chip.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            e.stopPropagation();
-            copyToClipboard(id);
-        }
-    });
-    return chip;
-}
 
 function formatRelativeTime(isoString) {
     if (!isoString) return '-';
@@ -10759,7 +10732,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
         <div class="release-card ${typeClass} ${expandedClass} ${archivedClass}" data-release-id="${release.id}">
             <div class="release-card-header" onclick="toggleReleaseExpanded('${release.id}')">
                 <div class="release-card-title">
-                    <span class="release-card-id">${release.id} ${typeBadge}</span>
+                    <span class="release-card-id" role="button" tabindex="0" title="Click to copy Release ID to clipboard" aria-label="Release ID: ${escapeHtml(release.id)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(release.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(release.id)}');}">${escapeHtml(release.id)}</span> ${typeBadge}
                     <span class="release-card-name">${release.shortTitle ? escapeHtml(release.shortTitle) + ' — ' + escapeHtml(release.name) : escapeHtml(release.name)}${archivedBadge}</span>
                 </div>
                 <div class="release-card-header-right">
@@ -10854,8 +10827,8 @@ async function loadReleaseItems(releaseId) {
             const isCancelled = item.status === 'cancelled';
             const stateClass = isCompleted ? 'completed' : (isCancelled ? 'cancelled' : '');
             return `
-            <div class="release-item ${stateClass}" data-item-id="${item.itemId}" onclick="navigateToQueueItemById('${item.itemId}')">
-                <span class="release-item-id">${item.itemId}</span>
+            <div class="release-item ${stateClass}" data-item-id="${escapeHtml(item.itemId)}" onclick="navigateToQueueItemById('${jsAttrEscape(item.itemId)}')">
+                <span class="release-item-id" role="button" tabindex="0" title="Click to copy item ID to clipboard" aria-label="Item ID: ${escapeHtml(item.itemId)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(item.itemId)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(item.itemId)}');}">${escapeHtml(item.itemId)}</span>
                 <span class="release-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="release-item-title">${escapeHtml(item.title)}</span>
                 <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
@@ -10953,6 +10926,21 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+// XACA-0277: Escape a value for safe interpolation as a JS string literal
+// inside an HTML attribute (e.g. onclick="copy('${jsAttrEscape(id)}')").
+// Covers HTML metacharacters AND the JS-string-breaking ones escapeHtml
+// leaves alone (\, '). Order matters: backslash MUST be escaped first.
+function jsAttrEscape(value) {
+    if (value === null || value === undefined) return '';
+    return String(value)
+        .replace(/\\/g, '\\\\')
+        .replace(/'/g, "\\'")
+        .replace(/&/g, '&amp;')
+        .replace(/"/g, '&quot;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
 }
 
 /**
@@ -12537,7 +12525,7 @@ function renderEpicCard(epic) {
                 <div class="epic-color-indicator" style="background-color: ${colorHex}"></div>
                 <div class="epic-card-info">
                     <div class="epic-card-title-row">
-                        <span class="epic-card-id">${epic.id}</span>
+                        <span class="epic-card-id" role="button" tabindex="0" title="Click to copy Epic ID to clipboard" aria-label="Epic ID: ${escapeHtml(epic.id)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(epic.id)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(epic.id)}');}">${escapeHtml(epic.id)}</span>
                         <span class="epic-card-name">${epic.shortTitle ? escapeHtml(epic.shortTitle) + ' — ' + escapeHtml(epic.title || epic.name) : escapeHtml(epic.title || epic.name)}</span>
                     </div>
                     <div class="epic-card-meta">
@@ -12623,7 +12611,7 @@ async function loadEpicItems(epicId) {
             const stateClass = isCompleted ? 'completed' : (isCancelled ? 'cancelled' : '');
             return `
             <div class="epic-item ${stateClass}" data-item-id="${item.itemId}">
-                <span class="epic-item-id">${item.itemId}</span>
+                <span class="epic-item-id" role="button" tabindex="0" title="Click to copy item ID to clipboard" aria-label="Item ID: ${escapeHtml(item.itemId)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(item.itemId)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(item.itemId)}');}">${escapeHtml(item.itemId)}</span>
                 <span class="epic-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="epic-item-title">${escapeHtml(item.title)}</span>
                 <span class="epic-item-team">${item.team}</span>

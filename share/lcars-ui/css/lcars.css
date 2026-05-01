@@ -8610,10 +8610,27 @@ body {
     gap: 4px;
 }
 
+/* XACA-0277: clickable copy-to-clipboard affordance (relocated from queue badges) */
 .release-card-id {
     font-size: 11px;
     color: var(--lcars-muted, #888);
     letter-spacing: 1px;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 3px;
+    transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease;
+}
+
+.release-card-id:hover {
+    background: rgba(102, 204, 204, 0.25);
+    color: var(--lcars-text, #fff);
+    transform: scale(1.04);
+}
+
+.release-card-id:focus-visible {
+    outline: 2px solid var(--lcars-green);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(102, 204, 102, 0.5);
 }
 
 /* XACA-0056: Release type badge */
@@ -8918,6 +8935,7 @@ body {
     color: var(--lcars-red);
 }
 
+/* XACA-0277: clickable copy-to-clipboard affordance for child item IDs */
 .release-item-id {
     font-size: 10px;
     font-weight: 700;
@@ -8925,6 +8943,21 @@ body {
     font-family: var(--lcars-font);
     min-width: 70px;
     flex-shrink: 0;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 3px;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.release-item-id:hover {
+    background: rgba(255, 204, 0, 0.25);
+    transform: scale(1.04);
+}
+
+.release-item-id:focus-visible {
+    outline: 2px solid var(--lcars-gold);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
 }
 
 .release-item-status {
@@ -10574,41 +10607,10 @@ body {
     background: rgba(102, 204, 204, 0.4);
 }
 
-/* XACA-0213: Release badge sub-spans — name text and copyable ID chip */
+/* XACA-0277: Release badge name span (ID chip moved to Releases dashboard cards) */
 .queue-release-badge-name {
     white-space: nowrap;
     color: inherit;
-}
-
-.queue-release-badge-id {
-    display: inline-block;
-    font-size: 87%;
-    font-family: 'Courier New', monospace;
-    font-weight: 600;
-    margin-left: 0.5em;
-    padding: 1px 5px;
-    min-height: 20px;
-    line-height: 18px;
-    border-radius: 3px;
-    background: rgba(102, 204, 204, 0.12);
-    color: inherit;
-    opacity: 0.72;
-    cursor: pointer;
-    transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
-    vertical-align: middle;
-}
-
-.queue-release-badge-id:hover {
-    opacity: 1;
-    background: rgba(102, 204, 204, 0.3);
-    transform: scale(1.04);
-}
-
-.queue-release-badge-id:focus-visible {
-    outline: 2px solid var(--lcars-green);
-    outline-offset: 2px;
-    box-shadow: 0 0 8px rgba(102, 204, 102, 0.5);
-    opacity: 1;
 }
 
 /* XACA-0056: Readonly badges for completed items (XACA-0121: removed epic/release — now always editable) */
@@ -11210,6 +11212,7 @@ body {
     margin-bottom: 4px;
 }
 
+/* XACA-0277: clickable copy-to-clipboard affordance (relocated from queue badges) */
 .epic-card-id {
     font-family: 'Antonio', sans-serif;
     font-size: 12px;
@@ -11219,6 +11222,19 @@ body {
     padding: 2px 6px;
     border-radius: 3px;
     white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.epic-card-id:hover {
+    background: rgba(255, 204, 0, 0.32);
+    transform: scale(1.04);
+}
+
+.epic-card-id:focus-visible {
+    outline: 2px solid var(--lcars-amber, #ffcc00);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
 }
 
 .epic-card-name {
@@ -11432,6 +11448,7 @@ body {
     color: var(--lcars-crimson);
 }
 
+/* XACA-0277: clickable copy-to-clipboard affordance for child item IDs */
 .epic-item-id {
     font-size: 10px;
     font-weight: 700;
@@ -11439,6 +11456,21 @@ body {
     font-family: var(--lcars-font);
     min-width: 70px;
     flex-shrink: 0;
+    cursor: pointer;
+    padding: 1px 4px;
+    border-radius: 3px;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.epic-item-id:hover {
+    background: rgba(255, 204, 0, 0.25);
+    transform: scale(1.04);
+}
+
+.epic-item-id:focus-visible {
+    outline: 2px solid var(--lcars-gold);
+    outline-offset: 2px;
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.5);
 }
 
 .epic-item-docs {
@@ -11603,41 +11635,10 @@ body {
     opacity: 1.0; /* Full brightness on hover */
 }
 
-/* XACA-0213: Epic badge sub-spans — name text and copyable ID chip */
+/* XACA-0277: Epic badge name span (ID chip moved to Epics dashboard cards) */
 .queue-epic-badge-name {
     white-space: nowrap;
     color: inherit;
-}
-
-.queue-epic-badge-id {
-    display: inline-block;
-    font-size: 87%;
-    font-family: 'Courier New', monospace;
-    font-weight: 600;
-    margin-left: 0.5em;
-    padding: 1px 5px;
-    min-height: 20px;
-    line-height: 18px;
-    border-radius: 3px;
-    background: rgba(153, 102, 204, 0.15);
-    color: inherit;
-    opacity: 0.72;
-    cursor: pointer;
-    transition: opacity 0.15s ease, background 0.15s ease, transform 0.1s ease;
-    vertical-align: middle;
-}
-
-.queue-epic-badge-id:hover {
-    opacity: 1;
-    background: rgba(153, 102, 204, 0.4);
-    transform: scale(1.04);
-}
-
-.queue-epic-badge-id:focus-visible {
-    outline: 2px solid var(--lcars-purple);
-    outline-offset: 2px;
-    box-shadow: 0 0 8px rgba(153, 102, 255, 0.5);
-    opacity: 1;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
@@ -12315,13 +12316,6 @@ body {
         padding: 2px 5px;
     }
 
-    /* XACA-0213: ID chips scale down on mobile to stay within badge row */
-    .queue-epic-badge-id,
-    .queue-release-badge-id {
-        font-size: 80%;
-        padding: 1px 4px;
-        margin-left: 0.35em;
-    }
 }
 
 @media (max-width: 768px) {

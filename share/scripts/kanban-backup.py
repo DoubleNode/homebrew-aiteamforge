@@ -23,6 +23,49 @@ Retention Policy:
     - Weekly:  Keep one backup per week for 4 weeks
     - Monthly: Keep one backup per month for 6 months
 
+Completeness Invariants:
+    These invariants enforce data integrity across the backup pipeline. Future
+    modifications must preserve them.
+
+    1. Single source-of-truth snapshot
+       Per backup run, per team, the source directory is walked exactly once by
+       snapshot_source_dir(). The resulting DirSnapshot is the SOLE input to
+       both hashing and zipping. Any future code path that needs to know "what
+       files are in this backup" must consume the snapshot, never re-walk.
+
+    2. Hash and zip derived from same snapshot
+       get_directory_hash(snapshot) and create_directory_backup_zip(snapshot)
+       accept the identical snapshot. Result: stored hash and archive contents
+       cannot diverge for that run. Eliminates the TOCTOU window that existed
+       between two independent rglob calls.
+
+    3. No silent partial backups
+       Every successful zip is verified post-write by _verify_zip_integrity()
+       against the snapshot for file count AND top-level directory manifest.
+       Mismatch → run FAILS (not silent success). A missing subdirectory is
+       immediately caught before the backup is considered complete.
+
+    4. Failure is loud and forensic
+       Integrity failure (per kanban-backup.py main loop):
+       - Bad zip renamed to ~/dev-team-backups/_failed/<team>_<name>.FAILED
+       - Previous-known-good hash preserved in stored_hashes[team]
+       - status["boards"][team]["lastIntegrityFailure"] populated with detail
+       - [INTEGRITY-FAIL] logged to stderr for LCARS alert pickup
+
+    5. Cross-run regressions surfaced
+       kanban-backup-health.py check_cross_run_regressions() compares latest
+       2–3 zips per team. Subdirectory disappearance = always ERROR. File-count
+       drops > 10% OR > 50 files = WARNING; > 25% = ERROR. Catches source-dir
+       content loss (the XACA-0276 origin incident).
+
+    6. Structured per-run audit trail
+       Each successful per-team backup writes one JSON line to backup.log:
+       - run_start (timestamp, teams_total, force flag)
+       - team_backup_ok (file_count, uncompressed_bytes, compressed_bytes,
+         top_level_dirs, zip_filename)
+       - run_end (totals)
+       Enables future trend analysis and post-incident forensics.
+
 Author: Reno's Engineering Lab
 """
 
@@ -35,7 +78,7 @@ import sys
 import zipfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional
+from typing import NamedTuple, Optional
 
 # ---------------------------------------------------------------------------
 # Shared path config — XACA-0168-007
@@ -99,8 +142,10 @@ except ImportError:
 
 # Centralized backup destination
 BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
+FAILED_BACKUP_DIR = Path.home() / "dev-team-backups" / "_failed"
 STATUS_FILE = BACKUP_DIR / "backup-status.json"
 HASH_FILE = BACKUP_DIR / "file-hashes.json"
+LOG_PATH = BACKUP_DIR / "backup.log"
 
 # Retention settings (how many to keep)
 RETENTION = {
@@ -111,7 +156,38 @@ RETENTION = {
 }
 
 
-def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Path) -> bool:
+class DirSnapshot(NamedTuple):
+    """Immutable snapshot of a source directory's file list.
+
+    Resolved once per backup run and shared between hashing and zipping so
+    both operations see the exact same file set (avoids TOCTOU between the
+    two independent rglob calls that previously existed).
+    """
+    files: tuple  # tuple[Path, ...] — sorted, exclusions already applied. Tuple (not list) so .append() can't silently mutate the snapshot.
+    top_level_dirs: frozenset  # first path component of each file relative to source_dir
+
+
+def snapshot_source_dir(source_dir: Path) -> DirSnapshot:
+    """Walk source_dir exactly once and return a stable snapshot.
+
+    Single rglob to avoid TOCTOU between hash and zip.  All exclusion rules
+    are applied here; callers must not filter the snapshot further.
+    """
+    files = []
+    for item in source_dir.rglob("*"):
+        if item.is_file() and not is_excluded_from_export(item):
+            files.append(item)
+    files.sort()
+
+    top_level_dirs: frozenset = frozenset(
+        item.relative_to(source_dir).parts[0]
+        for item in files
+        if len(item.relative_to(source_dir).parts) > 1
+    )
+    return DirSnapshot(files=tuple(files), top_level_dirs=top_level_dirs)
+
+
+def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Path, snapshot: DirSnapshot) -> bool:
     """
     Creates a zip archive of the ENTIRE kanban directory recursively.
 
@@ -130,6 +206,7 @@ def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Pat
         team_name: Name of the team (used for logging)
         source_dir: Path to the kanban directory to backup
         dest_file: Path where the zip archive should be created
+        snapshot: Pre-resolved file list (must be the same snapshot used for hashing)
 
     Returns:
         True if backup succeeded, False on failure
@@ -142,21 +219,14 @@ def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Pat
         # Create destination directory if needed
         dest_file.parent.mkdir(parents=True, exist_ok=True)
 
-        # Create the zip archive
+        # Iterate the pre-resolved snapshot — no second rglob
         with zipfile.ZipFile(dest_file, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            files_added = 0
+            for item in snapshot.files:
+                arcname = item.relative_to(source_dir)
+                zipf.write(item, str(arcname))
 
-            # Recursively add ALL files in the kanban directory
-            for item in source_dir.rglob("*"):
-                if item.is_file() and not is_excluded_from_export(item):
-                    # Use relative path to maintain directory structure
-                    arcname = item.relative_to(source_dir)
-                    zipf.write(item, str(arcname))
-                    files_added += 1
-
-        # Verify the archive was created and has content
         if dest_file.exists() and dest_file.stat().st_size > 0:
-            print(f"  [ZIP] {team_name}: Created {dest_file.name} ({files_added} files)")
+            print(f"  [ZIP] {team_name}: Created {dest_file.name} ({len(snapshot.files)} files)")
             return True
         else:
             print(f"  [ERROR] {team_name}: Archive created but is empty or invalid")
@@ -170,6 +240,51 @@ def create_directory_backup_zip(team_name: str, source_dir: Path, dest_file: Pat
         return False
 
 
+def _verify_zip_integrity(
+    team_name: str, zip_path: Path, source_dir: Path, snapshot: DirSnapshot
+) -> tuple:
+    """Verify that a freshly-written zip matches the pre-zip snapshot exactly.
+
+    Checks file count and top-level directory manifest.  zf.testzip() is NOT
+    used here — it only catches CRC corruption; we need completeness guarantees.
+
+    Returns:
+        (ok: bool, error_detail: str)  — error_detail is "" when ok is True.
+    """
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            zip_names = zf.namelist()
+    except Exception as e:
+        return False, f"could not open zip for verification: {e}"
+
+    expected_count = len(snapshot.files)
+    actual_count = len(zip_names)
+
+    if actual_count != expected_count:
+        # Derive which top-level dirs are missing from the zip
+        zip_top_dirs: frozenset = frozenset(
+            n.split("/")[0] for n in zip_names if "/" in n
+        )
+        missing_dirs = snapshot.top_level_dirs - zip_top_dirs
+        detail = (
+            f"file count mismatch: expected {expected_count}, got {actual_count}; "
+            f"missing top-level dirs: {sorted(missing_dirs) if missing_dirs else '(root files only)'}"
+        )
+        return False, detail
+
+    # Count match — spot-check top-level directory coverage
+    zip_top_dirs = frozenset(n.split("/")[0] for n in zip_names if "/" in n)
+    missing_dirs = snapshot.top_level_dirs - zip_top_dirs
+    if missing_dirs:
+        detail = (
+            f"top-level dir mismatch: expected {sorted(snapshot.top_level_dirs)}, "
+            f"zip has {sorted(zip_top_dirs)}, missing: {sorted(missing_dirs)}"
+        )
+        return False, detail
+
+    return True, ""
+
+
 def get_file_hash(filepath: Path) -> Optional[str]:
     """Calculate SHA256 hash of a file's contents."""
     try:
@@ -181,42 +296,33 @@ def get_file_hash(filepath: Path) -> Optional[str]:
         return None
 
 
-def get_directory_hash(kanban_dir: Path, team: str) -> Optional[str]:
+def get_directory_hash(kanban_dir: Path, team: str, snapshot: DirSnapshot) -> Optional[str]:
     """
-    Calculate combined SHA256 hash of ALL files that would be backed up.
+    Calculate combined SHA256 hash of ALL files in snapshot.
 
-    Includes: ALL files in the kanban directory recursively.
-    Excludes: .lock files, debug logs, .DS_Store (same as backup).
-    Uses is_excluded_from_export() from aiteamforge_paths for consistency.
+    Accepts the pre-resolved snapshot so it hashes exactly the same file set
+    that will be zipped — no independent rglob.
     """
     try:
-        if not kanban_dir.exists():
+        if not kanban_dir.exists() or not snapshot.files:
             return None
 
-        # Collect ALL files to hash (same exclusion rules as create_directory_backup_zip)
-        files_to_hash = []
-        for item in kanban_dir.rglob("*"):
-            if item.is_file() and not is_excluded_from_export(item):
-                files_to_hash.append(item)
-
-        if not files_to_hash:
-            return None
-
-        # Sort for consistent ordering
-        files_to_hash.sort()
-
-        # Compute combined hash
         combined_hash = hashlib.sha256()
-        for filepath in files_to_hash:
+        skipped = 0
+        for filepath in snapshot.files:
             try:
                 # Include relative path in hash (so renames are detected)
                 rel_path = filepath.relative_to(kanban_dir)
                 combined_hash.update(str(rel_path).encode())
-                # Include file contents
                 with open(filepath, 'rb') as f:
                     combined_hash.update(f.read())
             except Exception:
+                skipped += 1
                 continue
+
+        if skipped:
+            # Hash is degraded — caller can correlate with zip integrity check
+            print(f"[HASH-DEGRADED] team={team} skipped={skipped}/{len(snapshot.files)} unreadable files", file=sys.stderr)
 
         return combined_hash.hexdigest()
     except Exception:
@@ -307,6 +413,28 @@ def format_bytes(size: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+_LOG_MAX_BYTES = 10 * 1024 * 1024  # 10 MB — sized for ~17 months of 15-min runs at typical payload size
+
+
+def _append_log_line(payload: dict) -> None:
+    """Append one JSON line to backup.log (machine-parseable structured log).
+
+    Each line is a self-contained JSON object — no embedded newlines.
+    Failures to write are silenced so a log I/O error never aborts a backup.
+    Rotates to backup.log.1 (single generation, overwriting any previous .1)
+    when size exceeds _LOG_MAX_BYTES so disk doesn't grow unbounded.
+    """
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        if LOG_PATH.exists() and LOG_PATH.stat().st_size > _LOG_MAX_BYTES:
+            LOG_PATH.replace(LOG_PATH.with_suffix(LOG_PATH.suffix + ".1"))
+        line = json.dumps(payload, sort_keys=True)
+        with open(LOG_PATH, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def get_backup_dir_for_board(team: str) -> Path:
@@ -458,8 +586,11 @@ def backup_board(board_file: Path, stored_hashes: dict, status: dict, force: boo
             print(f"  [CRITICAL] {team}: Invalid JSON with NO backup available!")
         return result
 
-    # Calculate current hash of ALL files that will be backed up
-    current_hash = get_directory_hash(kanban_dir, team)
+    # Single rglob to avoid TOCTOU between hash and zip (XACA-0276-002)
+    snapshot = snapshot_source_dir(kanban_dir)
+
+    # Calculate current hash using the snapshot — same file set that will be zipped
+    current_hash = get_directory_hash(kanban_dir, team, snapshot)
     stored_hash = stored_hashes.get(team)
 
     # Check if backup needed (delta detection + 24-hour daily backup requirement)
@@ -490,16 +621,76 @@ def backup_board(board_file: Path, stored_hashes: dict, status: dict, force: boo
     now = datetime.now(timezone.utc)
     backup_file = backup_dir / get_backup_filename(now)
 
-    # Create zip archive of entire kanban directory
-    success = create_directory_backup_zip(team, kanban_dir, backup_file)
+    # Create zip archive using the same snapshot used for hashing
+    success = create_directory_backup_zip(team, kanban_dir, backup_file, snapshot)
 
-    if success:
-        stored_hashes[team] = current_hash
-        result["action"] = "backed_up"
-        result["message"] = f"Created {backup_file.name}"
-    else:
+    if not success:
         result["action"] = "error"
-        result["message"] = f"Backup failed: zip creation failed"
+        result["message"] = "Backup failed: zip creation failed"
+        return result
+
+    # Post-zip integrity check: zip contents must exactly match the snapshot (XACA-0276-003)
+    integrity_ok, integrity_error = _verify_zip_integrity(team, backup_file, kanban_dir, snapshot)
+
+    if not integrity_ok:
+        # --- XACA-0276-004: Loud failure mode ---
+        # Quarantine the bad zip (keep for forensics, do NOT delete)
+        FAILED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        failed_path = FAILED_BACKUP_DIR / f"{team}_{backup_file.name}.FAILED"
+        try:
+            backup_file.rename(failed_path)
+        except Exception:
+            failed_path = backup_file  # rename failed; leave in place
+
+        # Do NOT update stored_hashes — preserve last-known-good baseline so
+        # the next run retries rather than treating this failure as canonical.
+        failure_ts = datetime.now(timezone.utc).isoformat()
+        error_msg = f"Integrity failure: {integrity_error}; quarantined to {failed_path}"
+
+        # Structured error line that LCARS log-tail can pick up
+        print(
+            f"  [INTEGRITY-FAIL] {team}: {integrity_error} "
+            f"| zip quarantined: {failed_path}",
+            file=sys.stderr,
+        )
+        print(f"  [INTEGRITY-FAIL] {team}: stored hash NOT updated — next run will retry")
+
+        # Record in status so LCARS can surface it
+        if "boards" not in status:
+            status["boards"] = {}
+        board_entry = status["boards"].get(team, {})
+        board_entry["lastIntegrityFailure"] = {
+            "timestamp": failure_ts,
+            "detail": integrity_error,
+            "quarantinedZip": str(failed_path),
+            "expectedCount": len(snapshot.files),
+        }
+        status["boards"][team] = board_entry
+
+        result["action"] = "error"
+        result["message"] = error_msg
+        return result
+
+    # Integrity passed — safe to advance the stored hash
+    stored_hashes[team] = current_hash
+    result["action"] = "backed_up"
+    result["message"] = f"Created {backup_file.name}"
+
+    # --- XACA-0276-006: structured per-team success log line ---
+    uncompressed_bytes = sum(
+        item.stat().st_size for item in snapshot.files if item.exists()
+    )
+    compressed_bytes = backup_file.stat().st_size if backup_file.exists() else 0
+    _append_log_line({
+        "event": "team_backup_ok",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "team": team,
+        "file_count": len(snapshot.files),
+        "uncompressed_bytes": uncompressed_bytes,
+        "compressed_bytes": compressed_bytes,
+        "top_level_dirs": sorted(snapshot.top_level_dirs),
+        "zip_filename": backup_file.name,
+    })
 
     return result
 
@@ -632,6 +823,15 @@ def run_backup(force: bool = False):
     restored = 0
     errors = 0
 
+    # --- XACA-0276-006: run-start structured log line ---
+    run_start_ts = datetime.now(timezone.utc).isoformat()
+    _append_log_line({
+        "event": "run_start",
+        "ts": run_start_ts,
+        "teams_total": len(board_files),
+        "force": force,
+    })
+
     print("Processing boards:")
     print("-" * 40)
 
@@ -691,6 +891,19 @@ def run_backup(force: bool = False):
     }
 
     save_status(status)
+
+    # --- XACA-0276-006: run-end structured log line ---
+    _append_log_line({
+        "event": "run_end",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "run_start_ts": run_start_ts,
+        "teams_backed_up": backed_up,
+        "teams_skipped": skipped,
+        "teams_restored": restored,
+        "teams_errors": errors,
+        "teams_pruned": total_pruned,
+        "run_status": "success" if errors == 0 else "errors",
+    })
 
     print(f"\n{'='*60}")
     print("SUMMARY")

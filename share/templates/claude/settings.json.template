@@ -112,6 +112,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "{{CLAUDE_CONFIG_DIR}}/hooks/inject-time-context.sh",
+            "timeout": 3
+          }
+        ]
+      }
     ]
   },
   "statusLine": {
