@@ -37,7 +37,11 @@ mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
 NOW_DATE=$(date +%Y-%m-%d)
 NOW_TIME=$(date +%H:%M)
 NOW_TZ=$(date +%Z)              # e.g. PDT, UTC, EST
-NOW_IANA=$(readlink /etc/localtime | sed 's|.*/zoneinfo/||')  # e.g. America/Los_Angeles
+# Linux portability: on some Debian/Ubuntu installs /etc/localtime is a regular
+# file, not a symlink; readlink then exits non-zero and set -e aborts the hook.
+# Suppress stderr and tolerate failure — fall back to empty IANA, which the
+# decision tree treats as a tz-shift-recoverable signal.
+NOW_IANA=$(readlink /etc/localtime 2>/dev/null | sed 's|.*/zoneinfo/||' || echo "")
 # Quarter-hour bucket: HH:MM-floored-to-15. Hour MUST be included or
 # 14:04 and 15:04 collapse to the same key.
 NOW_HOUR=$(date +%H)
