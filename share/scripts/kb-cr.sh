@@ -908,6 +908,12 @@ _kb_cr_container_create() {
 
     _kb_cr_increment_seq "$_cr_board"
 
+    # Materialize the local source-of-truth markdown for this CR.
+    # The LCARS CR-doc modal reads this file; the Confluence CR page is
+    # generated FROM this document. Failure here is non-fatal — the CR
+    # record is already written.
+    _kb_cr_create_doc_file "$_cr_board" "$cr_id" "$title" "$cr_type" "$platform" "$summary" || true
+
     echo "Created CR [$cr_id]: $title"
     echo "  Type:  $cr_type"
     echo "  State: cr-drafted"
@@ -917,6 +923,82 @@ _kb_cr_container_create() {
     echo "  Next steps:"
     echo "    kb-cr add-item $cr_id <item-id>"
     echo "    kb-cr list"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal helper: create the local CR markdown file from the shipped
+# template at <AITEAMFORGE_DIR>/templates/kanban/cr-doc-template.md.
+# Writes to <team-kanban-dir>/change-requests/<CR-ID>_<slug>.md.
+# Returns 0 on success or skip; non-zero only if the file write itself fails.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_create_doc_file() {
+    local board="$1"
+    local cr_id="$2"
+    local title="$3"
+    local cr_type="$4"
+    local platform="$5"
+    local summary="$6"
+
+    local board_dir cr_dir
+    board_dir=$(dirname "$board")
+    cr_dir="${board_dir}/change-requests"
+    mkdir -p "$cr_dir" 2>/dev/null || return 1
+
+    # Resolve template — prefer installed location, fall back to dev-team
+    # source layout so the script still works in development.
+    local template
+    if [[ -n "${AITEAMFORGE_DIR:-}" && -f "${AITEAMFORGE_DIR}/templates/kanban/cr-doc-template.md" ]]; then
+        template="${AITEAMFORGE_DIR}/templates/kanban/cr-doc-template.md"
+    elif [[ -f "${HOME}/dev-team/homebrew-tap/share/templates/kanban/cr-doc-template.md" ]]; then
+        template="${HOME}/dev-team/homebrew-tap/share/templates/kanban/cr-doc-template.md"
+    else
+        echo "kb-cr: WARNING: cr-doc-template.md not found; skipping local md creation" >&2
+        return 0
+    fi
+
+    # Slugify title for filename — keep alnum, replace runs of others with _,
+    # trim, cap at 60 chars to keep filenames sane.
+    local slug
+    slug=$(printf '%s' "$title" | tr -c 'A-Za-z0-9' '_' | sed -E 's/_+/_/g; s/^_//; s/_$//')
+    slug=${slug:0:60}
+    [[ -z "$slug" ]] && slug="untitled"
+
+    local out="${cr_dir}/${cr_id}_${slug}.md"
+    if [[ -e "$out" ]]; then
+        echo "kb-cr: NOTE: CR doc already exists at ${out#$board_dir/} — leaving untouched" >&2
+        return 0
+    fi
+
+    local platform_label="${platform:-—}"
+    local state_label="CR DRAFTED"
+    local summary_text="${summary:-(add a description)}"
+
+    # Use awk for safe placeholder substitution — sed with arbitrary user input
+    # in `s//.../` is fragile (slashes, ampersands, newlines).
+    awk -v CR_ID="$cr_id" \
+        -v CR_TYPE="$(printf '%s' "${cr_type:-standard}" | tr '[:lower:]' '[:upper:]')" \
+        -v PLATFORM="$platform_label" \
+        -v CR_STATE="$state_label" \
+        -v TITLE="$title" \
+        -v SUMMARY="$summary_text" \
+        -v DEPLOY_WINDOW="TBD" \
+        -v ITEM_LIST="- (none yet — use kb-cr add-item)" \
+        -v CONFLUENCE_URL="(not yet published)" \
+        '{
+            gsub(/\{\{CR_ID\}\}/, CR_ID);
+            gsub(/\{\{CR_TYPE\}\}/, CR_TYPE);
+            gsub(/\{\{PLATFORM\}\}/, PLATFORM);
+            gsub(/\{\{CR_STATE\}\}/, CR_STATE);
+            gsub(/\{\{TITLE\}\}/, TITLE);
+            gsub(/\{\{SUMMARY\}\}/, SUMMARY);
+            gsub(/\{\{DEPLOY_WINDOW\}\}/, DEPLOY_WINDOW);
+            gsub(/\{\{ITEM_LIST\}\}/, ITEM_LIST);
+            gsub(/\{\{CONFLUENCE_URL\}\}/, CONFLUENCE_URL);
+            print
+        }' "$template" > "$out" || return 1
+
+    echo "  Doc:   change-requests/${cr_id}_${slug}.md"
+    return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

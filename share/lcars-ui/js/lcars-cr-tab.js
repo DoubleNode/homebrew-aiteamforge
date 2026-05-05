@@ -782,27 +782,33 @@
         const closeBtn = header.querySelector('#cr-doc-modal-close');
         if (closeBtn) closeBtn.addEventListener('click', _hideCRDocModal);
 
-        // If cr_doc_link is a relative path, fetch markdown content from the
-        // server. For http(s) URLs the metadata block already shows a launch
-        // button — no extra fetch needed. The server's cr-content endpoint
-        // also returns { isExternal:true, url } when the link is external,
-        // which we ignore here since the launch button is already rendered.
-        const link = view.cr_doc_link || '';
-        const isUrl = /^https?:\/\//i.test(link);
-        if (link && !isUrl && view.id) {
+        // Always fetch the CR doc from the server. The local markdown file
+        // (change-requests/<CR-ID>*.md) is the source of truth. The server
+        // returns { content, filename, confluenceUrl } when the file exists,
+        // or { isExternal:true, url } as a fallback when only the Confluence
+        // link is available. The metadata block already includes a launch
+        // button for external URLs, so when content is present we render
+        // the markdown body and let the metadata button handle the link.
+        if (view.id) {
             fetch(apiUrl('/api/kanban/' + encodeURIComponent(view.id) + '/cr-content'))
                 .then(r => { if (!r.ok) throw new Error('CR document not found'); return r.json(); })
                 .then(data => {
-                    if (data.isExternal) return;   // already represented by launch button
-                    const meta = _renderCRMetadata(view);
-                    const md   = (typeof renderMarkdown === 'function')
-                        ? renderMarkdown(data.content || '')
-                        : `<pre class="cr-doc-pre">${escapeHtml(data.content || '')}</pre>`;
-                    body.innerHTML = meta + '<div class="cr-doc-md">' + md + '</div>';
+                    if (data && data.content != null) {
+                        const md = (typeof renderMarkdown === 'function')
+                            ? renderMarkdown(data.content || '')
+                            : `<pre class="cr-doc-pre">${escapeHtml(data.content || '')}</pre>`;
+                        body.innerHTML = _renderCRMetadata(view) +
+                            '<div class="cr-doc-md">' + md + '</div>';
+                    }
+                    // else: external-only — metadata launch button is sufficient.
                 })
                 .catch(err => {
                     body.innerHTML = _renderCRMetadata(view) +
-                        `<div class="plan-doc-error"><strong>Error loading CR document</strong><br>${escapeHtml(err.message)}</div>`;
+                        `<div class="cr-doc-missing">` +
+                        `<strong>No local CR document found.</strong><br>` +
+                        `Expected at <code>change-requests/${escapeHtml(view.cr_id || '')}*.md</code>. ` +
+                        `Use the launch button above to view the Confluence page, or create the local source file.` +
+                        `</div>`;
                 });
         }
     }

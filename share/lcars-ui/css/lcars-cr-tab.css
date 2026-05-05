@@ -383,8 +383,17 @@
 
 /* ── CR-only doc modal ───────────────────────────────────────────────────── */
 
+/* Match the item plan-doc modal sizing — markdown bodies need the same room
+   for tables, code blocks, and long descriptions. The broader
+   `.lcars-modal-overlay .lcars-modal` rule sets a tight max-width, so we
+   scope by the unique overlay id (specificity 1,1,0) to win cleanly. */
 .cr-doc-modal {
-    max-width: 720px;
+    min-width: 500px;
+    max-height: 90vh;
+    width: 90%;
+}
+#cr-doc-modal-overlay .lcars-modal {
+    max-width: 1200px;
 }
 
 .cr-doc-meta {
