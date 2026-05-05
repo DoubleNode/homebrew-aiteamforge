@@ -6632,31 +6632,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     _add_field_update(field_key, fields[field_key], field_key,
                                       current_cr.get(field_key, ""))
 
-            # Serialize field jq args for embedding in bash heredoc
-            # Each arg becomes: --arg <key> <value>   (shell-quoted via repr trick below)
-            field_jq_filter = " | ".join(field_jq_parts) if field_jq_parts else ""
-
-            # Activity event lines: one cr_field_update per changed field.
-            field_activity_lines = []
-            for fname, vals in changed_fields.items():
-                old_esc = vals["old"].replace("'", "'\\''")
-                new_esc = vals["new"].replace("'", "'\\''")
-                field_activity_lines.append(
-                    f"_kb_cr_activity_event cr_field_update "
-                    f"actor='${{KB_CR_ACTOR:-lcars-ui}}' "
-                    f"field='{fname}' "
-                    f"old_value='{old_esc}' "
-                    f"new_value='{new_esc}' | "
-                    f"xargs -I EVT_JSON -- bash -c "
-                    f"'_kb_cr_activity_append \"{board_file_str}\" \"{cr_id}\" EVT_JSON'"
-                )
-
             # Build the full shell script.
             # We call _kb_cr_container_transition directly with explicit args to
             # bypass _kb_cr_board_preamble's tmux dependency.
+            # Resolve dev-team root from the user's home dir — same pattern as
+            # cr-confluence-poller.py — so the endpoint isn't single-user-bound.
+            dev_team_root = str(Path.home() / "dev-team")
             shell_parts = [
-                f"source /Users/darrenehlers/dev-team/kanban-helpers.sh",
-                f"source /Users/darrenehlers/dev-team/scripts/kb-cr.sh",
+                f"source {shlex.quote(dev_team_root + '/kanban-helpers.sh')}",
+                f"source {shlex.quote(dev_team_root + '/scripts/kb-cr.sh')}",
                 # Find CR index
                 f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] | select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
                 f'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',

@@ -96,6 +96,26 @@ def load_credentials() -> dict:
             "Schema: { \"teams\": { \"ios\": { \"site\": \"...\", \"email\": \"...\","
             " \"api_token\": \"...\", \"space_key\": \"DPD2\" } }, \"default\": \"ios\" }"
         )
+
+    # Refuse to load when permissions are too open. The file holds plaintext
+    # API tokens — group/world readability would expose them to other local
+    # accounts. Owner-only (0600) is required.
+    mode = CREDS_FILE.stat().st_mode & 0o777
+    if mode & 0o077:
+        try:
+            CREDS_FILE.chmod(0o600)
+            print(
+                f"[cr-confluence-poller] WARNING: tightened credentials file mode "
+                f"from 0{mode:o} to 0600: {CREDS_FILE}",
+                file=sys.stderr,
+            )
+        except OSError as exc:
+            raise PermissionError(
+                f"Credentials file {CREDS_FILE} has unsafe mode 0{mode:o} "
+                f"(holds plaintext token); refusing to load. chmod 600 to fix. "
+                f"(auto-fix failed: {exc})"
+            ) from exc
+
     try:
         data = json.loads(CREDS_FILE.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -378,14 +398,17 @@ def extract_cr_proper_link(page_html: str) -> str | None:
     if not anchors:
         return None
 
-    # Rule 1: last anchor whose text explicitly matches cr_proper
+    # Rule 1: last anchor whose text explicitly matches cr_proper.
+    # Require https:// — parity with the manual transition endpoint
+    # (server.py validates startswith('https://')); rejects plain http.
     for anchor in reversed(anchors):
         if CR_PROPER_TEXT_PATTERN.search(anchor["text"]):
             href = anchor["href"].strip()
-            if href and href.startswith("http"):
+            if href and href.startswith("https://"):
                 return href
 
-    # Rule 2: last confluence-URL anchor that appears after a cr-proper heading
+    # Rule 2: last confluence-URL anchor that appears after a cr-proper heading.
+    # CONFLUENCE_URL_PATTERN already anchors on https://, so no extra check.
     for anchor in reversed(anchors):
         if anchor.get("after_cr_proper_heading"):
             href = anchor["href"].strip()

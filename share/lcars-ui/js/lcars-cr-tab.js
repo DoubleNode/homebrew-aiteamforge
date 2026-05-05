@@ -1559,10 +1559,17 @@
             ? `<a class="cr-doc-launch" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">OPEN CR DOC →</a>`
             : '';
 
+        // Defense-in-depth: only render cr_proper_url as a clickable link
+        // when its scheme is http(s). escapeHtml encodes <>&" but does NOT
+        // strip a leading 'javascript:' scheme, so a stale/legacy value on
+        // disk could fire when clicked. Reject anything else, render as text.
         const properUrl = view.cr_proper_url || '';
-        const properUrlCell = properUrl
-            ? `<a class="cr-proper-url-link" href="${escapeHtml(properUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(properUrl)}</a>`
-            : '<span class="cr-dim">—</span>';
+        const properUrlIsHttp = /^https?:\/\//i.test(properUrl);
+        const properUrlCell = !properUrl
+            ? '<span class="cr-dim">—</span>'
+            : properUrlIsHttp
+                ? `<a class="cr-proper-url-link" href="${escapeHtml(properUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(properUrl)}</a>`
+                : `<span class="cr-dim" title="Non-http(s) scheme refused">${escapeHtml(properUrl)}</span>`;
 
         // Show all linked items, not just the first (XACA-0310-005).
         const allIds = view.linkedItemIds && view.linkedItemIds.length > 0
