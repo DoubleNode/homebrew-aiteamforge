@@ -30,6 +30,8 @@
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
     <link rel="stylesheet" href="css/usage-indicator.css">
+    <!-- XACA-0292-007: CHANGE REQ list view styles -->
+    <link rel="stylesheet" href="css/lcars-cr-tab.css">
     <script src="js/usage-helpers.js"></script>
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
@@ -106,8 +108,11 @@
                             <span>DETAILS</span>
                         </div>
                     </div>
-                    <div class="sidebar-button" data-section="queue">
-                        <span>QUEUE</span>
+                    <div class="sidebar-button" data-section="backlog">
+                        <span>BACKLOG</span>
+                    </div>
+                    <div class="sidebar-button" data-section="change-req" id="sidebar-btn-change-req" style="display: none;">
+                        <span>CHANGE REQ</span>
                     </div>
                     <div class="sidebar-split-row">
                         <div class="sidebar-button" data-section="epics">
@@ -374,13 +379,13 @@
                 </section>
 
                 <!-- Mission Queue -->
-                <section class="queue-section" data-mode="kanban">
+                <section class="backlog-section" data-mode="kanban">
                     <div class="section-header purple">
-                        <span class="section-title">MISSION QUEUE</span>
-                        <span class="section-count" id="queue-count">0 PENDING</span>
+                        <span class="section-title">MISSION BACKLOG</span>
+                        <span class="section-count" id="backlog-count">0 PENDING</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div class="queue-filter-bar" id="queue-filter-bar">
+                    <div class="backlog-filter-bar" id="backlog-filter-bar">
                         <div class="filter-row filter-row-status">
                             <div class="filter-pill active" data-filter="all">ALL</div>
                             <div class="filter-pill" data-filter="in_progress">ACTIVE</div>
@@ -440,10 +445,10 @@
                                 </select>
                             </div>
                             <div class="filter-search-container">
-                                <input type="text" id="queue-filter-text" class="filter-search-input" placeholder="SEARCH..." autocomplete="off" spellcheck="false">
-                                <button id="queue-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
+                                <input type="text" id="backlog-filter-text" class="filter-search-input" placeholder="SEARCH..." autocomplete="off" spellcheck="false">
+                                <button id="backlog-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
                             </div>
-                            <button class="import-action-btn" id="queue-import-btn" onclick="showImportModal()" title="Import external issue">
+                            <button class="import-action-btn" id="backlog-import-btn" onclick="showImportModal()" title="Import external issue">
                                 ↓ IMPORT
                             </button>
                             <button class="view-toggle-btn" id="view-toggle-btn" title="Toggle between Tags and Tracking view">
@@ -452,8 +457,22 @@
                             </button>
                         </div>
                     </div>
-                    <div class="queue-list" id="mission-queue">
-                        <div class="queue-empty">No pending missions in queue</div>
+                    <div class="backlog-list" id="mission-backlog">
+                        <div class="backlog-empty">No pending missions in backlog</div>
+                    </div>
+                </section>
+
+                <!-- Change Requests (CR/CAB) — XACA-0292 — hidden until crSupport.enabled=true -->
+                <section class="change-req-section" data-mode="kanban" id="section-change-req" style="display: none;">
+                    <div class="section-header purple">
+                        <span class="section-title">CHANGE REQUESTS</span>
+                        <span class="section-count" id="change-req-count">0 ITEMS</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div id="change-req-filter-bar" class="change-req-filter-bar"></div>
+                    <div id="change-req-saved-views" class="change-req-saved-views"></div>
+                    <div id="change-req-list" class="change-req-list">
+                        <div class="change-req-empty">No change requests</div>
                     </div>
                 </section>
 
@@ -606,8 +625,23 @@
                         <span class="section-title">TEAM CONFIGURATION</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div class="team-config-placeholder">
-                        <p>Team configuration settings will appear here.</p>
+                    <div class="team-config-form">
+                        <!-- XACA-0292: CR/CAB support toggle -->
+                        <div class="team-config-row" id="team-config-cr-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="team-config-cr-checkbox">
+                                    Enable CR (CAB) support
+                                </label>
+                                <span class="team-config-hint">
+                                    Enables Change Request tracking, the CHANGE REQ tab, and the CR tab inside
+                                    the item DOCS popup. Per-board setting (defaults off).
+                                </span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <input type="checkbox" id="team-config-cr-checkbox" class="team-config-checkbox" />
+                                <span class="team-config-status" id="team-config-cr-status"></span>
+                            </div>
+                        </div>
                     </div>
                 </section>
 
@@ -1137,8 +1171,11 @@
             <div class="tabbar-button" data-section="details">
                 <span class="tabbar-label">DETAILS</span>
             </div>
-            <div class="tabbar-button" data-section="queue">
-                <span class="tabbar-label">QUEUE</span>
+            <div class="tabbar-button" data-section="backlog">
+                <span class="tabbar-label">BACKLOG</span>
+            </div>
+            <div class="tabbar-button" data-section="change-req" id="tabbar-btn-change-req" style="display: none;">
+                <span class="tabbar-label">CHG REQ</span>
             </div>
             <div class="tabbar-button" data-section="epics">
                 <span class="tabbar-label">EPICS</span>
@@ -1450,7 +1487,7 @@
             </div>
             <div class="lcars-modal-body">
                 <div class="modal-field">
-                    <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in QUEUE tab</span></label>
+                    <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in BACKLOG tab</span></label>
                     <input type="text" class="modal-input" id="new-release-short-title" name="release_short_x7q" placeholder="e.g., Q1 Features" maxlength="20" autocomplete="one-time-code" data-lpignore="true" data-form-type="other" data-1p-ignore="true" aria-autocomplete="none">
                 </div>
                 <div class="modal-field">
@@ -1699,7 +1736,7 @@
             <div class="lcars-modal-body">
                 <input type="hidden" id="edit-release-id">
                 <div class="modal-field">
-                    <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in QUEUE tab</span></label>
+                    <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in BACKLOG tab</span></label>
                     <input type="text" class="modal-input" id="edit-release-short-title" name="release_short_edit_x7q" placeholder="e.g., Q1 Features" maxlength="20" autocomplete="one-time-code" data-lpignore="true" data-form-type="other" data-1p-ignore="true" aria-autocomplete="none">
                 </div>
                 <div class="modal-field">
@@ -1892,7 +1929,11 @@
     <script src="js/vendor/cytoscape.min.js"></script>
     <!-- LCARS Knowledge Graph Module -->
     <script src="js/lcars-graph.js?v=1.3"></script>
+<!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
+<script src="js/lcars-filter-bar.js"></script>
 <script src="js/lcars.js?v=3.18"></script>
+<!-- XACA-0292-007: CHANGE REQ list view — must load after lcars.js (depends on boardData, escapeHtml, showPlanDocModal, switchDocTab) -->
+<script src="js/lcars-cr-tab.js"></script>
 <!-- Activity Timeline Panel — must load after lcars.js (depends on escapeHtml, apiUrl) -->
 <script src="js/lcars-activity.js"></script>
 <!-- XACA-0220 Phase 3b — daily artifact audit banner (must load after lcars.js for apiUrl) -->

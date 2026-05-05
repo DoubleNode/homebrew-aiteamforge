@@ -1031,6 +1031,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Weekly anchor API endpoints (XACA-0253-003)
         elif path == '/api/weekly-anchor':
             self.handle_post_weekly_anchor()
+        # XACA-0292: Team config (CR/CAB support flag)
+        elif path == '/api/team-config':
+            self.handle_update_team_config()
         else:
             self.send_error(404, f"Unknown POST endpoint: {path}")
 
@@ -5320,9 +5323,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             }, status=500)
 
     def serve_plan_exists(self, item_id):
-        """GET /api/kanban/<item-id>/plan-exists - Check if plan document exists for item"""
+        """GET /api/kanban/<item-id>/plan-exists - Check if plan document exists for item.
+
+        Also returns retroExists and crExists so the caller can determine all tab
+        visibility in a single request (XACA-0292).
+        """
         try:
             import glob
+            import fcntl
 
             # Get the base path for this team's plan documents
             base_path = self._get_plan_doc_path_for_item(item_id)
@@ -5331,6 +5339,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({
                     "exists": False,
                     "retroExists": False,
+                    "crExists": False,
                     "itemId": item_id,
                     "error": "Unknown team prefix in item ID"
                 })
@@ -5351,9 +5360,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 exists = len(plan_matches) > 0
                 retro_exists = len(retro_matches) > 0
 
+            # Determine crExists: crSupport.enabled AND item has non-empty cr_id (XACA-0292)
+            cr_exists = False
+            try:
+                team = self._extract_team_from_item_id(item_id)
+                if team:
+                    board_file = get_board_file(team)
+                    if board_file.exists():
+                        lock_file = board_file.with_suffix('.json.lock')
+                        with open(lock_file, 'w') as lock:
+                            fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+                            try:
+                                with open(board_file, 'r', encoding='utf-8') as f:
+                                    board_data = json.load(f)
+                            finally:
+                                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        team_config = board_data.get('teamConfig', {})
+                        if bool(team_config.get('crSupport', {}).get('enabled', False)):
+                            for backlog_item in board_data.get('backlog', []):
+                                if backlog_item.get('id') == item_id:
+                                    cr_exists = bool(backlog_item.get('cr_id', '').strip())
+                                    break
+            except Exception as cr_err:
+                print(f"[LCARS] WARNING: could not determine crExists for {item_id}: {cr_err}")
+                cr_exists = False
+
             self._send_json_response({
                 "exists": exists,
                 "retroExists": retro_exists,
+                "crExists": cr_exists,
                 "itemId": item_id
             })
 
@@ -5362,6 +5397,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self._send_json_response({
                 "exists": False,
                 "retroExists": False,
+                "crExists": False,
                 "itemId": item_id,
                 "error": str(e)
             }, status=500)
@@ -5489,6 +5525,59 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "error": str(e)
             }, status=500)
 
+    def serve_cr_exists(self, item_id):
+        """GET /api/kanban/<item-id>/cr-exists - Check if a CR document is available for item.
+
+        Returns { exists: bool, itemId: str }.
+        exists is True iff crSupport.enabled is True for this team AND cr_id is non-empty.
+        """
+        try:
+            import fcntl
+
+            team = self._extract_team_from_item_id(item_id)
+            if not team:
+                self._send_json_response({"exists": False, "itemId": item_id})
+                return
+
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({"exists": False, "itemId": item_id})
+                return
+
+            lock_file = board_file.with_suffix('.json.lock')
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+                try:
+                    with open(board_file, 'r', encoding='utf-8') as f:
+                        board_data = json.load(f)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            # Check crSupport.enabled on the board
+            team_config = board_data.get('teamConfig', {})
+            cr_enabled = bool(team_config.get('crSupport', {}).get('enabled', False))
+            if not cr_enabled:
+                self._send_json_response({"exists": False, "itemId": item_id})
+                return
+
+            # Check that the item has a non-empty cr_id
+            item = None
+            for backlog_item in board_data.get('backlog', []):
+                if backlog_item.get('id') == item_id:
+                    item = backlog_item
+                    break
+
+            if item is None:
+                self._send_json_response({"exists": False, "itemId": item_id})
+                return
+
+            cr_exists = bool(item.get('cr_id', '').strip())
+            self._send_json_response({"exists": cr_exists, "itemId": item_id})
+
+        except Exception as e:
+            print(f"[LCARS] ERROR checking CR existence for {item_id}: {e}")
+            self._send_json_response({"exists": False, "itemId": item_id, "error": str(e)}, status=500)
+
     def serve_retro_content(self, item_id):
         """GET /api/kanban/<item-id>/retro-content - Read and return retrospective content"""
         try:
@@ -5566,6 +5655,104 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         except Exception as e:
             print(f"[LCARS] ERROR reading retro content for {item_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            self._send_json_response({
+                "error": str(e),
+                "itemId": item_id
+            }, status=500)
+
+    def serve_cr_content(self, item_id):
+        """GET /api/kanban/<item-id>/cr-content - Read and return CR document content"""
+        try:
+            import fcntl
+
+            # Extract team from item ID
+            team = self._extract_team_from_item_id(item_id)
+            if not team:
+                self._send_json_response({
+                    "error": f"Unknown team prefix in item ID: {item_id}"
+                }, status=404)
+                return
+
+            # Load the board and find the item
+            board_file = self._get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({
+                    "error": f"Board file not found for team: {team}"
+                }, status=404)
+                return
+
+            lock_file = board_file.with_suffix('.json.lock')
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
+                try:
+                    with open(board_file, 'r', encoding='utf-8') as f:
+                        board_data = json.load(f)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            # Find the item in the backlog
+            item = None
+            for backlog_item in board_data.get('backlog', []):
+                if backlog_item.get('id') == item_id:
+                    item = backlog_item
+                    break
+
+            if item is None:
+                self._send_json_response({
+                    "error": f"Item not found: {item_id}"
+                }, status=404)
+                return
+
+            # Read cr_doc_link field
+            cr_doc_link = item.get('cr_doc_link', '')
+            if not cr_doc_link:
+                self._send_json_response({
+                    "error": f"No CR document link set for item: {item_id}"
+                }, status=404)
+                return
+
+            # Resolve path against the team's kanban directory.
+            # Containment check: absolute paths are rejected outright; relative
+            # paths must resolve INSIDE team_kanban_dir to prevent traversal
+            # (e.g. "../../../.ssh/id_rsa" or "/etc/passwd"). The server binds
+            # to all interfaces so this is reachable from every tailnet peer.
+            team_kanban_dir = (TEAM_KANBAN_DIRS.get(team, KANBAN_DIR)).resolve()
+            cr_path_raw = Path(cr_doc_link)
+            if cr_path_raw.is_absolute():
+                self._send_json_response({
+                    "error": f"Invalid CR document link (absolute paths not permitted): {cr_doc_link}"
+                }, status=400)
+                return
+            cr_path = (team_kanban_dir / cr_path_raw).resolve()
+            try:
+                cr_path.relative_to(team_kanban_dir)
+            except ValueError:
+                self._send_json_response({
+                    "error": f"Invalid CR document link (escapes kanban directory): {cr_doc_link}"
+                }, status=400)
+                return
+
+            if not cr_path.exists() or not cr_path.is_file():
+                self._send_json_response({
+                    "error": f"CR document not found on disk: {cr_doc_link}"
+                }, status=404)
+                return
+
+            # Read the CR document
+            with open(cr_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+
+            # Return the content
+            self._send_json_response({
+                "content": content,
+                "itemId": item_id,
+                "filename": cr_path.name
+            })
+
+        except Exception as e:
+            print(f"[LCARS] ERROR reading CR content for {item_id}: {e}")
             import traceback
             traceback.print_exc()
             self._send_json_response({
@@ -5652,6 +5839,139 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             print(f"[LCARS] ERROR saving calendar config: {e}")
             self._send_json_response({"success": False, "error": str(e)}, status=500)
+
+    # =========================================================================
+    # TEAM CONFIG API — XACA-0292
+    # =========================================================================
+
+    def serve_team_config(self, query_string: str):
+        """GET /api/team-config?team=<team> — return teamConfig block from board JSON.
+
+        Falls back to { crSupport: { enabled: false } } if the key is absent or the
+        board file doesn't exist yet, so callers can treat the response as authoritative.
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0] or LCARS_TEAM
+
+            # XACA-0292-011: validate team against the allow-list
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            board_file = get_board_file(team)
+            if board_file.exists():
+                with open(board_file, 'r') as f:
+                    board_data = json.load(f)
+            else:
+                board_data = {}
+
+            team_config = board_data.get('teamConfig', {})
+            # Ensure crSupport key always present with default
+            team_config.setdefault('crSupport', {}).setdefault('enabled', False)
+
+            self._send_json_response({'teamConfig': team_config})
+        except Exception as e:
+            print(f"[LCARS] ERROR serving team config: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    # Allowed top-level keys in the POST /api/team-config payload
+    _TEAM_CONFIG_ALLOWED_KEYS = {'crSupport'}
+    # Allowed nested keys under crSupport
+    _CR_SUPPORT_ALLOWED_KEYS = {'enabled', 'description'}
+
+    def handle_update_team_config(self):
+        """POST /api/team-config — persist teamConfig changes to board JSON.
+
+        Accepted body: { team: str, teamConfig: { crSupport: { enabled: bool, description?: str } } }
+        Uses file lock + atomic write (same pattern as all other board mutations).
+
+        Security (XACA-0292-011, XACA-0292-012):
+          - team is validated against TEAM_KANBAN_DIRS allow-list
+          - only whitelisted keys are accepted; unknown keys → 400
+          - enabled must be bool; description (optional) must be str
+          - a CLEAN payload is constructed; attacker-controlled keys are never written
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            post_data = json.loads(self.rfile.read(content_length))
+
+            team = post_data.get('team') or LCARS_TEAM
+
+            # XACA-0292-011: validate team against the allow-list
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'success': False, 'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            new_team_config = post_data.get('teamConfig')
+            if new_team_config is None:
+                self._send_json_response({'success': False, 'error': 'Missing teamConfig payload'}, status=400)
+                return
+
+            # XACA-0292-012: schema-validate teamConfig — reject unknown top-level keys
+            unknown_top = set(new_team_config.keys()) - self._TEAM_CONFIG_ALLOWED_KEYS
+            if unknown_top:
+                bad = ', '.join(sorted(unknown_top))
+                self._send_json_response({'success': False, 'error': f'Unknown teamConfig key(s): {bad}'}, status=400)
+                return
+
+            # XACA-0292-012: validate crSupport block if present
+            clean_team_config = {}
+            if 'crSupport' in new_team_config:
+                cr = new_team_config['crSupport']
+                if not isinstance(cr, dict):
+                    self._send_json_response({'success': False, 'error': 'crSupport must be an object'}, status=400)
+                    return
+                unknown_cr = set(cr.keys()) - self._CR_SUPPORT_ALLOWED_KEYS
+                if unknown_cr:
+                    bad = ', '.join(sorted(unknown_cr))
+                    self._send_json_response({'success': False, 'error': f'Unknown crSupport key(s): {bad}'}, status=400)
+                    return
+                if 'enabled' in cr and not isinstance(cr['enabled'], bool):
+                    self._send_json_response({'success': False, 'error': 'crSupport.enabled must be a boolean'}, status=400)
+                    return
+                if 'description' in cr and not isinstance(cr['description'], str):
+                    self._send_json_response({'success': False, 'error': 'crSupport.description must be a string'}, status=400)
+                    return
+                # Build a clean crSupport dict from only the validated fields
+                clean_cr = {}
+                if 'enabled' in cr:
+                    clean_cr['enabled'] = cr['enabled']
+                if 'description' in cr:
+                    clean_cr['description'] = cr['description']
+                clean_team_config['crSupport'] = clean_cr
+
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                self._send_json_response({'success': False, 'error': f'Board not found for team: {team}'}, status=404)
+                return
+
+            import fcntl
+            lock_file = board_file.with_suffix('.json.lock')
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(board_file, 'r') as f:
+                        board_data = json.load(f)
+
+                    # Merge the CLEAN validated payload into existing teamConfig
+                    existing = board_data.get('teamConfig', {})
+                    for key, val in clean_team_config.items():
+                        if isinstance(val, dict) and isinstance(existing.get(key), dict):
+                            existing[key].update(val)
+                        else:
+                            existing[key] = val
+                    board_data['teamConfig'] = existing
+
+                    self._atomic_write_json(board_file, board_data)
+                    print(f"[LCARS] Team config updated for '{team}': {existing}")
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            self._send_json_response({'success': True, 'teamConfig': board_data['teamConfig']})
+        except Exception as e:
+            print(f"[LCARS] ERROR updating team config: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
 
     def handle_connect_apple_calendar(self):
         """POST /api/calendar/connect/apple - Connect Apple Calendar with CalDAV credentials"""
@@ -6343,9 +6663,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/kanban/') and path.endswith('/retro-exists'):
             item_id = path.replace('/api/kanban/', '').replace('/retro-exists', '')
             self.serve_retro_exists(item_id)
+        elif path.startswith('/api/kanban/') and path.endswith('/cr-exists'):
+            item_id = path.replace('/api/kanban/', '').replace('/cr-exists', '')
+            self.serve_cr_exists(item_id)
         elif path.startswith('/api/kanban/') and path.endswith('/retro-content'):
             item_id = path.replace('/api/kanban/', '').replace('/retro-content', '')
             self.serve_retro_content(item_id)
+        elif path.startswith('/api/kanban/') and path.endswith('/cr-content'):
+            item_id = path.replace('/api/kanban/', '').replace('/cr-content', '')
+            self.serve_cr_content(item_id)
         # Calendar sync API endpoints
         elif path == '/api/calendar/config':
             self.serve_calendar_config()
@@ -6386,6 +6712,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_import_status(job_id)
         elif path == '/api/tap-version':
             self.serve_tap_version()
+        # XACA-0292: Team config (CR/CAB support flag)
+        elif path == '/api/team-config':
+            self.serve_team_config(parsed.query)
         # XACA-0220 Phase 3b: daily artifact audit results
         elif path == '/api/artifact-audit':
             self.serve_artifact_audit()
