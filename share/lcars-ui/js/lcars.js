@@ -13019,7 +13019,17 @@ function switchDocTab(itemId, tabType) {
                     : 'PLAN DOCUMENT: ';
                 title.textContent = prefix + data.filename;
             }
-            body.innerHTML = renderMarkdown(data.content);
+            // New CR schema: cr-content may return { url, isExternal: true } when
+            // the CR doc lives in Confluence (no markdown to render). Show a
+            // launch button instead of attempting to render undefined content.
+            if (tabType === 'cr' && data.isExternal && data.url) {
+                body.innerHTML =
+                    '<div class="cr-doc-launch-row" style="padding:24px;text-align:center;">' +
+                    '<a class="cr-doc-launch" href="' + escapeHtml(data.url) + '" target="_blank" rel="noopener noreferrer">OPEN CR DOC →</a>' +
+                    '</div>';
+            } else {
+                body.innerHTML = renderMarkdown(data.content || '');
+            }
         })
         .catch(error => {
             console.error('Error loading ' + tabType + ':', error);

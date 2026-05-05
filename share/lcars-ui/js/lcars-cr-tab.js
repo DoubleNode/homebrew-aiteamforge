@@ -29,6 +29,11 @@
     let _initialized   = false;
     let _filterBar     = null;
 
+    // Map of cr_id → full normalized CR view-object, refreshed each render.
+    // Lets the DOCS click handler resolve the CR record without re-walking
+    // boardData or reading large attributes off the button.
+    const _crByIdCache = {};
+
     // ─── Saved-view state ─────────────────────────────────────────────────────
 
     const SAVED_VIEW_KEY = 'lcars-change-req-saved-view';
@@ -153,7 +158,7 @@
                 <div class="cr-filter-pills cr-type-pills" id="cr-type-pills">
                     <button class="filter-pill active" data-cr-type="all">ALL</button>
                     <button class="filter-pill" data-cr-type="standard">STANDARD</button>
-                    <button class="filter-pill" data-cr-type="normal">NORMAL</button>
+                    <button class="filter-pill" data-cr-type="major">MAJOR</button>
                     <button class="filter-pill" data-cr-type="emergency">EMERGENCY</button>
                 </div>
                 <div class="cr-filter-controls">
@@ -468,13 +473,20 @@
      * Returns [] when boardData is not yet loaded or has no CRs.
      */
     function _getCRItems() {
+        // Drop stale cache entries — we rebuild from live boardData below
+        for (const k of Object.keys(_crByIdCache)) delete _crByIdCache[k];
+
         if (!window.boardData) return [];
         const crs = window.boardData.crs;
         if (!Array.isArray(crs) || crs.length === 0) return [];
         const backlogIdx = _backlogIndex();
-        return crs
+        const items = crs
             .filter(cr => cr && cr.id && String(cr.id).trim().length > 0)
             .map(cr => _normalizeCR(cr, backlogIdx));
+        for (const it of items) {
+            if (it.cr_id) _crByIdCache[it.cr_id] = it;
+        }
+        return items;
     }
 
     /**
@@ -549,7 +561,7 @@
 
     const CR_TYPE_CLASS = {
         standard:  'cr-badge-standard',
-        normal:    'cr-badge-normal',
+        major:     'cr-badge-major',
         emergency: 'cr-badge-emergency',
     };
 
@@ -606,12 +618,16 @@
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
         const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0);
 
+        // DOCS button on the CR list opens a CR-only modal — distinct from the
+        // item DOCS button which shows Plan/Retro/CR tabs. We stash the CR id on
+        // the button so the click handler can look the full CR view-object back
+        // up from the cached list (avoids re-fetching boardData).
         const docsBtn = hasCRDoc
-            ? `<button class="cr-docs-btn" data-item-id="${escapeHtml(item.id)}" title="View CR document">DOCS</button>`
+            ? `<button class="cr-docs-btn" data-cr-id="${escapeHtml(item.cr_id)}" title="View CR document">DOCS</button>`
             : `<span class="cr-docs-placeholder"></span>`;
 
         return `<tr class="cr-row" data-item-id="${escapeHtml(item.id)}">
-            <td class="cr-col-id"><span class="cr-id-mono">${crId}</span></td>
+            <td class="cr-col-id"><button class="cr-id-copy" data-cr-id="${crId}" title="Copy CR ID to clipboard"><span class="cr-id-mono">${crId}</span></button></td>
             <td class="cr-col-type">${crType}</td>
             <td class="cr-col-state">${crState}</td>
             <td class="cr-col-title" title="${title}"><span class="cr-title-text">${title}</span></td>
@@ -692,19 +708,177 @@
                 <tbody>${rows}</tbody>
             </table>`;
 
-        // Wire DOCS buttons
+        // Wire DOCS buttons → open CR-only modal (NOT the item plan-doc modal).
         listEl.querySelectorAll('.cr-docs-btn').forEach(btn => {
             btn.addEventListener('click', e => {
                 e.stopPropagation();
-                const itemId = btn.dataset.itemId;
-                if (!itemId) return;
-                // Open plan-doc modal with crExists=true, then immediately switch to CR tab
-                showPlanDocModal(itemId, false, true);
-                // switchDocTab defers internally; schedule right after modal renders (10ms timeout
-                // matches the modal's own entrance animation setTimeout in showPlanDocModal)
-                setTimeout(() => switchDocTab(itemId, 'cr'), 20);
+                const crId = btn.dataset.crId;
+                if (!crId) return;
+                const view = _crByIdCache[crId];
+                if (!view) return;
+                _showCRDocModal(view);
             });
         });
+
+        // Wire CR-ID copy buttons → copy id to clipboard, flash visual feedback.
+        listEl.querySelectorAll('.cr-id-copy').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const crId = btn.dataset.crId || '';
+                if (!crId) return;
+                _copyToClipboard(crId).then(ok => {
+                    if (!ok) return;
+                    btn.classList.add('cr-id-copied');
+                    setTimeout(() => btn.classList.remove('cr-id-copied'), 900);
+                });
+            });
+        });
+    }
+
+    /**
+     * Copy text to clipboard. Returns Promise<boolean>. Falls back to
+     * a hidden-textarea + execCommand path when navigator.clipboard is
+     * unavailable (older browsers / non-secure contexts on tailnet).
+     */
+    function _copyToClipboard(text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            return navigator.clipboard.writeText(text).then(() => true).catch(() => _copyFallback(text));
+        }
+        return Promise.resolve(_copyFallback(text));
+    }
+    function _copyFallback(text) {
+        try {
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.setAttribute('readonly', '');
+            ta.style.position = 'absolute';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            return !!ok;
+        } catch (_) {
+            return false;
+        }
+    }
+
+    // ─── CR-only modal ────────────────────────────────────────────────────────
+
+    /**
+     * Show a CR-only modal for a CR record. Distinct from showPlanDocModal:
+     * no Plan/Retro tabs, title is the CR id (not the linked item id), and
+     * the body shows CR metadata + a launch button for the external CR doc.
+     *
+     * If cr_doc_link is an http(s) URL, render a launch button (the CR doc is
+     * typically a Confluence page). If it's a relative path inside the kanban
+     * dir, fetch via /api/kanban/<itemId>/cr-content and render markdown.
+     */
+    function _showCRDocModal(view) {
+        // pause auto-refresh if the host page exposes it (lcars.js global)
+        if (typeof pauseAutoRefresh === 'function') pauseAutoRefresh();
+
+        const overlay = document.createElement('div');
+        overlay.className = 'lcars-modal-overlay';
+        overlay.id = 'cr-doc-modal-overlay';
+
+        const modal = document.createElement('div');
+        modal.className = 'lcars-modal cr-doc-modal';
+        modal.setAttribute('data-cr-id', view.cr_id || '');
+
+        const header = document.createElement('div');
+        header.className = 'lcars-modal-header';
+        header.innerHTML =
+            `<span class="lcars-modal-title">CR DOCUMENT: ${escapeHtml(view.cr_id || '')}</span>` +
+            `<button class="lcars-modal-close" id="cr-doc-modal-close">&times;</button>`;
+
+        const body = document.createElement('div');
+        body.className = 'lcars-modal-body cr-doc-content';
+        body.innerHTML = _renderCRMetadata(view);
+
+        modal.appendChild(header);
+        modal.appendChild(body);
+        overlay.appendChild(modal);
+
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) _hideCRDocModal();
+        });
+        document.body.appendChild(overlay);
+        setTimeout(() => overlay.classList.add('active'), 10);
+
+        const closeBtn = header.querySelector('#cr-doc-modal-close');
+        if (closeBtn) closeBtn.addEventListener('click', _hideCRDocModal);
+
+        // If cr_doc_link is a relative path, fetch markdown content from the
+        // server. For http(s) URLs the metadata block already shows a launch
+        // button — no extra fetch needed. The server's cr-content endpoint
+        // also returns { isExternal:true, url } when the link is external,
+        // which we ignore here since the launch button is already rendered.
+        const link = view.cr_doc_link || '';
+        const isUrl = /^https?:\/\//i.test(link);
+        if (link && !isUrl && view.id) {
+            fetch(apiUrl('/api/kanban/' + encodeURIComponent(view.id) + '/cr-content'))
+                .then(r => { if (!r.ok) throw new Error('CR document not found'); return r.json(); })
+                .then(data => {
+                    if (data.isExternal) return;   // already represented by launch button
+                    const meta = _renderCRMetadata(view);
+                    const md   = (typeof renderMarkdown === 'function')
+                        ? renderMarkdown(data.content || '')
+                        : `<pre class="cr-doc-pre">${escapeHtml(data.content || '')}</pre>`;
+                    body.innerHTML = meta + '<div class="cr-doc-md">' + md + '</div>';
+                })
+                .catch(err => {
+                    body.innerHTML = _renderCRMetadata(view) +
+                        `<div class="plan-doc-error"><strong>Error loading CR document</strong><br>${escapeHtml(err.message)}</div>`;
+                });
+        }
+    }
+
+    function _hideCRDocModal() {
+        if (typeof resumeAutoRefresh === 'function') resumeAutoRefresh();
+        const overlay = document.getElementById('cr-doc-modal-overlay');
+        if (overlay) {
+            overlay.classList.remove('active');
+            setTimeout(() => overlay.remove(), 300);
+        }
+    }
+
+    /**
+     * Render the static metadata block at the top of the CR-only modal:
+     * id, type, state, summary, deploy window, approver, linked items,
+     * and a launch button when cr_doc_link is an external URL.
+     */
+    function _renderCRMetadata(view) {
+        const link = view.cr_doc_link || '';
+        const isUrl = /^https?:\/\//i.test(link);
+        const launch = isUrl
+            ? `<a class="cr-doc-launch" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">OPEN CR DOC →</a>`
+            : '';
+
+        const items = (view.id && view.id.trim().length > 0)
+            ? `<span class="cr-id-mono">${escapeHtml(view.id)}</span>`
+            : '<span class="cr-dim">—</span>';
+
+        const summary = view.cr_summary
+            ? `<div class="cr-doc-summary">${escapeHtml(view.cr_summary)}</div>`
+            : '';
+
+        return `
+            <div class="cr-doc-meta">
+                <div class="cr-doc-meta-row">
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">TYPE</span>${_typeBadge(view.cr_type)}</div>
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">STATE</span>${_stateBadge(view.crState)}</div>
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">PLATFORM</span><span>${escapeHtml(view.platform || '—')}</span></div>
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">DEPLOY</span><span>${_formatDeployWindow(view.deploy_window_planned)}</span></div>
+                </div>
+                <div class="cr-doc-meta-row">
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">APPROVER</span><span>${escapeHtml(view.cr_approver_name || view.cr_approved_by || '—')}</span></div>
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">PUSHBACKS</span>${_pushbackDisplay(view.cr_pushback_count)}</div>
+                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">LINKED ITEM</span>${items}</div>
+                </div>
+                ${summary}
+                ${launch ? `<div class="cr-doc-launch-row">${launch}</div>` : ''}
+            </div>`;
     }
 
     // ─── Public: initChangeReqTab ─────────────────────────────────────────────

@@ -248,10 +248,10 @@
     border: 1px solid rgba(153, 153, 255, 0.35);
 }
 
-.cr-badge-normal {
-    background: rgba(153, 204, 255, 0.18);
-    color: var(--lcars-cyan, #99ccff);
-    border: 1px solid rgba(153, 204, 255, 0.35);
+.cr-badge-major {
+    background: rgba(255, 204, 0, 0.18);
+    color: var(--lcars-amber, #ffcc00);
+    border: 1px solid rgba(255, 204, 0, 0.40);
 }
 
 .cr-badge-emergency {
@@ -357,6 +357,104 @@
 .cr-docs-placeholder {
     display: inline-block;
     width: 36px;
+}
+
+/* ── CR ID copy-button (tap to clipboard) ────────────────────────────────── */
+
+.cr-id-copy {
+    background: transparent;
+    border: 1px solid transparent;
+    padding: 2px 4px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+}
+.cr-id-copy:hover {
+    background: rgba(153, 204, 255, 0.10);
+    border-color: rgba(153, 204, 255, 0.30);
+}
+.cr-id-copy.cr-id-copied {
+    background: rgba(102, 255, 153, 0.18);
+    border-color: rgba(102, 255, 153, 0.55);
+}
+.cr-id-copy.cr-id-copied .cr-id-mono {
+    color: #66ff99;
+}
+
+/* ── CR-only doc modal ───────────────────────────────────────────────────── */
+
+.cr-doc-modal {
+    max-width: 720px;
+}
+
+.cr-doc-meta {
+    padding: 16px 20px 12px;
+    border-bottom: 1px solid rgba(204, 153, 255, 0.20);
+    background: rgba(204, 153, 255, 0.04);
+}
+.cr-doc-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px 28px;
+    margin-bottom: 8px;
+}
+.cr-doc-meta-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    min-width: 90px;
+}
+.cr-doc-meta-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: rgba(204, 153, 255, 0.75);
+}
+.cr-doc-summary {
+    margin-top: 10px;
+    padding: 10px 12px;
+    background: rgba(0,0,0,0.25);
+    border-left: 3px solid var(--lcars-purple, #cc99ff);
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgba(255,255,255,0.85);
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+.cr-doc-launch-row {
+    margin-top: 12px;
+    text-align: right;
+}
+.cr-doc-launch {
+    display: inline-block;
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    padding: 8px 16px;
+    background: var(--lcars-purple, #cc99ff);
+    color: #000;
+    border: 1px solid var(--lcars-purple, #cc99ff);
+    border-radius: 3px;
+    text-decoration: none;
+    transition: background 0.15s, color 0.15s;
+}
+.cr-doc-launch:hover {
+    background: #fff;
+    color: #000;
+}
+.cr-doc-md {
+    padding: 14px 20px;
+    font-size: 12px;
+    line-height: 1.5;
+}
+.cr-doc-pre {
+    padding: 14px 20px;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 11px;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 
 /* ── Saved-view chips ────────────────────────────────────────────────────── */

@@ -5360,7 +5360,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 exists = len(plan_matches) > 0
                 retro_exists = len(retro_matches) > 0
 
-            # Determine crExists: crSupport.enabled AND item has non-empty cr_id (XACA-0292)
+            # Determine crExists: crSupport.enabled AND item is linked to a CR.
+            # New schema (2026-05): CRs live in board.crs[]; items carry a back-pointer
+            # at item.crAssignment.crId. Legacy schema (pre-migration) put cr_id directly
+            # on the item — read both for compatibility on partially-migrated boards.
             cr_exists = False
             try:
                 team = self._extract_team_from_item_id(item_id)
@@ -5379,7 +5382,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         if bool(team_config.get('crSupport', {}).get('enabled', False)):
                             for backlog_item in board_data.get('backlog', []):
                                 if backlog_item.get('id') == item_id:
-                                    cr_exists = bool(backlog_item.get('cr_id', '').strip())
+                                    legacy_cr_id = (backlog_item.get('cr_id') or '').strip()
+                                    assignment = backlog_item.get('crAssignment') or {}
+                                    new_cr_id = (assignment.get('crId') or '').strip()
+                                    cr_exists = bool(legacy_cr_id or new_cr_id)
                                     break
             except Exception as cr_err:
                 print(f"[LCARS] WARNING: could not determine crExists for {item_id}: {cr_err}")
@@ -5560,7 +5566,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
-            # Check that the item has a non-empty cr_id
+            # Check that the item is linked to a CR — new schema uses crAssignment
+            # back-pointer; legacy schema had cr_id directly on the item.
             item = None
             for backlog_item in board_data.get('backlog', []):
                 if backlog_item.get('id') == item_id:
@@ -5571,7 +5578,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
-            cr_exists = bool(item.get('cr_id', '').strip())
+            legacy_cr_id = (item.get('cr_id') or '').strip()
+            new_cr_id = ((item.get('crAssignment') or {}).get('crId') or '').strip()
+            cr_exists = bool(legacy_cr_id or new_cr_id)
             self._send_json_response({"exists": cr_exists, "itemId": item_id})
 
         except Exception as e:
@@ -5705,12 +5714,36 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=404)
                 return
 
-            # Read cr_doc_link field
-            cr_doc_link = item.get('cr_doc_link', '')
+            # Resolve cr_doc_link. New schema (2026-05) stores it on the CR record
+            # in board.crs[]; the item carries a crAssignment.crId back-pointer.
+            # Legacy schema stored cr_doc_link directly on the item — read that
+            # too for compatibility with partially-migrated boards.
+            cr_doc_link = ''
+            assignment = item.get('crAssignment') or {}
+            new_cr_id = (assignment.get('crId') or '').strip()
+            if new_cr_id:
+                for cr_record in board_data.get('crs', []):
+                    if cr_record.get('id') == new_cr_id:
+                        cr_doc_link = cr_record.get('cr_doc_link', '') or ''
+                        break
+            if not cr_doc_link:
+                cr_doc_link = item.get('cr_doc_link', '') or ''
+
             if not cr_doc_link:
                 self._send_json_response({
                     "error": f"No CR document link set for item: {item_id}"
                 }, status=404)
+                return
+
+            # If the CR doc link is an http(s) URL (typical for Confluence-hosted
+            # CRs in the new schema), return it as a URL — the client renders a
+            # launch button rather than reading the file off disk.
+            if cr_doc_link.lower().startswith(('http://', 'https://')):
+                self._send_json_response({
+                    "url": cr_doc_link,
+                    "itemId": item_id,
+                    "isExternal": True
+                })
                 return
 
             # Resolve path against the team's kanban directory.
