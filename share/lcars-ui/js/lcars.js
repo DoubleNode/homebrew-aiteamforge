@@ -117,7 +117,11 @@ function apiUrl(path, extraParams) {
 // STATE
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let boardData = null;
+// `var` (not `let`) so the binding is exposed on `window.boardData`. lcars-cr-tab.js
+// runs inside an IIFE and reads `window.boardData`; with `let` at top-level the
+// global lexical declaration is not attached to `window` and the IIFE sees undefined,
+// making the CHANGE REQ list permanently render "No change requests for this team."
+var boardData = null;
 let refreshTimer = null;
 
 // RAG Engines health polling interval
@@ -8756,12 +8760,24 @@ function pickDefaultSectionForMode(mode) {
  */
 function loadModeSections() {
     const defaults = { team: 'home', kanban: 'home', data: 'home', settings: 'team-config' };
+    // Renames applied to any persisted section value before validation.
+    // XACA-0292 renamed 'queue' → 'backlog'; pre-rename users still have 'queue'
+    // in localStorage, which would fail the SECTIONS.indexOf check in switchSection
+    // and leave them stranded on the startup splash.
+    const RENAMES = { 'queue': 'backlog' };
     try {
         const raw = localStorage.getItem(MODE_SECTIONS_KEY);
         if (raw) {
             const parsed = JSON.parse(raw);
-            // Merge with defaults so any missing mode gets a sane fallback
-            return Object.assign({}, defaults, parsed);
+            const merged = Object.assign({}, defaults, parsed);
+            let dirty = false;
+            for (const mode of Object.keys(merged)) {
+                const orig = merged[mode];
+                if (RENAMES[orig]) { merged[mode] = RENAMES[orig]; dirty = true; }
+                if (!SECTIONS.includes(merged[mode])) { merged[mode] = defaults[mode] || 'home'; dirty = true; }
+            }
+            if (dirty) saveModeSections(merged);
+            return merged;
         }
     } catch (e) {
         console.warn('lcars: Could not read modeSections from localStorage', e);
@@ -8881,8 +8897,15 @@ function runMigration() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function switchSection(sectionName, skipAnimation = false) {
-    const newIndex = SECTIONS.indexOf(sectionName);
-    if (newIndex === -1) return;
+    let newIndex = SECTIONS.indexOf(sectionName);
+    if (newIndex === -1) {
+        // Unknown section (often stale persisted name after a rename). Fall back
+        // to the mode default so the user is never stranded on the splash.
+        console.warn(`[router] unknown section "${sectionName}" — falling back to default`);
+        sectionName = pickDefaultSectionForMode(activeMode);
+        newIndex = SECTIONS.indexOf(sectionName);
+        if (newIndex === -1) return;
+    }
 
     const previousSection = activeSection;
     const previousEl = document.querySelector(`.${getSectionClass(previousSection)}`);
@@ -17731,6 +17754,29 @@ async function loadTeamConfig() {
  */
 async function saveTeamConfigCRSupport(checkbox, statusEl) {
     const enabled = checkbox.checked;
+
+    // Warn before turning CR support OFF if any CRs already exist on this board.
+    // Disabling does not delete CRs, but it hides the CHANGE REQ tab + per-item
+    // CR doc tab, which is surprising if the user has live CRs in flight.
+    if (!enabled) {
+        const crCount = (window.boardData?.backlog || []).filter(item =>
+            item.cr_id && String(item.cr_id).trim().length > 0
+        ).length;
+        if (crCount > 0) {
+            const proceed = confirm(
+                `${crCount} change request${crCount === 1 ? '' : 's'} ` +
+                `currently exist${crCount === 1 ? 's' : ''} on this board.\n\n` +
+                `Disabling CR support will hide the CHANGE REQ tab and the CR ` +
+                `document tab on each item. Existing CR data is preserved and ` +
+                `will reappear if you re-enable CR support.\n\n` +
+                `Disable CR support anyway?`
+            );
+            if (!proceed) {
+                checkbox.checked = true; // revert visual state
+                return;
+            }
+        }
+    }
 
     if (statusEl) {
         statusEl.textContent = 'Saving...';
