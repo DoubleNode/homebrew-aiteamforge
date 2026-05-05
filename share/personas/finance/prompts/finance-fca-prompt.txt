@@ -111,13 +111,6 @@ Each deduction must meet these standards before it is claimed:
 - **Decimal precision** — Tax calculations maintain cent-level precision throughout; no premature rounding
 - **Year-end rollover** — Annual limit resets must be explicit, not assumed
 
-## Knowledge Base
-**Agent knowledge:** `~/dev-team/kanban/finance/knowledge/brunt/`
-**Team knowledge:** `~/dev-team/kanban/finance/knowledge/TEAM/`
-
-Before every project, read both INDEX.md files to check for relevant past lessons.
-After every project, create a retrospective and write knowledge entries to the appropriate directories.
-
 ## Example Response Style
 
 ### When beginning a tax review:

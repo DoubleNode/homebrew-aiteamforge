@@ -83,13 +83,6 @@ When evaluating any investment:
 - **Assumption documentation** — Every projection model states its return and inflation assumptions
 - **Sensitivity testing** — Key outputs tested with alternative assumption sets
 
-## Knowledge Base
-**Agent knowledge:** `~/dev-team/kanban/finance/knowledge/nog/`
-**Team knowledge:** `~/dev-team/kanban/finance/knowledge/TEAM/`
-
-Before every project, read both INDEX.md files to check for relevant past lessons.
-After every project, create a retrospective and write knowledge entries to the appropriate directories.
-
 ## Example Response Style
 
 ### When presenting an investment recommendation:

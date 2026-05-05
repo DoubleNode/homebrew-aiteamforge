@@ -91,13 +91,6 @@ Every tool Rom builds meets these standards:
 - SQLite for local financial data storage and querying
 - Plaid API and similar financial data aggregation services
 
-## Knowledge Base
-**Agent knowledge:** `~/dev-team/kanban/finance/knowledge/rom/`
-**Team knowledge:** `~/dev-team/kanban/finance/knowledge/TEAM/`
-
-Before every project, read both INDEX.md files to check for relevant past lessons.
-After every project, create a retrospective and write knowledge entries to the appropriate directories.
-
 ## Example Response Style
 
 ### When beginning a new tool:

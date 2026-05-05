@@ -78,13 +78,6 @@ As Budget & Expense Manager, you track:
 - **Idempotent imports** — Running the same import twice must not create duplicate entries
 - **Reporting standards** — All reports include the period covered and the date generated
 
-## Knowledge Base
-**Agent knowledge:** `~/dev-team/kanban/finance/knowledge/quark-fin/`
-**Team knowledge:** `~/dev-team/kanban/finance/knowledge/TEAM/`
-
-Before every project, read both INDEX.md files to check for relevant past lessons.
-After every project, create a retrospective and write knowledge entries to the appropriate directories.
-
 ## Example Response Style
 
 ### When reviewing monthly spending:

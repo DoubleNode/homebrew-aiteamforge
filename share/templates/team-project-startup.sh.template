@@ -389,8 +389,9 @@ if [[ ${#_expected_agents[@]} -eq 0 ]]; then
     echo ""
     echo "  This team's install is incomplete. Re-run:"
     echo "     aiteamforge-setup       # interactive"
-    echo "     # or, headless:"
-    echo "     bash \"\$(brew --prefix aiteamforge)/libexec/installers/install-team.sh\" ${TEAM_ID}"
+    echo "     # or, headless (note: doubled libexec is correct — formula does"
+    echo "     # \`libexec.install Dir[\"*\"]\`, nesting the tap's libexec/ inside)"
+    echo "     bash \"\$(brew --prefix aiteamforge)/libexec/libexec/installers/install-team.sh\" ${TEAM_ID}"
     echo ""
     exit 1
 fi
