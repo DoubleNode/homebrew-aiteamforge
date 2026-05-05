@@ -161,11 +161,10 @@
                         <label class="cr-dropdown-label">PLATFORM</label>
                         <select id="cr-platform-select" class="cr-platform-select">
                             <option value="all">ALL</option>
-                            <option value="iOS">iOS</option>
-                            <option value="Android">ANDROID</option>
-                            <option value="Firebase">FIREBASE</option>
-                            <option value="Web">WEB</option>
-                            <option value="Other">OTHER</option>
+                            <option value="ios">iOS</option>
+                            <option value="android">ANDROID</option>
+                            <option value="firebase">FIREBASE</option>
+                            <option value="crossplatform">CROSSPLATFORM</option>
                         </select>
                     </div>
                     <div class="cr-sort-wrap">
@@ -416,15 +415,66 @@
     // ─── Data helpers ─────────────────────────────────────────────────────────
 
     /**
-     * Extract CR items from the global boardData.
-     * An item qualifies when it has a non-empty cr_id.
-     * Returns [] when boardData is not yet loaded.
+     * Build a quick lookup of backlog items keyed by id, used to resolve
+     * per-item fields (priority for secondary sort, fallback title) when
+     * normalizing CR objects.
+     */
+    function _backlogIndex() {
+        const idx = {};
+        const list = (window.boardData && window.boardData.backlog) || [];
+        for (const item of list) {
+            if (item && item.id) idx[item.id] = item;
+        }
+        return idx;
+    }
+
+    /**
+     * Normalize a CR record from the new top-level `changeRequests[]` array
+     * into the view-object shape the rest of this file expects (cr_id, cr_type,
+     * crState, title, platform, deploy_window_planned, cr_pushback_count,
+     * cr_doc_link, cr_summary, cr_created_at, cr_emergency_deployed_at,
+     * cr_completed_at, addedAt, priority, id). The `id` field is set to the
+     * first linked backlog item id so the DOCS button can drive the existing
+     * plan-doc modal (which looks items up by backlog id).
+     */
+    function _normalizeCR(cr, backlogIdx) {
+        const ts = cr.timestamps || {};
+        const firstItemId = Array.isArray(cr.itemIds) && cr.itemIds.length > 0 ? cr.itemIds[0] : '';
+        const linkedItem = firstItemId ? backlogIdx[firstItemId] : null;
+        return {
+            id:                         firstItemId,
+            cr_id:                      cr.id || '',
+            cr_type:                    cr.type || '',
+            crState:                    cr.crState || '',
+            title:                      cr.title || (linkedItem ? linkedItem.title : '') || '',
+            platform:                   cr.platform || (linkedItem ? linkedItem.platform : '') || '',
+            cr_approver_name:           cr.cr_approver_name || '',
+            cr_approved_by:             cr.cr_approved_by || '',
+            deploy_window_planned:      cr.deploy_window_planned || '',
+            cr_pushback_count:          cr.pushback_count || 0,
+            cr_doc_link:                cr.cr_doc_link || '',
+            cr_summary:                 cr.summary || '',
+            cr_created_at:              ts.cr_created_at || cr.createdAt || '',
+            cr_emergency_deployed_at:   ts.cr_emergency_deployed_at || '',
+            cr_completed_at:            ts.cr_completed_at || '',
+            addedAt:                    cr.createdAt || '',
+            priority:                   linkedItem ? linkedItem.priority : '',
+        };
+    }
+
+    /**
+     * Extract CR view-objects from the global boardData.
+     * Reads the top-level `crs[]` array (current schema, written by kb-cr).
+     * Returns [] when boardData is not yet loaded or has no CRs.
      */
     function _getCRItems() {
-        if (!window.boardData || !window.boardData.backlog) return [];
-        return (window.boardData.backlog || []).filter(item =>
-            item.cr_id && String(item.cr_id).trim().length > 0
-        );
+        if (!window.boardData) return [];
+        const crs = window.boardData.crs;
+        if (!Array.isArray(crs) || crs.length === 0) return [];
+        const backlogIdx = _backlogIndex();
+        return crs
+            .filter(cr => cr && cr.id && String(cr.id).trim().length > 0)
+            .map(cr => _normalizeCR(cr, backlogIdx));
     }
 
     /**
@@ -444,9 +494,11 @@
             if (itemType !== s.typeFilter.toLowerCase()) return false;
         }
 
-        // Platform filter
+        // Platform filter — case-insensitive match (board may store 'ios'/'IOS'/'iOS')
         if (s.platformFilter && s.platformFilter !== 'all') {
-            if (item.platform !== s.platformFilter) return false;
+            const itemPlatform = (item.platform || '').toLowerCase();
+            const wantPlatform = s.platformFilter.toLowerCase();
+            if (itemPlatform !== wantPlatform) return false;
         }
 
         // Search filter — matches cr_id, cr_summary, item title
