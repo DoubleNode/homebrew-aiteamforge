@@ -147,29 +147,14 @@ install_global_claude_md() {
 }
 
 # Install team-specific CLAUDE.md files
+# NOTE (XACA-0285): Team CLAUDE.md files are no longer installed into
+# ${CLAUDE_CONFIG_DIR}/agents/<team>/.  They live in each team's own
+# repo under .claude/.  This function is retained as a no-op so that
+# any external callers do not break, but the main install loop no
+# longer calls it.
 install_team_claude_md() {
     local team_name="$1"
-
-    log_info "Installing CLAUDE.md for $team_name..."
-
-    local template="${TEMPLATE_DIR}/claude/claude-md-team.template"
-    local agent_dir="${CLAUDE_CONFIG_DIR}/agents/${team_name}"
-    local target="${agent_dir}/CLAUDE.md"
-
-    # Create agent directory if needed
-    mkdir -p "$agent_dir"
-
-    # Apply template
-    if [[ -f "$template" ]]; then
-        # Team-specific template substitution (can be customized per team)
-        sed -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
-            -e "s|{{HOME}}|${HOME}|g" \
-            -e "s|{{TEAM_NAME}}|${team_name}|g" \
-            "$template" > "$target"
-        log_success "CLAUDE.md installed for $team_name"
-    else
-        log_warning "Team CLAUDE.md template not found"
-    fi
+    log_info "Skipping per-user CLAUDE.md for $team_name (per-repo install — XACA-0285)"
 }
 
 # Install MCP server configuration
@@ -271,30 +256,42 @@ install_skills() {
     log_success "Skills installed (symlinked to aiteamforge)"
 }
 
-# Install agent personas
+# Install agent personas — XACA-0285: per-team ~/.claude/agents/<team>/ install removed.
+# Personas now live in each team repo's .claude/agents/ (populated by kb-sync-personas).
+# This function is retained as a no-op so external callers do not break.
 install_agent_personas() {
     local team_name="$1"
+    log_info "Skipping user-level persona install for $team_name (per-repo sync — XACA-0285)"
+}
 
-    log_info "Installing agent personas for $team_name..."
+# Deploy personas to all team repos via kb-sync-personas (XACA-0285).
+# Master lives in ~/dev-team/.claude/agents-master/. Each team repo's
+# .claude/agents/ is a synced copy. Run sync --all to populate every
+# team repo that exists on this machine. Missing repos (user doesn't
+# have that project) are skipped with warnings.
+invoke_persona_sync() {
+    log_info "Deploying personas to team repos via kb-sync-personas..."
 
-    local team_slug=$(echo "$team_name" | tr '[:upper:]' '[:lower:]' | tr ' ' '-')
-    local personas_src="${AITEAMFORGE_DIR}/${team_slug}/personas/agents"
-    local agent_dir="${CLAUDE_CONFIG_DIR}/agents/${team_name}"
+    local devteam_dir="${HOME}/dev-team"
+    local sync_script="${devteam_dir}/scripts/kb-sync-personas"
 
-    if [[ ! -d "$personas_src" ]]; then
-        log_warning "Personas not found for $team_name at: $personas_src"
-        return 0
+    if command -v kb-sync-personas >/dev/null 2>&1; then
+        if kb-sync-personas sync --all; then
+            log_success "Persona sync complete"
+        else
+            log_warning "Persona sync had failures; run 'kb-sync-personas check --all' after install to review"
+        fi
+    elif [[ -x "$sync_script" ]]; then
+        if "$sync_script" sync --all; then
+            log_success "Persona sync complete"
+        else
+            log_warning "Persona sync had failures; run '$sync_script check --all' after install to review"
+        fi
+    else
+        log_warning "kb-sync-personas not found; personas not deployed."
+        log_warning "After sourcing kanban-helpers.sh, run:"
+        log_warning "  source ~/dev-team/kanban-helpers.sh && kb-sync-personas sync --all"
     fi
-
-    mkdir -p "$agent_dir"
-
-    # Copy persona markdown files
-    find "$personas_src" -name "*.md" -type f | while read -r persona_file; do
-        cp "$persona_file" "$agent_dir/"
-        log_info "Installed persona: $(basename "$persona_file")"
-    done
-
-    log_success "Agent personas installed for $team_name"
 }
 
 # Install statusline command
@@ -441,20 +438,20 @@ install_claude_config() {
     install_hooks
     install_skills
 
-    # Install team-specific components
-    if [[ ${#selected_teams[@]} -gt 0 ]]; then
-        echo ""
-        log_info "Installing team-specific configurations..."
-
-        for team in "${selected_teams[@]}"; do
-            install_team_claude_md "$team"
-            install_agent_personas "$team"
-        done
-    fi
+    # NOTE (XACA-0285): per-team agent subdirs under ~/.claude/agents/<team>/ are
+    # no longer installed.  Personas are deployed to each team's own repo
+    # .claude/agents/ by kb-sync-personas below.  The selected_teams arg is
+    # kept for call-site compatibility but no per-team file writes happen here.
 
     # Install settings.json (do this last so it can reference installed components)
     echo ""
     install_settings_json
+
+    # Deploy personas to every team repo present on this machine (XACA-0285).
+    # Must run after ~/dev-team/ clone is in place so agents-master/ and
+    # personas-manifest.json are available to kb-sync-personas.
+    echo ""
+    invoke_persona_sync
 
     # Final summary
     echo ""
@@ -468,7 +465,7 @@ install_claude_config() {
     log_info "Next steps:"
     log_info "  1. Review settings: cat ~/.claude/settings.json"
     log_info "  2. Test Claude Code: claude"
-    log_info "  3. Check agents: ls ~/.claude/agents/"
+    log_info "  3. Check persona sync: kb-sync-personas check --all"
     echo ""
 
     return 0

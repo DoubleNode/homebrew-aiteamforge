@@ -1,0 +1,200 @@
+{
+  "_meta": {
+    "schema_version": "1.0.0",
+    "description": "Canonical CR (Change Request) lifecycle schema for the AITeamForge kanban system.",
+    "consumers": [
+      "migrate-cr-schema.py — reads crStates/crFields/teamConfig to patch team boards",
+      "scripts/kb-cr.sh — reads crStates for valid transition targets and field names",
+      "lcars-ui/server.py — reads teamConfig.crSupport.enabled to gate CR endpoints"
+    ],
+    "critical_invariants": [
+      "Cycle-time fields listed in crDerived MUST NOT be persisted to board JSON.",
+      "They are computed at read time from crTimestamps values.",
+      "teamConfig.crSupport.enabled defaults to false. kb-cr helpers no-op silently when false.",
+      "Do NOT store cr_cycle_*_days or deploy_estimate_delta_days in any board or item."
+    ]
+  },
+
+  "crStates": [
+    "cr-drafted",
+    "cr-submitted",
+    "cr-approved",
+    "cr-rejected",
+    "cr-held",
+    "implementing",
+    "deployed-dev",
+    "deployed-prod",
+    "emergency-deployed"
+  ],
+
+  "crFields": {
+    "cr_id": {
+      "type": "string",
+      "required": false,
+      "description": "Unique CR identifier, assigned at draft time. Format: CR-<TEAM>-<YYYYMMDD>-<seq>."
+    },
+    "cr_type": {
+      "type": "string",
+      "enum": ["major", "emergency", "fyi"],
+      "required": true,
+      "description": "CR classification. Required at draft time. 'major' requires CAB approval; 'emergency' bypasses CAB with mandatory justification; 'fyi' is informational only."
+    },
+    "cr_approved_by": {
+      "type": "string",
+      "required": false,
+      "description": "Login/handle of the approver (e.g., GitHub username or Jira account ID). Populated by kb-cr approve --by <login>."
+    },
+    "cr_approver_name": {
+      "type": "string",
+      "required": false,
+      "description": "Human-readable display name of the approver. Populated alongside cr_approved_by."
+    },
+    "cr_pushback_count": {
+      "type": "integer",
+      "required": false,
+      "default": 0,
+      "description": "Number of times this CR has been returned for rework (rejected then re-submitted). Incremented automatically on each reject→re-draft cycle."
+    },
+    "cr_pushback_notes": {
+      "type": "string",
+      "required": false,
+      "multiline": true,
+      "description": "Cumulative notes from CAB reviewers explaining pushback reasons. Appended (not replaced) on each rejection."
+    },
+    "cr_summary": {
+      "type": "string",
+      "required": false,
+      "description": "One-paragraph plain-language summary of what this CR changes and why. Targeted at non-technical CAB reviewers."
+    },
+    "cr_doc_link": {
+      "type": "string",
+      "required": false,
+      "description": "Path or URL to the full CR markdown document (e.g., kanban/plans/XIOS-0123/CR.md or a Confluence URL)."
+    },
+    "deploy_window_planned": {
+      "type": "string",
+      "format": "ISO 8601 date",
+      "required": false,
+      "immutable_after": "cr-submitted",
+      "description": "Planned deployment window start in ISO 8601 format (e.g., 2026-05-15T22:00:00Z). Immutable once the CR is submitted to prevent scope drift after CAB review begins."
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["ios", "android", "firebase", "crossplatform"],
+      "required": false,
+      "description": "Target deployment platform. Used by LCARS to route CR notifications and filter board views."
+    },
+    "emergency_justification": {
+      "type": "string",
+      "required_when": "cr_type == \"emergency\"",
+      "description": "Mandatory justification text when cr_type is 'emergency'. Explains why normal CAB review is being bypassed and documents the incident or risk driving the emergency deployment."
+    }
+  },
+
+  "crTimestamps": {
+    "cr_created_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to cr-drafted (kb-cr draft)"
+    },
+    "cr_submitted_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to cr-submitted (kb-cr submit)"
+    },
+    "cr_approved_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to cr-approved (kb-cr approve)"
+    },
+    "cr_dev_started_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to implementing (kb-cr start-dev)"
+    },
+    "cr_testing_started_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "kb-cr start-test is called (does not change crState; item status field tracks testing)"
+    },
+    "cr_deployed_dev_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to deployed-dev (kb-cr deploy-dev)"
+    },
+    "cr_deployed_prod_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to deployed-prod (kb-cr deploy-prod)"
+    },
+    "cr_emergency_deployed_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to emergency-deployed (kb-cr emergency)"
+    },
+    "cr_completed_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "kb-cr complete is called; item also moves to completed status via kb-done"
+    }
+  },
+
+  "crDerived": {
+    "_warning": "These fields are computed at READ TIME from crTimestamps. They MUST NOT be stored in board JSON or item records. Writing them to disk is a schema violation.",
+    "cr_cycle_draft_to_submit_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_submitted_at - cr_created_at) in fractional days",
+      "description": "Time from CR draft to CAB submission. Measures how long preparation took."
+    },
+    "cr_cycle_submit_to_approve_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_approved_at - cr_submitted_at) in fractional days",
+      "description": "CAB review cycle time. Measures how quickly the board approves or returns CRs."
+    },
+    "cr_cycle_approve_to_dev_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_dev_started_at - cr_approved_at) in fractional days",
+      "description": "Time from approval to dev start. Detects scheduling friction or queue buildup."
+    },
+    "cr_cycle_dev_to_test_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_testing_started_at - cr_dev_started_at) in fractional days",
+      "description": "Development duration. Time from dev start to handoff for testing."
+    },
+    "cr_cycle_test_to_deploydev_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_deployed_dev_at - cr_testing_started_at) in fractional days",
+      "description": "Testing and staging promotion duration."
+    },
+    "cr_cycle_deploydev_to_deployprod_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_deployed_prod_at - cr_deployed_dev_at) in fractional days",
+      "description": "Soak time between dev and prod deployments."
+    },
+    "cr_cycle_total_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_completed_at - cr_created_at) in fractional days",
+      "description": "End-to-end CR lifecycle duration from draft to completion."
+    },
+    "deploy_estimate_delta_days": {
+      "derived": true,
+      "type": "float",
+      "formula": "(cr_deployed_prod_at - deploy_window_planned) in fractional days; negative = early, positive = late",
+      "description": "Variance between planned and actual prod deployment. Negative values mean early delivery; positive means late."
+    }
+  },
+
+  "teamConfig": {
+    "crSupport": {
+      "enabled": false,
+      "description": "Load-bearing feature flag. When false (the default), ALL kb-cr subcommands exit 0 with a single informational message and perform NO side effects — no board reads, no writes, no state transitions. This is the primary isolation mechanism preventing CR schema fields from leaking into teams that have not opted in. Set to true ONLY after running migrate-cr-schema.py against the team's board and confirming the crStates array is present. Configure via SETTINGS → TEAM CONFIG → 'Enable CR (CAB) support' in the LCARS UI."
+    }
+  }
+}

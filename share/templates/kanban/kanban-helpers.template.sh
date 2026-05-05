@@ -4889,12 +4889,76 @@ else:
             fi
             ;;
 
+        # === CR Lifecycle Helpers (XACA-0291) ===
+        show|info)
+            # Display a single backlog item in detail, including CR lifecycle section when enabled.
+            # INVARIANT: CR section is rendered if and only if crSupport.enabled=true AND cr_id is set.
+            local selector="$1"
+            if [[ -z "$selector" ]]; then
+                echo "Usage: kb-backlog show <item-id>" >&2
+                return 1
+            fi
+
+            local index
+            index=$(_kb_resolve_selector "$board_file" "$selector")
+            if [[ "$index" == "-1" ]]; then
+                echo "Error: Item not found: $selector" >&2
+                return 1
+            fi
+
+            local item_id item_title item_priority item_status item_desc
+            local item_jira item_github item_tags item_due item_added item_updated
+            item_id=$(_kb_jq_read "$board_file" ".backlog[$index].id // \"?\"" -r)
+            item_title=$(_kb_jq_read "$board_file" ".backlog[$index].title // \"(no title)\"" -r)
+            item_priority=$(_kb_jq_read "$board_file" ".backlog[$index].priority // \"medium\"" -r)
+            item_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // \"todo\"" -r)
+            item_desc=$(_kb_jq_read "$board_file" ".backlog[$index].description // \"\"" -r)
+            item_jira=$(_kb_jq_read "$board_file" ".backlog[$index].jiraId // \"\"" -r)
+            item_github=$(_kb_jq_read "$board_file" ".backlog[$index].githubIssue // \"\"" -r)
+            item_tags=$(_kb_jq_read "$board_file" ".backlog[$index].tags // [] | join(\", \")" -r)
+            item_due=$(_kb_jq_read "$board_file" ".backlog[$index].dueDate // \"\"" -r)
+            item_added=$(_kb_jq_read "$board_file" ".backlog[$index].addedAt // \"\"" -r)
+            item_updated=$(_kb_jq_read "$board_file" ".backlog[$index].updatedAt // \"\"" -r)
+
+            echo ""
+            echo "╔═══════════════════════════════════════════════════════════╗"
+            echo "║ [$item_id] $item_title"
+            echo "╠═══════════════════════════════════════════════════════════╣"
+            printf "║  Priority: %-10s  Status: %s\n" "${(U)item_priority}" "${(U)item_status}"
+            [[ -n "$item_tags" ]]    && printf "║  Tags:     %s\n" "$item_tags"
+            [[ -n "$item_jira" ]]    && printf "║  JIRA:     %s\n" "$item_jira"
+            [[ -n "$item_github" ]]  && printf "║  GitHub:   %s\n" "$item_github"
+            [[ -n "$item_due" ]]     && printf "║  Due:      %s\n" "$item_due"
+            [[ -n "$item_added" ]]   && printf "║  Added:    %s\n" "$item_added"
+            [[ -n "$item_updated" ]] && printf "║  Updated:  %s\n" "$item_updated"
+            if [[ -n "$item_desc" ]]; then
+                echo "╠═══════════════════════════════════════════════════════════╣"
+                echo "║  $item_desc"
+            fi
+            echo "╚═══════════════════════════════════════════════════════════╝"
+
+            # CR Lifecycle section — only rendered when crSupport.enabled=true AND cr_id is set.
+            # When the flag is false, or cr_id is absent: render NOTHING (disabled-state parity invariant).
+            local cr_enabled
+            cr_enabled=$(_kb_jq_read "$board_file" '.teamConfig.crSupport.enabled // false' -r 2>/dev/null)
+            if [[ "$cr_enabled" == "true" ]]; then
+                local cr_id_val
+                cr_id_val=$(_kb_jq_read "$board_file" ".backlog[$index].cr_id // \"\"" -r 2>/dev/null)
+                if [[ -n "$cr_id_val" ]]; then
+                    # Delegate to kb-cr show for consistent CR field rendering.
+                    # kb-cr show will no-op if crSupport is disabled (double guard).
+                    type kb-cr &>/dev/null && kb-cr show "$item_id"
+                fi
+            fi
+            ;;
+
         *)
             echo "Usage: kb-backlog <command> [args...]"
             echo ""
             echo "Commands:"
             echo "  add \"task\" [pri] [\"desc\"] [jira] [os]  Add task with optional fields"
             echo "  list                               List all backlog items"
+            echo "  show <id>                          Show detailed view of a single item"
             echo "  change <i> [\"title\"] [priority]   Update item title and/or priority"
             echo "  desc <i> [\"description\"]          Set/view/clear item description"
             echo "  jira <i> [JIRA-ID]                 Set/view/clear JIRA ticket ID"
@@ -7191,6 +7255,49 @@ kb-retro-path() {
 
     # Output the canonical retrospective path
     echo "${kanban_dir}/${item_id}_${desc_slug}_RETROSPECTIVE.md"
+}
+
+# Resolve the canonical plan-doc directory path for a kanban item
+# Usage: kb-plan-doc-path <ITEM-ID>
+# Output: /full/path/to/kanban/plans/<ITEM-ID>/
+#
+# Mirrors kb-retro-path. Resolves the team's kanban dir, then returns the
+# plans/<ITEM-ID>/ subdirectory. Caller mkdir -p's if writing.
+kb-plan-doc-path() {
+    local item_id="$1"
+
+    if [[ -z "$item_id" ]]; then
+        echo "Usage: kb-plan-doc-path <ITEM-ID>" >&2
+        echo "  Outputs the canonical plan-doc directory path for the given item." >&2
+        echo "" >&2
+        echo "Example:" >&2
+        echo "  kb-plan-doc-path XACA-0278" >&2
+        echo "  # → /Users/.../kanban/plans/XACA-0278/" >&2
+        return 1
+    fi
+
+    if [[ ! "$item_id" =~ ^X[A-Z]{3}-[0-9]+$ ]]; then
+        echo "Error: Invalid item ID format: $item_id" >&2
+        echo "Expected format: XABC-1234 (e.g., XACA-0278, XIOS-0562)" >&2
+        return 1
+    fi
+
+    local team
+    team=$(_kb_get_team_from_code "$item_id")
+    if [[ -z "$team" ]]; then
+        echo "Error: Unknown team code in item ID: $item_id" >&2
+        return 1
+    fi
+
+    local kanban_dir
+    kanban_dir=$(_kb_get_kanban_dir "$team")
+
+    if [[ ! -d "$kanban_dir" ]]; then
+        echo "Error: Kanban directory not found: $kanban_dir" >&2
+        return 1
+    fi
+
+    echo "${kanban_dir}/plans/${item_id}/"
 }
 
 # Search knowledge entries across all teams
@@ -9591,3 +9698,19 @@ kb-help() {
     echo ""
     echo "═════════════════════════════════════════════════════════════"
 }
+
+# === CR Lifecycle Helpers (XACA-0291) — kb-cr ===
+# Adds ${AITEAMFORGE_DIR}/scripts to PATH so kb-cr (and other helper scripts
+# in that directory) are callable from any shell that sources kanban-helpers.sh.
+# Guard prevents duplicate PATH entries.
+if [[ ":${PATH}:" != *":${AITEAMFORGE_DIR}/scripts:"* ]]; then
+    export PATH="${AITEAMFORGE_DIR}/scripts:${PATH}"
+fi
+
+# Sources kb-cr.sh to provide kb-cr subcommands for CR (Change Request) lifecycle.
+# Guard prevents double-sourcing; file existence guard prevents hard failure on
+# fresh installs before the file is deployed.
+if [[ -z "${_KB_CR_LOADED:-}" ]] && [[ -f "${AITEAMFORGE_DIR}/scripts/kb-cr.sh" ]]; then
+    source "${AITEAMFORGE_DIR}/scripts/kb-cr.sh"
+    export _KB_CR_LOADED=1
+fi

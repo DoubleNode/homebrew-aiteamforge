@@ -311,6 +311,56 @@ cp ~/aiteamforge/kanban-backups/ios-board-20260217-1400.json \
 **Backup schedule:** Every hour (via LaunchAgent)
 **Retention:** 7 days of hourly backups
 
+### CR (Change Request) Schema — Opt-In Workflow
+
+AITeamForge ships an optional CR (Change Request) lifecycle layer for teams operating under a Change Advisory Board (CAB) framework. The schema is shipped with the tap but **not deployed automatically** — each team opts in.
+
+**Files shipped with the tap (run them in place from the Cellar):**
+
+```bash
+# Locate the shipped CR templates
+TAP_KANBAN_TEMPLATES="$(brew --prefix)/share/aiteamforge/templates/kanban"
+ls "$TAP_KANBAN_TEMPLATES"
+# cr-schema.json          — canonical schema definition
+# migrate-cr-schema.py    — idempotent migration script
+```
+
+**Opt-in steps** (per board — repeat for each team that needs CR support):
+
+```bash
+# 1. Back up the target board (REQUIRED — migration refuses without a fresh backup)
+BOARD="<path-to-team-board.json>"
+cp "$BOARD" "$BOARD.bak-cr-schema-$(date +%Y%m%d-%H%M%S)"
+
+# 2. Dry-run the migration to preview what would change
+python3 "$TAP_KANBAN_TEMPLATES/migrate-cr-schema.py" --board "$BOARD" --dry-run
+
+# 3. Apply the migration (adds 9 crStates + teamConfig.crSupport={enabled:false})
+python3 "$TAP_KANBAN_TEMPLATES/migrate-cr-schema.py" --board "$BOARD"
+
+# Convenience: target all canonical mobile boards (iOS, Android, Firebase, command)
+python3 "$TAP_KANBAN_TEMPLATES/migrate-cr-schema.py" --all-mobile
+
+# 4. After migration, the flag defaults to FALSE — kb-cr is a clean no-op until enabled.
+#    Enable per-board via: SETTINGS → TEAM CONFIG → "Enable CR (CAB) support" (LCARS UI),
+#    OR by editing the board JSON directly: teamConfig.crSupport.enabled = true
+```
+
+**The kb-cr helper** (deployed automatically by the installer to `$AITEAMFORGE_DIR/scripts/kb-cr.sh` and sourced by `kanban-helpers.sh`):
+
+```bash
+kb-cr help                     # List all subcommands
+kb-cr draft <id> --type <t>    # Mark item as cr-drafted, write cr_created_at
+kb-cr submit <id>              # → cr-submitted, write cr_submitted_at
+kb-cr approve <id> --by <l>    # → cr-approved, write cr_approved_at
+kb-cr deploy-prod <id>         # → deployed-prod, write cr_deployed_prod_at
+kb-cr emergency <id> --justification "..."   # → emergency-deployed
+kb-cr show <id>                # Render CR lifecycle view
+kb-cr backfill [--apply]       # Infer crState from existing timestamps (legacy data)
+```
+
+When `teamConfig.crSupport.enabled=false` (the default), every `kb-cr` subcommand exits 0 with a single informational message and performs zero side effects. Boards that have not opted in behave identically to their pre-migration state.
+
 ---
 
 ## Claude Code Agents
@@ -378,15 +428,38 @@ Agents automatically track their work in the kanban system:
 
 ### Agent Configuration
 
-Agent configurations are stored in:
+Agent personas are stored in each team repository's `.claude/agents/` directory:
 ```
-~/aiteamforge/claude/agents/<Team Name>/<agent-name>/
+<team-repo>/.claude/agents/<team>/<agent-name>_<role>_persona.md
 ```
 
-Each agent has:
-- `persona.md` - Agent personality and role description
-- `settings.json` - Claude Code configuration
-- `avatar.png` - Agent avatar image
+**Example locations:**
+```bash
+~/dev-team/.claude/agents/academy/emh_documentation_persona.md
+MainEventApp-iOS/.claude/agents/ios/picard_leadfeature_persona.md
+MainEventApp-iOS/.claude/agents/mainevent/doctor_leadfeature_persona.md
+DNSFramework/.claude/agents/dns/boimler_qa_persona.md
+```
+
+Each persona file contains:
+- **Frontmatter:** Agent name, role, team, description, context/knowledge
+- **Personality traits:** Character profile and working style
+- **Technical expertise:** Specializations and tool knowledge
+- **Collaboration patterns:** How the agent works with team members
+
+### Editing Personas
+
+Never edit personas directly in a team repo. Instead:
+
+1. Edit the master at `~/dev-team/.claude/agents-master/<team>/<file>.md`
+2. Run `kb-sync-personas sync --all` to push to all team repos
+3. Commit both master AND per-repo copies in their respective repos
+
+This ensures the master remains canonical and all deployments stay in sync.
+
+### Token Optimization
+
+When you open a terminal in a team repo, Claude Code loads only that repo's persona subset (e.g., iOS loads ~14 personas: 7 iOS-specific + 7 MainEvent-shared). This is ~85% more efficient than loading all 68 personas in every session.
 
 ---
 

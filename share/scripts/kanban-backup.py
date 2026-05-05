@@ -47,7 +47,7 @@ Completeness Invariants:
 
     4. Failure is loud and forensic
        Integrity failure (per kanban-backup.py main loop):
-       - Bad zip renamed to ~/dev-team-backups/_failed/<team>_<name>.FAILED
+       - Bad zip renamed to ~/aiteamforge-backups/_failed/<team>_<name>.FAILED
        - Previous-known-good hash preserved in stored_hashes[team]
        - status["boards"][team]["lastIntegrityFailure"] populated with detail
        - [INTEGRITY-FAIL] logged to stderr for LCARS alert pickup
@@ -141,8 +141,8 @@ except ImportError:
     }
 
 # Centralized backup destination
-BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
-FAILED_BACKUP_DIR = Path.home() / "dev-team-backups" / "_failed"
+BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
+FAILED_BACKUP_DIR = Path.home() / "aiteamforge-backups" / "_failed"
 STATUS_FILE = BACKUP_DIR / "backup-status.json"
 HASH_FILE = BACKUP_DIR / "file-hashes.json"
 LOG_PATH = BACKUP_DIR / "backup.log"

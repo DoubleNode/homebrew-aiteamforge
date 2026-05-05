@@ -2887,7 +2887,7 @@ python3 ~/dev-team/kanban-backup.py --status 2>/dev/null || \
 
 echo ""
 echo "=== Backup files at centralized location ==="
-ls -la ~/dev-team-backups/kanban/ 2>/dev/null | head -20
+ls -la ~/aiteamforge-backups/kanban/ 2>/dev/null | head -20
 ```
 **Expected Result:**
 - Backup system status command runs without error
@@ -2915,7 +2915,7 @@ python3 ~/dev-team/kanban-backup.py --status 2>/dev/null | grep -E "lastRun|last
 - Summary output shows `Backed up: N` where N matches the number of active team boards
 - `Errors: 0`
 - `lastRun` timestamp in status is current (within the last minute)
-- Each team directory under `~/dev-team-backups/kanban/` has a new backup zip file with today's timestamp
+- Each team directory under `~/aiteamforge-backups/kanban/` has a new backup zip file with today's timestamp
 - Backup filenames follow the format `backup_YYYYMMDD_HHMMSS.zip`
 **Pass/Fail:** [ ]
 

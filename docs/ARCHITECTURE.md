@@ -686,6 +686,83 @@ connect scripts for every team) so that cockpit machines receive a complete set 
 
 ---
 
+## Per-Team Persona Architecture (XACA-0285)
+
+### Overview
+
+Claude Code agent personas are deployed per-team-repository rather than user-level. This architecture reduces token usage ~85% by loading only the personas for the team you're currently working in, and allows teams to version-control and own their persona definitions.
+
+### Three-Layer Model
+
+**1. Master (canonical source):** `~/dev-team/.claude/agents-master/`
+- All 68 persona files organized by team slug: `academy/`, `ios/`, `android/`, `firebase/`, `command/`, `dns/`, `finance/`, `legal/`, `medical/`, `mainevent/`, `freelance/`
+- Maintained by Academy team
+- Tracked in main git repo
+
+**2. Manifest:** `~/dev-team/.claude/personas-manifest.json`
+- JSON file listing which teams deploy to which repositories
+- 13 deployment entries (e.g., iOS repo gets iOS + MainEvent personas)
+- Single source of truth for "which personas go where"
+- Editable for hot-swaps and dynamic persona variants
+
+**3. Team repo deployments:** `<team-repo>/.claude/agents/`
+- Synced copies of the appropriate master personas
+- Per-repo git-tracked (not symlinks)
+- Token-loaded per-session: opening iOS terminal loads only iOS + MainEvent personas (~14), not all 68
+
+### Install Flow
+
+During `aiteamforge setup --install-path <dir>`:
+
+1. Framework copies `.claude/agents-master/` and `.claude/personas-manifest.json` from tap share (if not present)
+2. `install-claude-config.sh` calls `kb-sync-personas sync --all`
+3. Each team repo's `.claude/agents/` is populated from master based on manifest
+4. User-level `~/.claude/agents/` remains empty post-migration
+
+### Sync Mechanism
+
+The `kb-sync-personas` command (from Academy's `~/dev-team/scripts/`) reads master and manifest, then:
+- `sync <team|--all>` — Copy master files to target repos
+- `check [team]` — Detect drift; exit 1 on mismatch
+- `diff <team>` — Show per-file diffs vs. master
+- `list` — Show all deployments and their status
+
+**Safety guardrails:**
+- Refuses to write into `/worktrees/` (preserves parallel development)
+- Skips missing target repos with WARN
+- Writes `.synced-from-master` marker (timestamp, commit SHA, schema version)
+
+### Token Savings
+
+| Context | Pre-XACA-0285 | Post-XACA-0285 | Reduction |
+|---------|---------------|----------------|-----------|
+| iOS dev session | 68 personas | 14 (iOS + MainEvent) | ~79% |
+| Android dev session | 68 personas | 14 (Android + MainEvent) | ~79% |
+| Firebase dev session | 68 personas | 14 (Firebase + MainEvent) | ~79% |
+| Academy session | 68 personas | 4 (Academy only) | ~94% |
+| Average across fleet | 68 personas | 11 (median) | ~85% |
+
+### Naming Disambiguation
+
+Two collisions were resolved by suffix:
+- `janeway` (Command team, Strategic) remains
+- `janeway-me` (MainEvent team, Lead Feature) — renamed to avoid collision
+- `paris` (Command team, Communications) remains
+- `paris-me` (MainEvent team, UX) — renamed to avoid collision
+
+The rename applies to both frontmatter `name:` field and Task subagent_type references.
+
+### Multi-Machine Sync
+
+On a fresh machine or after pulling from main:
+```bash
+~/dev-team/scripts/kb-sync-personas sync --all
+```
+
+Master is canonical; per-repo edits are valid but sync overwrites them. Use the manifest to describe variants; edit master for shared updates.
+
+---
+
 ## Extension Points
 
 ### Adding New Teams
@@ -732,6 +809,23 @@ source "$(brew --prefix)/opt/aiteamforge/libexec/ui/lib/wizard-ui.sh"
 print_header "My Custom Setup"
 # ... installation logic ...
 ```
+
+### CR (Change Request) Lifecycle Axis
+
+The kanban schema supports an optional CR-lifecycle axis layered orthogonally to the existing `status` and `releaseAssignment` axes. CR support is **per-board opt-in** via `teamConfig.crSupport.enabled` (boolean, default `false`).
+
+**Three orthogonal axes per item:**
+1. **`status`** — kanban workflow state (`backlog`, `in_progress`, `pr_review`, `completed`, …). Pre-existing.
+2. **`releaseAssignment`** — environment promotion track (`DEV`, `QA`, `BETA`, `PROD`, …). Pre-existing.
+3. **`crState`** — CR lifecycle state (`cr-drafted`, `cr-submitted`, `cr-approved`, `implementing`, `deployed-dev`, `deployed-prod`, `emergency-deployed`, …). Added by XACA-0291.
+
+The three axes do not gate each other. An item can be `status=in_progress`, `releaseAssignment=PROD`, `crState=cr-approved` simultaneously. State transitions on one axis do not constrain the others.
+
+**Cycle-time fields are derived, not stored.** All `cr_cycle_*_days` values and `deploy_estimate_delta_days` are computed at read time from the persisted `cr_*_at` timestamps. The schema document marks them with `derived: true` and a `formula` string. No code path persists derived values — preserves the single source of truth and avoids drift.
+
+**Disabled-state invariant.** When `crSupport.enabled=false` (or absent), every `kb-cr` subcommand exits 0 with a single informational message and performs zero side effects. UI components that consume CR fields short-circuit symmetrically. The migration script adds `crStates` + `teamConfig.crSupport={enabled:false}` to a board without touching item-level data — the board behaves byte-for-byte like its pre-migration state until the flag is flipped. This is what makes the system safely reversible per board.
+
+See `homebrew-tap/share/templates/kanban/cr-schema.json` for the canonical schema and the [CR Schema Opt-In Workflow](USER_GUIDE.md#cr-change-request-schema--opt-in-workflow) section of the User Guide for operator instructions.
 
 ---
 

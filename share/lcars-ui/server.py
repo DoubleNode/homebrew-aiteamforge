@@ -111,7 +111,7 @@ except ImportError as e:
 
 # Configuration
 DEFAULT_PORT = 8080
-BACKUP_DIR = Path.home() / "dev-team-backups" / "kanban"
+BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
 
 # Distributed kanban directories — loaded from aiteamforge_paths (XACA-0168).
 # Build a dict from the shared module so existing code using TEAM_KANBAN_DIRS[team]

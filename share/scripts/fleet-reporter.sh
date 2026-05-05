@@ -188,7 +188,7 @@ TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
 
 # Backup status file location
-BACKUP_STATUS_FILE="$HOME/dev-team-backups/kanban/backup-status.json"
+BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"
 
 # Registration sentinel file — presence means machine has been registered
 # with at least one server endpoint. Stored per-machine alongside the ID file.

@@ -558,6 +558,17 @@ install_lcars_profile_script() {
         warning "aiteamforge-resolve-hostname.sh not found (skipping)"
     fi
 
+    # Install kb-cr (CR-Lifecycle) helper. Sourced by kanban-helpers.sh.
+    # All subcommands no-op when teamConfig.crSupport.enabled=false (default).
+    local kbcr_src="$INSTALL_ROOT/share/scripts/kb-cr.sh"
+    if [ -f "$kbcr_src" ]; then
+        cp "$kbcr_src" "$scripts_dest/kb-cr.sh"
+        chmod +x "$scripts_dest/kb-cr.sh"
+        info "Installed: kb-cr.sh"
+    else
+        warning "kb-cr.sh not found (skipping)"
+    fi
+
     # Install Dynamic Profile JSON to iTerm2's hot-load directory.
     # iTerm2 reads this directory automatically — no restart required.
     # The profile uses 'Initial URL' (correct key for browser-mode tabs).
@@ -686,7 +697,7 @@ install_kanban_backup() {
     chmod +x "$backup_script_dest"
 
     # Create backup directory
-    mkdir -p "$HOME/dev-team-backups/kanban"
+    mkdir -p "$HOME/aiteamforge-backups/kanban"
 
     success "Installed backup script: $backup_script_dest"
 }
@@ -916,7 +927,7 @@ uninstall_kanban_system() {
         warning "This will delete all kanban boards and history!"
         if prompt_yes_no "Are you SURE?" "n"; then
             rm -rf "$AITEAMFORGE_DIR/kanban"
-            rm -rf "$HOME/dev-team-backups/kanban"
+            rm -rf "$HOME/aiteamforge-backups/kanban"
             success "Removed all kanban data"
         fi
     else

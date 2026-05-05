@@ -70,13 +70,13 @@ _kbc_get_kanban_dir() {
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal: find the most recent backup for a team.
-# Backups live at ~/dev-team-backups/kanban/{team}/
+# Backups live at ~/aiteamforge-backups/kanban/{team}/
 # Files are named backup_YYYYMMDD_HHMMSS.zip (or .json for older backups).
 # Prints the full path of the most recent backup, or nothing if none found.
 # ──────────────────────────────────────────────────────────────────────────────
 _kbc_find_latest_backup() {
     local team="$1"
-    local backup_dir="${HOME}/dev-team-backups/kanban/${team}"
+    local backup_dir="${HOME}/aiteamforge-backups/kanban/${team}"
 
     if [ ! -d "$backup_dir" ]; then
         return 1

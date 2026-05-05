@@ -500,6 +500,54 @@ tail -f ~/aiteamforge/logs/kanban-sync.log
 
 ---
 
+## Persona Synchronization Across Machines
+
+### Overview
+
+Agent personas are version-controlled in each team repository. Across a multi-machine fleet, the canonical source remains `~/dev-team/.claude/agents-master/`, synced to all team repos via `kb-sync-personas`.
+
+### Sync Strategy
+
+**On fresh machines or after pulling from main:**
+```bash
+~/dev-team/scripts/kb-sync-personas sync --all
+```
+
+This command:
+1. Reads `~/dev-team/.claude/personas-manifest.json`
+2. For each team, copies current master files to target repo's `.claude/agents/`
+3. Skips repositories that don't exist (per-repo setup varies by machine)
+4. Writes a `.synced-from-master` marker with timestamp and commit SHA
+
+**Checking for drift across the fleet:**
+```bash
+kb-sync-personas check --all
+```
+
+Exit code 0 = all deployments in sync; 1 = drift detected. Shows which files differ from master.
+
+### Multi-Machine Conflict Resolution
+
+When two machines diverge on persona definitions:
+
+1. **Canonical master** is always at `~/dev-team/.claude/agents-master/` in the main dev repo
+2. **Per-repo edits** are valid (teams can customize locally) but are overwritten on next sync
+3. **Resolution:** Edit the master, commit, push to all machines, then run `kb-sync-personas sync --all` on each
+
+If a machine has no Fleet Monitor network connection:
+- Master changes pull via git on the next `git pull` in that repo
+- Then manually run `kb-sync-personas sync --all` to propagate to team repos
+- No coordination needed; last-sync-timestamp in `.synced-from-master` helps diagnose stale state
+
+### Token Efficiency Across Machines
+
+Each machine loads only its relevant personas. A machine working on iOS loads iOS + MainEvent personas (~14 personas, ~79% token savings vs. loading all 68). This per-repo scoping scales linearly:
+- Fewer personas per terminal session → fewer tokens in parallel work
+- Fewer tokens → faster agent responses
+- Fewer tokens → cheaper on usage-based billing (if applicable)
+
+---
+
 ## Monitoring Agents
 
 Fleet Monitor tracks active Claude Code agents across all machines.
