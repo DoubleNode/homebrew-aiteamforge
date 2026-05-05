@@ -8457,7 +8457,21 @@ end tell
         self.end_headers()
         self.wfile.write(js_content.encode())
 
-    def serve_lcars_target_local(self):
+    def do_HEAD(self):
+        """Mirror do_GET dispatch for routes that need explicit HEAD support.
+
+        Browsers GET <script> tags so the local-override route doesn't strictly
+        need HEAD, but tooling (curl -I, health checks) expects HEAD/GET parity.
+        Falls through to the parent handler for everything else.
+        """
+        from urllib.parse import urlparse
+        path = urlparse(self.path).path
+        if path == '/lcars-target.local.js':
+            self.serve_lcars_target_local(head_only=True)
+            return
+        super().do_HEAD()
+
+    def serve_lcars_target_local(self, head_only=False):
         """XACA-0301: serve per-machine LCARS retargeting override.
 
         Source: ~/.aiteamforge/lcars-target.local.js (outside repo, not synced).
@@ -8484,7 +8498,8 @@ end tell
         self.send_header('Pragma', 'no-cache')
         self.send_header('Expires', '0')
         self.end_headers()
-        self.wfile.write(data)
+        if not head_only:
+            self.wfile.write(data)
 
     def _get_team_agents(self):
         """Get the set of knowledge directory names belonging to the current team.
