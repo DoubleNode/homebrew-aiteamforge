@@ -361,7 +361,9 @@ echo "  (Session log: $_SESSION_LOG)"
 _tmux_pids=()
 _expected_agents=()
 
-for _agent_script in "$AITEAMFORGE_DIR/${TEAM_ID}/scripts/${TEAM_ID}"-*-startup.sh; do
+# (N) = nullglob qualifier — expands to nothing instead of aborting under zsh's
+# default `nomatch` when the install never generated per-agent startup scripts.
+for _agent_script in "$AITEAMFORGE_DIR/${TEAM_ID}/scripts/${TEAM_ID}"-*-startup.sh(N); do
     [[ ! -f "$_agent_script" ]] && continue
     # Derive agent name: "<team>-<agent>-startup.sh" → "<agent>"
     _agent_base="$(basename "$_agent_script")"
@@ -376,6 +378,22 @@ for _agent_script in "$AITEAMFORGE_DIR/${TEAM_ID}/scripts/${TEAM_ID}"-*-startup.
     _tmux_pids+=($!)
     sleep 0.3
 done
+
+# Empty roster means install-team.sh's generate_per_agent_startup_scripts
+# never produced output (missing personas dir, python failure, etc.). Fail
+# loud so the user knows to re-run install rather than chasing tmux ghosts.
+if [[ ${#_expected_agents[@]} -eq 0 ]]; then
+    echo ""
+    echo "  ❌ No per-agent startup scripts found in:"
+    echo "     $AITEAMFORGE_DIR/${TEAM_ID}/scripts/"
+    echo ""
+    echo "  This team's install is incomplete. Re-run:"
+    echo "     aiteamforge-setup       # interactive"
+    echo "     # or, headless:"
+    echo "     bash \"\$(brew --prefix aiteamforge)/libexec/installers/install-team.sh\" ${TEAM_ID}"
+    echo ""
+    exit 1
+fi
 
 # Wait for all background session-creation processes to finish
 if [[ ${#_tmux_pids[@]} -gt 0 ]]; then
