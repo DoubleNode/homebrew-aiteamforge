@@ -6397,6 +6397,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # the target team to the static file, and all servers serve the same file.
         # Previously, dynamic serving broke the router because each server
         # would serve its own team instead of the globally-written target.
+        # XACA-0301: per-machine override served from ~/.aiteamforge/lcars-target.local.js
+        # (404 when absent — HTML loader handles the no-override case gracefully).
+        elif path == '/lcars-target.local.js':
+            self.serve_lcars_target_local()
         elif path.endswith('.js') or path.endswith('.html') or path == '/':
             # Serve JS and HTML with no-cache headers to prevent stale code
             self.serve_no_cache_static(path)
@@ -8452,6 +8456,35 @@ end tell
         self.send_header('Expires', '0')
         self.end_headers()
         self.wfile.write(js_content.encode())
+
+    def serve_lcars_target_local(self):
+        """XACA-0301: serve per-machine LCARS retargeting override.
+
+        Source: ~/.aiteamforge/lcars-target.local.js (outside repo, not synced).
+        Returns 404 if the file is absent so the HTML loader's onerror path
+        runs and the default lcars-target.js values stand. Lets developers
+        retarget their LCARS to a specific team/session without dirtying the
+        shipped tap submodule. Follow-up to XACA-0300.
+        """
+        override_path = Path.home() / '.aiteamforge' / 'lcars-target.local.js'
+        if not override_path.is_file():
+            self.send_error(404, 'No local lcars-target override')
+            return
+
+        try:
+            data = override_path.read_bytes()
+        except OSError as e:
+            self.send_error(500, f'Error reading local override: {e}')
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/javascript')
+        self.send_header('Content-Length', len(data))
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
+        self.end_headers()
+        self.wfile.write(data)
 
     def _get_team_agents(self):
         """Get the set of knowledge directory names belonging to the current team.

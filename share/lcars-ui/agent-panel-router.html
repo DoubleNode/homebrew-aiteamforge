@@ -7,12 +7,18 @@
     <meta http-equiv="Expires" content="0">
     <title>Agent Panel Router</title>
     <script>
-        // Load lcars-target.js with cache busting
+        // Load lcars-target.js with cache busting.
+        // XACA-0301: chain /lcars-target.local.js (per-machine override) AFTER
+        // the default so it can replace globals before the router scans.
         window.LCARS_TARGET_LOADED = false;
         const script = document.createElement('script');
         script.src = 'lcars-target.js?' + Date.now();
         script.onload = function() {
-            window.LCARS_TARGET_LOADED = true;
+            const localScript = document.createElement('script');
+            localScript.src = '/lcars-target.local.js?' + Date.now();
+            localScript.onload = function() { window.LCARS_TARGET_LOADED = true; };
+            localScript.onerror = function() { window.LCARS_TARGET_LOADED = true; };
+            document.head.appendChild(localScript);
         };
         script.onerror = function() {
             window.LCARS_TARGET_LOADED = true;

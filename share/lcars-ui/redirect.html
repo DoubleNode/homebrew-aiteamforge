@@ -7,13 +7,26 @@
     <meta http-equiv="Expires" content="0">
     <title>LCARS Router</title>
     <script>
-        // Load lcars-target.js with cache busting and proper onload handling
+        // Load lcars-target.js with cache busting and proper onload handling.
+        // XACA-0301: after the default loads, attempt /lcars-target.local.js
+        // (per-machine override served from ~/.aiteamforge/lcars-target.local.js).
+        // Chained — not parallel — to guarantee the override executes AFTER
+        // the default and can replace LCARS_TARGET_TEAM / LCARS_TARGET_SESSION.
         window.LCARS_TARGET_LOADED = false;
         const script = document.createElement('script');
         script.src = 'lcars-target.js?' + Date.now();
         script.onload = function() {
-            window.LCARS_TARGET_LOADED = true;
-            console.log('[Router] lcars-target.js loaded, team:', window.LCARS_TARGET_TEAM);
+            const localScript = document.createElement('script');
+            localScript.src = '/lcars-target.local.js?' + Date.now();
+            localScript.onload = function() {
+                window.LCARS_TARGET_LOADED = true;
+                console.log('[Router] lcars-target.js + .local.js loaded, team:', window.LCARS_TARGET_TEAM);
+            };
+            localScript.onerror = function() {
+                window.LCARS_TARGET_LOADED = true;
+                console.log('[Router] lcars-target.js loaded (no local override), team:', window.LCARS_TARGET_TEAM);
+            };
+            document.head.appendChild(localScript);
         };
         script.onerror = function() {
             console.log('[Router] Failed to load lcars-target.js');
