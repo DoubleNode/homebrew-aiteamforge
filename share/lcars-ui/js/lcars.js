@@ -16884,6 +16884,8 @@ let exportPollingInterval = null;
 let currentImportJobId = null;
 let importPollingInterval = null;
 let stagedImportFile = null;
+let currentSecretsExportJobId = null;
+let secretsExportPollingInterval = null;
 
 function initExportImportPanel() {
     const teamEl = document.getElementById('export-team-label');
@@ -17002,6 +17004,227 @@ function downloadTeamExport() {
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+}
+
+// ───── SECRETS EXPORT ─────
+
+function toggleSecretsExportPanel() {
+    const toggle = document.getElementById('secrets-export-toggle');
+    const panel  = document.getElementById('secrets-export-panel');
+    if (!toggle || !panel) return;
+    panel.style.display = toggle.checked ? 'block' : 'none';
+    if (!toggle.checked) {
+        resetSecretsExportUI();
+    }
+}
+
+function validateSecretsPasswords() {
+    const pw1 = document.getElementById('secrets-export-password');
+    const pw2 = document.getElementById('secrets-export-password-confirm');
+    const btn = document.getElementById('secrets-export-btn');
+    if (!pw1 || !pw2 || !btn) return;
+    const valid = pw1.value.length > 0 && pw1.value === pw2.value;
+    btn.disabled = !valid;
+}
+
+async function startSecretsExport() {
+    if (secretsExportPollingInterval) return;
+
+    const btn           = document.getElementById('secrets-export-btn');
+    const pw1El         = document.getElementById('secrets-export-password');
+    const pw2El         = document.getElementById('secrets-export-password-confirm');
+    const progressEl    = document.getElementById('secrets-export-progress');
+    const downloadEl    = document.getElementById('secrets-export-download');
+    const statusMsgEl   = document.getElementById('secrets-export-status-msg');
+
+    const password = pw1El ? pw1El.value : '';
+
+    if (!password) return;
+
+    if (btn) btn.disabled = true;
+    if (progressEl) progressEl.style.display = 'block';
+    if (downloadEl) downloadEl.style.display = 'none';
+    if (statusMsgEl) statusMsgEl.style.display = 'none';
+
+    updateSecretsExportProgress(0, 'ENCRYPTING...', 'Initializing...');
+
+    const body = {
+        team: CONFIG.team,
+        password: password
+    };
+    if (currentExportJobId) {
+        body.pairedExportId = currentExportJobId;
+    }
+
+    // Zero password from DOM immediately — before any await
+    if (pw1El) pw1El.value = '';
+    if (pw2El) pw2El.value = '';
+    let pw = password;
+
+    try {
+        const response = await fetch('/api/export/secrets/create', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body)
+        });
+        // Zero the local variable regardless of outcome
+        pw = '';
+        body.password = '';
+
+        const data = await response.json();
+        if (!response.ok) {
+            updateSecretsExportProgress(0, 'FAILED', data.error || 'Request failed');
+            if (statusMsgEl) {
+                statusMsgEl.textContent = `Secrets export failed: ${data.error || 'unknown error'}`;
+                statusMsgEl.style.display = 'block';
+            }
+            if (btn) btn.disabled = false;
+            return;
+        }
+        currentSecretsExportJobId = data.jobId;
+        secretsExportPollingInterval = setInterval(
+            () => pollSecretsExportStatus(data.jobId),
+            1500
+        );
+    } catch (error) {
+        pw = '';
+        body.password = '';
+        console.error('Secrets export request failed:', error);
+        updateSecretsExportProgress(0, 'FAILED', 'Network error');
+        if (statusMsgEl) {
+            statusMsgEl.textContent = 'Secrets export request failed — check network.';
+            statusMsgEl.style.display = 'block';
+        }
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function pollSecretsExportStatus(jobId) {
+    try {
+        const response = await fetch(`/api/export/secrets/status/${jobId}`);
+        const data = await response.json();
+
+        if (!response.ok) {
+            stopSecretsExportPolling();
+            const btn = document.getElementById('secrets-export-btn');
+            if (btn) btn.disabled = false;
+            return;
+        }
+
+        updateSecretsExportProgress(data.progress || 0, 'ENCRYPTING...', data.message || '');
+
+        if (data.status === 'completed') {
+            stopSecretsExportPolling();
+            const downloadEl  = document.getElementById('secrets-export-download');
+            const filenameEl  = document.getElementById('secrets-export-download-filename');
+            const sizeEl      = document.getElementById('secrets-export-download-size');
+            const statusMsgEl = document.getElementById('secrets-export-status-msg');
+            const panel       = document.getElementById('secrets-export-panel');
+            const toggle      = document.getElementById('secrets-export-toggle');
+
+            updateSecretsExportProgress(100, 'COMPLETE', data.message || 'Secrets zip ready');
+
+            if (filenameEl) filenameEl.textContent = data.filename || '--';
+            if (sizeEl)     sizeEl.textContent = data.fileSize || '--';
+            if (downloadEl) downloadEl.style.display = 'flex';
+
+            // Hide opt-in and password fields now that download is ready
+            const fieldsEl = panel ? panel.querySelector('.secrets-export-fields') : null;
+            if (fieldsEl) fieldsEl.style.display = 'none';
+            const generateActionsEl = panel ? panel.querySelector('.export-actions') : null;
+            if (generateActionsEl) generateActionsEl.style.display = 'none';
+
+            if (statusMsgEl) {
+                statusMsgEl.textContent = 'Encrypted secrets zip ready. Store separately from the main export and share the password through a secure channel.';
+                statusMsgEl.style.display = 'block';
+                statusMsgEl.className = 'secrets-export-status-msg secrets-info';
+            }
+
+        } else if (data.status === 'skipped') {
+            stopSecretsExportPolling();
+            const progressEl  = document.getElementById('secrets-export-progress');
+            const statusMsgEl = document.getElementById('secrets-export-status-msg');
+            const btn         = document.getElementById('secrets-export-btn');
+
+            if (progressEl) progressEl.style.display = 'none';
+            if (statusMsgEl) {
+                statusMsgEl.textContent = 'No secrets directory found for this team — secrets export skipped.';
+                statusMsgEl.style.display = 'block';
+                statusMsgEl.className = 'secrets-export-status-msg secrets-info';
+            }
+            if (btn) btn.disabled = false;
+
+        } else if (data.status === 'failed') {
+            stopSecretsExportPolling();
+            const btn         = document.getElementById('secrets-export-btn');
+            const statusMsgEl = document.getElementById('secrets-export-status-msg');
+
+            updateSecretsExportProgress(0, 'FAILED', data.message || 'Secrets export failed');
+            if (statusMsgEl) {
+                statusMsgEl.textContent = `Secrets export failed: ${data.error || data.message || 'unknown error'}`;
+                statusMsgEl.style.display = 'block';
+                statusMsgEl.className = 'secrets-export-status-msg secrets-error';
+            }
+            if (btn) btn.disabled = false;
+        }
+    } catch (error) {
+        console.error('Secrets export poll error:', error);
+    }
+}
+
+function stopSecretsExportPolling() {
+    if (secretsExportPollingInterval) {
+        clearInterval(secretsExportPollingInterval);
+        secretsExportPollingInterval = null;
+    }
+}
+
+function updateSecretsExportProgress(percent, label, message) {
+    const bar     = document.getElementById('secrets-export-progress-bar');
+    const pctEl   = document.getElementById('secrets-export-progress-percent');
+    const labelEl = document.getElementById('secrets-export-progress-label');
+    const msgEl   = document.getElementById('secrets-export-progress-message');
+    if (bar)     { bar.style.width = `${percent}%`; }
+    if (pctEl)   pctEl.textContent = `${percent}%`;
+    if (labelEl) labelEl.textContent = label;
+    if (msgEl)   msgEl.textContent = message;
+    const container = bar ? bar.closest('.progress-bar-container') : null;
+    if (container) container.setAttribute('aria-valuenow', percent);
+}
+
+function downloadSecretsExport() {
+    if (!currentSecretsExportJobId) return;
+    window.location.href = `/api/export/secrets/download/${currentSecretsExportJobId}`;
+}
+
+function resetSecretsExportUI() {
+    stopSecretsExportPolling();
+    currentSecretsExportJobId = null;
+
+    const pw1El       = document.getElementById('secrets-export-password');
+    const pw2El       = document.getElementById('secrets-export-password-confirm');
+    const btn         = document.getElementById('secrets-export-btn');
+    const progressEl  = document.getElementById('secrets-export-progress');
+    const downloadEl  = document.getElementById('secrets-export-download');
+    const statusMsgEl = document.getElementById('secrets-export-status-msg');
+    const panel       = document.getElementById('secrets-export-panel');
+
+    if (pw1El) pw1El.value = '';
+    if (pw2El) pw2El.value = '';
+    if (btn)   btn.disabled = true;
+    if (progressEl)  progressEl.style.display = 'none';
+    if (downloadEl)  downloadEl.style.display = 'none';
+    if (statusMsgEl) statusMsgEl.style.display = 'none';
+
+    // Restore fields visibility in case they were hidden after complete
+    if (panel) {
+        const fieldsEl = panel.querySelector('.secrets-export-fields');
+        if (fieldsEl) fieldsEl.style.display = '';
+        const generateActionsEl = panel.querySelector('.export-actions');
+        if (generateActionsEl) generateActionsEl.style.display = '';
+    }
+
+    updateSecretsExportProgress(0, 'ENCRYPTING...', 'Initializing...');
 }
 
 // ───── IMPORT ─────
@@ -17204,6 +17427,353 @@ function onImportFailed(data) {
 
     const btn = document.getElementById('import-btn');
     if (btn) btn.disabled = false;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// SECRETS IMPORT — encrypted zip with password (XACA-0172-005)
+// ═══════════════════════════════════════════════════════════════════
+
+let currentSecretsImportJobId = null;
+let secretsImportPollingInterval = null;
+// NOTE: password is kept in the DOM input only; never stored in a JS variable
+//       beyond the brief window of the fetch call.
+
+function handleSecretsImportFileSelected(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+        alert('Please select a .zip file.');
+        input.value = '';
+        return;
+    }
+    uploadSecretsImportFile(file);
+}
+
+async function uploadSecretsImportFile(file) {
+    const selectBtn = document.getElementById('secretsImport-select-btn');
+    if (selectBtn) selectBtn.disabled = true;
+
+    // Resolve team from the server config (same source as the main import handler)
+    const team = (window.serverConfig && window.serverConfig.team) || '';
+
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('team', team);
+
+    try {
+        const response = await fetch('/api/import/secrets/upload', {
+            method: 'POST',
+            body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok) {
+            alert(`Secrets upload failed: ${data.error || 'unknown error'}`);
+            if (selectBtn) selectBtn.disabled = false;
+            return;
+        }
+        // Backend returns { jobId, status: "awaiting-password" }
+        currentSecretsImportJobId = data.jobId;
+
+        // Hide file picker, show password panel
+        const fileArea = document.getElementById('secretsImport-file-area');
+        const pwPanel  = document.getElementById('secretsImport-password-panel');
+        if (fileArea) fileArea.style.display = 'none';
+        if (pwPanel)  pwPanel.style.display  = 'block';
+
+        const pwInput = document.getElementById('secretsImport-password-input');
+        if (pwInput) { pwInput.value = ''; pwInput.focus(); }
+
+        const errEl = document.getElementById('secretsImport-password-error');
+        if (errEl) errEl.style.display = 'none';
+    } catch (err) {
+        console.error('Secrets upload error:', err);
+        alert('Secrets upload failed — see console');
+        if (selectBtn) selectBtn.disabled = false;
+    }
+}
+
+async function verifySecretsImportPassword() {
+    if (!currentSecretsImportJobId) return;
+
+    const pwInput  = document.getElementById('secretsImport-password-input');
+    const errEl    = document.getElementById('secretsImport-password-error');
+    const verifyBtn = document.getElementById('secretsImport-verify-btn');
+
+    const password = pwInput ? pwInput.value : '';
+    if (!password) {
+        if (errEl) { errEl.textContent = 'Password is required.'; errEl.style.display = 'block'; }
+        if (pwInput) pwInput.focus();
+        return;
+    }
+
+    if (verifyBtn) verifyBtn.disabled = true;
+    if (errEl) errEl.style.display = 'none';
+
+    try {
+        const response = await fetch(`/api/import/secrets/preflight/${currentSecretsImportJobId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password }),
+        });
+        const data = await response.json();
+
+        if (!response.ok) {
+            // Wrong password (HTTP 400) — show inline error, keep panel open for retry.
+            // If budget exhausted the server returns a different error string and the
+            // job transitions to 'failed', so _resetSecretsImportToFileArea() is called.
+            let msg = data.error || 'Wrong password — please try again.';
+            if (
+                data.error === 'Too many failed password attempts. Re-upload the secrets zip to try again.' ||
+                (typeof data.error === 'string' && data.error.startsWith('Too many failed password attempts'))
+            ) {
+                if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+                // Budget exhausted — return to file picker so user can re-upload.
+                setTimeout(() => _resetSecretsImportToFileArea(), 3000);
+                return;
+            }
+            if (typeof data.attemptsRemaining === 'number') {
+                msg += ` (${data.attemptsRemaining} attempt${data.attemptsRemaining !== 1 ? 's' : ''} remaining)`;
+            }
+            if (errEl) { errEl.textContent = msg; errEl.style.display = 'block'; }
+            // Clear the input so user knows to re-type
+            if (pwInput) { pwInput.value = ''; pwInput.focus(); }
+            if (verifyBtn) verifyBtn.disabled = false;
+            return;
+        }
+
+        // Success — password stays populated so apply can reuse it
+        // Show preflight panel
+        const pwPanel       = document.getElementById('secretsImport-password-panel');
+        const preflightPanel = document.getElementById('secretsImport-preflight-panel');
+        if (pwPanel)        pwPanel.style.display        = 'none';
+        if (preflightPanel) preflightPanel.style.display = 'block';
+
+        renderSecretsImportPreflight(data.manifest || {}, data.fileCount, data.targetTeam, data.warning);
+    } catch (err) {
+        console.error('Secrets preflight error:', err);
+        if (errEl) { errEl.textContent = 'Network error — see console.'; errEl.style.display = 'block'; }
+        if (pwInput) { pwInput.value = ''; pwInput.focus(); }
+        if (verifyBtn) verifyBtn.disabled = false;
+    }
+}
+
+function renderSecretsImportPreflight(manifest, fileCount, targetTeam, teamWarning) {
+    const grid = document.getElementById('secretsImport-preflight-grid');
+    if (!grid) return;
+
+    while (grid.firstChild) grid.removeChild(grid.firstChild);
+
+    function addRow(key, value, cls) {
+        const row   = document.createElement('div'); row.className = 'preflight-row' + (cls ? ' ' + cls : '');
+        const kEl   = document.createElement('span'); kEl.className = 'preflight-key';   kEl.textContent = key;
+        const vEl   = document.createElement('span'); vEl.className = 'preflight-value'; vEl.textContent = value || '--';
+        row.appendChild(kEl); row.appendChild(vEl);
+        grid.appendChild(row);
+    }
+
+    addRow('Source Team',   manifest.team        || '--');
+    addRow('Target Team',   targetTeam           || manifest.team || '--');
+    addRow('Source Host',   manifest.sourceHost  || '--');
+    addRow('File Count',    fileCount != null ? String(fileCount) : '--');
+    addRow('Target Root',   manifest.targetRoot  || '--');
+
+    // Team mismatch warning — warn-only, cross-team transfer is allowed
+    if (teamWarning) {
+        addRow('WARNING', teamWarning, 'preflight-row-warning');
+    }
+
+    // Per-source target paths
+    const sources = Array.isArray(manifest.sources) ? manifest.sources : [];
+    sources.forEach((src, i) => {
+        const label = `Source ${i + 1} Path`;
+        const files = src.fileCount != null ? ` (${src.fileCount} file${src.fileCount !== 1 ? 's' : ''})` : '';
+        addRow(label, (src.target || '--') + files);
+    });
+}
+
+async function applySecretsImport() {
+    if (!currentSecretsImportJobId) return;
+
+    // Re-read password from input (it was kept populated after verify)
+    const pwInput  = document.getElementById('secretsImport-password-input');
+    const password = pwInput ? pwInput.value : '';
+    if (!password) {
+        // Shouldn't normally reach here, but guard anyway
+        const preflightPanel = document.getElementById('secretsImport-preflight-panel');
+        const pwPanel        = document.getElementById('secretsImport-password-panel');
+        const errEl          = document.getElementById('secretsImport-password-error');
+        if (preflightPanel) preflightPanel.style.display = 'none';
+        if (pwPanel) pwPanel.style.display = 'block';
+        if (errEl) { errEl.textContent = 'Session expired — please re-enter password.'; errEl.style.display = 'block'; }
+        if (pwInput) { pwInput.value = ''; pwInput.focus(); }
+        return;
+    }
+
+    const preflightPanel = document.getElementById('secretsImport-preflight-panel');
+    const progressEl     = document.getElementById('secretsImport-progress');
+    const resultEl       = document.getElementById('secretsImport-result');
+    if (preflightPanel) preflightPanel.style.display = 'none';
+    if (progressEl)     progressEl.style.display     = 'block';
+    if (resultEl)       resultEl.style.display       = 'none';
+
+    updateSecretsImportProgress(0, 'EXTRACTING...', 'Starting...');
+
+    try {
+        const response = await fetch(`/api/import/secrets/apply/${currentSecretsImportJobId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password }),
+        });
+
+        // Zero the password from the input immediately after the POST
+        if (pwInput) pwInput.value = '';
+
+        const data = await response.json();
+        if (!response.ok) {
+            if (progressEl) progressEl.style.display = 'none';
+            alert(`Secrets extraction failed: ${data.error || 'unknown error'}`);
+            _resetSecretsImportToFileArea();
+            return;
+        }
+        // data.status === "applying" — start polling
+        secretsImportPollingInterval = setInterval(
+            () => pollSecretsImportStatus(currentSecretsImportJobId), 1500
+        );
+    } catch (err) {
+        console.error('Secrets apply error:', err);
+        if (pwInput) pwInput.value = '';
+        if (progressEl) progressEl.style.display = 'none';
+        alert('Secrets extraction request failed — see console');
+        _resetSecretsImportToFileArea();
+    }
+}
+
+async function pollSecretsImportStatus(jobId) {
+    try {
+        const response = await fetch(`/api/import/secrets/status/${jobId}`);
+        const data = await response.json();
+        if (!response.ok) {
+            stopSecretsImportPolling();
+            return;
+        }
+        updateSecretsImportProgress(data.progress || 0, 'EXTRACTING...', data.message || '');
+
+        if (data.status === 'completed') {
+            stopSecretsImportPolling();
+            _onSecretsImportComplete(data);
+        } else if (data.status === 'failed') {
+            stopSecretsImportPolling();
+            _onSecretsImportFailed(data);
+        }
+    } catch (err) {
+        console.error('Secrets import poll error:', err);
+    }
+}
+
+function stopSecretsImportPolling() {
+    if (secretsImportPollingInterval) {
+        clearInterval(secretsImportPollingInterval);
+        secretsImportPollingInterval = null;
+    }
+}
+
+function updateSecretsImportProgress(percent, label, message) {
+    const bar    = document.getElementById('secretsImport-progress-bar');
+    const pctEl  = document.getElementById('secretsImport-progress-percent');
+    const lblEl  = document.getElementById('secretsImport-progress-label');
+    const msgEl  = document.getElementById('secretsImport-progress-message');
+    const prog   = document.getElementById('secretsImport-progress');
+    if (bar)    bar.style.width     = `${percent}%`;
+    if (pctEl)  pctEl.textContent   = `${percent}%`;
+    if (lblEl)  lblEl.textContent   = label;
+    if (msgEl)  msgEl.textContent   = message;
+    if (prog)   prog.setAttribute('aria-valuenow', String(percent));
+}
+
+function _onSecretsImportComplete(data) {
+    const progressEl = document.getElementById('secretsImport-progress');
+    const resultEl   = document.getElementById('secretsImport-result');
+    const titleEl    = document.getElementById('secretsImport-result-title');
+    const statsEl    = document.getElementById('secretsImport-result-stats');
+
+    updateSecretsImportProgress(100, 'COMPLETE', 'Extraction complete');
+    if (progressEl) progressEl.style.display = 'none';
+    if (resultEl)   resultEl.style.display   = 'block';
+    if (titleEl)    titleEl.textContent       = '✓ EXTRACTION COMPLETE';
+
+    if (statsEl) {
+        while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+        const targetRoot  = (data.manifest && data.manifest.targetRoot) || '';
+        const fileCount   = data.fileCount != null ? data.fileCount : (data.manifest && data.manifest.fileCount);
+        const countStr    = fileCount != null ? `${fileCount} file${fileCount !== 1 ? 's' : ''}` : 'files';
+        const msg = targetRoot
+            ? `Extracted ${countStr} to ${targetRoot}. Files placed in their original locations.`
+            : `Extracted ${countStr}. Files placed in their original locations.`;
+        const div = document.createElement('div'); div.textContent = msg;
+        statsEl.appendChild(div);
+    }
+
+    // Re-enable the file picker for another import
+    _resetSecretsImportToFileArea();
+}
+
+function _onSecretsImportFailed(data) {
+    const progressEl = document.getElementById('secretsImport-progress');
+    const resultEl   = document.getElementById('secretsImport-result');
+    const titleEl    = document.getElementById('secretsImport-result-title');
+    const statsEl    = document.getElementById('secretsImport-result-stats');
+
+    if (progressEl) progressEl.style.display = 'none';
+    if (resultEl)   resultEl.style.display   = 'block';
+    if (titleEl)    titleEl.textContent       = '✗ EXTRACTION FAILED';
+
+    if (statsEl) {
+        while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+        const div = document.createElement('div'); div.textContent = data.error || data.message || 'Unknown error';
+        statsEl.appendChild(div);
+    }
+
+    // If the error indicates wrong password, drop back to password panel for retry
+    const errMsg = data.error || '';
+    if (errMsg === 'Wrong password — please try again.' || data.status === 'awaiting-password') {
+        if (resultEl) resultEl.style.display = 'none';
+        const pwPanel = document.getElementById('secretsImport-password-panel');
+        const errEl   = document.getElementById('secretsImport-password-error');
+        if (pwPanel) pwPanel.style.display = 'block';
+        if (errEl)   { errEl.textContent = errMsg || 'Wrong password — please try again.'; errEl.style.display = 'block'; }
+        const pwInput = document.getElementById('secretsImport-password-input');
+        if (pwInput) { pwInput.value = ''; pwInput.focus(); }
+    } else {
+        _resetSecretsImportToFileArea();
+    }
+}
+
+function cancelSecretsImport() {
+    stopSecretsImportPolling();
+    currentSecretsImportJobId = null;
+    _resetSecretsImportToFileArea();
+}
+
+function _resetSecretsImportToFileArea() {
+    const fileArea      = document.getElementById('secretsImport-file-area');
+    const pwPanel       = document.getElementById('secretsImport-password-panel');
+    const preflightPanel = document.getElementById('secretsImport-preflight-panel');
+    const progressEl    = document.getElementById('secretsImport-progress');
+    const fileInput     = document.getElementById('secretsImport-file-input');
+    const selectBtn     = document.getElementById('secretsImport-select-btn');
+    const pwInput       = document.getElementById('secretsImport-password-input');
+    const errEl         = document.getElementById('secretsImport-password-error');
+    const verifyBtn     = document.getElementById('secretsImport-verify-btn');
+
+    if (fileArea)       fileArea.style.display       = 'block';
+    if (pwPanel)        pwPanel.style.display        = 'none';
+    if (preflightPanel) preflightPanel.style.display = 'none';
+    if (progressEl)     progressEl.style.display     = 'none';
+    if (fileInput)      fileInput.value              = '';
+    if (selectBtn)      selectBtn.disabled           = false;
+    if (pwInput)        pwInput.value                = '';
+    if (errEl)          errEl.style.display          = 'none';
+    if (verifyBtn)      verifyBtn.disabled           = false;
 }
 
 document.addEventListener('DOMContentLoaded', async () => {

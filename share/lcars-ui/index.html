@@ -874,6 +874,88 @@
                         </button>
                     </div>
 
+                    <!-- SECRETS EXPORT SUBSECTION -->
+                    <div class="section-header cyan" style="margin-top: 28px;">
+                        <span class="section-title">SECRETS EXPORT (OPTIONAL)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="export-description">
+                        Encrypted secrets travel in a SEPARATE zip — credentials never ride inside the main
+                        data export. Transfer-only; not a backup.
+                    </div>
+
+                    <div class="secrets-export-optin">
+                        <label class="lcars-toggle-label" for="secrets-export-toggle">
+                            <input type="checkbox" id="secrets-export-toggle"
+                                   onchange="toggleSecretsExportPanel()"
+                                   aria-controls="secrets-export-panel">
+                            Include team secrets in this export
+                        </label>
+                    </div>
+
+                    <div id="secrets-export-panel" style="display: none; margin-top: 14px;">
+                        <div class="secrets-export-fields">
+                            <div class="secrets-field-row">
+                                <label class="secrets-field-label" for="secrets-export-password">Password</label>
+                                <input type="password" id="secrets-export-password"
+                                       class="lcars-text-input secrets-password-input"
+                                       autocomplete="new-password"
+                                       placeholder="Enter encryption password"
+                                       oninput="validateSecretsPasswords()"
+                                       aria-label="Secrets export password">
+                            </div>
+                            <div class="secrets-field-row">
+                                <label class="secrets-field-label" for="secrets-export-password-confirm">Confirm</label>
+                                <input type="password" id="secrets-export-password-confirm"
+                                       class="lcars-text-input secrets-password-input"
+                                       autocomplete="new-password"
+                                       placeholder="Confirm encryption password"
+                                       oninput="validateSecretsPasswords()"
+                                       aria-label="Confirm secrets export password">
+                            </div>
+                            <div class="secrets-strength-hint">
+                                Minimum 12 characters recommended. The same password is required to import
+                                on the destination machine.
+                            </div>
+                        </div>
+
+                        <div class="export-actions" style="margin-top: 12px;">
+                            <button class="lcars-button export-btn" id="secrets-export-btn"
+                                    onclick="startSecretsExport()"
+                                    disabled
+                                    aria-label="Generate encrypted secrets zip">
+                                GENERATE ENCRYPTED SECRETS ZIP
+                            </button>
+                        </div>
+
+                        <div class="export-progress" id="secrets-export-progress" style="display: none;">
+                            <div class="progress-header">
+                                <span class="progress-label" id="secrets-export-progress-label">ENCRYPTING...</span>
+                                <span class="progress-percent" id="secrets-export-progress-percent">0%</span>
+                            </div>
+                            <div class="progress-bar-container" role="progressbar"
+                                 aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                                 aria-label="Secrets export progress">
+                                <div class="progress-bar" id="secrets-export-progress-bar" style="width: 0%"></div>
+                            </div>
+                            <div class="progress-message" id="secrets-export-progress-message">Initializing...</div>
+                        </div>
+
+                        <div class="export-download" id="secrets-export-download" style="display: none;">
+                            <div class="download-info">
+                                <span class="download-filename" id="secrets-export-download-filename">--</span>
+                                <span class="download-size" id="secrets-export-download-size">--</span>
+                            </div>
+                            <button class="lcars-button export-download-btn" id="secrets-export-download-btn"
+                                    onclick="downloadSecretsExport()"
+                                    aria-label="Download encrypted secrets zip">
+                                DOWNLOAD SECRETS
+                            </button>
+                        </div>
+
+                        <div class="secrets-export-status-msg" id="secrets-export-status-msg" style="display: none;"></div>
+                    </div>
+
                     <!-- IMPORT SUBSECTION -->
                     <div class="section-header cyan" style="margin-top: 20px;">
                         <span class="section-title">IMPORT INTO THIS TEAM</span>
@@ -926,6 +1008,89 @@
                     <div class="import-result" id="import-result" style="display: none;">
                         <div class="result-title" id="import-result-title">IMPORT COMPLETE</div>
                         <div class="result-stats" id="import-result-stats"></div>
+                    </div>
+
+                    <!-- SECRETS IMPORT SUBSECTION (XACA-0172-005) -->
+                    <div class="section-header cyan" style="margin-top: 28px;">
+                        <span class="section-title">SECRETS IMPORT (ENCRYPTED ZIP)</span>
+                        <div class="section-bar"></div>
+                    </div>
+                    <div class="import-description">
+                        Upload a secrets zip exported from another machine. The zip is AES-encrypted
+                        and requires the password set at export time. Files are restored to their
+                        original absolute paths.
+                    </div>
+
+                    <!-- File picker -->
+                    <div class="import-actions" id="secretsImport-file-area">
+                        <input type="file" id="secretsImport-file-input" accept=".zip" style="display: none;"
+                               onchange="handleSecretsImportFileSelected(this)">
+                        <button class="lcars-button import-btn" id="secretsImport-select-btn"
+                                onclick="document.getElementById('secretsImport-file-input').click()"
+                                aria-label="Select encrypted secrets zip to import">
+                            SELECT SECRETS ZIP
+                        </button>
+                    </div>
+
+                    <!-- Password panel -->
+                    <div class="import-preflight" id="secretsImport-password-panel" style="display: none;">
+                        <div class="preflight-header">ENTER PASSWORD</div>
+                        <div style="margin: 10px 0;">
+                            <input type="password" id="secretsImport-password-input"
+                                   autocomplete="current-password"
+                                   placeholder="Encryption password"
+                                   style="width: 100%; box-sizing: border-box; padding: 8px; background: #111; color: #9cf; border: 1px solid #336; font-family: inherit; font-size: 0.95em;"
+                                   onkeydown="if(event.key==='Enter') verifySecretsImportPassword()">
+                        </div>
+                        <div id="secretsImport-password-error"
+                             style="display: none; color: #f66; margin: 4px 0 8px; font-size: 0.9em;"></div>
+                        <div class="import-confirm-actions">
+                            <button class="lcars-button import-cancel-btn"
+                                    onclick="cancelSecretsImport()"
+                                    aria-label="Cancel secrets import">CANCEL</button>
+                            <button class="lcars-button import-apply-btn"
+                                    id="secretsImport-verify-btn"
+                                    onclick="verifySecretsImportPassword()"
+                                    aria-label="Verify password">VERIFY PASSWORD</button>
+                        </div>
+                    </div>
+
+                    <!-- Preflight panel -->
+                    <div class="import-preflight" id="secretsImport-preflight-panel" style="display: none;">
+                        <div class="preflight-header">PRE-FLIGHT — SECRETS</div>
+                        <div class="preflight-grid" id="secretsImport-preflight-grid"></div>
+                        <div class="preflight-warning">
+                            &#x26A0; Files will be written to the paths shown above. If any target file already exists, the import hard-fails and no files are written — remove or rename the existing file and re-import.
+                        </div>
+                        <div class="import-confirm-actions">
+                            <button class="lcars-button import-cancel-btn"
+                                    onclick="cancelSecretsImport()"
+                                    aria-label="Cancel secrets import">CANCEL</button>
+                            <button class="lcars-button import-apply-btn"
+                                    id="secretsImport-apply-btn"
+                                    onclick="applySecretsImport()"
+                                    aria-label="Extract secrets">EXTRACT SECRETS</button>
+                        </div>
+                    </div>
+
+                    <!-- Progress bar -->
+                    <div class="import-progress" id="secretsImport-progress" style="display: none;">
+                        <div class="progress-header">
+                            <span class="progress-label" id="secretsImport-progress-label">EXTRACTING...</span>
+                            <span class="progress-percent" id="secretsImport-progress-percent">0%</span>
+                        </div>
+                        <div class="progress-bar-container" role="progressbar"
+                             aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"
+                             aria-label="Secrets extraction progress">
+                            <div class="progress-bar" id="secretsImport-progress-bar" style="width: 0%"></div>
+                        </div>
+                        <div class="progress-message" id="secretsImport-progress-message">Initializing...</div>
+                    </div>
+
+                    <!-- Result / status message -->
+                    <div class="import-result" id="secretsImport-result" style="display: none;">
+                        <div class="result-title" id="secretsImport-result-title">EXTRACTION COMPLETE</div>
+                        <div class="result-stats" id="secretsImport-result-stats"></div>
                     </div>
                 </section>
 

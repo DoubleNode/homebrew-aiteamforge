@@ -1,0 +1,6 @@
+# lcars-ui Python dependencies
+#
+# pyzipper: AES-256 encrypted zip support for secrets export (XACA-0172).
+# NOTE: On shipped machines this is materialized by the homebrew-tap post_install
+# hook — do not add that hook in this repo (homebrew-tap is a separate repo).
+pyzipper>=0.3.6
