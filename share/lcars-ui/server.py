@@ -109,6 +109,25 @@ except ImportError as e:
     CCUSAGE_HEURISTICS_AVAILABLE = False
     print(f"[LCARS] Warning: ccusage_heuristics not available: {e}")
 
+# Import secrets export contract layer (XACA-0172) — same directory as server.py
+try:
+    from secrets_export_lib import (
+        discover_secrets_sources,
+        pyzipper_available,
+        SECRETS_EXPORT_MANIFEST_KIND,
+        SECRETS_EXPORT_MANIFEST_VERSION,
+    )
+    SECRETS_EXPORT_LIB_AVAILABLE = True
+except ImportError as e:
+    SECRETS_EXPORT_LIB_AVAILABLE = False
+    print(f"[LCARS] Warning: secrets_export_lib not available: {e}")
+    def discover_secrets_sources(team_id):  # type: ignore[misc]
+        return {"sources": [], "target_root": "secrets/", "manifest_used": "auto"}
+    def pyzipper_available():  # type: ignore[misc]
+        return False
+    SECRETS_EXPORT_MANIFEST_KIND = "lcars-team-secrets"
+    SECRETS_EXPORT_MANIFEST_VERSION = "1.0"
+
 # Configuration
 DEFAULT_PORT = 8080
 BACKUP_DIR = Path.home() / "aiteamforge-backups" / "kanban"
@@ -167,10 +186,40 @@ TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 
 # Archive job tracking
-EXPORT_JOBS = {}   # {job_id: {status, progress, message, filename, fileSize, error, ...}}
-IMPORT_JOBS = {}   # {job_id: {status, progress, message, manifest, stagedPath, ...}}
+EXPORT_JOBS = {}         # {job_id: {status, progress, message, filename, fileSize, error, ...}}
+SECRETS_EXPORT_JOBS = {} # {job_id: {status, progress, message, filename, fileSize, error, pairedExportId, manifestUsed, ...}}
+IMPORT_JOBS = {}         # {job_id: {status, progress, message, manifest, stagedPath, ...}}
+SECRETS_IMPORT_JOBS = {} # {job_id: {status, progress, message, manifest, stagedPath, targetTeam, fileCount, createdAt, error, wrongPasswordAttempts, ...}}
 EXPORT_DIR = Path("/tmp/lcars-exports")
 IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
+SECRETS_IMPORT_STAGING_DIR = Path("/tmp/lcars-secrets-imports")
+
+# Maximum wrong-password attempts before the staged zip is purged (item 6 spec).
+_SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS = 5
+
+
+def _prune_old_secrets_jobs():
+    """Prune completed/failed/skipped secrets jobs older than 1 hour from both dicts.
+
+    Called at the start of each create-handler so the dicts don't grow unbounded
+    across long-running server sessions.  Mirrors the TTL pattern in handle_create_export().
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    terminal_states = ('completed', 'failed', 'skipped')
+
+    for jobs_dict in (SECRETS_EXPORT_JOBS, SECRETS_IMPORT_JOBS):
+        stale = [
+            jid for jid, jdata in jobs_dict.items()
+            if jdata.get('status') in terminal_states
+            and (
+                now - datetime.fromisoformat(
+                    jdata.get('createdAt', now.isoformat()).replace('Z', '+00:00')
+                )
+            ).total_seconds() > 3600
+        ]
+        for jid in stale:
+            del jobs_dict[jid]
 
 # ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
 CCUSAGE_CACHE_PATH = "/tmp/lcars-ccusage-cache.json"
@@ -467,6 +516,196 @@ def generate_export(job_id, team_id):
         })
 
 
+def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
+    """Generate a per-team AES-256 password-protected secrets zip (runs in background thread).
+
+    XACA-0172-002: secrets are discovered via discover_secrets_sources(), encrypted
+    with pyzipper (WZ_AES), and a manifest is appended as the last entry in the zip.
+    The password is held only in local worker memory and is never stored or logged.
+
+    Args:
+        job_id:           UUID for this job (key into SECRETS_EXPORT_JOBS).
+        team_id:          LCARS_TEAM value (e.g. "academy", "ios").
+        password:         Encryption password — held in local scope only.
+        paired_export_id: Optional job_id of the concurrently-created main export.
+    """
+    import socket
+    from datetime import datetime, timezone
+
+    staged_path = None
+    try:
+        # ------------------------------------------------------------------ #
+        # 1. Dependency check                                                  #
+        # ------------------------------------------------------------------ #
+        if not pyzipper_available():
+            SECRETS_EXPORT_JOBS[job_id].update({
+                'status': 'failed',
+                'progress': 0,
+                'message': 'pyzipper dependency missing',
+                'error': (
+                    "pyzipper dependency missing — install via "
+                    "'pip install pyzipper' or reinstall the AITeamForge tap"
+                ),
+            })
+            return
+
+        import pyzipper
+
+        # ------------------------------------------------------------------ #
+        # 2. Discover secrets sources                                          #
+        # ------------------------------------------------------------------ #
+        SECRETS_EXPORT_JOBS[job_id]['message'] = 'Discovering secrets sources...'
+        SECRETS_EXPORT_JOBS[job_id]['progress'] = 5
+
+        discovery = discover_secrets_sources(team_id)
+        sources = discovery.get("sources", [])
+        target_root = discovery.get("target_root", "secrets/")
+        manifest_used = discovery.get("manifest_used", "auto")
+
+        # Store manifest_used in job immediately (status endpoint returns it)
+        SECRETS_EXPORT_JOBS[job_id]['manifestUsed'] = manifest_used
+
+        if not sources:
+            SECRETS_EXPORT_JOBS[job_id].update({
+                'status': 'skipped',
+                'progress': 100,
+                'message': 'No secrets directory found for this team — nothing to export.',
+            })
+            return
+
+        # ------------------------------------------------------------------ #
+        # 3. Build file list                                                   #
+        # ------------------------------------------------------------------ #
+        SECRETS_EXPORT_JOBS[job_id]['message'] = 'Scanning secrets files...'
+        SECRETS_EXPORT_JOBS[job_id]['progress'] = 10
+
+        # Each entry: (abs_path, arc_name_in_zip, source_target_rel)
+        file_entries = []    # list of (Path, str arc_path)
+        source_summary = []  # for manifest sources[]
+
+        for src_entry in sources:
+            src_path = Path(src_entry["src"])
+            target_rel = src_entry["target"]
+            kind = src_entry.get("kind", "dir" if src_path.is_dir() else "file")
+
+            if kind == "dir" and src_path.is_dir():
+                dir_files = []
+                for item in src_path.rglob("*"):
+                    if item.is_file():
+                        rel = item.relative_to(src_path)
+                        arc_name = f"{target_root}{target_rel}/{rel}"
+                        file_entries.append((item, arc_name))
+                        dir_files.append(item)
+                source_summary.append({
+                    "target": target_rel,
+                    "kind": "dir",
+                    "fileCount": len(dir_files),
+                })
+            elif kind == "file" and src_path.is_file():
+                arc_name = f"{target_root}{target_rel}"
+                file_entries.append((src_path, arc_name))
+                source_summary.append({
+                    "target": target_rel,
+                    "kind": "file",
+                    "fileCount": 1,
+                })
+
+        total_files = len(file_entries)
+        if total_files == 0:
+            SECRETS_EXPORT_JOBS[job_id].update({
+                'status': 'skipped',
+                'progress': 100,
+                'message': 'Secrets sources exist but contain no files — nothing to export.',
+            })
+            return
+
+        # ------------------------------------------------------------------ #
+        # 4. Write encrypted zip                                               #
+        # ------------------------------------------------------------------ #
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+        base_team, _ = _split_team_id(team_id)
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        filename = f"{team_id}-secrets-{timestamp}.zip"
+        staged_path = EXPORT_DIR / filename
+
+        SECRETS_EXPORT_JOBS[job_id]['message'] = f'Encrypting {total_files} file(s)...'
+        SECRETS_EXPORT_JOBS[job_id]['progress'] = 15
+
+        # Note: file metadata (names, sizes) are visible in the zip's central directory;
+        # only file contents are encrypted (WZ_AES).  Arc-path names must not contain
+        # secret values — see threat model in secrets_export_lib.py.
+        with pyzipper.AESZipFile(
+            staged_path,
+            'w',
+            compression=pyzipper.ZIP_DEFLATED,
+            encryption=pyzipper.WZ_AES,
+        ) as zf:
+            zf.setpassword(password.encode("utf-8"))
+
+            processed = 0
+            for src_path, arc_name in file_entries:
+                try:
+                    zf.write(src_path, arc_name)
+                except (PermissionError, FileNotFoundError) as exc:
+                    print(f"[LCARS SecretsExport] Skipped: {arc_name} ({exc.__class__.__name__})")
+                processed += 1
+                if processed % 20 == 0:
+                    SECRETS_EXPORT_JOBS[job_id]['progress'] = 15 + int((processed / total_files) * 75)
+                    SECRETS_EXPORT_JOBS[job_id]['message'] = (
+                        f'Encrypting... ({processed}/{total_files} files)'
+                    )
+
+            # Manifest is the LAST entry in the zip (also encrypted)
+            SECRETS_EXPORT_JOBS[job_id]['message'] = 'Writing encrypted manifest...'
+            SECRETS_EXPORT_JOBS[job_id]['progress'] = 92
+
+            manifest_doc = {
+                "version": SECRETS_EXPORT_MANIFEST_VERSION,
+                "kind": SECRETS_EXPORT_MANIFEST_KIND,
+                "team": team_id,
+                "baseTeam": base_team,
+                "sourceHost": socket.gethostname(),
+                "exportId": job_id,
+                "pairedExportId": paired_export_id,
+                "createdAt": datetime.now(timezone.utc).isoformat(),
+                "targetRoot": target_root,
+                "manifestUsed": manifest_used,
+                "fileCount": total_files,
+                "sources": source_summary,
+            }
+            zf.writestr("secrets-manifest.json", json.dumps(manifest_doc, indent=2))
+
+        # Password reference goes out of scope here — let GC handle it.
+        password = None  # noqa: F841  # explicit drop
+
+        file_size = staged_path.stat().st_size
+        SECRETS_EXPORT_JOBS[job_id].update({
+            'status': 'completed',
+            'progress': 100,
+            'message': 'Secrets export ready for download',
+            'filename': filename,
+            'fileSize': format_bytes_export(file_size),
+            'fileSizeBytes': file_size,
+            'totalFiles': total_files,
+        })
+
+    except Exception as exc:
+        print(f"[LCARS SecretsExport] Error for job {job_id}: {exc}")
+        # Clean up any partial zip so a stale file is not served
+        if staged_path is not None and staged_path.exists():
+            try:
+                staged_path.unlink()
+            except Exception:
+                pass
+        SECRETS_EXPORT_JOBS[job_id].update({
+            'status': 'failed',
+            'progress': 0,
+            'message': f'Secrets export failed: {str(exc)}',
+            'error': str(exc),
+        })
+
+
 def _rewrite_team_ids_in_file(filepath, old_team_id, new_team_id):
     """Rewrite occurrences of old_team_id → new_team_id inside a text file.
 
@@ -653,6 +892,287 @@ def apply_import(job_id):
             'message': f'Import failed: {str(e)}',
             'error': str(e),
         })
+
+
+def apply_secrets_import(job_id, password):
+    """Extract an AES-256 encrypted secrets zip to manifest-recorded target paths.
+
+    XACA-0172-003: password is held only in local scope and is never stored or logged.
+
+    Steps:
+    1. Open staged zip with pyzipper, verify password by reading secrets-manifest.json.
+    2. Validate manifest kind/version and team match.
+    3. No-clobber check — any existing target file causes a hard fail (no partial extraction).
+    4. Atomic extraction — stage to temp dir first, then move all files to targets.
+    5. On success: status='completed', delete staged zip.
+    """
+    import shutil
+    import tempfile
+    from datetime import datetime, timezone
+
+    job = SECRETS_IMPORT_JOBS.get(job_id)
+    if not job:
+        return
+
+    def _fail(msg):
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'status': 'failed',
+            'progress': 0,
+            'message': msg,
+            'error': msg,
+        })
+
+    try:
+        # ------------------------------------------------------------------ #
+        # 1. Dependency check                                                  #
+        # ------------------------------------------------------------------ #
+        if not pyzipper_available():
+            _fail(
+                "pyzipper dependency missing — install via "
+                "'pip install pyzipper' or reinstall the AITeamForge tap"
+            )
+            return
+
+        import pyzipper
+
+        staged_path = Path(job['stagedPath'])
+        if not staged_path.exists():
+            _fail(f'Staged zip missing: {staged_path}')
+            return
+
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'status': 'verifying',
+            'progress': 5,
+            'message': 'Verifying password...',
+        })
+
+        # ------------------------------------------------------------------ #
+        # 2. Verify password + parse manifest                                  #
+        # ------------------------------------------------------------------ #
+        try:
+            with pyzipper.AESZipFile(staged_path, 'r') as zf:
+                zf.setpassword(password.encode('utf-8'))
+                try:
+                    manifest_bytes = zf.read('secrets-manifest.json')
+                except RuntimeError:
+                    # pyzipper raises RuntimeError on bad password (WZ_AES)
+                    _fail("Wrong password — please try again.")
+                    return
+                except KeyError:
+                    _fail(
+                        "Archive does not contain secrets-manifest.json — "
+                        "not a recognized LCARS secrets export."
+                    )
+                    return
+        except Exception as e:
+            import zipfile as _zf
+            import pyzipper.zipfile as _pzf
+            if isinstance(e, (_zf.BadZipFile, _pzf.BadZipFile)):
+                _fail(
+                    "Invalid or corrupt secrets zip — please re-export and try again."
+                )
+                return
+            raise
+
+        try:
+            manifest = json.loads(manifest_bytes.decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            _fail(f"secrets-manifest.json is not valid JSON: {e}")
+            return
+
+        # ------------------------------------------------------------------ #
+        # 3. Validate manifest schema                                          #
+        # ------------------------------------------------------------------ #
+        if manifest.get('kind') != SECRETS_EXPORT_MANIFEST_KIND:
+            _fail(
+                f"Not a recognized LCARS secrets export "
+                f"(kind={manifest.get('kind')!r}, expected {SECRETS_EXPORT_MANIFEST_KIND!r})."
+            )
+            return
+
+        if manifest.get('version') != SECRETS_EXPORT_MANIFEST_VERSION:
+            _fail(
+                f"Unsupported secrets export version: {manifest.get('version')!r} "
+                f"(expected {SECRETS_EXPORT_MANIFEST_VERSION!r})."
+            )
+            return
+
+        # ------------------------------------------------------------------ #
+        # 4. Team match check (warn-only — cross-team transfer is allowed)     #
+        # ------------------------------------------------------------------ #
+        target_team = job['targetTeam']
+        manifest_team = manifest.get('team', '')
+        manifest_base = manifest.get('baseTeam', '')
+        target_base, _ = _split_team_id(target_team)
+
+        team_warning = None
+        if manifest_team != target_team:
+            team_warning = (
+                f"Team mismatch: archive was exported from '{manifest_team}', "
+                f"importing into '{target_team}'. Proceeding (cross-team transfer)."
+            )
+            SECRETS_IMPORT_JOBS[job_id]['message'] = team_warning
+
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'manifest': manifest,
+            'status': 'ready',
+            'progress': 15,
+            'message': team_warning or 'Manifest verified. Preparing extraction...',
+        })
+
+        # ------------------------------------------------------------------ #
+        # 5. Build target-path list                                            #
+        # ------------------------------------------------------------------ #
+        target_root = manifest.get('targetRoot', 'secrets/')
+        sources = manifest.get('sources', [])
+
+        # Determine project root for the target team
+        from secrets_export_lib import _get_team_project_root, _hardcoded_project_root
+        project_root = _get_team_project_root(target_team) or _hardcoded_project_root(target_team)
+        if project_root is None:
+            _fail(f"Cannot determine project root for team '{target_team}'.")
+            return
+
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'status': 'applying',
+            'progress': 20,
+            'message': 'Checking for collisions...',
+        })
+
+        # Open the zip again to enumerate all member paths for no-clobber check
+        with pyzipper.AESZipFile(staged_path, 'r') as zf:
+            zf.setpassword(password.encode('utf-8'))
+            all_names = [
+                n for n in zf.namelist()
+                if n != 'secrets-manifest.json' and not n.endswith('/')
+            ]
+
+        # ------------------------------------------------------------------ #
+        # 6a. Path-traversal containment: arc entries must resolve INSIDE     #
+        #     project_root. Crafted zips with "../../.ssh/authorized_keys"   #
+        #     or absolute paths are refused before any file operation. The   #
+        #     server binds to all interfaces and is reachable from tailnet   #
+        #     peers, so this is a real attack vector — not hypothetical.    #
+        # ------------------------------------------------------------------ #
+        project_root_resolved = project_root.resolve()
+        for arc_name in all_names:
+            arc_path = Path(arc_name)
+            if arc_path.is_absolute():
+                _fail(
+                    f"Archive contains an absolute path entry: {arc_name} — "
+                    "refusing to extract."
+                )
+                return
+            candidate = (project_root / arc_name).resolve()
+            try:
+                candidate.relative_to(project_root_resolved)
+            except ValueError:
+                _fail(
+                    f"Archive contains an entry that escapes the target "
+                    f"directory: {arc_name} — refusing to extract."
+                )
+                return
+
+        # ------------------------------------------------------------------ #
+        # 6b. No-clobber: fail hard if ANY target already exists              #
+        # ------------------------------------------------------------------ #
+        # arc entries are already under targetRoot (e.g. "secrets/env/.env")
+        # absolute target = project_root / arc_name
+        collision_paths = []
+        for arc_name in all_names:
+            target_path = project_root / arc_name
+            if target_path.exists():
+                collision_paths.append(str(target_path))
+
+        if collision_paths:
+            first = collision_paths[0]
+            count = len(collision_paths)
+            plural = 's' if count > 1 else ''
+            _fail(
+                f"File already exists at {first}"
+                + (f" (and {count - 1} other{plural})" if count > 1 else "")
+                + " — remove or rename and re-import. "
+                  "(No files were extracted; import is atomic.)"
+            )
+            return
+
+        # ------------------------------------------------------------------ #
+        # 7. Atomic extraction: stage → move                                  #
+        # ------------------------------------------------------------------ #
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'progress': 30,
+            'message': f'Extracting {len(all_names)} file(s)...',
+            'fileCount': len(all_names),
+        })
+
+        tmp_stage = Path(tempfile.mkdtemp(
+            prefix=f"lcars-secrets-import-{job_id}-",
+            dir=SECRETS_IMPORT_STAGING_DIR if SECRETS_IMPORT_STAGING_DIR.exists()
+            else Path(tempfile.gettempdir()),
+        ))
+
+        try:
+            # Extract everything to temp staging area
+            SECRETS_IMPORT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+            with pyzipper.AESZipFile(staged_path, 'r') as zf:
+                zf.setpassword(password.encode('utf-8'))
+                for arc_name in all_names:
+                    dest_in_stage = tmp_stage / arc_name
+                    dest_in_stage.parent.mkdir(parents=True, exist_ok=True)
+                    dest_in_stage.write_bytes(zf.read(arc_name))
+
+            SECRETS_IMPORT_JOBS[job_id].update({
+                'progress': 70,
+                'message': 'Moving files to target paths...',
+            })
+
+            # Move from staging to final target paths
+            moved = 0
+            for arc_name in all_names:
+                src_file = tmp_stage / arc_name
+                dest_file = project_root / arc_name
+                try:
+                    dest_file.parent.mkdir(parents=True, exist_ok=True)
+                except PermissionError:
+                    raise PermissionError(
+                        f"Permission denied writing to {dest_file.parent}. "
+                        "Adjust filesystem permissions and re-import."
+                    )
+                try:
+                    shutil.move(str(src_file), str(dest_file))
+                except PermissionError:
+                    raise PermissionError(
+                        f"Permission denied writing to {dest_file}. "
+                        "Adjust filesystem permissions and re-import."
+                    )
+                moved += 1
+                progress = 70 + int((moved / len(all_names)) * 25)
+                SECRETS_IMPORT_JOBS[job_id]['progress'] = progress
+
+        except Exception:
+            # Blow away temp stage; leave target tree untouched
+            shutil.rmtree(tmp_stage, ignore_errors=True)
+            raise
+        else:
+            shutil.rmtree(tmp_stage, ignore_errors=True)
+
+        # ------------------------------------------------------------------ #
+        # 8. Success                                                           #
+        # ------------------------------------------------------------------ #
+        try:
+            staged_path.unlink()
+        except Exception:
+            pass
+
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'status': 'completed',
+            'progress': 100,
+            'message': f"Extracted {len(all_names)} file(s) to {target_root}",
+            'fileCount': len(all_names),
+        })
+
+    except Exception as e:
+        _fail(f'Secrets import failed: {str(e)}')
 
 
 def get_board_file(team: str) -> Path:
@@ -995,11 +1515,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Team Export/Import API endpoints
         elif path == '/api/export/create':
             self.handle_create_export()
+        elif path == '/api/export/secrets/create':
+            self.handle_create_secrets_export()
         elif path == '/api/import/upload':
             self.handle_import_upload()
         elif path.startswith('/api/import/apply/'):
             job_id = path.replace('/api/import/apply/', '')
             self.handle_import_apply(job_id)
+        # Secrets Import API endpoints (XACA-0172-003)
+        elif path == '/api/import/secrets/upload':
+            self.handle_secrets_import_upload()
+        elif path.startswith('/api/import/secrets/preflight/'):
+            job_id = path.replace('/api/import/secrets/preflight/', '')
+            self.handle_secrets_import_preflight(job_id)
+        elif path.startswith('/api/import/secrets/apply/'):
+            job_id = path.replace('/api/import/secrets/apply/', '')
+            self.handle_secrets_import_apply(job_id)
         # RAG Engine API endpoints
         elif path == '/api/rag-engines/save':
             self.handle_rag_engine_save()
@@ -5716,18 +6247,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Resolve the CR record. New schema (2026-05): CR data lives in
             # board.crs[]; the item carries a crAssignment.crId back-pointer.
-            # Legacy schema stored fields directly on the item.
+            # Legacy schema stored fields directly on the item — and on a
+            # half-migrated board the CR record may already exist in crs[]
+            # while the item still carries the old top-level cr_id. Use
+            # whichever id we have to look up the CR record so we never miss
+            # the cr_doc_link.
             cr_record = None
             cr_doc_link = ''
             assignment = item.get('crAssignment') or {}
             new_cr_id = (assignment.get('crId') or '').strip()
-            if new_cr_id:
+            legacy_cr_id = (item.get('cr_id') or '').strip()
+            cr_id_for_glob = new_cr_id or legacy_cr_id
+            if cr_id_for_glob:
                 for record in board_data.get('crs', []):
-                    if record.get('id') == new_cr_id:
+                    if record.get('id') == cr_id_for_glob:
                         cr_record = record
                         cr_doc_link = record.get('cr_doc_link', '') or ''
                         break
-            cr_id_for_glob = new_cr_id or (item.get('cr_id') or '').strip()
             if not cr_doc_link:
                 cr_doc_link = item.get('cr_doc_link', '') or ''
 
@@ -6784,9 +7320,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/export/download/'):
             job_id = path.replace('/api/export/download/', '')
             self.serve_export_download(job_id)
+        elif path.startswith('/api/export/secrets/status/'):
+            job_id = path.replace('/api/export/secrets/status/', '')
+            self.serve_secrets_export_status(job_id)
+        elif path.startswith('/api/export/secrets/download/'):
+            job_id = path.replace('/api/export/secrets/download/', '')
+            self.serve_secrets_export_download(job_id)
         elif path.startswith('/api/import/status/'):
             job_id = path.replace('/api/import/status/', '')
             self.serve_import_status(job_id)
+        # Secrets Import status (XACA-0172-003)
+        elif path.startswith('/api/import/secrets/status/'):
+            job_id = path.replace('/api/import/secrets/status/', '')
+            self.serve_secrets_import_status(job_id)
         elif path == '/api/tap-version':
             self.serve_tap_version()
         # XACA-0292: Team config (CR/CAB support flag)
@@ -8578,6 +9124,483 @@ end tell
             self._send_json_response({'error': 'Job not found'}, status=404)
             return
         # Strip staged path from public response
+        public = {k: v for k, v in job.items() if k != 'stagedPath'}
+        self._send_json_response({**public, 'jobId': job_id})
+
+    # ---------------------------------------------------------------------- #
+    # Secrets Export routes (XACA-0172-002)                                   #
+    # ---------------------------------------------------------------------- #
+
+    def handle_create_secrets_export(self):
+        """POST /api/export/secrets/create — start an AES-256 secrets export job.
+
+        Body JSON: {"team": "<team_id>", "password": "<str>", "pairedExportId": "<optional>"}
+
+        The password is accepted from the request body, passed to the worker thread,
+        and is NEVER stored in the job dict or logged.
+        """
+        import uuid
+        import threading
+        from datetime import datetime, timezone
+
+        if not LCARS_TEAM:
+            self._send_json_response(
+                {'error': 'LCARS_TEAM not configured on this server'}, status=500
+            )
+            return
+
+        if not SECRETS_EXPORT_LIB_AVAILABLE:
+            self._send_json_response(
+                {'error': 'secrets_export_lib not available on this server'}, status=500
+            )
+            return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0:
+            self._send_json_response({'error': 'Request body required'}, status=400)
+            return
+
+        try:
+            body = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json_response({'error': 'Invalid JSON body'}, status=400)
+            return
+
+        password = body.get('password', '')
+        if not password:
+            self._send_json_response({'error': 'password is required'}, status=400)
+            return
+
+        paired_export_id = body.get('pairedExportId') or None
+
+        # Prune stale job entries and old zip files (TTL = 1 hour)
+        _prune_old_secrets_jobs()
+        now = datetime.now(timezone.utc)
+        if EXPORT_DIR.exists():
+            for old in EXPORT_DIR.glob('*-secrets-*.zip'):
+                try:
+                    age = (now - datetime.fromtimestamp(
+                        old.stat().st_mtime, tz=timezone.utc
+                    )).total_seconds()
+                    if age > 3600:
+                        old.unlink()
+                except Exception:
+                    pass
+
+        job_id = str(uuid.uuid4())
+        SECRETS_EXPORT_JOBS[job_id] = {
+            'status': 'generating',
+            'progress': 0,
+            'message': 'Initializing secrets export...',
+            'filename': None,
+            'fileSize': None,
+            'fileSizeBytes': None,
+            'totalFiles': None,
+            'error': None,
+            'team': LCARS_TEAM,
+            'pairedExportId': paired_export_id,
+            'manifestUsed': None,
+            'createdAt': datetime.now(timezone.utc).isoformat(),
+        }
+
+        # Password is passed only as a thread arg — never stored in the job dict.
+        thread = threading.Thread(
+            target=generate_secrets_export,
+            args=(job_id, LCARS_TEAM, password, paired_export_id),
+            daemon=True,
+        )
+        thread.start()
+
+        self._send_json_response({
+            'jobId': job_id,
+            'status': 'generating',
+            'team': LCARS_TEAM,
+        })
+
+    def serve_secrets_export_status(self, job_id):
+        """GET /api/export/secrets/status/<job_id>"""
+        job = SECRETS_EXPORT_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Secrets export job not found'}, status=404)
+            return
+        self._send_json_response({**job, 'jobId': job_id})
+
+    def serve_secrets_export_download(self, job_id):
+        """GET /api/export/secrets/download/<job_id> — stream the AES-256 encrypted zip."""
+        job = SECRETS_EXPORT_JOBS.get(job_id)
+        if not job or job.get('status') != 'completed' or not job.get('filename'):
+            self._send_json_response({'error': 'Secrets export not ready'}, status=404)
+            return
+
+        file_path = EXPORT_DIR / job['filename']
+        if not file_path.exists():
+            self._send_json_response({'error': 'Secrets export file not found'}, status=404)
+            return
+
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/zip')
+        self.send_header(
+            'Content-Disposition',
+            f'attachment; filename="{job["filename"]}"',
+        )
+        self.send_header('Content-Length', str(file_path.stat().st_size))
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+
+        with open(file_path, 'rb') as f:
+            while True:
+                chunk = f.read(8192)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+
+    # ---------------------------------------------------------------------- #
+    # Secrets Import routes (XACA-0172-003)                                   #
+    # ---------------------------------------------------------------------- #
+
+    def handle_secrets_import_upload(self):
+        """POST /api/import/secrets/upload — receive an encrypted secrets zip and stage it.
+
+        Expects multipart/form-data with:
+          - 'file'  field: the encrypted zip
+          - 'team'  form field: target team ID (defaults to LCARS_TEAM if absent)
+
+        Returns: {"jobId": "<uuid>", "status": "awaiting-password"}
+        The client then calls /api/import/secrets/preflight/<job_id> (optional)
+        or /api/import/secrets/apply/<job_id> to extract.
+        """
+        import uuid
+        from datetime import datetime, timezone
+
+        if not LCARS_TEAM:
+            self._send_json_response(
+                {'error': 'LCARS_TEAM not configured on this server'}, status=500
+            )
+            return
+
+        content_type = self.headers.get('Content-Type', '')
+        if not content_type.startswith('multipart/form-data'):
+            self._send_json_response(
+                {'error': 'Expected multipart/form-data upload'}, status=400
+            )
+            return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0 or content_length > 500 * 1024 * 1024:
+            self._send_json_response(
+                {'error': 'Invalid or too-large upload (max 500 MB)'}, status=400
+            )
+            return
+
+        # Parse multipart boundary
+        boundary_match = re.search(r'boundary=(.+)', content_type)
+        if not boundary_match:
+            self._send_json_response({'error': 'Missing multipart boundary'}, status=400)
+            return
+        boundary = boundary_match.group(1).strip().strip('"').encode('utf-8')
+
+        raw = self.rfile.read(content_length)
+        delim = b'--' + boundary
+        parts = raw.split(delim)
+
+        file_bytes = None
+        original_filename = 'secrets.zip'
+        target_team = LCARS_TEAM
+
+        for part in parts:
+            if b'\r\n\r\n' not in part:
+                continue
+            header_block, body = part.split(b'\r\n\r\n', 1)
+            if body.endswith(b'\r\n'):
+                body = body[:-2]
+            header_str = header_block.decode('utf-8', errors='replace')
+
+            if 'filename=' in header_str:
+                fname_match = re.search(r'filename="([^"]+)"', header_str)
+                if fname_match:
+                    # basename strip prevents Content-Disposition path traversal
+                    # (e.g. filename="../../etc/passwd"); keep only the trailing
+                    # component, fall back to default if it sanitizes to empty.
+                    raw_name = fname_match.group(1)
+                    safe_name = Path(raw_name).name or 'secrets.zip'
+                    original_filename = safe_name
+                file_bytes = body
+            elif 'name="team"' in header_str and body.strip():
+                target_team = body.strip().decode('utf-8', errors='replace')
+
+        if not file_bytes:
+            self._send_json_response({'error': 'No file found in upload'}, status=400)
+            return
+
+        SECRETS_IMPORT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        job_id = str(uuid.uuid4())
+        job_dir = SECRETS_IMPORT_STAGING_DIR / job_id
+        job_dir.mkdir(parents=True, exist_ok=True)
+        staged_path = job_dir / original_filename
+        staged_path.write_bytes(file_bytes)
+
+        SECRETS_IMPORT_JOBS[job_id] = {
+            'status': 'awaiting-password',
+            'progress': 0,
+            'message': 'Upload complete. Provide password to verify and extract.',
+            'stagedPath': str(staged_path),
+            'manifest': None,
+            'targetTeam': target_team,
+            'fileCount': 0,
+            'createdAt': datetime.now(timezone.utc).isoformat(),
+            'error': None,
+        }
+
+        self._send_json_response({
+            'jobId': job_id,
+            'status': 'awaiting-password',
+        })
+
+    def handle_secrets_import_preflight(self, job_id):
+        """POST /api/import/secrets/preflight/<job_id> — verify password + return manifest.
+
+        Body JSON: {"password": "<str>"}
+
+        Verifies the password and parses the manifest WITHOUT extracting any files.
+        Updates job to status='ready'. UI uses this for a confirmation panel before apply.
+        Returns the parsed manifest so the UI can show what will be extracted.
+
+        On wrong password: returns 400 with error; job status back to 'awaiting-password' (retryable).
+        """
+        job = SECRETS_IMPORT_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Secrets import job not found'}, status=404)
+            return
+
+        if job['status'] not in ('awaiting-password', 'ready'):
+            self._send_json_response(
+                {'error': f'Job is in state {job["status"]}, cannot preflight'}, status=400
+            )
+            return
+
+        if not pyzipper_available():
+            self._send_json_response(
+                {'error': (
+                    "pyzipper dependency missing — install via "
+                    "'pip install pyzipper' or reinstall the AITeamForge tap"
+                )},
+                status=500,
+            )
+            return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0:
+            self._send_json_response({'error': 'Request body required'}, status=400)
+            return
+
+        try:
+            body = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json_response({'error': 'Invalid JSON body'}, status=400)
+            return
+
+        password = body.get('password', '')
+        if not password:
+            self._send_json_response({'error': 'password is required'}, status=400)
+            return
+
+        # Verify password by reading manifest — password held in local scope only
+        import pyzipper
+        staged_path = Path(job['stagedPath'])
+
+        # Guard: if the staged zip is gone (e.g. budget exhausted), reject cleanly.
+        if not staged_path.exists():
+            self._send_json_response(
+                {'error': 'Staged zip no longer available — please re-upload.'}, status=400
+            )
+            return
+
+        try:
+            with pyzipper.AESZipFile(staged_path, 'r') as zf:
+                zf.setpassword(password.encode('utf-8'))
+                try:
+                    manifest_bytes = zf.read('secrets-manifest.json')
+                except RuntimeError:
+                    # Wrong password — increment attempt counter; retain staged zip for retry.
+                    attempts = job.get('wrongPasswordAttempts', 0) + 1
+                    if attempts >= _SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS:
+                        # Budget exhausted — delete staged zip and job dir.
+                        try:
+                            staged_path.unlink()
+                            staged_path.parent.rmdir()
+                        except Exception:
+                            pass
+                        exhaust_msg = (
+                            "Too many failed password attempts. "
+                            "Re-upload the secrets zip to try again."
+                        )
+                        SECRETS_IMPORT_JOBS[job_id].update({
+                            'status': 'failed',
+                            'error': exhaust_msg,
+                            'wrongPasswordAttempts': attempts,
+                        })
+                        self._send_json_response({'error': exhaust_msg}, status=400)
+                    else:
+                        SECRETS_IMPORT_JOBS[job_id].update({
+                            'status': 'awaiting-password',
+                            'error': 'Wrong password — please try again.',
+                            'wrongPasswordAttempts': attempts,
+                        })
+                        self._send_json_response(
+                            {
+                                'error': 'Wrong password — please try again.',
+                                'attemptsRemaining': _SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS - attempts,
+                            },
+                            status=400,
+                        )
+                    return
+                except KeyError:
+                    msg = (
+                        "Archive does not contain secrets-manifest.json — "
+                        "not a recognized LCARS secrets export."
+                    )
+                    SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+                    self._send_json_response({'error': msg}, status=400)
+                    return
+                all_members = [
+                    n for n in zf.namelist()
+                    if n != 'secrets-manifest.json' and not n.endswith('/')
+                ]
+        except Exception as e:
+            import zipfile as _zf
+            import pyzipper.zipfile as _pzf
+            if isinstance(e, (_zf.BadZipFile, _pzf.BadZipFile)):
+                msg = (
+                    "Invalid or corrupt secrets zip — please re-export and try again."
+                )
+                try:
+                    staged_path.unlink()
+                    staged_path.parent.rmdir()
+                except Exception:
+                    pass
+                SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+                self._send_json_response({'error': msg}, status=400)
+                return
+            raise
+
+        try:
+            manifest = json.loads(manifest_bytes.decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError) as e:
+            msg = f'secrets-manifest.json is not valid JSON: {e}'
+            SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+            self._send_json_response({'error': msg}, status=400)
+            return
+
+        if manifest.get('kind') != SECRETS_EXPORT_MANIFEST_KIND:
+            msg = (
+                f"Not a recognized LCARS secrets export "
+                f"(kind={manifest.get('kind')!r})."
+            )
+            SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+            self._send_json_response({'error': msg}, status=400)
+            return
+
+        if manifest.get('version') != SECRETS_EXPORT_MANIFEST_VERSION:
+            msg = (
+                f"Unsupported secrets export version: {manifest.get('version')!r} "
+                f"(expected {SECRETS_EXPORT_MANIFEST_VERSION!r})."
+            )
+            SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+            self._send_json_response({'error': msg}, status=400)
+            return
+
+        # Check team/base-team match — warn-only (cross-team transfer is allowed)
+        target_team = job.get('targetTeam', '')
+        manifest_team = manifest.get('team', '')
+        manifest_base = manifest.get('baseTeam', '')
+        team_warning = None
+        if manifest_team and target_team and manifest_team != target_team:
+            team_warning = (
+                f"Team mismatch: archive was exported from '{manifest_team}', "
+                f"importing into '{target_team}'. Proceeding (cross-team transfer)."
+            )
+
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'status': 'ready',
+            'manifest': manifest,
+            'fileCount': len(all_members),
+            'message': team_warning or 'Password verified. Ready to apply.',
+            'error': None,
+        })
+
+        resp: dict = {
+            'jobId': job_id,
+            'status': 'ready',
+            'manifest': manifest,
+            'fileCount': len(all_members),
+            'targetTeam': target_team,
+        }
+        if team_warning:
+            resp['warning'] = team_warning
+
+        self._send_json_response(resp)
+
+    def handle_secrets_import_apply(self, job_id):
+        """POST /api/import/secrets/apply/<job_id> — extract the secrets zip.
+
+        Body JSON: {"password": "<str>"}
+
+        Spawns apply_secrets_import() in a background thread.
+        Password is passed directly to the worker; never stored in the job dict.
+        """
+        import threading
+
+        job = SECRETS_IMPORT_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Secrets import job not found'}, status=404)
+            return
+
+        if job['status'] not in ('awaiting-password', 'ready'):
+            self._send_json_response(
+                {'error': f'Job is in state {job["status"]}, cannot apply'}, status=400
+            )
+            return
+
+        content_length = int(self.headers.get('Content-Length', 0))
+        if content_length <= 0:
+            self._send_json_response({'error': 'Request body required'}, status=400)
+            return
+
+        try:
+            body = json.loads(self.rfile.read(content_length).decode('utf-8'))
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            self._send_json_response({'error': 'Invalid JSON body'}, status=400)
+            return
+
+        password = body.get('password', '')
+        if not password:
+            self._send_json_response({'error': 'password is required'}, status=400)
+            return
+
+        SECRETS_IMPORT_JOBS[job_id].update({
+            'status': 'applying',
+            'progress': 0,
+            'message': 'Starting secrets import...',
+            'error': None,
+        })
+
+        # Password held only in thread-local scope — not stored in job dict
+        thread = threading.Thread(
+            target=apply_secrets_import,
+            args=(job_id, password),
+            daemon=True,
+        )
+        thread.start()
+
+        self._send_json_response({'jobId': job_id, 'status': 'applying'})
+
+    def serve_secrets_import_status(self, job_id):
+        """GET /api/import/secrets/status/<job_id>"""
+        job = SECRETS_IMPORT_JOBS.get(job_id)
+        if not job:
+            self._send_json_response({'error': 'Job not found'}, status=404)
+            return
+        # Never expose staged path; password is never stored, so nothing to strip on that front
         public = {k: v for k, v in job.items() if k != 'stagedPath'}
         self._send_json_response({**public, 'jobId': job_id})
 
