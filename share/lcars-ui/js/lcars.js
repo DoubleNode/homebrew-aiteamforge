@@ -158,7 +158,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'queue', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
+const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Mode state machine (XACA-0164)
@@ -169,8 +169,8 @@ const MODE_KEY = 'lcars.activeMode';
 const MODE_SECTIONS_KEY = 'lcars.modeSections'; // JSON: { team, kanban, data, settings }
 
 // Queue filter state
-const QUEUE_FILTER_KEY = 'lcars-queue-filter';
-let queueFilterState = { activeFilters: ['all'], searchText: '', sortBy: 'priority', osFilter: 'all', releaseFilter: 'all', epicFilter: 'all', categoryFilter: 'all' };
+const BACKLOG_FILTER_KEY = 'lcars-queue-filter';
+let backlogFilterState = { activeFilters: ['all'], searchText: '', sortBy: 'priority', osFilter: 'all', releaseFilter: 'all', epicFilter: 'all', categoryFilter: 'all' };
 
 // Release/Epic search state (XACA-0209 round 5 — replaces pill-filter bars).
 // Client-side substring search over id/title/shortTitle/description/tags.
@@ -623,7 +623,7 @@ function renderBoard() {
     renderShipInfo();
     renderKanbanColumns();
     renderTerminalDetails();
-    renderMissionQueue();
+    renderMissionBacklog();
     populateEpicFilterOptions();
     populateReleaseFilterOptions();
     updateStardate();
@@ -2003,7 +2003,7 @@ function renderShipInfo() {
 // Column priority: 'critical' always shows, 'important' shows if non-empty, 'optional' hides when empty
 const COLUMN_PRIORITY = {
     paused:    'critical',   // Always show - alerts need visibility
-    ready:     'critical',   // Always show - work queue entry point
+    ready:     'critical',   // Always show - work backlog entry point
     coding:    'critical',   // Always show - active development
     planning:  'important',  // Show if has cards
     testing:   'important',  // Show if has cards
@@ -2184,7 +2184,7 @@ function createKanbanCard(win) {
     card.appendChild(windowLine);
 
     // Line 3: Working ID (prominent) - shows subitem ID or item ID
-    // Clickable to navigate to the queue item
+    // Clickable to navigate to the backlog item
     if (win.workingOnId) {
         const workingLine = document.createElement('div');
         workingLine.className = 'card-working-id clickable';
@@ -2192,7 +2192,7 @@ function createKanbanCard(win) {
         workingLine.title = `Click to view ${win.workingOnId} in Queue`;
         workingLine.addEventListener('click', (e) => {
             e.stopPropagation();
-            navigateToQueueItemById(win.workingOnId);
+            navigateToBacklogItemById(win.workingOnId);
         });
         card.appendChild(workingLine);
     }
@@ -2410,7 +2410,7 @@ function createDetailRow(win) {
         workingId.title = `Click to view ${win.workingOnId} in Queue`;
         workingId.addEventListener('click', (e) => {
             e.stopPropagation();
-            navigateToQueueItemById(win.workingOnId);
+            navigateToBacklogItemById(win.workingOnId);
         });
         lineWorking.appendChild(workingId);
 
@@ -2533,9 +2533,9 @@ function getDeveloperAvatarUrl(team, terminal) {
     return `images/${team}_${avatarName}_avatar.png`;
 }
 
-function renderMissionQueue() {
-    const container = document.getElementById('mission-queue');
-    const countEl = document.getElementById('queue-count');
+function renderMissionBacklog() {
+    const container = document.getElementById('mission-backlog');
+    const countEl = document.getElementById('backlog-count');
     if (!container) return;
 
     // XACA-0021: Clear dependency filter before re-rendering to prevent stuck state
@@ -2549,9 +2549,9 @@ function renderMissionQueue() {
     const filteredBacklog = backlog.filter(item => itemMatchesFilter(item));
 
     // Update count display with filter info
-    const hasTextFilter = queueFilterState.searchText && queueFilterState.searchText.trim().length > 0;
-    const hasActiveFilter = !queueFilterState.activeFilters.includes('all');
-    const showingCompleted = queueFilterState.activeFilters.includes('completed');
+    const hasTextFilter = backlogFilterState.searchText && backlogFilterState.searchText.trim().length > 0;
+    const hasActiveFilter = !backlogFilterState.activeFilters.includes('all');
+    const showingCompleted = backlogFilterState.activeFilters.includes('completed');
 
     // Count active (non-completed, non-cancelled) items for display
     const activeCount = backlog.filter(item => item.status !== 'completed' && item.status !== 'cancelled').length;
@@ -2588,7 +2588,7 @@ function renderMissionQueue() {
     // Sort based on current sort setting
     // XACA-0022: Removed 'blocked' - it's a state, not a priority
     const priorityOrder = { critical: 0, high: 1, medium: 2, med: 2, low: 3 };
-    const sortBy = queueFilterState.sortBy || 'priority';
+    const sortBy = backlogFilterState.sortBy || 'priority';
 
     const sorted = [...filteredBacklog].sort((a, b) => {
         // Completed/cancelled items always sort to the end (unless viewing completed filter)
@@ -2664,8 +2664,8 @@ function renderMissionQueue() {
     sorted.forEach((item, index) => {
         // Find original index for display purposes
         const originalIndex = backlog.indexOf(item);
-        const queueItem = createQueueItem(item, originalIndex);
-        container.appendChild(queueItem);
+        const backlogItem = createBacklogItem(item, originalIndex);
+        container.appendChild(backlogItem);
     });
 }
 
@@ -2684,27 +2684,27 @@ function createTagsElement(tags) {
     }
 
     const row = document.createElement('div');
-    row.className = 'queue-tags-row';
+    row.className = 'backlog-tags-row';
 
     const container = document.createElement('div');
-    container.className = 'queue-tags';
+    container.className = 'backlog-tags';
 
     displayTags.forEach((tag, idx) => {
         // Add separator before each tag except the first
         if (idx > 0) {
             const separator = document.createElement('div');
-            separator.className = 'queue-tag-separator';
+            separator.className = 'backlog-tag-separator';
             container.appendChild(separator);
         }
 
         const tagEl = document.createElement('div');
-        tagEl.className = 'queue-tag';
+        tagEl.className = 'backlog-tag';
         tagEl.textContent = tag;
         tagEl.title = `Filter by: ${tag}`;
         tagEl.dataset.tag = tag.toLowerCase();
 
         // Check if this tag matches current search filter
-        const currentSearch = (queueFilterState.searchText || '').toLowerCase().trim();
+        const currentSearch = (backlogFilterState.searchText || '').toLowerCase().trim();
         if (currentSearch && tag.toLowerCase().includes(currentSearch)) {
             tagEl.classList.add('active');
         }
@@ -2712,7 +2712,7 @@ function createTagsElement(tags) {
         tagEl.addEventListener('click', (e) => {
             e.stopPropagation();
             // Update the search input and filter
-            const searchInput = document.getElementById('queue-filter-text');
+            const searchInput = document.getElementById('backlog-filter-text');
             if (searchInput) {
                 searchInput.value = tag;
             }
@@ -2728,11 +2728,11 @@ function createTagsElement(tags) {
 /**
  * Create OS logo element for display below priority pill
  * @param {string|null} os - The OS platform (iOS, Android, Firebase) or null for None
- * @param {string} className - CSS class name (queue-os-logo or subitem-os-logo)
+ * @param {string} className - CSS class name (backlog-os-logo or subitem-os-logo)
  * @param {boolean} isEditable - Whether the logo should be clickable (false for completed items)
  * @returns {HTMLElement} - The OS logo element
  */
-function createOSLogoElement(os, className = 'queue-os-logo', isEditable = true) {
+function createOSLogoElement(os, className = 'backlog-os-logo', isEditable = true) {
     const logoEl = document.createElement('div');
     logoEl.className = className;
     logoEl.dataset.os = os || 'None';
@@ -2774,7 +2774,7 @@ function navigateToBlocker(blockerId) {
     if (subitemMatch) {
         // It's a subitem - expand parent first
         const parentId = subitemMatch[1];
-        const parentItem = document.querySelector(`.queue-item[data-item-id="${parentId}"]`);
+        const parentItem = document.querySelector(`.backlog-item[data-item-id="${parentId}"]`);
 
         if (parentItem) {
             // Expand parent if collapsed
@@ -2795,7 +2795,7 @@ function navigateToBlocker(blockerId) {
         }
     } else {
         // It's a parent item - existing logic
-        const blockerItem = document.querySelector(`.queue-item[data-item-id="${blockerId}"]`);
+        const blockerItem = document.querySelector(`.backlog-item[data-item-id="${blockerId}"]`);
         if (blockerItem) {
             blockerItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
             blockerItem.classList.add('highlight-pulse');
@@ -2811,16 +2811,16 @@ function navigateToBlocker(blockerId) {
  * @param {string[]} blockerIds - Array of blocker IDs
  */
 function activateDependencyFilter(itemId, blockerIds) {
-    const queueList = document.getElementById('mission-queue');
-    if (!queueList) {
-        console.warn('[LCARS] Dependency filter: queue list not found');
+    const backlogList = document.getElementById('mission-backlog');
+    if (!backlogList) {
+        console.warn('[LCARS] Dependency filter: backlog list not found');
         return;
     }
 
     console.log('[LCARS] Activating dependency filter for:', itemId, 'blocked by:', blockerIds);
 
     // Add filter mode to container
-    queueList.classList.add('dependency-filter-active');
+    backlogList.classList.add('dependency-filter-active');
 
     // Mark the source (blocked) item as visible
     // Handle both parent items and subitems as the source
@@ -2829,7 +2829,7 @@ function activateDependencyFilter(itemId, blockerIds) {
     if (sourceSubitemMatch) {
         // Source is a subitem - mark and expand its parent, and mark the specific subitem
         const parentId = sourceSubitemMatch[1];
-        const parentItem = document.querySelector(`.queue-item[data-item-id="${parentId}"]`);
+        const parentItem = document.querySelector(`.backlog-item[data-item-id="${parentId}"]`);
         if (parentItem) {
             parentItem.classList.add('dependency-visible', 'dependency-source');
             // Auto-expand to show the subitem
@@ -2848,7 +2848,7 @@ function activateDependencyFilter(itemId, blockerIds) {
         }
     } else {
         // Source is a parent item
-        const sourceItem = document.querySelector(`.queue-item[data-item-id="${itemId}"]`);
+        const sourceItem = document.querySelector(`.backlog-item[data-item-id="${itemId}"]`);
         if (sourceItem) {
             sourceItem.classList.add('dependency-visible', 'dependency-source');
             console.log('[LCARS] Marked source item visible:', itemId);
@@ -2865,7 +2865,7 @@ function activateDependencyFilter(itemId, blockerIds) {
         if (subitemMatch) {
             // It's a subitem - mark the parent item visible, expand it, and mark the specific subitem
             const parentId = subitemMatch[1];
-            const parentItem = document.querySelector(`.queue-item[data-item-id="${parentId}"]`);
+            const parentItem = document.querySelector(`.backlog-item[data-item-id="${parentId}"]`);
             if (parentItem) {
                 parentItem.classList.add('dependency-visible');
                 // Auto-expand to show the subitem
@@ -2881,7 +2881,7 @@ function activateDependencyFilter(itemId, blockerIds) {
             }
         } else {
             // It's a parent item
-            const blockerItem = document.querySelector(`.queue-item[data-item-id="${blockerId}"]`);
+            const blockerItem = document.querySelector(`.backlog-item[data-item-id="${blockerId}"]`);
             if (blockerItem) {
                 blockerItem.classList.add('dependency-visible');
             }
@@ -2894,27 +2894,27 @@ function activateDependencyFilter(itemId, blockerIds) {
  * Restores normal view by removing all filter classes
  */
 function deactivateDependencyFilter() {
-    const queueList = document.getElementById('mission-queue');
-    if (!queueList) return;
+    const backlogList = document.getElementById('mission-backlog');
+    if (!backlogList) return;
 
     // Only log if filter was actually active
-    if (queueList.classList.contains('dependency-filter-active')) {
+    if (backlogList.classList.contains('dependency-filter-active')) {
         console.log('[LCARS] Deactivating dependency filter');
     }
 
     // Remove filter mode from container
-    queueList.classList.remove('dependency-filter-active');
+    backlogList.classList.remove('dependency-filter-active');
 
     // Remove visible/source classes from all items and subitems
-    queueList.querySelectorAll('.queue-item.dependency-visible').forEach(item => {
+    backlogList.querySelectorAll('.backlog-item.dependency-visible').forEach(item => {
         item.classList.remove('dependency-visible', 'dependency-source');
     });
-    queueList.querySelectorAll('.subitem.dependency-visible').forEach(subitem => {
+    backlogList.querySelectorAll('.subitem.dependency-visible').forEach(subitem => {
         subitem.classList.remove('dependency-visible', 'dependency-source');
     });
 
     // Also remove filter-hover from any blocked rows or subitem blocker containers
-    queueList.querySelectorAll('.queue-blocked-row.filter-hover, .subitem-blocker-container.filter-hover').forEach(row => {
+    backlogList.querySelectorAll('.backlog-blocked-row.filter-hover, .subitem-blocker-container.filter-hover').forEach(row => {
         row.classList.remove('filter-hover');
     });
 }
@@ -2924,11 +2924,11 @@ function deactivateDependencyFilter() {
  * Called on document click to ensure filter doesn't get stuck
  */
 function checkAndClearStuckDependencyFilter(event) {
-    const queueList = document.getElementById('mission-queue');
-    if (!queueList || !queueList.classList.contains('dependency-filter-active')) return;
+    const backlogList = document.getElementById('mission-backlog');
+    if (!backlogList || !backlogList.classList.contains('dependency-filter-active')) return;
 
     // If filter is active but no blocked row/container has filter-hover, it's stuck - clear it
-    const activeHoverRow = queueList.querySelector('.queue-blocked-row.filter-hover, .subitem-blocker-container.filter-hover');
+    const activeHoverRow = backlogList.querySelector('.backlog-blocked-row.filter-hover, .subitem-blocker-container.filter-hover');
     if (!activeHoverRow) {
         console.log('[LCARS] Clearing stuck dependency filter');
         deactivateDependencyFilter();
@@ -2938,14 +2938,14 @@ function checkAndClearStuckDependencyFilter(event) {
 // Global click handler to clear stuck dependency filter
 document.addEventListener('click', checkAndClearStuckDependencyFilter);
 
-function createQueueItem(item, index) {
+function createBacklogItem(item, index) {
     const div = document.createElement('div');
     const hasSubitems = item.subitems && item.subitems.length > 0;
     const isCollapsed = item.collapsed !== false; // Default to collapsed
     const isCompleted = item.status === 'completed';
     const isCancelled = item.status === 'cancelled';
 
-    div.className = 'queue-item';
+    div.className = 'backlog-item';
     if (isCompleted) {
         div.classList.add('completed');
     } else if (isCancelled) {
@@ -2976,7 +2976,7 @@ function createQueueItem(item, index) {
 
     // Header row container
     const header = document.createElement('div');
-    header.className = 'queue-header';
+    header.className = 'backlog-header';
 
     // XACA-0046: Zone 1 - IDENTITY (left-aligned, always visible)
     const identityZone = document.createElement('div');
@@ -2994,13 +2994,13 @@ function createQueueItem(item, index) {
         expander.setAttribute('tabindex', '0');
         expander.addEventListener('click', (e) => {
             e.stopPropagation();
-            toggleQueueItemExpansion(div, item, index);
+            toggleBacklogItemExpansion(div, item, index);
         });
         expander.addEventListener('keydown', (e) => {
             if (e.key === 'Enter' || e.key === ' ') {
                 e.preventDefault();
                 e.stopPropagation();
-                toggleQueueItemExpansion(div, item, index);
+                toggleBacklogItemExpansion(div, item, index);
             }
         });
         identityZone.appendChild(expander);
@@ -3010,7 +3010,7 @@ function createQueueItem(item, index) {
     const currentOS = getOSFromTags(item.tags);
     const priority = document.createElement('div');
     const priorityValue = (item.priority || 'medium').toLowerCase();
-    priority.className = `queue-priority ${priorityValue}`;
+    priority.className = `backlog-priority ${priorityValue}`;
     priority.textContent = priorityValue.toUpperCase();
     priority.setAttribute('aria-label', `Priority: ${priorityValue}`);
     // Only make editable if not completed
@@ -3036,12 +3036,12 @@ function createQueueItem(item, index) {
     // Category pill (after priority)
     const category = document.createElement('div');
     if (item.category) {
-        category.className = `queue-category ${item.category.toLowerCase().replace(/\s+/g, '-')}`;
+        category.className = `backlog-category ${item.category.toLowerCase().replace(/\s+/g, '-')}`;
         category.textContent = item.category.toUpperCase();
         category.title = `Category: ${item.category}\nClick to change`;
         category.setAttribute('aria-label', `Category: ${item.category}`);
     } else {
-        category.className = 'queue-category no-category';
+        category.className = 'backlog-category no-category';
         category.textContent = 'NO CAT';
         category.title = 'No category assigned\nClick to set';
         category.setAttribute('aria-label', 'No category assigned');
@@ -3072,7 +3072,7 @@ function createQueueItem(item, index) {
         const status = getDueDateStatus(effectiveDueDate.date);
         // Completed items should never show as overdue - use neutral 'was-due' class instead
         const displayStatus = (isCompleted && status === 'past_due') ? 'was-due' : status;
-        dueDatePill.className = `queue-due-date ${displayStatus.replaceAll('_', '-')}`;
+        dueDatePill.className = `backlog-due-date ${displayStatus.replaceAll('_', '-')}`;
         // Add inherited class if the date came from subitems
         if (effectiveDueDate.source === 'inherited') {
             dueDatePill.classList.add('inherited');
@@ -3092,7 +3092,7 @@ function createQueueItem(item, index) {
             dueDatePill.setAttribute('aria-label', `Due date: ${dueDateStr}${sourceLabel}`);
         }
     } else {
-        dueDatePill.className = 'queue-due-date no-date';
+        dueDatePill.className = 'backlog-due-date no-date';
         if (!isCompleted) {
             dueDatePill.classList.add('editable');
             dueDatePill.textContent = '+DUE';
@@ -3127,19 +3127,19 @@ function createQueueItem(item, index) {
     const effectiveWindow = workingWindow || (item.activelyWorking && item.worktreeWindowId ? getWindowById(item.worktreeWindowId) : null);
     const avatarTerminal = effectiveWindow?.terminal || (item.activelyWorking && item.worktreeWindowId ? item.worktreeWindowId.split(':')[0] : null);
     if (avatarTerminal) {
-        const queueAvatar = document.createElement('img');
-        queueAvatar.className = 'queue-item-avatar lcars-avatar';
-        queueAvatar.src = getDeveloperAvatarUrl(boardData?.team, avatarTerminal);
-        queueAvatar.alt = effectiveWindow?.developer || boardData?.terminals?.[avatarTerminal]?.developer || avatarTerminal;
-        queueAvatar.dataset.developer = effectiveWindow?.developer || boardData?.terminals?.[avatarTerminal]?.developer || avatarTerminal;
-        queueAvatar.dataset.role = boardData?.terminals?.[avatarTerminal]?.role || '';
-        queueAvatar.dataset.terminal = avatarTerminal || '';
-        queueAvatar.onerror = function() { this.style.display = 'none'; };
-        identityZone.appendChild(queueAvatar);
+        const backlogAvatar = document.createElement('img');
+        backlogAvatar.className = 'backlog-item-avatar lcars-avatar';
+        backlogAvatar.src = getDeveloperAvatarUrl(boardData?.team, avatarTerminal);
+        backlogAvatar.alt = effectiveWindow?.developer || boardData?.terminals?.[avatarTerminal]?.developer || avatarTerminal;
+        backlogAvatar.dataset.developer = effectiveWindow?.developer || boardData?.terminals?.[avatarTerminal]?.developer || avatarTerminal;
+        backlogAvatar.dataset.role = boardData?.terminals?.[avatarTerminal]?.role || '';
+        backlogAvatar.dataset.terminal = avatarTerminal || '';
+        backlogAvatar.onerror = function() { this.style.display = 'none'; };
+        identityZone.appendChild(backlogAvatar);
     }
 
     const idx = document.createElement('div');
-    idx.className = 'queue-index';
+    idx.className = 'backlog-index';
     idx.textContent = `[${item.id || index}]`;
     idx.setAttribute('role', 'button');
     idx.setAttribute('tabindex', '0');
@@ -3165,7 +3165,7 @@ function createQueueItem(item, index) {
     titleZone.className = 'title-zone';
 
     const title = document.createElement('div');
-    title.className = 'queue-title';
+    title.className = 'backlog-title';
     title.textContent = item.title || 'Untitled mission';
     titleZone.appendChild(title);
 
@@ -3179,7 +3179,7 @@ function createQueueItem(item, index) {
     // workingWindow already declared above for avatar (line 1683)
     if (workingWindow || (item.activelyWorking && item.worktreeWindowId)) {
         const windowBadge = document.createElement('div');
-        windowBadge.className = 'queue-window-badge';
+        windowBadge.className = 'backlog-window-badge';
 
         // Prefer live window info, fall back to stored worktreeWindowId
         const windowId = workingWindow?.windowId || item.worktreeWindowId;
@@ -3206,7 +3206,7 @@ function createQueueItem(item, index) {
     // Worktree badge (if actively working with worktree info) - now secondary to window badge
     if (item.activelyWorking && item.worktreeBranch && !workingWindow) {
         const worktreeBadge = document.createElement('div');
-        worktreeBadge.className = 'queue-worktree-badge';
+        worktreeBadge.className = 'backlog-worktree-badge';
         // Show branch name (truncated if long)
         const branchName = item.worktreeBranch;
         const displayBranch = branchName.length > 25 ? branchName.substring(0, 22) + '...' : branchName;
@@ -3245,15 +3245,15 @@ function createQueueItem(item, index) {
             const fallbackName = epicFullTitle;
             displayName = fallbackName.length > 15 ? fallbackName.substring(0, 15) + '…' : fallbackName;
         }
-        epicBadge.className = 'queue-epic-badge assigned';
+        epicBadge.className = 'backlog-epic-badge assigned';
         const epicNameSpan = document.createElement('span');
-        epicNameSpan.className = 'queue-epic-badge-name';
+        epicNameSpan.className = 'backlog-epic-badge-name';
         epicNameSpan.textContent = displayName;
         epicBadge.appendChild(epicNameSpan);
         epicBadge.title = `Epic: ${epicFullTitle}\nID: ${item.epicId}\nClick to change`;
         epicBadge.setAttribute('aria-label', `Epic: ${epicFullTitle}`);
     } else {
-        epicBadge.className = 'queue-epic-badge';
+        epicBadge.className = 'backlog-epic-badge';
         epicBadge.textContent = '+EPIC';
         epicBadge.title = 'Click to assign to an epic';
         epicBadge.setAttribute('aria-label', 'No epic assigned');
@@ -3311,15 +3311,15 @@ function createQueueItem(item, index) {
             displayName = releaseName.length > 20 ? releaseName.substring(0, 20) + '…' : releaseName;
         }
 
-        releaseBadge.className = 'queue-release-badge assigned';
+        releaseBadge.className = 'backlog-release-badge assigned';
         const releaseNameSpan = document.createElement('span');
-        releaseNameSpan.className = 'queue-release-badge-name';
+        releaseNameSpan.className = 'backlog-release-badge-name';
         releaseNameSpan.textContent = displayName;
         releaseBadge.appendChild(releaseNameSpan);
         releaseBadge.title = `Release: ${releaseName}\nID: ${releaseId}\nPlatform: ${item.releaseAssignment.platform}\nClick to change`;
         releaseBadge.setAttribute('aria-label', `Release: ${releaseName}, Platform: ${item.releaseAssignment.platform}`);
     } else {
-        releaseBadge.className = 'queue-release-badge';
+        releaseBadge.className = 'backlog-release-badge';
         releaseBadge.textContent = '+REL';
         releaseBadge.title = 'Click to assign to a release';
         releaseBadge.setAttribute('aria-label', 'No release assigned');
@@ -3349,7 +3349,7 @@ function createQueueItem(item, index) {
     const jiraTicket = item.jiraId || item.jiraKey || item.jira;
     if (jiraTicket) {
         const jiraLink = document.createElement('a');
-        jiraLink.className = isCompleted ? 'queue-jira readonly' : 'queue-jira editable';
+        jiraLink.className = isCompleted ? 'backlog-jira readonly' : 'backlog-jira editable';
         jiraLink.href = getJiraUrl(jiraTicket);
         jiraLink.target = '_blank';
         jiraLink.rel = 'noopener noreferrer';
@@ -3373,7 +3373,7 @@ function createQueueItem(item, index) {
     } else if (!isCompleted) {
         // No Jira ID - show "+LINK" button to add one (only for non-completed items)
         const addJiraBtn = document.createElement('a');
-        addJiraBtn.className = 'queue-jira add-jira editable';
+        addJiraBtn.className = 'backlog-jira add-jira editable';
         addJiraBtn.textContent = '+LINK';
         addJiraBtn.title = 'Click to link ticket';
         addJiraBtn.setAttribute('role', 'button');
@@ -3401,7 +3401,7 @@ function createQueueItem(item, index) {
     const githubIssue = item.githubIssue || item.github;
     if (githubIssue) {
         const githubLink = document.createElement('a');
-        githubLink.className = 'queue-github';
+        githubLink.className = 'backlog-github';
         githubLink.href = getGitHubUrl(githubIssue, CONFIG.team);
         githubLink.target = '_blank';
         githubLink.rel = 'noopener noreferrer';
@@ -3413,7 +3413,7 @@ function createQueueItem(item, index) {
 
     // XACA-0045: Plan document button (conditionally displayed)
     const docsButton = document.createElement('div');
-    docsButton.className = 'queue-docs-btn';
+    docsButton.className = 'backlog-docs-btn';
     docsButton.textContent = 'DOCS';
     docsButton.title = 'View plan document';
     docsButton.style.display = 'none'; // Hidden by default until we check
@@ -3422,13 +3422,13 @@ function createQueueItem(item, index) {
     docsButton.setAttribute('aria-label', 'View plan document');
     docsButton.addEventListener('click', (e) => {
         e.stopPropagation();
-        showPlanDocModal(item.id, docsButton.getAttribute('data-retro-exists') === 'true');
+        showPlanDocModal(item.id, docsButton.getAttribute('data-retro-exists') === 'true', docsButton.getAttribute('data-cr-exists') === 'true');
     });
     docsButton.addEventListener('keydown', (e) => {
         if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault();
             e.stopPropagation();
-            showPlanDocModal(item.id, docsButton.getAttribute('data-retro-exists') === 'true');
+            showPlanDocModal(item.id, docsButton.getAttribute('data-retro-exists') === 'true', docsButton.getAttribute('data-cr-exists') === 'true');
         }
     });
     trackingZone.appendChild(docsButton);
@@ -3438,7 +3438,7 @@ function createQueueItem(item, index) {
 
     // XACA-0117: Activity timeline button
     const activityBtn = document.createElement('div');
-    activityBtn.className = 'queue-activity-btn';
+    activityBtn.className = 'backlog-activity-btn';
     activityBtn.textContent = '\u25D7'; // ◗ clock-like history symbol
     activityBtn.title = 'View activity history';
     activityBtn.setAttribute('role', 'button');
@@ -3469,7 +3469,7 @@ function createQueueItem(item, index) {
     // Blocked by pills row (XACA-0020)
     if (item.blockedBy && item.blockedBy.length > 0) {
         const blockedRow = document.createElement('div');
-        blockedRow.className = 'queue-blocked-row';
+        blockedRow.className = 'backlog-blocked-row';
 
         const blockedLabel = document.createElement('span');
         blockedLabel.className = 'blocked-label';
@@ -3517,10 +3517,10 @@ function createQueueItem(item, index) {
     const hasDescription = item.description && item.description.trim();
 
     const contentArea = document.createElement('div');
-    contentArea.className = 'queue-content-area';
+    contentArea.className = 'backlog-content-area';
 
     // OS Logo (clickable to change OS)
-    const contentOsLogo = createOSLogoElement(currentOS, 'queue-os-logo-inline', !isCompleted);
+    const contentOsLogo = createOSLogoElement(currentOS, 'backlog-os-logo-inline', !isCompleted);
     if (!isCompleted) {
         contentOsLogo.classList.add('editable');
         contentOsLogo.setAttribute('role', 'button');
@@ -3545,14 +3545,14 @@ function createQueueItem(item, index) {
     // Description (to the right of OS logo)
     if (hasDescription) {
         const description = document.createElement('div');
-        description.className = 'queue-description';
+        description.className = 'backlog-description';
         description.textContent = item.description;
         contentArea.appendChild(description);
     }
 
     // Spacer to push meta to the right
     const spacer = document.createElement('div');
-    spacer.className = 'queue-spacer';
+    spacer.className = 'backlog-spacer';
     contentArea.appendChild(spacer);
 
     // Meta info (subitem count + timestamp) on right
@@ -3570,7 +3570,7 @@ function createQueueItem(item, index) {
     }
 
     const timestamp = document.createElement('div');
-    timestamp.className = 'queue-timestamp';
+    timestamp.className = 'backlog-timestamp';
     if (isCompleted) {
         timestamp.textContent = '✓ ' + formatAbsoluteTime(item.completedAt);
         timestamp.title = 'Completed: ' + formatRelativeTime(item.completedAt);
@@ -3642,7 +3642,7 @@ function createQueueItem(item, index) {
     if (hasSubitems) {
         const subitemsContainer = document.createElement('div');
         subitemsContainer.className = 'subitems-container';
-        // CSS handles visibility via .queue-item.expanded class
+        // CSS handles visibility via .backlog-item.expanded class
 
         // Sort subitems: completed last, then by blocking, due date, and priority
         const priorityOrder = { critical: 0, high: 1, medium: 2, low: 3 };
@@ -3787,7 +3787,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
     // Priority pill (editable only if not completed)
     const priority = document.createElement('div');
     const priorityValue = (subitem.priority || 'medium').toLowerCase();
-    priority.className = `queue-priority subitem-priority ${priorityValue}`;
+    priority.className = `backlog-priority subitem-priority ${priorityValue}`;
     priority.textContent = priorityValue.substring(0, 3).toUpperCase();
     if (!isSubitemCompleted) {
         priority.classList.add('editable');
@@ -3822,7 +3822,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
     const jiraTicket = subitem.jiraId || subitem.jiraKey || subitem.jira;
     if (jiraTicket) {
         const jiraLink = document.createElement('a');
-        jiraLink.className = 'queue-jira subitem-jira editable';
+        jiraLink.className = 'backlog-jira subitem-jira editable';
         jiraLink.href = getJiraUrl(jiraTicket);
         jiraLink.target = '_blank';
         jiraLink.rel = 'noopener noreferrer';
@@ -3843,7 +3843,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
     } else {
         // No Jira ID - show "+JIRA" button to add one
         const addJiraBtn = document.createElement('a');
-        addJiraBtn.className = 'queue-jira subitem-jira add-jira editable';
+        addJiraBtn.className = 'backlog-jira subitem-jira add-jira editable';
         addJiraBtn.textContent = '+LINK';
         addJiraBtn.title = 'Click to link ticket';
 
@@ -3860,7 +3860,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
     const githubIssue = subitem.githubIssue || subitem.github;
     if (githubIssue) {
         const githubLink = document.createElement('a');
-        githubLink.className = 'queue-github subitem-github';
+        githubLink.className = 'backlog-github subitem-github';
         githubLink.href = getGitHubUrl(githubIssue, CONFIG.team);
         githubLink.target = '_blank';
         githubLink.rel = 'noopener noreferrer';
@@ -3875,7 +3875,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
         const status = getDueDateStatus(subitem.dueDate);
         // Completed subitems should never show as overdue - use neutral 'was-due' class instead
         const displayStatus = (isSubitemCompleted && status === 'past_due') ? 'was-due' : status;
-        dueDatePill.className = `queue-due-date subitem-due-date ${displayStatus.replaceAll('_', '-')}`;
+        dueDatePill.className = `backlog-due-date subitem-due-date ${displayStatus.replaceAll('_', '-')}`;
         dueDatePill.textContent = formatDueDate(subitem.dueDate, isSubitemCompleted);
         if (!isSubitemCompleted) {
             dueDatePill.classList.add('editable');
@@ -3884,7 +3884,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
             dueDatePill.title = `Due: ${parseLocalDate(subitem.dueDate).toLocaleDateString()}`;
         }
     } else {
-        dueDatePill.className = 'queue-due-date subitem-due-date no-date';
+        dueDatePill.className = 'backlog-due-date subitem-due-date no-date';
         if (!isSubitemCompleted) {
             dueDatePill.classList.add('editable');
             dueDatePill.textContent = '+DUE';
@@ -4058,7 +4058,7 @@ function createSubitemElement(subitem, parentItem, parentIndex, subIndex) {
     return div;
 }
 
-function toggleQueueItemExpansion(element, item, index) {
+function toggleBacklogItemExpansion(element, item, index) {
     const isCurrentlyExpanded = element.classList.contains('expanded');
     const subitemsContainer = element.querySelector('.subitems-container');
     const expander = element.querySelector('.subitem-expander');
@@ -4209,7 +4209,7 @@ async function updateItemPriority(item, newPriority, element) {
 
         // Update UI immediately
         item.priority = newPriority;
-        element.className = `queue-priority ${newPriority} editable`;
+        element.className = `backlog-priority ${newPriority} editable`;
         element.textContent = newPriority.toUpperCase();
         console.log('Successfully updated priority for', item.id, 'to', newPriority);
     } catch (error) {
@@ -4228,7 +4228,7 @@ const CATEGORY_LEVELS = [
  * Show a dropdown menu for changing item category
  * @param {HTMLElement} element - The category pill element
  * @param {Object} item - The kanban item
- * @param {number} index - The item index in the queue
+ * @param {number} index - The item index in the backlog
  */
 function showCategoryDropdown(element, item, index) {
     // Remove any existing dropdown
@@ -4332,11 +4332,11 @@ async function updateItemCategory(item, newCategory, element) {
         // Update UI immediately
         item.category = newCategory;
         if (newCategory) {
-            element.className = `queue-category ${newCategory} editable`;
+            element.className = `backlog-category ${newCategory} editable`;
             element.textContent = newCategory.toUpperCase();
             element.title = `Category: ${newCategory}\nClick to change`;
         } else {
-            element.className = 'queue-category no-category editable';
+            element.className = 'backlog-category no-category editable';
             element.textContent = 'NO CAT';
             element.title = 'No category assigned\nClick to set';
         }
@@ -4655,11 +4655,11 @@ async function updateItemDueDate(item, newDueDate, element) {
         item.dueDate = newDueDate;
         if (newDueDate) {
             const status = getDueDateStatus(newDueDate);
-            element.className = `queue-due-date ${status.replaceAll('_', '-')} editable`;
+            element.className = `backlog-due-date ${status.replaceAll('_', '-')} editable`;
             element.textContent = formatDueDate(newDueDate);
             element.title = `Due: ${parseLocalDate(newDueDate).toLocaleDateString()} - Click to edit`;
         } else {
-            element.className = 'queue-due-date no-date editable';
+            element.className = 'backlog-due-date no-date editable';
             element.textContent = '+DUE';
             element.title = 'Click to set due date';
         }
@@ -5501,13 +5501,13 @@ async function updateItemJira(item, newJira, element) {
 
         // Update UI
         if (newJira) {
-            element.className = 'queue-jira editable';
+            element.className = 'backlog-jira editable';
             element.textContent = newJira;
             element.title = `${newJira} - Click to edit, Cmd+Click to open`;
             element.href = getJiraUrl(newJira);
         } else {
             // Transform into "add" button
-            element.className = 'queue-jira add-jira editable';
+            element.className = 'backlog-jira add-jira editable';
             element.textContent = '+LINK';
             element.title = 'Click to link ticket';
             element.removeAttribute('href');
@@ -5578,13 +5578,13 @@ async function updateSubitemJira(subitem, newJira, element, parentIndex, subInde
 
         // Update UI
         if (newJira) {
-            element.className = 'queue-jira subitem-jira editable';
+            element.className = 'backlog-jira subitem-jira editable';
             element.textContent = newJira;
             element.title = `${newJira} - Click to edit, Cmd+Click to open`;
             element.href = getJiraUrl(newJira);
         } else {
             // Transform into "add" button
-            element.className = 'queue-jira subitem-jira add-jira editable';
+            element.className = 'backlog-jira subitem-jira add-jira editable';
             element.textContent = '+LINK';
             element.title = 'Click to link ticket';
             element.removeAttribute('href');
@@ -5625,7 +5625,7 @@ function showSubitemPriorityDropdown(element, subitem, parentIndex, subIndex) {
         option.addEventListener('click', (e) => {
             e.stopPropagation();
             updateSubitemField(subitem, parentIndex, subIndex, 'priority', priority, element, (el, val) => {
-                el.className = `queue-priority subitem-priority ${val} editable`;
+                el.className = `backlog-priority subitem-priority ${val} editable`;
                 el.textContent = val.substring(0, 3).toUpperCase();
                 el.title = `Priority: ${val} - Click to change`;
             });
@@ -6021,11 +6021,11 @@ async function updateSubitemDueDate(subitem, parentIndex, subIndex, newDueDate, 
         subitem.dueDate = newDueDate;
         if (newDueDate) {
             const status = getDueDateStatus(newDueDate);
-            element.className = `queue-due-date subitem-due-date ${status.replaceAll('_', '-')} editable`;
+            element.className = `backlog-due-date subitem-due-date ${status.replaceAll('_', '-')} editable`;
             element.textContent = formatDueDate(newDueDate);
             element.title = `Due: ${parseLocalDate(newDueDate).toLocaleDateString()} - Click to edit`;
         } else {
-            element.className = 'queue-due-date subitem-due-date no-date editable';
+            element.className = 'backlog-due-date subitem-due-date no-date editable';
             element.textContent = '+DUE';
             element.title = 'Click to set due date';
         }
@@ -6274,21 +6274,21 @@ function showWindowDetails(win) {
     }, 300); // Allow section switch animation
 }
 
-function navigateToQueueItem(itemIndex, subIndex = null) {
-    // Navigate to QUEUE tab
-    switchSection('queue');
+function navigateToBacklogItem(itemIndex, subIndex = null) {
+    // Navigate to BACKLOG tab
+    switchSection('backlog');
 
-    // Reset scroll position of the queue section itself before navigating
-    // The queue-section is the actual scrollable container (position: absolute with overflow-y: auto)
-    const queueSection = document.querySelector('.queue-section');
-    if (queueSection) {
-        queueSection.scrollTop = 0;
+    // Reset scroll position of the backlog section itself before navigating
+    // The backlog-section is the actual scrollable container (position: absolute with overflow-y: auto)
+    const backlogSection = document.querySelector('.backlog-section');
+    if (backlogSection) {
+        backlogSection.scrollTop = 0;
     }
 
-    // Find, expand, scroll and highlight the queue item
+    // Find, expand, scroll and highlight the backlog item
     setTimeout(() => {
-        const queueItems = document.querySelectorAll('.queue-item');
-        queueItems.forEach(item => {
+        const backlogItems = document.querySelectorAll('.backlog-item');
+        backlogItems.forEach(item => {
             item.classList.remove('highlighted');
             if (parseInt(item.dataset.itemIndex) === itemIndex) {
                 // Expand the item if it has subitems and is collapsed
@@ -6306,7 +6306,7 @@ function navigateToQueueItem(itemIndex, subIndex = null) {
                         if (subitem) {
                             subitem.classList.add('highlighted');
                             // Use custom scroll to account for fixed status legend
-                            scrollToElementInSection(subitem, queueSection);
+                            scrollToElementInSection(subitem, backlogSection);
                             setTimeout(() => {
                                 subitem.classList.remove('highlighted');
                             }, 2000);
@@ -6315,7 +6315,7 @@ function navigateToQueueItem(itemIndex, subIndex = null) {
                 } else {
                     item.classList.add('highlighted');
                     // Use custom scroll to account for fixed status legend
-                    scrollToElementInSection(item, queueSection);
+                    scrollToElementInSection(item, backlogSection);
                     setTimeout(() => {
                         item.classList.remove('highlighted');
                     }, 2000);
@@ -6339,7 +6339,7 @@ function scrollToElementInSection(element, container) {
     const desiredOffsetFromTop = -45; // Position element to show a peek of previous item
 
     // Get element's position relative to the scrollable container
-    // Need to account for nested elements (element might be inside .queue-list)
+    // Need to account for nested elements (element might be inside .backlog-list)
     let elementOffsetTop = 0;
     let current = element;
     while (current && current !== container) {
@@ -6357,10 +6357,10 @@ function scrollToElementInSection(element, container) {
     });
 }
 
-function navigateToQueueItemById(itemId) {
-    // Navigate to QUEUE tab and find item by ID
+function navigateToBacklogItemById(itemId) {
+    // Navigate to BACKLOG tab and find item by ID
     // ID can be a parent ID (e.g., "XACA-0001") or subitem ID (e.g., "XACA-0001-001")
-    switchSection('queue');
+    switchSection('backlog');
 
     setTimeout(() => {
         const backlog = boardData?.backlog || [];
@@ -6408,16 +6408,16 @@ function navigateToQueueItemById(itemId) {
         }
 
         if (foundItemIndex >= 0) {
-            navigateToQueueItem(foundItemIndex, foundSubIndex);
+            navigateToBacklogItem(foundItemIndex, foundSubIndex);
         } else if (isFiltered) {
             // Item exists but is hidden by current filters
-            showToast(`Item ${itemId} exists but is hidden by current queue filters`, 'warning', 5000);
+            showToast(`Item ${itemId} exists but is hidden by current backlog filters`, 'warning', 5000);
         } else if (foundItem) {
             // Item exists but filtering state is unclear (shouldn't happen)
-            showToast(`Item ${itemId} not found in current queue view`, 'warning');
+            showToast(`Item ${itemId} not found in current backlog view`, 'warning');
         } else {
             // Item doesn't exist in backlog at all
-            showToast(`Item ${itemId} not found in queue`, 'warning');
+            showToast(`Item ${itemId} not found in backlog`, 'warning');
         }
     }, 100);
 }
@@ -6750,14 +6750,14 @@ function itemMatchesTextFilter(item, searchText) {
  * @returns {boolean} - Whether the item should be displayed
  */
 function itemMatchesFilter(item) {
-    const filters = queueFilterState.activeFilters;
-    const searchText = (queueFilterState.searchText || '').toLowerCase().trim();
+    const filters = backlogFilterState.activeFilters;
+    const searchText = (backlogFilterState.searchText || '').toLowerCase().trim();
 
     // First check text filter - must match if there's search text
     if (!itemMatchesTextFilter(item, searchText)) return false;
 
     // Check OS filter
-    const osFilter = queueFilterState.osFilter || 'all';
+    const osFilter = backlogFilterState.osFilter || 'all';
     if (osFilter !== 'all') {
         const itemOS = getOSFromTags(item.tags);
         if (osFilter === 'none') {
@@ -6770,7 +6770,7 @@ function itemMatchesFilter(item) {
     }
 
     // Check release filter (XACA-0023)
-    const releaseFilter = queueFilterState.releaseFilter || 'all';
+    const releaseFilter = backlogFilterState.releaseFilter || 'all';
     if (releaseFilter !== 'all') {
         const hasRelease = item.releaseAssignment && item.releaseAssignment.releaseId;
         if (releaseFilter === 'assigned') {
@@ -6784,7 +6784,7 @@ function itemMatchesFilter(item) {
     }
 
     // Check epic filter (XACA-0040)
-    const epicFilter = queueFilterState.epicFilter || 'all';
+    const epicFilter = backlogFilterState.epicFilter || 'all';
     if (epicFilter !== 'all') {
         const hasEpic = item.epicId;
         if (epicFilter === 'assigned') {
@@ -6798,7 +6798,7 @@ function itemMatchesFilter(item) {
     }
 
     // Check category filter
-    const categoryFilter = queueFilterState.categoryFilter || 'all';
+    const categoryFilter = backlogFilterState.categoryFilter || 'all';
     if (categoryFilter !== 'all') {
         const hasCategory = item.category;
         if (categoryFilter === 'none') {
@@ -7978,16 +7978,16 @@ function navigateToCalendarItem(itemId, epicId) {
             }
         }, 300);
     } else if (itemId) {
-        // Navigate to QUEUE section
-        switchSection('queue');
+        // Navigate to BACKLOG section
+        switchSection('backlog');
         
         // Wait for section to render, then scroll to and highlight the item
         setTimeout(() => {
-            const queueItem = document.querySelector(`.queue-item[data-item-id="${itemId}"]`);
-            if (queueItem) {
-                queueItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                queueItem.classList.add('highlight-pulse');
-                setTimeout(() => queueItem.classList.remove('highlight-pulse'), 2000);
+            const backlogItem = document.querySelector(`.backlog-item[data-item-id="${itemId}"]`);
+            if (backlogItem) {
+                backlogItem.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                backlogItem.classList.add('highlight-pulse');
+                setTimeout(() => backlogItem.classList.remove('highlight-pulse'), 2000);
             }
         }, 300);
     }
@@ -8410,53 +8410,39 @@ async function disconnectGoogleCalendar() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// QUEUE FILTER STATE MANAGEMENT
+// BACKLOG FILTER STATE MANAGEMENT
+// Powered by createFilterBar() from lcars-filter-bar.js (XACA-0292-005).
+// backlogFilterState is a live reference into the component's internal state
+// object — all existing callers (itemMatchesFilter, renderMissionBacklog, etc.)
+// continue to read it directly, unchanged.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Load filter state from localStorage
- */
-function loadQueueFilterState() {
-    try {
-        const saved = localStorage.getItem(QUEUE_FILTER_KEY);
-        if (saved) {
-            const parsed = JSON.parse(saved);
-            if (Array.isArray(parsed.activeFilters) && parsed.activeFilters.length > 0) {
-                queueFilterState.activeFilters = parsed.activeFilters;
-            }
-            if (typeof parsed.searchText === 'string') {
-                queueFilterState.searchText = parsed.searchText;
-            }
-            if (parsed.sortBy === 'priority' || parsed.sortBy === 'due_date') {
-                queueFilterState.sortBy = parsed.sortBy;
-            }
-            if (parsed.osFilter) {
-                queueFilterState.osFilter = parsed.osFilter;
-            }
-            if (parsed.releaseFilter) {
-                queueFilterState.releaseFilter = parsed.releaseFilter;
-            }
-            if (parsed.epicFilter) {
-                queueFilterState.epicFilter = parsed.epicFilter;
-            }
-            if (parsed.categoryFilter) {
-                queueFilterState.categoryFilter = parsed.categoryFilter;
-            }
-        }
-    } catch (e) {
-        console.warn('Could not load queue filter state:', e);
-    }
+// Component instance; assigned in initQueueFilterBar() below.
+let _backlogFilterBarInstance = null;
+
+// ── Thin stubs kept for external callers outside the filter-bar block ──────────
+// (populateReleaseFilterOptions at lines ~628, ~10653; populateEpicFilterOptions
+//  at lines ~12757, ~12855, ~12883; updateReleaseDropdownStyle at line ~11027;
+//  saveQueueFilterState at line ~11031)
+
+/** @deprecated internal — use component instance; kept for external call sites */
+function saveQueueFilterState() {
+    if (_backlogFilterBarInstance) _backlogFilterBarInstance.save();
 }
 
-/**
- * Save filter state to localStorage
- */
-function saveQueueFilterState() {
-    try {
-        localStorage.setItem(QUEUE_FILTER_KEY, JSON.stringify(queueFilterState));
-    } catch (e) {
-        console.warn('Could not save queue filter state:', e);
-    }
+/** @deprecated internal — use component instance; kept for external call sites */
+function updateReleaseDropdownStyle() {
+    if (_backlogFilterBarInstance) _backlogFilterBarInstance.updateReleaseStyle();
+}
+
+/** @deprecated internal — use component instance; kept for external call sites */
+function populateReleaseFilterOptions() {
+    if (_backlogFilterBarInstance) _backlogFilterBarInstance.populateReleaseOptions();
+}
+
+/** @deprecated internal — use component instance; kept for external call sites */
+function populateEpicFilterOptions() {
+    if (_backlogFilterBarInstance) _backlogFilterBarInstance.populateEpicOptions();
 }
 
 // ─── Release Tag Filter (XACA-0209) ──────────────────────────────────────────
@@ -8569,20 +8555,20 @@ function buildItemTagsHtml(tags, searchScope) {
     if (displayTags.length === 0) return '';
 
     const row = document.createElement('div');
-    row.className = 'queue-tags-row';
+    row.className = 'backlog-tags-row';
     const container = document.createElement('div');
-    container.className = 'queue-tags';
+    container.className = 'backlog-tags';
     row.appendChild(container);
 
     displayTags.forEach((tag, idx) => {
         if (idx > 0) {
             const sep = document.createElement('div');
-            sep.className = 'queue-tag-separator';
+            sep.className = 'backlog-tag-separator';
             container.appendChild(sep);
         }
         const trimmed = tag.trim();
         const pill = document.createElement('div');
-        pill.className = 'queue-tag';
+        pill.className = 'backlog-tag';
         pill.textContent = trimmed;
         pill.title = `Filter by: ${trimmed}`;
         pill.dataset.tag = trimmed;
@@ -8598,7 +8584,7 @@ function buildItemTagsHtml(tags, searchScope) {
 function bindItemTagClicks(dashboardEl) {
     if (!dashboardEl || dashboardEl.dataset.tagClicksWired === '1') return;
     dashboardEl.addEventListener('click', (e) => {
-        const pill = e.target.closest('.queue-tag[data-search-scope]');
+        const pill = e.target.closest('.backlog-tag[data-search-scope]');
         if (!pill) return;
         e.stopPropagation();
         const tag = pill.dataset.tag || '';
@@ -8612,617 +8598,55 @@ function bindItemTagClicks(dashboardEl) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
- * Toggle a filter pill
- * @param {string} filterName - The filter to toggle
- */
-function toggleQueueFilter(filterName) {
-    const filters = queueFilterState.activeFilters;
-
-    if (filterName === 'all') {
-        // Selecting ALL clears all other selections
-        queueFilterState.activeFilters = ['all'];
-    } else {
-        // Remove 'all' if present
-        const allIndex = filters.indexOf('all');
-        if (allIndex > -1) {
-            filters.splice(allIndex, 1);
-        }
-
-        // Toggle the selected filter
-        const filterIndex = filters.indexOf(filterName);
-        if (filterIndex > -1) {
-            filters.splice(filterIndex, 1);
-        } else {
-            filters.push(filterName);
-        }
-
-        // If no filters selected, default back to 'all'
-        if (filters.length === 0) {
-            queueFilterState.activeFilters = ['all'];
-        }
-    }
-
-    saveQueueFilterState();
-    updateFilterBarUI();
-    renderMissionQueue();
-}
-
-/**
- * Update filter bar UI to reflect current state
- */
-function updateFilterBarUI() {
-    const filterBar = document.getElementById('queue-filter-bar');
-    if (!filterBar) return;
-
-    const pills = filterBar.querySelectorAll('.filter-pill');
-    pills.forEach(pill => {
-        const filter = pill.dataset.filter;
-        if (queueFilterState.activeFilters.includes(filter)) {
-            pill.classList.add('active');
-        } else {
-            pill.classList.remove('active');
-        }
-    });
-
-    // Update search input
-    const searchInput = document.getElementById('queue-filter-text');
-    if (searchInput && searchInput !== document.activeElement) {
-        searchInput.value = queueFilterState.searchText || '';
-    }
-
-    // Hide sort toggle when viewing completed items (they sort by completedAt, not user choice)
-    const sortToggle = document.getElementById('sort-toggle');
-    if (sortToggle) {
-        const showingCompleted = queueFilterState.activeFilters.includes('completed');
-        sortToggle.style.display = showingCompleted ? 'none' : '';
-    }
-
-    // Update OS dropdown style
-    updateOSDropdownStyle();
-
-    // Update release dropdown and badge style (XACA-0026)
-    updateReleaseDropdownStyle();
-}
-
-/**
- * Set the text search filter
- * @param {string} text - Search text
- */
-function setQueueSearchFilter(text) {
-    queueFilterState.searchText = text;
-    saveQueueFilterState();
-    renderMissionQueue();
-}
-
-/**
- * Update OS filter dropdown visual style based on current selection
- */
-function updateOSDropdownStyle() {
-    const dropdown = document.getElementById('os-filter-dropdown');
-    const iconEl = document.getElementById('os-filter-icon');
-    const valueEl = document.getElementById('os-filter-value');
-    const currentValue = queueFilterState.osFilter || 'all';
-
-    if (dropdown) {
-        if (currentValue !== 'all') {
-            dropdown.classList.add('active');
-        } else {
-            dropdown.classList.remove('active');
-        }
-    }
-
-    if (iconEl && valueEl) {
-        if (currentValue === 'all') {
-            iconEl.innerHTML = '<span class="os-filter-all-icon">⊕</span>';
-            valueEl.textContent = 'ALL';
-        } else if (currentValue === 'none') {
-            iconEl.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16">
-                <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/>
-                <text x="12" y="17" text-anchor="middle" font-size="14" font-weight="bold">?</text>
-            </svg>`;
-            valueEl.textContent = 'None';
-        } else {
-            const config = OS_CONFIG[currentValue];
-            if (config && config.logo) {
-                iconEl.innerHTML = `<img src="${config.logo}" alt="${config.label}" class="os-filter-logo">`;
-            }
-            valueEl.textContent = config ? config.label : currentValue;
-        }
-    }
-}
-
-/**
- * Show OS filter dropdown with icons
- */
-function showOSFilterDropdown() {
-    // Remove any existing dropdown
-    const existingDropdown = document.querySelector('.os-filter-popup');
-    if (existingDropdown) {
-        existingDropdown.remove();
-        return; // Toggle off if already open
-    }
-
-    const trigger = document.getElementById('os-filter-trigger');
-    if (!trigger) return;
-
-    const dropdown = document.createElement('div');
-    dropdown.className = 'os-filter-popup';
-
-    const currentValue = queueFilterState.osFilter || 'all';
-
-    // Add ALL option first
-    const allOption = document.createElement('div');
-    allOption.className = 'os-filter-option' + (currentValue === 'all' ? ' selected' : '');
-    allOption.innerHTML = `<span class="os-filter-option-icon">⊕</span><span>ALL</span>`;
-    allOption.addEventListener('click', (e) => {
-        e.stopPropagation();
-        queueFilterState.osFilter = 'all';
-        updateOSDropdownStyle();
-        saveQueueFilterState();
-        renderMissionQueue();
-        dropdown.remove();
-    });
-    dropdown.appendChild(allOption);
-
-    // Add all OS platform options
-    OS_PLATFORMS.forEach(os => {
-        const option = document.createElement('div');
-        option.className = 'os-filter-option' + (currentValue === os ? ' selected' : '');
-        const config = OS_CONFIG[os];
-
-        if (config.logo) {
-            option.innerHTML = `<img src="${config.logo}" alt="${config.label}" class="os-filter-option-logo"><span>${config.label}</span>`;
-        } else {
-            option.innerHTML = `<span class="os-filter-option-icon">?</span><span>${config.label}</span>`;
-        }
-        option.style.setProperty('--option-color', config.color);
-
-        option.addEventListener('click', (e) => {
-            e.stopPropagation();
-            queueFilterState.osFilter = os;
-            updateOSDropdownStyle();
-            saveQueueFilterState();
-            renderMissionQueue();
-            dropdown.remove();
-        });
-        dropdown.appendChild(option);
-    });
-
-    // Add None option
-    const noneOption = document.createElement('div');
-    noneOption.className = 'os-filter-option' + (currentValue === 'none' ? ' selected' : '');
-    noneOption.innerHTML = `<svg viewBox="0 0 24 24" fill="currentColor" width="16" height="16" class="os-filter-option-icon">
-        <circle cx="12" cy="12" r="10" fill="none" stroke="currentColor" stroke-width="2"/>
-        <text x="12" y="17" text-anchor="middle" font-size="14" font-weight="bold">?</text>
-    </svg><span>None</span>`;
-    noneOption.addEventListener('click', (e) => {
-        e.stopPropagation();
-        queueFilterState.osFilter = 'none';
-        updateOSDropdownStyle();
-        saveQueueFilterState();
-        renderMissionQueue();
-        dropdown.remove();
-    });
-    dropdown.appendChild(noneOption);
-
-    // Position dropdown below trigger
-    const rect = trigger.getBoundingClientRect();
-    dropdown.style.position = 'fixed';
-    dropdown.style.top = `${rect.bottom + 4}px`;
-    dropdown.style.left = `${rect.left}px`;
-    dropdown.style.zIndex = '1000';
-
-    document.body.appendChild(dropdown);
-
-    // Close dropdown when clicking outside
-    const closeDropdown = (e) => {
-        if (!dropdown.contains(e.target) && !trigger.contains(e.target)) {
-            dropdown.remove();
-            document.removeEventListener('click', closeDropdown);
-        }
-    };
-    setTimeout(() => document.addEventListener('click', closeDropdown), 0);
-}
-
-/**
- * Update release dropdown visual style based on current selection (XACA-0023)
- */
-function updateReleaseDropdownStyle() {
-    const dropdown = document.getElementById('release-filter-dropdown');
-    const select = document.getElementById('release-filter-select');
-    if (dropdown && select) {
-        if (select.value !== 'all') {
-            dropdown.classList.add('active');
-        } else {
-            dropdown.classList.remove('active');
-        }
-    }
-}
-
-/**
- * Populate release filter dropdown with active releases from API (XACA-0023)
- */
-async function populateReleaseFilterOptions() {
-    const select = document.getElementById('release-filter-select');
-    if (!select) return;
-
-    try {
-        // XACA-0056: Fetch both active and archived releases
-        const [activeResponse, archivedResponse] = await Promise.all([
-            fetch(apiUrl('/api/releases?status=active')),
-            fetch(apiUrl('/api/releases?status=archived'))
-        ]);
-
-        if (!activeResponse.ok) return;
-
-        const activeData = await activeResponse.json();
-        const releases = activeData.releases || [];
-
-        // XACA-0056: Sort active releases by targetDate ascending, fallback to shortTitle
-        releases.sort((a, b) => {
-            const aDate = a.targetDate ? new Date(a.targetDate) : null;
-            const bDate = b.targetDate ? new Date(b.targetDate) : null;
-            if (aDate && bDate) return aDate - bDate;
-            const aLabel = (a.shortTitle || a.name || '').toLowerCase();
-            const bLabel = (b.shortTitle || b.name || '').toLowerCase();
-            return aLabel.localeCompare(bLabel);
-        });
-
-        // XACA-0056: Get up to 5 most recently archived releases
-        let archivedReleases = [];
-        if (archivedResponse.ok) {
-            const archivedData = await archivedResponse.json();
-            archivedReleases = (archivedData.releases || [])
-                .sort((a, b) => {
-                    // Sort by archivedAt descending (most recent first)
-                    const aDate = a.archivedAt ? new Date(a.archivedAt) : new Date(0);
-                    const bDate = b.archivedAt ? new Date(b.archivedAt) : new Date(0);
-                    return bDate - aDate;
-                })
-                .slice(0, 5);  // Take only the 5 most recent
-        }
-
-        // Use state variable for restoration - DOM value may be wrong during init race
-        const targetValue = queueFilterState.releaseFilter || select.value || 'all';
-
-        // Clear existing release-specific options (keep ALL, ASSIGNED, UNASSIGNED)
-        while (select.options.length > 3) {
-            select.remove(3);
-        }
-
-        // Add active releases section
-        if (releases.length > 0) {
-            const separator = document.createElement('option');
-            separator.value = '---';
-            separator.textContent = '── Active ──';
-            separator.disabled = true;
-            select.appendChild(separator);
-
-            releases.forEach(release => {
-                const option = document.createElement('option');
-                option.value = release.id;
-                let displayName;
-                if (release.shortTitle && release.name) {
-                    displayName = `${release.shortTitle} - ${release.name}`;
-                } else {
-                    displayName = release.name || release.id;
-                }
-                option.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '…' : displayName;
-                option.title = `${release.name} (${release.id})`;
-                select.appendChild(option);
-            });
-        }
-
-        // XACA-0056: Add archived releases section (5 most recent)
-        if (archivedReleases.length > 0) {
-            const archivedSeparator = document.createElement('option');
-            archivedSeparator.value = '---archived';
-            archivedSeparator.textContent = '── Archived ──';
-            archivedSeparator.disabled = true;
-            select.appendChild(archivedSeparator);
-
-            archivedReleases.forEach(release => {
-                const option = document.createElement('option');
-                option.value = release.id;
-                let displayName;
-                if (release.shortTitle && release.name) {
-                    displayName = `${release.shortTitle} - ${release.name}`;
-                } else {
-                    displayName = release.name || release.id;
-                }
-                option.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '…' : displayName;
-                option.title = `${release.name} (${release.id}) [Archived]`;
-                select.appendChild(option);
-            });
-        }
-
-        // Restore previous value if still valid
-        select.value = targetValue;
-        if (select.value !== targetValue) {
-            select.value = 'all';
-            queueFilterState.releaseFilter = 'all';
-        }
-    } catch (e) {
-        console.log('Could not load releases for filter:', e);
-    }
-}
-
-/**
- * Update epic dropdown visual style based on current selection (XACA-0040)
- */
-function updateEpicDropdownStyle() {
-    const dropdown = document.getElementById('epic-filter-dropdown');
-    const select = document.getElementById('epic-filter-select');
-    if (dropdown && select) {
-        if (select.value !== 'all') {
-            dropdown.classList.add('active');
-        } else {
-            dropdown.classList.remove('active');
-        }
-    }
-}
-
-/**
- * Update category dropdown visual style based on current selection
- */
-function updateCategoryDropdownStyle() {
-    const dropdown = document.getElementById('category-filter-dropdown');
-    const select = document.getElementById('category-filter-select');
-    if (dropdown && select) {
-        if (select.value !== 'all') {
-            dropdown.classList.add('active');
-        } else {
-            dropdown.classList.remove('active');
-        }
-    }
-}
-
-/**
- * Populate epic filter dropdown with active epics from API (XACA-0040)
- */
-async function populateEpicFilterOptions() {
-    const select = document.getElementById('epic-filter-select');
-    if (!select) return;
-
-    try {
-        const response = await fetch(apiUrl('/api/epics'));
-        if (!response.ok) return;
-
-        const data = await response.json();
-        const epics = data.epics || [];
-
-        // Use state variable for restoration
-        const targetValue = queueFilterState.epicFilter || select.value || 'all';
-
-        // Clear existing epic-specific options (keep ALL, ASSIGNED, UNASSIGNED)
-        while (select.options.length > 3) {
-            select.remove(3);
-        }
-
-        // Add a separator if there are epics
-        if (epics.length > 0) {
-            const separator = document.createElement('option');
-            separator.value = '---';
-            separator.textContent = '───────────';
-            separator.disabled = true;
-            select.appendChild(separator);
-
-            // Add each epic
-            epics.forEach(epic => {
-                const option = document.createElement('option');
-                option.value = epic.id;
-                // Display format: "ShortLabel - Title" or just title if no shortTitle
-                let displayName;
-                if (epic.shortTitle && (epic.title || epic.name)) {
-                    displayName = `${epic.shortTitle} - ${epic.title || epic.name}`;
-                } else {
-                    displayName = epic.title || epic.name || epic.id;
-                }
-                option.textContent = displayName.length > 35 ? displayName.substring(0, 35) + '…' : displayName;
-                option.title = `${epic.title || epic.name} (${epic.id})`;
-                select.appendChild(option);
-            });
-        }
-
-        // Restore previous value if still valid
-        select.value = targetValue;
-        if (select.value !== targetValue) {
-            select.value = 'all';
-            queueFilterState.epicFilter = 'all';
-        }
-    } catch (e) {
-        console.log('Could not load epics for filter:', e);
-    }
-}
-
-/**
- * Initialize filter bar event listeners
+ * Initialize the BACKLOG filter bar using the reusable createFilterBar component.
+ * XACA-0292-005: replaces the previous inline implementation.
+ *
+ * After init:
+ *   - backlogFilterState points to the component's live state object
+ *   - _backlogFilterBarInstance holds the full public API
+ *   - External callers of saveQueueFilterState / populateReleaseFilterOptions /
+ *     populateEpicFilterOptions / updateReleaseDropdownStyle forward to the instance
+ *     via the stubs defined above.
  */
 function initQueueFilterBar() {
-    loadQueueFilterState();
-
-    const filterBar = document.getElementById('queue-filter-bar');
-    if (!filterBar) return;
-
-    // Pill filter buttons
-    filterBar.querySelectorAll('.filter-pill').forEach(pill => {
-        pill.addEventListener('click', () => {
-            toggleQueueFilter(pill.dataset.filter);
-        });
+    _backlogFilterBarInstance = createFilterBar({
+        containerId:             'backlog-filter-bar',
+        storageKey:              BACKLOG_FILTER_KEY,
+        initialState:            Object.assign({}, backlogFilterState),
+        osPlatforms:             OS_PLATFORMS,
+        osConfig:                OS_CONFIG,
+        releaseOptionsEndpoint:  '/api/releases',
+        epicOptionsEndpoint:     '/api/epics',
+        extraButtons: [
+            {
+                id:      'backlog-import-btn',
+                onClick: () => showImportModal(),
+            },
+        ],
+        viewToggle: {
+            btnId:             'view-toggle-btn',
+            valueId:           'view-toggle-value',
+            sectionSelector:   '.backlog-section',
+            storageKey:        'lcars-view-toggle',
+            values:            ['TAGS', 'TRACKING'],
+        },
+        onChange: () => renderMissionBacklog(),
     });
 
-    // Text search input
-    const searchInput = document.getElementById('queue-filter-text');
-    const clearButton = document.getElementById('queue-filter-clear');
-
-    if (searchInput) {
-        // Set initial value from saved state
-        searchInput.value = queueFilterState.searchText || '';
-
-        // Debounced input handler
-        let debounceTimer;
-        searchInput.addEventListener('input', (e) => {
-            clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => {
-                setQueueSearchFilter(e.target.value);
-            }, 150);
-        });
-
-        // Clear on Escape
-        searchInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Escape') {
-                searchInput.value = '';
-                setQueueSearchFilter('');
-                searchInput.blur();
-            }
-        });
-    }
-
-    if (clearButton) {
-        clearButton.addEventListener('click', () => {
-            if (searchInput) {
-                searchInput.value = '';
-                setQueueSearchFilter('');
-                searchInput.focus();
-            }
-        });
-    }
-
-    // Sort toggle
-    const sortToggle = document.getElementById('sort-toggle');
-    const sortValue = document.getElementById('sort-value');
-    if (sortToggle && sortValue) {
-        // Set initial value from saved state
-        sortValue.textContent = queueFilterState.sortBy === 'due_date' ? 'DUE DATE' : 'PRIORITY';
-
-        sortToggle.addEventListener('click', () => {
-            // Toggle between priority and due_date
-            if (queueFilterState.sortBy === 'priority') {
-                queueFilterState.sortBy = 'due_date';
-                sortValue.textContent = 'DUE DATE';
-            } else {
-                queueFilterState.sortBy = 'priority';
-                sortValue.textContent = 'PRIORITY';
-            }
-            saveQueueFilterState();
-            renderMissionQueue();
-        });
-    }
-
-    // OS filter dropdown (custom dropdown with icons)
-    const osTrigger = document.getElementById('os-filter-trigger');
-    if (osTrigger) {
-        // Set initial display from saved state
-        updateOSDropdownStyle();
-
-        osTrigger.addEventListener('click', (e) => {
-            e.stopPropagation();
-            showOSFilterDropdown();
-        });
-    }
-
-    // Release filter dropdown (XACA-0023)
-    const releaseSelect = document.getElementById('release-filter-select');
-    if (releaseSelect) {
-        // Set initial value from saved state
-        releaseSelect.value = queueFilterState.releaseFilter || 'all';
-        updateReleaseDropdownStyle();
-
-        releaseSelect.addEventListener('change', (e) => {
-            queueFilterState.releaseFilter = e.target.value;
-            updateReleaseDropdownStyle();
-            saveQueueFilterState();
-            renderMissionQueue();
-        });
-
-        // Dynamically populate release options from API
-        populateReleaseFilterOptions();
-    }
-
-    // Epic filter dropdown (XACA-0040)
-    const epicSelect = document.getElementById('epic-filter-select');
-    if (epicSelect) {
-        // Set initial value from saved state
-        epicSelect.value = queueFilterState.epicFilter || 'all';
-        updateEpicDropdownStyle();
-
-        epicSelect.addEventListener('change', (e) => {
-            queueFilterState.epicFilter = e.target.value;
-            updateEpicDropdownStyle();
-            saveQueueFilterState();
-            renderMissionQueue();
-        });
-
-        // Dynamically populate epic options from API
-        populateEpicFilterOptions();
-    }
-
-    // Category filter dropdown
-    const categorySelect = document.getElementById('category-filter-select');
-    if (categorySelect) {
-        // Set initial value from saved state
-        categorySelect.value = queueFilterState.categoryFilter || 'all';
-        updateCategoryDropdownStyle();
-
-        categorySelect.addEventListener('change', (e) => {
-            queueFilterState.categoryFilter = e.target.value;
-            updateCategoryDropdownStyle();
-            saveQueueFilterState();
-            renderMissionQueue();
-        });
-    }
-
-    updateFilterBarUI();
+    // Redirect the module-level backlogFilterState reference to the component's
+    // live state object.  All existing callers (itemMatchesFilter, renderMissionBacklog,
+    // viewReleaseItems, etc.) reference the module-level variable; this single
+    // reassignment keeps them working with zero further changes.
+    backlogFilterState = _backlogFilterBarInstance.getState();
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// VIEW TOGGLE - Switch between Tags and Tracking view
-// XACA-0046: Replaces hover-to-reveal for better touch device support
+// VIEW TOGGLE — now handled inside createFilterBar via the viewToggle option.
+// XACA-0046 / XACA-0292-005: stub kept so any lingering call sites don't error.
 // ═══════════════════════════════════════════════════════════════════════════════
 
-let viewToggleState = 'tags'; // 'tags' or 'tracking'
-
 function initViewToggle() {
-    const toggleBtn = document.getElementById('view-toggle-btn');
-    const toggleValue = document.getElementById('view-toggle-value');
-    const queueSection = document.querySelector('.queue-section');
-
-    if (!toggleBtn || !toggleValue || !queueSection) return;
-
-    // Load saved preference
-    const saved = localStorage.getItem('lcars-view-toggle');
-    if (saved === 'tracking') {
-        viewToggleState = 'tracking';
-        queueSection.classList.add('show-tracking');
-        toggleValue.textContent = 'TRACKING';
-        toggleBtn.classList.add('active');
-    }
-
-    // Toggle click handler
-    toggleBtn.addEventListener('click', () => {
-        if (viewToggleState === 'tags') {
-            viewToggleState = 'tracking';
-            queueSection.classList.add('show-tracking');
-            toggleValue.textContent = 'TRACKING';
-            toggleBtn.classList.add('active');
-        } else {
-            viewToggleState = 'tags';
-            queueSection.classList.remove('show-tracking');
-            toggleValue.textContent = 'TAGS';
-            toggleBtn.classList.remove('active');
-        }
-
-        // Save preference
-        localStorage.setItem('lcars-view-toggle', viewToggleState);
-    });
-
-    // Keyboard support
-    toggleBtn.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault();
-            toggleBtn.click();
-        }
-    });
+    // No-op: view toggle wired by createFilterBar() in initQueueFilterBar() above.
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -9409,7 +8833,7 @@ function runMigration() {
             'home': { mode: 'kanban', section: 'home' },
             'workflow': { mode: 'kanban', section: 'workflow' },
             'kanban': { mode: 'kanban', section: 'workflow' },
-            'queue': { mode: 'kanban', section: 'queue' },
+            'backlog': { mode: 'kanban', section: 'backlog' },
             'details': { mode: 'kanban', section: 'details' },
             'epics': { mode: 'kanban', section: 'epics' },
             'releases': { mode: 'kanban', section: 'releases' },
@@ -9646,6 +9070,16 @@ function switchSection(sectionName, skipAnimation = false) {
     if (sectionName === 'todos') {
         loadTodos();
     }
+
+    // Load team config when switching to team-config section (XACA-0292)
+    if (sectionName === 'team-config') {
+        loadTeamConfig();
+    }
+
+    // Render CR list when switching to change-req section (XACA-0292-007)
+    if (sectionName === 'change-req') {
+        if (typeof renderChangeReqList === 'function') renderChangeReqList();
+    }
 }
 
 function loadSavedSection() {
@@ -9690,7 +9124,7 @@ const STARTUP_MESSAGES = [
     'ESTABLISHING SECURE CHANNELS...',
     'LOADING DEVELOPER PROFILES...',
     'CALIBRATING WORKFLOW ENGINE...',
-    'INITIALIZING MISSION QUEUE...',
+    'INITIALIZING MISSION BACKLOG...',
     'LOADING COMMAND INTERFACE...',
     'VERIFYING SECURITY CLEARANCE...',
     'SYSTEMS NOMINAL',
@@ -10020,11 +9454,11 @@ const COMMANDS = [
     },
 
     // ═══════════════════════════════════════════════════════════════════════════════
-    // BACKLOG - Mission queue management
+    // BACKLOG - Mission backlog management
     // ═══════════════════════════════════════════════════════════════════════════════
     { section: 'kanban', cmd: 'kb-backlog', color: 'planning', cat: 'Backlog', short: 'Manage backlog',
       usage: 'kb-backlog <command> [args]',
-      desc: 'Manage the mission backlog queue. The backlog holds tasks waiting to be worked on, sorted by priority. Use this to add upcoming work, review pending tasks, update priorities, manage subitems, or remove items that are no longer needed.',
+      desc: 'Manage the mission backlog. The backlog holds tasks waiting to be worked on, sorted by priority. Use this to add upcoming work, review pending tasks, update priorities, manage subitems, or remove items that are no longer needed.',
       subcommands: [
         { sub: 'add "task" [priority] [desc] [jira] [os]', desc: 'Add new task. Priority: low/med/high/critical. OS: iOS/Android/Firebase.' },
         { sub: 'list', desc: 'Display all backlog items with index numbers and priorities.' },
@@ -10754,7 +10188,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 ${isExpanded ? '<div class="release-items-loading">Loading items...</div>' : ''}
             </div>
             <div class="release-card-actions">
-                <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true')" style="display:none">DOCS</button>
+                <button class="release-action-btn docs" data-item-id="${release.id}" onclick="event.stopPropagation(); showPlanDocModal('${release.id}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" style="display:none">DOCS</button>
                 <button class="release-action-btn promote-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'promoteRelease(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>PROMOTE</button>
                 <button class="release-action-btn" onclick="event.stopPropagation(); viewReleaseNotes('${release.id}')">RELNOTES</button>
                 <button class="release-action-btn edit-btn" onclick="event.stopPropagation(); ${isArchived ? 'return false' : 'showEditReleaseModal(\'' + release.id + '\')'}" ${isArchived ? 'disabled' : ''}>EDIT</button>
@@ -10827,11 +10261,11 @@ async function loadReleaseItems(releaseId) {
             const isCancelled = item.status === 'cancelled';
             const stateClass = isCompleted ? 'completed' : (isCancelled ? 'cancelled' : '');
             return `
-            <div class="release-item ${stateClass}" data-item-id="${escapeHtml(item.itemId)}" onclick="navigateToQueueItemById('${jsAttrEscape(item.itemId)}')">
+            <div class="release-item ${stateClass}" data-item-id="${escapeHtml(item.itemId)}" onclick="navigateToBacklogItemById('${jsAttrEscape(item.itemId)}')">
                 <span class="release-item-id" role="button" tabindex="0" title="Click to copy item ID to clipboard" aria-label="Item ID: ${escapeHtml(item.itemId)}. Click to copy." onclick="event.stopPropagation(); copyToClipboard('${jsAttrEscape(item.itemId)}')" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();event.stopPropagation();copyToClipboard('${jsAttrEscape(item.itemId)}');}">${escapeHtml(item.itemId)}</span>
                 <span class="release-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="release-item-title">${escapeHtml(item.title)}</span>
-                <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
+                <button class="release-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="release-item-remove" onclick="event.stopPropagation(); removeItemFromRelease('${releaseId}', '${item.itemId}')" title="Remove from release">✕</button>
             </div>
         `}).join('');
@@ -11013,7 +10447,7 @@ function viewReleaseItems(releaseId) {
     console.log('View items for release:', releaseId);
 
     // Set the release filter
-    queueFilterState.releaseFilter = releaseId;
+    backlogFilterState.releaseFilter = releaseId;
 
     // Update the dropdown if it exists
     const releaseSelect = document.getElementById('release-filter-select');
@@ -11026,11 +10460,11 @@ function viewReleaseItems(releaseId) {
     saveQueueFilterState();
 
     // Switch to Queue tab
-    switchSection('queue');
+    switchSection('backlog');
 
-    // Re-render the queue with the filter applied (after tab switch animation)
+    // Re-render the backlog with the filter applied (after tab switch animation)
     setTimeout(() => {
-        renderMissionQueue();
+        renderMissionBacklog();
     }, 150);
 }
 
@@ -12536,7 +11970,7 @@ function renderEpicCard(epic) {
                 <div class="epic-card-header-right">
                     ${tagsHtml}
                     <div class="epic-card-actions">
-                        <button class="epic-action-btn docs" data-item-id="${epic.id}" onclick="event.stopPropagation(); showPlanDocModal('${epic.id}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
+                        <button class="epic-action-btn docs" data-item-id="${epic.id}" onclick="event.stopPropagation(); showPlanDocModal('${epic.id}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                         <button class="epic-action-btn edit" onclick="event.stopPropagation(); showEditEpicModal('${epic.id}')" title="Edit Epic">✎</button>
                         <button class="epic-action-btn delete" onclick="event.stopPropagation(); confirmDeleteEpic('${epic.id}')" title="Delete Epic">✕</button>
                         <span class="epic-expand-icon">${isExpanded ? '▼' : '▶'}</span>
@@ -12615,7 +12049,7 @@ async function loadEpicItems(epicId) {
                 <span class="epic-item-status status-${item.status}">${item.status.toUpperCase()}</span>
                 <span class="epic-item-title">${escapeHtml(item.title)}</span>
                 <span class="epic-item-team">${item.team}</span>
-                <button class="epic-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
+                <button class="epic-item-docs" data-item-id="${item.itemId}" onclick="event.stopPropagation(); showPlanDocModal('${item.itemId}', this.getAttribute('data-retro-exists') === 'true', this.getAttribute('data-cr-exists') === 'true')" title="View Plan Document" style="display:none">DOCS</button>
                 <button class="epic-item-remove" onclick="removeItemFromEpic('${epicId}', '${item.itemId}')" title="Remove from epic">✕</button>
             </div>
         `;
@@ -12849,7 +12283,7 @@ async function updateEpic() {
         // Update Queue tab's epic filter dropdown with new name
         populateEpicFilterOptions();
 
-        // Also reload the queue to update epic names on assigned items
+        // Also reload the backlog to update epic names on assigned items
         refreshData();
     } catch (e) {
         showEpicError('epic-edit-error', e.message);
@@ -12877,7 +12311,7 @@ async function confirmDeleteEpic(epicId) {
         // Update Queue tab's epic filter dropdown
         populateEpicFilterOptions();
 
-        // Reload queue to remove deleted epic badges from items
+        // Reload backlog to remove deleted epic badges from items
         refreshData();
     } catch (e) {
         alert(`Error deleting epic: ${e.message}`);
@@ -12940,7 +12374,7 @@ function createEpicModals() {
                 </div>
                 <div class="lcars-modal-body">
                     <div class="modal-field">
-                        <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in QUEUE tab</span></label>
+                        <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in BACKLOG tab</span></label>
                         <input type="text" id="new-epic-short-title" class="modal-input" placeholder="e.g., Q1 Infrastructure" maxlength="20">
                     </div>
                     <div class="modal-field">
@@ -12994,7 +12428,7 @@ function createEpicModals() {
                 <div class="lcars-modal-body">
                     <input type="hidden" id="edit-epic-id">
                     <div class="modal-field">
-                        <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in QUEUE tab</span></label>
+                        <label class="modal-label">LABEL (OPTIONAL) <span class="modal-label-hint">For compact display in BACKLOG tab</span></label>
                         <input type="text" id="edit-epic-short-title" class="modal-input" placeholder="e.g., Q1 Infrastructure" maxlength="20">
                     </div>
                     <div class="modal-field">
@@ -13044,7 +12478,7 @@ function createEpicModals() {
 }
 
 /**
- * Show epic assignment modal for queue items
+ * Show epic assignment modal for backlog items
  */
 async function showEpicAssignModal(itemId, itemTitle, team, currentEpicId) {
     pauseAutoRefresh();
@@ -13181,7 +12615,7 @@ async function selectEpicForItem(epicId, epicName) {
 
         hideEpicAssignModal();
 
-        // Refresh the queue to show new badge
+        // Refresh the backlog to show new badge
         refreshData();
 
         // Refresh epics if on that section
@@ -13222,7 +12656,7 @@ async function removeEpicFromItem() {
 
         hideEpicAssignModal();
 
-        // Refresh the queue
+        // Refresh the backlog
         refreshData();
 
         // Refresh epics if on that section
@@ -13247,14 +12681,67 @@ async function removeEpicFromItem() {
  * Render markdown content to HTML
  * Supports headers, lists, bold, italic, code blocks, links
  */
+/**
+ * Validate that a URL href uses an allowed scheme.
+ * Permits http:, https:, mailto:, and relative paths (/, ./, ../, #, or no scheme).
+ * Rejects javascript:, data:, vbscript:, and any other dangerous schemes.
+ * XACA-0292-013: XSS hardening for CR doc rendering.
+ * @param {string} href - The URL to validate (may already be HTML-entity-escaped)
+ * @returns {string|null} The href if safe, or null if dangerous
+ */
+function validateUrlScheme(href) {
+    if (!href) return null;
+    // Decode HTML entities that escapeHtml may have introduced before scheme check
+    const decoded = href
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>')
+        .replace(/&quot;/g, '"')
+        .replace(/&#39;/g, "'");
+    const trimmed = decoded.trim().toLowerCase();
+    // Allowed absolute schemes
+    if (trimmed.startsWith('http:') || trimmed.startsWith('https:') || trimmed.startsWith('mailto:')) {
+        return href;
+    }
+    // Allowed relative paths
+    if (trimmed.startsWith('/') || trimmed.startsWith('./') || trimmed.startsWith('../') || trimmed.startsWith('#')) {
+        return href;
+    }
+    // No scheme at all (bare relative path like "foo/bar") — allowed if colon appears
+    // after the first slash (query param), or there is no colon at all
+    const colonPos = trimmed.indexOf(':');
+    const slashPos = trimmed.indexOf('/');
+    if (colonPos === -1 || (slashPos !== -1 && slashPos < colonPos)) {
+        return href;
+    }
+    // Anything else (javascript:, data:, vbscript:, etc.) — reject
+    return null;
+}
+
 function renderMarkdown(content) {
     if (!content) return '<div class="plan-doc-empty">No plan document available</div>';
 
-    let html = content;
+    // XACA-0292-013: XSS hardening — escape all raw HTML in the content FIRST so
+    // that embedded <script> tags or HTML attributes become inert entities.
+    // Code blocks are extracted before escaping so their content is preserved
+    // verbatim (we escape them separately inside the replacement function).
+    const codeBlockPlaceholders = [];
+    let html = content.replace(/```(\w+)?\n([\s\S]*?)```/g, function(match, lang, code) {
+        const idx = codeBlockPlaceholders.length;
+        codeBlockPlaceholders.push(`<pre><code class="language-${lang || 'text'}">${escapeHtml(code.trim())}</code></pre>`);
+        return `\x00CODEBLOCK${idx}\x00`;
+    });
 
-    // Code blocks (must be before inline code)
-    html = html.replace(/```(\w+)?\n([\s\S]*?)```/g, function(match, lang, code) {
-        return `<pre><code class="language-${lang || 'text'}">${escapeHtml(code.trim())}</code></pre>`;
+    // Escape all remaining content before any HTML injection via regex capture groups
+    html = escapeHtml(html);
+
+    // Restore pre-rendered code blocks. escapeHtml uses div.textContent which
+    // browsers encode NUL as empty string (dropping the placeholder delimiters);
+    // use a visible ASCII sentinel that won't appear in normal markdown instead.
+    // NOTE: the NUL bytes above survive escapeHtml in V8/browser (they pass through
+    // textContent unchanged), so this straightforward replacement works.
+    html = html.replace(/\x00CODEBLOCK(\d+)\x00/g, function(match, idx) {
+        return codeBlockPlaceholders[parseInt(idx, 10)] || '';
     });
 
     // Headers (must be at start of line)
@@ -13283,8 +12770,15 @@ function renderMarkdown(content) {
     // Inline code
     html = html.replace(/`(.+?)`/g, '<code>$1</code>');
 
-    // Links
-    html = html.replace(/\[(.+?)\]\((.+?)\)/g, '<a href="$2" target="_blank">$1</a>');
+    // Links — validate href scheme; render as plain text if dangerous
+    html = html.replace(/\[(.+?)\]\((.+?)\)/g, function(match, text, href) {
+        const safeHref = validateUrlScheme(href);
+        if (safeHref) {
+            return `<a href="${safeHref}" target="_blank">${text}</a>`;
+        }
+        // Dangerous scheme — render link text only, no anchor element
+        return text;
+    });
 
     // Wrap consecutive <li> tags in <ul>
     html = html.replace(/(<li>.*<\/li>\n?)+/g, function(match) {
@@ -13313,8 +12807,12 @@ function renderMarkdown(content) {
 
 /**
  * Show plan document modal for an item
+ * @param {string} itemId - The kanban item ID
+ * @param {boolean} retroExists - Whether a retrospective document exists
+ * @param {boolean} [crExists=false] - Whether a CR document is available (XACA-0292)
  */
-function showPlanDocModal(itemId, retroExists) {
+function showPlanDocModal(itemId, retroExists, crExists) {
+    crExists = !!crExists; // normalise — callers may pass undefined when only 2 args given
     pauseAutoRefresh();
 
     // Create overlay
@@ -13332,13 +12830,13 @@ function showPlanDocModal(itemId, retroExists) {
     const header = document.createElement('div');
     header.className = 'lcars-modal-header';
     header.innerHTML = `
-        <span class="lcars-modal-title">PLAN DOCUMENT: ${itemId}</span>
+        <span class="lcars-modal-title">PLAN DOCUMENT: ${escapeHtml(itemId)}</span>
         <button class="lcars-modal-close" onclick="hidePlanDocModal()">&times;</button>
     `;
 
-    // Create tab bar (only if retro exists)
+    // Create tab bar when any secondary tab is present (retro and/or CR)
     let tabBar = null;
-    if (retroExists) {
+    if (retroExists || crExists) {
         tabBar = document.createElement('div');
         tabBar.className = 'plan-doc-tabs';
 
@@ -13347,15 +12845,25 @@ function showPlanDocModal(itemId, retroExists) {
         planTab.setAttribute('data-tab', 'plan');
         planTab.textContent = 'PLAN';
         planTab.onclick = function() { switchDocTab(itemId, 'plan'); };
-
-        const retroTab = document.createElement('button');
-        retroTab.className = 'plan-doc-tab';
-        retroTab.setAttribute('data-tab', 'retro');
-        retroTab.textContent = 'RETRO';
-        retroTab.onclick = function() { switchDocTab(itemId, 'retro'); };
-
         tabBar.appendChild(planTab);
-        tabBar.appendChild(retroTab);
+
+        if (retroExists) {
+            const retroTab = document.createElement('button');
+            retroTab.className = 'plan-doc-tab';
+            retroTab.setAttribute('data-tab', 'retro');
+            retroTab.textContent = 'RETRO';
+            retroTab.onclick = function() { switchDocTab(itemId, 'retro'); };
+            tabBar.appendChild(retroTab);
+        }
+
+        if (crExists) {
+            const crTab = document.createElement('button');
+            crTab.className = 'plan-doc-tab';
+            crTab.setAttribute('data-tab', 'cr');
+            crTab.textContent = 'CR';
+            crTab.onclick = function() { switchDocTab(itemId, 'cr'); };
+            tabBar.appendChild(crTab);
+        }
     }
 
     // Create body (for markdown content)
@@ -13446,35 +12954,54 @@ function switchDocTab(itemId, tabType) {
     // Update title
     const title = modal.querySelector('.lcars-modal-title');
     if (title) {
-        title.textContent = tabType === 'retro'
-            ? `RETROSPECTIVE: ${itemId}`
-            : `PLAN DOCUMENT: ${itemId}`;
+        if (tabType === 'retro') {
+            title.textContent = `RETROSPECTIVE: ${itemId}`;
+        } else if (tabType === 'cr') {
+            title.textContent = `CR DOCUMENT: ${itemId}`;
+        } else {
+            title.textContent = `PLAN DOCUMENT: ${itemId}`;
+        }
     }
 
     // Fetch and display content
     const body = modal.querySelector('.plan-doc-content');
     if (!body) return;
 
-    const endpoint = tabType === 'retro' ? 'retro-content' : 'plan-content';
-    body.innerHTML = '<div class="plan-doc-loading">Loading ' +
-        (tabType === 'retro' ? 'retrospective' : 'plan document') + '...</div>';
+    let endpoint, loadingLabel, errorLabel;
+    if (tabType === 'retro') {
+        endpoint = 'retro-content';
+        loadingLabel = 'retrospective';
+        errorLabel = 'Retrospective not found';
+    } else if (tabType === 'cr') {
+        endpoint = 'cr-content';
+        loadingLabel = 'CR document';
+        errorLabel = 'CR document not found';
+    } else {
+        endpoint = 'plan-content';
+        loadingLabel = 'plan document';
+        errorLabel = 'Plan document not found';
+    }
+
+    body.innerHTML = '<div class="plan-doc-loading">Loading ' + loadingLabel + '...</div>';
 
     fetch(apiUrl('/api/kanban/' + itemId + '/' + endpoint))
         .then(response => {
-            if (!response.ok) throw new Error(tabType === 'retro' ? 'Retrospective not found' : 'Plan document not found');
+            if (!response.ok) throw new Error(errorLabel);
             return response.json();
         })
         .then(data => {
             if (data.filename && title) {
-                title.textContent = (tabType === 'retro' ? 'RETROSPECTIVE: ' : 'PLAN DOCUMENT: ') + data.filename;
+                const prefix = tabType === 'retro' ? 'RETROSPECTIVE: '
+                    : tabType === 'cr' ? 'CR DOCUMENT: '
+                    : 'PLAN DOCUMENT: ';
+                title.textContent = prefix + data.filename;
             }
             body.innerHTML = renderMarkdown(data.content);
         })
         .catch(error => {
             console.error('Error loading ' + tabType + ':', error);
             body.innerHTML = '<div class="plan-doc-error"><strong>Error loading ' +
-                (tabType === 'retro' ? 'retrospective' : 'plan document') + '</strong><br>' +
-                error.message + '</div>';
+                loadingLabel + '</strong><br>' + error.message + '</div>';
         });
 }
 
@@ -13992,7 +13519,7 @@ async function submitEditRelease() {
         // Refresh releases dashboard
         loadReleases();
 
-        // Refresh board data to update release names on QUEUE items
+        // Refresh board data to update release names on BACKLOG items
         loadBoardData();
 
     } catch (error) {
@@ -16839,6 +16366,10 @@ async function checkPlanExists(itemId, docsButton) {
             if (data.retroExists) {
                 docsButton.setAttribute('data-retro-exists', 'true');
             }
+            // Store crExists for the modal (XACA-0292)
+            if (data.crExists) {
+                docsButton.setAttribute('data-cr-exists', 'true');
+            }
         } else {
             console.log('[DOCS] No plan for', itemId);
         }
@@ -17754,7 +17285,7 @@ document.addEventListener('DOMContentLoaded', async () => {
             if (key >= 1 && key <= 8) {
                 e.preventDefault();
                 // Alt+1 = home, Alt+2 = todos, Alt+3 = calendar, Alt+4 = workflow,
-                // Alt+5 = details, Alt+6 = queue, Alt+7 = epics, Alt+8 = releases
+                // Alt+5 = details, Alt+6 = backlog, Alt+7 = epics, Alt+8 = releases
                 switchSection(SECTIONS[key]);
             }
         }
@@ -17841,6 +17372,12 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // Initialize startup screen with boot animation
     initStartupScreen();
+
+    // CHANGE REQ — XACA-0292-006: bootstrap visibility and wire crsupport-changed listener
+    initChangeReqSection();
+
+    // CHANGE REQ — XACA-0292-007: mount CR list view filter bar
+    if (typeof initChangeReqTab === 'function') initChangeReqTab();
 
     console.log('LCARS Kanban Monitor Ready');
 });
@@ -18145,4 +17682,156 @@ async function toggleTodo(todoId) {
         // Re-render to restore checkbox visual state
         renderTodos();
     }
+}
+
+
+// =============================================================================
+// TEAM CONFIG — XACA-0292
+// Loads and persists per-board settings.  Currently: crSupport.enabled.
+// Dispatches 'crsupport-changed' on toggle so other agents can react.
+// =============================================================================
+
+/**
+ * Fetch the current teamConfig from the server and wire up the CR checkbox.
+ * Safe to call multiple times (re-reads server state each visit).
+ */
+async function loadTeamConfig() {
+    const checkbox = document.getElementById('team-config-cr-checkbox');
+    const statusEl = document.getElementById('team-config-cr-status');
+    if (!checkbox) return;
+
+    try {
+        const response = await fetch(apiUrl('/api/team-config'));
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+
+        const enabled = !!(data.teamConfig && data.teamConfig.crSupport && data.teamConfig.crSupport.enabled);
+        checkbox.checked = enabled;
+
+        // Wire change handler (replace any existing to avoid duplicate listeners)
+        checkbox.onchange = () => saveTeamConfigCRSupport(checkbox, statusEl);
+
+        if (statusEl) {
+            statusEl.textContent = '';
+            statusEl.className = 'team-config-status';
+        }
+    } catch (err) {
+        console.error('[team-config] Failed to load:', err);
+        if (statusEl) {
+            statusEl.textContent = 'Load error';
+            statusEl.className = 'team-config-status error';
+        }
+    }
+}
+
+/**
+ * Persist crSupport.enabled to the server.
+ * On success: dispatch 'crsupport-changed' DOM event with { enabled } detail.
+ * On failure: revert checkbox state and show error message.
+ */
+async function saveTeamConfigCRSupport(checkbox, statusEl) {
+    const enabled = checkbox.checked;
+
+    if (statusEl) {
+        statusEl.textContent = 'Saving...';
+        statusEl.className = 'team-config-status saving';
+    }
+
+    try {
+        const response = await fetch(apiUrl('/api/team-config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                team: CONFIG.team,
+                teamConfig: { crSupport: { enabled } }
+            })
+        });
+
+        if (!response.ok) {
+            const err = await response.json().catch(() => ({}));
+            throw new Error(err.error || `HTTP ${response.status}`);
+        }
+
+        if (statusEl) {
+            statusEl.textContent = 'Saved';
+            statusEl.className = 'team-config-status saved';
+            // Fade out after 2 s
+            setTimeout(() => {
+                if (statusEl.className === 'team-config-status saved') {
+                    statusEl.textContent = '';
+                    statusEl.className = 'team-config-status';
+                }
+            }, 2000);
+        }
+
+        // Notify other agents/components — no page reload
+        document.dispatchEvent(new CustomEvent('crsupport-changed', { detail: { enabled } }));
+        console.log('[team-config] crsupport-changed dispatched: enabled=' + enabled);
+
+    } catch (err) {
+        console.error('[team-config] Save failed:', err);
+        // Revert checkbox visual state
+        checkbox.checked = !enabled;
+        if (statusEl) {
+            statusEl.textContent = 'Save failed';
+            statusEl.className = 'team-config-status error';
+        }
+    }
+}
+
+// =============================================================================
+// CHANGE REQ SECTION — XACA-0292-006
+// Conditional mount/unmount based on crSupport.enabled flag.
+// =============================================================================
+
+/**
+ * Apply visibility state for the CHANGE REQ tab and section.
+ * When enabled=false (default Academy state), sidebar/tabbar buttons and the
+ * section element are hidden with style="display:none" — no DOM removal.
+ * When enabled=true they are unhidden, making the section reachable via routing.
+ * If the user is currently viewing CHANGE REQ when the flag turns false, they
+ * are navigated back to BACKLOG without a page reload.
+ *
+ * @param {boolean} enabled
+ */
+function applyChangeReqVisibility(enabled) {
+    const sidebarBtn = document.getElementById('sidebar-btn-change-req');
+    const tabbarBtn  = document.getElementById('tabbar-btn-change-req');
+    const section    = document.getElementById('section-change-req');
+
+    const display = enabled ? '' : 'none';
+    if (sidebarBtn) sidebarBtn.style.display = display;
+    if (tabbarBtn)  tabbarBtn.style.display  = display;
+    if (section)    section.style.display    = display;
+
+    // If the user is currently on CHANGE REQ and the flag just turned off,
+    // navigate them to BACKLOG immediately (no page reload).
+    if (!enabled && activeSection === 'change-req') {
+        switchSection('backlog');
+    }
+
+    console.log('[change-req] visibility set to ' + (enabled ? 'visible' : 'hidden'));
+}
+
+/**
+ * Bootstrap CHANGE REQ visibility on page load.
+ * Fetches /api/team-config once and applies the initial state.
+ * On error (e.g. server not yet running) defaults to hidden — safe.
+ */
+async function initChangeReqSection() {
+    try {
+        const response = await fetch(apiUrl('/api/team-config'));
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = await response.json();
+        const enabled = !!(data.teamConfig && data.teamConfig.crSupport && data.teamConfig.crSupport.enabled);
+        applyChangeReqVisibility(enabled);
+    } catch (err) {
+        console.warn('[change-req] Could not load team-config on init; defaulting to hidden:', err);
+        applyChangeReqVisibility(false);
+    }
+
+    // Listen for runtime toggles (dispatched by saveTeamConfigCRSupport)
+    document.addEventListener('crsupport-changed', (e) => {
+        applyChangeReqVisibility(!!(e.detail && e.detail.enabled));
+    });
 }

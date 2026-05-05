@@ -1,0 +1,454 @@
+/**
+ * lcars-cr-tab.css — CHANGE REQ section list view
+ *
+ * XACA-0292-007: Styling for the CR/CAB tabular list, filter bar, badges,
+ * and per-row DOCS button.  LCARS palette; complements .backlog-* visuals.
+ */
+
+/* ── Filter bar ─────────────────────────────────────────────────────────── */
+
+.change-req-filter-bar {
+    padding: 8px 16px 6px;
+    background: transparent;
+}
+
+.cr-filter-row {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.cr-filter-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.cr-type-pills {
+    padding-top: 2px;
+    border-top: 1px solid rgba(204, 153, 255, 0.15);
+}
+
+/* CR filter pills share base .filter-pill styling (defined in lcars.css),
+   but we supply state-specific active colors */
+
+.cr-filter-pills .filter-pill {
+    font-size: 9px;
+    padding: 3px 8px;
+    letter-spacing: 0.06em;
+    background: rgba(255,255,255,0.05);
+    border-color: rgba(204, 153, 255, 0.3);
+    color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-filter-pills .filter-pill.active {
+    background: var(--lcars-purple, #cc99ff);
+    color: #000;
+    border-color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-filter-pills .filter-pill:hover:not(.active) {
+    background: rgba(204, 153, 255, 0.15);
+}
+
+/* Type pills — slightly different accent (violet) */
+.cr-type-pills .filter-pill {
+    border-color: rgba(170, 119, 221, 0.3);
+    color: var(--lcars-violet, #aa77dd);
+}
+
+.cr-type-pills .filter-pill.active {
+    background: var(--lcars-violet, #aa77dd);
+    color: #000;
+    border-color: var(--lcars-violet, #aa77dd);
+}
+
+.cr-type-pills .filter-pill:hover:not(.active) {
+    background: rgba(170, 119, 221, 0.15);
+}
+
+.cr-filter-controls {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding-top: 4px;
+}
+
+/* Platform dropdown */
+.cr-platform-wrap {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.cr-dropdown-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    color: var(--lcars-mauve, #cc99cc);
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.cr-platform-select {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(204, 153, 255, 0.3);
+    color: var(--lcars-purple, #cc99ff);
+    padding: 3px 6px;
+    border-radius: 3px;
+    cursor: pointer;
+    outline: none;
+    text-transform: uppercase;
+}
+
+.cr-platform-select:focus {
+    border-color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-platform-select option {
+    background: #1a0a2e;
+    color: var(--lcars-purple, #cc99ff);
+}
+
+/* Sort button */
+.cr-sort-wrap {}
+
+.cr-sort-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(153, 153, 255, 0.3);
+    color: var(--lcars-blue, #9999ff);
+    padding: 3px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+    white-space: nowrap;
+    text-transform: uppercase;
+}
+
+.cr-sort-btn:hover {
+    background: rgba(153, 153, 255, 0.2);
+    border-color: var(--lcars-blue, #9999ff);
+}
+
+#cr-sort-value {
+    color: var(--lcars-cyan, #99ccff);
+}
+
+/* Search */
+.cr-search-wrap {
+    flex: 1;
+    min-width: 160px;
+    max-width: 320px;
+}
+
+/* ── Table layout ────────────────────────────────────────────────────────── */
+
+.change-req-list {
+    padding: 0 16px 16px;
+    overflow-x: auto;
+}
+
+.cr-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.04em;
+}
+
+.cr-header-row th {
+    padding: 6px 8px 5px;
+    font-size: 9px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--lcars-mauve, #cc99cc);
+    border-bottom: 1px solid rgba(204, 153, 255, 0.25);
+    white-space: nowrap;
+    text-align: left;
+    font-weight: 600;
+    background: rgba(204, 153, 255, 0.04);
+}
+
+.cr-row {
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+    transition: background 0.12s;
+}
+
+.cr-row:hover {
+    background: rgba(204, 153, 255, 0.07);
+}
+
+.cr-row td {
+    padding: 6px 8px;
+    vertical-align: middle;
+    color: var(--lcars-lavender, #ccccff);
+}
+
+/* Column widths */
+.cr-col-id       { width: 100px; }
+.cr-col-type     { width: 90px; }
+.cr-col-state    { width: 130px; }
+.cr-col-title    { min-width: 140px; max-width: 220px; }
+.cr-col-platform { width: 80px; }
+.cr-col-approver { width: 110px; }
+.cr-col-deploy   { width: 110px; }
+.cr-col-pushbacks{ width: 70px; text-align: center; }
+.cr-col-docs     { width: 60px; text-align: center; }
+
+/* CR ID — monospace */
+.cr-id-mono {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 10px;
+    color: var(--lcars-cyan, #99ccff);
+    letter-spacing: 0.02em;
+}
+
+/* Title truncation */
+.cr-title-text {
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 210px;
+}
+
+/* Dim "—" placeholders */
+.cr-dim {
+    color: rgba(255,255,255,0.25);
+}
+
+/* Pushback count highlight */
+.cr-pushback-count {
+    color: var(--lcars-amber, #ffcc00);
+    font-weight: bold;
+}
+
+/* ── Type badges ─────────────────────────────────────────────────────────── */
+
+.cr-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.cr-badge-standard {
+    background: rgba(153, 153, 255, 0.18);
+    color: var(--lcars-blue, #9999ff);
+    border: 1px solid rgba(153, 153, 255, 0.35);
+}
+
+.cr-badge-normal {
+    background: rgba(153, 204, 255, 0.18);
+    color: var(--lcars-cyan, #99ccff);
+    border: 1px solid rgba(153, 204, 255, 0.35);
+}
+
+.cr-badge-emergency {
+    background: rgba(255, 68, 102, 0.18);
+    color: var(--lcars-crimson, #ff4466);
+    border: 1px solid rgba(255, 68, 102, 0.40);
+}
+
+/* ── State badges ────────────────────────────────────────────────────────── */
+
+.cr-state-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    white-space: nowrap;
+}
+
+.cr-state-drafted {
+    background: rgba(255,255,255,0.07);
+    color: rgba(255,255,255,0.45);
+    border: 1px solid rgba(255,255,255,0.15);
+}
+
+.cr-state-submitted {
+    background: rgba(255, 204, 0, 0.15);
+    color: var(--lcars-amber, #ffcc00);
+    border: 1px solid rgba(255, 204, 0, 0.35);
+}
+
+.cr-state-approved {
+    background: rgba(153, 255, 153, 0.12);
+    color: var(--lcars-green, #99ff99);
+    border: 1px solid rgba(153, 255, 153, 0.30);
+}
+
+.cr-state-rejected {
+    background: rgba(204, 68, 68, 0.15);
+    color: var(--lcars-red, #cc4444);
+    border: 1px solid rgba(204, 68, 68, 0.35);
+}
+
+.cr-state-held {
+    background: rgba(204, 153, 204, 0.12);
+    color: var(--lcars-mauve, #cc99cc);
+    border: 1px solid rgba(204, 153, 204, 0.30);
+}
+
+.cr-state-implementing {
+    background: rgba(153, 204, 255, 0.12);
+    color: var(--lcars-cyan, #99ccff);
+    border: 1px solid rgba(153, 204, 255, 0.30);
+}
+
+.cr-state-deployed-dev {
+    background: rgba(153, 153, 255, 0.12);
+    color: var(--lcars-blue, #9999ff);
+    border: 1px solid rgba(153, 153, 255, 0.28);
+}
+
+.cr-state-deployed-prod {
+    background: rgba(153, 255, 153, 0.18);
+    color: var(--lcars-green-dark, #66cc66);
+    border: 1px solid rgba(153, 255, 153, 0.35);
+}
+
+.cr-state-emergency {
+    background: rgba(255, 68, 102, 0.18);
+    color: var(--lcars-crimson, #ff4466);
+    border: 1px solid rgba(255, 68, 102, 0.40);
+    font-weight: 700;
+}
+
+/* ── DOCS button ─────────────────────────────────────────────────────────── */
+
+.cr-docs-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    padding: 3px 8px;
+    background: rgba(204, 153, 255, 0.12);
+    border: 1px solid rgba(204, 153, 255, 0.35);
+    color: var(--lcars-purple, #cc99ff);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+    white-space: nowrap;
+}
+
+.cr-docs-btn:hover {
+    background: rgba(204, 153, 255, 0.25);
+    border-color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-docs-btn:active {
+    background: var(--lcars-purple, #cc99ff);
+    color: #000;
+}
+
+.cr-docs-placeholder {
+    display: inline-block;
+    width: 36px;
+}
+
+/* ── Saved-view chips ────────────────────────────────────────────────────── */
+
+.cr-saved-views {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 6px 16px 4px;
+    align-items: center;
+}
+
+.cr-saved-view-chip {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 5px 14px;
+    border-radius: 20px;
+    border: 1px solid rgba(204, 153, 255, 0.35);
+    background: rgba(255,255,255,0.04);
+    color: var(--lcars-purple, #cc99ff);
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+}
+
+.cr-saved-view-chip:hover:not(.active) {
+    background: rgba(204, 153, 255, 0.15);
+    border-color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-saved-view-chip.active {
+    background: var(--lcars-orange, #ff9966);
+    border-color: var(--lcars-orange, #ff9966);
+    color: #000;
+}
+
+.cr-saved-view-chip.active:hover {
+    background: var(--lcars-amber, #ffcc00);
+    border-color: var(--lcars-amber, #ffcc00);
+}
+
+.cr-saved-view-clear {
+    border-color: rgba(255,255,255,0.15);
+    color: rgba(255,255,255,0.35);
+    font-size: 9px;
+    padding: 4px 10px;
+}
+
+.cr-saved-view-clear:hover:not(.active) {
+    background: rgba(255,255,255,0.08);
+    border-color: rgba(255,255,255,0.35);
+    color: rgba(255,255,255,0.7);
+}
+
+/* ── Empty / loading states ──────────────────────────────────────────────── */
+
+.change-req-empty {
+    padding: 32px 20px;
+    text-align: center;
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.08em;
+    color: rgba(204, 153, 255, 0.4);
+    text-transform: uppercase;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────────── */
+
+@media (max-width: 900px) {
+    .cr-col-approver,
+    .cr-col-platform {
+        display: none;
+    }
+
+    .cr-title-text {
+        max-width: 140px;
+    }
+}
+
+@media (max-width: 600px) {
+    .cr-col-deploy { display: none; }
+
+    .cr-filter-controls {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+
+    .cr-search-wrap {
+        width: 100%;
+        max-width: none;
+    }
+}

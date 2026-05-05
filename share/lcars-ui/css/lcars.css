@@ -466,7 +466,7 @@ body {
 
 /* Medium screens - filter bar wraps to 2 rows */
 @media (max-width: 850px) {
-    .queue-filter-bar {
+    .backlog-filter-bar {
         flex-wrap: wrap;
         row-gap: 8px;
     }
@@ -632,7 +632,7 @@ body {
 .sidebar-button[data-section="todos"] { background: var(--lcars-orange); }
 .sidebar-button[data-section="workflow"] { background: var(--lcars-peach); }
 .sidebar-button[data-section="details"] { background: var(--lcars-cyan); }
-.sidebar-button[data-section="queue"] { background: var(--lcars-purple); }
+.sidebar-button[data-section="backlog"] { background: var(--lcars-purple); }
 .sidebar-button[data-section="integrations"] { background: var(--lcars-orange); }
 .sidebar-button[data-section="releases"] { background: var(--lcars-green); }
 .sidebar-button[data-section="epics"] { background: var(--lcars-purple); }
@@ -679,7 +679,7 @@ body {
     background: var(--lcars-black);
     color: var(--lcars-cyan);
 }
-.sidebar-button[data-section="queue"].active {
+.sidebar-button[data-section="backlog"].active {
     background: var(--lcars-black);
     color: var(--lcars-purple);
 }
@@ -1158,7 +1158,8 @@ body {
 .lcars-content > .home-section,
 .lcars-content > .kanban-section,
 .lcars-content > .details-section,
-.lcars-content > .queue-section,
+.lcars-content > .backlog-section,
+.lcars-content > .change-req-section,
 .lcars-content > .releases-section,
 .lcars-content > .epics-section,
 .lcars-content > .calendar-section,
@@ -1188,7 +1189,8 @@ body {
 .lcars-content > .home-section.active,
 .lcars-content > .kanban-section.active,
 .lcars-content > .details-section.active,
-.lcars-content > .queue-section.active,
+.lcars-content > .backlog-section.active,
+.lcars-content > .change-req-section.active,
 .lcars-content > .releases-section.active,
 .lcars-content > .epics-section.active,
 .lcars-content > .calendar-section.active,
@@ -1258,7 +1260,7 @@ body {
 .home-section.active .section-bar,
 .kanban-section.active .section-bar,
 .details-section.active .section-bar,
-.queue-section.active .section-bar,
+.backlog-section.active .section-bar,
 .releases-section.active .section-bar,
 .epics-section.active .section-bar,
 .calendar-section.active .section-bar,
@@ -1274,7 +1276,7 @@ body {
 .home-section.active .section-title,
 .kanban-section.active .section-title,
 .details-section.active .section-title,
-.queue-section.active .section-title,
+.backlog-section.active .section-title,
 .releases-section.active .section-title,
 .epics-section.active .section-title,
 .calendar-section.active .section-title,
@@ -1295,8 +1297,8 @@ body {
 .kanban-section.active .section-bar { transition-delay: 0.10s; }
 .details-section.active .section-title { transition-delay: 0.05s; }
 .details-section.active .section-bar { transition-delay: 0.10s; }
-.queue-section.active .section-title { transition-delay: 0.05s; }
-.queue-section.active .section-bar { transition-delay: 0.10s; }
+.backlog-section.active .section-title { transition-delay: 0.05s; }
+.backlog-section.active .section-bar { transition-delay: 0.10s; }
 .commands-section.active .section-title { transition-delay: 0.05s; }
 .commands-section.active .section-bar { transition-delay: 0.10s; }
 .backups-section.active .section-title { transition-delay: 0.05s; }
@@ -1418,74 +1420,74 @@ body {
 .details-section.active .detail-row:nth-child(n+5) .detail-status { transition-delay: 0.40s; }
 
 /* -------------------------------------------------------------------------------
-   QUEUE SECTION TRANSITIONS (Mission Queue)
+   BACKLOG SECTION TRANSITIONS (Mission Queue)
    Queue items cascade in, filter bar animates first
    ------------------------------------------------------------------------------- */
 
 /* Queue filter bar - fade up */
-.queue-filter-bar {
+.backlog-filter-bar {
     opacity: 0;
     transform: translateY(-4px);
     transition: opacity 0.2s var(--lcars-ease-smooth), transform 0.2s var(--lcars-ease-smooth);
 }
 
-.queue-section.active .queue-filter-bar {
+.backlog-section.active .backlog-filter-bar {
     opacity: 1;
     transform: translateY(0);
     transition-delay: 0.12s;
 }
 
 /* Queue list container - fade up */
-.queue-list {
+.backlog-list {
     opacity: 0;
     transform: translateY(6px);
     transition: opacity 0.2s ease-out, transform 0.2s ease-out;
 }
 
-.queue-section.active .queue-list {
+.backlog-section.active .backlog-list {
     opacity: 1;
     transform: translateY(0);
     transition-delay: 0.18s;
 }
 
 /* Queue items - slide in from left */
-.queue-item {
+.backlog-item {
     opacity: 0;
     transform: translateX(-10px);
     transition: opacity 0.2s var(--lcars-ease-smooth), transform 0.2s var(--lcars-ease-smooth);
 }
 
-.queue-section.active .queue-item {
+.backlog-section.active .backlog-item {
     opacity: 1;
     transform: translateX(0);
 }
 
-/* Stagger queue items */
-.queue-section.active .queue-item:nth-child(1) { transition-delay: 0.22s; }
-.queue-section.active .queue-item:nth-child(2) { transition-delay: 0.26s; }
-.queue-section.active .queue-item:nth-child(3) { transition-delay: 0.30s; }
-.queue-section.active .queue-item:nth-child(4) { transition-delay: 0.34s; }
-.queue-section.active .queue-item:nth-child(5) { transition-delay: 0.38s; }
-.queue-section.active .queue-item:nth-child(6) { transition-delay: 0.42s; }
-.queue-section.active .queue-item:nth-child(7) { transition-delay: 0.46s; }
-.queue-section.active .queue-item:nth-child(8) { transition-delay: 0.50s; }
-.queue-section.active .queue-item:nth-child(n+9) { transition-delay: 0.54s; }
+/* Stagger backlog items */
+.backlog-section.active .backlog-item:nth-child(1) { transition-delay: 0.22s; }
+.backlog-section.active .backlog-item:nth-child(2) { transition-delay: 0.26s; }
+.backlog-section.active .backlog-item:nth-child(3) { transition-delay: 0.30s; }
+.backlog-section.active .backlog-item:nth-child(4) { transition-delay: 0.34s; }
+.backlog-section.active .backlog-item:nth-child(5) { transition-delay: 0.38s; }
+.backlog-section.active .backlog-item:nth-child(6) { transition-delay: 0.42s; }
+.backlog-section.active .backlog-item:nth-child(7) { transition-delay: 0.46s; }
+.backlog-section.active .backlog-item:nth-child(8) { transition-delay: 0.50s; }
+.backlog-section.active .backlog-item:nth-child(n+9) { transition-delay: 0.54s; }
 
 /* Due date badges - elastic bounce */
-.queue-item .due-badge {
+.backlog-item .due-badge {
     transform: scale(0);
     transition: transform 0.3s var(--lcars-ease-elastic);
 }
 
-.queue-section.active .queue-item .due-badge {
+.backlog-section.active .backlog-item .due-badge {
     transform: scale(1);
 }
 
 /* Stagger due badges slightly after their items */
-.queue-section.active .queue-item:nth-child(1) .due-badge { transition-delay: 0.28s; }
-.queue-section.active .queue-item:nth-child(2) .due-badge { transition-delay: 0.32s; }
-.queue-section.active .queue-item:nth-child(3) .due-badge { transition-delay: 0.36s; }
-.queue-section.active .queue-item:nth-child(n+4) .due-badge { transition-delay: 0.40s; }
+.backlog-section.active .backlog-item:nth-child(1) .due-badge { transition-delay: 0.28s; }
+.backlog-section.active .backlog-item:nth-child(2) .due-badge { transition-delay: 0.32s; }
+.backlog-section.active .backlog-item:nth-child(3) .due-badge { transition-delay: 0.36s; }
+.backlog-section.active .backlog-item:nth-child(n+4) .due-badge { transition-delay: 0.40s; }
 
 /* -------------------------------------------------------------------------------
    COMMANDS SECTION TRANSITIONS
@@ -1548,7 +1550,7 @@ body {
 .home-section.exiting,
 .kanban-section.exiting,
 .details-section.exiting,
-.queue-section.exiting,
+.backlog-section.exiting,
 .releases-section.exiting,
 .commands-section.exiting {
     pointer-events: none;
@@ -1558,7 +1560,7 @@ body {
 .home-section.exiting .section-bar,
 .kanban-section.exiting .section-bar,
 .details-section.exiting .section-bar,
-.queue-section.exiting .section-bar,
+.backlog-section.exiting .section-bar,
 .releases-section.exiting .section-bar,
 .commands-section.exiting .section-bar {
     transform: scaleX(0);
@@ -1569,7 +1571,7 @@ body {
 .home-section.exiting .section-title,
 .kanban-section.exiting .section-title,
 .details-section.exiting .section-title,
-.queue-section.exiting .section-title,
+.backlog-section.exiting .section-title,
 .releases-section.exiting .section-title,
 .commands-section.exiting .section-title {
     opacity: 0;
@@ -1617,19 +1619,19 @@ body {
 }
 
 /* Queue items fade out */
-.queue-section.exiting .queue-item {
+.backlog-section.exiting .backlog-item {
     opacity: 0;
     transition-duration: 0.1s;
     transition-delay: 0s;
 }
 
-.queue-section.exiting .queue-item .due-badge {
+.backlog-section.exiting .backlog-item .due-badge {
     transform: scale(0);
     transition-duration: 0.1s;
     transition-delay: 0s;
 }
 
-.queue-section.exiting .queue-filter-bar {
+.backlog-section.exiting .backlog-filter-bar {
     opacity: 0;
     transition-delay: 0.08s;
     transition-duration: 0.1s;
@@ -1656,7 +1658,7 @@ body {
 .home-section.refreshing,
 .kanban-section.refreshing,
 .details-section.refreshing,
-.queue-section.refreshing,
+.backlog-section.refreshing,
 .releases-section.refreshing,
 .commands-section.refreshing {
     pointer-events: none;
@@ -1671,12 +1673,12 @@ body {
 .details-section.refreshing .details-grid,
 .details-section.refreshing .detail-row,
 .details-section.refreshing .detail-status,
-.queue-section.refreshing .section-bar,
-.queue-section.refreshing .section-title,
-.queue-section.refreshing .queue-filter-bar,
-.queue-section.refreshing .queue-list,
-.queue-section.refreshing .queue-item,
-.queue-section.refreshing .due-badge,
+.backlog-section.refreshing .section-bar,
+.backlog-section.refreshing .section-title,
+.backlog-section.refreshing .backlog-filter-bar,
+.backlog-section.refreshing .backlog-list,
+.backlog-section.refreshing .backlog-item,
+.backlog-section.refreshing .due-badge,
 .commands-section.refreshing .section-bar,
 .commands-section.refreshing .section-title,
 .commands-section.refreshing .commands-grid,
@@ -2508,17 +2510,17 @@ body {
 .status-badge.pr_review { background: var(--lcars-lavender); color: var(--lcars-black); }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   QUEUE SECTION
+   BACKLOG SECTION
    ───────────────────────────────────────────────────────────────────────────── */
-.queue-section {
+.backlog-section {
     margin-bottom: 60px;
     scroll-margin-top: 10px;
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   QUEUE FILTER BAR - LCARS Button Style (matches fleet monitor)
+   BACKLOG FILTER BAR - LCARS Button Style (matches fleet monitor)
    ───────────────────────────────────────────────────────────────────────────── */
-.queue-filter-bar {
+.backlog-filter-bar {
     display: flex;
     gap: 8px;
     margin-top: 12px;
@@ -2721,7 +2723,7 @@ body {
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* Queue item paused state - pulsing red left-edge indicator */
-.queue-item.is-paused {
+.backlog-item.is-paused {
     border-left: 4px solid var(--lcars-red);
     animation: pausedLeftEdgePulse 2s ease-in-out infinite;
     position: relative;
@@ -2747,7 +2749,7 @@ body {
 }
 
 /* Disable pulse animation on hover for better interaction */
-.queue-item.is-paused:hover,
+.backlog-item.is-paused:hover,
 .subitem.is-paused:hover {
     animation: none;
     border-left-color: var(--lcars-red);
@@ -2755,8 +2757,8 @@ body {
 }
 
 /* Paused takes precedence over actively-working and has-subitems */
-.queue-item.is-paused.actively-working,
-.queue-item.is-paused.has-subitems,
+.backlog-item.is-paused.actively-working,
+.backlog-item.is-paused.has-subitems,
 .subitem.is-paused.actively-working {
     animation: pausedLeftEdgePulse 2s ease-in-out infinite;
     border-left-color: var(--lcars-red);
@@ -2768,7 +2770,7 @@ body {
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* Queue item blocked state - orange left-edge indicator */
-.queue-item.is-blocked {
+.backlog-item.is-blocked {
     border-left: 4px solid var(--lcars-gold);
     animation: blockedLeftEdgePulse 3s ease-in-out infinite;
     position: relative;
@@ -2794,7 +2796,7 @@ body {
 }
 
 /* Disable pulse animation on hover for better interaction */
-.queue-item.is-blocked:hover,
+.backlog-item.is-blocked:hover,
 .subitem.is-blocked:hover {
     animation: none;
     border-left-color: var(--lcars-gold);
@@ -2802,22 +2804,22 @@ body {
 }
 
 /* Blocked takes precedence over actively-working and has-subitems */
-.queue-item.is-blocked.actively-working,
-.queue-item.is-blocked.has-subitems,
+.backlog-item.is-blocked.actively-working,
+.backlog-item.is-blocked.has-subitems,
 .subitem.is-blocked.actively-working {
     animation: blockedLeftEdgePulse 3s ease-in-out infinite;
     border-left-color: var(--lcars-gold);
 }
 
 /* Paused takes precedence over blocked (manual pause > dependency block) */
-.queue-item.is-blocked.is-paused,
+.backlog-item.is-blocked.is-paused,
 .subitem.is-blocked.is-paused {
     animation: pausedLeftEdgePulse 2s ease-in-out infinite;
     border-left-color: var(--lcars-red);
 }
 
 /* Blocked by pills row */
-.queue-blocked-row {
+.backlog-blocked-row {
     display: flex;
     align-items: center;
     gap: 6px;
@@ -2870,7 +2872,7 @@ body {
     }
 }
 
-.queue-item.highlight-pulse {
+.backlog-item.highlight-pulse {
     animation: highlight-pulse-anim 0.5s ease-in-out 4;
 }
 
@@ -2923,7 +2925,7 @@ body {
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* Queue container in dependency filter mode */
-.queue-list.dependency-filter-active .queue-item {
+.backlog-list.dependency-filter-active .backlog-item {
     opacity: 0.15;
     transform: scale(0.98);
     pointer-events: none;
@@ -2931,7 +2933,7 @@ body {
 }
 
 /* Items visible during dependency filter */
-.queue-list.dependency-filter-active .queue-item.dependency-visible {
+.backlog-list.dependency-filter-active .backlog-item.dependency-visible {
     opacity: 1;
     transform: scale(1);
     pointer-events: auto;
@@ -2941,13 +2943,13 @@ body {
 }
 
 /* Highlight the blocked item slightly differently from its blockers */
-.queue-list.dependency-filter-active .queue-item.dependency-visible.dependency-source {
+.backlog-list.dependency-filter-active .backlog-item.dependency-visible.dependency-source {
     box-shadow: 0 0 16px 4px rgba(255, 153, 0, 0.6),
                 inset 0 0 20px rgba(255, 153, 0, 0.1);
 }
 
 /* Visual indicator on the blocked row during hover */
-.queue-blocked-row.filter-hover {
+.backlog-blocked-row.filter-hover {
     background: rgba(255, 153, 0, 0.25);
     box-shadow: 0 0 8px rgba(255, 153, 0, 0.4);
     /* CRITICAL: Keep pointer-events so mouseleave can fire to deactivate filter */
@@ -2957,22 +2959,22 @@ body {
 }
 
 /* Subitems also fade during filter mode */
-.queue-list.dependency-filter-active .queue-item .subitems-container {
+.backlog-list.dependency-filter-active .backlog-item .subitems-container {
     opacity: 0.5;
 }
 
-.queue-list.dependency-filter-active .queue-item.dependency-visible .subitems-container {
+.backlog-list.dependency-filter-active .backlog-item.dependency-visible .subitems-container {
     opacity: 1;
 }
 
 /* Individual subitem visibility during dependency filter mode */
-.queue-list.dependency-filter-active .subitem {
+.backlog-list.dependency-filter-active .subitem {
     opacity: 0.15;
     transform: scale(0.98);
     transition: opacity 0.2s ease, transform 0.2s ease;
 }
 
-.queue-list.dependency-filter-active .subitem.dependency-visible {
+.backlog-list.dependency-filter-active .subitem.dependency-visible {
     opacity: 1;
     transform: scale(1);
     box-shadow: 0 0 10px 2px rgba(255, 153, 0, 0.35);
@@ -2980,7 +2982,7 @@ body {
     position: relative;
 }
 
-.queue-list.dependency-filter-active .subitem.dependency-visible.dependency-source {
+.backlog-list.dependency-filter-active .subitem.dependency-visible.dependency-source {
     box-shadow: 0 0 14px 3px rgba(255, 153, 0, 0.5),
                 inset 0 0 15px rgba(255, 153, 0, 0.1);
 }
@@ -3365,7 +3367,7 @@ body {
    ───────────────────────────────────────────────────────────────────────────── */
 
 /* Due date pill - inline with other metadata - TERTIARY ELEMENT */
-.queue-due-date {
+.backlog-due-date {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 600;
@@ -3381,12 +3383,12 @@ body {
 }
 
 /* Full brightness on hover */
-.queue-due-date:hover {
+.backlog-due-date:hover {
     opacity: 1.0;
 }
 
 /* Inherited due date (calculated from subitems) */
-.queue-due-date.inherited {
+.backlog-due-date.inherited {
     /* Visual indicators that this date is calculated, not directly set */
     font-style: italic;
     opacity: 0.6; /* More subtle than regular due dates (0.7) */
@@ -3396,7 +3398,7 @@ body {
 }
 
 /* Inherited date on hover - still slightly dimmer than regular */
-.queue-due-date.inherited:hover {
+.backlog-due-date.inherited:hover {
     opacity: 0.85; /* Not full brightness like regular dates */
 }
 
@@ -3406,67 +3408,67 @@ body {
    ═══════════════════════════════════════════════════════════════════════════════ */
 
 /* Distant future (> 2 weeks) - dark green */
-.queue-due-date.due-distant {
+.backlog-due-date.due-distant {
     background: var(--lcars-dark-green);
     color: white;
 }
 
 /* 1-2 weeks out - green */
-.queue-due-date.due-weeks {
+.backlog-due-date.due-weeks {
     background: var(--lcars-green);
     color: var(--lcars-black);
 }
 
 /* 7 days - green (start of gradient) */
-.queue-due-date.due-7 {
+.backlog-due-date.due-7 {
     background: var(--lcars-due-7);
     color: var(--lcars-black);
 }
 
 /* 6 days */
-.queue-due-date.due-6 {
+.backlog-due-date.due-6 {
     background: var(--lcars-due-6);
     color: var(--lcars-black);
 }
 
 /* 5 days */
-.queue-due-date.due-5 {
+.backlog-due-date.due-5 {
     background: var(--lcars-due-5);
     color: var(--lcars-black);
 }
 
 /* 4 days */
-.queue-due-date.due-4 {
+.backlog-due-date.due-4 {
     background: var(--lcars-due-4);
     color: var(--lcars-black);
 }
 
 /* 3 days */
-.queue-due-date.due-3 {
+.backlog-due-date.due-3 {
     background: var(--lcars-due-3);
     color: var(--lcars-black);
 }
 
 /* 2 days (day after tomorrow) */
-.queue-due-date.due-2 {
+.backlog-due-date.due-2 {
     background: var(--lcars-due-2);
     color: var(--lcars-black);
 }
 
 /* Tomorrow */
-.queue-due-date.due-tomorrow {
+.backlog-due-date.due-tomorrow {
     background: var(--lcars-due-1);
     color: var(--lcars-black);
 }
 
 /* Due today - orange */
-.queue-due-date.due-today {
+.backlog-due-date.due-today {
     background: var(--lcars-orange);
     color: var(--lcars-black);
 }
 
 /* Past due - red with pulse animation */
-.queue-due-date.past-due {
+.backlog-due-date.past-due {
     background: var(--lcars-red);
     color: white;
     animation: past-due-pulse 2s ease-in-out infinite;
@@ -3479,7 +3481,7 @@ body {
 
 /* Was due - neutral styling for completed items that were past due */
 /* Completed items should never appear "overdue" - they're done! */
-.queue-due-date.was-due {
+.backlog-due-date.was-due {
     background: var(--lcars-gray);
     color: var(--lcars-text-secondary);
     opacity: 0.6;
@@ -3504,30 +3506,30 @@ body {
 }
 
 /* Queue item border highlight when overdue */
-.queue-item.has-overdue {
+.backlog-item.has-overdue {
     border-left-color: var(--lcars-red);
 }
 
 /* Editable due date pill */
-.queue-due-date.editable {
+.backlog-due-date.editable {
     cursor: pointer;
     transition: all 0.2s ease;
 }
 
-.queue-due-date.editable:hover {
+.backlog-due-date.editable:hover {
     transform: scale(1.1);
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
 }
 
 /* No due date state */
-.queue-due-date.no-date {
+.backlog-due-date.no-date {
     background: rgba(100, 100, 100, 0.5);
     color: var(--lcars-purple);
     border: 1px dashed var(--lcars-purple);
     font-size: 8px;
 }
 
-.queue-due-date.no-date:hover {
+.backlog-due-date.no-date:hover {
     background: var(--lcars-purple);
     color: var(--lcars-black);
     border-style: solid;
@@ -3687,14 +3689,14 @@ body {
 }
 
 /* Add Jira button (for items without Jira ID) */
-.queue-jira.add-jira {
+.backlog-jira.add-jira {
     background: transparent;
     border: 1px dashed var(--lcars-blue);
     color: var(--lcars-blue);
     opacity: 0.7;
 }
 
-.queue-jira.add-jira:hover {
+.backlog-jira.add-jira:hover {
     background: var(--lcars-blue);
     color: var(--lcars-black);
     opacity: 1;
@@ -3981,14 +3983,14 @@ body {
    END INTEGRATION SELECTOR STYLES
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-.queue-list {
+.backlog-list {
     display: flex;
     flex-direction: column;
     gap: 6px;
     margin-top: 15px;
 }
 
-.queue-item {
+.backlog-item {
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -4000,55 +4002,55 @@ body {
     scroll-margin-top: 20px; /* Small margin for scroll targeting */
 }
 
-.queue-item:hover {
+.backlog-item:hover {
     background: var(--lcars-dark); /* Solid on hover to hide watermark */
     transform: translateX(3px);
 }
 
-/* Completed queue items - grayed out with checkmark indicator */
-.queue-item.completed {
+/* Completed backlog items - grayed out with checkmark indicator */
+.backlog-item.completed {
     border-left-color: var(--lcars-green);
     opacity: 0.6;
 }
 
-.queue-item.completed .queue-title {
+.backlog-item.completed .backlog-title {
     text-decoration: line-through;
     opacity: 0.8;
 }
 
-.queue-item.completed .queue-priority {
+.backlog-item.completed .backlog-priority {
     background: var(--lcars-green) !important;
     color: var(--lcars-black) !important;
 }
 
 /* Override priority text for completed items */
-.queue-item.completed .queue-priority::after {
+.backlog-item.completed .backlog-priority::after {
     content: ' ✓';
 }
 
-/* Cancelled queue items - red with strikethrough */
-.queue-item.cancelled {
+/* Cancelled backlog items - red with strikethrough */
+.backlog-item.cancelled {
     border-left-color: var(--lcars-red);
     opacity: 0.6;
 }
 
-.queue-item.cancelled .queue-title {
+.backlog-item.cancelled .backlog-title {
     text-decoration: line-through;
     opacity: 0.8;
 }
 
-.queue-item.cancelled .queue-priority {
+.backlog-item.cancelled .backlog-priority {
     background: var(--lcars-red) !important;
     color: white !important;
 }
 
 /* Override priority text for cancelled items */
-.queue-item.cancelled .queue-priority::after {
+.backlog-item.cancelled .backlog-priority::after {
     content: ' ✗';
 }
 
 /* Cancelled items should not pulse */
-.queue-item.cancelled .queue-priority.critical {
+.backlog-item.cancelled .backlog-priority.critical {
     animation: none;
 }
 
@@ -4074,12 +4076,12 @@ body {
     }
 }
 
-.queue-item.actively-working {
+.backlog-item.actively-working {
     animation: pulse-border 2s ease-in-out infinite;
     border-left-width: 4px;
 }
 
-.queue-item.actively-working .queue-priority::before {
+.backlog-item.actively-working .backlog-priority::before {
     content: '● ';
     color: var(--lcars-orange);
 }
@@ -4094,7 +4096,7 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════════
-   QUEUE HEADER - Zone-Based Layout (XACA-0046)
+   BACKLOG HEADER - Zone-Based Layout (XACA-0046)
 
    4 Zones with Visual Hierarchy:
    ZONE 1: IDENTITY - Who/what is this? (expander, priority, category, ID)
@@ -4139,7 +4141,7 @@ body {
      - Tracking zone becomes static row, not hover-to-reveal
    ═══════════════════════════════════════════════════════════════════════════════ */
 
-.queue-header {
+.backlog-header {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -4185,7 +4187,7 @@ body {
 }
 
 /* Show tracking zone when toggle is active */
-.queue-section.show-tracking .tracking-zone {
+.backlog-section.show-tracking .tracking-zone {
     max-width: 500px;
     opacity: 1;
     padding: 4px 8px;
@@ -4206,7 +4208,7 @@ body {
 }
 
 /* Hide workflow zone (tags) when tracking is shown */
-.queue-section.show-tracking .workflow-zone {
+.backlog-section.show-tracking .workflow-zone {
     max-width: 0;
     opacity: 0;
     overflow: hidden;
@@ -4247,7 +4249,7 @@ body {
     font-weight: bold;
 }
 
-.queue-description {
+.backlog-description {
     font-size: 11px;
     color: var(--lcars-tan);
     line-height: 1.4;
@@ -4263,7 +4265,7 @@ body {
    PRIMARY ELEMENTS - Largest, brightest, immediate focus
    ───────────────────────────────────────────────────────────────────────────── */
 
-.queue-priority {
+.backlog-priority {
     /* PRIMARY: 14px - Largest badge for critical scanning */
     font-size: 14px;
     font-weight: 700;
@@ -4277,29 +4279,29 @@ body {
     opacity: 1.0; /* PRIMARY: Full opacity */
 }
 
-.queue-priority.high {
+.backlog-priority.high {
     background: var(--lcars-orange);
     color: var(--lcars-black);
 }
 
-.queue-priority.medium, .queue-priority.med {
+.backlog-priority.medium, .backlog-priority.med {
     background: var(--lcars-yellow);
     color: var(--lcars-black);
 }
 
-.queue-priority.low {
+.backlog-priority.low {
     background: var(--lcars-tan);
     color: var(--lcars-black);
 }
 
-.queue-priority.critical {
+.backlog-priority.critical {
     background: #ff3333;
     color: white;
     animation: critical-pulse 1.5s ease-in-out infinite;
 }
 
 /* Completed items should not pulse - mission accomplished */
-.completed .queue-priority.critical {
+.completed .backlog-priority.critical {
     animation: none;
 }
 
@@ -4308,20 +4310,20 @@ body {
     50% { opacity: 0.7; }
 }
 
-/* XACA-0022: Removed .queue-priority.paused - paused is a state, not a priority */
+/* XACA-0022: Removed .backlog-priority.paused - paused is a state, not a priority */
 
 /* Editable priority pill */
-.queue-priority.editable {
+.backlog-priority.editable {
     cursor: pointer;
     transition: all 0.2s ease;
 }
 
-.queue-priority.editable:hover {
+.backlog-priority.editable:hover {
     transform: scale(1.1);
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
 }
 
-.queue-priority.editable:focus {
+.backlog-priority.editable:focus {
     outline: 2px solid var(--lcars-white);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
@@ -4333,7 +4335,7 @@ body {
    ───────────────────────────────────────────────────────────────────────────── */
 
 /* Category pill - SECONDARY */
-.queue-category {
+.backlog-category {
     /* SECONDARY: 12px - Visible for quick filtering */
     font-size: 12px;
     font-weight: 600;
@@ -4349,90 +4351,90 @@ body {
 }
 
 /* Category-specific colors */
-.queue-category.feature {
+.backlog-category.feature {
     background: rgba(102, 178, 255, 0.25);
     color: var(--lcars-blue, #66b2ff);
     border-color: rgba(102, 178, 255, 0.4);
 }
 
-.queue-category.bugfix {
+.backlog-category.bugfix {
     background: rgba(255, 102, 102, 0.25);
     color: var(--lcars-red, #ff6666);
     border-color: rgba(255, 102, 102, 0.4);
 }
 
-.queue-category.technical {
+.backlog-category.technical {
     background: rgba(153, 102, 255, 0.25);
     color: var(--lcars-purple, #9966ff);
     border-color: rgba(153, 102, 255, 0.4);
 }
 
-.queue-category.testing {
+.backlog-category.testing {
     background: rgba(102, 255, 178, 0.25);
     color: var(--lcars-green, #66ffb2);
     border-color: rgba(102, 255, 178, 0.4);
 }
 
-.queue-category.security {
+.backlog-category.security {
     background: rgba(255, 51, 51, 0.3);
     color: #ff5555;
     border-color: rgba(255, 51, 51, 0.5);
 }
 
-.queue-category.performance {
+.backlog-category.performance {
     background: rgba(255, 204, 0, 0.25);
     color: var(--lcars-gold, #ffcc00);
     border-color: rgba(255, 204, 0, 0.4);
 }
 
-.queue-category.documentation {
+.backlog-category.documentation {
     background: rgba(102, 204, 204, 0.25);
     color: var(--lcars-teal, #66cccc);
     border-color: rgba(102, 204, 204, 0.4);
 }
 
-.queue-category.refactor {
+.backlog-category.refactor {
     background: rgba(204, 153, 255, 0.25);
     color: #cc99ff;
     border-color: rgba(204, 153, 255, 0.4);
 }
 
-.queue-category.operations {
+.backlog-category.operations {
     background: rgba(255, 153, 51, 0.25);
     color: var(--lcars-orange, #ff9933);
     border-color: rgba(255, 153, 51, 0.4);
 }
 
-.queue-category.release {
+.backlog-category.release {
     background: rgba(51, 204, 51, 0.25);
     color: #33cc33;
     border-color: rgba(51, 204, 51, 0.4);
 }
 
-.queue-category.epic {
+.backlog-category.epic {
     background: rgba(255, 102, 178, 0.25);
     color: #ff66b2;
     border-color: rgba(255, 102, 178, 0.4);
 }
 
-.queue-category.chore {
+.backlog-category.chore {
     background: rgba(153, 153, 153, 0.25);
     color: #aaaaaa;
     border-color: rgba(153, 153, 153, 0.4);
 }
 
 /* Legal categories */
-.queue-category.discovery,
-.queue-category.motions,
-.queue-category.filings,
-.queue-category.evidence {
+.backlog-category.discovery,
+.backlog-category.motions,
+.backlog-category.filings,
+.backlog-category.evidence {
     background: rgba(204, 153, 0, 0.25);
     color: #ccaa00;
     border-color: rgba(204, 153, 0, 0.4);
 }
 
 /* No category state */
-.queue-category.no-category {
+.backlog-category.no-category {
     background: rgba(80, 80, 80, 0.3);
     color: var(--lcars-muted, #666);
     border-color: rgba(80, 80, 80, 0.4);
@@ -4440,17 +4442,17 @@ body {
 }
 
 /* Editable category pill */
-.queue-category.editable {
+.backlog-category.editable {
     cursor: pointer;
     transition: all 0.2s ease;
 }
 
-.queue-category.editable:hover {
+.backlog-category.editable:hover {
     transform: scale(1.1);
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
 }
 
-.queue-category.editable:focus {
+.backlog-category.editable:focus {
     outline: 2px solid var(--lcars-white);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
@@ -4636,7 +4638,7 @@ body {
 }
 
 /* Main item OS logo (under priority - larger) */
-.queue-os-logo {
+.backlog-os-logo {
     width: 32px;
     height: 32px;
     border-radius: 50%;
@@ -4649,13 +4651,13 @@ body {
     transition: all 0.2s ease;
 }
 
-.queue-os-logo img {
+.backlog-os-logo img {
     width: 22px;
     height: 22px;
     object-fit: contain;
 }
 
-.queue-os-logo svg {
+.backlog-os-logo svg {
     width: 20px;
     height: 20px;
     color: var(--lcars-purple);
@@ -4688,45 +4690,45 @@ body {
 }
 
 /* Editable state */
-.queue-os-logo.editable,
+.backlog-os-logo.editable,
 .subitem-os-logo.editable {
     cursor: pointer;
 }
 
-.queue-os-logo.editable:hover,
+.backlog-os-logo.editable:hover,
 .subitem-os-logo.editable:hover {
     transform: scale(1.1);
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
 }
 
 /* Readonly state (completed items) */
-.queue-os-logo.readonly,
+.backlog-os-logo.readonly,
 .subitem-os-logo.readonly {
     opacity: 0.5;
     cursor: default;
 }
 
 /* Completed item styling */
-.queue-item.completed .queue-os-logo,
+.backlog-item.completed .backlog-os-logo,
 .subitem.completed .subitem-os-logo {
     opacity: 0.5;
     filter: grayscale(50%);
 }
 
 /* Content area: [OS logo] [description] ... [count] [timestamp] */
-.queue-content-area {
+.backlog-content-area {
     display: flex;
     align-items: center;
     gap: 8px;
     margin-left: 12px; /* Center OS logo under priority pill */
 }
 
-.queue-content-area .queue-description {
+.backlog-content-area .backlog-description {
     min-width: 0; /* Allow text truncation */
 }
 
 /* Inline OS logo (in content area - to left of tags/description) */
-.queue-os-logo-inline {
+.backlog-os-logo-inline {
     width: 24px;
     height: 24px;
     min-width: 24px;
@@ -4740,28 +4742,28 @@ body {
     flex-shrink: 0;
 }
 
-.queue-os-logo-inline img {
+.backlog-os-logo-inline img {
     width: 16px;
     height: 16px;
     object-fit: contain;
 }
 
-.queue-os-logo-inline svg {
+.backlog-os-logo-inline svg {
     width: 14px;
     height: 14px;
     color: var(--lcars-purple);
 }
 
-.queue-os-logo-inline.editable {
+.backlog-os-logo-inline.editable {
     cursor: pointer;
 }
 
-.queue-os-logo-inline.editable:hover {
+.backlog-os-logo-inline.editable:hover {
     transform: scale(1.1);
     box-shadow: 0 0 8px rgba(255, 255, 255, 0.3);
 }
 
-.queue-item.completed .queue-os-logo-inline {
+.backlog-item.completed .backlog-os-logo-inline {
     opacity: 0.5;
     filter: grayscale(50%);
 }
@@ -4819,7 +4821,7 @@ body {
    TERTIARY ELEMENTS - Smallest, subtle until hovered (in tracking zone)
    ───────────────────────────────────────────────────────────────────────────── */
 
-.queue-jira {
+.backlog-jira {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 600;
@@ -4834,17 +4836,17 @@ body {
     opacity: 0.7; /* TERTIARY: Subtle until hover */
 }
 
-.queue-jira:hover {
+.backlog-jira:hover {
     background: var(--lcars-cyan);
     transform: scale(1.05);
     opacity: 1.0; /* Full brightness on hover */
 }
 
-.queue-jira:active {
+.backlog-jira:active {
     transform: scale(0.98);
 }
 
-.queue-github {
+.backlog-github {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 600;
@@ -4859,18 +4861,18 @@ body {
     opacity: 0.7; /* TERTIARY: Subtle until hover */
 }
 
-.queue-github:hover {
+.backlog-github:hover {
     background: #8b6bae;
     transform: scale(1.05);
     opacity: 1.0; /* Full brightness on hover */
 }
 
-.queue-github:active {
+.backlog-github:active {
     transform: scale(0.98);
 }
 
 /* Monday.com ticket styling */
-.queue-monday {
+.backlog-monday {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 600;
@@ -4885,32 +4887,32 @@ body {
     opacity: 0.7; /* TERTIARY: Subtle until hover */
 }
 
-.queue-monday:hover {
+.backlog-monday:hover {
     background: #ff8787;
     transform: scale(1.05);
     opacity: 1.0; /* Full brightness on hover */
 }
 
-.queue-monday:active {
+.backlog-monday:active {
     transform: scale(0.98);
 }
 
 /* Monday add button */
-.queue-monday.add-monday {
+.backlog-monday.add-monday {
     background: transparent;
     border: 1px dashed #ff6b6b;
     color: #ff6b6b;
     opacity: 0.7;
 }
 
-.queue-monday.add-monday:hover {
+.backlog-monday.add-monday:hover {
     background: #ff6b6b;
     color: white;
     opacity: 1;
     border-style: solid;
 }
 
-.queue-index {
+.backlog-index {
     /* PRIMARY: 14px - Always need to reference this, monospace for clarity */
     font-size: 14px;
     color: var(--lcars-purple);
@@ -4920,8 +4922,8 @@ body {
     opacity: 1.0; /* PRIMARY: Full opacity */
 }
 
-/* XACA-0067-003: Developer avatar in queue items */
-.queue-item-avatar {
+/* XACA-0067-003: Developer avatar in backlog items */
+.backlog-item-avatar {
     width: 26px;
     height: 26px;
     border-radius: 4px;
@@ -4933,11 +4935,11 @@ body {
     transition: opacity 0.3s ease-in;
 }
 
-.queue-section.active .queue-item-avatar {
+.backlog-section.active .backlog-item-avatar {
     opacity: 1;
 }
 
-.queue-title {
+.backlog-title {
     /* PRIMARY: 14px - Main content, largest and most prominent */
     font-size: 14px;
     color: var(--lcars-peach);
@@ -4956,11 +4958,11 @@ body {
 }
 
 /* Spacer pushes meta info to the right */
-.queue-spacer {
+.backlog-spacer {
     flex: 1;
 }
 
-.queue-timestamp {
+.backlog-timestamp {
     font-size: 10px;
     color: var(--lcars-mauve);
     font-style: italic;
@@ -5005,13 +5007,13 @@ body {
 }
 
 /* Tag pills container (legacy - now using header-tags) */
-.queue-tags-row {
+.backlog-tags-row {
     display: flex;
     justify-content: flex-end;
     margin-top: 4px;
 }
 
-.queue-tags {
+.backlog-tags {
     display: inline-flex;
     align-items: stretch;
     background: var(--lcars-purple);
@@ -5020,7 +5022,7 @@ body {
     height: 18px;
 }
 
-.queue-tag {
+.backlog-tag {
     font-size: 9px;
     font-weight: 600;
     padding: 2px 8px;
@@ -5040,38 +5042,38 @@ body {
     white-space: nowrap;
 }
 
-.queue-tag:hover {
+.backlog-tag:hover {
     background: var(--lcars-peach);
 }
 
-.queue-tag:active {
+.backlog-tag:active {
     background: var(--lcars-orange);
 }
 
 /* Active tag - matches current search filter */
-.queue-tag.active {
+.backlog-tag.active {
     background: var(--lcars-peach);
 }
 
 /* Black vertical separator between tags */
-.queue-tag-separator {
+.backlog-tag-separator {
     width: 2px;
     background: var(--lcars-black);
     align-self: stretch;
 }
 
 /* Subitem tags - smaller variant */
-.subitem .queue-tags {
+.subitem .backlog-tags {
     height: 16px;
     border-radius: 6px;
 }
 
-.subitem .queue-tag {
+.subitem .backlog-tag {
     font-size: 8px;
     padding: 1px 6px;
 }
 
-.queue-empty {
+.backlog-empty {
     font-size: 12px;
     color: var(--lcars-tan);
     opacity: 0.6;
@@ -5081,7 +5083,7 @@ body {
 }
 
 /* ─────────────────────────────────────────────────────────────────────────────
-   SUBITEMS - Collapsible hierarchical queue items
+   SUBITEMS - Collapsible hierarchical backlog items
    ───────────────────────────────────────────────────────────────────────────── */
 
 /* Expand/collapse indicator */
@@ -5128,11 +5130,11 @@ body {
 }
 
 /* Parent item with subitems */
-.queue-item.has-subitems {
+.backlog-item.has-subitems {
     border-left-color: var(--lcars-cyan);
 }
 
-.queue-item.has-subitems.expanded {
+.backlog-item.has-subitems.expanded {
     border-left-color: var(--lcars-peach);
     padding-bottom: 6px;
 }
@@ -5153,14 +5155,14 @@ body {
 }
 
 /* Collapsed state - hidden with smooth transition */
-.queue-item:not(.expanded) .subitems-container {
+.backlog-item:not(.expanded) .subitems-container {
     max-height: 0;
     margin-top: 0;
     opacity: 0;
 }
 
 /* Expanded state - visible with smooth transition */
-.queue-item.expanded .subitems-container {
+.backlog-item.expanded .subitems-container {
     max-height: 2000px;
     opacity: 1;
 }
@@ -5261,7 +5263,7 @@ body {
     transition: opacity 0.3s ease-in;
 }
 
-.queue-section.active .subitem-avatar {
+.backlog-section.active .subitem-avatar {
     opacity: 1;
 }
 
@@ -5291,7 +5293,7 @@ body {
 }
 
 /* Worktree badge - shows branch/worktree info for actively worked items - SECONDARY ELEMENT */
-.queue-worktree-badge,
+.backlog-worktree-badge,
 .subitem-worktree-badge {
     /* SECONDARY: 12px - Important workflow status */
     font-size: 12px;
@@ -5309,7 +5311,7 @@ body {
     opacity: 0.85; /* SECONDARY: Slightly dimmed */
 }
 
-.queue-worktree-badge {
+.backlog-worktree-badge {
     font-size: 12px;
     padding: 3px 8px;
 }
@@ -5320,7 +5322,7 @@ body {
 }
 
 /* XACA-0020: Window badge - shows which terminal is working on this item - SECONDARY ELEMENT */
-.queue-window-badge,
+.backlog-window-badge,
 .subitem-window-badge {
     /* SECONDARY: 12px - Important workflow status */
     font-size: 12px;
@@ -5338,7 +5340,7 @@ body {
     opacity: 0.85; /* SECONDARY: Slightly dimmed */
 }
 
-.queue-window-badge {
+.backlog-window-badge {
     font-size: 12px;
     padding: 3px 8px;
 }
@@ -5349,19 +5351,19 @@ body {
 }
 
 /* Window badge status variants - white text for visibility against dark UI */
-.queue-window-badge.coding,
+.backlog-window-badge.coding,
 .subitem-window-badge.coding {
     background: var(--lcars-blue);
     color: var(--lcars-white);
 }
 
-.queue-window-badge.planning,
+.backlog-window-badge.planning,
 .subitem-window-badge.planning {
     background: var(--lcars-gold);
     color: var(--lcars-white);
 }
 
-.queue-window-badge.paused,
+.backlog-window-badge.paused,
 .subitem-window-badge.paused {
     background: var(--lcars-red);
     color: var(--lcars-white);
@@ -5455,13 +5457,13 @@ body {
    NAVIGATION INTERACTIONS - Clickable IDs and Highlight Effects
    ───────────────────────────────────────────────────────────────────────────── */
 
-/* Clickable ID elements (queue-index, subitem-index) */
+/* Clickable ID elements (backlog-index, subitem-index) */
 .clickable {
     cursor: pointer;
     transition: all 0.15s ease;
 }
 
-.queue-index.clickable:hover,
+.backlog-index.clickable:hover,
 .subitem-index.clickable:hover {
     color: var(--lcars-cyan);
     text-shadow: 0 0 8px var(--lcars-cyan);
@@ -5469,7 +5471,7 @@ body {
 }
 
 /* Highlight animation for navigation targets */
-.queue-item.highlighted,
+.backlog-item.highlighted,
 .detail-row.highlighted,
 .subitem.highlighted {
     animation: highlight-flash 2s ease-out;
@@ -5868,7 +5870,7 @@ body {
 .tabbar-button[data-section="home"] { background: var(--lcars-blue); }
 .tabbar-button[data-section="workflow"] { background: var(--lcars-peach); }
 .tabbar-button[data-section="details"] { background: var(--lcars-cyan); }
-.tabbar-button[data-section="queue"] { background: var(--lcars-purple); }
+.tabbar-button[data-section="backlog"] { background: var(--lcars-purple); }
 .tabbar-button[data-section="releases"] { background: var(--lcars-green); }
 .tabbar-button[data-section="epics"] { background: var(--lcars-purple); }
 .tabbar-button[data-section="calendar"] { background: var(--lcars-amber); }
@@ -5888,7 +5890,7 @@ body {
     background: var(--lcars-black);
     color: var(--lcars-cyan);
 }
-.tabbar-button[data-section="queue"].active {
+.tabbar-button[data-section="backlog"].active {
     background: var(--lcars-black);
     color: var(--lcars-purple);
 }
@@ -6711,29 +6713,29 @@ body {
     }
 
     /* Queue section - single column, content scrollable */
-    .queue-section {
+    .backlog-section {
         overflow-x: auto;
         -webkit-overflow-scrolling: touch;
     }
 
-    .queue-list {
+    .backlog-list {
         display: flex;
         flex-direction: column;
         gap: 6px;
         min-width: 350px;
     }
 
-    .queue-item {
+    .backlog-item {
         min-width: 350px;
         overflow-x: auto;
     }
 
-    .queue-content-area {
+    .backlog-content-area {
         margin-left: 0;
     }
 
     /* Mobile filter bar adjustments - stacked rows for narrow screens */
-    .queue-filter-bar {
+    .backlog-filter-bar {
         gap: 6px;
         flex-direction: column;
         align-items: stretch;
@@ -6765,7 +6767,7 @@ body {
         letter-spacing: 0.5px;
     }
 
-    .queue-due-date {
+    .backlog-due-date {
         font-size: 8px;
         padding: 1px 4px;
     }
@@ -6820,7 +6822,7 @@ body {
     .lcars-content > .home-section.active,
     .lcars-content > .kanban-section.active,
     .lcars-content > .details-section.active,
-    .lcars-content > .queue-section.active,
+    .lcars-content > .backlog-section.active,
     .lcars-content > .releases-section.active,
     .lcars-content > .epics-section.active,
     .lcars-content > .calendar-section.active,
@@ -7678,7 +7680,7 @@ body {
     box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
 }
 
-/* Priority-based colors (matching queue items) */
+/* Priority-based colors (matching backlog items) */
 .calendar-item.priority-critical {
     background: rgba(255, 68, 102, 0.8);
     color: white;
@@ -8610,7 +8612,7 @@ body {
     gap: 4px;
 }
 
-/* XACA-0277: clickable copy-to-clipboard affordance (relocated from queue badges) */
+/* XACA-0277: clickable copy-to-clipboard affordance (relocated from backlog badges) */
 .release-card-id {
     font-size: 11px;
     color: var(--lcars-muted, #888);
@@ -8693,7 +8695,7 @@ body {
     flex-shrink: 0;
 }
 
-.release-card-header-right .queue-tags-row {
+.release-card-header-right .backlog-tags-row {
     margin-top: 0;
 }
 
@@ -8920,7 +8922,7 @@ body {
     text-decoration: line-through;
 }
 
-/* Cancelled release items — red strikethrough, mirrors queue-item.cancelled */
+/* Cancelled release items — red strikethrough, mirrors backlog-item.cancelled */
 .release-item.cancelled {
     opacity: 0.6;
 }
@@ -10575,7 +10577,7 @@ body {
    RELEASE BADGE (Queue Items)
    ========================================================================= */
 
-.queue-release-badge {
+.backlog-release-badge {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 600;
@@ -10588,38 +10590,38 @@ body {
     white-space: nowrap;
 }
 
-.queue-release-badge.editable {
+.backlog-release-badge.editable {
     cursor: pointer;
 }
 
-.queue-release-badge.editable:hover {
+.backlog-release-badge.editable:hover {
     opacity: 1;
     background: rgba(102, 204, 204, 0.3);
 }
 
-.queue-release-badge.assigned {
+.backlog-release-badge.assigned {
     opacity: 1;
     background: rgba(102, 204, 204, 0.25);
     border: 1px solid rgba(102, 204, 204, 0.4);
 }
 
-.queue-release-badge.assigned:hover {
+.backlog-release-badge.assigned:hover {
     background: rgba(102, 204, 204, 0.4);
 }
 
 /* XACA-0277: Release badge name span (ID chip moved to Releases dashboard cards) */
-.queue-release-badge-name {
+.backlog-release-badge-name {
     white-space: nowrap;
     color: inherit;
 }
 
 /* XACA-0056: Readonly badges for completed items (XACA-0121: removed epic/release — now always editable) */
-.queue-jira.readonly {
+.backlog-jira.readonly {
     cursor: default;
     opacity: 0.5;
 }
 
-.queue-jira.readonly:hover {
+.backlog-jira.readonly:hover {
     background: inherit;
     opacity: 0.5;
 }
@@ -11050,7 +11052,7 @@ body {
     color: var(--lcars-muted, #666);
 }
 
-/* Import action button in queue controls */
+/* Import action button in backlog controls */
 .import-action-btn {
     padding: 6px 12px;
     background: rgba(102, 153, 255, 0.2);
@@ -11212,7 +11214,7 @@ body {
     margin-bottom: 4px;
 }
 
-/* XACA-0277: clickable copy-to-clipboard affordance (relocated from queue badges) */
+/* XACA-0277: clickable copy-to-clipboard affordance (relocated from backlog badges) */
 .epic-card-id {
     font-family: 'Antonio', sans-serif;
     font-size: 12px;
@@ -11262,7 +11264,7 @@ body {
    spans full header height. Tags sit flex-start (top); the action cluster uses
    margin-top:auto to bottom-align whether or not tags are present above it —
    justify-content:space-between would pin the lone actions child to the top on
-   tag-less cards. .queue-tags-row default margin-top is zeroed since the
+   tag-less cards. .backlog-tags-row default margin-top is zeroed since the
    column's layout handles spacing. */
 .epic-card-header-right {
     display: flex;
@@ -11274,7 +11276,7 @@ body {
     flex-shrink: 0;
 }
 
-.epic-card-header-right .queue-tags-row {
+.epic-card-header-right .backlog-tags-row {
     margin-top: 0;
 }
 
@@ -11610,7 +11612,7 @@ body {
    EPIC BADGE (Queue Items)
    ───────────────────────────────────────────────────────────────────────────── */
 
-.queue-epic-badge {
+.backlog-epic-badge {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 700;
@@ -11625,18 +11627,18 @@ body {
     opacity: 0.7; /* TERTIARY: Subtle until hover */
 }
 
-.queue-epic-badge.assigned {
+.backlog-epic-badge.assigned {
     background: rgba(153, 102, 204, 0.35);
     color: var(--lcars-text);
 }
 
-.queue-epic-badge:hover {
+.backlog-epic-badge:hover {
     background: rgba(153, 102, 204, 0.5);
     opacity: 1.0; /* Full brightness on hover */
 }
 
 /* XACA-0277: Epic badge name span (ID chip moved to Epics dashboard cards) */
-.queue-epic-badge-name {
+.backlog-epic-badge-name {
     white-space: nowrap;
     color: inherit;
 }
@@ -12267,32 +12269,32 @@ body {
     }
 
     /* Smaller fonts on mobile for all elements */
-    .queue-priority {
+    .backlog-priority {
         font-size: 12px;
         padding: 3px 8px;
         min-width: 50px;
     }
 
-    .queue-category {
+    .backlog-category {
         font-size: 10px;
         padding: 2px 6px;
     }
 
-    .queue-index {
+    .backlog-index {
         font-size: 12px;
     }
 
-    .queue-title {
+    .backlog-title {
         font-size: 12px;
     }
 
     /* Workflow badges slightly smaller on mobile */
-    .queue-window-badge {
+    .backlog-window-badge {
         font-size: 10px;
         padding: 2px 6px;
     }
 
-    .queue-worktree-badge {
+    .backlog-worktree-badge {
         font-size: 10px;
         padding: 2px 6px;
     }
@@ -12304,14 +12306,14 @@ body {
     }
 
     /* Tracking zone elements on mobile */
-    .tracking-zone .queue-epic-badge,
-    .tracking-zone .queue-release-badge,
-    .tracking-zone .queue-due-date,
-    .tracking-zone .queue-jira,
-    .tracking-zone .queue-github,
-    .tracking-zone .queue-monday,
-    .tracking-zone .queue-docs-btn,
-    .tracking-zone .queue-activity-btn {
+    .tracking-zone .backlog-epic-badge,
+    .tracking-zone .backlog-release-badge,
+    .tracking-zone .backlog-due-date,
+    .tracking-zone .backlog-jira,
+    .tracking-zone .backlog-github,
+    .tracking-zone .backlog-monday,
+    .tracking-zone .backlog-docs-btn,
+    .tracking-zone .backlog-activity-btn {
         font-size: 10px;
         padding: 2px 5px;
     }
@@ -13015,8 +13017,8 @@ body {
    PLAN DOCUMENT MODAL (XACA-0045)
    ========================================================================= */
 
-/* DOCS button in queue items - TERTIARY ELEMENT */
-.queue-docs-btn {
+/* DOCS button in backlog items - TERTIARY ELEMENT */
+.backlog-docs-btn {
     /* TERTIARY: 11px - Tracking zone element */
     font-size: 11px;
     font-weight: 700;
@@ -13031,7 +13033,7 @@ body {
     opacity: 0.7; /* TERTIARY: Subtle until hover */
 }
 
-.queue-docs-btn:hover {
+.backlog-docs-btn:hover {
     background: rgba(102, 153, 204, 0.5);
     opacity: 1.0; /* Full brightness on hover */
 }
@@ -13223,11 +13225,11 @@ body {
 
 /* ═══════════════════════════════════════════════════════════════════════════
    XACA-0046: ACCESSIBILITY - Focus Indicators for Interactive Elements
-   All interactive queue item elements need clear focus indicators
+   All interactive backlog item elements need clear focus indicators
    ═══════════════════════════════════════════════════════════════════════════ */
 
 /* Queue Index (item ID) - clickable to copy */
-.queue-index:focus {
+.backlog-index:focus {
     outline: 2px solid var(--lcars-cyan);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(153, 204, 255, 0.5);
@@ -13235,7 +13237,7 @@ body {
 }
 
 /* Epic badge focus */
-.queue-epic-badge:focus {
+.backlog-epic-badge:focus {
     outline: 2px solid var(--lcars-purple);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(153, 102, 255, 0.5);
@@ -13243,7 +13245,7 @@ body {
 }
 
 /* Release badge focus */
-.queue-release-badge:focus {
+.backlog-release-badge:focus {
     outline: 2px solid var(--lcars-green);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(102, 204, 102, 0.5);
@@ -13251,7 +13253,7 @@ body {
 }
 
 /* Due date focus */
-.queue-due-date:focus {
+.backlog-due-date:focus {
     outline: 2px solid var(--lcars-white);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
@@ -13259,14 +13261,14 @@ body {
 }
 
 /* JIRA link focus */
-.queue-jira:focus {
+.backlog-jira:focus {
     outline: 2px solid var(--lcars-cyan);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(153, 204, 255, 0.5);
 }
 
 /* Docs button focus */
-.queue-docs-btn:focus {
+.backlog-docs-btn:focus {
     outline: 2px solid var(--lcars-white);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(255, 255, 255, 0.5);
@@ -13277,9 +13279,9 @@ body {
    ACTIVITY BUTTON (XACA-0117) — TERTIARY TRACKING ZONE ELEMENT
    ========================================================================= */
 
-/* Activity history button in queue items - TERTIARY ELEMENT */
-.queue-activity-btn {
-    /* TERTIARY: 11px - Tracking zone element, matches queue-docs-btn */
+/* Activity history button in backlog items - TERTIARY ELEMENT */
+.backlog-activity-btn {
+    /* TERTIARY: 11px - Tracking zone element, matches backlog-docs-btn */
     font-size: 13px;
     font-weight: 700;
     padding: 2px 6px;
@@ -13293,12 +13295,12 @@ body {
     line-height: 1;
 }
 
-.queue-activity-btn:hover {
+.backlog-activity-btn:hover {
     background: rgba(153, 204, 153, 0.45);
     opacity: 1.0; /* Full brightness on hover */
 }
 
-.queue-activity-btn:focus {
+.backlog-activity-btn:focus {
     outline: 2px solid var(--lcars-green, #99cc99);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(153, 204, 153, 0.5);
@@ -13306,8 +13308,8 @@ body {
 }
 
 /* OS logo focus */
-.queue-os-logo:focus,
-.queue-os-logo-inline:focus {
+.backlog-os-logo:focus,
+.backlog-os-logo-inline:focus {
     outline: 2px solid var(--lcars-peach);
     outline-offset: 2px;
     box-shadow: 0 0 10px rgba(255, 158, 119, 0.5);
@@ -13514,6 +13516,17 @@ body {
 .plan-doc-tab[data-tab="retro"]:hover {
     color: var(--lcars-amber, #ffcc00);
     background: rgba(255, 204, 0, 0.05);
+}
+
+.plan-doc-tab[data-tab="cr"].active {
+    color: var(--lcars-orange, #ff9900);
+    border-bottom-color: var(--lcars-orange, #ff9900);
+    background: rgba(255, 153, 0, 0.1);
+}
+
+.plan-doc-tab[data-tab="cr"]:hover {
+    color: var(--lcars-orange, #ff9900);
+    background: rgba(255, 153, 0, 0.05);
 }
 
 /* Custom scrollbar for plan doc content — scoped to actual scroll container */
@@ -14871,6 +14884,87 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   TEAM CONFIG FORM — XACA-0292
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+.team-config-form {
+    padding: 16px 0 8px;
+}
+
+.team-config-row {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 14px 16px;
+    border-bottom: 1px solid rgba(255, 153, 0, 0.15);
+}
+
+.team-config-row:last-child {
+    border-bottom: none;
+}
+
+.team-config-row-left {
+    flex: 1;
+    min-width: 0;
+}
+
+.team-config-label {
+    display: block;
+    font-size: 13px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    color: var(--lcars-orange);
+    text-transform: uppercase;
+    cursor: pointer;
+    margin-bottom: 4px;
+}
+
+.team-config-hint {
+    display: block;
+    font-size: 11px;
+    color: var(--lcars-blue);
+    line-height: 1.5;
+    opacity: 0.85;
+}
+
+.team-config-row-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    padding-top: 2px;
+}
+
+.team-config-checkbox {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--lcars-orange);
+    cursor: pointer;
+    flex-shrink: 0;
+}
+
+.team-config-status {
+    font-size: 11px;
+    letter-spacing: 0.5px;
+    min-width: 60px;
+    text-align: left;
+    transition: color 0.2s;
+}
+
+.team-config-status.saving {
+    color: var(--lcars-blue);
+}
+
+.team-config-status.saved {
+    color: var(--lcars-green, #99cc99);
+}
+
+.team-config-status.error {
+    color: var(--lcars-red, #cc6666);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    EXPORT / IMPORT — Per-team archive UI (import-specific elements)
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -15736,13 +15830,13 @@ body {
 /* ─────────────────────────────────────────────────────────────────────────────
    RELEASE TAG FILTER BAR (XACA-0209)
    Sits between the Releases section header and the releases dashboard.
-   Mirrors the queue filter dropdown pattern (.release-filter-dropdown).
+   Mirrors the backlog filter dropdown pattern (.release-filter-dropdown).
    ───────────────────────────────────────────────────────────────────────────── */
 
 /* XACA-0209 round 5: Release/Epic search bars — Queue-parity search UX.
    The pill-filter bar (rounds 3–4) was removed; each section now has a single
    search input that matches id/title/shortTitle/description/tags. Tag pills
-   on individual items (see .queue-tag below) are clickable and populate this
+   on individual items (see .backlog-tag below) are clickable and populate this
    search input on tap. */
 
 .release-search-bar,
@@ -15771,3 +15865,59 @@ body {
 
 /* The search input reuses the shared .filter-search-input / .filter-search-clear
    styles already defined for the Queue section — no per-section restyling here. */
+
+/* -------------------------------------------------------------------------------
+   CHANGE REQ SECTION — XACA-0292-006
+   Mirrors BACKLOG color palette and spacing; detail populated by agents G and H.
+   ------------------------------------------------------------------------------- */
+
+.change-req-section {
+    padding-top: 8px;
+}
+
+/* Filter bar placeholder — agent G will populate */
+.change-req-filter-bar {
+    opacity: 0;
+    transform: translateY(-4px);
+    transition: opacity 0.2s var(--lcars-ease-smooth), transform 0.2s var(--lcars-ease-smooth);
+}
+
+.change-req-section.active .change-req-filter-bar {
+    opacity: 1;
+    transform: translateY(0);
+    transition-delay: 0.12s;
+}
+
+/* Saved views placeholder — agent H will populate */
+.change-req-saved-views {
+    opacity: 0;
+    transition: opacity 0.2s var(--lcars-ease-smooth);
+}
+
+.change-req-section.active .change-req-saved-views {
+    opacity: 1;
+    transition-delay: 0.15s;
+}
+
+/* List container */
+.change-req-list {
+    opacity: 0;
+    transform: translateY(6px);
+    transition: opacity 0.2s ease-out, transform 0.2s ease-out;
+}
+
+.change-req-section.active .change-req-list {
+    opacity: 1;
+    transform: translateY(0);
+    transition-delay: 0.18s;
+}
+
+/* Empty state */
+.change-req-empty {
+    color: var(--lcars-tan);
+    font-size: 0.85rem;
+    letter-spacing: 0.06em;
+    padding: 24px 16px;
+    text-align: center;
+    opacity: 0.7;
+}

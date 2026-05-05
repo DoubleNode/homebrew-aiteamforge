@@ -4,7 +4,125 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0292: CAB Workflow Phase 2 — UI layer (EPIC-0017) -->
+
+### Fixed
+- **XACA-0292-013:** `renderMarkdown` XSS hardening — raw content is now HTML-escaped before any regex substitution, so embedded `<script>` tags or raw HTML in CR docs become inert entities. Code blocks are extracted into placeholders prior to escaping (preserving verbatim display) and restored afterward. A new `validateUrlScheme` helper enforces an allow-list of safe link schemes (`http:`, `https:`, `mailto:`, relative paths); `javascript:`, `data:`, `vbscript:`, and any other unlisted schemes are rejected — the anchor is dropped and only the link text is rendered.
+- **XACA-0292-011:** `serve_team_config` (GET) and `handle_update_team_config` (POST `/api/team-config`) now validate the `team` parameter against the `TEAM_KANBAN_DIRS` allow-list before touching the filesystem. Unknown or path-traversal values (e.g. `../foo`) → HTTP 400 `{"error": "Unknown team: <team>"}`.
+- **XACA-0292-012:** `handle_update_team_config` now schema-validates the `teamConfig` payload. Only `crSupport` is accepted as a top-level key; only `enabled` (bool) and `description` (str, optional) are accepted under it. Unknown keys at either level → HTTP 400. A clean payload is constructed from validated values; no attacker-controlled keys are ever written to the board JSON.
+- **XACA-0292-014:** OS dropdown in `lcars-filter-bar.js` replaced `innerHTML` interpolation of `cfg.logo`/`cfg.label` config strings with DOM node construction (`createElement` + `textContent` / `img.src`). `cfg.logo` is a URL, so `<img>` is built via DOM; static developer-controlled SVG retains a single `innerHTML` assignment on a fresh element with a comment explaining the decision.
+- **XACA-0292-010:** `serve_plan_exists` 500-path now includes `crExists: False` so the error response schema matches the success path.
+- **XACA-0292-015:** Removed dead `_abortCtrl` variable from `lcars-cr-tab.js` — declared but never assigned; AbortController not needed in synchronous data path.
+- **XACA-0292-017:** Wrapped `itemId` in `escapeHtml()` in `showPlanDocModal` modal header innerHTML to prevent XSS injection via crafted item IDs.
+- **XACA-0292 (PR #330 review):** `serve_cr_content` (`/api/kanban/<id>/cr-content`) now rejects absolute paths and validates that resolved relative paths stay inside the team's kanban directory. Closes a path-traversal vector reachable from every tailnet peer (server binds to all interfaces).
+
+### Added
+- **XACA-0292-008: Saved-view chips for CHANGE REQ section** -
+  Three chip-style buttons rendered in `#change-req-saved-views` between the
+  filter bar and the list: "THIS WEEK'S CRs" (items whose `cr_created_at` or
+  `addedAt` falls in the current Mon–Sun ISO week), "AWAITING APPROVAL"
+  (filter-bar preset `crState=cr-submitted`), and "EMERGENCY (30D)" (type=emergency
+  AND (`cr_emergency_deployed_at` || `cr_completed_at` || `addedAt`) within 30 days).
+  Active chip highlighted with orange/amber LCARS accent.  Saved-view predicate is
+  AND-ed on top of the existing filter-bar result in `renderChangeReqList()`.
+  Active view ID persisted at `localStorage['lcars-change-req-saved-view']`.
+  Manual filter changes clear the active chip (divergence detection hooked into every
+  filter-bar control except the sort cycle button).  CLEAR chip resets both filter
+  state and active view.  Reload restores the persisted chip.
+  Helpers `isWithinIsoWeek(tsMs)` and `isWithinLastNDays(tsMs, n)` added to
+  `lcars-cr-tab.js`; absent timestamps return `false` (honest about missing data).
+  CSS added to `lcars-cr-tab.css`.
+
+- **XACA-0292-007: CHANGE REQ list view with filter bar and DOCS button** -
+  New files `js/lcars-cr-tab.js` (exposes `initChangeReqTab()` / `renderChangeReqList()`)
+  and `css/lcars-cr-tab.css`.  Renders a 9-column tabular list (CR ID, TYPE, STATE,
+  TITLE, PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, DOCS) populated from
+  `boardData.backlog` items that carry a non-empty `cr_id`.  Filter bar mounted in
+  `#change-req-filter-bar` with state pills (10 values), type pills (4 values),
+  platform dropdown, sort-cycle button (STATE/TYPE/PLATFORM/APPROVER), and debounced
+  search.  Filter state is persisted to localStorage under `lcars-change-req-filter`.
+  Per-row DOCS button visible only when `cr_doc_link` is set; opens existing
+  `showPlanDocModal` then calls `switchDocTab(itemId, 'cr')` after 20ms to land
+  directly on the CR tab.  Section nav hook added in `switchSection` for `change-req`.
+  Both new files linked in `index.html`.
+  Note: the CR tab's filter bar logic is inline rather than consuming the shared
+  `createFilterBar` component (Wave 3G decision) — both filter bars are visually
+  similar but not code-shared. A future refactor could unify them.
+
+- **XACA-0292-006: CHANGE REQ tab shell** -
+  Added sidebar button (`#sidebar-btn-change-req`, `data-section="change-req"`),
+  mobile tabbar button (`#tabbar-btn-change-req`), and section shell
+  (`#section-change-req`, `.change-req-section[data-mode="kanban"]`) with header,
+  empty-state list container (`#change-req-list`), and placeholder slots for filter
+  bar (`#change-req-filter-bar`) and saved views (`#change-req-saved-views`).
+  Added `'change-req'` to the SECTIONS array in `lcars.js` so routing works.
+  Added `initChangeReqSection()` which fetches `/api/team-config` on page load and
+  calls `applyChangeReqVisibility(enabled)` to show/hide all three elements without a
+  page reload. Listens for the existing `crsupport-changed` DOM event for runtime
+  toggles; navigates user back to BACKLOG if they are currently on CHANGE REQ when
+  the flag is turned off. All three elements render with `style="display:none"`
+  initially so the DOM is visually identical to the pre-change state when the flag
+  is false. Minimal CSS rules added to `lcars.css` mirroring the BACKLOG section's
+  color palette, fade-in transitions, and spacing.
+
+- **XACA-0292-005: Extract reusable filter-bar component** -
+  New file `js/lcars-filter-bar.js` exports `createFilterBar(options)` — a
+  constructor-style component that encapsulates filter-bar state management,
+  localStorage persistence, pill/sort/OS/release/epic/category/search event
+  wiring, and an optional view toggle.  Public API: `getState()`, `setState(partial)`,
+  `refresh()`, `filterItems(items, matchFn)`, `populateReleaseOptions()`,
+  `populateEpicOptions()`, `updateReleaseStyle()`, `save()`.
+  BACKLOG behavior is unchanged; `backlogFilterState` now references the
+  component's live state object.  External callers of `saveQueueFilterState`,
+  `populateReleaseFilterOptions`, `populateEpicFilterOptions`, and
+  `updateReleaseDropdownStyle` are forwarded via thin stubs in `lcars.js`.
+  Script tag added to `index.html` before `lcars.js`.
+
+- **XACA-0292-004: CR tab in item DOCS popup** -
+  `showPlanDocModal(itemId, retroExists, crExists)` gains a third parameter.
+  A CR tab appears when `crSupport.enabled` is true for the board AND the item's
+  `cr_id` is non-empty; otherwise the tab bar is identical to before.
+  `checkPlanExists` now stores `data-cr-exists` on the DOCS button alongside
+  `data-retro-exists` (single request, no extra round-trip) using the extended
+  `plan-exists` response. Clicking the CR tab calls
+  `GET /api/kanban/<id>/cr-content` and renders via `renderMarkdown()`.
+  New `GET /api/kanban/<id>/cr-exists` endpoint mirrors `retro-exists`.
+  All 6 callers of `showPlanDocModal` updated to pass the third argument.
+  CSS adds distinct orange active/hover colours for the CR tab while
+  preserving existing 1-tab and 2-tab layouts unchanged.
+
+- **XACA-0292-003: Add `/api/kanban/<id>/cr-content` endpoint** -
+  New GET endpoint mirroring `plan-content` and `retro-content`. Looks up the
+  kanban item by ID, reads the `cr_doc_link` field, resolves absolute or relative
+  paths against the team's kanban directory, and returns
+  `{ "content": "...", "itemId": "...", "filename": "..." }`. Returns 404 if the
+  item is not found, `cr_doc_link` is empty/missing, or the file does not exist
+  on disk. No gating on `crSupport.enabled` — endpoint is visibility-agnostic.
+
+- **XACA-0292-002: SETTINGS → TEAM CONFIG → "Enable CR (CAB) support" checkbox** -
+  Replaced the `team-config-placeholder` in `index.html` with a real config form.
+  Added `GET /api/team-config?team=<team>` (returns `{ teamConfig: { crSupport: { enabled: bool } } }`)
+  and `POST /api/team-config` (deep-merges payload into `teamConfig` in the board JSON
+  using file lock + atomic write). On checkbox toggle the UI shows a "Saving..." /
+  "Saved" inline indicator, then dispatches a `crsupport-changed` DOM CustomEvent with
+  `{ enabled: bool }` detail so downstream agents can react without a page reload.
+  Default value is `false` (no-op when `teamConfig` key is absent from board JSON).
+
 ### Changed
+- **XACA-0292-001: Rename QUEUE → BACKLOG throughout LCARS UI** -
+  Unconditional rename of all kanban "queue" identifiers and labels to "backlog".
+  Covers `index.html` (sidebar button `data-section`, `<span>` labels, section class,
+  section title "MISSION BACKLOG", all element IDs), `css/lcars.css` (all `.queue-*`
+  class selectors → `.backlog-*`, sidebar active-state rule, transition/animation
+  blocks, comment headers), and `js/lcars.js` (SECTIONS array entry, DOM ID lookups,
+  CSS class string literals, `BACKLOG_FILTER_KEY` constant, `backlogFilterState`
+  variable, `renderMissionBacklog`/`createBacklogItem`/`toggleBacklogItemExpansion`/
+  `navigateToBacklogItem` function names, all querySelector/className references).
+  The localStorage key `'lcars-queue-filter'` is intentionally preserved for
+  backward compatibility. Non-kanban "queue" uses (fetch debounce comment, JS async
+  queue comment, `sync-release-manifests.py` board-data field backward-compat check)
+  are intentionally unchanged.
+
 - **Main header title no longer ends with "STATUS"** -
   Trimmed the trailing `STATUS` from the LCARS header title in all three responsive
   variants (`.title-full`, `.title-medium`, `.title-short`) and the matching
