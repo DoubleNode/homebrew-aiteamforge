@@ -1975,24 +1975,24 @@ function renderShipInfo() {
 
     if (titleFullEl) {
         if (displayGroupName && titleDisplayName) {
-            titleFullEl.textContent = `${displayGroupName} ${titleDisplayName} STATUS`;
+            titleFullEl.textContent = `${displayGroupName} ${titleDisplayName}`;
         } else if (displayGroupName) {
-            titleFullEl.textContent = `${displayGroupName} STATUS`;
+            titleFullEl.textContent = `${displayGroupName}`;
         } else if (titleDisplayName) {
-            titleFullEl.textContent = `${titleDisplayName} STATUS`;
+            titleFullEl.textContent = `${titleDisplayName}`;
         }
     }
     if (titleMediumEl && titleDisplayName) {
-        titleMediumEl.textContent = `${titleDisplayName} STATUS`;
+        titleMediumEl.textContent = `${titleDisplayName}`;
     }
 
     // Update page title to match the display
     if (displayGroupName && titleDisplayName) {
-        document.title = `${displayGroupName} ${titleDisplayName} STATUS`;
+        document.title = `${displayGroupName} ${titleDisplayName}`;
     } else if (displayGroupName) {
-        document.title = `${displayGroupName} STATUS`;
+        document.title = `${displayGroupName}`;
     } else if (titleDisplayName) {
-        document.title = `${titleDisplayName} STATUS`;
+        document.title = `${titleDisplayName}`;
     }
 }
 

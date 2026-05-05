@@ -4,6 +4,16 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+### Changed
+- **Main header title no longer ends with "STATUS"** -
+  Trimmed the trailing `STATUS` from the LCARS header title in all three responsive
+  variants (`.title-full`, `.title-medium`, `.title-short`) and the matching
+  `document.title`. The header now renders e.g. `STARFLEET ACADEMY` instead of
+  `STARFLEET ACADEMY STATUS`. The static `STATUS` placeholder in `index.html`
+  for `.title-short` was replaced with `--` to align with the other two `--`
+  placeholders. Inline section titles (`MISSION STATUS`, `BACKUP SYSTEM STATUS`,
+  sidebar `WORKFLOW STATUS`) are unchanged — only the main page header.
+
 ### Fixed
 - **XACA-0249: Team param now injected by UI for all team-scoped API calls** -
   Extended the existing `apiUrl()` helper to automatically append `?team=<CONFIG.team>`
