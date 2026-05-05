@@ -458,6 +458,7 @@
             deploy_window_planned:      cr.deploy_window_planned || '',
             cr_pushback_count:          cr.pushback_count || 0,
             cr_doc_link:                cr.cr_doc_link || '',
+            cr_proper_url:              cr.cr_proper_url || '',
             cr_summary:                 cr.summary || '',
             cr_created_at:              ts.cr_created_at || cr.createdAt || '',
             cr_emergency_deployed_at:   ts.cr_emergency_deployed_at || '',
@@ -763,11 +764,29 @@
         header.className = 'lcars-modal-header';
         header.innerHTML =
             `<span class="lcars-modal-title">CR DOCUMENT: ${escapeHtml(view.cr_id || '')}</span>` +
-            `<button class="lcars-modal-close" id="cr-doc-modal-close">&times;</button>`;
+            `<div class="cr-doc-header-actions">` +
+                `<button class="cr-edit-state-btn" id="cr-edit-state-btn" title="Change CR state">EDIT STATE</button>` +
+                `<button class="lcars-modal-close" id="cr-doc-modal-close">&times;</button>` +
+            `</div>`;
 
         const body = document.createElement('div');
         body.className = 'lcars-modal-body cr-doc-content';
-        body.innerHTML = _renderCRMetadata(view);
+
+        // Stable sub-divs so fetches can update them independently
+        const metaDiv = document.createElement('div');
+        metaDiv.className = 'cr-doc-meta-container';
+        metaDiv.innerHTML = _renderCRMetadata(view);
+
+        const contentDiv = document.createElement('div');
+        contentDiv.className = 'cr-doc-content-area';
+
+        const activityDiv = document.createElement('div');
+        activityDiv.className = 'cr-activity-section';
+        activityDiv.innerHTML = '<div class="cr-activity-loading">Loading activity log...</div>';
+
+        body.appendChild(metaDiv);
+        body.appendChild(contentDiv);
+        body.appendChild(activityDiv);
 
         modal.appendChild(header);
         modal.appendChild(body);
@@ -781,6 +800,11 @@
 
         const closeBtn = header.querySelector('#cr-doc-modal-close');
         if (closeBtn) closeBtn.addEventListener('click', _hideCRDocModal);
+
+        const editStateBtn = header.querySelector('#cr-edit-state-btn');
+        if (editStateBtn) {
+            editStateBtn.addEventListener('click', () => _showCRStateChangeDialog(view));
+        }
 
         // Always fetch the CR doc from the server. The local markdown file
         // (change-requests/<CR-ID>*.md) is the source of truth. The server
@@ -797,13 +821,12 @@
                         const md = (typeof renderMarkdown === 'function')
                             ? renderMarkdown(data.content || '')
                             : `<pre class="cr-doc-pre">${escapeHtml(data.content || '')}</pre>`;
-                        body.innerHTML = _renderCRMetadata(view) +
-                            '<div class="cr-doc-md">' + md + '</div>';
+                        contentDiv.innerHTML = '<div class="cr-doc-md">' + md + '</div>';
                     }
                     // else: external-only — metadata launch button is sufficient.
                 })
-                .catch(err => {
-                    body.innerHTML = _renderCRMetadata(view) +
+                .catch(() => {
+                    contentDiv.innerHTML =
                         `<div class="cr-doc-missing">` +
                         `<strong>No local CR document found.</strong><br>` +
                         `Expected at <code>change-requests/${escapeHtml(view.cr_id || '')}*.md</code>. ` +
@@ -811,6 +834,92 @@
                         `</div>`;
                 });
         }
+
+        // Fetch activity log (XACA-0328-002)
+        const crIdForActivity = view.cr_id || '';
+        if (crIdForActivity) {
+            fetch(apiUrl('/api/kanban/cr/' + encodeURIComponent(crIdForActivity) + '/activity'))
+                .then(r => r.json())
+                .then(data => {
+                    activityDiv.innerHTML = _renderCRActivityLog(data);
+                    _wireCRActivityCollapse(activityDiv);
+                })
+                .catch(() => {
+                    activityDiv.innerHTML = _renderCRActivityLog(null);
+                });
+        } else {
+            activityDiv.innerHTML = '';
+        }
+    }
+
+    // ─── Activity log rendering (XACA-0328-002) ───────────────────────────────
+
+    const _CR_ACTIVITY_TYPE_COLORS = {
+        'cr_state_changed':    'var(--lcars-orange, #ff9900)',
+        'cr_created':          'var(--lcars-amber, #ffcc00)',
+        'cr_published':        'var(--lcars-amber, #ffcc00)',
+        'cr_proper_detected':  'var(--lcars-cyan,  #99ccff)',
+        'cr_field_update':     'var(--lcars-blue,  #9999ff)',
+    };
+
+    function _crActivityTypePill(type) {
+        const color = _CR_ACTIVITY_TYPE_COLORS[type] || 'var(--lcars-mauve, #cc99cc)';
+        return `<span class="cr-activity-pill" style="background:${color};color:#000">${escapeHtml(type)}</span>`;
+    }
+
+    function _crActivityDetails(evt) {
+        if (evt.type === 'cr_state_changed' && evt.from_state && evt.to_state) {
+            return `<span class="cr-activity-states">${escapeHtml(evt.from_state)} &rarr; ${escapeHtml(evt.to_state)}</span>`;
+        }
+        if ((evt.type === 'cr_proper_detected' || evt.type === 'cr_field_update') && evt.field) {
+            const oldV = evt.old_value != null ? escapeHtml(String(evt.old_value)) : '&mdash;';
+            const newV = evt.new_value != null ? escapeHtml(String(evt.new_value)) : '&mdash;';
+            return `<span class="cr-activity-field">${escapeHtml(evt.field)}: ${oldV} &rarr; ${newV}</span>`;
+        }
+        if (evt.note) {
+            return `<span class="cr-activity-note">${escapeHtml(evt.note)}</span>`;
+        }
+        return '';
+    }
+
+    function _renderCRActivityLog(data) {
+        const events = (data && Array.isArray(data.events)) ? data.events : [];
+        // Reverse for newest-first display
+        const sorted = events.slice().reverse();
+
+        const rows = sorted.length > 0
+            ? sorted.map(evt => {
+                const ts = escapeHtml(evt.ts || '');
+                const actor = escapeHtml(evt.actor || '');
+                const pill = _crActivityTypePill(evt.type || '');
+                const details = _crActivityDetails(evt);
+                return `<div class="cr-activity-row">` +
+                    `<span class="cr-activity-ts">${ts}</span>` +
+                    `${pill}` +
+                    `<span class="cr-activity-actor">${actor}</span>` +
+                    (details ? `<span class="cr-activity-details">${details}</span>` : '') +
+                    `</div>`;
+            }).join('')
+            : '<div class="cr-activity-empty">No activity recorded for this CR.</div>';
+
+        return `<div class="cr-activity-header" data-collapsed="false">` +
+            `<span class="cr-activity-title">ACTIVITY LOG</span>` +
+            `<span class="cr-activity-toggle">&#9660;</span>` +
+            `</div>` +
+            `<div class="cr-activity-body">${rows}</div>`;
+    }
+
+    function _wireCRActivityCollapse(container) {
+        const hdr = container.querySelector('.cr-activity-header');
+        const body = container.querySelector('.cr-activity-body');
+        if (!hdr || !body) return;
+        hdr.addEventListener('click', () => {
+            const collapsed = hdr.dataset.collapsed === 'true';
+            hdr.dataset.collapsed = collapsed ? 'false' : 'true';
+            body.style.display = collapsed ? '' : 'none';
+            const toggle = hdr.querySelector('.cr-activity-toggle');
+            if (toggle) toggle.innerHTML = collapsed ? '&#9660;' : '&#9654;';
+        });
     }
 
     function _hideCRDocModal() {
@@ -822,10 +931,418 @@
         }
     }
 
+    // ─── EDIT STATE dialog (XACA-0328-004) ────────────────────────────────────
+
+    /**
+     * The 9 valid CR states and their per-state conditional field definitions.
+     * `fields` is an ordered array of field descriptors; empty = no extra inputs.
+     * required: all listed fields must be non-empty before SUBMIT enables.
+     */
+    const _CR_STATES = [
+        'cr-drafted',
+        'cr-submitted',
+        'cr-approved',
+        'cr-rejected',
+        'cr-held',
+        'implementing',
+        'deployed-dev',
+        'deployed-prod',
+        'emergency-deployed',
+    ];
+
+    const _CR_STATE_FIELDS = {
+        'cr-drafted':         [],
+        'cr-submitted':       [
+            { key: 'cr_proper_url', label: 'CR-PROPER URL', type: 'url', required: true,
+              hint: 'Must start with https://' },
+        ],
+        'cr-approved':        [
+            { key: 'approver_login', label: 'APPROVER LOGIN', type: 'text', required: true },
+            { key: 'approver_name',  label: 'APPROVER NAME',  type: 'text', required: true },
+        ],
+        'cr-rejected':        [
+            { key: 'pushback_notes', label: 'REJECTION REASON', type: 'textarea', required: true },
+        ],
+        'cr-held':            [
+            { key: 'hold_reason', label: 'HOLD REASON', type: 'textarea', required: true },
+        ],
+        'implementing':       [],
+        'deployed-dev':       [
+            { key: 'deploy_estimate', label: 'DEPLOY TIMESTAMP', type: 'datetime-local',
+              required: true, defaultNow: true },
+        ],
+        'deployed-prod':      [
+            { key: 'deploy_estimate', label: 'DEPLOY TIMESTAMP', type: 'datetime-local',
+              required: true, defaultNow: true },
+        ],
+        'emergency-deployed': [
+            { key: 'emergency_justification', label: 'EMERGENCY JUSTIFICATION',
+              type: 'textarea', required: true },
+            { key: 'deploy_estimate', label: 'DEPLOY TIMESTAMP', type: 'datetime-local',
+              required: true, defaultNow: true },
+        ],
+    };
+
+    /**
+     * Locate the raw CR record from boardData.crs by cr_id.
+     * Returns null if not found.
+     */
+    function _findRawCRById(crId) {
+        if (!window.boardData || !Array.isArray(window.boardData.crs)) return null;
+        return window.boardData.crs.find(cr => cr && cr.id === crId) || null;
+    }
+
+    /**
+     * Return a datetime-local string for "now" (local time, no seconds).
+     */
+    function _nowDatetimeLocal() {
+        const d = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+    }
+
+    /**
+     * Render the conditional fields HTML for a given target state.
+     * Returns an HTML string for injection into #cr-state-cond-fields.
+     */
+    function _renderStateCondFields(targetState) {
+        const fieldDefs = _CR_STATE_FIELDS[targetState] || [];
+        if (fieldDefs.length === 0) {
+            return '<div class="cr-sc-no-fields">No additional fields required for this state.</div>';
+        }
+        return fieldDefs.map(f => {
+            const id = 'cr-sc-field-' + f.key;
+            let input;
+            if (f.type === 'textarea') {
+                input = `<textarea id="${id}" class="cr-sc-textarea" placeholder="" rows="3"></textarea>`;
+            } else if (f.type === 'datetime-local') {
+                const dflt = f.defaultNow ? ` value="${_nowDatetimeLocal()}"` : '';
+                input = `<input type="datetime-local" id="${id}" class="cr-sc-input"${dflt}>`;
+            } else {
+                // text or url
+                input = `<input type="text" id="${id}" class="cr-sc-input" autocomplete="off" spellcheck="false">`;
+            }
+            const hintHtml = f.hint
+                ? `<span class="cr-sc-hint">${escapeHtml(f.hint)}</span>`
+                : '';
+            return `<div class="cr-sc-field-group">` +
+                   `<label class="cr-sc-label" for="${id}">${escapeHtml(f.label)}</label>` +
+                   input +
+                   hintHtml +
+                   `</div>`;
+        }).join('');
+    }
+
+    /**
+     * Validate the current state of all conditional fields for targetState.
+     * Returns true when SUBMIT should be enabled.
+     * Validation rules:
+     *   - All required fields non-empty after trim
+     *   - cr_proper_url: must start with https://
+     *   - datetime-local: must be parseable
+     */
+    function _validateStateCondFields(targetState) {
+        const fieldDefs = _CR_STATE_FIELDS[targetState] || [];
+        for (const f of fieldDefs) {
+            if (!f.required) continue;
+            const el = document.getElementById('cr-sc-field-' + f.key);
+            if (!el) return false;
+            const val = (el.value || '').trim();
+            if (!val) return false;
+            if (f.key === 'cr_proper_url') {
+                if (!/^https:\/\//i.test(val)) return false;
+            }
+            if (f.type === 'datetime-local') {
+                if (isNaN(new Date(val).getTime())) return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Collect the `fields` payload from conditional inputs for a given target state.
+     */
+    function _collectStateCondFields(targetState) {
+        const fieldDefs = _CR_STATE_FIELDS[targetState] || [];
+        const fields = {};
+        for (const f of fieldDefs) {
+            const el = document.getElementById('cr-sc-field-' + f.key);
+            if (!el) continue;
+            const val = (el.value || '').trim();
+            if (f.key === 'approver_login') {
+                if (!fields.approver) fields.approver = {};
+                fields.approver.login = val;
+            } else if (f.key === 'approver_name') {
+                if (!fields.approver) fields.approver = {};
+                fields.approver.name = val;
+            } else {
+                fields[f.key] = val;
+            }
+        }
+        return fields;
+    }
+
+    /**
+     * Open a state-change dialog overlaid on the existing CR-DOCS modal.
+     * @param {object} view  — the normalized CR view object (from _crByIdCache)
+     */
+    function _showCRStateChangeDialog(view) {
+        // Remove any existing state-change dialog
+        const existing = document.getElementById('cr-state-dialog-overlay');
+        if (existing) existing.remove();
+
+        // Resolve optimistic concurrency token from raw CR record
+        const rawCR = _findRawCRById(view.cr_id);
+        const expectedUpdatedAt = (rawCR && (rawCR.updatedAt || rawCR.lastUpdatedAt)) || '';
+
+        const overlay = document.createElement('div');
+        overlay.className = 'lcars-modal-overlay cr-state-dialog-overlay';
+        overlay.id = 'cr-state-dialog-overlay';
+
+        const dialog = document.createElement('div');
+        dialog.className = 'lcars-modal cr-state-dialog';
+
+        // Build dropdown options — exclude the current state (can't transition to self)
+        const options = _CR_STATES.map(s => {
+            const label = s.toUpperCase().replace(/-/g, ' ');
+            const isCurrent = s === view.crState;
+            return `<option value="${escapeHtml(s)}"${isCurrent ? ' data-is-current="true"' : ''}>${escapeHtml(label)}</option>`;
+        }).join('');
+
+        dialog.innerHTML =
+            `<div class="lcars-modal-header cr-state-dialog-header">` +
+                `<span class="lcars-modal-title">EDIT CR STATE — ${escapeHtml(view.cr_id || '')}</span>` +
+                `<button class="lcars-modal-close" id="cr-state-dialog-close">&times;</button>` +
+            `</div>` +
+            `<div class="lcars-modal-body cr-state-dialog-body">` +
+                `<div class="cr-sc-meta-row">` +
+                    `<div class="cr-sc-meta-cell">` +
+                        `<span class="cr-sc-meta-label">CURRENT STATE</span>` +
+                        `<span>${_stateBadge(view.crState)}</span>` +
+                    `</div>` +
+                `</div>` +
+                `<div class="cr-sc-field-group cr-sc-target-group">` +
+                    `<label class="cr-sc-label" for="cr-sc-target-select">TARGET STATE</label>` +
+                    `<select id="cr-sc-target-select" class="cr-sc-select">` +
+                        `<option value="">— SELECT —</option>` +
+                        options +
+                    `</select>` +
+                `</div>` +
+                `<div class="cr-sc-divider"></div>` +
+                `<div id="cr-state-cond-fields" class="cr-sc-cond-fields">` +
+                    `<div class="cr-sc-no-fields">Select a target state above.</div>` +
+                `</div>` +
+                `<div id="cr-sc-error" class="cr-sc-error" style="display:none"></div>` +
+                `<div class="cr-sc-actions">` +
+                    `<button class="cr-sc-btn cr-sc-cancel" id="cr-sc-cancel">CANCEL</button>` +
+                    `<button class="cr-sc-btn cr-sc-submit" id="cr-sc-submit" disabled>SUBMIT</button>` +
+                `</div>` +
+            `</div>`;
+
+        overlay.appendChild(dialog);
+
+        // Clicking outside the dialog (on the overlay darkened area) = cancel
+        overlay.addEventListener('click', e => {
+            if (e.target === overlay) _hideCRStateChangeDialog();
+        });
+
+        document.body.appendChild(overlay);
+        setTimeout(() => overlay.classList.add('active'), 10);
+
+        // Wire close / cancel buttons
+        dialog.querySelector('#cr-state-dialog-close').addEventListener('click', _hideCRStateChangeDialog);
+        dialog.querySelector('#cr-sc-cancel').addEventListener('click', _hideCRStateChangeDialog);
+
+        // Wire target-state dropdown
+        const targetSelect = dialog.querySelector('#cr-sc-target-select');
+        const condFieldsDiv = dialog.querySelector('#cr-state-cond-fields');
+        const submitBtn = dialog.querySelector('#cr-sc-submit');
+        const errorDiv = dialog.querySelector('#cr-sc-error');
+
+        function _refreshCondFields() {
+            const targetState = targetSelect.value;
+            if (!targetState) {
+                condFieldsDiv.innerHTML = '<div class="cr-sc-no-fields">Select a target state above.</div>';
+                submitBtn.disabled = true;
+                return;
+            }
+            condFieldsDiv.innerHTML = _renderStateCondFields(targetState);
+            _revalidate();
+            // Wire input events on newly-rendered fields
+            condFieldsDiv.querySelectorAll('input, textarea, select').forEach(el => {
+                el.addEventListener('input', _revalidate);
+                el.addEventListener('change', _revalidate);
+            });
+        }
+
+        function _revalidate() {
+            const targetState = targetSelect.value;
+            if (!targetState) { submitBtn.disabled = true; return; }
+            submitBtn.disabled = !_validateStateCondFields(targetState);
+        }
+
+        targetSelect.addEventListener('change', () => {
+            _hideError();
+            _refreshCondFields();
+        });
+
+        // Wire SUBMIT button
+        submitBtn.addEventListener('click', () => {
+            const targetState = targetSelect.value;
+            if (!targetState) return;
+            if (!_validateStateCondFields(targetState)) return;
+
+            const fields = _collectStateCondFields(targetState);
+            const payload = {
+                targetState,
+                expectedUpdatedAt,
+                fields,
+                actor: 'lcars-ui',
+            };
+
+            _doSubmitTransition(view.cr_id, payload, submitBtn, errorDiv, view);
+        });
+
+        function _hideError() {
+            errorDiv.style.display = 'none';
+            errorDiv.innerHTML = '';
+        }
+    }
+
+    /**
+     * POST the transition request and handle the response.
+     * On success: close dialog, re-open docs modal with fresh data.
+     * On 409: show inline conflict error with RELOAD button.
+     * On 400/other: show inline server error.
+     * On network failure: show inline error with RETRY button.
+     */
+    function _doSubmitTransition(crId, payload, submitBtn, errorDiv, view) {
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'SUBMITTING...';
+
+        const url = apiUrl('/api/kanban/cr/' + encodeURIComponent(crId) + '/transition');
+
+        function _showError(msg, withReload, withRetry) {
+            errorDiv.innerHTML = escapeHtml(msg) +
+                (withReload
+                    ? ` <button class="cr-sc-btn cr-sc-btn-inline cr-sc-reload" id="cr-sc-reload-btn">RELOAD</button>`
+                    : '') +
+                (withRetry
+                    ? ` <button class="cr-sc-btn cr-sc-btn-inline cr-sc-retry" id="cr-sc-retry-btn">RETRY</button>`
+                    : '');
+            errorDiv.style.display = 'block';
+            submitBtn.textContent = 'SUBMIT';
+            submitBtn.disabled = false;
+
+            const reloadBtn = errorDiv.querySelector('#cr-sc-reload-btn');
+            if (reloadBtn) {
+                reloadBtn.addEventListener('click', () => {
+                    // Close dialog, close docs modal, re-open docs modal with fresh data
+                    _hideCRStateChangeDialog();
+                    _hideCRDocModal();
+                    // Re-fetch board data then re-open the docs modal
+                    if (typeof window.refreshBoardData === 'function') {
+                        window.refreshBoardData(() => {
+                            const freshRaw = _findRawCRById(crId);
+                            if (freshRaw) {
+                                const backlogIdx = _backlogIndex();
+                                const freshView = _normalizeCR(freshRaw, backlogIdx);
+                                _showCRDocModal(freshView);
+                            }
+                        });
+                    } else {
+                        // Fallback: just close both modals — user can navigate back
+                    }
+                });
+            }
+
+            const retryBtn = errorDiv.querySelector('#cr-sc-retry-btn');
+            if (retryBtn) {
+                retryBtn.addEventListener('click', () => {
+                    errorDiv.style.display = 'none';
+                    _doSubmitTransition(crId, payload, submitBtn, errorDiv, view);
+                });
+            }
+        }
+
+        fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        })
+        .then(r => {
+            if (r.status === 409) {
+                return r.json().then(data => {
+                    _showError(
+                        'This CR was modified by another session. Reload to see the latest state.',
+                        true,   // withReload
+                        false,  // withRetry
+                    );
+                }).catch(() => {
+                    _showError(
+                        'This CR was modified by another session. Reload to see the latest state.',
+                        true,
+                        false,
+                    );
+                });
+            }
+            if (!r.ok) {
+                return r.json().then(data => {
+                    const msg = (data && data.error) ? data.error : ('Server error ' + r.status);
+                    _showError(msg, false, false);
+                }).catch(() => {
+                    _showError('Server error ' + r.status + '. Check server logs.', false, false);
+                });
+            }
+            return r.json().then(data => {
+                if (!data || !data.ok) {
+                    const msg = (data && data.error) ? data.error : 'Transition failed (server returned ok=false).';
+                    _showError(msg, false, false);
+                    return;
+                }
+                // Success — close dialog, refresh docs modal
+                _hideCRStateChangeDialog();
+                _hideCRDocModal();
+                // Re-fetch boardData if possible, then re-open updated docs modal
+                if (typeof window.refreshBoardData === 'function') {
+                    window.refreshBoardData(() => {
+                        const freshRaw = _findRawCRById(crId);
+                        if (freshRaw) {
+                            const backlogIdx = _backlogIndex();
+                            const freshView = _normalizeCR(freshRaw, backlogIdx);
+                            _crByIdCache[crId] = freshView;
+                            _showCRDocModal(freshView);
+                        }
+                    });
+                } else {
+                    // If we can't refresh board data, just update the cache from the
+                    // returned CR object (if the server echoed it back in data.cr)
+                    if (data.cr) {
+                        const backlogIdx = _backlogIndex();
+                        const freshView = _normalizeCR(data.cr, backlogIdx);
+                        _crByIdCache[crId] = freshView;
+                        _showCRDocModal(freshView);
+                    }
+                }
+            });
+        })
+        .catch(() => {
+            _showError('Network error — could not reach the server.', false, true);
+        });
+    }
+
+    function _hideCRStateChangeDialog() {
+        const overlay = document.getElementById('cr-state-dialog-overlay');
+        if (overlay) {
+            overlay.classList.remove('active');
+            setTimeout(() => overlay.remove(), 250);
+        }
+    }
+
     /**
      * Render the static metadata block at the top of the CR-only modal:
      * id, type, state, summary, deploy window, approver, linked items,
-     * and a launch button when cr_doc_link is an external URL.
+     * cr_doc_link launch button, and cr_proper_url when present.
      */
     function _renderCRMetadata(view) {
         const link = view.cr_doc_link || '';
@@ -833,6 +1350,11 @@
         const launch = isUrl
             ? `<a class="cr-doc-launch" href="${escapeHtml(link)}" target="_blank" rel="noopener noreferrer">OPEN CR DOC →</a>`
             : '';
+
+        const properUrl = view.cr_proper_url || '';
+        const properUrlCell = properUrl
+            ? `<a class="cr-proper-url-link" href="${escapeHtml(properUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(properUrl)}</a>`
+            : '<span class="cr-dim">—</span>';
 
         const items = (view.id && view.id.trim().length > 0)
             ? `<span class="cr-id-mono">${escapeHtml(view.id)}</span>`
@@ -854,6 +1376,9 @@
                     <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">APPROVER</span><span>${escapeHtml(view.cr_approver_name || view.cr_approved_by || '—')}</span></div>
                     <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">PUSHBACKS</span>${_pushbackDisplay(view.cr_pushback_count)}</div>
                     <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">LINKED ITEM</span>${items}</div>
+                </div>
+                <div class="cr-doc-meta-row cr-doc-url-row">
+                    <div class="cr-doc-meta-cell cr-doc-meta-cell--wide"><span class="cr-doc-meta-label">CR-PROPER URL</span>${properUrlCell}</div>
                 </div>
                 ${summary}
                 ${launch ? `<div class="cr-doc-launch-row">${launch}</div>` : ''}

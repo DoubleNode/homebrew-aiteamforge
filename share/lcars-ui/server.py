@@ -1565,6 +1565,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0292: Team config (CR/CAB support flag)
         elif path == '/api/team-config':
             self.handle_update_team_config()
+        # CR transition endpoint (XACA-0328-005)
+        elif path.startswith('/api/kanban/cr/') and path.endswith('/transition'):
+            cr_id = path[len('/api/kanban/cr/'):-len('/transition')]
+            self.handle_cr_transition(cr_id)
         else:
             self.send_error(404, f"Unknown POST endpoint: {path}")
 
@@ -6373,6 +6377,366 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "itemId": item_id
             }, status=500)
 
+    def serve_cr_activity(self, cr_id):
+        """GET /api/kanban/cr/<CR-ID>/activity - Return activity log for a CR container.
+
+        Auto-detects team from CR-ID prefix (CR-<TEAM_UPPER>-<YYYYMMDD>-<seq>).
+        Returns { crId, events: [] } when no log file exists yet (not an error).
+        """
+        import re
+        try:
+            # Validate CR-ID format to prevent path traversal
+            if not re.match(r'^CR-[A-Z]+-\d{8}-\d+$', cr_id):
+                self._send_json_response({"error": "Invalid CR-ID format"}, status=400)
+                return
+
+            # Extract team: CR-IOS-20260515-0123 → "ios"
+            m = re.match(r'^CR-([A-Z]+)-', cr_id)
+            if not m:
+                self._send_json_response({"error": f"Cannot parse team from CR-ID: {cr_id}"}, status=400)
+                return
+            team = m.group(1).lower()
+
+            # Map team to kanban directory (same mapping as TEAM_KANBAN_DIRS)
+            team_kanban_dir = TEAM_KANBAN_DIRS.get(team)
+            if team_kanban_dir is None:
+                # Unknown team — return empty log rather than 404
+                self._send_json_response({"crId": cr_id, "events": []})
+                return
+
+            activity_file = (Path(team_kanban_dir) / "change-requests" / "activity" / f"{cr_id}.json").resolve()
+
+            # Containment check
+            activity_root = (Path(team_kanban_dir) / "change-requests" / "activity").resolve()
+            try:
+                activity_file.relative_to(activity_root)
+            except ValueError:
+                self._send_json_response({"error": "Invalid CR-ID (path traversal)"}, status=400)
+                return
+
+            if not activity_file.exists():
+                self._send_json_response({"crId": cr_id, "events": []})
+                return
+
+            with open(activity_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+
+            self._send_json_response(data)
+
+        except Exception as e:
+            print(f"[LCARS] ERROR reading CR activity for {cr_id}: {e}")
+            self._send_json_response({"error": str(e), "crId": cr_id}, status=500)
+
+    # ── CR Transition endpoint (XACA-0328-005) ──────────────────────────────
+    # Valid target states (mirrors crStates in cr-schema.json).
+    _CR_VALID_STATES = frozenset([
+        "cr-drafted", "cr-submitted", "cr-approved", "cr-rejected",
+        "cr-held", "implementing", "deployed-dev", "deployed-prod",
+        "emergency-deployed",
+    ])
+
+    # Required fields per target state.
+    # Each entry is (field_path, description, validator_fn or None).
+    # field_path uses dot notation to address nested fields (e.g. "approver.login").
+    _CR_REQUIRED_FIELDS = {
+        "cr-drafted":         [],
+        "cr-submitted":       [("cr_proper_url", "must start with https://")],
+        "cr-approved":        [("approver.login", None), ("approver.name", None)],
+        "cr-rejected":        [("pushback_notes", "non-empty after trim")],
+        "cr-held":            [("hold_reason", None)],
+        "implementing":       [],
+        "deployed-dev":       [("deploy_estimate", "ISO 8601 date/time")],
+        "deployed-prod":      [("deploy_estimate", "ISO 8601 date/time")],
+        "emergency-deployed": [("emergency_justification", None), ("deploy_estimate", "ISO 8601 date/time")],
+    }
+
+    def _cr_get_nested(self, d, dotted_key):
+        """Return value at dotted key (e.g. 'approver.login') from dict d, or None."""
+        parts = dotted_key.split(".")
+        val = d
+        for p in parts:
+            if not isinstance(val, dict):
+                return None
+            val = val.get(p)
+        return val
+
+    def _cr_validate_fields(self, target_state, fields):
+        """Validate required fields for target_state.
+
+        Returns (ok, error_message). fields is the 'fields' dict from the
+        request body (may be None or empty).
+        """
+        fields = fields or {}
+        rules = self._CR_REQUIRED_FIELDS.get(target_state, [])
+        for field_path, hint in rules:
+            val = self._cr_get_nested(fields, field_path)
+            if val is None or (isinstance(val, str) and not val.strip()):
+                err = f"missing required field: {field_path} for target {target_state}"
+                if hint:
+                    err += f" ({hint})"
+                return False, err
+            # Extra semantic validators
+            if field_path == "cr_proper_url" and not str(val).startswith("https://"):
+                return False, f"cr_proper_url must start with https:// for target {target_state}"
+            if field_path == "deploy_estimate":
+                try:
+                    from datetime import datetime
+                    # Accept both Z-suffix and +00:00; strip Z for fromisoformat compat
+                    datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+                except (ValueError, TypeError):
+                    return False, f"deploy_estimate must be parseable ISO 8601 for target {target_state}"
+        return True, None
+
+    def handle_cr_transition(self, cr_id):
+        """POST /api/kanban/cr/<CR-ID>/transition — Manual state-change endpoint.
+
+        Accepts:
+          { targetState, expectedUpdatedAt, fields: { ... }, actor }
+
+        Performs optimistic concurrency check, validates required fields per
+        target state, applies the state transition and field updates via
+        kb-cr shell helpers (single flock path), writes activity events,
+        and returns the updated CR record.
+        """
+        import re
+        try:
+            # ── Parse request body ─────────────────────────────────────────────
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length == 0:
+                self._send_json_response({"ok": False, "error": "Empty request body"}, status=400)
+                return
+            body = json.loads(self.rfile.read(content_length))
+
+            target_state     = body.get("targetState", "").strip()
+            expected_updated = body.get("expectedUpdatedAt", "")
+            fields           = body.get("fields") or {}
+            actor            = body.get("actor", "lcars-ui").strip() or "lcars-ui"
+
+            # ── Validate CR-ID format ──────────────────────────────────────────
+            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+$", cr_id):
+                self._send_json_response({"ok": False, "error": "Invalid CR-ID format"}, status=400)
+                return
+
+            # ── Validate target state ──────────────────────────────────────────
+            if target_state not in self._CR_VALID_STATES:
+                self._send_json_response(
+                    {"ok": False, "error": f"Unknown targetState '{target_state}'. "
+                     f"Valid states: {', '.join(sorted(self._CR_VALID_STATES))}"},
+                    status=400,
+                )
+                return
+
+            # ── Validate required fields for target state ──────────────────────
+            ok, field_err = self._cr_validate_fields(target_state, fields)
+            if not ok:
+                self._send_json_response({"ok": False, "error": field_err}, status=400)
+                return
+
+            # ── Resolve board file from CR-ID prefix ───────────────────────────
+            m = re.match(r"^CR-([A-Z]+)-", cr_id)
+            if not m:
+                self._send_json_response({"ok": False, "error": f"Cannot parse team from CR-ID: {cr_id}"}, status=400)
+                return
+            team = m.group(1).lower()
+
+            team_kanban_dir = TEAM_KANBAN_DIRS.get(team)
+            if team_kanban_dir is None:
+                self._send_json_response({"ok": False, "error": f"Unknown team '{team}' derived from CR-ID"}, status=404)
+                return
+
+            board_file = Path(team_kanban_dir) / f"{team}-board.json"
+            if not board_file.exists():
+                self._send_json_response({"ok": False, "error": f"Board file not found for team '{team}'"}, status=404)
+                return
+
+            # Containment / path-traversal guard
+            try:
+                board_file.resolve().relative_to(Path(team_kanban_dir).resolve())
+            except ValueError:
+                self._send_json_response({"ok": False, "error": "Invalid CR-ID (path traversal)"}, status=400)
+                return
+
+            # ── Read current board + locate CR record ──────────────────────────
+            with open(board_file, "r", encoding="utf-8") as f:
+                board_data = json.load(f)
+
+            crs = board_data.get("crs", [])
+            cr_idx = next((i for i, c in enumerate(crs) if c.get("id") == cr_id), None)
+            if cr_idx is None:
+                self._send_json_response({"ok": False, "error": f"CR not found: {cr_id}"}, status=404)
+                return
+
+            current_cr = crs[cr_idx]
+
+            # ── Optimistic concurrency check ───────────────────────────────────
+            current_updated_at = current_cr.get("updatedAt") or current_cr.get("lastUpdatedAt", "")
+            if expected_updated and current_updated_at and expected_updated != current_updated_at:
+                self._send_json_response(
+                    {
+                        "ok": False,
+                        "conflict": True,
+                        "error": "CR was modified by another writer",
+                        "currentUpdatedAt": current_updated_at,
+                    },
+                    status=409,
+                )
+                return
+
+            from_state = current_cr.get("crState", "")
+
+            # ── Build shell script for atomic transition + field writes ────────
+            # We source kanban-helpers.sh and kb-cr.sh so we get _kb_jq_update
+            # (Perl-flock locking) and all kb-cr helpers.  All writes go through
+            # a single flock path — no parallel race between this request and a
+            # concurrent kb-cr CLI invocation.
+            #
+            # Strategy:
+            #   1. Set _cr_board / _cr_enabled / _cr_team directly (bypasses
+            #      _kb_cr_board_preamble which needs tmux).
+            #   2. Call _kb_cr_container_transition directly for the state change.
+            #   3. Build a jq update for the extra fields (approver, notes, etc.).
+            #   4. Append activity events via _kb_cr_activity_append.
+            #
+            # All of the above use _kb_jq_update's Perl flock — single locking path.
+
+            board_file_str = str(board_file.resolve())
+
+            # Build field-update jq fragments and args.
+            # We collect changed fields for cr_field_update activity events.
+            field_jq_parts = []   # jq filter fragments (all share the same --argjson cidx)
+            field_jq_args  = []   # list of "--arg key val" pairs (flat, for shell embedding)
+            changed_fields = {}   # field_name -> new_value (for activity events)
+
+            def _add_field_update(jq_path, new_value, label, old_value):
+                """Register a simple string field update."""
+                arg_key = jq_path.replace(".", "_").replace("[", "").replace("]", "")
+                field_jq_parts.append(f'.crs[$cidx].{jq_path} = ${arg_key}')
+                field_jq_args.append((arg_key, str(new_value)))
+                if str(new_value) != str(old_value or ""):
+                    changed_fields[label] = {"old": str(old_value or ""), "new": str(new_value)}
+
+            approver_fields = fields.get("approver") or {}
+            if approver_fields:
+                old_approver = current_cr.get("approver") or {}
+                if "login" in approver_fields:
+                    _add_field_update("approver.login", approver_fields["login"], "approver.login",
+                                      old_approver.get("login", ""))
+                if "name" in approver_fields:
+                    _add_field_update("approver.name", approver_fields["name"], "approver.name",
+                                      old_approver.get("name", ""))
+
+            for field_key in ("pushback_notes", "hold_reason", "emergency_justification",
+                              "cr_proper_url", "deploy_estimate"):
+                if field_key in fields and fields[field_key] is not None:
+                    _add_field_update(field_key, fields[field_key], field_key,
+                                      current_cr.get(field_key, ""))
+
+            # Serialize field jq args for embedding in bash heredoc
+            # Each arg becomes: --arg <key> <value>   (shell-quoted via repr trick below)
+            field_jq_filter = " | ".join(field_jq_parts) if field_jq_parts else ""
+
+            # Activity event lines: one cr_field_update per changed field.
+            field_activity_lines = []
+            for fname, vals in changed_fields.items():
+                old_esc = vals["old"].replace("'", "'\\''")
+                new_esc = vals["new"].replace("'", "'\\''")
+                field_activity_lines.append(
+                    f"_kb_cr_activity_event cr_field_update "
+                    f"actor='${{KB_CR_ACTOR:-lcars-ui}}' "
+                    f"field='{fname}' "
+                    f"old_value='{old_esc}' "
+                    f"new_value='{new_esc}' | "
+                    f"xargs -I EVT_JSON -- bash -c "
+                    f"'_kb_cr_activity_append \"{board_file_str}\" \"{cr_id}\" EVT_JSON'"
+                )
+
+            # Build the full shell script.
+            # We call _kb_cr_container_transition directly with explicit args to
+            # bypass _kb_cr_board_preamble's tmux dependency.
+            shell_parts = [
+                f"source /Users/darrenehlers/dev-team/kanban-helpers.sh",
+                f"source /Users/darrenehlers/dev-team/scripts/kb-cr.sh",
+                # Find CR index
+                f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] | select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
+                f'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',
+                # Apply state transition (uses _kb_jq_update with flock internally)
+                f'old_state=$(_kb_jq_read "{board_file_str}" ".crs[$cr_idx].crState // empty" -r 2>/dev/null || echo "")',
+                f'ts=$(_kb_cr_timestamp)',
+                f'_kb_jq_update "{board_file_str}" \'.crs[$cidx].crState = $state | .crs[$cidx].updatedAt = $ts | .lastUpdated = $ts\' --argjson cidx "$cr_idx" --arg state "{target_state}" --arg ts "$ts"',
+            ]
+
+            # Field updates — each needs cidx, so we re-use the same _kb_jq_update
+            if field_jq_parts:
+                jq_filter_combined = " | ".join(
+                    [".crs[$cidx].updatedAt = $ts | .lastUpdated = $ts"] + field_jq_parts
+                )
+                shell_parts.append(
+                    f'ts2=$(_kb_cr_timestamp)'
+                )
+                # Build the --arg lines
+                field_arg_str = ' '.join(
+                    f'--arg {k} {json.dumps(v)}' for k, v in field_jq_args
+                )
+                shell_parts.append(
+                    f'_kb_jq_update "{board_file_str}" \'{jq_filter_combined}\' --argjson cidx "$cr_idx" --arg ts "$ts2" {field_arg_str}'
+                )
+
+            # cr_state_changed activity event
+            shell_parts += [
+                f'from_state_safe="${{old_state:-{from_state}}}"',
+                f'state_evt=$(_kb_cr_activity_event cr_state_changed from_state="$from_state_safe" to_state="{target_state}" 2>/dev/null || echo "")',
+                f'[ -n "$state_evt" ] && _kb_cr_activity_append "{board_file_str}" "{cr_id}" "$state_evt" 2>/dev/null || true',
+            ]
+
+            # cr_field_update activity events (one per changed field)
+            for fname, vals in changed_fields.items():
+                old_esc = vals["old"].replace('"', '\\"')
+                new_esc = vals["new"].replace('"', '\\"')
+                shell_parts += [
+                    f'fld_evt=$(_kb_cr_activity_event cr_field_update field="{fname}" old_value="{old_esc}" new_value="{new_esc}" 2>/dev/null || echo "")',
+                    f'[ -n "$fld_evt" ] && _kb_cr_activity_append "{board_file_str}" "{cr_id}" "$fld_evt" 2>/dev/null || true',
+                ]
+
+            shell_script = "\n".join(shell_parts)
+
+            env = {**os.environ, "KB_CR_ACTOR": actor}
+            result = subprocess.run(
+                ["zsh", "-c", shell_script],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=30,
+            )
+
+            if result.returncode != 0:
+                stderr = result.stderr.strip()
+                print(f"[LCARS] CR transition shell error for {cr_id}: {stderr}")
+                self._send_json_response(
+                    {"ok": False, "error": f"Transition failed: {stderr or 'unknown error'}"},
+                    status=500,
+                )
+                return
+
+            # ── Re-read updated CR record ──────────────────────────────────────
+            with open(board_file, "r", encoding="utf-8") as f:
+                board_data_after = json.load(f)
+
+            crs_after = board_data_after.get("crs", [])
+            updated_cr = next((c for c in crs_after if c.get("id") == cr_id), None)
+            if updated_cr is None:
+                self._send_json_response({"ok": False, "error": "CR vanished after write"}, status=500)
+                return
+
+            self._send_json_response({"ok": True, "cr": updated_cr})
+
+        except json.JSONDecodeError as e:
+            self._send_json_response({"ok": False, "error": f"Invalid JSON body: {e}"}, status=400)
+        except Exception as e:
+            print(f"[LCARS] ERROR in CR transition for {cr_id}: {e}")
+            import traceback as _tb
+            _tb.print_exc()
+            self._send_json_response({"ok": False, "error": str(e)}, status=500)
+
     def serve_calendar_config(self):
         """GET /api/calendar/config - Get calendar configuration for current team"""
         try:
@@ -7262,6 +7626,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Todo API endpoints
         elif path == '/api/todos':
             self.serve_todos_list(parsed.query)
+        # CR activity log API (XACA-0328-002) — must be before generic /activity route
+        elif path.startswith('/api/kanban/cr/') and path.endswith('/activity'):
+            cr_id = path[len('/api/kanban/cr/'):-len('/activity')]
+            self.serve_cr_activity(cr_id)
         # Kanban activity log API
         elif path.startswith('/api/kanban/') and path.endswith('/activity'):
             item_id = path.replace('/api/kanban/', '').replace('/activity', '')

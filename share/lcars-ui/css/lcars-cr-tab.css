@@ -453,6 +453,21 @@
     background: #fff;
     color: #000;
 }
+.cr-doc-url-row {
+    align-items: flex-start;
+}
+.cr-doc-meta-cell--wide {
+    min-width: 100%;
+}
+.cr-proper-url-link {
+    font-size: 11px;
+    color: var(--lcars-cyan, #99ccff);
+    text-decoration: none;
+    word-break: break-all;
+}
+.cr-proper-url-link:hover {
+    text-decoration: underline;
+}
 .cr-doc-md {
     padding: 14px 20px;
     font-size: 12px;
@@ -464,6 +479,434 @@
     font-size: 11px;
     white-space: pre-wrap;
     word-break: break-word;
+}
+
+/* ── CR-DOCS modal header actions (XACA-0328-004) ────────────────────────── */
+
+/* Flex wrapper that holds the EDIT STATE button + close button side-by-side */
+.cr-doc-header-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+}
+
+/* EDIT STATE button — orange accent to distinguish from a navigation action */
+.cr-edit-state-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    padding: 5px 14px;
+    background: rgba(255, 153, 102, 0.14);
+    border: 1px solid rgba(255, 153, 102, 0.50);
+    color: var(--lcars-peach, #ff9966);
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    white-space: nowrap;
+    text-transform: uppercase;
+}
+
+.cr-edit-state-btn:hover {
+    background: rgba(255, 153, 102, 0.28);
+    border-color: var(--lcars-peach, #ff9966);
+    color: #fff;
+}
+
+.cr-edit-state-btn:active {
+    background: var(--lcars-peach, #ff9966);
+    color: #000;
+}
+
+/* ── CR state-change dialog (XACA-0328-004) ──────────────────────────────── */
+
+/* Overlay for the state-change dialog — sits on top of the docs modal overlay.
+   Uses a slightly darker tint so depth is perceptible without being jarring. */
+.cr-state-dialog-overlay {
+    z-index: 1100;   /* docs modal overlay = 1000 (lcars.css); dialog sits above */
+    background: rgba(0, 0, 0, 0.65);
+}
+
+.cr-state-dialog {
+    min-width: 420px;
+    max-width: 600px;
+    width: 95%;
+    max-height: 85vh;
+}
+
+.cr-state-dialog-header {
+    /* same as standard lcars-modal-header but with flex justify for side buttons */
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+}
+
+.cr-state-dialog-body {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    padding: 18px 20px 20px;
+    overflow-y: auto;
+}
+
+/* Current-state summary row */
+.cr-sc-meta-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    padding-bottom: 2px;
+}
+
+.cr-sc-meta-cell {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cr-sc-meta-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: rgba(204, 153, 255, 0.65);
+    text-transform: uppercase;
+}
+
+/* Target state dropdown */
+.cr-sc-target-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.cr-sc-select {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.06em;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 153, 102, 0.40);
+    color: var(--lcars-peach, #ff9966);
+    padding: 6px 10px;
+    border-radius: 3px;
+    cursor: pointer;
+    outline: none;
+    text-transform: uppercase;
+    width: 100%;
+}
+
+.cr-sc-select:focus {
+    border-color: var(--lcars-peach, #ff9966);
+    background: rgba(255, 153, 102, 0.08);
+}
+
+.cr-sc-select option {
+    background: #1a0a2e;
+    color: var(--lcars-peach, #ff9966);
+    text-transform: uppercase;
+}
+
+/* Divider between static controls and conditional fields */
+.cr-sc-divider {
+    height: 1px;
+    background: rgba(204, 153, 255, 0.15);
+    margin: 0 -2px;
+}
+
+/* Conditional fields container */
+.cr-sc-cond-fields {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.cr-sc-no-fields {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.30);
+    font-style: italic;
+    padding: 4px 0;
+}
+
+/* Individual field group: label + input */
+.cr-sc-field-group {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.cr-sc-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    color: rgba(204, 153, 255, 0.75);
+    text-transform: uppercase;
+}
+
+.cr-sc-input {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(204, 153, 255, 0.35);
+    color: var(--lcars-lavender, #ccccff);
+    padding: 6px 10px;
+    border-radius: 3px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.cr-sc-input:focus {
+    border-color: var(--lcars-purple, #cc99ff);
+    background: rgba(204, 153, 255, 0.06);
+}
+
+.cr-sc-textarea {
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.04em;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(204, 153, 255, 0.35);
+    color: var(--lcars-lavender, #ccccff);
+    padding: 6px 10px;
+    border-radius: 3px;
+    outline: none;
+    width: 100%;
+    box-sizing: border-box;
+    resize: vertical;
+    min-height: 70px;
+}
+
+.cr-sc-textarea:focus {
+    border-color: var(--lcars-purple, #cc99ff);
+    background: rgba(204, 153, 255, 0.06);
+}
+
+/* datetime-local — needs color fix on webkit */
+input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
+    filter: invert(0.6) sepia(1) saturate(3) hue-rotate(200deg);
+    cursor: pointer;
+}
+
+.cr-sc-hint {
+    font-size: 9px;
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.35);
+    font-style: italic;
+}
+
+/* Inline error display */
+.cr-sc-error {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    background: rgba(204, 68, 68, 0.14);
+    border: 1px solid rgba(204, 68, 68, 0.40);
+    border-radius: 3px;
+    color: var(--lcars-red, #cc4444);
+    padding: 8px 12px;
+    line-height: 1.4;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+}
+
+/* Action row: CANCEL left, SUBMIT right */
+.cr-sc-actions {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    padding-top: 4px;
+    border-top: 1px solid rgba(204, 153, 255, 0.12);
+}
+
+/* Base button style for dialog actions */
+.cr-sc-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    padding: 7px 20px;
+    border-radius: 3px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.cr-sc-cancel {
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: rgba(255, 255, 255, 0.55);
+}
+
+.cr-sc-cancel:hover {
+    background: rgba(255, 255, 255, 0.10);
+    border-color: rgba(255, 255, 255, 0.35);
+    color: rgba(255, 255, 255, 0.85);
+}
+
+.cr-sc-submit {
+    background: rgba(153, 255, 153, 0.12);
+    border: 1px solid rgba(153, 255, 153, 0.40);
+    color: var(--lcars-green, #99ff99);
+    min-width: 100px;
+}
+
+.cr-sc-submit:hover:not(:disabled) {
+    background: rgba(153, 255, 153, 0.22);
+    border-color: var(--lcars-green, #99ff99);
+    color: #fff;
+}
+
+.cr-sc-submit:disabled {
+    opacity: 0.35;
+    cursor: not-allowed;
+    pointer-events: none;
+}
+
+/* Inline buttons inside error div (RELOAD / RETRY) */
+.cr-sc-btn-inline {
+    font-size: 10px;
+    padding: 4px 12px;
+    display: inline-block;
+    margin: 0;
+}
+
+.cr-sc-reload {
+    background: rgba(255, 153, 102, 0.18);
+    border: 1px solid rgba(255, 153, 102, 0.50);
+    color: var(--lcars-peach, #ff9966);
+}
+
+.cr-sc-reload:hover {
+    background: rgba(255, 153, 102, 0.30);
+    color: #fff;
+}
+
+.cr-sc-retry {
+    background: rgba(153, 204, 255, 0.18);
+    border: 1px solid rgba(153, 204, 255, 0.50);
+    color: var(--lcars-cyan, #99ccff);
+}
+
+.cr-sc-retry:hover {
+    background: rgba(153, 204, 255, 0.30);
+    color: #fff;
+}
+
+/* ── CR Activity Log (XACA-0328-002) ─────────────────────────────────────── */
+
+.cr-activity-section {
+    border-top: 1px solid rgba(204, 153, 255, 0.15);
+    margin-top: 4px;
+}
+
+.cr-activity-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 20px 8px;
+    cursor: pointer;
+    background: rgba(204, 153, 255, 0.04);
+    user-select: none;
+}
+
+.cr-activity-header:hover {
+    background: rgba(204, 153, 255, 0.09);
+}
+
+.cr-activity-title {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: rgba(204, 153, 255, 0.85);
+    flex: 1;
+}
+
+.cr-activity-toggle {
+    font-size: 9px;
+    color: rgba(204, 153, 255, 0.55);
+}
+
+.cr-activity-body {
+    padding: 4px 20px 12px;
+}
+
+.cr-activity-loading {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    padding: 8px 0;
+}
+
+.cr-activity-empty {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    padding: 8px 0;
+    font-style: italic;
+}
+
+.cr-activity-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 10px;
+    padding: 5px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+    font-size: 11px;
+}
+
+.cr-activity-row:last-child {
+    border-bottom: none;
+}
+
+.cr-activity-ts {
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.40);
+    white-space: nowrap;
+    min-width: 160px;
+}
+
+.cr-activity-pill {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    padding: 2px 7px;
+    border-radius: 2px;
+    white-space: nowrap;
+}
+
+.cr-activity-actor {
+    font-size: 10px;
+    color: rgba(255, 255, 255, 0.50);
+    white-space: nowrap;
+}
+
+.cr-activity-details {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.cr-activity-states {
+    color: var(--lcars-peach, #ffcc99);
+}
+
+.cr-activity-field {
+    color: var(--lcars-cyan, #99ccff);
+    word-break: break-all;
+}
+
+.cr-activity-note {
+    color: rgba(255, 255, 255, 0.60);
+    font-style: italic;
 }
 
 /* ── Saved-view chips ────────────────────────────────────────────────────── */
