@@ -4,6 +4,22 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0310: CAB Workflow Phase 2.5 — CR-row expansion + BACKLOG CR filter -->
+
+### Fixed
+- **XACA-0310-013:** `renderChangeReqList` no longer rebuilds the backlog index — it reuses `_lastBacklogIdx` populated by `_getCRItems()`. Eliminates the duplicate O(n) walk over `boardData.backlog` on every render.
+- **XACA-0310-014:** Chevron expand/collapse now uses DOM surgery (insert/remove the children row in place) instead of triggering a full `renderChangeReqList()` re-render. Avoids wiping every event listener on every toggle. New `_toggleCRExpansion()` and `_wireChildCopyButton()` helpers extracted.
+- **XACA-0310-016:** Added CSS rules for `.cr-filter-dropdown` / `.cr-filter-label` / `.cr-filter-select` (mirrors category-filter pattern with cyan accent) so the BACKLOG CR filter renders properly when `crSupport.enabled = true`.
+
+### Changed
+- **XACA-0310-015:** `_showCRDocModal` TODO comment for the future CR-keyed server endpoint now references the parent XACA-0310 ticket to track the follow-up.
+
+### Added
+- **XACA-0310-001:** `_normalizeCR` now preserves `linkedItemIds[]` (full array of linked item ids). `_renderRow` shows a `cr-item-count` badge in the TITLE cell when a CR has more than one linked item (e.g. "3 items").
+- **XACA-0310-002:** Expandable CR rows — chevron button in col-0 toggles a `cr-children-row` showing all linked kanban items (id, title, status). Child item ids are copyable via `copyToClipboard()`. Expansion state is preserved across re-renders in `_expandedCRs` Set keyed by `cr_id`.
+- **XACA-0310-005:** `_showCRDocModal` now reads `cr_doc_link` directly from the CR record. External URLs (`https?://`) render metadata + launch button only (no fetch). Relative paths fall back to item-keyed `/api/kanban/<id>/cr-content` endpoint using the first linked item id. `_renderCRMetadata` now lists ALL linked items (not just one) in the LINKED ITEMS metadata cell.
+- **XACA-0310-007:** `SAVED_VIEWS` predicates verified against CR record timestamps. Added comment block documenting that predicates evaluate against normalized CR view-objects (not backlog items) post-XACA-0310. `emergency-30d` predicate comment updated to document `cr_emergency_deployed_at` / `cr_completed_at` / `addedAt` fallback chain.
+
 <!-- XACA-0292: CAB Workflow Phase 2 — UI layer (EPIC-0017) -->
 
 ### Fixed

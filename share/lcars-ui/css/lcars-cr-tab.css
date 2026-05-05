@@ -192,6 +192,7 @@
 }
 
 /* Column widths */
+.cr-col-chevron  { width: 24px; padding: 0 2px; text-align: center; }
 .cr-col-id       { width: 100px; }
 .cr-col-type     { width: 90px; }
 .cr-col-state    { width: 130px; }
@@ -201,6 +202,131 @@
 .cr-col-deploy   { width: 110px; }
 .cr-col-pushbacks{ width: 70px; text-align: center; }
 .cr-col-docs     { width: 60px; text-align: center; }
+
+/* ── Chevron expand button (XACA-0310-002) ───────────────────────────────── */
+
+.cr-chevron {
+    background: transparent;
+    border: none;
+    padding: 2px 3px;
+    cursor: pointer;
+    color: rgba(204, 153, 255, 0.45);
+    font-size: 9px;
+    line-height: 1;
+    border-radius: 2px;
+    transition: color 0.15s, transform 0.15s;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.cr-chevron:hover {
+    color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-chevron.expanded {
+    transform: rotate(90deg);
+    color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-chevron-placeholder {
+    display: inline-block;
+    width: 18px;
+}
+
+/* Parent row highlight when expanded */
+.cr-row-expanded {
+    background: rgba(204, 153, 255, 0.05);
+}
+
+/* ── Item-count badge (XACA-0310-001) ────────────────────────────────────── */
+
+.cr-item-count {
+    display: inline-block;
+    margin-left: 5px;
+    padding: 1px 5px;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    background: rgba(153, 204, 255, 0.15);
+    color: var(--lcars-cyan, #99ccff);
+    border: 1px solid rgba(153, 204, 255, 0.30);
+    border-radius: 3px;
+    vertical-align: middle;
+    white-space: nowrap;
+}
+
+/* ── Children expanded row (XACA-0310-002) ───────────────────────────────── */
+
+.cr-children-row td {
+    padding: 0;
+    background: rgba(0,0,0,0.25);
+    border-bottom: 1px solid rgba(204, 153, 255, 0.15);
+}
+
+.cr-children-container {
+    padding: 8px 12px 8px 28px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.cr-children-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    color: rgba(204, 153, 255, 0.55);
+    text-transform: uppercase;
+    margin-bottom: 4px;
+}
+
+.cr-child-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 3px 6px;
+    border-radius: 3px;
+    transition: background 0.12s;
+}
+
+.cr-child-item:hover {
+    background: rgba(204, 153, 255, 0.07);
+}
+
+.cr-child-title {
+    flex: 1;
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    color: var(--lcars-lavender, #ccccff);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 350px;
+}
+
+.cr-child-status {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    padding: 1px 6px;
+    border-radius: 3px;
+    white-space: nowrap;
+    background: rgba(255,255,255,0.07);
+    color: rgba(255,255,255,0.5);
+    border: 1px solid rgba(255,255,255,0.12);
+}
+
+/* Linked items cell in modal — allow wrapping for multiple ids */
+.cr-doc-linked-items {
+    min-width: 160px;
+}
+.cr-linked-ids {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
 
 /* CR ID — monospace */
 .cr-id-mono {

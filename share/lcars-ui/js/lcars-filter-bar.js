@@ -11,11 +11,12 @@
  *     storageKey:    'lcars-queue-filter',
  *     initialState:  { activeFilters: ['all'], searchText: '', sortBy: 'priority',
  *                      osFilter: 'all', releaseFilter: 'all', epicFilter: 'all',
- *                      categoryFilter: 'all' },
+ *                      categoryFilter: 'all', crFilter: 'all' },
  *     osPlatforms:   ['iOS', 'Android', 'Firebase', 'Web'],   // optional
  *     osConfig:      { iOS: { color, logo, label }, ... },    // optional
  *     releaseOptionsEndpoint: '/api/releases',                // optional
  *     epicOptionsEndpoint:    '/api/epics',                   // optional
+ *     crsProvider:   () => (window.boardData && window.boardData.crs) || [],  // optional
  *     extraButtons:  [{ id: 'backlog-import-btn', label: '↓ IMPORT', onClick: fn }],
  *     viewToggle:    { btnId: 'view-toggle-btn', valueId: 'view-toggle-value',
  *                      sectionSelector: '.backlog-section',
@@ -31,6 +32,7 @@
  *   fb.filterItems(items, matchFn) — convenience: items.filter(i => matchFn(i, fb.getState()))
  *   fb.populateReleaseOptions()  — async; re-fetch + rebuild release <select>
  *   fb.populateEpicOptions()     — async; re-fetch + rebuild epic <select>
+ *   fb.populateCROptions()       — sync; reads crsProvider(), rebuilds CR <select>
  *   fb.updateReleaseStyle()      — sync active/inactive CSS class on release dropdown
  *   fb.save()                    — persist state to localStorage
  */
@@ -41,7 +43,7 @@
 
 /**
  * @param {object} options
- * @returns {{ getState, setState, refresh, filterItems, populateReleaseOptions, populateEpicOptions, updateReleaseStyle, save }}
+ * @returns {{ getState, setState, refresh, filterItems, populateReleaseOptions, populateEpicOptions, populateCROptions, updateReleaseStyle, save }}
  */
 function createFilterBar(options) {
     const {
@@ -52,6 +54,7 @@ function createFilterBar(options) {
         osConfig = {},
         releaseOptionsEndpoint = null,
         epicOptionsEndpoint = null,
+        crsProvider = null,
         extraButtons = [],
         viewToggle = null,
         onChange = null,
@@ -67,6 +70,7 @@ function createFilterBar(options) {
         releaseFilter:  'all',
         epicFilter:     'all',
         categoryFilter: 'all',
+        crFilter:       'all',
     };
 
     // Merge caller defaults into a new state object (live reference returned to caller)
@@ -95,6 +99,7 @@ function createFilterBar(options) {
             if (parsed.releaseFilter)  state.releaseFilter  = parsed.releaseFilter;
             if (parsed.epicFilter)     state.epicFilter     = parsed.epicFilter;
             if (parsed.categoryFilter) state.categoryFilter = parsed.categoryFilter;
+            if (parsed.crFilter)       state.crFilter       = parsed.crFilter;
         } catch (e) {
             console.warn('[FilterBar] Could not load filter state:', e);
         }
@@ -521,6 +526,105 @@ function createFilterBar(options) {
         });
     }
 
+    // ─── CR dropdown (XACA-0310-006) ─────────────────────────────────────────────
+    // Only wired when crsProvider is supplied.  Reads boardData.crs[] synchronously
+    // via the provider callback — no server round-trip needed.
+    //
+    // Active CR states that appear in the dropdown (inactive / terminal states are
+    // omitted so the list stays short):
+    const CR_ACTIVE_STATES = new Set([
+        'cr-drafted', 'cr-submitted', 'cr-approved', 'implementing', 'deployed-dev',
+    ]);
+
+    // Priority order for sorting active CRs in the dropdown (lower = higher in list)
+    const CR_STATE_SORT_ORDER = {
+        'cr-submitted': 0,
+        'cr-approved':  1,
+        'implementing': 2,
+        'deployed-dev': 3,
+        'cr-drafted':   4,
+    };
+
+    function _syncCRStyle() {
+        const dropdown = document.getElementById('cr-filter-dropdown');
+        const select   = document.getElementById('cr-filter-select');
+        if (dropdown && select) {
+            if (select.value !== 'all') {
+                dropdown.classList.add('active');
+            } else {
+                dropdown.classList.remove('active');
+            }
+        }
+    }
+
+    function _populateCROptions() {
+        const select = document.getElementById('cr-filter-select');
+        if (!select || typeof crsProvider !== 'function') return;
+
+        const allCRs = crsProvider();
+        const activeCRs = Array.isArray(allCRs)
+            ? allCRs.filter(cr => cr && cr.id && CR_ACTIVE_STATES.has(cr.crState || ''))
+            : [];
+
+        // Sort: by crState priority asc, then by createdAt desc
+        activeCRs.sort((a, b) => {
+            const aOrd = CR_STATE_SORT_ORDER[a.crState] !== undefined ? CR_STATE_SORT_ORDER[a.crState] : 99;
+            const bOrd = CR_STATE_SORT_ORDER[b.crState] !== undefined ? CR_STATE_SORT_ORDER[b.crState] : 99;
+            if (aOrd !== bOrd) return aOrd - bOrd;
+            // createdAt desc (newer first within same state)
+            const aDate = a.createdAt ? new Date(a.createdAt) : new Date(0);
+            const bDate = b.createdAt ? new Date(b.createdAt) : new Date(0);
+            return bDate - aDate;
+        });
+
+        const targetValue = state.crFilter || select.value || 'all';
+
+        // Trim down to the static options (ALL + UNASSIGNED) then re-add dynamic entries
+        while (select.options.length > 2) select.remove(2);
+
+        if (activeCRs.length > 0) {
+            const sep = document.createElement('option');
+            sep.value    = '---';
+            sep.textContent = '── Active CRs ──';
+            sep.disabled = true;
+            select.appendChild(sep);
+
+            activeCRs.forEach(cr => {
+                const opt = document.createElement('option');
+                opt.value = cr.id;
+                // Label: "<id> · <truncated summary>"
+                const summary = cr.cr_summary || cr.summary || '';
+                const label   = summary
+                    ? `${cr.id} · ${summary.length > 28 ? summary.substring(0, 28) + '…' : summary}`
+                    : cr.id;
+                opt.textContent = label;
+                opt.title       = `${cr.id}${summary ? ' — ' + summary : ''}`;
+                select.appendChild(opt);
+            });
+        }
+
+        select.value = targetValue;
+        if (select.value !== targetValue) {
+            select.value = 'all';
+            state.crFilter = 'all';
+        }
+    }
+
+    function _wireCRDropdown() {
+        if (!crsProvider) return;
+        const select = document.getElementById('cr-filter-select');
+        if (!select) return;
+        select.value = state.crFilter || 'all';
+        _syncCRStyle();
+        select.addEventListener('change', (e) => {
+            state.crFilter = e.target.value;
+            _syncCRStyle();
+            _saveState();
+            if (typeof onChange === 'function') onChange(state);
+        });
+        _populateCROptions();
+    }
+
     // ─── Search input ─────────────────────────────────────────────────────────────
 
     function _wireSearch() {
@@ -640,6 +744,7 @@ function createFilterBar(options) {
         _syncReleaseStyle();
         _syncEpicStyle();
         _syncCategoryStyle();
+        _syncCRStyle();
     }
 
     // ─── Init (wire all controls) ─────────────────────────────────────────────────
@@ -654,6 +759,7 @@ function createFilterBar(options) {
         _wireReleaseDropdown();
         _wireEpicDropdown();
         _wireCategoryDropdown();
+        _wireCRDropdown();
         _wireSearch();
         _wireExtraButtons();
         _wireViewToggle();
@@ -719,6 +825,15 @@ function createFilterBar(options) {
          */
         populateEpicOptions() {
             return _populateEpicOptions();
+        },
+
+        /**
+         * Sync — re-read crsProvider() and repopulate the CR <select>.
+         * No-op when crsProvider was not supplied.
+         * Call after boardData reloads so newly-added CRs appear immediately.
+         */
+        populateCROptions() {
+            _populateCROptions();
         },
 
         /**

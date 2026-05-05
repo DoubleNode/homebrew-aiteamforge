@@ -446,6 +446,14 @@
                                     <option value="chore">CHORE</option>
                                 </select>
                             </div>
+                            <!-- CR filter — XACA-0310-003: hidden until crSupport.enabled=true -->
+                            <div class="cr-filter-dropdown filter-dropdown" id="cr-filter-dropdown" style="display:none">
+                                <span class="cr-filter-label">CR:</span>
+                                <select id="cr-filter-select" class="cr-filter-select filter-dropdown-select">
+                                    <option value="all">ALL CRs</option>
+                                    <option value="none">UNASSIGNED</option>
+                                </select>
+                            </div>
                             <div class="filter-search-container">
                                 <input type="text" id="backlog-filter-text" class="filter-search-input" placeholder="SEARCH..." autocomplete="off" spellcheck="false">
                                 <button id="backlog-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>

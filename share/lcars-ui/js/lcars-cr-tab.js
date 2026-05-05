@@ -10,12 +10,20 @@
  *   "AWAITING APPROVAL"  — crState === 'cr-submitted' (filter-bar preset only)
  *   "EMERGENCY (30D)"    — cr_type === 'emergency' within last 30 days
  *
+ * XACA-0310 Phase 2.5:
+ *   001: CR rows carry linkedItemIds[]; item-count badge in TITLE cell.
+ *   002: Chevron expands a cr-children-row showing linked kanban items.
+ *   005: DOCS modal reads cr_doc_link directly (CR-keyed, not item-keyed).
+ *   007: SAVED_VIEWS predicates evaluate against CR record timestamps —
+ *        see comment block at SAVED_VIEWS declaration below.
+ *
  * Public API (globals):
  *   initChangeReqTab()       — idempotent; called from lcars.js on page load.
  *   renderChangeReqList()    — called when user navigates into CHANGE REQ section.
  *
  * Dependencies (all defined in lcars.js, which loads before this file):
- *   boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab
+ *   boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar,
+ *   copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown
  */
 
 /* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown */
@@ -34,6 +42,15 @@
     // boardData or reading large attributes off the button.
     const _crByIdCache = {};
 
+    // Backlog index built during the most recent _getCRItems() call, reused
+    // by renderChangeReqList() and the DOM-surgery chevron handler so we don't
+    // recompute the index on every render or expand/collapse (XACA-0310-013).
+    let _lastBacklogIdx = {};
+
+    // Set of cr_ids whose child-rows are currently expanded.
+    // Keyed by cr_id; survives re-renders (renderChangeReqList restores state).
+    const _expandedCRs = new Set();
+
     // ─── Saved-view state ─────────────────────────────────────────────────────
 
     const SAVED_VIEW_KEY = 'lcars-change-req-saved-view';
@@ -41,6 +58,14 @@
     /**
      * Stable view IDs — do NOT rename; persisted to localStorage.
      * Labels may change freely; these IDs must not.
+     *
+     * NOTE (XACA-0310-007): predicates evaluate against NORMALIZED CR VIEW-OBJECTS
+     * (post-_normalizeCR), NOT raw backlog items. Field mapping:
+     *   cr_created_at          ← timestamps.cr_created_at || cr.createdAt
+     *   cr_emergency_deployed_at ← timestamps.cr_emergency_deployed_at
+     *   cr_completed_at        ← timestamps.cr_completed_at
+     *   addedAt                ← cr.createdAt (same source, fallback alias)
+     * These are verified correct in _normalizeCR below.
      */
     const SAVED_VIEWS = {
         'this-week':        {
@@ -60,6 +85,8 @@
             label: 'EMERGENCY (30D)',
             preset: { stateFilter: 'all', typeFilter: 'emergency', platformFilter: 'all', searchText: '' },
             predicate: item => {
+                // cr_emergency_deployed_at covers emergency-deployed state;
+                // cr_completed_at covers deployed-prod; addedAt is last fallback.
                 const ts = item.cr_emergency_deployed_at || item.cr_completed_at || item.addedAt;
                 return ts ? isWithinLastNDays(new Date(ts).getTime(), 30) : false;
             },
@@ -422,7 +449,7 @@
     /**
      * Build a quick lookup of backlog items keyed by id, used to resolve
      * per-item fields (priority for secondary sort, fallback title) when
-     * normalizing CR objects.
+     * normalizing CR objects and when expanding child rows.
      */
     function _backlogIndex() {
         const idx = {};
@@ -438,13 +465,22 @@
      * into the view-object shape the rest of this file expects (cr_id, cr_type,
      * crState, title, platform, deploy_window_planned, cr_pushback_count,
      * cr_doc_link, cr_summary, cr_created_at, cr_emergency_deployed_at,
-     * cr_completed_at, addedAt, priority, id). The `id` field is set to the
-     * first linked backlog item id so the DOCS button can drive the existing
-     * plan-doc modal (which looks items up by backlog id).
+     * cr_completed_at, addedAt, priority, id, linkedItemIds). The `id` field
+     * is set to the first linked backlog item id so the DOCS button can fall
+     * back to the item-keyed cr-content endpoint when needed.
+     *
+     * linkedItemIds: full array of linked item ids (XACA-0310-001).
+     *
+     * Timestamp mapping (XACA-0310-007 — verified against kb-cr schema):
+     *   cr_created_at          ← timestamps.cr_created_at || cr.createdAt
+     *   cr_emergency_deployed_at ← timestamps.cr_emergency_deployed_at (may be absent)
+     *   cr_completed_at        ← timestamps.cr_completed_at (may be absent)
+     *   addedAt                ← cr.createdAt (fallback alias used by saved-view predicates)
      */
     function _normalizeCR(cr, backlogIdx) {
         const ts = cr.timestamps || {};
-        const firstItemId = Array.isArray(cr.itemIds) && cr.itemIds.length > 0 ? cr.itemIds[0] : '';
+        const linkedItemIds = Array.isArray(cr.itemIds) ? cr.itemIds.filter(Boolean) : [];
+        const firstItemId = linkedItemIds.length > 0 ? linkedItemIds[0] : '';
         const linkedItem = firstItemId ? backlogIdx[firstItemId] : null;
         return {
             id:                         firstItemId,
@@ -465,6 +501,7 @@
             cr_completed_at:            ts.cr_completed_at || '',
             addedAt:                    cr.createdAt || '',
             priority:                   linkedItem ? linkedItem.priority : '',
+            linkedItemIds:              linkedItemIds,
         };
     }
 
@@ -477,10 +514,11 @@
         // Drop stale cache entries — we rebuild from live boardData below
         for (const k of Object.keys(_crByIdCache)) delete _crByIdCache[k];
 
-        if (!window.boardData) return [];
+        if (!window.boardData) { _lastBacklogIdx = {}; return []; }
         const crs = window.boardData.crs;
-        if (!Array.isArray(crs) || crs.length === 0) return [];
+        if (!Array.isArray(crs) || crs.length === 0) { _lastBacklogIdx = {}; return []; }
         const backlogIdx = _backlogIndex();
+        _lastBacklogIdx = backlogIdx;
         const items = crs
             .filter(cr => cr && cr.id && String(cr.id).trim().length > 0)
             .map(cr => _normalizeCR(cr, backlogIdx));
@@ -606,18 +644,40 @@
         return `<span class="cr-pushback-count">${n}</span>`;
     }
 
+    // ─── Item-count badge (XACA-0310-001) ────────────────────────────────────
+
+    /**
+     * Build the title cell content: title text + item-count badge when > 1 linked item.
+     * Single item: title only (the cr_id or linked item title is already in title).
+     * Multiple items: title + small "N items" badge overlaid in the title cell.
+     */
+    function _titleWithBadge(item) {
+        const title = escapeHtml(item.title || '');
+        const count = item.linkedItemIds ? item.linkedItemIds.length : 0;
+        if (count <= 1) {
+            return `<span class="cr-title-text" title="${title}">${title}</span>`;
+        }
+        const badge = `<span class="cr-item-count" title="${count} linked kanban items">${count} items</span>`;
+        return `<span class="cr-title-text" title="${title}">${title}</span>${badge}`;
+    }
+
     // ─── Row renderer ─────────────────────────────────────────────────────────
+
+    // Total column count including the new chevron col-0.
+    const CR_COL_COUNT = 10;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
         const crType     = _typeBadge(item.cr_type);
         const crState    = _stateBadge(item.crState);
-        const title      = escapeHtml(item.title || '');
+        const titleCell  = _titleWithBadge(item);
         const platform   = escapeHtml(item.platform || '');
         const approver   = escapeHtml(item.cr_approver_name || item.cr_approved_by || '');
         const deployWin  = _formatDeployWindow(item.deploy_window_planned);
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
         const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0);
+        const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
+        const isExpanded  = _expandedCRs.has(item.cr_id);
 
         // DOCS button on the CR list opens a CR-only modal — distinct from the
         // item DOCS button which shows Plan/Retro/CR tabs. We stash the CR id on
@@ -627,17 +687,121 @@
             ? `<button class="cr-docs-btn" data-cr-id="${escapeHtml(item.cr_id)}" title="View CR document">DOCS</button>`
             : `<span class="cr-docs-placeholder"></span>`;
 
-        return `<tr class="cr-row" data-item-id="${escapeHtml(item.id)}">
+        // Chevron column (col-0): shown only when there are linked items.
+        const chevronCls = isExpanded ? 'cr-chevron expanded' : 'cr-chevron';
+        const chevronBtn = hasChildren
+            ? `<button class="${chevronCls}" data-cr-id="${escapeHtml(item.cr_id)}" title="${isExpanded ? 'Collapse' : 'Expand'} linked items" aria-expanded="${isExpanded}" aria-label="${isExpanded ? 'Collapse' : 'Expand'} linked items">&#9654;</button>`
+            : `<span class="cr-chevron-placeholder"></span>`;
+
+        return `<tr class="cr-row${isExpanded ? ' cr-row-expanded' : ''}" data-cr-id="${escapeHtml(item.cr_id)}" data-item-id="${escapeHtml(item.id)}">
+            <td class="cr-col-chevron">${chevronBtn}</td>
             <td class="cr-col-id"><button class="cr-id-copy" data-cr-id="${crId}" title="Copy CR ID to clipboard"><span class="cr-id-mono">${crId}</span></button></td>
             <td class="cr-col-type">${crType}</td>
             <td class="cr-col-state">${crState}</td>
-            <td class="cr-col-title" title="${title}"><span class="cr-title-text">${title}</span></td>
+            <td class="cr-col-title">${titleCell}</td>
             <td class="cr-col-platform">${platform}</td>
             <td class="cr-col-approver">${approver}</td>
             <td class="cr-col-deploy">${deployWin}</td>
             <td class="cr-col-pushbacks">${pushbacks}</td>
             <td class="cr-col-docs">${docsBtn}</td>
         </tr>`;
+    }
+
+    // ─── Child-row renderer (XACA-0310-002) ──────────────────────────────────
+
+    /**
+     * Render the expanded children row for a CR.
+     * Inserts a single <tr class="cr-children-row"> with colspan=CR_COL_COUNT
+     * containing an inline list of linked kanban items.
+     * Uses _backlogIndex() to look up title/status for each linked item id.
+     */
+    function _renderChildrenRow(item, backlogIdx) {
+        const ids = item.linkedItemIds || [];
+        if (ids.length === 0) return '';
+
+        const childRows = ids.map(id => {
+            const backlogItem = backlogIdx[id] || null;
+            const rawTitle    = backlogItem ? (backlogItem.title || '') : '';
+            const rawStatus   = backlogItem ? (backlogItem.status || backlogItem.crState || '') : '';
+            const titleText   = escapeHtml(rawTitle) || '<span class="cr-dim">—</span>';
+            const statusText  = rawStatus
+                ? `<span class="cr-child-status cr-child-status-${escapeHtml(rawStatus.toLowerCase().replace(/\s+/g, '-'))}">${escapeHtml(rawStatus)}</span>`
+                : '<span class="cr-dim">—</span>';
+
+            return `<div class="cr-child-item">
+                <button class="cr-child-id-copy" data-copy-id="${escapeHtml(id)}" title="Copy item ID to clipboard">
+                    <span class="cr-id-mono">${escapeHtml(id)}</span>
+                </button>
+                <span class="cr-child-title">${titleText}</span>
+                ${statusText}
+            </div>`;
+        }).join('');
+
+        return `<tr class="cr-children-row" data-parent-cr-id="${escapeHtml(item.cr_id)}">
+            <td colspan="${CR_COL_COUNT}">
+                <div class="cr-children-container">
+                    <div class="cr-children-label">LINKED ITEMS</div>
+                    ${childRows}
+                </div>
+            </td>
+        </tr>`;
+    }
+
+    // ─── Expansion DOM surgery (XACA-0310-014) ───────────────────────────────
+
+    /**
+     * Wire a single child-id copy button. Extracted so newly-inserted rows
+     * (from chevron expansion) can be wired without re-running the parent
+     * loop in renderChangeReqList().
+     */
+    function _wireChildCopyButton(btn) {
+        btn.addEventListener('click', e => {
+            e.stopPropagation();
+            const copyId = btn.dataset.copyId || '';
+            if (!copyId) return;
+            if (typeof copyToClipboard === 'function') copyToClipboard(copyId);
+            btn.classList.add('cr-id-copied');
+            setTimeout(() => btn.classList.remove('cr-id-copied'), 900);
+        });
+    }
+
+    /**
+     * Toggle CR row expansion via DOM surgery — insert or remove the children
+     * row directly under the parent row, instead of triggering a full
+     * renderChangeReqList() (which would wipe and re-wire all event listeners).
+     */
+    function _toggleCRExpansion(chevronBtn) {
+        const crId = chevronBtn.dataset.crId;
+        if (!crId) return;
+        const parentRow = chevronBtn.closest('tr.cr-row');
+        if (!parentRow) return;
+
+        const isExpanded = _expandedCRs.has(crId);
+        if (isExpanded) {
+            _expandedCRs.delete(crId);
+            chevronBtn.classList.remove('expanded');
+            chevronBtn.setAttribute('aria-expanded', 'false');
+            const next = parentRow.nextElementSibling;
+            if (next && next.classList.contains('cr-children-row') &&
+                next.dataset.parentCrId === crId) {
+                next.remove();
+            }
+            return;
+        }
+
+        const view = _crByIdCache[crId];
+        if (!view) return;
+        const childrenHtml = _renderChildrenRow(view, _lastBacklogIdx);
+        if (!childrenHtml) return;
+
+        _expandedCRs.add(crId);
+        chevronBtn.classList.add('expanded');
+        chevronBtn.setAttribute('aria-expanded', 'true');
+        parentRow.insertAdjacentHTML('afterend', childrenHtml);
+        const inserted = parentRow.nextElementSibling;
+        if (inserted) {
+            inserted.querySelectorAll('.cr-child-id-copy').forEach(_wireChildCopyButton);
+        }
     }
 
     // ─── Public: renderChangeReqList ──────────────────────────────────────────
@@ -689,12 +853,24 @@
             return;
         }
 
-        const rows = sorted.map(_renderRow).join('');
+        // Backlog index already built during _getCRItems() above; reuse it
+        // (XACA-0310-013) instead of walking boardData.backlog a second time.
+        const backlogIdx = _lastBacklogIdx;
+
+        // Build rows: each CR row optionally followed by its children row
+        const rows = sorted.map(item => {
+            const parentRow = _renderRow(item);
+            const childrenRow = _expandedCRs.has(item.cr_id)
+                ? _renderChildrenRow(item, backlogIdx)
+                : '';
+            return parentRow + childrenRow;
+        }).join('');
 
         listEl.innerHTML = `
             <table class="cr-table">
                 <thead>
                     <tr class="cr-header-row">
+                        <th class="cr-col-chevron"></th>
                         <th class="cr-col-id">CR ID</th>
                         <th class="cr-col-type">TYPE</th>
                         <th class="cr-col-state">STATE</th>
@@ -735,18 +911,49 @@
                 setTimeout(() => btn.classList.remove('cr-id-copied'), 900);
             });
         });
+
+        // Wire chevron buttons → toggle expansion via DOM surgery
+        // (XACA-0310-002 / 014). Avoids full innerHTML re-render + re-wire,
+        // which would otherwise wipe every event listener on every toggle.
+        listEl.querySelectorAll('.cr-chevron[data-cr-id]').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                _toggleCRExpansion(btn);
+            });
+            btn.addEventListener('keydown', e => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    btn.click();
+                }
+            });
+        });
+
+        // Wire child item ID copy buttons for any rows expanded at first paint
+        // (e.g. restored from a prior render). Newly-expanded rows wire their
+        // own copy buttons inside _toggleCRExpansion().
+        listEl.querySelectorAll('.cr-child-id-copy').forEach(_wireChildCopyButton);
     }
 
     // ─── CR-only modal ────────────────────────────────────────────────────────
 
     /**
-     * Show a CR-only modal for a CR record. Distinct from showPlanDocModal:
-     * no Plan/Retro tabs, title is the CR id (not the linked item id), and
-     * the body shows CR metadata + a launch button for the external CR doc.
+     * Show a CR-only modal for a CR record (XACA-0310-005).
      *
-     * If cr_doc_link is an http(s) URL, render a launch button (the CR doc is
-     * typically a Confluence page). If it's a relative path inside the kanban
-     * dir, fetch via /api/kanban/<itemId>/cr-content and render markdown.
+     * Logic for fetching/displaying the CR document:
+     *
+     * 1. If cr_doc_link is an external URL (https?://): render metadata block
+     *    with a launch button. No fetch needed.
+     *
+     * 2. If cr_doc_link is a relative path (e.g. change-requests/CR-2026-001.md):
+     *    fetch via the item-keyed endpoint /api/kanban/<firstItemId>/cr-content
+     *    using view.id (first linked item id). The server resolves the CR doc
+     *    via crAssignment in the same call. No CR-keyed server route exists yet
+     *    (out of scope for this chunk) so item-keyed fallback is intentional.
+     *    TODO(server-route): switch to /api/kanban/cr/<cr_id>/content when the
+     *    CR-keyed server route lands. File a follow-up XACA ticket against the
+     *    XACA-0310 parent (Phase 2.5) before changing this call.
+     *
+     * 3. If no cr_doc_link at all: show "no local CR document" guidance.
      */
     function _showCRDocModal(view) {
         // pause auto-refresh if the host page exposes it (lcars.js global)
@@ -806,14 +1013,14 @@
             editStateBtn.addEventListener('click', () => _showCRStateChangeDialog(view));
         }
 
-        // Always fetch the CR doc from the server. The local markdown file
-        // (change-requests/<CR-ID>*.md) is the source of truth. The server
-        // returns { content, filename, confluenceUrl } when the file exists,
-        // or { isExternal:true, url } as a fallback when only the Confluence
-        // link is available. The metadata block already includes a launch
-        // button for external URLs, so when content is present we render
-        // the markdown body and let the metadata button handle the link.
-        if (view.id) {
+        const docLink = view.cr_doc_link || '';
+        const isExternalUrl = /^https?:\/\//i.test(docLink);
+
+        // Local *.md is the source of truth (XACA-0309). Fetch from the server
+        // via the item-keyed endpoint when a relative path / empty link is in
+        // play. Skip the cr-content fetch for external-only URLs (the metadata
+        // launch button is sufficient); the activity log fetch below still runs.
+        if (!isExternalUrl && view.id) {
             fetch(apiUrl('/api/kanban/' + encodeURIComponent(view.id) + '/cr-content'))
                 .then(r => { if (!r.ok) throw new Error('CR document not found'); return r.json(); })
                 .then(data => {
@@ -823,7 +1030,7 @@
                             : `<pre class="cr-doc-pre">${escapeHtml(data.content || '')}</pre>`;
                         contentDiv.innerHTML = '<div class="cr-doc-md">' + md + '</div>';
                     }
-                    // else: external-only — metadata launch button is sufficient.
+                    // else: external-only response — metadata launch button is sufficient.
                 })
                 .catch(() => {
                     contentDiv.innerHTML =
@@ -1341,8 +1548,9 @@
 
     /**
      * Render the static metadata block at the top of the CR-only modal:
-     * id, type, state, summary, deploy window, approver, linked items,
-     * cr_doc_link launch button, and cr_proper_url when present.
+     * id, type, state, summary, deploy window, approver, linked items
+     * (lists ALL items per XACA-0310-005 when linkedItemIds.length > 1),
+     * cr_doc_link launch button, and cr_proper_url (XACA-0328) when present.
      */
     function _renderCRMetadata(view) {
         const link = view.cr_doc_link || '';
@@ -1356,8 +1564,12 @@
             ? `<a class="cr-proper-url-link" href="${escapeHtml(properUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(properUrl)}</a>`
             : '<span class="cr-dim">—</span>';
 
-        const items = (view.id && view.id.trim().length > 0)
-            ? `<span class="cr-id-mono">${escapeHtml(view.id)}</span>`
+        // Show all linked items, not just the first (XACA-0310-005).
+        const allIds = view.linkedItemIds && view.linkedItemIds.length > 0
+            ? view.linkedItemIds
+            : (view.id ? [view.id] : []);
+        const items = allIds.length > 0
+            ? allIds.map(id => `<span class="cr-id-mono">${escapeHtml(id)}</span>`).join(' ')
             : '<span class="cr-dim">—</span>';
 
         const summary = view.cr_summary
@@ -1375,7 +1587,7 @@
                 <div class="cr-doc-meta-row">
                     <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">APPROVER</span><span>${escapeHtml(view.cr_approver_name || view.cr_approved_by || '—')}</span></div>
                     <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">PUSHBACKS</span>${_pushbackDisplay(view.cr_pushback_count)}</div>
-                    <div class="cr-doc-meta-cell"><span class="cr-doc-meta-label">LINKED ITEM</span>${items}</div>
+                    <div class="cr-doc-meta-cell cr-doc-linked-items"><span class="cr-doc-meta-label">LINKED ITEMS</span><span class="cr-linked-ids">${items}</span></div>
                 </div>
                 <div class="cr-doc-meta-row cr-doc-url-row">
                     <div class="cr-doc-meta-cell cr-doc-meta-cell--wide"><span class="cr-doc-meta-label">CR-PROPER URL</span>${properUrlCell}</div>

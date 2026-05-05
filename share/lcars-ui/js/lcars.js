@@ -630,6 +630,7 @@ function renderBoard() {
     renderMissionBacklog();
     populateEpicFilterOptions();
     populateReleaseFilterOptions();
+    populateCRFilterOptions();
     updateStardate();
     updateContentWatermark();
 
@@ -6814,6 +6815,19 @@ function itemMatchesFilter(item) {
         }
     }
 
+    // Check CR filter (XACA-0310-003)
+    const crFilter = backlogFilterState.crFilter || 'all';
+    if (crFilter !== 'all') {
+        const itemCRId = (item.crAssignment && item.crAssignment.crId) || '';
+        if (crFilter === 'none') {
+            // UNASSIGNED: only items without a crAssignment
+            if (itemCRId) return false;
+        } else {
+            // Specific CR ID
+            if (itemCRId !== crFilter) return false;
+        }
+    }
+
     // Check for 'completed' filter - show completed AND cancelled items
     if (filters.includes('completed')) {
         return item.status === 'completed' || item.status === 'cancelled';
@@ -8449,6 +8463,11 @@ function populateEpicFilterOptions() {
     if (_backlogFilterBarInstance) _backlogFilterBarInstance.populateEpicOptions();
 }
 
+/** Repopulate CR dropdown from live boardData.crs[]. Called after board refresh. */
+function populateCRFilterOptions() {
+    if (_backlogFilterBarInstance) _backlogFilterBarInstance.populateCROptions();
+}
+
 // ─── Release Tag Filter (XACA-0209) ──────────────────────────────────────────
 
 // ─── Release / Epic search + item-tag helpers (XACA-0209 round 5) ─────────────
@@ -8621,6 +8640,8 @@ function initQueueFilterBar() {
         osConfig:                OS_CONFIG,
         releaseOptionsEndpoint:  '/api/releases',
         epicOptionsEndpoint:     '/api/epics',
+        // XACA-0310-003: synchronous provider; reads live boardData.crs[] — no server route needed
+        crsProvider:             () => (window.boardData && window.boardData.crs) || [],
         extraButtons: [
             {
                 id:      'backlog-import-btn',
@@ -8642,6 +8663,40 @@ function initQueueFilterBar() {
     // viewReleaseItems, etc.) reference the module-level variable; this single
     // reassignment keeps them working with zero further changes.
     backlogFilterState = _backlogFilterBarInstance.getState();
+
+    // XACA-0310-003: Gate CR dropdown visibility on crSupport.enabled.
+    // Read initial state from already-loaded boardData (set by loadBoardData before
+    // initQueueFilterBar is called).  Runtime toggles are handled by the
+    // crsupport-changed listener below.
+    _applyCRDropdownVisibility(
+        !!(window.boardData &&
+           window.boardData.teamConfig &&
+           window.boardData.teamConfig.crSupport &&
+           window.boardData.teamConfig.crSupport.enabled)
+    );
+
+    document.addEventListener('crsupport-changed', (e) => {
+        const enabled = !!(e.detail && e.detail.enabled);
+        _applyCRDropdownVisibility(enabled);
+        if (!enabled && backlogFilterState.crFilter !== 'all') {
+            // Reset CR filter so hidden state doesn't silently suppress items
+            backlogFilterState.crFilter = 'all';
+            const crSelect = document.getElementById('cr-filter-select');
+            if (crSelect) crSelect.value = 'all';
+            if (_backlogFilterBarInstance) _backlogFilterBarInstance.save();
+            renderMissionBacklog();
+        }
+    });
+}
+
+/**
+ * Show or hide the BACKLOG CR filter dropdown based on crSupport.enabled.
+ * @param {boolean} enabled
+ */
+function _applyCRDropdownVisibility(enabled) {
+    const crDropdown = document.getElementById('cr-filter-dropdown');
+    if (!crDropdown) return;
+    crDropdown.style.display = enabled ? '' : 'none';
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
