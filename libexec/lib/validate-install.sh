@@ -497,6 +497,7 @@ _val_check_launchagents() {
     local agents=(
         "com.aiteamforge.kanban-backup"
         "com.aiteamforge.lcars-health"
+        "com.aiteamforge.cr-confluence-poller"
     )
 
     for agent in "${agents[@]}"; do

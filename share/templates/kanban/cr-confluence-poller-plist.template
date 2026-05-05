@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.aiteamforge.cr-confluence-poller.plist — TEMPLATE
+  Installer substitutes: {{PYTHON3_PATH}} {{AITEAMFORGE_DIR}} {{USER_HOME}}
+
+  This LaunchAgent runs cr-confluence-poller.py every 10 minutes (StartInterval=600).
+  It scans cr-drafted CRs across all teams, detects a CR-Proper Confluence link
+  appended to the bottom of each CR request page, writes cr_proper_url, and
+  transitions cr-drafted → cr-submitted with a cr_proper_detected activity event.
+
+  INSTALLER HOOK REQUIRED:
+    Installer entry point: homebrew-tap/libexec/installers/install-kanban.sh
+    Add a call to install_cr_confluence_poller_launchagent() in the
+    install_kanban_system() function after the install_lcars_health_launchagent()
+    call (line ~899).
+
+  CREDENTIALS (not auto-created — set up manually):
+    ~/.config/aiteamforge/confluence-credentials.json
+    Schema:
+      {
+        "teams": {
+          "ios":      { "site": "...", "email": "...", "api_token": "...", "space_key": "DPD2" },
+          "android":  { "site": "...", "email": "...", "api_token": "...", "space_key": "DPD2" },
+          "firebase": { "site": "...", "email": "...", "api_token": "...", "space_key": "DPD2" }
+        },
+        "default": "ios"
+      }
+    The daemon exits cleanly with a warning if this file is absent.
+
+  LOGS:
+    stdout: {{USER_HOME}}/Library/Logs/aiteamforge/cr-confluence-poller.out.log
+    stderr: {{USER_HOME}}/Library/Logs/aiteamforge/cr-confluence-poller.err.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.cr-confluence-poller</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PYTHON3_PATH}}</string>
+        <string>{{AITEAMFORGE_DIR}}/scripts/cr-confluence-poller.py</string>
+        <string>--daemon</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>600</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{USER_HOME}}/Library/Logs/aiteamforge/cr-confluence-poller.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{USER_HOME}}/Library/Logs/aiteamforge/cr-confluence-poller.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{USER_HOME}}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

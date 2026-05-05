@@ -13,7 +13,9 @@
       "teamConfig.crSupport.enabled defaults to false. kb-cr helpers no-op silently when false.",
       "Do NOT store cr_cycle_*_days or deploy_estimate_delta_days in any board or item.",
       "Per-item cr_* fields (crFields section) are DEPRECATED as of schema v2.0. They remain in the schema ONLY so migrate-cr-schema.py can read and transform them. Remove after all boards have been migrated.",
-      "New CRs must be created as crs[] container records. crAssignment.crId on the item points to the parent CR record."
+      "New CRs must be created as crs[] container records. crAssignment.crId on the item points to the parent CR record.",
+      "'cr-drafted' semantically means: the CR markdown has been published to Confluence as a request page. The CR-Proper page does NOT yet exist.",
+      "'cr-submitted' semantically means: a CR-Proper page link has been appended to the bottom of the request page. The poller (XACA-0328-003) detects this link and writes cr_proper_url."
     ]
   },
 
@@ -64,6 +66,11 @@
       "type": "string",
       "required": false,
       "description": "Path or URL to the full CR markdown document (e.g., kanban/plans/XIOS-0123/CR.md or a Confluence URL)."
+    },
+    "cr_proper_url": {
+      "type": "string",
+      "required": false,
+      "description": "URL of the appended CR-Proper Confluence page link discovered at the bottom of the CR request page. Presence indicates the CR has been formally submitted (cr-submitted). Populated by the Confluence poller daemon (XACA-0328-003) when the link is detected. Manual entry via the LCARS state-change UI (XACA-0328-004) is also permitted."
     },
     "approver": {
       "type": "object",

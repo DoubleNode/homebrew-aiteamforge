@@ -422,6 +422,16 @@ check_launchagents() {
       echo "    Load: launchctl load ~/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist"
     fi
   fi
+
+  # CR Confluence Poller agent (XACA-0328-003)
+  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.cr-confluence-poller"; then
+    check_result pass "CR Confluence Poller LaunchAgent loaded"
+  elif [ -f "$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist" ]; then
+    check_result warn "CR Confluence Poller LaunchAgent not loaded"
+    if [ "$VERBOSE" = true ]; then
+      echo "    Load: launchctl load ~/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+    fi
+  fi
 }
 
 # Check: Git Repositories

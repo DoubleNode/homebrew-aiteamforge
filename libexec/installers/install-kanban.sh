@@ -803,6 +803,75 @@ uninstall_lcars_health_launchagent() {
     fi
 }
 
+# Install CR Confluence Poller LaunchAgent (XACA-0328-003)
+# Scans cr-drafted CRs every 10 min; detects appended CR-Proper links on Confluence
+# request pages; writes cr_proper_url and transitions cr-drafted → cr-submitted.
+#
+# Credentials are NOT auto-created — user must populate:
+#   ~/.config/aiteamforge/confluence-credentials.json
+# (Daemon exits cleanly with a warning if file is absent — no credentials risk.)
+install_cr_confluence_poller_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/kanban/cr-confluence-poller-plist.template"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+    local poller_src="$INSTALL_ROOT/share/scripts/cr-confluence-poller.py"
+    local poller_dest="$AITEAMFORGE_DIR/scripts/cr-confluence-poller.py"
+
+    # Install the poller script first (non-fatal if missing)
+    if [ -f "$poller_src" ]; then
+        mkdir -p "$AITEAMFORGE_DIR/scripts"
+        cp "$poller_src" "$poller_dest"
+        chmod +x "$poller_dest"
+        info "Installed: cr-confluence-poller.py"
+    else
+        warning "cr-confluence-poller.py not found at $poller_src (skipping LaunchAgent)"
+        return 0
+    fi
+
+    if [ ! -f "$plist_template" ]; then
+        warning "CR Confluence Poller LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    info "Installing CR Confluence Poller LaunchAgent"
+    mkdir -p "$HOME/Library/LaunchAgents"
+    mkdir -p "$HOME/Library/Logs/aiteamforge"
+
+    # Find python3 path
+    local python3_path
+    python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
+
+    sed -e "s|{{USER_HOME}}|$HOME|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        -e "s|{{PYTHON3_PATH}}|$python3_path|g" \
+        "$plist_template" > "$plist_dest"
+
+    launchctl unload "$plist_dest" 2>/dev/null || true
+
+    if launchctl load "$plist_dest"; then
+        success "Installed and loaded CR Confluence Poller LaunchAgent"
+        info "Poller will scan cr-drafted CRs every 10 minutes"
+    else
+        warning "Failed to load CR Confluence Poller LaunchAgent (may need manual activation)"
+    fi
+
+    info ""
+    info "IMPORTANT: Populate Confluence credentials before the poller can scan:"
+    info "  ~/.config/aiteamforge/confluence-credentials.json"
+    info "  See homebrew-tap/share/templates/kanban/cr-confluence-poller-plist.template for schema."
+}
+
+# Uninstall CR Confluence Poller LaunchAgent
+uninstall_cr_confluence_poller_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading CR Confluence Poller LaunchAgent"
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed CR Confluence Poller LaunchAgent"
+    fi
+}
+
 # Test LCARS server startup
 test_lcars_server() {
     local port="${1:-$DEFAULT_LCARS_PORT}"
@@ -897,6 +966,7 @@ install_kanban_system() {
     # Install LaunchAgents if templates exist
     install_backup_launchagent
     install_lcars_health_launchagent
+    install_cr_confluence_poller_launchagent
 
     success "LCARS Kanban System installed successfully"
 
@@ -923,8 +993,9 @@ install_kanban_system() {
 uninstall_kanban_system() {
     header "Uninstalling LCARS Kanban System"
 
-    # Unload LaunchAgent
+    # Unload LaunchAgents
     uninstall_backup_launchagent
+    uninstall_cr_confluence_poller_launchagent
 
     # Remove installed files
     info "Removing kanban system files"
