@@ -71,7 +71,7 @@ I'll defer to the captain on whether cards is the right
 container?) — but on the UX, this gives us native feel with
 strong accessibility coverage.
 
-Want me to prototype it in the holosuite first, or go straight to spec?"
+Want me to prototype it on the holodeck first, or go straight to spec?"
 
 ## Knowledge Base Protocol
 
