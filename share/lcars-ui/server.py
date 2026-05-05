@@ -19,6 +19,7 @@ import copy
 import json
 import os
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -6673,9 +6674,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 shell_parts.append(
                     f'ts2=$(_kb_cr_timestamp)'
                 )
-                # Build the --arg lines
+                # Build the --arg lines. shlex.quote on EVERY value — values come
+                # from untrusted JSON request bodies and would otherwise allow shell
+                # command substitution ($(...), backticks, $VAR) to fire before jq
+                # ever sees them.
                 field_arg_str = ' '.join(
-                    f'--arg {k} {json.dumps(v)}' for k, v in field_jq_args
+                    f'--arg {shlex.quote(k)} {shlex.quote(v)}' for k, v in field_jq_args
                 )
                 shell_parts.append(
                     f'_kb_jq_update "{board_file_str}" \'{jq_filter_combined}\' --argjson cidx "$cr_idx" --arg ts "$ts2" {field_arg_str}'
@@ -6688,12 +6692,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 f'[ -n "$state_evt" ] && _kb_cr_activity_append "{board_file_str}" "{cr_id}" "$state_evt" 2>/dev/null || true',
             ]
 
-            # cr_field_update activity events (one per changed field)
+            # cr_field_update activity events (one per changed field).
+            # shlex.quote each user-controlled value — fname comes from the
+            # validated allowlist above but old/new are arbitrary user input.
             for fname, vals in changed_fields.items():
-                old_esc = vals["old"].replace('"', '\\"')
-                new_esc = vals["new"].replace('"', '\\"')
+                fname_q = shlex.quote(f"field={fname}")
+                old_q   = shlex.quote(f"old_value={vals['old']}")
+                new_q   = shlex.quote(f"new_value={vals['new']}")
                 shell_parts += [
-                    f'fld_evt=$(_kb_cr_activity_event cr_field_update field="{fname}" old_value="{old_esc}" new_value="{new_esc}" 2>/dev/null || echo "")',
+                    f'fld_evt=$(_kb_cr_activity_event cr_field_update {fname_q} {old_q} {new_q} 2>/dev/null || echo "")',
                     f'[ -n "$fld_evt" ] && _kb_cr_activity_append "{board_file_str}" "{cr_id}" "$fld_evt" 2>/dev/null || true',
                 ]
 
