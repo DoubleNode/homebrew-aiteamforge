@@ -18,7 +18,7 @@
  *   boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab
  */
 
-/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar */
+/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown */
 
 'use strict';
 
@@ -720,47 +720,20 @@
             });
         });
 
-        // Wire CR-ID copy buttons → copy id to clipboard, flash visual feedback.
+        // Wire CR-ID copy buttons → delegate to the global copyToClipboard()
+        // (defined in lcars.js) so the upper-right toast is identical to the
+        // one shown when item IDs are copied. Local green-flash class layers
+        // on top of the toast for direct visual feedback at the click site.
         listEl.querySelectorAll('.cr-id-copy').forEach(btn => {
             btn.addEventListener('click', e => {
                 e.stopPropagation();
                 const crId = btn.dataset.crId || '';
                 if (!crId) return;
-                _copyToClipboard(crId).then(ok => {
-                    if (!ok) return;
-                    btn.classList.add('cr-id-copied');
-                    setTimeout(() => btn.classList.remove('cr-id-copied'), 900);
-                });
+                if (typeof copyToClipboard === 'function') copyToClipboard(crId);
+                btn.classList.add('cr-id-copied');
+                setTimeout(() => btn.classList.remove('cr-id-copied'), 900);
             });
         });
-    }
-
-    /**
-     * Copy text to clipboard. Returns Promise<boolean>. Falls back to
-     * a hidden-textarea + execCommand path when navigator.clipboard is
-     * unavailable (older browsers / non-secure contexts on tailnet).
-     */
-    function _copyToClipboard(text) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            return navigator.clipboard.writeText(text).then(() => true).catch(() => _copyFallback(text));
-        }
-        return Promise.resolve(_copyFallback(text));
-    }
-    function _copyFallback(text) {
-        try {
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.setAttribute('readonly', '');
-            ta.style.position = 'absolute';
-            ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.select();
-            const ok = document.execCommand('copy');
-            document.body.removeChild(ta);
-            return !!ok;
-        } catch (_) {
-            return false;
-        }
     }
 
     // ─── CR-only modal ────────────────────────────────────────────────────────
