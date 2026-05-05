@@ -173,6 +173,11 @@ class Aiteamforge < Formula
     # Verify Python env helper ships with the tap
     assert_predicate libexec/"libexec/lib/python-env.sh", :exist?
 
+    # Verify kb-cr namespace + migration script ship in installer payload (XACA-0309)
+    assert_predicate libexec/"share/scripts/kb-cr.sh", :exist?
+    assert_predicate libexec/"share/scripts/migrate-cr-schema.py", :exist?
+    assert_predicate libexec/"share/templates/kanban/cr-schema.json", :exist?
+
     # Test that setup wizard shows version
     system "#{bin}/aiteamforge-setup", "--help"
   end

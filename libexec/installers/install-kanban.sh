@@ -569,6 +569,18 @@ install_lcars_profile_script() {
         warning "kb-cr.sh not found (skipping)"
     fi
 
+    # Install migrate-cr-schema.py — one-shot migration tool that upgrades
+    # kanban board JSON from pre-v2.0.0 cr fields to the crs[] container schema.
+    # Operators run this manually after upgrading if they have existing CR data.
+    local migrate_cr_src="$INSTALL_ROOT/share/scripts/migrate-cr-schema.py"
+    if [ -f "$migrate_cr_src" ]; then
+        cp "$migrate_cr_src" "$scripts_dest/migrate-cr-schema.py"
+        chmod +x "$scripts_dest/migrate-cr-schema.py"
+        info "Installed: migrate-cr-schema.py"
+    else
+        warning "migrate-cr-schema.py not found (skipping)"
+    fi
+
     # Install Dynamic Profile JSON to iTerm2's hot-load directory.
     # iTerm2 reads this directory automatically — no restart required.
     # The profile uses 'Initial URL' (correct key for browser-mode tabs).
