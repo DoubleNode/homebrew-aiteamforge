@@ -1083,7 +1083,9 @@ body {
     gap: 15px;
     width: 80%;
     max-width: 800px;
-    flex-shrink: 0;
+    flex: 1;
+    min-height: 0;
+    margin-top: -25px;
 }
 
 .startup-init-text {
