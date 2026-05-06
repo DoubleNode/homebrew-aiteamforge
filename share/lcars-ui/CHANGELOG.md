@@ -14,6 +14,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 - **XACA-0351 backend enrichment:** Each item in `GET /api/daily-overview` now carries a `details` sub-object whose `kind` matches the category and whose required keys are present for the popup renderer (todo body, kanban description + subitem ratio + linked-item IDs, CR state/customer/summary, backup `last_error`, calendar source/start/end, release environments map, alert body/source/metadata/dedupe_key). 9 new unit tests in `TestPopupDetails` plus an explicit regression for the "Dedupe test v2" shape (alert with `body=null`, `source='qa-test'` produces a usable details dict). Total: 163 daily-overview + alert tests passing.
 - **XACA-0351 popup styles:** New section in `daily-overview.css` covering the popup shell, key/value table, status/priority pills, environment chips, and deep-link anchor styling. Card hover/focus states added so the new tap-to-open affordance is discoverable.
 
+### Fixed (PR #351 reviewer follow-ups, subitems 010–012)
+- **XACA-0351-010:** `_priorityPill` now applies the same `[^a-z0-9_-]` whitelist sanitization on the class suffix that `_statusPill` already used. Defence-in-depth — `escapeHtml` already covers attribute escaping, but consistency between the two pill helpers prevents future drift.
+- **XACA-0351-011:** Added a JSDoc comment to the `_keydownWired` singleton flag clarifying that the listener is intentionally module-lifetime (install-once on first popup open) — not a leak.
+- **XACA-0351-012:** Tightened the `_bodyHtml` linkifier regex from a broad `[A-Z][A-Z0-9]+-\d{1,6}` to an anchored alternation against a fixed prefix list (`XACA`, `MEAPP`, `IOSAPP`, `ANDAPP`, `FBAPP`, `DNS`, `EPIC`, `REL`, `CR`). Generic uppercase-token-dash-number patterns in alert bodies (e.g. `HTTP-200`, `ISO-8601`, `RFC-7231`) no longer render as false deep-links.
+
 <!-- XACA-0334: Daily Overview — sidebar restructure + section registration -->
 
 ### Added

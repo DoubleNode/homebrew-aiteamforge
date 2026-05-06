@@ -35,7 +35,15 @@ let _activeBackdrop = null;
 /** Element that had focus before the popup opened — restored on close. */
 let _previouslyFocused = null;
 
-/** Whether the document-level keydown listener has been attached. */
+/**
+ * Whether the document-level keydown listener has been attached.
+ *
+ * Module-lifetime singleton: the listener is registered on first popup open
+ * and intentionally never removed. The handler is cheap (one `key === 'Escape'`
+ * check, gated on `_activeBackdrop !== null`) and the LCARS UI is a long-lived
+ * SPA — re-attaching on every open would invite double-fire bugs without any
+ * memory benefit. Treat as install-once, not as a leak.
+ */
 let _keydownWired = false;
 
 // ─── Public entry points ───────────────────────────────────────────────────────
@@ -389,7 +397,10 @@ function _statusPill(status) {
 function _priorityPill(priority) {
     if (!priority) return '—';
     const p = String(priority).toLowerCase();
-    const cls = 'do-popup-pill do-popup-prio-' + escapeHtml(p);
+    // Match _statusPill: whitelist [a-z0-9_-] in the class suffix so an unexpected
+    // priority string (e.g. injected via misconfig) cannot leak into the class
+    // attribute. Defence-in-depth — escapeHtml already handles attribute escaping.
+    const cls = 'do-popup-pill do-popup-prio-' + escapeHtml(p.replace(/[^a-z0-9_-]/g, '-'));
     return '<span class="' + cls + '">' + escapeHtml(p.toUpperCase()) + '</span>';
 }
 
@@ -416,9 +427,32 @@ function _envChips(environments) {
 // ─── Body / link helpers ───────────────────────────────────────────────────────
 
 /**
- * Linkify kanban-style IDs (XACA-NNNN, MEAPP-NNNN, EPIC-NNNN, REL-NNNN, etc.)
+ * Recognised kanban / release / CR / epic / per-team-app ID prefixes.
+ * Limited to the prefixes we route via `switchSection` so non-kanban
+ * tokens in body text (e.g. "HTTP-200", "ISO-8601", "RFC-7231") don't render
+ * as deep links.  Add new team prefixes here when they come online.
+ */
+const _KANBAN_ID_PREFIXES = [
+    'XACA',     // Academy
+    'MEAPP',    // Main Event app
+    'IOSAPP',   // iOS Main Event
+    'ANDAPP',   // Android Main Event
+    'FBAPP',    // Firebase Main Event
+    'DNS',      // DNS Framework
+    'EPIC',     // Cross-team epics
+    'REL',      // Releases
+    'CR',       // Change Requests
+];
+
+/**
+ * Linkify kanban-style IDs (XACA-NNNN, EPIC-NNNN, REL-NNNN, CR-NNNN, etc.)
  * inside a body string.  IDs become `<a class="do-popup-deeplink">` so the
  * delegated handler intercepts them.  All other text is escaped.
+ *
+ * The regex is anchored to a fixed prefix list (`_KANBAN_ID_PREFIXES`) so
+ * generic uppercase-token-dash-number sequences in alert bodies (e.g.
+ * "HTTP-200", "ISO-8601") are NOT promoted to deep links.  The numeric range
+ * stays at 1-6 digits, matching the rest of the codebase's ID generators.
  *
  * Defaults to `workflow` section for matched IDs; alert/CR rendering can
  * override by linking the primary ID separately above the body.
@@ -427,7 +461,10 @@ function _bodyHtml(text) {
     if (!text) return '';
     const str = String(text);
     const out = [];
-    const re = /[A-Z][A-Z0-9]+-\d{1,6}/g;
+    const re = new RegExp(
+        '\\b(?:' + _KANBAN_ID_PREFIXES.join('|') + ')-\\d{1,6}\\b',
+        'g'
+    );
     let last = 0;
     let m;
     while ((m = re.exec(str)) !== null) {
