@@ -32,6 +32,8 @@
     <link rel="stylesheet" href="css/usage-indicator.css">
     <!-- XACA-0292-007: CHANGE REQ list view styles -->
     <link rel="stylesheet" href="css/lcars-cr-tab.css">
+    <!-- XACA-0334-005: Daily Overview grid + card styles -->
+    <link rel="stylesheet" href="css/daily-overview.css">
     <script src="js/usage-helpers.js"></script>
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
@@ -89,8 +91,12 @@
 
                 <!-- KANBAN mode sidebar — XACA-0164-005 -->
                 <div class="sidebar-mode-items" data-mode="kanban">
-                    <div class="sidebar-button active" data-section="home">
+                    <!-- XACA-0334: New HOME → Daily Overview; former HOME renamed ANALYTICS -->
+                    <div class="sidebar-button active" data-section="daily-overview">
                         <span>HOME</span>
+                    </div>
+                    <div class="sidebar-button" data-section="home">
+                        <span>ANALYTICS</span>
                     </div>
                     <div class="sidebar-split-row">
                         <div class="sidebar-button" data-section="todos">
@@ -213,6 +219,21 @@
                             </div>
                         </div>
                         <div class="startup-copyright" id="startup-copyright">Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.</div>
+                    </div>
+                </section>
+
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: DAILY OVERVIEW — XACA-0334 (subitem 004 stub)             -->
+                <!-- Grid layout and category cards implemented in subitem 005.          -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <section class="daily-overview-section" data-mode="kanban">
+                    <div class="section-header cyan">
+                        <span class="section-title">DAILY OVERVIEW</span>
+                        <div class="section-bar"></div>
+                        <button id="do-refresh-btn" class="do-refresh-btn" type="button" aria-label="Refresh daily overview">REFRESH</button>
+                    </div>
+                    <div id="daily-overview-grid">
+                        <!-- Populated by daily-overview.js (subitem 005) -->
                     </div>
                 </section>
 
@@ -1482,8 +1503,12 @@
         <!-- MOBILE TAB BAR: Bottom navigation for narrow screens               -->
         <!-- ═══════════════════════════════════════════════════════════════════ -->
         <nav class="mobile-tabbar">
-            <div class="tabbar-button active" data-section="home">
+            <!-- XACA-0334: New HOME → Daily Overview; former HOME renamed ANALYTICS -->
+            <div class="tabbar-button active" data-section="daily-overview">
                 <span class="tabbar-label">HOME</span>
+            </div>
+            <div class="tabbar-button" data-section="home">
+                <span class="tabbar-label">ANALYTICS</span>
             </div>
             <div class="tabbar-button" data-section="todos">
                 <span class="tabbar-label">TODOS</span>
@@ -2272,6 +2297,8 @@
 <script src="js/lcars-activity.js"></script>
 <!-- XACA-0220 Phase 3b — daily artifact audit banner (must load after lcars.js for apiUrl) -->
 <script src="js/lcars-artifact-audit.js?v=1.0"></script>
+<!-- XACA-0334-005: Daily Overview grid renderer — must load after lcars.js (depends on apiUrl, escapeHtml, CONFIG) -->
+<script src="js/daily-overview.js"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- XACA-0243-005: Full usage widget polling JS                             -->

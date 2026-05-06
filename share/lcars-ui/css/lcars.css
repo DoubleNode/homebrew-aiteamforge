@@ -628,6 +628,7 @@ body {
 }
 
 /* Navigation buttons - Fixed unique colors (same for all teams) */
+.sidebar-button[data-section="daily-overview"] { background: var(--lcars-cyan); }
 .sidebar-button[data-section="home"] { background: var(--lcars-blue); }
 .sidebar-button[data-section="todos"] { background: var(--lcars-orange); }
 .sidebar-button[data-section="workflow"] { background: var(--lcars-peach); }
@@ -663,6 +664,10 @@ body {
 }
 
 /* Active state - invert colors (black background, original color text) */
+.sidebar-button[data-section="daily-overview"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
 .sidebar-button[data-section="home"].active {
     background: var(--lcars-black);
     color: var(--lcars-blue);
@@ -1188,7 +1193,8 @@ body {
 .lcars-content > .knowledge-graph-section,
 .lcars-content > .team-config-section,
 .lcars-content > .export-import-section,
-.lcars-content > .usage-section {
+.lcars-content > .usage-section,
+.lcars-content > .daily-overview-section {
     position: absolute !important;
     top: 0 !important;
     left: 0 !important;
@@ -1219,7 +1225,8 @@ body {
 .lcars-content > .knowledge-graph-section.active,
 .lcars-content > .team-config-section.active,
 .lcars-content > .export-import-section.active,
-.lcars-content > .usage-section.active {
+.lcars-content > .usage-section.active,
+.lcars-content > .daily-overview-section.active {
     display: block;
     overflow-y: auto !important;
     padding-top: 5px; /* Minimal padding - mode-bar is above content area */
@@ -1230,6 +1237,14 @@ body {
 .lcars-content > .knowledge-graph-section.active {
     display: flex !important;
     overflow-y: auto !important;
+}
+
+/* Daily Overview section - grid layout, no scroll (XACA-0334) */
+.lcars-content > .daily-overview-section.active {
+    display: grid !important;
+    overflow: hidden !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
 }
 
 /* Startup section special - centered content, no scroll */
@@ -1286,7 +1301,8 @@ body {
 .backups-section.active .section-bar,
 .integrations-section.active .section-bar,
 .export-import-section.active .section-bar,
-.usage-section.active .section-bar {
+.usage-section.active .section-bar,
+.daily-overview-section.active .section-bar {
     transform: scaleX(1);
 }
 
@@ -1302,12 +1318,15 @@ body {
 .backups-section.active .section-title,
 .integrations-section.active .section-title,
 .export-import-section.active .section-title,
-.usage-section.active .section-title {
+.usage-section.active .section-title,
+.daily-overview-section.active .section-title {
     opacity: 1;
     transform: translateX(0);
 }
 
 /* Stagger section headers - title before bar */
+.daily-overview-section.active .section-title { transition-delay: 0.05s; }
+.daily-overview-section.active .section-bar { transition-delay: 0.10s; }
 .home-section.active .section-title { transition-delay: 0.05s; }
 .home-section.active .section-bar { transition-delay: 0.10s; }
 .kanban-section.active .section-title { transition-delay: 0.05s; }
@@ -1569,7 +1588,8 @@ body {
 .details-section.exiting,
 .backlog-section.exiting,
 .releases-section.exiting,
-.commands-section.exiting {
+.commands-section.exiting,
+.daily-overview-section.exiting {
     pointer-events: none;
 }
 
@@ -1579,7 +1599,8 @@ body {
 .details-section.exiting .section-bar,
 .backlog-section.exiting .section-bar,
 .releases-section.exiting .section-bar,
-.commands-section.exiting .section-bar {
+.commands-section.exiting .section-bar,
+.daily-overview-section.exiting .section-bar {
     transform: scaleX(0);
     transition-delay: 0.12s;
     transition-duration: 0.15s;
@@ -1590,7 +1611,8 @@ body {
 .details-section.exiting .section-title,
 .backlog-section.exiting .section-title,
 .releases-section.exiting .section-title,
-.commands-section.exiting .section-title {
+.commands-section.exiting .section-title,
+.daily-overview-section.exiting .section-title {
     opacity: 0;
     transform: translateX(-10px);
     transition-delay: 0.10s;
@@ -5884,6 +5906,7 @@ body {
 }
 
 /* Button colors matching sidebar - fixed unique colors */
+.tabbar-button[data-section="daily-overview"] { background: var(--lcars-cyan); }
 .tabbar-button[data-section="home"] { background: var(--lcars-blue); }
 .tabbar-button[data-section="workflow"] { background: var(--lcars-peach); }
 .tabbar-button[data-section="details"] { background: var(--lcars-cyan); }
@@ -5895,6 +5918,10 @@ body {
 .tabbar-button[data-section="backups"] { background: var(--lcars-tan); }
 
 /* Active state - inverted colors (matches sidebar styling) */
+.tabbar-button[data-section="daily-overview"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
+}
 .tabbar-button[data-section="home"].active {
     background: var(--lcars-black);
     color: var(--lcars-blue);

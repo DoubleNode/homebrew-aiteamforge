@@ -76,6 +76,7 @@ const TEAM_SCOPED_PREFIXES = [
     '/api/items',
     '/api/release-config',
     '/api/calendar/items',
+    '/api/daily-overview',   // XACA-0334: Daily Overview aggregator
 ];
 
 function apiUrl(path, extraParams) {
@@ -162,7 +163,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
+const SECTIONS = ['startup', 'daily-overview', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Mode state machine (XACA-0164)
@@ -8796,8 +8797,9 @@ function filterSectionsByMode(mode) {
  */
 function pickDefaultSectionForMode(mode) {
     switch (mode) {
-        case 'team':
         case 'kanban':
+            return 'daily-overview'; // XACA-0334: kanban mode lands on Daily Overview
+        case 'team':
         case 'data':
             return 'home';
         case 'settings':
@@ -8814,7 +8816,7 @@ function pickDefaultSectionForMode(mode) {
  * Returns an object with defaults if nothing is stored yet.
  */
 function loadModeSections() {
-    const defaults = { team: 'home', kanban: 'home', data: 'home', settings: 'team-config' };
+    const defaults = { team: 'home', kanban: 'daily-overview', data: 'home', settings: 'team-config' }; // XACA-0334: kanban default → daily-overview
     // Renames applied to any persisted section value before validation.
     // XACA-0292 renamed 'queue' → 'backlog'; pre-rename users still have 'queue'
     // in localStorage, which would fail the SECTIONS.indexOf check in switchSection
@@ -9142,6 +9144,11 @@ function switchSection(sectionName, skipAnimation = false) {
     // Initialize Export/Import panel when switching to section
     if (sectionName === 'export-import') {
         initExportImportPanel();
+    }
+
+    // Load Daily Overview when switching to that section (XACA-0334)
+    if (sectionName === 'daily-overview') {
+        if (typeof loadDailyOverview === 'function') loadDailyOverview();
     }
 
     // Load todos when switching to todos section (XACA-0101)
@@ -18048,6 +18055,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
     // XACA-0332: wire up the copyright Save button
     initCopyrightSaveButton();
+
+    // XACA-0334-006: wire Daily Overview delegated interactions + refresh button
+    if (typeof initDailyOverviewInteractions === 'function') initDailyOverviewInteractions();
 
     console.log('LCARS Kanban Monitor Ready');
 });

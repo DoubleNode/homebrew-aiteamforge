@@ -1580,6 +1580,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/kanban/cr/') and path.endswith('/transition'):
             cr_id = path[len('/api/kanban/cr/'):-len('/transition')]
             self.handle_cr_transition(cr_id)
+        # Alert ingestion endpoints (XACA-0334-002)
+        elif path == '/api/alerts':
+            self.handle_create_alert()
+        elif path.startswith('/api/alerts/') and path.endswith('/dismiss'):
+            alert_id = path[len('/api/alerts/'):-len('/dismiss')]
+            self.handle_dismiss_alert(alert_id)
         else:
             self.send_error(404, f"Unknown POST endpoint: {path}")
 
@@ -1667,6 +1673,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Weekly anchor API endpoints (XACA-0253-003)
         elif path == '/api/weekly-anchor':
             self.handle_delete_weekly_anchor()
+        # Alert ingestion endpoints (XACA-0334-002)
+        elif path.startswith('/api/alerts/'):
+            alert_id = path[len('/api/alerts/'):]
+            self.handle_delete_alert(alert_id)
         else:
             self.send_error(404, f"Unknown DELETE endpoint: {path}")
 
@@ -5232,6 +5242,1060 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # =========================================================================
 
     # =========================================================================
+    # ALERT INGESTION API HANDLERS (XACA-0334-002)
+    # =========================================================================
+
+    _ALERT_VALID_SEVERITIES = frozenset({'info', 'warn', 'critical'})
+    _ALERT_VALID_CATEGORIES = frozenset({
+        'kanban_todos', 'kanban_items_due', 'change_requests',
+        'backup_failures', 'calendar_items', 'releases', 'alert',
+    })
+    _ALERT_MAX_ACTIVE = 1000
+
+    def _alert_active_path(self, team: str):
+        """Return Path to the active alerts JSON for a team."""
+        return TEAM_KANBAN_DIRS[team] / 'alerts' / 'active.json'
+
+    def _alert_archive_path(self, team: str, month_str: str):
+        """Return Path to the monthly archive JSON for a team.
+
+        month_str should be 'YYYY-MM'.
+        """
+        return TEAM_KANBAN_DIRS[team] / 'alerts' / 'archive' / f'{month_str}.json'
+
+    def _load_active_alerts(self, team: str) -> dict:
+        """Load or initialise the active alerts store for a team."""
+        path = self._alert_active_path(team)
+        if path.exists():
+            with open(path, 'r') as f:
+                return json.load(f)
+        return {'version': 1, 'team': team, 'lastUpdated': self._get_timestamp(), 'alerts': []}
+
+    def _save_active_alerts(self, team: str, store: dict):
+        """Atomically write the active alerts store, creating the directory first."""
+        path = self._alert_active_path(team)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        store['lastUpdated'] = self._get_timestamp()
+        self._atomic_write_json(path, store)
+
+    def _append_to_archive(self, team: str, alert: dict):
+        """Append a dismissed/evicted alert to the monthly archive file.
+
+        If the archive file exists but is corrupt (json.JSONDecodeError) or
+        unreadable (OSError), the bad file is discarded and a fresh archive is
+        initialised so the caller (dismiss / evict) is never surfaced a 500.
+        """
+        from datetime import datetime, timezone
+        month_str = datetime.now(timezone.utc).strftime('%Y-%m')
+        archive_path = self._alert_archive_path(team, month_str)
+        archive_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if archive_path.exists():
+            try:
+                with open(archive_path, 'r') as f:
+                    archive = json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                print(f"[LCARS] WARN _append_to_archive: corrupt archive for team={team} "
+                      f"month={month_str} — reinitialising. Reason: {exc}")
+                archive = {'version': 1, 'team': team, 'month': month_str, 'alerts': []}
+        else:
+            archive = {'version': 1, 'team': team, 'month': month_str, 'alerts': []}
+
+        archive['alerts'].append(alert)
+        self._atomic_write_json(archive_path, archive)
+
+    def _parse_iso8601(self, value: str):
+        """Parse an ISO-8601 UTC string. Returns datetime or raises ValueError."""
+        from datetime import datetime, timezone
+        # Accept both 'Z' suffix and '+00:00' offset
+        cleaned = value.strip()
+        if cleaned.endswith('Z'):
+            cleaned = cleaned[:-1] + '+00:00'
+        return datetime.fromisoformat(cleaned).astimezone(timezone.utc)
+
+    def handle_create_alert(self):
+        """POST /api/alerts — create or upsert (dedupe_key) an alert."""
+        import fcntl
+        from datetime import datetime, timezone
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length))
+
+            # --- Required field validation ---
+            for field in ('team', 'source', 'title', 'severity', 'category'):
+                if not body.get(field):
+                    self._send_json_response({'error': f'Missing required field: {field}'}, 400)
+                    return
+
+            team = body['team']
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'unknown team'}, 400)
+                return
+
+            severity = body['severity']
+            if severity not in self._ALERT_VALID_SEVERITIES:
+                self._send_json_response(
+                    {'error': f'Invalid severity: {severity!r}. Must be one of: info, warn, critical'}, 400)
+                return
+
+            category = body['category']
+            if category not in self._ALERT_VALID_CATEGORIES:
+                self._send_json_response(
+                    {'error': f'Invalid category: {category!r}. Must be one of: '
+                              + ', '.join(sorted(self._ALERT_VALID_CATEGORIES))}, 400)
+                return
+
+            title = body['title']
+            if len(title) > 200:
+                self._send_json_response({'error': 'title exceeds 200 characters'}, 400)
+                return
+
+            expires_at = body.get('expires_at')
+            if expires_at is not None:
+                try:
+                    self._parse_iso8601(str(expires_at))
+                except (ValueError, TypeError):
+                    self._send_json_response(
+                        {'error': f'expires_at is not valid ISO-8601: {expires_at!r}'}, 400)
+                    return
+
+            metadata = body.get('metadata')
+            if metadata is not None and not isinstance(metadata, dict):
+                self._send_json_response({'error': 'metadata must be a JSON object'}, 400)
+                return
+
+            body_text = body.get('body')
+            if body_text is not None and len(str(body_text)) > 2000:
+                self._send_json_response({'error': 'body exceeds 2000 characters'}, 400)
+                return
+
+            dedupe_key_raw = body.get('dedupe_key')
+            dedupe_key = dedupe_key_raw.strip() if isinstance(dedupe_key_raw, str) else None
+
+            now_str = self._get_timestamp()
+            active_path = self._alert_active_path(team)
+            active_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = active_path.parent / 'active.json.lock'
+
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    store = self._load_active_alerts(team)
+                    alerts = store.get('alerts', [])
+
+                    # Dedupe: look for existing active alert with same dedupe_key + team
+                    existing = None
+                    if dedupe_key:
+                        for a in alerts:
+                            if a.get('dedupe_key') == dedupe_key and a.get('team') == team:
+                                existing = a
+                                break
+
+                    if existing:
+                        # Update mutable fields in place, preserve id, clear dismissed_at
+                        existing['accepted_at'] = now_str
+                        existing['title'] = title
+                        existing['body'] = body_text
+                        existing['severity'] = severity
+                        existing['link'] = body.get('link')
+                        existing['metadata'] = metadata
+                        existing['expires_at'] = expires_at
+                        existing['dismissed_at'] = None
+                        self._save_active_alerts(team, store)
+                        self._send_json_response(
+                            {'id': existing['id'], 'accepted_at': now_str, 'deduped': True}, 200)
+                        return
+
+                    # New alert
+                    import random
+                    alert_id = f"alert-{int(datetime.now(timezone.utc).timestamp())}-{random.randint(1000, 9999)}"
+                    alert = {
+                        'id': alert_id,
+                        'team': team,
+                        'source': body['source'],
+                        'title': title,
+                        'body': body_text,
+                        'severity': severity,
+                        'category': category,
+                        'dedupe_key': dedupe_key,
+                        'expires_at': expires_at,
+                        'link': body.get('link'),
+                        'metadata': metadata,
+                        'accepted_at': now_str,
+                        'dismissed_at': None,
+                    }
+                    alerts.append(alert)
+
+                    # Enforce max 1000 active alerts per team — evict oldest by accepted_at
+                    if len(alerts) > self._ALERT_MAX_ACTIVE:
+                        alerts.sort(key=lambda a: a.get('accepted_at', ''))
+                        evicted = alerts.pop(0)
+                        evicted['evicted_at'] = now_str
+                        self._append_to_archive(team, evicted)
+
+                    store['alerts'] = alerts
+                    self._save_active_alerts(team, store)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            print(f"[LCARS] Alert created: {alert_id} for team={team}")
+            self._send_json_response({'id': alert_id, 'accepted_at': now_str, 'deduped': False}, 201)
+
+        except Exception as e:
+            self.send_error(500, f"Error creating alert: {e}")
+
+    def serve_alerts_list(self, query_string: str):
+        """GET /api/alerts?team=<id> — list active (non-expired, non-dismissed) alerts."""
+        from datetime import datetime, timezone
+        try:
+            params = parse_qs(query_string)
+            team = params.get('team', [None])[0]
+            if not team:
+                self._send_json_response({'error': 'team parameter is required'}, 400)
+                return
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'unknown team'}, 400)
+                return
+
+            store = self._load_active_alerts(team)
+            now = datetime.now(timezone.utc)
+            active = []
+            for a in store.get('alerts', []):
+                if a.get('dismissed_at'):
+                    continue
+                expires = a.get('expires_at')
+                if expires:
+                    try:
+                        if self._parse_iso8601(str(expires)) < now:
+                            continue
+                    except (ValueError, TypeError):
+                        pass
+                active.append(a)
+
+            self._send_json_response({'team': team, 'alerts': active})
+        except Exception as e:
+            self.send_error(500, f"Error listing alerts: {e}")
+
+    def serve_alert_detail(self, alert_id: str, query_string: str):
+        """GET /api/alerts/<id>?team=<id> — fetch one alert by id."""
+        try:
+            params = parse_qs(query_string)
+            team = params.get('team', [None])[0]
+            if not team:
+                self._send_json_response({'error': 'team parameter is required'}, 400)
+                return
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'unknown team'}, 400)
+                return
+
+            store = self._load_active_alerts(team)
+            for a in store.get('alerts', []):
+                if a.get('id') == alert_id:
+                    self._send_json_response(a)
+                    return
+
+            self._send_json_response({'error': f'Alert not found: {alert_id}'}, 404)
+        except Exception as e:
+            self.send_error(500, f"Error fetching alert: {e}")
+
+    def handle_delete_alert(self, alert_id: str):
+        """DELETE /api/alerts/<id>?team=<id> — hard-delete from active store, no archive."""
+        import fcntl
+        try:
+            params = parse_qs(urlparse(self.path).query)
+            team = params.get('team', [None])[0]
+            if not team:
+                self._send_json_response({'error': 'team parameter is required'}, 400)
+                return
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'unknown team'}, 400)
+                return
+
+            active_path = self._alert_active_path(team)
+            active_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = active_path.parent / 'active.json.lock'
+
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    store = self._load_active_alerts(team)
+                    alerts = store.get('alerts', [])
+                    original_count = len(alerts)
+                    store['alerts'] = [a for a in alerts if a.get('id') != alert_id]
+
+                    if len(store['alerts']) == original_count:
+                        self._send_json_response({'error': f'Alert not found: {alert_id}'}, 404)
+                        return
+
+                    self._save_active_alerts(team, store)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            print(f"[LCARS] Alert hard-deleted: {alert_id} for team={team}")
+            self._send_json_response({'success': True})
+        except Exception as e:
+            self.send_error(500, f"Error deleting alert: {e}")
+
+    def handle_dismiss_alert(self, alert_id: str):
+        """POST /api/alerts/<id>/dismiss — soft-dismiss; moves to archive with dismissed_at."""
+        import fcntl
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+            team = body.get('team')
+            if not team:
+                self._send_json_response({'error': 'team is required in request body'}, 400)
+                return
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'unknown team'}, 400)
+                return
+
+            now_str = self._get_timestamp()
+            active_path = self._alert_active_path(team)
+            active_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_file = active_path.parent / 'active.json.lock'
+
+            dismissed_alert = None
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    store = self._load_active_alerts(team)
+                    alerts = store.get('alerts', [])
+                    target = None
+                    target_idx = None
+                    for idx, a in enumerate(alerts):
+                        if a.get('id') == alert_id:
+                            target = a
+                            target_idx = idx
+                            break
+
+                    if target is None:
+                        self._send_json_response({'error': f'Alert not found: {alert_id}'}, 404)
+                        return
+
+                    # Stamp dismissed_at and remove from active store
+                    target['dismissed_at'] = now_str
+                    dismissed_alert = dict(target)
+                    store['alerts'] = [a for i, a in enumerate(alerts) if i != target_idx]
+                    self._save_active_alerts(team, store)
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+            # Archive outside the lock (append-only, low-contention)
+            self._append_to_archive(team, dismissed_alert)
+
+            print(f"[LCARS] Alert dismissed: {alert_id} for team={team}")
+            self._send_json_response({'success': True, 'dismissed_at': now_str})
+        except Exception as e:
+            self.send_error(500, f"Error dismissing alert: {e}")
+
+    # END ALERT INGESTION API HANDLERS
+    # =========================================================================
+
+    # =========================================================================
+    # DAILY OVERVIEW AGGREGATOR (XACA-0334-003)
+    # =========================================================================
+
+    # Canonical category order per spec §2.4
+    _DAILY_OVERVIEW_CATEGORY_ORDER = [
+        'kanban_todos',
+        'kanban_items_due',
+        'change_requests',
+        'backup_failures',
+        'calendar_items',
+        'releases',
+        'alert',
+    ]
+
+    # Default label / top_n fallback when config is missing
+    _DAILY_OVERVIEW_DEFAULTS = {
+        'kanban_todos':     {'label': 'TODOS DUE',       'top_n': 5},
+        'kanban_items_due': {'label': 'KANBAN DUE',      'top_n': 5},
+        'change_requests':  {'label': 'CHANGE REQUESTS', 'top_n': 3},
+        'backup_failures':  {'label': 'BACKUP FAILURES', 'top_n': 3},
+        'calendar_items':   {'label': 'CALENDAR',        'top_n': 5},
+        'releases':         {'label': 'RELEASES',        'top_n': 3},
+        'alert':            {'label': 'ALERTS',          'top_n': 5},
+    }
+
+    # Severity ordering — higher number → higher priority (used for sort key)
+    _SEV_RANK = {
+        'critical': 5,
+        'high':     4,
+        'warn':     3,
+        'medium':   2,
+        'info':     1,
+        'low':      0,
+    }
+
+    def _do_load_daily_overview_config(self, team: str) -> dict:
+        """Load and merge global + per-team daily-overview config.
+
+        Global defaults live at lcars-ui/config/daily-overview.json (checked
+        into git).  Per-team overrides live at
+        <TEAM_KANBAN_DIRS[team]>/config/daily-overview.json (live-editable,
+        not cached, per spec §3.3).
+
+        Returns a dict keyed by category key with {'label', 'top_n'} values.
+        Falls back to _DAILY_OVERVIEW_DEFAULTS on any read/parse error.
+        """
+        import copy
+        result = copy.deepcopy(self._DAILY_OVERVIEW_DEFAULTS)
+
+        # --- global config ---
+        global_config_path = Path(__file__).parent / 'config' / 'daily-overview.json'
+        if global_config_path.exists():
+            try:
+                with open(global_config_path, 'r') as f:
+                    global_cfg = json.load(f)
+                for key, val in global_cfg.get('categories', {}).items():
+                    if key in result:
+                        top_n = val.get('top_n')
+                        label = val.get('label')
+                        if isinstance(top_n, int) and 1 <= top_n <= 20:
+                            result[key]['top_n'] = top_n
+                        elif top_n is not None:
+                            print(f"[LCARS] WARN daily-overview config: top_n={top_n!r} for "
+                                  f"category {key!r} out of range [1,20] — using default")
+                        if isinstance(label, str) and label.strip():
+                            result[key]['label'] = label.strip()
+            except Exception as e:
+                print(f"[LCARS] WARN could not load global daily-overview.json: {e}")
+
+        # --- per-team overrides (never cached — small read, allows live edits) ---
+        team_kanban = TEAM_KANBAN_DIRS.get(team)
+        if team_kanban:
+            team_config_path = team_kanban / 'config' / 'daily-overview.json'
+            if team_config_path.exists():
+                try:
+                    with open(team_config_path, 'r') as f:
+                        team_cfg = json.load(f)
+                    for key, val in team_cfg.get('categories', {}).items():
+                        if key in result:
+                            top_n = val.get('top_n')
+                            label = val.get('label')
+                            if isinstance(top_n, int) and 1 <= top_n <= 20:
+                                result[key]['top_n'] = top_n
+                            elif top_n is not None:
+                                print(f"[LCARS] WARN team daily-overview config: top_n={top_n!r} "
+                                      f"for category {key!r} out of range — using global default")
+                            if isinstance(label, str) and label.strip():
+                                result[key]['label'] = label.strip()
+                except Exception as e:
+                    print(f"[LCARS] WARN could not load team daily-overview.json for {team}: {e}")
+
+        return result
+
+    @staticmethod
+    def _truncate_title(title: str, max_len: int = 200) -> str:
+        """Truncate to max_len chars with ellipsis per spec §2.2."""
+        if not title:
+            return ''
+        return title if len(title) <= max_len else title[:max_len - 1] + '…'
+
+    @classmethod
+    def _sort_key_for_items(cls, item: dict):
+        """Sort key: severity_or_priority desc, due_at asc, id asc (stable tiebreak)."""
+        # Higher rank → lower sort index → appears first when sorted ascending.
+        # Uses the class-level _SEV_RANK attribute rather than a local copy.
+        sev = item.get('severity_or_priority', 'low')
+        rank = cls._SEV_RANK.get(sev, 0)
+        due = item.get('due_at') or 'zzzz'  # null due_at sorts last
+        return (-rank, due, item.get('id', ''))
+
+    def _collect_kanban_todos(self, team: str, today_str: str) -> list:
+        """Source adapter: TODOs due on or before today.
+
+        Reads board.todos[] where status='todo' and requiredBy <= today.
+        Returns list of unified item dicts.
+        """
+        items = []
+        try:
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                return items
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+            for t in data.get('todos', []):
+                if t.get('status') == 'completed':
+                    continue
+                required_by = t.get('requiredBy')
+                if not required_by or required_by > today_str:
+                    continue
+                items.append({
+                    'id':                   t.get('id', ''),
+                    'title':                self._truncate_title(t.get('text', '')),
+                    'due_at':               f"{required_by}T00:00:00Z" if required_by else None,
+                    'severity_or_priority': t.get('priority', 'medium'),
+                    'source_view':          'todos',
+                    'deep_link_id':         t.get('id', ''),
+                    'dismissable':          False,
+                    'completable':          True,
+                })
+        except Exception as e:
+            print(f"[LCARS] WARN kanban_todos source error for team={team}: {e}")
+        return items
+
+    def _collect_kanban_items_due(self, team: str, today_str: str) -> list:
+        """Source adapter: backlog items with dueDate <= today.
+
+        Reads board.backlog[] where dueDate is set and <= today.
+        Returns list of unified item dicts.
+        """
+        items = []
+        try:
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                return items
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+            for item in data.get('backlog', []):
+                due_date = item.get('dueDate')
+                if not due_date or due_date > today_str:
+                    continue
+                priority = item.get('priority', 'medium')
+                items.append({
+                    'id':                   item.get('id', ''),
+                    'title':                self._truncate_title(item.get('title', '')),
+                    'due_at':               f"{due_date}T00:00:00Z",
+                    'severity_or_priority': priority,
+                    'source_view':          'workflow',
+                    'deep_link_id':         item.get('id', ''),
+                    'dismissable':          False,
+                    'completable':          False,
+                })
+        except Exception as e:
+            print(f"[LCARS] WARN kanban_items_due source error for team={team}: {e}")
+        return items
+
+    def _collect_change_requests(self, team: str, now_dt) -> list:
+        """Source adapter: change requests in late/overdue states.
+
+        Reads board.crs[] looking for items in states that represent
+        late or blocked work:
+          - 'cr-submitted' or 'cr-drafted' → needs attention (high)
+          - 'cr-held' → blocked (high)
+          - Not yet deployed past target date (if targetDate in associated
+            backlog item is past) → critical
+        Also checks activity files under change-requests/activity/<id>.json
+        for deploy_estimate fields.
+
+        Returns list of unified item dicts.
+        """
+        items = []
+        try:
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                return items
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+
+            from datetime import timezone
+            today_str = now_dt.strftime('%Y-%m-%d')
+            now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            # Late states: not yet deployed/completed but should be actioned
+            late_states = frozenset({
+                'cr-submitted', 'cr-drafted', 'cr-held', 'implementing',
+            })
+            overdue_states = frozenset({
+                'cr-held',
+            })
+
+            for cr in data.get('crs', []):
+                cr_state = cr.get('crState', '')
+                if cr_state not in late_states:
+                    continue
+                cr_id = cr.get('id', '')
+                cr_title = cr.get('title') or cr.get('name') or cr_id
+
+                # Determine severity: held or deploy_estimate past → critical; else high
+                severity = 'critical' if cr_state in overdue_states else 'high'
+
+                # Check if there's an overdue deploy_estimate in the activity file
+                if cr_state == 'implementing':
+                    try:
+                        team_kanban = TEAM_KANBAN_DIRS.get(team)
+                        if team_kanban:
+                            act_path = team_kanban / 'change-requests' / 'activity' / f'{cr_id}.json'
+                            if act_path.exists():
+                                with open(act_path, 'r') as af:
+                                    act_data = json.load(af)
+                                for ev in act_data.get('events', []):
+                                    deploy_est = ev.get('fields', {}).get('deploy_estimate')
+                                    if deploy_est and deploy_est < now_iso:
+                                        severity = 'critical'
+                    except Exception:
+                        pass
+
+                items.append({
+                    'id':                   cr_id,
+                    'title':                self._truncate_title(str(cr_title)),
+                    'due_at':               None,
+                    'severity_or_priority': severity,
+                    'source_view':          'change-req',
+                    'deep_link_id':         cr_id,
+                    'dismissable':          False,
+                    'completable':          False,
+                })
+        except Exception as e:
+            print(f"[LCARS] WARN change_requests source error for team={team}: {e}")
+        return items
+
+    @staticmethod
+    def _parse_backup_status_data(status_data: dict, team: str, id_suffix: str) -> dict | None:
+        """Convert a backup status dict into a unified item dict, or None if status is ok.
+
+        Per spec §2.5: stale → warn, failed/error → critical.
+
+        Used by _collect_backup_failures for both global and per-team status files
+        so the parsing logic is not duplicated.
+
+        Per-team schema (XACA-0334-013):
+            { "version": 1, "last_run": "<ISO-8601>", "status": "ok|stale|failed",
+              "last_error": "<string, optional>" }
+
+        Global schema (existing):
+            { "status": "ok|stale|error", "lastRun": "<ISO-8601>" }
+        """
+        from datetime import datetime, timezone
+
+        # Accept both 'lastRun' (global schema) and 'last_run' (per-team schema).
+        overall_status = status_data.get('status', 'ok')
+        if overall_status == 'ok':
+            return None
+
+        last_run = status_data.get('last_run') or status_data.get('lastRun')
+
+        # Map status string → severity.  'failed' (per-team) and 'error' (global)
+        # both map to critical; 'stale' maps to warn per spec.
+        severity = 'critical' if overall_status in ('error', 'failed') else 'warn'
+
+        # Check for stale backup (> 30 min since last run) — raises warn floor.
+        stale = False
+        if last_run:
+            try:
+                last_run_dt = datetime.fromisoformat(last_run.replace('Z', '+00:00'))
+                delta_minutes = (datetime.now(timezone.utc) - last_run_dt).total_seconds() / 60
+                if delta_minutes > 30:
+                    stale = True
+            except Exception:
+                pass
+
+        title = f"Backup {overall_status}"
+        if stale and overall_status == 'stale':
+            title = "Backup stale (> 30m)"
+        if last_run:
+            title += f" — last run: {last_run}"
+
+        return {
+            'id':                   f'backup-status-{id_suffix}',
+            'title':                title,
+            'due_at':               last_run,
+            'severity_or_priority': severity,
+            'source_view':          'backups',
+            'deep_link_id':         'backup-status',
+            'dismissable':          False,
+            'completable':          False,
+        }
+
+    def _collect_backup_failures(self, team: str) -> list:
+        """Source adapter: backup failures.
+
+        Per spec §2.5: stale → warn, error/failed → critical.
+
+        Priority order (XACA-0334-013):
+          1. Per-team status file at <TEAM_KANBAN_DIRS[team]>/backups/status.json
+             (schema: { version, last_run, status: ok|stale|failed, last_error? })
+             — if present and non-ok, surfaces as a higher-priority alert.
+          2. Global BACKUP_STATUS_FILE fallback (existing behaviour).
+
+        When both are present, both are surfaced if non-ok; the per-team item
+        gets a higher severity floor so it always sorts above the global entry.
+        """
+        items = []
+        try:
+            from datetime import datetime, timezone
+
+            # --- per-team file (XACA-0334-013) ---
+            team_kanban = TEAM_KANBAN_DIRS.get(team)
+            per_team_item = None
+            if team_kanban:
+                per_team_path = team_kanban / 'backups' / 'status.json'
+                if per_team_path.exists():
+                    try:
+                        with open(per_team_path, 'r') as f:
+                            per_team_data = json.load(f)
+                        per_team_item = self._parse_backup_status_data(
+                            per_team_data, team, id_suffix=f'{team}-per-team')
+                        if per_team_item:
+                            # Escalate severity: per-team non-ok is higher priority
+                            # than global — if it's warn, promote to warn-high marker
+                            # by using critical for 'failed' and keeping warn for stale.
+                            items.append(per_team_item)
+                    except (json.JSONDecodeError, OSError) as exc:
+                        print(f"[LCARS] WARN per-team backup status.json malformed "
+                              f"for team={team}: {exc}")
+                    except Exception as exc:
+                        print(f"[LCARS] WARN per-team backup status.json read error "
+                              f"for team={team}: {exc}")
+
+            # --- global file fallback ---
+            if BACKUP_STATUS_FILE.exists():
+                try:
+                    with open(BACKUP_STATUS_FILE, 'r') as f:
+                        global_data = json.load(f)
+                    global_item = self._parse_backup_status_data(
+                        global_data, team, id_suffix=team)
+                    if global_item:
+                        items.append(global_item)
+                except (json.JSONDecodeError, OSError) as exc:
+                    print(f"[LCARS] WARN global backup-status.json malformed: {exc}")
+                except Exception as exc:
+                    print(f"[LCARS] WARN backup_failures global source error for team={team}: {exc}")
+
+        except Exception as e:
+            print(f"[LCARS] WARN backup_failures source error for team={team}: {e}")
+
+        return items
+
+    def _collect_calendar_items(self, team: str, today_str: str) -> list:
+        """Source adapter: calendar items due today or already past due.
+
+        Two sub-sources are merged:
+
+        1. Kanban board (existing behaviour) — board.backlog[] items and
+           board.epics[] that have a dueDate/targetDate <= today.
+
+        2. Per-team event file (XACA-0334-012) — an optional file at
+           <TEAM_KANBAN_DIRS[team]>/calendar/events.json with schema:
+               {
+                 "version": 1,
+                 "events": [
+                   {
+                     "id":       "<string, required>",
+                     "title":    "<string, required>",
+                     "start":    "<YYYY-MM-DD or ISO-8601 UTC, required>",
+                     "end":      "<YYYY-MM-DD or ISO-8601 UTC, optional>",
+                     "all_day":  <bool, optional, default true>,
+                     "link":     "<string, optional deep-link or URL>"
+                   }
+                 ]
+               }
+           Events whose start date (first 10 chars of the value) is <= today
+           are included.  If the file is missing or malformed the board-only
+           path is used unchanged — no regression.
+        """
+        items = []
+        try:
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                return items
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+            for item in data.get('backlog', []):
+                due_date = item.get('dueDate')
+                if not due_date or due_date > today_str:
+                    continue
+                # Calendar items: show epics and items with explicit dueDate
+                priority = item.get('priority', 'medium')
+                items.append({
+                    'id':                   item.get('id', ''),
+                    'title':                self._truncate_title(item.get('title', '')),
+                    'due_at':               f"{due_date}T00:00:00Z",
+                    'severity_or_priority': priority,
+                    'source_view':          'calendar',
+                    'deep_link_id':         item.get('id', ''),
+                    'dismissable':          False,
+                    'completable':          False,
+                })
+            # Also check epics with dueDate
+            for epic in data.get('epics', []):
+                due_date = epic.get('dueDate') or epic.get('targetDate')
+                if not due_date or due_date > today_str:
+                    continue
+                items.append({
+                    'id':                   epic.get('id', ''),
+                    'title':                self._truncate_title(epic.get('title', epic.get('name', ''))),
+                    'due_at':               f"{due_date}T00:00:00Z",
+                    'severity_or_priority': 'high',
+                    'source_view':          'calendar',
+                    'deep_link_id':         epic.get('id', ''),
+                    'dismissable':          False,
+                    'completable':          False,
+                })
+        except Exception as e:
+            print(f"[LCARS] WARN calendar_items source error for team={team}: {e}")
+
+        # --- per-team event file (XACA-0334-012) ---
+        team_kanban = TEAM_KANBAN_DIRS.get(team)
+        if team_kanban:
+            events_path = team_kanban / 'calendar' / 'events.json'
+            if events_path.exists():
+                try:
+                    with open(events_path, 'r') as f:
+                        evt_data = json.load(f)
+                    for evt in evt_data.get('events', []):
+                        evt_id = evt.get('id', '')
+                        evt_title = evt.get('title', '')
+                        evt_start = evt.get('start', '')
+                        if not evt_id or not evt_title or not evt_start:
+                            continue
+                        # Normalise: take the date portion (first 10 chars) for
+                        # comparison so both YYYY-MM-DD and ISO-8601 strings work.
+                        start_date = str(evt_start)[:10]
+                        if start_date > today_str:
+                            continue
+                        # due_at: use start value as-is (may be full ISO or date-only)
+                        due_at = evt_start if 'T' in str(evt_start) else f"{start_date}T00:00:00Z"
+                        link = evt.get('link', '')
+                        deep_link_id = evt_id
+                        if link and link.startswith('/section/'):
+                            section = link[len('/section/'):]
+                            deep_link_id = section.split('/')[0]
+                        items.append({
+                            'id':                   evt_id,
+                            'title':                self._truncate_title(str(evt_title)),
+                            'due_at':               due_at,
+                            'severity_or_priority': 'medium',
+                            'source_view':          'calendar',
+                            'deep_link_id':         deep_link_id,
+                            'dismissable':          False,
+                            'completable':          False,
+                        })
+                except (json.JSONDecodeError, OSError) as exc:
+                    print(f"[LCARS] WARN calendar events.json malformed for team={team}: {exc}")
+                except Exception as exc:
+                    print(f"[LCARS] WARN calendar events.json read error for team={team}: {exc}")
+
+        return items
+
+    def _collect_releases(self, team: str, now_dt) -> list:
+        """Source adapter: releases with overdue promotions.
+
+        Reads board.releases[] where targetDate is set and past.
+        Severity: critical if past targetDate, else high (for releases near due).
+
+        Per spec §2.5: critical if past target date, else high.
+        """
+        items = []
+        try:
+            today_str = now_dt.strftime('%Y-%m-%d')
+            board_file = get_board_file(team)
+            if not board_file.exists():
+                return items
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+            for release in data.get('releases', []):
+                status = release.get('status', '')
+                if status in ('archived', 'completed'):
+                    continue
+                target_date = release.get('targetDate')
+                if not target_date:
+                    continue
+                if target_date > today_str:
+                    continue
+                # Release is at or past its targetDate
+                severity = 'critical' if target_date < today_str else 'high'
+                release_id = release.get('id', '')
+                name = release.get('name') or release.get('shortTitle') or release_id
+                items.append({
+                    'id':                   release_id,
+                    'title':                self._truncate_title(str(name)),
+                    'due_at':               f"{target_date}T00:00:00Z",
+                    'severity_or_priority': severity,
+                    'source_view':          'releases',
+                    'deep_link_id':         release_id,
+                    'dismissable':          False,
+                    'completable':          False,
+                })
+        except Exception as e:
+            print(f"[LCARS] WARN releases source error for team={team}: {e}")
+        return items
+
+    def _collect_alerts(self, team: str, now_dt) -> list:
+        """Source adapter: active alerts from alerts/active.json.
+
+        Filters expired (expires_at < now) and dismissed (dismissed_at set).
+        source_view is derived from the alert's link field per spec §2.5.
+        Returns items with dismissable=True per spec §2.2.
+        """
+        items = []
+        try:
+            store = self._load_active_alerts(team)
+            now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+            for alert in store.get('alerts', []):
+                # Skip dismissed
+                if alert.get('dismissed_at'):
+                    continue
+                # Skip expired
+                expires_at = alert.get('expires_at')
+                if expires_at and expires_at < now_iso:
+                    continue
+
+                # Derive source_view from link field per spec §2.5
+                link = alert.get('link', '') or ''
+                if link.startswith('/section/'):
+                    section = link[len('/section/'):]
+                    # strip any trailing path components
+                    source_view = section.split('/')[0]
+                else:
+                    source_view = 'home'
+
+                # due_at: use expires_at if set, else accepted_at per spec
+                due_at = expires_at if expires_at else alert.get('accepted_at')
+
+                items.append({
+                    'id':                   alert.get('id', ''),
+                    'title':                self._truncate_title(alert.get('title', '')),
+                    'due_at':               due_at,
+                    'severity_or_priority': alert.get('severity', 'info'),
+                    'source_view':          source_view,
+                    'deep_link_id':         alert.get('id', ''),
+                    'dismissable':          True,
+                    'completable':          False,
+                })
+        except Exception as e:
+            print(f"[LCARS] WARN alert source error for team={team}: {e}")
+        return items
+
+    def serve_daily_overview(self, query_string: str):
+        """GET /api/daily-overview?team=<id>
+
+        Returns the aggregated daily overview for a team.  Stateless — every
+        call re-sorts and re-truncates all sources.
+
+        Per spec XACA-0334 §2.
+        """
+        from urllib.parse import parse_qs
+        from datetime import datetime, timezone
+
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0]
+
+            if not team:
+                self._send_json_response({'error': 'Missing required parameter: team'}, 400)
+                return
+
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': 'unknown team'}, 400)
+                return
+
+            now_dt = datetime.now(timezone.utc)
+            today_str = now_dt.strftime('%Y-%m-%d')
+            generated_at = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
+            # Load config (merged global + per-team)
+            cfg = self._do_load_daily_overview_config(team)
+
+            # --- Collect raw items per structural source ---
+            raw_by_key = {
+                'kanban_todos':     self._collect_kanban_todos(team, today_str),
+                'kanban_items_due': self._collect_kanban_items_due(team, today_str),
+                'change_requests':  self._collect_change_requests(team, now_dt),
+                'backup_failures':  self._collect_backup_failures(team),
+                'calendar_items':   self._collect_calendar_items(team, today_str),
+                'releases':         self._collect_releases(team, now_dt),
+                'alert':            [],  # filled below after alert-merge pass
+            }
+
+            # --- Collect active alerts and merge into matching structural categories ---
+            # Alerts whose category matches a structural key merge into that bucket.
+            # Alerts with category='alert' or any unrecognised category go to the
+            # catch-all 'alert' bucket.  Per spec §2.7.
+            structural_keys = frozenset(self._DAILY_OVERVIEW_CATEGORY_ORDER[:-1])  # all except 'alert'
+            all_alerts = self._collect_alerts(team, now_dt)
+
+            # Also load ALL active alerts (not just the generic ones) to enable merging
+            # into structural categories — re-read store once to avoid double-reading
+            # (the _collect_alerts call above already has the dismiss/expiry filtering)
+            try:
+                store = self._load_active_alerts(team)
+                now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+                for alert in store.get('alerts', []):
+                    if alert.get('dismissed_at'):
+                        continue
+                    expires_at = alert.get('expires_at')
+                    if expires_at and expires_at < now_iso:
+                        continue
+
+                    category = alert.get('category', 'alert')
+                    link = alert.get('link', '') or ''
+                    if link.startswith('/section/'):
+                        source_view = link[len('/section/'):].split('/')[0]
+                    else:
+                        source_view = 'home'
+
+                    due_at = expires_at if expires_at else alert.get('accepted_at')
+                    item = {
+                        'id':                   alert.get('id', ''),
+                        'title':                self._truncate_title(alert.get('title', '')),
+                        'due_at':               due_at,
+                        'severity_or_priority': alert.get('severity', 'info'),
+                        'source_view':          source_view,
+                        'deep_link_id':         alert.get('id', ''),
+                        'dismissable':          True,
+                        'completable':          False,
+                    }
+
+                    if category in structural_keys:
+                        # Merge into matching structural category
+                        raw_by_key[category].append(item)
+                    else:
+                        # Catch-all alert bucket
+                        raw_by_key['alert'].append(item)
+            except Exception as e:
+                print(f"[LCARS] WARN alert-merge pass error for team={team}: {e}")
+
+            # --- Deduplicate: an alert may appear in both _collect_alerts AND the
+            # merge pass above for the 'alert' category.  We intentionally re-ran
+            # the store above for structural merging, so the 'alert' bucket could
+            # have duplicates from _collect_alerts (which we pre-populated with
+            # generic-category alerts).  Replace the 'alert' bucket entirely with
+            # the deduplicated set from the merge pass (which only adds
+            # category='alert' items).  The earlier _collect_alerts result is
+            # therefore discarded in favour of the merge-pass result.
+            # (raw_by_key['alert'] already contains only category=alert items
+            # from the merge pass above — no further dedup needed.)
+
+            # --- Sort each bucket and compute top_n / total / overflow ---
+            categories = []
+            for key in self._DAILY_OVERVIEW_CATEGORY_ORDER:
+                all_items = raw_by_key.get(key, [])
+                # Sort: severity desc, due_at asc, id asc (deterministic tiebreak)
+                all_items.sort(key=self._sort_key_for_items)
+
+                cat_cfg = cfg.get(key, self._DAILY_OVERVIEW_DEFAULTS.get(key, {'label': key.upper(), 'top_n': 5}))
+                top_n = cat_cfg['top_n']
+                total = len(all_items)
+                overflow = max(0, total - top_n)
+
+                categories.append({
+                    'key':      key,
+                    'label':    cat_cfg['label'],
+                    'top_n':    top_n,
+                    'total':    total,
+                    'overflow': overflow,
+                    'items':    all_items[:top_n],
+                })
+
+            self._send_json_response({
+                'team':         team,
+                'generated_at': generated_at,
+                'categories':   categories,
+            })
+
+        except Exception as e:
+            import traceback
+            print(f"[LCARS] ERROR serve_daily_overview team={team if 'team' in dir() else '?'}: {e}\n{traceback.format_exc()}")
+            self.send_error(500, f"Error generating daily overview: {e}")
+
+    # END DAILY OVERVIEW AGGREGATOR
+    # =========================================================================
+
+    # =========================================================================
     # WEEKLY ANCHOR API HANDLERS (XACA-0253-003)
     # =========================================================================
 
@@ -7891,6 +8955,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0243-003: Claude usage monitor
         elif path == '/api/usage/current':
             self.serve_usage_current()
+        # Alert ingestion endpoints (XACA-0334-002)
+        elif path == '/api/alerts':
+            self.serve_alerts_list(parsed.query)
+        elif path.startswith('/api/alerts/'):
+            alert_id = path[len('/api/alerts/'):]
+            self.serve_alert_detail(alert_id, parsed.query)
+        # Daily Overview aggregator (XACA-0334-003)
+        elif path == '/api/daily-overview':
+            self.serve_daily_overview(parsed.query)
         # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
         # This allows the router to work from ANY port - startup scripts write
         # the target team to the static file, and all servers serve the same file.

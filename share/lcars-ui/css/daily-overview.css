@@ -1,0 +1,440 @@
+/*
+ *  daily-overview.css
+ *  DoubleNode Dev-Team Infrastructure (AITeamForge)
+ *
+ *  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+ *  (Year order is intentional: current year first per COPYRIGHT_POLICY.md § 4.8 range convention.)
+ */
+
+/* =============================================================================
+   XACA-0334 — Daily Overview Section
+   No-scroll 7-category grid layout + category cell anatomy + card rows.
+
+   Design spec: kanban/plans/XACA-0334/SPEC.md § 4, § 5
+   Target minimum viewport: 1280×720
+   Interactions (dismiss/complete/deep-link/refresh) wired in subitem 006.
+
+   HTML structure inside .daily-overview-section:
+     <section class="daily-overview-section" data-mode="kanban">
+       <div class="section-header cyan">        ← standard LCARS header
+         <span class="section-title">DAILY OVERVIEW</span>
+         <div class="section-bar"></div>
+         <button id="do-refresh-btn" class="do-refresh-btn">REFRESH</button>
+       </div>
+       <div id="daily-overview-grid">           ← 7-cell CSS grid
+         <div class="do-cell" data-category="kanban_todos">…</div>
+         …
+       </div>
+     </section>
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   SECTION LAYOUT
+   The section uses flex-column so the header is fixed at ~56px and the grid
+   fills remaining space. lcars.css .daily-overview-section.active overrides
+   display to `grid !important` — we counteract that by keeping the section
+   as a CSS Grid where the header is the first row and #daily-overview-grid
+   fills the rest. This is done by declaring grid-template-rows here.
+   ----------------------------------------------------------------------------- */
+
+/* When active, lcars.css sets display:grid — give the section two rows:
+   56px for the header, then the remaining space for the grid. */
+.daily-overview-section.active {
+    grid-template-rows: 56px 1fr;
+    grid-template-columns: 1fr;
+    grid-template-areas:
+        "do-header"
+        "do-grid";
+    padding: 8px;
+    box-sizing: border-box;
+    background: var(--lcars-black);
+    gap: 6px;
+}
+
+.daily-overview-section .section-header {
+    grid-area: do-header;
+    margin-top: 0 !important;
+    align-self: center;
+}
+
+/* -----------------------------------------------------------------------------
+   CATEGORY GRID — #daily-overview-grid
+   This is the 7-cell grid per spec § 4.2.
+   ----------------------------------------------------------------------------- */
+
+#daily-overview-grid {
+    grid-area: do-grid;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: repeat(3, 1fr) 0.6fr;
+    grid-template-areas:
+        "todos    kanban"
+        "crs      backups"
+        "calendar releases"
+        "alerts   alerts";
+    gap: 6px;
+    overflow: hidden;               /* hard-clip — no scrollbar at all */
+    min-height: 0;
+    box-sizing: border-box;
+}
+
+/* Loading / error states span the full grid */
+#daily-overview-grid .do-grid-loading,
+#daily-overview-grid .do-grid-error {
+    grid-column: 1 / -1;
+    grid-row: 1 / -1;
+}
+
+/* -----------------------------------------------------------------------------
+   CATEGORY CELL PLACEMENT — spec § 4.2
+   ----------------------------------------------------------------------------- */
+
+.do-cell[data-category="kanban_todos"]     { grid-area: todos; }
+.do-cell[data-category="kanban_items_due"] { grid-area: kanban; }
+.do-cell[data-category="change_requests"]  { grid-area: crs; }
+.do-cell[data-category="backup_failures"]  { grid-area: backups; }
+.do-cell[data-category="calendar_items"]   { grid-area: calendar; }
+.do-cell[data-category="releases"]         { grid-area: releases; }
+.do-cell[data-category="alert"]            { grid-area: alerts; }
+
+/* -----------------------------------------------------------------------------
+   CATEGORY CELL — spec § 4.2 + § 4.3
+   overflow: hidden is REQUIRED on both cell and body — no scroll bars at all.
+   ----------------------------------------------------------------------------- */
+
+.do-cell {
+    overflow: hidden;               /* hard-clip per spec */
+    display: flex;
+    flex-direction: column;
+    background: var(--lcars-dark);
+    border: 1px solid rgba(153, 204, 255, 0.12);
+    border-radius: 4px;
+    min-height: 0;
+}
+
+/* Cell header — label + total count + overflow chip */
+.do-cell-header {
+    display: flex;
+    align-items: center;
+    padding: 5px 8px 4px 8px;
+    flex-shrink: 0;
+    border-bottom: 1px solid rgba(153, 204, 255, 0.10);
+    gap: 6px;
+    height: 28px;
+    box-sizing: border-box;
+}
+
+.do-cell-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    color: var(--lcars-cyan);
+    white-space: nowrap;
+    text-transform: uppercase;
+    flex-shrink: 0;
+}
+
+/* Total count badge */
+.do-cell-count {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    background: rgba(153, 204, 255, 0.12);
+    color: var(--lcars-cyan);
+    border-radius: 8px;
+    padding: 0px 5px;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+
+/* Overflow chip — "+12 MORE" in LCARS pill style */
+.do-overflow-chip {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 1px;
+    color: var(--lcars-peach);
+    background: rgba(204, 153, 102, 0.15);
+    border: 1px solid rgba(204, 153, 102, 0.30);
+    border-radius: 8px;
+    padding: 0px 6px;
+    white-space: nowrap;
+    flex-shrink: 0;
+    margin-left: auto;
+    /* Subitem 006 adds cursor:pointer + "show all" handler */
+}
+
+.do-overflow-chip.hidden {
+    visibility: hidden;     /* hidden not display:none — preserves header layout */
+}
+
+/* Cell body — contains card rows, hard-clipped */
+.do-cell-body {
+    overflow: hidden;               /* NEVER overflow:auto — per spec § 4.2 */
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+}
+
+/* Loading state inside a cell */
+.do-cell-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    color: rgba(153, 204, 255, 0.35);
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+
+/* Empty state — spec § 4.3: centred, 60% opacity */
+.do-cell-empty {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    color: var(--lcars-peach);
+    opacity: 0.60;
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+}
+
+/* Error state inside a cell */
+.do-cell-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: 1;
+    color: var(--lcars-alert-red);
+    opacity: 0.75;
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    letter-spacing: 1px;
+    text-align: center;
+    padding: 0 6px;
+}
+
+/* -----------------------------------------------------------------------------
+   FULL-SECTION LOADING / ERROR states (while initial fetch is in-flight)
+   ----------------------------------------------------------------------------- */
+
+.do-grid-loading,
+.do-grid-error {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 8px;
+    color: rgba(153, 204, 255, 0.45);
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    letter-spacing: 2px;
+}
+
+.do-grid-error {
+    color: var(--lcars-alert-red);
+    opacity: 0.80;
+}
+
+/* -----------------------------------------------------------------------------
+   CARD ROW — spec § 4.4
+   Fixed 32px height, single line, text-overflow ellipsis.
+   ----------------------------------------------------------------------------- */
+
+.do-card {
+    display: flex;
+    align-items: center;
+    height: 32px;                   /* fixed per spec */
+    flex-shrink: 0;
+    padding: 0 6px 0 0;
+    gap: 5px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+    box-sizing: border-box;
+}
+
+.do-card:last-child {
+    border-bottom: none;
+}
+
+/* Severity color bar — 4px × full height left edge per spec § 4.4 */
+.do-card-severity-bar {
+    width: 4px;
+    height: 32px;
+    flex-shrink: 0;
+    border-radius: 0 2px 2px 0;
+}
+
+/* Severity color dot — 8px circle per spec § 4.4 */
+.do-card-severity-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+
+/* Severity color palette — exact hex values from spec § 4.4 */
+.do-sev-critical .do-card-severity-bar,
+.do-sev-critical .do-card-severity-dot {
+    background: #FF6B6B;            /* LCARS red */
+}
+
+.do-sev-high .do-card-severity-bar,
+.do-sev-high .do-card-severity-dot,
+.do-sev-warn .do-card-severity-bar,
+.do-sev-warn .do-card-severity-dot {
+    background: #FFCC99;            /* LCARS amber */
+}
+
+.do-sev-medium .do-card-severity-bar,
+.do-sev-medium .do-card-severity-dot,
+.do-sev-info .do-card-severity-bar,
+.do-sev-info .do-card-severity-dot {
+    background: #9999FF;            /* LCARS lavender */
+}
+
+.do-sev-low .do-card-severity-bar,
+.do-sev-low .do-card-severity-dot {
+    background: #88AAFF;            /* LCARS pale blue */
+}
+
+/* Card title — fills remaining space, ellipsis on overflow */
+.do-card-title {
+    flex: 1;
+    min-width: 0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    font-size: 11px;
+    color: var(--lcars-peach);
+    font-family: 'Antonio', sans-serif;
+    letter-spacing: 0.3px;
+}
+
+/* Due / relative timestamp */
+.do-card-due {
+    flex-shrink: 0;
+    font-size: 10px;
+    color: rgba(204, 153, 102, 0.65);
+    font-family: 'Antonio', sans-serif;
+    letter-spacing: 0.3px;
+    white-space: nowrap;
+}
+
+/* Action icons cluster — right-aligned, wired by subitem 006 */
+.do-card-actions {
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    flex-shrink: 0;
+}
+
+/* Individual action icon buttons */
+.do-action-btn {
+    width: 16px;
+    height: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: none;
+    border-radius: 3px;
+    font-size: 10px;
+    line-height: 1;
+    padding: 0;
+    cursor: pointer;                /* XACA-0334-006: active buttons are clickable */
+    flex-shrink: 0;
+    opacity: 0.55;
+    color: rgba(153, 204, 255, 0.55);
+    transition: opacity 0.12s ease, background 0.12s ease;
+}
+
+.do-action-btn:hover:not(:disabled) {
+    opacity: 1;
+    background: rgba(153, 204, 255, 0.10);
+}
+
+.do-action-btn:focus-visible {
+    outline: 1px solid rgba(153, 204, 255, 0.70);
+    outline-offset: 1px;
+    opacity: 1;
+}
+
+.do-action-btn:disabled {
+    cursor: default;
+    opacity: 0.25;
+}
+
+.do-action-btn.dismiss-btn {
+    color: rgba(255, 107, 107, 0.65);
+}
+
+.do-action-btn.dismiss-btn:hover:not(:disabled) {
+    background: rgba(255, 107, 107, 0.12);
+}
+
+.do-action-btn.complete-btn {
+    color: rgba(153, 255, 153, 0.65);
+}
+
+.do-action-btn.complete-btn:hover:not(:disabled) {
+    background: rgba(153, 255, 153, 0.12);
+}
+
+.do-action-btn.deep-link-btn {
+    color: rgba(153, 204, 255, 0.65);
+}
+
+/* Hide inapplicable action buttons per item type */
+.do-action-btn[data-action="dismiss"].not-dismissable,
+.do-action-btn[data-action="complete"].not-completable {
+    visibility: hidden;
+    cursor: default;
+    pointer-events: none;
+}
+
+/* -----------------------------------------------------------------------------
+   REFRESH BUTTON — XACA-0334-006
+   Positioned at the right end of .section-header; styled as a compact LCARS pill.
+   ----------------------------------------------------------------------------- */
+
+.do-refresh-btn {
+    margin-left: auto;
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--lcars-cyan);
+    background: rgba(153, 204, 255, 0.08);
+    border: 1px solid rgba(153, 204, 255, 0.30);
+    border-radius: 10px;
+    padding: 2px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.do-refresh-btn:hover:not(:disabled) {
+    background: rgba(153, 204, 255, 0.18);
+    border-color: rgba(153, 204, 255, 0.60);
+}
+
+.do-refresh-btn:focus-visible {
+    outline: 1px solid rgba(153, 204, 255, 0.70);
+    outline-offset: 2px;
+}
+
+.do-refresh-btn:disabled {
+    cursor: default;
+    opacity: 0.45;
+}
+
+/* -----------------------------------------------------------------------------
+   RESPONSIVE NOTE:
+   Spec mandates no narrower-than-1280 breakpoints. No media queries here.
+   ============================================================================= */

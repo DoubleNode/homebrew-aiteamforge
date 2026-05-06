@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "categories": {
+    "kanban_todos":     { "label": "TODOS DUE",       "top_n": 5 },
+    "kanban_items_due": { "label": "KANBAN DUE",      "top_n": 5 },
+    "change_requests":  { "label": "CHANGE REQUESTS", "top_n": 3 },
+    "backup_failures":  { "label": "BACKUP FAILURES", "top_n": 3 },
+    "calendar_items":   { "label": "CALENDAR",        "top_n": 5 },
+    "releases":         { "label": "RELEASES",        "top_n": 3 },
+    "alert":            { "label": "ALERTS",          "top_n": 5 }
+  }
+}
