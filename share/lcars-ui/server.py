@@ -6846,7 +6846,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 board_data = {}
 
-            team_config = board_data.get('teamConfig', {})
+            # XACA-0333-006: `or {}` guards against an explicitly null teamConfig in the
+            # board JSON — dict.get() only uses the default when the key is ABSENT, not
+            # when it's None. Cannot occur via server-written boards, but a hand-edited
+            # JSON could leave teamConfig: null, which would crash setdefault().
+            team_config = board_data.get('teamConfig') or {}
             # Ensure crSupport key always present with default
             team_config.setdefault('crSupport', {}).setdefault('enabled', False)
 
@@ -7085,10 +7089,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # the canonical saved values (including the is_placeholder sub-dict from 003).
             response_team_config: dict = {}
             if board_data is not None:
-                response_team_config = dict(board_data.get('teamConfig', {}))
+                # XACA-0333-006: `or {}` guards against an explicitly null teamConfig.
+                response_team_config = dict(board_data.get('teamConfig') or {})
             elif board_file.exists():
                 with open(board_file, 'r') as f:
-                    response_team_config = dict(json.load(f).get('teamConfig', {}))
+                    response_team_config = dict(json.load(f).get('teamConfig') or {})
             response_team_config.setdefault('crSupport', {}).setdefault('enabled', False)
 
             saved_copyright = self._read_copyright_config(team)

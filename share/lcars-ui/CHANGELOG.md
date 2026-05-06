@@ -12,6 +12,7 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 - **XACA-0333-003:** Server is now the single source of truth for the TBD-sentinel string set (`_COPYRIGHT_PLACEHOLDER_VALUES`). GET/POST responses include a per-field `copyright.is_placeholder = { copyright_owner: bool, ... }` map. The JS hardcoded `_COPYRIGHT_TBD_VALUES` list is removed; `_populateCopyrightFields` reads `is_placeholder[key]` instead.
 - **XACA-0333-004:** `handle_update_team_config` wraps the board.json lock+read+merge+write in `if clean_team_config:`. Copyright-only POSTs no longer acquire the board lock or do a no-op fsync.
 - **XACA-0333-005:** POST response always includes the saved `teamConfig.copyright` block (with `is_placeholder`), read fresh from `team-paths.json` after writes. When 004's guard skips the board write, response re-reads the board for `crSupport`. JS local-form fallback in `saveTeamConfigCopyright` removed (dead code).
+- **XACA-0333-006:** PR #347 review advisory. `dict.get('teamConfig', {})` falls back to default only when the key is absent, not when it's `None`. Switched to `dict.get('teamConfig') or {}` in the GET handler and POST response builder so a hand-edited `"teamConfig": null` board JSON cannot crash `setdefault`.
 
 <!-- XACA-0293: CAB Workflow Phase 3 — Cycle-Time Metrics -->
 
