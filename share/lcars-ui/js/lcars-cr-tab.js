@@ -609,12 +609,18 @@
 
     function _formatDeployWindow(value) {
         if (!value || !String(value).trim()) return '<span class="cr-dim">—</span>';
-        // Try to parse as ISO date; fall back to raw string
         const d = new Date(value);
-        if (!isNaN(d.getTime())) {
-            return escapeHtml(d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' }));
-        }
-        return escapeHtml(String(value));
+        if (isNaN(d.getTime())) return escapeHtml(String(value));
+
+        // Date-only fields are stored as midnight UTC ("2026-05-11T00:00:00Z"); formatting
+        // those in local time pushes the calendar date back a day for viewers west of UTC.
+        // Detect midnight UTC and format in UTC to preserve the stored date label; treat
+        // any non-midnight value as a real instant and show date + time in local TZ.
+        const isMidnightUTC = d.getUTCHours() === 0 && d.getUTCMinutes() === 0 && d.getUTCSeconds() === 0;
+        const opts = isMidnightUTC
+            ? { month: 'short', day: 'numeric', year: 'numeric', timeZone: 'UTC' }
+            : { month: 'short', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' };
+        return escapeHtml(d.toLocaleString('en-US', opts));
     }
 
     function _pushbackDisplay(count) {
@@ -719,9 +725,10 @@
 
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
-    // Total column count including chevron col-0, PUBLISHED col (XACA-0308-004),
-    // and STAGE AGE col (XACA-0293-002).
-    const CR_COL_COUNT = 12;
+    // Total column count: chevron, ID, TYPE/STATE (merged, XACA-0353), TITLE,
+    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, DOCS.
+    // PUBLISHED column dropped in XACA-0353 (Confluence link still in DOCS modal).
+    const CR_COL_COUNT = 10;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
@@ -735,7 +742,6 @@
         const stageAge   = _stageAgeBadge(item);
         const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0) ||
                            !!(item.cr_confluence_url && String(item.cr_confluence_url).trim().length > 0);
-        const confluenceUrl = (item.cr_confluence_url && String(item.cr_confluence_url).trim()) || '';
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
         const isExpanded  = _expandedCRs.has(item.cr_id);
 
@@ -753,21 +759,15 @@
             ? `<button class="${chevronCls}" data-cr-id="${escapeHtml(item.cr_id)}" title="${isExpanded ? 'Collapse' : 'Expand'} linked items" aria-expanded="${isExpanded}" aria-label="${isExpanded ? 'Collapse' : 'Expand'} linked items">&#9654;</button>`
             : `<span class="cr-chevron-placeholder"></span>`;
 
-        const publishedCell = confluenceUrl
-            ? `<a class="cr-published-link" href="${escapeHtml(confluenceUrl)}" target="_blank" rel="noopener noreferrer" title="View on Confluence">&#128196;</a>`
-            : '';
-
         return `<tr class="cr-row${isExpanded ? ' cr-row-expanded' : ''}" data-cr-id="${escapeHtml(item.cr_id)}" data-item-id="${escapeHtml(item.id)}">
             <td class="cr-col-chevron">${chevronBtn}</td>
             <td class="cr-col-id"><button class="cr-id-copy" data-cr-id="${crId}" title="Copy CR ID to clipboard"><span class="cr-id-mono">${crId}</span></button></td>
-            <td class="cr-col-type">${crType}</td>
-            <td class="cr-col-state">${crState}</td>
+            <td class="cr-col-typestate"><div class="cr-typestate-stack"><div class="cr-typestate-type">${crType}</div><div class="cr-typestate-state">${crState}</div></div></td>
             <td class="cr-col-title">${titleCell}</td>
             <td class="cr-col-platform">${platform}</td>
             <td class="cr-col-approver">${approver}</td>
             <td class="cr-col-deploy">${deployWin}</td>
             <td class="cr-col-pushbacks">${pushbacks}</td>
-            <td class="cr-col-published">${publishedCell}</td>
             <td class="cr-col-stage-age">${stageAge}</td>
             <td class="cr-col-docs">${docsBtn}</td>
         </tr>`;
@@ -788,7 +788,10 @@
         const childRows = ids.map(id => {
             const backlogItem = backlogIdx[id] || null;
             const rawTitle    = backlogItem ? (backlogItem.title || '') : '';
-            const rawStatus   = backlogItem ? (backlogItem.status || backlogItem.crState || '') : '';
+            // crState belongs to the CR row, not the kanban item — never fall through to it
+            // here (XACA-0353). Null status means "untriaged backlog" per the LCARS
+            // convention used in lcars.js (`item.status || 'backlog'`).
+            const rawStatus   = backlogItem ? (backlogItem.status || 'backlog') : '';
             const titleText   = escapeHtml(rawTitle) || '<span class="cr-dim">—</span>';
             const statusText  = rawStatus
                 ? `<span class="cr-child-status cr-child-status-${escapeHtml(rawStatus.toLowerCase().replace(/\s+/g, '-'))}">${escapeHtml(rawStatus)}</span>`
@@ -938,14 +941,12 @@
                     <tr class="cr-header-row">
                         <th class="cr-col-chevron"></th>
                         <th class="cr-col-id">CR ID</th>
-                        <th class="cr-col-type">TYPE</th>
-                        <th class="cr-col-state">STATE</th>
+                        <th class="cr-col-typestate">TYPE / STATE</th>
                         <th class="cr-col-title">TITLE</th>
                         <th class="cr-col-platform">PLATFORM</th>
                         <th class="cr-col-approver">APPROVER</th>
                         <th class="cr-col-deploy">DEPLOY WINDOW</th>
                         <th class="cr-col-pushbacks">PUSHBACKS</th>
-                        <th class="cr-col-published">PUBLISHED</th>
                         <th class="cr-col-stage-age">STAGE AGE</th>
                         <th class="cr-col-docs">DOCS</th>
                     </tr>

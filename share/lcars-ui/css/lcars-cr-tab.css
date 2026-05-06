@@ -192,17 +192,24 @@
 }
 
 /* Column widths */
-.cr-col-chevron  { width: 24px; padding: 0 2px; text-align: center; }
-.cr-col-id       { width: 100px; }
-.cr-col-type     { width: 90px; }
-.cr-col-state    { width: 130px; }
-.cr-col-title    { min-width: 140px; max-width: 220px; }
-.cr-col-platform { width: 80px; }
-.cr-col-approver { width: 110px; }
-.cr-col-deploy   { width: 110px; }
-.cr-col-pushbacks  { width: 70px; text-align: center; }
-.cr-col-published  { width: 60px; text-align: center; }
-.cr-col-docs       { width: 60px; text-align: center; }
+.cr-col-chevron   { width: 24px; padding: 0 2px; text-align: center; }
+.cr-col-id        { width: 100px; }
+.cr-col-typestate { width: 1%; white-space: nowrap; text-align: center; }  /* size to content (XACA-0353) */
+.cr-col-title     { min-width: 140px; max-width: 220px; }
+.cr-col-platform  { width: 80px; }
+.cr-col-approver  { width: 110px; }
+.cr-col-deploy    { width: 110px; }
+.cr-col-pushbacks { width: 70px; text-align: center; }
+.cr-col-docs      { width: 60px; text-align: center; }
+
+/* TYPE / STATE merged column (XACA-0353): TYPE badge stacked on top of STATE badge */
+.cr-typestate-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 3px;
+}
+.cr-typestate-stack > div { line-height: 1; }
 
 /* ── Chevron expand button (XACA-0310-002) ───────────────────────────────── */
 
@@ -338,12 +345,17 @@
     letter-spacing: 0.02em;
 }
 
-/* Title truncation */
+/* Title — 2-line wrap with overflow truncation (XACA-0353).
+   Full title remains accessible via the title="" tooltip on the span. */
 .cr-title-text {
-    display: block;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
     overflow: hidden;
     text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    word-break: break-word;
+    line-height: 1.25;
     max-width: 210px;
 }
 
@@ -1108,21 +1120,6 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     text-transform: uppercase;
 }
 
-/* ── PUBLISHED column — Confluence link indicator (XACA-0308-004) ─────────── */
-
-.cr-published-link {
-    display: inline-block;
-    font-size: 14px;
-    line-height: 1;
-    text-decoration: none;
-    color: var(--lcars-cyan, #99ccff);
-    transition: color 0.15s;
-}
-
-.cr-published-link:hover {
-    color: var(--lcars-white, #ffffff);
-}
-
 /* ── CR confluence footer — rendered below markdown body in popup/modal ─── */
 
 .cr-confluence-footer {
@@ -1216,8 +1213,7 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
 }
 
 @media (max-width: 600px) {
-    .cr-col-deploy,
-    .cr-col-published { display: none; }
+    .cr-col-deploy { display: none; }
 
     .cr-filter-controls {
         flex-direction: column;
