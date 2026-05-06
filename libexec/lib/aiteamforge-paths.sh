@@ -271,7 +271,7 @@ _aiteamforge_get_field() {
     if [ -f "$config_path" ] && command -v jq &>/dev/null; then
         local version
         version=$(jq -r '.schema_version // 0' "$config_path" 2>/dev/null)
-        if [ "$version" != "1" ] && [ "$version" != "0" ]; then
+        if [ "$version" != "2" ] && [ "$version" != "1" ] && [ "$version" != "0" ]; then
             echo "[aiteamforge-paths] WARNING: schema_version=${version} unsupported" >&2
         fi
 
