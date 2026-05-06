@@ -1540,12 +1540,15 @@ _kb_cr_create_doc_file() {
     cr_docs_dir="${board_dir}/cr-docs"
     mkdir -p "$cr_docs_dir" 2>/dev/null || return 1
 
-    # ── Template resolution (worktree-first so Phase 3 template is used during
-    #    development; falls back to main-repo and tap paths in order) ──────────
+    # ── Template resolution (worktree-agnostic; derives current repo via git
+    #    so any active worktree finds the Phase 3 template; falls back to
+    #    main-repo and tap paths in order) ─────────────────────────────────────
     local template=""
-    # Worktree path (xaca-0308 branch — has the Phase 3 template with {{ITEM_ID}} etc.)
-    if [[ -f "${HOME}/dev-team/worktrees/xaca-0308/templates/cr-doc-template.md" ]]; then
-        template="${HOME}/dev-team/worktrees/xaca-0308/templates/cr-doc-template.md"
+    # Current git tree root (works for main repo OR any active worktree)
+    local _git_root=""
+    _git_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [[ -n "$_git_root" && -f "${_git_root}/templates/cr-doc-template.md" ]]; then
+        template="${_git_root}/templates/cr-doc-template.md"
     # Main-repo tracked path (after PR merge, has the Phase 3 version)
     elif [[ -f "${HOME}/dev-team/templates/cr-doc-template.md" ]]; then
         template="${HOME}/dev-team/templates/cr-doc-template.md"
@@ -2557,7 +2560,7 @@ PROMPT
 
     # Invoke the skill. Capture stdout to extract the Confluence URL.
     local skill_output
-    skill_output=$(printf '%s\n' "$skill_prompt" | claude --no-interactive 2>&1) || {
+    skill_output=$(printf '%s\n' "$skill_prompt" | claude -p 2>&1) || {
         echo "kb-cr publish: skill invocation failed (exit $?)." >&2
         echo "$skill_output" >&2
         return 1
