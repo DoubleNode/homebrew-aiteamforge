@@ -3,6 +3,22 @@
 #
 # Sourced by kanban-helpers.sh. Provides the kb-cr dispatcher.
 #
+# ── PHASE 3 — CR DOC AS SOURCE OF TRUTH (XACA-0308) ─────────────────────────
+#
+#  • LOCAL MARKDOWN IS CANONICAL: Each CR has a file at
+#      <team-kanban>/cr-docs/<ITEM-ID>-CR.md
+#    This file is the authoritative CR document. The Confluence page is
+#    published FROM it via `kb-cr publish` (implemented in subitem 002).
+#
+#  • cr_confluence_url: NEW field on crs[] records. Holds the published
+#    Confluence page URL after a successful `kb-cr publish`. Null/missing
+#    means "not yet published." Written by `kb-cr publish` (subitem 002).
+#
+#  • cr_doc_link: DEPRECATED. Previously held a Confluence URL or file path.
+#    Removed by migrate-cr-schema-phase3.py (XACA-0308-001).
+#    Run `python3 scripts/migrate-cr-schema-phase3.py` to migrate (dry-run);
+#    add `--apply` to write changes (subitem 006 runs this against all teams).
+#
 # LOAD-BEARING INVARIANT:
 #   If teamConfig.crSupport.enabled is false (or absent) on the team board,
 #   ALL subcommands exit 0 with a single informational line. No reads, no writes,
@@ -15,7 +31,8 @@
 #   kb-cr remove-item  <CR-ID> <item-id>
 #   kb-cr list         [--state <state>] [--platform <name>]
 #   kb-cr transition   <CR-ID> <new-state>
-#   kb-cr show         <CR-ID>
+#   kb-cr show         <CR-ID>  [Phase 3: also shows cr-docs/<ITEM-ID>-CR.md + cr_confluence_url]
+#   kb-cr publish      <ITEM-ID>  [Phase 3: reads local md → publishes to Confluence → writes cr_confluence_url]
 #
 #   Container lifecycle (v2.0 — state + timestamp, atomic — argument starts with CR-):
 #   kb-cr submit  <CR-ID>
@@ -28,6 +45,7 @@
 #
 #   Per-item lifecycle (v1 / legacy — argument is an item-id):
 #   kb-cr draft   <item-id> --type <major|emergency|fyi>
+#                 [Phase 3: creates <team-kanban>/cr-docs/<ITEM-ID>-CR.md from template]
 #   kb-cr submit  <item-id>
 #   kb-cr approve <item-id> --by <login> --name <display-name>
 #   kb-cr reject  <item-id>
@@ -1855,6 +1873,8 @@ _kb_cr_help() {
     echo "              Remove a backlog item from a CR container."
     echo "  show <CR-ID>"
     echo "              Display CR container details, items, and timestamps."
+    echo "              Phase 3 (XACA-0308): also shows canonical local md path"
+    echo "              (<team-kanban>/cr-docs/<ITEM-ID>-CR.md) and cr_confluence_url."
     echo "  list [--state <state>] [--platform <name>]"
     echo "              List all CRs on the board (filterable)."
     echo "  transition <CR-ID> <new-state>"
@@ -1897,6 +1917,12 @@ _kb_cr_help() {
     echo "── Per-item Lifecycle Commands (v1 / legacy — argument is an item-id) ─"
     echo "  draft   <id> --type <major|emergency|fyi>"
     echo "              Create a CR draft for a backlog item."
+    echo "              Phase 3 (XACA-0308): also creates <team-kanban>/cr-docs/<id>-CR.md"
+    echo "              from cr-doc-template.md (implemented in subitem 002)."
+    echo "  publish <id>"
+    echo "              Phase 3 (XACA-0308): reads <team-kanban>/cr-docs/<id>-CR.md,"
+    echo "              publishes to Confluence (DPD2 space), writes cr_confluence_url."
+    echo "              Implemented in subitem 002."
     echo "  submit  <id>"
     echo "              Submit the CR for CAB review (per-item path)."
     echo "  approve <id> [--by <login>] [--name <display>]"
@@ -1923,6 +1949,13 @@ _kb_cr_help() {
     echo "              Dry-run by default. Pass --apply to write."
     echo "  show <item-id>"
     echo "              Display CR lifecycle fields for an item (routes by ID prefix)."
+    echo ""
+    echo "── Phase 3 Schema (XACA-0308) ───────────────────────────────────────────"
+    echo "  CANONICAL LOCAL PATH: <team-kanban>/cr-docs/<ITEM-ID>-CR.md"
+    echo "  cr_confluence_url (NEW): published Confluence URL on crs[] records."
+    echo "  cr_doc_link (DEPRECATED): removed by migrate-cr-schema-phase3.py"
+    echo "    Dry-run: python3 scripts/migrate-cr-schema-phase3.py"
+    echo "    Apply:   python3 scripts/migrate-cr-schema-phase3.py --apply"
     echo ""
     echo "  help"
     echo "              Show this help."
