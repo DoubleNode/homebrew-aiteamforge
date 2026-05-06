@@ -817,7 +817,7 @@ The kanban schema supports an optional CR-lifecycle axis layered orthogonally to
 **Three orthogonal axes per item:**
 1. **`status`** — kanban workflow state (`backlog`, `in_progress`, `pr_review`, `completed`, …). Pre-existing.
 2. **`releaseAssignment`** — environment promotion track (`DEV`, `QA`, `BETA`, `PROD`, …). Pre-existing.
-3. **`crState`** — CR lifecycle state (`cr-drafted`, `cr-submitted`, `cr-approved`, `implementing`, `deployed-dev`, `deployed-prod`, `emergency-deployed`, …). Added by XACA-0291.
+3. **`crState`** — CR lifecycle state (`cr-drafted`, `cr-submitted`, `cr-approved`, `implementing`, `deployed-dev`, `deployed-prod`, `emergency-deployed`, `cr-closed`, …). Added by XACA-0291. `cr-closed` is a manual terminal archive state (XACA-0349) — reachable from any state via `kb-cr close`; does not increment `pushback_count`.
 
 The three axes do not gate each other. An item can be `status=in_progress`, `releaseAssignment=PROD`, `crState=cr-approved` simultaneously. State transitions on one axis do not constrain the others.
 
