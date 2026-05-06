@@ -519,7 +519,7 @@ def extract_session_uuid(env_id):
     return env_id
 
 
-async def resize_pane_by_env(connection, target_cols=30):
+async def resize_pane_by_env(connection, target_cols=30, min_rows=50):
     """Resize the current pane (identified by ITERM_SESSION_ID env var) to a fixed column width.
 
     Called by agent-panel-display.sh when pane width drifts from target.
@@ -546,17 +546,29 @@ async def resize_pane_by_env(connection, target_cols=30):
                     # reading total_cols and subtracting creates a
                     # feedback loop where rounding/divider errors
                     # accumulate, shrinking the window each cycle.
-                    session.preferred_size = iterm2.util.Size(target_cols, session.grid_size.height)
+                    #
+                    # Height: only grow to min_rows if currently shorter.
+                    # Round-tripping grid_size.height into preferred_size
+                    # also feedback-loops (chrome padding inflates grid each
+                    # cycle, causing monotonic window growth). Preserve the
+                    # stable preferred height when current is already tall enough.
+                    current_height = session.grid_size.height
+                    if current_height < min_rows:
+                        target_height = min_rows
+                    else:
+                        target_height = session.preferred_size.height or current_height
+                    session.preferred_size = iterm2.util.Size(target_cols, target_height)
                     await tab.async_update_layout()
                     print(f"Resized pane {session.session_id}: "
-                          f"{current_width} -> {target_cols} cols")
+                          f"{current_width} -> {target_cols} cols, "
+                          f"height {current_height} (min {min_rows})")
                     return True
     print(f"Session not found: {env_session_id} (uuid: {session_uuid})", file=sys.stderr)
     return False
 
 
 
-async def reset_all_agent_panels(connection, target_cols=30):
+async def reset_all_agent_panels(connection, target_cols=30, min_rows=50):
     """Reset ALL agent panel panes across all windows to the target width.
 
     Iterates through every tab in every window. For tabs with exactly 2 panes,
@@ -588,7 +600,15 @@ async def reset_all_agent_panels(connection, target_cols=30):
                 skipped += 1
                 continue
 
-            agent.preferred_size = iterm2.util.Size(target_cols, agent.grid_size.height)
+            # Height: only grow to min_rows if shorter; otherwise preserve the
+            # stable preferred height. Using grid_size.height round-trips
+            # chrome-padded values back into preferred and inflates the window.
+            current_h = agent.grid_size.height
+            if current_h < min_rows:
+                target_h = min_rows
+            else:
+                target_h = agent.preferred_size.height or current_h
+            agent.preferred_size = iterm2.util.Size(target_cols, target_h)
             await tab.async_update_layout()
             fixed += 1
 
@@ -786,7 +806,8 @@ async def main_async(args):
 
     elif args.action == "resize-pane":
         target = int(args.target_cols) if args.target_cols else 30
-        await resize_pane_by_env(connection, target)
+        min_rows = int(args.min_rows) if args.min_rows else 50
+        await resize_pane_by_env(connection, target, min_rows)
 
     elif args.action == "set-font":
         font_name = args.font or "FiraCodeNFM-Light 8"
@@ -798,7 +819,8 @@ async def main_async(args):
 
     elif args.action == "reset-panels":
         target = int(args.target_cols) if args.target_cols else 30
-        await reset_all_agent_panels(connection, target)
+        min_rows = int(args.min_rows) if args.min_rows else 50
+        await reset_all_agent_panels(connection, target, min_rows)
 
     elif args.action == "list-windows":
         app = await iterm2.async_get_app(connection)
@@ -822,6 +844,7 @@ def main():
     parser.add_argument("--command", "-c", help="Command to execute in the tab")
     parser.add_argument("--url", "-u", help="(deprecated) URL for agent panel")
     parser.add_argument("--target-cols", help="Target column width for resize-pane action (default: 30)")
+    parser.add_argument("--min-rows", help="Minimum row height; only grows pane if shorter (default: 50)")
     parser.add_argument("--font", "-f", help="Font spec for set-font action (e.g. 'FiraCodeNFM-Light 8')")
     parser.add_argument(
         "--action", "-a",
