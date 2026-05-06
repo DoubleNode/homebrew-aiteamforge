@@ -4,6 +4,15 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0333: Team Config UI hardening — XACA-0332 advisory follow-ups -->
+
+### Fixed
+- **XACA-0333-001:** Advisory `*.json.lock` files left by `_write_copyright_config` and `handle_update_team_config` are now `unlink()`-ed after `LOCK_UN` (best-effort, swallows `OSError`). A startup `_sweep_stale_locks()` removes stranded zero-byte locks older than 60s — targets `~/.aiteamforge/*.lock` and every canonical `<team>-board.json.lock`.
+- **XACA-0333-002:** `_read_copyright_config` uses an mtime-based class-level cache (`_TEAM_PATHS_CACHE` keyed by `st_mtime_ns`) so repeat GETs to `/api/team-config` no longer re-read `team-paths.json` from disk. Cache invalidates on `_write_copyright_config` success. Thread-safe via `_TEAM_PATHS_CACHE_LOCK`.
+- **XACA-0333-003:** Server is now the single source of truth for the TBD-sentinel string set (`_COPYRIGHT_PLACEHOLDER_VALUES`). GET/POST responses include a per-field `copyright.is_placeholder = { copyright_owner: bool, ... }` map. The JS hardcoded `_COPYRIGHT_TBD_VALUES` list is removed; `_populateCopyrightFields` reads `is_placeholder[key]` instead.
+- **XACA-0333-004:** `handle_update_team_config` wraps the board.json lock+read+merge+write in `if clean_team_config:`. Copyright-only POSTs no longer acquire the board lock or do a no-op fsync.
+- **XACA-0333-005:** POST response always includes the saved `teamConfig.copyright` block (with `is_placeholder`), read fresh from `team-paths.json` after writes. When 004's guard skips the board write, response re-reads the board for `crSupport`. JS local-form fallback in `saveTeamConfigCopyright` removed (dead code).
+
 <!-- XACA-0293: CAB Workflow Phase 3 — Cycle-Time Metrics -->
 
 ### Added

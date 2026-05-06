@@ -18352,8 +18352,8 @@ async function toggleTodo(todoId) {
 // Dispatches 'crsupport-changed' on toggle so other agents can react.
 // =============================================================================
 
-/** Sentinel for copyright TBD placeholder values (set by XACA-0251). */
-const _COPYRIGHT_TBD_VALUES = ['<TBD-per-engagement>', '<TBD>'];
+// XACA-0333-003: TBD detection now uses server-supplied teamConfig.copyright.is_placeholder
+// (server is the single source of truth for placeholder strings; previous _COPYRIGHT_TBD_VALUES removed).
 
 /**
  * Fetch the current teamConfig from the server and wire up the CR checkbox
@@ -18402,6 +18402,8 @@ async function loadTeamConfig() {
  * Applies TBD warning styling for placeholder values.
  */
 function _populateCopyrightFields(copyright) {
+    // XACA-0333-003: use server-supplied is_placeholder map; empty map = safe fallback (no TBD badges shown).
+    const isPlaceholderMap = (copyright && copyright.is_placeholder) || {};
     const fields = [
         { id: 'team-config-copyright-owner', key: 'copyright_owner', tbdId: 'team-config-copyright-owner-tbd' },
         { id: 'team-config-component-label', key: 'component_label', tbdId: 'team-config-component-label-tbd' },
@@ -18427,7 +18429,7 @@ function _populateCopyrightFields(copyright) {
         } else {
             el.value = val;
             el.classList.remove('unset');
-            const isTbd = _COPYRIGHT_TBD_VALUES.includes(val);
+            const isTbd = !!isPlaceholderMap[key];
             el.classList.toggle('tbd-warning', isTbd);
             if (tbdEl) tbdEl.style.display = isTbd ? 'inline-block' : 'none';
         }
@@ -18533,9 +18535,8 @@ async function saveTeamConfigCopyright() {
         }
 
         // Re-apply TBD styling after save (values may have changed)
-        _populateCopyrightFields(result.teamConfig && result.teamConfig.copyright
-            ? result.teamConfig.copyright
-            : { copyright_owner: copyrightOwner, license_type: licenseType, component_label: componentLabel, year_start: yearStart, notice_template: noticeTemplate });
+        // XACA-0333-005: server response now always includes saved copyright block (with is_placeholder)
+        _populateCopyrightFields(result.teamConfig && result.teamConfig.copyright);
 
         const msg = result.warning ? `Saved (${result.warning})` : 'Saved';
         _setCopyrightStatus(statusEl, 'saved', msg);

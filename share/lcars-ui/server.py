@@ -23,6 +23,7 @@ import shlex
 import socket
 import subprocess
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -1410,6 +1411,11 @@ def _build_usage_response(
     return 200, result
 
 
+# XACA-0333-003: TBD sentinel values for copyright fields — server-side single source of truth.
+# JS (lcars.js) mirrors this set; update both together if new placeholders are added.
+_COPYRIGHT_PLACEHOLDER_VALUES: frozenset = frozenset({'<TBD-per-engagement>', '<TBD>'})
+
+
 class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     """Custom handler for LCARS Kanban Monitor"""
 
@@ -1419,6 +1425,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # - Legal: legal-{projectId} (e.g., legal-coparenting)
     # - MainEvent floaters: mainevent-{projectId} (project-specific)
     PATH_PREFIXES = ['/academy', '/firebase', '/dns', '/freelance-doublenode-workstats', '/freelance-doublenode-starwords', '/freelance-doublenode-appplanning', '/command', '/ios', '/android', '/mainevent', '/legal-coparenting', '/finance-personal']
+
+    # XACA-0333-002: mtime-based cache for team-paths.json (avoids disk read on every GET)
+    _TEAM_PATHS_CACHE: dict = {'mtime_ns': None, 'data': None}
+    _TEAM_PATHS_CACHE_LOCK: threading.Lock = threading.Lock()
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
@@ -6854,25 +6864,53 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """Read XACA-0251 copyright fields for `team` from ~/.aiteamforge/team-paths.json (schema v2).
 
         Returns a dict with copyright_owner / license_type / component_label / year_start /
-        notice_template, or None if the team is not present or the file is missing.
+        notice_template / is_placeholder, or None if the team is not present or the file is missing.
+
+        XACA-0333-002: uses an mtime-based class-level cache to avoid re-reading from disk
+        on every GET.  Cache is invalidated by _write_copyright_config after a successful write.
+
+        XACA-0333-003: includes is_placeholder sub-dict mapping each copyright field name
+        to a bool indicating whether the current value is a TBD placeholder.
         """
         team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
         if not team_paths_file.exists():
             return None
         try:
-            with open(team_paths_file, 'r') as f:
-                data = json.load(f)
+            # XACA-0333-002: stat first; reuse cache if mtime_ns matches
+            try:
+                current_mtime_ns = os.stat(team_paths_file).st_mtime_ns
+            except OSError:
+                return None
+
+            with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                cached = LCARSHandler._TEAM_PATHS_CACHE
+                if cached['mtime_ns'] == current_mtime_ns and cached['data'] is not None:
+                    data = cached['data']
+                else:
+                    with open(team_paths_file, 'r') as f:
+                        data = json.load(f)
+                    LCARSHandler._TEAM_PATHS_CACHE = {'mtime_ns': current_mtime_ns, 'data': data}
+
             team_block = data.get('teams', {}).get(team)
             if not team_block:
                 return None
-            # Return only the copyright fields (not kanban_dir, working_dir, lcars_port, etc.)
-            return {
+
+            # Collect the 5 copyright fields
+            fields = {
                 'copyright_owner': team_block.get('copyright_owner'),
                 'license_type': team_block.get('license_type'),
                 'component_label': team_block.get('component_label'),
                 'year_start': team_block.get('year_start'),
                 'notice_template': team_block.get('notice_template'),
             }
+
+            # XACA-0333-003: build is_placeholder sub-dict — True iff string value is a TBD sentinel
+            fields['is_placeholder'] = {
+                k: (isinstance(v, str) and v in _COPYRIGHT_PLACEHOLDER_VALUES)
+                for k, v in fields.items()
+            }
+
+            return fields
         except Exception as e:
             print(f"[LCARS] WARNING reading copyright config for {team}: {e}")
             return None
@@ -7006,34 +7044,58 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({'success': False, 'error': f'Board not found for team: {team}'}, status=404)
                 return
 
-            import fcntl
-            lock_file = board_file.with_suffix('.json.lock')
-            with open(lock_file, 'w') as lock:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-                try:
-                    with open(board_file, 'r') as f:
-                        board_data = json.load(f)
+            # XACA-0333-004: skip the board.json lock+write entirely when payload has no crSupport
+            # changes (copyright-only saves).  board_data stays None; subitem 005 handles response.
+            if clean_team_config:
+                import fcntl
+                lock_file = board_file.with_suffix('.json.lock')
+                with open(lock_file, 'w') as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    try:
+                        with open(board_file, 'r') as f:
+                            board_data = json.load(f)
 
-                    # Merge the CLEAN validated payload into existing teamConfig
-                    existing = board_data.get('teamConfig', {})
-                    for key, val in clean_team_config.items():
-                        if isinstance(val, dict) and isinstance(existing.get(key), dict):
-                            existing[key].update(val)
-                        else:
-                            existing[key] = val
-                    board_data['teamConfig'] = existing
+                        # Merge the CLEAN validated payload into existing teamConfig
+                        existing = board_data.get('teamConfig', {})
+                        for key, val in clean_team_config.items():
+                            if isinstance(val, dict) and isinstance(existing.get(key), dict):
+                                existing[key].update(val)
+                            else:
+                                existing[key] = val
+                        board_data['teamConfig'] = existing
 
-                    self._atomic_write_json(board_file, board_data)
-                    print(f"[LCARS] Team config updated for '{team}': {existing}")
-                finally:
-                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        self._atomic_write_json(board_file, board_data)
+                        print(f"[LCARS] Team config updated for '{team}': {existing}")
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        # XACA-0333-001: remove the advisory lock file after release — best-effort
+                        try: lock_file.unlink(missing_ok=True)
+                        except OSError: pass
+            else:
+                board_data = None  # copyright-only save — board not touched
 
             # --- Write copyright changes to team-paths.json (XACA-0332) ---
             copyright_write_error = None
             if clean_copyright:
                 copyright_write_error = self._write_copyright_config(team, clean_copyright)
 
-            response_payload = {'success': True, 'teamConfig': board_data['teamConfig']}
+            # XACA-0333-005: build a complete teamConfig response. crSupport comes from the
+            # board write above (or a fresh re-read if the board wasn't touched), and the
+            # copyright block is read fresh from team-paths.json so the client always gets
+            # the canonical saved values (including the is_placeholder sub-dict from 003).
+            response_team_config: dict = {}
+            if board_data is not None:
+                response_team_config = dict(board_data.get('teamConfig', {}))
+            elif board_file.exists():
+                with open(board_file, 'r') as f:
+                    response_team_config = dict(json.load(f).get('teamConfig', {}))
+            response_team_config.setdefault('crSupport', {}).setdefault('enabled', False)
+
+            saved_copyright = self._read_copyright_config(team)
+            if saved_copyright is not None:
+                response_team_config['copyright'] = saved_copyright
+
+            response_payload = {'success': True, 'teamConfig': response_team_config}
             if copyright_write_error:
                 # Board write succeeded; copyright write failed — partial success
                 response_payload['warning'] = f'Team config saved, but copyright write failed: {copyright_write_error}'
@@ -7088,10 +7150,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             tmp_path.unlink()
                         raise
 
+                    # XACA-0333-002: invalidate the mtime cache so the next GET re-reads from disk.
+                    # Do this BEFORE the success log and ONLY on successful write (not in except).
+                    with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                        LCARSHandler._TEAM_PATHS_CACHE = {'mtime_ns': None, 'data': None}
+
                     print(f"[LCARS] Copyright config updated for '{team}': {copyright_fields}")
                     return None
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                    # XACA-0333-001: remove the advisory lock file after release — best-effort
+                    try: lock_file.unlink(missing_ok=True)
+                    except OSError: pass
         except Exception as e:
             print(f"[LCARS] ERROR writing copyright config for {team}: {e}")
             return str(e)
@@ -10807,6 +10877,58 @@ LEGACY_STUB_PATHS = {
 }
 
 
+def _sweep_stale_locks() -> None:
+    """XACA-0333-001: Sweep and remove stale .json.lock files at server startup.
+
+    Targets:
+      - ~/.aiteamforge/*.lock  (team-paths.json.lock and any siblings)
+      - <board.json>.lock for every board reachable via TEAM_KANBAN_DIRS
+
+    A lock file is considered stale — and safe to remove — when BOTH:
+      1. Its mtime is older than 60 seconds (no live process is mid-write)
+      2. Its size is 0 bytes (server.py only ever opens lock files for 'w'
+         without writing content, so any real in-use lock is 0 bytes; files
+         written by other tools are preserved by the size guard)
+
+    Each unlink is best-effort; OSError is silently swallowed.
+    """
+    import time
+    now = time.time()
+    stale_age_secs = 60
+
+    candidates: list[Path] = []
+
+    # ~/.aiteamforge/*.lock
+    aiteamforge_dir = Path.home() / '.aiteamforge'
+    if aiteamforge_dir.is_dir():
+        candidates.extend(aiteamforge_dir.glob('*.lock'))
+
+    # <team>-board.json.lock for all known teams
+    for team_id, kanban_dir in TEAM_KANBAN_DIRS.items():
+        board_lock = kanban_dir / f'{team_id}-board.json.lock'
+        candidates.append(board_lock)
+
+    swept = 0
+    for lock_path in candidates:
+        try:
+            st = lock_path.stat()
+        except OSError:
+            continue  # doesn't exist or no permission — skip
+        age = now - st.st_mtime
+        if age >= stale_age_secs and st.st_size == 0:
+            try:
+                lock_path.unlink(missing_ok=True)
+                swept += 1
+                print(f"[LCARS] Swept stale lock: {lock_path} (age {age:.0f}s)")
+            except OSError:
+                pass  # best-effort
+
+    if swept:
+        print(f"[LCARS] Stale lock sweep complete — removed {swept} file(s).")
+    else:
+        print("[LCARS] Stale lock sweep complete — nothing to remove.")
+
+
 def check_dual_boards_or_die(team: str) -> None:
     """XACA-0180 guardrail: refuse to start if a legacy stub board coexists
     with the canonical board for *team*.  Other teams' stubs emit warnings.
@@ -10881,6 +11003,9 @@ def main():
 ║                                                                   ║
 ╚═══════════════════════════════════════════════════════════════════╝
 """)
+
+    # XACA-0333-001: sweep stale zero-byte lock files left by prior killed processes.
+    _sweep_stale_locks()
 
     # XACA-0180: refuse to start if a legacy stub board coexists with canonical.
     check_dual_boards_or_die(LCARS_TEAM)
