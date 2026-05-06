@@ -200,8 +200,9 @@
 .cr-col-platform { width: 80px; }
 .cr-col-approver { width: 110px; }
 .cr-col-deploy   { width: 110px; }
-.cr-col-pushbacks{ width: 70px; text-align: center; }
-.cr-col-docs     { width: 60px; text-align: center; }
+.cr-col-pushbacks  { width: 70px; text-align: center; }
+.cr-col-published  { width: 60px; text-align: center; }
+.cr-col-docs       { width: 60px; text-align: center; }
 
 /* ── Chevron expand button (XACA-0310-002) ───────────────────────────────── */
 
@@ -1102,6 +1103,51 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     text-transform: uppercase;
 }
 
+/* ── PUBLISHED column — Confluence link indicator (XACA-0308-004) ─────────── */
+
+.cr-published-link {
+    display: inline-block;
+    font-size: 14px;
+    line-height: 1;
+    text-decoration: none;
+    color: var(--lcars-cyan, #99ccff);
+    transition: color 0.15s;
+}
+
+.cr-published-link:hover {
+    color: var(--lcars-white, #ffffff);
+}
+
+/* ── CR confluence footer — rendered below markdown body in popup/modal ─── */
+
+.cr-confluence-footer {
+    margin-top: 16px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(153, 204, 255, 0.2);
+}
+
+.cr-confluence-footer a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--lcars-cyan, #99ccff);
+    text-decoration: none;
+    transition: color 0.15s;
+}
+
+.cr-confluence-footer a:hover {
+    color: var(--lcars-white, #ffffff);
+}
+
+.cr-confluence-icon {
+    font-size: 14px;
+    line-height: 1;
+}
+
 /* ── XACA-0293-002: Stage Age column + badges ────────────────────────────── */
 
 /* Column width — sits between PUSHBACKS and DOCS */
@@ -1165,7 +1211,8 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
 }
 
 @media (max-width: 600px) {
-    .cr-col-deploy { display: none; }
+    .cr-col-deploy,
+    .cr-col-published { display: none; }
 
     .cr-filter-controls {
         flex-direction: column;

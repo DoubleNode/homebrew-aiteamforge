@@ -14,6 +14,16 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 - **XACA-0333-005:** POST response always includes the saved `teamConfig.copyright` block (with `is_placeholder`), read fresh from `team-paths.json` after writes. When 004's guard skips the board write, response re-reads the board for `crSupport`. JS local-form fallback in `saveTeamConfigCopyright` removed (dead code).
 - **XACA-0333-006:** PR #347 review advisory. `dict.get('teamConfig', {})` falls back to default only when the key is absent, not when it's `None`. Switched to `dict.get('teamConfig') or {}` in the GET handler and POST response builder so a hand-edited `"teamConfig": null` board JSON cannot crash `setdefault`.
 
+<!-- XACA-0304: Converge BACKLOG and CHANGE REQ filter bars onto lcars-filter-bar.js -->
+
+### Changed
+- **XACA-0304-001:** `js/lcars-filter-bar.js` extended with four optional config blocks — `searchIds`, `pillGroups[]` (multi/single pill modes), `sortControl` (N-value cycle button), and `customDropdowns[]` (generic `<select>` wiring). Defaults preserve original BACKLOG behavior; BACKLOG `createFilterBar()` init is unchanged.
+- **XACA-0304-002:** `index.html` — CR filter-bar HTML is now static markup. Previously injected at runtime via a `container.innerHTML` template literal in `_wireCRFilterBar`.
+- **XACA-0304-003:** `js/lcars-cr-tab.js` deleted `_filterState`, `_loadFilterState`, `_saveFilterState`, `_wireCRFilterBar`, `_syncStatePills`, `_syncTypePills`, plus `FILTER_KEY` / `SORT_VALUES` constants (~180 LOC of duplicate filter-bar plumbing). Replaced with a single `createFilterBar({...})` call. Net: −81 lines in this file. localStorage keys unchanged (`lcars-queue-filter` for BACKLOG, `lcars-change-req-filter` for CR) — no migration needed.
+- **XACA-0304-004:** Saved-view chips (THIS WEEK / AWAITING APPROVAL / EMERGENCY 30D) now drive `fb.setState(preset)`. Added an `_applyingSavedView` re-entrancy guard plus a non-sort-fields snapshot so the active chip is not cleared on sort cycles or self-applied presets. Resolves the Wave 3G TODO noted in XACA-0292-007 ("future refactor could unify them").
+- **XACA-0304-006:** CR platform dropdown `.active` parity — added `id="cr-platform-wrap"` to the wrapping `<div>` and pointed `customDropdowns.dropdownId` at the wrapper, matching the OS / release / epic / category convention.
+- **XACA-0304-007:** `fb.snapshot(keys)` hoisted into `createFilterBar` as a public method (deterministic over arrays + null/undefined). CR tab now calls `_filterBar.snapshot(SAVED_VIEW_DIVERGE_KEYS)` instead of carrying its own `_filterSnap` helper, so future consumers can request their own non-sort snapshots without duplicating field lists.
+
 <!-- XACA-0293: CAB Workflow Phase 3 — Cycle-Time Metrics -->
 
 ### Added

@@ -5,7 +5,12 @@
  * consumers (CHANGE REQ tab, etc.) can share the same filter-bar UX without
  * duplicating state management, event wiring, or localStorage persistence.
  *
- * Usage:
+ * XACA-0304-001: Extended with caller-provided IDs, generic pill-groups,
+ * configurable sort-toggle values, and generic <select> dropdowns so the
+ * CHANGE REQ tab bar can use the same factory. All new options default to the
+ * legacy BACKLOG behavior — existing callers unchanged.
+ *
+ * Usage (BACKLOG, legacy — unchanged):
  *   const fb = createFilterBar({
  *     containerId:   'backlog-filter-bar',
  *     storageKey:    'lcars-queue-filter',
@@ -25,11 +30,57 @@
  *     onChange: (state) => { renderList(); },
  *   });
  *
+ * Usage (CHANGE REQ tab, generic):
+ *   createFilterBar({
+ *     containerId: 'change-req-filter-bar',
+ *     storageKey:  'lcars-change-req-filter',
+ *     initialState:{ stateFilter:'all', typeFilter:'all', platformFilter:'all',
+ *                    searchText:'', sortBy:'STATE' },
+ *     searchIds:   { inputId: 'cr-filter-text', clearId: 'cr-filter-clear' },
+ *     pillGroups:  [
+ *       { containerId: 'cr-state-pills', dataAttr: 'cr-state',
+ *         mode: 'single', stateKey: 'stateFilter', defaultValue: 'all' },
+ *       { containerId: 'cr-type-pills',  dataAttr: 'cr-type',
+ *         mode: 'single', stateKey: 'typeFilter',  defaultValue: 'all' },
+ *     ],
+ *     sortControl: { btnId: 'cr-sort-btn', valueId: 'cr-sort-value',
+ *                    values: ['STATE','TYPE','PLATFORM','APPROVER'],
+ *                    stateKey: 'sortBy' },
+ *     customDropdowns: [
+ *       { selectId: 'cr-platform-select', dropdownId: 'cr-platform-select',
+ *         stateKey: 'platformFilter' },
+ *     ],
+ *     onChange: (state) => { renderList(); },
+ *   });
+ *
+ * New (XACA-0304-001) options — all optional:
+ *   searchIds       — override hardcoded BACKLOG search input/clear button IDs.
+ *   pillGroups      — array of pill-group descriptors. When omitted, the
+ *                     legacy single multi-select group keyed on `data-filter`
+ *                     and `state.activeFilters` is wired (unchanged BACKLOG).
+ *                     When supplied, this REPLACES the legacy group entirely.
+ *                     Per-group `mode`: 'multi' (BACKLOG-style multi-select
+ *                     with 'all' exclusivity) or 'single' (CR-tab single-pick).
+ *   sortControl     — override sort-toggle DOM IDs / value list / stateKey.
+ *                     Defaults to BACKLOG (`sort-toggle` / `sort-value` /
+ *                     ['priority','due_date'] / 'sortBy').
+ *                     `hideOnFilters` (optional, array of values) hides the
+ *                     button when ANY value is in the named pill-group's
+ *                     active set; defaults to BACKLOG's "hide when 'completed'
+ *                     is active" behavior keyed on the legacy multi-select.
+ *   customDropdowns — generic `<select>` wiring. Each entry:
+ *                       { selectId, dropdownId, stateKey }
+ *                     Toggles `.active` on the dropdown element when value
+ *                     !== 'all'; flows value into state[stateKey]; persists.
+ *
  * Public API:
  *   fb.getState()                — returns live state object (same reference always)
  *   fb.setState(partial)         — merge partial state, persist, call onChange
  *   fb.refresh()                 — re-sync all UI controls from current state
  *   fb.filterItems(items, matchFn) — convenience: items.filter(i => matchFn(i, fb.getState()))
+ *   fb.snapshot(keys)            — deterministic '|'-joined snapshot of the named state keys;
+ *                                  useful for detecting "real" filter changes vs. ignorable ones
+ *                                  (e.g. sort cycles shouldn't clear an active saved-view chip)
  *   fb.populateReleaseOptions()  — async; re-fetch + rebuild release <select>
  *   fb.populateEpicOptions()     — async; re-fetch + rebuild epic <select>
  *   fb.populateCROptions()       — sync; reads crsProvider(), rebuilds CR <select>
@@ -58,7 +109,31 @@ function createFilterBar(options) {
         extraButtons = [],
         viewToggle = null,
         onChange = null,
+        // ─── XACA-0304-001 additions (all optional; defaults preserve BACKLOG) ──
+        searchIds = { inputId: 'backlog-filter-text', clearId: 'backlog-filter-clear' },
+        pillGroups = null,           // null → legacy single multi-select group
+        sortControl = null,          // null → legacy BACKLOG defaults
+        customDropdowns = [],
     } = options;
+
+    // Legacy sort-toggle defaults — kept distinct so the special-case
+    // 'priority'/'due_date' label rendering only fires when the caller
+    // hasn't supplied a custom values list.
+    const _legacySortDefaults = {
+        btnId:    'sort-toggle',
+        valueId:  'sort-value',
+        values:   ['priority', 'due_date'],
+        stateKey: 'sortBy',
+        // BACKLOG hides sort when 'completed' filter is active.
+        hideOnFilters: ['completed'],
+    };
+    const _sortCfg = sortControl
+        ? Object.assign({}, _legacySortDefaults, sortControl)
+        : _legacySortDefaults;
+    const _isLegacySortValues =
+        _sortCfg.values.length === 2 &&
+        _sortCfg.values[0] === 'priority' &&
+        _sortCfg.values[1] === 'due_date';
 
     // ─── State ───────────────────────────────────────────────────────────────────
 
@@ -92,14 +167,50 @@ function createFilterBar(options) {
             if (typeof parsed.searchText === 'string') {
                 state.searchText = parsed.searchText;
             }
-            if (parsed.sortBy === 'priority' || parsed.sortBy === 'due_date') {
-                state.sortBy = parsed.sortBy;
+            // Legacy sort persistence: only restrict to {priority, due_date}
+            // when the caller is using the legacy 2-value sort.  For custom
+            // sort value-sets, accept any string the caller's values include.
+            if (typeof parsed.sortBy === 'string') {
+                if (_isLegacySortValues) {
+                    if (parsed.sortBy === 'priority' || parsed.sortBy === 'due_date') {
+                        state.sortBy = parsed.sortBy;
+                    }
+                } else if (_sortCfg.values.indexOf(parsed.sortBy) !== -1) {
+                    state[_sortCfg.stateKey] = parsed.sortBy;
+                }
+            }
+            // Caller-supplied stateKey (when sortControl uses a non-default key)
+            if (sortControl && _sortCfg.stateKey !== 'sortBy' &&
+                typeof parsed[_sortCfg.stateKey] === 'string' &&
+                _sortCfg.values.indexOf(parsed[_sortCfg.stateKey]) !== -1) {
+                state[_sortCfg.stateKey] = parsed[_sortCfg.stateKey];
             }
             if (parsed.osFilter)       state.osFilter       = parsed.osFilter;
             if (parsed.releaseFilter)  state.releaseFilter  = parsed.releaseFilter;
             if (parsed.epicFilter)     state.epicFilter     = parsed.epicFilter;
             if (parsed.categoryFilter) state.categoryFilter = parsed.categoryFilter;
             if (parsed.crFilter)       state.crFilter       = parsed.crFilter;
+
+            // Generic per-pill-group state restoration (XACA-0304-001)
+            if (Array.isArray(pillGroups)) {
+                pillGroups.forEach(g => {
+                    if (!g || !g.stateKey) return;
+                    const v = parsed[g.stateKey];
+                    if (g.mode === 'multi') {
+                        if (Array.isArray(v) && v.length > 0) state[g.stateKey] = v;
+                    } else if (typeof v === 'string') {
+                        state[g.stateKey] = v;
+                    }
+                });
+            }
+            // Generic custom-dropdown state restoration
+            if (Array.isArray(customDropdowns)) {
+                customDropdowns.forEach(d => {
+                    if (d && d.stateKey && typeof parsed[d.stateKey] === 'string') {
+                        state[d.stateKey] = parsed[d.stateKey];
+                    }
+                });
+            }
         } catch (e) {
             console.warn('[FilterBar] Could not load filter state:', e);
         }
@@ -120,8 +231,22 @@ function createFilterBar(options) {
     }
 
     // ─── Status pills ─────────────────────────────────────────────────────────────
+    //
+    // Two wiring paths:
+    //   1) Legacy implicit group — when caller did NOT pass `pillGroups`.
+    //      Pills carry `data-filter`, state lives in `state.activeFilters[]`,
+    //      multi-select with 'all' exclusivity. (Original BACKLOG behavior.)
+    //   2) Explicit `pillGroups` — caller supplies one or more group descriptors
+    //      `{ containerId, dataAttr, mode, stateKey, defaultValue }`. Each group
+    //      reads pills via `data-${dataAttr}`. `mode: 'multi'` reproduces the
+    //      legacy 'all'-exclusivity rule into `state[stateKey]` (array).
+    //      `mode: 'single'` writes the picked value into `state[stateKey]`.
 
     function _syncPillsUI() {
+        if (Array.isArray(pillGroups)) {
+            pillGroups.forEach(_syncPillGroupUI);
+            return;
+        }
         const filterBar = document.getElementById(containerId);
         if (!filterBar) return;
         filterBar.querySelectorAll('.filter-pill').forEach(pill => {
@@ -131,6 +256,22 @@ function createFilterBar(options) {
             } else {
                 pill.classList.remove('active');
             }
+        });
+    }
+
+    function _syncPillGroupUI(group) {
+        if (!group || !group.containerId) return;
+        const container = document.getElementById(group.containerId);
+        if (!container) return;
+        const attr = `data-${group.dataAttr}`;
+        const sel  = `.filter-pill[${attr}]`;
+        const current = state[group.stateKey];
+        container.querySelectorAll(sel).forEach(pill => {
+            const value = pill.getAttribute(attr);
+            const isActive = group.mode === 'multi'
+                ? (Array.isArray(current) && current.indexOf(value) !== -1)
+                : (current === value);
+            pill.classList.toggle('active', !!isActive);
         });
     }
 
@@ -157,7 +298,51 @@ function createFilterBar(options) {
         if (typeof onChange === 'function') onChange(state);
     }
 
+    function _toggleGroupPillMulti(group, value) {
+        const arr = Array.isArray(state[group.stateKey])
+            ? state[group.stateKey].slice()
+            : [];
+        if (value === 'all') {
+            state[group.stateKey] = ['all'];
+        } else {
+            const allIdx = arr.indexOf('all');
+            if (allIdx > -1) arr.splice(allIdx, 1);
+            const idx = arr.indexOf(value);
+            if (idx > -1) arr.splice(idx, 1);
+            else           arr.push(value);
+            state[group.stateKey] = arr.length === 0 ? ['all'] : arr;
+        }
+        _saveState();
+        _syncPillGroupUI(group);
+        _syncSortToggleVisibility();
+        if (typeof onChange === 'function') onChange(state);
+    }
+
+    function _setGroupPillSingle(group, value) {
+        state[group.stateKey] = value;
+        _saveState();
+        _syncPillGroupUI(group);
+        _syncSortToggleVisibility();
+        if (typeof onChange === 'function') onChange(state);
+    }
+
     function _wirePills() {
+        if (Array.isArray(pillGroups)) {
+            pillGroups.forEach(group => {
+                if (!group || !group.containerId) return;
+                const container = document.getElementById(group.containerId);
+                if (!container) return;
+                const attr = `data-${group.dataAttr}`;
+                container.querySelectorAll(`.filter-pill[${attr}]`).forEach(pill => {
+                    const value = pill.getAttribute(attr);
+                    pill.addEventListener('click', () => {
+                        if (group.mode === 'multi') _toggleGroupPillMulti(group, value);
+                        else                        _setGroupPillSingle(group, value);
+                    });
+                });
+            });
+            return;
+        }
         const filterBar = document.getElementById(containerId);
         if (!filterBar) return;
         filterBar.querySelectorAll('.filter-pill').forEach(pill => {
@@ -166,32 +351,73 @@ function createFilterBar(options) {
     }
 
     // ─── Sort toggle ──────────────────────────────────────────────────────────────
+    // Honors caller-supplied `sortControl` (btnId / valueId / values / stateKey /
+    // hideOnFilters). Defaults preserve BACKLOG: sort-toggle / sort-value /
+    // ['priority','due_date'] / 'sortBy' / hide-when-'completed'-active.
+
+    function _renderSortLabel(value) {
+        // Legacy 2-value sort renders pretty labels for back-compat
+        if (_isLegacySortValues) {
+            return value === 'due_date' ? 'DUE DATE' : 'PRIORITY';
+        }
+        return String(value || '').toUpperCase();
+    }
 
     function _syncSortToggleVisibility() {
-        const sortToggle = document.getElementById('sort-toggle');
-        if (sortToggle) {
-            const showingCompleted = state.activeFilters.includes('completed');
-            sortToggle.style.display = showingCompleted ? 'none' : '';
+        const sortToggle = document.getElementById(_sortCfg.btnId);
+        if (!sortToggle) return;
+
+        const hideOn = Array.isArray(_sortCfg.hideOnFilters) ? _sortCfg.hideOnFilters : [];
+        if (hideOn.length === 0) {
+            sortToggle.style.display = '';
+            return;
         }
+
+        let activeSet;
+        if (Array.isArray(pillGroups)) {
+            // When caller supplied pillGroups, look for a multi-mode group
+            // whose stateKey holds an array — first one wins. (BACKLOG-style
+            // hideOnFilters matching against 'completed' etc.)
+            const multiGroup = pillGroups.find(g => g && g.mode === 'multi');
+            if (multiGroup) {
+                const v = state[multiGroup.stateKey];
+                activeSet = Array.isArray(v) ? v : [];
+            } else {
+                activeSet = [];
+            }
+        } else {
+            // Legacy: state.activeFilters
+            activeSet = Array.isArray(state.activeFilters) ? state.activeFilters : [];
+        }
+
+        const shouldHide = hideOn.some(v => activeSet.indexOf(v) !== -1);
+        sortToggle.style.display = shouldHide ? 'none' : '';
     }
 
     function _syncSortToggleValue() {
-        const sortValue = document.getElementById('sort-value');
-        if (sortValue) {
-            sortValue.textContent = state.sortBy === 'due_date' ? 'DUE DATE' : 'PRIORITY';
+        const sortValueEl = document.getElementById(_sortCfg.valueId);
+        if (sortValueEl) {
+            sortValueEl.textContent = _renderSortLabel(state[_sortCfg.stateKey]);
         }
     }
 
     function _wireSortToggle() {
-        const sortToggle = document.getElementById('sort-toggle');
-        const sortValue  = document.getElementById('sort-value');
-        if (!sortToggle || !sortValue) return;
+        const sortToggle  = document.getElementById(_sortCfg.btnId);
+        const sortValueEl = document.getElementById(_sortCfg.valueId);
+        if (!sortToggle || !sortValueEl) return;
 
-        sortValue.textContent = state.sortBy === 'due_date' ? 'DUE DATE' : 'PRIORITY';
+        // Initialize state[stateKey] to first value if currently invalid
+        if (_sortCfg.values.indexOf(state[_sortCfg.stateKey]) === -1) {
+            state[_sortCfg.stateKey] = _sortCfg.values[0];
+        }
+        sortValueEl.textContent = _renderSortLabel(state[_sortCfg.stateKey]);
 
         sortToggle.addEventListener('click', () => {
-            state.sortBy = state.sortBy === 'priority' ? 'due_date' : 'priority';
-            sortValue.textContent = state.sortBy === 'due_date' ? 'DUE DATE' : 'PRIORITY';
+            const cur = state[_sortCfg.stateKey];
+            const idx = _sortCfg.values.indexOf(cur);
+            const next = _sortCfg.values[(idx + 1) % _sortCfg.values.length];
+            state[_sortCfg.stateKey] = next;
+            sortValueEl.textContent = _renderSortLabel(next);
             _saveState();
             if (typeof onChange === 'function') onChange(state);
         });
@@ -628,8 +854,8 @@ function createFilterBar(options) {
     // ─── Search input ─────────────────────────────────────────────────────────────
 
     function _wireSearch() {
-        const input     = document.getElementById('backlog-filter-text');
-        const clearBtn  = document.getElementById('backlog-filter-clear');
+        const input     = document.getElementById(searchIds.inputId);
+        const clearBtn  = document.getElementById(searchIds.clearId);
         if (!input) return;
 
         input.value = state.searchText || '';
@@ -666,10 +892,54 @@ function createFilterBar(options) {
     }
 
     function _syncSearchUI() {
-        const input = document.getElementById('backlog-filter-text');
+        const input = document.getElementById(searchIds.inputId);
         if (input && input !== document.activeElement) {
             input.value = state.searchText || '';
         }
+    }
+
+    // ─── Generic <select> dropdowns (XACA-0304-001) ──────────────────────────────
+    // Caller supplies `[{ selectId, dropdownId, stateKey }, ...]`. We DO NOT
+    // populate options — caller renders static <option> markup. We just wire
+    // change events, persist into state[stateKey], and toggle the `.active`
+    // class on the wrapping element when the value differs from 'all'.
+
+    function _syncCustomDropdownStyle(d) {
+        const select   = document.getElementById(d.selectId);
+        const wrapper  = document.getElementById(d.dropdownId);
+        if (!select || !wrapper) return;
+        if (select.value && select.value !== 'all') wrapper.classList.add('active');
+        else                                        wrapper.classList.remove('active');
+    }
+
+    function _syncCustomDropdownsUI() {
+        if (!Array.isArray(customDropdowns)) return;
+        customDropdowns.forEach(d => {
+            if (!d || !d.selectId) return;
+            const select = document.getElementById(d.selectId);
+            if (!select) return;
+            const v = state[d.stateKey];
+            if (typeof v === 'string') select.value = v;
+            _syncCustomDropdownStyle(d);
+        });
+    }
+
+    function _wireCustomDropdowns() {
+        if (!Array.isArray(customDropdowns)) return;
+        customDropdowns.forEach(d => {
+            if (!d || !d.selectId) return;
+            const select = document.getElementById(d.selectId);
+            if (!select) return;
+            const persisted = state[d.stateKey];
+            if (typeof persisted === 'string') select.value = persisted;
+            _syncCustomDropdownStyle(d);
+            select.addEventListener('change', (e) => {
+                state[d.stateKey] = e.target.value;
+                _syncCustomDropdownStyle(d);
+                _saveState();
+                if (typeof onChange === 'function') onChange(state);
+            });
+        });
     }
 
     // ─── Extra buttons ────────────────────────────────────────────────────────────
@@ -745,6 +1015,7 @@ function createFilterBar(options) {
         _syncEpicStyle();
         _syncCategoryStyle();
         _syncCRStyle();
+        _syncCustomDropdownsUI();
     }
 
     // ─── Init (wire all controls) ─────────────────────────────────────────────────
@@ -763,6 +1034,7 @@ function createFilterBar(options) {
         _wireSearch();
         _wireExtraButtons();
         _wireViewToggle();
+        _wireCustomDropdowns();
         _syncAllUI();
     }
 
@@ -809,6 +1081,28 @@ function createFilterBar(options) {
         filterItems(items, matchFn) {
             if (typeof matchFn !== 'function') return items.slice();
             return items.filter(item => matchFn(item, state));
+        },
+
+        /**
+         * Snapshot a subset of state fields as a stable string. Useful for
+         * detecting "real" filter changes vs. ignorable ones (e.g. sort cycles
+         * shouldn't clear an active saved-view chip).
+         *
+         * Array values are sorted before joining so set-equality is preserved
+         * regardless of insertion order. null/undefined become ''. Order in
+         * the returned string follows the caller-supplied keys[] order, so
+         * snapshots are deterministic for any given key list.
+         *
+         * @param {string[]} keys  state-key names to include in the snapshot
+         * @returns {string}       deterministic '|'-joined snapshot
+         */
+        snapshot(keys) {
+            if (!Array.isArray(keys)) return '';
+            return keys.map(k => {
+                const v = state[k];
+                if (Array.isArray(v)) return v.slice().sort().join(',');
+                return v == null ? '' : String(v);
+            }).join('|');
         },
 
         /**

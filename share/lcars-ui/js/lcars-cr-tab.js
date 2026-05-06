@@ -59,6 +59,12 @@
 
     const SAVED_VIEW_KEY = 'lcars-change-req-saved-view';
 
+    // Filter-bar state keys that count as "real" filter changes for saved-view
+    // divergence purposes. Cycling sortBy is intentionally excluded so that
+    // re-ordering doesn't clear an active saved-view chip. Used by both the
+    // post-init seed and the onChange divergence check via fb.snapshot(keys).
+    const SAVED_VIEW_DIVERGE_KEYS = ['stateFilter', 'typeFilter', 'platformFilter', 'searchText'];
+
     /**
      * Stable view IDs — do NOT rename; persisted to localStorage.
      * Labels may change freely; these IDs must not.
@@ -190,204 +196,73 @@
     }
 
     // ─── Filter-bar initialisation ────────────────────────────────────────────
+    //
+    // XACA-0304-003: All bespoke filter-bar machinery (state load/save, pill
+    // wiring, pill UI sync, search input, sort cycle, platform dropdown) has
+    // been replaced with a single createFilterBar({...}) call. The component
+    // owns state, persistence, and UI sync; this module only supplies the
+    // descriptor and an onChange hook that drives saved-view chip clearing
+    // and list re-rendering.
+    //
+    // Re-entrancy: _applySavedView() calls _filterBar.setState(preset) to
+    // apply a chip's preset. setState fires onChange synchronously, which
+    // would clear the chip we just activated. The _applyingSavedView flag
+    // suppresses the divergence handler for the duration of that call.
+    //
+    // Sort-only changes: cycling the sort button does not diverge from a
+    // saved-view preset (presets don't constrain sortBy). _lastFilterSnap
+    // captures the non-sort filter values after each onChange so the next
+    // onChange can detect whether anything besides sortBy changed.
+
+    let _applyingSavedView = false;
+    let _lastFilterSnap = null;
 
     function _initFilterBar() {
         const container = document.getElementById('change-req-filter-bar');
         if (!container || _filterBar) return;   // already wired or container missing
 
-        // Inject filter-bar HTML into the mount point
-        container.innerHTML = `
-            <div class="cr-filter-row">
-                <div class="cr-filter-pills" id="cr-state-pills">
-                    <button class="filter-pill active" data-cr-state="all">ALL</button>
-                    <button class="filter-pill" data-cr-state="cr-drafted">DRAFTED</button>
-                    <button class="filter-pill" data-cr-state="cr-submitted">SUBMITTED</button>
-                    <button class="filter-pill" data-cr-state="cr-approved">APPROVED</button>
-                    <button class="filter-pill" data-cr-state="implementing">IMPLEMENTING</button>
-                    <button class="filter-pill" data-cr-state="deployed-dev">DEPLOYED-DEV</button>
-                    <button class="filter-pill" data-cr-state="deployed-prod">DEPLOYED-PROD</button>
-                    <button class="filter-pill" data-cr-state="emergency-deployed">EMERGENCY</button>
-                    <button class="filter-pill" data-cr-state="cr-rejected">REJECTED</button>
-                    <button class="filter-pill" data-cr-state="cr-held">HELD</button>
-                </div>
-                <div class="cr-filter-pills cr-type-pills" id="cr-type-pills">
-                    <button class="filter-pill active" data-cr-type="all">ALL</button>
-                    <button class="filter-pill" data-cr-type="standard">STANDARD</button>
-                    <button class="filter-pill" data-cr-type="major">MAJOR</button>
-                    <button class="filter-pill" data-cr-type="emergency">EMERGENCY</button>
-                </div>
-                <div class="cr-filter-controls">
-                    <div class="cr-platform-wrap">
-                        <label class="cr-dropdown-label">PLATFORM</label>
-                        <select id="cr-platform-select" class="cr-platform-select">
-                            <option value="all">ALL</option>
-                            <option value="ios">iOS</option>
-                            <option value="android">ANDROID</option>
-                            <option value="firebase">FIREBASE</option>
-                            <option value="crossplatform">CROSSPLATFORM</option>
-                        </select>
-                    </div>
-                    <div class="cr-sort-wrap">
-                        <button class="cr-sort-btn" id="cr-sort-btn" title="Cycle sort order">
-                            SORT: <span id="cr-sort-value">STATE</span>
-                        </button>
-                    </div>
-                    <div class="filter-search-container cr-search-wrap">
-                        <input type="text" id="cr-filter-text" class="filter-search-input"
-                               placeholder="SEARCH CR ID, TITLE, SUMMARY..." autocomplete="off" spellcheck="false">
-                        <button id="cr-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
-                    </div>
-                </div>
-            </div>`;
+        // HTML now lives statically in index.html (XACA-0304-002)
 
-        _wireCRFilterBar();
-    }
-
-    // ─── Filter bar state ─────────────────────────────────────────────────────
-
-    const FILTER_KEY = 'lcars-change-req-filter';
-    const SORT_VALUES = ['STATE', 'TYPE', 'PLATFORM', 'APPROVER', 'STAGE-AGE'];
-
-    let _filterState = _loadFilterState();
-
-    function _loadFilterState() {
-        const defaults = {
-            stateFilter: 'all',
-            typeFilter:  'all',
-            platformFilter: 'all',
-            searchText: '',
-            sortBy: 'STATE',
-        };
-        try {
-            const saved = localStorage.getItem(FILTER_KEY);
-            if (!saved) return defaults;
-            return Object.assign({}, defaults, JSON.parse(saved));
-        } catch (e) {
-            return defaults;
-        }
-    }
-
-    function _saveFilterState() {
-        try {
-            localStorage.setItem(FILTER_KEY, JSON.stringify(_filterState));
-        } catch (e) { /* silently ignore */ }
-    }
-
-    // ─── Filter bar wiring ────────────────────────────────────────────────────
-
-    function _wireCRFilterBar() {
-        // State pills
-        const statePillsContainer = document.getElementById('cr-state-pills');
-        if (statePillsContainer) {
-            statePillsContainer.querySelectorAll('.filter-pill[data-cr-state]').forEach(pill => {
-                pill.addEventListener('click', () => {
-                    _filterState.stateFilter = pill.dataset.crState;
-                    _syncStatePills();
-                    _saveFilterState();
-                    _onFilterDiverge();
-                    renderChangeReqList();
-                });
-            });
-        }
-
-        // Type pills
-        const typePillsContainer = document.getElementById('cr-type-pills');
-        if (typePillsContainer) {
-            typePillsContainer.querySelectorAll('.filter-pill[data-cr-type]').forEach(pill => {
-                pill.addEventListener('click', () => {
-                    _filterState.typeFilter = pill.dataset.crType;
-                    _syncTypePills();
-                    _saveFilterState();
-                    _onFilterDiverge();
-                    renderChangeReqList();
-                });
-            });
-        }
-
-        // Platform dropdown
-        const platformSelect = document.getElementById('cr-platform-select');
-        if (platformSelect) {
-            platformSelect.value = _filterState.platformFilter || 'all';
-            platformSelect.addEventListener('change', () => {
-                _filterState.platformFilter = platformSelect.value;
-                _saveFilterState();
-                _onFilterDiverge();
+        _filterBar = createFilterBar({
+            containerId: 'change-req-filter-bar',
+            storageKey:  'lcars-change-req-filter',
+            initialState: {
+                stateFilter:    'all',
+                typeFilter:     'all',
+                platformFilter: 'all',
+                searchText:     '',
+                sortBy:         'STATE',
+            },
+            pillGroups: [
+                { containerId: 'cr-state-pills', dataAttr: 'cr-state', mode: 'single', stateKey: 'stateFilter', defaultValue: 'all' },
+                { containerId: 'cr-type-pills',  dataAttr: 'cr-type',  mode: 'single', stateKey: 'typeFilter',  defaultValue: 'all' },
+            ],
+            sortControl: {
+                btnId:    'cr-sort-btn',
+                valueId:  'cr-sort-value',
+                // XACA-0293: STAGE-AGE added so ACTIVE PIPELINE saved-view can sort by stage age desc.
+                values:   ['STATE', 'TYPE', 'PLATFORM', 'APPROVER', 'STAGE-AGE'],
+                stateKey: 'sortBy',
+            },
+            customDropdowns: [
+                { selectId: 'cr-platform-select', dropdownId: 'cr-platform-wrap', stateKey: 'platformFilter' },
+            ],
+            searchIds: { inputId: 'cr-filter-text', clearId: 'cr-filter-clear' },
+            onChange: (_state) => {
+                const snap = _filterBar.snapshot(SAVED_VIEW_DIVERGE_KEYS);
+                const filtersChanged = (_lastFilterSnap !== null && snap !== _lastFilterSnap);
+                _lastFilterSnap = snap;
+                // Sort-only changes (sortBy differs but other filters identical
+                // to last snapshot) preserve the active saved-view chip.
+                if (!_applyingSavedView && filtersChanged) _onFilterDiverge();
                 renderChangeReqList();
-            });
-        }
-
-        // Sort cycle button
-        const sortBtn = document.getElementById('cr-sort-btn');
-        const sortValue = document.getElementById('cr-sort-value');
-        if (sortBtn && sortValue) {
-            sortValue.textContent = _filterState.sortBy || 'STATE';
-            sortBtn.addEventListener('click', () => {
-                const current = _filterState.sortBy || 'STATE';
-                const idx = SORT_VALUES.indexOf(current);
-                _filterState.sortBy = SORT_VALUES[(idx + 1) % SORT_VALUES.length];
-                sortValue.textContent = _filterState.sortBy;
-                _saveFilterState();
-                // Sort changes don't diverge from a saved-view preset — don't clear chip
-                renderChangeReqList();
-            });
-        }
-
-        // Search input
-        const searchInput = document.getElementById('cr-filter-text');
-        const clearBtn    = document.getElementById('cr-filter-clear');
-        if (searchInput) {
-            searchInput.value = _filterState.searchText || '';
-            let debounce;
-            searchInput.addEventListener('input', () => {
-                clearTimeout(debounce);
-                debounce = setTimeout(() => {
-                    _filterState.searchText = searchInput.value;
-                    _saveFilterState();
-                    _onFilterDiverge();
-                    renderChangeReqList();
-                }, 150);
-            });
-            searchInput.addEventListener('keydown', e => {
-                if (e.key === 'Escape') {
-                    searchInput.value = '';
-                    _filterState.searchText = '';
-                    _saveFilterState();
-                    _onFilterDiverge();
-                    renderChangeReqList();
-                    searchInput.blur();
-                }
-            });
-        }
-        if (clearBtn) {
-            clearBtn.addEventListener('click', () => {
-                const input = document.getElementById('cr-filter-text');
-                if (input) { input.value = ''; input.focus(); }
-                _filterState.searchText = '';
-                _saveFilterState();
-                _onFilterDiverge();
-                renderChangeReqList();
-            });
-        }
-
-        // Sync pill UI from loaded state
-        _syncStatePills();
-        _syncTypePills();
-    }
-
-    function _syncStatePills() {
-        const container = document.getElementById('cr-state-pills');
-        if (!container) return;
-        container.querySelectorAll('.filter-pill[data-cr-state]').forEach(pill => {
-            pill.classList.toggle('active', pill.dataset.crState === (_filterState.stateFilter || 'all'));
+            },
         });
-    }
 
-    function _syncTypePills() {
-        const container = document.getElementById('cr-type-pills');
-        if (!container) return;
-        container.querySelectorAll('.filter-pill[data-cr-type]').forEach(pill => {
-            pill.classList.toggle('active', pill.dataset.crType === (_filterState.typeFilter || 'all'));
-        });
+        // Seed the snapshot from the post-init state so the first user-driven
+        // onChange can compare against a real baseline (rather than null,
+        // which would suppress divergence on the first interaction).
+        _lastFilterSnap = _filterBar.snapshot(SAVED_VIEW_DIVERGE_KEYS);
     }
 
     // ─── Saved-view chip rendering + wiring ───────────────────────────────────
@@ -481,42 +356,41 @@
      * Apply a saved view: update filter state to the view's preset,
      * save active view ID, sync chips, re-render.
      * Pass null to clear (reset to default state).
+     *
+     * Uses _filterBar.setState() to push the preset into the filter-bar
+     * component, which handles persistence + UI sync for free. The
+     * _applyingSavedView guard prevents the onChange callback from
+     * clearing the saved-view chip we're about to activate.
      */
     function _applySavedView(viewId) {
+        let preset;
         if (viewId && SAVED_VIEWS[viewId]) {
             const view = SAVED_VIEWS[viewId];
-            Object.assign(_filterState, view.preset);
-            // Honor per-view sort hint (e.g. ACTIVE PIPELINE sorts by STAGE-AGE desc).
-            if (view.sortKey) {
-                _filterState.sortBy = view.sortKey;
-            }
+            preset = Object.assign({}, view.preset);
+            // XACA-0293: honor per-view sort hint (e.g. ACTIVE PIPELINE sorts by STAGE-AGE desc).
+            if (view.sortKey) preset.sortBy = view.sortKey;
         } else {
-            // Reset to defaults
-            _filterState.stateFilter   = 'all';
-            _filterState.typeFilter    = 'all';
-            _filterState.platformFilter = 'all';
-            _filterState.searchText    = '';
+            preset = { stateFilter: 'all', typeFilter: 'all', platformFilter: 'all', searchText: '' };
         }
 
         _saveSavedView(viewId || null);
-        _saveFilterState();
 
-        // Sync UI controls to new filter state
-        _syncStatePills();
-        _syncTypePills();
-
-        const platformSelect = document.getElementById('cr-platform-select');
-        if (platformSelect) platformSelect.value = _filterState.platformFilter || 'all';
-
-        const searchInput = document.getElementById('cr-filter-text');
-        if (searchInput) searchInput.value = _filterState.searchText || '';
-
-        // Reflect sortBy in the sort button display (e.g. "STAGE-AGE" when active-pipeline applied).
-        const sortValueEl = document.getElementById('cr-sort-value');
-        if (sortValueEl) sortValueEl.textContent = _filterState.sortBy || 'STATE';
-
-        _syncSavedViewChips();
-        renderChangeReqList();
+        if (_filterBar) {
+            _applyingSavedView = true;
+            try {
+                _filterBar.setState(preset);
+            } finally {
+                _applyingSavedView = false;
+            }
+            // setState's onChange already triggered renderChangeReqList().
+            // _syncAllUI() handles sort-value sync (incl. STAGE-AGE for the
+            // ACTIVE PIPELINE saved view), so no manual DOM pokes are needed.
+            _syncSavedViewChips();
+        } else {
+            // Defensive fallback — chip click before filter bar mounted
+            _syncSavedViewChips();
+            renderChangeReqList();
+        }
     }
 
     function _syncSavedViewChips() {
@@ -578,6 +452,7 @@
             deploy_window_planned:      cr.deploy_window_planned || '',
             cr_pushback_count:          cr.pushback_count || 0,
             cr_doc_link:                cr.cr_doc_link || '',
+            cr_confluence_url:          cr.cr_confluence_url || '',
             cr_proper_url:              cr.cr_proper_url || '',
             cr_summary:                 cr.summary || '',
             cr_created_at:              ts.cr_created_at || cr.createdAt || '',
@@ -619,9 +494,13 @@
 
     /**
      * Match function: return true when item passes all active filters.
+     * Reads live state from _filterBar; falls back to a permissive default
+     * when the filter bar hasn't mounted yet (early renders before init).
      */
     function _itemMatchesFilters(item) {
-        const s = _filterState;
+        const s = _filterBar ? _filterBar.getState() : {
+            stateFilter: 'all', typeFilter: 'all', platformFilter: 'all', searchText: '', sortBy: 'STATE',
+        };
 
         // State filter
         if (s.stateFilter && s.stateFilter !== 'all') {
@@ -661,7 +540,8 @@
      * Alternate sorts: TYPE, PLATFORM, APPROVER (all alpha).
      */
     function _sortItems(items) {
-        const sortBy = (_filterState.sortBy || 'STATE').toUpperCase();
+        const fbState = _filterBar ? _filterBar.getState() : null;
+        const sortBy = ((fbState && fbState.sortBy) || 'STATE').toUpperCase();
         return [...items].sort((a, b) => {
             if (sortBy === 'TYPE') {
                 return (a.cr_type || '').localeCompare(b.cr_type || '');
@@ -839,8 +719,9 @@
 
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
-    // Total column count including chevron col-0 and STAGE AGE col (XACA-0293-002).
-    const CR_COL_COUNT = 11;
+    // Total column count including chevron col-0, PUBLISHED col (XACA-0308-004),
+    // and STAGE AGE col (XACA-0293-002).
+    const CR_COL_COUNT = 12;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
@@ -852,7 +733,9 @@
         const deployWin  = _formatDeployWindow(item.deploy_window_planned);
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
         const stageAge   = _stageAgeBadge(item);
-        const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0);
+        const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0) ||
+                           !!(item.cr_confluence_url && String(item.cr_confluence_url).trim().length > 0);
+        const confluenceUrl = (item.cr_confluence_url && String(item.cr_confluence_url).trim()) || '';
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
         const isExpanded  = _expandedCRs.has(item.cr_id);
 
@@ -870,6 +753,10 @@
             ? `<button class="${chevronCls}" data-cr-id="${escapeHtml(item.cr_id)}" title="${isExpanded ? 'Collapse' : 'Expand'} linked items" aria-expanded="${isExpanded}" aria-label="${isExpanded ? 'Collapse' : 'Expand'} linked items">&#9654;</button>`
             : `<span class="cr-chevron-placeholder"></span>`;
 
+        const publishedCell = confluenceUrl
+            ? `<a class="cr-published-link" href="${escapeHtml(confluenceUrl)}" target="_blank" rel="noopener noreferrer" title="View on Confluence">&#128196;</a>`
+            : '';
+
         return `<tr class="cr-row${isExpanded ? ' cr-row-expanded' : ''}" data-cr-id="${escapeHtml(item.cr_id)}" data-item-id="${escapeHtml(item.id)}">
             <td class="cr-col-chevron">${chevronBtn}</td>
             <td class="cr-col-id"><button class="cr-id-copy" data-cr-id="${crId}" title="Copy CR ID to clipboard"><span class="cr-id-mono">${crId}</span></button></td>
@@ -880,6 +767,7 @@
             <td class="cr-col-approver">${approver}</td>
             <td class="cr-col-deploy">${deployWin}</td>
             <td class="cr-col-pushbacks">${pushbacks}</td>
+            <td class="cr-col-published">${publishedCell}</td>
             <td class="cr-col-stage-age">${stageAge}</td>
             <td class="cr-col-docs">${docsBtn}</td>
         </tr>`;
@@ -1057,6 +945,7 @@
                         <th class="cr-col-approver">APPROVER</th>
                         <th class="cr-col-deploy">DEPLOY WINDOW</th>
                         <th class="cr-col-pushbacks">PUSHBACKS</th>
+                        <th class="cr-col-published">PUBLISHED</th>
                         <th class="cr-col-stage-age">STAGE AGE</th>
                         <th class="cr-col-docs">DOCS</th>
                     </tr>
@@ -1207,7 +1096,13 @@
                         const md = (typeof renderMarkdown === 'function')
                             ? renderMarkdown(data.content || '')
                             : `<pre class="cr-doc-pre">${escapeHtml(data.content || '')}</pre>`;
-                        contentDiv.innerHTML = '<div class="cr-doc-md">' + md + '</div>';
+                        const footerHtml = (data.confluenceUrl && String(data.confluenceUrl).trim())
+                            ? `<div class="cr-confluence-footer">` +
+                              `<a href="${escapeHtml(String(data.confluenceUrl).trim())}" target="_blank" rel="noopener noreferrer">` +
+                              `<span class="cr-confluence-icon">&#128196;</span>Published to Confluence` +
+                              `</a></div>`
+                            : '';
+                        contentDiv.innerHTML = '<div class="cr-doc-md">' + md + '</div>' + footerHtml;
                     }
                     // else: external-only response — metadata launch button is sufficient.
                 })

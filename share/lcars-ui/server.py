@@ -6078,16 +6078,26 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             }, status=500)
 
     def serve_cr_exists(self, item_id):
-        """GET /api/kanban/<item-id>/cr-exists - Check if a CR document is available for item.
+        """GET /api/kanban/<item-id>/cr-exists - Check if a local CR document exists for item.
 
         Returns { exists: bool, itemId: str }.
-        exists is True iff crSupport.enabled is True for this team AND cr_id is non-empty.
+        exists is True iff crSupport.enabled is True for this team AND the canonical
+        local CR markdown file <team-kanban>/cr-docs/<item-id>-CR.md exists on disk.
+
+        Phase 3 (XACA-0308-003): no longer checks cr_id / cr_doc_link — path is
+        derived from item ID. Containment check narrows to <team-kanban>/cr-docs/.
         """
         try:
             import fcntl
 
             team = self._extract_team_from_item_id(item_id)
             if not team:
+                self._send_json_response({"exists": False, "itemId": item_id})
+                return
+
+            # Sanitize item_id: must be alphanumeric + dash only (no / .. or leading .)
+            import re as _re
+            if not _re.match(r'^[A-Za-z0-9][A-Za-z0-9\-]*$', item_id):
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
@@ -6105,28 +6115,30 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-            # Check crSupport.enabled on the board
+            # crSupport.enabled guard — disabled teams always return exists=false
+            # (no info leak about whether any CR file is present).
             team_config = board_data.get('teamConfig', {})
             cr_enabled = bool(team_config.get('crSupport', {}).get('enabled', False))
             if not cr_enabled:
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
-            # Check that the item is linked to a CR — new schema uses crAssignment
-            # back-pointer; legacy schema had cr_id directly on the item.
-            item = None
-            for backlog_item in board_data.get('backlog', []):
-                if backlog_item.get('id') == item_id:
-                    item = backlog_item
-                    break
+            # Build canonical path: <team-kanban>/cr-docs/<item-id>-CR.md
+            # Fully resolve cr_docs_dir (mirrors serve_cr_content) so the
+            # relative_to() containment check sees a canonical path even
+            # if cr-docs/ itself is a symlink.
+            team_kanban_dir = TEAM_KANBAN_DIRS.get(team, KANBAN_DIR)
+            cr_docs_dir = (Path(team_kanban_dir) / 'cr-docs').resolve()
+            candidate = (cr_docs_dir / f"{item_id}-CR.md").resolve()
 
-            if item is None:
+            # Containment check: resolved path must be inside cr-docs/
+            try:
+                candidate.relative_to(cr_docs_dir)
+            except ValueError:
                 self._send_json_response({"exists": False, "itemId": item_id})
                 return
 
-            legacy_cr_id = (item.get('cr_id') or '').strip()
-            new_cr_id = ((item.get('crAssignment') or {}).get('crId') or '').strip()
-            cr_exists = bool(legacy_cr_id or new_cr_id)
+            cr_exists = candidate.is_file()
             self._send_json_response({"exists": cr_exists, "itemId": item_id})
 
         except Exception as e:
@@ -6218,9 +6230,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             }, status=500)
 
     def serve_cr_content(self, item_id):
-        """GET /api/kanban/<item-id>/cr-content - Read and return CR document content"""
+        """GET /api/kanban/<item-id>/cr-content - Read and return CR document content.
+
+        Phase 3 (XACA-0308-003): reads the canonical local markdown at
+        <team-kanban>/cr-docs/<item-id>-CR.md.  Returns 404 with an informative
+        "run kb-cr draft" message when the file does not exist.  Surfaces
+        cr_confluence_url from the crs[] record so the UI can render a footer link
+        (subitem 004).  All cr_doc_link reads and the legacy URL/path fallback chain
+        have been removed.
+        """
         try:
             import fcntl
+            import re as _re
 
             # Extract team from item ID
             team = self._extract_team_from_item_id(item_id)
@@ -6230,7 +6251,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=404)
                 return
 
-            # Load the board and find the item
+            # Sanitize item_id: must be alphanumeric + dash only (no / .. or leading .)
+            if not _re.match(r'^[A-Za-z0-9][A-Za-z0-9\-]*$', item_id):
+                self._send_json_response({
+                    "error": f"Invalid item ID format: {item_id}"
+                }, status=400)
+                return
+
+            # Load the board — needed for crSupport.enabled check and cr_confluence_url.
             board_file = self._get_board_file(team)
             if not board_file.exists():
                 self._send_json_response({
@@ -6247,135 +6275,65 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-            # Find the item in the backlog
+            # crSupport.enabled guard — disabled teams always return 404
+            # (same response shape as a missing CR, no info leak).
+            team_config = board_data.get('teamConfig', {})
+            cr_enabled = bool(team_config.get('crSupport', {}).get('enabled', False))
+            if not cr_enabled:
+                self._send_json_response({
+                    "error": f"CR support is not enabled for this team. Run `kb-cr draft {item_id}` first.",
+                    "itemId": item_id
+                }, status=404)
+                return
+
+            # Build canonical path: <team-kanban>/cr-docs/<item-id>-CR.md
+            team_kanban_dir = Path(TEAM_KANBAN_DIRS.get(team, KANBAN_DIR)).resolve()
+            cr_docs_dir = (team_kanban_dir / 'cr-docs').resolve()
+            cr_file = (cr_docs_dir / f"{item_id}-CR.md").resolve()
+
+            # Containment check: resolved path must be inside cr-docs/
+            # Rejects ../ traversal, absolute path injection, and symlink escapes.
+            try:
+                cr_file.relative_to(cr_docs_dir)
+            except ValueError:
+                self._send_json_response({
+                    "error": f"Invalid item ID (path traversal rejected): {item_id}"
+                }, status=400)
+                return
+
+            if not cr_file.is_file():
+                self._send_json_response({
+                    "error": f"Local CR document not yet created — run `kb-cr draft {item_id}` first.",
+                    "itemId": item_id
+                }, status=404)
+                return
+
+            content = cr_file.read_text(encoding='utf-8')
+
+            # Retrieve cr_confluence_url from the matching crs[] record.
+            # The item carries a crAssignment.crId back-pointer (new schema) or
+            # a direct cr_id (legacy schema) — use whichever is available to
+            # look up the CR record.  If neither is set the URL will be empty,
+            # which is correct for items that haven't been published yet.
+            cr_confluence_url = ''
             item = None
             for backlog_item in board_data.get('backlog', []):
                 if backlog_item.get('id') == item_id:
                     item = backlog_item
                     break
-
-            if item is None:
-                self._send_json_response({
-                    "error": f"Item not found: {item_id}"
-                }, status=404)
-                return
-
-            # Resolve the CR record. New schema (2026-05): CR data lives in
-            # board.crs[]; the item carries a crAssignment.crId back-pointer.
-            # Legacy schema stored fields directly on the item — and on a
-            # half-migrated board the CR record may already exist in crs[]
-            # while the item still carries the old top-level cr_id. Use
-            # whichever id we have to look up the CR record so we never miss
-            # the cr_doc_link.
-            cr_record = None
-            cr_doc_link = ''
-            assignment = item.get('crAssignment') or {}
-            new_cr_id = (assignment.get('crId') or '').strip()
-            legacy_cr_id = (item.get('cr_id') or '').strip()
-            cr_id_for_glob = new_cr_id or legacy_cr_id
-            if cr_id_for_glob:
-                for record in board_data.get('crs', []):
-                    if record.get('id') == cr_id_for_glob:
-                        cr_record = record
-                        cr_doc_link = record.get('cr_doc_link', '') or ''
-                        break
-            if not cr_doc_link:
-                cr_doc_link = item.get('cr_doc_link', '') or ''
-
-            # The local source-of-truth markdown lives in
-            #   <team-kanban-dir>/change-requests/<CR-ID>*.md
-            # The Confluence URL (if any) is returned alongside as a launch link.
-            team_kanban_dir = (TEAM_KANBAN_DIRS.get(team, KANBAN_DIR)).resolve()
-            cr_md_dir = (team_kanban_dir / 'change-requests').resolve()
-            content = None
-            filename = None
-            if cr_id_for_glob and cr_md_dir.exists():
-                # Glob both <CR>_*.md and <CR>-*.md, plus exact <CR>.md
-                import glob as _glob
-                patterns = [
-                    str(cr_md_dir / f"{cr_id_for_glob}_*.md"),
-                    str(cr_md_dir / f"{cr_id_for_glob}-*.md"),
-                    str(cr_md_dir / f"{cr_id_for_glob}.md"),
-                ]
-                matches = []
-                for p in patterns:
-                    matches.extend(_glob.glob(p))
-                # Containment check — defence in depth even though glob is
-                # rooted under cr_md_dir.
-                for candidate in matches:
-                    cpath = Path(candidate).resolve()
-                    try:
-                        cpath.relative_to(cr_md_dir)
-                    except ValueError:
-                        continue
-                    if cpath.is_file():
-                        try:
-                            content = cpath.read_text(encoding='utf-8')
-                            filename = cpath.name
+            if item is not None:
+                assignment = item.get('crAssignment') or {}
+                cr_id_ref = (assignment.get('crId') or '').strip() or (item.get('cr_id') or '').strip()
+                if cr_id_ref:
+                    for cr_record in board_data.get('crs', []):
+                        if cr_record.get('id') == cr_id_ref:
+                            cr_confluence_url = (cr_record.get('cr_confluence_url') or '').strip()
                             break
-                        except Exception:
-                            continue
 
-            confluence_url = cr_doc_link if cr_doc_link.lower().startswith(('http://', 'https://')) else ''
-
-            if content is not None:
-                # Local md is the source of truth; Confluence link is secondary.
-                self._send_json_response({
-                    "content": content,
-                    "filename": filename,
-                    "confluenceUrl": confluence_url,
-                    "crId": cr_id_for_glob,
-                    "itemId": item_id
-                })
-                return
-
-            # No local md found. Fall back to legacy behaviour: if cr_doc_link
-            # is a relative file path inside the kanban dir, read it. If it's
-            # an http(s) URL, return it for the client to render as a launch
-            # button (no markdown body available).
-            if not cr_doc_link:
-                self._send_json_response({
-                    "error": f"No CR document found for item: {item_id} (looked for change-requests/{cr_id_for_glob}*.md)",
-                    "confluenceUrl": "",
-                    "crId": cr_id_for_glob,
-                    "itemId": item_id
-                }, status=404)
-                return
-
-            if confluence_url:
-                self._send_json_response({
-                    "url": confluence_url,
-                    "confluenceUrl": confluence_url,
-                    "isExternal": True,
-                    "crId": cr_id_for_glob,
-                    "itemId": item_id
-                })
-                return
-
-            cr_path_raw = Path(cr_doc_link)
-            if cr_path_raw.is_absolute():
-                self._send_json_response({
-                    "error": f"Invalid CR document link (absolute paths not permitted): {cr_doc_link}"
-                }, status=400)
-                return
-            cr_path = (team_kanban_dir / cr_path_raw).resolve()
-            try:
-                cr_path.relative_to(team_kanban_dir)
-            except ValueError:
-                self._send_json_response({
-                    "error": f"Invalid CR document link (escapes kanban directory): {cr_doc_link}"
-                }, status=400)
-                return
-            if not cr_path.exists() or not cr_path.is_file():
-                self._send_json_response({
-                    "error": f"CR document not found on disk: {cr_doc_link}"
-                }, status=404)
-                return
             self._send_json_response({
-                "content": cr_path.read_text(encoding='utf-8'),
-                "filename": cr_path.name,
-                "confluenceUrl": "",
-                "crId": cr_id_for_glob,
+                "content": content,
+                "filename": cr_file.name,
+                "confluenceUrl": cr_confluence_url,
                 "itemId": item_id
             })
 

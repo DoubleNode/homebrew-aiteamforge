@@ -13083,7 +13083,16 @@ function switchDocTab(itemId, tabType) {
                     '<a class="cr-doc-launch" href="' + escapeHtml(data.url) + '" target="_blank" rel="noopener noreferrer">OPEN CR DOC →</a>' +
                     '</div>';
             } else {
-                body.innerHTML = renderMarkdown(data.content || '');
+                const mainContent = renderMarkdown(data.content || '');
+                const cfUrl = (tabType === 'cr' && data.confluenceUrl && String(data.confluenceUrl).trim())
+                    ? String(data.confluenceUrl).trim() : '';
+                const footerHtml = cfUrl
+                    ? '<div class="cr-confluence-footer">' +
+                      '<a href="' + escapeHtml(cfUrl) + '" target="_blank" rel="noopener noreferrer">' +
+                      '<span class="cr-confluence-icon">&#128196;</span>Published to Confluence' +
+                      '</a></div>'
+                    : '';
+                body.innerHTML = mainContent + footerHtml;
             }
         })
         .catch(error => {

@@ -487,7 +487,50 @@
                     </div>
                     <!-- PIPELINE pane — existing filter-bar, saved-views, list -->
                     <div id="change-req-pane-pipeline" class="change-req-pane" data-subtab-pane="pipeline">
-                        <div id="change-req-filter-bar" class="change-req-filter-bar"></div>
+                        <div id="change-req-filter-bar" class="change-req-filter-bar">
+                            <div class="cr-filter-row">
+                                <div class="cr-filter-pills" id="cr-state-pills">
+                                    <button class="filter-pill active" data-cr-state="all">ALL</button>
+                                    <button class="filter-pill" data-cr-state="cr-drafted">DRAFTED</button>
+                                    <button class="filter-pill" data-cr-state="cr-submitted">SUBMITTED</button>
+                                    <button class="filter-pill" data-cr-state="cr-approved">APPROVED</button>
+                                    <button class="filter-pill" data-cr-state="implementing">IMPLEMENTING</button>
+                                    <button class="filter-pill" data-cr-state="deployed-dev">DEPLOYED-DEV</button>
+                                    <button class="filter-pill" data-cr-state="deployed-prod">DEPLOYED-PROD</button>
+                                    <button class="filter-pill" data-cr-state="emergency-deployed">EMERGENCY</button>
+                                    <button class="filter-pill" data-cr-state="cr-rejected">REJECTED</button>
+                                    <button class="filter-pill" data-cr-state="cr-held">HELD</button>
+                                </div>
+                                <div class="cr-filter-pills cr-type-pills" id="cr-type-pills">
+                                    <button class="filter-pill active" data-cr-type="all">ALL</button>
+                                    <button class="filter-pill" data-cr-type="standard">STANDARD</button>
+                                    <button class="filter-pill" data-cr-type="major">MAJOR</button>
+                                    <button class="filter-pill" data-cr-type="emergency">EMERGENCY</button>
+                                </div>
+                                <div class="cr-filter-controls">
+                                    <div class="cr-platform-wrap" id="cr-platform-wrap">
+                                        <label class="cr-dropdown-label">PLATFORM</label>
+                                        <select id="cr-platform-select" class="cr-platform-select">
+                                            <option value="all">ALL</option>
+                                            <option value="ios">iOS</option>
+                                            <option value="android">ANDROID</option>
+                                            <option value="firebase">FIREBASE</option>
+                                            <option value="crossplatform">CROSSPLATFORM</option>
+                                        </select>
+                                    </div>
+                                    <div class="cr-sort-wrap">
+                                        <button class="cr-sort-btn" id="cr-sort-btn" title="Cycle sort order">
+                                            SORT: <span id="cr-sort-value">STATE</span>
+                                        </button>
+                                    </div>
+                                    <div class="filter-search-container cr-search-wrap">
+                                        <input type="text" id="cr-filter-text" class="filter-search-input"
+                                               placeholder="SEARCH CR ID, TITLE, SUMMARY..." autocomplete="off" spellcheck="false">
+                                        <button id="cr-filter-clear" class="filter-search-clear" title="Clear search">&times;</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
                         <div id="change-req-saved-views" class="change-req-saved-views"></div>
                         <div id="change-req-list" class="change-req-list">
                             <div class="change-req-empty">No change requests</div>
