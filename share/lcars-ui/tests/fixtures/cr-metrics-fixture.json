@@ -1,0 +1,263 @@
+{
+  "_meta": {
+    "purpose": "Gold-standard fixture for lcars-cr-metrics.js — XACA-0293-006",
+    "note_epoch_correction": "Brief stated now_ms=1778414400000 (2026-05-10T12:00:00Z) which is incorrect. Verified correct epoch for 2026-05-06T12:00:00Z is 1778068800000.",
+    "now_iso": "2026-05-06T12:00:00Z",
+    "now_ms": 1778068800000,
+    "window_days": 14,
+    "window_cutoff_iso": "2026-04-22T12:00:00Z",
+    "in_window_cr_ids": ["CR-FIXTURE-001", "CR-FIXTURE-002", "CR-FIXTURE-003", "CR-FIXTURE-005", "CR-FIXTURE-006"],
+    "out_of_window_cr_ids": ["CR-FIXTURE-004"]
+  },
+
+  "crs": [
+    {
+      "_scenario": "HAPPY PATH — all 9 timestamps present, every segment exactly 2.0 days, delta=0 (HIT)",
+      "id": "CR-FIXTURE-001",
+      "title": "Happy Path CR — All Segments 2 Days",
+      "type": "major",
+      "crState": "deployed-prod",
+      "platform": "ios",
+      "deploy_window_planned": "2026-05-04T12:00:00.000Z",
+      "timestamps": {
+        "cr_created_at":          "2026-04-22T12:00:00.000Z",
+        "cr_submitted_at":        "2026-04-24T12:00:00.000Z",
+        "cr_approved_at":         "2026-04-26T12:00:00.000Z",
+        "cr_dev_started_at":      "2026-04-28T12:00:00.000Z",
+        "cr_testing_started_at":  "2026-04-30T12:00:00.000Z",
+        "cr_deployed_dev_at":     "2026-05-02T12:00:00.000Z",
+        "cr_deployed_prod_at":    "2026-05-04T12:00:00.000Z",
+        "cr_completed_at":        "2026-05-04T12:00:00.000Z",
+        "cr_emergency_deployed_at": null
+      }
+    },
+    {
+      "_scenario": "MISSING-TIMESTAMP GAP — cr_dev_started_at and cr_testing_started_at null; delta=+3.0 (LATE)",
+      "id": "CR-FIXTURE-002",
+      "title": "Missing Dev/Test Timestamps CR",
+      "type": "major",
+      "crState": "deployed-prod",
+      "platform": "android",
+      "deploy_window_planned": "2026-04-28T12:00:00.000Z",
+      "timestamps": {
+        "cr_created_at":          "2026-04-16T12:00:00.000Z",
+        "cr_submitted_at":        "2026-04-18T12:00:00.000Z",
+        "cr_approved_at":         "2026-04-21T12:00:00.000Z",
+        "cr_dev_started_at":      null,
+        "cr_testing_started_at":  null,
+        "cr_deployed_dev_at":     "2026-04-26T12:00:00.000Z",
+        "cr_deployed_prod_at":    "2026-05-01T12:00:00.000Z",
+        "cr_completed_at":        "2026-05-01T12:00:00.000Z",
+        "cr_emergency_deployed_at": null
+      }
+    },
+    {
+      "_scenario": "EMERGENCY PATH — crState=emergency-deployed; cr_completed_at/cr_deployed_prod_at/deploy_window_planned all null; anchor=cr_emergency_deployed_at",
+      "id": "CR-FIXTURE-003",
+      "title": "Emergency Hotfix CR",
+      "type": "emergency",
+      "crState": "emergency-deployed",
+      "platform": "firebase",
+      "deploy_window_planned": null,
+      "emergency_justification": "Critical data-loss defect in production; CAB review bypassed per emergency protocol.",
+      "timestamps": {
+        "cr_created_at":          "2026-04-26T12:00:00.000Z",
+        "cr_submitted_at":        "2026-04-27T12:00:00.000Z",
+        "cr_approved_at":         null,
+        "cr_dev_started_at":      "2026-04-28T12:00:00.000Z",
+        "cr_testing_started_at":  null,
+        "cr_deployed_dev_at":     "2026-04-29T12:00:00.000Z",
+        "cr_deployed_prod_at":    null,
+        "cr_completed_at":        null,
+        "cr_emergency_deployed_at": "2026-04-29T12:00:00.000Z"
+      }
+    },
+    {
+      "_scenario": "OUT-OF-WINDOW — cr_completed_at=T-30d (before 14-day cutoff); derivePerCR still computes values but rollups exclude this CR",
+      "id": "CR-FIXTURE-004",
+      "title": "Old CR Outside Rolling Window",
+      "type": "major",
+      "crState": "deployed-prod",
+      "platform": "ios",
+      "deploy_window_planned": "2026-04-06T12:00:00.000Z",
+      "timestamps": {
+        "cr_created_at":          "2026-03-27T12:00:00.000Z",
+        "cr_submitted_at":        "2026-03-29T12:00:00.000Z",
+        "cr_approved_at":         "2026-03-31T12:00:00.000Z",
+        "cr_dev_started_at":      "2026-04-02T12:00:00.000Z",
+        "cr_testing_started_at":  "2026-04-04T12:00:00.000Z",
+        "cr_deployed_dev_at":     "2026-04-05T12:00:00.000Z",
+        "cr_deployed_prod_at":    "2026-04-06T12:00:00.000Z",
+        "cr_completed_at":        "2026-04-06T12:00:00.000Z",
+        "cr_emergency_deployed_at": null
+      }
+    },
+    {
+      "_scenario": "EARLY DELIVERY — cr_deployed_prod_at is 3 days before deploy_window_planned; delta=-3.0 (EARLY)",
+      "id": "CR-FIXTURE-005",
+      "title": "Early Delivery CR",
+      "type": "major",
+      "crState": "deployed-prod",
+      "platform": "android",
+      "deploy_window_planned": "2026-05-05T12:00:00.000Z",
+      "timestamps": {
+        "cr_created_at":          "2026-04-18T12:00:00.000Z",
+        "cr_submitted_at":        "2026-04-20T12:00:00.000Z",
+        "cr_approved_at":         "2026-04-23T12:00:00.000Z",
+        "cr_dev_started_at":      "2026-04-26T12:00:00.000Z",
+        "cr_testing_started_at":  "2026-04-29T12:00:00.000Z",
+        "cr_deployed_dev_at":     "2026-05-01T12:00:00.000Z",
+        "cr_deployed_prod_at":    "2026-05-02T12:00:00.000Z",
+        "cr_completed_at":        "2026-05-03T12:00:00.000Z",
+        "cr_emergency_deployed_at": null
+      }
+    },
+    {
+      "_scenario": "BOUNDARY HIT — deploy_estimate_delta_days=+0.5 (abs<=1 threshold); verifies hit classification at boundary",
+      "id": "CR-FIXTURE-006",
+      "title": "On-Time CR at Hit Boundary",
+      "type": "major",
+      "crState": "deployed-prod",
+      "platform": "crossplatform",
+      "deploy_window_planned": "2026-05-04T12:00:00.000Z",
+      "timestamps": {
+        "cr_created_at":          "2026-04-24T12:00:00.000Z",
+        "cr_submitted_at":        "2026-04-26T12:00:00.000Z",
+        "cr_approved_at":         "2026-04-28T12:00:00.000Z",
+        "cr_dev_started_at":      "2026-04-30T12:00:00.000Z",
+        "cr_testing_started_at":  "2026-05-02T12:00:00.000Z",
+        "cr_deployed_dev_at":     "2026-05-04T12:00:00.000Z",
+        "cr_deployed_prod_at":    "2026-05-05T00:00:00.000Z",
+        "cr_completed_at":        "2026-05-05T12:00:00.000Z",
+        "cr_emergency_deployed_at": null
+      }
+    }
+  ],
+
+  "expected_per_cr": {
+    "CR-FIXTURE-001": {
+      "_handcomputed": "All 6 lifecycle segments are exactly 2.0 days (each timestamp 2 days after prior). cr_cycle_total_days = completed(T-2d) - created(T-14d) = 12.0 days. deploy_estimate_delta_days = deployed_prod(T-2d) - planned(T-2d) = 0.0 (HIT, abs<=1). Anchor: cr_completed_at=T-2d, in 14-day window.",
+      "cr_cycle_draft_to_submit_days":          2.0,
+      "cr_cycle_submit_to_approve_days":        2.0,
+      "cr_cycle_approve_to_dev_days":           2.0,
+      "cr_cycle_dev_to_test_days":              2.0,
+      "cr_cycle_test_to_deploydev_days":        2.0,
+      "cr_cycle_deploydev_to_deployprod_days":  2.0,
+      "cr_cycle_total_days":                    12.0,
+      "deploy_estimate_delta_days":             0.0
+    },
+    "CR-FIXTURE-002": {
+      "_handcomputed": "cr_dev_started_at and cr_testing_started_at are null, so approve_to_dev, dev_to_test, and test_to_deploydev are all null. draft_to_submit = submitted(T-18d) - created(T-20d) = 2.0. submit_to_approve = approved(T-15d) - submitted(T-18d) = 3.0. deploydev_to_deployprod = deployed_prod(T-5d) - deployed_dev(T-10d) = 5.0. cr_cycle_total_days = completed(T-5d) - created(T-20d) = 15.0. deploy_estimate_delta_days = deployed_prod(T-5d) - planned(T-8d) = +3.0 (LATE, >1). Anchor: cr_completed_at=T-5d, in window.",
+      "cr_cycle_draft_to_submit_days":          2.0,
+      "cr_cycle_submit_to_approve_days":        3.0,
+      "cr_cycle_approve_to_dev_days":           null,
+      "cr_cycle_dev_to_test_days":              null,
+      "cr_cycle_test_to_deploydev_days":        null,
+      "cr_cycle_deploydev_to_deployprod_days":  5.0,
+      "cr_cycle_total_days":                    15.0,
+      "deploy_estimate_delta_days":             3.0
+    },
+    "CR-FIXTURE-003": {
+      "_handcomputed": "Emergency path: cr_approved_at, cr_testing_started_at, cr_deployed_prod_at, cr_completed_at, and deploy_window_planned are all null. draft_to_submit = submitted(T-9d) - created(T-10d) = 1.0. submit_to_approve = null (no approved_at). approve_to_dev = null (no approved_at). dev_to_test = null (no testing_started_at). test_to_deploydev = null (no testing_started_at). deploydev_to_deployprod = null (no deployed_prod_at). cr_cycle_total_days = null (no completed_at). deploy_estimate_delta_days = null (no deploy_window_planned). Anchor: cr_emergency_deployed_at=T-7d, in window. Excluded from estimateDelta rollup (delta is null).",
+      "cr_cycle_draft_to_submit_days":          1.0,
+      "cr_cycle_submit_to_approve_days":        null,
+      "cr_cycle_approve_to_dev_days":           null,
+      "cr_cycle_dev_to_test_days":              null,
+      "cr_cycle_test_to_deploydev_days":        null,
+      "cr_cycle_deploydev_to_deployprod_days":  null,
+      "cr_cycle_total_days":                    null,
+      "deploy_estimate_delta_days":             null
+    },
+    "CR-FIXTURE-004": {
+      "_handcomputed": "All timestamps present. draft_to_submit = submitted(T-38d) - created(T-40d) = 2.0. submit_to_approve = approved(T-36d) - submitted(T-38d) = 2.0. approve_to_dev = dev_started(T-34d) - approved(T-36d) = 2.0. dev_to_test = testing_started(T-32d) - dev_started(T-34d) = 2.0. test_to_deploydev = deployed_dev(T-31d) - testing_started(T-32d) = 1.0. deploydev_to_deployprod = deployed_prod(T-30d) - deployed_dev(T-31d) = 1.0. cr_cycle_total_days = completed(T-30d) - created(T-40d) = 10.0. deploy_estimate_delta_days = deployed_prod(T-30d) - planned(T-30d) = 0.0. NOTE: cr_completed_at=T-30d is before the 14-day window cutoff (T-14d), so this CR is EXCLUDED from all rollups. derivePerCR still computes these values correctly for the per-CR block.",
+      "cr_cycle_draft_to_submit_days":          2.0,
+      "cr_cycle_submit_to_approve_days":        2.0,
+      "cr_cycle_approve_to_dev_days":           2.0,
+      "cr_cycle_dev_to_test_days":              2.0,
+      "cr_cycle_test_to_deploydev_days":        1.0,
+      "cr_cycle_deploydev_to_deployprod_days":  1.0,
+      "cr_cycle_total_days":                    10.0,
+      "deploy_estimate_delta_days":             0.0
+    },
+    "CR-FIXTURE-005": {
+      "_handcomputed": "Early delivery. draft_to_submit = submitted(T-16d) - created(T-18d) = 2.0. submit_to_approve = approved(T-13d) - submitted(T-16d) = 3.0. approve_to_dev = dev_started(T-10d) - approved(T-13d) = 3.0. dev_to_test = testing_started(T-7d) - dev_started(T-10d) = 3.0. test_to_deploydev = deployed_dev(T-5d) - testing_started(T-7d) = 2.0. deploydev_to_deployprod = deployed_prod(T-4d) - deployed_dev(T-5d) = 1.0. cr_cycle_total_days = completed(T-3d) - created(T-18d) = 15.0. deploy_estimate_delta_days = deployed_prod(T-4d) - planned(T-1d) = -3.0 (EARLY, < -1). Anchor: cr_completed_at=T-3d, in window.",
+      "cr_cycle_draft_to_submit_days":          2.0,
+      "cr_cycle_submit_to_approve_days":        3.0,
+      "cr_cycle_approve_to_dev_days":           3.0,
+      "cr_cycle_dev_to_test_days":              3.0,
+      "cr_cycle_test_to_deploydev_days":        2.0,
+      "cr_cycle_deploydev_to_deployprod_days":  1.0,
+      "cr_cycle_total_days":                    15.0,
+      "deploy_estimate_delta_days":             -3.0
+    },
+    "CR-FIXTURE-006": {
+      "_handcomputed": "Boundary hit. All segments 2.0 days except deploydev_to_deployprod. draft_to_submit=2.0, submit_to_approve=2.0, approve_to_dev=2.0, dev_to_test=2.0, test_to_deploydev=2.0. deploydev_to_deployprod = deployed_prod(2026-05-05T00:00:00Z) - deployed_dev(2026-05-04T12:00:00Z) = 12 hours = 0.5 days. cr_cycle_total_days = completed(T-1d) - created(T-12d) = 11.0. deploy_estimate_delta_days = deployed_prod(T-1.5d) - planned(T-2d) = 0.5 days (HIT, abs<=1). Anchor: cr_completed_at=T-1d, in window.",
+      "cr_cycle_draft_to_submit_days":          2.0,
+      "cr_cycle_submit_to_approve_days":        2.0,
+      "cr_cycle_approve_to_dev_days":           2.0,
+      "cr_cycle_dev_to_test_days":              2.0,
+      "cr_cycle_test_to_deploydev_days":        2.0,
+      "cr_cycle_deploydev_to_deployprod_days":  0.5,
+      "cr_cycle_total_days":                    11.0,
+      "deploy_estimate_delta_days":             0.5
+    }
+  },
+
+  "expected_rollups": {
+    "_derivation_note": "Rollups use only in-window CRs: 001, 002, 003, 005, 006. CR-004 is excluded (cr_completed_at=T-30d, before cutoff T-14d). sampleCount for each segment counts only non-null values among the in-window set. Median for even-count arrays = midpoint of two middle sorted values.",
+
+    "cr_cycle_draft_to_submit_days": {
+      "_handcomputed": "In-window non-null values: 001=2.0, 002=2.0, 003=1.0, 005=2.0, 006=2.0. Sorted: [1.0, 2.0, 2.0, 2.0, 2.0]. avg=(1+2+2+2+2)/5=9/5=1.8. median=2.0 (middle of 5). sampleCount=5.",
+      "avg": 1.8,
+      "median": 2.0,
+      "sampleCount": 5
+    },
+    "cr_cycle_submit_to_approve_days": {
+      "_handcomputed": "In-window non-null values: 001=2.0, 002=3.0, 003=null(excluded), 005=3.0, 006=2.0. Sorted: [2.0, 2.0, 3.0, 3.0]. avg=(2+2+3+3)/4=10/4=2.5. median=(2.0+3.0)/2=2.5 (even count, midpoint of positions 2 and 3). sampleCount=4.",
+      "avg": 2.5,
+      "median": 2.5,
+      "sampleCount": 4
+    },
+    "cr_cycle_approve_to_dev_days": {
+      "_handcomputed": "In-window non-null values: 001=2.0, 002=null(dev_started missing), 003=null(approved_at missing), 005=3.0, 006=2.0. Sorted: [2.0, 2.0, 3.0]. avg=(2+2+3)/3=7/3=2.3333... median=2.0 (middle of 3). sampleCount=3.",
+      "avg": 2.3333333333333335,
+      "median": 2.0,
+      "sampleCount": 3
+    },
+    "cr_cycle_dev_to_test_days": {
+      "_handcomputed": "In-window non-null values: 001=2.0, 002=null(both missing), 003=null(dev_started+testing_started missing), 005=3.0, 006=2.0. Sorted: [2.0, 2.0, 3.0]. avg=7/3=2.3333... median=2.0. sampleCount=3.",
+      "avg": 2.3333333333333335,
+      "median": 2.0,
+      "sampleCount": 3
+    },
+    "cr_cycle_test_to_deploydev_days": {
+      "_handcomputed": "In-window non-null values: 001=2.0, 002=null(testing_started missing), 003=null(testing_started missing), 005=2.0, 006=2.0. Sorted: [2.0, 2.0, 2.0]. avg=2.0. median=2.0. sampleCount=3.",
+      "avg": 2.0,
+      "median": 2.0,
+      "sampleCount": 3
+    },
+    "cr_cycle_deploydev_to_deployprod_days": {
+      "_handcomputed": "In-window non-null values: 001=2.0, 002=5.0, 003=null(deployed_prod missing), 005=1.0, 006=0.5. Sorted: [0.5, 1.0, 2.0, 5.0]. avg=(0.5+1.0+2.0+5.0)/4=8.5/4=2.125. median=(1.0+2.0)/2=1.5 (even count, midpoint of positions 2 and 3). sampleCount=4.",
+      "avg": 2.125,
+      "median": 1.5,
+      "sampleCount": 4
+    },
+    "cr_cycle_total_days": {
+      "_handcomputed": "In-window non-null values: 001=12.0, 002=15.0, 003=null(completed_at missing), 005=15.0, 006=11.0. Sorted: [11.0, 12.0, 15.0, 15.0]. avg=(11+12+15+15)/4=53/4=13.25. median=(12.0+15.0)/2=13.5. sampleCount=4.",
+      "avg": 13.25,
+      "median": 13.5,
+      "sampleCount": 4
+    },
+    "estimateDelta": {
+      "_handcomputed": "In-window CRs with both deploy_window_planned AND cr_deployed_prod_at non-null: 001 delta=0.0, 002 delta=+3.0, 003 excluded(null delta — no planned/no deployed_prod), 005 delta=-3.0, 006 delta=+0.5. Values: [-3.0, 0.0, 0.5, 3.0] sorted. avg=(-3+0+0.5+3)/4=0.5/4=0.125. sampleCount=4. hits: abs(0.0)<=1 → 001 YES; abs(3.0)<=1 → 002 NO; abs(-3.0)<=1 → 005 NO; abs(0.5)<=1 → 006 YES. hits=2. earlies: 005 delta=-3.0 < -1 → YES. earlies=1. lates: 002 delta=+3.0 > +1 → YES. lates=1. hitPct=50.0, earlyPct=25.0, latePct=25.0.",
+      "avg": 0.125,
+      "sampleCount": 4,
+      "hits": 2,
+      "earlies": 1,
+      "lates": 1,
+      "hitPct": 50.0,
+      "earlyPct": 25.0,
+      "latePct": 25.0
+    }
+  }
+}

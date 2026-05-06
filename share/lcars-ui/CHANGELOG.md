@@ -4,6 +4,17 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0293: CAB Workflow Phase 3 — Cycle-Time Metrics -->
+
+### Added
+- **XACA-0293-011:** Add Node-native test_cr_metrics.js (15 cases against gold-standard fixture); ESLint clean across all 4 CR JS modules (3 new modules zero errors; 8 pre-existing errors in lcars-cr-tab.js from XACA-0328 code documented); manual UI exercise performed via code inspection with justification (server not running).
+- **XACA-0293-005:** View 2 estimate-vs-actual tile — avg deploy_estimate_delta_days with HIT/EARLY/LATE breakdown over rolling 14-day window; color-coded health badge (green/yellow/red, tunable in Phase 7).
+- **XACA-0293-004:** View 2 segment rollup tiles — 7 cycle-time tiles (avg / median / sample count) across the rolling 14-day window; refresh on board update; empty-state handling for low-sample windows.
+- **XACA-0293-006:** Add cr-metrics fixture (5+ CRs covering happy/gap/emergency/out-of-window/early paths) + reconciliation doc + Node smoke check.
+- **XACA-0293-003:** View 2 scaffold — PIPELINE | CYCLE TIME sub-tab toggle inside #section-change-req; 8 empty chart-card tiles for cycle-time rollups (rendered by 004/005).
+- **XACA-0293-002:** View 1 Active CR Pipeline — ACTIVE PIPELINE saved-view chip (filters non-terminal cr-* states); STAGE AGE column with color-coded aging badge (green/yellow/red thresholds tunable in Phase 7).
+- **XACA-0293-001:** Add lcars-cr-metrics.js — pure-JS cycle-time derivation + rolling-window aggregation helpers.
+
 <!-- XACA-0310: CAB Workflow Phase 2.5 — CR-row expansion + BACKLOG CR filter -->
 
 ### Fixed

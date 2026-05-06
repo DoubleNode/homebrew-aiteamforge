@@ -10,6 +10,10 @@
  *   "AWAITING APPROVAL"  — crState === 'cr-submitted' (filter-bar preset only)
  *   "EMERGENCY (30D)"    — cr_type === 'emergency' within last 30 days
  *
+ * XACA-0293-002: View 1 Active CR Pipeline
+ *   "ACTIVE PIPELINE"    — all non-terminal crState values; sorted by STAGE AGE desc
+ *   STAGE AGE column     — time-in-current-state with color-coded badge (green/yellow/red)
+ *
  * XACA-0310 Phase 2.5:
  *   001: CR rows carry linkedItemIds[]; item-count badge in TITLE cell.
  *   002: Chevron expands a cr-children-row showing linked kanban items.
@@ -89,6 +93,30 @@
                 // cr_completed_at covers deployed-prod; addedAt is last fallback.
                 const ts = item.cr_emergency_deployed_at || item.cr_completed_at || item.addedAt;
                 return ts ? isWithinLastNDays(new Date(ts).getTime(), 30) : false;
+            },
+        },
+
+        // XACA-0293-002: Active CR Pipeline.
+        // Stable view ID — do NOT rename; persisted to localStorage.
+        //
+        // Terminal-state rationale:
+        //   'deployed-prod'      — end of standard pipeline; no further transitions expected.
+        //   'emergency-deployed' — end of emergency pipeline; no further transitions expected.
+        //   'cr-rejected'        — dead-end in current submission cycle. If the CR is
+        //                          re-submitted it transitions back to 'cr-submitted',
+        //                          which automatically puts it back into the active set.
+        //   'cr-held'            — NOT terminal; the CR is paused but still in flight.
+        //
+        // sortKey: when this view is applied, _applySavedView honors it by writing
+        //   _filterState.sortBy = 'STAGE-AGE', surfacing stuck CRs first.
+        'active-pipeline': {
+            label: 'ACTIVE PIPELINE',
+            preset: { stateFilter: 'all', typeFilter: 'all', platformFilter: 'all', searchText: '' },
+            sortKey: 'STAGE-AGE',
+            predicate: item => {
+                // Active = any non-terminal cr-* state. Terminal states excluded (see above).
+                const TERMINAL = new Set(['deployed-prod', 'emergency-deployed', 'cr-rejected']);
+                return !TERMINAL.has(item.crState) && item.crState && item.crState.length > 0;
             },
         },
     };
@@ -218,7 +246,7 @@
     // ─── Filter bar state ─────────────────────────────────────────────────────
 
     const FILTER_KEY = 'lcars-change-req-filter';
-    const SORT_VALUES = ['STATE', 'TYPE', 'PLATFORM', 'APPROVER'];
+    const SORT_VALUES = ['STATE', 'TYPE', 'PLATFORM', 'APPROVER', 'STAGE-AGE'];
 
     let _filterState = _loadFilterState();
 
@@ -374,6 +402,54 @@
         _syncSavedViewChips();
     }
 
+    // ─── Sub-tab toggle (XACA-0293-003) ─────────────────────────────────────
+
+    const _SUBTAB_KEY    = 'lcars-cr-subtab';
+    const _VALID_SUBTABS = ['pipeline', 'cycle-time'];
+
+    function _initSubtabs() {
+        const bar = document.getElementById('change-req-subtabs');
+        if (!bar) return;
+
+        const buttons = bar.querySelectorAll('.cr-subtab');
+        if (!buttons.length) return;
+
+        function _activateSubtab(target) {
+            buttons.forEach(btn => {
+                const isTarget = btn.dataset.subtab === target;
+                btn.classList.toggle('active', isTarget);
+                btn.setAttribute('aria-selected', String(isTarget));
+            });
+
+            document.querySelectorAll('.change-req-pane').forEach(pane => {
+                if (pane.dataset.subtabPane === target) {
+                    pane.removeAttribute('hidden');
+                } else {
+                    pane.setAttribute('hidden', '');
+                }
+            });
+
+            try {
+                localStorage.setItem(_SUBTAB_KEY, target);
+            } catch (_) {}
+
+            document.dispatchEvent(new CustomEvent('cr-subtab-changed', { detail: { subtab: target } }));
+        }
+
+        buttons.forEach(btn => {
+            btn.addEventListener('click', () => _activateSubtab(btn.dataset.subtab));
+        });
+
+        // Restore persisted selection; fall back to 'pipeline' if invalid
+        let stored = 'pipeline';
+        try {
+            const raw = localStorage.getItem(_SUBTAB_KEY);
+            if (raw && _VALID_SUBTABS.includes(raw)) stored = raw;
+        } catch (_) {}
+
+        _activateSubtab(stored);
+    }
+
     function _initSavedViews() {
         const container = document.getElementById('change-req-saved-views');
         if (!container) return;
@@ -408,8 +484,12 @@
      */
     function _applySavedView(viewId) {
         if (viewId && SAVED_VIEWS[viewId]) {
-            const preset = SAVED_VIEWS[viewId].preset;
-            Object.assign(_filterState, preset);
+            const view = SAVED_VIEWS[viewId];
+            Object.assign(_filterState, view.preset);
+            // Honor per-view sort hint (e.g. ACTIVE PIPELINE sorts by STAGE-AGE desc).
+            if (view.sortKey) {
+                _filterState.sortBy = view.sortKey;
+            }
         } else {
             // Reset to defaults
             _filterState.stateFilter   = 'all';
@@ -430,6 +510,10 @@
 
         const searchInput = document.getElementById('cr-filter-text');
         if (searchInput) searchInput.value = _filterState.searchText || '';
+
+        // Reflect sortBy in the sort button display (e.g. "STAGE-AGE" when active-pipeline applied).
+        const sortValueEl = document.getElementById('cr-sort-value');
+        if (sortValueEl) sortValueEl.textContent = _filterState.sortBy || 'STATE';
 
         _syncSavedViewChips();
         renderChangeReqList();
@@ -497,6 +581,11 @@
             cr_proper_url:              cr.cr_proper_url || '',
             cr_summary:                 cr.summary || '',
             cr_created_at:              ts.cr_created_at || cr.createdAt || '',
+            cr_submitted_at:            ts.cr_submitted_at || '',
+            cr_approved_at:             ts.cr_approved_at || '',
+            cr_dev_started_at:          ts.cr_dev_started_at || '',
+            cr_deployed_dev_at:         ts.cr_deployed_dev_at || '',
+            cr_deployed_prod_at:        ts.cr_deployed_prod_at || '',
             cr_emergency_deployed_at:   ts.cr_emergency_deployed_at || '',
             cr_completed_at:            ts.cr_completed_at || '',
             addedAt:                    cr.createdAt || '',
@@ -585,6 +674,16 @@
                 const bName = b.cr_approver_name || b.cr_approved_by || '';
                 return aName.localeCompare(bName);
             }
+            // STAGE-AGE: descending (oldest first, so stuck CRs surface at top).
+            // null ages (missing anchor) sort to the bottom.
+            if (sortBy === 'STAGE-AGE') {
+                const aAge = _computeStageAge(a);
+                const bAge = _computeStageAge(b);
+                if (aAge === null && bAge === null) return 0;
+                if (aAge === null) return 1;   // a sinks
+                if (bAge === null) return -1;  // b sinks
+                return bAge - aAge;            // larger age = higher in list
+            }
             // Default: STATE priority
             const aOrd = CR_STATE_ORDER[a.crState] !== undefined ? CR_STATE_ORDER[a.crState] : 99;
             const bOrd = CR_STATE_ORDER[b.crState] !== undefined ? CR_STATE_ORDER[b.crState] : 99;
@@ -644,6 +743,83 @@
         return `<span class="cr-pushback-count">${n}</span>`;
     }
 
+    // ─── Stage age helpers (XACA-0293-002) ───────────────────────────────────
+
+    /**
+     * Anchor-timestamp mapping for STAGE AGE computation.
+     * Returns the timestamp (string/ISO) that marks when the CR entered its
+     * current state.  Fallback chain: anchor field → cr_created_at → addedAt.
+     *
+     * Thresholds are first-cut values; tunable in Phase 7 (XACA-0297).
+     */
+    const _STAGE_ANCHOR = {
+        'cr-drafted':         item => item.cr_created_at,
+        'cr-submitted':       item => item.cr_submitted_at,
+        'cr-approved':        item => item.cr_approved_at,
+        // cr-held: paused since submission; use cr_submitted_at as anchor.
+        'cr-held':            item => item.cr_submitted_at,
+        // cr-rejected: dead-end since submission; would re-enter at cr-submitted if re-submitted.
+        'cr-rejected':        item => item.cr_submitted_at,
+        'implementing':       item => item.cr_dev_started_at,
+        'deployed-dev':       item => item.cr_deployed_dev_at,
+        'deployed-prod':      item => item.cr_deployed_prod_at,
+        'emergency-deployed': item => item.cr_emergency_deployed_at,
+    };
+
+    /**
+     * Returns fractional days (float) that the CR has been in its current state,
+     * or null when no usable anchor timestamp is available.
+     */
+    function _computeStageAge(item) {
+        const anchorFn = _STAGE_ANCHOR[item.crState];
+        const rawTs = anchorFn
+            ? (anchorFn(item) || item.cr_created_at || item.addedAt)
+            : (item.cr_created_at || item.addedAt);
+
+        if (!rawTs) return null;
+        const anchorMs = new Date(rawTs).getTime();
+        if (!anchorMs || isNaN(anchorMs)) return null;
+
+        return (Date.now() - anchorMs) / (24 * 60 * 60 * 1000);
+    }
+
+    /**
+     * Render a stage-age badge <td> cell.
+     * Format: <Xh | Xd | X.Xmo>  with CSS class for color coding.
+     * Thresholds (first cut — tunable in Phase 7, XACA-0297):
+     *   0–2 days   → .stage-age-fresh  (green)
+     *   2–5 days   → .stage-age-aging  (yellow)
+     *   >5 days    → .stage-age-stale  (red)
+     *   no anchor  → .stage-age-unknown (gray), displays "—"
+     */
+    function _stageAgeBadge(item) {
+        const ageDays = _computeStageAge(item);
+
+        if (ageDays === null) {
+            return '<span class="stage-age-badge stage-age-unknown">—</span>';
+        }
+
+        let label;
+        if (ageDays < 1) {
+            label = Math.floor(ageDays * 24) + 'h';
+        } else if (ageDays < 30) {
+            label = Math.floor(ageDays) + 'd';
+        } else {
+            label = (ageDays / 30).toFixed(1) + 'mo';
+        }
+
+        let cls;
+        if (ageDays <= 2) {
+            cls = 'stage-age-fresh';
+        } else if (ageDays <= 5) {
+            cls = 'stage-age-aging';
+        } else {
+            cls = 'stage-age-stale';
+        }
+
+        return `<span class="stage-age-badge ${cls}">${label}</span>`;
+    }
+
     // ─── Item-count badge (XACA-0310-001) ────────────────────────────────────
 
     /**
@@ -663,8 +839,8 @@
 
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
-    // Total column count including the new chevron col-0.
-    const CR_COL_COUNT = 10;
+    // Total column count including chevron col-0 and STAGE AGE col (XACA-0293-002).
+    const CR_COL_COUNT = 11;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
@@ -675,6 +851,7 @@
         const approver   = escapeHtml(item.cr_approver_name || item.cr_approved_by || '');
         const deployWin  = _formatDeployWindow(item.deploy_window_planned);
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
+        const stageAge   = _stageAgeBadge(item);
         const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0);
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
         const isExpanded  = _expandedCRs.has(item.cr_id);
@@ -703,6 +880,7 @@
             <td class="cr-col-approver">${approver}</td>
             <td class="cr-col-deploy">${deployWin}</td>
             <td class="cr-col-pushbacks">${pushbacks}</td>
+            <td class="cr-col-stage-age">${stageAge}</td>
             <td class="cr-col-docs">${docsBtn}</td>
         </tr>`;
     }
@@ -879,6 +1057,7 @@
                         <th class="cr-col-approver">APPROVER</th>
                         <th class="cr-col-deploy">DEPLOY WINDOW</th>
                         <th class="cr-col-pushbacks">PUSHBACKS</th>
+                        <th class="cr-col-stage-age">STAGE AGE</th>
                         <th class="cr-col-docs">DOCS</th>
                     </tr>
                 </thead>
@@ -1614,6 +1793,9 @@
     function initChangeReqTab() {
         if (_initialized) return;
         _initialized = true;
+
+        // Wire sub-tab toggle (PIPELINE | CYCLE TIME)
+        _initSubtabs();
 
         // Mount filter bar (will no-op gracefully if container not in DOM yet)
         _initFilterBar();

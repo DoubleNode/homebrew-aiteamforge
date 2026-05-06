@@ -1048,8 +1048,7 @@ body {
     gap: 30px;
     width: 100%;
     height: 100%;
-    padding: 40px 0 48px 0;
-    position: relative;
+    padding: 40px 0 20px 0;
 }
 
 .startup-logo-container {
@@ -1076,7 +1075,7 @@ body {
     to { opacity: 1; transform: scale(1); }
 }
 
-/* Initialization Status Area - fills remaining space between logo and the absolutely-positioned copyright */
+/* Initialization Status Area - sits above the bottom copyright; sized by content + fixed data-scroll */
 .startup-status {
     display: flex;
     flex-direction: column;
@@ -1084,9 +1083,7 @@ body {
     gap: 15px;
     width: 80%;
     max-width: 800px;
-    flex: 1;
-    min-height: 0;
-    margin-top: -60px;
+    flex-shrink: 0;
 }
 
 .startup-init-text {
@@ -1103,13 +1100,13 @@ body {
     to { opacity: 1; }
 }
 
-/* Scrolling Data Display - expands to fill available space */
+/* Scrolling Data Display - fixed height so layout leaves room for the bottom copyright */
 .startup-data-scroll {
     font-family: 'Courier New', monospace;
     font-size: 0.75rem;
     color: var(--lcars-blue);
-    flex: 1;
-    min-height: 100px;
+    flex-shrink: 0;
+    height: 220px;
     width: 100%;
     overflow: hidden;
     background: rgba(0, 0, 0, 0.3);
@@ -1128,18 +1125,17 @@ body {
 }
 
 .startup-copyright {
-    position: absolute;
-    bottom: -48px;
-    left: 0;
-    right: 0;
     font-family: 'Antonio', sans-serif;
     font-size: 0.7rem;
     color: var(--lcars-orange);
     letter-spacing: 2px;
     text-align: center;
     opacity: 0.5;
+    padding: 8px 0 4px 0;
+    flex-shrink: 0;
     text-transform: uppercase;
-    pointer-events: none;
+    margin-top: auto;
+    width: 100%;
 }
 
 .startup-data-scroll .data-line:last-child {
@@ -15099,11 +15095,6 @@ body {
 
 .team-config-input-narrow {
     width: 100px;
-}
-
-.team-config-input-wide {
-    width: 460px;
-    max-width: 100%;
 }
 
 .team-config-tbd-badge {

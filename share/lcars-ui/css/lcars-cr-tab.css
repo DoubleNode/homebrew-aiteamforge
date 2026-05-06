@@ -1102,6 +1102,55 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     text-transform: uppercase;
 }
 
+/* ── XACA-0293-002: Stage Age column + badges ────────────────────────────── */
+
+/* Column width — sits between PUSHBACKS and DOCS */
+.cr-col-stage-age {
+    width: 110px;
+    text-align: center;
+    white-space: nowrap;
+}
+
+/* Base badge — mirrors .cr-badge padding/border-radius for visual consistency */
+.stage-age-badge {
+    display: inline-block;
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+/* Green: 0–2 days — CR is moving normally */
+.stage-age-fresh {
+    background: rgba(127, 191, 127, 0.18);
+    color: var(--lcars-green, #7fbf7f);
+    border: 1px solid rgba(127, 191, 127, 0.40);
+}
+
+/* Yellow: 2–5 days — CR is slowing down */
+.stage-age-aging {
+    background: rgba(204, 153, 102, 0.18);
+    color: var(--lcars-amber-warm, #cc9966);
+    border: 1px solid rgba(204, 153, 102, 0.40);
+}
+
+/* Red: >5 days — CR may be stuck; review needed */
+.stage-age-stale {
+    background: rgba(204, 102, 102, 0.18);
+    color: var(--lcars-red, #cc6666);
+    border: 1px solid rgba(204, 102, 102, 0.40);
+}
+
+/* Gray: no usable anchor timestamp for the current state */
+.stage-age-unknown {
+    background: rgba(120, 120, 120, 0.12);
+    color: #777;
+    border: 1px solid rgba(120, 120, 120, 0.25);
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
@@ -1127,4 +1176,296 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
         width: 100%;
         max-width: none;
     }
+}
+
+/* ── XACA-0293-003: Sub-tab toggle (PIPELINE | CYCLE TIME) ──────────────── */
+
+.change-req-subtabs {
+    display: flex;
+    flex-direction: row;
+    gap: 12px;
+    padding: 8px 16px 0;
+    border-bottom: 1px solid rgba(204, 153, 255, 0.20);
+}
+
+.cr-subtab {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 5px 14px 7px;
+    background: transparent;
+    border: none;
+    border-bottom: 2px solid transparent;
+    color: rgba(204, 153, 255, 0.50);
+    cursor: pointer;
+    border-radius: 3px 3px 0 0;
+    transition: color 0.15s, border-bottom-color 0.15s, background 0.15s;
+    margin-bottom: -1px;
+}
+
+.cr-subtab:hover:not(.active) {
+    color: var(--lcars-purple, #cc99ff);
+    background: rgba(204, 153, 255, 0.08);
+}
+
+.cr-subtab.active {
+    color: var(--lcars-purple, #cc99ff);
+    border-bottom-color: var(--lcars-purple, #cc99ff);
+    background: rgba(204, 153, 255, 0.10);
+}
+
+/* Hidden pane — no layout shift; browser [hidden] sets display:none */
+.change-req-pane[hidden] {
+    display: none;
+}
+
+/* ── XACA-0293-003: Cycle-time chart-card grid ───────────────────────────── */
+
+.cr-cycle-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 16px;
+    padding: 16px;
+}
+
+.cr-cycle-card {
+    background: rgba(0, 0, 0, 0.35);
+    border-left: 4px solid var(--lcars-purple, #cc99ff);
+    border-radius: 8px 2px 2px 2px;
+    min-height: 140px;
+}
+
+.cr-cycle-card:empty::before {
+    content: '\2014';
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 140px;
+    color: #555;
+    font-family: 'Antonio', sans-serif;
+    font-size: 18px;
+}
+
+/* ── Cycle-grid responsive breakpoints ───────────────────────────────────── */
+
+@media (max-width: 900px) {
+    .cr-cycle-grid {
+        grid-template-columns: repeat(2, 1fr);
+    }
+}
+
+@media (max-width: 600px) {
+    .cr-cycle-grid {
+        grid-template-columns: 1fr;
+    }
+}
+
+/* ── XACA-0293-004: Cycle-time segment tile content ─────────────────────── */
+
+.cr-tile-header {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 10px 12px 0;
+}
+
+.cr-tile-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: var(--lcars-purple, #cc99ff);
+}
+
+.cr-tile-window {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    font-weight: 400;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(204, 153, 255, 0.45);
+    background: rgba(204, 153, 255, 0.10);
+    border: 1px solid rgba(204, 153, 255, 0.20);
+    border-radius: 3px;
+    padding: 1px 5px;
+    white-space: nowrap;
+}
+
+.cr-tile-body {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 12px 12px;
+    gap: 6px;
+}
+
+.cr-tile-primary {
+    display: flex;
+    flex-direction: row;
+    align-items: baseline;
+    gap: 6px;
+}
+
+.cr-tile-value {
+    font-family: 'Antonio', sans-serif;
+    font-size: 2rem;
+    font-weight: 700;
+    color: #ffffff;
+    line-height: 1;
+}
+
+.cr-tile-unit {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.45);
+    align-self: flex-end;
+    padding-bottom: 3px;
+}
+
+.cr-tile-secondary {
+    display: flex;
+    flex-direction: row;
+    gap: 14px;
+}
+
+.cr-tile-stat {
+    font-family: 'Antonio', sans-serif;
+    font-size: 9px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.40);
+}
+
+.cr-tile-stat strong {
+    color: rgba(255, 255, 255, 0.70);
+    font-weight: 700;
+}
+
+/* Empty / no-sample state */
+
+.cr-tile-empty {
+    align-items: center;
+    justify-content: center;
+    min-height: 80px;
+}
+
+.cr-tile-empty-msg {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    font-weight: 400;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: rgba(204, 153, 255, 0.30);
+    font-style: italic;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   XACA-0293-005: Estimate-vs-Actual tile
+   Only .cr-estimate-* selectors are defined here.
+   Base tile structure (.cr-tile-header, .cr-tile-body, .cr-tile-primary,
+   .cr-tile-value, .cr-tile-unit, .cr-tile-empty, .cr-tile-empty-msg) is
+   defined above by XACA-0293-004 — DO NOT redefine.
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Primary value + unit stacked as a column, baseline-aligned */
+.cr-estimate-primary {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+}
+
+/* Health color variants for the primary avg-delta value.
+   Fallback hex tokens: green #7fbf7f, yellow #cc9966, red #cc6666.
+   Uses LCARS palette vars when available. */
+.cr-estimate-delta-value.cr-estimate-health-good {
+    color: var(--lcars-green, #7fbf7f);
+}
+
+.cr-estimate-delta-value.cr-estimate-health-warn {
+    color: var(--lcars-yellow, #cc9966);
+}
+
+.cr-estimate-delta-value.cr-estimate-health-bad {
+    color: var(--lcars-red, #cc6666);
+}
+
+/* Breakdown row: three equal-flex columns */
+.cr-estimate-breakdown {
+    display: flex;
+    flex-direction: row;
+    justify-content: space-between;
+    padding-top: 8px;
+    width: 100%;
+}
+
+/* Individual bucket column */
+.cr-estimate-bucket {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    flex: 1 1 0;
+}
+
+/* Large percentage figure */
+.cr-estimate-bucket-pct {
+    font-family: 'Antonio', sans-serif;
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: 0.04em;
+    line-height: 1.1;
+    color: rgba(204, 153, 255, 0.90);
+}
+
+/* Category label — uppercase, dim */
+.cr-estimate-bucket-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: rgba(204, 153, 255, 0.45);
+    margin-top: 2px;
+}
+
+/* Integer count — smaller, dimmer */
+.cr-estimate-bucket-count {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.06em;
+    color: rgba(204, 153, 255, 0.28);
+    margin-top: 1px;
+}
+
+/* Bucket label tints by category */
+.cr-estimate-bucket-hit .cr-estimate-bucket-label {
+    color: var(--lcars-green, #7fbf7f);
+    opacity: 0.80;
+}
+
+.cr-estimate-bucket-early .cr-estimate-bucket-label {
+    color: var(--lcars-cyan, #66bbcc);
+    opacity: 0.80;
+}
+
+.cr-estimate-bucket-late .cr-estimate-bucket-label {
+    color: var(--lcars-red, #cc6666);
+    opacity: 0.80;
+}
+
+/* Sample count footer */
+.cr-estimate-sample-count {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 400;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: rgba(204, 153, 255, 0.35);
+    padding-top: 6px;
 }

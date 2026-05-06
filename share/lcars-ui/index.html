@@ -480,10 +480,31 @@
                         <span class="section-count" id="change-req-count">0 ITEMS</span>
                         <div class="section-bar"></div>
                     </div>
-                    <div id="change-req-filter-bar" class="change-req-filter-bar"></div>
-                    <div id="change-req-saved-views" class="change-req-saved-views"></div>
-                    <div id="change-req-list" class="change-req-list">
-                        <div class="change-req-empty">No change requests</div>
+                    <!-- XACA-0293-003: sub-tab toggle sits between section-header and panes -->
+                    <div id="change-req-subtabs" class="change-req-subtabs" role="tablist">
+                        <button class="cr-subtab active" data-subtab="pipeline" role="tab" aria-selected="true">PIPELINE</button>
+                        <button class="cr-subtab"        data-subtab="cycle-time" role="tab" aria-selected="false">CYCLE TIME</button>
+                    </div>
+                    <!-- PIPELINE pane — existing filter-bar, saved-views, list -->
+                    <div id="change-req-pane-pipeline" class="change-req-pane" data-subtab-pane="pipeline">
+                        <div id="change-req-filter-bar" class="change-req-filter-bar"></div>
+                        <div id="change-req-saved-views" class="change-req-saved-views"></div>
+                        <div id="change-req-list" class="change-req-list">
+                            <div class="change-req-empty">No change requests</div>
+                        </div>
+                    </div>
+                    <!-- CYCLE TIME pane — 8-tile chart-card grid; tiles populated by 004/005 -->
+                    <div id="change-req-pane-cycle-time" class="change-req-pane" data-subtab-pane="cycle-time" hidden>
+                        <div class="cr-cycle-grid">
+                            <div class="cr-cycle-card" id="cr-cycle-tile-draft-to-submit"         data-segment="draft_to_submit"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-submit-to-approve"       data-segment="submit_to_approve"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-approve-to-dev"          data-segment="approve_to_dev"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-dev-to-test"             data-segment="dev_to_test"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-test-to-deploydev"       data-segment="test_to_deploydev"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-deploydev-to-deployprod" data-segment="deploydev_to_deployprod"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-total"                   data-segment="total"></div>
+                            <div class="cr-cycle-card" id="cr-cycle-tile-estimate-delta"          data-segment="estimate_delta"></div>
+                        </div>
                     </div>
                 </section>
 
@@ -704,7 +725,7 @@
                                 <span class="team-config-hint">Used in source-file headers (e.g. "Main Event App", "DoubleNode Dev-Team Infrastructure (AITeamForge)").</span>
                             </div>
                             <div class="team-config-row-right">
-                                <input type="text" id="team-config-component-label" class="team-config-input team-config-input-wide" maxlength="200" placeholder="e.g. Main Event App" />
+                                <input type="text" id="team-config-component-label" class="team-config-input" maxlength="200" placeholder="e.g. Main Event App" />
                             </div>
                         </div>
 
@@ -2194,8 +2215,14 @@
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js"></script>
 <script src="js/lcars.js?v=3.18"></script>
+<!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
+<script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0292-007: CHANGE REQ list view — must load after lcars.js (depends on boardData, escapeHtml, showPlanDocModal, switchDocTab) -->
 <script src="js/lcars-cr-tab.js"></script>
+<!-- XACA-0293-004: CR cycle-time segment tiles — must load after lcars-cr-metrics.js and lcars-cr-tab.js -->
+<script src="js/lcars-cr-segment-tiles.js"></script>
+<!-- XACA-0293-005: CR estimate-vs-actual tile — must load after lcars-cr-metrics.js and lcars-cr-segment-tiles.js -->
+<script src="js/lcars-cr-estimate-tile.js"></script>
 <!-- Activity Timeline Panel — must load after lcars.js (depends on escapeHtml, apiUrl) -->
 <script src="js/lcars-activity.js"></script>
 <!-- XACA-0220 Phase 3b — daily artifact audit banner (must load after lcars.js for apiUrl) -->
