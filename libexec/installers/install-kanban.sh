@@ -803,18 +803,27 @@ uninstall_lcars_health_launchagent() {
     fi
 }
 
-# Install CR Confluence Poller LaunchAgent (XACA-0328-003)
-# Scans cr-drafted CRs every 10 min; detects appended CR-Proper links on Confluence
-# request pages; writes cr_proper_url and transitions cr-drafted → cr-submitted.
+# Install CR Confluence Poller LaunchAgents — one per team (XACA-0350)
+#
+# Scans cr-drafted CRs every 10 min per team; detects appended CR-Proper links
+# on Confluence request pages; writes cr_proper_url and transitions
+# cr-drafted → cr-submitted.  Isolating one LaunchAgent per team means a bad
+# team config only wedges that team's poller; others keep running.
+#
+# Per-team plists:  ~/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.<team>.plist
+# Per-team logs:    ~/Library/Logs/aiteamforge/cr-poller/<team>.{out,err}.log
 #
 # Credentials are NOT auto-created — user must populate:
 #   ~/.config/aiteamforge/confluence-credentials.json
-# (Daemon exits cleanly with a warning if file is absent — no credentials risk.)
+# If absent or empty, installer logs an info message and skips plist installation.
+# The daemon itself exits cleanly with a warning if the file is absent at runtime.
 install_cr_confluence_poller_launchagent() {
     local plist_template="$INSTALL_ROOT/share/templates/kanban/cr-confluence-poller-plist.template"
-    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
     local poller_src="$INSTALL_ROOT/share/scripts/cr-confluence-poller.py"
     local poller_dest="$AITEAMFORGE_DIR/scripts/cr-confluence-poller.py"
+    local creds_file="$HOME/.config/aiteamforge/confluence-credentials.json"
+    local launch_agents_dir="$HOME/Library/LaunchAgents"
+    local log_dir="$HOME/Library/Logs/aiteamforge/cr-poller"
 
     # Install the poller script first (non-fatal if missing)
     if [ -f "$poller_src" ]; then
@@ -832,43 +841,106 @@ install_cr_confluence_poller_launchagent() {
         return 0
     fi
 
-    info "Installing CR Confluence Poller LaunchAgent"
-    mkdir -p "$HOME/Library/LaunchAgents"
-    mkdir -p "$HOME/Library/Logs/aiteamforge"
+    mkdir -p "$launch_agents_dir"
+    mkdir -p "$log_dir"
 
-    # Find python3 path
+    # ── Migration: remove legacy global plist (XACA-0350-004) ─────────────────
+    local legacy_plist="$launch_agents_dir/com.aiteamforge.cr-confluence-poller.plist"
+    if [ -f "$legacy_plist" ]; then
+        info "Migrating: unloading legacy global CR Confluence Poller LaunchAgent"
+        launchctl unload "$legacy_plist" 2>/dev/null || true
+        rm -f "$legacy_plist"
+        info "Removed legacy plist: com.aiteamforge.cr-confluence-poller.plist"
+    fi
+
+    # ── Read teams from credentials (XACA-0350-002) ───────────────────────────
+    if [ ! -f "$creds_file" ]; then
+        info "Confluence credentials not found — skipping per-team LaunchAgent installation."
+        info "Configure credentials at $creds_file then re-run installer."
+        return 0
+    fi
+
+    # jq is required to parse the credentials teams dict; surface a clear error
+    # rather than silently degrading to an empty teams_json (XACA-0350-016).
+    if ! command -v jq &>/dev/null; then
+        warning "jq is required for per-team CR Confluence Poller install — install jq and re-run."
+        return 0
+    fi
+
+    # Extract team names from .teams dict; jq returns one team name per line.
+    local teams_json
+    teams_json="$(jq -r '.teams | keys[]' "$creds_file" 2>/dev/null || true)"
+    if [ -z "$teams_json" ]; then
+        info "No teams defined in $creds_file — skipping per-team LaunchAgent installation."
+        info "Add teams to .teams in $creds_file then re-run installer."
+        return 0
+    fi
+
+    # Find python3 path once (shared across all team plists)
     local python3_path
     python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
 
-    sed -e "s|{{USER_HOME}}|$HOME|g" \
-        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        -e "s|{{PYTHON3_PATH}}|$python3_path|g" \
-        "$plist_template" > "$plist_dest"
+    info "Installing per-team CR Confluence Poller LaunchAgents"
 
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    # ── Render and load one plist per team (XACA-0350-002, 003) ──────────────
+    local team plist_dest
+    while IFS= read -r team; do
+        [ -z "$team" ] && continue
+        # Allow only [a-zA-Z0-9_-] in team names — the value flows into a sed
+        # replacement and a launchctl Label, so a JSON key with pipes/slashes
+        # could break the plist render or produce an invalid LaunchAgent label
+        # (XACA-0350-014).
+        if [[ ! "$team" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            warning "Skipping team '$team': name must match [a-zA-Z0-9_-]+ for LaunchAgent label."
+            continue
+        fi
+        plist_dest="$launch_agents_dir/com.aiteamforge.cr-confluence-poller.${team}.plist"
 
-    if launchctl load "$plist_dest"; then
-        success "Installed and loaded CR Confluence Poller LaunchAgent"
-        info "Poller will scan cr-drafted CRs every 10 minutes"
-    else
-        warning "Failed to load CR Confluence Poller LaunchAgent (may need manual activation)"
-    fi
+        sed -e "s|{{USER_HOME}}|$HOME|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+            -e "s|{{PYTHON3_PATH}}|$python3_path|g" \
+            -e "s|{{TEAM_NAME}}|$team|g" \
+            "$plist_template" > "$plist_dest"
 
-    info ""
-    info "IMPORTANT: Populate Confluence credentials before the poller can scan:"
-    info "  ~/.config/aiteamforge/confluence-credentials.json"
-    info "  See homebrew-tap/share/templates/kanban/cr-confluence-poller-plist.template for schema."
+        launchctl unload "$plist_dest" 2>/dev/null || true
+
+        if launchctl load "$plist_dest"; then
+            success "Loaded CR Confluence Poller LaunchAgent: $team"
+        else
+            warning "Failed to load CR Confluence Poller LaunchAgent for team '$team' (may need manual activation)"
+        fi
+    done <<< "$teams_json"
+
+    info "Per-team pollers scan cr-drafted CRs every 10 minutes"
+    info "Logs: $log_dir/<team>.{out,err}.log"
 }
 
-# Uninstall CR Confluence Poller LaunchAgent
+# Uninstall CR Confluence Poller LaunchAgents — glob-removes all per-team plists
+# and the legacy global plist if it still exists (XACA-0350-005).
+#
+# Note: per-team logs at ~/Library/Logs/aiteamforge/cr-poller/<team>.{out,err}.log
+# are intentionally preserved on uninstall (matches lcars-health convention).
+# Operators can inspect prior poller output after uninstall; remove the log
+# directory manually if desired (XACA-0350-015).
 uninstall_cr_confluence_poller_launchagent() {
-    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+    local launch_agents_dir="$HOME/Library/LaunchAgents"
+    local found_any=0
 
-    if [ -f "$plist_file" ]; then
-        info "Unloading CR Confluence Poller LaunchAgent"
+    # Use nullglob-safe loop: test -e guards against no-match expansion in bash
+    shopt -s nullglob
+    local plist_files=("$launch_agents_dir"/com.aiteamforge.cr-confluence-poller*.plist)
+    shopt -u nullglob
+
+    for plist_file in "${plist_files[@]}"; do
+        [ -e "$plist_file" ] || continue
+        info "Unloading: $(basename "$plist_file")"
         launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
-        success "Removed CR Confluence Poller LaunchAgent"
+        found_any=1
+    done
+
+    if [ "$found_any" -eq 1 ]; then
+        success "Removed CR Confluence Poller LaunchAgent(s)"
     fi
 }
 
