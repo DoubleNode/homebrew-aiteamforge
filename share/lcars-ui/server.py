@@ -6817,6 +6817,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         Falls back to { crSupport: { enabled: false } } if the key is absent or the
         board file doesn't exist yet, so callers can treat the response as authoritative.
+
+        XACA-0332: also merges copyright config from ~/.aiteamforge/team-paths.json (schema v2).
         """
         try:
             params = parse_qs(query_string) if query_string else {}
@@ -6838,26 +6840,73 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Ensure crSupport key always present with default
             team_config.setdefault('crSupport', {}).setdefault('enabled', False)
 
+            # XACA-0332: surface copyright config from ~/.aiteamforge/team-paths.json (schema v2)
+            copyright_block = self._read_copyright_config(team)
+            if copyright_block is not None:
+                team_config['copyright'] = copyright_block
+
             self._send_json_response({'teamConfig': team_config})
         except Exception as e:
             print(f"[LCARS] ERROR serving team config: {e}")
             self._send_json_response({'error': str(e)}, status=500)
 
+    def _read_copyright_config(self, team: str):
+        """Read XACA-0251 copyright fields for `team` from ~/.aiteamforge/team-paths.json (schema v2).
+
+        Returns a dict with copyright_owner / license_type / component_label / year_start /
+        notice_template, or None if the team is not present or the file is missing.
+        """
+        team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
+        if not team_paths_file.exists():
+            return None
+        try:
+            with open(team_paths_file, 'r') as f:
+                data = json.load(f)
+            team_block = data.get('teams', {}).get(team)
+            if not team_block:
+                return None
+            # Return only the copyright fields (not kanban_dir, working_dir, lcars_port, etc.)
+            return {
+                'copyright_owner': team_block.get('copyright_owner'),
+                'license_type': team_block.get('license_type'),
+                'component_label': team_block.get('component_label'),
+                'year_start': team_block.get('year_start'),
+                'notice_template': team_block.get('notice_template'),
+            }
+        except Exception as e:
+            print(f"[LCARS] WARNING reading copyright config for {team}: {e}")
+            return None
+
     # Allowed top-level keys in the POST /api/team-config payload
-    _TEAM_CONFIG_ALLOWED_KEYS = {'crSupport'}
+    _TEAM_CONFIG_ALLOWED_KEYS = {'crSupport', 'copyright'}
     # Allowed nested keys under crSupport
     _CR_SUPPORT_ALLOWED_KEYS = {'enabled', 'description'}
+    # Allowed nested keys under copyright (XACA-0332)
+    _COPYRIGHT_ALLOWED_KEYS = {'copyright_owner', 'license_type', 'component_label', 'year_start', 'notice_template'}
+    # Valid enum values for copyright fields (XACA-0332)
+    _VALID_LICENSE_TYPES = {'MIT', 'Proprietary', 'Client-Owned', 'BSD-3-Clause'}
+    _VALID_NOTICE_TEMPLATES = {'range', 'single'}
 
     def handle_update_team_config(self):
-        """POST /api/team-config — persist teamConfig changes to board JSON.
+        """POST /api/team-config — persist teamConfig changes to board JSON and team-paths.json.
 
-        Accepted body: { team: str, teamConfig: { crSupport: { enabled: bool, description?: str } } }
+        Accepted body: {
+            team: str,
+            teamConfig: {
+                crSupport: { enabled: bool, description?: str },
+                copyright?: {
+                    copyright_owner: str, license_type: str, component_label: str,
+                    year_start: int, notice_template: str
+                }
+            }
+        }
         Uses file lock + atomic write (same pattern as all other board mutations).
+        Copyright block is written to ~/.aiteamforge/team-paths.json (schema v2).
 
-        Security (XACA-0292-011, XACA-0292-012):
+        Security (XACA-0292-011, XACA-0292-012, XACA-0332):
           - team is validated against TEAM_KANBAN_DIRS allow-list
-          - only whitelisted keys are accepted; unknown keys → 400
-          - enabled must be bool; description (optional) must be str
+          - only whitelisted keys are accepted; unknown keys -> 400
+          - all fields are type-validated; enum fields are validated against allow-lists
           - a CLEAN payload is constructed; attacker-controlled keys are never written
         """
         try:
@@ -6909,6 +6958,49 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     clean_cr['description'] = cr['description']
                 clean_team_config['crSupport'] = clean_cr
 
+            # XACA-0332: validate copyright block if present
+            clean_copyright = None
+            if 'copyright' in new_team_config:
+                cp = new_team_config['copyright']
+                if not isinstance(cp, dict):
+                    self._send_json_response({'success': False, 'error': 'copyright must be an object'}, status=400)
+                    return
+                unknown_cp = set(cp.keys()) - self._COPYRIGHT_ALLOWED_KEYS
+                if unknown_cp:
+                    bad = ', '.join(sorted(unknown_cp))
+                    self._send_json_response({'success': False, 'error': f'Unknown copyright key(s): {bad}'}, status=400)
+                    return
+                # Validate each field individually
+                if 'copyright_owner' in cp:
+                    v = cp['copyright_owner']
+                    if not isinstance(v, str) or not (1 <= len(v) <= 200):
+                        self._send_json_response({'success': False, 'error': 'copyright_owner must be a string (1-200 chars)'}, status=400)
+                        return
+                if 'license_type' in cp:
+                    v = cp['license_type']
+                    if v not in self._VALID_LICENSE_TYPES:
+                        self._send_json_response({'success': False, 'error': f'license_type must be one of: {", ".join(sorted(self._VALID_LICENSE_TYPES))}'}, status=400)
+                        return
+                if 'component_label' in cp:
+                    v = cp['component_label']
+                    if not isinstance(v, str) or not (1 <= len(v) <= 200):
+                        self._send_json_response({'success': False, 'error': 'component_label must be a string (1-200 chars)'}, status=400)
+                        return
+                if 'year_start' in cp:
+                    v = cp['year_start']
+                    # Exclude bool: isinstance(True, int) is True in Python
+                    if not isinstance(v, int) or isinstance(v, bool) or not (1990 <= v <= 2100):
+                        self._send_json_response({'success': False, 'error': 'year_start must be an integer between 1990 and 2100'}, status=400)
+                        return
+                if 'notice_template' in cp:
+                    v = cp['notice_template']
+                    if v not in self._VALID_NOTICE_TEMPLATES:
+                        self._send_json_response({'success': False, 'error': f'notice_template must be one of: {", ".join(sorted(self._VALID_NOTICE_TEMPLATES))}'}, status=400)
+                        return
+                # Build a clean copyright dict from only the validated fields
+                clean_copyright = {k: cp[k] for k in self._COPYRIGHT_ALLOWED_KEYS if k in cp}
+
+            # --- Write crSupport changes to board JSON ---
             board_file = get_board_file(team)
             if not board_file.exists():
                 self._send_json_response({'success': False, 'error': f'Board not found for team: {team}'}, status=404)
@@ -6936,10 +7028,73 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 finally:
                     fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-            self._send_json_response({'success': True, 'teamConfig': board_data['teamConfig']})
+            # --- Write copyright changes to team-paths.json (XACA-0332) ---
+            copyright_write_error = None
+            if clean_copyright:
+                copyright_write_error = self._write_copyright_config(team, clean_copyright)
+
+            response_payload = {'success': True, 'teamConfig': board_data['teamConfig']}
+            if copyright_write_error:
+                # Board write succeeded; copyright write failed — partial success
+                response_payload['warning'] = f'Team config saved, but copyright write failed: {copyright_write_error}'
+            self._send_json_response(response_payload)
         except Exception as e:
             print(f"[LCARS] ERROR updating team config: {e}")
             self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
+    def _write_copyright_config(self, team: str, copyright_fields: dict):
+        """Write XACA-0332 copyright fields for `team` into ~/.aiteamforge/team-paths.json (schema v2).
+
+        Uses file lock + atomic write + backup.  Updates ONLY the named team's copyright
+        fields; all other team blocks and non-copyright fields are left untouched.
+
+        Returns None on success, or an error string on failure.
+        """
+        import fcntl, tempfile, datetime
+        team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
+        if not team_paths_file.exists():
+            return f'team-paths.json not found at {team_paths_file}'
+
+        lock_file = team_paths_file.with_suffix('.json.lock')
+        try:
+            with open(lock_file, 'w') as lock:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(team_paths_file, 'r') as f:
+                        data = json.load(f)
+
+                    if team not in data.get('teams', {}):
+                        return f"Team '{team}' not found in team-paths.json"
+
+                    # Backup before mutating
+                    timestamp = datetime.datetime.now().strftime('%Y%m%d-%H%M%S')
+                    backup_path = team_paths_file.parent / f'team-paths.json.bak-{timestamp}'
+                    with open(backup_path, 'w') as bf:
+                        json.dump(data, bf, indent=2)
+
+                    # Merge only the copyright fields; leave all other fields (kanban_dir, etc.) untouched
+                    data['teams'][team].update(copyright_fields)
+
+                    # Atomic write via tmp file
+                    tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
+                    try:
+                        with open(tmp_path, 'w') as f:
+                            json.dump(data, f, indent=2)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(str(tmp_path), str(team_paths_file))
+                    except Exception:
+                        if tmp_path.exists():
+                            tmp_path.unlink()
+                        raise
+
+                    print(f"[LCARS] Copyright config updated for '{team}': {copyright_fields}")
+                    return None
+                finally:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+        except Exception as e:
+            print(f"[LCARS] ERROR writing copyright config for {team}: {e}")
+            return str(e)
 
     def handle_connect_apple_calendar(self):
         """POST /api/calendar/connect/apple - Connect Apple Calendar with CalDAV credentials"""

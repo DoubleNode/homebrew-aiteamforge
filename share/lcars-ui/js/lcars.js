@@ -18037,6 +18037,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     // CHANGE REQ — XACA-0292-007: mount CR list view filter bar
     if (typeof initChangeReqTab === 'function') initChangeReqTab();
 
+    // XACA-0332: wire up the copyright Save button
+    initCopyrightSaveButton();
+
     console.log('LCARS Kanban Monitor Ready');
 });
 
@@ -18344,13 +18347,17 @@ async function toggleTodo(todoId) {
 
 
 // =============================================================================
-// TEAM CONFIG — XACA-0292
-// Loads and persists per-board settings.  Currently: crSupport.enabled.
+// TEAM CONFIG — XACA-0292 + XACA-0332
+// Loads and persists per-board settings: crSupport.enabled + copyright fields.
 // Dispatches 'crsupport-changed' on toggle so other agents can react.
 // =============================================================================
 
+/** Sentinel for copyright TBD placeholder values (set by XACA-0251). */
+const _COPYRIGHT_TBD_VALUES = ['<TBD-per-engagement>', '<TBD>'];
+
 /**
- * Fetch the current teamConfig from the server and wire up the CR checkbox.
+ * Fetch the current teamConfig from the server and wire up the CR checkbox
+ * and all copyright fields.
  * Safe to call multiple times (re-reads server state each visit).
  */
 async function loadTeamConfig() {
@@ -18373,6 +18380,13 @@ async function loadTeamConfig() {
             statusEl.textContent = '';
             statusEl.className = 'team-config-status';
         }
+
+        // XACA-0332: populate copyright fields if present
+        if (data.teamConfig && data.teamConfig.copyright) {
+            _populateCopyrightFields(data.teamConfig.copyright);
+        } else {
+            _populateCopyrightFields(null);
+        }
     } catch (err) {
         console.error('[team-config] Failed to load:', err);
         if (statusEl) {
@@ -18380,6 +18394,163 @@ async function loadTeamConfig() {
             statusEl.className = 'team-config-status error';
         }
     }
+}
+
+/**
+ * Populate the five copyright input elements from a copyright block.
+ * If block is null/undefined, marks all inputs as unset.
+ * Applies TBD warning styling for placeholder values.
+ */
+function _populateCopyrightFields(copyright) {
+    const fields = [
+        { id: 'team-config-copyright-owner', key: 'copyright_owner', tbdId: 'team-config-copyright-owner-tbd' },
+        { id: 'team-config-component-label', key: 'component_label', tbdId: 'team-config-component-label-tbd' },
+    ];
+    const selects = [
+        { id: 'team-config-license-type', key: 'license_type' },
+        { id: 'team-config-notice-template', key: 'notice_template' },
+    ];
+    const numericFields = [
+        { id: 'team-config-year-start', key: 'year_start' },
+    ];
+
+    fields.forEach(({ id, key, tbdId }) => {
+        const el = document.getElementById(id);
+        const tbdEl = tbdId ? document.getElementById(tbdId) : null;
+        if (!el) return;
+        const val = copyright ? copyright[key] : null;
+        if (val == null) {
+            el.value = '';
+            el.classList.add('unset');
+            el.classList.remove('tbd-warning');
+            if (tbdEl) tbdEl.style.display = 'none';
+        } else {
+            el.value = val;
+            el.classList.remove('unset');
+            const isTbd = _COPYRIGHT_TBD_VALUES.includes(val);
+            el.classList.toggle('tbd-warning', isTbd);
+            if (tbdEl) tbdEl.style.display = isTbd ? 'inline-block' : 'none';
+        }
+    });
+
+    selects.forEach(({ id, key }) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const val = copyright ? copyright[key] : null;
+        if (val == null) {
+            el.value = '';
+            el.classList.add('unset');
+        } else {
+            el.value = val;
+            el.classList.remove('unset');
+        }
+    });
+
+    numericFields.forEach(({ id, key }) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const val = copyright ? copyright[key] : null;
+        if (val == null) {
+            el.value = '';
+            el.classList.add('unset');
+        } else {
+            el.value = String(val);
+            el.classList.remove('unset');
+        }
+    });
+}
+
+/**
+ * Wire up the "Save Copyright" button on DOM ready.
+ * Called once from DOMContentLoaded init (below).
+ */
+function initCopyrightSaveButton() {
+    const btn = document.getElementById('team-config-copyright-save-btn');
+    if (!btn) return;
+    btn.onclick = saveTeamConfigCopyright;
+}
+
+/**
+ * Collect current copyright field values and POST to /api/team-config.
+ * Shows inline saving/saved/error status next to the Save button.
+ */
+async function saveTeamConfigCopyright() {
+    const statusEl = document.getElementById('team-config-copyright-status');
+
+    const copyrightOwner = (document.getElementById('team-config-copyright-owner') || {}).value || '';
+    const licenseType = (document.getElementById('team-config-license-type') || {}).value || '';
+    const componentLabel = (document.getElementById('team-config-component-label') || {}).value || '';
+    const yearStartRaw = (document.getElementById('team-config-year-start') || {}).value || '';
+    const noticeTemplate = (document.getElementById('team-config-notice-template') || {}).value || '';
+
+    // Client-side validation (mirrors server rules)
+    if (!copyrightOwner || copyrightOwner.length > 200) {
+        _setCopyrightStatus(statusEl, 'error', 'Copyright owner is required (1-200 chars)');
+        return;
+    }
+    if (!licenseType) {
+        _setCopyrightStatus(statusEl, 'error', 'License type is required');
+        return;
+    }
+    if (!componentLabel || componentLabel.length > 200) {
+        _setCopyrightStatus(statusEl, 'error', 'Component label is required (1-200 chars)');
+        return;
+    }
+    const yearStart = parseInt(yearStartRaw, 10);
+    if (isNaN(yearStart) || yearStart < 1990 || yearStart > 2100) {
+        _setCopyrightStatus(statusEl, 'error', 'Year start must be 1990-2100');
+        return;
+    }
+    if (!noticeTemplate) {
+        _setCopyrightStatus(statusEl, 'error', 'Notice template is required');
+        return;
+    }
+
+    _setCopyrightStatus(statusEl, 'saving', 'Saving...');
+
+    try {
+        const response = await fetch(apiUrl('/api/team-config'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                team: CONFIG.team,
+                teamConfig: {
+                    copyright: {
+                        copyright_owner: copyrightOwner,
+                        license_type: licenseType,
+                        component_label: componentLabel,
+                        year_start: yearStart,
+                        notice_template: noticeTemplate,
+                    }
+                }
+            })
+        });
+
+        const result = await response.json().catch(() => ({}));
+
+        if (!response.ok) {
+            throw new Error(result.error || `HTTP ${response.status}`);
+        }
+
+        // Re-apply TBD styling after save (values may have changed)
+        _populateCopyrightFields(result.teamConfig && result.teamConfig.copyright
+            ? result.teamConfig.copyright
+            : { copyright_owner: copyrightOwner, license_type: licenseType, component_label: componentLabel, year_start: yearStart, notice_template: noticeTemplate });
+
+        const msg = result.warning ? `Saved (${result.warning})` : 'Saved';
+        _setCopyrightStatus(statusEl, 'saved', msg);
+        setTimeout(() => _setCopyrightStatus(statusEl, '', ''), 3000);
+
+    } catch (err) {
+        console.error('[team-config] Copyright save failed:', err);
+        _setCopyrightStatus(statusEl, 'error', `Save failed: ${err.message}`);
+    }
+}
+
+function _setCopyrightStatus(el, type, text) {
+    if (!el) return;
+    el.textContent = text;
+    el.className = 'team-config-status' + (type ? ' ' + type : '');
 }
 
 /**

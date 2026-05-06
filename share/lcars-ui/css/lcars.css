@@ -1075,7 +1075,7 @@ body {
     to { opacity: 1; transform: scale(1); }
 }
 
-/* Initialization Status Area - fills remaining space */
+/* Initialization Status Area - sits above the bottom copyright; sized by content + fixed data-scroll */
 .startup-status {
     display: flex;
     flex-direction: column;
@@ -1083,8 +1083,7 @@ body {
     gap: 15px;
     width: 80%;
     max-width: 800px;
-    flex: 1;
-    min-height: 0;
+    flex-shrink: 0;
 }
 
 .startup-init-text {
@@ -1101,13 +1100,13 @@ body {
     to { opacity: 1; }
 }
 
-/* Scrolling Data Display - expands to fill available space */
+/* Scrolling Data Display - fixed height so layout leaves room for the bottom copyright */
 .startup-data-scroll {
     font-family: 'Courier New', monospace;
     font-size: 0.75rem;
     color: var(--lcars-blue);
-    flex: 1;
-    min-height: 100px;
+    flex-shrink: 0;
+    height: 220px;
     width: 100%;
     overflow: hidden;
     background: rgba(0, 0, 0, 0.3);
@@ -1135,6 +1134,8 @@ body {
     padding: 8px 0 4px 0;
     flex-shrink: 0;
     text-transform: uppercase;
+    margin-top: auto;
+    width: 100%;
 }
 
 .startup-data-scroll .data-line:last-child {
@@ -15033,6 +15034,92 @@ body {
 
 .team-config-status.error {
     color: var(--lcars-red, #cc6666);
+}
+
+/* XACA-0332: Copyright config rows */
+
+.team-config-section-divider {
+    height: 1px;
+    background: rgba(255, 153, 0, 0.35);
+    margin: 8px 16px;
+}
+
+.team-config-row-header {
+    padding-bottom: 6px;
+    border-bottom: none;
+}
+
+.team-config-input {
+    background: rgba(0, 0, 0, 0.55);
+    border: 1px solid var(--lcars-orange);
+    color: var(--lcars-peach);
+    font-family: 'Antonio', sans-serif;
+    font-size: 13px;
+    letter-spacing: 0.3px;
+    padding: 5px 10px;
+    border-radius: 3px;
+    width: 220px;
+    outline: none;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.team-config-input:focus {
+    border-color: var(--lcars-peach);
+    box-shadow: 0 0 6px rgba(255, 153, 0, 0.4);
+}
+
+.team-config-input.unset {
+    border-color: rgba(255, 153, 0, 0.4);
+    color: rgba(255, 204, 153, 0.5);
+}
+
+.team-config-input.tbd-warning {
+    border-color: var(--lcars-amber);
+    box-shadow: 0 0 6px rgba(255, 204, 0, 0.45);
+}
+
+.team-config-select {
+    appearance: none;
+    -webkit-appearance: none;
+    cursor: pointer;
+    padding-right: 28px;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath fill='%23ff9900' d='M6 8L0 0h12z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+}
+
+.team-config-select option {
+    background: #1a1a2e;
+    color: var(--lcars-peach);
+}
+
+.team-config-input-narrow {
+    width: 100px;
+}
+
+.team-config-tbd-badge {
+    display: inline-block;
+    margin-left: 8px;
+    font-size: 9px;
+    font-weight: bold;
+    letter-spacing: 1px;
+    color: #1a1a00;
+    background: var(--lcars-amber);
+    padding: 1px 5px;
+    border-radius: 2px;
+    vertical-align: middle;
+}
+
+.team-config-row-save {
+    border-top: 1px solid rgba(255, 153, 0, 0.15);
+    padding-top: 10px;
+    border-bottom: none;
+}
+
+.team-config-save-btn {
+    font-size: 12px;
+    padding: 5px 14px;
+    letter-spacing: 0.5px;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════

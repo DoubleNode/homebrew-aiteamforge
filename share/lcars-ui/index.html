@@ -653,6 +653,92 @@
                                 <span class="team-config-status" id="team-config-cr-status"></span>
                             </div>
                         </div>
+
+                        <!-- XACA-0332: Copyright configuration (read/write from ~/.aiteamforge/team-paths.json schema v2) -->
+                        <div class="team-config-section-divider"></div>
+                        <div class="team-config-row team-config-row-header">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label">Copyright Configuration</label>
+                                <span class="team-config-hint">
+                                    Per-team copyright settings used by the kb-header helper and the LCARS splash.
+                                    Stored in ~/.aiteamforge/team-paths.json (schema v2).
+                                </span>
+                            </div>
+                        </div>
+
+                        <div class="team-config-row" id="team-config-copyright-owner-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="team-config-copyright-owner">
+                                    Copyright owner
+                                    <span class="team-config-tbd-badge" id="team-config-copyright-owner-tbd" style="display:none;">NEEDS CONFIGURATION</span>
+                                </label>
+                                <span class="team-config-hint">Legal owner string (e.g. "DoubleNode.com", "Main Event Entertainment, LP")</span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <input type="text" id="team-config-copyright-owner" class="team-config-input" maxlength="200" placeholder="e.g. DoubleNode.com" />
+                            </div>
+                        </div>
+
+                        <div class="team-config-row" id="team-config-license-type-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="team-config-license-type">License type</label>
+                                <span class="team-config-hint">Software license applied to this team's code.</span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <select id="team-config-license-type" class="team-config-input team-config-select">
+                                    <option value="">-- select --</option>
+                                    <option value="MIT">MIT</option>
+                                    <option value="Proprietary">Proprietary</option>
+                                    <option value="Client-Owned">Client-Owned</option>
+                                    <option value="BSD-3-Clause">BSD-3-Clause</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="team-config-row" id="team-config-component-label-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="team-config-component-label">
+                                    Component label
+                                    <span class="team-config-tbd-badge" id="team-config-component-label-tbd" style="display:none;">NEEDS CONFIGURATION</span>
+                                </label>
+                                <span class="team-config-hint">Used in source-file headers (e.g. "Main Event App", "DoubleNode Dev-Team Infrastructure (AITeamForge)").</span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <input type="text" id="team-config-component-label" class="team-config-input" maxlength="200" placeholder="e.g. Main Event App" />
+                            </div>
+                        </div>
+
+                        <div class="team-config-row" id="team-config-year-start-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="team-config-year-start">Year start</label>
+                                <span class="team-config-hint">First year of copyright (e.g. 2018). Combined with current year for "range" notice templates.</span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <input type="number" id="team-config-year-start" class="team-config-input team-config-input-narrow" min="1990" max="2100" placeholder="2025" />
+                            </div>
+                        </div>
+
+                        <div class="team-config-row" id="team-config-notice-template-row">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label" for="team-config-notice-template">Notice template</label>
+                                <span class="team-config-hint">"range" = "Copyright 2018-2026 Owner". "single" = "Copyright 2026 Owner".</span>
+                            </div>
+                            <div class="team-config-row-right">
+                                <select id="team-config-notice-template" class="team-config-input team-config-select">
+                                    <option value="">-- select --</option>
+                                    <option value="range">range</option>
+                                    <option value="single">single</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div class="team-config-row team-config-row-save" id="team-config-copyright-save-row">
+                            <div class="team-config-row-left"></div>
+                            <div class="team-config-row-right">
+                                <span class="team-config-status" id="team-config-copyright-status"></span>
+                                <button class="lcars-button team-config-save-btn" id="team-config-copyright-save-btn">Save Copyright</button>
+                            </div>
+                        </div>
                     </div>
                 </section>
 
