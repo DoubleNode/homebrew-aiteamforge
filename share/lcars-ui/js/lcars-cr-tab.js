@@ -470,6 +470,7 @@
             cr_deployed_prod_at:        ts.cr_deployed_prod_at || '',
             cr_emergency_deployed_at:   ts.cr_emergency_deployed_at || '',
             cr_completed_at:            ts.cr_completed_at || '',
+            cr_closed_at:               ts.cr_closed_at || '',
             addedAt:                    cr.createdAt || '',
             priority:                   linkedItem ? linkedItem.priority : '',
             linkedItemIds:              linkedItemIds,
@@ -509,8 +510,12 @@
             stateFilter: 'all', typeFilter: 'all', platformFilter: 'all', searchText: '', sortBy: 'STATE',
         };
 
-        // State filter
-        if (s.stateFilter && s.stateFilter !== 'all') {
+        // State filter:
+        //   - 'all' hides closed CRs (XACA-0349) — only the explicit CLOSED filter shows them
+        //   - any other value: exact match (including 'cr-closed' to show closed CRs)
+        if (s.stateFilter === 'all') {
+            if (item.crState === 'cr-closed') return false;
+        } else if (s.stateFilter) {
             if (item.crState !== s.stateFilter) return false;
         }
 
@@ -614,6 +619,7 @@
         'deployed-dev':       'cr-state-deployed-dev',
         'deployed-prod':      'cr-state-deployed-prod',
         'emergency-deployed': 'cr-state-emergency',
+        'cr-closed':          'cr-state-closed',
     };
 
     function _typeBadge(crType) {
@@ -671,6 +677,8 @@
         'deployed-dev':       item => item.cr_deployed_dev_at,
         'deployed-prod':      item => item.cr_deployed_prod_at,
         'emergency-deployed': item => item.cr_emergency_deployed_at,
+        // cr-closed: terminal state — anchor to the close timestamp when available
+        'cr-closed':          item => item.cr_closed_at,
     };
 
     /**
@@ -771,9 +779,11 @@
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
     // Total column count: chevron, ID, TYPE/STATE (merged, XACA-0353), TITLE,
-    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, AGE (XACA-0335), DOCS.
+    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, AGE (XACA-0335), DOCS, EDIT.
     // PUBLISHED column dropped in XACA-0353 (Confluence link still in DOCS modal).
-    const CR_COL_COUNT = 11;
+    // EDIT column added in XACA-0349 (per-row EDIT STATE button).
+    // AGE column added in XACA-0335 (total CR age, sourced from cr_created_at).
+    const CR_COL_COUNT = 12;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
@@ -805,6 +815,8 @@
             ? `<button class="${chevronCls}" data-cr-id="${escapeHtml(item.cr_id)}" title="${isExpanded ? 'Collapse' : 'Expand'} linked items" aria-expanded="${isExpanded}" aria-label="${isExpanded ? 'Collapse' : 'Expand'} linked items">&#9654;</button>`
             : `<span class="cr-chevron-placeholder"></span>`;
 
+        const editStateBtn = `<button class="cr-edit-state-btn cr-row-edit-state" data-cr-id="${escapeHtml(item.cr_id)}" title="Change CR state">EDIT STATE</button>`;
+
         return `<tr class="cr-row${isExpanded ? ' cr-row-expanded' : ''}" data-cr-id="${escapeHtml(item.cr_id)}" data-item-id="${escapeHtml(item.id)}">
             <td class="cr-col-chevron">${chevronBtn}</td>
             <td class="cr-col-id"><button class="cr-id-copy" data-cr-id="${crId}" title="Copy CR ID to clipboard"><span class="cr-id-mono">${crId}</span></button></td>
@@ -817,6 +829,7 @@
             <td class="cr-col-stage-age">${stageAge}</td>
             <td class="cr-col-age">${ageCell}</td>
             <td class="cr-col-docs">${docsBtn}</td>
+            <td class="cr-col-edit">${editStateBtn}</td>
         </tr>`;
     }
 
@@ -997,6 +1010,7 @@
                         <th class="cr-col-stage-age">STAGE AGE</th>
                         <th class="cr-col-age">AGE</th>
                         <th class="cr-col-docs">DOCS</th>
+                        <th class="cr-col-edit">EDIT</th>
                     </tr>
                 </thead>
                 <tbody>${rows}</tbody>
@@ -1045,6 +1059,18 @@
             });
         });
 
+        // Wire per-row EDIT STATE buttons → open state-change dialog (XACA-0349-007).
+        listEl.querySelectorAll('.cr-row-edit-state').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const crId = btn.dataset.crId;
+                if (!crId) return;
+                const view = _crByIdCache[crId];
+                if (!view) return;
+                _showCRStateChangeDialog(view);
+            });
+        });
+
         // Wire child item ID copy buttons for any rows expanded at first paint
         // (e.g. restored from a prior render). Newly-expanded rows wire their
         // own copy buttons inside _toggleCRExpansion().
@@ -1089,7 +1115,6 @@
         header.innerHTML =
             `<span class="lcars-modal-title">CR DOCUMENT: ${escapeHtml(view.cr_id || '')}</span>` +
             `<div class="cr-doc-header-actions">` +
-                `<button class="cr-edit-state-btn" id="cr-edit-state-btn" title="Change CR state">EDIT STATE</button>` +
                 `<button class="lcars-modal-close" id="cr-doc-modal-close">&times;</button>` +
             `</div>`;
 
@@ -1124,11 +1149,6 @@
 
         const closeBtn = header.querySelector('#cr-doc-modal-close');
         if (closeBtn) closeBtn.addEventListener('click', _hideCRDocModal);
-
-        const editStateBtn = header.querySelector('#cr-edit-state-btn');
-        if (editStateBtn) {
-            editStateBtn.addEventListener('click', () => _showCRStateChangeDialog(view));
-        }
 
         const docLink = view.cr_doc_link || '';
         const isExternalUrl = /^https?:\/\//i.test(docLink);
@@ -1278,6 +1298,7 @@
         'deployed-dev',
         'deployed-prod',
         'emergency-deployed',
+        'cr-closed',
     ];
 
     const _CR_STATE_FIELDS = {
@@ -1311,6 +1332,7 @@
             { key: 'deploy_estimate', label: 'DEPLOY TIMESTAMP', type: 'datetime-local',
               required: true, defaultNow: true },
         ],
+        'cr-closed':          [],
     };
 
     /**
@@ -1550,6 +1572,11 @@
         submitBtn.disabled = true;
         submitBtn.textContent = 'SUBMITTING...';
 
+        // Capture whether the docs modal is open at submit time so we know whether
+        // to re-open it on success. When called from a per-row button (XACA-0349-008)
+        // there is no docs modal — we just refresh the board table instead.
+        const wasDocsModalOpen = !!document.getElementById('cr-doc-modal-overlay');
+
         const url = apiUrl('/api/kanban/cr/' + encodeURIComponent(crId) + '/transition');
 
         function _showError(msg, withReload, withRetry) {
@@ -1567,22 +1594,21 @@
             const reloadBtn = errorDiv.querySelector('#cr-sc-reload-btn');
             if (reloadBtn) {
                 reloadBtn.addEventListener('click', () => {
-                    // Close dialog, close docs modal, re-open docs modal with fresh data
+                    // Close dialog, then close and re-open docs modal only if it was open
                     _hideCRStateChangeDialog();
-                    _hideCRDocModal();
-                    // Re-fetch board data then re-open the docs modal
+                    if (wasDocsModalOpen) _hideCRDocModal();
+                    // Re-fetch board data; re-open docs modal only if it was originally open
                     if (typeof window.refreshBoardData === 'function') {
                         window.refreshBoardData(() => {
                             const freshRaw = _findRawCRById(crId);
                             if (freshRaw) {
                                 const backlogIdx = _backlogIndex();
                                 const freshView = _normalizeCR(freshRaw, backlogIdx);
-                                _showCRDocModal(freshView);
+                                if (wasDocsModalOpen) _showCRDocModal(freshView);
                             }
                         });
-                    } else {
-                        // Fallback: just close both modals — user can navigate back
                     }
+                    // Fallback: if no refreshBoardData, board stays stale — user must reload manually
                 });
             }
 
@@ -1630,10 +1656,11 @@
                     _showError(msg, false, false);
                     return;
                 }
-                // Success — close dialog, refresh docs modal
+                // Success — close dialog, close docs modal only if it was open
                 _hideCRStateChangeDialog();
-                _hideCRDocModal();
+                if (wasDocsModalOpen) _hideCRDocModal();
                 // Re-fetch boardData if possible, then re-open updated docs modal
+                // only if it was open when the transition was submitted
                 if (typeof window.refreshBoardData === 'function') {
                     window.refreshBoardData(() => {
                         const freshRaw = _findRawCRById(crId);
@@ -1641,17 +1668,17 @@
                             const backlogIdx = _backlogIndex();
                             const freshView = _normalizeCR(freshRaw, backlogIdx);
                             _crByIdCache[crId] = freshView;
-                            _showCRDocModal(freshView);
+                            if (wasDocsModalOpen) _showCRDocModal(freshView);
                         }
                     });
                 } else {
-                    // If we can't refresh board data, just update the cache from the
+                    // If we can't refresh board data, update the cache from the
                     // returned CR object (if the server echoed it back in data.cr)
                     if (data.cr) {
                         const backlogIdx = _backlogIndex();
                         const freshView = _normalizeCR(data.cr, backlogIdx);
                         _crByIdCache[crId] = freshView;
-                        _showCRDocModal(freshView);
+                        if (wasDocsModalOpen) _showCRDocModal(freshView);
                     }
                 }
             });

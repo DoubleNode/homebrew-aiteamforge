@@ -7587,7 +7587,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _CR_VALID_STATES = frozenset([
         "cr-drafted", "cr-submitted", "cr-approved", "cr-rejected",
         "cr-held", "implementing", "deployed-dev", "deployed-prod",
-        "emergency-deployed",
+        "emergency-deployed", "cr-closed",
     ])
 
     # Required fields per target state.
@@ -7603,6 +7603,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         "deployed-dev":       [("deploy_estimate", "ISO 8601 date/time")],
         "deployed-prod":      [("deploy_estimate", "ISO 8601 date/time")],
         "emergency-deployed": [("emergency_justification", None), ("deploy_estimate", "ISO 8601 date/time")],
+        "cr-closed":          [],
     }
 
     def _cr_get_nested(self, d, dotted_key):
