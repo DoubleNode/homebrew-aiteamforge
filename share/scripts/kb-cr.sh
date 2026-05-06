@@ -2308,6 +2308,19 @@ _kb_cr_draft() {
     _kb_cr_preamble "$item_id" || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
 
+    # Guard: if the item already has a crAssignment, do not create a second container.
+    local existing_cr_id
+    existing_cr_id=$(_kb_jq_read "$_cr_board" ".backlog[$_cr_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+    if [[ -n "$existing_cr_id" ]]; then
+        local board_dir doc_path
+        board_dir=$(dirname "$_cr_board")
+        doc_path="${board_dir}/cr-docs/${item_id}-CR.md"
+        printf "NOTE: [%s] already has a CR draft — %s\n" "$item_id" "$existing_cr_id"
+        printf "  Doc:  %s\n" "$doc_path"
+        printf "  Use \`kb-cr show %s\` to review the existing draft.\n" "$item_id"
+        return 0
+    fi
+
     # Read the item title to use as the CR container title.
     local item_title
     item_title=$(_kb_jq_read "$_cr_board" ".backlog[$_cr_idx].title" -r 2>/dev/null)
