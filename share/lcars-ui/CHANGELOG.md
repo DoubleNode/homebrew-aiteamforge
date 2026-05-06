@@ -4,6 +4,16 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0351: Daily Overview — completed-item filter + per-card detail popup -->
+
+### Fixed
+- **XACA-0351-001:** Daily Overview was surfacing kanban backlog items even after they were marked `completed`/`done`/`cancelled`. `_collect_kanban_items_due` in `server.py` now skips terminal-state items before the dueDate check (mirroring the filter `_collect_kanban_todos` already had). 4 regression tests added in `test_daily_overview_endpoint.py::TestKanbanItemsDue` covering each terminal state plus an active-with-completed-sibling case.
+
+### Added
+- **XACA-0351 detail popup:** Tap any card on the Daily Overview to open a per-item detail popup. Modal shell (backdrop, ESC, click-outside, focus restore) lives in new `lcars-ui/js/daily-overview-popup.js` with category-specific renderers for all 7 sources (`kanban_todos`, `kanban_items_due`, `change_requests`, `backup_failures`, `calendar_items`, `releases`, `alert`). Kanban-style IDs inside body text (`XACA-NNNN`, `EPIC-NNNN`, `REL-NNNN`, etc.) render as deep-link anchors that close the popup and route via `switchSection`. Cards are now `role="button" tabindex="0"` so Enter/Space open the popup; existing dismiss/complete/deep-link icon buttons keep their behaviour (`stopPropagation` on the action button path so card click does not double-fire).
+- **XACA-0351 backend enrichment:** Each item in `GET /api/daily-overview` now carries a `details` sub-object whose `kind` matches the category and whose required keys are present for the popup renderer (todo body, kanban description + subitem ratio + linked-item IDs, CR state/customer/summary, backup `last_error`, calendar source/start/end, release environments map, alert body/source/metadata/dedupe_key). 9 new unit tests in `TestPopupDetails` plus an explicit regression for the "Dedupe test v2" shape (alert with `body=null`, `source='qa-test'` produces a usable details dict). Total: 163 daily-overview + alert tests passing.
+- **XACA-0351 popup styles:** New section in `daily-overview.css` covering the popup shell, key/value table, status/priority pills, environment chips, and deep-link anchor styling. Card hover/focus states added so the new tap-to-open affordance is discoverable.
+
 <!-- XACA-0334: Daily Overview — sidebar restructure + section registration -->
 
 ### Added

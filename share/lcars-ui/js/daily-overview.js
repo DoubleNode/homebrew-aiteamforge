@@ -29,7 +29,8 @@
  *       recorded in SPEC.md decision override #1.
  */
 
-/* global apiUrl, escapeHtml, CONFIG, showToast, switchSection */
+/* global apiUrl, escapeHtml, CONFIG, showToast, switchSection,
+          openDailyOverviewPopup */
 
 'use strict';
 
@@ -110,36 +111,50 @@ function _wireDelegation() {
     }
 
     grid.addEventListener('click', function (e) {
-        // Walk up from the target to find a button with data-action.
+        // Action button takes precedence over card-level click.
         const btn = e.target.closest('button[data-action]');
-        if (!btn) return;
+        if (btn) {
+            const card = btn.closest('.do-card');
+            if (!card) return;
 
-        // Find the parent card for item metadata.
-        const card = btn.closest('.do-card');
-        if (!card) return;
+            const action     = btn.dataset.action;
+            const itemId     = card.dataset.id;
+            const sourceView = card.dataset.sourceView;
+            const deepLinkId = card.dataset.deepLinkId;
 
-        const action     = btn.dataset.action;
-        const itemId     = card.dataset.id;
-        const sourceView = card.dataset.sourceView;
-        const deepLinkId = card.dataset.deepLinkId;
-
-        switch (action) {
-            case 'dismiss':
-                _handleDismiss(btn, card, itemId);
-                break;
-            case 'complete':
-                _handleComplete(btn, card, itemId);
-                break;
-            case 'deep-link':
-                _handleDeepLink(sourceView, deepLinkId);
-                break;
-            default:
-                console.warn('[daily-overview] unknown data-action:', action);
+            switch (action) {
+                case 'dismiss':
+                    _handleDismiss(btn, card, itemId);
+                    break;
+                case 'complete':
+                    _handleComplete(btn, card, itemId);
+                    break;
+                case 'deep-link':
+                    _handleDeepLink(sourceView, deepLinkId);
+                    break;
+                default:
+                    console.warn('[daily-overview] unknown data-action:', action);
+            }
+            return;
         }
+
+        // Fall-through: card-level click → open detail popup.
+        const card = e.target.closest('.do-card');
+        if (!card) return;
+        _handleCardClick(card);
     });
 
     // Keyboard: Enter/Space on focusable buttons is handled natively by <button>,
     // so no extra keydown handler is needed — the click event fires on activation.
+
+    // Cards are role="button" tabindex="0", so Enter/Space must be wired explicitly.
+    grid.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' && e.key !== ' ') return;
+        const card = e.target.closest('.do-card');
+        if (!card || card !== e.target) return;
+        e.preventDefault();
+        _handleCardClick(card);
+    });
 
     _delegationWired = true;
 }
@@ -283,6 +298,31 @@ function _handleComplete(btn, card, itemId) {
             btn.disabled = false;
             showToast('Complete failed: ' + (err.message || 'unknown error'), 'error', 5000);
         });
+}
+
+/**
+ * Handle a card-level click — open the detail popup for that item.
+ *
+ * Looks up the full item (with `details`) from the most recently rendered
+ * payload using the card's category + id.  Bails silently if the popup module
+ * has not loaded or the item cannot be resolved.
+ */
+function _handleCardClick(card) {
+    if (typeof openDailyOverviewPopup !== 'function') return;
+    if (!_lastOverviewData || !Array.isArray(_lastOverviewData.categories)) return;
+
+    const cell = card.closest('.do-cell');
+    if (!cell) return;
+    const categoryKey = cell.dataset.category;
+    const itemId = card.dataset.id;
+    if (!categoryKey || !itemId) return;
+
+    const cat = _lastOverviewData.categories.find(function (c) { return c.key === categoryKey; });
+    if (!cat || !Array.isArray(cat.items)) return;
+    const item = cat.items.find(function (i) { return String(i.id) === String(itemId); });
+    if (!item) return;
+
+    openDailyOverviewPopup(item, categoryKey);
 }
 
 /**
@@ -510,7 +550,9 @@ function _renderCard(item) {
         '<div class="do-card ' + sevClass + '"' +
                 ' data-id="' + itemId + '"' +
                 ' data-source-view="' + sourceView + '"' +
-                ' data-deep-link-id="' + deepLinkId + '">' +
+                ' data-deep-link-id="' + deepLinkId + '"' +
+                ' tabindex="0" role="button"' +
+                ' aria-label="Open details for ' + title + '">' +
             '<div class="do-card-severity-bar"></div>' +
             '<div class="do-card-severity-dot"></div>' +
             '<span class="do-card-title" title="' + title + '">' + title + '</span>' +

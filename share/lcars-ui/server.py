@@ -5732,6 +5732,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'deep_link_id':         t.get('id', ''),
                     'dismissable':          False,
                     'completable':          True,
+                    'details': {
+                        'kind':         'kanban_todo',
+                        'team':         team,
+                        'todo_id':      t.get('id', ''),
+                        'text':         t.get('text', ''),
+                        'priority':     t.get('priority', 'medium'),
+                        'status':       t.get('status', 'todo'),
+                        'created_at':   t.get('createdAt'),
+                        'completed_at': t.get('completedAt'),
+                        'required_by':  required_by,
+                    },
                 })
         except Exception as e:
             print(f"[LCARS] WARN kanban_todos source error for team={team}: {e}")
@@ -5751,10 +5762,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             with open(board_file, 'r') as f:
                 data = json.load(f)
             for item in data.get('backlog', []):
+                if item.get('status') in ('completed', 'done', 'cancelled'):
+                    continue
                 due_date = item.get('dueDate')
                 if not due_date or due_date > today_str:
                     continue
                 priority = item.get('priority', 'medium')
+                subitems = item.get('subitems', []) or []
                 items.append({
                     'id':                   item.get('id', ''),
                     'title':                self._truncate_title(item.get('title', '')),
@@ -5764,6 +5778,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'deep_link_id':         item.get('id', ''),
                     'dismissable':          False,
                     'completable':          False,
+                    'details': {
+                        'kind':                'kanban_item',
+                        'team':                team,
+                        'item_id':             item.get('id', ''),
+                        'title':               item.get('title', ''),
+                        'description':         item.get('description', ''),
+                        'status':              item.get('status', ''),
+                        'priority':            priority,
+                        'platform':            item.get('os') or item.get('platform') or '',
+                        'jira_id':             item.get('jiraId', ''),
+                        'github_id':           item.get('githubId', ''),
+                        'due_date':            due_date,
+                        'subitems_total':      len(subitems),
+                        'subitems_completed':  sum(
+                            1 for s in subitems
+                            if s.get('status') in ('completed', 'done', 'cancelled')
+                        ),
+                    },
                 })
         except Exception as e:
             print(f"[LCARS] WARN kanban_items_due source error for team={team}: {e}")
@@ -5838,6 +5870,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'deep_link_id':         cr_id,
                     'dismissable':          False,
                     'completable':          False,
+                    'details': {
+                        'kind':              'change_request',
+                        'team':              team,
+                        'cr_id':             cr_id,
+                        'cr_state':          cr_state,
+                        'cr_type':           cr.get('crType', ''),
+                        'title':             str(cr_title),
+                        'customer':          cr.get('customer', ''),
+                        'summary':           cr.get('summary') or cr.get('description') or '',
+                        'created_at':        cr.get('createdAt') or cr.get('created'),
+                        'target_date':       cr.get('targetDate') or cr.get('deployDate'),
+                        'severity':          severity,
+                        'linked_kanban_id':  cr.get('parentId') or cr.get('kanbanId') or '',
+                    },
                 })
         except Exception as e:
             print(f"[LCARS] WARN change_requests source error for team={team}: {e}")
@@ -5898,6 +5944,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'deep_link_id':         'backup-status',
             'dismissable':          False,
             'completable':          False,
+            'details': {
+                'kind':            'backup_failure',
+                'team':            team,
+                'overall_status':  overall_status,
+                'last_run':        last_run,
+                'last_error':      status_data.get('last_error') or status_data.get('lastError') or '',
+                'severity':        severity,
+                'is_stale':        stale,
+                'id_suffix':       id_suffix,
+            },
         }
 
     def _collect_backup_failures(self, team: str) -> list:
@@ -6009,21 +6065,40 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'deep_link_id':         item.get('id', ''),
                     'dismissable':          False,
                     'completable':          False,
+                    'details': {
+                        'kind':       'calendar_item',
+                        'source':     'kanban_backlog',
+                        'team':       team,
+                        'item_id':    item.get('id', ''),
+                        'title':      item.get('title', ''),
+                        'due_date':   due_date,
+                        'priority':   priority,
+                        'status':     item.get('status', ''),
+                    },
                 })
             # Also check epics with dueDate
             for epic in data.get('epics', []):
                 due_date = epic.get('dueDate') or epic.get('targetDate')
                 if not due_date or due_date > today_str:
                     continue
+                epic_title = epic.get('title', epic.get('name', ''))
                 items.append({
                     'id':                   epic.get('id', ''),
-                    'title':                self._truncate_title(epic.get('title', epic.get('name', ''))),
+                    'title':                self._truncate_title(epic_title),
                     'due_at':               f"{due_date}T00:00:00Z",
                     'severity_or_priority': 'high',
                     'source_view':          'calendar',
                     'deep_link_id':         epic.get('id', ''),
                     'dismissable':          False,
                     'completable':          False,
+                    'details': {
+                        'kind':       'calendar_item',
+                        'source':     'kanban_epic',
+                        'team':       team,
+                        'item_id':    epic.get('id', ''),
+                        'title':      epic_title,
+                        'due_date':   due_date,
+                    },
                 })
         except Exception as e:
             print(f"[LCARS] WARN calendar_items source error for team={team}: {e}")
@@ -6063,6 +6138,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             'deep_link_id':         deep_link_id,
                             'dismissable':          False,
                             'completable':          False,
+                            'details': {
+                                'kind':      'calendar_item',
+                                'source':    'team_calendar',
+                                'team':      team,
+                                'event_id':  evt_id,
+                                'title':     str(evt_title),
+                                'start':     evt_start,
+                                'end':       evt.get('end', ''),
+                                'all_day':   evt.get('all_day', True),
+                                'link':      link,
+                            },
                         })
                 except (json.JSONDecodeError, OSError) as exc:
                     print(f"[LCARS] WARN calendar events.json malformed for team={team}: {exc}")
@@ -6109,6 +6195,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'deep_link_id':         release_id,
                     'dismissable':          False,
                     'completable':          False,
+                    'details': {
+                        'kind':          'release',
+                        'team':          team,
+                        'release_id':    release_id,
+                        'name':          str(name),
+                        'short_title':   release.get('shortTitle', ''),
+                        'status':        status,
+                        'target_date':   target_date,
+                        'severity':      severity,
+                        'environments':  release.get('environments', {}),
+                    },
                 })
         except Exception as e:
             print(f"[LCARS] WARN releases source error for team={team}: {e}")
@@ -6155,10 +6252,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'deep_link_id':         alert.get('id', ''),
                     'dismissable':          True,
                     'completable':          False,
+                    'details':              self._build_alert_details(alert, team, link),
                 })
         except Exception as e:
             print(f"[LCARS] WARN alert source error for team={team}: {e}")
         return items
+
+    @staticmethod
+    def _build_alert_details(alert: dict, team: str, link: str) -> dict:
+        """Construct the popup `details` payload for an alert item.
+
+        Centralised so both `_collect_alerts` and the structural-merge pass in
+        `serve_daily_overview` produce the same shape.
+        """
+        return {
+            'kind':         'alert',
+            'team':         team,
+            'alert_id':     alert.get('id', ''),
+            'title':        alert.get('title', ''),
+            'body':         alert.get('body') or '',
+            'source':       alert.get('source', ''),
+            'severity':     alert.get('severity', 'info'),
+            'category':     alert.get('category', 'alert'),
+            'accepted_at':  alert.get('accepted_at'),
+            'expires_at':   alert.get('expires_at'),
+            'link':         link or '',
+            'metadata':     alert.get('metadata') or {},
+            'dedupe_key':   alert.get('dedupe_key'),
+        }
 
     def serve_daily_overview(self, query_string: str):
         """GET /api/daily-overview?team=<id>
@@ -6238,6 +6359,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         'deep_link_id':         alert.get('id', ''),
                         'dismissable':          True,
                         'completable':          False,
+                        'details':              self._build_alert_details(alert, team, link),
                     }
 
                     if category in structural_keys:

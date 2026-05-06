@@ -254,6 +254,17 @@
     gap: 5px;
     border-bottom: 1px solid rgba(255, 255, 255, 0.04);
     box-sizing: border-box;
+    cursor: pointer;
+    transition: background 0.12s ease;
+}
+
+.do-card:hover {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.do-card:focus-visible {
+    outline: 1px solid rgba(153, 204, 255, 0.70);
+    outline-offset: -1px;
 }
 
 .do-card:last-child {
@@ -438,3 +449,239 @@
    RESPONSIVE NOTE:
    Spec mandates no narrower-than-1280 breakpoints. No media queries here.
    ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   DETAIL POPUP — XACA-0351
+   Modal surface that opens when a card is tapped. Generic shell + per-category
+   key/value layout. Lives outside the no-scroll grid (overflow:auto inside).
+   ----------------------------------------------------------------------------- */
+
+.do-popup-backdrop {
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.65);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    padding: 24px;
+    box-sizing: border-box;
+}
+
+.do-popup {
+    background: #0a0a14;
+    border: 1px solid rgba(153, 204, 255, 0.35);
+    border-radius: 12px;
+    width: 100%;
+    max-width: 720px;
+    max-height: 80vh;
+    display: flex;
+    flex-direction: column;
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+}
+
+.do-popup-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    background: rgba(153, 204, 255, 0.06);
+    border-bottom: 1px solid rgba(153, 204, 255, 0.20);
+    flex-shrink: 0;
+}
+
+.do-popup-kind {
+    font-family: 'Antonio', sans-serif;
+    font-size: 11px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--lcars-cyan);
+    font-weight: 600;
+}
+
+.do-popup-close {
+    background: transparent;
+    border: 1px solid rgba(255, 153, 153, 0.30);
+    border-radius: 4px;
+    color: #FF9999;
+    font-size: 14px;
+    line-height: 1;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+}
+
+.do-popup-close:hover {
+    background: rgba(255, 153, 153, 0.12);
+    border-color: rgba(255, 153, 153, 0.60);
+}
+
+.do-popup-close:focus-visible {
+    outline: 1px solid rgba(255, 153, 153, 0.70);
+    outline-offset: 2px;
+}
+
+.do-popup-title {
+    margin: 0;
+    padding: 14px 16px 6px;
+    font-size: 16px;
+    font-weight: 600;
+    color: #FFFFFF;
+    line-height: 1.3;
+    word-break: break-word;
+    flex-shrink: 0;
+}
+
+.do-popup-body {
+    padding: 6px 16px 16px;
+    overflow-y: auto;
+    flex: 1 1 auto;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.do-popup-section {
+    margin-top: 12px;
+}
+
+.do-popup-section:first-child {
+    margin-top: 0;
+}
+
+.do-popup-section-label {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--lcars-cyan);
+    margin: 0 0 6px;
+    font-weight: 600;
+}
+
+.do-popup-text {
+    margin: 0 0 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.do-popup-pre {
+    margin: 0;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 11.5px;
+    color: rgba(255, 255, 255, 0.75);
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.do-popup-mono {
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.78);
+    background: rgba(255, 255, 255, 0.04);
+    padding: 1px 5px;
+    border-radius: 3px;
+}
+
+.do-popup-kv {
+    display: grid;
+    grid-template-columns: max-content 1fr;
+    gap: 4px 14px;
+    margin: 0;
+}
+
+.do-popup-kv dt {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10.5px;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.55);
+    padding: 1px 0;
+}
+
+.do-popup-kv dd {
+    margin: 0;
+    padding: 1px 0;
+    color: rgba(255, 255, 255, 0.92);
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.do-popup-pill {
+    display: inline-block;
+    font-family: 'Antonio', sans-serif;
+    font-size: 9.5px;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 1px 7px;
+    border-radius: 9px;
+    font-weight: 600;
+    background: rgba(255, 255, 255, 0.08);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: rgba(255, 255, 255, 0.88);
+}
+
+.do-popup-prio-critical { background: rgba(255, 107, 107, 0.18); border-color: rgba(255, 107, 107, 0.50); color: #FF9999; }
+.do-popup-prio-high     { background: rgba(255, 204, 153, 0.16); border-color: rgba(255, 204, 153, 0.45); color: #FFCC99; }
+.do-popup-prio-warn     { background: rgba(255, 204, 153, 0.16); border-color: rgba(255, 204, 153, 0.45); color: #FFCC99; }
+.do-popup-prio-medium   { background: rgba(153, 153, 255, 0.16); border-color: rgba(153, 153, 255, 0.45); color: #B3B3FF; }
+.do-popup-prio-info     { background: rgba(153, 153, 255, 0.16); border-color: rgba(153, 153, 255, 0.45); color: #B3B3FF; }
+.do-popup-prio-low      { background: rgba(255, 255, 255, 0.06); border-color: rgba(255, 255, 255, 0.20); color: rgba(255, 255, 255, 0.70); }
+
+.do-popup-status-completed,
+.do-popup-status-done       { background: rgba(102, 204, 153, 0.16); border-color: rgba(102, 204, 153, 0.45); color: #99E6BF; }
+.do-popup-status-cancelled  { background: rgba(255, 255, 255, 0.05); border-color: rgba(255, 255, 255, 0.18); color: rgba(255, 255, 255, 0.55); }
+.do-popup-status-in-progress,
+.do-popup-status-in_progress,
+.do-popup-status-implementing { background: rgba(153, 204, 255, 0.16); border-color: rgba(153, 204, 255, 0.45); color: #99CCFF; }
+
+.do-popup-deeplink {
+    color: var(--lcars-cyan);
+    text-decoration: none;
+    border-bottom: 1px dotted rgba(153, 204, 255, 0.45);
+    cursor: pointer;
+    font-family: 'SF Mono', Menlo, Consolas, monospace;
+    font-size: 12px;
+}
+
+.do-popup-deeplink:hover {
+    color: #FFFFFF;
+    border-bottom-color: rgba(255, 255, 255, 0.70);
+}
+
+.do-popup-deeplink:focus-visible {
+    outline: 1px solid rgba(153, 204, 255, 0.70);
+    outline-offset: 2px;
+}
+
+.do-popup-env-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.do-popup-env-chip {
+    display: inline-block;
+    font-family: 'Antonio', sans-serif;
+    font-size: 9.5px;
+    letter-spacing: 0.8px;
+    text-transform: uppercase;
+    padding: 2px 8px;
+    border-radius: 9px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    color: rgba(255, 255, 255, 0.78);
+}
+
+.do-popup-env-completed,
+.do-popup-env-deployed { background: rgba(102, 204, 153, 0.14); border-color: rgba(102, 204, 153, 0.45); color: #99E6BF; }
+.do-popup-env-pending,
+.do-popup-env-planned  { background: rgba(255, 204, 153, 0.14); border-color: rgba(255, 204, 153, 0.45); color: #FFCC99; }
+.do-popup-env-failed   { background: rgba(255, 107, 107, 0.16); border-color: rgba(255, 107, 107, 0.45); color: #FF9999; }

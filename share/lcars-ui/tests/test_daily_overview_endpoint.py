@@ -451,6 +451,45 @@ class TestKanbanItemsDue(DailyOverviewTestBase):
         self.assertEqual(len(cat['items']), 5)
         self.assertEqual(cat['overflow'], 2)
 
+    def test_completed_item_excluded(self):
+        self._seed_backlog([{
+            'id': 'XACA-0010', 'title': 'Done item', 'status': 'completed',
+            'priority': 'high', 'dueDate': YESTERDAY,
+        }])
+        h, buf = self._call_endpoint()
+        cat = next(c for c in _response_json(buf)['categories'] if c['key'] == 'kanban_items_due')
+        self.assertEqual(cat['total'], 0)
+
+    def test_done_item_excluded(self):
+        self._seed_backlog([{
+            'id': 'XACA-0011', 'title': 'Done-status item', 'status': 'done',
+            'priority': 'medium', 'dueDate': TODAY,
+        }])
+        h, buf = self._call_endpoint()
+        cat = next(c for c in _response_json(buf)['categories'] if c['key'] == 'kanban_items_due')
+        self.assertEqual(cat['total'], 0)
+
+    def test_cancelled_item_excluded(self):
+        self._seed_backlog([{
+            'id': 'XACA-0012', 'title': 'Cancelled item', 'status': 'cancelled',
+            'cancelledReason': 'no longer needed', 'dueDate': YESTERDAY,
+        }])
+        h, buf = self._call_endpoint()
+        cat = next(c for c in _response_json(buf)['categories'] if c['key'] == 'kanban_items_due')
+        self.assertEqual(cat['total'], 0)
+
+    def test_active_item_with_completed_sibling(self):
+        self._seed_backlog([
+            {'id': 'XACA-0020', 'title': 'Active', 'status': 'in_progress',
+             'priority': 'high', 'dueDate': YESTERDAY},
+            {'id': 'XACA-0021', 'title': 'Done', 'status': 'completed',
+             'priority': 'high', 'dueDate': YESTERDAY},
+        ])
+        h, buf = self._call_endpoint()
+        cat = next(c for c in _response_json(buf)['categories'] if c['key'] == 'kanban_items_due')
+        self.assertEqual(cat['total'], 1)
+        self.assertEqual(cat['items'][0]['id'], 'XACA-0020')
+
 
 # ---------------------------------------------------------------------------
 # Tests: change_requests
@@ -1293,6 +1332,230 @@ class TestStatelessAggregation(DailyOverviewTestBase):
         h2, buf2 = self._call_endpoint()
         cat2 = next(c for c in _response_json(buf2)['categories'] if c['key'] == 'alert')
         self.assertEqual(cat2['total'], 0)
+
+
+# ---------------------------------------------------------------------------
+# Tests: detail popup payload (XACA-0351)
+# Each category's items must include a `details` dict whose `kind` matches
+# the category and whose required keys are present for the popup renderer.
+# ---------------------------------------------------------------------------
+
+class TestPopupDetails(DailyOverviewTestBase):
+
+    def _seed_board(self, **overrides):
+        board = {
+            'team': 'academy', 'backlog': [], 'todos': [],
+            'releases': [], 'epics': [], 'crs': [],
+        }
+        board.update(overrides)
+        self._write_board(board)
+
+    def _cat(self, key):
+        h, buf = self._call_endpoint()
+        return next(c for c in _response_json(buf)['categories'] if c['key'] == key)
+
+    def test_kanban_todo_details_shape(self):
+        self._seed_board(todos=[{
+            'id': 'todo-1', 'text': 'Write the report',
+            'status': 'todo', 'priority': 'high',
+            'requiredBy': YESTERDAY, 'createdAt': _ts(YESTERDAY),
+        }])
+        cat = self._cat('kanban_todos')
+        self.assertEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'kanban_todo')
+        self.assertEqual(d['todo_id'], 'todo-1')
+        self.assertEqual(d['text'], 'Write the report')
+        self.assertEqual(d['priority'], 'high')
+        self.assertEqual(d['status'], 'todo')
+        self.assertEqual(d['required_by'], YESTERDAY)
+        self.assertEqual(d['team'], 'academy')
+
+    def test_kanban_item_details_shape(self):
+        self._seed_board(backlog=[{
+            'id': 'XACA-0500', 'title': 'Refactor module',
+            'description': 'Long description with XACA-0501 reference.',
+            'status': 'in_progress', 'priority': 'high',
+            'os': 'iOS', 'jiraId': 'JIRA-100', 'githubId': 'gh-200',
+            'dueDate': YESTERDAY,
+            'subitems': [
+                {'id': 'XACA-0500-1', 'status': 'completed'},
+                {'id': 'XACA-0500-2', 'status': 'todo'},
+                {'id': 'XACA-0500-3', 'status': 'cancelled'},
+            ],
+        }])
+        cat = self._cat('kanban_items_due')
+        self.assertEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'kanban_item')
+        self.assertEqual(d['item_id'], 'XACA-0500')
+        self.assertEqual(d['title'], 'Refactor module')
+        self.assertEqual(d['description'], 'Long description with XACA-0501 reference.')
+        self.assertEqual(d['status'], 'in_progress')
+        self.assertEqual(d['priority'], 'high')
+        self.assertEqual(d['platform'], 'iOS')
+        self.assertEqual(d['jira_id'], 'JIRA-100')
+        self.assertEqual(d['github_id'], 'gh-200')
+        self.assertEqual(d['subitems_total'], 3)
+        # completed + cancelled both count as "done" for the popup ratio
+        self.assertEqual(d['subitems_completed'], 2)
+
+    def test_change_request_details_shape(self):
+        self._seed_board(crs=[{
+            'id': 'CR-9001', 'title': 'Deploy pipeline fix',
+            'crState': 'cr-held', 'crType': 'BUGFIX',
+            'customer': 'Acme', 'summary': 'Pipeline broken on prod',
+            'createdAt': _ts(YESTERDAY), 'targetDate': YESTERDAY,
+            'parentId': 'XACA-0700',
+        }])
+        cat = self._cat('change_requests')
+        self.assertEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'change_request')
+        self.assertEqual(d['cr_id'], 'CR-9001')
+        self.assertEqual(d['cr_state'], 'cr-held')
+        self.assertEqual(d['cr_type'], 'BUGFIX')
+        self.assertEqual(d['customer'], 'Acme')
+        self.assertEqual(d['summary'], 'Pipeline broken on prod')
+        self.assertEqual(d['target_date'], YESTERDAY)
+        self.assertEqual(d['linked_kanban_id'], 'XACA-0700')
+        # cr-held → critical
+        self.assertEqual(d['severity'], 'critical')
+
+    def test_backup_failure_details_shape(self):
+        self._seed_board()
+        backups_dir = self._fake_kanban / 'backups'
+        backups_dir.mkdir(exist_ok=True)
+        with open(backups_dir / 'status.json', 'w') as f:
+            json.dump({
+                'version': 1, 'last_run': _ts(YESTERDAY),
+                'status': 'failed', 'last_error': 'rsync exited 23',
+            }, f)
+        cat = self._cat('backup_failures')
+        self.assertGreaterEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'backup_failure')
+        self.assertEqual(d['team'], 'academy')
+        self.assertEqual(d['overall_status'], 'failed')
+        self.assertEqual(d['severity'], 'critical')
+        self.assertEqual(d['last_error'], 'rsync exited 23')
+
+    def test_calendar_kanban_backlog_source(self):
+        self._seed_board(backlog=[{
+            'id': 'XACA-0600', 'title': 'Sprint review',
+            'status': 'in_progress', 'priority': 'high',
+            'dueDate': YESTERDAY,
+        }])
+        cat = self._cat('calendar_items')
+        # The same backlog item appears in kanban_items_due AND calendar_items;
+        # we only assert details shape on the calendar entry here.
+        cal = next(it for it in cat['items'] if it['id'] == 'XACA-0600')
+        d = cal['details']
+        self.assertEqual(d['kind'], 'calendar_item')
+        self.assertEqual(d['source'], 'kanban_backlog')
+        self.assertEqual(d['item_id'], 'XACA-0600')
+        self.assertEqual(d['due_date'], YESTERDAY)
+
+    def test_calendar_team_event_source(self):
+        self._seed_board()
+        events_dir = self._fake_kanban / 'calendar'
+        events_dir.mkdir(exist_ok=True)
+        with open(events_dir / 'events.json', 'w') as f:
+            json.dump({
+                'version': 1, 'events': [{
+                    'id': 'evt-1', 'title': 'Team standup',
+                    'start': _ts(YESTERDAY), 'end': _ts(YESTERDAY),
+                    'all_day': False, 'link': '/section/calendar/evt-1',
+                }],
+            }, f)
+        cat = self._cat('calendar_items')
+        evt = next(it for it in cat['items'] if it['id'] == 'evt-1')
+        d = evt['details']
+        self.assertEqual(d['kind'], 'calendar_item')
+        self.assertEqual(d['source'], 'team_calendar')
+        self.assertEqual(d['event_id'], 'evt-1')
+        self.assertEqual(d['title'], 'Team standup')
+        self.assertEqual(d['all_day'], False)
+
+    def test_release_details_shape(self):
+        self._seed_board(releases=[{
+            'id': 'REL-2026-04', 'name': 'April release',
+            'shortTitle': 'Apr', 'status': 'in_progress',
+            'targetDate': YESTERDAY,
+            'environments': {
+                'DEV':  {'status': 'completed', 'enabled': True},
+                'PROD': {'status': 'pending',   'enabled': True},
+            },
+        }])
+        cat = self._cat('releases')
+        self.assertEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'release')
+        self.assertEqual(d['release_id'], 'REL-2026-04')
+        self.assertEqual(d['name'], 'April release')
+        self.assertEqual(d['short_title'], 'Apr')
+        self.assertEqual(d['target_date'], YESTERDAY)
+        self.assertIn('DEV', d['environments'])
+        self.assertEqual(d['environments']['DEV']['status'], 'completed')
+
+    def test_alert_details_shape(self):
+        alerts_dir = self._fake_kanban / 'alerts'
+        alerts_dir.mkdir(exist_ok=True)
+        store = {
+            'version': 1, 'team': 'academy', 'lastUpdated': _ts(TODAY),
+            'alerts': [{
+                'id': 'alert-detail-1', 'team': 'academy', 'source': 'cron-job',
+                'title': 'Backup hung', 'body': 'Process stuck for 2h.',
+                'severity': 'critical', 'category': 'alert',
+                'accepted_at': _ts(TODAY), 'dismissed_at': None,
+                'expires_at': None, 'link': '/section/backups',
+                'dedupe_key': 'cron-1', 'metadata': {'host': 'prod-1'},
+            }],
+        }
+        with open(alerts_dir / 'active.json', 'w') as f:
+            json.dump(store, f)
+        self._seed_board()
+        cat = self._cat('alert')
+        self.assertEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'alert')
+        self.assertEqual(d['alert_id'], 'alert-detail-1')
+        self.assertEqual(d['title'], 'Backup hung')
+        self.assertEqual(d['body'], 'Process stuck for 2h.')
+        self.assertEqual(d['source'], 'cron-job')
+        self.assertEqual(d['severity'], 'critical')
+        self.assertEqual(d['category'], 'alert')
+        self.assertEqual(d['link'], '/section/backups')
+        self.assertEqual(d['dedupe_key'], 'cron-1')
+        self.assertEqual(d['metadata'], {'host': 'prod-1'})
+
+    def test_alert_with_null_body_still_has_details(self):
+        """Regression: 'Dedupe test v2' style alert (body=null, source='qa-test')
+        must still produce a details dict with empty-string body so the popup
+        can render without choking."""
+        alerts_dir = self._fake_kanban / 'alerts'
+        alerts_dir.mkdir(exist_ok=True)
+        store = {
+            'version': 1, 'team': 'academy', 'lastUpdated': _ts(TODAY),
+            'alerts': [{
+                'id': 'alert-null-body', 'team': 'academy', 'source': 'qa-test',
+                'title': 'Dedupe test v2', 'body': None,
+                'severity': 'warn', 'category': 'alert',
+                'accepted_at': _ts(TODAY), 'dismissed_at': None,
+                'expires_at': None, 'link': None,
+                'dedupe_key': 'qa-1', 'metadata': None,
+            }],
+        }
+        with open(alerts_dir / 'active.json', 'w') as f:
+            json.dump(store, f)
+        self._seed_board()
+        cat = self._cat('alert')
+        self.assertEqual(cat['total'], 1)
+        d = cat['items'][0]['details']
+        self.assertEqual(d['kind'], 'alert')
+        self.assertEqual(d['source'], 'qa-test')
+        self.assertEqual(d['body'], '')
+        self.assertEqual(d['metadata'], {})
 
 
 # ---------------------------------------------------------------------------

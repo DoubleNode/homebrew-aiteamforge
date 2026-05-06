@@ -2298,6 +2298,8 @@
 <!-- XACA-0220 Phase 3b — daily artifact audit banner (must load after lcars.js for apiUrl) -->
 <script src="js/lcars-artifact-audit.js?v=1.0"></script>
 <!-- XACA-0334-005: Daily Overview grid renderer — must load after lcars.js (depends on apiUrl, escapeHtml, CONFIG) -->
+<!-- XACA-0351: popup must load BEFORE daily-overview.js so openDailyOverviewPopup is in scope. -->
+<script src="js/daily-overview-popup.js"></script>
 <script src="js/daily-overview.js"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
