@@ -556,6 +556,10 @@ async def resize_pane_by_env(connection, target_cols=30, min_rows=50):
                     if current_height < min_rows:
                         target_height = min_rows
                     else:
+                        # `preferred_size.height or current_height`: on a freshly-created
+                        # session iTerm2 reports preferred_size.height as 0 (falsy) until
+                        # the layout has stabilized — fall back to current_height in that
+                        # window to avoid pinning the pane to a 0-row preference.
                         target_height = session.preferred_size.height or current_height
                     session.preferred_size = iterm2.util.Size(target_cols, target_height)
                     await tab.async_update_layout()
@@ -607,6 +611,8 @@ async def reset_all_agent_panels(connection, target_cols=30, min_rows=50):
             if current_h < min_rows:
                 target_h = min_rows
             else:
+                # See `preferred_size.height or current_h` note in resize_pane_by_env:
+                # a fresh session reports preferred_size.height = 0 until layout settles.
                 target_h = agent.preferred_size.height or current_h
             agent.preferred_size = iterm2.util.Size(target_cols, target_h)
             await tab.async_update_layout()
