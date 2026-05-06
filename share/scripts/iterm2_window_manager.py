@@ -562,17 +562,7 @@ async def resize_pane_by_env(connection, target_cols=30, min_rows=50):
                         # window to avoid pinning the pane to a 0-row preference.
                         target_height = session.preferred_size.height or current_height
                     session.preferred_size = iterm2.util.Size(target_cols, target_height)
-                    # Capture window frame BEFORE update_layout, restore AFTER.
-                    # async_update_layout uses preferred_sizes as the layout target;
-                    # because main pane's preferred_size is frozen at split-time
-                    # (170 cols) and never tracks user-driven window growth,
-                    # the layout pass pulls the window down toward the preferred
-                    # sum (~200 cols) — shrinking the window monotonically each
-                    # tick where this branch fires. Restoring the pixel frame
-                    # cancels that pull without disturbing pane ratios.
-                    saved_frame = await window.async_get_frame()
                     await tab.async_update_layout()
-                    await window.async_set_frame(saved_frame)
                     print(f"Resized pane {session.session_id}: "
                           f"{current_width} -> {target_cols} cols, "
                           f"height {current_height} (min {min_rows})")
@@ -625,13 +615,7 @@ async def reset_all_agent_panels(connection, target_cols=30, min_rows=50):
                 # a fresh session reports preferred_size.height = 0 until layout settles.
                 target_h = agent.preferred_size.height or current_h
             agent.preferred_size = iterm2.util.Size(target_cols, target_h)
-            # See window-frame capture/restore note in resize_pane_by_env:
-            # the layout pass otherwise pulls the window toward the sum of
-            # preferred_sizes (agent_target + main_frozen ≈ 200 cols),
-            # shrinking the window each cycle.
-            saved_frame = await window.async_get_frame()
             await tab.async_update_layout()
-            await window.async_set_frame(saved_frame)
             fixed += 1
 
             # Small delay between tabs to let iTerm2 settle
