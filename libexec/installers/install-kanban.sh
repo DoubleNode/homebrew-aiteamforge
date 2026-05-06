@@ -860,6 +860,13 @@ install_cr_confluence_poller_launchagent() {
         return 0
     fi
 
+    # jq is required to parse the credentials teams dict; surface a clear error
+    # rather than silently degrading to an empty teams_json (XACA-0350-016).
+    if ! command -v jq &>/dev/null; then
+        warning "jq is required for per-team CR Confluence Poller install — install jq and re-run."
+        return 0
+    fi
+
     # Extract team names from .teams dict; jq returns one team name per line.
     local teams_json
     teams_json="$(jq -r '.teams | keys[]' "$creds_file" 2>/dev/null || true)"
@@ -879,6 +886,14 @@ install_cr_confluence_poller_launchagent() {
     local team plist_dest
     while IFS= read -r team; do
         [ -z "$team" ] && continue
+        # Allow only [a-zA-Z0-9_-] in team names — the value flows into a sed
+        # replacement and a launchctl Label, so a JSON key with pipes/slashes
+        # could break the plist render or produce an invalid LaunchAgent label
+        # (XACA-0350-014).
+        if [[ ! "$team" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            warning "Skipping team '$team': name must match [a-zA-Z0-9_-]+ for LaunchAgent label."
+            continue
+        fi
         plist_dest="$launch_agents_dir/com.aiteamforge.cr-confluence-poller.${team}.plist"
 
         sed -e "s|{{USER_HOME}}|$HOME|g" \
@@ -901,7 +916,12 @@ install_cr_confluence_poller_launchagent() {
 }
 
 # Uninstall CR Confluence Poller LaunchAgents — glob-removes all per-team plists
-# and the legacy global plist if it still exists (XACA-0350-005)
+# and the legacy global plist if it still exists (XACA-0350-005).
+#
+# Note: per-team logs at ~/Library/Logs/aiteamforge/cr-poller/<team>.{out,err}.log
+# are intentionally preserved on uninstall (matches lcars-health convention).
+# Operators can inspect prior poller output after uninstall; remove the log
+# directory manually if desired (XACA-0350-015).
 uninstall_cr_confluence_poller_launchagent() {
     local launch_agents_dir="$HOME/Library/LaunchAgents"
     local found_any=0
