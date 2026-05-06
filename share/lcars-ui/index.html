@@ -2287,6 +2287,8 @@
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
 <script src="js/lcars-cr-poll-bus.js"></script>
+<!-- XACA-0335: AGE column compute/format helpers — must load before lcars-cr-tab.js (no DOM/network deps) -->
+<script src="js/lcars-cr-age-helpers.js"></script>
 <!-- XACA-0292-007: CHANGE REQ list view — must load after lcars.js (depends on boardData, escapeHtml, showPlanDocModal, switchDocTab) -->
 <script src="js/lcars-cr-tab.js"></script>
 <!-- XACA-0293-004: CR cycle-time segment tiles — must load after lcars-cr-metrics.js and lcars-cr-tab.js -->

@@ -36,7 +36,7 @@
  *   copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown
  */
 
-/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown */
+/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown, lcarsCrAgeHelpers */
 
 'use strict';
 
@@ -573,9 +573,13 @@
             }
             // AGE (XACA-0335): total CR age from cr_created_at, oldest-first.
             // null/terminal-state ages sort to the bottom. Mirrors STAGE-AGE pattern.
+            // Compute helper lives in lcars-cr-age-helpers.js (window.lcarsCrAgeHelpers).
             if (sortBy === 'AGE') {
-                const aAge = _computeCRAgeMs(a);
-                const bAge = _computeCRAgeMs(b);
+                const compute = (typeof window !== 'undefined' && window.lcarsCrAgeHelpers)
+                    ? window.lcarsCrAgeHelpers.computeCRAgeMs
+                    : null;
+                const aAge = compute ? compute(a) : null;
+                const bAge = compute ? compute(b) : null;
                 if (aAge === null && bAge === null) return 0;
                 if (aAge === null) return 1;
                 if (bAge === null) return -1;
@@ -725,50 +729,12 @@
 
     // ─── AGE column helpers (XACA-0335) ──────────────────────────────────────
 
-    /**
-     * Terminal CR states for which AGE renders as "—". Mirrors the TERMINAL set
-     * in SAVED_VIEWS['active-pipeline'] (lcars-cr-tab.js:124) — keep in sync.
-     * Once a CR reaches one of these states the queue-management value of "how
-     * long has this been waiting" goes to zero, so we suppress the value rather
-     * than let it grow unbounded on rows that no longer need triage.
-     */
-    const _AGE_TERMINAL_STATES = new Set(['deployed-prod', 'emergency-deployed', 'cr-rejected']);
-
-    /**
-     * Returns total CR age in milliseconds from cr_created_at (fallback addedAt),
-     * or null when the CR is in a terminal state or both timestamps are absent.
-     * Used by both the AGE comparator and the AGE cell renderer.
-     */
-    function _computeCRAgeMs(item) {
-        if (_AGE_TERMINAL_STATES.has(item.crState)) return null;
-        const rawTs = item.cr_created_at || item.addedAt;
-        if (!rawTs) return null;
-        const ms = new Date(rawTs).getTime();
-        if (!ms || isNaN(ms)) return null;
-        return Date.now() - ms;
-    }
-
-    /**
-     * Format a millisecond duration as a compact relative-age string.
-     *   < 1h          → "<N>m"
-     *   < 24h         → "<N>h"
-     *   < 7d          → "<N>d"
-     *   < 30d         → "<N>w"
-     *   ≥ 30d         → "<N>mo"
-     * Negative or zero clamps to "0m" (handles minor clock skew without confusion).
-     */
-    function _formatRelativeAge(ageMs) {
-        const m = Math.max(0, Math.floor(ageMs / 60000));
-        if (m < 60)        return m + 'm';
-        const h = Math.floor(m / 60);
-        if (h < 24)        return h + 'h';
-        const d = Math.floor(h / 24);
-        if (d < 7)         return d + 'd';
-        const w = Math.floor(d / 7);
-        if (d < 30)        return w + 'w';
-        const mo = Math.floor(d / 30);
-        return mo + 'mo';
-    }
+    // Pure compute/format helpers live in lcars-cr-age-helpers.js so they can
+    // be unit-tested without standing up this entire IIFE. That file declares
+    // window.lcarsCrAgeHelpers and is loaded by index.html immediately before
+    // this script. The renderer below stays here because it touches the DOM
+    // contract (escapeHtml + the .cr-age / .cr-age-empty CSS classes).
+    const _AGE = (typeof window !== 'undefined' && window.lcarsCrAgeHelpers) || {};
 
     /**
      * Render the AGE <td> cell content. Returns a span carrying both the relative
@@ -776,13 +742,13 @@
      * covers the REQUESTED-AT use case the XACA-0305 review weighed against AGE).
      */
     function _ageCell(item) {
-        const ageMs = _computeCRAgeMs(item);
+        const ageMs = _AGE.computeCRAgeMs ? _AGE.computeCRAgeMs(item) : null;
         if (ageMs === null) {
             return '<span class="cr-age cr-age-empty">—</span>';
         }
         const rawTs = item.cr_created_at || item.addedAt;
         const isoLabel = escapeHtml(new Date(rawTs).toISOString());
-        return `<span class="cr-age" title="Created ${isoLabel}">${_formatRelativeAge(ageMs)}</span>`;
+        return `<span class="cr-age" title="Created ${isoLabel}">${_AGE.formatRelativeAge(ageMs)}</span>`;
     }
 
     // ─── Item-count badge (XACA-0310-001) ────────────────────────────────────
