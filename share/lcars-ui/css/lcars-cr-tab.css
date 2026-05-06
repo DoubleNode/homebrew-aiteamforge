@@ -200,6 +200,7 @@
 .cr-col-approver  { width: 110px; }
 .cr-col-deploy    { width: 110px; }
 .cr-col-pushbacks { width: 70px; text-align: center; }
+.cr-col-age       { width: 75px; text-align: center; white-space: nowrap; }  /* XACA-0335 */
 .cr-col-docs      { width: 60px; text-align: center; }
 
 /* TYPE / STATE merged column (XACA-0353): TYPE badge stacked on top of STATE badge */
@@ -1199,6 +1200,23 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
     border: 1px solid rgba(120, 120, 120, 0.25);
 }
 
+/* ── XACA-0335: AGE column (total CR age, between STAGE AGE and DOCS) ────── */
+
+.cr-age {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    color: var(--lcars-text-secondary, #b8b8b8);
+    white-space: nowrap;
+}
+
+/* Terminal-state / missing-timestamp dash — match the .cr-dim convention */
+.cr-age-empty {
+    color: #666;
+    font-weight: 400;
+}
+
 /* ── Responsive ──────────────────────────────────────────────────────────── */
 
 @media (max-width: 900px) {
@@ -1213,7 +1231,8 @@ input[type="datetime-local"].cr-sc-input::-webkit-calendar-picker-indicator {
 }
 
 @media (max-width: 600px) {
-    .cr-col-deploy { display: none; }
+    .cr-col-deploy,
+    .cr-col-age { display: none; }  /* XACA-0335 */
 
     .cr-filter-controls {
         flex-direction: column;

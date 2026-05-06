@@ -2,7 +2,7 @@
  * lcars-cr-tab.js — CHANGE REQ section list view
  *
  * XACA-0292-007: Renders the CR/CAB list inside #change-req-list with a
- * 9-column tabular layout, filter-bar integration, and per-row DOCS button
+ * 10-column tabular layout, filter-bar integration, and per-row DOCS button
  * that opens the existing plan-doc modal pre-switched to the CR tab.
  *
  * XACA-0292-008: Adds 3 saved-view chips in #change-req-saved-views:
@@ -13,6 +13,12 @@
  * XACA-0293-002: View 1 Active CR Pipeline
  *   "ACTIVE PIPELINE"    — all non-terminal crState values; sorted by STAGE AGE desc
  *   STAGE AGE column     — time-in-current-state with color-coded badge (green/yellow/red)
+ *
+ * XACA-0335: AGE column (10th data cell, between STAGE AGE and DOCS)
+ *   Total CR age from cr_created_at (fallback addedAt). Format: 15m/3h/2d/3w/2mo.
+ *   title="" tooltip carries absolute ISO timestamp (covers REQUESTED-AT use case).
+ *   Suppressed to "—" on terminal states (deployed-prod, emergency-deployed,
+ *   cr-rejected) since age stops being a queue-management signal once the CR is done.
  *
  * XACA-0310 Phase 2.5:
  *   001: CR rows carry linkedItemIds[]; item-count badge in TITLE cell.
@@ -241,7 +247,8 @@
                 btnId:    'cr-sort-btn',
                 valueId:  'cr-sort-value',
                 // XACA-0293: STAGE-AGE added so ACTIVE PIPELINE saved-view can sort by stage age desc.
-                values:   ['STATE', 'TYPE', 'PLATFORM', 'APPROVER', 'STAGE-AGE'],
+                // XACA-0335: AGE added — sorts by total CR age (cr_created_at) oldest-first.
+                values:   ['STATE', 'TYPE', 'PLATFORM', 'APPROVER', 'STAGE-AGE', 'AGE'],
                 stateKey: 'sortBy',
             },
             customDropdowns: [
@@ -564,6 +571,16 @@
                 if (bAge === null) return -1;  // b sinks
                 return bAge - aAge;            // larger age = higher in list
             }
+            // AGE (XACA-0335): total CR age from cr_created_at, oldest-first.
+            // null/terminal-state ages sort to the bottom. Mirrors STAGE-AGE pattern.
+            if (sortBy === 'AGE') {
+                const aAge = _computeCRAgeMs(a);
+                const bAge = _computeCRAgeMs(b);
+                if (aAge === null && bAge === null) return 0;
+                if (aAge === null) return 1;
+                if (bAge === null) return -1;
+                return bAge - aAge;
+            }
             // Default: STATE priority
             const aOrd = CR_STATE_ORDER[a.crState] !== undefined ? CR_STATE_ORDER[a.crState] : 99;
             const bOrd = CR_STATE_ORDER[b.crState] !== undefined ? CR_STATE_ORDER[b.crState] : 99;
@@ -706,6 +723,68 @@
         return `<span class="stage-age-badge ${cls}">${label}</span>`;
     }
 
+    // ─── AGE column helpers (XACA-0335) ──────────────────────────────────────
+
+    /**
+     * Terminal CR states for which AGE renders as "—". Mirrors the TERMINAL set
+     * in SAVED_VIEWS['active-pipeline'] (lcars-cr-tab.js:124) — keep in sync.
+     * Once a CR reaches one of these states the queue-management value of "how
+     * long has this been waiting" goes to zero, so we suppress the value rather
+     * than let it grow unbounded on rows that no longer need triage.
+     */
+    const _AGE_TERMINAL_STATES = new Set(['deployed-prod', 'emergency-deployed', 'cr-rejected']);
+
+    /**
+     * Returns total CR age in milliseconds from cr_created_at (fallback addedAt),
+     * or null when the CR is in a terminal state or both timestamps are absent.
+     * Used by both the AGE comparator and the AGE cell renderer.
+     */
+    function _computeCRAgeMs(item) {
+        if (_AGE_TERMINAL_STATES.has(item.crState)) return null;
+        const rawTs = item.cr_created_at || item.addedAt;
+        if (!rawTs) return null;
+        const ms = new Date(rawTs).getTime();
+        if (!ms || isNaN(ms)) return null;
+        return Date.now() - ms;
+    }
+
+    /**
+     * Format a millisecond duration as a compact relative-age string.
+     *   < 1h          → "<N>m"
+     *   < 24h         → "<N>h"
+     *   < 7d          → "<N>d"
+     *   < 30d         → "<N>w"
+     *   ≥ 30d         → "<N>mo"
+     * Negative or zero clamps to "0m" (handles minor clock skew without confusion).
+     */
+    function _formatRelativeAge(ageMs) {
+        const m = Math.max(0, Math.floor(ageMs / 60000));
+        if (m < 60)        return m + 'm';
+        const h = Math.floor(m / 60);
+        if (h < 24)        return h + 'h';
+        const d = Math.floor(h / 24);
+        if (d < 7)         return d + 'd';
+        const w = Math.floor(d / 7);
+        if (d < 30)        return w + 'w';
+        const mo = Math.floor(d / 30);
+        return mo + 'mo';
+    }
+
+    /**
+     * Render the AGE <td> cell content. Returns a span carrying both the relative
+     * label and a title="" tooltip with the absolute ISO timestamp (the latter
+     * covers the REQUESTED-AT use case the XACA-0305 review weighed against AGE).
+     */
+    function _ageCell(item) {
+        const ageMs = _computeCRAgeMs(item);
+        if (ageMs === null) {
+            return '<span class="cr-age cr-age-empty">—</span>';
+        }
+        const rawTs = item.cr_created_at || item.addedAt;
+        const isoLabel = escapeHtml(new Date(rawTs).toISOString());
+        return `<span class="cr-age" title="Created ${isoLabel}">${_formatRelativeAge(ageMs)}</span>`;
+    }
+
     // ─── Item-count badge (XACA-0310-001) ────────────────────────────────────
 
     /**
@@ -726,9 +805,9 @@
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
     // Total column count: chevron, ID, TYPE/STATE (merged, XACA-0353), TITLE,
-    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, DOCS.
+    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, AGE (XACA-0335), DOCS.
     // PUBLISHED column dropped in XACA-0353 (Confluence link still in DOCS modal).
-    const CR_COL_COUNT = 10;
+    const CR_COL_COUNT = 11;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
@@ -740,6 +819,7 @@
         const deployWin  = _formatDeployWindow(item.deploy_window_planned);
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
         const stageAge   = _stageAgeBadge(item);
+        const ageCell    = _ageCell(item);
         const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0) ||
                            !!(item.cr_confluence_url && String(item.cr_confluence_url).trim().length > 0);
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
@@ -769,6 +849,7 @@
             <td class="cr-col-deploy">${deployWin}</td>
             <td class="cr-col-pushbacks">${pushbacks}</td>
             <td class="cr-col-stage-age">${stageAge}</td>
+            <td class="cr-col-age">${ageCell}</td>
             <td class="cr-col-docs">${docsBtn}</td>
         </tr>`;
     }
@@ -948,6 +1029,7 @@
                         <th class="cr-col-deploy">DEPLOY WINDOW</th>
                         <th class="cr-col-pushbacks">PUSHBACKS</th>
                         <th class="cr-col-stage-age">STAGE AGE</th>
+                        <th class="cr-col-age">AGE</th>
                         <th class="cr-col-docs">DOCS</th>
                     </tr>
                 </thead>

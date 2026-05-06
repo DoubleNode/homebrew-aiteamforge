@@ -4,6 +4,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0335: CHANGE REQ — AGE column (XACA-0305 review verdict) -->
+
+### Added
+- **XACA-0335:** New **AGE** column on the CHANGE REQ tab, slotted between STAGE AGE and DOCS (10-column data layout, 11-cell `CR_COL_COUNT`). Renders the total CR age from `cr_created_at` (fallback `addedAt`) in compact relative form (`15m`, `3h`, `2d`, `3w`, `2mo`). Each cell carries a `title=""` tooltip with the absolute ISO timestamp — folds the REQUESTED-AT use case into a hover affordance, matching the XACA-0305 CAB-stakeholder review verdict. Suppressed to `—` on terminal states (`deployed-prod`, `emergency-deployed`, `cr-rejected`) — the codebase-canonical TERMINAL set used by SAVED_VIEWS — since the queue-management signal goes to zero once a CR is done. AGE added to filter-bar `SORT_VALUES` with an oldest-first comparator (mirrors the existing STAGE-AGE pattern; null/terminal-state ages sink to the bottom). New `.cr-col-age` CSS rule (75px width, center-aligned, nowrap) plus a `<600px` viewport hide rule that matches DEPLOY WINDOW responsive behavior. Header comment "9-column tabular layout" updated to "10-column" — the count had drifted across XACA-0293/0308-004/0353; this brings it back into agreement with the rendered layout.
+
 <!-- XACA-0351: Daily Overview — completed-item filter + per-card detail popup -->
 
 ### Fixed
