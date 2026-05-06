@@ -1128,7 +1128,7 @@ body {
 
 .startup-copyright {
     position: absolute;
-    bottom: 12px;
+    bottom: -48px;
     left: 0;
     right: 0;
     font-family: 'Antonio', sans-serif;
