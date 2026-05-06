@@ -132,9 +132,32 @@ avg  = (-3.0 + 0.0 + 0.5 + 3.0) / 4 = 0.5 / 4 = 0.125
 hits    = 2  (001 and 006)
 earlies = 1  (005)
 lates   = 1  (002)
-hitPct   = 2/4 × 100 = 50.0
-earlyPct = 1/4 × 100 = 25.0
-latePct  = 1/4 × 100 = 25.0
+```
+
+**Largest-remainder (Hamilton) rounding** (XACA-0293-015):
+
+`rollupEstimateDelta` uses the largest-remainder method instead of independent
+`Math.round()` on each bucket. Independent rounding can produce sums of 99 or 101
+when raw percentages are non-integer. Largest-remainder guarantees the three
+percentages always sum to exactly 100 when `sampleCount > 0`.
+
+Algorithm:
+1. Compute exact float percentages: `hitRaw = hits/count × 100`, etc.
+2. Floor each: `hitFloor`, `earlyFloor`, `lateFloor`. Their sum is ≤ 100.
+3. Leftover = `100 − (hitFloor + earlyFloor + lateFloor)`.
+4. Sort buckets descending by residual (raw − floor). Tie-break alphabetically
+   by bucket name (`early < hit < late`) for deterministic results with equal residuals.
+5. Add 1 to each of the top `leftover` buckets.
+
+For this fixture the raw percentages happen to be exact (50.0, 25.0, 25.0), so
+the floors are 50, 25, 25, leftover = 0, and no adjustment is needed. The
+expected values are unchanged.
+
+```
+hitPct   = 50   (floor(50.0) + 0 adjustment)
+earlyPct = 25   (floor(25.0) + 0 adjustment)
+latePct  = 25   (floor(25.0) + 0 adjustment)
+sum      = 100  ✓
 ```
 
 ### Median Computation — cr_cycle_deploydev_to_deployprod_days

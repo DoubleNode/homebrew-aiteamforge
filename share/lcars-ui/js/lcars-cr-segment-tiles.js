@@ -6,13 +6,14 @@
  * sample count for one lifecycle segment computed by lcars-cr-metrics.js.
  *
  * Public API (window.lcarsCrSegmentTiles):
- *   init()           — idempotent; subscribes to DOM events and starts the
- *                      board-update poll guard.
- *   render(crs)      — renders all 7 segment tiles given a CR array.
+ *   init()            — idempotent; subscribes to DOM events and registers with
+ *                       the shared lcarsCrPollBus for board-change callbacks.
+ *   render(crs)       — renders all 7 segment tiles given a CR array.
  *   renderFromBoard() — convenience; reads window.boardData.crs and delegates.
  *
  * Dependencies:
  *   window.lcarsCrMetrics  (lcars-cr-metrics.js)
+ *   window.lcarsCrPollBus  (lcars-cr-poll-bus.js)
  *   window.boardData       (lcars.js)
  *
  * No DOM access outside the 7 tile mount divs.
@@ -52,31 +53,9 @@
     /** Rolling window in days (matches the metrics module default). */
     var WINDOW_DAYS = 14;
 
-    /** Poll interval for board-update detection when no event is available. */
-    var POLL_INTERVAL_MS = 5000;
-
     // ─── Module state ─────────────────────────────────────────────────────────
 
-    var _initialized    = false;
-    var _pollTimer      = null;
-    var _lastCrsHash    = null;
-
-    // ─── Internal helpers ─────────────────────────────────────────────────────
-
-    /**
-     * Cheap hash of the CRs array to detect board changes without deep-equal.
-     * JSON.stringify is acceptable for dashboard polling (small array, 5 s cadence).
-     *
-     * @param {Array} crs
-     * @returns {string}
-     */
-    function _hashCrs(crs) {
-        try {
-            return JSON.stringify(crs);
-        } catch (_) {
-            return String(Date.now());
-        }
-    }
+    var _initialized = false;
 
     /**
      * Return the DOM mount element for a segment key, or null if absent.
@@ -220,6 +199,13 @@
      */
     function render(crs) {
         if (_crDisabled()) { return; }
+        // No point computing a rollup nobody will see — bail when pane is hidden.
+        // lcars-cr-tab.js removes [hidden] BEFORE dispatching cr-subtab-changed,
+        // so the event path always sees the pane as visible when it should render.
+        try {
+            var pane = document.getElementById('change-req-pane-cycle-time');
+            if (pane && pane.hasAttribute('hidden')) { return; }
+        } catch (_) {}
         var safeCrs = Array.isArray(crs) ? crs : [];
         SEGMENT_KEYS.forEach(function (key) {
             _renderTile(key, safeCrs);
@@ -243,28 +229,6 @@
     }
 
     /**
-     * Start polling for board changes (5 s interval).
-     * Uses a JSON hash of boardData.crs to detect mutations without a
-     * dedicated board-updated event (lcars.js does not dispatch one).
-     */
-    function _startPoll() {
-        if (_pollTimer !== null) { return; }
-        _pollTimer = setInterval(function () {
-            if (_crDisabled()) { return; }
-            try {
-                var crs = (window.boardData && Array.isArray(window.boardData.crs))
-                    ? window.boardData.crs
-                    : [];
-                var hash = _hashCrs(crs);
-                if (hash !== _lastCrsHash) {
-                    _lastCrsHash = hash;
-                    render(crs);
-                }
-            } catch (_) {}
-        }, POLL_INTERVAL_MS);
-    }
-
-    /**
      * Subscribe to DOM events and perform an initial render if the CYCLE TIME
      * subtab is already active.  Idempotent — safe to call multiple times.
      */
@@ -272,22 +236,21 @@
         if (_initialized) { return; }
         _initialized = true;
 
-        // Event 1: subtab activation
+        // Event: subtab activation (kept separate from the poll bus — this fires
+        // on user tab-switch, not on board-data change).
         document.addEventListener('cr-subtab-changed', function (e) {
             if (e && e.detail && e.detail.subtab === 'cycle-time') {
                 renderFromBoard();
             }
         });
 
-        // Event 2: crsupport-changed (flag toggled on → re-render)
-        document.addEventListener('crsupport-changed', function (e) {
-            if (e && e.detail && e.detail.enabled === true) {
-                renderFromBoard();
-            }
-        });
-
-        // Fallback board-update detection: poll every 5 s
-        _startPoll();
+        // Board-update detection delegated to the shared poll bus.
+        // The bus also handles crsupport-changed; no duplicate listener needed here.
+        if (window.lcarsCrPollBus) {
+            window.lcarsCrPollBus.subscribe('segment-tiles', function (crs) {
+                render(crs);
+            });
+        }
 
         // Initial render: lcars-cr-tab.js will dispatch cr-subtab-changed on
         // DOMContentLoaded when it restores the persisted subtab.  If it runs

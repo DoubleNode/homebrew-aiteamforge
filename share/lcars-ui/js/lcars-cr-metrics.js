@@ -333,16 +333,48 @@
         var count = values.length;
         if (count === 0) { return empty; }
 
+        // Largest-remainder (Hamilton) rounding: guarantees hitPct + earlyPct +
+        // latePct === 100 exactly when sampleCount > 0.
+        // Independent Math.round() on each bucket can produce totals of 99 or 101.
+        // Step 1: exact float percentages.
+        var hitRaw   = (hits    / count) * 100;
+        var earlyRaw = (earlies / count) * 100;
+        var lateRaw  = (lates   / count) * 100;
+        // Step 2: floor each bucket.
+        var hitFloor   = Math.floor(hitRaw);
+        var earlyFloor = Math.floor(earlyRaw);
+        var lateFloor  = Math.floor(lateRaw);
+        // Step 3: distribute leftover points to buckets with the largest residuals.
+        // Tie-break is alphabetical by bucket name (early < hit < late) so results
+        // are deterministic regardless of bucket counts.
+        var leftover = 100 - (hitFloor + earlyFloor + lateFloor);
+        var buckets = [
+            { key: 'early', floor: earlyFloor, residual: earlyRaw - earlyFloor },
+            { key: 'hit',   floor: hitFloor,   residual: hitRaw   - hitFloor   },
+            { key: 'late',  floor: lateFloor,  residual: lateRaw  - lateFloor  },
+        ];
+        buckets.sort(function (a, b) {
+            // Sort descending by residual; ties broken by key ascending (alphabetical).
+            if (b.residual !== a.residual) { return b.residual - a.residual; }
+            return a.key < b.key ? -1 : 1;
+        });
+        for (var j = 0; j < leftover; j++) {
+            buckets[j].floor += 1;
+        }
+        var pctMap = {};
+        for (var k = 0; k < buckets.length; k++) {
+            pctMap[buckets[k].key] = buckets[k].floor;
+        }
+
         return {
             avg:         _avg(values),
             sampleCount: count,
             hits:        hits,
             earlies:     earlies,
             lates:       lates,
-            // Percentages are null when sampleCount is 0 (already handled above)
-            hitPct:      (hits   / count) * 100,
-            earlyPct:    (earlies / count) * 100,
-            latePct:     (lates  / count) * 100,
+            hitPct:      pctMap['hit'],
+            earlyPct:    pctMap['early'],
+            latePct:     pctMap['late'],
         };
     }
 
