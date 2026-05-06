@@ -333,7 +333,8 @@
 .cr-id-mono {
     font-family: 'Courier New', Courier, monospace;
     font-size: 10px;
-    color: var(--lcars-cyan, #99ccff);
+    font-weight: 700;
+    color: #ccddff;
     letter-spacing: 0.02em;
 }
 
@@ -488,23 +489,27 @@
 
 /* ── CR ID copy-button (tap to clipboard) ────────────────────────────────── */
 
-.cr-id-copy {
-    background: transparent;
-    border: 1px solid transparent;
-    padding: 2px 4px;
+.cr-id-copy,
+.cr-child-id-copy {
+    background: rgba(153, 204, 255, 0.08);
+    border: 1px solid rgba(153, 204, 255, 0.25);
+    padding: 2px 6px;
     border-radius: 3px;
     cursor: pointer;
     transition: background 0.15s, border-color 0.15s;
 }
-.cr-id-copy:hover {
-    background: rgba(153, 204, 255, 0.10);
-    border-color: rgba(153, 204, 255, 0.30);
+.cr-id-copy:hover,
+.cr-child-id-copy:hover {
+    background: rgba(153, 204, 255, 0.18);
+    border-color: rgba(153, 204, 255, 0.45);
 }
-.cr-id-copy.cr-id-copied {
+.cr-id-copy.cr-id-copied,
+.cr-child-id-copy.cr-id-copied {
     background: rgba(102, 255, 153, 0.18);
     border-color: rgba(102, 255, 153, 0.55);
 }
-.cr-id-copy.cr-id-copied .cr-id-mono {
+.cr-id-copy.cr-id-copied .cr-id-mono,
+.cr-child-id-copy.cr-id-copied .cr-id-mono {
     color: #66ff99;
 }
 
