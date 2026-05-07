@@ -335,7 +335,7 @@ cp "$BOARD" "$BOARD.bak-cr-schema-$(date +%Y%m%d-%H%M%S)"
 # 2. Dry-run the migration to preview what would change
 python3 "$TAP_KANBAN_TEMPLATES/migrate-cr-schema.py" --board "$BOARD" --dry-run
 
-# 3. Apply the migration (adds 9 crStates + teamConfig.crSupport={enabled:false})
+# 3. Apply the migration (adds 10 crStates + teamConfig.crSupport={enabled:false})
 python3 "$TAP_KANBAN_TEMPLATES/migrate-cr-schema.py" --board "$BOARD"
 
 # Convenience: target all canonical mobile boards (iOS, Android, Firebase, command)

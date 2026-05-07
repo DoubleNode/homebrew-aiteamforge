@@ -15,7 +15,8 @@
       "Per-item cr_* fields (crFields section) are DEPRECATED as of schema v2.0. They remain in the schema ONLY so migrate-cr-schema.py can read and transform them. Remove after all boards have been migrated.",
       "New CRs must be created as crs[] container records. crAssignment.crId on the item points to the parent CR record.",
       "'cr-drafted' semantically means: the CR markdown has been published to Confluence as a request page. The CR-Proper page does NOT yet exist.",
-      "'cr-submitted' semantically means: a CR-Proper page link has been appended to the bottom of the request page. The poller (XACA-0328-003) detects this link and writes cr_proper_url."
+      "'cr-submitted' semantically means: a CR-Proper page link has been appended to the bottom of the request page. The poller (XACA-0328-003) detects this link and writes cr_proper_url.",
+      "'cr-closed' semantically means: the CR has been manually archived and is no longer active. This is a terminal state reachable from any other state via kb-cr close. It does NOT increment pushback_count — it is a neutral archive operation, not a rejection. cr-closed CRs are excluded from default list/filter views to keep dashboards clean."
     ]
   },
 
@@ -28,7 +29,8 @@
     "implementing",
     "deployed-dev",
     "deployed-prod",
-    "emergency-deployed"
+    "emergency-deployed",
+    "cr-closed"
   ],
 
   "crContainer": {
