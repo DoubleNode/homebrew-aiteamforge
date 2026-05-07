@@ -522,11 +522,6 @@
     color: #000;
 }
 
-.cr-docs-placeholder {
-    display: inline-block;
-    width: 36px;
-}
-
 /* ── CR ID copy-button (tap to clipboard) ────────────────────────────────── */
 
 .cr-id-copy,
