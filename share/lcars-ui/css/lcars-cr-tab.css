@@ -1,3 +1,10 @@
+/*
+  lcars-cr-tab.css
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+*/
+
 /**
  * lcars-cr-tab.css — CHANGE REQ section list view
  *
@@ -520,11 +527,6 @@
 .cr-docs-btn:active {
     background: var(--lcars-purple, #cc99ff);
     color: #000;
-}
-
-.cr-docs-placeholder {
-    display: inline-block;
-    width: 36px;
 }
 
 /* ── CR ID copy-button (tap to clipboard) ────────────────────────────────── */

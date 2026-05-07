@@ -1,3 +1,10 @@
+<!--
+  calendar-config-schema.md
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+-->
+
 # Calendar Configuration Schema
 
 This document describes the JSON schema for per-team calendar configuration files stored in `config/{team}/calendar-config.json`.

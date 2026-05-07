@@ -1,3 +1,10 @@
+<!--
+  README.md
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+-->
+
 # LCARS Multi-Platform Integration System
 
 A flexible integration system for connecting kanban items to external ticket tracking platforms.

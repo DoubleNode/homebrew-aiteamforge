@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  secrets_export_lib.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 secrets_export_lib.py — Contract layer for LCARS per-team secrets export/import.
 

@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  ccusage_collector.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 ccusage_collector.py — Claude Usage Cache Collector Daemon
 

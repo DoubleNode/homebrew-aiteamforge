@@ -1,3 +1,10 @@
+//
+//  lcars-cr-tab.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-cr-tab.js — CHANGE REQ section list view
  *
@@ -36,7 +43,7 @@
  *   copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown
  */
 
-/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown, lcarsCrAgeHelpers */
+/* global boardData, apiUrl, escapeHtml, showPlanDocModal, switchDocTab, createFilterBar, copyToClipboard, pauseAutoRefresh, resumeAutoRefresh, renderMarkdown, loadBoardData, lcarsCrAgeHelpers */
 
 'use strict';
 
@@ -796,18 +803,14 @@
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
         const stageAge   = _stageAgeBadge(item);
         const ageCell    = _ageCell(item);
-        const hasCRDoc   = !!(item.cr_doc_link && String(item.cr_doc_link).trim().length > 0) ||
-                           !!(item.cr_confluence_url && String(item.cr_confluence_url).trim().length > 0);
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
         const isExpanded  = _expandedCRs.has(item.cr_id);
 
-        // DOCS button on the CR list opens a CR-only modal — distinct from the
-        // item DOCS button which shows Plan/Retro/CR tabs. We stash the CR id on
-        // the button so the click handler can look the full CR view-object back
-        // up from the cached list (avoids re-fetching boardData).
-        const docsBtn = hasCRDoc
-            ? `<button class="cr-docs-btn" data-cr-id="${escapeHtml(item.cr_id)}" title="View CR document">DOCS</button>`
-            : `<span class="cr-docs-placeholder"></span>`;
+        // DETAIL button (XACA-0357) — always rendered. Opens the CR detail modal
+        // (metadata + doc when present + activity log). Previously gated on
+        // cr_doc_link/cr_confluence_url presence, which hid the activity log
+        // for any CR without a doc file (e.g. test CRs).
+        const detailBtn = `<button class="cr-docs-btn" data-cr-id="${escapeHtml(item.cr_id)}" title="View CR detail">DETAIL</button>`;
 
         // Chevron column (col-0): shown only when there are linked items.
         const chevronCls = isExpanded ? 'cr-chevron expanded' : 'cr-chevron';
@@ -828,7 +831,7 @@
             <td class="cr-col-pushbacks">${pushbacks}</td>
             <td class="cr-col-stage-age">${stageAge}</td>
             <td class="cr-col-age">${ageCell}</td>
-            <td class="cr-col-docs">${docsBtn}</td>
+            <td class="cr-col-docs">${detailBtn}</td>
             <td class="cr-col-edit">${editStateBtn}</td>
         </tr>`;
     }
@@ -1009,7 +1012,7 @@
                         <th class="cr-col-pushbacks">PUSHBACKS</th>
                         <th class="cr-col-stage-age">STAGE AGE</th>
                         <th class="cr-col-age">AGE</th>
-                        <th class="cr-col-docs">DOCS</th>
+                        <th class="cr-col-docs">DETAIL</th>
                         <th class="cr-col-edit">EDIT</th>
                     </tr>
                 </thead>
@@ -1113,7 +1116,7 @@
         const header = document.createElement('div');
         header.className = 'lcars-modal-header';
         header.innerHTML =
-            `<span class="lcars-modal-title">CR DOCUMENT: ${escapeHtml(view.cr_id || '')}</span>` +
+            `<span class="lcars-modal-title">CR DETAIL: ${escapeHtml(view.cr_id || '')}</span>` +
             `<div class="cr-doc-header-actions">` +
                 `<button class="lcars-modal-close" id="cr-doc-modal-close">&times;</button>` +
             `</div>`;
@@ -1597,9 +1600,15 @@
                     // Close dialog, then close and re-open docs modal only if it was open
                     _hideCRStateChangeDialog();
                     if (wasDocsModalOpen) _hideCRDocModal();
-                    // Re-fetch board data; re-open docs modal only if it was originally open
-                    if (typeof window.refreshBoardData === 'function') {
-                        window.refreshBoardData(() => {
+                    // Re-fetch board data, re-render the CR list, then re-open
+                    // the detail modal only if it was originally open.
+                    // (XACA-0357: was window.refreshBoardData — undefined global
+                    // that silently no-op'd; canonical loader is loadBoardData
+                    // in lcars.js, which returns a Promise but does not itself
+                    // re-render the CR table — that's renderChangeReqList.)
+                    if (typeof loadBoardData === 'function') {
+                        loadBoardData().then(() => {
+                            renderChangeReqList();
                             const freshRaw = _findRawCRById(crId);
                             if (freshRaw) {
                                 const backlogIdx = _backlogIndex();
@@ -1608,7 +1617,7 @@
                             }
                         });
                     }
-                    // Fallback: if no refreshBoardData, board stays stale — user must reload manually
+                    // Fallback: if loadBoardData is unavailable, board stays stale — user must reload manually
                 });
             }
 
@@ -1659,10 +1668,12 @@
                 // Success — close dialog, close docs modal only if it was open
                 _hideCRStateChangeDialog();
                 if (wasDocsModalOpen) _hideCRDocModal();
-                // Re-fetch boardData if possible, then re-open updated docs modal
-                // only if it was open when the transition was submitted
-                if (typeof window.refreshBoardData === 'function') {
-                    window.refreshBoardData(() => {
+                // Re-fetch boardData, re-render the CR list to show the new
+                // state badge, then re-open the detail modal only if it was
+                // open when the transition was submitted. (XACA-0357.)
+                if (typeof loadBoardData === 'function') {
+                    loadBoardData().then(() => {
+                        renderChangeReqList();
                         const freshRaw = _findRawCRById(crId);
                         if (freshRaw) {
                             const backlogIdx = _backlogIndex();
@@ -1674,10 +1685,12 @@
                 } else {
                     // If we can't refresh board data, update the cache from the
                     // returned CR object (if the server echoed it back in data.cr)
+                    // and re-render so the row reflects the new state.
                     if (data.cr) {
                         const backlogIdx = _backlogIndex();
                         const freshView = _normalizeCR(data.cr, backlogIdx);
                         _crByIdCache[crId] = freshView;
+                        renderChangeReqList();
                         if (wasDocsModalOpen) _showCRDocModal(freshView);
                     }
                 }

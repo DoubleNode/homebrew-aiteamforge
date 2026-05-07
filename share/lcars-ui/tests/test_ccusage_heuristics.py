@@ -1,3 +1,10 @@
+#
+#  test_ccusage_heuristics.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """Unit tests for ``ccusage_heuristics``.
 
 Run with:

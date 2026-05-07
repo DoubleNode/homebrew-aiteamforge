@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_import.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Tests for the external issue import system.
 

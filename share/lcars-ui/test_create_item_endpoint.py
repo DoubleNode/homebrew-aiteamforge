@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_create_item_endpoint.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Test script for the /api/integrations/create-item endpoint.
 

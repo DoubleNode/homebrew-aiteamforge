@@ -2045,9 +2045,11 @@ _ATFD="${{AITEAMFORGE_DIR:-$HOME/aiteamforge}}"
 [[ -f "$_ATFD/claude_code_cc_aliases.sh" ]] && source "$_ATFD/claude_code_cc_aliases.sh"
 [[ -f "$_ATFD/worktree-helpers.sh" ]]       && source "$_ATFD/worktree-helpers.sh"
 
-# Source agent prompt (character persona for Claude Code)
-_PROMPT_FILE="$_ATFD/${{SESSION_TYPE}}/scripts/prompts/${{SESSION_CODE}}-prompt.sh"
-[[ -f "$_PROMPT_FILE" ]] && source "$_PROMPT_FILE"
+# Load agent prompt (character persona for Claude Code)
+# .txt files are plain prompt text — read directly into the env var rather than
+# `source` (which would try to execute the prose as shell and choke on heredocs / quoting).
+_PROMPT_FILE="$_ATFD/${{SESSION_TYPE}}/scripts/prompts/${{SESSION_CODE}}-prompt.txt"
+[[ -f "$_PROMPT_FILE" ]] && CLAUDE_SYSTEM_PROMPT="$(<"$_PROMPT_FILE")" && export CLAUDE_SYSTEM_PROMPT
 
 # Auto-set worktree project context
 wt-project $SESSION_TYPE > /dev/null 2>&1 || true

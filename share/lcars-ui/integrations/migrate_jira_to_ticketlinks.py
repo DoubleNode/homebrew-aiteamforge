@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  migrate_jira_to_ticketlinks.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Migration Script: jiraId -> ticketLinks
 

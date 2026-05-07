@@ -1,3 +1,10 @@
+//
+//  lcars-cr-segment-tiles.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-cr-segment-tiles.js — CR Cycle-Time Segment Rollup Tiles
  *

@@ -119,6 +119,34 @@
     /* Personal Divisions */
     --div-legal: var(--lcars-green);          /* Legal - Green */
     --div-legal-coparenting: var(--lcars-green-dark);  /* Coparenting - Dark Green */
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       PALETTE SPLIT — HEADER vs BODY
+       These two groups are intentionally separate so that a future
+       [data-mode="..."] selector can override body variables without
+       touching the header.
+
+       HEADER GROUP — driven by team org-color class (.org-color-crimson etc.)
+       Override target: .lcars-top-frame and its children (.top-sidebar, .top-bar,
+       .top-bar-buttons, ::after corner cutout).
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Default header palette (blue — matches DoubleNode org default).
+       Overridden per-org by .org-color-* selector blocks below. */
+    --fleet-header-primary: var(--lcars-blue);
+    --fleet-header-accent:  var(--lcars-lavender);
+
+    /* ═══════════════════════════════════════════════════════════════════════════
+       BODY GROUP — sidebar frame, mode bar, and main content chrome.
+       Override target: .lcars-sidebar, its pseudo-elements, .top-bar-buttons,
+       and any future mode-bar chrome.
+       XACA-0164-003 will override these via [data-mode="..."] selectors.
+       ═══════════════════════════════════════════════════════════════════════════ */
+
+    /* Default body palette (blue — matches current sidebar hardcoded value).
+       Safe to override without affecting header. */
+    --fleet-body-primary: var(--lcars-blue);
+    --fleet-body-accent:  var(--lcars-lavender);
 }
 
 /* -------------------------------------------------------------------------------
@@ -560,23 +588,25 @@
 /* -------------------------------------------------------------------------------
    THEME OVERRIDES FOR BASE FRAMEWORK
 
-   Apply red/blue emphasis to sidebar and other frame elements
+   Apply red/blue emphasis to sidebar and other frame elements.
+   Uses --fleet-body-primary so XACA-0164-003 can re-tint the body/sidebar
+   per active mode without touching the header palette.
    ------------------------------------------------------------------------------- */
 
-/* Sidebar frame - shift from orange to blue-accented */
+/* Sidebar frame - body palette (independent of header org-color) */
 .lcars-sidebar {
-    background: var(--lcars-blue);
+    background: var(--fleet-body-primary);
 }
 
 .lcars-sidebar::before {
-    background: var(--lcars-blue);
+    background: var(--fleet-body-primary);
 }
 
 .lcars-sidebar::after {
     background: radial-gradient(
         circle at 30px 30px,
         var(--lcars-black) 30px,
-        var(--lcars-blue) 30px
+        var(--fleet-body-primary) 30px
     );
 }
 
@@ -655,12 +685,12 @@
         --lcars-crimson: #ff5577;
     }
 
-    /* Adjust sidebar curve for mobile */
+    /* Adjust sidebar curve for mobile (body palette) */
     .lcars-sidebar::after {
         background: radial-gradient(
             circle at 20px 20px,
             var(--lcars-black) 20px,
-            var(--lcars-blue) 20px
+            var(--fleet-body-primary) 20px
         );
     }
 }
@@ -2106,62 +2136,83 @@
 
 /* -------------------------------------------------------------------------------
    Organization Color Header Classes
-   Applied to body element to affect header AND top-sidebar corner cutout
+   Applied to body element to affect header AND top-sidebar corner cutout.
+
+   Each class sets --fleet-header-primary so the header selectors below
+   can read a single variable. The background properties use
+   var(--fleet-header-primary) so body-palette overrides (XACA-0164-003)
+   have no effect on the header.
    ------------------------------------------------------------------------------- */
 
 /* Crimson - Main Event */
+.org-color-crimson {
+    --fleet-header-primary: var(--lcars-crimson);
+    --fleet-header-accent:  var(--lcars-rose);
+}
 .org-color-crimson .top-bar,
 .org-color-crimson .top-sidebar,
 .org-color-crimson .top-bar-buttons {
-    background: var(--lcars-crimson);
+    background: var(--fleet-header-primary);
 }
 .org-color-crimson .top-sidebar::after {
     background: radial-gradient(
         circle at 100% 0%,
         var(--lcars-black) 30px,
-        var(--lcars-crimson) 30px
+        var(--fleet-header-primary) 30px
     );
 }
 
 /* Blue - DoubleNode */
+.org-color-blue {
+    --fleet-header-primary: var(--lcars-blue);
+    --fleet-header-accent:  var(--lcars-lavender);
+}
 .org-color-blue .top-bar,
 .org-color-blue .top-sidebar,
 .org-color-blue .top-bar-buttons {
-    background: var(--lcars-blue);
+    background: var(--fleet-header-primary);
 }
 .org-color-blue .top-sidebar::after {
     background: radial-gradient(
         circle at 100% 0%,
         var(--lcars-black) 30px,
-        var(--lcars-blue) 30px
+        var(--fleet-header-primary) 30px
     );
 }
 
 /* Cyan - Academy */
+.org-color-cyan {
+    --fleet-header-primary: var(--lcars-cyan);
+    --fleet-header-accent:  var(--lcars-lavender);
+}
 .org-color-cyan .top-bar,
 .org-color-cyan .top-sidebar,
 .org-color-cyan .top-bar-buttons {
-    background: var(--lcars-cyan);
+    background: var(--fleet-header-primary);
 }
 .org-color-cyan .top-sidebar::after {
     background: radial-gradient(
         circle at 100% 0%,
         var(--lcars-black) 30px,
-        var(--lcars-cyan) 30px
+        var(--fleet-header-primary) 30px
     );
 }
 
 /* Lavender - All Fleet */
+.org-color-lavender {
+    --fleet-header-primary: var(--lcars-lavender);
+    --fleet-header-accent:  var(--lcars-blue);
+}
 .org-color-lavender .top-bar,
 .org-color-lavender .top-sidebar,
 .org-color-lavender .top-bar-buttons {
-    background: var(--lcars-lavender);
+    background: var(--fleet-header-primary);
 }
 .org-color-lavender .top-sidebar::after {
     background: radial-gradient(
         circle at 100% 0%,
         var(--lcars-black) 30px,
-        var(--lcars-lavender) 30px
+        var(--fleet-header-primary) 30px
     );
 }
 
@@ -3955,7 +4006,7 @@
         z-index: 1000;
     }
 
-    /* Endcaps - rounded on outer edges */
+    /* Endcaps - rounded on outer edges (body palette) */
     .lcars-sidebar::before,
     .lcars-sidebar::after {
         display: block !important;
@@ -3965,7 +4016,7 @@
         bottom: 0 !important;
         height: auto !important;
         width: 40px !important;
-        background: var(--lcars-blue) !important;
+        background: var(--fleet-body-primary) !important;
     }
 
     /* Left endcap - curve on left (outer) edge */
@@ -4029,7 +4080,7 @@
         padding: 0;
     }
 
-    /* Data bar needs to be in column 1 on mobile - with blue endcaps */
+    /* Data bar needs to be in column 1 on mobile - with body-palette endcaps */
     .lcars-data-bar {
         grid-column: 1 !important;
         max-width: 100vw !important;
@@ -4041,7 +4092,7 @@
         gap: 0 !important;
     }
 
-    /* Left endcap - squared blue */
+    /* Left endcap - body palette */
     .lcars-data-bar::before {
         content: '' !important;
         position: absolute !important;
@@ -4049,11 +4100,11 @@
         top: 0 !important;
         bottom: 0 !important;
         width: 40px !important;
-        background: var(--lcars-blue) !important;
+        background: var(--fleet-body-primary) !important;
         border-radius: 0 !important;
     }
 
-    /* Right endcap - squared blue */
+    /* Right endcap - body palette */
     .lcars-data-bar::after {
         content: '' !important;
         position: absolute !important;
@@ -4061,7 +4112,7 @@
         top: 0 !important;
         bottom: 0 !important;
         width: 40px !important;
-        background: var(--lcars-blue) !important;
+        background: var(--fleet-body-primary) !important;
         border-radius: 0 !important;
     }
 
@@ -4355,7 +4406,7 @@
         display: none !important;
     }
 
-    /* Adjust the concave corner cutout position */
+    /* Adjust the concave corner cutout position (header palette) */
     .top-sidebar::after {
         bottom: 6px !important;
         width: 20px !important;
@@ -4364,7 +4415,7 @@
         background: radial-gradient(
             circle at 100% 0%,
             var(--lcars-black) 20px,
-            var(--lcars-blue) 20px
+            var(--fleet-header-primary) 20px
         ) !important;
     }
 
@@ -4409,7 +4460,7 @@
         z-index: 1000;
     }
 
-    /* Endcaps - rounded on outer edges */
+    /* Endcaps - rounded on outer edges (body palette) */
     .lcars-sidebar::before,
     .lcars-sidebar::after {
         display: block !important;
@@ -4419,7 +4470,7 @@
         bottom: 0 !important;
         height: auto !important;
         width: 40px !important;
-        background: var(--lcars-blue) !important;
+        background: var(--fleet-body-primary) !important;
     }
 
     /* Left endcap - curve on left (outer) edge */

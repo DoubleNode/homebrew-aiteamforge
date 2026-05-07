@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  cleanup_orphans.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 One-time cleanup script: Delete orphaned Fleet Monitor events from Apple Calendar.
 

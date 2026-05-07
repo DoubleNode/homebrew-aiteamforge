@@ -1,3 +1,10 @@
+#
+#  test_usage_endpoint.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """Unit tests for the /api/usage/current endpoint logic (XACA-0243-003).
 
 We test ``_build_usage_response`` — the pure function that contains all

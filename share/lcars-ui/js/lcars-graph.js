@@ -1,3 +1,10 @@
+//
+//  lcars-graph.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * LCARS - Library Computer Access/Retrieval System
  * Knowledge Graph Visualizer - Cytoscape.js Theme and Controller

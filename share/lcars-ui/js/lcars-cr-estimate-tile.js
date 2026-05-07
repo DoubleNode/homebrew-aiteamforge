@@ -1,3 +1,10 @@
+//
+//  lcars-cr-estimate-tile.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-cr-estimate-tile.js — CR Estimate-vs-Actual Tile
  *

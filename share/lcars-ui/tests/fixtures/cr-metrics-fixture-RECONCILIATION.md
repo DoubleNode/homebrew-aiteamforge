@@ -1,3 +1,10 @@
+<!--
+  cr-metrics-fixture-RECONCILIATION.md
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+-->
+
 # CR Metrics Fixture Reconciliation — XACA-0293-006
 
 **Gold Standard:** `cr-metrics-fixture.json`

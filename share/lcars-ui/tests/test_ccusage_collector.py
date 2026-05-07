@@ -1,3 +1,10 @@
+#
+#  test_ccusage_collector.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """Unit tests for ccusage_collector.py — schema v2 additions (XACA-0250-002).
 
 Tests cover:
