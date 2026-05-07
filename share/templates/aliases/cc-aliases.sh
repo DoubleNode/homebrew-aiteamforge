@@ -74,18 +74,16 @@ _cc_save_session() {
 _cc_launch() {
     local prompt_file="$1"
 
-    # Read .txt file directly — sourcing .sh files breaks in tmux (${0:a:h} resolves wrong)
-    local txt_file="${prompt_file%.sh}.txt"
-
-    if [[ ! -f "$txt_file" ]]; then
-        echo "ERROR: Prompt file not found: $txt_file" >&2
+    # Read prompt text directly
+    if [[ ! -f "$prompt_file" ]]; then
+        echo "ERROR: Prompt file not found: $prompt_file" >&2
         return 1
     fi
 
-    CLAUDE_SYSTEM_PROMPT="$(<"$txt_file")"
+    CLAUDE_SYSTEM_PROMPT="$(<"$prompt_file")"
 
     if [[ -z "$CLAUDE_SYSTEM_PROMPT" ]]; then
-        echo "ERROR: CLAUDE_SYSTEM_PROMPT is empty after reading $txt_file" >&2
+        echo "ERROR: CLAUDE_SYSTEM_PROMPT is empty after reading $prompt_file" >&2
         return 1
     fi
 
@@ -117,8 +115,8 @@ _cc_launch() {
 cc() {
     if [[ -n "$SESSION_TYPE" && -n "$SESSION_NAME" ]]; then
         local dir="${SESSION_DIR:-$SESSION_TYPE}"
-        local prompt_file="$AITEAMFORGE_DIR/${dir}/scripts/prompts/${SESSION_TYPE}-${SESSION_NAME}-prompt.sh"
-        if [[ -f "${prompt_file%.sh}.txt" ]]; then
+        local prompt_file="$AITEAMFORGE_DIR/${dir}/scripts/prompts/${SESSION_TYPE}-${SESSION_NAME}-prompt.txt"
+        if [[ -f "$prompt_file" ]]; then
             _cc_launch "$prompt_file"
             return
         fi
@@ -169,76 +167,76 @@ unalias cc-finance-nagus cc-finance-bar cc-finance-vault cc-finance-fca cc-finan
 # ─────────────────────────────────────────────────────────────────────────────
 # iOS Team (TNG)
 # ─────────────────────────────────────────────────────────────────────────────
-cc-ios-bridge() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-bridge-prompt.sh"; }
-cc-ios-engineering() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-engineering-prompt.sh"; }
-cc-ios-sickbay() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-sickbay-prompt.sh"; }
-cc-ios-holodeck() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-holodeck-prompt.sh"; }
-cc-ios-observation() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-observation-prompt.sh"; }
-cc-ios-stellar() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-stellar-prompt.sh"; }
+cc-ios-bridge() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-bridge-prompt.txt"; }
+cc-ios-engineering() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-engineering-prompt.txt"; }
+cc-ios-sickbay() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-sickbay-prompt.txt"; }
+cc-ios-holodeck() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-holodeck-prompt.txt"; }
+cc-ios-observation() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-observation-prompt.txt"; }
+cc-ios-stellar() { _cc_launch "$AITEAMFORGE_DIR/ios/scripts/prompts/ios-stellar-prompt.txt"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Firebase Team (DS9)
 # ─────────────────────────────────────────────────────────────────────────────
-cc-firebase-ops() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-ops-prompt.sh"; }
-cc-firebase-engineering() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-engineering-prompt.sh"; }
-cc-firebase-holodeck() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-holodeck-prompt.sh"; }
-cc-firebase-stellar() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-stellar-prompt.sh"; }
-cc-firebase-sickbay() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-sickbay-prompt.sh"; }
-cc-firebase-observation() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-observation-prompt.sh"; }
-cc-firebase-promenade() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-promenade-prompt.sh"; }
+cc-firebase-ops() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-ops-prompt.txt"; }
+cc-firebase-engineering() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-engineering-prompt.txt"; }
+cc-firebase-holodeck() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-holodeck-prompt.txt"; }
+cc-firebase-stellar() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-stellar-prompt.txt"; }
+cc-firebase-sickbay() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-sickbay-prompt.txt"; }
+cc-firebase-observation() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-observation-prompt.txt"; }
+cc-firebase-promenade() { _cc_launch "$AITEAMFORGE_DIR/firebase/scripts/prompts/firebase-promenade-prompt.txt"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Android Team (TOS)
 # ─────────────────────────────────────────────────────────────────────────────
-cc-android-bridge() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-bridge-prompt.sh"; }
-cc-android-science() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-science-prompt.sh"; }
-cc-android-sickbay() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-sickbay-prompt.sh"; }
-cc-android-engineering() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-engineering-prompt.sh"; }
-cc-android-communications() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-communications-prompt.sh"; }
-cc-android-navigation() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-navigation-prompt.sh"; }
-cc-android-helm() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-helm-prompt.sh"; }
+cc-android-bridge() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-bridge-prompt.txt"; }
+cc-android-science() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-science-prompt.txt"; }
+cc-android-sickbay() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-sickbay-prompt.txt"; }
+cc-android-engineering() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-engineering-prompt.txt"; }
+cc-android-communications() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-communications-prompt.txt"; }
+cc-android-navigation() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-navigation-prompt.txt"; }
+cc-android-helm() { _cc_launch "$AITEAMFORGE_DIR/android/scripts/prompts/android-helm-prompt.txt"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Freelance Team (ENT)
 # ─────────────────────────────────────────────────────────────────────────────
-cc-freelance-command() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-command-prompt.sh"; }
-cc-freelance-engineering() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-engineering-prompt.sh"; }
-cc-freelance-science() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-science-prompt.sh"; }
-cc-freelance-sickbay() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-sickbay-prompt.sh"; }
-cc-freelance-tactical() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-tactical-prompt.sh"; }
-cc-freelance-comms() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-comms-prompt.sh"; }
-cc-freelance-helm() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-helm-prompt.sh"; }
+cc-freelance-command() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-command-prompt.txt"; }
+cc-freelance-engineering() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-engineering-prompt.txt"; }
+cc-freelance-science() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-science-prompt.txt"; }
+cc-freelance-sickbay() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-sickbay-prompt.txt"; }
+cc-freelance-tactical() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-tactical-prompt.txt"; }
+cc-freelance-comms() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-comms-prompt.txt"; }
+cc-freelance-helm() { _cc_launch "$AITEAMFORGE_DIR/freelance/scripts/prompts/freelance-helm-prompt.txt"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # {{ORG_NAME}} Team (VOY) — org plugin provides prompts at {{ORG_SLUG}}/scripts/prompts/
 # ─────────────────────────────────────────────────────────────────────────────
 cc-{{ORG_SLUG}}-command() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-COMMAND"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-command-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-command-prompt.txt"
 }
 cc-{{ORG_SLUG}}-engineering() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-ENGINEERING"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-engineering-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-engineering-prompt.txt"
 }
 cc-{{ORG_SLUG}}-science() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-SCIENCE"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-science-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-science-prompt.txt"
 }
 cc-{{ORG_SLUG}}-sickbay() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-SICKBAY"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-sickbay-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-sickbay-prompt.txt"
 }
 cc-{{ORG_SLUG}}-tactical() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-TACTICAL"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-tactical-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-tactical-prompt.txt"
 }
 cc-{{ORG_SLUG}}-comms() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-COMMS"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-comms-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-comms-prompt.txt"
 }
 cc-{{ORG_SLUG}}-helm() {
     export CLAUDE_{{ORG_SLUG}}_THEME="VOY-HELM"
-    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-helm-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/{{ORG_SLUG}}/scripts/prompts/{{ORG_SLUG}}-helm-prompt.txt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -246,31 +244,31 @@ cc-{{ORG_SLUG}}-helm() {
 # ─────────────────────────────────────────────────────────────────────────────
 cc-dns-command() {
     export CLAUDE_DNS_THEME="LD-COMMAND"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-command-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-command-prompt.txt"
 }
 cc-dns-bugbay() {
     export CLAUDE_DNS_THEME="LD-BUGBAY"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-bugbay-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-bugbay-prompt.txt"
 }
 cc-dns-testing() {
     export CLAUDE_DNS_THEME="LD-TESTING"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-testing-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-testing-prompt.txt"
 }
 cc-dns-build() {
     export CLAUDE_DNS_THEME="LD-BUILD"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-build-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-build-prompt.txt"
 }
 cc-dns-refactor() {
     export CLAUDE_DNS_THEME="LD-REFACTOR"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-refactor-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-refactor-prompt.txt"
 }
 cc-dns-apidesign() {
     export CLAUDE_DNS_THEME="LD-APIDESIGN"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-apidesign-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-apidesign-prompt.txt"
 }
 cc-dns-docs() {
     export CLAUDE_DNS_THEME="LD-DOCS"
-    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-docs-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/dns-framework/scripts/prompts/dns-docs-prompt.txt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -278,19 +276,19 @@ cc-dns-docs() {
 # ─────────────────────────────────────────────────────────────────────────────
 cc-academy-chancellor() {
     export CLAUDE_ACADEMY_THEME="CHANCELLOR"
-    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-chancellor-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-chancellor-prompt.txt"
 }
 cc-academy-engineering() {
     export CLAUDE_ACADEMY_THEME="ENGINEERING"
-    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-engineering-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-engineering-prompt.txt"
 }
 cc-academy-medical() {
     export CLAUDE_ACADEMY_THEME="MEDICAL"
-    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-medical-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-medical-prompt.txt"
 }
 cc-academy-training() {
     export CLAUDE_ACADEMY_THEME="TRAINING"
-    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-training-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/academy/scripts/prompts/academy-training-prompt.txt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -298,23 +296,23 @@ cc-academy-training() {
 # ─────────────────────────────────────────────────────────────────────────────
 cc-command-admiral() {
     export CLAUDE_COMMAND_THEME="ADMIRAL"
-    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-admiral-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-admiral-prompt.txt"
 }
 cc-command-operations() {
     export CLAUDE_COMMAND_THEME="OPERATIONS"
-    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-operations-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-operations-prompt.txt"
 }
 cc-command-strategic() {
     export CLAUDE_COMMAND_THEME="STRATEGIC"
-    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-strategic-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-strategic-prompt.txt"
 }
 cc-command-communications() {
     export CLAUDE_COMMAND_THEME="COMMUNICATIONS"
-    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-communications-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-communications-prompt.txt"
 }
 cc-command-intelligence() {
     export CLAUDE_COMMAND_THEME="INTELLIGENCE"
-    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-intelligence-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/command/scripts/prompts/command-intelligence-prompt.txt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -322,23 +320,23 @@ cc-command-intelligence() {
 # ─────────────────────────────────────────────────────────────────────────────
 cc-finance-nagus() {
     export CLAUDE_FINANCE_THEME="NAGUS"
-    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-nagus-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-nagus-prompt.txt"
 }
 cc-finance-bar() {
     export CLAUDE_FINANCE_THEME="BAR"
-    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-bar-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-bar-prompt.txt"
 }
 cc-finance-vault() {
     export CLAUDE_FINANCE_THEME="VAULT"
-    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-vault-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-vault-prompt.txt"
 }
 cc-finance-fca() {
     export CLAUDE_FINANCE_THEME="FCA"
-    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-fca-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-fca-prompt.txt"
 }
 cc-finance-workshop() {
     export CLAUDE_FINANCE_THEME="WORKSHOP"
-    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-workshop-prompt.sh"
+    _cc_launch "$AITEAMFORGE_DIR/finance/scripts/prompts/finance-workshop-prompt.txt"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
