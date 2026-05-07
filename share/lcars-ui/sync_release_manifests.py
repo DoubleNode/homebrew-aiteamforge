@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  sync_release_manifests.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Sync Release Manifests with Current Board Data
 

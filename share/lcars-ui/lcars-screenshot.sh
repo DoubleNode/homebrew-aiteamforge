@@ -1,4 +1,12 @@
 #!/bin/bash
+
+#
+#  lcars-screenshot.sh
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #   LCARS Screenshot Display for iTerm2
 #   Captures the LCARS web UI and displays it inline using imgcat

@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_sync_service.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Test script for CalendarSyncService inbound sync functionality.
 

@@ -1,3 +1,10 @@
+#
+#  code_graph_rag_engine.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Code-Graph-RAG Engine Provider - Source code intelligence RAG engine.
 

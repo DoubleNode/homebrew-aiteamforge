@@ -1,3 +1,10 @@
+//
+//  lcars-artifact-audit.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-artifact-audit.js — XACA-0220 Phase 3b
  *

@@ -1,3 +1,10 @@
+//
+//  lcars-cr-poll-bus.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-cr-poll-bus.js — Shared CR Board-Data Poll Bus
  *

@@ -1,3 +1,10 @@
+//
+//  test_cr_metrics.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * test_cr_metrics.js — Node-native unit tests for lcars-cr-metrics.js
  *

@@ -1,3 +1,10 @@
+//
+//  lcars-cr-age-helpers.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-cr-age-helpers.js — Total-CR-age helpers for the CHANGE REQ tab
  *

@@ -1,3 +1,10 @@
+//
+//  check-cr-metrics-fixture.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * check-cr-metrics-fixture.js — Smoke test for lcars-cr-metrics.js
  *

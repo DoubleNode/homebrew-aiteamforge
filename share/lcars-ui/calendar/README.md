@@ -1,3 +1,10 @@
+<!--
+  README.md
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+-->
+
 # Fleet Monitor Calendar Sync
 
 Bidirectional synchronization between Fleet Monitor kanban items and external calendar providers (Apple iCloud, Google Calendar).

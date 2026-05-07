@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_calendar_endpoints.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Quick test to verify calendar sync API endpoints are accessible.
 This doesn't test actual functionality - just that endpoints exist and respond.

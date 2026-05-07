@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_secrets_workers.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Unit tests for the secrets export/import WORKER functions in server.py:
   - generate_secrets_export()

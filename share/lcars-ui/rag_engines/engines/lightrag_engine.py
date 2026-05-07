@@ -1,3 +1,10 @@
+#
+#  lightrag_engine.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 LightRAG Engine Provider - Text knowledge graph RAG engine.
 

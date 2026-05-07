@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_rag_engines.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Unit tests for lcars-ui/rag_engines module.
 

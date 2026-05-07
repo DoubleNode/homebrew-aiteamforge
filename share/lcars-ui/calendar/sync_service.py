@@ -1,3 +1,10 @@
+#
+#  sync_service.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 CalendarSyncService - Bidirectional calendar synchronization service.
 

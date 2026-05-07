@@ -1,3 +1,10 @@
+#
+#  ccusage_heuristics.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """ccusage heuristics — policy layer for the Claude Usage Monitor (XACA-0243).
 
 This module is pure policy: it consumes the daemon-produced cache (see XACA-0243-001

@@ -1,3 +1,10 @@
+//
+//  usage-helpers.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 // Shared number-formatting helpers for the Claude Usage Monitor (XACA-0243).
 // Used by both the compact agent-panel indicator and the full LCARS dashboard widget.
 // Exposed on `window.UsageHelpers` since the LCARS UI does not use ES modules.

@@ -1,3 +1,10 @@
+<!--
+  CHANGELOG.md
+  DoubleNode Dev-Team Infrastructure (AITeamForge)
+
+  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+-->
+
 # LCARS UI Changelog
 
 All notable changes to the LCARS Kanban Workflow Monitor will be documented in this file.

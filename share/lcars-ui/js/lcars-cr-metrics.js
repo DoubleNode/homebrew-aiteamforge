@@ -1,3 +1,10 @@
+//
+//  lcars-cr-metrics.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-cr-metrics.js — CR Cycle-Time Compute Module
  *

@@ -1,3 +1,10 @@
+#
+#  test_weekly_degradation.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """Degradation tests for weekly-limit display (XACA-0250-006).
 
 Covers every failure path documented in the graceful-degradation spec:

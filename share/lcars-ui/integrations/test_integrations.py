@@ -1,4 +1,12 @@
 #!/usr/bin/env python3
+
+#
+#  test_integrations.py
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 """
 Integration Tests for LCARS Multi-Platform Integration System
 
