@@ -1,7 +1,7 @@
 {
   "_meta": {
-    "schema_version": "2.0.0",
-    "description": "Canonical CR (Change Request) lifecycle schema for the AITeamForge kanban system. v2.0 adds the CR-as-Container pattern: a top-level crs[] collection (mirrors epics[]/releases[]) and a crAssignment back-pointer on items (mirrors releaseAssignment). Per-item cr_* fields are deprecated but retained for migration compatibility.",
+    "schema_version": "2.2.0",
+    "description": "Canonical CR (Change Request) lifecycle schema for the AITeamForge kanban system. v2.0 adds the CR-as-Container pattern: a top-level crs[] collection (mirrors epics[]/releases[]) and a crAssignment back-pointer on items (mirrors releaseAssignment). Per-item cr_* fields are deprecated but retained for migration compatibility. v2.1 adds Phase 4 automation idempotency keys (cr_drafted_reminder_last_at, delay_flagged_at) to crContainer (XACA-0294). v2.2 adds cr_approval_candidate_at (Auto 2 approval-signal detection idempotency key, XACA-0294-004).",
     "consumers": [
       "migrate-cr-schema.py — reads crStates/crFields/teamConfig/crContainer to patch team boards",
       "scripts/kb-cr.sh — reads crStates for valid transition targets and field names",
@@ -61,6 +61,12 @@
       "required": false,
       "immutable_after": "cr-submitted",
       "description": "Planned deployment window start (e.g., 2026-05-15T22:00:00Z). Immutable once submitted to prevent scope drift after CAB review begins."
+    },
+    "delay_flagged_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "Idempotency key for Auto 3 (deploy-window delay daemon, XACA-0294). First time the planned deploy window passed without deployed-prod. Missing = not delayed. Cleared on transition to deployed-prod, cr-rejected, or cr-closed."
     },
     "cr_doc_link": {
       "type": "string",
@@ -122,6 +128,12 @@
       "required_when": "type == \"emergency\"",
       "description": "Mandatory justification text when type is 'emergency'. Explains why normal CAB review is being bypassed."
     },
+    "cr_drafted_reminder_last_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "Idempotency key for Auto 1 (24h drafted reminder daemon, XACA-0294). Last time a 24h drafted reminder fired for this CR. Missing = never fired. Cleared by lifecycle helpers when crState leaves cr-drafted."
+    },
     "createdAt": {
       "type": "string",
       "format": "ISO 8601 UTC",
@@ -136,6 +148,24 @@
       "type": "object",
       "description": "All lifecycle timestamps for this CR record. Mirrors crTimestamps but stored on the container, not the item.",
       "$ref_section": "crTimestamps"
+    },
+    "cr_drafted_reminder_last_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "Auto 1 idempotency key — ISO 8601 UTC timestamp of the last 24h drafted-reminder event. Absent = no reminder has fired yet. Written by cr-lifecycle-monitor daemon (XACA-0294). Reset naturally when crState leaves cr-drafted (state filter excludes non-drafted CRs)."
+    },
+    "delay_flagged_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "Auto 3 idempotency key — ISO 8601 UTC timestamp of first deploy-window-missed detection. Absent = not flagged. Written once by cr-lifecycle-monitor daemon (XACA-0294); never cleared by the daemon (one-shot). LCARS shows DELAYED badge while non-null and crState is not terminal."
+    },
+    "cr_approval_candidate_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "Auto 2 idempotency key — ISO 8601 UTC timestamp of first approval-signal detection on the CR-Proper Confluence page. Absent = no candidate signal detected yet. Written by cr-confluence-poller on first detection within a cr-submitted window; not re-recorded on subsequent poll cycles unless the CR reverts through backwards lifecycle (XACA-0294-004)."
     }
   },
 
