@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.aiteamforge.cr-lifecycle-monitor.{{TEAM_NAME}}.plist — TEMPLATE
+  Installer substitutes: {{PYTHON3_PATH}} {{AITEAMFORGE_DIR}} {{USER_HOME}} {{TEAM_NAME}}
+
+  Per-Team LaunchAgent Scheme (XACA-0294):
+    One LaunchAgent plist is installed PER TEAM configured in cr-automations.json
+    (or confluence-credentials.json as fallback).  Each plist invokes
+    cr-lifecycle-monitor.py with the team flag so that team's daemon runs
+    independently.  If one team's config is broken, only that team's agent
+    exits; the other teams continue unaffected.
+
+    Label pattern:  com.aiteamforge.cr-lifecycle-monitor.TEAM
+    Plist path:     ~/Library/LaunchAgents/com.aiteamforge.cr-lifecycle-monitor.TEAM.plist
+    Log paths:      ~/Library/Logs/aiteamforge/cr-lifecycle-monitor/TEAM.out.log
+                    ~/Library/Logs/aiteamforge/cr-lifecycle-monitor/TEAM.err.log
+
+  This template is rendered once per team by install_cr_lifecycle_monitor_launchagent().
+
+  AUTOMATIONS HANDLED:
+    Auto 1 — 24h drafted reminder.  Fires once per 24h window when a CR has
+              been in cr-drafted for >= 24h.  Idempotency key: cr_drafted_reminder_last_at.
+    Auto 3 — Deploy-window delay flag.  Sets delay_flagged_at once when
+              deploy_window_planned < now and crState is non-terminal.
+              One-shot: subsequent scans are no-ops.  Idempotency key: delay_flagged_at.
+
+  FAILURE ISOLATION:
+    When --team is set and the config file is absent OR the team key is missing,
+    the daemon logs a WARNING and exits 0.  This prevents launchd from hitting
+    its flap-restart threshold (default 600 s exponential back-off).
+
+  AUTOMATION CONFIG (optional — daemon falls back to sensible defaults if absent):
+    ~/.config/aiteamforge/cr-automations.json
+    See share/config/cr-automations.json.example for schema.
+
+  LOGS (per-team):
+    stdout: {{USER_HOME}}/Library/Logs/aiteamforge/cr-lifecycle-monitor/{{TEAM_NAME}}.out.log
+    stderr: {{USER_HOME}}/Library/Logs/aiteamforge/cr-lifecycle-monitor/{{TEAM_NAME}}.err.log
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.cr-lifecycle-monitor.{{TEAM_NAME}}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>{{PYTHON3_PATH}}</string>
+        <string>{{AITEAMFORGE_DIR}}/scripts/cr-lifecycle-monitor.py</string>
+        <string>--daemon</string>
+        <string>--team</string>
+        <string>{{TEAM_NAME}}</string>
+        <string>--interval</string>
+        <string>86400</string>
+        <string>--auto3-enabled</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>86400</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <false/>
+    <key>StandardOutPath</key>
+    <string>{{USER_HOME}}/Library/Logs/aiteamforge/cr-lifecycle-monitor/{{TEAM_NAME}}.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>{{USER_HOME}}/Library/Logs/aiteamforge/cr-lifecycle-monitor/{{TEAM_NAME}}.err.log</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>{{USER_HOME}}</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>

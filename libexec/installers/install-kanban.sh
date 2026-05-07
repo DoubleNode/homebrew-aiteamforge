@@ -944,6 +944,139 @@ uninstall_cr_confluence_poller_launchagent() {
     fi
 }
 
+# Install CR Lifecycle Monitor LaunchAgents — one per team (XACA-0294)
+#
+# Scans CR container records every 24 h per team; fires a drafted-24h reminder
+# (Auto 1) and sets the deploy-window delay flag (Auto 3) when conditions are
+# met.  Isolating one LaunchAgent per team means a bad team config only wedges
+# that team's monitor; others keep running.
+#
+# Per-team plists:  ~/Library/LaunchAgents/com.aiteamforge.cr-lifecycle-monitor.<team>.plist
+# Per-team logs:    ~/Library/Logs/aiteamforge/cr-lifecycle-monitor/<team>.{out,err}.log
+#
+# Config is read from ~/.config/aiteamforge/cr-automations.json (primary) or
+# ~/.config/aiteamforge/confluence-credentials.json (fallback for the team list).
+# If neither file exists, the installer logs an info message and skips plist installation.
+# The daemon itself exits cleanly with a warning if config is absent at runtime.
+install_cr_lifecycle_monitor_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/kanban/cr-lifecycle-monitor-plist.template"
+    local monitor_src="$INSTALL_ROOT/share/scripts/cr-lifecycle-monitor.py"
+    local monitor_dest="$AITEAMFORGE_DIR/scripts/cr-lifecycle-monitor.py"
+    local automations_file="$HOME/.config/aiteamforge/cr-automations.json"
+    local creds_file="$HOME/.config/aiteamforge/confluence-credentials.json"
+    local launch_agents_dir="$HOME/Library/LaunchAgents"
+    local log_dir="$HOME/Library/Logs/aiteamforge/cr-lifecycle-monitor"
+
+    # Install the daemon script first (non-fatal if missing)
+    if [ -f "$monitor_src" ]; then
+        mkdir -p "$AITEAMFORGE_DIR/scripts"
+        cp "$monitor_src" "$monitor_dest"
+        chmod +x "$monitor_dest"
+        info "Installed: cr-lifecycle-monitor.py"
+    else
+        warning "cr-lifecycle-monitor.py not found at $monitor_src (skipping LaunchAgent)"
+        return 0
+    fi
+
+    if [ ! -f "$plist_template" ]; then
+        warning "CR Lifecycle Monitor LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$launch_agents_dir"
+    mkdir -p "$log_dir"
+
+    # ── Read teams — primary: cr-automations.json; fallback: confluence-credentials.json ──
+    local config_source=""
+    if [ -f "$automations_file" ]; then
+        config_source="$automations_file"
+    elif [ -f "$creds_file" ]; then
+        config_source="$creds_file"
+        info "cr-automations.json not found — using team list from confluence-credentials.json"
+    else
+        info "No CR-enabled teams configured — skipping per-team LaunchAgent installation."
+        info "To set up Phase 4 automations, create $automations_file with a teams: {} map."
+        info "See share/config/cr-automations.json.example for schema."
+        return 0
+    fi
+
+    # jq is required to parse the teams dict
+    if ! command -v jq &>/dev/null; then
+        warning "jq is required for per-team CR Lifecycle Monitor install — install jq and re-run."
+        return 0
+    fi
+
+    local teams_json
+    teams_json="$(jq -r '.teams | keys[]' "$config_source" 2>/dev/null || true)"
+    if [ -z "$teams_json" ]; then
+        info "No teams defined in $config_source — skipping per-team LaunchAgent installation."
+        info "Add teams to .teams in $config_source then re-run installer."
+        return 0
+    fi
+
+    # Find python3 path once (shared across all team plists)
+    local python3_path
+    python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
+
+    info "Installing per-team CR Lifecycle Monitor LaunchAgents"
+
+    # ── Render and load one plist per team ────────────────────────────────────
+    local team plist_dest
+    while IFS= read -r team; do
+        [ -z "$team" ] && continue
+        # Allow only [a-zA-Z0-9_-] in team names — value flows into sed and launchctl Label
+        if [[ ! "$team" =~ ^[a-zA-Z0-9_-]+$ ]]; then
+            warning "Skipping team '$team': name must match [a-zA-Z0-9_-]+ for LaunchAgent label."
+            continue
+        fi
+        plist_dest="$launch_agents_dir/com.aiteamforge.cr-lifecycle-monitor.${team}.plist"
+
+        sed -e "s|{{USER_HOME}}|$HOME|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+            -e "s|{{PYTHON3_PATH}}|$python3_path|g" \
+            -e "s|{{TEAM_NAME}}|$team|g" \
+            "$plist_template" > "$plist_dest"
+
+        launchctl unload "$plist_dest" 2>/dev/null || true
+
+        if launchctl load -w "$plist_dest"; then
+            success "Loaded CR Lifecycle Monitor LaunchAgent: $team"
+        else
+            warning "Failed to load CR Lifecycle Monitor LaunchAgent for team '$team' (may need manual activation)"
+        fi
+    done <<< "$teams_json"
+
+    info "Per-team lifecycle monitors run every 24 hours"
+    info "Logs: $log_dir/<team>.{out,err}.log"
+}
+
+# Uninstall CR Lifecycle Monitor LaunchAgents — glob-removes all per-team plists.
+#
+# Note: per-team logs at ~/Library/Logs/aiteamforge/cr-lifecycle-monitor/<team>.{out,err}.log
+# are intentionally preserved on uninstall (matches lcars-health and cr-poller conventions).
+# Operators can inspect prior lifecycle monitor output after uninstall; remove the log
+# directory manually if desired.
+uninstall_cr_lifecycle_monitor_launchagent() {
+    local launch_agents_dir="$HOME/Library/LaunchAgents"
+    local found_any=0
+
+    shopt -s nullglob
+    local plist_files=("$launch_agents_dir"/com.aiteamforge.cr-lifecycle-monitor*.plist)
+    shopt -u nullglob
+
+    for plist_file in "${plist_files[@]}"; do
+        [ -e "$plist_file" ] || continue
+        info "Unloading: $(basename "$plist_file")"
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        found_any=1
+    done
+
+    if [ "$found_any" -eq 1 ]; then
+        success "Removed CR Lifecycle Monitor LaunchAgent(s)"
+    fi
+}
+
 # Test LCARS server startup
 test_lcars_server() {
     local port="${1:-$DEFAULT_LCARS_PORT}"
@@ -1039,6 +1172,7 @@ install_kanban_system() {
     install_backup_launchagent
     install_lcars_health_launchagent
     install_cr_confluence_poller_launchagent
+    install_cr_lifecycle_monitor_launchagent
 
     success "LCARS Kanban System installed successfully"
 
@@ -1068,6 +1202,7 @@ uninstall_kanban_system() {
     # Unload LaunchAgents
     uninstall_backup_launchagent
     uninstall_cr_confluence_poller_launchagent
+    uninstall_cr_lifecycle_monitor_launchagent
 
     # Remove installed files
     info "Removing kanban system files"
@@ -1101,3 +1236,5 @@ uninstall_kanban_system() {
 export -f install_kanban_system
 export -f uninstall_kanban_system
 export -f populate_board_terminals
+export -f install_cr_lifecycle_monitor_launchagent
+export -f uninstall_cr_lifecycle_monitor_launchagent

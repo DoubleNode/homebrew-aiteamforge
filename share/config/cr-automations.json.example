@@ -1,0 +1,27 @@
+{
+  "_comment": "Phase 4 CR automation config (XACA-0294). Sibling file to confluence-credentials.json. Used by cr-lifecycle-monitor.py (Auto 1 + Auto 3) and cr-confluence-poller.py (Auto 2). Copy to ~/.config/aiteamforge/cr-automations.json and customize per team.",
+  "teams": {
+    "ios": {
+      "auto1_enabled": true,
+      "auto3_enabled": true,
+      "approval_signals": {
+        "labels": ["approved", "cab-approved"],
+        "heading_regex": "(?i)^\\s*approved\\b"
+      },
+      "auto_approve_enabled": false
+    },
+    "android": {
+      "auto1_enabled": true,
+      "auto3_enabled": true,
+      "approval_signals": {
+        "labels": ["approved"]
+      },
+      "auto_approve_enabled": false
+    },
+    "firebase": {
+      "auto1_enabled": true,
+      "auto3_enabled": true,
+      "auto_approve_enabled": false
+    }
+  }
+}
