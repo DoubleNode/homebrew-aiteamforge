@@ -148,8 +148,8 @@ function renderOrganizationNav(sortedOrgs, organizationGroups) {
         const navButton = document.createElement('button');
         navButton.className = `org-nav-button ${getGroupColor(orgName)}`;
         navButton.innerHTML = `
-            <span class="org-nav-name">${escapeHtml(orgName)}</span>
-            <span class="org-nav-stats">${escapeHtml(divisionCount)} Divisions • ${escapeHtml(totalSessions)} Sessions</span>
+            <span class="org-nav-name">${orgName}</span>
+            <span class="org-nav-stats">${divisionCount} Divisions • ${totalSessions} Sessions</span>
         `;
 
         navButton.onclick = () => {
@@ -199,8 +199,8 @@ function renderDivisions(divisions) {
         const totalSessions = organizationGroups[orgName].reduce((sum, [_, data]) => sum + data.total_sessions, 0);
 
         orgHeader.innerHTML = `
-            <span>${escapeHtml(orgName)}</span>
-            <span class="organization-stats">${escapeHtml(totalSessions)} Sessions</span>
+            <span>${orgName}</span>
+            <span class="organization-stats">${totalSessions} Sessions</span>
         `;
         orgContainer.appendChild(orgHeader);
 
@@ -224,8 +224,8 @@ function renderDivisions(divisions) {
                 navButton.className = 'division-mini-nav-button';
                 const divisionTitle = getDivisionTitle(divisionName);
                 navButton.innerHTML = `
-                    <span class="division-mini-nav-name">${escapeHtml(divisionTitle)}</span>
-                    <span class="division-mini-nav-stats">${escapeHtml(divisionData.total_sessions)} Sessions</span>
+                    <span class="division-mini-nav-name">${divisionTitle}</span>
+                    <span class="division-mini-nav-stats">${divisionData.total_sessions} Sessions</span>
                 `;
 
                 navButton.onclick = () => {
@@ -260,8 +260,8 @@ function createDivisionPanel(name, data) {
     header.className = 'division-header';
     const fullTitle = getDivisionTitle(name);
     header.innerHTML = `
-        <span>${escapeHtml(fullTitle)}</span>
-        <span class="division-stats">${escapeHtml(data.total_sessions)} Sessions</span>
+        <span>${fullTitle}</span>
+        <span class="division-stats">${data.total_sessions} Sessions</span>
     `;
     panel.appendChild(header);
 
@@ -320,7 +320,7 @@ function createTeamCard(name, data) {
     const isOnline = status === 'online';
 
     const avatarUrl = getAvatarUrl(session.division, name);
-    const avatarHtml = `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(name)}" class="team-avatar${isLcars ? ' lcars-avatar' : ''}" onerror="this.src='/avatars/default_team_logo.svg'">`;
+    const avatarHtml = `<img src="${avatarUrl}" alt="${name}" class="team-avatar${isLcars ? ' lcars-avatar' : ''}" onerror="this.src='/avatars/default_team_logo.svg'">`;
 
     const lcarsBadge = isLcars ? '<span class="lcars-badge">LCARS</span>' : '';
 
@@ -337,31 +337,31 @@ function createTeamCard(name, data) {
         <div class="team-header">
             <div class="team-header-left">
                 ${avatarHtml}
-                <div class="team-name">${escapeHtml(name)}${lcarsBadge}</div>
+                <div class="team-name">${name}${lcarsBadge}</div>
             </div>
             ${lcarsAction}
-            <span class="team-status ${escapeHtml(status)}"></span>
+            <span class="team-status ${status}"></span>
         </div>
         <div class="session-info">
             <div class="session-detail">
                 <span class="session-label">Session:</span>
-                <span class="session-value">${escapeHtml(session.name)}</span>
+                <span class="session-value">${session.name}</span>
             </div>
             <div class="session-detail">
                 <span class="session-label">Machine:</span>
-                <span class="session-value">${escapeHtml(session.hostname)}</span>
+                <span class="session-value">${session.hostname}</span>
             </div>
             <div class="session-detail">
                 <span class="session-label">Windows:</span>
-                <span class="session-value">${escapeHtml(session.windows)}</span>
+                <span class="session-value">${session.windows}</span>
             </div>
             <div class="session-detail">
                 <span class="session-label">Uptime:</span>
-                <span class="session-value">${escapeHtml(session.uptime_display)}</span>
+                <span class="session-value">${session.uptime_display}</span>
             </div>
             <div class="session-detail">
                 <span class="session-label">Status:</span>
-                <span class="session-value text-${escapeHtml(status)}">${escapeHtml(status.toUpperCase())}</span>
+                <span class="session-value text-${status}">${status.toUpperCase()}</span>
             </div>
         </div>
     `;
@@ -412,27 +412,27 @@ function createMachineItem(machine) {
     const timeSinceLastSeen = getTimeSince(machine.last_seen);
 
     item.innerHTML = `
-        <div class="machine-name">${escapeHtml(machine.hostname)}</div>
+        <div class="machine-name">${machine.hostname}</div>
         <div class="machine-details">
             <div class="machine-detail">
                 <span>IP Address:</span>
-                <span class="machine-detail-value">${escapeHtml(machine.ip)}</span>
+                <span class="machine-detail-value">${machine.ip}</span>
             </div>
             <div class="machine-detail">
                 <span>OS:</span>
-                <span class="machine-detail-value">${escapeHtml(machine.os)}</span>
+                <span class="machine-detail-value">${machine.os}</span>
             </div>
             <div class="machine-detail">
                 <span>Status:</span>
-                <span class="machine-detail-value text-${escapeHtml(machine.status)}">${escapeHtml(machine.status.toUpperCase())}</span>
+                <span class="machine-detail-value text-${machine.status}">${machine.status.toUpperCase()}</span>
             </div>
             <div class="machine-detail">
                 <span>Sessions:</span>
-                <span class="machine-detail-value">${escapeHtml(machine.session_count)}</span>
+                <span class="machine-detail-value">${machine.session_count}</span>
             </div>
             <div class="machine-detail">
                 <span>Last Seen:</span>
-                <span class="machine-detail-value">${escapeHtml(timeSinceLastSeen)}</span>
+                <span class="machine-detail-value">${timeSinceLastSeen}</span>
             </div>
         </div>
     `;
@@ -509,13 +509,6 @@ function getDivisionPriority(divisionCode) {
 // ============================================================================
 // UTILITY FUNCTIONS
 // ============================================================================
-
-/**
- * Escape HTML special characters to prevent XSS via innerHTML injection
- */
-function escapeHtml(str) {
-    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-}
 
 function isLcarsTerminal(teamData) {
     if (!teamData || !teamData.sessions || teamData.sessions.length === 0) {

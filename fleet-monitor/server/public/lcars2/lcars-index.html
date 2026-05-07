@@ -124,12 +124,12 @@
                     </div>
                 </div>
                 <div class="sidebar-spacer"></div>
-                <!-- Dashboard Switcher (populated dynamically from /api/dashboards) -->
+                <!-- Dashboard Switcher -->
                 <div class="sidebar-label">DASHBOARDS</div>
-                <div id="dashboard-links">
-                    <a href="lcars-index.html" class="sidebar-link active">ACADEMY</a>
-                    <a href="lcars-all.html" class="sidebar-link">ALL FLEET</a>
-                </div>
+                <a href="lcars-index.html" class="sidebar-link active">ACADEMY</a>
+                <a href="lcars-mainevent.html" class="sidebar-link">MAIN EVENT</a>
+                <a href="lcars-doublenode.html" class="sidebar-link">DOUBLENODE</a>
+                <a href="lcars-all.html" class="sidebar-link">ALL FLEET</a>
                 <div class="sidebar-spacer"></div>
             </nav>
 
@@ -265,6 +265,8 @@
                                 <span class="lcars-text-sm">Dashboard</span>
                                 <select class="lcars-select cyan" id="dashboard-select" onchange="window.location.href=this.value">
                                     <option value="lcars-index.html" selected>ACADEMY</option>
+                                    <option value="lcars-mainevent.html">MAIN EVENT</option>
+                                    <option value="lcars-doublenode.html">DOUBLENODE</option>
                                     <option value="lcars-all.html">ALL FLEET</option>
                                 </select>
                             </div>
@@ -302,55 +304,5 @@
     <script src="../shared/js/lcars-kiosk.js"></script>
     <!-- Academy Dashboard Application -->
     <script src="js/lcars-academy-app.js"></script>
-    <!-- Plugin-aware dashboard switcher: pulls the dashboard list from the
-         server so any opt-in plugins (main-event, etc.) appear in the nav. -->
-    <script>
-    (async function hydrateDashboardNav() {
-        try {
-            const resp = await fetch('/api/dashboards');
-            if (!resp.ok) return;
-            const { dashboards } = await resp.json();
-            if (!Array.isArray(dashboards) || dashboards.length === 0) return;
-
-            const linksContainer = document.getElementById('dashboard-links');
-            const selectEl       = document.getElementById('dashboard-select');
-            if (!linksContainer) return;
-
-            const currentPath = window.location.pathname.split('/').pop();
-
-            // Rebuild link list from scratch using DOM methods (no innerHTML).
-            while (linksContainer.firstChild) {
-                linksContainer.removeChild(linksContainer.firstChild);
-            }
-            if (selectEl) {
-                while (selectEl.firstChild) selectEl.removeChild(selectEl.firstChild);
-            }
-
-            for (const d of dashboards) {
-                const href = d.id === 'academy'
-                    ? 'lcars-index.html'
-                    : d.id === 'all'
-                        ? 'lcars-all.html'
-                        : `lcars-${d.id}.html`;
-
-                const link = document.createElement('a');
-                link.href = href;
-                link.className = 'sidebar-link' + (href === currentPath ? ' active' : '');
-                link.textContent = (d.name || d.id).toUpperCase();
-                linksContainer.appendChild(link);
-
-                if (selectEl) {
-                    const opt = document.createElement('option');
-                    opt.value = href;
-                    opt.textContent = (d.name || d.id).toUpperCase();
-                    if (href === currentPath) opt.selected = true;
-                    selectEl.appendChild(opt);
-                }
-            }
-        } catch (err) {
-            console.warn('[lcars-index] dashboard nav hydration failed:', err);
-        }
-    })();
-    </script>
 </body>
 </html>
