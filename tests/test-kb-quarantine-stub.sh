@@ -118,6 +118,10 @@ _run_in_sandbox() {
     # The aliases file is written as zsh but the functions are POSIX-compatible
     # enough for bash sourcing in tests; where zsh-only constructs appear
     # (array slicing) we avoid exercising them here.
+    # Shell-escape each cmd element before splicing into the bash -c body so
+    # arguments containing spaces or special chars survive intact.
+    local _quoted_cmd
+    _quoted_cmd=$(printf '%q ' "${cmd[@]}")
     env -i \
         HOME="$home_dir" \
         KANBAN_TEAM="finance-personal" \
@@ -127,7 +131,7 @@ _run_in_sandbox() {
             source '$ALIASES_PATH' 2>/dev/null
             # Override AFTER sourcing — the template unconditionally sets the var.
             AITEAMFORGE_DIR='$atf_dir'
-            ${cmd[*]}
+            $_quoted_cmd
         " >"$_STDOUT_FILE" 2>"$_STDERR_FILE"
 }
 
@@ -249,7 +253,7 @@ fi
 test_start "Case 6: Dry-run prints plan for finance-personal, exits 0, stub not moved"
 _setup_sandbox
 _run_in_sandbox "$_TEST_TMP" "$_TEST_TMP/aiteamforge" \
-    "kb-quarantine-stub finance-personal --dry-run"
+    kb-quarantine-stub finance-personal --dry-run
 rc=$?
 dry_out="$(_stdout)"
 stub_still_exists=0
@@ -290,7 +294,7 @@ _teardown_sandbox
 test_start "Case 7: Dry-run quarantine destination uses AITEAMFORGE_DIR (not dev-team)"
 _setup_sandbox
 _run_in_sandbox "$_TEST_TMP" "$_TEST_TMP/aiteamforge" \
-    "kb-quarantine-stub finance-personal --dry-run"
+    kb-quarantine-stub finance-personal --dry-run
 dry_out="$(_stdout)"
 
 if [[ "$dry_out" != *"quarantine/runtime-stub-stash"* ]]; then
@@ -313,7 +317,7 @@ _teardown_sandbox
 test_start "Case 8: Real quarantine (--yes) moves stub and creates .meta.json sidecar"
 _setup_sandbox
 _run_in_sandbox "$_TEST_TMP" "$_TEST_TMP/aiteamforge" \
-    "kb-quarantine-stub finance-personal --yes"
+    kb-quarantine-stub finance-personal --yes
 rc=$?
 
 # Stub must be gone
@@ -349,7 +353,7 @@ printf '{"backlog":[{"id":"A","title":"live item"}]}\n' \
     > "$_TEST_TMP/finance/kanban/finance-board.json"
 
 _run_in_sandbox "$_TEST_TMP" "$_TEST_TMP/aiteamforge" \
-    "kb-quarantine-stub finance-personal --yes"
+    kb-quarantine-stub finance-personal --yes
 rc=$?
 err_out="$(_stderr)"
 
@@ -372,7 +376,7 @@ printf '{"backlog":[{"id":"A","title":"live item"}]}\n' \
     > "$_TEST_TMP/finance/kanban/finance-board.json"
 
 _run_in_sandbox "$_TEST_TMP" "$_TEST_TMP/aiteamforge" \
-    "kb-quarantine-stub finance-personal --force --yes"
+    kb-quarantine-stub finance-personal --force --yes
 rc=$?
 
 stub_gone=0

@@ -259,7 +259,6 @@ _REGISTRY_ENTRY="$(jq -e --arg tid "$TEAM_ID" '.teams[] | select(.id == $tid)' "
     echo "Error: Template '${TEAM_ID}' has no entry in registry.json — cannot proceed without branding." >&2
     exit 1
 }
-REGISTRY_NAME="$(echo "$_REGISTRY_ENTRY"     | jq -r '.name'        | tr '[:upper:]' '[:upper:]')"
 REGISTRY_NAME_RAW="$(echo "$_REGISTRY_ENTRY" | jq -r '.name')"
 REGISTRY_DESC="$(echo "$_REGISTRY_ENTRY"     | jq -r '.description')"
 REGISTRY_COLOR="$(echo "$_REGISTRY_ENTRY"    | jq -r '.color')"
