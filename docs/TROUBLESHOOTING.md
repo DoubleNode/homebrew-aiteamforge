@@ -634,36 +634,75 @@ chmod 644 ~/aiteamforge/kanban/*.json
 aiteamforge setup --upgrade
 ```
 
-### Dual Kanban Board Warning
+### Dual Kanban Board State
 
 **Symptoms:**
-- Warning message: "LCARS 404: No plan document directory configured for team: X"
-- Or: "Dual board warning: Both stub and canonical boards exist"
 
-**Cause:**
+- LCARS header shows only the organization name (e.g., "DOUBLENODE") — no team segment
+- Import dialog offers a destructive rename (e.g., "finance-personal → finance")
+- LCARS server fails to start with a fatal error about template vs instance team IDs
+- Server logs show: "Refusing to start — silent ID collisions are likely if both files coexist"
 
-Teams with profile-scoped boards (e.g., Finance with personal/work profiles) can end up with both a stub board (e.g., `~/finance/finance-board.json`) and a canonical board (e.g., `~/finance/personal/kanban/finance-personal-board.json`). This typically occurs on older installations before the installer's profile-awareness feature was added.
+**What's Wrong:**
 
-**Solution:**
+Two board files coexist for one team:
+- A **legacy stub** (e.g., `~/finance/finance-board.json`)
+- A **canonical profile-scoped board** (e.g., `~/finance/personal/kanban/finance-personal-board.json`)
 
-Disable the stub board warning with:
+This occurs when an older installation used a bare-template team ID (e.g., `finance`) before the installer learned to generate profile-scoped instances (e.g., `finance-personal`). The architectural contract (see [team-id-contract.md](../architecture/team-id-contract.md)) requires that each installed team have an **instance ID** (the full, specific team identifier) and that all runtime layers use this instance ID for board file lookup. When both files exist, different layers see different boards:
+
+- The stub uses the template id → branding lookup falls back to defaults → LCARS header loses team info
+- The canonical board uses the instance id → kanban logic works correctly
+- The server refuses to start when it detects this state, rather than silently use the wrong board
+
+**Fix:**
+
+Run the `kb-quarantine-stub` command to move the stub aside without losing data:
+
 ```bash
-kb-quarantine-stub <team>
+kb-quarantine-stub finance-personal
 ```
 
-Example for Finance team:
+Then restart LCARS:
 ```bash
-kb-quarantine-stub finance
+aiteamforge restart lcars
 ```
 
-This marks the stub board as quarantined (disabled) so the warning no longer fires. The canonical profile-scoped board remains active and is the source of truth.
+Retry your action (import, dashboard load, etc.). The canonical board is now the sole source of truth.
+
+**For Finance, Medical, Legal, and Freelance Teams:**
+
+Instance IDs follow this pattern:
+- **Finance:** `finance-<profile>` (e.g., `finance-personal`, `finance-business`)
+- **Medical:** `medical-<specialty>` (e.g., `medical-general`, `medical-pediatric`)
+- **Legal:** `legal-<case-type>` (e.g., `legal-coparenting`)
+- **Freelance:** `freelance-<client>-<project>` (e.g., `freelance-doublenode-starwords`)
 
 **Verification:**
 
-After running the command, verify the warning is resolved:
+After quarantining, verify the fix:
 ```bash
-kb-list  # Should use canonical board without warnings
+kb-list  # Should use canonical board with full team name in header
+curl http://localhost:8082/health  # LCARS should start cleanly
 ```
+
+**Advanced: Dry-Run and Inspection**
+
+If you want to see what would be moved without actually moving it:
+```bash
+kb-quarantine-stub --dry-run finance-personal
+```
+
+To view the quarantine location and inspect the stub metadata:
+```bash
+kb-quarantine-stub --help
+```
+
+The quarantine destination is `${AITEAMFORGE_DIR}/quarantine/runtime-stub-stash/<timestamp>-<team>/`, which includes a `.meta.json` sidecar with the stub's SHA, modification time, and item count — preserving full provenance in case recovery is ever needed.
+
+**Prevention:**
+
+The XACA-0460 fix added pre-flight checks at LCARS startup and Import time, so this state will be caught loudly going forward rather than silently producing corrupted behavior. If you see this error, it indicates a legacy installation that predates the multi-instance team ID contract. Quarantine resolves it completely; the condition will not recur on fresh installations.
 
 ### Backup System Not Running
 

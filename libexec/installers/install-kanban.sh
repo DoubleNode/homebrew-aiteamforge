@@ -377,31 +377,65 @@ init_kanban_board() {
                 -e "s|{{CREATED_DATE}}|${created_date}|g" \
                 "$template" > "$board_file"
         else
-            # Fallback to minimal structure
+            # Fallback to minimal structure, but read branding from registry.json
+            # if available (XACA-0460-011). Hard-fail if registry.json exists but
+            # lacks an entry for this template — we should never write generic defaults.
             local created_date
             created_date="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-            cat > "$board_file" << EOF
-{
-  "team": "$board_name",
-  "teamName": "$(echo "$board_name" | tr '[:lower:]' '[:upper:]')",
-  "subtitle": "",
-  "ship": "",
-  "series": "$(derive_series_prefix "$team")",
-  "organization": "DEVTEAM",
-  "orgColor": "white",
-  "kanbanDir": "$kanban_dir",
-  "lastUpdated": "$created_date",
-  "nextId": 1,
-  "nextEpicId": 1,
-  "nextReleaseId": 1,
-  "fleetMonitorUrl": "",
-  "terminals": {},
-  "activeWindows": [],
-  "backlog": [],
-  "epics": [],
-  "releases": []
-}
-EOF
+            local _reg_json="$INSTALL_ROOT/share/teams/registry.json"
+            local _reg_name="" _reg_desc="" _reg_color="" _reg_icon=""
+            if [ -f "$_reg_json" ] && command -v jq >/dev/null 2>&1; then
+                local _reg_entry
+                _reg_entry="$(jq -e --arg tid "$team" '.teams[] | select(.id == $tid)' "$_reg_json" 2>/dev/null)" || {
+                    error "Template '${team}' has no entry in registry.json — refusing to write generic board defaults."
+                    return 1
+                }
+                _reg_name="$(echo "$_reg_entry"  | jq -r '.name')"
+                _reg_desc="$(echo "$_reg_entry"  | jq -r '.description')"
+                _reg_color="$(echo "$_reg_entry" | jq -r '.color')"
+                _reg_icon="$(echo "$_reg_entry"  | jq -r '.icon')"
+            fi
+            # Use registry branding when available; generic fallback only when
+            # registry.json itself is missing (should not happen post-install).
+            local _org_name="${_reg_name:-DEVTEAM}"
+            local _subtitle="${_reg_desc:-}"
+            local _org_color="${_reg_color:-white}"
+            local _icon="${_reg_icon:-}"
+            jq -n \
+                --arg team        "$board_name" \
+                --arg teamName    "$_org_name" \
+                --arg subtitle    "$_subtitle" \
+                --arg series      "$(derive_series_prefix "$team")" \
+                --arg organization "$_org_name" \
+                --arg orgColor    "$_org_color" \
+                --arg icon        "$_icon" \
+                --arg template    "$team" \
+                --arg instance    "$board_name" \
+                --arg kanbanDir   "$kanban_dir" \
+                --arg created     "$created_date" \
+                '{
+                  "team":         $team,
+                  "teamName":     $teamName,
+                  "subtitle":     $subtitle,
+                  "ship":         "",
+                  "series":       $series,
+                  "organization": $organization,
+                  "orgColor":     $orgColor,
+                  "icon":         $icon,
+                  "template":     $template,
+                  "instance":     $instance,
+                  "kanbanDir":    $kanbanDir,
+                  "lastUpdated":  $created,
+                  "nextId":       1,
+                  "nextEpicId":   1,
+                  "nextReleaseId":1,
+                  "fleetMonitorUrl": "",
+                  "terminals":    {},
+                  "activeWindows":[],
+                  "backlog":      [],
+                  "epics":        [],
+                  "releases":     []
+                }' > "$board_file"
         fi
 
         success "Created kanban board: $board_file"

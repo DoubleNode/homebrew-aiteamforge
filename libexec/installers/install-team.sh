@@ -29,6 +29,8 @@ AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
 TEAM_ID=""
 CONNECT_ONLY=false
+ARG_PROJECT=""
+ARG_CLIENT=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir|--aiteamforge-dir)
@@ -38,6 +40,14 @@ while [[ $# -gt 0 ]]; do
         --connect-only)
             CONNECT_ONLY=true
             shift
+            ;;
+        --project)
+            ARG_PROJECT="$2"
+            shift 2
+            ;;
+        --client)
+            ARG_CLIENT="$2"
+            shift 2
             ;;
         *)
             if [[ -z "$TEAM_ID" ]]; then
@@ -105,6 +115,7 @@ _read_conf() {
         printf 'TEAM_SHUTDOWN_SCRIPT=%q\n' "${TEAM_SHUTDOWN_SCRIPT:-${TEAM_ID}-shutdown.sh}"
         printf 'TEAM_HAS_PROJECTS=%q\n'    "${TEAM_HAS_PROJECTS:-false}"
         printf 'TEAM_REQUIRES_CLIENT_ID=%q\n' "${TEAM_REQUIRES_CLIENT_ID:-false}"
+        printf 'TEAM_DEFAULT_PROJECT=%q\n' "${TEAM_DEFAULT_PROJECT:-}"
         printf 'TEAM_ORGANIZATION=%q\n' "${TEAM_ORGANIZATION:-}"
 
         # Emit arrays as bash array declarations so they survive the eval.
@@ -135,8 +146,127 @@ _read_conf() {
 # Import conf values into the current shell via eval.
 eval "$(_read_conf "$TEAM_CONF")"
 
+# ============================================================================
+# INSTANCE ID COMPUTATION (XACA-0460-008)
+# Implements contract §3 + §5: template-id vs instance-id separation.
+# TEAM_ID (the template id) is preserved for branding lookups.
+# INSTANCE_ID is the stable runtime key for paths, env vars, sockets, and
+# generated artifact filenames.
+# ============================================================================
+
+# validate_instance_component: ensure a param component matches ^[a-z0-9_]+$
+# (no dashes — dash is the component separator in the instance id).
+_validate_instance_component() {
+    local component="$1" label="$2"
+    if [[ ! "$component" =~ ^[a-z0-9_]+$ ]]; then
+        echo "Error: $label component '${component}' must match ^[a-z0-9_]+$ (lowercase letters, digits, underscores only — no dashes)" >&2
+        exit 1
+    fi
+}
+
+# compute_instance_id: pure function, no filesystem side-effects.
+# Inputs: template_id, client (may be empty), project (may be empty)
+# Output: instance id string on stdout
+compute_instance_id() {
+    local template_id="$1"
+    local client="$2"
+    local project="$3"
+    local has_projects="$TEAM_HAS_PROJECTS"
+    local requires_client="$TEAM_REQUIRES_CLIENT_ID"
+    local default_project="$TEAM_DEFAULT_PROJECT"
+
+    if [[ "$has_projects" != "true" ]]; then
+        # Unparameterized template: instance == template
+        if [[ -n "$client" || -n "$project" ]]; then
+            echo "Error: Template '${template_id}' takes no parameters (TEAM_HAS_PROJECTS=false); --client and --project are not accepted" >&2
+            exit 1
+        fi
+        echo "$template_id"
+        return 0
+    fi
+
+    # Resolve project: --project flag, then TEAM_DEFAULT_PROJECT, then error
+    local resolved_project="${project:-${default_project}}"
+    if [[ -z "$resolved_project" ]]; then
+        echo "Error: Template '${template_id}' requires a project (TEAM_HAS_PROJECTS=true). Pass --project <value> or set TEAM_DEFAULT_PROJECT in the conf." >&2
+        exit 1
+    fi
+    # Lowercase the component
+    resolved_project="$(echo "$resolved_project" | tr '[:upper:]' '[:lower:]')"
+    _validate_instance_component "$resolved_project" "project"
+
+    # Emit notice if we fell back to the default
+    if [[ -z "$project" ]]; then
+        echo "Note: Using default project '${resolved_project}' for ${template_id}; specify --project to override." >&2
+    fi
+
+    if [[ "$requires_client" != "true" ]]; then
+        # template-project (finance, medical, legal)
+        echo "${template_id}-${resolved_project}"
+        return 0
+    fi
+
+    # Resolve client: --client flag required; no default
+    local resolved_client="${client}"
+    if [[ -z "$resolved_client" ]]; then
+        # Try interactive prompt if on a TTY
+        if (exec 9<>/dev/tty) 2>/dev/null; then
+            printf "Client ID for '%s' (e.g. acme): " "$template_id" >/dev/tty
+            read -r resolved_client </dev/tty 2>/dev/null || resolved_client=""
+        fi
+    fi
+    if [[ -z "$resolved_client" ]]; then
+        echo "Error: Template '${template_id}' requires a client id (TEAM_REQUIRES_CLIENT_ID=true). Pass --client <value>." >&2
+        exit 1
+    fi
+    resolved_client="$(echo "$resolved_client" | tr '[:upper:]' '[:lower:]')"
+    _validate_instance_component "$resolved_client" "client"
+
+    # template-client-project (freelance)
+    echo "${template_id}-${resolved_client}-${resolved_project}"
+}
+
+# Compute and validate instance id
+INSTANCE_ID="$(compute_instance_id "$TEAM_ID" "$ARG_CLIENT" "$ARG_PROJECT")"
+
+# Reject extra flags for unparameterized templates (belt-and-suspenders;
+# compute_instance_id already errors, but be explicit here too)
+if [[ "$TEAM_HAS_PROJECTS" != "true" ]]; then
+    if [[ -n "$ARG_PROJECT" ]]; then
+        echo "Error: --project is not valid for template '${TEAM_ID}' (TEAM_HAS_PROJECTS=false)" >&2
+        exit 1
+    fi
+    if [[ -n "$ARG_CLIENT" ]]; then
+        echo "Error: --client is not valid for template '${TEAM_ID}' (TEAM_HAS_PROJECTS=false)" >&2
+        exit 1
+    fi
+fi
+
+# Validate final instance id shape (contract §6, invariant 5)
+if [[ ! "$INSTANCE_ID" =~ ^[a-z0-9_]+(-[a-z0-9_]+){0,2}$ ]]; then
+    echo "Error: Computed instance id '${INSTANCE_ID}' does not match ^[a-z0-9_]+(-[a-z0-9_]+){0,2}$" >&2
+    exit 1
+fi
+
+# Load branding fields from registry.json keyed on TEAM_ID (template id).
+# These are used for board JSON writes and summary display.
+_REGISTRY_JSON="$HOMEBREW_TAP_ROOT/share/teams/registry.json"
+if [[ ! -f "$_REGISTRY_JSON" ]]; then
+    echo "Error: registry.json not found at $_REGISTRY_JSON" >&2
+    exit 1
+fi
+_REGISTRY_ENTRY="$(jq -e --arg tid "$TEAM_ID" '.teams[] | select(.id == $tid)' "$_REGISTRY_JSON" 2>/dev/null)" || {
+    echo "Error: Template '${TEAM_ID}' has no entry in registry.json — cannot proceed without branding." >&2
+    exit 1
+}
+REGISTRY_NAME="$(echo "$_REGISTRY_ENTRY"     | jq -r '.name'        | tr '[:upper:]' '[:upper:]')"
+REGISTRY_NAME_RAW="$(echo "$_REGISTRY_ENTRY" | jq -r '.name')"
+REGISTRY_DESC="$(echo "$_REGISTRY_ENTRY"     | jq -r '.description')"
+REGISTRY_COLOR="$(echo "$_REGISTRY_ENTRY"    | jq -r '.color')"
+REGISTRY_ICON="$(echo "$_REGISTRY_ENTRY"     | jq -r '.icon')"
+
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo "  Installing Team: $TEAM_ID"
+echo "  Installing Team: $TEAM_ID  (instance: $INSTANCE_ID)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 
@@ -284,18 +414,18 @@ done
 # ============================================================================
 
 if [[ "$CONNECT_ONLY" == "true" ]]; then
-    echo "🔗 Rendering connect scripts for $TEAM_ID (connect-only mode)..."
+    echo "🔗 Rendering connect scripts for $INSTANCE_ID (connect-only mode)..."
     mkdir -p "$AITEAMFORGE_DIR"
 
     CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
-    CONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
+    CONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
 
     if [[ -f "$CONNECT_TEMPLATE" ]]; then
-        sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
             -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
             -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
             -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-            -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+            -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
             -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
             -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
             "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
@@ -316,22 +446,22 @@ with open(dst, 'w') as f:
 PYEOF
         rm -f "${CONNECT_SCRIPT}.tmp"
         chmod +x "$CONNECT_SCRIPT"
-        echo "  ✓ ${TEAM_ID}-connect.sh"
+        echo "  ✓ ${INSTANCE_ID}-connect.sh"
     else
         echo "  ⚠️  Template not found: team-connect.sh.template (skipping)"
     fi
 
     DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
-    DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-disconnect.sh"
+    DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
 
     if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
-        sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
             -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
             -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
             -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
             "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
         chmod +x "$DISCONNECT_SCRIPT"
-        echo "  ✓ ${TEAM_ID}-disconnect.sh"
+        echo "  ✓ ${INSTANCE_ID}-disconnect.sh"
     else
         echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping)"
     fi
@@ -470,9 +600,15 @@ fi
 
 echo "🚀 Creating startup/shutdown scripts..."
 
+# Override script filenames from conf to use INSTANCE_ID instead of template id.
+# The conf may provide e.g. "finance-startup.sh" (template-keyed). We replace
+# that with the instance-keyed name so multiple instances of the same template
+# get distinct files. Contract §6, invariant 8.
+TEAM_STARTUP_SCRIPT="${INSTANCE_ID}-startup.sh"
+TEAM_SHUTDOWN_SCRIPT="${INSTANCE_ID}-shutdown.sh"
+
 STARTUP_SCRIPT="$AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
 SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
-
 
 # Determine if this is a project-based team (values already imported from conf)
 IS_PROJECT_TEAM="$TEAM_HAS_PROJECTS"
@@ -495,13 +631,19 @@ fi
 
 if [[ -f "$STARTUP_TEMPLATE" ]]; then
     # Step 1: single-line substitutions via sed
+    # {{TEAM_ID}} receives INSTANCE_ID (not template id) so that the generated
+    # script's TEAM_ID variable holds the instance id — keeping backwards compat
+    # with callers that read TEAM_ID while correcting the cascade (contract §6.8).
+    # {{TEAM_TMUX_SOCKET}} also uses INSTANCE_ID for per-instance socket isolation.
+    # TODO(XACA-0460): LCARS port is still template-keyed via TEAM_LCARS_PORT.
+    # Per-instance port allocation is out of scope for XACA-0460; will be a follow-up.
     _TEAM_WORKING_DIR_RESOLVED="$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_BASE_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)"
-    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
         -e "s|{{TEAM_SHIP}}|$TEAM_SHIP|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-        -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+        -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
         -e "s|{{TEAM_WORKING_DIR}}|${_TEAM_WORKING_DIR_RESOLVED}|g" \
         -e "s|{{TEAM_REQUIRES_CLIENT}}|${REQUIRES_CLIENT}|g" \
@@ -549,15 +691,16 @@ EOF
 fi
 
 CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
-CONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
+CONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
 
 if [[ -f "$CONNECT_TEMPLATE" ]]; then
     # Step 1: single-line substitutions via sed
-    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+    # {{TEAM_ID}} → INSTANCE_ID; {{TEAM_TMUX_SOCKET}} → INSTANCE_ID (per-instance socket)
+    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-        -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+        -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
@@ -582,7 +725,7 @@ with open(dst, 'w') as f:
 PYEOF
     rm -f "${CONNECT_SCRIPT}.tmp"
     chmod +x "$CONNECT_SCRIPT"
-    echo "  ✓ ${TEAM_ID}-connect.sh"
+    echo "  ✓ ${INSTANCE_ID}-connect.sh"
 else
     echo "  ⚠️  Template not found: team-connect.sh.template (skipping connect script)"
 fi
@@ -592,24 +735,24 @@ fi
 # profile URL back to localhost. Simple single-pass sed substitution —
 # no per-agent windows config needed.
 DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
-DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${TEAM_ID}-disconnect.sh"
+DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
 
 if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
-    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
     chmod +x "$DISCONNECT_SCRIPT"
-    echo "  ✓ ${TEAM_ID}-disconnect.sh"
+    echo "  ✓ ${INSTANCE_ID}-disconnect.sh"
 else
     echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping disconnect script)"
 fi
 
 if [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
-    sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
-        -e "s|{{TEAM_TMUX_SOCKET}}|$TEAM_TMUX_SOCKET|g" \
+        -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
         -e "s|{{TEAM_WORKING_DIR}}|${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
@@ -621,7 +764,7 @@ else
 #!/bin/zsh
 # $TEAM_NAME Shutdown Script
 echo "Shutting down $TEAM_NAME..."
-tmux -L $TEAM_TMUX_SOCKET kill-server 2>/dev/null || true
+tmux -L $INSTANCE_ID kill-server 2>/dev/null || true
 echo "✓ $TEAM_NAME shut down"
 EOF
     chmod +x "$SHUTDOWN_SCRIPT"
@@ -637,7 +780,7 @@ echo ""
 echo "🎨 Generating team banner script..."
 
 BANNER_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-banner.sh.template"
-BANNER_SCRIPT="$TEAM_DIR/scripts/${TEAM_ID}-banner.sh"
+BANNER_SCRIPT="$TEAM_DIR/scripts/${INSTANCE_ID}-banner.sh"
 
 if [[ -f "$BANNER_TEMPLATE" ]]; then
     # Convert TEAM_COLOR hex (#RRGGBB) to a best-effort xterm-256 color code.
@@ -895,9 +1038,9 @@ BANNER_COLORS_EOF
 
     # Generate banner script — Python handles multi-line substitution cleanly
     # (awk -v breaks on $-signs and newlines in palette/theme strings)
-    TEAM_BANNER_SCRIPT_NAME="${TEAM_ID}-banner.sh"
+    TEAM_BANNER_SCRIPT_NAME="${INSTANCE_ID}-banner.sh"
     python3 - "$BANNER_TEMPLATE" "$BANNER_SCRIPT" "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE" \
-              "$TEAM_ID" "$TEAM_NAME" "${TEAM_SHIP:-${TEAM_THEME}}" "$TEAM_BANNER_SCRIPT_NAME" <<'BANNER_SUB_EOF'
+              "$INSTANCE_ID" "$TEAM_NAME" "${TEAM_SHIP:-${TEAM_THEME}}" "$TEAM_BANNER_SCRIPT_NAME" <<'BANNER_SUB_EOF'
 import sys
 template_path, output_path = sys.argv[1], sys.argv[2]
 palette_path, theme_path = sys.argv[3], sys.argv[4]
@@ -922,7 +1065,7 @@ with open(output_path, "w") as f:
 BANNER_SUB_EOF
     rm -f "$BANNER_PALETTE_FILE" "$BANNER_THEME_FILE"
     chmod +x "$BANNER_SCRIPT"
-    echo "  ✓ ${TEAM_ID}-banner.sh (team-specific color palette)"
+    echo "  ✓ ${INSTANCE_ID}-banner.sh (team-specific color palette)"
     echo "    Path: $BANNER_SCRIPT"
 else
     echo "  ⚠️  Banner template not found: $BANNER_TEMPLATE (skipping)"
@@ -1000,7 +1143,8 @@ else
 fi
 mkdir -p "$KANBAN_DIR"
 
-TEAM_BOARD="$KANBAN_DIR/${TEAM_ID}-board.json"
+# Board filename uses INSTANCE_ID (not template id) — contract §6, invariant 8.
+TEAM_BOARD="$KANBAN_DIR/${INSTANCE_ID}-board.json"
 
 # XACA-0212: skip stub creation when a profile-scoped canonical board already exists
 # Scan one level up from $KANBAN_DIR (the team root) for any profile-scoped board files.
@@ -1015,23 +1159,49 @@ if (( ${#CANONICAL_MATCHES[@]} > 0 )); then
     for canonical_path in "${CANONICAL_MATCHES[@]}"; do
         echo "      Canonical: $canonical_path"
     done
-elif [[ ! -f "$TEAM_BOARD" ]]; then
-    # Create initial empty board structure
-    cat > "$TEAM_BOARD" <<EOF
-{
-  "team": "$TEAM_ID",
-  "teamName": "$TEAM_NAME",
-  "version": "1.3.0",
-  "items": {},
-  "metadata": {
-    "created": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
-    "lastModified": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  }
-}
-EOF
-    echo "  ✓ Created kanban board: ${TEAM_ID}-board.json"
-else
+elif [[ -f "$TEAM_BOARD" ]]; then
     echo "  ✓ Kanban board already exists"
+else
+    # Build board JSON from registry.json branding (XACA-0460-011).
+    # REGISTRY_NAME_RAW / REGISTRY_DESC / REGISTRY_COLOR / REGISTRY_ICON were
+    # loaded above when we validated the template entry.
+    _BOARD_CREATED="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+    _BOARD_SERIES="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]' | cut -c1-3)"
+    jq -n \
+        --arg team        "$INSTANCE_ID" \
+        --arg teamName    "$REGISTRY_NAME_RAW" \
+        --arg subtitle    "$REGISTRY_DESC" \
+        --arg series      "X${_BOARD_SERIES}" \
+        --arg organization "$REGISTRY_NAME_RAW" \
+        --arg orgColor    "$REGISTRY_COLOR" \
+        --arg icon        "$REGISTRY_ICON" \
+        --arg template    "$TEAM_ID" \
+        --arg instance    "$INSTANCE_ID" \
+        --arg kanbanDir   "$KANBAN_DIR" \
+        --arg created     "$_BOARD_CREATED" \
+        '{
+          "team":         $team,
+          "teamName":     $teamName,
+          "subtitle":     $subtitle,
+          "series":       $series,
+          "organization": $organization,
+          "orgColor":     $orgColor,
+          "icon":         $icon,
+          "template":     $template,
+          "instance":     $instance,
+          "kanbanDir":    $kanbanDir,
+          "lastUpdated":  $created,
+          "nextId":       1,
+          "nextEpicId":   1,
+          "nextReleaseId":1,
+          "fleetMonitorUrl": "",
+          "terminals":    {},
+          "activeWindows":[],
+          "backlog":      [],
+          "epics":        [],
+          "releases":     []
+        }' > "$TEAM_BOARD"
+    echo "  ✓ Created kanban board: ${INSTANCE_ID}-board.json (branding: $REGISTRY_NAME_RAW)"
 fi
 
 echo ""
@@ -2079,11 +2249,12 @@ echo ""
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  ✅ Team Installation Complete: $TEAM_NAME"
+echo "  Template: $TEAM_ID  |  Instance: $INSTANCE_ID"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "Team directory: $TEAM_DIR"
 echo "Startup script: $AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
-echo "Connect script: $AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
+echo "Connect script: $AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
 echo "Shutdown script: $AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 echo "Kanban board: $TEAM_BOARD"
 echo ""

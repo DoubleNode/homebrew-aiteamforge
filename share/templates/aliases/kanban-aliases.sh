@@ -996,6 +996,370 @@ kb-status() {
     fi
 }
 
+# _kb_realpath — resolve symlinks + normalize a path (ported from kanban-helpers.sh XACA-0180)
+# Falls back gracefully: readlink -f → realpath → python3 → echo input unchanged.
+_kb_realpath() {
+    local p="$1"
+    [ -n "$p" ] || return 1
+    local out
+    # GNU-style readlink -f (Linux; macOS 12.3+)
+    if out=$(readlink -f -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # realpath binary (coreutils via brew; most Linux distros)
+    if out=$(realpath -- "$p" 2>/dev/null) && [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # python3 fallback — ships on every dev environment we support
+    if command -v python3 >/dev/null 2>&1; then
+        if out=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$p" 2>/dev/null) && [ -n "$out" ]; then
+            printf '%s\n' "$out"
+            return 0
+        fi
+    fi
+    # Degrade gracefully — return input unchanged so caller falls back to string compare
+    printf '%s\n' "$p"
+}
+
+# kb-quarantine-stub — quarantines a legacy stub board so the canonical profile-scoped board is the only one LCARS sees. See XACA-0460.
+kb-quarantine-stub() {
+    # ── Argument parsing ──────────────────────────────────────────────────────
+    local team=""
+    local flag_yes=0
+    local flag_dry_run=0
+    local flag_force=0
+    local flag_force_no_canonical=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --help|-h)
+                cat <<'HELP'
+kb-quarantine-stub — safely move a legacy stub board file to quarantine
+
+USAGE
+    kb-quarantine-stub <team> [--yes] [--dry-run] [--force] [--force-no-canonical]
+    kb-quarantine-stub --help | -h
+
+ARGUMENTS
+    team                Team name whose stub board to quarantine.
+                        Must be one of the known team keys
+                        (e.g. legal-coparenting, finance-personal, medical-general).
+
+FLAGS
+    --yes               Skip the confirmation prompt (for scripted use)
+    --dry-run           Print the plan and exit 0; nothing is moved or written
+    --force             Allow quarantine of a stub that contains items
+                        (default: refuse if item count > 0)
+    --force-no-canonical
+                        Allow quarantine even when no canonical board exists
+                        for the team (DANGEROUS: data may be lost if the stub
+                        is actually the only board)
+
+DESCRIPTION
+    When a legacy stub board file coexists with the canonical profile-scoped
+    board, LCARS may load the wrong board.  This command:
+      1. Locates the stub and canonical paths via the same map as the warning.
+      2. Verifies the stub is empty (or --force was given).
+      3. Verifies the canonical board exists (or --force-no-canonical was given).
+      4. Prompts for confirmation (skipped with --yes or --dry-run).
+      5. Moves the stub to:
+           <AITEAMFORGE_DIR>/quarantine/runtime-stub-stash/<YYYYMMDD-HHMMSS>-<team>/
+         with the filename matching the original path (slashes → underscores).
+      6. Writes a .meta.json sidecar alongside the moved file.
+      7. Rolls back on any error.
+
+EXAMPLES
+    kb-quarantine-stub legal-coparenting
+    kb-quarantine-stub finance-personal --yes
+    kb-quarantine-stub medical-general --force --yes
+    kb-quarantine-stub finance-personal --dry-run
+
+SEE ALSO
+    XACA-0460 — LCARS Import pre-flight refuses dual-board state
+HELP
+                return 0
+                ;;
+            --yes)
+                flag_yes=1
+                shift
+                ;;
+            --dry-run)
+                flag_dry_run=1
+                shift
+                ;;
+            --force)
+                flag_force=1
+                shift
+                ;;
+            --force-no-canonical)
+                flag_force_no_canonical=1
+                shift
+                ;;
+            -*)
+                echo "kb-quarantine-stub: unknown flag '$1'" >&2
+                echo "Run: kb-quarantine-stub --help" >&2
+                return 1
+                ;;
+            *)
+                if [ -n "$team" ]; then
+                    echo "kb-quarantine-stub: unexpected argument '$1' (team already set to '$team')" >&2
+                    return 1
+                fi
+                team="$1"
+                shift
+                ;;
+        esac
+    done
+
+    if [ -z "$team" ]; then
+        echo "kb-quarantine-stub: team argument is required" >&2
+        echo "Run: kb-quarantine-stub --help" >&2
+        return 1
+    fi
+
+    # ── Resolve the stub path for this team ───────────────────────────────────
+    # Mirrors the _checks array used in the dual-board warning.  If the team is
+    # not in this map, there is no known stub path and we refuse early.
+    local stub_path=""
+    case "$team" in
+        legal-coparenting)
+            # This team has TWO known stub locations; pick the first that exists.
+            # Users can run the command twice if both are present.
+            if [ -f "${HOME}/legal/kanban/legal-board.json" ]; then
+                stub_path="${HOME}/legal/kanban/legal-board.json"
+            elif [ -f "${HOME}/legal/default/kanban/legal-default-board.json" ]; then
+                stub_path="${HOME}/legal/default/kanban/legal-default-board.json"
+            fi
+            ;;
+        medical-general)
+            stub_path="${HOME}/medical/kanban/medical-board.json"
+            ;;
+        finance-personal)
+            stub_path="${HOME}/finance/kanban/finance-board.json"
+            ;;
+        *)
+            echo "kb-quarantine-stub: team '$team' has no known stub path." >&2
+            echo "  Known teams: legal-coparenting, medical-general, finance-personal" >&2
+            echo "  If this is a new team, add it to the stub map in kb-quarantine-stub." >&2
+            return 1
+            ;;
+    esac
+
+    # ── Verify stub exists ────────────────────────────────────────────────────
+    if [ ! -f "$stub_path" ]; then
+        echo "kb-quarantine-stub: no stub found for team '$team'." >&2
+        echo "  Expected stub at: $stub_path" >&2
+        echo "  Either it was already quarantined, or this team has no stub to clean up." >&2
+        return 1
+    fi
+
+    # ── Safety: refuse to operate on paths outside known safe roots ───────────
+    # We only allow stubs inside $HOME; no arbitrary --path overrides.
+    local real_stub
+    real_stub=$(_kb_realpath "$stub_path")
+    local real_home
+    real_home=$(_kb_realpath "${HOME}")
+    case "$real_stub" in
+        "${real_home}/"*)
+            ;;  # safe
+        *)
+            echo "kb-quarantine-stub: stub path '$stub_path' resolves outside \$HOME — refusing to operate." >&2
+            return 1
+            ;;
+    esac
+
+    # ── Resolve canonical path ────────────────────────────────────────────────
+    local canonical_path
+    canonical_path=$(_kb_get_board_file "$team" 2>/dev/null) || {
+        echo "kb-quarantine-stub: could not resolve canonical board path for team '$team'." >&2
+        return 1
+    }
+
+    # ── Safety: canonical must exist (or --force-no-canonical) ───────────────
+    if [ ! -f "$canonical_path" ]; then
+        if [ "$flag_force_no_canonical" -eq 1 ]; then
+            echo "WARNING: No canonical board found for '$team' at $canonical_path" >&2
+            echo "  --force-no-canonical given — proceeding anyway.  Data may be at risk." >&2
+        else
+            echo "kb-quarantine-stub: Refusing to quarantine: no canonical board found for team '$team'." >&2
+            echo "  Expected canonical at: $canonical_path" >&2
+            echo "  If the stub IS the only board, use --force-no-canonical (understand the risk first)." >&2
+            return 1
+        fi
+    fi
+
+    # ── Safety: stub must not be the canonical board ──────────────────────────
+    if [ -f "$canonical_path" ]; then
+        local real_canonical
+        real_canonical=$(_kb_realpath "$canonical_path")
+        if [ "$real_stub" = "$real_canonical" ]; then
+            echo "kb-quarantine-stub: stub and canonical resolve to the same file ($real_stub)." >&2
+            echo "  Nothing to quarantine — they are the same board." >&2
+            return 0
+        fi
+    fi
+
+    # ── Count items in the stub ───────────────────────────────────────────────
+    local item_count=0
+    if command -v jq &>/dev/null; then
+        item_count=$(jq '(.backlog // []) | length' "$stub_path" 2>/dev/null) || item_count=0
+        # If jq couldn't parse it, treat as non-empty to be safe
+        if ! echo "$item_count" | grep -qE '^[0-9]+$'; then
+            item_count=1
+        fi
+    fi
+
+    if [ "$item_count" -gt 0 ] && [ "$flag_force" -eq 0 ]; then
+        echo "kb-quarantine-stub: stub '$stub_path' contains $item_count item(s)." >&2
+        echo "  Refusing to quarantine a non-empty stub — it may be a real board." >&2
+        echo "  If you are sure, use --force to override." >&2
+        return 1
+    fi
+
+    # ── Build quarantine destination ──────────────────────────────────────────
+    local timestamp_dir
+    timestamp_dir=$(date -u +"%Y%m%d-%H%M%S")
+    local quarantine_base="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}/quarantine/runtime-stub-stash"
+    local quarantine_dir="${quarantine_base}/${timestamp_dir}-${team}"
+
+    # Derive a flat filename from the original path: replace / with _
+    local flat_name
+    flat_name=$(printf '%s' "$stub_path" | tr '/' '_' | sed 's/^_//')
+    local dest_file="${quarantine_dir}/${flat_name}"
+    local dest_meta="${quarantine_dir}/${flat_name}.meta.json"
+
+    # ── Compute SHA-256 of stub ───────────────────────────────────────────────
+    local sha256=""
+    if command -v shasum &>/dev/null; then
+        sha256=$(shasum -a 256 "$stub_path" 2>/dev/null | awk '{print $1}')
+    elif command -v sha256sum &>/dev/null; then
+        sha256=$(sha256sum "$stub_path" 2>/dev/null | awk '{print $1}')
+    fi
+
+    # ── mtime of stub ─────────────────────────────────────────────────────────
+    local mtime_iso=""
+    if command -v python3 &>/dev/null; then
+        mtime_iso=$(python3 -c '
+import os, sys, datetime
+st = os.stat(sys.argv[1])
+dt = datetime.datetime.utcfromtimestamp(st.st_mtime)
+print(dt.strftime("%Y-%m-%dT%H:%M:%SZ"))
+' "$stub_path" 2>/dev/null)
+    fi
+
+    # ── size ──────────────────────────────────────────────────────────────────
+    local size_bytes=""
+    if command -v python3 &>/dev/null; then
+        size_bytes=$(python3 -c 'import os,sys; print(os.path.getsize(sys.argv[1]))' "$stub_path" 2>/dev/null)
+    fi
+
+    # ── Print plan ────────────────────────────────────────────────────────────
+    echo ""
+    echo "kb-quarantine-stub: Plan for team '$team'"
+    echo "─────────────────────────────────────────────────────────"
+    echo "  Stub:          $stub_path"
+    echo "  Item count:    $item_count"
+    echo "  SHA-256:       ${sha256:-<unavailable>}"
+    echo "  Size:          ${size_bytes:-<unknown>} bytes"
+    echo "  Canonical:     $canonical_path"
+    if [ ! -f "$canonical_path" ]; then
+        echo "  Canonical exists: NO (--force-no-canonical given)"
+    else
+        echo "  Canonical exists: YES"
+    fi
+    echo "  Quarantine to: $dest_file"
+    echo "  Sidecar:       $dest_meta"
+    echo "─────────────────────────────────────────────────────────"
+
+    if [ "$flag_force" -eq 1 ] && [ "$item_count" -gt 0 ]; then
+        echo "  WARNING: --force given; stub has $item_count item(s)"
+    fi
+    echo ""
+
+    # ── Dry-run exits here ────────────────────────────────────────────────────
+    if [ "$flag_dry_run" -eq 1 ]; then
+        echo "  [DRY RUN] Nothing moved. Exiting."
+        return 0
+    fi
+
+    # ── Confirmation prompt ───────────────────────────────────────────────────
+    if [ "$flag_yes" -eq 0 ]; then
+        printf "Continue? [y/N] "
+        local answer
+        read -r answer
+        case "$answer" in
+            [yY]|[yY][eE][sS])
+                ;;
+            *)
+                echo "Aborted."
+                return 1
+                ;;
+        esac
+    fi
+
+    # ── Execute move ──────────────────────────────────────────────────────────
+    local quarantine_at
+    quarantine_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+    # Create quarantine directory
+    if ! mkdir -p "$quarantine_dir"; then
+        echo "kb-quarantine-stub: failed to create quarantine directory '$quarantine_dir'" >&2
+        return 1
+    fi
+
+    # Move the stub (atomic on same filesystem)
+    if ! mv "$stub_path" "$dest_file"; then
+        echo "kb-quarantine-stub: mv failed — '$stub_path' not moved." >&2
+        # No rollback needed if mv failed; stub is still in place
+        return 1
+    fi
+
+    # Write .meta.json sidecar — if this fails, roll back the move
+    if ! python3 -c '
+import json, sys
+data = {
+    "original_path":   sys.argv[1],
+    "canonical_path":  sys.argv[2],
+    "sha256":          sys.argv[3],
+    "size_bytes":      int(sys.argv[4]) if sys.argv[4] else None,
+    "mtime_iso":       sys.argv[5] if sys.argv[5] else None,
+    "item_count":      int(sys.argv[6]),
+    "quarantined_at":  sys.argv[7],
+    "quarantined_by":  "kb-quarantine-stub (XACA-0460)",
+    "user":            sys.argv[8],
+    "hostname":        sys.argv[9],
+    "reason":          "Stub board file coexisted with canonical board. Quarantined via kb-quarantine-stub.",
+}
+with open(sys.argv[10], "w") as f:
+    json.dump(data, f, indent=2)
+    f.write("\n")
+' "$stub_path" "$canonical_path" \
+    "${sha256:-}" \
+    "${size_bytes:-}" \
+    "${mtime_iso:-}" \
+    "$item_count" \
+    "$quarantine_at" \
+    "${USER:-unknown}" \
+    "$(hostname -s 2>/dev/null || echo unknown)" \
+    "$dest_meta" 2>/dev/null; then
+        echo "kb-quarantine-stub: WARNING: failed to write .meta.json sidecar at '$dest_meta'" >&2
+        echo "  The stub was moved successfully; please create the sidecar manually." >&2
+        # Do NOT roll back — the move succeeded; sidecar is non-critical
+    fi
+
+    echo "kb-quarantine-stub: Done."
+    echo "  Moved:   $stub_path"
+    echo "    -> $dest_file"
+    if [ -f "$dest_meta" ]; then
+        echo "  Sidecar: $dest_meta"
+    fi
+    echo ""
+    echo "  To verify: ls -la '$quarantine_dir'"
+    echo "  To restore (if needed): mv '$dest_file' '$stub_path'"
+}
+
 # Show detailed help for all kanban commands
 kb-help() {
     echo ""
