@@ -1,3 +1,10 @@
+//
+//  lcars-analytics-fleet.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * LCARS Analytics - Fleet & Session Charts
  * Renders session activity into the Fleet Monitor ANALYTICS section.

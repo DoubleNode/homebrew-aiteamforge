@@ -1,3 +1,10 @@
+//
+//  app.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * Starfleet Operations Dashboard - Client Application
  * Fetches and displays fleet status data in LCARS interface

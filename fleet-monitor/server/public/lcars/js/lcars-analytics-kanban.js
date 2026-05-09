@@ -1,3 +1,10 @@
+//
+//  lcars-analytics-kanban.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-analytics-kanban.js
  * LCARS Analytics - Kanban Data Charts

@@ -1,3 +1,10 @@
+//
+//  lcars-analytics-pages.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * LCARS Analytics Pages Module
  * Sub-screen navigation system for the analytics section.

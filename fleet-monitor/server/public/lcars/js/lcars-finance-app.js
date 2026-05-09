@@ -1,3 +1,10 @@
+//
+//  lcars-finance-app.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * LCARS Finance Dashboard Application
  * Filtered view showing only Finance division
