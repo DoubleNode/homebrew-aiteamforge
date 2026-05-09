@@ -39,7 +39,102 @@ _cc_window_suffix() {
     echo "-w${idx}"
 }
 
-# Save the most recent Claude session ID for the current tmux window.
+# Derive a human-readable session name mirroring what the agent panel's
+# MISSION section displays: kanban task → "ITEM-ID: item title" → first
+# user message from the transcript. Truncated to 40 chars. Empty if none
+# of the sources yield a usable value.
+_cc_derive_session_name() {
+    local transcript="$1"
+    local name=""
+
+    # Sources 1 & 2: kanban board (same lookup logic as get_kanban_info
+    # in scripts/agent-panel-display.sh, trimmed to the fields we need).
+    if typeset -f _kb_detect_context &>/dev/null; then
+        local context team terminal window_name board_file window_id info
+        context=$(_kb_detect_context 2>/dev/null)
+        if [[ -n "$context" && "$context" != "ERROR:ERROR:0:unknown" ]]; then
+            team="${context%%:*}"
+            local rest="${context#*:}"
+            terminal="${rest%%:*}"
+            rest="${rest#*:}"
+            window_name="${rest#*:}"
+            board_file=$(_kb_get_board_file "$team" 2>/dev/null)
+            window_id=$(_kb_get_window_id "$terminal" "$window_name" 2>/dev/null)
+
+            if [[ -f "$board_file" && -n "$window_id" ]]; then
+                info=$(_kb_jq_read "$board_file" '
+                    (.activeWindows // []) as $wins |
+                    (.backlog // []) as $bl |
+                    ($wins | map(select(.id == $wid)) | first // null) as $aw |
+                    if $aw == null then ""
+                    else
+                        ($aw.task // "") as $task |
+                        (if $aw.workingOnId then
+                            ($bl | map(select(.id == $aw.workingOnId)) | first // null)
+                         else
+                            ($bl | map(
+                                if .worktreeWindowId == $wid then .
+                                elif ((.subitems // []) | map(select(.worktreeWindowId == $wid)) | length) > 0 then
+                                    (.subitems | map(select(.worktreeWindowId == $wid)) | first)
+                                else null end
+                            ) | map(select(. != null)) | first // null)
+                         end) as $item |
+                        "\($task)\t\($item.id // "")\t\($item.title // "")"
+                    end
+                ' --arg wid "$window_id" -r 2>/dev/null)
+
+                local task item_id item_title
+                IFS=$'\t' read -r task item_id item_title <<< "$info"
+                if [[ -n "$task" ]]; then
+                    name="$task"
+                elif [[ -n "$item_id" ]]; then
+                    name="${item_id}: ${item_title}"
+                fi
+            fi
+        fi
+    fi
+
+    # Source 3: first user message from transcript (only when kanban is silent).
+    if [[ -z "$name" && -f "$transcript" ]]; then
+        name=$(python3 - "$transcript" <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1]) as fp:
+        for line in fp:
+            try: p = json.loads(line)
+            except Exception: continue
+            if p.get('type') != 'user' or p.get('isSidechain'):
+                continue
+            c = (p.get('message') or {}).get('content')
+            text = None
+            if isinstance(c, str):
+                text = c
+            elif isinstance(c, list):
+                for part in c:
+                    if isinstance(part, dict) and part.get('type') == 'text':
+                        text = part.get('text'); break
+            if text:
+                print(' '.join(text.split()))
+                break
+except Exception:
+    pass
+PY
+        )
+    fi
+
+    # Collapse whitespace, strip pipes (record separator), cap at 40 chars.
+    name="${name//$'\n'/ }"
+    name="${name//|/ }"
+    if (( ${#name} > 40 )); then
+        name="${name:0:37}..."
+    fi
+    printf '%s' "$name"
+}
+
+# Save the most recent Claude session ID for the current tmux window, the
+# display name derived from the MISSION panel state, and the current project
+# dir so ccc can cd back to it on resume (XACA-0177). Sidecar file format is
+# "<uuid>|<name>|<project_dir>" (pipe-delimited; name and dir may be empty).
 # Skipped outside tmux — no per-window scope to attach to.
 _cc_save_session() {
     [[ -z "$SESSION_CODE" ]] && return 0
@@ -62,10 +157,31 @@ _cc_save_session() {
     session_id=$(basename "$latest_file" .jsonl)
 
     # Validate UUID format
-    if [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
-        mkdir -p "$HOME/.claude/terminal-sessions"
-        echo "$session_id" > "$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
-    fi
+    [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 0
+
+    local session_name
+    session_name=$(_cc_derive_session_name "$latest_file")
+
+    mkdir -p "$HOME/.claude/terminal-sessions"
+    printf '%s|%s|%s\n' "$session_id" "$session_name" "$PWD" \
+        > "$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
+}
+
+# Read the saved-session sidecar for the current tmux window and echo the
+# display-name portion (empty if unset, missing, or legacy uuid-only file).
+# Used by team banner scripts to render the "Saved Session:" line.
+_cc_saved_session_label() {
+    [[ -z "$SESSION_CODE" ]] && return 0
+
+    local window_suffix
+    window_suffix=$(_cc_window_suffix) || return 0
+
+    local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
+    [[ -f "$session_file" ]] || return 0
+
+    local session_id saved_name saved_dir
+    IFS='|' read -r session_id saved_name saved_dir < "$session_file"
+    printf '%s' "$saved_name"
 }
 
 # Helper: launch Claude Code with a system prompt file
@@ -132,9 +248,21 @@ ccc() {
     local session_file="$HOME/.claude/terminal-sessions/${SESSION_CODE}${window_suffix}"
 
     if [[ -n "$SESSION_CODE" && -n "$window_suffix" && -f "$session_file" ]]; then
-        local session_id
-        session_id=$(<"$session_file")
+        # Sidecar is "<uuid>|<name>|<project_dir>" — legacy 2-field and
+        # 1-field (uuid only) files parse with empty trailing vars and still
+        # work with --resume.
+        local session_id saved_name saved_dir
+        IFS='|' read -r session_id saved_name saved_dir < "$session_file"
         if [[ -n "$session_id" ]]; then
+            # XACA-0177: restore project dir so claude --resume sees the
+            # same cwd that was active when the session was saved.
+            if [[ -n "$saved_dir" && "$saved_dir" != "$PWD" ]]; then
+                if [[ -d "$saved_dir" ]]; then
+                    cd "$saved_dir" || echo "ccc: warning — cd '$saved_dir' failed, resuming from $PWD" >&2
+                else
+                    echo "ccc: warning — saved project dir '$saved_dir' is gone, resuming from $PWD" >&2
+                fi
+            fi
             claude --permission-mode bypassPermissions --resume "$session_id"
             _cc_save_session
             if command -v kb-clear &> /dev/null; then
