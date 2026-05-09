@@ -149,6 +149,18 @@ jobs:
         run: |
           bash homebrew-tap/scripts/check-no-setup-drift.sh
 
+  tap-hygiene-guard:
+    name: Tap-Hygiene Guard (XACA-0361)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run tap-hygiene guard
+        run: |
+          bash scripts/check-tap-hygiene.sh
+
   test-scripts:
     name: Test Core Scripts
     runs-on: macos-latest

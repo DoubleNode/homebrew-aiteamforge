@@ -17,6 +17,20 @@ brew tap DoubleNode/aiteamforge
 cd $(brew --repository DoubleNode/aiteamforge)
 ```
 
+### Enable Local Pre-Commit Hooks (Recommended)
+
+This repository ships optional pre-commit hooks in `.githooks/`. Enable them
+once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+The hooks catch tap-hygiene issues (orphan formulas, version drift, stale
+rebrand filenames) and setup-wizard drift before you push. The same checks run
+authoritatively in CI, so enabling the hooks locally is optional but saves a
+round-trip push-and-fix cycle.
+
 ## Formula Development
 
 ### Testing Changes Locally

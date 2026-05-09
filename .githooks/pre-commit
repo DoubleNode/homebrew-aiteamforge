@@ -1,10 +1,16 @@
 #!/bin/bash
-# Pre-commit hook: AITeamForge setup-wizard drift guard (XACA-0173).
+# Pre-commit hook: AITeamForge tap hygiene guards.
 #
 # Enable on your clone with:
 #   git config core.hooksPath .githooks
 #
-# Only runs the guard when the commit actually touches files the guard cares
+# Guards:
+#   1. Setup-wizard drift guard (XACA-0173) — runs when bin/aiteamforge-setup.sh
+#      or related paths are staged.
+#   2. Tap-hygiene guard (XACA-0361) — runs when Formula/, VERSION, fleet-monitor/,
+#      or Formula/aiteamforge.rb are staged.
+#
+# Each guard only runs when the commit actually touches files the guard cares
 # about; other commits pass through instantly.
 
 set -eo pipefail
@@ -20,26 +26,70 @@ if [ -f "${REPO_ROOT}/scripts/check-no-setup-drift.sh" ]; then
 elif [ -f "${REPO_ROOT}/homebrew-tap/scripts/check-no-setup-drift.sh" ]; then
   TAP_PREFIX="homebrew-tap/"
 else
-  # Guard script not present — nothing to do.
+  # Guard scripts not present — nothing to do.
   exit 0
 fi
 
-trigger_paths=(
+staged="$(git diff --cached --name-only --diff-filter=ACMRTD)"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Guard 1: Setup-wizard drift guard (XACA-0173)
+# ─────────────────────────────────────────────────────────────────────────────
+setup_trigger_paths=(
   "${TAP_PREFIX}bin/aiteamforge-setup.sh"
   "${TAP_PREFIX}libexec/aiteamforge-setup.sh"
   "${TAP_PREFIX}tests/test-setup-wizard.sh"
   "${TAP_PREFIX}scripts/check-no-setup-drift.sh"
 )
 
-staged="$(git diff --cached --name-only --diff-filter=ACMRTD)"
-relevant=false
-for p in "${trigger_paths[@]}"; do
+setup_relevant=false
+for p in "${setup_trigger_paths[@]}"; do
   if echo "$staged" | grep -Fxq "$p"; then
-    relevant=true
+    setup_relevant=true
     break
   fi
 done
 
-[ "$relevant" = false ] && exit 0
+if [ "$setup_relevant" = true ]; then
+  "${REPO_ROOT}/${TAP_PREFIX}scripts/check-no-setup-drift.sh" || exit 1
+fi
 
-exec "${REPO_ROOT}/${TAP_PREFIX}scripts/check-no-setup-drift.sh"
+# ─────────────────────────────────────────────────────────────────────────────
+# Guard 2: Tap-hygiene guard (XACA-0361)
+# Triggers on any staged file under Formula/, VERSION, fleet-monitor/, or
+# the hygiene check script itself.
+# ─────────────────────────────────────────────────────────────────────────────
+hygiene_relevant=false
+
+# Exact-file triggers
+hygiene_exact_triggers=(
+  "${TAP_PREFIX}VERSION"
+  "${TAP_PREFIX}Formula/aiteamforge.rb"
+  "${TAP_PREFIX}scripts/check-tap-hygiene.sh"
+)
+for p in "${hygiene_exact_triggers[@]}"; do
+  if echo "$staged" | grep -Fxq "$p"; then
+    hygiene_relevant=true
+    break
+  fi
+done
+
+# Directory-prefix triggers (any file under these paths)
+if [ "$hygiene_relevant" = false ]; then
+  hygiene_prefix_triggers=(
+    "${TAP_PREFIX}Formula/"
+    "${TAP_PREFIX}fleet-monitor/"
+  )
+  for prefix in "${hygiene_prefix_triggers[@]}"; do
+    if echo "$staged" | grep -q "^${prefix}"; then
+      hygiene_relevant=true
+      break
+    fi
+  done
+fi
+
+if [ "$hygiene_relevant" = true ]; then
+  "${REPO_ROOT}/${TAP_PREFIX}scripts/check-tap-hygiene.sh" || exit 1
+fi
+
+exit 0
