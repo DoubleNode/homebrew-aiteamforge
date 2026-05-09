@@ -1,3 +1,10 @@
+//
+//  lcars-kiosk-division-health.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-kiosk-division-health.js
  * LCARS Kiosk Page — Division Health Summary

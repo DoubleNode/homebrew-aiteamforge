@@ -169,26 +169,94 @@ def _hardcoded_team_kanban_dirs() -> dict:
     }
 
 
+# Templates that REQUIRE one or more parameters (project, client+project) per
+# the team-id contract (docs/architecture/team-id-contract.md §3). A bare
+# template id like "freelance" or "medical" appearing as a TEAM_KANBAN_DIRS key
+# is a contract violation — those keys must be instance ids like
+# "finance-personal" or "freelance-doublenode-starwords".
+_PARAMETERIZED_TEMPLATES = frozenset({"finance", "legal", "medical", "freelance"})
+
+
+def _filter_contract_violating_teams(team_dirs: dict) -> dict:
+    """Drop bare-template ids for parameterized templates with a loud warning.
+
+    Per XACA-0460-007 contract: TEAM_KANBAN_DIRS keys are instance ids.
+    A key like "freelance" (template == instance) is invalid because
+    freelance requires client+project. Filtering here protects 009's
+    LCARS_TEAM validation from accepting a bogus bare-template install.
+    """
+    filtered = {}
+    for team, kanban_dir in team_dirs.items():
+        first_segment = team.split("-", 1)[0]
+        if first_segment in _PARAMETERIZED_TEMPLATES and team == first_segment:
+            print(
+                f"[LCARS] WARNING: ignoring contract-violating team key "
+                f"'{team}' in team-paths.json — '{team}' is a parameterized "
+                f"template id, not an instance id. Remove it from "
+                f"~/.aiteamforge/team-paths.json. See "
+                f"docs/architecture/team-id-contract.md.",
+                file=sys.stderr,
+            )
+            continue
+        filtered[team] = kanban_dir
+    return filtered
+
+
+# Canonical-team guard constants (XACA-0457).
+# list_teams() must include ALL of _CANONICAL_REQUIRED and AT LEAST ONE of
+# _CANONICAL_AT_LEAST_ONE before the result is trusted.  A partial corruption
+# (e.g. team-paths.json collapsed to academy-only on 2026-05-07) passes the
+# legacy `if teams:` truthiness check but silently breaks every non-academy
+# team lookup for the server's lifetime.
+_CANONICAL_REQUIRED = {"academy"}
+_CANONICAL_AT_LEAST_ONE = {"ios", "android", "firebase", "dns"}
+
+
 def _build_team_kanban_dirs() -> dict:
     # Empty result from list_teams() is treated as a load failure and triggers the
     # fallback — otherwise a server started during a config write-race caches {}
     # for its lifetime and every team lookup 404s until manual restart. (Bug found
     # 2026-04-22: Android LCARS served empty board after config briefly had no teams.)
+    # Partial corruption (e.g. only academy survives a write-race) is also caught:
+    # the canonical-team check below requires academy AND at least one of
+    # ios/android/firebase/dns before the dynamic list is trusted. (XACA-0457)
     if _AITEAMFORGE_PATHS_AVAILABLE:
         try:
             teams = list_teams()
             if teams:
-                return {team: get_team_kanban_dir(team) for team in teams}
-            print(
-                "[LCARS] WARNING: aiteamforge_paths.list_teams() returned empty — using hardcoded team dirs",
-                file=sys.stderr,
-            )
+                teams_set = set(teams)
+                missing_required = _CANONICAL_REQUIRED - teams_set
+                has_at_least_one = bool(teams_set & _CANONICAL_AT_LEAST_ONE)
+                if missing_required or not has_at_least_one:
+                    # Build a precise diagnostic: distinguish missing-required
+                    # from missing-canonical-set so the warning message tells
+                    # the operator exactly which constraint failed. (XACA-0457-011)
+                    parts = []
+                    if missing_required:
+                        parts.append(f"missing required: {sorted(missing_required)}")
+                    if not has_at_least_one:
+                        parts.append(
+                            f"none of {sorted(_CANONICAL_AT_LEAST_ONE)} present"
+                        )
+                    print(
+                        f"[LCARS] WARNING: list_teams() returned partial config "
+                        f"({'; '.join(parts)}) — using hardcoded team dirs",
+                        file=sys.stderr,
+                    )
+                else:
+                    raw = {team: get_team_kanban_dir(team) for team in teams}
+                    return _filter_contract_violating_teams(raw)
+            else:
+                print(
+                    "[LCARS] WARNING: aiteamforge_paths.list_teams() returned empty — using hardcoded team dirs",
+                    file=sys.stderr,
+                )
         except Exception as e:
             print(
                 f"[LCARS] WARNING: aiteamforge_paths.list_teams() raised {e!r} — using hardcoded team dirs",
                 file=sys.stderr,
             )
-    return _hardcoded_team_kanban_dirs()
+    return _filter_contract_violating_teams(_hardcoded_team_kanban_dirs())
 
 TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 
@@ -379,6 +447,48 @@ def _base_team_knowledge_dir(base_team):
     if base_team not in MULTI_PROJECT_BASE_TEAMS:
         return None
     return Path.home() / "dev-team" / "kanban" / base_team / "knowledge"
+
+
+# XACA-0453: Separators recognised when stripping a label prefix from a name.
+_LABEL_SEPARATORS = (' - ', ': ', ' — ')  # hyphen, colon, em-dash
+
+
+def _strip_label_prefix(name: str, label: str) -> str:
+    """Strip a leading label + separator from *name* if present.
+
+    LCARS renders release cards as ``{shortTitle} - {name}``.  When a user
+    accidentally includes the shortTitle at the start of the name field the
+    card reads ``REL - REL - Sprint 5``.  This helper removes the duplicate
+    prefix so the stored name is just ``Sprint 5``.
+
+    Args:
+        name:  The release ``name`` field value.
+        label: The release ``shortTitle`` field value (the label prefix).
+
+    Returns:
+        *name* with the leading ``label + separator`` removed, or *name*
+        unchanged when no recognised prefix is found or the result would be
+        empty.
+
+    Separators checked (in order): ``' - '``, ``': '``, ``' — '`` (em-dash).
+    Comparison is case-sensitive; ``label`` is matched literally.
+    ``None`` / empty *label* is treated as no-op.
+    """
+    if not label or not label.strip() or not name:
+        return name
+
+    for sep in _LABEL_SEPARATORS:
+        prefix = label + sep
+        if name.startswith(prefix):
+            stripped = name[len(prefix):]
+            # Never return an empty string — preserve the original when the
+            # separator is the last thing in the name (e.g. "REL - ").
+            if stripped:
+                return stripped
+            # Prefix matched but nothing follows — return name unchanged.
+            return name
+
+    return name
 
 
 def generate_export(job_id, team_id):
@@ -1193,7 +1303,7 @@ BACKUP_STATUS_FILE = BACKUP_DIR / "backup-status.json"
 UI_DIR = Path(__file__).parent
 CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
-LCARS_TEAM = os.environ.get("LCARS_TEAM", "freelance")
+LCARS_TEAM = os.environ.get("LCARS_TEAM", "").strip()
 def _resolve_server_hostname() -> str:
     """Prefer the Tailscale MagicDNS short name — it is stable,
     user-controlled, and matches the host argument users pass to
@@ -3814,6 +3924,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 post_data.get('shortTitle') or name
             )
 
+            # XACA-0453: Strip duplicate label prefix from name before persisting.
+            # e.g. POST {name: "REL - Sprint 5", shortTitle: "REL"} → name stored as "Sprint 5".
+            short_title = post_data.get('shortTitle')
+            if short_title:
+                name = _strip_label_prefix(name, short_title)
+
             # Build platforms configuration
             platforms_input = post_data.get('platforms', ['ios', 'android'])
             if isinstance(platforms_input, str):
@@ -4193,6 +4309,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # XACA-0209 round 3: also strip individual values so new data is clean.
             if 'tags' in post_data:
                 release['tags'] = [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()]
+
+            # XACA-0453: Strip duplicate label prefix from name on update.
+            # Only runs when the patch includes a name.  The effective label is
+            # release['shortTitle'] at this point (already merged above from
+            # post_data or preserved from the stored record).  We write the
+            # normalized value back to both release['name'] and post_data['name']
+            # so that the _update_items_release_name call below stays consistent.
+            if 'name' in post_data:
+                effective_label = release.get('shortTitle')
+                normalized_name = _strip_label_prefix(post_data['name'], effective_label)
+                release['name'] = normalized_name
+                post_data['name'] = normalized_name
 
             # When shortTitle changes, keep platform versions in lockstep with
             # the release version label (e.g. shortTitle "v2.10.0" → every
@@ -7497,7 +7625,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             if not cr_file.is_file():
                 self._send_json_response({
-                    "error": f"Local CR document not yet created — run `kb-cr draft {item_id}` first.",
+                    "error": f"Local CR document not yet created. Run `kb-cr draft {item_id}` (creates a draft CR with the doc) OR `kb-cr add-item <CR-ID> {item_id}` (links an existing CR; doc materializes on first item).",
                     "itemId": item_id
                 }, status=404)
                 return
@@ -9270,14 +9398,111 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, f"Error reading image: {e}")
 
+    # XACA-0460-002: registry.json path — resolved once at class definition time.
+    # server.py lives at <repo>/lcars-ui/server.py; registry.json is at
+    # <repo>/homebrew-tap/share/teams/registry.json.
+    _REGISTRY_PATH: Path = (
+        Path(__file__).parent.parent / "homebrew-tap" / "share" / "teams" / "registry.json"
+    )
+    # Branding fields expected at the board JSON top level.
+    _BRANDING_FIELDS = ('organization', 'teamName', 'subtitle')
+    # XACA-0460-014: parsed-registry cache. Populated lazily on first access by
+    # _load_registry_branding so repeated requests don't re-parse the JSON.
+    # Sentinel _REGISTRY_NOT_LOADED distinguishes "not yet loaded" from "loaded
+    # but missing/unreadable" (which caches None to avoid retry storms).
+    _REGISTRY_NOT_LOADED = object()
+    _REGISTRY_CACHE: "dict | None" = _REGISTRY_NOT_LOADED  # type: ignore[assignment]
+
+    @classmethod
+    def _load_registry_branding(cls, template_id: str) -> "dict | None":
+        """XACA-0460-002: Load branding fields for *template_id* from registry.json.
+
+        Returns a dict with keys matching ``_BRANDING_FIELDS`` when the template
+        is found, or None when the registry is missing or the template is unknown.
+
+        Only ``name`` and ``color`` are surfaced from the registry entry — these
+        map to ``teamName`` and ``orgColor``.  ``organization`` and ``subtitle``
+        are derived from the registry ``name`` as sensible defaults.
+
+        XACA-0460-014: parsed registry is cached at the class level after first
+        successful load. A missing/unreadable registry caches None so we don't
+        re-attempt I/O on every request once the absence is established.
+        """
+        if cls._REGISTRY_CACHE is cls._REGISTRY_NOT_LOADED:
+            if not cls._REGISTRY_PATH.exists():
+                cls._REGISTRY_CACHE = None
+            else:
+                try:
+                    with open(cls._REGISTRY_PATH, 'r') as f:
+                        cls._REGISTRY_CACHE = json.load(f)
+                except (OSError, ValueError):
+                    cls._REGISTRY_CACHE = None
+        registry = cls._REGISTRY_CACHE
+        if registry is None:
+            return None
+        try:
+            for entry in registry.get('teams', []):
+                if entry.get('id') == template_id:
+                    name = entry.get('name', '')
+                    color = entry.get('color', '')
+                    return {
+                        'teamName': name,
+                        'organization': entry.get('category', '').upper() or name.upper(),
+                        'subtitle': name,
+                        'orgColor': color,
+                    }
+        except Exception as e:
+            print(f"[LCARS] WARNING: Could not read registry.json for branding: {e}", file=sys.stderr)
+        return None
+
     def serve_kanban_data(self, team):
-        """Serve kanban board data for a team"""
+        """Serve kanban board data for a team.
+
+        XACA-0460-002: If the board JSON is missing top-level branding fields
+        (``organization``, ``teamName``, ``subtitle``) the frontend falls back to
+        the generic 'DOUBLENODE' label.  This method hydrates those fields from
+        registry.json (keyed by template id) so the correct team branding is
+        shown even when the board was created before branding fields were written
+        by the installer.
+
+        If the registry cannot supply branding (missing registry, unknown template),
+        the partial board data is served as-is — we do NOT block the response, since
+        the board itself is valid.  A 503 is returned only when the registry exists
+        and the template is not in it (indicates a corrupted or mismatched install).
+        """
         board_file = get_board_file(team)
 
         if board_file.exists():
             try:
                 with open(board_file, 'r') as f:
                     data = json.load(f)
+
+                # XACA-0460-002: hydrate missing branding from registry.json.
+                missing_branding = any(not data.get(field) for field in self._BRANDING_FIELDS)
+                if missing_branding:
+                    template_id, _ = _split_team_id(team)
+                    branding = self._load_registry_branding(template_id)
+                    if branding is not None:
+                        # Only fill in fields that are absent/empty — never overwrite.
+                        for field, value in branding.items():
+                            if not data.get(field):
+                                data[field] = value
+                    elif self._REGISTRY_PATH.exists():
+                        # Registry is present but template not found — mismatched install.
+                        self._send_json_response(
+                            {
+                                "error": "branding_unresolved",
+                                "team": team,
+                                "message": (
+                                    f"Board for '{team}' is missing branding fields and template "
+                                    f"'{template_id}' was not found in registry.json. "
+                                    "Re-run the team installer to repair branding."
+                                ),
+                            },
+                            status=503,
+                        )
+                        return
+                    # If registry is absent entirely, serve the data as-is (degraded mode).
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
@@ -10817,6 +11042,37 @@ end tell
         target_base, _ = _split_team_id(LCARS_TEAM)
         base_match = (source_base == target_base)
 
+        # XACA-0460-001: pre-flight dual-board check for the import target.
+        # Importing into a team that has a dual-board state would corrupt kanban data
+        # because apply_import writes into the canonical path while the legacy stub
+        # may still be the board the UI is reading.  Refuse before offering the rename
+        # prompt — the structured error replaces the rename flow for this case.
+        dual_state = _detect_dual_boards(LCARS_TEAM)
+        if dual_state is not None:
+            try:
+                staged_path.unlink()
+            except Exception:
+                pass
+            self._send_json_response(
+                {
+                    "error": "dual_board_state",
+                    "team": LCARS_TEAM,
+                    "message": (
+                        f"Dual-board state detected for '{LCARS_TEAM}'. "
+                        f"The legacy stub at {dual_state.stub} coexists with the "
+                        f"canonical board at {dual_state.canonical}. "
+                        "Importing now would corrupt your kanban state."
+                    ),
+                    "remediation": [
+                        f"Run `kb-quarantine-stub {LCARS_TEAM}` to move the stub aside.",
+                        "Restart LCARS.",
+                        "Retry the import.",
+                    ],
+                },
+                status=409,
+            )
+            return
+
         IMPORT_JOBS[job_id] = {
             'status': 'staged',
             'progress': 0,
@@ -12096,61 +12352,192 @@ def _sweep_stale_locks() -> None:
         print("[LCARS] Stale lock sweep complete — nothing to remove.")
 
 
-def check_dual_boards_or_die(team: str) -> None:
-    """XACA-0180 guardrail: refuse to start if a legacy stub board coexists
-    with the canonical board for *team*.  Other teams' stubs emit warnings.
+class _DualBoardState:
+    """Holds the result of a dual-board detection for a single team."""
+
+    __slots__ = ('team', 'canonical', 'stub')
+
+    def __init__(self, team: str, canonical: Path, stub: Path):
+        self.team = team
+        self.canonical = canonical
+        self.stub = stub
+
+
+def _detect_dual_boards(team: str) -> "_DualBoardState | None":
+    """XACA-0460-010: Detect whether *team* is in a dual-board state.
+
+    A dual-board state exists when BOTH are true for a team:
+      1. A legacy stub path from LEGACY_STUB_PATHS exists on disk.
+      2. The canonical board file (TEAM_KANBAN_DIRS layout) also exists
+         and is NOT the same inode/path as the stub.
+
+    Returns a ``_DualBoardState`` if the condition is met, otherwise None.
+    Does NOT sys.exit — callers decide the fatal response.
+
+    Note: ``command`` is in LEGACY_STUB_PATHS but is a single-instance team
+    whose instance id equals its template id, so normal lookup works.
+    """
+    legacy_paths = LEGACY_STUB_PATHS.get(team)
+    if not legacy_paths:
+        return None
+
+    canonical = get_board_file(team)
+    if not canonical.exists():
+        return None
+    canonical_resolved = canonical.resolve()
+
+    for legacy in legacy_paths:
+        if not legacy.exists():
+            continue
+        if legacy.resolve() != canonical_resolved:
+            return _DualBoardState(team=team, canonical=canonical, stub=legacy)
+
+    return None
+
+
+def check_all_dual_boards_or_die() -> None:
+    """XACA-0460-010: Iterate ALL known stub mappings and refuse to start if any
+    team is in a dual-board state.
+
+    Keying the check on LCARS_TEAM meant that when LCARS_TEAM was unknown (e.g.
+    bare template id 'finance' instead of 'finance-personal') the check was
+    silently skipped.  This function checks every team in LEGACY_STUB_PATHS so
+    that on-disk corruption is caught regardless of which instance is starting.
+
     Set LCARS_SKIP_DUAL_BOARD_CHECK=1 to bypass (e.g. for automated tests).
     """
     if os.environ.get("LCARS_SKIP_DUAL_BOARD_CHECK") == "1":
         print("[LCARS] Dual-board check skipped (LCARS_SKIP_DUAL_BOARD_CHECK=1)")
         return
 
-    canonical = get_board_file(team)
-    canonical_resolved = canonical.resolve() if canonical.exists() else canonical
+    for check_team in LEGACY_STUB_PATHS:
+        state = _detect_dual_boards(check_team)
+        if state is not None:
+            print(
+                "\n"
+                "================================================================================" + "\n"
+                f"FATAL: Dual kanban board files detected for team '{state.team}'" + "\n"
+                "================================================================================" + "\n"
+                f"  Canonical:   {state.canonical}" + "\n"
+                f"  Legacy stub: {state.stub}" + "\n"
+                "\n"
+                "  Refusing to start — silent ID collisions are likely if both files coexist." + "\n"
+                "\n"
+                "  To resolve:" + "\n"
+                "    1. Verify which is correct (canonical is the source of truth)" + "\n"
+                f"    2. Quarantine the stub via: kb-quarantine-stub {state.team}" + "\n"
+                "       (See XACA-0180 for context)" + "\n"
+                "    3. Restart this server" + "\n"
+                "================================================================================",
+                file=sys.stderr,
+            )
+            sys.exit(1)
 
-    fatal_legacy: Path | None = None
+    print("[LCARS] Dual-board check OK (all teams)")
 
-    for check_team, legacy_paths in LEGACY_STUB_PATHS.items():
-        for legacy in legacy_paths:
-            if not legacy.exists():
-                continue
-            if check_team == team:
-                # Canonical must also exist for a true dual-board condition.
-                if canonical.exists() and legacy.resolve() != canonical_resolved:
-                    fatal_legacy = legacy
-            else:
-                # Different team — warn but don't exit.
-                print(
-                    f"[LCARS] WARNING: Legacy stub exists for team '{check_team}': {legacy}",
-                    file=sys.stderr,
-                )
 
-    if fatal_legacy is not None:
+def check_dual_boards_or_die(team: str) -> None:
+    """XACA-0180 guardrail: compatibility shim — delegates to check_all_dual_boards_or_die().
+
+    The original single-team version silently skipped the check when *team* was
+    not a known key in LEGACY_STUB_PATHS (e.g. bare template id 'finance').
+    XACA-0460-010 replaces the single-team iteration with an all-teams scan so
+    the check is robust regardless of which instance is being started.
+
+    Set LCARS_SKIP_DUAL_BOARD_CHECK=1 to bypass (e.g. for automated tests).
+    """
+    check_all_dual_boards_or_die()
+
+
+def validate_lcars_team_or_die() -> None:
+    """XACA-0460-009: Validate LCARS_TEAM at startup against TEAM_KANBAN_DIRS.
+
+    Enforces the contract from docs/architecture/team-id-contract.md §6:
+      1. LCARS_TEAM must be set.
+      2. LCARS_TEAM must appear as a key in TEAM_KANBAN_DIRS (instance id).
+      3. A bare template id (e.g. 'finance') where TEAM_HAS_PROJECTS=true is
+         explicitly rejected with a helpful message suggesting the instance id.
+
+    This check runs before the HTTP server starts, so a misconfigured env
+    fails fast with a human-readable error rather than serving a broken UI.
+
+    Set LCARS_SKIP_TEAM_VALIDATION=1 to bypass (for automated tests only).
+    """
+    if os.environ.get("LCARS_SKIP_TEAM_VALIDATION") == "1":
+        print("[LCARS] Team validation skipped (LCARS_SKIP_TEAM_VALIDATION=1)")
+        return
+
+    team = LCARS_TEAM
+
+    # Rule 1: LCARS_TEAM must be set.
+    if not team or not team.strip():
+        print(
+            "\n"
+            "FATAL: LCARS_TEAM is not set.\n"
+            "  Pass the instance id via the team-startup.sh script (e.g. finance-personal-startup.sh).\n"
+            "  Do NOT launch server.py directly without LCARS_TEAM.\n"
+            "  See docs/architecture/team-id-contract.md §6.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Rule 2: known instance id — fast path.
+    if team in TEAM_KANBAN_DIRS:
+        print(f"[LCARS] Team validation OK: LCARS_TEAM='{team}'")
+        return
+
+    # Rule 3: check whether this looks like a bare template id for a
+    # multi-project template (e.g. 'finance' instead of 'finance-personal').
+    base_team, _ = _split_team_id(team)
+    if base_team in MULTI_PROJECT_BASE_TEAMS:
+        # Find any known instance ids that start with this base team.
+        known_instances = sorted(k for k in TEAM_KANBAN_DIRS if k.startswith(base_team + '-'))
+        suggestion = known_instances[0] if known_instances else f"{base_team}-<project>"
         print(
             "\n"
             "================================================================================" + "\n"
-            f"FATAL: Dual kanban board files detected for team '{team}'" + "\n"
+            f"FATAL: LCARS_TEAM='{team}' is a template id, not an instance id." + "\n"
             "================================================================================" + "\n"
-            f"  Canonical:   {canonical}" + "\n"
-            f"  Legacy stub: {fatal_legacy}" + "\n"
             "\n"
-            "  Refusing to start — silent ID collisions are likely if both files coexist." + "\n"
+            f"  The installer should have written the instance id (e.g. '{suggestion}')" + "\n"
+            "  into the team-startup script, not the bare template id." + "\n"
             "\n"
-            "  To resolve:" + "\n"
-            "    1. Verify which is correct (canonical is the source of truth)" + "\n"
-            "    2. Quarantine the stub via: kb-quarantine-stub " + team + "\n"
-            "       (See XACA-0180 for context)" + "\n"
-            "    3. Restart this server" + "\n"
+            "  Likely fix:" + "\n"
+            f"    Re-run: install-team.sh {base_team} --project <project>" + "\n"
+            "    Then use the resulting team-startup script to launch LCARS." + "\n"
+            "\n"
+            "  See docs/architecture/team-id-contract.md for the full contract." + "\n"
             "================================================================================",
             file=sys.stderr,
         )
         sys.exit(1)
 
-    print(f"[LCARS] Dual-board check OK for team '{team}'")
+    # Rule 4: unknown team — not a known instance, not a recognisable template.
+    known_list = ', '.join(sorted(TEAM_KANBAN_DIRS.keys()))
+    print(
+        "\n"
+        "================================================================================" + "\n"
+        f"FATAL: LCARS_TEAM='{team}' is not a known team." + "\n"
+        "================================================================================" + "\n"
+        "\n"
+        f"  Known instances: {known_list}" + "\n"
+        "\n"
+        "  If this is a newly installed team, ensure aiteamforge_paths is up to date" + "\n"
+        "  and re-run the team-startup script." + "\n"
+        "  See docs/architecture/team-id-contract.md §6." + "\n"
+        "================================================================================",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
+
+    # XACA-0460-009: validate LCARS_TEAM first — refuse before printing anything
+    # if the env is wrong.  Fast-fail on bare template ids and unknown teams so
+    # operators see a clear error, not a half-started server.
+    validate_lcars_team_or_die()
 
     print(f"""
 ╔═══════════════════════════════════════════════════════════════════╗
@@ -12174,8 +12561,9 @@ def main():
     # XACA-0333-001: sweep stale zero-byte lock files left by prior killed processes.
     _sweep_stale_locks()
 
-    # XACA-0180: refuse to start if a legacy stub board coexists with canonical.
-    check_dual_boards_or_die(LCARS_TEAM)
+    # XACA-0460-010 / XACA-0180: refuse to start if ANY team has a legacy stub
+    # coexisting with its canonical board — check all teams, not just LCARS_TEAM.
+    check_all_dual_boards_or_die()
 
     # Allow port reuse to avoid "Address already in use" errors
     socketserver.TCPServer.allow_reuse_address = True

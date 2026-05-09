@@ -50,6 +50,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -213,6 +214,14 @@ _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
 
 SUPPORTED_SCHEMA_VERSION = 1
 
+# Teams that MUST appear in any valid config.  If any are absent the config is
+# considered corrupt and load_config() falls back to _bootstrap().  (XACA-0457)
+CANONICAL_REQUIRED_TEAMS: frozenset[str] = frozenset({"academy"})
+
+# At least ONE of these must be present.  A config with only "academy" and none
+# of the platform teams is almost certainly a partial-write artifact.  (XACA-0457)
+CANONICAL_AT_LEAST_ONE_TEAMS: frozenset[str] = frozenset({"ios", "android", "firebase", "dns"})
+
 
 def _make_default_config() -> dict:
     """Build a config dict from DEFAULT_TEAMS, ready to write as JSON."""
@@ -226,6 +235,21 @@ def _write_defaults(config_path: Path) -> None:
     """Write DEFAULT_TEAMS to config_path (non-interactive bootstrap)."""
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Backup-before-write so regressions ALWAYS leave a forensic trail. (XACA-0457)
+        if config_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = config_path.with_name(f"{config_path.name}.bak-{timestamp}")
+            try:
+                backup_path.write_bytes(config_path.read_bytes())
+                print(
+                    f"[aiteamforge-paths] backup snapshot: {backup_path}",
+                    file=sys.stderr,
+                )
+            except OSError as exc:
+                print(
+                    f"[aiteamforge-paths] WARNING: failed to write backup snapshot {backup_path}: {exc}",
+                    file=sys.stderr,
+                )
         config_path.write_text(
             json.dumps(_make_default_config(), indent=2) + "\n",
             encoding="utf-8",
@@ -307,6 +331,43 @@ def load_config() -> dict:
                 f"[aiteamforge-paths] WARNING: could not parse {config_path}: {exc} — using defaults",
                 file=sys.stderr,
             )
+            config = None
+
+    # Schema-integrity check (XACA-0457) — catch partial-write corruption where
+    # JSON is technically valid but the config is missing required teams or the
+    # schema_version field.  Must run BEFORE the `if config is None` branch so
+    # a corrupted-but-parseable file triggers bootstrap, not silent degradation.
+    if config is not None:
+        has_schema = "schema_version" in config
+        teams_keys = set(config.get("teams", {}).keys())
+        missing_required = CANONICAL_REQUIRED_TEAMS - teams_keys
+        has_canonical_one = bool(CANONICAL_AT_LEAST_ONE_TEAMS & teams_keys)
+        if not has_schema or missing_required or not has_canonical_one:
+            print(
+                f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "
+                f"(has_schema_version={has_schema}, missing_required={sorted(missing_required)}, "
+                f"has_canonical_subset={has_canonical_one}) — bootstrapping defaults",
+                file=sys.stderr,
+            )
+            # Snapshot the corrupt file BEFORE nulling config — _bootstrap may
+            # take the interactive-TTY path and skip _write_defaults, leaving
+            # the corrupt file on disk without a forensic trail.  (XACA-0457-012)
+            if config_path.exists():
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = config_path.with_name(
+                    f"{config_path.name}.bak-{timestamp}"
+                )
+                try:
+                    backup_path.write_bytes(config_path.read_bytes())
+                    print(
+                        f"[aiteamforge-paths] backup snapshot (corrupt config): {backup_path}",
+                        file=sys.stderr,
+                    )
+                except OSError as exc:
+                    print(
+                        f"[aiteamforge-paths] WARNING: failed to write backup snapshot {backup_path}: {exc}",
+                        file=sys.stderr,
+                    )
             config = None
 
     if config is None:
@@ -467,6 +528,21 @@ def wizard_hook_create_config(teams_dict: dict, force: bool = False) -> bool:
     }
     try:
         config_path.parent.mkdir(parents=True, exist_ok=True)
+        # Backup-before-write so future regressions ALWAYS leave a forensic trail. (XACA-0457)
+        if config_path.exists():
+            timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+            backup_path = config_path.with_name(f"{config_path.name}.bak-{timestamp}")
+            try:
+                backup_path.write_bytes(config_path.read_bytes())
+                print(
+                    f"[aiteamforge-paths] backup snapshot: {backup_path}",
+                    file=sys.stderr,
+                )
+            except OSError as exc:
+                print(
+                    f"[aiteamforge-paths] WARNING: failed to write backup snapshot {backup_path}: {exc}",
+                    file=sys.stderr,
+                )
         config_path.write_text(
             json.dumps(config, indent=2) + "\n",
             encoding="utf-8",

@@ -64,6 +64,7 @@ from server import (  # noqa: E402
     get_board_file,
     format_bytes_export as format_bytes_archive,
     TEAM_KANBAN_DIRS,
+    _strip_label_prefix,
 )
 
 
@@ -1869,6 +1870,318 @@ class TestWeeklyAnchorDelete(unittest.TestCase):
         self.assertEqual(handler._response_code, 503)
         data = _response_json(buf)
         self.assertIn("error", data)
+
+
+# ---------------------------------------------------------------------------
+# Tests: _strip_label_prefix — XACA-0453
+# ---------------------------------------------------------------------------
+
+class TestStripLabelPrefix(unittest.TestCase):
+    """Unit tests for _strip_label_prefix(name, label).
+
+    Covers all three recognised separators plus all required no-op cases.
+    """
+
+    # ------------------------------------------------------------------
+    # Stripping — each recognised separator
+    # ------------------------------------------------------------------
+
+    def test_strip_hyphen_separator(self):
+        """'REL - Sprint 5' with label 'REL' -> 'Sprint 5'."""
+        self.assertEqual(_strip_label_prefix("REL - Sprint 5", "REL"), "Sprint 5")
+
+    def test_strip_colon_separator(self):
+        """'REL: Sprint 5' with label 'REL' -> 'Sprint 5'."""
+        self.assertEqual(_strip_label_prefix("REL: Sprint 5", "REL"), "Sprint 5")
+
+    def test_strip_emdash_separator(self):
+        """'REL — Sprint 5' with label 'REL' -> 'Sprint 5'."""
+        self.assertEqual(_strip_label_prefix("REL — Sprint 5", "REL"), "Sprint 5")
+
+    def test_strip_longer_label_hyphen(self):
+        """'v2.10.0 - iOS release' with label 'v2.10.0' -> 'iOS release'."""
+        self.assertEqual(
+            _strip_label_prefix("v2.10.0 - iOS release", "v2.10.0"),
+            "iOS release",
+        )
+
+    def test_strip_longer_label_colon(self):
+        """'v2.10.0: iOS release' with label 'v2.10.0' -> 'iOS release'."""
+        self.assertEqual(
+            _strip_label_prefix("v2.10.0: iOS release", "v2.10.0"),
+            "iOS release",
+        )
+
+    def test_strip_longer_label_emdash(self):
+        """'v2.10.0 — iOS release' with label 'v2.10.0' -> 'iOS release'."""
+        self.assertEqual(
+            _strip_label_prefix("v2.10.0 — iOS release", "v2.10.0"),
+            "iOS release",
+        )
+
+    # ------------------------------------------------------------------
+    # No-op: name equals label exactly (no separator)
+    # ------------------------------------------------------------------
+
+    def test_noop_name_equals_label(self):
+        """name='REL', label='REL' — equal strings, no separator -> unchanged."""
+        self.assertEqual(_strip_label_prefix("REL", "REL"), "REL")
+
+    # ------------------------------------------------------------------
+    # No-op: label is a substring but without a recognised separator
+    # ------------------------------------------------------------------
+
+    def test_noop_label_is_substring_without_separator(self):
+        """'RELease 5' starts with 'REL' but no recognised separator follows."""
+        self.assertEqual(_strip_label_prefix("RELease 5", "REL"), "RELease 5")
+
+    def test_noop_label_prefix_different_case(self):
+        """Comparison is case-sensitive: 'rel - Sprint 5' with label 'REL' -> unchanged."""
+        self.assertEqual(_strip_label_prefix("rel - Sprint 5", "REL"), "rel - Sprint 5")
+
+    # ------------------------------------------------------------------
+    # No-op: stripping would yield empty string
+    # ------------------------------------------------------------------
+
+    def test_noop_strip_would_leave_empty_hyphen(self):
+        """'REL - ' with label 'REL' — stripped remainder is empty -> unchanged."""
+        self.assertEqual(_strip_label_prefix("REL - ", "REL"), "REL - ")
+
+    def test_noop_strip_would_leave_empty_colon(self):
+        """'REL: ' with label 'REL' — stripped remainder is empty -> unchanged."""
+        self.assertEqual(_strip_label_prefix("REL: ", "REL"), "REL: ")
+
+    def test_noop_strip_would_leave_empty_emdash(self):
+        """'REL — ' with label 'REL' — stripped remainder is empty -> unchanged."""
+        self.assertEqual(_strip_label_prefix("REL — ", "REL"), "REL — ")
+
+    # ------------------------------------------------------------------
+    # No-op: empty or None label
+    # ------------------------------------------------------------------
+
+    def test_noop_empty_label(self):
+        """label='' -> name returned unchanged."""
+        self.assertEqual(_strip_label_prefix("REL - Sprint 5", ""), "REL - Sprint 5")
+
+    def test_noop_none_label(self):
+        """label=None -> name returned unchanged."""
+        self.assertEqual(_strip_label_prefix("REL - Sprint 5", None), "REL - Sprint 5")
+
+    # ------------------------------------------------------------------
+    # No-op: name does not start with label
+    # ------------------------------------------------------------------
+
+    def test_noop_name_does_not_start_with_label(self):
+        """'Sprint 5' does not start with 'REL' -> unchanged."""
+        self.assertEqual(_strip_label_prefix("Sprint 5", "REL"), "Sprint 5")
+
+    def test_noop_separator_in_middle_not_at_start(self):
+        """Separator present but not after label at position 0 -> unchanged."""
+        self.assertEqual(_strip_label_prefix("Sprint - REL", "REL"), "Sprint - REL")
+
+    # ------------------------------------------------------------------
+    # Edge: empty name
+    # ------------------------------------------------------------------
+
+    def test_noop_empty_name(self):
+        """name='' -> '' returned (nothing to strip)."""
+        self.assertEqual(_strip_label_prefix("", "REL"), "")
+
+    def test_noop_both_empty(self):
+        """name='' and label='' -> '' returned."""
+        self.assertEqual(_strip_label_prefix("", ""), "")
+
+    # ------------------------------------------------------------------
+    # Regex-metacharacter labels — plain-string contract (XACA-0453-008)
+    # ------------------------------------------------------------------
+
+    def test_label_with_regex_metacharacters(self):
+        """Labels containing regex metacharacters are matched literally, not as patterns.
+
+        Ensures _strip_label_prefix uses plain string ops (startswith) so a
+        future refactor to regex would be caught immediately by these tests.
+        """
+        # '.*' in label must be treated as the two literal chars dot and star.
+        self.assertEqual(
+            _strip_label_prefix("REL.* - Sprint 5", "REL.*"),
+            "Sprint 5",
+        )
+        # Parentheses and dots in a version string must match literally.
+        self.assertEqual(
+            _strip_label_prefix("v(2.10.0): hotfix", "v(2.10.0)"),
+            "hotfix",
+        )
+        # Square brackets must match literally.
+        self.assertEqual(
+            _strip_label_prefix("REL[1] — Update", "REL[1]"),
+            "Update",
+        )
+        # Plus sign must match literally.
+        self.assertEqual(
+            _strip_label_prefix("REL+QA - Final", "REL+QA"),
+            "Final",
+        )
+
+    # ------------------------------------------------------------------
+    # Repeated-prefix — single-pass stripping (XACA-0453-009)
+    # ------------------------------------------------------------------
+
+    def test_repeated_prefix_strips_once(self):
+        """Only the first occurrence of label+separator is stripped (single-pass).
+
+        Documents the expected behaviour so callers understand that
+        'REL - REL - Sprint 5' yields 'REL - Sprint 5', not 'Sprint 5'.
+        """
+        # Hyphen separator — first prefix removed, second left intact.
+        self.assertEqual(
+            _strip_label_prefix("REL - REL - Sprint 5", "REL"),
+            "REL - Sprint 5",
+        )
+        # Colon separator — same single-pass contract.
+        self.assertEqual(
+            _strip_label_prefix("REL: REL: Sprint 5", "REL"),
+            "REL: Sprint 5",
+        )
+
+    # ------------------------------------------------------------------
+    # Whitespace-only label — no-op (XACA-0453-010)
+    # ------------------------------------------------------------------
+
+    def test_whitespace_only_label_is_noop(self):
+        """A whitespace-only label (spaces or tab) is treated as no-op.
+
+        Prevents accidental stripping when shortTitle is blank/whitespace
+        rather than a meaningful release prefix.
+        """
+        # Three spaces — name returned unchanged.
+        self.assertEqual(
+            _strip_label_prefix("   - Sprint 5", "   "),
+            "   - Sprint 5",
+        )
+        # Tab character — name returned unchanged.
+        self.assertEqual(
+            _strip_label_prefix("\t - Update", "\t"),
+            "\t - Update",
+        )
+        # Two spaces, arbitrary name — name returned unchanged.
+        self.assertEqual(
+            _strip_label_prefix("anything", "  "),
+            "anything",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Tests: _strip_label_prefix wired into handle_create_release — XACA-0453
+# ---------------------------------------------------------------------------
+
+class TestHandleCreateReleaseStripLabelPrefix(unittest.TestCase):
+    """handle_create_release must strip shortTitle prefix from name before persisting."""
+
+    def _run_create(self, body_dict):
+        body = json.dumps(body_dict).encode()
+        handler, buf = _make_handler(
+            path="/api/releases",
+            method="POST",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        fake_data = {"releases": [], "projectEnvironments": {}, "defaultEnvironments": ["DEV"]}
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._save_releases_config = MagicMock(return_value=True)
+        handler._save_release_manifest = MagicMock(return_value=True)
+        handler._generate_release_id = MagicMock(return_value="REL-001")
+        handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
+        handler._extract_version_from_name = MagicMock(return_value="1.0.0")
+        handler.handle_create_release()
+        return handler, _response_json(buf)
+
+    def test_create_strips_hyphen_prefix(self):
+        """POST {name='REL - Sprint 5', shortTitle='REL'} -> persisted name is 'Sprint 5'."""
+        _, data = self._run_create({"name": "REL - Sprint 5", "shortTitle": "REL"})
+        self.assertEqual(data["name"], "Sprint 5")
+
+    def test_create_noop_name_already_clean(self):
+        """POST {name='Sprint 5', shortTitle='REL'} -> name unchanged (no prefix to strip)."""
+        _, data = self._run_create({"name": "Sprint 5", "shortTitle": "REL"})
+        self.assertEqual(data["name"], "Sprint 5")
+
+    def test_create_noop_no_short_title(self):
+        """POST without shortTitle -> name passed through unchanged."""
+        _, data = self._run_create({"name": "REL - Sprint 5"})
+        self.assertEqual(data["name"], "REL - Sprint 5")
+
+    def test_create_short_title_preserved(self):
+        """shortTitle field in persisted release is not altered by stripping."""
+        _, data = self._run_create({"name": "REL - Sprint 5", "shortTitle": "REL"})
+        self.assertEqual(data["shortTitle"], "REL")
+
+
+# ---------------------------------------------------------------------------
+# Tests: _strip_label_prefix wired into handle_update_release — XACA-0453
+# ---------------------------------------------------------------------------
+
+class TestHandleUpdateReleaseStripLabelPrefix(unittest.TestCase):
+    """handle_update_release must strip shortTitle prefix from name when name is in patch."""
+
+    def _run_update(self, existing_release, update_body):
+        body = json.dumps(update_body).encode()
+        handler, buf = _make_handler(
+            path=f"/api/releases/{existing_release['id']}",
+            method="PUT",
+            body=body,
+            headers={"Content-Length": str(len(body))},
+        )
+        fake_data = {"releases": [existing_release]}
+        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._save_releases_config = MagicMock(return_value=True)
+        handler._find_release_by_id = MagicMock(return_value=existing_release)
+        handler._update_items_release_name = MagicMock()
+        handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
+        handler._extract_version_from_name = MagicMock(return_value="1.0.0")
+        handler.handle_update_release(existing_release['id'])
+        return handler, _response_json(buf)
+
+    def _make_release(self, name="Existing Release", short_title="REL"):
+        return {
+            "id": "REL-001",
+            "name": name,
+            "shortTitle": short_title,
+            "platforms": {},
+            "tags": [],
+        }
+
+    def test_update_both_fields_strips_prefix(self):
+        """PATCH {name='REL: Sprint 6', shortTitle='REL'} -> persisted name is 'Sprint 6'."""
+        existing = self._make_release()
+        _, data = self._run_update(existing, {"name": "REL: Sprint 6", "shortTitle": "REL"})
+        self.assertEqual(data["name"], "Sprint 6")
+
+    def test_update_name_only_uses_existing_label(self):
+        """PATCH {name='REL — Sprint 7'} with existing shortTitle='REL' -> name is 'Sprint 7'."""
+        existing = self._make_release(short_title="REL")
+        _, data = self._run_update(existing, {"name": "REL — Sprint 7"})
+        self.assertEqual(data["name"], "Sprint 7")
+
+    def test_update_label_only_does_not_rewrite_stored_name(self):
+        """PATCH {shortTitle='REL'} without name -> stored name 'Sprint 8' unchanged."""
+        existing = self._make_release(name="Sprint 8", short_title="OLD")
+        _, data = self._run_update(existing, {"shortTitle": "REL"})
+        self.assertEqual(data["name"], "Sprint 8")
+
+    def test_update_noop_name_already_clean(self):
+        """PATCH {name='Sprint 6', shortTitle='REL'} -> name unchanged (no prefix present)."""
+        existing = self._make_release()
+        _, data = self._run_update(existing, {"name": "Sprint 6", "shortTitle": "REL"})
+        self.assertEqual(data["name"], "Sprint 6")
+
+    def test_update_items_release_name_receives_normalized_name(self):
+        """_update_items_release_name must be called with the normalized name, not the raw one."""
+        existing = self._make_release()
+        handler, _ = self._run_update(existing, {"name": "REL - Sprint 6", "shortTitle": "REL"})
+        handler._update_items_release_name.assert_called_once()
+        call_args = handler._update_items_release_name.call_args
+        # Second positional arg is the new_name
+        self.assertEqual(call_args[0][1], "Sprint 6")
 
 
 if __name__ == "__main__":

@@ -1,3 +1,10 @@
+//
+//  lcars-health-scores.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * lcars-health-scores.js
  * LCARS Health Score Computation Module

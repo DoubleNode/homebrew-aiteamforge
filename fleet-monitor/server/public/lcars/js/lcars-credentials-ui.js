@@ -1,3 +1,10 @@
+//
+//  lcars-credentials-ui.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * LCARS Credentials UI Module
  * Handles secure credential input and management in the INTEGRATIONS section.

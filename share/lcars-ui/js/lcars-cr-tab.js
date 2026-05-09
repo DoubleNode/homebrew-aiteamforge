@@ -481,6 +481,9 @@
             addedAt:                    cr.createdAt || '',
             priority:                   linkedItem ? linkedItem.priority : '',
             linkedItemIds:              linkedItemIds,
+            // XACA-0294-007: Phase 4 automation badge fields (optional; absent = automation hasn't fired)
+            cr_drafted_reminder_last_at: cr.cr_drafted_reminder_last_at || '',
+            delay_flagged_at:            cr.delay_flagged_at || '',
         };
     }
 
@@ -783,6 +786,49 @@
         return `<span class="cr-title-text" title="${title}">${title}</span>${badge}`;
     }
 
+    // ─── Automation badges (XACA-0294-007) ───────────────────────────────────
+
+    // Terminal states for the DELAYED badge — mirrors the plan-doc definition.
+    // A CR in any of these states has already resolved the deploy-window concern;
+    // showing a DELAYED badge on a closed/rejected/deployed CR would be noise.
+    const _DELAY_TERMINAL = new Set(['deployed-prod', 'cr-rejected', 'cr-closed', 'emergency-deployed']);
+
+    /**
+     * Return HTML for the ⏰ DRAFTED 24h+ and/or ⚠ DELAYED automation badges.
+     * Returns an empty string when neither condition is met.
+     *
+     * Render conditions (XACA-0294-007):
+     *   DRAFTED 24h+: cr_drafted_reminder_last_at is set AND crState == 'cr-drafted'
+     *   DELAYED:      delay_flagged_at is set AND crState NOT IN _DELAY_TERMINAL
+     *
+     * Both badges read from normalized view-object fields that _normalizeCR
+     * maps directly from the CR record. No API change — the fields are optional
+     * and were committed to the schema in XACA-0294-002 (schema v2.2.0).
+     */
+    function _automationBadges(item) {
+        const parts = [];
+
+        // DRAFTED 24h+ badge
+        if (item.cr_drafted_reminder_last_at && item.crState === 'cr-drafted') {
+            const isoReminder = escapeHtml(new Date(item.cr_drafted_reminder_last_at).toISOString());
+            const tip = escapeHtml(`This CR has been in cr-drafted for over 24 hours. Last reminder: ${isoReminder}`);
+            parts.push(`<span class="cr-automation-badge cr-badge-drafted-24h" title="${tip}">&#9200; DRAFTED 24h+</span>`);
+        }
+
+        // DELAYED badge
+        if (item.delay_flagged_at && !_DELAY_TERMINAL.has(item.crState)) {
+            const isoFlagged  = escapeHtml(new Date(item.delay_flagged_at).toISOString());
+            const isoPlanned  = item.deploy_window_planned
+                ? escapeHtml(new Date(item.deploy_window_planned).toISOString())
+                : 'unknown';
+            const tip = escapeHtml(`Deploy window passed (planned: ${isoPlanned}). Flagged: ${isoFlagged}`);
+            parts.push(`<span class="cr-automation-badge cr-badge-delayed" title="${tip}">&#9888; DELAYED</span>`);
+        }
+
+        if (parts.length === 0) return '';
+        return `<div class="cr-automation-badges">${parts.join('')}</div>`;
+    }
+
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
     // Total column count: chevron, ID, TYPE/STATE (merged, XACA-0353), TITLE,
@@ -803,6 +849,8 @@
         const pushbacks  = _pushbackDisplay(item.cr_pushback_count);
         const stageAge   = _stageAgeBadge(item);
         const ageCell    = _ageCell(item);
+        // XACA-0294-007: drafted-24h + delayed automation badges
+        const autoBadges = _automationBadges(item);
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
         const isExpanded  = _expandedCRs.has(item.cr_id);
 
@@ -818,7 +866,13 @@
             ? `<button class="${chevronCls}" data-cr-id="${escapeHtml(item.cr_id)}" title="${isExpanded ? 'Collapse' : 'Expand'} linked items" aria-expanded="${isExpanded}" aria-label="${isExpanded ? 'Collapse' : 'Expand'} linked items">&#9654;</button>`
             : `<span class="cr-chevron-placeholder"></span>`;
 
+        // EDIT STATE button + optional automation badges stacked in the trailing cell.
+        // autoBadges renders as an empty string when neither condition is met, so
+        // rows with no active automations look identical to pre-XACA-0294-007.
         const editStateBtn = `<button class="cr-edit-state-btn cr-row-edit-state" data-cr-id="${escapeHtml(item.cr_id)}" title="Change CR state">EDIT STATE</button>`;
+        const editCell = autoBadges
+            ? `<div class="cr-edit-cell-wrap">${editStateBtn}${autoBadges}</div>`
+            : editStateBtn;
 
         return `<tr class="cr-row${isExpanded ? ' cr-row-expanded' : ''}" data-cr-id="${escapeHtml(item.cr_id)}" data-item-id="${escapeHtml(item.id)}">
             <td class="cr-col-chevron">${chevronBtn}</td>
@@ -832,7 +886,7 @@
             <td class="cr-col-stage-age">${stageAge}</td>
             <td class="cr-col-age">${ageCell}</td>
             <td class="cr-col-docs">${detailBtn}</td>
-            <td class="cr-col-edit">${editStateBtn}</td>
+            <td class="cr-col-edit">${editCell}</td>
         </tr>`;
     }
 
@@ -1182,8 +1236,8 @@
                     contentDiv.innerHTML =
                         `<div class="cr-doc-missing">` +
                         `<strong>No local CR document found.</strong><br>` +
-                        `Expected at <code>change-requests/${escapeHtml(view.cr_id || '')}*.md</code>. ` +
-                        `Use the launch button above to view the Confluence page, or create the local source file.` +
+                        `Expected at <code>cr-docs/${escapeHtml(view.id || '')}-CR.md</code>. ` +
+                        `Run <code>kb-cr draft &lt;item-id&gt;</code> to create a draft CR, or <code>kb-cr add-item &lt;CR-ID&gt; &lt;item-id&gt;</code> to link an existing CR. Use the launch button above to view the Confluence page.` +
                         `</div>`;
                 });
         }

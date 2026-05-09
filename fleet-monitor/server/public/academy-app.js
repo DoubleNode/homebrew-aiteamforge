@@ -1,3 +1,10 @@
+//
+//  academy-app.js
+//  DoubleNode Dev-Team Infrastructure (AITeamForge)
+//
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
+//
+
 /**
  * Starfleet Academy Dashboard - Client Application
  * Filtered view showing only Academy division
