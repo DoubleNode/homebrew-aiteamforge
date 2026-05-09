@@ -615,6 +615,12 @@
                         <span class="section-action" id="epic-new-btn" title="Create New Epic">+ NEW</span>
                         <div class="section-bar"></div>
                     </div>
+                    <!-- XACA-0474: State filter toggle (Planned | Active | Archived) -->
+                    <div class="epics-status-toggle">
+                        <button class="status-toggle-btn"        id="epics-planned-btn"  onclick="toggleEpicsStateFilter('planned')"  title="Show Planned Epics">PLANNED</button>
+                        <button class="status-toggle-btn active" id="epics-active-btn"   onclick="toggleEpicsStateFilter('active')"   title="Show Active Epics">ACTIVE</button>
+                        <button class="status-toggle-btn"        id="epics-archived-btn" onclick="toggleEpicsStateFilter('archived')" title="Show Archived Epics">ARCHIVED</button>
+                    </div>
                     <!-- XACA-0209 round 5: Epics search bar -->
                     <div class="epic-search-bar">
                         <div class="filter-search-container">

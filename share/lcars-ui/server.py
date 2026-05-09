@@ -4974,36 +4974,88 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         next_id = epics_data.get('nextEpicId', 1)
         return f"E{team_code}-{next_id:04d}"
 
-    def _get_items_for_epic(self, epic_id):
+    @staticmethod
+    def _derive_epic_state(items):
+        """Derive epic state from a list of item dicts (already fetched for this epic).
+
+        Returns 'PLANNED' | 'ACTIVE' | 'ARCHIVED'.
+        Pure: same input -> same output. See STATE_CONTRACT.md §1.5.
+
+        Effective items are those whose status != 'cancelled'.
+        Blocked items count as in-flight (not todo, not completed) per §1.1.
+        Orphan IDs are not present in `items` (handled by caller via
+        _get_items_for_epic), so case M is naturally satisfied here.
+        """
+        effective = [i for i in items if i.get('status') != 'cancelled']
+        if not effective:
+            return 'PLANNED'  # cases A, B, M
+        if all(i.get('status') == 'completed' for i in effective):
+            return 'ARCHIVED'
+        if all(i.get('status') == 'todo' for i in effective):
+            return 'PLANNED'
+        return 'ACTIVE'
+
+    @staticmethod
+    def _build_epic_item_counts(items):
+        """Build the 8-key itemCounts rollup dict for an epic.
+
+        Keys (camelCase per STATE_CONTRACT.md §5.1):
+          total, effective, todo, inProgress, inReview, blocked, completed, cancelled
+        """
+        total = len(items)
+        cancelled = sum(1 for i in items if i.get('status') == 'cancelled')
+        effective = total - cancelled
+        todo = sum(1 for i in items if i.get('status') == 'todo')
+        in_progress = sum(1 for i in items if i.get('status') == 'in_progress')
+        in_review = sum(1 for i in items if i.get('status') == 'in_review')
+        blocked = sum(1 for i in items if i.get('status') == 'blocked')
+        # 'completed' is the canonical terminal status per STATE_CONTRACT.md §1.1.
+        # Legacy 'done' is intentionally NOT counted here — derivation and counts
+        # must agree (XACA-0474-010).
+        completed = sum(1 for i in items if i.get('status') == 'completed')
+        return {
+            'total': total,
+            'effective': effective,
+            'todo': todo,
+            'inProgress': in_progress,
+            'inReview': in_review,
+            'blocked': blocked,
+            'completed': completed,
+            'cancelled': cancelled,
+        }
+
+    def _get_items_for_epic(self, epic_id, board_data=None):
         """Get kanban items assigned to an epic from the current team's board only.
 
         NO cross-team data - epics and items are scoped to the current team.
+
+        Pass `board_data` to skip the file read — useful when iterating epics
+        in a single request (XACA-0474-011 avoids N file reads per /api/epics).
         """
         items = []
 
-        # Only search the current team's board file
-        board_file = get_board_file(LCARS_TEAM)
+        if board_data is None:
+            board_file = get_board_file(LCARS_TEAM)
+            if not board_file.exists():
+                return items
+            try:
+                with open(board_file, 'r') as f:
+                    board_data = json.load(f)
+            except Exception as e:
+                print(f"[LCARS] Error reading {board_file}: {e}")
+                return items
 
-        if not board_file.exists():
-            return items
-
-        try:
-            with open(board_file, 'r') as f:
-                board_data = json.load(f)
-
-            for item in board_data.get('backlog', []):
-                if item.get('epicId') == epic_id:
-                    items.append({
-                        "itemId": item.get('id'),
-                        "title": item.get('title', ''),
-                        "status": item.get('status', 'todo'),
-                        "priority": item.get('priority', 'medium'),
-                        "team": LCARS_TEAM,
-                        "tags": item.get('tags', []),
-                        "subRepo": item.get('subRepo', '')
-                    })
-        except Exception as e:
-            print(f"[LCARS] Error reading {board_file}: {e}")
+        for item in board_data.get('backlog', []):
+            if item.get('epicId') == epic_id:
+                items.append({
+                    "itemId": item.get('id'),
+                    "title": item.get('title', ''),
+                    "status": item.get('status', 'todo'),
+                    "priority": item.get('priority', 'medium'),
+                    "team": LCARS_TEAM,
+                    "tags": item.get('tags', []),
+                    "subRepo": item.get('subRepo', '')
+                })
 
         return items
 
@@ -5011,26 +5063,63 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """GET /api/epics - List all epics from kanban board
 
         Query parameters:
-            team: Filter epics by team (mirrors other epic endpoints)
+            team:  Filter epics by team (mirrors other epic endpoints)
+            state: Filter by derived state - 'PLANNED', 'ACTIVE', or 'ARCHIVED'
+                   (case-insensitive; comma-separated for multi-value allow-list).
+                   Empty value or absent param returns all epics. Invalid value
+                   returns 400. See STATE_CONTRACT.md §5.2 (XACA-0474).
 
         XACA-0209 round 5: server-side tag filtering removed. All tag/search
         filtering is now client-side in the LCARS UI.
         """
         from urllib.parse import parse_qs
+
+        _VALID_STATES = {'PLANNED', 'ACTIVE', 'ARCHIVED'}
+
         try:
             params = parse_qs(query_string) if query_string else {}
             filter_team = params.get('team', [None])[0]
 
+            # XACA-0474: Parse ?state= filter (case-insensitive, comma-separated).
+            raw_state = params.get('state', [None])[0]
+            filter_states = None  # None means no filter
+            if raw_state is not None and raw_state.strip():
+                tokens = [t.strip().upper() for t in raw_state.split(',') if t.strip()]
+                invalid = [t for t in tokens if t not in _VALID_STATES]
+                if invalid:
+                    self._send_json_response(
+                        {'error': 'Invalid state', 'valid': sorted(_VALID_STATES)},
+                        status=400
+                    )
+                    return
+                filter_states = set(tokens)
+
             data = self._load_board_epics(filter_team)
             epics = data.get('epics', [])
+
+            # XACA-0474-011: Read the team board once for the whole request and
+            # pass it to _get_items_for_epic to avoid N file reads in this loop.
+            board_data_cache = None
+            board_file = get_board_file(LCARS_TEAM)
+            if board_file.exists():
+                try:
+                    with open(board_file, 'r') as f:
+                        board_data_cache = json.load(f)
+                except Exception as e:
+                    print(f"[LCARS] Error reading {board_file}: {e}")
 
             # Add item counts and normalize field names for UI compatibility.
             # Cancelled items are excluded from itemCount/completedCount so the
             # progress fraction reflects active work, mirroring release math
             # (XACA-0206). cancelledCount is surfaced so the UI can show why
             # the denominator shrank.
+            #
+            # XACA-0474: Also add derived `state` (UPPERCASE enum) and `itemCounts`
+            # (8-key rollup dict). Existing fields itemCount/completedCount/
+            # cancelledCount are preserved for backward compat with renderEpicCard.
+            result_epics = []
             for epic in epics:
-                items = self._get_items_for_epic(epic['id'])
+                items = self._get_items_for_epic(epic['id'], board_data=board_data_cache)
                 active = [i for i in items if i['status'] != 'cancelled']
                 epic['itemCount'] = len(active)
                 epic['completedCount'] = len([i for i in active if i['status'] in ('done', 'completed')])
@@ -5038,13 +5127,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Map 'title' to 'name' for UI compatibility (board uses 'title')
                 if 'title' in epic and 'name' not in epic:
                     epic['name'] = epic['title']
+                # XACA-0474: Derived state + full item-count breakdown
+                epic['state'] = self._derive_epic_state(items)
+                epic['itemCounts'] = self._build_epic_item_counts(items)
+                # Apply ?state= filter (AND with ?team= which was handled by _load_board_epics)
+                if filter_states is not None and epic['state'] not in filter_states:
+                    continue
+                result_epics.append(epic)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({
-                "epics": epics,
+                "epics": result_epics,
                 "colors": self.EPIC_COLORS
             }, indent=2).encode())
 
@@ -5052,7 +5148,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_error(500, f"Error listing epics: {e}")
 
     def serve_epic_detail(self, epic_id):
-        """GET /api/epics/<id> - Get epic details from kanban board"""
+        """GET /api/epics/<id> - Get epic details from kanban board
+
+        XACA-0474: Response includes `state` (UPPERCASE enum) and `itemCounts`
+        (8-key rollup dict) per STATE_CONTRACT.md §5.3.
+        """
         try:
             data = self._load_board_epics()
             epic = self._find_epic_by_id(data, epic_id)
@@ -5066,7 +5166,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 epic['name'] = epic['title']
 
             # Add items to epic
-            epic['items'] = self._get_items_for_epic(epic_id)
+            items = self._get_items_for_epic(epic_id)
+            epic['items'] = items
+
+            # XACA-0474: Derived state + full item-count breakdown
+            epic['state'] = self._derive_epic_state(items)
+            epic['itemCounts'] = self._build_epic_item_counts(items)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')

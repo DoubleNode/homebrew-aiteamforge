@@ -11233,6 +11233,25 @@ body {
     background: rgba(0, 0, 0, 0.5);
 }
 
+/* XACA-0474: Epic derived-state visual treatments */
+.epic-card.epic-state-planned {
+    border-left-color: #888;
+}
+
+.epic-card.epic-state-active {
+    /* default look — no overrides; inherits --epic-color from renderEpicCard */
+}
+
+.epic-card.epic-state-archived {
+    opacity: 0.65;
+    filter: saturate(0.6);
+    border-left-color: #666 !important;
+}
+
+.epic-card.epic-state-archived .epic-card-header {
+    background: linear-gradient(135deg, #333 0%, #444 100%);
+}
+
 .epic-card-header {
     display: flex;
     align-items: center;

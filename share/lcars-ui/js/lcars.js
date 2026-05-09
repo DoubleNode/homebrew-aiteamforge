@@ -11943,8 +11943,45 @@ function updateReleasesStatusToggle() {
 let epicsState = {
     epics: [],
     colors: {},
-    expandedEpics: new Set()
+    expandedEpics: new Set(),
+    stateFilter: localStorage.getItem('lcars-epics-state-filter') || 'active'  // XACA-0474: 'planned' | 'active' | 'archived'
 };
+
+/**
+ * XACA-0474: Toggle epics state filter (planned | active | archived)
+ */
+function toggleEpicsStateFilter(state) {
+    epicsState.stateFilter = state;
+    try {
+        localStorage.setItem('lcars-epics-state-filter', state);
+    } catch (e) {
+        console.warn('lcars: Could not persist epics state filter to localStorage', e);
+    }
+    updateEpicsStateToggle();
+    loadEpics();
+}
+
+/**
+ * XACA-0474: Update toggle button UI to reflect current epics state filter
+ */
+function updateEpicsStateToggle() {
+    const plannedBtn = document.getElementById('epics-planned-btn');
+    const activeBtn = document.getElementById('epics-active-btn');
+    const archivedBtn = document.getElementById('epics-archived-btn');
+
+    [plannedBtn, activeBtn, archivedBtn].forEach(btn => {
+        if (btn) btn.classList.remove('active');
+    });
+
+    const filter = epicsState.stateFilter;
+    if (filter === 'planned' && plannedBtn) {
+        plannedBtn.classList.add('active');
+    } else if (filter === 'archived' && archivedBtn) {
+        archivedBtn.classList.add('active');
+    } else if (activeBtn) {
+        activeBtn.classList.add('active');
+    }
+}
 
 /**
  * Fetch and display epics
@@ -11955,9 +11992,14 @@ async function loadEpics() {
 
     dashboard.innerHTML = '<div class="epics-loading">Loading epics...</div>';
 
+    // XACA-0474: Update toggle buttons to reflect current state filter
+    updateEpicsStateToggle();
+
     try {
         // XACA-0209 round 5: tag filtering moved fully client-side — see displayEpics.
-        const response = await fetch(apiUrl('/api/epics'));
+        // XACA-0474: state filter applied server-side via ?state= query param.
+        const stateParam = epicsState.stateFilter ? `?state=${encodeURIComponent(epicsState.stateFilter)}` : '';
+        const response = await fetch(apiUrl(`/api/epics${stateParam}`));
         if (!response.ok) {
             const errorText = await response.text();
             throw new Error(`Server returned ${response.status}: ${errorText || response.statusText}`);
@@ -11989,11 +12031,27 @@ function displayEpics(epics) {
     if (!dashboard) return;
 
     if (!epics || epics.length === 0) {
+        // XACA-0474: filter-aware empty state messages
+        let emptyIcon, emptyTitle, emptyHint;
+        const filter = epicsState.stateFilter;
+        if (filter === 'planned') {
+            emptyIcon = '🗓';
+            emptyTitle = 'No Planned Epics';
+            emptyHint = 'Epics appear here when created but no items have been started.';
+        } else if (filter === 'archived') {
+            emptyIcon = '📁';
+            emptyTitle = 'No Archived Epics';
+            emptyHint = 'Epics appear here when all their items are completed.';
+        } else {
+            emptyIcon = '📚';
+            emptyTitle = 'No Active Epics';
+            emptyHint = 'Start work on an epic\'s items to see it here.';
+        }
         dashboard.innerHTML = `
             <div class="epics-empty">
-                <div class="epics-empty-icon">📚</div>
-                <div class="epics-empty-text">No Epics Created</div>
-                <div class="epics-empty-hint">Click "+ NEW" to create an epic</div>
+                <div class="epics-empty-icon">${emptyIcon}</div>
+                <div class="epics-empty-text">${emptyTitle}</div>
+                <div class="epics-empty-hint">${emptyHint}</div>
             </div>
         `;
         return;
@@ -12045,8 +12103,12 @@ function renderEpicCard(epic) {
     // sets the epic search input (handler wired via bindItemTagClicks).
     const tagsHtml = buildItemTagsHtml(epic.tags, 'epic');
 
+    // XACA-0474: derive state class from epic.state field (UPPERCASE from API, lowercase for CSS)
+    const epicStateToken = (epic.state || 'active').toLowerCase();
+    const epicStateAttr = (epic.state || 'ACTIVE').toUpperCase();
+
     return `
-        <div class="epic-card ${expandedClass}" data-epic-id="${epic.id}" style="--epic-color: ${colorHex}">
+        <div class="epic-card ${expandedClass} epic-state-${epicStateToken}" data-epic-id="${epic.id}" data-epic-state="${epicStateAttr}" style="--epic-color: ${colorHex}">
             <div class="epic-card-header" onclick="toggleEpicExpanded('${epic.id}')">
                 <div class="epic-color-indicator" style="background-color: ${colorHex}"></div>
                 <div class="epic-card-info">
@@ -17886,6 +17948,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         currentText: () => epicSearchText,
         setFilter: setEpicSearchFilter,
     });
+    // XACA-0474: hydrate epics state filter toggle from persisted value
+    updateEpicsStateToggle();
     initViewToggle();
     initCommandSectionBar();
 
