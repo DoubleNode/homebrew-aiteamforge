@@ -690,21 +690,39 @@ function createFilterBar(options) {
             while (select.options.length > 3) select.remove(3);
 
             if (epics.length > 0) {
-                const sep = document.createElement('option');
-                sep.value    = '---';
-                sep.textContent = '───────────';
-                sep.disabled = true;
-                select.appendChild(sep);
-
+                // XACA-0474 follow-up: bucket epics by derived state (PLANNED/ACTIVE/ARCHIVED).
+                // Epics missing `state` (e.g. stale server) fall into ACTIVE — safe middle bucket.
+                const STATE_ORDER = ['PLANNED', 'ACTIVE', 'ARCHIVED'];
+                const buckets = { PLANNED: [], ACTIVE: [], ARCHIVED: [] };
                 epics.forEach(epic => {
-                    const opt = document.createElement('option');
-                    opt.value = epic.id;
-                    let name  = (epic.shortTitle && (epic.title || epic.name))
-                        ? `${epic.shortTitle} - ${epic.title || epic.name}`
-                        : (epic.title || epic.name || epic.id);
-                    opt.textContent = name.length > 35 ? name.substring(0, 35) + '…' : name;
-                    opt.title       = `${epic.title || epic.name} (${epic.id})`;
-                    select.appendChild(opt);
+                    const s = (epic.state && buckets[epic.state]) ? epic.state : 'ACTIVE';
+                    buckets[s].push(epic);
+                });
+
+                const epicSortKey = (epic) =>
+                    ((epic.title || epic.name || epic.id) + '').toLowerCase();
+
+                STATE_ORDER.forEach(stateLabel => {
+                    const group = buckets[stateLabel];
+                    if (!group.length) return;
+                    group.sort((a, b) => epicSortKey(a).localeCompare(epicSortKey(b)));
+
+                    const header = document.createElement('option');
+                    header.value = `--state-${stateLabel.toLowerCase()}--`;
+                    header.textContent = `── ${stateLabel} ──`;
+                    header.disabled = true;
+                    select.appendChild(header);
+
+                    group.forEach(epic => {
+                        const opt = document.createElement('option');
+                        opt.value = epic.id;
+                        let name  = (epic.shortTitle && (epic.title || epic.name))
+                            ? `${epic.shortTitle} - ${epic.title || epic.name}`
+                            : (epic.title || epic.name || epic.id);
+                        opt.textContent = name.length > 35 ? name.substring(0, 35) + '…' : name;
+                        opt.title       = `${epic.title || epic.name} (${epic.id})`;
+                        select.appendChild(opt);
+                    });
                 });
             }
 
