@@ -66,6 +66,18 @@ Follow Homebrew's formula style guide:
 - Indent with 2 spaces
 - Keep dependencies alphabetically sorted
 
+### Cellar post_install symlinks (XACA-0477)
+
+Three specific file paths are converted to symlinks at `brew install` time via the formula's `post_install` block. These symlinks collapse duplicated CSS/JS assets shared between lcars-ui and fleet-monitor:
+
+- `share/lcars-ui/css/lcars-fleet.css` → `../../fleet-monitor/server/public/lcars/css/lcars-fleet.css`
+- `share/lcars-ui/css/lcars-fleet-theme.css` → `../../fleet-monitor/server/public/lcars/css/lcars-fleet-theme.css`
+- `share/lcars-ui/js/lcars-fleet-core.js` → `../../fleet-monitor/server/public/lcars/js/lcars-fleet-core.js`
+
+The tap repo continues to ship both lcars-ui and fleet-monitor paths as real files — `sync-tap.sh` dereferences symlinks from the dev-tree and copies the real files into the tap. At `brew install` time, the formula's `post_install` block replaces the lcars-ui copies with symlinks pointing to the canonical fleet-monitor equivalents. These symlinks dangle in the cellar layout (correct behavior: nothing reads from cellar at runtime) but resolve correctly in the user-dir sibling layout after `cp -r` plants both directories.
+
+If new lcars-ui↔fleet-monitor symlinks are added in the dev-tree, the sentinel check `XACA-0477-001` in the subitem tracker will warn, and the formula's `overlap_pairs` array in `post_install` MUST be extended to match. See `kanban/plans/XACA-0477/PLAN.md` for rationale and implementation details.
+
 ### Updating the Formula
 
 When updating the formula for a new release:
