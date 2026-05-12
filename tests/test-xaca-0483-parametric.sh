@@ -520,19 +520,30 @@ test_start "XACA-0485-010: invalid --project rejected by _validate_instance_comp
 #
 # If any of those three regress, the augmentation block could be reached with
 # an unvalidated project value and construct a malicious path.
+#
+# NOTE on grep mode: -F (fixed-string) is used for the regex-literal check
+# because BRE/ERE interpretation of the pattern is ambiguous when the SEARCH
+# STRING itself contains regex metacharacters. -F eliminates the escaping
+# dimension entirely. Reno caught a BRE pattern that always returned 0 in the
+# initial version of this test (XACA-0485-010 review feedback).
 
-# (a) validator regex
-validator_ok=$(grep -A 4 '_validate_instance_component()' "$INSTALL_TEAM" | grep -c '\^\[a-z0-9_\]\+\$' || echo 0)
+# (a) validator regex — fixed-string match so the regex literal in the source matches as-is
+validator_ok=$(grep -A 4 '_validate_instance_component()' "$INSTALL_TEAM" | grep -cF '^[a-z0-9_]+$')
 # (b) errexit
-errexit_ok=$(grep -c 'set -e\|set -euo\|errexit' "$INSTALL_TEAM" || echo 0)
+errexit_ok=$(grep -cE 'set -e|set -euo|errexit' "$INSTALL_TEAM")
 # (c) sequencing
 instance_line=$(grep -n 'INSTANCE_ID="\$(compute_instance_id' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
 seq_aug_line=$(grep -n '_XACA0485_RESOLVED_PROJECT' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
 
+# Guard against empty values from grep failures — coerce to 0 so -lt comparison
+# is a single-integer test rather than a multi-line string expression.
+validator_ok="${validator_ok:-0}"
+errexit_ok="${errexit_ok:-0}"
+
 if [ "$validator_ok" -lt 1 ]; then
-    test_fail "_validate_instance_component does not enforce ^[a-z0-9_]+$ regex"
+    test_fail "_validate_instance_component does not enforce ^[a-z0-9_]+\$ regex (validator_ok=$validator_ok)"
 elif [ "$errexit_ok" -lt 1 ]; then
-    test_fail "install-team.sh missing set -e / errexit — validator exit would be ignored"
+    test_fail "install-team.sh missing set -e / errexit — validator exit would be ignored (errexit_ok=$errexit_ok)"
 elif [ -z "$instance_line" ] || [ -z "$seq_aug_line" ] || [ "$instance_line" -ge "$seq_aug_line" ]; then
     test_fail "Validation-before-augmentation invariant broken: INSTANCE_ID@${instance_line:-unset}, aug@${seq_aug_line:-unset}"
 else
