@@ -263,6 +263,12 @@ REGISTRY_NAME_RAW="$(echo "$_REGISTRY_ENTRY" | jq -r '.name')"
 REGISTRY_DESC="$(echo "$_REGISTRY_ENTRY"     | jq -r '.description')"
 REGISTRY_COLOR="$(echo "$_REGISTRY_ENTRY"    | jq -r '.color')"
 REGISTRY_ICON="$(echo "$_REGISTRY_ENTRY"     | jq -r '.icon')"
+# XACA-0486 review feedback (XACA-0486-011): theme comes from <team>.conf's
+# TEAM_THEME (loaded above via _read_conf), NOT registry.json's .theme field.
+# Several registry.json entries (academy, command, legal, medical) have
+# .theme == .name (stale data), which would produce duplicate teamName/subtitle
+# on the board. <team>.conf TEAM_THEME values are authoritative and distinct
+# from team names. registry.json data sync is a separate concern.
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Installing Team: $TEAM_ID  (instance: $INSTANCE_ID)"
@@ -1295,16 +1301,28 @@ elif [[ -f "$TEAM_BOARD" ]]; then
     echo "  ✓ Kanban board already exists"
 else
     # Build board JSON from registry.json branding (XACA-0460-011).
-    # REGISTRY_NAME_RAW / REGISTRY_DESC / REGISTRY_COLOR / REGISTRY_ICON were
-    # loaded above when we validated the template entry.
+    # REGISTRY_NAME_RAW / REGISTRY_DESC / REGISTRY_COLOR / REGISTRY_ICON / REGISTRY_THEME
+    # were loaded above when we validated the template entry.
+    #
+    # Field semantics (matches dev-team's academy-board.json model):
+    #   teamName     = brand name (uppercase, e.g., "FERENGI COMMERCE AUTHORITY")
+    #   organization = template id (uppercase, e.g., "FINANCE") — drives sidebar line 2
+    #   subtitle     = theme (uppercase, e.g., "STAR TREK: DEEP SPACE NINE - FERENGI") — sidebar line 1
+    #   ship         = TEAM_SHIP from conf (mixed case, e.g., "Ferengi Alliance Commerce Hub")
+    # LCARS UI renders title as "${organization} ${teamName}" so these MUST be distinct
+    # values; using the same string for both (the pre-XACA-0486 bug) caused the title
+    # to render duplicated as "Ferengi Commerce Authority Ferengi Commerce Authority".
     _BOARD_CREATED="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
     _BOARD_SERIES="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]' | cut -c1-3)"
+    _BOARD_TEAMNAME_UPPER="$(echo "$REGISTRY_NAME_RAW" | tr '[:lower:]' '[:upper:]')"
+    _BOARD_ORG_UPPER="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]')"
+    _BOARD_SUBTITLE_UPPER="$(echo "$TEAM_THEME" | tr '[:lower:]' '[:upper:]')"
     jq -n \
         --arg team        "$INSTANCE_ID" \
-        --arg teamName    "$REGISTRY_NAME_RAW" \
-        --arg subtitle    "$REGISTRY_DESC" \
+        --arg teamName    "$_BOARD_TEAMNAME_UPPER" \
+        --arg subtitle    "$_BOARD_SUBTITLE_UPPER" \
         --arg series      "X${_BOARD_SERIES}" \
-        --arg organization "$REGISTRY_NAME_RAW" \
+        --arg organization "$_BOARD_ORG_UPPER" \
         --arg orgColor    "$REGISTRY_COLOR" \
         --arg ship        "${TEAM_SHIP:-Unknown Vessel}" \
         --arg icon        "$REGISTRY_ICON" \
@@ -1345,24 +1363,43 @@ fi
 # registry+conf. Non-destructive: only updates the branding fields; preserves
 # all backlog/epics/releases/terminals data.
 if [[ -f "$TEAM_BOARD" ]]; then
+    # XACA-0486 detection: also catch the duplicate-brand bug from 0.11.7/0.11.8
+    # where boards have non-null but wrong values (organization == teamName).
+    # That fingerprint can never be correct under the academy-board.json model
+    # (organization is template-id-upper, teamName is brand-upper — they differ).
     _XACA0484_NEEDS_PATCH=$(jq -r '
         if (.teamName == null) or (.organization == null) or
-           (.ship == null) or (.subtitle == null) then "true" else "false" end
+           (.ship == null) or (.subtitle == null) or
+           (.organization == .teamName) then "true" else "false" end
     ' "$TEAM_BOARD" 2>/dev/null || echo "false")
     if [[ "$_XACA0484_NEEDS_PATCH" == "true" ]]; then
+        # XACA-0486 field semantics (matches academy-board.json model):
+        #   teamName=brand (UPPER), organization=template-id (UPPER), subtitle=theme (UPPER).
+        # Pre-XACA-0486 migration set all three from REGISTRY_NAME_RAW / REGISTRY_DESC
+        # which produced duplicate org/teamName and the wrong subtitle.
+        _XACA0486_TEAMNAME_UPPER="$(echo "$REGISTRY_NAME_RAW" | tr '[:lower:]' '[:upper:]')"
+        _XACA0486_ORG_UPPER="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]')"
+        _XACA0486_SUBTITLE_UPPER="$(echo "$TEAM_THEME" | tr '[:lower:]' '[:upper:]')"
         _XACA0484_BOARD_TMP="${TEAM_BOARD}.xaca0484-patch.tmp"
+        # XACA-0486 patch: for the three semantic fields (teamName / organization /
+        # subtitle), re-derive UNCONDITIONALLY from current registry+conf. Earlier
+        # `// $default` coalescing preserved the wrong values from 0.11.7/0.11.8
+        # installs. The install-time computation is the source of truth for
+        # parametric teams — users who manually edit these should expect re-derive.
+        # Other fields (ship, icon, template, instance) keep `// $default` since
+        # they may legitimately predate or post-date this migration.
         jq \
-            --arg teamName    "$REGISTRY_NAME_RAW" \
-            --arg subtitle    "$REGISTRY_DESC" \
-            --arg organization "$REGISTRY_NAME_RAW" \
+            --arg teamName    "$_XACA0486_TEAMNAME_UPPER" \
+            --arg subtitle    "$_XACA0486_SUBTITLE_UPPER" \
+            --arg organization "$_XACA0486_ORG_UPPER" \
             --arg orgColor    "$REGISTRY_COLOR" \
             --arg ship        "${TEAM_SHIP:-Unknown Vessel}" \
             --arg icon        "$REGISTRY_ICON" \
             --arg template    "$TEAM_ID" \
             --arg instance    "$INSTANCE_ID" \
-            '.teamName     = (.teamName     // $teamName)
-           | .subtitle     = (.subtitle     // $subtitle)
-           | .organization = (.organization // $organization)
+            '.teamName     = $teamName
+           | .subtitle     = $subtitle
+           | .organization = $organization
            | .orgColor     = (.orgColor     // $orgColor)
            | .ship         = (.ship         // $ship)
            | .icon         = (.icon         // $icon)

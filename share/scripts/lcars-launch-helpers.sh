@@ -61,12 +61,25 @@ start_lcars_server() {
     # expected when nothing is running; suppress them.
     pkill -f "server.py.*${port}" 2>/dev/null
 
+    # XACA-0486: Resolve the brew venv python so runtime imports (pyzipper,
+    # requests, etc. listed in share/requirements.txt) actually work. Bare
+    # `python3` resolves to the system python which does NOT have these deps.
+    # The Formula installs requirements.txt into `libexec/venv` at install time;
+    # that venv's python3 must be the one we invoke.
+    local lcars_python="python3"  # last-resort fallback
+    local _brew_aitf_prefix
+    if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
+        lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
+    elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
+        lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
+    fi
+
     # Start the server in a background subshell. stdout/stderr are discarded
     # because server.py is chatty and we only care about the /api/status poll.
     (
         cd "${lcars_ui_dir}" || return 1
         LCARS_TEAM="${team}" LCARS_SESSION_NAME="${session_name}" \
-            python3 server.py "${port}" > /dev/null 2>&1 &
+            "${lcars_python}" server.py "${port}" > /dev/null 2>&1 &
     )
 
     # Poll /api/status for up to 5s (10 × 0.5s). A ready response means the
