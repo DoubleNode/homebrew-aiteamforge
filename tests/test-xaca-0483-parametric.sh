@@ -556,14 +556,27 @@ fi
 
 LCARS_LAUNCH_HELPER="$TAP_ROOT/share/scripts/lcars-launch-helpers.sh"
 
-test_start "XACA-0486: lcars-launch-helpers.sh resolves brew venv python"
-output=$(grep -c 'brew --prefix aiteamforge\|libexec/venv/bin/python3' "$LCARS_LAUNCH_HELPER")
-run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+test_start "XACA-0486: lcars-launch-helpers.sh sources brew env.sh and uses AITEAMFORGE_PYTHON"
+# Canonical pattern per Formula design: source $(brew --prefix)/var/aiteamforge/env.sh
+# then use $AITEAMFORGE_PYTHON. Earlier fix used wrong path (libexec/venv) that doesn't exist.
+output=$(grep -cE 'var/aiteamforge/env\.sh|AITEAMFORGE_PYTHON' "$LCARS_LAUNCH_HELPER")
+run_assert_pass assert_exit_success $([ "$output" -ge 2 ]; echo $?)
 
 test_start "XACA-0486: lcars-launch-helpers.sh has fallback chain for non-brew installs"
 # AITEAMFORGE_DIR fallback should appear in the same start_lcars_server function.
-output=$(grep -A 10 'lcars_python="python3"' "$LCARS_LAUNCH_HELPER" | grep -c 'AITEAMFORGE_DIR\|share/venv')
+output=$(grep -A 14 'lcars_python="python3"' "$LCARS_LAUNCH_HELPER" | grep -c 'AITEAMFORGE_DIR\|share/venv')
 run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0486: lcars-launch-helpers.sh does NOT use the wrong libexec/venv path"
+# Catch the path-resolution bug caught by M1Pro smoke (p071 gate). The Formula's
+# venv is at var/aiteamforge/venv, NOT libexec/venv. Any reference to libexec/venv
+# in the launch helper would be a regression.
+output=$(grep -c 'libexec/venv' "$LCARS_LAUNCH_HELPER")
+if [ "$output" -eq 0 ]; then
+    test_pass
+else
+    test_fail "Found $output references to wrong libexec/venv path (should be var/aiteamforge/venv)"
+fi
 
 test_start "XACA-0486: server invocation uses \${lcars_python} (not bare python3)"
 output=$(grep -c '"\${lcars_python}" server.py' "$LCARS_LAUNCH_HELPER")

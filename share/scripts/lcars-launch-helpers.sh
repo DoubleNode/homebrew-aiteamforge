@@ -64,12 +64,20 @@ start_lcars_server() {
     # XACA-0486: Resolve the brew venv python so runtime imports (pyzipper,
     # requests, etc. listed in share/requirements.txt) actually work. Bare
     # `python3` resolves to the system python which does NOT have these deps.
-    # The Formula installs requirements.txt into `libexec/venv` at install time;
-    # that venv's python3 must be the one we invoke.
-    local lcars_python="python3"  # last-resort fallback
-    local _brew_aitf_prefix
-    if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
-        lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
+    #
+    # The Formula creates a venv at $(brew --prefix)/var/aiteamforge/venv and
+    # exports AITEAMFORGE_PYTHON via env.sh. Use that env var (canonical) when
+    # available; otherwise probe known paths; bare python3 as last resort.
+    local lcars_python="python3"  # last-resort fallback (dev-team source machine)
+    local _atf_env_sh="$(brew --prefix 2>/dev/null)/var/aiteamforge/env.sh"
+    if [[ -f "$_atf_env_sh" ]]; then
+        # shellcheck disable=SC1090
+        source "$_atf_env_sh"
+    fi
+    if [[ -n "${AITEAMFORGE_PYTHON:-}" ]] && [[ -x "$AITEAMFORGE_PYTHON" ]]; then
+        lcars_python="$AITEAMFORGE_PYTHON"
+    elif [[ -x "$(brew --prefix 2>/dev/null)/var/aiteamforge/venv/bin/python3" ]]; then
+        lcars_python="$(brew --prefix)/var/aiteamforge/venv/bin/python3"
     elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
         lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
     fi
