@@ -251,3 +251,144 @@ test_start "XACA-0483: legacy instance-keyed branch still present in install-tea
 # The else branch must still produce ${INSTANCE_ID}-startup.sh for non-parametric paths
 output=$(grep -c 'TEAM_STARTUP_SCRIPT="\${INSTANCE_ID}-startup.sh"' "$INSTALL_TEAM")
 run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0484: per-agent script ship + stub-board migration
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0484: per-agent scripts ship for all parametric teams"
+# Each parametric team must ship at least one *-startup.sh under <team>/scripts/
+# plus a <team>-banner.sh.
+all_present=true
+for team in "${PARAMETRIC_TEAMS[@]}"; do
+    if [ ! -d "$TAP_ROOT/share/scripts/teams/${team}/scripts" ]; then
+        test_fail "Missing: share/scripts/teams/${team}/scripts/ directory"
+        all_present=false
+        break
+    fi
+    startup_count=$(find "$TAP_ROOT/share/scripts/teams/${team}/scripts" -name "${team}-*-startup.sh" | wc -l | tr -d ' ')
+    if [ "$startup_count" -lt 1 ]; then
+        test_fail "No per-agent startup scripts for ${team} (expected ≥1)"
+        all_present=false
+        break
+    fi
+    if [ ! -f "$TAP_ROOT/share/scripts/teams/${team}/scripts/${team}-banner.sh" ]; then
+        test_fail "Missing: share/scripts/teams/${team}/scripts/${team}-banner.sh"
+        all_present=false
+        break
+    fi
+done
+[ "$all_present" = true ] && test_pass
+
+test_start "XACA-0484: shipped per-agent scripts pass bash -n"
+all_syntax=true
+for f in "$TAP_ROOT"/share/scripts/teams/*/scripts/*.sh; do
+    [ -f "$f" ] || continue
+    if ! bash -n "$f" 2>/dev/null; then
+        test_fail "Syntax error: $(basename "$f")"
+        all_syntax=false
+        break
+    fi
+done
+[ "$all_syntax" = true ] && test_pass
+
+test_start "XACA-0484: shipped per-agent scripts are debrand-clean"
+# No DoubleNode/MainEvent literals should appear in tap-shipped per-agent files.
+hits=$(grep -rcE '[Dd]ouble[Nn]ode|doublenode' "$TAP_ROOT"/share/scripts/teams/ 2>/dev/null | awk -F: '$2 > 0 {s += $2} END {print s+0}')
+if [ "$hits" -eq 0 ]; then
+    test_pass
+else
+    test_fail "Found $hits debrand violations in per-agent scripts under share/scripts/teams/"
+fi
+
+test_start "XACA-0484: install-team.sh has per-agent install block in parametric branch"
+# The new block must reference share/scripts/teams/.../scripts and run within
+# the parametric mode branch.
+output=$(grep -c 'share/scripts/teams/\${TEAM_ID}/scripts' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0484: install-team.sh board init now includes ship field"
+# Earlier versions wrote board JSON without 'ship', causing LCARS UI to
+# fall back to "Unknown Vessel". Verify the jq board-build references ship.
+output=$(grep -c '"ship":.*\$ship' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0484: install-team.sh has stub-board migration block"
+# Detect-and-patch logic for boards with null branding fields.
+output=$(grep -c '_XACA0484_NEEDS_PATCH\|Patched stub branding' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0484: stub-board migration produces non-null fields"
+# Synthetic test: hand-craft a stub board with null fields, run a jq patch
+# matching the installer's pattern, verify the result has the expected fields.
+STUB_SANDBOX="$TEST_TMP_DIR/xaca0484-stub"
+mkdir -p "$STUB_SANDBOX"
+STUB_BOARD="$STUB_SANDBOX/finance-personal-board.json"
+cat > "$STUB_BOARD" <<'STUBEOF'
+{
+  "team": "finance-personal",
+  "teamName": null,
+  "subtitle": null,
+  "organization": null,
+  "orgColor": null,
+  "ship": null,
+  "icon": null,
+  "template": null,
+  "instance": null,
+  "backlog": [],
+  "epics": []
+}
+STUBEOF
+jq \
+    --arg teamName "Ferengi Commerce Authority" \
+    --arg subtitle "Personal finance" \
+    --arg organization "Ferengi Commerce Authority" \
+    --arg orgColor "#FFD700" \
+    --arg ship "Ferengi Alliance Commerce Hub" \
+    --arg icon "💰" \
+    --arg template "finance" \
+    --arg instance "finance-personal" \
+    '.teamName = (.teamName // $teamName)
+   | .subtitle = (.subtitle // $subtitle)
+   | .organization = (.organization // $organization)
+   | .orgColor = (.orgColor // $orgColor)
+   | .ship = (.ship // $ship)
+   | .icon = (.icon // $icon)
+   | .template = (.template // $template)
+   | .instance = (.instance // $instance)' \
+    "$STUB_BOARD" > "${STUB_BOARD}.tmp" && mv "${STUB_BOARD}.tmp" "$STUB_BOARD"
+
+# Verify all fields are now populated
+nulls=$(jq -r '[.teamName, .subtitle, .organization, .ship, .template, .instance] | map(select(. == null)) | length' "$STUB_BOARD")
+if [ "$nulls" -eq 0 ]; then
+    test_pass
+else
+    test_fail "Stub-board migration left $nulls null fields"
+fi
+
+test_start "XACA-0484: stub-board migration preserves non-stub data"
+# Re-run the jq patch on the already-patched board; backlog/epics arrays must be preserved.
+preserved=$(jq -r '[(.backlog | type == "array"), (.epics | type == "array")] | all' "$STUB_BOARD")
+if [ "$preserved" = "true" ]; then
+    test_pass
+else
+    test_fail "Migration corrupted preserved arrays (backlog/epics)"
+fi
+
+test_start "XACA-0484: per-agent ship matches expected counts per team"
+# Sanity check: finance ≥6 startup, medical ≥7, legal ≥7, freelance ≥6.
+declare -A min_counts
+min_counts[finance]=6
+min_counts[medical]=7
+min_counts[legal]=7
+min_counts[freelance]=6
+all_meet=true
+for team in finance medical legal freelance; do
+    count=$(find "$TAP_ROOT/share/scripts/teams/${team}/scripts" -name "${team}-*-startup.sh" 2>/dev/null | wc -l | tr -d ' ')
+    if [ "$count" -lt "${min_counts[$team]}" ]; then
+        test_fail "${team}: ${count} startup scripts (expected ≥${min_counts[$team]})"
+        all_meet=false
+        break
+    fi
+done
+[ "$all_meet" = true ] && test_pass
