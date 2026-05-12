@@ -1,0 +1,253 @@
+#!/bin/bash
+# test-xaca-0483-parametric.sh
+# Tests for XACA-0483 parametric-mode installer path
+#
+# Covers:
+# - install-team.sh detects parametric mode correctly
+# - share/scripts/teams/ ships all four parametric teams' scripts
+# - share/scripts/lcars-launch-helpers.sh ships
+# - Path-substitution helper produces clean output (no residual dev-team refs)
+# - Migration block renames legacy instance-keyed scripts safely
+# - Migration is idempotent (re-running doesn't double-suffix)
+# - Non-parametric installer path is preserved (academy/ios/firebase/android)
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INSTALL_TEAM="$TAP_ROOT/libexec/installers/install-team.sh"
+PARAMETRIC_TEAMS=(finance medical legal freelance)
+NON_PARAMETRIC_TEAMS=(academy ios android firebase)
+
+# Local helper (run-test-runner doesn't export this from test-installers.sh)
+run_assert_pass() {
+    if "$@"; then test_pass; fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Shipping checks: parametric scripts exist in the tap
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0483: parametric teams ship startup scripts under share/scripts/teams/"
+all_present=true
+for team in "${PARAMETRIC_TEAMS[@]}"; do
+    if [ ! -f "$TAP_ROOT/share/scripts/teams/${team}-startup.sh" ]; then
+        test_fail "Missing: share/scripts/teams/${team}-startup.sh"
+        all_present=false
+        break
+    fi
+done
+[ "$all_present" = true ] && test_pass
+
+test_start "XACA-0483: parametric teams ship shutdown scripts under share/scripts/teams/"
+all_present=true
+for team in "${PARAMETRIC_TEAMS[@]}"; do
+    if [ ! -f "$TAP_ROOT/share/scripts/teams/${team}-shutdown.sh" ]; then
+        test_fail "Missing: share/scripts/teams/${team}-shutdown.sh"
+        all_present=false
+        break
+    fi
+done
+[ "$all_present" = true ] && test_pass
+
+test_start "XACA-0483: lcars-launch-helpers.sh ships under share/scripts/"
+run_assert_pass assert_file_exists "$TAP_ROOT/share/scripts/lcars-launch-helpers.sh"
+
+test_start "XACA-0483: shipped parametric scripts pass bash -n syntax check"
+all_syntax=true
+for team in "${PARAMETRIC_TEAMS[@]}"; do
+    for kind in startup shutdown; do
+        if ! bash -n "$TAP_ROOT/share/scripts/teams/${team}-${kind}.sh" 2>/dev/null; then
+            test_fail "Syntax error: ${team}-${kind}.sh"
+            all_syntax=false
+            break 2
+        fi
+    done
+done
+[ "$all_syntax" = true ] && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# install-team.sh structural checks: parametric mode plumbing
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0483: install-team.sh defines _PARAMETRIC_MODE branch"
+output=$(grep -c '_PARAMETRIC_MODE="true"' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
+
+test_start "XACA-0483: install-team.sh gates parametric mode on TEAM_HAS_PROJECTS=true AND shipped source"
+# The gate must AND both conditions to avoid accidentally triggering parametric
+# mode for teams that don't ship parametric source.
+output=$(grep -c 'TEAM_HAS_PROJECTS.*true.*share/scripts/teams' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
+
+test_start "XACA-0483: install-team.sh defines path-substitution helper"
+output=$(grep -c '_xaca0483_install_script' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
+
+test_start "XACA-0483: install-team.sh substitutes all three dev-team path forms"
+# Must handle ~, $HOME, and ${HOME} variants
+forms_found=0
+grep -q '\$HOME/dev-team' "$INSTALL_TEAM" && forms_found=$((forms_found + 1))
+grep -q '\${HOME}/dev-team' "$INSTALL_TEAM" && forms_found=$((forms_found + 1))
+grep -q '~/dev-team' "$INSTALL_TEAM" && forms_found=$((forms_found + 1))
+run_assert_pass assert_exit_success $([ "$forms_found" -eq 3 ]; echo $?)
+
+test_start "XACA-0483: install-team.sh has migration block for legacy instance-keyed scripts"
+output=$(grep -c 'stale-pre-XACA-0483' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 2 ]; echo $?)
+
+test_start "XACA-0483: parametric branch skips connect/disconnect generation"
+# Each of CONNECT_SCRIPT/DISCONNECT_SCRIPT assignment must be followed within
+# ~5 lines by a _PARAMETRIC_MODE skip guard. Use -A 5 to span the comment block.
+connect_guarded=$(grep -A 5 '^CONNECT_SCRIPT=' "$INSTALL_TEAM" | grep -c '_PARAMETRIC_MODE')
+disconnect_guarded=$(grep -A 5 '^DISCONNECT_SCRIPT=' "$INSTALL_TEAM" | grep -c '_PARAMETRIC_MODE')
+if [ "$connect_guarded" -ge 1 ] && [ "$disconnect_guarded" -ge 1 ]; then
+    test_pass
+else
+    test_fail "Expected both CONNECT_SCRIPT and DISCONNECT_SCRIPT to be guarded by _PARAMETRIC_MODE (found connect=$connect_guarded disconnect=$disconnect_guarded)"
+fi
+
+test_start "XACA-0483: parametric branch skips shutdown template (already installed verbatim)"
+# The shutdown template `if [[ -f "$SHUTDOWN_TEMPLATE" ]]` block must be preceded
+# by a `_PARAMETRIC_MODE` skip guard.
+output=$(grep -B 3 'if \[\[ -f "\$SHUTDOWN_TEMPLATE" \]\]' "$INSTALL_TEAM" | grep -c '_PARAMETRIC_MODE')
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Path substitution functional test
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0483: path substitution produces clean scripts (no residual dev-team refs)"
+SANDBOX="$TEST_TMP_DIR/xaca0483-substitution"
+mkdir -p "$SANDBOX/scripts"
+all_clean=true
+for team in "${PARAMETRIC_TEAMS[@]}"; do
+    for kind in startup shutdown; do
+        src="$TAP_ROOT/share/scripts/teams/${team}-${kind}.sh"
+        dst="$SANDBOX/${team}-${kind}.sh"
+        sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$SANDBOX/scripts/iterm2_window_manager.py|g" \
+            -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$SANDBOX/scripts/iterm2_window_manager.py|g" \
+            -e "s|~/dev-team/iterm2_window_manager.py|$SANDBOX/scripts/iterm2_window_manager.py|g" \
+            -e "s|\$HOME/dev-team|$SANDBOX|g" \
+            -e "s|\${HOME}/dev-team|$SANDBOX|g" \
+            -e "s|~/dev-team|$SANDBOX|g" \
+            "$src" > "$dst"
+        if grep -q 'dev-team' "$dst" 2>/dev/null; then
+            test_fail "Residual dev-team ref in ${team}-${kind}.sh after substitution"
+            all_clean=false
+            break 2
+        fi
+    done
+done
+[ "$all_clean" = true ] && test_pass
+
+test_start "XACA-0483: substituted scripts pass bash -n"
+all_valid=true
+for f in "$SANDBOX"/*.sh; do
+    [ -f "$f" ] || continue
+    if ! bash -n "$f" 2>/dev/null; then
+        test_fail "Syntax error after substitution: $(basename "$f")"
+        all_valid=false
+        break
+    fi
+done
+[ "$all_valid" = true ] && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Migration logic test (extracted from install-team.sh)
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0483: migration renames legacy instance-keyed scripts to .stale-pre-XACA-0483"
+MIG_SANDBOX="$TEST_TMP_DIR/xaca0483-migration"
+mkdir -p "$MIG_SANDBOX"
+touch "$MIG_SANDBOX/finance-personal-startup.sh" \
+      "$MIG_SANDBOX/finance-personal-shutdown.sh" \
+      "$MIG_SANDBOX/finance-latinum1-startup.sh" \
+      "$MIG_SANDBOX/finance-startup.sh"
+
+AITEAMFORGE_DIR="$MIG_SANDBOX"
+TEAM_ID="finance"
+_PARAMETRIC_MODE="true"
+_XACA0483_STALE_SUFFIX=".stale-pre-XACA-0483"
+
+for _stale_glob in "$AITEAMFORGE_DIR/${TEAM_ID}-"*-startup.sh \
+                   "$AITEAMFORGE_DIR/${TEAM_ID}-"*-shutdown.sh \
+                   "$AITEAMFORGE_DIR/${TEAM_ID}-"*-connect.sh \
+                   "$AITEAMFORGE_DIR/${TEAM_ID}-"*-disconnect.sh; do
+    [[ -f "$_stale_glob" ]] || continue
+    case "$(basename "$_stale_glob")" in
+        "${TEAM_ID}-startup.sh"|"${TEAM_ID}-shutdown.sh"|"${TEAM_ID}-connect.sh"|"${TEAM_ID}-disconnect.sh") continue ;;
+    esac
+    [[ "$_stale_glob" == *"$_XACA0483_STALE_SUFFIX" ]] && continue
+    mv "$_stale_glob" "${_stale_glob}${_XACA0483_STALE_SUFFIX}"
+done
+
+# Check: instance-keyed got renamed
+all_renamed=true
+for f in "$MIG_SANDBOX"/finance-personal-startup.sh \
+         "$MIG_SANDBOX"/finance-personal-shutdown.sh \
+         "$MIG_SANDBOX"/finance-latinum1-startup.sh; do
+    if [ -f "$f" ]; then
+        test_fail "Should have been renamed: $(basename "$f")"
+        all_renamed=false
+        break
+    fi
+done
+# Check: template-keyed preserved
+if [ ! -f "$MIG_SANDBOX/finance-startup.sh" ]; then
+    test_fail "Template-keyed name should be preserved: finance-startup.sh"
+    all_renamed=false
+fi
+[ "$all_renamed" = true ] && test_pass
+
+test_start "XACA-0483: migration is idempotent (no double-suffixing on re-run)"
+# Re-run the migration loop over the post-migrated state
+files_before=$(ls "$MIG_SANDBOX" | sort)
+for _stale_glob in "$AITEAMFORGE_DIR/${TEAM_ID}-"*-startup.sh \
+                   "$AITEAMFORGE_DIR/${TEAM_ID}-"*-shutdown.sh \
+                   "$AITEAMFORGE_DIR/${TEAM_ID}-"*-connect.sh \
+                   "$AITEAMFORGE_DIR/${TEAM_ID}-"*-disconnect.sh; do
+    [[ -f "$_stale_glob" ]] || continue
+    case "$(basename "$_stale_glob")" in
+        "${TEAM_ID}-startup.sh"|"${TEAM_ID}-shutdown.sh"|"${TEAM_ID}-connect.sh"|"${TEAM_ID}-disconnect.sh") continue ;;
+    esac
+    [[ "$_stale_glob" == *"$_XACA0483_STALE_SUFFIX" ]] && continue
+    mv "$_stale_glob" "${_stale_glob}${_XACA0483_STALE_SUFFIX}"
+done
+files_after=$(ls "$MIG_SANDBOX" | sort)
+if [ "$files_before" = "$files_after" ]; then
+    test_pass
+else
+    test_fail "Migration not idempotent — files changed on re-run"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Non-parametric regression: confirm legacy installer path is preserved
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0483: non-parametric team confs still set TEAM_HAS_PROJECTS=false"
+all_false=true
+for team in "${NON_PARAMETRIC_TEAMS[@]}"; do
+    conf="$TAP_ROOT/share/teams/${team}.conf"
+    [ -f "$conf" ] || continue
+    if grep -q 'TEAM_HAS_PROJECTS="true"' "$conf"; then
+        test_fail "Unexpected: ${team}.conf has TEAM_HAS_PROJECTS=true (would trigger parametric mode)"
+        all_false=false
+        break
+    fi
+done
+[ "$all_false" = true ] && test_pass
+
+test_start "XACA-0483: non-parametric teams have no shipped parametric source (would not trigger parametric mode)"
+all_absent=true
+for team in "${NON_PARAMETRIC_TEAMS[@]}"; do
+    if [ -f "$TAP_ROOT/share/scripts/teams/${team}-startup.sh" ]; then
+        test_fail "Unexpected: share/scripts/teams/${team}-startup.sh ships (would enable parametric mode for non-parametric team)"
+        all_absent=false
+        break
+    fi
+done
+[ "$all_absent" = true ] && test_pass
+
+test_start "XACA-0483: legacy instance-keyed branch still present in install-team.sh"
+# The else branch must still produce ${INSTANCE_ID}-startup.sh for non-parametric paths
+output=$(grep -c 'TEAM_STARTUP_SCRIPT="\${INSTANCE_ID}-startup.sh"' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)

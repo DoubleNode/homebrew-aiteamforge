@@ -599,15 +599,55 @@ fi
 
 echo "🚀 Creating startup/shutdown scripts..."
 
-# Override script filenames from conf to use INSTANCE_ID instead of template id.
-# The conf may provide e.g. "finance-startup.sh" (template-keyed). We replace
-# that with the instance-keyed name so multiple instances of the same template
-# get distinct files. Contract §6, invariant 8.
-TEAM_STARTUP_SCRIPT="${INSTANCE_ID}-startup.sh"
-TEAM_SHUTDOWN_SCRIPT="${INSTANCE_ID}-shutdown.sh"
+# XACA-0483: For parametric (TEAM_HAS_PROJECTS=true) teams that have dev-team
+# source scripts shipped under share/scripts/teams/, install the parametric
+# script verbatim instead of generating a per-instance template substitution.
+# This restores ONE template-keyed script (e.g. finance-startup.sh) that takes
+# project args, matching the dev-team source-of-truth design. Reverses the
+# instance-keyed naming established in 0.11.5 / Contract §6 invariant 8.
+#
+# Non-parametric teams retain instance-keyed naming. Parameterized teams that
+# don't (yet) have a shipped parametric script also retain instance-keyed
+# naming via the legacy template path.
+if [[ "$TEAM_HAS_PROJECTS" == "true" ]] && [[ -f "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh" ]]; then
+    _PARAMETRIC_MODE="true"
+    TEAM_STARTUP_SCRIPT="${TEAM_ID}-startup.sh"
+    TEAM_SHUTDOWN_SCRIPT="${TEAM_ID}-shutdown.sh"
+else
+    _PARAMETRIC_MODE="false"
+    # Override script filenames from conf to use INSTANCE_ID instead of template id.
+    # The conf may provide e.g. "finance-startup.sh" (template-keyed). We replace
+    # that with the instance-keyed name so multiple instances of the same template
+    # get distinct files. Contract §6, invariant 8.
+    TEAM_STARTUP_SCRIPT="${INSTANCE_ID}-startup.sh"
+    TEAM_SHUTDOWN_SCRIPT="${INSTANCE_ID}-shutdown.sh"
+fi
 
 STARTUP_SCRIPT="$AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
 SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
+
+# XACA-0483 migration: when this template was previously installed in instance-keyed
+# mode (0.11.5 layout), the user has files like finance-personal-startup.sh,
+# finance-personal-shutdown.sh, etc. on disk. Move them aside with .stale-pre-XACA-0483
+# suffix so the new template-keyed scripts can take their place without ambiguity.
+# Non-destructive — user can audit or restore manually.
+if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
+    _XACA0483_STALE_SUFFIX=".stale-pre-XACA-0483"
+    for _stale_glob in "$AITEAMFORGE_DIR/${TEAM_ID}-"*-startup.sh \
+                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-shutdown.sh \
+                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-connect.sh \
+                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-disconnect.sh; do
+        [[ -f "$_stale_glob" ]] || continue
+        # Skip the template-keyed names themselves
+        case "$(basename "$_stale_glob")" in
+            "${TEAM_ID}-startup.sh"|"${TEAM_ID}-shutdown.sh"|"${TEAM_ID}-connect.sh"|"${TEAM_ID}-disconnect.sh") continue ;;
+        esac
+        # Skip files already wearing the stale suffix
+        [[ "$_stale_glob" == *"$_XACA0483_STALE_SUFFIX" ]] && continue
+        mv "$_stale_glob" "${_stale_glob}${_XACA0483_STALE_SUFFIX}"
+        echo "  📦 Migrated legacy instance-keyed script: $(basename "$_stale_glob") → $(basename "$_stale_glob")${_XACA0483_STALE_SUFFIX}"
+    done
+fi
 
 # Determine if this is a project-based team (values already imported from conf)
 IS_PROJECT_TEAM="$TEAM_HAS_PROJECTS"
@@ -628,7 +668,44 @@ if [[ ! -f "$SHUTDOWN_TEMPLATE" ]]; then
     SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-shutdown.sh.template"
 fi
 
-if [[ -f "$STARTUP_TEMPLATE" ]]; then
+# XACA-0483: parametric mode — copy dev-team source scripts verbatim with
+# path substitution from ~/dev-team/* to $AITEAMFORGE_DIR/*. Skips template
+# substitution entirely. The dev-team scripts already implement the parametric
+# pattern correctly (accept project/client args at runtime, compute instance id
+# from them, set LCARS_TEAM accordingly via scripts/lcars-launch-helpers.sh).
+if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
+    # Path-substitution helper: rewrite ~/dev-team and $HOME/dev-team references
+    # to $AITEAMFORGE_DIR. One special case: dev-team has iterm2_window_manager.py
+    # at the top level, but the tap installs it under scripts/. Handle that first.
+    _xaca0483_install_script() {
+        local src="$1" dst="$2"
+        # The dev-team source uses ~/dev-team/iterm2_window_manager.py (top-level),
+        # but the tap installs iterm2_window_manager.py under scripts/. Rewrite
+        # that specific case first, then the general ~/dev-team → $AITEAMFORGE_DIR
+        # path mapping. Covers all three reference forms: ~, $HOME, ${HOME}.
+        sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+            -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+            -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+            -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
+            -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
+            -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
+            "$src" > "$dst"
+        chmod +x "$dst"
+    }
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh" "$STARTUP_SCRIPT"
+    echo "  ✓ $TEAM_STARTUP_SCRIPT (parametric, XACA-0483)"
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-shutdown.sh" "$SHUTDOWN_SCRIPT"
+    echo "  ✓ $TEAM_SHUTDOWN_SCRIPT (parametric, XACA-0483)"
+
+    # Ensure lcars-launch-helpers.sh is installed (parametric scripts source it).
+    # Always re-install: substitution is cheap and the installed file diverges
+    # from the source by design (path rewrites), so a content-equality guard
+    # would always trip false. Re-running is the cheaper-and-clearer behavior.
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" \
+        "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+    echo "  ✓ scripts/lcars-launch-helpers.sh"
+elif [[ -f "$STARTUP_TEMPLATE" ]]; then
     # Step 1: single-line substitutions via sed
     # {{TEAM_ID}} receives INSTANCE_ID (not template id) so that the generated
     # script's TEAM_ID variable holds the instance id — keeping backwards compat
@@ -692,7 +769,12 @@ fi
 CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
 CONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
 
-if [[ -f "$CONNECT_TEMPLATE" ]]; then
+# XACA-0483: parametric teams (finance/medical/legal/freelance) don't ship a
+# connect/disconnect script in the dev-team source. Skip generation in
+# parametric mode to keep the install surface consistent with source-of-truth.
+if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
+    :  # No connect script for parametric teams
+elif [[ -f "$CONNECT_TEMPLATE" ]]; then
     # Step 1: single-line substitutions via sed
     # {{TEAM_ID}} → INSTANCE_ID; {{TEAM_TMUX_SOCKET}} → INSTANCE_ID (per-instance socket)
     sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
@@ -736,7 +818,10 @@ fi
 DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
 DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
 
-if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
+# XACA-0483: parametric teams skip disconnect generation — see connect comment above.
+if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
+    :  # No disconnect script for parametric teams
+elif [[ -f "$DISCONNECT_TEMPLATE" ]]; then
     sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
@@ -748,7 +833,11 @@ else
     echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping disconnect script)"
 fi
 
-if [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
+# XACA-0483: parametric shutdown was already installed verbatim in the parametric
+# block above. Skip the template-substitution path here.
+if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
+    :  # Shutdown already installed parametrically above
+elif [[ -f "$SHUTDOWN_TEMPLATE" ]]; then
     sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
