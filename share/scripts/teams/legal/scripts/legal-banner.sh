@@ -93,6 +93,11 @@ print -P "${WHITE}${BOLD}    Role: ${SESSION_ROLE}${RESET}"
 _saved=$(_cc_saved_session_label 2>/dev/null)
 [[ -n "$_saved" ]] && print -P "${WHITE}${BOLD}    Saved Session: ${RESET}${WHITE}${_saved}${RESET}"
 unset _saved
+# Defensive stubs: tap installs don't ship worktree-helpers.sh; dev-team installs
+# typically have it sourced via .zshrc. If either function is missing, fall back
+# to a no-op string so the banner renders without command-not-found errors.
+if ! command -v wt-current >/dev/null 2>&1; then wt-current() { echo "(no worktree)"; }; fi
+if ! command -v wt-project >/dev/null 2>&1; then wt-project() { echo "(no worktree)"; }; fi
 print -P "${WHITE}${BOLD}    Worktree: $(wt-project status-name) - $(wt-project status-code)${RESET}"
 print -P "${WHITE}${BOLD}              $(wt-current short)${RESET}"
 print -P "${WHITE}              $(wt-project status-short)${RESET}"
