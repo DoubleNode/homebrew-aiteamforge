@@ -705,6 +705,20 @@ if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
     _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" \
         "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
     echo "  ✓ scripts/lcars-launch-helpers.sh"
+
+    # XACA-0484: install per-agent startup scripts (and team banner) referenced
+    # by the master parametric script. Without these, tmux sessions never form
+    # because the master script's [ -f "$script" ] guard silently skips missing files.
+    if [[ -d "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}/scripts" ]]; then
+        mkdir -p "$AITEAMFORGE_DIR/${TEAM_ID}/scripts"
+        _xaca0484_count=0
+        for _src in "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}/scripts/"*.sh; do
+            [[ -f "$_src" ]] || continue
+            _xaca0483_install_script "$_src" "$AITEAMFORGE_DIR/${TEAM_ID}/scripts/$(basename "$_src")"
+            _xaca0484_count=$((_xaca0484_count + 1))
+        done
+        echo "  ✓ ${TEAM_ID}/scripts/ ($_xaca0484_count files — XACA-0484)"
+    fi
 elif [[ -f "$STARTUP_TEMPLATE" ]]; then
     # Step 1: single-line substitutions via sed
     # {{TEAM_ID}} receives INSTANCE_ID (not template id) so that the generated
@@ -1262,6 +1276,7 @@ else
         --arg series      "X${_BOARD_SERIES}" \
         --arg organization "$REGISTRY_NAME_RAW" \
         --arg orgColor    "$REGISTRY_COLOR" \
+        --arg ship        "${TEAM_SHIP:-Unknown Vessel}" \
         --arg icon        "$REGISTRY_ICON" \
         --arg template    "$TEAM_ID" \
         --arg instance    "$INSTANCE_ID" \
@@ -1274,6 +1289,7 @@ else
           "series":       $series,
           "organization": $organization,
           "orgColor":     $orgColor,
+          "ship":         $ship,
           "icon":         $icon,
           "template":     $template,
           "instance":     $instance,
@@ -1290,6 +1306,42 @@ else
           "releases":     []
         }' > "$TEAM_BOARD"
     echo "  ✓ Created kanban board: ${INSTANCE_ID}-board.json (branding: $REGISTRY_NAME_RAW)"
+fi
+
+# XACA-0484: stub-board migration. Earlier installer versions wrote board files
+# with null branding fields (teamName / organization / ship / subtitle). The
+# "Kanban board already exists" check above means those stale stubs are never
+# upgraded. Detect null/missing branding fields and patch them from the current
+# registry+conf. Non-destructive: only updates the branding fields; preserves
+# all backlog/epics/releases/terminals data.
+if [[ -f "$TEAM_BOARD" ]]; then
+    _XACA0484_NEEDS_PATCH=$(jq -r '
+        if (.teamName == null) or (.organization == null) or
+           (.ship == null) or (.subtitle == null) then "true" else "false" end
+    ' "$TEAM_BOARD" 2>/dev/null || echo "false")
+    if [[ "$_XACA0484_NEEDS_PATCH" == "true" ]]; then
+        _XACA0484_BOARD_TMP="${TEAM_BOARD}.xaca0484-patch.tmp"
+        jq \
+            --arg teamName    "$REGISTRY_NAME_RAW" \
+            --arg subtitle    "$REGISTRY_DESC" \
+            --arg organization "$REGISTRY_NAME_RAW" \
+            --arg orgColor    "$REGISTRY_COLOR" \
+            --arg ship        "${TEAM_SHIP:-Unknown Vessel}" \
+            --arg icon        "$REGISTRY_ICON" \
+            --arg template    "$TEAM_ID" \
+            --arg instance    "$INSTANCE_ID" \
+            '.teamName     = (.teamName     // $teamName)
+           | .subtitle     = (.subtitle     // $subtitle)
+           | .organization = (.organization // $organization)
+           | .orgColor     = (.orgColor     // $orgColor)
+           | .ship         = (.ship         // $ship)
+           | .icon         = (.icon         // $icon)
+           | .template     = (.template     // $template)
+           | .instance     = (.instance     // $instance)' \
+            "$TEAM_BOARD" > "$_XACA0484_BOARD_TMP" \
+        && mv "$_XACA0484_BOARD_TMP" "$TEAM_BOARD" \
+        && echo "  🔧 Patched stub branding fields in ${INSTANCE_ID}-board.json (XACA-0484)"
+    fi
 fi
 
 echo ""

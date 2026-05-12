@@ -1,0 +1,94 @@
+#!/bin/bash
+set +x
+# Freelance LCARS Terminal Startup
+# ENT Location: Enterprise NX-01 Computer Core
+# Primary Function: Kanban Workflow Monitor
+# Color Theme: ENT Orange/Beige
+
+SESSION_TYPE="freelance"
+SESSION_NAME="lcars"
+
+# Use passed project parameters or fallback to defaults
+if [ -n "$FREELANCE_PROJECT_DIR" ]; then
+    SESSION_DIRECTORY="$FREELANCE_PROJECT_DIR"
+    GROUPID="$FREELANCE_GROUPID"
+    PROJECTID="$FREELANCE_PROJECTID"
+    # Include project info in session name for uniqueness
+    GROUP_LOWER=$(echo "$GROUPID" | tr '[:upper:]' '[:lower:]')
+    PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
+    SESSION_PROJECT="${GROUP_LOWER}-${PROJECT_LOWER}"
+    SESSION_CODE="${SESSION_TYPE}-${SESSION_PROJECT}-${SESSION_NAME}"
+else
+    SESSION_DIRECTORY="/Users/darrenehlers/dev-team"
+    SESSION_PROJECT="acmecorp-widgettracker"
+    SESSION_CODE="${SESSION_TYPE}-${SESSION_PROJECT}-${SESSION_NAME}"
+fi
+
+# Port for Freelance LCARS - use passed port or default
+# Master script calculates unique port per project
+LCARS_PORT="${FREELANCE_LCARS_PORT:-8505}"
+
+# Port file directory for fleet-monitor integration
+LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+
+# Use team-specific tmux socket if set, otherwise use default server
+TMUX_CMD="tmux${TMUX_SOCKET:+ -L $TMUX_SOCKET}"
+
+# Compute LCARS team name for data isolation (e.g., freelance-acmecorp-starwords)
+LCARS_TEAM_NAME="${SESSION_TYPE}-${SESSION_PROJECT}"
+
+$TMUX_CMD has-session -t $SESSION_CODE 2>/dev/null
+SESSION_EXISTS=$?
+
+if [ $SESSION_EXISTS != 0 ]; then
+    clear
+    echo "  Initializing Freelance LCARS Display..."
+
+    # Create session with single window
+    $TMUX_CMD new-session -d -s $SESSION_CODE -n "lcars-monitor" -c "$SESSION_DIRECTORY"
+
+    sleep 0.1
+
+    # Configure tmux status line - ENT Orange/Beige theme
+    $TMUX_CMD set -t $SESSION_CODE status-left-length 15
+    $TMUX_CMD set -t $SESSION_CODE status-left "  LCARS "
+    $TMUX_CMD set -t $SESSION_CODE @developer "Enterprise NX-01"
+    $TMUX_CMD set -t $SESSION_CODE status-right "Kanban Monitor | Port $LCARS_PORT | 🖥  #h  "
+    $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour208,fg=colour232"
+    $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour166,fg=colour255,bold"
+    $TMUX_CMD set -t $SESSION_CODE status-right-style "bg=colour208,fg=colour232"
+    $TMUX_CMD set -t $SESSION_CODE window-status-style "bg=colour208,fg=colour232"
+    $TMUX_CMD set -t $SESSION_CODE window-status-current-style "bg=colour166,fg=colour255,bold"
+    $TMUX_CMD set -t $SESSION_CODE pane-border-style "fg=colour208"
+    $TMUX_CMD set -t $SESSION_CODE pane-active-border-style "fg=colour166"
+
+    # Start server ONLY if not launched by main startup script
+    # (Main script handles server startup more reliably with wait-for-ready loop)
+    if [ -z "$SKIP_SERVER_START" ]; then
+        # Start the LCARS server with correct team settings
+        $TMUX_CMD send-keys -t $SESSION_CODE:0 "cd ~/dev-team/lcars-ui && LCARS_TEAM=$LCARS_TEAM_NAME LCARS_SESSION_NAME=$SESSION_CODE python3 server.py $LCARS_PORT" C-m
+    else
+        # Show waiting message - main script will start server
+        $TMUX_CMD send-keys -t $SESSION_CODE:0 "echo 'LCARS server will be started by main startup script...'" C-m
+    fi
+
+    # Write port file for fleet-monitor integration
+    mkdir -p "$LCARS_PORTS_DIR"
+    echo "$LCARS_PORT" > "$LCARS_PORTS_DIR/${SESSION_CODE}.port"
+    echo "📡 Port file written: ${SESSION_CODE}.port -> $LCARS_PORT"
+
+    sleep 1
+
+    echo "  Freelance LCARS Display initialized"
+    echo ""
+    echo "--> LCARS server running on port $LCARS_PORT"
+    echo "--> Open http://localhost:$LCARS_PORT in browser"
+    echo "--> To attach to server: $TMUX_CMD attach -t $SESSION_CODE"
+    echo ""
+    sleep 1
+fi
+
+# Only attach if not being launched by master startup script
+if [ -z "$SKIP_ATTACH" ]; then
+    $TMUX_CMD attach-session -t $SESSION_CODE
+fi
