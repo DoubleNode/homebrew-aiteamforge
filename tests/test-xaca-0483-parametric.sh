@@ -506,3 +506,35 @@ if [ -n "$base_line" ] && [ -n "$aug_line" ] && [ -n "$kanban_line" ] && \
 else
     test_fail "Ordering violated: base@$base_line, aug@$aug_line, kanban@$kanban_line — expected base < aug < kanban"
 fi
+
+test_start "XACA-0485-010: invalid --project rejected by _validate_instance_component BEFORE augmentation"
+# Security invariant: path-traversal-shaped values like '../etc' must be rejected
+# at compute_instance_id (line ~189-205) BEFORE the augmentation block runs.
+# This test pins three invariants:
+#
+# (a) _validate_instance_component enforces ^[a-z0-9_]+$ — rejects dots, slashes,
+#     hyphens, anything outside the allowed set.
+# (b) install-team.sh runs under errexit semantics (set -e or equivalent) — a
+#     non-zero exit from compute_instance_id's $() subshell terminates the parent.
+# (c) INSTANCE_ID="$(compute_instance_id ...)" runs BEFORE the augmentation block.
+#
+# If any of those three regress, the augmentation block could be reached with
+# an unvalidated project value and construct a malicious path.
+
+# (a) validator regex
+validator_ok=$(grep -A 4 '_validate_instance_component()' "$INSTALL_TEAM" | grep -c '\^\[a-z0-9_\]\+\$' || echo 0)
+# (b) errexit
+errexit_ok=$(grep -c 'set -e\|set -euo\|errexit' "$INSTALL_TEAM" || echo 0)
+# (c) sequencing
+instance_line=$(grep -n 'INSTANCE_ID="\$(compute_instance_id' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
+seq_aug_line=$(grep -n '_XACA0485_RESOLVED_PROJECT' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
+
+if [ "$validator_ok" -lt 1 ]; then
+    test_fail "_validate_instance_component does not enforce ^[a-z0-9_]+$ regex"
+elif [ "$errexit_ok" -lt 1 ]; then
+    test_fail "install-team.sh missing set -e / errexit — validator exit would be ignored"
+elif [ -z "$instance_line" ] || [ -z "$seq_aug_line" ] || [ "$instance_line" -ge "$seq_aug_line" ]; then
+    test_fail "Validation-before-augmentation invariant broken: INSTANCE_ID@${instance_line:-unset}, aug@${seq_aug_line:-unset}"
+else
+    test_pass
+fi
