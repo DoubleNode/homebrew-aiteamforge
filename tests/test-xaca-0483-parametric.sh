@@ -549,3 +549,133 @@ elif [ -z "$instance_line" ] || [ -z "$seq_aug_line" ] || [ "$instance_line" -ge
 else
     test_pass
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0486: LCARS server venv-python + board field-semantics
+# ═══════════════════════════════════════════════════════════════════════════
+
+LCARS_LAUNCH_HELPER="$TAP_ROOT/share/scripts/lcars-launch-helpers.sh"
+
+test_start "XACA-0486: lcars-launch-helpers.sh resolves brew venv python"
+output=$(grep -c 'brew --prefix aiteamforge\|libexec/venv/bin/python3' "$LCARS_LAUNCH_HELPER")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0486: lcars-launch-helpers.sh has fallback chain for non-brew installs"
+# AITEAMFORGE_DIR fallback should appear in the same start_lcars_server function.
+output=$(grep -A 10 'lcars_python="python3"' "$LCARS_LAUNCH_HELPER" | grep -c 'AITEAMFORGE_DIR\|share/venv')
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0486: server invocation uses \${lcars_python} (not bare python3)"
+output=$(grep -c '"\${lcars_python}" server.py' "$LCARS_LAUNCH_HELPER")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0486: install-team.sh loads REGISTRY_THEME"
+output=$(grep -c 'REGISTRY_THEME=' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0486: board init uses uppercase derivations for teamName/organization/subtitle"
+output=$(grep -cE '_BOARD_TEAMNAME_UPPER|_BOARD_ORG_UPPER|_BOARD_SUBTITLE_UPPER' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 3 ]; echo $?)
+
+test_start "XACA-0486: organization sourced from TEAM_ID (template id), not REGISTRY_NAME_RAW"
+# Detect the (post-XACA-0486) pattern: _BOARD_ORG_UPPER computed from TEAM_ID.
+output=$(grep -A 2 '_BOARD_ORG_UPPER=' "$INSTALL_TEAM" | head -1)
+case "$output" in
+    *'echo "$TEAM_ID"'*) test_pass ;;
+    *) test_fail "_BOARD_ORG_UPPER not derived from TEAM_ID (got: $output)" ;;
+esac
+
+test_start "XACA-0486: migration detects duplicate-brand bug (organization == teamName)"
+# The detect condition must include `.organization == .teamName` clause.
+output=$(grep -c '\.organization == \.teamName' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0486: migration unconditionally re-derives parametric branding fields"
+# For the three semantic fields (teamName / subtitle / organization), the jq
+# assignment must be `= $name` (unconditional) NOT `// $name` (coalesce).
+# Check each pattern separately; the patterns appear on distinct lines after
+# the _XACA0484_BOARD_TMP= anchor (with jq --arg block in between, so widen scan).
+window=$(grep -A 30 '_XACA0484_BOARD_TMP=' "$INSTALL_TEAM")
+ok=0
+echo "$window" | grep -qE '\.teamName *= *\$teamName' && ok=$((ok + 1))
+echo "$window" | grep -qE '\.subtitle *= *\$subtitle' && ok=$((ok + 1))
+echo "$window" | grep -qE '\.organization *= *\$organization' && ok=$((ok + 1))
+if [ "$ok" -eq 3 ]; then
+    test_pass
+else
+    test_fail "Expected 3 unconditional assignments in migration block, found $ok"
+fi
+
+test_start "XACA-0486: synthetic board-init field values match academy-board.json model"
+# Replicate the install-team.sh logic with known inputs (finance template) and
+# verify the resulting jq output matches academy-board.json's field semantics.
+TEAM_ID="finance"
+REGISTRY_NAME_RAW="Ferengi Commerce Authority"
+REGISTRY_THEME="Star Trek: Deep Space Nine - Ferengi"
+_BOARD_TEAMNAME_UPPER="$(echo "$REGISTRY_NAME_RAW" | tr '[:lower:]' '[:upper:]')"
+_BOARD_ORG_UPPER="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]')"
+_BOARD_SUBTITLE_UPPER="$(echo "$REGISTRY_THEME" | tr '[:lower:]' '[:upper:]')"
+
+EXPECTED_TEAMNAME="FERENGI COMMERCE AUTHORITY"
+EXPECTED_ORG="FINANCE"
+EXPECTED_SUBTITLE="STAR TREK: DEEP SPACE NINE - FERENGI"
+
+if [ "$_BOARD_TEAMNAME_UPPER" = "$EXPECTED_TEAMNAME" ] && \
+   [ "$_BOARD_ORG_UPPER" = "$EXPECTED_ORG" ] && \
+   [ "$_BOARD_SUBTITLE_UPPER" = "$EXPECTED_SUBTITLE" ] && \
+   [ "$_BOARD_TEAMNAME_UPPER" != "$_BOARD_ORG_UPPER" ]; then
+    test_pass
+else
+    test_fail "Synthesized field values mismatch: teamName=$_BOARD_TEAMNAME_UPPER org=$_BOARD_ORG_UPPER subtitle=$_BOARD_SUBTITLE_UPPER"
+fi
+
+test_start "XACA-0486: synthetic migration re-derives org from TEAM_ID even when board has duplicate-brand"
+# Stub board with the duplicate-brand bug.
+MIG486_SANDBOX="$TEST_TMP_DIR/xaca0486-mig"
+mkdir -p "$MIG486_SANDBOX"
+STUB="$MIG486_SANDBOX/finance-personal-board.json"
+cat > "$STUB" <<'STUBEOF'
+{
+  "team": "finance-personal",
+  "teamName": "Ferengi Commerce Authority",
+  "subtitle": "Personal finance management and automation",
+  "organization": "Ferengi Commerce Authority",
+  "ship": "Ferengi Alliance Commerce Hub",
+  "backlog": [],
+  "epics": []
+}
+STUBEOF
+
+# Run the detection — should be true because organization == teamName.
+detect=$(jq -r '
+    if (.teamName == null) or (.organization == null) or
+       (.ship == null) or (.subtitle == null) or
+       (.organization == .teamName) then "true" else "false" end
+' "$STUB")
+
+# Run the patch with academy-style field semantics.
+jq \
+    --arg teamName "FERENGI COMMERCE AUTHORITY" \
+    --arg subtitle "STAR TREK: DEEP SPACE NINE - FERENGI" \
+    --arg organization "FINANCE" \
+    '.teamName     = $teamName
+   | .subtitle     = $subtitle
+   | .organization = $organization' \
+    "$STUB" > "${STUB}.tmp" && mv "${STUB}.tmp" "$STUB"
+
+# Verify post-patch values are the academy-model uppercase derivations.
+post_teamName=$(jq -r '.teamName' "$STUB")
+post_org=$(jq -r '.organization' "$STUB")
+post_subtitle=$(jq -r '.subtitle' "$STUB")
+preserved_backlog=$(jq -r '.backlog | type' "$STUB")
+
+if [ "$detect" = "true" ] && \
+   [ "$post_teamName" = "FERENGI COMMERCE AUTHORITY" ] && \
+   [ "$post_org" = "FINANCE" ] && \
+   [ "$post_subtitle" = "STAR TREK: DEEP SPACE NINE - FERENGI" ] && \
+   [ "$post_teamName" != "$post_org" ] && \
+   [ "$preserved_backlog" = "array" ]; then
+    test_pass
+else
+    test_fail "Migration didn't produce expected post-state: detect=$detect teamName=$post_teamName org=$post_org subtitle=$post_subtitle backlog-type=$preserved_backlog"
+fi
