@@ -590,6 +590,28 @@ else
     test_fail "Found $output references using stale REGISTRY_THEME for subtitle (should be TEAM_THEME)"
 fi
 
+test_start "XACA-0486-011: every team's TEAM_NAME != TEAM_THEME (no duplicate sidebar)"
+# Reno's review caught that name==theme produces duplicate teamName/subtitle
+# on the board. Switching the subtitle source from REGISTRY_THEME (stale)
+# to TEAM_THEME (authoritative) was step 1; this test ensures the conf data
+# itself never has name==theme. Catches future regressions in new team confs.
+violators=""
+for conf in "$TAP_ROOT"/share/teams/*.conf; do
+    [ -f "$conf" ] || continue
+    team_name=$(grep -E '^TEAM_NAME=' "$conf" | head -1 | sed -E 's/^TEAM_NAME=//; s/^"//; s/"$//')
+    team_theme=$(grep -E '^TEAM_THEME=' "$conf" | head -1 | sed -E 's/^TEAM_THEME=//; s/^"//; s/"$//')
+    # Skip teams without TEAM_THEME (some confs don't set it)
+    [ -n "$team_theme" ] || continue
+    if [ "$team_name" = "$team_theme" ]; then
+        violators="${violators}$(basename "$conf") "
+    fi
+done
+if [ -z "$violators" ]; then
+    test_pass
+else
+    test_fail "Teams with TEAM_NAME == TEAM_THEME (duplicate sidebar risk): $violators"
+fi
+
 test_start "XACA-0486: board init uses uppercase derivations for teamName/organization/subtitle"
 output=$(grep -cE '_BOARD_TEAMNAME_UPPER|_BOARD_ORG_UPPER|_BOARD_SUBTITLE_UPPER' "$INSTALL_TEAM")
 run_assert_pass assert_exit_success $([ "$output" -ge 3 ]; echo $?)
