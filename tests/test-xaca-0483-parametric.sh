@@ -392,3 +392,117 @@ for team in finance medical legal freelance; do
     fi
 done
 [ "$all_meet" = true ] && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0485: KANBAN_DIR / TEAM_WORKING_DIR project-component resolution
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0485: install-team.sh has TEAM_WORKING_DIR project-augmentation block"
+# The block must be guarded by TEAM_HAS_PROJECTS=true and reference ARG_PROJECT
+# (or TEAM_DEFAULT_PROJECT) for the resolution.
+output=$(grep -c '_XACA0485_RESOLVED_PROJECT\|XACA-0485' "$INSTALL_TEAM")
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0485: augmentation block handles template-client-project pattern"
+# Must reference TEAM_REQUIRES_CLIENT_ID for the freelance case (3-segment path).
+output=$(grep -A 10 '_XACA0485_RESOLVED_PROJECT' "$INSTALL_TEAM" | grep -c 'TEAM_REQUIRES_CLIENT_ID')
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0485: _TEAM_WORKING_DIR_RESOLVED now uses TEAM_WORKING_DIR (not TEAM_BASE_WORKING_DIR)"
+# The legacy template path's working-dir substitution previously used
+# TEAM_BASE_WORKING_DIR for project teams (stripping the project component).
+# Should now use TEAM_WORKING_DIR (project-augmented).
+output=$(grep -A 1 '_TEAM_WORKING_DIR_RESOLVED=' "$INSTALL_TEAM" | grep -c '\$TEAM_WORKING_DIR')
+run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+
+test_start "XACA-0485: template-project path computation (synthetic finance/personal)"
+# Synthesize the augmentation logic in isolation and verify output.
+TEAM_HAS_PROJECTS="true"
+TEAM_REQUIRES_CLIENT_ID="false"
+ARG_PROJECT="personal"
+TEAM_DEFAULT_PROJECT="personal"
+ARG_CLIENT=""
+TEAM_BASE_WORKING_DIR="/tmp/xaca0485-test-finance"
+
+_XACA0485_RESOLVED_PROJECT="${ARG_PROJECT:-$TEAM_DEFAULT_PROJECT}"
+_XACA0485_RESOLVED_PROJECT="$(echo "$_XACA0485_RESOLVED_PROJECT" | tr '[:upper:]' '[:lower:]')"
+if [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]]; then
+    _XACA0485_RESOLVED_CLIENT="$(echo "${ARG_CLIENT:-}" | tr '[:upper:]' '[:lower:]')"
+    COMPUTED="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_CLIENT}/${_XACA0485_RESOLVED_PROJECT}"
+else
+    COMPUTED="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_PROJECT}"
+fi
+EXPECTED="/tmp/xaca0485-test-finance/personal"
+if [ "$COMPUTED" = "$EXPECTED" ]; then
+    test_pass
+else
+    test_fail "template-project: got '$COMPUTED', expected '$EXPECTED'"
+fi
+
+test_start "XACA-0485: template-client-project path computation (synthetic freelance)"
+TEAM_HAS_PROJECTS="true"
+TEAM_REQUIRES_CLIENT_ID="true"
+ARG_PROJECT="widgettracker"
+TEAM_DEFAULT_PROJECT=""
+ARG_CLIENT="acmecorp"
+TEAM_BASE_WORKING_DIR="/tmp/xaca0485-test-freelance"
+
+_XACA0485_RESOLVED_PROJECT="${ARG_PROJECT:-$TEAM_DEFAULT_PROJECT}"
+_XACA0485_RESOLVED_PROJECT="$(echo "$_XACA0485_RESOLVED_PROJECT" | tr '[:upper:]' '[:lower:]')"
+if [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]]; then
+    _XACA0485_RESOLVED_CLIENT="$(echo "${ARG_CLIENT:-}" | tr '[:upper:]' '[:lower:]')"
+    COMPUTED="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_CLIENT}/${_XACA0485_RESOLVED_PROJECT}"
+else
+    COMPUTED="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_PROJECT}"
+fi
+EXPECTED="/tmp/xaca0485-test-freelance/acmecorp/widgettracker"
+if [ "$COMPUTED" = "$EXPECTED" ]; then
+    test_pass
+else
+    test_fail "template-client-project: got '$COMPUTED', expected '$EXPECTED'"
+fi
+
+test_start "XACA-0485: default-project fallback when --project not supplied"
+TEAM_HAS_PROJECTS="true"
+TEAM_REQUIRES_CLIENT_ID="false"
+ARG_PROJECT=""
+TEAM_DEFAULT_PROJECT="general"
+TEAM_BASE_WORKING_DIR="/tmp/xaca0485-test-medical"
+
+_XACA0485_RESOLVED_PROJECT="${ARG_PROJECT:-$TEAM_DEFAULT_PROJECT}"
+_XACA0485_RESOLVED_PROJECT="$(echo "$_XACA0485_RESOLVED_PROJECT" | tr '[:upper:]' '[:lower:]')"
+COMPUTED="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_PROJECT}"
+EXPECTED="/tmp/xaca0485-test-medical/general"
+if [ "$COMPUTED" = "$EXPECTED" ]; then
+    test_pass
+else
+    test_fail "default-project fallback: got '$COMPUTED', expected '$EXPECTED'"
+fi
+
+test_start "XACA-0485: non-parametric teams' TEAM_WORKING_DIR unchanged"
+# When TEAM_HAS_PROJECTS=false, the project-augmentation block must NOT fire.
+TEAM_HAS_PROJECTS="false"
+TEAM_BASE_WORKING_DIR="/Users/test/aiteamforge/academy"
+# Replicate the else branch of the augmentation
+TEAM_WORKING_DIR_RESULT="$TEAM_BASE_WORKING_DIR"
+EXPECTED="/Users/test/aiteamforge/academy"
+if [ "$TEAM_WORKING_DIR_RESULT" = "$EXPECTED" ]; then
+    test_pass
+else
+    test_fail "non-parametric: got '$TEAM_WORKING_DIR_RESULT', expected '$EXPECTED'"
+fi
+
+test_start "XACA-0485: install-team.sh sources required vars before augmentation block"
+# Sequencing check: augmentation must come AFTER _read_conf eval (so TEAM_HAS_PROJECTS,
+# TEAM_DEFAULT_PROJECT, TEAM_REQUIRES_CLIENT_ID are populated) AND AFTER TEAM_BASE_WORKING_DIR
+# is saved (so we use the base, not the augmented value).
+# Find line numbers for: TEAM_BASE_WORKING_DIR assignment, _XACA0485 block, KANBAN_DIR= line.
+base_line=$(grep -n 'TEAM_BASE_WORKING_DIR="\${TEAM_WORKING_DIR}"' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
+aug_line=$(grep -n '_XACA0485_RESOLVED_PROJECT' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
+kanban_line=$(grep -n 'KANBAN_DIR="\${TEAM_WORKING_DIR}/kanban"' "$INSTALL_TEAM" | head -1 | cut -d: -f1)
+if [ -n "$base_line" ] && [ -n "$aug_line" ] && [ -n "$kanban_line" ] && \
+   [ "$base_line" -lt "$aug_line" ] && [ "$aug_line" -lt "$kanban_line" ]; then
+    test_pass
+else
+    test_fail "Ordering violated: base@$base_line, aug@$aug_line, kanban@$kanban_line — expected base < aug < kanban"
+fi

@@ -468,11 +468,37 @@ PYEOF
     exit 0
 fi
 
-# Save the base working dir from conf (before env override)
-# For project-based teams, this is the parent dir (e.g., ~/medical)
-# while TEAM_WORKING_DIR from env includes the project (e.g., ~/medical/ehlers.darren)
+# Save the base working dir from conf (before env override or XACA-0485 augmentation).
+# For project-based teams, this is the parent dir (e.g., ~/medical) — used for
+# template-substitution defaults and other branding-time lookups.
 TEAM_BASE_WORKING_DIR="${TEAM_WORKING_DIR}"
 TEAM_BASE_WORKING_DIR="${TEAM_BASE_WORKING_DIR/\$HOME/$HOME}"
+
+# XACA-0485: Self-sufficient TEAM_WORKING_DIR computation for parametric teams.
+# The team conf sets TEAM_WORKING_DIR=$HOME/<team> (template-base, no project).
+# _read_conf re-sources the conf in a subshell which overrides any pre-set env
+# var, so the wizard cannot reliably pass a project-augmented value via env.
+# To keep install-time paths in lockstep with .aiteamforge-config.team_paths
+# (and with the LCARS server's kanban_dir resolution), install-team.sh appends
+# the resolved project (and client, for template-client-project teams) here.
+#
+# Layouts after this block:
+#   - unparameterized:        TEAM_WORKING_DIR = $TEAM_BASE_WORKING_DIR
+#   - template-project:       TEAM_WORKING_DIR = $TEAM_BASE_WORKING_DIR/<project>
+#   - template-client-project:TEAM_WORKING_DIR = $TEAM_BASE_WORKING_DIR/<client>/<project>
+if [[ "$TEAM_HAS_PROJECTS" == "true" ]]; then
+    _XACA0485_RESOLVED_PROJECT="${ARG_PROJECT:-$TEAM_DEFAULT_PROJECT}"
+    _XACA0485_RESOLVED_PROJECT="$(echo "$_XACA0485_RESOLVED_PROJECT" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]]; then
+        _XACA0485_RESOLVED_CLIENT="$(echo "${ARG_CLIENT:-}" | tr '[:upper:]' '[:lower:]')"
+        TEAM_WORKING_DIR="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_CLIENT}/${_XACA0485_RESOLVED_PROJECT}"
+    else
+        TEAM_WORKING_DIR="${TEAM_BASE_WORKING_DIR}/${_XACA0485_RESOLVED_PROJECT}"
+    fi
+else
+    # Unparameterized teams: just normalize the conf value with $HOME expansion.
+    TEAM_WORKING_DIR="$TEAM_BASE_WORKING_DIR"
+fi
 
 echo "Team Name: $TEAM_NAME"
 echo "Category: $TEAM_CATEGORY"
@@ -727,7 +753,11 @@ elif [[ -f "$STARTUP_TEMPLATE" ]]; then
     # {{TEAM_TMUX_SOCKET}} also uses INSTANCE_ID for per-instance socket isolation.
     # TODO(XACA-0460): LCARS port is still template-keyed via TEAM_LCARS_PORT.
     # Per-instance port allocation is out of scope for XACA-0460; will be a follow-up.
-    _TEAM_WORKING_DIR_RESOLVED="$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_BASE_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)"
+    # XACA-0485: for project teams, use the project-augmented TEAM_WORKING_DIR
+    # (computed above with the resolved-project/client component). Previously
+    # this used TEAM_BASE_WORKING_DIR which stripped the project component and
+    # made the legacy template path inherit the same bug as KANBAN_DIR.
+    _TEAM_WORKING_DIR_RESOLVED="$(if [[ "$IS_PROJECT_TEAM" == "true" ]]; then echo "$TEAM_WORKING_DIR"; else echo "${TEAM_WORKING_DIR:-$AITEAMFORGE_DIR/$TEAM_ID}"; fi)"
     sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
         -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
         -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
