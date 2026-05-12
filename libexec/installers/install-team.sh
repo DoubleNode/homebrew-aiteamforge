@@ -698,13 +698,13 @@ if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
     echo "  ✓ $TEAM_SHUTDOWN_SCRIPT (parametric, XACA-0483)"
 
     # Ensure lcars-launch-helpers.sh is installed (parametric scripts source it).
+    # Always re-install: substitution is cheap and the installed file diverges
+    # from the source by design (path rewrites), so a content-equality guard
+    # would always trip false. Re-running is the cheaper-and-clearer behavior.
     mkdir -p "$AITEAMFORGE_DIR/scripts"
-    if [[ ! -f "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh" ]] || \
-       ! cmp -s "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"; then
-        _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" \
-            "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
-        echo "  ✓ scripts/lcars-launch-helpers.sh"
-    fi
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" \
+        "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+    echo "  ✓ scripts/lcars-launch-helpers.sh"
 elif [[ -f "$STARTUP_TEMPLATE" ]]; then
     # Step 1: single-line substitutions via sed
     # {{TEAM_ID}} receives INSTANCE_ID (not template id) so that the generated

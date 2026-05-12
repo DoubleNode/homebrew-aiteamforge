@@ -119,7 +119,11 @@ terminal_order=(
 
 # Create tmux sessions ASYNCHRONOUSLY for faster startup
 # Use bash (not zsh) since scripts use bash shebang and rely on word splitting
+# NOTE: Earlier versions piped output through `head -3` which could SIGPIPE the
+# child mid-setup, silently killing session creation. Output now goes to a log.
+STARTUP_LOG="/tmp/legal-startup-sessions-$(date +%Y%m%d-%H%M%S).log"
 echo "  Creating tmux sessions (async for speed)..."
+echo "  (Session log: $STARTUP_LOG)"
 pids=()
 for base_name in "${base_terminals[@]}"; do
     script="$HOME/dev-team/legal/scripts/legal-${base_name}-startup.sh"
@@ -127,7 +131,8 @@ for base_name in "${base_terminals[@]}"; do
     if [ -f "$script" ]; then
         echo "  Initializing $session_name..."
         # Run in background with bash, passing PROJECTID via environment
-        SKIP_ATTACH=1 SKIP_SERVER_START=1 PROJECTID="$PROJECTID" bash "$script" 2>&1 | grep -v "^$" | head -3 &
+        SKIP_ATTACH=1 SKIP_SERVER_START=1 PROJECTID="$PROJECTID" \
+            bash "$script" >>"$STARTUP_LOG" 2>&1 &
         pids+=($!)
         # Small delay to stagger tmux commands slightly
         sleep 0.3
@@ -152,8 +157,10 @@ echo "  Creating terminal tabs..."
 # Detect if iTerm2 or Terminal.app
 if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
     # ── LCARS: start server BEFORE tab creation loop ──
+    # start_lcars_server writes the team line to lcars-target.js; append the session line after.
     echo "  Starting Legal LCARS server on port $LCARS_PORT..."
     start_lcars_server "legal-${PROJECTID}" "$LCARS_PORT" "legal-${PROJECTID}-lcars" || echo "    ⚠️  Server readiness poll timed out — continuing"
+    echo "window.LCARS_TARGET_SESSION = 'legal-${PROJECTID}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
 
     # iTerm2 automation using Python API for window management
     # Window was already initialized at script start, all tabs are created fresh

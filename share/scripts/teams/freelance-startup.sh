@@ -145,7 +145,11 @@ declare -A terminal_devdata=(
 
 # Create tmux sessions ASYNCHRONOUSLY for faster startup
 # Use bash (not zsh) since scripts use bash shebang and rely on word splitting
+# NOTE: Earlier versions piped output through `head -3` which could SIGPIPE the
+# child mid-setup, silently killing session creation. Output now goes to a log.
+STARTUP_LOG="/tmp/freelance-startup-sessions-$(date +%Y%m%d-%H%M%S).log"
 echo "📡 Creating tmux sessions (async for speed)..."
+echo "  (Session log: $STARTUP_LOG)"
 pids=()
 for base_name in "${base_terminals[@]}"; do
     script="$HOME/dev-team/freelance/scripts/freelance-${base_name}-startup.sh"
@@ -154,7 +158,8 @@ for base_name in "${base_terminals[@]}"; do
         echo "  Initializing $session_name..."
         # Run in background with bash
         # Pass LCARS_PORT so the LCARS script can use the project-specific port
-        SKIP_ATTACH=1 SKIP_SERVER_START=1 FREELANCE_GROUPID="$GROUPID" FREELANCE_PROJECTID="$PROJECTID" FREELANCE_PROJECT_DIR="$PROJECT_DIR" FREELANCE_LCARS_PORT="$LCARS_PORT" bash "$script" 2>&1 | grep -v "^$" | head -3 &
+        SKIP_ATTACH=1 SKIP_SERVER_START=1 FREELANCE_GROUPID="$GROUPID" FREELANCE_PROJECTID="$PROJECTID" FREELANCE_PROJECT_DIR="$PROJECT_DIR" FREELANCE_LCARS_PORT="$LCARS_PORT" \
+            bash "$script" >>"$STARTUP_LOG" 2>&1 &
         pids+=($!)
         # Small delay to stagger tmux commands slightly
         sleep 0.3
