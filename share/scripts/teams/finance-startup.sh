@@ -1,0 +1,339 @@
+#!/bin/zsh
+# Finance Team All Terminals Master Startup
+# Launches all Finance terminals in separate tabs
+# Includes LCARS (Kanban Overview) as first tab
+# Usage: ./finance-startup.sh <PROJECTID>
+# Example: ./finance-startup.sh latinum1
+
+source "$HOME/dev-team/scripts/lcars-launch-helpers.sh" || { echo "fatal: scripts/lcars-launch-helpers.sh missing or unreadable" >&2; exit 1; }
+
+# ============================================================================
+# Cleanup orphaned processes from previous crashed sessions
+# ============================================================================
+cleanup_orphans() {
+    local orphans=$(ps -eo pid,ppid,tty,comm | grep zsh | grep "??" | awk '$2 == 1 {print $1}')
+    if [[ -n "$orphans" ]]; then
+        echo "  Cleaning up orphaned processes..."
+        echo "$orphans" | xargs kill 2>/dev/null
+    fi
+}
+
+# Check for required parameters
+clear
+
+if [ $# -lt 1 ]; then
+    echo "ERROR: Project ID required"
+    echo "Usage: $0 <PROJECTID>"
+    echo "Example: $0 latinum1"
+    exit 1
+fi
+
+PROJECTID="$1"
+PROJECT_DIR="$HOME/finance/${PROJECTID}"
+
+# Validate directory exists
+if [ ! -d "$PROJECT_DIR" ]; then
+    echo "ERROR: Project directory does not exist:"
+    echo "   $PROJECT_DIR"
+    echo ""
+    echo "Please verify the PROJECTID is correct."
+    exit 1
+fi
+
+echo "FINANCE TEAM INFRASTRUCTURE"
+echo "   Tower of Commerce - Ferengi Alliance"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "   Project: $PROJECTID"
+echo "   Path:    $PROJECT_DIR"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# Cleanup orphaned processes from previous crashed sessions
+cleanup_orphans
+
+# Use separate tmux server for this team (prevents cross-team crashes)
+export TMUX_SOCKET="finance"
+echo "   tmux socket: $TMUX_SOCKET"
+
+# Window name for iTerm2 (tabs will be created in this named window)
+# Includes project name to support multiple finance projects simultaneously
+ITERM_WINDOW_NAME="${PROJECTID}: Finance"
+
+# ============================================================================
+# CAPTURE: Lock the current window IMMEDIATELY to prevent race conditions
+# ============================================================================
+ITERM_STARTUP_LOG="/tmp/finance-startup-iterm2-$(date +%Y%m%d-%H%M%S).log"
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+    echo "  Capturing current window..."
+    python3 ~/dev-team/iterm2_window_manager.py \
+        --action init-team-window \
+        --window-title "$ITERM_WINDOW_NAME" \
+        2>>"$ITERM_STARTUP_LOG"
+    if [[ $? -ne 0 ]]; then
+        echo "  Window capture failed (see $ITERM_STARTUP_LOG)"
+    fi
+fi
+
+# Create project-specific session names
+PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
+SESSION_PREFIX="finance-${PROJECT_LOWER}"
+
+# Generate unique port for LCARS based on project name (8360-8439 range for finance)
+LCARS_PORT=$((8360 + $(echo "${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 80))
+echo "   LCARS Port: $LCARS_PORT"
+
+# Base terminal names (actual script filenames)
+# LCARS is first - provides the kanban overview
+base_terminals=(
+    "lcars"
+    "nagus"
+    "bar"
+    "vault"
+    "fca"
+    "workshop"
+)
+
+# Terminal definitions with project-specific session names and labels
+declare -A terminals=(
+    ["${SESSION_PREFIX}-lcars"]="LCARS"
+    ["${SESSION_PREFIX}-nagus"]="nagus"
+    ["${SESSION_PREFIX}-bar"]="bar"
+    ["${SESSION_PREFIX}-vault"]="vault"
+    ["${SESSION_PREFIX}-fca"]="fca"
+    ["${SESSION_PREFIX}-workshop"]="workshop"
+)
+
+# Order of terminals (project-specific session names)
+# LCARS is first tab - Kanban overview
+terminal_order=(
+    "${SESSION_PREFIX}-lcars"
+    "${SESSION_PREFIX}-nagus"
+    "${SESSION_PREFIX}-bar"
+    "${SESSION_PREFIX}-vault"
+    "${SESSION_PREFIX}-fca"
+    "${SESSION_PREFIX}-workshop"
+)
+
+# Create tmux sessions ASYNCHRONOUSLY for faster startup, then verify + retry.
+# Use bash (not zsh) since scripts use bash shebang and rely on word splitting.
+# NOTE: Earlier versions piped output through `head -3` which could SIGPIPE the
+# child mid-setup, silently killing session creation. Output now goes to a log.
+STARTUP_LOG="/tmp/finance-startup-sessions-$(date +%Y%m%d-%H%M%S).log"
+echo "  Creating tmux sessions (async for speed)..."
+echo "  (Session log: $STARTUP_LOG)"
+pids=()
+for base_name in "${base_terminals[@]}"; do
+    script="$HOME/dev-team/finance/scripts/finance-${base_name}-startup.sh"
+    session_name="${SESSION_PREFIX}-${base_name}"
+    if [ -f "$script" ]; then
+        echo "  Initializing $session_name..."
+        # Pass LCARS_PORT so the LCARS script can use the project-specific port.
+        SKIP_ATTACH=1 FINANCE_PROJECTID="$PROJECTID" FINANCE_PROJECT_DIR="$PROJECT_DIR" FINANCE_LCARS_PORT="$LCARS_PORT" \
+            bash "$script" >>"$STARTUP_LOG" 2>&1 &
+        pids+=($!)
+        # Small delay to stagger tmux commands slightly
+        sleep 0.3
+    else
+        echo "  Warning: $script not found"
+    fi
+done
+
+# Wait for all background processes to complete
+echo "  Waiting for sessions to initialize..."
+for pid in "${pids[@]}"; do
+    wait $pid 2>/dev/null
+done
+
+# Verify each expected session exists; retry any missing ones serially.
+# Parallel tmux operations on the same socket can race — retry is our safety net.
+echo "  Verifying sessions..."
+missing=()
+for base_name in "${base_terminals[@]}"; do
+    session_name="${SESSION_PREFIX}-${base_name}"
+    if ! tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
+        missing+=("$base_name")
+    fi
+done
+
+if [[ ${#missing[@]} -gt 0 ]]; then
+    echo "  ⚠️  ${#missing[@]} session(s) failed to create, retrying serially..."
+    for base_name in "${missing[@]}"; do
+        script="$HOME/dev-team/finance/scripts/finance-${base_name}-startup.sh"
+        session_name="${SESSION_PREFIX}-${base_name}"
+        echo "    Retrying $session_name..."
+        SKIP_ATTACH=1 FINANCE_PROJECTID="$PROJECTID" FINANCE_PROJECT_DIR="$PROJECT_DIR" FINANCE_LCARS_PORT="$LCARS_PORT" \
+            bash "$script" >>"$STARTUP_LOG" 2>&1
+        if tmux -L "$TMUX_SOCKET" has-session -t "$session_name" 2>/dev/null; then
+            echo "    ✓ $session_name created on retry"
+        else
+            echo "    ❌ $session_name still missing (see $STARTUP_LOG)"
+        fi
+    done
+fi
+
+echo ""
+echo "All sessions initialized"
+sleep 1
+
+echo ""
+echo "  Creating terminal tabs..."
+
+# Detect if iTerm2 or Terminal.app
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+    # Start the LCARS server BEFORE the tab creation loop to avoid changing cwd.
+    # start_lcars_server writes the team line to lcars-target.js; append the session line after.
+    echo "    Starting Finance LCARS server on port $LCARS_PORT..."
+    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  LCARS server did not respond on port $LCARS_PORT within 5s — continuing without it"
+    echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
+
+    # iTerm2 automation using Python API for window management
+    for terminal in "${terminal_order[@]}"; do
+        label="${terminals[$terminal]}"
+        echo "  Opening tab: $terminal ($label)"
+
+        # Create iTerm2 tab and attach to tmux session using Python API
+        if [[ "$label" == "LCARS" ]]; then
+            open_lcars_tab "$LCARS_PORT" "$ITERM_WINDOW_NAME" "LCARS" "$TMUX_SOCKET" "${SESSION_PREFIX}-lcars" "$ITERM_STARTUP_LOG" \
+                || echo "    ❌ Failed to open LCARS tab (see $ITERM_STARTUP_LOG)"
+            sleep 0.3
+            continue
+        fi
+
+        # Create tab with retry on failure
+        tab_created=false
+        for attempt in 1 2 3; do
+            python3 ~/dev-team/iterm2_window_manager.py \
+                --action create-tab \
+                --window-title "$ITERM_WINDOW_NAME" \
+                --profile "Default" \
+                --tab-name "$label" \
+                --command "export ITERM_TAB_TITLE='$label' && tmux -L $TMUX_SOCKET attach -t $terminal" \
+                2>>"$ITERM_STARTUP_LOG"
+            if [[ $? -eq 0 ]]; then
+                tab_created=true
+                break
+            fi
+            echo "    Tab creation attempt $attempt failed, retrying..." >&2
+            sleep 1
+        done
+        if [[ "$tab_created" != "true" ]]; then
+            echo "    Failed to create tab: $label (see $ITERM_STARTUP_LOG)"
+        fi
+
+        sleep 0.3
+    done
+else
+    # Terminal.app automation
+    for terminal in "${terminal_order[@]}"; do
+        label="${terminals[$terminal]}"
+        echo "  Opening tab: $terminal ($label)"
+
+        osascript <<EOF
+tell application "Terminal"
+    activate
+    tell application "System Events"
+        tell process "Terminal"
+            keystroke "t" using command down
+        end tell
+    end tell
+    delay 0.5
+    do script "printf '\\\\033]0;$label\\\\007' && tmux -L $TMUX_SOCKET attach -t $terminal" in front window
+end tell
+EOF
+        sleep 0.5
+    done
+fi
+
+echo ""
+
+# Add Agent Panel WebView pane to each terminal tab
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+    echo "  Adding agent panels to terminal tabs..."
+
+    # Wait for iTerm2 Python API to become ready (may lag after launch)
+    api_ready=false
+    for wait_attempt in 1 2 3 4 5; do
+        if python3 ~/dev-team/iterm2_window_manager.py \
+            --action select-tab \
+            --window-title "$ITERM_WINDOW_NAME" \
+            --tab-name "LCARS" \
+            2>/dev/null; then
+            api_ready=true
+            break
+        fi
+        echo "    ⏳ Waiting for iTerm2 API (attempt $wait_attempt/5)..."
+        sleep 2
+    done
+
+    if [[ "$api_ready" != "true" ]]; then
+        echo "    ⚠️  iTerm2 API not ready after 10s — agent panels may not open"
+    fi
+
+    for terminal in "${terminal_order[@]}"; do
+        label="${terminals[$terminal]}"
+        [[ "$label" == "LCARS" ]] && continue
+
+        panel_created=false
+        for attempt in 1 2 3; do
+            python3 ~/dev-team/iterm2_window_manager.py \
+                --action split-agent-panel \
+                --window-title "$ITERM_WINDOW_NAME" \
+                --tab-name "$label" \
+                --command "~/dev-team/scripts/agent-panel-display.sh $terminal" \
+                2>>"$ITERM_STARTUP_LOG"
+            if [[ $? -eq 0 ]]; then
+                panel_created=true
+                break
+            fi
+            echo "    ⚠️  Panel split attempt $attempt failed for $label, retrying..." >&2
+            sleep 1
+        done
+        if [[ "$panel_created" != "true" ]]; then
+            echo "    ❌ Failed to create agent panel: $label (see $ITERM_STARTUP_LOG)"
+        fi
+
+        sleep 0.3
+    done
+fi
+
+echo ""
+
+# Switch to the LCARS tab after all tabs are created
+if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+    echo "  Switching to LCARS tab..."
+    python3 ~/dev-team/iterm2_window_manager.py \
+        --action select-tab \
+        --window-title "$ITERM_WINDOW_NAME" \
+        --tab-name "LCARS" \
+        2>>"$ITERM_STARTUP_LOG"
+fi
+
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "All Finance terminals launched in separate tabs!"
+echo ""
+echo "Available Sessions:"
+tmux -L $TMUX_SOCKET list-sessions 2>/dev/null | grep "^${SESSION_PREFIX}-"
+echo ""
+echo "Finance Team Roster:"
+echo "  * LCARS - Kanban Overview (Port $LCARS_PORT)"
+echo "  * Grand Nagus Zek - Lead Financial Strategist"
+echo "  * Quark-fin - Budget & Expense Manager"
+echo "  * Nog - Investment Analyst"
+echo "  * Brunt - Tax & Compliance Auditor"
+echo "  * Rom - Finance Automation Engineer"
+echo ""
+echo "Kanban Commands Available in All Terminals:"
+echo "  kb-plan \"task\"   - Start planning a task"
+echo "  kb-code          - Move to coding phase"
+echo "  kb-test          - Move to testing phase"
+echo "  kb-done          - Mark task complete"
+echo "  kb-show          - Display kanban board"
+echo ""
+
+# Report any iTerm2 errors
+if [[ -n "$ITERM_STARTUP_LOG" ]] && [[ -s "$ITERM_STARTUP_LOG" ]]; then
+    echo "  iTerm2 errors logged to: $ITERM_STARTUP_LOG"
+fi
+
+echo "The 285th Rule of Acquisition: No good deed ever goes unpunished."
+echo "Finance Team ready for profit!"
