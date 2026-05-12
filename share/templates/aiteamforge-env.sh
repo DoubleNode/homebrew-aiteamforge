@@ -46,6 +46,14 @@ if [ -f "$AITEAMFORGE_DIR/share/aliases/worktree-aliases.sh" ]; then
     source "$AITEAMFORGE_DIR/share/aliases/worktree-aliases.sh"
 fi
 
+# Full worktree helpers — provides wt-current, wt-project status-name/code/short,
+# and other subcommands required by team banners. Sourced AFTER worktree-aliases.sh
+# so its richer wt-project() definition (with status-* subcommands) takes precedence.
+# (XACA-0494: tap installs previously lacked wt-current entirely)
+if [ -f "$AITEAMFORGE_DIR/worktree-helpers.sh" ]; then
+    source "$AITEAMFORGE_DIR/worktree-helpers.sh"
+fi
+
 #──────────────────────────────────────────────────────────────────────────────
 # Load Prompt Customization
 #──────────────────────────────────────────────────────────────────────────────

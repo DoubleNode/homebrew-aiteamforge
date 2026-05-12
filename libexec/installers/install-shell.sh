@@ -193,6 +193,25 @@ install_helper_scripts() {
     success "Installed helper scripts"
 }
 
+# Install worktree-helpers.sh — provides wt-current, wt-project status-name/code/short,
+# and related wt-* functions required by all team banners. Without this file present at
+# $AITEAMFORGE_DIR/worktree-helpers.sh, banners fail with command-not-found on tap installs.
+# (XACA-0494: was missing from tap install manifest; worktree-aliases.sh is insufficient)
+install_worktree_helpers() {
+    local src="$INSTALL_ROOT/share/scripts/worktree-helpers.sh"
+    local target="$AITEAMFORGE_DIR/worktree-helpers.sh"
+
+    if [ ! -f "$src" ]; then
+        warning "worktree-helpers.sh not found at: $src (skipping)"
+        return 0
+    fi
+
+    info "Installing worktree helper functions"
+    cp "$src" "$target"
+    chmod +x "$target"
+    success "Installed: $target"
+}
+
 # Install secrets template
 install_secrets_template() {
     local template="$INSTALL_ROOT/share/templates/secrets.env.template"
@@ -294,6 +313,7 @@ install_shell_environment() {
     install_prompt || return 1
     install_aliases || return 1
     install_helper_scripts || return 1
+    install_worktree_helpers  # non-fatal; banners fall back to stubs if missing
     install_secrets_template || return 1
 
     # Set up Python venv with iterm2 module (non-fatal if Python unavailable)

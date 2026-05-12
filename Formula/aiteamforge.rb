@@ -178,6 +178,10 @@ class Aiteamforge < Formula
     assert_predicate libexec/"share/scripts/migrate-cr-schema.py", :exist?
     assert_predicate libexec/"share/templates/kanban/cr-schema.json", :exist?
 
+    # Verify worktree-helpers.sh ships in installer payload (XACA-0494)
+    # Required by all team banners for wt-current and wt-project status-* subcommands
+    assert_predicate libexec/"share/scripts/worktree-helpers.sh", :exist?
+
     # Test that setup wizard shows version
     system "#{bin}/aiteamforge-setup", "--help"
   end

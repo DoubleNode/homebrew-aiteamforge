@@ -220,9 +220,11 @@ wt-project() {
     export WT_CURRENT_BASE="$repo"
     export WT_CURRENT_DIR="$(dirname "$repo")/worktrees"
 
-    echo "✓ Project context set: $project"
-    echo "  Base: $repo"
-    echo "  Worktrees: $WT_CURRENT_DIR"
+    # Redirect init feedback to stderr so banner stdout capture is not mangled
+    # (XACA-0494: bare wt-project() call from banner-launch context polluted layout)
+    echo "✓ Project context set: $project" >&2
+    echo "  Base: $repo" >&2
+    echo "  Worktrees: $WT_CURRENT_DIR" >&2
 
     # Also set CURRENT_WORKTREE if we're in one
     if _wt_in_worktree; then
