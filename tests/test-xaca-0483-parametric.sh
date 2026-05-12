@@ -569,9 +569,26 @@ test_start "XACA-0486: server invocation uses \${lcars_python} (not bare python3
 output=$(grep -c '"\${lcars_python}" server.py' "$LCARS_LAUNCH_HELPER")
 run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
 
-test_start "XACA-0486: install-team.sh loads REGISTRY_THEME"
-output=$(grep -c 'REGISTRY_THEME=' "$INSTALL_TEAM")
-run_assert_pass assert_exit_success $([ "$output" -ge 1 ]; echo $?)
+test_start "XACA-0486: install-team.sh subtitle source is TEAM_THEME (from conf), not REGISTRY_THEME"
+# Reno's [Review] subitem (XACA-0486-011): several registry.json entries have
+# .theme == .name (stale data), which produces duplicate teamName/subtitle.
+# Subtitle MUST come from <team>.conf's TEAM_THEME (authoritative & distinct).
+output=$(grep -cE '_BOARD_SUBTITLE_UPPER.*TEAM_THEME|_XACA0486_SUBTITLE_UPPER.*TEAM_THEME' "$INSTALL_TEAM")
+if [ "$output" -ge 2 ]; then
+    test_pass
+else
+    test_fail "Expected both board-init and migration to source subtitle from TEAM_THEME (found $output references)"
+fi
+
+test_start "XACA-0486: install-team.sh does NOT source subtitle from REGISTRY_THEME"
+# Symmetric negative: ensure the stale registry.theme field isn't accidentally
+# wired in alongside TEAM_THEME.
+output=$(grep -cE '_BOARD_SUBTITLE_UPPER.*REGISTRY_THEME|_XACA0486_SUBTITLE_UPPER.*REGISTRY_THEME' "$INSTALL_TEAM")
+if [ "$output" -eq 0 ]; then
+    test_pass
+else
+    test_fail "Found $output references using stale REGISTRY_THEME for subtitle (should be TEAM_THEME)"
+fi
 
 test_start "XACA-0486: board init uses uppercase derivations for teamName/organization/subtitle"
 output=$(grep -cE '_BOARD_TEAMNAME_UPPER|_BOARD_ORG_UPPER|_BOARD_SUBTITLE_UPPER' "$INSTALL_TEAM")

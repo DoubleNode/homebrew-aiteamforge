@@ -263,7 +263,12 @@ REGISTRY_NAME_RAW="$(echo "$_REGISTRY_ENTRY" | jq -r '.name')"
 REGISTRY_DESC="$(echo "$_REGISTRY_ENTRY"     | jq -r '.description')"
 REGISTRY_COLOR="$(echo "$_REGISTRY_ENTRY"    | jq -r '.color')"
 REGISTRY_ICON="$(echo "$_REGISTRY_ENTRY"     | jq -r '.icon')"
-REGISTRY_THEME="$(echo "$_REGISTRY_ENTRY"    | jq -r '.theme')"
+# XACA-0486 review feedback (XACA-0486-011): theme comes from <team>.conf's
+# TEAM_THEME (loaded above via _read_conf), NOT registry.json's .theme field.
+# Several registry.json entries (academy, command, legal, medical) have
+# .theme == .name (stale data), which would produce duplicate teamName/subtitle
+# on the board. <team>.conf TEAM_THEME values are authoritative and distinct
+# from team names. registry.json data sync is a separate concern.
 
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  Installing Team: $TEAM_ID  (instance: $INSTANCE_ID)"
@@ -1311,7 +1316,7 @@ else
     _BOARD_SERIES="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]' | cut -c1-3)"
     _BOARD_TEAMNAME_UPPER="$(echo "$REGISTRY_NAME_RAW" | tr '[:lower:]' '[:upper:]')"
     _BOARD_ORG_UPPER="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]')"
-    _BOARD_SUBTITLE_UPPER="$(echo "$REGISTRY_THEME" | tr '[:lower:]' '[:upper:]')"
+    _BOARD_SUBTITLE_UPPER="$(echo "$TEAM_THEME" | tr '[:lower:]' '[:upper:]')"
     jq -n \
         --arg team        "$INSTANCE_ID" \
         --arg teamName    "$_BOARD_TEAMNAME_UPPER" \
@@ -1374,7 +1379,7 @@ if [[ -f "$TEAM_BOARD" ]]; then
         # which produced duplicate org/teamName and the wrong subtitle.
         _XACA0486_TEAMNAME_UPPER="$(echo "$REGISTRY_NAME_RAW" | tr '[:lower:]' '[:upper:]')"
         _XACA0486_ORG_UPPER="$(echo "$TEAM_ID" | tr '[:lower:]' '[:upper:]')"
-        _XACA0486_SUBTITLE_UPPER="$(echo "$REGISTRY_THEME" | tr '[:lower:]' '[:upper:]')"
+        _XACA0486_SUBTITLE_UPPER="$(echo "$TEAM_THEME" | tr '[:lower:]' '[:upper:]')"
         _XACA0484_BOARD_TMP="${TEAM_BOARD}.xaca0484-patch.tmp"
         # XACA-0486 patch: for the three semantic fields (teamName / organization /
         # subtitle), re-derive UNCONDITIONALLY from current registry+conf. Earlier
