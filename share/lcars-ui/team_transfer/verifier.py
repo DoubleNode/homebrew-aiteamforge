@@ -91,7 +91,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 2
         src_prefix, dst_prefix = raw.split("=", 1)
-        path_maps.append((src_prefix, dst_prefix))
+        # Normalize: strip trailing slash so /foo/=/bar and /foo=/bar behave identically.
+        path_maps.append((src_prefix.rstrip("/"), dst_prefix.rstrip("/")))
 
     try:
         text = Path(args.manifest).read_text(encoding="utf-8")
@@ -150,11 +151,13 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Manifest: {args.manifest}")
     print(f"Source : {manifest.source_user}@{manifest.source_hostname} (HOME={src_home})")
     print(f"Dest   : {os.environ.get('USER','?')}@{os.uname().nodename} (HOME={dst_home})")
-    if rewrite:
-        print(f"Note: rewriting paths from {src_home} -> {dst_home}")
-    for _src, _dst in path_maps:
-        print(f"Path map: {_src} -> {_dst}")
-    print()
+    if rewrite or path_maps:
+        print("=== ACTIVE REWRITES ===")
+        if rewrite:
+            print(f"  home-prefix: {src_home} -> {dst_home}")
+        for _src, _dst in path_maps:
+            print(f"  path-map:    {_src} -> {_dst}")
+        print()
 
     print("=== PER-CHANNEL ===")
     for ch in manifest.channels or list(by_channel.keys()):
