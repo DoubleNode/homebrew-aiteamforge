@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -160,7 +161,6 @@ def validate_secrets_manifest(manifest_path: Path) -> dict:
             entry_target == target_root_stem
             or entry_target.startswith(target_root_stem + "/")
         ):
-            import warnings
             warnings.warn(
                 f"secrets-manifest.json sources[{i}].target '{entry_target}' duplicates "
                 f"targetRoot '{data.get('targetRoot')}'. This will produce double-nested "
