@@ -8,6 +8,40 @@ Python standard library.
 Board filename detection: the verifier no longer hardcodes 'finance-personal-board.json'.
 Instead it uses the file extension (.json) and the presence of a 'item_ids' key in the
 probe payload to identify board entries — this works regardless of team.
+
+Canonical layouts — path translation across machine types:
+
+  The manifests are generated on whichever machine the user has run the manifest tool on
+  (often M3Pro, the dev source-of-truth, but could be any user machine). The verifier then
+  runs on the destination machine to audit whether the transferred files exist and match.
+  These two machines have different directory layouts:
+
+    M3Pro (dev source of truth):
+      ~/dev-team/<team>/...               team-specific work (monorepo)
+      ~/dev-team/lcars-ui/...             shared LCARS UI
+      ~/dev-team/kanban/...               shared kanban infra
+      ~/<team>/...                        optional personal/team data (e.g., ~/finance/)
+
+    User machine (AITeamForge tap install):
+      ~/aiteamforge/<team>/...            team work (equivalent to dev-team/<team>/)
+      ~/aiteamforge/lcars-ui/...          shared LCARS UI
+      ~/aiteamforge/kanban/...            shared kanban infra
+      ~/<team>/personal/personas/...      personas (nested under in-project personal dir)
+
+  When a manifest generated on M3Pro is verified on a user machine, absolute paths like
+  /Users/developer/dev-team/finance/catalog.json do not exist at that literal path (user
+  machine has ~/aiteamforge/finance/ instead). The --path-map flag bridges this gap.
+
+  Example: A manifest from M3Pro (user 'developer', finance team) verified on user machine
+  (user 'alice'). Two mappings are needed — one for the team data, one for personas:
+
+    --path-map /Users/developer/dev-team=/Users/alice/aiteamforge \
+    --path-map /Users/developer/finance/personal/personas=/Users/alice/finance/personal/personas
+
+  The verifier applies mappings in order; the first match wins. If no mapping matches but
+  the source and destination homes differ, the verifier falls back to simple home-prefix
+  rewriting (src_home → dst_home). This handles the common case where the username changes
+  but the relative directory structure is preserved.
 """
 from __future__ import annotations
 
@@ -32,7 +66,32 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--manifest", "-m", required=True, help="Path to manifest JSON.")
     ap.add_argument("--quiet", action="store_true", help="Only print summary + failures.")
     ap.add_argument("--max-fail-display", type=int, default=50)
+    ap.add_argument(
+        "--path-map",
+        action="append",
+        default=[],
+        metavar="SRC=DST",
+        help=(
+            "Prefix rewrite applied before any filesystem check. "
+            "Format: SRC=DST where SRC is the path prefix on the source machine "
+            "and DST is the corresponding prefix on the destination machine. "
+            "May be specified multiple times; mappings are applied in order, "
+            "first match wins."
+        ),
+    )
     args = ap.parse_args(argv)
+
+    # Parse --path-map values into (src, dst) tuples.
+    path_maps: list[tuple[str, str]] = []
+    for raw in args.path_map:
+        if "=" not in raw:
+            print(
+                f"[verifier] ERROR: --path-map value {raw!r} must be in SRC=DST format.",
+                file=sys.stderr,
+            )
+            return 2
+        src_prefix, dst_prefix = raw.split("=", 1)
+        path_maps.append((src_prefix, dst_prefix))
 
     try:
         text = Path(args.manifest).read_text(encoding="utf-8")
@@ -60,9 +119,16 @@ def main(argv: list[str] | None = None) -> int:
                 by_domain[dname]["skipped"] += 1
                 continue
 
-            # Resolve destination path: rewrite home if needed.
+            # Resolve destination path: apply --path-map rewrites first (first-match-wins),
+            # then fall back to home-prefix rewrite if no mapping matched.
             dst_path_str = fe.path
-            if rewrite and dst_path_str.startswith(src_home):
+            _mapped = False
+            for _src, _dst in path_maps:
+                if dst_path_str.startswith(_src):
+                    dst_path_str = _dst + dst_path_str[len(_src):]
+                    _mapped = True
+                    break
+            if not _mapped and rewrite and dst_path_str.startswith(src_home):
                 dst_path_str = dst_home + dst_path_str[len(src_home):]
             dst_path = Path(dst_path_str)
 
@@ -86,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Dest   : {os.environ.get('USER','?')}@{os.uname().nodename} (HOME={dst_home})")
     if rewrite:
         print(f"Note: rewriting paths from {src_home} -> {dst_home}")
+    for _src, _dst in path_maps:
+        print(f"Path map: {_src} -> {_dst}")
     print()
 
     print("=== PER-CHANNEL ===")
