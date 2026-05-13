@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .channels import ChannelConfig, EXPORT, GIT, ICLOUD_EXCLUDED, SECRETS_EXPORT, UNTAGGED, _substitute, _build_tokens
+from .channels import ChannelConfig, EXPORT, GIT, ICLOUD_EXCLUDED, SECRETS_EXPORT, UNTAGGED, build_tokens, substitute_tokens
 from .checksum import is_excluded, sha256_file, walk_files
 from .manifest import EXACT, FileEntry, Manifest, PRESENT, SCHEMA
 
@@ -63,11 +63,11 @@ def inventory(
     extras: list[tuple[Path, str]] = []
 
     if team_config:
-        tokens = _build_tokens(team_config, str(_home))
+        tokens = build_tokens(team_config, str(_home))
         for db_entry in team_config.get("databases", []):
             raw_path = db_entry.get("path", "")
             if raw_path:
-                db_path = Path(_substitute(raw_path, tokens))
+                db_path = Path(substitute_tokens(raw_path, tokens))
                 extras.append((db_path, PRESENT))
 
     for p, cls in extras:
@@ -93,12 +93,12 @@ def inventory(
 
     # 4. Probe databases declared in team_config and stash result on the manifest entry.
     if db_probe_fn is not None and team_config:
-        tokens = _build_tokens(team_config, str(_home))
+        tokens = build_tokens(team_config, str(_home))
         for db_entry in team_config.get("databases", []):
             raw_path = db_entry.get("path", "")
             if not raw_path:
                 continue
-            db_path = Path(_substitute(raw_path, tokens))
+            db_path = Path(substitute_tokens(raw_path, tokens))
             if not db_path.exists():
                 continue
             probe = db_probe_fn(db_path)

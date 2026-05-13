@@ -95,7 +95,7 @@ def default_rules(team_config: dict, home: Path | None = None) -> list[ChannelRu
     Order: more-specific patterns AFTER more-general ones (later rules win).
     """
     h = str(home or Path.home())
-    tokens = _build_tokens(team_config, h)
+    tokens = build_tokens(team_config, h)
 
     rules: list[ChannelRule] = []
     for entry in team_config.get("defaults", {}).get("rules", []):
@@ -103,18 +103,18 @@ def default_rules(team_config: dict, home: Path | None = None) -> list[ChannelRu
         channel = entry.get("channel", "")
         if not raw_pattern or not channel:
             continue
-        pattern = _substitute(raw_pattern, tokens)
+        pattern = substitute_tokens(raw_pattern, tokens)
         rules.append(ChannelRule(pattern, channel))
 
     # icloud_excluded shorthand list
     for glob in team_config.get("defaults", {}).get("icloud_excluded", []):
-        pattern = _substitute(glob, tokens)
+        pattern = substitute_tokens(glob, tokens)
         rules.append(ChannelRule(pattern, ICLOUD_EXCLUDED))
 
     return rules
 
 
-def _build_tokens(team_config: dict, home_str: str) -> dict[str, str]:
+def build_tokens(team_config: dict, home_str: str) -> dict[str, str]:
     """Build the substitution token dict for a team config."""
     root = team_config.get("home_relative_root", "")
     team = team_config.get("team", "")
@@ -127,7 +127,7 @@ def _build_tokens(team_config: dict, home_str: str) -> dict[str, str]:
     }
 
 
-def _substitute(s: str, tokens: dict[str, str]) -> str:
+def substitute_tokens(s: str, tokens: dict[str, str]) -> str:
     for tok, val in tokens.items():
         s = s.replace(tok, val)
     return s
