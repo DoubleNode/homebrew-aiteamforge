@@ -1,0 +1,113 @@
+# Team transfer configuration: Finance (personal)
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+
+team: finance
+home_relative_root: "finance/personal"
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "finance-personal-board.json"
+ticket_prefix: "XFIN-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Derived value: -Users-<user>-<home_relative_root with / replaced by ->
+# Override here if the derivation doesn't match what Claude Code created.
+claude_project_dir_name: "-Users-darrenehlers-finance-personal"
+
+# SQLite databases to probe for structural integrity.
+databases:
+  - path: "{home}/{root}/data/finance.db"
+    cls: schema
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+# These reproduce the hardcoded defaults from the original finance_platform.migration
+# channels.py exactly (back-compat boundary for XACA-0495).
+defaults:
+  rules:
+    # ----- AITEAMFORGE: dev-team infra, persona avatars, Claude memory/agents -----
+    - pattern: "{home}/dev-team/{team}/*"
+      channel: aiteamforge
+    - pattern: "{home}/dev-team/{team}/**"
+      channel: aiteamforge
+    - pattern: "{home}/finance/.claude/agents/*"
+      channel: aiteamforge
+    - pattern: "{home}/finance/.claude/agents/**"
+      channel: aiteamforge
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: aiteamforge
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/quark/*"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/quark/**"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/nog/*"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/nog/**"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/brunt/*"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/brunt/**"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/rom/*"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/rom/**"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/zek/*"
+      channel: aiteamforge
+    - pattern: "{home}/knowledge/agents/zek/**"
+      channel: aiteamforge
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # NOTE: domain_git decides per-file whether something is tracked; this rule covers
+    # the *repo root* as a fallback. domain_git overrides this for gitignored files
+    # (DB -> export, .env -> secrets_export, sensitive docs -> icloud_excluded).
+    - pattern: "{home}/{root}/*"
+      channel: git
+    - pattern: "{home}/{root}/**"
+      channel: git
+
+    # ----- EXPORT: kanban tree (fully gitignored) + DB + project state -----
+    - pattern: "{home}/{root}/kanban/*"
+      channel: export
+    - pattern: "{home}/{root}/kanban/**"
+      channel: export
+    - pattern: "{home}/{root}/data/*"
+      channel: export
+    - pattern: "{home}/{root}/data/**"
+      channel: export
+    - pattern: "{home}/{root}/worktrees/*"
+      channel: export
+    - pattern: "{home}/{root}/worktrees/**"
+      channel: export
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "{home}/{root}/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/**"
+      channel: secrets_export
+
+    # ----- ICLOUD_EXCLUDED: sensitive docs archived to iCloud -----
+    # These paths SHOULD NOT exist locally (deleted 2026-05-05). If a future re-sync
+    # restores them, the audit silently skips them.
+    - pattern: "{home}/{root}/docs/statements/**"
+      channel: icloud_excluded
+    - pattern: "{home}/{root}/docs/paystubs/**"
+      channel: icloud_excluded
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+# Entries here layer on top of defaults (later rules win).
+overrides: []
