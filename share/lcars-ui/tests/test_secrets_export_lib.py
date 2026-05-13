@@ -227,8 +227,35 @@ class TestDiscoverSecretsSources(unittest.TestCase):
         self.assertEqual(len(result["sources"]), 1)
         src = result["sources"][0]
         self.assertEqual(src["kind"], "dir")
-        self.assertEqual(src["target_root"] if "target_root" in src else result["target_root"], "secrets/")
+        self.assertEqual(result["target_root"], "secrets/")
         self.assertEqual(result["manifest_used"], "auto")
+
+    def test_discover_secrets_sources_auto_detect_target_is_empty(self):
+        """XACA-0491 regression: auto-detect must return target='' (not 'secrets').
+
+        Before the fix, target='secrets' + target_root='secrets/' caused the
+        arc-name builder to produce 'secrets/secrets/<rel>' — a double-prefix.
+        The contract is: target is a SUBPATH under target_root, so for the
+        auto-detect case (the whole secrets/ dir IS target_root) target must
+        be '' (empty string).
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            secrets_dir = root / "secrets"
+            secrets_dir.mkdir()
+
+            orig_get, orig_hard = self._patch_project_root(root)
+            try:
+                result = discover_secrets_sources("testteam")
+            finally:
+                self._restore_project_root(orig_get, orig_hard)
+
+        src = result["sources"][0]
+        self.assertEqual(
+            src["target"],
+            "",
+            f"Auto-detect target must be '' (empty) to avoid double-prefix; got {src['target']!r}",
+        )
 
     def test_discover_secrets_sources_empty(self):
         """No manifest and no secrets dir → empty sources list."""

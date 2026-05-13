@@ -17,6 +17,13 @@ from typing import Iterable
 # Channel identifiers. Order is for display.
 GIT = "git"
 EXPORT = "export"
+# SECRETS_EXPORT — real, load-bearing channel even when nearly empty.
+# Transport is operator-driven (e.g. scp) directly to the source secrets/ directory;
+# it is intentionally NOT bundled inside the git-tracked export to keep sensitive
+# material off shared channels. Operators drop files here before running the export.
+# The file secrets/test-secrets.txt exists on purpose: it exercises the full
+# pack/unpack path end-to-end without requiring real credentials in the repo.
+# See docs/team-transfer/RUNBOOK.md § "Secrets Channel (secrets_export)".
 SECRETS_EXPORT = "secrets_export"
 AITEAMFORGE = "aiteamforge"
 ICLOUD_EXCLUDED = "icloud_excluded"

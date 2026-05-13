@@ -439,6 +439,121 @@ class TestRetryBudget(unittest.TestCase):
 
 
 # ---------------------------------------------------------------------------
+# Test: XACA-0491 — double-prefix regression (secrets/secrets/ bug)
+# ---------------------------------------------------------------------------
+
+class TestExportImportNoDoublePrefix(unittest.TestCase):
+    """Regression test for XACA-0491.
+
+    Before the fix, the auto-detect branch of discover_secrets_sources() returned
+    target="secrets" AND target_root="secrets/", causing the arc-name builder to
+    produce "secrets/secrets/<rel>" instead of "secrets/<rel>".  The importer
+    then extracted to <project_root>/secrets/secrets/* instead of
+    <project_root>/secrets/*.
+
+    This test exercises the full export->import round-trip and asserts the
+    extracted files land at the CORRECT single-nested path.
+
+    On pre-fix code this test fails because:
+    - arc names inside the zip are "secrets/secrets/foo.txt", not "secrets/foo.txt"
+    - imported files appear at <import_root>/secrets/secrets/foo.txt
+    - <import_root>/secrets/secrets/ exists (our explicit assertion catches it)
+    """
+
+    def test_round_trip_no_double_prefix(self):
+        """Export + import of a real secrets/ dir lands files at ./secrets/* only."""
+        with tempfile.TemporaryDirectory() as export_tmpdir, \
+             tempfile.TemporaryDirectory() as import_tmpdir:
+
+            # ----------------------------------------------------------------
+            # 1. Build a source project with secrets/ content
+            # ----------------------------------------------------------------
+            src_project = Path(export_tmpdir) / "project"
+            secrets_dir = src_project / "secrets"
+            secrets_dir.mkdir(parents=True)
+            (secrets_dir / "foo.txt").write_text("SOME_SECRET=abc", encoding="utf-8")
+            sub = secrets_dir / "sub"
+            sub.mkdir()
+            (sub / "bar.txt").write_text("NESTED_SECRET=xyz", encoding="utf-8")
+
+            export_dir = Path(export_tmpdir) / "exports"
+            export_dir.mkdir()
+
+            # ----------------------------------------------------------------
+            # 2. Export — wire discovery to the real secrets/ dir via auto-detect
+            # ----------------------------------------------------------------
+            export_job_id = _new_job_id()
+            _make_export_job(export_job_id)
+
+            with patch("server.discover_secrets_sources") as mock_discover, \
+                 patch("server.EXPORT_DIR", export_dir):
+                mock_discover.return_value = {
+                    "sources": [
+                        {"src": str(secrets_dir), "target": "", "kind": "dir"},
+                    ],
+                    "target_root": "secrets/",
+                    "manifest_used": "auto",
+                }
+                generate_secrets_export(export_job_id, "academy", _PASSWORD)
+
+            export_job = SECRETS_EXPORT_JOBS[export_job_id]
+            self.assertEqual(export_job["status"], "completed",
+                             f"Export failed: {export_job.get('error')}")
+            zip_path = export_dir / export_job["filename"]
+            self.assertTrue(zip_path.exists())
+
+            # ----------------------------------------------------------------
+            # 3. Verify arc names inside the zip — must be "secrets/…", NOT "secrets/secrets/…"
+            # ----------------------------------------------------------------
+            with pyzipper.AESZipFile(zip_path, "r") as zf:
+                zf.setpassword(_PASSWORD.encode("utf-8"))
+                arc_names = [n for n in zf.namelist() if n != "secrets-manifest.json"]
+
+            for arc_name in arc_names:
+                self.assertFalse(
+                    arc_name.startswith("secrets/secrets/"),
+                    f"Double-prefix bug present: arc_name={arc_name!r} starts with "
+                    f"'secrets/secrets/' — expected 'secrets/<file>'",
+                )
+                self.assertTrue(
+                    arc_name.startswith("secrets/"),
+                    f"Unexpected arc_name prefix: {arc_name!r}",
+                )
+
+            # ----------------------------------------------------------------
+            # 4. Import into a fresh project root
+            # ----------------------------------------------------------------
+            import_project = Path(import_tmpdir) / "project"
+            import_project.mkdir()
+
+            import_job_id = _new_job_id()
+            _make_import_job(import_job_id, str(zip_path), "academy")
+
+            with patch("secrets_export_lib._get_team_project_root", return_value=import_project), \
+                 patch("secrets_export_lib._hardcoded_project_root", return_value=None):
+                apply_secrets_import(import_job_id, _PASSWORD)
+
+            import_job = SECRETS_IMPORT_JOBS[import_job_id]
+            self.assertEqual(import_job["status"], "completed",
+                             f"Import failed: {import_job.get('error')}")
+
+            # ----------------------------------------------------------------
+            # 5. Assert correct single-nested extraction paths
+            # ----------------------------------------------------------------
+            expected_foo = import_project / "secrets" / "foo.txt"
+            expected_bar = import_project / "secrets" / "sub" / "bar.txt"
+            double_prefix_dir = import_project / "secrets" / "secrets"
+
+            self.assertTrue(expected_foo.exists(),
+                            f"Missing: {expected_foo} — import landed in wrong location")
+            self.assertTrue(expected_bar.exists(),
+                            f"Missing: {expected_bar} — import landed in wrong location")
+            self.assertFalse(double_prefix_dir.exists(),
+                             f"Double-prefix bug: {double_prefix_dir} should NOT exist "
+                             f"(files extracted to secrets/secrets/ instead of secrets/)")
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 

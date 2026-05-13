@@ -709,11 +709,15 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
             kind = src_entry.get("kind", "dir" if src_path.is_dir() else "file")
 
             if kind == "dir" and src_path.is_dir():
+                # XACA-0491: build the archive prefix cleanly whether target_rel is
+                # non-empty ("subdir") or empty ("" — place directly under target_root).
+                # Without this guard an empty target_rel produces "secrets//file.txt".
+                arc_prefix = f"{target_root}{target_rel}/" if target_rel else target_root
                 dir_files = []
                 for item in src_path.rglob("*"):
                     if item.is_file():
                         rel = item.relative_to(src_path)
-                        arc_name = f"{target_root}{target_rel}/{rel}"
+                        arc_name = f"{arc_prefix}{rel}"
                         file_entries.append((item, arc_name))
                         dir_files.append(item)
                 source_summary.append({
