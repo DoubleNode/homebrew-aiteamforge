@@ -34,7 +34,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--max-fail-display", type=int, default=50)
     args = ap.parse_args(argv)
 
-    text = Path(args.manifest).read_text(encoding="utf-8")
+    try:
+        text = Path(args.manifest).read_text(encoding="utf-8")
+    except FileNotFoundError as e:
+        print(f"[verifier] ERROR: manifest not found: {e.filename}", file=sys.stderr)
+        return 2
     manifest = Manifest.from_json(text)
 
     src_home = manifest.home or str(Path.home())
