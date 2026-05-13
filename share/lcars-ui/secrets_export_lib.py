@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -143,6 +144,7 @@ def validate_secrets_manifest(manifest_path: Path) -> dict:
     if not isinstance(data.get("sources"), list):
         raise ValueError("secrets-manifest.json 'sources' must be a list")
 
+    target_root_stem = data.get("targetRoot", "").rstrip("/")
     for i, src_entry in enumerate(data["sources"]):
         if not isinstance(src_entry, dict):
             raise ValueError(f"secrets-manifest.json sources[{i}] must be an object")
@@ -151,6 +153,22 @@ def validate_secrets_manifest(manifest_path: Path) -> dict:
                 raise ValueError(
                     f"secrets-manifest.json sources[{i}] missing required key '{key}'"
                 )
+        # XACA-0491: guard against the double-prefix footgun — if target starts
+        # with targetRoot (stripped), the arc-name builder will produce double nesting.
+        # Warn loudly so operators catch the mistake before export.
+        entry_target = src_entry.get("target", "")
+        if target_root_stem and (
+            entry_target == target_root_stem
+            or entry_target.startswith(target_root_stem + "/")
+        ):
+            warnings.warn(
+                f"secrets-manifest.json sources[{i}].target '{entry_target}' duplicates "
+                f"targetRoot '{data.get('targetRoot')}'. This will produce double-nested "
+                f"archive paths (e.g. 'secrets/secrets/…'). Set target to the subpath "
+                f"*under* targetRoot, or use an empty string to place files directly "
+                f"under targetRoot.",
+                stacklevel=2,
+            )
 
     return data
 
@@ -263,13 +281,17 @@ def discover_secrets_sources(team_id: str) -> dict:
             }
 
     # Priority 2: auto-detect <project_root>/secrets/
+    # XACA-0491: target must be "" (empty) so the arc-name builder produces
+    # "{target_root}{rel}" = "secrets/<rel>", not "secrets/secrets/<rel>".
+    # target_root already encodes the "secrets/" prefix — target is a SUBPATH
+    # under target_root, not a repeat of it.
     auto_secrets_dir = project_root / "secrets"
     if auto_secrets_dir.exists() and auto_secrets_dir.is_dir():
         return {
             "sources": [
                 {
                     "src": str(auto_secrets_dir),
-                    "target": "secrets",
+                    "target": "",
                     "kind": "dir",
                 }
             ],

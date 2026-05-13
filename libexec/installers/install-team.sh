@@ -80,6 +80,25 @@ if [[ ! "$TEAM_ID" =~ ^[a-zA-Z0-9_-]+$ ]]; then
 fi
 
 # ============================================================================
+# DEV-SOURCE PROTECTION GUARD (XACA-0497)
+# ============================================================================
+# Refuse to install on top of an AITeamForge dev-team source tree. A sentinel
+# file `.aiteamforge-source-tree` at the root of AITEAMFORGE_DIR marks the
+# directory as a development source-of-truth. Installing the tap product on
+# top of source pollutes it with rendered artifacts — the failure mode that
+# XACA-0497 recovered from (AITEAMFORGE_DIR inherited from a dev shell
+# overrode the safe `:-$HOME/aiteamforge` default).
+_AITF_REAL="$(cd "$AITEAMFORGE_DIR" 2>/dev/null && pwd -P || echo "")"
+if [[ -n "$_AITF_REAL" && -f "$_AITF_REAL/.aiteamforge-source-tree" ]]; then
+    echo "Error: target directory is an AITeamForge dev-team source tree:" >&2
+    echo "       $_AITF_REAL" >&2
+    echo "       Refusing to install tap product on top of source." >&2
+    echo "       Unset AITEAMFORGE_DIR or pass --install-dir to a different path." >&2
+    exit 1
+fi
+unset _AITF_REAL
+
+# ============================================================================
 # LOAD TEAM DEFINITION
 # ============================================================================
 
