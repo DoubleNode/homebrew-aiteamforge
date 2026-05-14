@@ -656,21 +656,38 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 │  Standard Sync Local Develop Branch Subitem:                               │
 │  Title: "Sync Local Develop Branch"                                        │
 │                                                                             │
-│  This subitem should include:                                               │
+│  This subitem MUST verify THREE GATES before calling kb-done:              │
+│                                                                             │
+│  GATE 1 — Worktree is clean                                                │
+│  • From the worktree (or current working dir):                             │
+│      git status --porcelain      # MUST be empty                          │
+│  • If non-empty: STOP. Investigate and commit, stash, or restore.          │
+│    Uncommitted work has been found stranded on develop in the main repo    │
+│    (see XACA-0347). Do NOT proceed until the tree is clean.                │
+│                                                                             │
+│  GATE 2 — PR is fully merged (not just approved)                           │
+│  • Confirm via the GitHub API:                                             │
+│      gh pr view <N> --json state --jq '.state'   # MUST be "MERGED"       │
+│  • If "OPEN" or "CLOSED" (without merge): STOP and resolve before syncing. │
+│                                                                             │
+│  GATE 3 — Local develop is synced with the merge                           │
 │  • Switch to the main repo (not a worktree):                               │
-│    cd <main-repo-path>                                                     │
-│  • Checkout develop and pull latest:                                        │
-│    git checkout develop && git pull                                        │
-│  • Verify the merged PR's changes are present locally                      │
-│  • If in a worktree: clean up the worktree after confirming merge:         │
-│    git worktree remove <worktree-path>  (if no longer needed)              │
-│  • Mark the kanban item as done:                                            │
-│    source ~/dev-team/kanban-helpers.sh && kb-done                          │
+│      cd <main-repo-path>                                                   │
+│  • Checkout develop and pull latest:                                       │
+│      git checkout develop && git pull origin develop                       │
+│  • Verify the merged commit is present on local develop:                   │
+│      git log --grep="<ITEM-ID>" -1 --oneline    # must match the merge   │
+│                                                                             │
+│  Only after ALL THREE GATES pass:                                          │
+│  • Mark the kanban item as done:                                           │
+│      source ~/dev-team/kanban-helpers.sh && kb-done                        │
 │                                                                             │
 │  Position: ALWAYS the LAST subitem (after Retrospective)                   │
 │                                                                             │
 │  ⛔ DO NOT skip this subitem — stale local branches cause merge conflicts  │
-│  ⛔ DO NOT mark the task complete without syncing develop                  │
+│  ⛔ DO NOT mark the task complete without all three gates passing          │
+│  ⛔ DO NOT run `git worktree remove` — agents are forbidden from removing  │
+│     or deleting worktrees (standing user rule)                             │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
