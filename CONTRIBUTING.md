@@ -31,6 +31,23 @@ rebrand filenames) and setup-wizard drift before you push. The same checks run
 authoritatively in CI, so enabling the hooks locally is optional but saves a
 round-trip push-and-fix cycle.
 
+## PR Review Workflow (Bot-Gate Exemption)
+
+The upstream `dev-team` repo uses a dual-gate auto-merge flow that requires
+approvals from `ai-security-review-bot[bot]` and `ds9-tester-bot[bot]`. **Those
+bots are intentionally NOT installed on this repo.** This tap ships a Homebrew
+formula plus setup scripts — it has no secrets, no runtime data path, and no
+application logic for a security-review bot to meaningfully analyze. The
+authoritative quality gate here is `.github/workflows/tests.yml` (formula audit,
+`brew install`/`test`/`uninstall`, shellcheck, drift-guard, tap-hygiene), which
+catches every failure mode a tap consumer can actually experience.
+
+PRs merge on green `tests.yml` alone — no `--admin` override required, no bot
+reviews to wait for. Branch protection for `main` must list only the
+`tests.yml` jobs as required status checks; do not add bot-review requirements
+to this repo. Maintainers may still hand-review any PR they consider
+nontrivial; the exemption removes the auto-gate, not human judgment.
+
 ## Formula Development
 
 ### Testing Changes Locally

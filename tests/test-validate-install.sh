@@ -73,6 +73,7 @@ _write_scripts() {
         "agent-panel-display.sh"
         "display-agent-avatar.sh"
         "lcars-tmp-dir.sh"
+        "init-agent-panel-json.py"
     )
     for s in "${names[@]}"; do
         touch "$scripts_dir/$s"
@@ -417,8 +418,8 @@ cp "$install_dir/scripts/iterm2_window_manager.py" "$install_dir/iterm2_window_m
 _val_check_scripts "$install_dir" >/dev/null 2>&1
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "0" "$_VAL_WARN"
-# 4 required scripts + root copy = 5 passes
-assert_equal "5" "$_VAL_PASS"
+# 5 required scripts + root copy = 6 passes
+assert_equal "6" "$_VAL_PASS"
 test_pass
 
 test_start "_val_check_scripts: warns for missing script file"
@@ -427,7 +428,7 @@ _val_reset
 install_dir="$TEST_TMP_DIR/missing_one_script"
 mkdir -p "$install_dir/scripts"
 # Create all except iterm2_window_manager.py
-for s in "agent-panel-display.sh" "display-agent-avatar.sh" "lcars-tmp-dir.sh"; do
+for s in "agent-panel-display.sh" "display-agent-avatar.sh" "lcars-tmp-dir.sh" "init-agent-panel-json.py"; do
     touch "$install_dir/scripts/$s"
     chmod +x "$install_dir/scripts/$s"
 done
@@ -576,10 +577,17 @@ fi
 # _val_check_python_venv
 # ═══════════════════════════════════════════════════════════════════════════
 
-test_start "_val_check_python_venv: warns when venv directory absent"
+# NOTE: _val_check_python_venv was refactored to consult the tap-owned venv via
+# $AITEAMFORGE_PYTHON rather than $install_dir/.venv. The install_dir parameter
+# is retained for call-site compatibility but ignored. These tests therefore
+# manipulate AITEAMFORGE_PYTHON; install_dir paths are placeholders only.
+_saved_aiteamforge_python="${AITEAMFORGE_PYTHON:-}"
+
+test_start "_val_check_python_venv: warns when AITEAMFORGE_PYTHON unset"
 _reload_validate_lib
 _val_reset
-install_dir="$TEST_TMP_DIR/venv_absent"
+unset AITEAMFORGE_PYTHON
+install_dir="$TEST_TMP_DIR/venv_unset"
 mkdir -p "$install_dir"
 _val_check_python_venv "$install_dir" >/dev/null 2>&1
 assert_equal "0" "$_VAL_FAIL"
@@ -587,54 +595,70 @@ assert_equal "1" "$_VAL_WARN"
 assert_equal "0" "$_VAL_PASS"
 test_pass
 
-test_start "_val_check_python_venv: warns when venv python3 binary missing"
+test_start "_val_check_python_venv: warns when AITEAMFORGE_PYTHON points to missing binary"
 _reload_validate_lib
 _val_reset
 install_dir="$TEST_TMP_DIR/venv_no_python"
-mkdir -p "$install_dir/.venv/bin"
-# No python3 binary created
+mkdir -p "$install_dir/bin"
+# Point at a path that does not exist
+export AITEAMFORGE_PYTHON="$install_dir/bin/python3"
 _val_check_python_venv "$install_dir" >/dev/null 2>&1
+unset AITEAMFORGE_PYTHON
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "1" "$_VAL_WARN"
-assert_equal "1" "$_VAL_PASS"  # venv dir itself
+assert_equal "0" "$_VAL_PASS"
 test_pass
 
-test_start "_val_check_python_venv: warns when venv python3 not executable"
+test_start "_val_check_python_venv: warns when AITEAMFORGE_PYTHON binary not executable"
 _reload_validate_lib
 _val_reset
 install_dir="$TEST_TMP_DIR/venv_non_exec_python"
-mkdir -p "$install_dir/.venv/bin"
-touch "$install_dir/.venv/bin/python3"
-chmod -x "$install_dir/.venv/bin/python3"
+mkdir -p "$install_dir/bin"
+touch "$install_dir/bin/python3"
+chmod -x "$install_dir/bin/python3"
+export AITEAMFORGE_PYTHON="$install_dir/bin/python3"
 _val_check_python_venv "$install_dir" >/dev/null 2>&1
+unset AITEAMFORGE_PYTHON
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "1" "$_VAL_WARN"
-assert_equal "1" "$_VAL_PASS"  # venv dir
+assert_equal "0" "$_VAL_PASS"
 test_pass
 
-test_start "_val_check_python_venv: warns when pip absent from venv"
+test_start "_val_check_python_venv: warns when pip absent alongside AITEAMFORGE_PYTHON"
 _reload_validate_lib
 _val_reset
 install_dir="$TEST_TMP_DIR/venv_no_pip"
-mkdir -p "$install_dir/.venv/bin"
-touch "$install_dir/.venv/bin/python3"
-chmod +x "$install_dir/.venv/bin/python3"
-# No pip created
+mkdir -p "$install_dir/bin"
+# Build a shim python3 that prints a version and exits 0; no pip alongside
+cat > "$install_dir/bin/python3" <<'PYSHIM'
+#!/bin/bash
+echo "Python 3.99.0"
+PYSHIM
+chmod +x "$install_dir/bin/python3"
+export AITEAMFORGE_PYTHON="$install_dir/bin/python3"
 _val_check_python_venv "$install_dir" >/dev/null 2>&1
+unset AITEAMFORGE_PYTHON
 assert_equal "0" "$_VAL_FAIL"
+# 1 warn for missing pip; 1 pass for the tap-owned venv Python being valid
 assert_equal "1" "$_VAL_WARN"
-# venv dir + python3 binary = 2 passes
-assert_equal "2" "$_VAL_PASS"
+assert_equal "1" "$_VAL_PASS"
 test_pass
 
-test_start "_val_check_python_venv: warn message includes venv remediation hint"
+test_start "_val_check_python_venv: warn message includes brew reinstall remediation hint"
 _reload_validate_lib
 _val_reset
+unset AITEAMFORGE_PYTHON
 install_dir="$TEST_TMP_DIR/venv_hint"
 mkdir -p "$install_dir"
 output=$(_capture _val_check_python_venv "$install_dir")
-assert_contains "$output" "python3 -m venv"
+assert_contains "$output" "brew reinstall aiteamforge"
 test_pass
+
+# Restore AITEAMFORGE_PYTHON for tests that follow.
+if [ -n "$_saved_aiteamforge_python" ]; then
+    export AITEAMFORGE_PYTHON="$_saved_aiteamforge_python"
+fi
+unset _saved_aiteamforge_python
 
 # ═══════════════════════════════════════════════════════════════════════════
 # _val_check_shell_integration
@@ -830,7 +854,7 @@ mkdir -p "$HOME/Library/LaunchAgents"
 _val_check_launchagents >/dev/null 2>&1
 export HOME="$_original_home"
 assert_equal "0" "$_VAL_FAIL"
-assert_equal "2" "$_VAL_WARN"   # kanban-backup + lcars-health
+assert_equal "3" "$_VAL_WARN"   # kanban-backup + lcars-health + cr-confluence-poller
 assert_equal "0" "$_VAL_PASS"
 test_pass
 
@@ -851,17 +875,23 @@ _val_reset
 _original_home="$HOME"
 export HOME="$TEST_TMP_DIR/fakehome_la_not_loaded"
 mkdir -p "$HOME/Library/LaunchAgents"
-# Create both plists
+# Create all three plists
 touch "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist"
 touch "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
-# Mock launchctl to return empty (simulating "not loaded")
-launchctl() { echo ""; }
+touch "$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+# Mock launchctl: `list` returns empty (not loaded); `load` returns non-zero
+# (load failure) to force the warn-with-hint path rather than the auto-fix-pass
+# path the library tries when launchctl load succeeds.
+launchctl() {
+    if [ "${1:-}" = "load" ]; then return 1; fi
+    echo ""
+}
 export -f launchctl
 _val_check_launchagents >/dev/null 2>&1
 unset -f launchctl
 export HOME="$_original_home"
 assert_equal "0" "$_VAL_FAIL"
-assert_equal "2" "$_VAL_WARN"   # both present but not loaded
+assert_equal "3" "$_VAL_WARN"   # all three present but not loaded; load fails
 assert_equal "0" "$_VAL_PASS"
 test_pass
 
@@ -873,10 +903,12 @@ export HOME="$TEST_TMP_DIR/fakehome_la_loaded"
 mkdir -p "$HOME/Library/LaunchAgents"
 touch "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist"
 touch "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
-# Mock launchctl to report both agents loaded
+touch "$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+# Mock launchctl to report all three agents loaded
 launchctl() {
     printf '0\tcom.aiteamforge.kanban-backup\n'
     printf '0\tcom.aiteamforge.lcars-health\n'
+    printf '0\tcom.aiteamforge.cr-confluence-poller\n'
 }
 export -f launchctl
 _val_check_launchagents >/dev/null 2>&1
@@ -884,7 +916,7 @@ unset -f launchctl
 export HOME="$_original_home"
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "0" "$_VAL_WARN"
-assert_equal "2" "$_VAL_PASS"
+assert_equal "3" "$_VAL_PASS"
 test_pass
 
 test_start "_val_check_launchagents: warn message includes launchctl load hint"
@@ -895,7 +927,13 @@ export HOME="$TEST_TMP_DIR/fakehome_la_lctl_hint"
 mkdir -p "$HOME/Library/LaunchAgents"
 touch "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist"
 touch "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
-launchctl() { echo ""; }
+touch "$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist"
+# `list` returns empty (not loaded); `load` fails so library emits the warn
+# whose remediation hint includes "launchctl load".
+launchctl() {
+    if [ "${1:-}" = "load" ]; then return 1; fi
+    echo ""
+}
 export -f launchctl
 output=$(_capture _val_check_launchagents)
 unset -f launchctl

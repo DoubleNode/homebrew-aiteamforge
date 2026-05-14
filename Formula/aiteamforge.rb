@@ -1,19 +1,19 @@
 class Aiteamforge < Formula
-  desc "AITeamForge - AI-powered multi-team development infrastructure"
+  desc "AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
       tag: "v0.11.10"
-  license "MIT"
   version "0.11.10"
+  license "MIT"
 
   # Core dependencies required for aiteamforge to function
-  depends_on "python@3"
-  depends_on "node"
-  depends_on "jq"
   depends_on "gh"
   depends_on "git"
+  depends_on "jq"
+  depends_on macos: :big_sur # iTerm2 and macOS-specific features
+  depends_on "node"
+  depends_on "python@3"
   depends_on "tmux"
-  depends_on :macos => :big_sur # iTerm2 and macOS-specific features
 
   # Optional dependencies for advanced features
   uses_from_macos "rsync" # For sync scripts
@@ -146,41 +146,43 @@ class Aiteamforge < Formula
 
   test do
     # Verify main commands exist and are executable
-    assert_predicate bin/"aiteamforge", :exist?
-    assert_predicate bin/"aiteamforge-setup", :exist?
+    assert_path_exists bin/"aiteamforge"
+    assert_path_exists bin/"aiteamforge-setup"
 
     # Verify core directories exist (libexec/ subdir mirrors repo structure)
-    assert_predicate libexec/"libexec/commands", :exist?
-    assert_predicate libexec/"libexec/installers", :exist?
-    assert_predicate libexec/"libexec/lib", :exist?
-    assert_predicate libexec/"share/templates", :exist?
-    assert_predicate libexec/"share/templates/team-connect.sh.template", :exist?
-    assert_predicate libexec/"share/teams", :exist?
+    assert_path_exists libexec/"libexec/commands"
+    assert_path_exists libexec/"libexec/installers"
+    assert_path_exists libexec/"libexec/lib"
+    assert_path_exists libexec/"share/templates"
+    assert_path_exists libexec/"share/templates/team-connect.sh.template"
+    assert_path_exists libexec/"share/teams"
 
     # Verify library files exist
-    assert_predicate libexec/"libexec/lib/common.sh", :exist?
-    assert_predicate libexec/"libexec/lib/config.sh", :exist?
-    assert_predicate libexec/"libexec/lib/wizard-ui.sh", :exist?
+    assert_path_exists libexec/"libexec/lib/common.sh"
+    assert_path_exists libexec/"libexec/lib/config.sh"
+    assert_path_exists libexec/"libexec/lib/wizard-ui.sh"
 
     # Verify alias templates exist (must ship in released package for install-shell.sh)
-    assert_predicate libexec/"share/templates/aliases/agent-aliases.sh", :exist?
-    assert_predicate libexec/"share/templates/aliases/cc-aliases.sh", :exist?
-    assert_predicate libexec/"share/templates/aliases/worktree-aliases.sh", :exist?
+    assert_path_exists libexec/"share/templates/aliases/agent-aliases.sh"
+    assert_path_exists libexec/"share/templates/aliases/cc-aliases.sh"
+    assert_path_exists libexec/"share/templates/aliases/worktree-aliases.sh"
 
     # Verify Python dependency manifest ships with the tap
-    assert_predicate libexec/"share/requirements.txt", :exist?
+    assert_path_exists libexec/"share/requirements.txt"
 
     # Verify Python env helper ships with the tap
-    assert_predicate libexec/"libexec/lib/python-env.sh", :exist?
+    assert_path_exists libexec/"libexec/lib/python-env.sh"
 
     # Verify kb-cr namespace + migration script ship in installer payload (XACA-0309)
-    assert_predicate libexec/"share/scripts/kb-cr.sh", :exist?
-    assert_predicate libexec/"share/scripts/migrate-cr-schema.py", :exist?
-    assert_predicate libexec/"share/templates/kanban/cr-schema.json", :exist?
+    assert_path_exists libexec/"share/scripts/kb-cr.sh"
+    assert_path_exists libexec/"share/scripts/migrate-cr-schema.py"
+    assert_path_exists libexec/"share/templates/kanban/cr-schema.json"
 
-    # Verify worktree-helpers.sh ships in installer payload (XACA-0494)
-    # Required by all team banners for wt-current and wt-project status-* subcommands
-    assert_predicate libexec/"share/scripts/worktree-helpers.sh", :exist?
+    # worktree-helpers.sh ships in installer payload (XACA-0494) but its
+    # assertion is intentionally omitted here: the formula's `tag: v0.11.10`
+    # predates the file. Restore the assert_path_exists check once the next
+    # release tag (≥ v0.11.11) includes share/scripts/worktree-helpers.sh.
+    # Tracked: XACA-0499.
 
     # Test that setup wizard shows version
     system "#{bin}/aiteamforge-setup", "--help"
