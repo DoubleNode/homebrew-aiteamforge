@@ -137,7 +137,7 @@ jobs:
 
       - name: Run setup-wizard drift guard
         run: |
-          bash homebrew-tap/scripts/check-no-setup-drift.sh
+          bash scripts/check-no-setup-drift.sh
 
   tap-hygiene-guard:
     name: Tap-Hygiene Guard (XACA-0361)
@@ -183,7 +183,7 @@ jobs:
           test -x bin/aiteamforge-doctor.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # Shell Test Suites — homebrew-tap/tests/
+  # Shell Test Suites — tests/
   # ─────────────────────────────────────────────────────────────────────────────
   test-shell-homebrew-tap:
     name: Shell Tests (homebrew-tap)
@@ -237,86 +237,6 @@ jobs:
         # Tailscale is not installed in CI — tests use internal mocks so no real binary needed
         run: |
           bash tests/test-runner.sh tests/test-tailscale.sh
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Shell Test Suites — scripts/tests/ and fleet-monitor/client/tests/
-  # ─────────────────────────────────────────────────────────────────────────────
-  test-shell-scripts:
-    name: Shell Tests (scripts + fleet client)
-    runs-on: macos-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install dependencies
-        run: |
-          brew install jq
-
-      - name: Make test scripts executable
-        run: |
-          chmod +x homebrew-tap/tests/test-runner.sh
-          chmod +x scripts/tests/test-*.sh
-          chmod +x fleet-monitor/client/tests/test-*.sh
-
-      - name: Run agent-panel-display tests
-        # tmux is not required — the test mocks tmux calls internally
-        run: |
-          # test-agent-panel-display.sh bootstraps its own runner via test-runner.sh
-          bash scripts/tests/test-agent-panel-display.sh
-
-      - name: Run fleet-reporter tests
-        # Real tmux/iTerm2 not needed — reporter tests mock network calls
-        run: |
-          bash fleet-monitor/client/tests/test-fleet-reporter.sh
-
-      - name: Run lcars-tmp-dir-consistency tests
-        # Cross-validates shell helper, Python function, and TEAM_KANBAN_DIRS stay in sync
-        run: |
-          bash scripts/tests/test-lcars-tmp-dir-consistency.sh
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # Python Test Suites
-  # ─────────────────────────────────────────────────────────────────────────────
-  test-python:
-    name: Python Tests (${{ matrix.python-version }})
-    runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.11", "3.12", "3.13"]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          # Install any test dependencies (unittest is stdlib — no extras needed)
-          # jq is needed by some modules at runtime but tests stub those paths
-          brew install jq
-
-      - name: Run lcars-ui server tests
-        # server.py optionally imports iterm2, calendar sync, and kanban_utils;
-        # the test file stubs all three before import so no real installs needed.
-        run: |
-          python -m unittest discover -s lcars-ui/tests -p 'test_*.py' -v
-
-      - name: Run kanban-hooks tests
-        run: |
-          python -m unittest discover -s kanban-hooks/tests -p 'test_*.py' -v
-
-      - name: Run scripts Python tests
-        # iterm2_window_manager.py requires the 'iterm2' pip package at import time;
-        # the test stubs sys.modules['iterm2'] before importing, so no real package needed.
-        run: |
-          python -m unittest discover -s scripts/tests -p 'test_*.py' -v
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Node.js Test Suites — fleet-monitor/server/tests/
