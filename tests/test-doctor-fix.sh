@@ -179,15 +179,20 @@ _run_doctor_full --fix
 assert_exit_code 2 "$_LAST_EXIT_CODE"
 test_pass
 
-test_start "--fix without failures (warnings only) does not show stub message"
-# When all checks pass or only produce warnings, FIX branch is not entered
-# (the fix branch triggers only on FAILED_CHECKS > 0)
-_write_config
-_run_doctor_full --fix
-# Doctor may still exit 1 (warnings) or 0 (all pass)
-# The stub message should NOT appear when there are no failures
-assert_not_contains "$_LAST_OUTPUT" "Auto-fix not yet implemented"
-test_pass
+if [ -z "${CI:-}" ]; then
+    # Skipped on CI (XACA-0499): premise — "valid config means doctor reports
+    # no failures" — does not hold on a vanilla GitHub runner where the
+    # aiteamforge tap is not installed and the tap-owned Python venv is
+    # missing. Doctor correctly reports those as failures and renders the
+    # "Auto-fix not yet implemented" stub, which the test forbids. On a
+    # configured dev machine it passes. Follow-up: rewrite the test to mock
+    # the environment so the no-failure path is reachable on CI.
+    test_start "--fix without failures (warnings only) does not show stub message"
+    _write_config
+    _run_doctor_full --fix
+    assert_not_contains "$_LAST_OUTPUT" "Auto-fix not yet implemented"
+    test_pass
+fi
 
 test_start "Without --fix flag, output suggests running with --fix"
 _remove_config
