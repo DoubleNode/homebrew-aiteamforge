@@ -65,57 +65,57 @@ jobs:
           ln -s $PWD $(brew --repository)/Library/Taps/doublenode/homebrew-aiteamforge
 
       - name: Audit formula
-        if: github.ref == 'refs/heads/develop'
+        if: github.ref == 'refs/heads/main'
         run: |
           brew audit --strict --online Formula/aiteamforge.rb
 
       - name: Install formula
         run: |
-          brew install --verbose --build-from-source dev-team
+          brew install --verbose --build-from-source aiteamforge
 
       - name: Test formula
         run: |
-          brew test dev-team
+          brew test aiteamforge
 
       - name: Verify installation
         run: |
           # Check main commands exist
-          which dev-team
-          which dev-team-setup
-          which dev-team-doctor
+          which aiteamforge
+          which aiteamforge-setup
+          which aiteamforge-doctor
 
           # Check they're executable
-          dev-team --version
-          dev-team-setup --help
-          dev-team-doctor --version
+          aiteamforge --version
+          aiteamforge-setup --help
+          aiteamforge-doctor --version
 
           # Verify core files installed
-          test -d $(brew --prefix)/opt/dev-team/libexec/scripts
-          test -d $(brew --prefix)/opt/dev-team/libexec/config/templates
-          test -d $(brew --prefix)/opt/dev-team/libexec/docs
-          test -f $(brew --prefix)/opt/dev-team/libexec/kanban-helpers.sh
+          test -d $(brew --prefix)/opt/aiteamforge/libexec/scripts
+          test -d $(brew --prefix)/opt/aiteamforge/libexec/config/templates
+          test -d $(brew --prefix)/opt/aiteamforge/libexec/docs
+          test -f $(brew --prefix)/opt/aiteamforge/libexec/kanban-helpers.sh
 
       - name: Test setup wizard (dry run)
         run: |
           # Test help output
-          dev-team setup --help
+          aiteamforge setup --help
 
       - name: Test doctor (without config)
         run: |
           # Should report not configured but not crash
-          dev-team doctor --check dependencies || true
-          dev-team doctor --check framework
+          aiteamforge doctor --check dependencies || true
+          aiteamforge doctor --check framework
 
       - name: Uninstall formula
         run: |
-          brew uninstall dev-team
+          brew uninstall aiteamforge
 
       - name: Verify clean uninstall
         run: |
           # Commands should not exist
-          ! which dev-team || exit 1
-          ! which dev-team-setup || exit 1
-          ! which dev-team-doctor || exit 1
+          ! which aiteamforge || exit 1
+          ! which aiteamforge-setup || exit 1
+          ! which aiteamforge-doctor || exit 1
 
   lint-formula:
     name: Lint Formula
