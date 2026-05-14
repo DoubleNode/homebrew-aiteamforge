@@ -525,6 +525,66 @@ else
     TEAM_WORKING_DIR="$TEAM_BASE_WORKING_DIR"
 fi
 
+# ============================================================================
+# TEAM_WORKING_DIR DEV-SOURCE PROTECTION GUARD (XACA-0498)
+# ============================================================================
+# Parity guard for XACA-0497 (AITEAMFORGE_DIR guard, lines 82-99).  XACA-0497
+# blocks installs when AITEAMFORGE_DIR itself is a dev-source tree, but does
+# NOT catch the parallel case where TEAM_WORKING_DIR resolves to a direct
+# $HOME child (e.g. ~/academy, ~/android) on a dev-source machine — a second
+# installer writer (persona refresher / board writer) proved this gap exists
+# during the 2026-05-12 ~/academy re-creation event.
+#
+# Detection: sentinel at $HOME/dev-team/.aiteamforge-source-tree.
+# Cross-reference: docs/kanban/XACA-0497-academy-stub-forensics.md
+#                  "Recommendations for follow-up" #2.
+#
+# Short-circuit on non-dev machines (no sentinel) — on-by-default path for
+# tap-installed end-user machines.
+if [[ -f "$HOME/dev-team/.aiteamforge-source-tree" ]]; then
+    # Re-expand $HOME in TEAM_WORKING_DIR.  The augmentation block above may
+    # have rebuilt TEAM_WORKING_DIR from TEAM_BASE_WORKING_DIR (which already
+    # has $HOME expanded), but a defensive re-substitution is free and keeps
+    # this block self-contained.
+    _TWD_EXPANDED="${TEAM_WORKING_DIR/\$HOME/$HOME}"
+
+    # Resolve to canonical path without requiring TEAM_WORKING_DIR to exist yet
+    # (the installer creates it later).  cd into the parent (which does exist —
+    # it is $HOME or a child of it) and concatenate the basename.
+    _TWD_PARENT="$(cd "$(dirname "$_TWD_EXPANDED")" 2>/dev/null && pwd -P || echo "")"
+    _TWD_REAL="$_TWD_PARENT/$(basename "$_TWD_EXPANDED")"
+
+    # Re-resolve AITEAMFORGE_DIR canonical path (_AITF_REAL was unset at line 99).
+    _AITF_REAL="$(cd "$AITEAMFORGE_DIR" 2>/dev/null && pwd -P || echo "")"
+
+    # Deny when ALL three clauses are true:
+    #   1. TEAM_WORKING_DIR is a direct child of $HOME (depth-1, e.g. ~/academy)
+    #      — project-augmented teams (finance/legal/medical/freelance) resolve to
+    #      depth-2+ and are allowed through.
+    #   2. TEAM_WORKING_DIR is NOT inside AITEAMFORGE_DIR (i.e. AITEAMFORGE_DIR
+    #      is not an ancestor of TEAM_WORKING_DIR) — user-supplied containment
+    #      (TWD a child of AITF install root) is allowed through this clause.
+    #   3. AITEAMFORGE_DIR is NOT inside TEAM_WORKING_DIR (i.e. TEAM_WORKING_DIR
+    #      is not an ancestor of AITEAMFORGE_DIR) — Command monorepo
+    #      ($HOME/dev-team containing $HOME/dev-team/aiteamforge) is allowed
+    #      through this clause.
+    # Trailing slashes on both sides assert directory containment rather than
+    # raw string prefix, so AITF=$HOME/academy vs TWD=$HOME/academy-extra
+    # cannot collide into a false ALLOW.
+    if [[ -n "$_TWD_PARENT" && "$_TWD_PARENT" == "$HOME" ]] \
+        && [[ -z "$_AITF_REAL" || "$_TWD_REAL/" != "$_AITF_REAL/"* ]] \
+        && [[ -z "$_AITF_REAL" || "$_AITF_REAL/" != "$_TWD_REAL/"* ]]; then
+        echo "Error: TEAM_WORKING_DIR resolves to a direct \$HOME child on a dev-source machine:" >&2
+        echo "       $_TWD_REAL" >&2
+        echo "       Installing here would write stub files into the dev source tree." >&2
+        echo "       Pass --install-dir to a path outside \$HOME, or unset AITEAMFORGE_DIR" >&2
+        echo "       and ensure the team conf uses a depth-2+ TEAM_WORKING_DIR." >&2
+        exit 1
+    fi
+
+    unset _TWD_EXPANDED _TWD_PARENT _TWD_REAL _AITF_REAL
+fi
+
 echo "Team Name: $TEAM_NAME"
 echo "Category: $TEAM_CATEGORY"
 echo "Description: $TEAM_DESCRIPTION"
