@@ -176,9 +176,9 @@ jobs:
       - name: Check script syntax
         run: |
           # Check bash scripts
-          bash -n bin/dev-team-cli.sh
-          bash -n bin/dev-team-setup.sh
-          bash -n bin/dev-team-doctor.sh
+          bash -n bin/aiteamforge-cli.sh
+          bash -n bin/aiteamforge-setup.sh
+          bash -n bin/aiteamforge-doctor.sh
 
       - name: Run ShellCheck on scripts
         run: |
@@ -188,9 +188,9 @@ jobs:
       - name: Test script permissions
         run: |
           # Scripts should be executable
-          test -x bin/dev-team-cli.sh
-          test -x bin/dev-team-setup.sh
-          test -x bin/dev-team-doctor.sh
+          test -x bin/aiteamforge-cli.sh
+          test -x bin/aiteamforge-setup.sh
+          test -x bin/aiteamforge-doctor.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Shell Test Suites — homebrew-tap/tests/
