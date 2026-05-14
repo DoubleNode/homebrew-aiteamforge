@@ -25,7 +25,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-13, macos-14]  # Intel and ARM
+        # macos-14 is the primary target (Apple Silicon, current macOS).
+        # macos-13 (Ventura, Intel) was dropped in XACA-0499 — GHA Intel
+        # macOS runners are heavily oversubscribed and routinely queue
+        # for hours without ever scheduling, blocking PR merges on an
+        # infrastructure bottleneck rather than a real test failure.
+        os: [macos-14]
 
     steps:
       - name: Checkout repository
