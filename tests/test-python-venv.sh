@@ -446,7 +446,10 @@ assert_file_not_exists "$corrupt_venv_dir/bin/python3"
 test_pass
 
 test_start "Corrupted venv: validate-install.sh references rebuild instructions"
-output=$(grep -A5 "python3.*missing\|venv.*binary\|Recreate" \
+# Post-XACA-0499: tap-owned venv lives in a brew prefix dir and is rebuilt by
+# `brew reinstall aiteamforge`; the prior "python3 -m venv" wording belonged
+# to the install_dir/.venv era.
+output=$(grep "brew reinstall aiteamforge" \
   "$TAP_ROOT/libexec/lib/validate-install.sh" 2>/dev/null || echo "")
 assert_not_empty "$output" \
   "validate-install.sh does not document corrupted venv rebuild path"
@@ -514,13 +517,14 @@ assert_not_empty "$output" \
   "_val_check_python_venv not found in validate-install.sh"
 test_pass
 
-test_start "validate-install.sh checks for venv directory existence"
-output=$(grep -A10 "_val_check_python_venv" \
-  "$TAP_ROOT/libexec/lib/validate-install.sh" 2>/dev/null | \
-  grep -c "\-d.*venv\|venv.*-d" 2>/dev/null || echo "0")
+test_start "validate-install.sh checks for tap-owned venv via AITEAMFORGE_PYTHON"
+# Post-XACA-0499: the function consults $AITEAMFORGE_PYTHON (set by
+# python-env.sh at source time) rather than testing install_dir/.venv with -d.
+output=$(grep -c "AITEAMFORGE_PYTHON" \
+  "$TAP_ROOT/libexec/lib/validate-install.sh" 2>/dev/null || echo "0")
 [ "$output" -gt 0 ]
 assert_exit_success $? \
-  "validate-install.sh does not check for venv directory with -d"
+  "validate-install.sh does not reference AITEAMFORGE_PYTHON for venv discovery"
 test_pass
 
 test_start "validate-install.sh checks for iterm2 package in venv"

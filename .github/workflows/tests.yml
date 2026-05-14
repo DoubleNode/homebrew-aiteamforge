@@ -79,11 +79,13 @@ jobs:
           aiteamforge-setup --help
           aiteamforge-doctor --version
 
-          # Verify core files installed
+          # Verify core files installed (paths reflect post-XACA-0499 layout:
+          # libexec.install Dir["*"] mirrors the tap repo under prefix/libexec/)
           test -d $(brew --prefix)/opt/aiteamforge/libexec/scripts
-          test -d $(brew --prefix)/opt/aiteamforge/libexec/config/templates
+          test -d $(brew --prefix)/opt/aiteamforge/libexec/share/templates
           test -d $(brew --prefix)/opt/aiteamforge/libexec/docs
-          test -f $(brew --prefix)/opt/aiteamforge/libexec/kanban-helpers.sh
+          test -d $(brew --prefix)/opt/aiteamforge/libexec/libexec/lib
+          test -d $(brew --prefix)/opt/aiteamforge/libexec/libexec/commands
 
       - name: Test setup wizard (dry run)
         run: |
@@ -119,13 +121,12 @@ jobs:
         uses: Homebrew/actions/setup-homebrew@master
 
       - name: Lint formula with brew style
+        # `brew style` already runs the same RuboCop config that Homebrew
+        # vendors, so a separate `rubocop` step is redundant. It also
+        # cannot install — rubocop is a gem, not a brew formula — and the
+        # prior step here was a no-op-then-fail. Removed (XACA-0499).
         run: |
           brew style Formula/aiteamforge.rb
-
-      - name: Lint formula with RuboCop
-        run: |
-          brew install --quiet rubocop
-          rubocop Formula/aiteamforge.rb
 
   drift-guard:
     name: Setup-Wizard Drift Guard (XACA-0173)
