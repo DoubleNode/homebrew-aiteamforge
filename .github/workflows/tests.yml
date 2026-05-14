@@ -6,27 +6,17 @@ on:
     paths:
       - 'Formula/**'
       - '.github/workflows/tests.yml'
-      - 'homebrew-tap/bin/**'
-      - 'homebrew-tap/libexec/**'
-      - 'homebrew-tap/scripts/**'
-      - 'homebrew-tap/tests/**'
-      - 'scripts/tests/**'
+      - 'tests/**'
+      - 'scripts/**'
       - 'fleet-monitor/**'
-      - 'lcars-ui/**'
-      - 'kanban-hooks/**'
   pull_request:
     branches: [ main, develop ]
     paths:
       - 'Formula/**'
       - '.github/workflows/tests.yml'
-      - 'homebrew-tap/bin/**'
-      - 'homebrew-tap/libexec/**'
-      - 'homebrew-tap/scripts/**'
-      - 'homebrew-tap/tests/**'
-      - 'scripts/tests/**'
+      - 'tests/**'
+      - 'scripts/**'
       - 'fleet-monitor/**'
-      - 'lcars-ui/**'
-      - 'kanban-hooks/**'
   workflow_dispatch:
 
 jobs:
@@ -209,44 +199,44 @@ jobs:
 
       - name: Make test scripts executable
         run: |
-          chmod +x homebrew-tap/tests/test-runner.sh
-          chmod +x homebrew-tap/tests/test-*.sh
+          chmod +x tests/test-runner.sh
+          chmod +x tests/test-*.sh
 
       - name: Run validate-install tests
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-validate-install.sh
+          bash tests/test-runner.sh tests/test-validate-install.sh
 
       - name: Run python-venv tests
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-python-venv.sh
+          bash tests/test-runner.sh tests/test-python-venv.sh
 
       - name: Run team-banner tests
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-team-banner.sh
+          bash tests/test-runner.sh tests/test-team-banner.sh
 
       - name: Run board-template tests
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-board-template.sh
+          bash tests/test-runner.sh tests/test-board-template.sh
 
       - name: Run doctor-fix tests
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-doctor-fix.sh
+          bash tests/test-runner.sh tests/test-doctor-fix.sh
 
       - name: Run e2e-setup-launch tests
         # NON_INTERACTIVE prevents the setup wizard from blocking on user input
         env:
           NON_INTERACTIVE: "true"
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-e2e-setup-launch.sh
+          bash tests/test-runner.sh tests/test-e2e-setup-launch.sh
 
       - name: Run multi-team tests
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-multi-team.sh
+          bash tests/test-runner.sh tests/test-multi-team.sh
 
       - name: Run tailscale tests
         # Tailscale is not installed in CI — tests use internal mocks so no real binary needed
         run: |
-          bash homebrew-tap/tests/test-runner.sh homebrew-tap/tests/test-tailscale.sh
+          bash tests/test-runner.sh tests/test-tailscale.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Shell Test Suites — scripts/tests/ and fleet-monitor/client/tests/
