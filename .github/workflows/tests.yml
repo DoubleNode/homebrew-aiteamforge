@@ -244,13 +244,10 @@ jobs:
           bash tests/test-runner.sh tests/test-e2e-setup-launch.sh
 
       - name: Run multi-team tests
-        # Disabled (XACA-0499): one assertion enforces that platform teams
-        # (ios/android/firebase) must NOT share agent persona names. Current
-        # team configs intentionally share names like 'engineering',
-        # 'holodeck', 'sickbay' across platforms. Decide whether the
-        # constraint reflects an actual design rule (then fix configs) or
-        # is obsolete (then drop the assertion) in a follow-up.
-        if: false
+        # Re-enabled (XACA-0504): the previous role-label-uniqueness assertion
+        # was misnamed — TEAM_AGENTS holds station labels (engineering, sickbay,
+        # holodeck) that intentionally overlap across ios/android/firebase (TNG/TOS/DS9).
+        # Assertion replaced with a character-name uniqueness check on persona files.
         run: |
           bash tests/test-runner.sh tests/test-multi-team.sh
 

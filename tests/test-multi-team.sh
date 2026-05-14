@@ -682,36 +682,48 @@ while IFS= read -r conf_file; do
 done < <(find "$TEAMS_DIR" -maxdepth 1 -name "*.conf" -type f | sort)
 test_pass
 
-test_start "No team .conf agent persona names overlap across platform teams"
-# Platform teams should use different agent persona sets so sessions are identifiable
-declare -A agent_to_team
-agent_conflict=false
+test_start "No platform team persona character names overlap across platform teams"
+# XACA-0504: TEAM_AGENTS holds station/role labels (engineering, sickbay,
+# holodeck) that intentionally overlap across ios/android/firebase — each is
+# a different Star Trek series with its own engineering bay and sickbay. The
+# real isolation guarantee is that the *character* assigned to each station is
+# unique across all platform teams. This test checks that invariant by
+# extracting character names from persona filenames in share/personas/<team>/agents/.
+#
+# Filename pattern: <team>_<character>_<role>_persona.md
+# Character name = basename without team-prefix and without _<role>_persona suffix.
+#
+# Skip cleanly if a team's persona directory does not yet exist (defensive).
+declare -A char_to_team
+char_conflict=false
 while IFS= read -r conf_file; do
-  cat_val=$(get_team_field "$conf_file" "TEAM_ID")
   platform=$(get_team_field "$conf_file" "TEAM_CATEGORY")
   [ "$platform" = "platform" ] || continue
-  tid="$cat_val"
+  tid=$(get_team_field "$conf_file" "TEAM_ID")
 
-  # Read TEAM_AGENTS array from the conf file
-  agents=$(
-    # shellcheck disable=SC1090
-    source "$conf_file"
-    echo "${TEAM_AGENTS[*]}"
-  )
-  for agent in $agents; do
-    if [ -n "${agent_to_team[$agent]:-}" ]; then
-      # Agent name collision between two platform teams
-      print_error "Agent '$agent' shared by platform teams '$tid' and '${agent_to_team[$agent]}'"
-      agent_conflict=true
+  persona_dir="$TAP_ROOT/share/personas/$tid/agents"
+  if [ ! -d "$persona_dir" ]; then
+    print_warning "Persona dir missing for platform team '$tid' — skipping character-name check"
+    continue
+  fi
+
+  for persona_file in "$persona_dir"/*.md; do
+    [ -f "$persona_file" ] || continue
+    base=$(basename "$persona_file" .md)
+    # Strip leading <team>_ prefix, then strip trailing _<role>_persona suffix
+    char=$(echo "$base" | sed "s/^${tid}_//" | sed 's/_[^_]*_persona$//')
+    if [ -n "${char_to_team[$char]:-}" ]; then
+      print_error "Character '$char' claimed by both platform team '$tid' and '${char_to_team[$char]}'"
+      char_conflict=true
     fi
-    agent_to_team[$agent]="$tid"
+    char_to_team[$char]="$tid"
   done
 done < <(find "$TEAMS_DIR" -maxdepth 1 -name "*.conf" -type f | sort)
 
-if [ "$agent_conflict" = false ]; then
+if [ "$char_conflict" = false ]; then
   test_pass
 else
-  test_fail "Platform teams must not share agent persona names"
+  test_fail "Platform teams must not share persona character names (XACA-0504)"
 fi
 
 test_start "Registry team count matches number of .conf files"
