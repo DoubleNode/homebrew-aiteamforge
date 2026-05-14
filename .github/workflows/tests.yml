@@ -51,7 +51,7 @@ jobs:
           path: |
             ~/Library/Caches/Homebrew
             ~/Library/Caches/pip
-          key: ${{ runner.os }}-homebrew-${{ hashFiles('Formula/dev-team.rb') }}
+          key: ${{ runner.os }}-homebrew-${{ hashFiles('Formula/aiteamforge.rb') }}
           restore-keys: |
             ${{ runner.os }}-homebrew-
 
@@ -67,7 +67,7 @@ jobs:
       - name: Audit formula
         if: github.ref == 'refs/heads/develop'
         run: |
-          brew audit --strict --online Formula/dev-team.rb
+          brew audit --strict --online Formula/aiteamforge.rb
 
       - name: Install formula
         run: |
@@ -130,12 +130,12 @@ jobs:
 
       - name: Lint formula with brew style
         run: |
-          brew style Formula/dev-team.rb
+          brew style Formula/aiteamforge.rb
 
       - name: Lint formula with RuboCop
         run: |
           brew install --quiet rubocop
-          rubocop Formula/dev-team.rb
+          rubocop Formula/aiteamforge.rb
 
   drift-guard:
     name: Setup-Wizard Drift Guard (XACA-0173)
