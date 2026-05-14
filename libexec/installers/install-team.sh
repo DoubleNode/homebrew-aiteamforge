@@ -561,15 +561,19 @@ if [[ -f "$HOME/dev-team/.aiteamforge-source-tree" ]]; then
     #   1. TEAM_WORKING_DIR is a direct child of $HOME (depth-1, e.g. ~/academy)
     #      — project-augmented teams (finance/legal/medical/freelance) resolve to
     #      depth-2+ and are allowed through.
-    #   2. TEAM_WORKING_DIR is NOT a prefix of AITEAMFORGE_DIR
-    #      — Command monorepo ($HOME/dev-team contains $HOME/dev-team/aiteamforge)
-    #      is allowed through via this clause.
-    #   3. AITEAMFORGE_DIR is NOT a prefix of TEAM_WORKING_DIR
-    #      — user-supplied containment (both inside the same install root) is
-    #      allowed through via this clause.
+    #   2. TEAM_WORKING_DIR is NOT inside AITEAMFORGE_DIR (i.e. AITEAMFORGE_DIR
+    #      is not an ancestor of TEAM_WORKING_DIR) — user-supplied containment
+    #      (TWD a child of AITF install root) is allowed through this clause.
+    #   3. AITEAMFORGE_DIR is NOT inside TEAM_WORKING_DIR (i.e. TEAM_WORKING_DIR
+    #      is not an ancestor of AITEAMFORGE_DIR) — Command monorepo
+    #      ($HOME/dev-team containing $HOME/dev-team/aiteamforge) is allowed
+    #      through this clause.
+    # Trailing slashes on both sides assert directory containment rather than
+    # raw string prefix, so AITF=$HOME/academy vs TWD=$HOME/academy-extra
+    # cannot collide into a false ALLOW.
     if [[ -n "$_TWD_PARENT" && "$_TWD_PARENT" == "$HOME" ]] \
-        && [[ -z "$_AITF_REAL" || "$_TWD_REAL" != "$_AITF_REAL"* ]] \
-        && [[ -z "$_AITF_REAL" || "$_AITF_REAL" != "$_TWD_REAL"* ]]; then
+        && [[ -z "$_AITF_REAL" || "$_TWD_REAL/" != "$_AITF_REAL/"* ]] \
+        && [[ -z "$_AITF_REAL" || "$_AITF_REAL/" != "$_TWD_REAL/"* ]]; then
         echo "Error: TEAM_WORKING_DIR resolves to a direct \$HOME child on a dev-source machine:" >&2
         echo "       $_TWD_REAL" >&2
         echo "       Installing here would write stub files into the dev source tree." >&2
