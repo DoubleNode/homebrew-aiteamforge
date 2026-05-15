@@ -18,11 +18,13 @@ TEAMS_DIR="$HOMEBREW_TAP_ROOT/share/teams"
 AITEAMFORGE_SHARE_DIR="$HOMEBREW_TAP_ROOT/share"
 export AITEAMFORGE_SHARE_DIR
 # shellcheck source=../lib/aiteamforge-org-paths.sh
+# shellcheck disable=SC1091  # source guarded by file-test or `|| true`; default-mode can't follow
 source "${SCRIPT_DIR}/../lib/aiteamforge-org-paths.sh" 2>/dev/null || true
 # XACA-0463: Source the port allocator and path helpers.
 # aiteamforge-paths.sh itself sources aiteamforge-org-paths.sh internally, so
 # the double-source is safe (aiteamforge-org-paths.sh has a guard against it).
 # shellcheck source=../lib/aiteamforge-paths.sh
+# shellcheck disable=SC1091  # source guarded by file-test or `|| true`; default-mode can't follow
 source "${SCRIPT_DIR}/../lib/aiteamforge-paths.sh"
 
 # Default installation location (can be overridden)
@@ -318,7 +320,6 @@ _REGISTRY_ENTRY="$(jq -e --arg tid "$TEAM_ID" '.teams[] | select(.id == $tid)' "
     exit 1
 }
 REGISTRY_NAME_RAW="$(echo "$_REGISTRY_ENTRY" | jq -r '.name')"
-REGISTRY_DESC="$(echo "$_REGISTRY_ENTRY"     | jq -r '.description')"
 REGISTRY_COLOR="$(echo "$_REGISTRY_ENTRY"    | jq -r '.color')"
 REGISTRY_ICON="$(echo "$_REGISTRY_ENTRY"     | jq -r '.icon')"
 # XACA-0486 review feedback (XACA-0486-011): theme comes from <team>.conf's
@@ -395,6 +396,7 @@ _ensure_org_config() {
     # YAML double-quoted scalars (`"`, `\`, control chars). Keeps spaces, punctuation,
     # uppercase letters, and unicode — only stripping delimiters that corrupt downstream.
     _sanitize_free_text() {
+        # shellcheck disable=SC1003  # tr -d arg, not a shell quote-escape: '|"\\' = strip pipe, dquote, backslash
         printf '%s' "$1" | tr -d '|"\\' | tr -d '\000-\037'
     }
 
@@ -737,7 +739,7 @@ if [[ -d "$PERSONAS_TEMPLATE_DIR" ]]; then
     if [[ -d "$PERSONAS_TEMPLATE_DIR/prompts" ]]; then
         mkdir -p "$TEAM_DIR/scripts/prompts"
         cp "$PERSONAS_TEMPLATE_DIR/prompts/"*.txt "$TEAM_DIR/scripts/prompts/" 2>/dev/null || true
-        PROMPT_COUNT=$(ls "$TEAM_DIR/scripts/prompts/"*.txt 2>/dev/null | wc -l | tr -d ' ')
+        PROMPT_COUNT=$(find "$TEAM_DIR/scripts/prompts" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
         echo "  ✓ Installed $PROMPT_COUNT system prompt file(s) to scripts/prompts/"
     fi
     echo ""
