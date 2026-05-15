@@ -157,14 +157,14 @@ update_templates() {
   local templates_updated=0
 
   # Check if templates directory exists
-  if [ ! -d "${FRAMEWORK_DIR}/config/templates" ]; then
+  if [ ! -d "${FRAMEWORK_DIR}/share/templates" ]; then
     print_warning "Templates directory not found in framework"
     return
   fi
 
   # Find all templates
   local templates
-  templates=$(find "${FRAMEWORK_DIR}/config/templates" -name "*.template" 2>/dev/null)
+  templates=$(find "${FRAMEWORK_DIR}/share/templates" -name "*.template" 2>/dev/null)
 
   if [ -z "$templates" ]; then
     print_info "No templates to update"
@@ -214,7 +214,7 @@ update_templates() {
 update_lcars() {
   print_section "Updating LCARS UI"
 
-  local lcars_source="${FRAMEWORK_DIR}/lcars-ui"
+  local lcars_source="${FRAMEWORK_DIR}/share/lcars-ui"
   local lcars_target="${WORKING_DIR}/lcars-ui"
 
   if [ ! -d "$lcars_source" ]; then
@@ -246,9 +246,9 @@ update_shell_helpers() {
 
   local updated=0
 
-  # Resolve the homebrew tap share directory (parent of FRAMEWORK_DIR's libexec)
+  # Resolve the homebrew tap share directory (under FRAMEWORK_DIR)
   local tap_share
-  tap_share="$(dirname "$FRAMEWORK_DIR")/share"
+  tap_share="${FRAMEWORK_DIR}/share"
 
   # Update kanban-helpers.sh from the kanban template (root of WORKING_DIR)
   local kanban_template="${tap_share}/templates/kanban/kanban-helpers.template.sh"
@@ -334,7 +334,7 @@ update_shell_helpers() {
 update_skills() {
   print_section "Updating Skills"
 
-  local skills_source="${FRAMEWORK_DIR}/skills"
+  local skills_source="${FRAMEWORK_DIR}/share/skills"
   local skills_target="${WORKING_DIR}/skills"
 
   if [ ! -d "$skills_source" ]; then
@@ -394,7 +394,7 @@ update_launchagents() {
   local updated=0
 
   for agent in "${agents[@]}"; do
-    local source="${FRAMEWORK_DIR}/launchagents/${agent}"
+    local source="${FRAMEWORK_DIR}/share/launchagents/${agent}"
     local target="$HOME/Library/LaunchAgents/${agent}"
 
     if [ ! -f "$source" ]; then
@@ -439,7 +439,7 @@ update_launchagents() {
 show_changelog() {
   print_section "What's New"
 
-  local changelog="${FRAMEWORK_DIR}/CHANGELOG.md"
+  local changelog="${FRAMEWORK_DIR}/share/CHANGELOG.md"
 
   if [ ! -f "$changelog" ]; then
     print_info "No changelog available"

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .channels import AITEAMFORGE, ChannelConfig, UNTAGGED
+from .channels import USER_STATE, ChannelConfig, UNTAGGED
 from .checksum import is_excluded, sha256_file, walk_files
 from .manifest import EXACT, FileEntry, Manifest, PRESENT
 
@@ -66,7 +66,7 @@ def inventory(
                     size=0,
                     mtime=d.stat().st_mtime,
                     cls=PRESENT,
-                    channel=channels.resolve(str(d)) if channels.resolve(str(d)) != UNTAGGED else AITEAMFORGE,
+                    channel=channels.resolve(str(d)) if channels.resolve(str(d)) != UNTAGGED else USER_STATE,
                     domain=DOMAIN,
                     probe={"file_count": files_in, "kind": "session_subdir"},
                 )
@@ -74,7 +74,10 @@ def inventory(
 
     if froot.exists():
         for p in walk_files(froot):
-            _emit(manifest, p, _home, channels, EXACT)
+            # finance/.claude/agents/ is installer-carried (aiteamforge_product channel).
+            # ADR §3.2: aiteamforge_product files must use PRESENT — installer mutates
+            # these files on the destination after update, so EXACT would false-FAIL.
+            _emit(manifest, p, _home, channels, PRESENT)
 
     blk = manifest.domains.setdefault(DOMAIN, _empty_block())
     blk.stats = {
@@ -88,7 +91,7 @@ def _emit(manifest: Manifest, p: Path, home: Path, channels: ChannelConfig, cls:
     abs_path = str(p)
     ch = channels.resolve(abs_path)
     if ch == UNTAGGED:
-        ch = AITEAMFORGE
+        ch = USER_STATE
     sha = None if cls == PRESENT else _safe_sha(p)
     fe = FileEntry(
         path=abs_path,

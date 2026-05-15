@@ -49,7 +49,7 @@ if _KANBAN_HOOKS_DIR not in sys.path:
 
 # Import team path config from shared module (XACA-0168)
 try:
-    from aiteamforge_paths import get_team_kanban_dir, get_team_lcars_port, list_teams
+    from aiteamforge_paths import get_team_kanban_dir, get_team_lcars_port, list_teams, load_config as _aiteamforge_load_config
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError as e:
     _AITEAMFORGE_PATHS_AVAILABLE = False
@@ -626,6 +626,96 @@ def generate_export(job_id, team_id):
             'totalFiles': total_files,
             'manifest': manifest,
         })
+
+        # XACA-0496-004: Append team_transfer manifest + verifier report as
+        # supplementary audit artifacts. Failures here are non-fatal — the
+        # core export already succeeded; we only update verifierSummary.
+        try:
+            import subprocess
+            import sys
+            import tempfile
+
+            # Determine which team name the team_transfer config is keyed by.
+            # Config lives in lcars-ui/team_transfer/config/<team>.yaml.
+            # If team_id is a derived form (e.g. "finance-personal"), fall back
+            # to base_team; if both fail, skip gracefully.
+            lcars_ui_dir = Path(__file__).parent
+            tt_config_dir = lcars_ui_dir / "team_transfer" / "config"
+            tt_team = team_id if (tt_config_dir / f"{team_id}.yaml").exists() else (
+                base_team if (tt_config_dir / f"{base_team}.yaml").exists() else None
+            )
+
+            if tt_team is None:
+                EXPORT_JOBS[job_id]['verifierSummary'] = {
+                    'exit': -1,
+                    'error': f'No team_transfer config found for team_id={team_id!r} or base_team={base_team!r}',
+                }
+            else:
+                EXPORT_JOBS[job_id]['message'] = 'Generating team_transfer manifest...'
+
+                with tempfile.TemporaryDirectory() as tmp_str:
+                    tmp = Path(tmp_str)
+                    tt_manifest_path = tmp / "manifest.json"
+
+                    gen_result = subprocess.run(
+                        [sys.executable, "-m", "team_transfer.generator",
+                         "--team", tt_team,
+                         "--output", str(tt_manifest_path),
+                         "--allow-untagged"],
+                        cwd=str(lcars_ui_dir),
+                        env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+                        capture_output=True, text=True, timeout=120,
+                    )
+
+                    if gen_result.returncode not in (0, 1) or not tt_manifest_path.exists():
+                        # exit 2 = config error; or manifest was not written
+                        gen_err = (gen_result.stderr or gen_result.stdout or "").strip()
+                        EXPORT_JOBS[job_id]['verifierSummary'] = {
+                            'exit': -1,
+                            'error': f'team_transfer.generator failed (rc={gen_result.returncode}): {gen_err[:200]}',
+                        }
+                    else:
+                        ver_result = subprocess.run(
+                            [sys.executable, "-m", "team_transfer.verifier",
+                             "--manifest", str(tt_manifest_path), "--quiet"],
+                            cwd=str(lcars_ui_dir),
+                            env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+                            capture_output=True, text=True, timeout=120,
+                        )
+                        verifier_output = ver_result.stdout + ver_result.stderr
+                        verifier_exit = ver_result.returncode
+
+                        # Parse pass/warn/fail counts from the SUMMARY block.
+                        counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+                        for line in verifier_output.splitlines():
+                            m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)", line)
+                            if m:
+                                counts[m.group(1)] = int(m.group(2))
+
+                        # Append both files into the already-written zip.
+                        with zipfile.ZipFile(output_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
+                            zipf.write(str(tt_manifest_path), "team_transfer/manifest.json")
+                            zipf.writestr("team_transfer/verifier-report.txt", verifier_output)
+
+                        EXPORT_JOBS[job_id]['verifierSummary'] = {
+                            'exit': verifier_exit,
+                            'pass': counts['PASS'],
+                            'warn': counts['WARN'],
+                            'fail': counts['FAIL'],
+                            'reportPath': 'team_transfer/verifier-report.txt',
+                            'manifestPath': 'team_transfer/manifest.json',
+                        }
+                        print(
+                            f"[LCARS Export] team_transfer: exit={verifier_exit} "
+                            f"PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']}"
+                        )
+
+        except Exception as tt_exc:
+            print(f"[LCARS Export] team_transfer step failed (non-fatal): {tt_exc}")
+            EXPORT_JOBS[job_id]['verifierSummary'] = {
+                'exit': -1,
+                'error': str(tt_exc)[:200],
+            }
 
     except Exception as e:
         EXPORT_JOBS[job_id].update({
@@ -11182,6 +11272,72 @@ end tell
             )
             return
 
+        # XACA-0496-005: Check for team_transfer/manifest.json in the uploaded zip.
+        # If present, run the verifier and include the summary in the pre-flight response.
+        # This is supplementary — failure here never fails the upload.
+        tt_verifier_summary: dict = {'present': False}
+        try:
+            import re
+            import subprocess
+            import sys
+            import tempfile
+
+            with zipfile.ZipFile(staged_path, 'r') as _zf:
+                has_tt_manifest = 'team_transfer/manifest.json' in _zf.namelist()
+
+            if has_tt_manifest:
+                with zipfile.ZipFile(staged_path, 'r') as _zf:
+                    tt_manifest_bytes = _zf.read('team_transfer/manifest.json')
+
+                lcars_ui_dir = Path(__file__).parent
+
+                with tempfile.TemporaryDirectory() as tmp_str:
+                    tmp = Path(tmp_str)
+                    tt_manifest_path = tmp / "manifest.json"
+                    tt_manifest_path.write_bytes(tt_manifest_bytes)
+
+                    ver_result = subprocess.run(
+                        [sys.executable, "-m", "team_transfer.verifier",
+                         "--manifest", str(tt_manifest_path), "--quiet"],
+                        cwd=str(lcars_ui_dir),
+                        env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+                        capture_output=True, text=True, timeout=120,
+                    )
+                    verifier_output = ver_result.stdout + ver_result.stderr
+                    verifier_exit = ver_result.returncode
+
+                    # Parse pass/warn/fail counts from the SUMMARY block.
+                    counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+                    for line in verifier_output.splitlines():
+                        m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)", line)
+                        if m:
+                            counts[m.group(1)] = int(m.group(2))
+
+                    # Last 20 lines for UI display.
+                    tail_lines = verifier_output.splitlines()[-20:]
+                    tail = "\n".join(tail_lines)
+
+                    tt_verifier_summary = {
+                        'present': True,
+                        'exit': verifier_exit,
+                        'pass': counts['PASS'],
+                        'warn': counts['WARN'],
+                        'fail': counts['FAIL'],
+                        'tail': tail,
+                    }
+                    print(
+                        f"[LCARS Import] team_transfer verifier: exit={verifier_exit} "
+                        f"PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']}"
+                    )
+
+        except Exception as tt_exc:
+            print(f"[LCARS Import] team_transfer verifier step failed (non-fatal): {tt_exc}")
+            tt_verifier_summary = {
+                'present': True,
+                'exit': -1,
+                'error': str(tt_exc)[:200],
+            }
+
         IMPORT_JOBS[job_id] = {
             'status': 'staged',
             'progress': 0,
@@ -11193,6 +11349,7 @@ end tell
             'baseMatch': base_match,
             'idRenameRequired': (source_team != LCARS_TEAM),
             'createdAt': datetime.now(timezone.utc).isoformat(),
+            'teamTransferVerifierSummary': tt_verifier_summary,
         }
 
         self._send_json_response({
@@ -11202,6 +11359,7 @@ end tell
             'targetTeam': LCARS_TEAM,
             'baseMatch': base_match,
             'idRenameRequired': (source_team != LCARS_TEAM),
+            'teamTransferVerifierSummary': tt_verifier_summary,
         })
 
     def handle_import_apply(self, job_id):
@@ -12409,6 +12567,110 @@ LEGACY_STUB_PATHS = {
 }
 
 
+def _xaca0463_load_team_paths() -> dict:
+    """XACA-0463: Load team-paths.json for the startup conflict guard.
+
+    Delegates to aiteamforge_paths.load_config() when available (re-uses its
+    cache, schema-integrity checks, and bootstrap logic).  Falls back to a
+    minimal direct JSON read when aiteamforge_paths is not importable.
+
+    Returns a dict with at least {"teams": {}}.  Never raises.
+    """
+    if _AITEAMFORGE_PATHS_AVAILABLE:
+        try:
+            return _aiteamforge_load_config()
+        except Exception as exc:
+            print(f"[XACA-0463] load_config() failed ({exc!r}); falling back to direct read.", file=sys.stderr)
+
+    # Fallback: direct JSON read (aiteamforge_paths not available)
+    config_path = os.path.expanduser(
+        os.environ.get("AITEAMFORGE_CONFIG", "~/.aiteamforge/team-paths.json")
+    )
+    if not os.path.isfile(config_path):
+        return {"teams": {}}
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError) as exc:
+        raise RuntimeError(f"Could not read {config_path}: {exc}") from exc
+
+
+def _xaca0463_assert_no_port_conflicts(team_paths_data: dict, active_instance) -> None:
+    """XACA-0463: Refuse to start LCARS server on port conflicts or null active port.
+
+    Per docs/architecture/team-id-contract.md §6 server-startup rule 4.
+    Scans team-paths.json for any port held by two or more instances.
+    Also refuses if the active LCARS_TEAM's instance has a null lcars_port.
+    Exits with a non-zero status and a loud, user-facing error message
+    pointing at `kb-port-fix`.
+
+    Args:
+        team_paths_data: parsed team-paths.json contents (or load result).
+        active_instance: the LCARS_TEAM env value (the instance this
+            server intends to serve), or None if not set.
+    """
+    teams = (team_paths_data or {}).get("teams", {}) or {}
+
+    # Collision detection — build port → [instance_ids] map
+    port_to_instances: dict = {}
+    for instance_id, entry in teams.items():
+        port = entry.get("lcars_port") if isinstance(entry, dict) else None
+        if port is None:
+            continue
+        port_to_instances.setdefault(int(port), []).append(instance_id)
+
+    collisions = {p: ids for p, ids in port_to_instances.items() if len(ids) > 1}
+
+    # Null-port check — only for the active (this server's) instance
+    active_null = False
+    if active_instance and active_instance in teams:
+        entry = teams[active_instance]
+        if isinstance(entry, dict) and entry.get("lcars_port") is None:
+            active_null = True
+
+    if not collisions and not active_null:
+        return  # All clear — nothing to do
+
+    # Build loud, scannable error output
+    config_path = os.path.expanduser(
+        os.environ.get("AITEAMFORGE_CONFIG", "~/.aiteamforge/team-paths.json")
+    )
+    sep = "=" * 72
+    print("", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print("LCARS REFUSING TO START -- port allocation conflict detected", file=sys.stderr)
+    print(sep, file=sys.stderr)
+    print(f"  team-paths.json: {config_path}", file=sys.stderr)
+    print(f"  active LCARS_TEAM: {active_instance!r}", file=sys.stderr)
+    print("", file=sys.stderr)
+
+    if collisions:
+        print(f"  Port collisions ({len(collisions)}):", file=sys.stderr)
+        for port in sorted(collisions):
+            ids = sorted(collisions[port])
+            print(
+                f"    Port {port} -- held by {len(ids)} instances: {', '.join(ids)}",
+                file=sys.stderr,
+            )
+        print("", file=sys.stderr)
+
+    if active_null:
+        print(
+            f"  WARNING: Active instance '{active_instance}' has lcars_port: null",
+            file=sys.stderr,
+        )
+        print("", file=sys.stderr)
+
+    print("  Fix: run  kb-port-fix --apply", file=sys.stderr)
+    print(
+        "  Spec: docs/architecture/team-id-contract.md §4.1, §6 (XACA-0463)",
+        file=sys.stderr,
+    )
+    print(sep, file=sys.stderr)
+    print("", file=sys.stderr)
+    sys.exit(2)
+
+
 def _sweep_stale_locks() -> None:
     """XACA-0333-001: Sweep and remove stale .json.lock files at server startup.
 
@@ -12647,6 +12909,23 @@ def main():
     # if the env is wrong.  Fast-fail on bare template ids and unknown teams so
     # operators see a clear error, not a half-started server.
     validate_lcars_team_or_die()
+
+    # XACA-0463: precondition check — refuse to start on port conflicts or null
+    # active-instance port.  Runs after team validation so LCARS_TEAM is trusted.
+    _xaca0463_active_lcars_team = os.environ.get("LCARS_TEAM")
+    try:
+        _xaca0463_team_paths_data = _xaca0463_load_team_paths()
+    except Exception as _e:
+        # If team-paths.json is missing or unreadable, fall back gracefully.
+        # Matches existing aiteamforge_paths bootstrap behaviour — shouldn't block startup.
+        print(
+            f"[XACA-0463] team-paths.json unreadable ({_e!r}); skipping conflict check.",
+            file=sys.stderr,
+        )
+        _xaca0463_team_paths_data = None
+
+    if _xaca0463_team_paths_data is not None:
+        _xaca0463_assert_no_port_conflicts(_xaca0463_team_paths_data, _xaca0463_active_lcars_team)
 
     print(f"""
 ╔═══════════════════════════════════════════════════════════════════╗

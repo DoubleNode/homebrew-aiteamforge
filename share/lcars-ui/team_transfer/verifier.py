@@ -60,6 +60,40 @@ from .manifest import EXACT, Manifest, PRESENT, SCHEMA
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
+# Per-channel cls invariants (ADR §3.2).
+# Keys are channel names; values are the *allowed* cls values for entries in that channel.
+# Channels absent from this dict have no enforced constraint (git, secrets_export,
+# icloud_excluded vary by per-entry logic and carry no blanket restriction).
+_CHANNEL_CLASS_INVARIANTS: dict[str, frozenset[str]] = {
+    "aiteamforge_product": frozenset({"present"}),
+    # user_state is intentionally mixed: EXACT for authored memory/knowledge,
+    # PRESENT for ephemeral session logs.
+    "user_state": frozenset({"exact", "present"}),
+    # export_kanban allows exact for authored content (EPIC-*.md, retros, plan docs),
+    # present for lock files, schema for the board JSON.
+    "export_kanban": frozenset({"exact", "present", "schema"}),
+    "export_database": frozenset({"schema"}),
+}
+
+
+def _check_channel_class_invariant(fe) -> tuple[str, str] | None:
+    """Return (FAIL, message) if fe.cls violates the per-channel invariant; else None.
+
+    Runs before SHA/SCHEMA validation so misclassified entries fail fast with a clear
+    message rather than producing confusing sha256-mismatch reports downstream.
+    """
+    allowed = _CHANNEL_CLASS_INVARIANTS.get(fe.channel)
+    if allowed is None:
+        return None  # no constraint for this channel
+    # cls is stored lowercase in the manifest (see manifest.py constants).
+    if fe.cls not in allowed:
+        allowed_str = " | ".join(sorted(allowed))
+        return FAIL, (
+            f"channel-class invariant violated: channel={fe.channel!r} "
+            f"requires cls in {{{allowed_str}}}, got {fe.cls!r}"
+        )
+    return None
+
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Verify a migration manifest against the destination filesystem.")
@@ -203,6 +237,12 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _check_one(fe, dst_path: Path) -> tuple[str, str]:
+    # Enforce per-channel cls invariants early — misclassified entries fail fast with
+    # a clear channel-class message rather than producing confusing SHA-mismatch reports.
+    inv = _check_channel_class_invariant(fe)
+    if inv is not None:
+        return inv
+
     if not dst_path.exists():
         return FAIL, "missing on destination"
 

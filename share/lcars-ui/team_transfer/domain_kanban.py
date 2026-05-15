@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .channels import ChannelConfig, EXPORT, UNTAGGED
+from .channels import ChannelConfig, EXPORT_KANBAN, UNTAGGED
 from .checksum import is_excluded, safe_relpath, sha256_file, walk_files
 from .manifest import EXACT, FileEntry, Manifest, PRESENT, SCHEMA
 
@@ -55,12 +55,12 @@ def inventory(
             size=len(listing_bytes),
             mtime=worktrees_root.stat().st_mtime,
             cls=PRESENT,
-            channel=channels.resolve(str(worktrees_root)) or EXPORT,
+            channel=channels.resolve(str(worktrees_root)) or EXPORT_KANBAN,
             domain=DOMAIN,
             probe={"worktrees": entries},
         )
         if fe.channel == UNTAGGED:
-            fe.channel = EXPORT  # safe fallback; worktrees ride the export channel
+            fe.channel = EXPORT_KANBAN  # safe fallback; worktrees ride the export_kanban channel
         manifest.add_file(DOMAIN, fe)
 
     blk = manifest.domains.setdefault(DOMAIN, _empty_block())

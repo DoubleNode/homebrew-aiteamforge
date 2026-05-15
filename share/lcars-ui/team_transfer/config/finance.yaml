@@ -27,62 +27,66 @@ databases:
 # channels.py exactly (back-compat boundary for XACA-0495).
 defaults:
   rules:
-    # ----- AITEAMFORGE: dev-team infra, persona avatars, Claude memory/agents -----
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
     - pattern: "{home}/dev-team/{team}/*"
-      channel: aiteamforge
+      channel: aiteamforge_product
     - pattern: "{home}/dev-team/{team}/**"
-      channel: aiteamforge
+      channel: aiteamforge_product
     - pattern: "{home}/finance/.claude/agents/*"
-      channel: aiteamforge
+      channel: aiteamforge_product
     - pattern: "{home}/finance/.claude/agents/**"
-      channel: aiteamforge
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
     - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/quark/*"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/quark/**"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/nog/*"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/nog/**"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/brunt/*"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/brunt/**"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/rom/*"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/rom/**"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/zek/*"
-      channel: aiteamforge
+      channel: user_state
     - pattern: "{home}/knowledge/agents/zek/**"
-      channel: aiteamforge
+      channel: user_state
 
     # ----- GIT: anything tracked under the repo working tree -----
     # NOTE: domain_git decides per-file whether something is tracked; this rule covers
     # the *repo root* as a fallback. domain_git overrides this for gitignored files
-    # (DB -> export, .env -> secrets_export, sensitive docs -> icloud_excluded).
+    # (DB -> export_database, .env -> secrets_export, sensitive docs -> icloud_excluded).
     - pattern: "{home}/{root}/*"
       channel: git
     - pattern: "{home}/{root}/**"
       channel: git
 
-    # ----- EXPORT: kanban tree (fully gitignored) + DB + project state -----
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
     - pattern: "{home}/{root}/kanban/*"
-      channel: export
+      channel: export_kanban
     - pattern: "{home}/{root}/kanban/**"
-      channel: export
-    - pattern: "{home}/{root}/data/*"
-      channel: export
-    - pattern: "{home}/{root}/data/**"
-      channel: export
+      channel: export_kanban
     - pattern: "{home}/{root}/worktrees/*"
-      channel: export
+      channel: export_kanban
     - pattern: "{home}/{root}/worktrees/**"
-      channel: export
+      channel: export_kanban
+
+    # ----- EXPORT_DATABASE: SQLite databases (require explicit scp/rsync + SCHEMA verify) -----
+    - pattern: "{home}/{root}/data/*"
+      channel: export_database
+    - pattern: "{home}/{root}/data/**"
+      channel: export_database
 
     # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
     - pattern: "{home}/{root}/.env"

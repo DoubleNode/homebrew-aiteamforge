@@ -13,6 +13,7 @@ from pathlib import Path
 from . import channels as channels_mod
 from . import domain_claude, domain_devteam, domain_git, domain_kanban, domain_knowledge
 from .channels import load_team_config
+from .checklist import emit_pre_export_checklist
 from .checksum import safe_relpath
 from .db_integrity import probe_db
 from .manifest import FileEntry, Manifest, PRESENT, new_manifest
@@ -76,6 +77,9 @@ def main(argv: list[str] | None = None) -> int:
     # The manifest file itself is added once below as a PRESENT-class self-entry.
     # Tell domain_git to skip it so we don't end up with a stale EXACT duplicate.
     skip_paths = {out}
+    # XACA-0490: PRE_EXPORT_CHECKLIST.md is excluded via ALWAYS_EXCLUDE_GLOBS
+    # in checksum.py — it's generator-owned output, not user content.
+    checklist_path = out.parent / "PRE_EXPORT_CHECKLIST.md"
 
     print("[generator] Domain 1: git_repo ...", flush=True)
     domain_git.inventory(
@@ -103,22 +107,44 @@ def main(argv: list[str] | None = None) -> int:
     domain_claude.inventory(manifest, channels, home=home, team_config=team_config)
     print(f"  -> {len(manifest.domains.get('claude', _empty()).files)} files", flush=True)
 
+    # XACA-0496-012: Dedupe cross-domain duplicates. A file that's claimed by both
+    # git_repo (broad sweep) and a more-specific domain (e.g. knowledge) used to
+    # land in the manifest twice, producing a zipfile.UserWarning at package time.
+    # Priority: most-specific wins. The broader git_repo is the fallback.
+    removed = _dedupe_cross_domain(manifest)
+    if removed:
+        print(f"[generator] Deduped {removed} cross-domain duplicate entries.", flush=True)
+
     # Self-include: add a manifest entry for the manifest file itself.
-    self_channel = channels.resolve(str(out))
-    if self_channel == channels_mod.UNTAGGED:
-        self_channel = channels_mod.GIT
-    self_entry = FileEntry(
-        path=str(out),
-        relpath=safe_relpath(out, home),
-        sha256=None,
-        size=0,
-        mtime=0.0,
-        cls=PRESENT,
-        channel=self_channel,
-        domain="git_repo",
-        probe={"kind": "self_reference", "note": "manifest references itself; verifier checks existence only"},
-    )
-    manifest.add_file("git_repo", self_entry)
+    # XACA-0496-013: Skip the self-entry when --output is outside $HOME (typically
+    # a temp file path like /tmp/foo). Such a path won't resolve to a portable
+    # relpath, and the verifier — which checks files at the destination $HOME —
+    # would always report a spurious FAIL because the temp file is gone by then.
+    try:
+        out.relative_to(home)
+        out_under_home = True
+    except ValueError:
+        out_under_home = False
+
+    if out_under_home:
+        self_channel = channels.resolve(str(out))
+        if self_channel == channels_mod.UNTAGGED:
+            self_channel = channels_mod.GIT
+        self_entry = FileEntry(
+            path=str(out),
+            relpath=safe_relpath(out, home),
+            sha256=None,
+            size=0,
+            mtime=0.0,
+            cls=PRESENT,
+            channel=self_channel,
+            domain="git_repo",
+            probe={"kind": "self_reference", "note": "manifest references itself; verifier checks existence only"},
+        )
+        manifest.add_file("git_repo", self_entry)
+    else:
+        print(f"[generator] Skipping self-entry — output {out} is outside HOME {home} "
+              f"(temp/CI path; would produce a spurious FAIL on verify).", flush=True)
 
     manifest.recompute_channel_stats()
     gaps = manifest.collect_untagged()
@@ -126,6 +152,20 @@ def main(argv: list[str] | None = None) -> int:
     out.write_text(manifest.to_json(), encoding="utf-8")
     total = sum(len(d.files) for d in manifest.domains.values())
     print(f"\n[generator] Wrote {out} — {total} entries across {len(manifest.domains)} domains", flush=True)
+
+    # Emit the pre-export checklist alongside the manifest.
+    # XACA-0490: Skip when --output is outside $HOME (temp/CI path — same guard as self-entry above).
+    # checklist_path was computed earlier (alongside skip_paths) so domain_git would
+    # skip a prior run's checklist; re-use it here rather than recomputing.
+    if out_under_home:
+        emit_pre_export_checklist(manifest, team_config, out, checklist_path)
+        print(f"[generator] Wrote {checklist_path}", flush=True)
+    else:
+        print(
+            f"[generator] Skipping PRE_EXPORT_CHECKLIST.md emit — output {out} outside HOME "
+            f"(temp/CI path).",
+            flush=True,
+        )
 
     print("\n=== CHANNEL STATS ===", flush=True)
     for ch in manifest.channels:
@@ -150,6 +190,39 @@ def main(argv: list[str] | None = None) -> int:
 def _empty():
     from .manifest import DomainBlock
     return DomainBlock()
+
+
+def _dedupe_cross_domain(manifest) -> int:
+    """Remove duplicate file entries that appear in multiple domains.
+
+    Priority (most-specific first): claude > knowledge > kanban > devteam > git_repo.
+    A file path seen first in the higher-priority domain is kept; later entries
+    for the same path in lower-priority domains are dropped. Same-domain
+    duplicates (rare) are also collapsed to the first occurrence.
+
+    Returns the count of duplicates removed.
+    """
+    priority = ["claude", "knowledge", "kanban", "devteam", "git_repo"]
+    seen: set[str] = set()
+    removed = 0
+
+    # Domains the caller created but that aren't in the priority list (forward-
+    # compat for future domain modules) are processed last in alphabetical order.
+    ordered = priority + sorted(d for d in manifest.domains if d not in priority)
+    for domain in ordered:
+        dblock = manifest.domains.get(domain)
+        if not dblock:
+            continue
+        kept = []
+        for fe in dblock.files:
+            if fe.path in seen:
+                removed += 1
+                continue
+            seen.add(fe.path)
+            kept.append(fe)
+        dblock.files = kept
+
+    return removed
 
 
 if __name__ == "__main__":
