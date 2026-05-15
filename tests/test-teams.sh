@@ -2,6 +2,11 @@
 
 # test-teams.sh
 # Tests for team configuration files (share/teams/)
+#
+# REQUIRES bash 4+ (uses `declare -A`). macOS-latest GitHub Actions runners
+# ship /bin/bash 3.2 — if this file is added to .github/workflows/tests.yml,
+# the step MUST invoke it via "$(brew --prefix)/bin/bash" after `brew install bash`.
+# See the multi-team test step (XACA-0504) for the canonical pattern.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
