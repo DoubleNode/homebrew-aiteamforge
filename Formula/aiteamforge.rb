@@ -2,8 +2,8 @@ class Aiteamforge < Formula
   desc "AI-powered multi-team development infrastructure"
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
-      tag: "v0.11.10"
-  version "0.11.10"
+      tag: "v0.11.11"
+  version "0.11.11"
   license "MIT"
 
   # Core dependencies required for aiteamforge to function
@@ -178,11 +178,8 @@ class Aiteamforge < Formula
     assert_path_exists libexec/"share/scripts/migrate-cr-schema.py"
     assert_path_exists libexec/"share/templates/kanban/cr-schema.json"
 
-    # worktree-helpers.sh ships in installer payload (XACA-0494) but its
-    # assertion is intentionally omitted here: the formula's `tag: v0.11.10`
-    # predates the file. Restore the assert_path_exists check once the next
-    # release tag (≥ v0.11.11) includes share/scripts/worktree-helpers.sh.
-    # Tracked: XACA-0499.
+    # Verify worktree-helpers.sh ships in installer payload (XACA-0494/XACA-0506)
+    assert_path_exists libexec/"share/scripts/worktree-helpers.sh"
 
     # Test that setup wizard shows version
     system "#{bin}/aiteamforge-setup", "--help"
