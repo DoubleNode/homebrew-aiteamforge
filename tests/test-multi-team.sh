@@ -723,11 +723,15 @@ while IFS= read -r conf_file; do
     char="${trimmed%_*}"
     role_token="${trimmed##*_}"
 
-    # Defensive: if <char>_<role> can be re-joined as "$char_$role_token"
-    # exactly, the parser worked. Otherwise the convention was violated —
-    # warn so the maintainer knows to look (does not fail the test).
-    if [ "${char}_${role_token}" != "$trimmed" ]; then
-      print_warning "Filename '$base' did not match <team>_<char>_<role>_persona convention — parsed char='$char' role='$role_token'"
+    # Defensive: after `${trimmed%_*}`, `char` only contains an underscore
+    # when the original had 3+ tokens. That happens either because the
+    # character name is legitimately multi-token (e.g. jean_luc) OR
+    # because a multi-token role broke the convention (e.g. lead_release).
+    # Either case is worth surfacing to the maintainer — the warning is
+    # advisory (not fatal), and current convention keeps both char and
+    # role single-token (no underscores). All 21 current personas conform.
+    if [[ "$char" == *_* ]]; then
+      print_warning "Filename '$base' has 3+ tokens — parser yielded char='$char' role='$role_token'. Verify this matches the intended <team>_<char>_<role>_persona convention."
     fi
 
     if [ -n "${char_to_team[$char]:-}" ]; then
