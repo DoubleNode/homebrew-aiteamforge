@@ -19,6 +19,11 @@ AITEAMFORGE_SHARE_DIR="$HOMEBREW_TAP_ROOT/share"
 export AITEAMFORGE_SHARE_DIR
 # shellcheck source=../lib/aiteamforge-org-paths.sh
 source "${SCRIPT_DIR}/../lib/aiteamforge-org-paths.sh" 2>/dev/null || true
+# XACA-0463: Source the port allocator and path helpers.
+# aiteamforge-paths.sh itself sources aiteamforge-org-paths.sh internally, so
+# the double-source is safe (aiteamforge-org-paths.sh has a guard against it).
+# shellcheck source=../lib/aiteamforge-paths.sh
+source "${SCRIPT_DIR}/../lib/aiteamforge-paths.sh"
 
 # Default installation location (can be overridden)
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
@@ -266,6 +271,40 @@ if [[ ! "$INSTANCE_ID" =~ ^[a-z0-9_]+(-[a-z0-9_]+){0,2}$ ]]; then
     echo "Error: Computed instance id '${INSTANCE_ID}' does not match ^[a-z0-9_]+(-[a-z0-9_]+){0,2}$" >&2
     exit 1
 fi
+
+# ============================================================================
+# XACA-0463: Per-instance LCARS port allocation (team-id-contract §4.1)
+# ============================================================================
+# Call the pure allocator from aiteamforge-paths.sh (sourced above).
+# The allocator scans team-paths.json for all used ports in the template's band
+# and returns the lowest free port on stdout.  It does NOT mutate team-paths.json;
+# the writer below (WRITE BACK section, after the connect-only early exit) is
+# responsible for persisting the resolved port for this instance.
+#
+# $TEAM_LCARS_PORT is overwritten here from the conf-file-read value (template
+# default) to the per-instance allocated value.  All downstream consumers
+# (sed substitutions in connect/disconnect/startup templates, the lcars-ports
+# directory writer, and the agent port derivation at AGENT_PORT=$((TEAM_LCARS_PORT+n)))
+# pick up the correct instance port automatically because they all reference the
+# same variable.
+_xaca0463_team_paths="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+if command -v aiteamforge_compute_instance_port >/dev/null 2>&1; then
+    _xaca0463_allocated=""
+    if ! _xaca0463_allocated=$(aiteamforge_compute_instance_port "$TEAM_ID" "$_xaca0463_team_paths" 2>&1); then
+        echo "❌ XACA-0463 port allocator failed for template '$TEAM_ID':" >&2
+        echo "   $_xaca0463_allocated" >&2
+        echo "   See docs/architecture/team-id-contract.md §4.1 (Port allocation rule)." >&2
+        exit 1
+    fi
+    TEAM_LCARS_PORT="$_xaca0463_allocated"
+    unset _xaca0463_allocated
+    echo "  ✓ XACA-0463: allocated port $TEAM_LCARS_PORT for instance $INSTANCE_ID (template $TEAM_ID band)"
+else
+    echo "❌ XACA-0463: aiteamforge_compute_instance_port not in scope." >&2
+    echo "   aiteamforge-paths.sh should have been sourced above; check for errors." >&2
+    exit 1
+fi
+unset _xaca0463_team_paths
 
 # Load branding fields from registry.json keyed on TEAM_ID (template id).
 # These are used for board JSON writes and summary display.
@@ -836,8 +875,7 @@ elif [[ -f "$STARTUP_TEMPLATE" ]]; then
     # script's TEAM_ID variable holds the instance id — keeping backwards compat
     # with callers that read TEAM_ID while correcting the cascade (contract §6.8).
     # {{TEAM_TMUX_SOCKET}} also uses INSTANCE_ID for per-instance socket isolation.
-    # TODO(XACA-0460): LCARS port is still template-keyed via TEAM_LCARS_PORT.
-    # Per-instance port allocation is out of scope for XACA-0460; will be a follow-up.
+    # XACA-0463: per-instance LCARS port now allocated above via aiteamforge_compute_instance_port.
     # XACA-0485: for project teams, use the project-augmented TEAM_WORKING_DIR
     # (computed above with the resolved-project/client component). Previously
     # this used TEAM_BASE_WORKING_DIR which stripped the project component and
@@ -1359,6 +1397,71 @@ else
     KANBAN_DIR="$AITEAMFORGE_DIR/kanban"
 fi
 mkdir -p "$KANBAN_DIR"
+
+# ============================================================================
+# XACA-0463: Persist per-instance lcars_port to team-paths.json
+# ============================================================================
+# Upsert the INSTANCE_ID entry in team-paths.json with the allocated port.
+# Runs after the connect-only early exit so only full installs write the file.
+# KANBAN_DIR and TEAM_WORKING_DIR are both finalized by this point.
+#
+# The write is atomic (write-to-tmp + rename) to avoid corrupting team-paths.json
+# if the installer is interrupted mid-write.
+#
+# If team-paths.json does not exist yet, the Python script initialises it with
+# {"schema_version": 1, "teams": {}} before adding this entry.
+echo "  ✓ XACA-0463: persisting lcars_port=$TEAM_LCARS_PORT for instance $INSTANCE_ID to team-paths.json..."
+python3 - "$INSTANCE_ID" "$TEAM_ID" "$KANBAN_DIR" "$TEAM_WORKING_DIR" "$TEAM_LCARS_PORT" \
+    "${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}" <<'TEAM_PATHS_PYEOF'
+import sys
+import json
+import os
+from pathlib import Path
+
+instance_id  = sys.argv[1]
+template_id  = sys.argv[2]
+kanban_dir   = sys.argv[3]
+working_dir  = sys.argv[4]
+lcars_port   = int(sys.argv[5])
+config_path  = Path(sys.argv[6])
+
+# Load existing config, or start fresh.
+if config_path.exists():
+    try:
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"  Warning: could not parse {config_path}: {exc} — starting with empty config", file=sys.stderr)
+        config = {"schema_version": 1, "teams": {}}
+else:
+    config = {"schema_version": 1, "teams": {}}
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+
+teams = config.setdefault("teams", {})
+
+# Upsert: preserve any existing fields; update or add lcars_port, kanban_dir, working_dir.
+entry = teams.get(instance_id, {})
+entry["kanban_dir"]  = kanban_dir
+entry["working_dir"] = working_dir
+entry["lcars_port"]  = lcars_port
+# Preserve band metadata if already present (written by kb-port-fix or prior installs).
+# Do not overwrite lcars_port_base / lcars_port_range — those come from DEFAULT_TEAMS,
+# not from the installer; the reader falls back to DEFAULT_TEAMS for band queries.
+teams[instance_id] = entry
+
+# Atomic write: write-to-tmp then rename.
+# TODO(XACA-0463): consider adding a backup snapshot like _write_defaults does.
+tmp_path = config_path.with_suffix(".tmp")
+try:
+    tmp_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    os.replace(str(tmp_path), str(config_path))
+    print(f"  ✓ XACA-0463: team-paths.json updated — {instance_id}.lcars_port={lcars_port}")
+except OSError as exc:
+    print(f"  Warning: XACA-0463 could not write {config_path}: {exc}", file=sys.stderr)
+    try:
+        tmp_path.unlink()
+    except OSError:
+        pass
+TEAM_PATHS_PYEOF
 
 # Board filename uses INSTANCE_ID (not template id) — contract §6, invariant 8.
 TEAM_BOARD="$KANBAN_DIR/${INSTANCE_ID}-board.json"
