@@ -80,9 +80,14 @@ def get_config_path() -> Path:
 # homebrew-tap/libexec/lib/aiteamforge-paths.sh (kept in sync by hand until
 # Wave 4 automation lands).
 #
-# kanban_dir  — absolute path to the live board directory
-# working_dir — parent of kanban_dir (= kanban_dir.parent)
-# lcars_port  — local port for this team's LCARS server, or None
+# kanban_dir       — absolute path to the live board directory
+# working_dir      — parent of kanban_dir (= kanban_dir.parent)
+# lcars_port_base  — first port in the template's band (XACA-0463)
+# lcars_port_range — inclusive count of ports in band (XACA-0463)
+# lcars_port       — DEPRECATED (XACA-0463): per-instance port, derived from
+#                    band base at install time and persisted to team-paths.json;
+#                    use lcars_port_base + lcars_port_range for band queries.
+#                    None means not yet allocated (pre-migration install).
 # ---------------------------------------------------------------------------
 
 _HOME = str(Path.home())
@@ -92,31 +97,43 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "academy": {
         "kanban_dir": f"{_HOME}/dev-team/kanban",
         "working_dir": f"{_HOME}/dev-team",
+        "lcars_port_base": 8200,
+        "lcars_port_range": 10,
         "lcars_port": 8203,
     },
     "ios": {
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS",
+        "lcars_port_base": 8260,
+        "lcars_port_range": 10,
         "lcars_port": 8260,
     },
     "android": {
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android",
+        "lcars_port_base": 8280,
+        "lcars_port_range": 10,
         "lcars_port": 8280,
     },
     "firebase": {
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions",
+        "lcars_port_base": 8240,
+        "lcars_port_range": 10,
         "lcars_port": 8240,
     },
     "command": {
         "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/dev-team",
+        "lcars_port_base": 8230,
+        "lcars_port_range": 10,
         "lcars_port": 8234,
     },
     "dns": {
         "kanban_dir": "/Users/Shared/Development/DNSFramework/kanban",
         "working_dir": "/Users/Shared/Development/DNSFramework",
+        "lcars_port_base": 8180,
+        "lcars_port_range": 10,
         "lcars_port": 8180,
     },
 
@@ -124,31 +141,43 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "freelance-doublenode-starwords": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/Starwords/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/Starwords",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
     "freelance-doublenode-appplanning": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/appPlanning/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/appPlanning",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
     "freelance-doublenode-workstats": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/WorkStats/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/WorkStats",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
     "freelance-doublenode-lifeboard": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/LifeBoard/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/LifeBoard",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
     "freelance-doublenode-caravan": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/Caravan/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/Caravan",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
     "freelance-doublenode-awaysentry": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/AwaySentry/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/AwaySentry",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
 
@@ -156,11 +185,15 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "freelance-liquidstyle-agentbadges-app": {
         "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban",
         "working_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8960,
     },
     "freelance-liquidstyle-agentbadges-ios": {
         "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban",
         "working_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8970,
     },
 
@@ -168,6 +201,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "legal-coparenting": {
         "kanban_dir": f"{_HOME}/legal/coparenting/kanban",
         "working_dir": f"{_HOME}/legal/coparenting",
+        "lcars_port_base": 8320,
+        "lcars_port_range": 10,
         "lcars_port": None,
     },
 
@@ -175,6 +210,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "medical-general": {
         "kanban_dir": f"{_HOME}/medical/general/kanban",
         "working_dir": f"{_HOME}/medical/general",
+        "lcars_port_base": 8340,
+        "lcars_port_range": 10,
         "lcars_port": None,
     },
 
@@ -182,25 +219,40 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "finance-personal": {
         "kanban_dir": f"{_HOME}/finance/personal/kanban",
         "working_dir": f"{_HOME}/finance/personal",
+        "lcars_port_base": 8360,
+        "lcars_port_range": 10,
         "lcars_port": None,
     },
 
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
+    # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve the existing
+    # command/mainevent collision. 8234 is in command's band [8230, 8240);
+    # mainevent's authoritative band is [8400, 8410). This is the one deliberate
+    # schema-time renumber — mainevent has no concrete team-paths.json entry to
+    # be confused about. The kb-port-fix migration tool (subitem 005) handles
+    # live team-paths.json entries; DEFAULT_TEAMS reflects the correct post-migration
+    # value here so fresh installs get the right port immediately.
     "mainevent": {
         "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/dev-team",
-        "lcars_port": 8234,
+        "lcars_port_base": 8400,
+        "lcars_port_range": 10,
+        "lcars_port": 8400,
     },
     "medical": {
         # alias for medical-general
         "kanban_dir": f"{_HOME}/medical/general/kanban",
         "working_dir": f"{_HOME}/medical/general",
+        "lcars_port_base": 8340,
+        "lcars_port_range": 10,
         "lcars_port": None,
     },
     "freelance": {
         # generic fallback — mirrors kanban_utils.py
         "kanban_dir": f"{_HOME}/dev-team/kanban",
         "working_dir": f"{_HOME}/dev-team",
+        "lcars_port_base": 8500,
+        "lcars_port_range": 100,
         "lcars_port": 8505,
     },
 }
@@ -456,6 +508,105 @@ def get_team_lcars_port(team: str) -> int | None:
         )
     port = entry.get("lcars_port")
     return int(port) if port is not None else None
+
+
+def _resolve_template_band(template_id: str) -> tuple[int, int]:
+    """Return (lcars_port_base, lcars_port_range) for *template_id*.
+
+    Lookup strategy (in order):
+    1. Direct key match in DEFAULT_TEAMS.
+    2. Tolerant input: if template_id contains a dash, strip to first
+       dash-separated component (base template) and retry direct lookup
+       (handles "finance-personal" → "finance").
+    3. Prefix scan: search DEFAULT_TEAMS for any key that starts with
+       "<template_id>-" and inherit its band. This handles pure template
+       ids like "finance" that only appear as "finance-personal" in
+       DEFAULT_TEAMS.
+
+    Raises:
+        ValueError: if no matching entry or the entry has no band declared.
+    """
+    # 1. Direct lookup.
+    entry = DEFAULT_TEAMS.get(template_id)
+
+    # 2. Tolerant input: instance id passed; strip to base template.
+    if entry is None and "-" in template_id:
+        base_template = template_id.split("-")[0]
+        entry = DEFAULT_TEAMS.get(base_template)
+
+    # 3. Prefix scan: template id exists only as part of instance keys.
+    if entry is None:
+        prefix = template_id + "-"
+        for key, candidate in DEFAULT_TEAMS.items():
+            if key.startswith(prefix) and candidate.get("lcars_port_base") is not None:
+                entry = candidate
+                break
+
+    if entry is None:
+        raise ValueError(
+            f"Template '{template_id}' has no lcars_port_base declared "
+            f"(not found in DEFAULT_TEAMS directly, by stripping dashes, "
+            f"or via prefix scan)."
+        )
+
+    base = entry.get("lcars_port_base")
+    band_range = entry.get("lcars_port_range")
+    if base is None:
+        raise ValueError(
+            f"Template '{template_id}' has no lcars_port_base declared."
+        )
+    if band_range is None:
+        raise ValueError(
+            f"Template '{template_id}' has no lcars_port_range declared."
+        )
+    return int(base), int(band_range)
+
+
+def compute_instance_port(template_id: str, existing_team_paths: dict) -> int:
+    """Allocate the lowest free port in the template's band.
+
+    Per XACA-0463 / team-id-contract §4.1: each template owns a port band
+    declared as TEAM_LCARS_PORT_BASE + TEAM_LCARS_PORT_RANGE. The lowest
+    port in the half-open interval [base, base+range) that is NOT already
+    used by any entry in existing_team_paths["teams"][*]["lcars_port"] is
+    returned. Cross-template collisions are honored (a port owned by
+    another template is still considered taken).
+
+    Args:
+        template_id: A template id (e.g. "finance", "freelance"). MUST
+            match a key in DEFAULT_TEAMS *with* lcars_port_base set, OR
+            be derivable via splitting on '-' and taking the first segment
+            (tolerant input: "finance-personal" resolves to "finance").
+        existing_team_paths: The parsed contents of team-paths.json,
+            shape {"teams": {"<instance>": {"lcars_port": int | None, ...}}}.
+
+    Returns:
+        The chosen port (int).
+
+    Raises:
+        ValueError: template unknown, band not declared, or band exhausted.
+    """
+    base, band_range = _resolve_template_band(template_id)
+
+    # Collect every port already in use, across ALL templates.
+    used_ports: set[int] = {
+        int(entry["lcars_port"])
+        for entry in existing_team_paths.get("teams", {}).values()
+        if entry.get("lcars_port") is not None
+    }
+
+    for port in range(base, base + band_range):
+        if port not in used_ports:
+            return port
+
+    # Band fully exhausted.
+    used_in_band = [p for p in used_ports if base <= p < base + band_range]
+    raise ValueError(
+        f"Port band exhausted for template '{template_id}': "
+        f"band [{base}, {base + band_range}), "
+        f"{len(used_in_band)} of {band_range} used. "
+        f"Extend TEAM_LCARS_PORT_RANGE in <template>.conf and rerun."
+    )
 
 
 # ---------------------------------------------------------------------------
