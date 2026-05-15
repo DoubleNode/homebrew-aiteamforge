@@ -41,8 +41,10 @@ _AITEAMFORGE_PATHS_LOADED=1
 # python-env.sh lives alongside this file in the same lib/ directory.
 _atf_paths_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 # shellcheck source=./python-env.sh
+# shellcheck disable=SC1091  # source guarded by file-test or `|| true`; default-mode can't follow
 [ -f "$_atf_paths_script_dir/python-env.sh" ] && . "$_atf_paths_script_dir/python-env.sh" 2>/dev/null || true
 # shellcheck source=./aiteamforge-org-paths.sh
+# shellcheck disable=SC1091  # source guarded by file-test or `|| true`; default-mode can't follow
 [ -f "$_atf_paths_script_dir/aiteamforge-org-paths.sh" ] && . "$_atf_paths_script_dir/aiteamforge-org-paths.sh" 2>/dev/null || true
 unset _atf_paths_script_dir
 
