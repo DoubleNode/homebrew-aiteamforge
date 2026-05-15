@@ -1093,6 +1093,7 @@ palette_file = sys.argv[2]
 theme_file = sys.argv[3]
 
 # Per-team color palettes — must match TEAM_COLORS in generate_per_agent_zshrc_files()
+# SYNC PAIR: tests/test-team-banner.sh _apply_template also inlines this dict.  Keep both in sync.
 TEAM_BANNER_COLORS = {
     "academy": {
         "palette": """\
