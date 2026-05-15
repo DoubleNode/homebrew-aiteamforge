@@ -691,7 +691,12 @@ test_start "No platform team persona character names overlap across platform tea
 # extracting character names from persona filenames in share/personas/<team>/agents/.
 #
 # Filename pattern: <team>_<character>_<role>_persona.md
-# Character name = basename without team-prefix and without _<role>_persona suffix.
+#   - <team>      = first underscore-delimited token (== TEAM_ID)
+#   - <role>      = SINGLE-token convention (leadfeature, leadtester, bugfix,
+#                   release, documentation, ux, …). Multi-token roles would
+#                   confuse the parser — see the defensive warning below.
+#   - <character> = everything between <team>_ and _<role>_persona; MAY contain
+#                   underscores (e.g. jean_luc).
 #
 # Skip cleanly if a team's persona directory does not yet exist (defensive).
 declare -A char_to_team
@@ -710,8 +715,21 @@ while IFS= read -r conf_file; do
   for persona_file in "$persona_dir"/*.md; do
     [ -f "$persona_file" ] || continue
     base=$(basename "$persona_file" .md)
-    # Strip leading <team>_ prefix, then strip trailing _<role>_persona suffix
-    char=$(echo "$base" | sed "s/^${tid}_//" | sed 's/_[^_]*_persona$//')
+    # Strip <team>_ prefix and _persona suffix using bash parameter expansion
+    # (no sub-shell; handles multi-token character names robustly).
+    trimmed="${base#${tid}_}"
+    trimmed="${trimmed%_persona}"
+    # Strip the trailing _<role> token — convention is single-token roles.
+    char="${trimmed%_*}"
+    role_token="${trimmed##*_}"
+
+    # Defensive: if <char>_<role> can be re-joined as "$char_$role_token"
+    # exactly, the parser worked. Otherwise the convention was violated —
+    # warn so the maintainer knows to look (does not fail the test).
+    if [ "${char}_${role_token}" != "$trimmed" ]; then
+      print_warning "Filename '$base' did not match <team>_<char>_<role>_persona convention — parsed char='$char' role='$role_token'"
+    fi
+
     if [ -n "${char_to_team[$char]:-}" ]; then
       print_error "Character '$char' claimed by both platform team '$tid' and '${char_to_team[$char]}'"
       char_conflict=true

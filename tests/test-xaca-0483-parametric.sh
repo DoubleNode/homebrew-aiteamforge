@@ -2,6 +2,11 @@
 # test-xaca-0483-parametric.sh
 # Tests for XACA-0483 parametric-mode installer path
 #
+# REQUIRES bash 4+ (uses `declare -A`). macOS-latest GitHub Actions runners
+# ship /bin/bash 3.2 — if this file is added to .github/workflows/tests.yml,
+# the step MUST invoke it via "$(brew --prefix)/bin/bash" after `brew install bash`.
+# See the multi-team test step (XACA-0504) for the canonical pattern.
+#
 # Covers:
 # - install-team.sh detects parametric mode correctly
 # - share/scripts/teams/ ships all four parametric teams' scripts

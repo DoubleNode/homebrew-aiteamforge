@@ -309,6 +309,35 @@ The `--verbose` flag enables detailed per-test output. Without it, you get dots 
 
 All tests use `--non-interactive` or `--dry-run` modes to avoid prompts. If a test hangs, it may be calling a script without these flags. Check the test file for proper flag usage.
 
+### Bash 4+ Required for Some Test Files (XACA-0504)
+
+`tests/test-multi-team.sh`, `tests/test-teams.sh`, and
+`tests/test-xaca-0483-parametric.sh` use `declare -A` (associative arrays,
+bash 4+). macOS-latest GitHub Actions runners ship `/bin/bash` 3.2 only, so
+CI steps that invoke these test files MUST use Homebrew bash:
+
+```yaml
+- name: Install dependencies
+  run: brew install jq bash
+
+- name: Run multi-team tests
+  run: |
+    "$(brew --prefix)/bin/bash" tests/test-runner.sh tests/test-multi-team.sh
+```
+
+`$(brew --prefix)/bin/bash` resolves correctly on both arm64
+(`/opt/homebrew`) and intel (`/usr/local`) runners. See
+`.github/workflows/tests.yml` for the canonical pattern. Test files that
+require bash 4+ carry a header note pointing back to this section.
+
+### `bash -n` Produces False Positives on YAML Files (XACA-0504)
+
+Do NOT use `bash -n` to lint GitHub Actions workflow YAML. Step names
+containing parentheses (e.g. `Tap-Hygiene Guard (XACA-0361)`) trigger
+bash parse errors that are not real defects — bash treats `(` as a
+subshell delimiter. Use `yamllint` or `actionlint` for workflow files
+instead. `bash -n` is only valid against actual `.sh`/`.bash` scripts.
+
 ## Performance
 
 Expected runtime:
