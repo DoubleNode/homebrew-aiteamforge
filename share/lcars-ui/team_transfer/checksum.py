@@ -27,10 +27,22 @@ ALWAYS_EXCLUDE_GLOBS = (
     "**/*.egg-info",
     "**/.DS_Store",
     "**/*.json.lock",
+    # SQLite write-ahead-log / shared-memory sidecars — transient state
+    # regenerated on the destination when the db is reopened. XACA-0496:
+    # surfaced via XACA-0488's new export_database channel-class invariant
+    # which requires cls=schema; sidecars naturally fall into cls=present
+    # and tripped the invariant on every E2E round-trip.
+    "**/*.db-shm",
+    "**/*.db-wal",
     "**/node_modules/**",
     "**/node_modules",
     "**/firebase-debug.log",
     "**/kanban/tmp/**",  # explicitly per its own .gitignore
+    # XACA-0490: the generator writes PRE_EXPORT_CHECKLIST.md alongside the manifest
+    # on every run. It is generator-owned derived output — not user content — and
+    # must never be cataloged as a manifest entry. Without this glob, a prior run's
+    # checklist would be swept up by domain_git on the next run.
+    "**/docs/migration/PRE_EXPORT_CHECKLIST.md",
 )
 
 

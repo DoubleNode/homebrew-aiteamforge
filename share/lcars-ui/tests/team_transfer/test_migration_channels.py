@@ -1,6 +1,7 @@
 """Tests for the channel resolver."""
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 import textwrap
 
@@ -12,12 +13,12 @@ def _finance_config(home: Path) -> dict:
     return ch.load_team_config("finance")
 
 
-def test_default_rules_route_devteam_to_aiteamforge(tmp_path):
+def test_default_rules_route_devteam_to_aiteamforge_product(tmp_path):
     home = tmp_path / "home"
     home.mkdir()
     team_config = ch.load_team_config("finance")
     cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
-    assert cfg.resolve(str(home / "dev-team" / "finance" / "personas" / "agents" / "p.md")) == ch.AITEAMFORGE
+    assert cfg.resolve(str(home / "dev-team" / "finance" / "personas" / "agents" / "p.md")) == ch.AITEAMFORGE_PRODUCT
 
 
 def test_default_rules_route_repo_to_git(tmp_path):
@@ -27,18 +28,18 @@ def test_default_rules_route_repo_to_git(tmp_path):
     assert cfg.resolve(str(home / "finance" / "personal" / "src" / "x.py")) == ch.GIT
 
 
-def test_default_rules_route_kanban_to_export(tmp_path):
+def test_default_rules_route_kanban_to_export_kanban(tmp_path):
     home = tmp_path / "home"
     team_config = ch.load_team_config("finance")
     cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
-    assert cfg.resolve(str(home / "finance" / "personal" / "kanban" / "board.json")) == ch.EXPORT
+    assert cfg.resolve(str(home / "finance" / "personal" / "kanban" / "board.json")) == ch.EXPORT_KANBAN
 
 
-def test_default_rules_route_db_to_export(tmp_path):
+def test_default_rules_route_db_to_export_database(tmp_path):
     home = tmp_path / "home"
     team_config = ch.load_team_config("finance")
     cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
-    assert cfg.resolve(str(home / "finance" / "personal" / "data" / "finance.db")) == ch.EXPORT
+    assert cfg.resolve(str(home / "finance" / "personal" / "data" / "finance.db")) == ch.EXPORT_DATABASE
 
 
 def test_default_rules_route_env_to_secrets(tmp_path):
@@ -117,6 +118,97 @@ def test_yaml_comments_ignored(tmp_path):
     assert len(rules) == 1
     assert rules[0].pattern == "*/foo"
     assert rules[0].channel == "git"
+
+
+# ── XACA-0488: new channel resolution tests ───────────────────────────────────
+
+def test_aiteamforge_product_resolves_for_devteam_path(tmp_path):
+    """~/dev-team/<team>/* paths resolve to aiteamforge_product."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    assert cfg.resolve(str(home / "dev-team" / "finance" / "scripts" / "setup.sh")) == ch.AITEAMFORGE_PRODUCT
+
+
+def test_aiteamforge_product_resolves_for_finance_agents_path(tmp_path):
+    """~/finance/.claude/agents/* paths resolve to aiteamforge_product."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    assert cfg.resolve(str(home / "finance" / ".claude" / "agents" / "quark.sh")) == ch.AITEAMFORGE_PRODUCT
+
+
+def test_user_state_resolves_for_claude_project_memory_path(tmp_path):
+    """~/.claude/projects/<UUID>/memory/ paths resolve to user_state."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    # The finance config uses claude_project_dir_name = "-Users-darrenehlers-finance-personal"
+    # but with token substitution the home changes at test time, so we build from the resolved token.
+    tokens = ch.build_tokens(team_config, str(home))
+    claude_dir = tokens["{claude_project_dir_name}"]
+    p = str(home / ".claude" / "projects" / claude_dir / "memory" / "MEMORY.md")
+    assert cfg.resolve(p) == ch.USER_STATE
+
+
+def test_user_state_resolves_for_knowledge_agents_path(tmp_path):
+    """~/knowledge/agents/<persona>/* paths resolve to user_state."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    # finance.yaml lists several knowledge agents (quark, nog, brunt, rom, zek)
+    assert cfg.resolve(str(home / "knowledge" / "agents" / "quark" / "INDEX.md")) == ch.USER_STATE
+    assert cfg.resolve(str(home / "knowledge" / "agents" / "nog" / "lessons.md")) == ch.USER_STATE
+
+
+def test_export_kanban_resolves_for_kanban_path(tmp_path):
+    """<root>/kanban/* paths resolve to export_kanban."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    assert cfg.resolve(str(home / "finance" / "personal" / "kanban" / "backlog.json")) == ch.EXPORT_KANBAN
+
+
+def test_export_kanban_resolves_for_worktrees_path(tmp_path):
+    """<root>/worktrees/* paths resolve to export_kanban."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    assert cfg.resolve(str(home / "finance" / "personal" / "worktrees" / "xfin-0001" / "main.py")) == ch.EXPORT_KANBAN
+
+
+def test_export_database_resolves_for_db_path(tmp_path):
+    """<root>/data/*.db paths resolve to export_database."""
+    home = tmp_path / "home"
+    team_config = ch.load_team_config("finance")
+    cfg = ch.ChannelConfig(rules=ch.default_rules(team_config, home=home))
+    assert cfg.resolve(str(home / "finance" / "personal" / "data" / "finance.db")) == ch.EXPORT_DATABASE
+
+
+def test_deprecated_aiteamforge_alias_emits_warning():
+    """Accessing channels.AITEAMFORGE emits a DeprecationWarning and equals AITEAMFORGE_PRODUCT."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        alias_value = ch.AITEAMFORGE  # noqa: B018 — intentional access to test the alias
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
+        "Expected DeprecationWarning when accessing channels.AITEAMFORGE"
+    )
+    assert alias_value == ch.AITEAMFORGE_PRODUCT, (
+        "channels.AITEAMFORGE must equal AITEAMFORGE_PRODUCT"
+    )
+
+
+def test_deprecated_export_alias_emits_warning():
+    """Accessing channels.EXPORT emits a DeprecationWarning and equals EXPORT_KANBAN."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        alias_value = ch.EXPORT  # noqa: B018 — intentional access to test the alias
+    assert any(issubclass(w.category, DeprecationWarning) for w in caught), (
+        "Expected DeprecationWarning when accessing channels.EXPORT"
+    )
+    assert alias_value == ch.EXPORT_KANBAN, (
+        "channels.EXPORT must equal EXPORT_KANBAN"
+    )
 
 
 # ── XACA-0487 regression: .git/ directories must always be excluded ──────────

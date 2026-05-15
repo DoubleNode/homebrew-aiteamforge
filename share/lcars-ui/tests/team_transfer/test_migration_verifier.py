@@ -109,7 +109,7 @@ def test_present_class_passes_on_existence_alone(tmp_path):
     m = new_manifest()
     fe = FileEntry(
         path=str(p), relpath=p.name, sha256=None, size=8, mtime=p.stat().st_mtime,
-        cls=PRESENT, channel=channels.EXPORT, domain="kanban",
+        cls=PRESENT, channel=channels.EXPORT_KANBAN, domain="kanban",
     )
     m.add_file("kanban", fe)
     m.recompute_channel_stats()
@@ -133,42 +133,98 @@ def test_per_channel_report_in_output(tmp_path):
         assert c in out
 
 
-def test_generator_self_includes_manifest_in_output(tmp_path):
-    """Generator output must contain an entry for the manifest path itself."""
-    import json
-
+def _run_generator(out_path: Path) -> subprocess.CompletedProcess:
+    """Shared helper — invoke generator with --output and return the completed process."""
     lcars_ui = _lcars_ui_dir()
-    out_path = tmp_path / "manifest.json"
-
     env = os.environ.copy()
     pythonpath = str(lcars_ui)
     if env.get("PYTHONPATH"):
         pythonpath = pythonpath + ":" + env["PYTHONPATH"]
     env["PYTHONPATH"] = pythonpath
-    proc = subprocess.run(
+    return subprocess.run(
         [sys.executable, "-m", "team_transfer.generator",
          "--output", str(out_path), "--allow-untagged"],
         env=env, capture_output=True, text=True,
     )
+
+
+def test_generator_self_includes_manifest_in_output_when_under_home(tmp_path, monkeypatch):
+    """Generator self-entry IS present when --output resolves under $HOME.
+
+    XACA-0496-013: the self-entry is intentionally skipped when --output is
+    outside $HOME (typically a temp/CI path) because the verifier could not
+    locate it portably at destination $HOME. To test the in-home contract,
+    pretend $HOME is the pytest tmp dir.
+    """
+    import json
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out_path = tmp_path / "manifest.json"
+
+    proc = _run_generator(out_path)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert out_path.exists()
 
     with open(out_path) as f:
         m = json.load(f)
-    # The manifest must contain a self-entry for its own absolute path.
-    all_paths = []
-    for dname, dblock in m["domains"].items():
-        for fe in dblock["files"]:
-            all_paths.append(fe["path"])
-    assert str(out_path.resolve()) in all_paths, "manifest must self-reference"
+    all_paths = [fe["path"] for d in m["domains"].values() for fe in d["files"]]
+    assert str(out_path.resolve()) in all_paths, "manifest must self-reference when under HOME"
 
-    # The self-entry must be class=present (avoids self-hash paradox).
     self_entries = [
         fe for d in m["domains"].values() for fe in d["files"]
         if fe["path"] == str(out_path.resolve())
     ]
     assert len(self_entries) == 1
-    assert self_entries[0]["cls"] == "present"
+    assert self_entries[0]["cls"] == "present", "self-entry must be PRESENT-class (no self-hash paradox)"
+
+
+def test_generator_skips_self_entry_when_output_outside_home(tmp_path):
+    """XACA-0496-013: when --output is outside $HOME (e.g. /tmp/...), generator
+    must NOT add a self-entry to the manifest. The entry would otherwise produce
+    a spurious FAIL on every same-machine verify-only run because the temp file
+    is gone before the verifier runs.
+    """
+    import json
+
+    # tmp_path under pytest is /var/folders/... or /tmp/... — both outside $HOME.
+    # Sanity-check that assumption before relying on it.
+    home = Path(os.environ.get("HOME", "/"))
+    try:
+        tmp_path.relative_to(home)
+        pytest.skip(f"pytest tmp_path {tmp_path} happens to be under HOME {home}; cannot exercise this branch")
+    except ValueError:
+        pass
+
+    out_path = tmp_path / "manifest.json"
+    proc = _run_generator(out_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    assert out_path.exists()
+    assert "Skipping self-entry" in (proc.stdout + proc.stderr)
+
+    with open(out_path) as f:
+        m = json.load(f)
+    all_paths = [fe["path"] for d in m["domains"].values() for fe in d["files"]]
+    assert str(out_path.resolve()) not in all_paths, "self-entry must NOT appear when output is outside HOME"
+
+
+def test_generator_dedupes_cross_domain_duplicates(tmp_path, monkeypatch):
+    """XACA-0496-012: a file claimed by multiple domains must appear in the
+    manifest exactly once, with priority going to the more-specific domain.
+    """
+    import json
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    out_path = tmp_path / "manifest.json"
+
+    proc = _run_generator(out_path)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+
+    with open(out_path) as f:
+        m = json.load(f)
+    all_paths = [fe["path"] for d in m["domains"].values() for fe in d["files"]]
+    duplicates = [p for p in set(all_paths) if all_paths.count(p) > 1]
+    assert not duplicates, f"manifest has cross-domain duplicates: {duplicates[:5]}"
+
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +257,26 @@ def _make_manifest_with_path(
         size=len(data),
         mtime=actual_file.stat().st_mtime,
         cls=EXACT,
+        channel=channel,
+        domain="git_repo",
+    )
+    m.add_file("git_repo", fe)
+    m.recompute_channel_stats()
+    return m
+
+
+# ── Per-channel class invariant guard (XACA-0488-006) ─────────────────────────
+
+def _make_manifest_with_entry(p: Path, channel: str, cls: str, sha: str | None = None) -> "Manifest":
+    from team_transfer.manifest import new_manifest
+    m = new_manifest()
+    fe = FileEntry(
+        path=str(p),
+        relpath=p.name,
+        sha256=sha,
+        size=p.stat().st_size if p.exists() else 0,
+        mtime=p.stat().st_mtime if p.exists() else 0.0,
+        cls=cls,
         channel=channel,
         domain="git_repo",
     )
@@ -522,3 +598,107 @@ class TestPathMap:
             assert "FAIL: 0" in out, (
                 f"Expected FAIL: 0 for variant {raw_map!r}. Output:\n{out}"
             )
+
+
+def test_invariant_aiteamforge_product_rejects_exact(tmp_path):
+    """aiteamforge_product entries with cls=exact must fail the invariant check."""
+    p = tmp_path / "agent.sh"
+    p.write_bytes(b"#!/bin/sh\n")
+    m = _make_manifest_with_entry(p, channels.AITEAMFORGE_PRODUCT, EXACT,
+                                  sha=_sha256(p.read_bytes()))
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 1
+    assert "channel-class invariant violated" in out
+    assert "aiteamforge_product" in out
+
+
+def test_invariant_aiteamforge_product_passes_present(tmp_path):
+    """aiteamforge_product entries with cls=present must pass the invariant check."""
+    p = tmp_path / "agent.sh"
+    p.write_bytes(b"#!/bin/sh\n")
+    m = _make_manifest_with_entry(p, channels.AITEAMFORGE_PRODUCT, PRESENT)
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 0
+    assert "channel-class invariant violated" not in out
+
+
+def test_invariant_export_database_rejects_present(tmp_path):
+    """export_database entries with cls=present must fail the invariant check."""
+    p = tmp_path / "fin.db"
+    p.write_bytes(b"SQLite")
+    m = _make_manifest_with_entry(p, channels.EXPORT_DATABASE, PRESENT)
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 1
+    assert "channel-class invariant violated" in out
+    assert "export_database" in out
+
+
+def test_invariant_export_database_rejects_exact(tmp_path):
+    """export_database entries with cls=exact must fail the invariant check."""
+    p = tmp_path / "fin.db"
+    p.write_bytes(b"SQLite")
+    m = _make_manifest_with_entry(p, channels.EXPORT_DATABASE, EXACT,
+                                  sha=_sha256(p.read_bytes()))
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 1
+    assert "channel-class invariant violated" in out
+
+
+def test_invariant_user_state_allows_exact_and_present(tmp_path):
+    """user_state allows both exact (memory) and present (session logs)."""
+    p = tmp_path / "MEMORY.md"
+    p.write_bytes(b"# memory")
+    # exact for authored files
+    m = _make_manifest_with_entry(p, channels.USER_STATE, EXACT,
+                                  sha=_sha256(p.read_bytes()))
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 0, f"user_state+exact should pass; got: {out}"
+
+    q = tmp_path / "session.jsonl"
+    q.write_bytes(b"{}")
+    m2 = _make_manifest_with_entry(q, channels.USER_STATE, PRESENT)
+    mp2 = tmp_path / "manifest2.json"
+    mp2.write_text(m2.to_json())
+    rc2, out2 = _run_verifier(mp2)
+    assert rc2 == 0, f"user_state+present should pass; got: {out2}"
+
+
+def test_invariant_export_kanban_accepts_exact_for_authored(tmp_path):
+    """export_kanban accepts cls=exact for authored content (EPIC-*.md, retros, plan docs).
+
+    Lock files use PRESENT and the board JSON uses SCHEMA, but authored markdown under
+    kanban/ benefits from SHA verification — the invariant must permit it.
+    """
+    p = tmp_path / "EPIC-0001.md"
+    p.write_bytes(b"# epic body\n")
+    m = _make_manifest_with_entry(p, channels.EXPORT_KANBAN, EXACT,
+                                  sha=_sha256(p.read_bytes()))
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 0, f"export_kanban+exact should pass; got: {out}"
+    assert "channel-class invariant violated" not in out
+
+
+def test_invariant_git_channel_has_no_constraint(tmp_path):
+    """git channel has no cls invariant — any cls value should pass the guard."""
+    p = tmp_path / "main.py"
+    p.write_bytes(b"print('hi')")
+    # git channel with exact — normal case, should never hit an invariant error
+    m = _make_manifest_with_entry(p, channels.GIT, EXACT,
+                                  sha=_sha256(p.read_bytes()))
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    rc, out = _run_verifier(mp)
+    assert rc == 0
+    assert "channel-class invariant violated" not in out

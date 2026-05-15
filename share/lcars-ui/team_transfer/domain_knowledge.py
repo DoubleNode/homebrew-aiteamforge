@@ -16,7 +16,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .channels import AITEAMFORGE, ChannelConfig, UNTAGGED
+from .channels import USER_STATE, ChannelConfig, UNTAGGED
 from .checksum import sha256_file, walk_files
 from .manifest import EXACT, FileEntry, Manifest
 
@@ -105,7 +105,7 @@ def _emit(manifest: Manifest, p: Path, home: Path, channels: ChannelConfig) -> N
     abs_path = str(p)
     ch = channels.resolve(abs_path)
     if ch == UNTAGGED:
-        ch = AITEAMFORGE
+        ch = USER_STATE
     fe = FileEntry(
         path=abs_path,
         relpath=p.relative_to(home).as_posix() if _under(p, home) else p.as_posix(),

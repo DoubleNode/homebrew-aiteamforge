@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .channels import AITEAMFORGE, ChannelConfig, UNTAGGED
+from .channels import AITEAMFORGE_PRODUCT, ChannelConfig, UNTAGGED
 from .checksum import is_excluded, safe_relpath, sha256_file, walk_files
-from .manifest import EXACT, FileEntry, Manifest
+from .manifest import EXACT, FileEntry, Manifest, PRESENT
 
 DOMAIN = "devteam"
 
@@ -40,14 +40,14 @@ def inventory(
         abs_path = str(p)
         ch = channels.resolve(abs_path)
         if ch == UNTAGGED:
-            ch = AITEAMFORGE  # safety net for new files in this tree
+            ch = AITEAMFORGE_PRODUCT  # safety net for new files in this tree
         fe = FileEntry(
             path=abs_path,
             relpath=safe_relpath(p, home),
-            sha256=_safe_sha(p),
+            sha256=None,  # PRESENT class: installer mutates; SHA would false-FAIL
             size=p.stat().st_size,
             mtime=p.stat().st_mtime,
-            cls=EXACT,
+            cls=PRESENT,  # ADR §3.2: aiteamforge_product is PRESENT-only
             channel=ch,
             domain=DOMAIN,
         )

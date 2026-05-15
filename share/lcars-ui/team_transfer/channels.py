@@ -10,13 +10,15 @@ from __future__ import annotations
 import fnmatch
 import json
 import os
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
 # Channel identifiers. Order is for display.
 GIT = "git"
-EXPORT = "export"
+EXPORT_KANBAN = "export_kanban"
+EXPORT_DATABASE = "export_database"
 # SECRETS_EXPORT — real, load-bearing channel even when nearly empty.
 # Transport is operator-driven (e.g. scp) directly to the source secrets/ directory;
 # it is intentionally NOT bundled inside the git-tracked export to keep sensitive
@@ -25,11 +27,49 @@ EXPORT = "export"
 # pack/unpack path end-to-end without requiring real credentials in the repo.
 # See docs/team-transfer/RUNBOOK.md § "Secrets Channel (secrets_export)".
 SECRETS_EXPORT = "secrets_export"
-AITEAMFORGE = "aiteamforge"
+AITEAMFORGE_PRODUCT = "aiteamforge_product"
+USER_STATE = "user_state"
 ICLOUD_EXCLUDED = "icloud_excluded"
 UNTAGGED = "untagged"  # sentinel — never appears in a final manifest
 
-ALL_CHANNELS = (GIT, EXPORT, SECRETS_EXPORT, AITEAMFORGE, ICLOUD_EXCLUDED)
+ALL_CHANNELS = (GIT, EXPORT_KANBAN, EXPORT_DATABASE, SECRETS_EXPORT,
+                AITEAMFORGE_PRODUCT, USER_STATE, ICLOUD_EXCLUDED)
+
+# Deprecated aliases — kept for one release cycle; removed next sprint.
+# Code that references these constants still resolves to the new channel value,
+# but a DeprecationWarning is emitted the first time each alias is read.
+#
+# `_deprecated_alias_warned` is intentionally process-lifetime state — exactly
+# one warning per interpreter run per alias is the design goal (avoids spamming
+# scripts that loop over manifest entries). Do NOT clear this set per-call to
+# "fix" missing warnings in tests; tests that assert on the warning must either
+# run before any other code path accesses the alias, or reset the set explicitly
+# in a fixture.
+_deprecated_alias_warned: set[str] = set()
+
+
+def _deprecated(old_name: str, new_name: str, value: str) -> str:
+    """Emit a DeprecationWarning once per alias name and return the channel value."""
+    if old_name not in _deprecated_alias_warned:
+        _deprecated_alias_warned.add(old_name)
+        warnings.warn(
+            f"Channel constant '{old_name}' is deprecated. "
+            f"Use '{new_name}' instead. "
+            f"The alias will be removed in the next sprint.",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+    return value
+
+
+# Module-level __getattr__ fires for names not found in the module dict,
+# so we must NOT define AITEAMFORGE or EXPORT as plain module vars here.
+def __getattr__(name: str) -> str:
+    if name == "AITEAMFORGE":
+        return _deprecated("AITEAMFORGE", "AITEAMFORGE_PRODUCT", AITEAMFORGE_PRODUCT)
+    if name == "EXPORT":
+        return _deprecated("EXPORT", "EXPORT_KANBAN", EXPORT_KANBAN)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 # Packaged default config directory (relative to this file).
 _PACKAGE_CONFIG_DIR = Path(__file__).parent / "config"

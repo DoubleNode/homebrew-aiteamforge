@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from .channels import ChannelConfig, EXPORT, GIT, ICLOUD_EXCLUDED, SECRETS_EXPORT, UNTAGGED, build_tokens, substitute_tokens
+from .channels import ChannelConfig, GIT, ICLOUD_EXCLUDED, SECRETS_EXPORT, UNTAGGED, build_tokens, substitute_tokens
 from .checksum import is_excluded, sha256_file, walk_files
 from .manifest import EXACT, FileEntry, Manifest, PRESENT, SCHEMA
 

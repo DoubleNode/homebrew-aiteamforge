@@ -22,6 +22,13 @@ def test_excluded_paths_skipped():
     assert is_excluded(Path("/x/foo.pyc"))
     assert is_excluded(Path("/x/.DS_Store"))
     assert is_excluded(Path("/x/board.json.lock"))
+    # XACA-0496: SQLite WAL/SHM sidecars must be excluded. They are transient
+    # state regenerated when the database is reopened on the destination, and
+    # they tripped XACA-0488's new export_database channel-class invariant
+    # (which requires cls=schema) because they naturally fall into cls=present.
+    assert is_excluded(Path("/x/data/finance.db-wal"))
+    assert is_excluded(Path("/x/data/finance.db-shm"))
+    assert not is_excluded(Path("/x/data/finance.db"))  # the db itself MUST stay
     assert not is_excluded(Path("/x/CHANGELOG.md"))
     assert not is_excluded(Path("/x/src/y.py"))
 
@@ -75,8 +82,10 @@ def test_devteam_inventory_walks_files(tmp_path):
     assert paths == {"p.md", "s.sh"}
     for fe in files:
         assert fe.channel == channels.AITEAMFORGE
-        assert fe.cls == EXACT
-        assert fe.sha256 is not None
+        # ADR §3.2: aiteamforge_product files must use PRESENT (installer mutates them
+        # on destination; EXACT would produce false-FAILs after any update).
+        assert fe.cls == PRESENT
+        assert fe.sha256 is None
 
 
 def test_devteam_handles_missing_root(tmp_path):

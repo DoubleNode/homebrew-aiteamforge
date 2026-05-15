@@ -12875,6 +12875,14 @@ function validateUrlScheme(href) {
 function renderMarkdown(content) {
     if (!content) return '<div class="plan-doc-empty">No plan document available</div>';
 
+    // XACA-0478: Strip HTML comments before any further processing so that
+    // '<!-- plan_doc: canonical -->' and similar markers are invisible in the
+    // rendered output. This matches CommonMark spec behavior (HTML comments are
+    // not rendered). Must run before escapeHtml() to avoid encoding '<' as
+    // '&lt;' which would make the comment visible as literal text in the UI.
+    // Non-greedy [\s\S]*? handles multi-line comments correctly.
+    content = content.replace(/<!--[\s\S]*?-->/g, '');
+
     // XACA-0292-013: XSS hardening — escape all raw HTML in the content FIRST so
     // that embedded <script> tags or HTML attributes become inert entities.
     // Code blocks are extracted before escaping so their content is preserved
