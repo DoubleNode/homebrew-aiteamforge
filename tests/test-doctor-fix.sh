@@ -179,20 +179,17 @@ _run_doctor_full --fix
 assert_exit_code 2 "$_LAST_EXIT_CODE"
 test_pass
 
-if [ -z "${CI:-}" ]; then
-    # Skipped on CI (XACA-0499): premise — "valid config means doctor reports
-    # no failures" — does not hold on a vanilla GitHub runner where the
-    # aiteamforge tap is not installed and the tap-owned Python venv is
-    # missing. Doctor correctly reports those as failures and renders the
-    # "Auto-fix not yet implemented" stub, which the test forbids. On a
-    # configured dev machine it passes. Follow-up: rewrite the test to mock
-    # the environment so the no-failure path is reachable on CI.
-    test_start "--fix without failures (warnings only) does not show stub message"
-    _write_config
-    _run_doctor_full --fix
-    assert_not_contains "$_LAST_OUTPUT" "Auto-fix not yet implemented"
-    test_pass
-fi
+# XACA-0505: scoped to --check config so the test runs on CI (vanilla GHA
+# macOS runners don't have the aiteamforge tap installed, so a full --fix
+# pass trips framework/dependency failures unrelated to this assertion).
+# --check config is bounded by AITEAMFORGE_DIR (which the test fixture
+# already mocks), so it reports zero failures when _write_config has been
+# called. The assertion — no stub when there are no failures — is preserved.
+test_start "--fix --check config without failures does not show stub message"
+_write_config
+_run_doctor_full --fix --check config
+assert_not_contains "$_LAST_OUTPUT" "Auto-fix not yet implemented"
+test_pass
 
 test_start "Without --fix flag, output suggests running with --fix"
 _remove_config
