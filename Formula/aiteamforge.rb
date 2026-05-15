@@ -6,6 +6,8 @@ class Aiteamforge < Formula
   version "0.11.11"
   license "MIT"
 
+  head "https://github.com/DoubleNode/homebrew-aiteamforge.git", branch: "main"
+
   # Core dependencies required for aiteamforge to function
   depends_on "gh"
   depends_on "git"
