@@ -200,8 +200,11 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install dependencies
+        # bash 4+ is required for `declare -A` in test-multi-team.sh.
+        # macOS-latest ships /bin/bash 3.2 only — brew bash is invoked
+        # explicitly in the multi-team step below (XACA-0504).
         run: |
-          brew install jq
+          brew install jq bash
 
       - name: Make test scripts executable
         run: |
@@ -248,8 +251,10 @@ jobs:
         # was misnamed — TEAM_AGENTS holds station labels (engineering, sickbay,
         # holodeck) that intentionally overlap across ios/android/firebase (TNG/TOS/DS9).
         # Assertion replaced with a character-name uniqueness check on persona files.
+        # NOTE: this file uses `declare -A` (associative arrays, bash 4+) in 10+
+        # places. /bin/bash on macOS-latest is 3.2 — invoke brew bash explicitly.
         run: |
-          bash tests/test-runner.sh tests/test-multi-team.sh
+          "$(brew --prefix)/bin/bash" tests/test-runner.sh tests/test-multi-team.sh
 
       - name: Run tailscale tests
         # Tailscale is not installed in CI — tests use internal mocks so no real binary needed
