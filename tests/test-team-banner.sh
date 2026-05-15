@@ -70,26 +70,237 @@ _derive_secondary() {
 
 # Apply all template substitutions used by install-team.sh and return the
 # generated script content.  Writes to stdout.
+#
+# XACA-0503: Rewritten to match install-team.sh Python substitution contract.
+# Uses inline python3 (same as _hex_to_256 above) with the full TEAM_BANNER_COLORS
+# dict and all six str.replace() calls in the same order as install-team.sh.
+# The team_color parameter is accepted for API compatibility but is NOT used —
+# the template no longer contains {{TEAM_COLOR_PRIMARY}} or {{TEAM_COLOR_SECONDARY}};
+# palette and theme_select are driven solely by TEAM_BANNER_COLORS[team_id].
 _apply_template() {
     local team_id="${1:-testteam}"
     local team_name="${2:-Test Team}"
     local team_ship="${3:-USS Test}"
-    local team_color="${4:-#5585CC}"
-
-    local primary_code
-    primary_code=$(_hex_to_256 "$team_color")
-    local secondary_code
-    secondary_code=$(_derive_secondary "$primary_code")
+    local team_color="${4:-#5585CC}"  # kept for API compat; unused by substitution
     local banner_script_name="${team_id}-banner.sh"
 
-    sed \
-        -e "s|{{TEAM_ID}}|${team_id}|g" \
-        -e "s|{{TEAM_NAME}}|${team_name}|g" \
-        -e "s|{{TEAM_SHIP}}|${team_ship}|g" \
-        -e "s|{{TEAM_BANNER_SCRIPT}}|${banner_script_name}|g" \
-        -e "s|{{TEAM_COLOR_PRIMARY}}|${primary_code}|g" \
-        -e "s|{{TEAM_COLOR_SECONDARY}}|${secondary_code}|g" \
-        "$BANNER_TEMPLATE"
+    python3 - "$BANNER_TEMPLATE" "$team_id" "$team_name" "$team_ship" "$banner_script_name" <<'APPLY_TEMPLATE_EOF'
+import sys
+
+template_path = sys.argv[1]
+team_id       = sys.argv[2]
+team_name     = sys.argv[3]
+team_ship     = sys.argv[4]
+banner_name   = sys.argv[5]
+
+# Per-team color palettes — MUST stay in sync with TEAM_BANNER_COLORS in
+# libexec/installers/install-team.sh (lines 1096-1282).  If you update one,
+# update the other.  See XACA-0503 for context.
+TEAM_BANNER_COLORS = {
+    "academy": {
+        "palette": """\
+# Command Red (32nd Century Starfleet Red)
+COMMAND_RED='%F{124}'              # Deep red
+COMMAND_RED_BRIGHT='%F{160}'       # Brighter red for highlights
+
+# Operations Gold (32nd Century Starfleet Gold)
+OPS_GOLD='%F{178}'                # Mustard gold
+OPS_GOLD_DARK='%F{136}'           # Darker gold for contrast
+
+# Sciences Blue (32nd Century Starfleet Blue)
+SCIENCES_BLUE='%F{25}'             # Deep blue
+SCIENCES_BLUE_BRIGHT='%F{33}'      # Brighter blue""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_RED
+    THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD
+    THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]; then
+    THEME_COLOR=$SCIENCES_BLUE
+    THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+    "android": {
+        "palette": """\
+COMMAND_GOLD='%F{220}'
+COMMAND_GOLD_BRIGHT='%F{226}'
+SCIENCE_BLUE='%F{27}'
+SCIENCE_BLUE_BRIGHT='%F{33}'
+MEDICAL_BLUE='%F{39}'
+MEDICAL_BLUE_BRIGHT='%F{45}'
+ENGINEERING_RED='%F{160}'
+ENGINEERING_RED_BRIGHT='%F{196}'
+OPERATIONS_GOLD='%F{178}'
+OPERATIONS_GOLD_BRIGHT='%F{184}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_GOLD; THEME_COLOR_HIGHLIGHT=$COMMAND_GOLD_BRIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$SCIENCE_BLUE; THEME_COLOR_HIGHLIGHT=$SCIENCE_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "MEDICAL" ]]; then
+    THEME_COLOR=$MEDICAL_BLUE; THEME_COLOR_HIGHLIGHT=$MEDICAL_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "ENGINEERING" ]]; then
+    THEME_COLOR=$ENGINEERING_RED; THEME_COLOR_HIGHLIGHT=$ENGINEERING_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPERATIONS_GOLD; THEME_COLOR_HIGHLIGHT=$OPERATIONS_GOLD_BRIGHT
+fi""",
+    },
+    "ios": {
+        "palette": """\
+COMMAND_RED='%F{124}'
+COMMAND_RED_BRIGHT='%F{196}'
+OPS_GOLD='%F{136}'
+OPS_GOLD_ACCENT='%F{220}'
+SCIENCE_TEAL='%F{30}'
+SCIENCE_TEAL_BRIGHT='%F{51}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_RED; THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_ACCENT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$SCIENCE_TEAL; THEME_COLOR_HIGHLIGHT=$SCIENCE_TEAL_BRIGHT
+fi""",
+    },
+    "firebase": {
+        "palette": """\
+OPS_BLUE='%F{25}'
+OPS_BLUE_BRIGHT='%F{33}'
+ENG_GOLD='%F{94}'
+ENG_GOLD_DARK='%F{172}'
+SECURITY_GRAY='%F{236}'
+SECURITY_GRAY_LIGHT='%F{240}'
+SCIENCE_PURPLE='%F{60}'
+SCIENCE_PURPLE_BRIGHT='%F{99}'
+INCIDENT_RED='%F{52}'
+INCIDENT_RED_BRIGHT='%F{160}'
+PROM_GOLD='%F{94}'
+PROM_GOLD_BRIGHT='%F{214}'
+STELLAR_BLUE='%F{24}'
+STELLAR_BLUE_BRIGHT='%F{39}'
+SICKBAY_RED='%F{52}'
+SICKBAY_RED_BRIGHT='%F{160}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$OPS_BLUE; THEME_COLOR_HIGHLIGHT=$OPS_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "ENGINEERING" ]]; then
+    THEME_COLOR=$ENG_GOLD; THEME_COLOR_HIGHLIGHT=$ENG_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SECURITY" ]]; then
+    THEME_COLOR=$SECURITY_GRAY; THEME_COLOR_HIGHLIGHT=$SECURITY_GRAY_LIGHT
+fi
+if [[ $SESSION_THEME == "OBSERVATION" ]]; then
+    THEME_COLOR=$SCIENCE_PURPLE; THEME_COLOR_HIGHLIGHT=$SCIENCE_PURPLE_BRIGHT
+fi
+if [[ $SESSION_THEME == "INCIDENT" ]]; then
+    THEME_COLOR=$INCIDENT_RED; THEME_COLOR_HIGHLIGHT=$INCIDENT_RED_BRIGHT
+fi
+if [[ $SESSION_THEME == "PROMENADE" ]]; then
+    THEME_COLOR=$PROM_GOLD; THEME_COLOR_HIGHLIGHT=$PROM_GOLD_BRIGHT
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$STELLAR_BLUE; THEME_COLOR_HIGHLIGHT=$STELLAR_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_BLUE; THEME_COLOR_HIGHLIGHT=$OPS_BLUE_BRIGHT
+fi""",
+    },
+    "command": {
+        "palette": """\
+COMMAND_RED='%F{124}'
+COMMAND_RED_BRIGHT='%F{160}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_RED; THEME_COLOR_HIGHLIGHT=$COMMAND_RED_BRIGHT
+fi""",
+    },
+    "freelance": {
+        "palette": """\
+COMMAND_BLUE='%F{24}'
+COMMAND_BLUE_BRIGHT='%F{33}'
+OPS_GOLD='%F{136}'
+OPS_GOLD_DARK='%F{178}'
+SCIENCE_TEAL='%F{30}'
+SCIENCE_TEAL_BRIGHT='%F{37}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_BLUE; THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCE" ]]; then
+    THEME_COLOR=$SCIENCE_TEAL; THEME_COLOR_HIGHLIGHT=$SCIENCE_TEAL_BRIGHT
+fi""",
+    },
+    "legal": {
+        "palette": """\
+COMMAND_BLUE='%F{25}'
+COMMAND_BLUE_BRIGHT='%F{33}'
+OPS_GOLD='%F{178}'
+OPS_GOLD_DARK='%F{136}'
+SCIENCES_BLUE='%F{25}'
+SCIENCES_BLUE_BRIGHT='%F{33}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_BLUE; THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_DARK
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]; then
+    THEME_COLOR=$SCIENCES_BLUE; THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+    "medical": {
+        "palette": """\
+COMMAND_BLUE='%F{25}'
+COMMAND_BLUE_BRIGHT='%F{33}'
+OPS_GOLD='%F{25}'
+OPS_GOLD_ACCENT='%F{178}'
+SCIENCES_BLUE='%F{25}'
+SCIENCES_BLUE_BRIGHT='%F{39}'""",
+        "theme_select": """\
+if [[ $SESSION_THEME == "COMMAND" ]]; then
+    THEME_COLOR=$COMMAND_BLUE; THEME_COLOR_HIGHLIGHT=$COMMAND_BLUE_BRIGHT
+fi
+if [[ $SESSION_THEME == "OPERATIONS" ]]; then
+    THEME_COLOR=$OPS_GOLD; THEME_COLOR_HIGHLIGHT=$OPS_GOLD_ACCENT
+fi
+if [[ $SESSION_THEME == "SCIENCES" ]]; then
+    THEME_COLOR=$SCIENCES_BLUE; THEME_COLOR_HIGHLIGHT=$SCIENCES_BLUE_BRIGHT
+fi""",
+    },
+}
+
+data = TEAM_BANNER_COLORS.get(team_id, {})
+palette     = data.get("palette",      "# No team-specific palette defined")
+theme_select = data.get("theme_select", "# No team-specific theme mapping")
+
+with open(template_path) as f:
+    content = f.read()
+
+# Six replacements in the same order as install-team.sh lines 1311-1316.
+content = content.replace("{{TEAM_ID}}",                 team_id)
+content = content.replace("{{TEAM_NAME}}",               team_name)
+content = content.replace("{{TEAM_SHIP}}",               team_ship)
+content = content.replace("{{TEAM_BANNER_SCRIPT}}",      banner_name)
+content = content.replace("{{TEAM_BANNER_PALETTE}}",     palette)
+content = content.replace("{{TEAM_BANNER_THEME_SELECT}}", theme_select)
+
+print(content, end="")
+APPLY_TEMPLATE_EOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -220,8 +431,9 @@ test_pass
 
 test_start "No unreplaced {{PLACEHOLDER}} tokens remain after substitution"
 generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
+# Only check {{ — the template uses bash ${var:-default} syntax which produces
+# legitimate }} sequences (e.g. "${8:-${SESSION_NAME}}") that are not placeholders.
 assert_not_contains "$generated" "{{" "Found unreplaced {{ in generated script"
-assert_not_contains "$generated" "}}" "Found unreplaced }} in generated script"
 test_pass
 
 test_start "TEAM_ID substituted in generated script"
@@ -244,23 +456,19 @@ generated=$(_apply_template "mytestteam" "My Test Team" "USS Test" "#5585CC")
 assert_contains "$generated" "mytestteam-banner.sh" "Banner script name not correct in generated script"
 test_pass
 
-test_start "TEAM_COLOR_PRIMARY substituted with a numeric xterm code"
-primary=$(_hex_to_256 "#5585CC")
-generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
-assert_contains "$generated" "%F{${primary}}" "Expected color escape %F{$primary} not found"
+test_start "Academy palette injected: COMMAND_RED color escape present"
+generated=$(_apply_template "academy" "Starfleet Academy" "Starfleet HQ" "#5585CC")
+assert_contains "$generated" "COMMAND_RED='%F{124}'" "Academy palette not injected (COMMAND_RED missing)"
 test_pass
 
-test_start "TEAM_COLOR_SECONDARY substituted with a numeric xterm code"
-primary=$(_hex_to_256 "#5585CC")
-secondary=$(_derive_secondary "$primary")
-generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
-assert_contains "$generated" "%F{${secondary}}" "Expected secondary color escape %F{$secondary} not found"
+test_start "Android palette injected: COMMAND_GOLD color escape present"
+generated=$(_apply_template "android" "Android Team" "USS Android" "#5585CC")
+assert_contains "$generated" "COMMAND_GOLD='%F{220}'" "Android palette not injected (COMMAND_GOLD missing)"
 test_pass
 
-test_start "Primary and secondary colors are different in generated script"
-primary=$(_hex_to_256 "#5585CC")
-secondary=$(_derive_secondary "$primary")
-assert_not_equal "$primary" "$secondary" "Primary and secondary colors should differ"
+test_start "iOS palette injected: SCIENCE_TEAL color escape present"
+generated=$(_apply_template "ios" "iOS Team" "USS Pioneer" "#5585CC")
+assert_contains "$generated" "SCIENCE_TEAL='%F{30}'" "iOS palette not injected (SCIENCE_TEAL missing)"
 test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -408,22 +616,22 @@ test_pass
 # Theme mapping / color fallback
 # ═══════════════════════════════════════════════════════════════════════════
 
-test_start "Generated script maps OPERATIONS theme to primary color"
-generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
-assert_contains "$generated" 'SESSION_THEME == "OPERATIONS"' "OPERATIONS theme mapping not found"
+test_start "Generated script maps OPERATIONS theme (academy has OPERATIONS mapping)"
+generated=$(_apply_template "academy" "Starfleet Academy" "Starfleet HQ" "#5585CC")
+assert_contains "$generated" 'SESSION_THEME == "OPERATIONS"' "OPERATIONS theme mapping not found in academy script"
 test_pass
 
-test_start "Generated script maps COMMAND theme to primary color"
-generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
-assert_contains "$generated" 'SESSION_THEME == "COMMAND"' "COMMAND theme mapping not found"
+test_start "Generated script maps COMMAND theme (academy has COMMAND mapping)"
+generated=$(_apply_template "academy" "Starfleet Academy" "Starfleet HQ" "#5585CC")
+assert_contains "$generated" 'SESSION_THEME == "COMMAND"' "COMMAND theme mapping not found in academy script"
 test_pass
 
 test_start "Generated script has fallback when SESSION_THEME is unrecognised"
 generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
-assert_contains "$generated" 'THEME_COLOR="${THEME_COLOR:-$TEAM_PRIMARY}"' \
-    "THEME_COLOR fallback to TEAM_PRIMARY not found"
-assert_contains "$generated" 'THEME_COLOR_HIGHLIGHT="${THEME_COLOR_HIGHLIGHT:-$TEAM_SECONDARY}"' \
-    "THEME_COLOR_HIGHLIGHT fallback not found"
+assert_contains "$generated" 'THEME_COLOR="${THEME_COLOR:-$WHITE}"' \
+    "THEME_COLOR fallback to WHITE not found"
+assert_contains "$generated" 'THEME_COLOR_HIGHLIGHT="${THEME_COLOR_HIGHLIGHT:-$GRAY}"' \
+    "THEME_COLOR_HIGHLIGHT fallback to GRAY not found"
 test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -436,20 +644,20 @@ assert_not_contains "$generated" "{{" "Unreplaced placeholder in academy config"
 assert_contains "$generated" "academy" "Academy TEAM_ID not found"
 test_pass
 
-test_start "Red-themed team generates primary in red range"
+test_start "Red-themed team generates valid script with correct banner name"
+# team_color param is kept for API compat but palette comes from TEAM_BANNER_COLORS (redteam is unknown)
 primary=$(_hex_to_256 "#CC0000")
-# Pure red range is around 160-196 in xterm-256
 [ "$primary" -ge 16 ] && [ "$primary" -le 255 ]
-assert_exit_success $? "Red team primary $primary out of range"
+assert_exit_success $? "Red hex primary $primary out of valid range"
 generated=$(_apply_template "redteam" "Red Team" "USS Defiant" "#CC0000")
-assert_contains "$generated" "%F{${primary}}" "Red team primary color not substituted"
+assert_not_contains "$generated" "{{" "Unreplaced placeholder in redteam script"
+assert_contains "$generated" "redteam-banner.sh" "Red team banner script name incorrect"
 test_pass
 
-test_start "Gold-themed team generates valid script"
+test_start "Gold-themed team generates valid script with no unreplaced tokens"
 generated=$(_apply_template "goldteam" "Gold Team" "USS Voyager" "#FFD700")
 assert_not_contains "$generated" "{{" "Unreplaced placeholder in gold config"
-primary=$(_hex_to_256 "#FFD700")
-assert_contains "$generated" "%F{${primary}}" "Gold team primary color not found"
+assert_contains "$generated" "goldteam-banner.sh" "Gold team banner script name incorrect"
 test_pass
 
 test_start "Team ID with hyphen generates correct banner script name"
@@ -485,7 +693,8 @@ test_pass
 
 test_start "Generated script includes worktree helper source guard"
 generated=$(_apply_template "testteam" "Test Team" "USS Test" "#5585CC")
-assert_contains "$generated" "worktree-helpers.sh" "Worktree helper source guard not found"
+# Template sources worktree-aliases.sh (not worktree-helpers.sh)
+assert_contains "$generated" "worktree-aliases.sh" "Worktree helper source guard not found"
 test_pass
 
 test_start "Generated script sources display-agent-avatar helper"

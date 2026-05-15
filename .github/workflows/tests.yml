@@ -220,14 +220,7 @@ jobs:
           bash tests/test-runner.sh tests/test-python-venv.sh
 
       - name: Run team-banner tests
-        # Disabled (XACA-0499): the test helper `_apply_template` is a sed-only
-        # reimplementation of install-team.sh banner generation and is out of
-        # sync with the current Python multi-line substitution model
-        # (TEAM_BANNER_PALETTE / TEAM_BANNER_THEME_SELECT). 13 of 75 tests fail
-        # for that reason — not because banner generation itself is broken.
-        # Follow-up: rewrite the test helper to either source install-team.sh's
-        # generator or reimplement the new substitution contract.
-        if: false
+        # Re-enabled in XACA-0503 — _apply_template now uses Python substitution matching install-team.sh.
         run: |
           bash tests/test-runner.sh tests/test-team-banner.sh
 
