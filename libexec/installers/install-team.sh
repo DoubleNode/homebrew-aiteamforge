@@ -1416,6 +1416,9 @@ python3 - "$INSTANCE_ID" "$TEAM_ID" "$KANBAN_DIR" "$TEAM_WORKING_DIR" "$TEAM_LCA
 import sys
 import json
 import os
+import shutil
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 instance_id  = sys.argv[1]
@@ -1424,6 +1427,13 @@ kanban_dir   = sys.argv[3]
 working_dir  = sys.argv[4]
 lcars_port   = int(sys.argv[5])
 config_path  = Path(sys.argv[6])
+
+# XACA-0463 subitem 013: backup snapshot before write (parity with kb-port-fix --apply).
+# Skipped on first install when config_path does not yet exist.
+if config_path.exists():
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup_path = config_path.parent / (config_path.name + ".bak-xaca0463-installer-" + ts)
+    shutil.copy2(str(config_path), str(backup_path))
 
 # Load existing config, or start fresh.
 if config_path.exists():
@@ -1435,6 +1445,15 @@ if config_path.exists():
 else:
     config = {"schema_version": 1, "teams": {}}
     config_path.parent.mkdir(parents=True, exist_ok=True)
+
+# XACA-0463 subitem 015: _safe_teams-normalize parsed-but-malformed root/teams value.
+# Mirrors the _safe_teams guard added to kb-port-fix.py in XACA-0463-013.
+# Without this, a malformed team-paths.json (null root, [], or "teams": null)
+# would crash at config["teams"][instance_id] = entry.
+if not isinstance(config, dict):
+    config = {}
+if not isinstance(config.get("teams"), dict):
+    config["teams"] = {}
 
 teams = config.setdefault("teams", {})
 
@@ -1448,19 +1467,34 @@ entry["lcars_port"]  = lcars_port
 # not from the installer; the reader falls back to DEFAULT_TEAMS for band queries.
 teams[instance_id] = entry
 
-# Atomic write: write-to-tmp then rename.
-# TODO(XACA-0463): consider adding a backup snapshot like _write_defaults does.
-tmp_path = config_path.with_suffix(".tmp")
+# XACA-0463 subitem 014: concurrency-safe atomic write via tempfile.mkstemp + os.replace.
+# mkstemp generates a unique name even if two installers race; os.replace is atomic on
+# the same filesystem. Replaces the previous write_text + fixed-suffix .tmp approach.
+#
+# XACA-0463 subitem 016: preserve target file's mode bits across the atomic rename.
+# mkstemp defaults to 0600; we carry over the original mode (or 0o644 for new files)
+# before os.replace clobbers the target's permissions.
+target_dir = str(config_path.parent)
+tmp_fd, tmp_path = tempfile.mkstemp(prefix="team-paths-", dir=target_dir)
 try:
-    tmp_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
-    os.replace(str(tmp_path), str(config_path))
+    with os.fdopen(tmp_fd, "w") as f:
+        json.dump(config, f, indent=2)
+        f.write("\n")
+    # XACA-0463 subitem 016: stat existing file for mode; fall back to 0o644 for new.
+    try:
+        original_mode = os.stat(str(config_path)).st_mode
+    except FileNotFoundError:
+        original_mode = 0o644
+    os.chmod(tmp_path, original_mode & 0o7777)
+    os.replace(tmp_path, str(config_path))
     print(f"  ✓ XACA-0463: team-paths.json updated — {instance_id}.lcars_port={lcars_port}")
-except OSError as exc:
+except Exception as exc:
     print(f"  Warning: XACA-0463 could not write {config_path}: {exc}", file=sys.stderr)
     try:
-        tmp_path.unlink()
-    except OSError:
+        os.unlink(tmp_path)
+    except FileNotFoundError:
         pass
+    raise
 TEAM_PATHS_PYEOF
 
 # Board filename uses INSTANCE_ID (not template id) — contract §6, invariant 8.
