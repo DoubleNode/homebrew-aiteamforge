@@ -93,9 +93,9 @@ team_name     = sys.argv[3]
 team_ship     = sys.argv[4]
 banner_name   = sys.argv[5]
 
-# Per-team color palettes — MUST stay in sync with TEAM_BANNER_COLORS in
-# libexec/installers/install-team.sh (lines 1096-1282).  If you update one,
-# update the other.  See XACA-0503 for context.
+# SYNC PAIR: keep this dict in sync with the TEAM_BANNER_COLORS dict in
+# libexec/installers/install-team.sh (grep for `TEAM_BANNER_COLORS = {`).
+# If you update one, update the other.  See XACA-0503 for context.
 TEAM_BANNER_COLORS = {
     "academy": {
         "palette": """\
