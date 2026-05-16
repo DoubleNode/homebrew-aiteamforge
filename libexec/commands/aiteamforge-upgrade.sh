@@ -21,6 +21,11 @@ VERSION="$(_find_version)"
 DRY_RUN=false
 FORCE=false
 
+# NOTE: KANBAN_BACKUP_INTERVAL default mirrors install-kanban.sh:16. If you
+# change one, change the other. Tracked for proper consolidation in XACA-0516
+# (created by XACA-0510-013 [Review] subitem from PR #30).
+readonly XACA_0510_KANBAN_BACKUP_INTERVAL_DEFAULT=900
+
 # Usage
 usage() {
   cat <<EOF
@@ -382,54 +387,116 @@ update_skills() {
   fi
 }
 
+# Cleanup helper invoked by update_launchagents' RETURN trap.
+# Removes any *.new tempfiles that survived an interrupt or early return.
+# _upgrade_tmpfiles is populated by update_launchagents before each render.
+_upgrade_tmpfiles=()
+# shellcheck disable=SC2329  # called indirectly via trap; not a dead function
+_cleanup_upgrade_tmpfiles() {
+  local f
+  for f in "${_upgrade_tmpfiles[@]}"; do
+    rm -f "$f"
+  done
+}
+
+# Render a LaunchAgent template to a tempfile.
+# Applies the full substitution map (USER_HOME, AITEAMFORGE_DIR,
+# BACKUP_INTERVAL, PYTHON3_PATH) so that every template gets every
+# substitution — harmless extras prevent sibling-drift bugs.
+# Usage: _render_launchagent_template <template_path> <dest_path>
+# Returns: 0 on success, 1 if template not found.
+_render_launchagent_template() {
+  local template="$1"
+  local dest="$2"
+
+  if [ ! -f "$template" ]; then
+    print_warning "LaunchAgent template not found: $template"
+    return 1
+  fi
+
+  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$XACA_0510_KANBAN_BACKUP_INTERVAL_DEFAULT}"
+  local python3_path
+  # NOTE: PYTHON3_PATH is re-resolved on every upgrade — PATH changes between
+  # install and upgrade will silently re-pin the plist interpreter. See XACA-0510.
+  python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
+
+  sed -e "s|{{USER_HOME}}|$HOME|g" \
+      -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
+      -e "s|{{BACKUP_INTERVAL}}|${kanban_backup_interval}|g" \
+      -e "s|{{PYTHON3_PATH}}|${python3_path}|g" \
+      "$template" > "$dest"
+}
+
 # Update LaunchAgents
 update_launchagents() {
   print_section "Updating LaunchAgents"
 
+  # Pairs of "plist-filename:template-basename" — order matters for logging.
+  # Templates live at ${FRAMEWORK_DIR}/share/templates/kanban/<basename>.
   local agents=(
-    "com.aiteamforge.kanban-backup.plist"
-    "com.aiteamforge.lcars-health.plist"
+    "com.aiteamforge.kanban-backup.plist:backup-plist.template"
+    "com.aiteamforge.lcars-health.plist:lcars-health-plist.template"
   )
 
+  # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
+  local launchagents_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+
   local updated=0
+  # Reset module-level tempfile tracker; RETURN trap cleans up any survivors.
+  _upgrade_tmpfiles=()
+  trap '_cleanup_upgrade_tmpfiles' RETURN
 
-  for agent in "${agents[@]}"; do
-    local source="${FRAMEWORK_DIR}/share/launchagents/${agent}"
-    local target="$HOME/Library/LaunchAgents/${agent}"
+  for entry in "${agents[@]}"; do
+    local agent="${entry%%:*}"
+    local tmpl_basename="${entry##*:}"
+    local template="${FRAMEWORK_DIR}/share/templates/kanban/${tmpl_basename}"
+    local target="${launchagents_dir}/${agent}"
+    local tmpfile="${target}.new"
+    _upgrade_tmpfiles+=("$tmpfile")
 
-    if [ ! -f "$source" ]; then
-      continue
-    fi
-
+    # Skip agents the user has not installed — upgrade must not silently
+    # materialise agents the user opted out of at install time.
     if [ ! -f "$target" ]; then
       continue
     fi
 
-    # Check if source is newer or different
-    if ! diff -q "$source" "$target" &>/dev/null || [ "$FORCE" = true ]; then
+    # Template missing: report without aborting the whole upgrade run.
+    if ! _render_launchagent_template "$template" "$tmpfile"; then
+      continue
+    fi
+
+    # Diff rendered output against live target (not the raw template, which
+    # always looks different due to {{VAR}} placeholders).
+    if ! diff -q "$tmpfile" "$target" &>/dev/null || [ "$FORCE" = true ]; then
       print_info "Updating ${agent}..."
 
       if [ "$DRY_RUN" = false ]; then
-        # Unload current agent
+        # Unload current agent (ignore failure — may not be loaded)
         launchctl unload "$target" 2>/dev/null || true
 
-        # Update file
-        cp "$source" "$target"
+        # Atomically replace with rendered version
+        mv "$tmpfile" "$target"
 
-        # Reload agent
+        # Reload agent (ignore failure — may need user session context)
         launchctl load "$target" 2>/dev/null || true
 
         print_success "Updated ${agent}"
         updated=$((updated + 1))
       else
         echo "Would update: ${agent}"
+        rm -f "$tmpfile"
         updated=$((updated + 1))
       fi
+    else
+      # No change — clean up tempfile, count as no-op
+      rm -f "$tmpfile"
     fi
   done
 
   if [ $updated -eq 0 ]; then
     print_success "All LaunchAgents up to date"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would update ${updated} LaunchAgent(s)"
   else
     print_success "Updated ${updated} LaunchAgent(s)"
   fi
