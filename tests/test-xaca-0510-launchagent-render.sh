@@ -46,37 +46,35 @@ fi
 launchctl() { return 0; }
 export -f launchctl
 
-# Extract and eval _render_launchagent_template + update_launchagents from
-# upgrade.sh using awk. We grab from the render helper comment through to
-# the closing brace of update_launchagents.
+# Extract and eval _cleanup_upgrade_tmpfiles + _render_launchagent_template +
+# update_launchagents from upgrade.sh using awk. We grab from the cleanup
+# helper comment through to the closing brace of update_launchagents.
+# Three top-level closing braces expected (one per function).
 _extracted_funcs="$(awk '
-  /^# Render a LaunchAgent template/ { capture=1 }
+  /^# Cleanup helper invoked by update_launchagents/ { capture=1 }
   capture { print }
   /^}$/ && capture {
     brace_count++
-    if (brace_count == 2) { capture=0 }
+    if (brace_count == 3) { capture=0 }
   }
 ' "$UPGRADE_SH")"
 
 if [ -z "$_extracted_funcs" ]; then
   test_start "Sanity: can extract functions from upgrade.sh"
-  test_fail "Failed to extract _render_launchagent_template and update_launchagents — awk returned empty"
+  test_fail "Failed to extract _cleanup_upgrade_tmpfiles, _render_launchagent_template, and update_launchagents — awk returned empty"
   return 0
 fi
 
 eval "$_extracted_funcs"
 
-# Verify both functions are now defined
-if ! declare -f _render_launchagent_template >/dev/null 2>&1; then
-  test_start "Sanity: _render_launchagent_template defined"
-  test_fail "_render_launchagent_template not defined after extraction"
-  return 0
-fi
-if ! declare -f update_launchagents >/dev/null 2>&1; then
-  test_start "Sanity: update_launchagents defined"
-  test_fail "update_launchagents not defined after extraction"
-  return 0
-fi
+# Hard precondition: if awk extracted something but the functions weren't
+# defined, all downstream tests would give cryptic failures. Abort loudly.
+declare -f _cleanup_upgrade_tmpfiles >/dev/null || \
+  { echo "FATAL: _cleanup_upgrade_tmpfiles not extracted from upgrade.sh"; exit 1; }
+declare -f _render_launchagent_template >/dev/null || \
+  { echo "FATAL: _render_launchagent_template not extracted from upgrade.sh"; exit 1; }
+declare -f update_launchagents >/dev/null || \
+  { echo "FATAL: update_launchagents not extracted from upgrade.sh"; exit 1; }
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Helper: run update_launchagents with our sandbox variables injected
@@ -260,4 +258,42 @@ backup_content="$(cat "$BACKUP_PLIST")"
 lcars_content="$(cat "$LCARS_PLIST")"
 assert_not_contains "$backup_content" "{{" "kanban-backup.plist must contain no {{ placeholders"
 assert_not_contains "$lcars_content"  "{{" "lcars-health.plist must contain no {{ placeholders"
+test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 8: DRY_RUN=true + no-change path — tempfile cleanup and no-op assertion
+# When the target content already matches the rendered template, the function
+# should continue (skip) before ever entering the DRY_RUN branch. This test
+# verifies the no-op path correctly suppresses the tempfile and leaves the
+# target untouched under DRY_RUN.
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "DRY_RUN=true + no-change: target is unchanged after run"
+reset_launchagents
+touch "$BACKUP_PLIST"
+# Seed target with the real rendered content so diff sees no change
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+content_before="$(cat "$BACKUP_PLIST")"
+# Now run again with DRY_RUN=true — content is identical, should be a no-op
+FORCE=false DRY_RUN=true run_update_launchagents >/dev/null 2>&1
+content_after="$(cat "$BACKUP_PLIST")"
+assert_equal "$content_before" "$content_after" "DRY_RUN=true + no-change must leave target file unmodified"
+test_pass
+
+test_start "DRY_RUN=true + no-change: no .new tempfile remains after run"
+reset_launchagents
+touch "$BACKUP_PLIST"
+# Seed with real content so diff is clean
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+FORCE=false DRY_RUN=true run_update_launchagents >/dev/null 2>&1
+assert_file_not_exists "${BACKUP_PLIST}.new" "No .new tempfile should remain after DRY_RUN=true no-change run"
+test_pass
+
+test_start "DRY_RUN=true + no-change: output reports 'All LaunchAgents up to date'"
+reset_launchagents
+touch "$BACKUP_PLIST"
+# Seed with real content so diff is clean
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+output="$(FORCE=false DRY_RUN=true run_update_launchagents 2>&1)"
+assert_contains "$output" "All LaunchAgents up to date" "No-change DRY_RUN run must report 'All LaunchAgents up to date'"
 test_pass

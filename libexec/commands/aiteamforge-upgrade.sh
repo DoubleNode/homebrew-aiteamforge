@@ -21,6 +21,11 @@ VERSION="$(_find_version)"
 DRY_RUN=false
 FORCE=false
 
+# NOTE: KANBAN_BACKUP_INTERVAL default mirrors install-kanban.sh:16. If you
+# change one, change the other. Tracked for proper consolidation in XACA-0516
+# (created by XACA-0510-013 [Review] subitem from PR #30).
+readonly XACA_0510_KANBAN_BACKUP_INTERVAL_DEFAULT=900
+
 # Usage
 usage() {
   cat <<EOF
@@ -382,6 +387,18 @@ update_skills() {
   fi
 }
 
+# Cleanup helper invoked by update_launchagents' RETURN trap.
+# Removes any *.new tempfiles that survived an interrupt or early return.
+# _upgrade_tmpfiles is populated by update_launchagents before each render.
+_upgrade_tmpfiles=()
+# shellcheck disable=SC2329  # called indirectly via trap; not a dead function
+_cleanup_upgrade_tmpfiles() {
+  local f
+  for f in "${_upgrade_tmpfiles[@]}"; do
+    rm -f "$f"
+  done
+}
+
 # Render a LaunchAgent template to a tempfile.
 # Applies the full substitution map (USER_HOME, AITEAMFORGE_DIR,
 # BACKUP_INTERVAL, PYTHON3_PATH) so that every template gets every
@@ -397,8 +414,10 @@ _render_launchagent_template() {
     return 1
   fi
 
-  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-900}"
+  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$XACA_0510_KANBAN_BACKUP_INTERVAL_DEFAULT}"
   local python3_path
+  # NOTE: PYTHON3_PATH is re-resolved on every upgrade — PATH changes between
+  # install and upgrade will silently re-pin the plist interpreter. See XACA-0510.
   python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
 
   sed -e "s|{{USER_HOME}}|$HOME|g" \
@@ -423,6 +442,9 @@ update_launchagents() {
   local launchagents_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
   local updated=0
+  # Reset module-level tempfile tracker; RETURN trap cleans up any survivors.
+  _upgrade_tmpfiles=()
+  trap '_cleanup_upgrade_tmpfiles' RETURN
 
   for entry in "${agents[@]}"; do
     local agent="${entry%%:*}"
@@ -430,6 +452,7 @@ update_launchagents() {
     local template="${FRAMEWORK_DIR}/share/templates/kanban/${tmpl_basename}"
     local target="${launchagents_dir}/${agent}"
     local tmpfile="${target}.new"
+    _upgrade_tmpfiles+=("$tmpfile")
 
     # Skip agents the user has not installed — upgrade must not silently
     # materialise agents the user opted out of at install time.
@@ -472,6 +495,8 @@ update_launchagents() {
 
   if [ $updated -eq 0 ]; then
     print_success "All LaunchAgents up to date"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would update ${updated} LaunchAgent(s)"
   else
     print_success "Updated ${updated} LaunchAgent(s)"
   fi
