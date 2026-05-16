@@ -256,6 +256,29 @@ Tests include:
 
 ## Release Process
 
+### Refreshing the framework CHANGELOG snapshot
+
+`share/CHANGELOG.md` is a **snapshot** of the dev-team framework `CHANGELOG.md`
+captured at the time of the current tap tag. `show_changelog` in
+`libexec/commands/aiteamforge-upgrade.sh` (around line 442) reads this file
+after `aiteamforge upgrade` to show users what changed since their previous
+version. If the snapshot is stale, users see outdated release notes.
+
+**Refresh it immediately before tagging a new tap version** so the bottle
+that ships under that tag carries fresh notes:
+
+```bash
+# from the tap clone root
+cp ../dev-team/CHANGELOG.md share/CHANGELOG.md  # adjust path to your dev-team checkout
+git add share/CHANGELOG.md
+git commit -m "Chore: Refresh share/CHANGELOG.md snapshot for v<X.Y.Z>"
+```
+
+This is intentionally a manual cp at release time (per XACA-0511) rather than
+a `sync-tap.sh` auto-sync rule — auto-sync would impose a drift-check tax on
+every dev-team CHANGELOG update, which the project rejected. Reference:
+XACA-0511.
+
 ### Creating a New Release
 
 1. **Update version in formula**
