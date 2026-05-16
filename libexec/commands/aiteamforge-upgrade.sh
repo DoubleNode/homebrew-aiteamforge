@@ -382,49 +382,91 @@ update_skills() {
   fi
 }
 
+# Render a LaunchAgent template to a tempfile.
+# Applies the full substitution map (USER_HOME, AITEAMFORGE_DIR,
+# BACKUP_INTERVAL, PYTHON3_PATH) so that every template gets every
+# substitution — harmless extras prevent sibling-drift bugs.
+# Usage: _render_launchagent_template <template_path> <dest_path>
+# Returns: 0 on success, 1 if template not found.
+_render_launchagent_template() {
+  local template="$1"
+  local dest="$2"
+
+  if [ ! -f "$template" ]; then
+    print_warning "LaunchAgent template not found: $template"
+    return 1
+  fi
+
+  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-900}"
+  local python3_path
+  python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
+
+  sed -e "s|{{USER_HOME}}|$HOME|g" \
+      -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
+      -e "s|{{BACKUP_INTERVAL}}|${kanban_backup_interval}|g" \
+      -e "s|{{PYTHON3_PATH}}|${python3_path}|g" \
+      "$template" > "$dest"
+}
+
 # Update LaunchAgents
 update_launchagents() {
   print_section "Updating LaunchAgents"
 
+  # Pairs of "plist-filename:template-basename" — order matters for logging.
+  # Templates live at ${FRAMEWORK_DIR}/share/templates/kanban/<basename>.
   local agents=(
-    "com.aiteamforge.kanban-backup.plist"
-    "com.aiteamforge.lcars-health.plist"
+    "com.aiteamforge.kanban-backup.plist:backup-plist.template"
+    "com.aiteamforge.lcars-health.plist:lcars-health-plist.template"
   )
+
+  # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
+  local launchagents_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
   local updated=0
 
-  for agent in "${agents[@]}"; do
-    local source="${FRAMEWORK_DIR}/share/launchagents/${agent}"
-    local target="$HOME/Library/LaunchAgents/${agent}"
+  for entry in "${agents[@]}"; do
+    local agent="${entry%%:*}"
+    local tmpl_basename="${entry##*:}"
+    local template="${FRAMEWORK_DIR}/share/templates/kanban/${tmpl_basename}"
+    local target="${launchagents_dir}/${agent}"
+    local tmpfile="${target}.new"
 
-    if [ ! -f "$source" ]; then
-      continue
-    fi
-
+    # Skip agents the user has not installed — upgrade must not silently
+    # materialise agents the user opted out of at install time.
     if [ ! -f "$target" ]; then
       continue
     fi
 
-    # Check if source is newer or different
-    if ! diff -q "$source" "$target" &>/dev/null || [ "$FORCE" = true ]; then
+    # Template missing: report without aborting the whole upgrade run.
+    if ! _render_launchagent_template "$template" "$tmpfile"; then
+      continue
+    fi
+
+    # Diff rendered output against live target (not the raw template, which
+    # always looks different due to {{VAR}} placeholders).
+    if ! diff -q "$tmpfile" "$target" &>/dev/null || [ "$FORCE" = true ]; then
       print_info "Updating ${agent}..."
 
       if [ "$DRY_RUN" = false ]; then
-        # Unload current agent
+        # Unload current agent (ignore failure — may not be loaded)
         launchctl unload "$target" 2>/dev/null || true
 
-        # Update file
-        cp "$source" "$target"
+        # Atomically replace with rendered version
+        mv "$tmpfile" "$target"
 
-        # Reload agent
+        # Reload agent (ignore failure — may need user session context)
         launchctl load "$target" 2>/dev/null || true
 
         print_success "Updated ${agent}"
         updated=$((updated + 1))
       else
         echo "Would update: ${agent}"
+        rm -f "$tmpfile"
         updated=$((updated + 1))
       fi
+    else
+      # No change — clean up tempfile, count as no-op
+      rm -f "$tmpfile"
     fi
   done
 
