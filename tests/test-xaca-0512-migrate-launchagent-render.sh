@@ -277,6 +277,24 @@ FORCE=false DRY_RUN=true run_update_launchagents >/dev/null 2>&1
 assert_file_not_exists "${BACKUP_PLIST}.new" "No .new tempfile must remain after DRY_RUN run"
 test_pass
 
+# Per-renderer DRY_RUN coverage — the three tests above all exercise
+# _render_kanban_template via the kanban-backup target. The fleet-monitor
+# target routes through _render_fleet_template, which has a different
+# substitution map. XACA-0512-002 [Review] from PR #32 — exercise DRY_RUN
+# on the fleet-monitor path so a regression in the fleet renderer's
+# DRY_RUN handling can't slip through.
+
+test_start "DRY_RUN=true (fleet-monitor): sentinel preserved, no .new leak, 'Would update' printed"
+reset_launchagents
+echo "FLEET_SENTINEL_DO_NOT_OVERWRITE" > "$FLEET_PLIST"
+output="$(FORCE=false DRY_RUN=true run_update_launchagents 2>&1)"
+fleet_content="$(cat "$FLEET_PLIST")"
+assert_equal "FLEET_SENTINEL_DO_NOT_OVERWRITE" "$fleet_content" "DRY_RUN must not overwrite fleet-monitor target plist"
+assert_file_not_exists "${FLEET_PLIST}.new" "No .new tempfile must remain after fleet-monitor DRY_RUN run"
+assert_contains "$output" "fleet-monitor" "DRY_RUN output must reference fleet-monitor agent"
+assert_contains "$output" "Would update" "DRY_RUN must print 'Would update' for fleet-monitor change"
+test_pass
+
 # ═══════════════════════════════════════════════════════════════════════════
 # TEST 9: Missing template → reports cleanly without aborting
 # ═══════════════════════════════════════════════════════════════════════════
