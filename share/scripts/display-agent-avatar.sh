@@ -166,6 +166,33 @@ except:
         worktree_info=$(wt-current short 2>/dev/null || echo "develop")
     fi
 
+    # XACA-0279: Resolve Anthropic account identity for the agent panel JSON.
+    # Prefer env vars set by _cc_export_account_credentials (cc/ccc/kb-run entry points).
+    # Fall back to team-paths.json so banner-fresh terminals (before cc is invoked)
+    # still carry account context. Downstream consumers (agent-panel.html, fleet-monitor)
+    # treat empty strings as "no account configured — using default OAuth".
+    local account_id="${CLAUDE_ACTIVE_ACCOUNT_ID:-}"
+    local account_nickname="${CLAUDE_ACTIVE_ACCOUNT_NICKNAME:-}"
+    if [[ ( -z "$account_nickname" || -z "$account_id" ) && -f "$HOME/.aiteamforge/team-paths.json" ]] && command -v python3 >/dev/null 2>&1; then
+        local _account_pair
+        _account_pair=$(python3 -c "
+import json
+try:
+    with open('$HOME/.aiteamforge/team-paths.json') as f:
+        cfg = json.load(f)
+    t = cfg.get('teams', {}).get('${team}', {})
+    print(t.get('anthropic_account_id', '') + '|' + t.get('anthropic_account_nickname', ''))
+except Exception:
+    print('|')
+" 2>/dev/null)
+        if [[ -z "$account_id" ]]; then
+            account_id="${_account_pair%%|*}"
+        fi
+        if [[ -z "$account_nickname" ]]; then
+            account_nickname="${_account_pair##*|}"
+        fi
+    fi
+
     # Write agent data as JSON to per-session temp file
     # Uses Python for proper JSON escaping (handles apostrophes, special chars)
     # SESSION_CODE is set by the banner script (e.g., "academy-chancellor")
@@ -188,13 +215,17 @@ data = {
     'worktree': sys.argv[10],
     'amb_handle': sys.argv[11],
     'hostname': sys.argv[12],
-    'timestamp': sys.argv[13]
+    'timestamp': sys.argv[13],
+    # XACA-0279: Anthropic account routing fields. Empty string = no account
+    # configured; consumers should treat this as 'fall back to default OAuth'.
+    'account_id': sys.argv[14],
+    'account_nickname': sys.argv[15],
 }
 json_str = json.dumps(data, indent=4)
-with open(sys.argv[14], 'w') as f:
+with open(sys.argv[16], 'w') as f:
     f.write(json_str)
-if len(sys.argv) > 15 and sys.argv[15]:
-    with open(sys.argv[15], 'w') as f:
+if len(sys.argv) > 17 and sys.argv[17]:
+    with open(sys.argv[17], 'w') as f:
         f.write(json_str)
 " \
     "${team}" \
@@ -210,6 +241,8 @@ if len(sys.argv) > 15 and sys.argv[15]:
     "${amb_handle}" \
     "$(hostname -s 2>/dev/null || hostname)" \
     "$(date +%s)" \
+    "${account_id}" \
+    "${account_nickname}" \
     "${json_file}" \
     "${TERMINAL_NUMBER:+${tmp_dir}lcars-agent-${session_key}-w${TERMINAL_NUMBER}.json}"
 

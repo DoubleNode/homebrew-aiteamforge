@@ -100,6 +100,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8200,
         "lcars_port_range": 10,
         "lcars_port": 8203,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_ACADEMY_API_KEY",
     },
     "ios": {
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
@@ -107,6 +110,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8260,
         "lcars_port_range": 10,
         "lcars_port": 8260,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_IOS_API_KEY",
     },
     "android": {
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
@@ -114,6 +120,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8280,
         "lcars_port_range": 10,
         "lcars_port": 8280,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_ANDROID_API_KEY",
     },
     "firebase": {
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
@@ -121,6 +130,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8240,
         "lcars_port_range": 10,
         "lcars_port": 8240,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FIREBASE_API_KEY",
     },
     "command": {
         "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
@@ -128,6 +140,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8230,
         "lcars_port_range": 10,
         "lcars_port": 8234,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_COMMAND_API_KEY",
     },
     "dns": {
         "kanban_dir": "/Users/Shared/Development/DNSFramework/kanban",
@@ -135,6 +150,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8180,
         "lcars_port_range": 10,
         "lcars_port": 8180,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_DNS_API_KEY",
     },
 
     # ── Freelance — DoubleNode ────────────────────────────────────────────
@@ -144,6 +162,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_STARWORDS_API_KEY",
     },
     "freelance-doublenode-appplanning": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/appPlanning/kanban",
@@ -151,6 +172,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_APPPLANNING_API_KEY",
     },
     "freelance-doublenode-workstats": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/WorkStats/kanban",
@@ -158,6 +182,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_WORKSTATS_API_KEY",
     },
     "freelance-doublenode-lifeboard": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/LifeBoard/kanban",
@@ -165,6 +192,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_LIFEBOARD_API_KEY",
     },
     "freelance-doublenode-caravan": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/Caravan/kanban",
@@ -172,6 +202,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_CARAVAN_API_KEY",
     },
     "freelance-doublenode-awaysentry": {
         "kanban_dir": "/Users/Shared/Development/DoubleNode/AwaySentry/kanban",
@@ -179,6 +212,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_AWAYSENTRY_API_KEY",
     },
 
     # ── Freelance — Liquidstyle ───────────────────────────────────────────
@@ -188,6 +224,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8960,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_LIQUIDSTYLE_AGENTBADGES_APP_API_KEY",
     },
     "freelance-liquidstyle-agentbadges-ios": {
         "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban",
@@ -195,6 +234,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8970,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_LIQUIDSTYLE_AGENTBADGES_IOS_API_KEY",
     },
 
     # ── Legal ─────────────────────────────────────────────────────────────
@@ -204,6 +246,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8320,
         "lcars_port_range": 10,
         "lcars_port": None,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_LEGAL_COPARENTING_API_KEY",
     },
 
     # ── Medical ───────────────────────────────────────────────────────────
@@ -213,6 +258,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8340,
         "lcars_port_range": 10,
         "lcars_port": None,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MEDICAL_GENERAL_API_KEY",
     },
 
     # ── Finance ───────────────────────────────────────────────────────────
@@ -222,6 +270,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8360,
         "lcars_port_range": 10,
         "lcars_port": None,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FINANCE_PERSONAL_API_KEY",
     },
 
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
@@ -238,6 +289,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8400,
         "lcars_port_range": 10,
         "lcars_port": 8400,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
     },
     "medical": {
         # alias for medical-general
@@ -246,6 +300,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8340,
         "lcars_port_range": 10,
         "lcars_port": None,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MEDICAL_API_KEY",
     },
     "freelance": {
         # generic fallback — mirrors kanban_utils.py
@@ -254,6 +311,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "lcars_port_base": 8500,
         "lcars_port_range": 100,
         "lcars_port": 8505,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_API_KEY",
     },
 }
 
@@ -264,7 +324,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 _CONFIG_CACHE: dict | None = None
 _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
 
-SUPPORTED_SCHEMA_VERSION = 1
+SUPPORTED_SCHEMA_VERSION = 3
 
 # Teams that MUST appear in any valid config.  If any are absent the config is
 # considered corrupt and load_config() falls back to _bootstrap().  (XACA-0457)
@@ -425,12 +485,16 @@ def load_config() -> dict:
     if config is None:
         config = _bootstrap(config_path)
 
-    # Validate schema_version
+    # Validate schema_version — v1/v2/v3 all load cleanly; warn only for
+    # unknown/future versions.  Missing new fields (v1/v2 configs lacking the
+    # anthropic_* keys added in v3) are tolerated; downstream consumers that
+    # need those fields should use .get() with empty-string defaults.
+    _READABLE_SCHEMA_VERSIONS: frozenset[int] = frozenset({1, 2, 3})
     version = config.get("schema_version")
-    if version != SUPPORTED_SCHEMA_VERSION:
+    if version not in _READABLE_SCHEMA_VERSIONS:
         print(
             f"[aiteamforge-paths] WARNING: schema_version={version!r} is not "
-            f"supported (expected {SUPPORTED_SCHEMA_VERSION}). Proceeding anyway.",
+            f"recognized (readable: {sorted(_READABLE_SCHEMA_VERSIONS)}). Proceeding anyway.",
             file=sys.stderr,
         )
 
@@ -447,6 +511,47 @@ def load_config() -> dict:
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
     return _CONFIG_CACHE
+
+
+def upgrade_config_to_v3(config: dict) -> dict:
+    """Return a copy of *config* with v3 Anthropic account fields back-filled.
+
+    Takes an existing v1 or v2 config dict (or any config missing the three
+    new fields) and returns a new dict with:
+      - schema_version bumped to 3
+      - anthropic_account_id: "" (empty; user fills this in via wizard)
+      - anthropic_account_nickname: "" (empty; user fills this in via wizard)
+      - anthropic_api_key_env_var: "TEAM_<SLUG_UPPER>_API_KEY" derived from
+        the team slug (hyphens replaced with underscores, uppercased)
+
+    This function does NOT write anything to disk and is NOT called
+    automatically from load_config().  It is reserved for the interactive
+    account-routing wizard (XACA-0279 subitem 003) to invoke explicitly after
+    the user has acknowledged the migration.
+
+    The input config is never mutated; a deep copy is returned.
+
+    Example::
+
+        import copy
+        old = load_config()
+        new = upgrade_config_to_v3(copy.deepcopy(old))
+        # inspect new, then write to disk if user approves
+    """
+    import copy
+    upgraded = copy.deepcopy(config)
+    upgraded["schema_version"] = 3
+
+    for slug, entry in upgraded.get("teams", {}).items():
+        if "anthropic_account_id" not in entry:
+            entry["anthropic_account_id"] = ""
+        if "anthropic_account_nickname" not in entry:
+            entry["anthropic_account_nickname"] = ""
+        if "anthropic_api_key_env_var" not in entry:
+            env_var = f"TEAM_{slug.upper().replace('-', '_')}_API_KEY"
+            entry["anthropic_api_key_env_var"] = env_var
+
+    return upgraded
 
 
 # ---------------------------------------------------------------------------
