@@ -13,5 +13,12 @@
 #   - libexec/installers/install-kanban.sh
 #   - libexec/commands/aiteamforge-upgrade.sh
 #   - libexec/commands/aiteamforge-migrate.sh
+#
+# Consumers resolve the runtime value with ${KANBAN_BACKUP_INTERVAL:-$KANBAN_BACKUP_INTERVAL_DEFAULT}.
+# The `:-` operator substitutes the default when the variable is unset OR empty,
+# so setting KANBAN_BACKUP_INTERVAL='' explicitly falls through to 900 — empty
+# strings never reach the rendered plist as a literal empty interval. To force
+# a non-default cadence, set KANBAN_BACKUP_INTERVAL to a positive integer
+# (e.g., KANBAN_BACKUP_INTERVAL=1800 for 30 minutes).
 : "${KANBAN_BACKUP_INTERVAL_DEFAULT:=900}"
 readonly KANBAN_BACKUP_INTERVAL_DEFAULT
