@@ -80,8 +80,6 @@ fi
 
 # Defaults that the extracted functions reference (normally set at script top).
 # shellcheck disable=SC2034  # referenced by eval'd functions; shellcheck can't trace eval
-readonly XACA_0512_KANBAN_BACKUP_INTERVAL_DEFAULT=900
-# shellcheck disable=SC2034  # referenced by eval'd functions; shellcheck can't trace eval
 readonly XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000
 
 eval "$_extracted_funcs"

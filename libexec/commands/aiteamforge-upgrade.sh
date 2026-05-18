@@ -12,6 +12,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source shared libraries
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
+source "${LIBEXEC_DIR}/lib/constants.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -20,11 +21,6 @@ VERSION="$(_find_version)"
 # Options
 DRY_RUN=false
 FORCE=false
-
-# NOTE: KANBAN_BACKUP_INTERVAL default mirrors install-kanban.sh:16. If you
-# change one, change the other. Tracked for proper consolidation in XACA-0516
-# (created by XACA-0510-013 [Review] subitem from PR #30).
-readonly XACA_0510_KANBAN_BACKUP_INTERVAL_DEFAULT=900
 
 # Usage
 usage() {
@@ -414,7 +410,7 @@ _render_launchagent_template() {
     return 1
   fi
 
-  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$XACA_0510_KANBAN_BACKUP_INTERVAL_DEFAULT}"
+  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$KANBAN_BACKUP_INTERVAL_DEFAULT}"
   local python3_path
   # NOTE: PYTHON3_PATH is re-resolved on every upgrade — PATH changes between
   # install and upgrade will silently re-pin the plist interpreter. See XACA-0510.
