@@ -4,16 +4,17 @@
 
 set -euo pipefail
 
-# Source common utilities
+# Source common utilities and shared constants
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
+source "$SCRIPT_DIR/../lib/constants.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
 #──────────────────────────────────────────────────────────────────────────────
 
 KANBAN_BACKUP_LABEL="com.aiteamforge.kanban-backup"
-KANBAN_BACKUP_INTERVAL=900  # 15 minutes (in seconds)
+KANBAN_BACKUP_INTERVAL="${KANBAN_BACKUP_INTERVAL:-$KANBAN_BACKUP_INTERVAL_DEFAULT}"  # default 900s / 15min — see lib/constants.sh
 DEFAULT_LCARS_PORT=8080
 
 #──────────────────────────────────────────────────────────────────────────────
