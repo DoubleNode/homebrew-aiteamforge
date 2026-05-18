@@ -24,6 +24,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source shared libraries
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
+source "${LIBEXEC_DIR}/lib/constants.sh"
 
 # Source org identity resolver (XACA-0139) — graceful no-op if lib not yet installed
 # shellcheck source=../lib/aiteamforge-org-paths.sh
@@ -48,10 +49,9 @@ ROLLBACK_FROM=""
 MIGRATION_STATE_FILE="${HOME}/.aiteamforge/migration-state.json"
 MIGRATION_LOG="${HOME}/.aiteamforge/migration.log"
 
-# NOTE: Defaults mirror install-kanban.sh:16 (KANBAN_BACKUP_INTERVAL) and
-# install-fleet-monitor.sh:15 (FLEET_MONITOR_PORT). If you change one,
-# change the other. Sibling-drift consolidation tracked in XACA-0516.
-readonly XACA_0512_KANBAN_BACKUP_INTERVAL_DEFAULT=900
+# NOTE: FLEET_MONITOR_PORT default mirrors install-fleet-monitor.sh:15. If
+# you change one, change the other. Sibling-drift consolidation is a pending
+# follow-up (mirrors the pattern XACA-0516 fixed for KANBAN_BACKUP_INTERVAL).
 readonly XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000
 
 # Usage
@@ -528,7 +528,7 @@ _render_kanban_template() {
     return 1
   fi
 
-  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$XACA_0512_KANBAN_BACKUP_INTERVAL_DEFAULT}"
+  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$KANBAN_BACKUP_INTERVAL_DEFAULT}"
   local python3_path
   # NOTE: PYTHON3_PATH is re-resolved on every migrate — PATH changes between
   # original install and migrate will re-pin the plist interpreter. See XACA-0510.
