@@ -48,6 +48,12 @@ ROLLBACK_FROM=""
 MIGRATION_STATE_FILE="${HOME}/.aiteamforge/migration-state.json"
 MIGRATION_LOG="${HOME}/.aiteamforge/migration.log"
 
+# NOTE: Defaults mirror install-kanban.sh:16 (KANBAN_BACKUP_INTERVAL) and
+# install-fleet-monitor.sh:15 (FLEET_MONITOR_PORT). If you change one,
+# change the other. Sibling-drift consolidation tracked in XACA-0516.
+readonly XACA_0512_KANBAN_BACKUP_INTERVAL_DEFAULT=900
+readonly XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000
+
 # Usage
 usage() {
   cat <<EOF
@@ -496,51 +502,162 @@ migrate_user_data() {
   echo ""
 }
 
+# Cleanup helper invoked by update_launchagents' RETURN trap.
+# Removes any *.new tempfiles that survived an interrupt or early return.
+# _migrate_tmpfiles is populated by update_launchagents before each render.
+_migrate_tmpfiles=()
+# shellcheck disable=SC2329  # called indirectly via trap; not a dead function
+_cleanup_migrate_tmpfiles() {
+  local f
+  for f in "${_migrate_tmpfiles[@]}"; do
+    rm -f "$f"
+  done
+}
+
+# Render a kanban-family LaunchAgent template to a tempfile.
+# Substitution map matches install-kanban.sh:771-775 + the XACA-0510
+# extension (PYTHON3_PATH) so every kanban template gets every substitution.
+# Usage: _render_kanban_template <template_path> <dest_path>
+# Returns: 0 on success, 1 if template not found.
+_render_kanban_template() {
+  local template="$1"
+  local dest="$2"
+
+  if [ ! -f "$template" ]; then
+    warning "LaunchAgent template not found: $template"
+    return 1
+  fi
+
+  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$XACA_0512_KANBAN_BACKUP_INTERVAL_DEFAULT}"
+  local python3_path
+  # NOTE: PYTHON3_PATH is re-resolved on every migrate — PATH changes between
+  # original install and migrate will re-pin the plist interpreter. See XACA-0510.
+  python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
+
+  sed -e "s|{{USER_HOME}}|$HOME|g" \
+      -e "s|{{AITEAMFORGE_DIR}}|${NEW_DATA_DIR}|g" \
+      -e "s|{{BACKUP_INTERVAL}}|${kanban_backup_interval}|g" \
+      -e "s|{{PYTHON3_PATH}}|${python3_path}|g" \
+      "$template" > "$dest"
+}
+
+# Render the fleet-monitor LaunchAgent template to a tempfile.
+# Substitution map mirrors install-fleet-monitor.sh:569-577.
+# Usage: _render_fleet_template <template_path> <dest_path>
+# Returns: 0 on success, 1 if template not found or node missing.
+_render_fleet_template() {
+  local template="$1"
+  local dest="$2"
+
+  if [ ! -f "$template" ]; then
+    warning "LaunchAgent template not found: $template"
+    return 1
+  fi
+
+  local node_path
+  if command -v node >/dev/null 2>&1; then
+    node_path="$(command -v node)"
+  elif [ -x "/opt/homebrew/bin/node" ]; then
+    node_path="/opt/homebrew/bin/node"
+  else
+    warning "Node.js not found — skipping fleet-monitor LaunchAgent render"
+    return 1
+  fi
+
+  local fleet_port="${FLEET_MONITOR_PORT:-$XACA_0512_FLEET_MONITOR_PORT_DEFAULT}"
+  local homebrew_prefix
+  homebrew_prefix="$(brew --prefix 2>/dev/null || echo '/opt/homebrew')"
+
+  sed -e "s|{{NODE_PATH}}|${node_path}|g" \
+      -e "s|{{FLEET_SERVER_PATH}}|${NEW_DATA_DIR}/fleet-monitor/server|g" \
+      -e "s|{{LOG_DIR}}|${NEW_DATA_DIR}/logs|g" \
+      -e "s|{{HOMEBREW_PREFIX}}|${homebrew_prefix}|g" \
+      -e "s|{{HOME_DIR}}|$HOME|g" \
+      -e "s|{{FLEET_PORT}}|${fleet_port}|g" \
+      -e "s|{{AITEAMFORGE_DIR}}|${NEW_DATA_DIR}|g" \
+      "$template" > "$dest"
+}
+
 update_launchagents() {
   section "Updating LaunchAgents"
 
-  LAUNCHAGENT_DIR="${HOME}/Library/LaunchAgents"
-  AGENTS_UPDATED=0
+  # Resolve framework dir (where templates ship) lazily — get_framework_dir
+  # is provided by lib/config.sh, sourced at script load.
+  local framework_dir="${FRAMEWORK_DIR:-$(get_framework_dir)}"
 
-  EXPECTED_AGENTS=(
-    "com.aiteamforge.kanban-backup.plist"
-    "com.aiteamforge.lcars-health.plist"
-    "com.aiteamforge.fleet-monitor.plist"
+  # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
+  local launchagents_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+
+  # Pairs of "plist-filename|render-fn|template-relpath". The render function
+  # selects which substitution map to apply — kanban vs fleet-monitor have
+  # different placeholder sets and cannot share a single sed expression.
+  local agents=(
+    "com.aiteamforge.kanban-backup.plist|_render_kanban_template|share/templates/kanban/backup-plist.template"
+    "com.aiteamforge.lcars-health.plist|_render_kanban_template|share/templates/kanban/lcars-health-plist.template"
+    "com.aiteamforge.fleet-monitor.plist|_render_fleet_template|share/templates/fleet-monitor/fleet-launchagent.template.plist"
   )
 
-  for agent in "${EXPECTED_AGENTS[@]}"; do
-    AGENT_PATH="${LAUNCHAGENT_DIR}/${agent}"
+  local agents_updated=0
+  # Reset module-level tempfile tracker; RETURN trap cleans up any survivors.
+  _migrate_tmpfiles=()
+  trap '_cleanup_migrate_tmpfiles' RETURN
 
-    if [[ -f "${AGENT_PATH}" ]]; then
-      log "Updating ${agent}..."
+  for entry in "${agents[@]}"; do
+    local agent="${entry%%|*}"
+    local rest="${entry#*|}"
+    local render_fn="${rest%%|*}"
+    local tmpl_relpath="${rest#*|}"
+    local template="${framework_dir}/${tmpl_relpath}"
+    local target="${launchagents_dir}/${agent}"
+    local tmpfile="${target}.new"
+    _migrate_tmpfiles+=("$tmpfile")
 
+    # Opt-in guard: only re-render agents the user already has installed.
+    # Migrate must not silently materialise agents that weren't there.
+    if [[ ! -f "${target}" ]]; then
+      continue
+    fi
+
+    log "Rendering ${agent} from template..."
+
+    # Dispatch to the per-agent render function. Failures (missing template,
+    # missing node, etc.) are reported by the render fn and we move on.
+    if ! "$render_fn" "$template" "$tmpfile"; then
+      continue
+    fi
+
+    # Diff rendered output against live target. If unchanged, no-op.
+    if ! diff -q "$tmpfile" "$target" >/dev/null 2>&1 || [[ "${FORCE}" == "true" ]]; then
       if [[ "${DRY_RUN}" == "true" ]]; then
-        echo "[DRY RUN] Would update paths in: ${agent}"
+        echo "[DRY RUN] Would update: ${agent}"
+        rm -f "$tmpfile"
+        agents_updated=$((agents_updated + 1))
         continue
       fi
 
-      # Unload first
-      launchctl unload "${AGENT_PATH}" 2>/dev/null || true
+      # Unload current agent (ignore failure — may not be loaded)
+      launchctl unload "${target}" 2>/dev/null || true
 
-      # Update paths in plist
-      sed -i.bak "s|${HOME}/aiteamforge|${NEW_DATA_DIR}|g" "${AGENT_PATH}"
+      # Atomically replace with rendered version
+      mv "$tmpfile" "${target}"
 
-      # Also update to use new framework location
-      sed -i.bak2 "s|${HOME}/aiteamforge/|/opt/homebrew/opt/aiteamforge/libexec/|g" "${AGENT_PATH}"
+      # Reload agent (ignore failure — may need user session context)
+      launchctl load "${target}" 2>/dev/null || true
 
-      # Reload
-      launchctl load "${AGENT_PATH}" 2>/dev/null || true
-
-      AGENTS_UPDATED=$((AGENTS_UPDATED + 1))
+      success "Updated ${agent}"
+      agents_updated=$((agents_updated + 1))
+    else
+      # No change — clean up tempfile, count as no-op
+      rm -f "$tmpfile"
     fi
   done
 
-  if [[ "${DRY_RUN}" != "true" ]]; then
-    if [[ "${AGENTS_UPDATED}" -gt 0 ]]; then
-      success "LaunchAgents updated: ${AGENTS_UPDATED}"
-    else
-      info "No LaunchAgents to update"
-    fi
+  if [[ "${agents_updated}" -eq 0 ]]; then
+    success "All LaunchAgents up to date"
+  elif [[ "${DRY_RUN}" == "true" ]]; then
+    success "Would update ${agents_updated} LaunchAgent(s)"
+  else
+    success "LaunchAgents updated: ${agents_updated}"
   fi
 
   echo ""
