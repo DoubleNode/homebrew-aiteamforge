@@ -10,12 +10,13 @@ A comprehensive backup system for kanban board JSON files with:
 - Status reporting for LCARS UI integration
 
 Usage:
-    python3 kanban-backup.py [--backup | --restore <team> | --status | --prune]
+    python3 kanban-backup.py [--backup | --restore <team> | --restore-memory <team> | --status | --prune]
 
-    --backup    Run backup cycle (default)
-    --restore   Restore a specific team's board from backup
-    --status    Show backup status for all boards
-    --prune     Run retention pruning only
+    --backup              Run backup cycle (default)
+    --restore             Restore a specific team's kanban board from backup
+    --restore-memory      Restore a team's Claude auto-memory directory from the latest memory backup
+    --status              Show backup status for all boards
+    --prune               Run retention pruning only
 
 Retention Policy:
     - Hourly:  Keep backups from the last 24 hours
@@ -32,18 +33,21 @@ Completeness Invariants:
        snapshot_source_dir(). The resulting DirSnapshot is the SOLE input to
        both hashing and zipping. Any future code path that needs to know "what
        files are in this backup" must consume the snapshot, never re-walk.
+       This invariant applies equally to memory-dir backups (XACA-0207-002).
 
     2. Hash and zip derived from same snapshot
        get_directory_hash(snapshot) and create_directory_backup_zip(snapshot)
        accept the identical snapshot. Result: stored hash and archive contents
        cannot diverge for that run. Eliminates the TOCTOU window that existed
        between two independent rglob calls.
+       Memory-dir backups use the same DirSnapshot + hash + zip pipeline.
 
     3. No silent partial backups
        Every successful zip is verified post-write by _verify_zip_integrity()
        against the snapshot for file count AND top-level directory manifest.
        Mismatch → run FAILS (not silent success). A missing subdirectory is
        immediately caught before the backup is considered complete.
+       Memory zips are subject to the same post-write integrity check.
 
     4. Failure is loud and forensic
        Integrity failure (per kanban-backup.py main loop):
@@ -51,19 +55,25 @@ Completeness Invariants:
        - Previous-known-good hash preserved in stored_hashes[team]
        - status["boards"][team]["lastIntegrityFailure"] populated with detail
        - [INTEGRITY-FAIL] logged to stderr for LCARS alert pickup
+       Memory integrity failures follow the same quarantine + hash-preservation
+       pattern, keyed as stored_hashes["<team>:memory"].
 
     5. Cross-run regressions surfaced
        kanban-backup-health.py check_cross_run_regressions() compares latest
        2–3 zips per team. Subdirectory disappearance = always ERROR. File-count
        drops > 10% OR > 50 files = WARNING; > 25% = ERROR. Catches source-dir
        content loss (the XACA-0276 origin incident).
+       Memory backup zips use the "<team>-memory" team name in the health
+       check so the same regression logic applies with identical thresholds.
 
     6. Structured per-run audit trail
        Each successful per-team backup writes one JSON line to backup.log:
        - run_start (timestamp, teams_total, force flag)
        - team_backup_ok (file_count, uncompressed_bytes, compressed_bytes,
          top_level_dirs, zip_filename)
-       - run_end (totals)
+       - memory_backup_ok (same fields, plus source_dir; distinguishes from
+         kanban backups so log parsers can filter by type)
+       - run_end (totals, plus memory_backed_up / memory_skipped / memory_errors)
        Enables future trend analysis and post-incident forensics.
 
 Author: Reno's Engineering Lab
@@ -92,6 +102,7 @@ try:
     from aiteamforge_paths import (
         list_teams,
         get_team_kanban_dir,
+        get_team_memory_dir,
         EXPORT_EXCLUSION_SUFFIXES,
         EXPORT_EXCLUSION_NAMES,
         EXPORT_EXCLUSION_PATTERNS,
@@ -110,6 +121,10 @@ except ImportError:
         if d is None:
             raise KeyError(f"Team '{team}' not found in fallback dirs")
         return d
+
+    def get_team_memory_dir(team):  # type: ignore[misc]
+        # Fallback: return None — memory dirs not discoverable without shared module.
+        return None
 
     EXPORT_EXCLUSION_SUFFIXES = frozenset({".lock"})
     EXPORT_EXCLUSION_NAMES = frozenset({".DS_Store", "firebase-debug.log"})
@@ -351,6 +366,264 @@ def _get_team_kanban_dirs() -> dict:
         except KeyError:
             pass
     return result
+
+
+def _get_team_memory_dirs() -> dict:
+    """Build a team -> memory_dir mapping for teams that HAVE a memory dir.
+
+    Skips teams whose memory directory is absent (never opened in Claude Code,
+    or no memory written yet).  Alias teams (mainevent, medical, freelance)
+    that share the same working_dir as another team are included only once
+    because get_team_memory_dir() returns the same Path — deduplication via
+    a seen-paths set prevents double-backup of the same directory.
+    """
+    result = {}
+    seen_paths: set = set()
+    for team in list_teams():
+        try:
+            mem = get_team_memory_dir(team)
+        except KeyError:
+            continue
+        if mem is None:
+            continue
+        # Deduplicate — alias teams point at the same memory dir
+        resolved = str(mem.resolve())
+        if resolved in seen_paths:
+            continue
+        seen_paths.add(resolved)
+        result[team] = mem
+    return result
+
+
+def get_memory_backup_dir(team: str) -> Path:
+    """Return the backup directory for a team's memory backups.
+
+    Memory backups are stored alongside kanban backups but in a separate
+    subdirectory to avoid collision:  ~/aiteamforge-backups/kanban/<team>-memory/
+    """
+    return BACKUP_DIR / f"{team}-memory"
+
+
+def get_memory_backup_filename(timestamp: datetime) -> str:
+    """Generate a memory backup filename from a timestamp.
+
+    Uses a distinct infix so log parsers and rsync excludes can distinguish
+    memory zips from kanban zips:  <team>-memory_YYYYMMDD_HHMMSS.zip
+    The zip lives inside get_memory_backup_dir(team)/, so the full path is:
+        .../kanban/<team>-memory/<team>-memory_YYYYMMDD_HHMMSS.zip
+    """
+    return f"memory_{timestamp.strftime('%Y%m%d_%H%M%S')}.zip"
+
+
+def get_latest_memory_backup(team: str) -> Optional[Path]:
+    """Return the most recent memory backup zip for a team, or None."""
+    mem_backup_dir = get_memory_backup_dir(team)
+    if not mem_backup_dir.exists():
+        return None
+
+    zips = sorted(mem_backup_dir.glob("memory_*.zip"), reverse=True)
+    for z in zips:
+        if z.exists() and z.stat().st_size > 0:
+            try:
+                with zipfile.ZipFile(z, "r") as zf:
+                    zf.namelist()  # validate readable
+                return z
+            except Exception:
+                continue
+    return None
+
+
+def backup_memory_dir(
+    team: str, memory_dir: Path, stored_hashes: dict, status: dict, force: bool = False
+) -> dict:
+    """Backup a single team's Claude auto-memory directory.
+
+    Mirrors the logic of backup_board() but operates on an arbitrary directory
+    (not a board JSON file) and uses memory-specific zip naming.  The same
+    DirSnapshot + hash + zip + integrity-check pipeline applies (invariants 1-4).
+
+    Args:
+        team:        Team name (used for logging and hash key "<team>:memory").
+        memory_dir:  Path to the memory directory (must exist).
+        stored_hashes: Mutable dict of stored hashes (updated on success).
+        status:      Mutable status dict (updated on failure / success).
+        force:       If True, skip delta detection.
+
+    Returns:
+        Result dict with keys: team, action, message, timestamp.
+    """
+    hash_key = f"{team}:memory"
+    result = {
+        "team": team,
+        "action": "none",
+        "message": "",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+    if not memory_dir.exists() or not memory_dir.is_dir():
+        result["action"] = "skipped"
+        result["message"] = f"Memory dir absent or not a directory: {memory_dir}"
+        return result
+
+    # Single rglob snapshot (invariant 1 + 2)
+    snapshot = snapshot_source_dir(memory_dir)
+
+    if not snapshot.files:
+        result["action"] = "skipped"
+        result["message"] = "Memory dir is empty"
+        return result
+
+    current_hash = get_directory_hash(memory_dir, team, snapshot)
+    stored_hash = stored_hashes.get(hash_key)
+
+    # Delta detection — skip if unchanged (no daily-backup requirement for memory:
+    # memory files change rarely; back up only on actual change or force)
+    if not force and current_hash and current_hash == stored_hash:
+        result["action"] = "skipped"
+        result["message"] = "No changes detected"
+        return result
+
+    mem_backup_dir = get_memory_backup_dir(team)
+    mem_backup_dir.mkdir(parents=True, exist_ok=True)
+
+    now = datetime.now(timezone.utc)
+    backup_file = mem_backup_dir / get_memory_backup_filename(now)
+
+    success = create_directory_backup_zip(team, memory_dir, backup_file, snapshot)
+    if not success:
+        result["action"] = "error"
+        result["message"] = "Memory backup failed: zip creation failed"
+        return result
+
+    # Post-zip integrity check (invariant 3)
+    integrity_ok, integrity_error = _verify_zip_integrity(team, backup_file, memory_dir, snapshot)
+
+    if not integrity_ok:
+        # Quarantine bad zip (invariant 4)
+        FAILED_BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+        failed_path = FAILED_BACKUP_DIR / f"{team}-memory_{backup_file.name}.FAILED"
+        try:
+            backup_file.rename(failed_path)
+        except Exception:
+            failed_path = backup_file
+
+        failure_ts = datetime.now(timezone.utc).isoformat()
+        error_msg = f"Memory integrity failure: {integrity_error}; quarantined to {failed_path}"
+
+        print(
+            f"  [INTEGRITY-FAIL] {team} (memory): {integrity_error} "
+            f"| zip quarantined: {failed_path}",
+            file=sys.stderr,
+        )
+        print(f"  [INTEGRITY-FAIL] {team} (memory): stored hash NOT updated — next run will retry")
+
+        if "memory" not in status:
+            status["memory"] = {}
+        mem_entry = status["memory"].get(team, {})
+        mem_entry["lastIntegrityFailure"] = {
+            "timestamp": failure_ts,
+            "detail": integrity_error,
+            "quarantinedZip": str(failed_path),
+            "expectedCount": len(snapshot.files),
+        }
+        status["memory"][team] = mem_entry
+
+        result["action"] = "error"
+        result["message"] = error_msg
+        return result
+
+    # Success — advance hash (invariant 4: hash preserved only on success)
+    stored_hashes[hash_key] = current_hash
+    result["action"] = "backed_up"
+    result["message"] = f"Created {backup_file.name}"
+
+    # Structured audit log line (invariant 6: memory_backup_ok event)
+    uncompressed_bytes = sum(
+        item.stat().st_size for item in snapshot.files if item.exists()
+    )
+    compressed_bytes = backup_file.stat().st_size if backup_file.exists() else 0
+    _append_log_line({
+        "event": "memory_backup_ok",
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "team": team,
+        "source_dir": str(memory_dir),
+        "file_count": len(snapshot.files),
+        "uncompressed_bytes": uncompressed_bytes,
+        "compressed_bytes": compressed_bytes,
+        "top_level_dirs": sorted(snapshot.top_level_dirs),
+        "zip_filename": backup_file.name,
+    })
+
+    return result
+
+
+def prune_memory_backups(team: str) -> dict:
+    """Apply the same tiered retention policy to memory backups for a team.
+
+    Memory files change rarely — the hourly tier will typically keep all
+    recent snapshots; weekly/monthly provide the long tail.
+    """
+    mem_backup_dir = get_memory_backup_dir(team)
+    if not mem_backup_dir.exists():
+        return {"pruned": 0, "kept": 0}
+
+    now = datetime.now(timezone.utc)
+    backups = []
+
+    for backup_file in mem_backup_dir.glob("memory_*.zip"):
+        ts = parse_backup_timestamp(backup_file.name)
+        if ts:
+            backups.append((ts, backup_file))
+
+    if not backups:
+        return {"pruned": 0, "kept": 0}
+
+    backups.sort(key=lambda x: x[0], reverse=True)
+    keep: set = set()
+    keep.add(backups[0][1])  # always keep latest
+
+    hourly_cutoff = now - timedelta(hours=RETENTION["hourly"])
+    for ts, path in backups:
+        if ts >= hourly_cutoff:
+            keep.add(path)
+
+    daily_kept: dict = {}
+    daily_cutoff = now - timedelta(days=RETENTION["daily"])
+    for ts, path in backups:
+        if ts >= daily_cutoff:
+            day_key = ts.strftime("%Y-%m-%d")
+            if day_key not in daily_kept:
+                daily_kept[day_key] = path
+                keep.add(path)
+
+    weekly_kept: dict = {}
+    weekly_cutoff = now - timedelta(weeks=RETENTION["weekly"])
+    for ts, path in backups:
+        if ts >= weekly_cutoff:
+            week_key = ts.strftime("%Y-W%W")
+            if week_key not in weekly_kept:
+                weekly_kept[week_key] = path
+                keep.add(path)
+
+    monthly_kept: dict = {}
+    monthly_cutoff = now - timedelta(days=RETENTION["monthly"] * 30)
+    for ts, path in backups:
+        if ts >= monthly_cutoff:
+            month_key = ts.strftime("%Y-%m")
+            if month_key not in monthly_kept:
+                monthly_kept[month_key] = path
+                keep.add(path)
+
+    pruned = 0
+    for ts, path in backups:
+        if path not in keep:
+            try:
+                path.unlink()
+                pruned += 1
+            except Exception as e:
+                print(f"  [WARNING] Failed to prune memory backup {path.name}: {e}")
+
+    return {"pruned": pruned, "kept": len(keep)}
 
 
 def get_board_files() -> list[Path]:
@@ -797,7 +1070,7 @@ def calculate_storage() -> tuple[int, int]:
 
 
 def run_backup(force: bool = False):
-    """Run a full backup cycle."""
+    """Run a full backup cycle (kanban boards + Claude auto-memory dirs)."""
     print(f"\n{'='*60}")
     print("KANBAN BACKUP SYSTEM")
     print(f"{'='*60}")
@@ -823,7 +1096,12 @@ def run_backup(force: bool = False):
     restored = 0
     errors = 0
 
-    # --- XACA-0276-006: run-start structured log line ---
+    # Memory-dir counters (XACA-0207-002)
+    memory_backed_up = 0
+    memory_skipped = 0
+    memory_errors = 0
+
+    # --- XACA-0276-006 / XACA-0207-002: run-start structured log line ---
     run_start_ts = datetime.now(timezone.utc).isoformat()
     _append_log_line({
         "event": "run_start",
@@ -857,6 +1135,42 @@ def run_backup(force: bool = False):
         elif result["action"] == "error":
             errors += 1
 
+    # --- Memory dir backups (XACA-0207-002) ---
+    memory_dirs = _get_team_memory_dirs()
+    if memory_dirs:
+        print("\nProcessing Claude auto-memory directories:")
+        print("-" * 40)
+        if "memory" not in status:
+            status["memory"] = {}
+
+        for team, memory_dir in sorted(memory_dirs.items()):
+            mem_result = backup_memory_dir(team, memory_dir, stored_hashes, status, force)
+            action = mem_result["action"]
+            msg = mem_result["message"]
+            if action == "backed_up":
+                memory_backed_up += 1
+                print(f"  [MEM-OK] {team}: {msg}")
+            elif action == "skipped":
+                memory_skipped += 1
+                print(f"  [MEM-SKIP] {team}: {msg}")
+            elif action == "error":
+                memory_errors += 1
+                print(f"  [MEM-ERROR] {team}: {msg}")
+
+        # Prune memory backups
+        print("\nRunning memory retention pruning:")
+        print("-" * 40)
+        total_mem_pruned = 0
+        for team in sorted(memory_dirs.keys()):
+            prune_result = prune_memory_backups(team)
+            if prune_result["pruned"] > 0:
+                print(f"  [MEM-PRUNE] {team}: Removed {prune_result['pruned']} old memory backups, kept {prune_result['kept']}")
+                total_mem_pruned += prune_result["pruned"]
+        if total_mem_pruned == 0:
+            print("  No memory backups needed pruning")
+    else:
+        print("\n  No Claude auto-memory directories found (skipping memory backup)")
+
     # Save updated hashes
     save_hashes(stored_hashes)
 
@@ -879,7 +1193,7 @@ def run_backup(force: bool = False):
 
     # Update status
     status["lastRun"] = datetime.now(timezone.utc).isoformat()
-    status["lastRunStatus"] = "success" if errors == 0 else "errors"
+    status["lastRunStatus"] = "success" if (errors == 0 and memory_errors == 0) else "errors"
     status["totalBackups"] = backup_count
     status["storageUsed"] = format_bytes(storage_bytes)
     status["lastRunStats"] = {
@@ -887,12 +1201,15 @@ def run_backup(force: bool = False):
         "skipped": skipped,
         "restored": restored,
         "errors": errors,
-        "pruned": total_pruned
+        "pruned": total_pruned,
+        "memoryBackedUp": memory_backed_up,
+        "memorySkipped": memory_skipped,
+        "memoryErrors": memory_errors,
     }
 
     save_status(status)
 
-    # --- XACA-0276-006: run-end structured log line ---
+    # --- XACA-0276-006 / XACA-0207-002: run-end structured log line ---
     _append_log_line({
         "event": "run_end",
         "ts": datetime.now(timezone.utc).isoformat(),
@@ -902,18 +1219,24 @@ def run_backup(force: bool = False):
         "teams_restored": restored,
         "teams_errors": errors,
         "teams_pruned": total_pruned,
-        "run_status": "success" if errors == 0 else "errors",
+        "memory_backed_up": memory_backed_up,
+        "memory_skipped": memory_skipped,
+        "memory_errors": memory_errors,
+        "run_status": "success" if (errors == 0 and memory_errors == 0) else "errors",
     })
 
     print(f"\n{'='*60}")
     print("SUMMARY")
     print(f"{'='*60}")
-    print(f"  Backed up:  {backed_up}")
-    print(f"  Skipped:    {skipped} (no changes)")
-    print(f"  Restored:   {restored}")
-    print(f"  Errors:     {errors}")
-    print(f"  Pruned:     {total_pruned}")
-    print(f"  Total:      {backup_count} backups ({format_bytes(storage_bytes)})")
+    print(f"  Backed up:       {backed_up}")
+    print(f"  Skipped:         {skipped} (no changes)")
+    print(f"  Restored:        {restored}")
+    print(f"  Errors:          {errors}")
+    print(f"  Pruned:          {total_pruned}")
+    print(f"  Memory backed:   {memory_backed_up}")
+    print(f"  Memory skipped:  {memory_skipped} (no changes)")
+    print(f"  Memory errors:   {memory_errors}")
+    print(f"  Total:           {backup_count} backups ({format_bytes(storage_bytes)})")
     print(f"{'='*60}\n")
 
 
@@ -952,6 +1275,99 @@ def run_restore(team: str):
             print(f"SUCCESS: Restored {team} from {latest.name}")
     else:
         print(f"ERROR: Failed to restore from {latest.name}")
+        sys.exit(1)
+
+
+def run_restore_memory(team: str, force: bool = False, yes: bool = False):
+    """Restore a team's Claude auto-memory directory from the latest memory backup.
+
+    Safety: refuses to overwrite destination files that are NEWER than the
+    backup zip's mtime unless --force is passed.  This protects against
+    accidentally clobbering live memory written since the last backup.
+
+    Args:
+        team:  Team name (must be known to get_team_memory_dir).
+        force: If True, restore even if destination has newer files.
+        yes:   If True, skip the interactive confirmation prompt (for
+               scripted/headless restore scenarios).
+    """
+    print(f"\nRestoring Claude auto-memory for team '{team}'...")
+
+    # Resolve destination
+    try:
+        dest_dir = get_team_memory_dir(team)
+    except KeyError:
+        available = ", ".join(sorted(list_teams()))
+        print(f"ERROR: Unknown team '{team}'")
+        print(f"Available teams: {available}")
+        sys.exit(1)
+
+    if dest_dir is None:
+        # Try to infer destination even if memory dir doesn't exist yet
+        # (restoring to a fresh machine where dir was never created).
+        # We can still proceed — extractall will create the directory.
+        print(f"  Note: memory dir not found on disk for '{team}' — will create on restore.")
+
+    latest = get_latest_memory_backup(team)
+    if not latest:
+        print(f"ERROR: No memory backup found for team '{team}'")
+        sys.exit(1)
+
+    print(f"  Latest memory backup: {latest}")
+    if dest_dir:
+        print(f"  Target directory:     {dest_dir}")
+    else:
+        print(f"  Target directory:     (will be created by restore)")
+
+    # Safety check: refuse to clobber newer files without --force
+    if dest_dir and dest_dir.exists() and not force:
+        zip_mtime = latest.stat().st_mtime
+        newer_files = []
+        for f in dest_dir.rglob("*"):
+            if f.is_file() and f.stat().st_mtime > zip_mtime:
+                newer_files.append(f)
+        if newer_files:
+            print(f"\n  WARNING: {len(newer_files)} file(s) in the destination are NEWER than the backup:")
+            for nf in newer_files[:5]:
+                print(f"    {nf}")
+            if len(newer_files) > 5:
+                print(f"    ... and {len(newer_files) - 5} more")
+            print("\n  Refusing to overwrite newer files. Use --force to override.")
+            sys.exit(1)
+
+    # Confirm (skip prompt when --yes is set for scripted/headless restores)
+    if not yes:
+        response = input("\nProceed with memory restore? [y/N]: ")
+        if response.lower() != "y":
+            print("Restore cancelled.")
+            return
+
+    # Destination for extraction: parent of memory_dir
+    # (zip contains relative paths like "MEMORY.md", so we extract INTO dest_dir)
+    if dest_dir:
+        extract_to = dest_dir
+    else:
+        # Derive destination from the backup path
+        # backup is at .../kanban/<team>-memory/memory_*.zip
+        # dest should be ~/.claude/projects/<encoded>/memory/
+        # We can't derive this without the module; bail out.
+        try:
+            from aiteamforge_paths import get_team_working_dir
+            working_dir = get_team_working_dir(team)
+            encoded = working_dir.as_posix().replace(" ", "-").replace("/", "-")
+            extract_to = Path.home() / ".claude" / "projects" / encoded / "memory"
+        except Exception as e:
+            print(f"ERROR: Cannot determine restore destination: {e}")
+            sys.exit(1)
+
+    extract_to.mkdir(parents=True, exist_ok=True)
+
+    try:
+        with zipfile.ZipFile(latest, "r") as zf:
+            zf.extractall(extract_to)
+        print(f"SUCCESS: Restored '{team}' memory from {latest.name} to {extract_to}")
+    except Exception as e:
+        print(f"ERROR: Restore failed: {e}")
         sys.exit(1)
 
 
@@ -1008,6 +1424,11 @@ def main():
         help='Restore a specific team board from backup'
     )
     parser.add_argument(
+        '--restore-memory',
+        metavar='TEAM',
+        help='Restore a team Claude auto-memory directory from the latest memory backup'
+    )
+    parser.add_argument(
         '--status', '-s',
         action='store_true',
         help='Show backup status'
@@ -1020,19 +1441,26 @@ def main():
     parser.add_argument(
         '--force', '-f',
         action='store_true',
-        help='Force backup even if no changes detected'
+        help='Force backup even if no changes detected; for --restore-memory, allow clobbering newer destination files'
+    )
+    parser.add_argument(
+        '--yes', '-y',
+        action='store_true',
+        help='Skip interactive confirmation prompt (for --restore-memory in scripted/headless scenarios)'
     )
 
     args = parser.parse_args()
 
     # Default to backup if no action specified
-    if not any([args.backup, args.restore, args.status, args.prune]):
+    if not any([args.backup, args.restore, args.restore_memory, args.status, args.prune]):
         args.backup = True
 
     if args.status:
         show_status()
     elif args.restore:
         run_restore(args.restore)
+    elif args.restore_memory:
+        run_restore_memory(args.restore_memory, force=args.force, yes=args.yes)
     elif args.prune:
         print("Running retention pruning...")
         for board_file in get_board_files():

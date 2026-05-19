@@ -103,6 +103,31 @@ defaults:
 overrides: []
 ```
 
+### MANDATORY: Claude auto-memory in every team YAML
+
+Every team YAML **must** include the following two rules in its `defaults.rules`
+list (under `# ----- USER_STATE ... -----`).  Replace `{claude_project_dir_name}`
+with the team's actual encoded project dir name (see `claude_project_dir_name`
+top-level key):
+
+```yaml
+- pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+  channel: user_state
+- pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+  channel: user_state
+```
+
+`finance.yaml` is the canonical example — see lines 41-44.  If these rules are
+omitted, the team's MEMORY.md and agent memory files are NOT captured in the
+Export/Import manifest and will be lost on a machine transfer.
+
+The backup side (kanban-backup.py, XACA-0207-002) discovers memory dirs
+automatically via `get_team_memory_dir()` from `aiteamforge_paths.py` — no
+YAML change is needed for backup coverage.  The YAML rules above are only
+required for the Export/Import transfer pipeline.
+
+---
+
 ### Channel selection decision tree
 
 1. **Is the path carried by AITeamForge installer?** (e.g., `~/dev-team/{team}/`, `~/{team}/.claude/agents/`)
