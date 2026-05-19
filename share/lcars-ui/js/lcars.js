@@ -9172,6 +9172,14 @@ function switchSection(sectionName, skipAnimation = false) {
     if (sectionName === 'change-req') {
         if (typeof renderChangeReqList === 'function') renderChangeReqList();
     }
+
+    // Refresh account selector when switching to usage section (XACA-0280-007)
+    if (sectionName === 'usage') {
+        const selFn = document.getElementById('usage-account-selector')
+            ? window._populateUsageAccountSelector
+            : null;
+        if (typeof selFn === 'function') selFn();
+    }
 }
 
 function loadSavedSection() {

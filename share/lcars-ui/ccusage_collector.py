@@ -15,9 +15,9 @@ cache to /tmp/lcars-ccusage-cache.json atomically. Multiple UI clients
 (LCARS dashboard, agent panels) read the cache without repeatedly re-scanning
 the underlying JSONL files.
 
-Cache schema (v2):
+Cache schema (v3):
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "collected_at": "<ISO-8601 UTC>",
   "collected_at_unix": <int>,
   "ccusage_ok": <bool>,
@@ -56,8 +56,45 @@ Cache schema (v2):
       ...  // up to 12 weeks, oldest->newest, excludes current week
     ]
   } | null,  // null when ccusage weekly call fails; weekly_error populated
-  "weekly_error": str | null  // set when weekly collection fails
+  "weekly_error": str | null,  // set when weekly collection fails
+  "accounts": {
+    "<account_id>": {
+      "nickname": str,         // from team-paths.json anthropic_account_nickname
+      "today_tokens": int,
+      "today_cost_usd": float,
+      "last_7d_tokens": int,
+      "last_7d_cost_usd": float,
+      "all_time_tokens": int,
+      "all_time_cost_usd": float,
+    },
+    ...
+  },
+  "untagged_bucket": {
+    "nickname": "Untagged (pre-isolation)",
+    "today_tokens": int,
+    "today_cost_usd": float,
+    "last_7d_tokens": int,
+    "last_7d_cost_usd": float,
+    "all_time_tokens": int,
+    "all_time_cost_usd": float,
+    "cwds": [str, ...]         // decoded cwd paths, for diagnostics
+  }
 }
+
+NOTE on v3 rollup semantics:
+- All v2 fields (active_window, history, calibration, totals, weekly) are
+  PRESERVED UNCHANGED as the all-accounts rollup. Existing consumers are
+  unaffected.
+- "accounts" is the new per-account breakdown keyed by Anthropic account_id
+  (e.g. "acct-xyz") or "default-oauth" for teams with no explicit account
+  configured. Attribution uses cwd-based matching via team-paths.json
+  working_dir fields. session --json sessionId encoding: all '/' replaced
+  by '-', so we encode working_dir the same way and use prefix matching.
+- "untagged_bucket" aggregates sessions whose cwd does not match any team.
+  No heuristic backfill is attempted; only genuinely unmapped cwds land here.
+- SessionAccountMapIndex (see class below) provides an auxiliary tiebreaker:
+  if a cwd has no team-paths match but the JSONL map has a known account for
+  it, that account is used instead of Untagged.
 
 v1 -> v2 change notes:
 - All v1 fields are preserved unchanged for backward compatibility.
@@ -65,6 +102,14 @@ v1 -> v2 change notes:
 - New top-level "weekly_error" key captures weekly-fetch failures without
   affecting ccusage_ok (the 5h blocks flow is independent).
 - schema_version bumped from 1 to 2.
+
+v2 -> v3 change notes:
+- All v2 fields are preserved unchanged for backward compatibility.
+- New top-level "accounts" key contains per-account usage breakdown.
+- New top-level "untagged_bucket" key aggregates unmatched sessions.
+- schema_version bumped from 2 to 3.
+- v2->v3 migration (run once): legacy totals mirrored into untagged_bucket
+  so historical numbers don't vanish from the new UI.
 
 Notes for subitem 003 (API endpoint consumer):
 - active_window is null between usage sessions.
@@ -91,6 +136,9 @@ import sys
 import time
 from typing import Any, Optional
 
+TEAM_PATHS_JSON = pathlib.Path("~/.aiteamforge/team-paths.json").expanduser()
+SESSION_ACCOUNT_MAP_JSONL = pathlib.Path("~/.claude/.session-account-map.jsonl").expanduser()
+
 # --- constants ---
 CACHE_PATH = pathlib.Path("/tmp/lcars-ccusage-cache.json")
 CACHE_TMP_PATH = pathlib.Path("/tmp/lcars-ccusage-cache.tmp.json")
@@ -104,7 +152,7 @@ PID_PATH = pathlib.Path("/tmp/lcars-ccusage-collector.pid")
 POLL_INTERVAL_S = 180
 CCUSAGE_TIMEOUT_S = 240  # ccusage scans JSONL transcripts; ~65s typical, 200s+ under load
 HISTORY_MAX = 50
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 ROLLING_DAYS = 7       # rolling history window for display
 CALIBRATION_DAYS = 30  # wider window keeps calibration stable as rolling rotates
 WEEKLY_DAYS = 90       # ~13 calendar weeks for weekly history
@@ -192,6 +240,32 @@ def run_ccusage_weekly(binary: str) -> tuple[bool, Any, str]:
         return True, json.loads(result.stdout), ""
     except json.JSONDecodeError as e:
         return False, None, f"weekly JSON parse error: {e} — output: {result.stdout[:100]}"
+
+
+def run_ccusage_session(binary: str, days_back: int) -> tuple[bool, Any, str]:
+    """Run ccusage session --json --since YYYYMMDD. Returns (ok, data, error_msg).
+
+    Used for per-account attribution: each session row carries a sessionId that
+    encodes the project working directory.  Uses the same timeout as blocks/weekly
+    since it scans the same JSONL transcripts.
+    """
+    cmd = [binary, "session", "--json", "--since", _since_flag(days_back)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT_S)
+    except FileNotFoundError as e:
+        return False, None, f"ccusage binary not found: {e}"
+    except subprocess.TimeoutExpired:
+        return False, None, f"ccusage session timed out after {CCUSAGE_TIMEOUT_S}s"
+    except Exception as e:
+        return False, None, f"ccusage session subprocess error: {e}"
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "unknown error").strip()
+        return False, None, f"ccusage session exited {result.returncode}: {err[:200]}"
+    try:
+        return True, json.loads(result.stdout), ""
+    except json.JSONDecodeError as e:
+        return False, None, f"session JSON parse error: {e} — output: {result.stdout[:100]}"
 
 
 # --- data helpers ---
@@ -351,10 +425,307 @@ def build_weekly(raw_weeks: list[dict]) -> dict:
     }
 
 
+def _load_team_paths() -> dict:
+    """Load ~/.aiteamforge/team-paths.json. Returns {} on any error."""
+    try:
+        return json.loads(TEAM_PATHS_JSON.read_text())
+    except Exception:
+        return {}
+
+
+def _encode_path_as_session_id(path: str) -> str:
+    """Encode a filesystem path the same way ccusage encodes sessionId.
+
+    ccusage replaces all '/' characters with '-', so /Users/foo/bar becomes
+    -Users-foo-bar.  Spaces in directory names also become '-' since ccusage
+    uses the raw path separator replacement.
+    """
+    return path.replace("/", "-").replace(" ", "-")
+
+
+def build_accounts(
+    session_rows: list[dict],
+    team_paths: dict,
+    session_map_index: Optional["SessionAccountMapIndex"] = None,
+) -> tuple[dict, dict]:
+    """Build per-account usage breakdown from ccusage session rows.
+
+    Returns (accounts, untagged_bucket) where:
+    - accounts: {account_id: {nickname, today_tokens, today_cost_usd,
+                              last_7d_tokens, last_7d_cost_usd,
+                              all_time_tokens, all_time_cost_usd}}
+    - untagged_bucket: same shape + cwds: [list of decoded cwd strings]
+
+    Attribution priority:
+    1. Exact encoded-path match or prefix match against team working_dir.
+    2. SessionAccountMapIndex tiebreaker for cwds with no team match.
+    3. Untagged (pre-isolation) bucket.
+
+    The "today" cutoff uses system local time (midnight today).
+    The "last_7d" cutoff uses system local time (midnight 7 days ago).
+    All-time uses the full session history (no date filter).
+    """
+    teams = team_paths.get("teams", {})
+
+    # Pre-encode all team working_dirs for fast comparison.
+    # Each entry: (encoded_prefix, account_id, nickname)
+    team_encodings: list[tuple[str, str, str]] = []
+    for _slug, tdata in teams.items():
+        wdir = tdata.get("working_dir", "")
+        if not wdir:
+            continue
+        encoded = _encode_path_as_session_id(wdir)
+        account_id = tdata.get("anthropic_account_id") or "default-oauth"
+        nickname = tdata.get("anthropic_account_nickname") or account_id
+        team_encodings.append((encoded, account_id, nickname))
+
+    # Sort longest-prefix-first so most-specific match wins.
+    team_encodings.sort(key=lambda t: len(t[0]), reverse=True)
+
+    local_now = datetime.datetime.now()
+    today_start = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
+    seven_days_ago = today_start - datetime.timedelta(days=7)
+
+    # Accumulators: {account_id: {nickname, today_tokens, ...}}
+    acc: dict[str, dict] = {}
+    untagged_tokens_today = untagged_cost_today = 0.0
+    untagged_tokens_7d = untagged_cost_7d = 0.0
+    untagged_tokens_all = untagged_cost_all = 0.0
+    untagged_cwds: list[str] = []
+    untagged_cwds_seen: set[str] = set()
+
+    for row in session_rows:
+        session_id = row.get("sessionId", "")
+        total_tokens = row.get("totalTokens", 0)
+        total_cost = row.get("totalCost", 0.0)
+        last_activity = row.get("lastActivity", "")  # YYYY-MM-DD local date string
+
+        # Determine "today" and "7d" fractions using lastActivity.
+        # lastActivity is a date string; we treat it as a start-of-day marker
+        # in system local time.  This is an approximation — the session may
+        # span multiple days — but it matches the intent for the UI display.
+        try:
+            la_date = datetime.datetime.strptime(last_activity, "%Y-%m-%d") if last_activity else None
+        except ValueError:
+            la_date = None
+
+        is_today = la_date is not None and la_date >= today_start
+        is_7d = la_date is not None and la_date >= seven_days_ago
+
+        # Match sessionId against team encodings (exact or prefix).
+        matched_account_id: Optional[str] = None
+        matched_nickname: Optional[str] = None
+        for encoded_prefix, a_id, a_nick in team_encodings:
+            if session_id == encoded_prefix or session_id.startswith(encoded_prefix + "-"):
+                matched_account_id = a_id
+                matched_nickname = a_nick
+                break
+
+        # Tiebreaker: SessionAccountMapIndex by decoded cwd.
+        if matched_account_id is None and session_map_index is not None:
+            # Decode sessionId back to a cwd approximation for map lookup.
+            decoded_cwd = session_id.replace("-", "/", 1).replace("-", "/") if session_id.startswith("-") else session_id
+            result = session_map_index.most_recent_account_for_cwd(decoded_cwd)
+            if result:
+                matched_account_id, matched_nickname = result
+
+        if matched_account_id is not None and matched_nickname is not None:
+            if matched_account_id not in acc:
+                acc[matched_account_id] = {
+                    "nickname": matched_nickname,
+                    "today_tokens": 0, "today_cost_usd": 0.0,
+                    "last_7d_tokens": 0, "last_7d_cost_usd": 0.0,
+                    "all_time_tokens": 0, "all_time_cost_usd": 0.0,
+                }
+            entry = acc[matched_account_id]
+            entry["all_time_tokens"] += total_tokens
+            entry["all_time_cost_usd"] += total_cost
+            if is_7d:
+                entry["last_7d_tokens"] += total_tokens
+                entry["last_7d_cost_usd"] += total_cost
+            if is_today:
+                entry["today_tokens"] += total_tokens
+                entry["today_cost_usd"] += total_cost
+        else:
+            # Untagged
+            untagged_tokens_all += total_tokens
+            untagged_cost_all += total_cost
+            if is_7d:
+                untagged_tokens_7d += total_tokens
+                untagged_cost_7d += total_cost
+            if is_today:
+                untagged_tokens_today += total_tokens
+                untagged_cost_today += total_cost
+            # Decode for diagnostics (best-effort; hyphens in dir names are ambiguous)
+            decoded_cwd = session_id.replace("-", "/", 1) if session_id.startswith("-") else session_id
+            if decoded_cwd not in untagged_cwds_seen:
+                untagged_cwds_seen.add(decoded_cwd)
+                untagged_cwds.append(decoded_cwd)
+
+    # Round all costs.
+    for entry in acc.values():
+        entry["today_cost_usd"] = round(entry["today_cost_usd"], 6)
+        entry["last_7d_cost_usd"] = round(entry["last_7d_cost_usd"], 6)
+        entry["all_time_cost_usd"] = round(entry["all_time_cost_usd"], 6)
+
+    untagged_bucket = {
+        "nickname": "Untagged (pre-isolation)",
+        "today_tokens": int(untagged_tokens_today),
+        "today_cost_usd": round(untagged_cost_today, 6),
+        "last_7d_tokens": int(untagged_tokens_7d),
+        "last_7d_cost_usd": round(untagged_cost_7d, 6),
+        "all_time_tokens": int(untagged_tokens_all),
+        "all_time_cost_usd": round(untagged_cost_all, 6),
+        "cwds": untagged_cwds,
+    }
+
+    return acc, untagged_bucket
+
+
+# --- SessionAccountMapIndex (auxiliary attribution helper) ---
+
+class SessionAccountMapIndex:
+    """Lazy-loaded index of ~/.claude/.session-account-map.jsonl.
+
+    Primary attribution uses team-paths.json working_dir prefix matching.
+    This index is an auxiliary tiebreaker: when a cwd doesn't match any
+    team's working_dir, the map may still know the account for that cwd
+    from past cc-whoami attribution.
+
+    The index auto-rebuilds when the file's mtime changes.
+    """
+
+    def __init__(self, path: pathlib.Path = SESSION_ACCOUNT_MAP_JSONL) -> None:
+        self._path = path
+        self._mtime: Optional[float] = None
+        self._stat_error_logged: bool = False
+        # {session_uuid: entry_dict}
+        self._by_session: dict[str, dict] = {}
+        # {cwd: [entry_dict, ...] sorted newest-first}
+        self._by_cwd: dict[str, list[dict]] = {}
+
+    def _rebuild(self) -> None:
+        self._by_session = {}
+        self._by_cwd = {}
+        try:
+            text = self._path.read_text()
+        except Exception:
+            return
+        entries = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            entries.append(entry)
+            sid = entry.get("session_id", "")
+            if sid:
+                self._by_session[sid] = entry
+        # Build cwd index sorted newest-first.
+        from collections import defaultdict
+        cwd_map: dict[str, list[dict]] = defaultdict(list)
+        for entry in entries:
+            cwd = entry.get("cwd", "")
+            if cwd:
+                cwd_map[cwd].append(entry)
+        for cwd, elist in cwd_map.items():
+            self._by_cwd[cwd] = sorted(
+                elist,
+                key=lambda e: e.get("started_at", ""),
+                reverse=True,
+            )
+
+    def _refresh_if_stale(self) -> None:
+        try:
+            mtime = self._path.stat().st_mtime
+        except OSError as e:
+            if not self._stat_error_logged:
+                log_warn(f"SessionAccountMapIndex: stat() failed on {self._path}: {e}; serving stale index")
+                self._stat_error_logged = True
+            return
+        if mtime != self._mtime:
+            self._mtime = mtime
+            self._rebuild()
+
+    def by_session_id(self, session_uuid: str) -> Optional[dict]:
+        """Exact lookup by JSONL filename UUID."""
+        self._refresh_if_stale()
+        return self._by_session.get(session_uuid)
+
+    def by_cwd(self, cwd: str) -> list[dict]:
+        """Return all entries for a given cwd, sorted newest-first."""
+        self._refresh_if_stale()
+        return self._by_cwd.get(cwd, [])
+
+    def most_recent_account_for_cwd(self, cwd: str) -> Optional[tuple[str, str]]:
+        """Return (account_id, nickname) from most recent entry for cwd, or None."""
+        self._refresh_if_stale()
+        entries = self._by_cwd.get(cwd, [])
+        for entry in entries:
+            account_id = entry.get("account_id", "")
+            if account_id:
+                nickname = entry.get("account_nickname", account_id)
+                return account_id, nickname
+        return None
+
+
 # --- cache I/O ---
+
+def _empty_untagged_bucket() -> dict:
+    """Factory for a zero-filled untagged_bucket dict.
+
+    Use a factory (not a module-level dict literal) so each caller gets its
+    own instance and cannot accidentally mutate a shared object.
+    """
+    return {
+        "nickname": "Untagged (pre-isolation)",
+        "today_tokens": 0,
+        "today_cost_usd": 0.0,
+        "last_7d_tokens": 0,
+        "last_7d_cost_usd": 0.0,
+        "all_time_tokens": 0,
+        "all_time_cost_usd": 0.0,
+        "cwds": [],
+    }
+
+
+def _migrate_cache_if_needed(cache: dict) -> dict:
+    """Upgrade cache in-memory from v1/v2 to v3 shape.
+
+    Migration runs once: the next write_cache() will persist the v3 schema
+    so subsequent loads skip this path.
+
+    v2->v3: synthesise empty accounts={} and untagged_bucket that mirrors
+    the legacy totals so historical numbers don't vanish from the new UI.
+    """
+    if not isinstance(cache, dict):
+        return {}
+    version = cache.get("schema_version", 1)
+    if version >= 3:
+        return cache
+    prev_totals = cache.get("totals", {})
+    cache.setdefault("accounts", {})
+    cache.setdefault("untagged_bucket", {
+        "nickname": "Untagged (pre-isolation)",
+        "today_tokens": prev_totals.get("today_tokens", 0),
+        "today_cost_usd": prev_totals.get("today_cost_usd", 0.0),
+        "last_7d_tokens": prev_totals.get("last_7d_tokens", 0),
+        "last_7d_cost_usd": prev_totals.get("last_7d_cost_usd", 0.0),
+        "all_time_tokens": 0,
+        "all_time_cost_usd": 0.0,
+        "cwds": [],
+    })
+    cache["schema_version"] = 3
+    return cache
+
+
 def read_prev_cache() -> dict:
     try:
-        return json.loads(CACHE_PATH.read_text())
+        raw = json.loads(CACHE_PATH.read_text())
+        return _migrate_cache_if_needed(raw)
     except Exception:
         return {}
 
@@ -378,7 +749,7 @@ def collect(binary: str) -> None:
     if not ok:
         log_error(f"ccusage rolling fetch failed: {err}")
         # Preserve last known good values so UI can show stale-data warning.
-        # Weekly data is preserved as-is from previous cache (independent flow).
+        # Weekly and per-account data are preserved from previous cache (independent flows).
         write_cache({
             "schema_version": SCHEMA_VERSION,
             "collected_at": now_iso, "collected_at_unix": now_unix,
@@ -392,6 +763,8 @@ def collect(binary: str) -> None:
             }),
             "weekly": prev.get("weekly"),
             "weekly_error": prev.get("weekly_error"),
+            "accounts": prev.get("accounts", {}),
+            "untagged_bucket": prev.get("untagged_bucket", _empty_untagged_bucket()),
         })
         return
 
@@ -427,6 +800,25 @@ def collect(binary: str) -> None:
         weekly = None
         weekly_error = weekly_err
 
+    # Per-account attribution — independent of blocks flow; failures are tolerated.
+    # On failure: preserve previous accounts/untagged_bucket so UI doesn't blank out.
+    session_ok, session_data, session_err = run_ccusage_session(binary, ROLLING_DAYS)
+    if session_ok:
+        team_paths = _load_team_paths()
+        session_rows = session_data.get("sessions", [])
+        session_map = SessionAccountMapIndex()
+        accounts, untagged_bucket = build_accounts(
+            session_rows, team_paths, session_map
+        )
+        log_info(
+            f"Accounts: {len(accounts)} account(s) attributed, "
+            f"untagged_cwds={len(untagged_bucket.get('cwds', []))}"
+        )
+    else:
+        log_warn(f"ccusage session fetch failed ({session_err}); preserving prev account data")
+        accounts = prev.get("accounts", {})
+        untagged_bucket = prev.get("untagged_bucket", _empty_untagged_bucket())
+
     payload = {
         "schema_version": SCHEMA_VERSION,
         "collected_at": now_iso,
@@ -439,6 +831,8 @@ def collect(binary: str) -> None:
         "totals": totals,
         "weekly": weekly,
         "weekly_error": weekly_error,
+        "accounts": accounts,
+        "untagged_bucket": untagged_bucket,
     }
     write_cache(payload)
 
@@ -448,7 +842,8 @@ def collect(binary: str) -> None:
         f"history={len(history)}, "
         f"cal_samples={calibration.get('samples', 0)}, "
         f"max_window_tokens={calibration.get('max_window_tokens', 0):,}, "
-        f"weekly={'ok' if weekly_ok else 'failed'}"
+        f"weekly={'ok' if weekly_ok else 'failed'}, "
+        f"accounts={'ok' if session_ok else 'failed'}"
     )
 
 
