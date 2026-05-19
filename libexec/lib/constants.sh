@@ -22,3 +22,13 @@
 # (e.g., KANBAN_BACKUP_INTERVAL=1800 for 30 minutes).
 : "${KANBAN_BACKUP_INTERVAL_DEFAULT:=900}"
 readonly KANBAN_BACKUP_INTERVAL_DEFAULT
+
+# Fleet monitor HTTP server port. 3000 is the conventional default; override
+# via FLEET_MONITOR_PORT env var before sourcing.
+# Consumers:
+#   - libexec/installers/install-fleet-monitor.sh
+#   - libexec/commands/aiteamforge-migrate.sh
+#
+# Consumers resolve the runtime value with ${FLEET_MONITOR_PORT:-$FLEET_MONITOR_PORT_DEFAULT}.
+: "${FLEET_MONITOR_PORT_DEFAULT:=3000}"
+readonly FLEET_MONITOR_PORT_DEFAULT
