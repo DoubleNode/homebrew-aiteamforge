@@ -78,9 +78,9 @@ if [ -z "$_extracted_funcs" ]; then
   return 0
 fi
 
-# Defaults that the extracted functions reference (normally set at script top).
-# shellcheck disable=SC2034  # referenced by eval'd functions; shellcheck can't trace eval
-readonly XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000
+# Defaults that the extracted functions reference are sourced from constants.sh
+# via aiteamforge-migrate.sh at load time.  FLEET_MONITOR_PORT is injected via
+# the run_update_launchagents() helper below; no local mirror needed here.
 
 eval "$_extracted_funcs"
 
