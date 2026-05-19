@@ -143,6 +143,16 @@
         var status = _resolveCredentialStatus(currentConfig);
         row.dataset.credentialStatus = status;
 
+        // Tooltip on the status dot so the color isn't a mystery.
+        var dotEl = row.querySelector('.team-account-status-dot');
+        if (dotEl) {
+            dotEl.title = (
+                status === 'ok' ? 'Credentials present and validated' :
+                status === 'missing' ? 'No credentials — env var not set in this LCARS process' :
+                'Credentials present but never validated — run TEST CONNECTION'
+            );
+        }
+
         // Fill left-side labels.
         var nameEl = row.querySelector('.team-account-team-name');
         if (nameEl) nameEl.textContent = teamSlug.toUpperCase();
