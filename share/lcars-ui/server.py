@@ -8993,15 +8993,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             account_nickname = body.get('account_nickname', '')
             env_var_name = body.get('env_var_name', '')
 
-            # Validate: all three must be non-empty strings
-            if not isinstance(account_id, str) or not account_id.strip():
-                self._send_json_response({'success': False, 'error': 'account_id must be a non-empty string'}, status=400)
+            # Type-check first; then strip; then content-validate the trimmed value
+            # so whitespace-padded input is normalized before the regex guard sees it.
+            # account_id and account_nickname are OPTIONAL (empty = OAuth fallback,
+            # pre-XACA-0279 behavior). env_var_name is also optional, but if non-empty
+            # after stripping it must match the standard env-var pattern. All three
+            # empty = clear the manual config and revert the team to the OAuth fallback.
+            if not isinstance(account_id, str):
+                self._send_json_response({'success': False, 'error': 'account_id must be a string'}, status=400)
                 return
-            if not isinstance(account_nickname, str) or not account_nickname.strip():
-                self._send_json_response({'success': False, 'error': 'account_nickname must be a non-empty string'}, status=400)
+            if not isinstance(account_nickname, str):
+                self._send_json_response({'success': False, 'error': 'account_nickname must be a string'}, status=400)
                 return
-            if not isinstance(env_var_name, str) or not self._ENV_VAR_NAME_RE.match(env_var_name):
-                self._send_json_response({'success': False, 'error': 'env_var_name must match ^[A-Z][A-Z0-9_]*$'}, status=400)
+            if not isinstance(env_var_name, str):
+                self._send_json_response({'success': False, 'error': 'env_var_name must be a string'}, status=400)
+                return
+
+            account_id = account_id.strip()
+            account_nickname = account_nickname.strip()
+            env_var_name = env_var_name.strip()
+
+            if env_var_name and not self._ENV_VAR_NAME_RE.match(env_var_name):
+                self._send_json_response({'success': False, 'error': 'env_var_name must match ^[A-Z][A-Z0-9_]*$ when set'}, status=400)
                 return
 
             # Write to team-paths.json via fcntl lock + atomic rename
@@ -9022,9 +9035,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             self._send_json_response({'success': False, 'error': f"Team '{team}' not found in team-paths.json"}, status=400)
                             return
 
-                        # Merge only the three account fields; all other fields untouched
-                        data['teams'][team]['anthropic_account_id'] = account_id.strip()
-                        data['teams'][team]['anthropic_account_nickname'] = account_nickname.strip()
+                        # Merge only the three account fields; all other fields untouched.
+                        # Values are already stripped above — no redundant .strip() here.
+                        data['teams'][team]['anthropic_account_id'] = account_id
+                        data['teams'][team]['anthropic_account_nickname'] = account_nickname
                         data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
 
                         # Atomic write
