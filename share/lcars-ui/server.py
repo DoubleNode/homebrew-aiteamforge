@@ -275,6 +275,14 @@ SECRETS_IMPORT_STAGING_DIR = Path("/tmp/lcars-secrets-imports")
 # Maximum wrong-password attempts before the staged zip is purged (item 6 spec).
 _SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS = 5
 
+# XACA-0520-014: Channels that must NOT appear in the main export zip.
+# - secrets_export: shipped separately in the encrypted secrets zip (paired job).
+# - icloud_excluded: sync-only metadata, never bundled.
+# Used by generate_export() (pack-side filter), apply_import() (extract-side
+# filter), and the matching test assertions in tests/team_transfer/. Single
+# source of truth — do NOT inline a separate frozenset elsewhere.
+MAIN_ZIP_SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+
 
 def _prune_old_secrets_jobs():
     """Prune completed/failed/skipped secrets jobs older than 1 hour from both dicts.
@@ -569,10 +577,9 @@ def generate_export(job_id, team_id):
     import zipfile
     from datetime import datetime, timezone
 
-    # Channels that must NOT be included in the main export zip.
-    # secrets_export is handled by generate_secrets_export(); icloud_excluded
-    # files cannot be reliably transferred via a flat zip bundle.
-    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+    # XACA-0520-014: see module-level MAIN_ZIP_SKIP_CHANNELS for the
+    # canonical filter. Aliased here for in-function readability.
+    SKIP_CHANNELS = MAIN_ZIP_SKIP_CHANNELS
 
     try:
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -1007,15 +1014,14 @@ def apply_import(job_id):
     4. Re-run team_transfer.verifier against the destination filesystem and surface
        per-channel PASS/WARN/FAIL in the job status.
     """
-    import re
     import subprocess
     import sys
     import zipfile
     import shutil
     from datetime import datetime, timezone
 
-    # Channels that are never extracted from the main zip.
-    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+    # XACA-0520-014: canonical filter is MAIN_ZIP_SKIP_CHANNELS at module level.
+    SKIP_CHANNELS = MAIN_ZIP_SKIP_CHANNELS
 
     job = IMPORT_JOBS.get(job_id)
     if not job:
@@ -1217,6 +1223,12 @@ def apply_import(job_id):
             # in normal operation — the upload handler rejects legacy zips since  #
             # XACA-0520. Kept here so in-flight jobs created before the upgrade  #
             # can still complete.                                                 #
+            #                                                                     #
+            # TODO(XACA-0520-015): DELETE this entire `else:` branch + the        #
+            # `import_format='legacy'` state on the next release cycle (target:   #
+            # AITeamForge v0.10.0, ~2 weeks). Since IMPORT_JOBS is process-local  #
+            # any in-flight legacy jobs already evaporate on server restart, so   #
+            # the dead-code window is effectively zero post-deploy.               #
             # ------------------------------------------------------------------ #
             source_team = job['manifest'].get('team', '')
             target_base = job.get('targetBase', '')
@@ -2347,7 +2359,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def _resolve_selector(self, data, selector):
         """Resolve selector (ID or index) to array index. Returns -1 if not found."""
-        import re
         # Check if it's a JIRA-style ID (X followed by 3 letters, dash, digits)
         if re.match(r'^X[A-Z]{3}-\d+$', str(selector)):
             return self._find_item_index(data, selector)
@@ -4430,7 +4441,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def _extract_version_from_name(self, name):
         """Extract version number from release name (e.g., 'v1.3.0' -> '1.3.0')"""
-        import re
         # Match patterns like: v1.3.0, 1.3.0, v1.3, 1.3, Version 1.3.0, etc.
         match = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', name, re.IGNORECASE)
         return match.group(1) if match else '1.0.0'
@@ -4865,7 +4875,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # platform.version becomes "2.10.0"). Explicit per-platform
             # versions in the same request still win (handled below).
             if 'shortTitle' in post_data and post_data.get('shortTitle'):
-                import re
                 m = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', post_data['shortTitle'], re.IGNORECASE)
                 if m:
                     synced_version = m.group(1)
@@ -7764,7 +7773,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             agent  (string) -- filter by agent handle
             subitem (string) -- filter to a specific subitem ID
         """
-        import re
         from urllib.parse import parse_qs
         try:
             # Validate item_id format to prevent path traversal
@@ -8317,7 +8325,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Auto-detects team from CR-ID prefix (CR-<TEAM_UPPER>-<YYYYMMDD>-<seq>).
         Returns { crId, events: [] } when no log file exists yet (not an error).
         """
-        import re
         try:
             # Validate CR-ID format to prevent path traversal
             if not re.match(r'^CR-[A-Z]+-\d{8}-\d+$', cr_id):
@@ -8433,7 +8440,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         kb-cr shell helpers (single flock path), writes activity events,
         and returns the updated CR record.
         """
-        import re
         try:
             # ── Parse request body ─────────────────────────────────────────────
             content_length = int(self.headers.get("Content-Length", 0))
@@ -9806,7 +9812,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Keeps alphanumerics and hyphens only, lowercased. Falls back to
         'unknown' if nothing survives the filter.
         """
-        import re
         slug = re.sub(r'[^a-z0-9\-]', '', account_id.lower())
         return slug or 'unknown'
 
@@ -10816,7 +10821,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def serve_image(self, path):
         """Serve team logos and avatars from their respective directories"""
-        import re
         filename = path.replace('/images/', '')
 
         # First, check if the file exists in the local images directory (for startup logos, etc.)
@@ -11921,7 +11925,6 @@ end tell
 
     def serve_rag_engine_log(self):
         """Serve GET /api/rag-engines/log?engineId=X — read stderr log file for an engine"""
-        import re
         from urllib.parse import urlparse, parse_qs
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)

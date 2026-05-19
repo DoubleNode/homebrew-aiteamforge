@@ -57,9 +57,13 @@ SERVER_PY = LCARS_UI_DIR / "server.py"
 sys.path.insert(0, str(LCARS_UI_DIR))
 from team_transfer import channels as ch
 
-# The two channels that generate_export() MUST skip (SKIP_CHANNELS constant).
+# XACA-0520-014: must stay in sync with server.MAIN_ZIP_SKIP_CHANNELS.
+# This test module is deliberately import-free of `server` at the module level
+# (the test fixture boots server.py as a subprocess), so we mirror the literal
+# here. If the server constant changes, update this line and audit the test
+# assertions. (Drift surface is two strings; CI test failures will flag it.)
 EXPECTED_SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
-# All channels that MUST be included (not in SKIP_CHANNELS).
+# All channels that MUST be included (not in EXPECTED_SKIP_CHANNELS).
 EXPECTED_INCLUDE_CHANNELS = frozenset(ch.ALL_CHANNELS) - EXPECTED_SKIP_CHANNELS
 
 
@@ -126,7 +130,7 @@ def test_empty_channel_manifest_does_not_crash_packing():
     })
 
     # Mirror the filter from generate_export().
-    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+    SKIP_CHANNELS = EXPECTED_SKIP_CHANNELS  # XACA-0520-014: single source of truth
     packable = []
     for _dname, dblock in manifest["domains"].items():
         files = dblock.get("files", []) if isinstance(dblock, dict) else []
@@ -154,7 +158,7 @@ def test_all_empty_channels_produces_zero_packable():
         "gamma": {"files": []},
     })
 
-    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+    SKIP_CHANNELS = EXPECTED_SKIP_CHANNELS  # XACA-0520-014: single source of truth
     packable = []
     for _dname, dblock in manifest["domains"].items():
         files = dblock.get("files", []) if isinstance(dblock, dict) else []
@@ -268,7 +272,7 @@ def test_channel_filter_rule(channel: str):
     | secrets_export      | NO  (skip)          |
     | icloud_excluded     | NO  (skip)          |
     """
-    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+    SKIP_CHANNELS = EXPECTED_SKIP_CHANNELS  # XACA-0520-014: single source of truth
 
     manifest = _make_manifest({
         "test_domain": {
@@ -666,7 +670,7 @@ def test_skip_channel_files_absent_from_main_zip():
             for ch_name, fe in files_by_channel.items()
         })
 
-        SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+        SKIP_CHANNELS = EXPECTED_SKIP_CHANNELS  # XACA-0520-014: single source of truth
 
         # Run the packing filter (mirrors generate_export step 4).
         packable = []
@@ -749,7 +753,7 @@ def test_planted_secret_file_under_secrets_path_absent_from_zip():
             },
         })
 
-        SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
+        SKIP_CHANNELS = EXPECTED_SKIP_CHANNELS  # XACA-0520-014: single source of truth
         packable = []
         for _dname, dblock in manifest["domains"].items():
             files = dblock.get("files", []) if isinstance(dblock, dict) else []
