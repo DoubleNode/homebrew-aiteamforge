@@ -1499,20 +1499,41 @@ def _fetch_amb_badges(handle):
         return []
 
 
+CCUSAGE_STALENESS_THRESHOLD_S = 300  # 5-minute stale threshold (mirrors heuristics evaluate())
+
+
+def _is_cache_stale(collected_at_unix: int | None) -> bool:
+    """Return True when the cache is older than CCUSAGE_STALENESS_THRESHOLD_S.
+
+    Uses collected_at_unix (integer epoch seconds) for a cheap, tz-safe check.
+    Returns True when the value is absent or zero so callers get a safe default.
+    """
+    if not collected_at_unix:
+        return True
+    return (time.time() - collected_at_unix) > CCUSAGE_STALENESS_THRESHOLD_S
+
+
 def _build_usage_response(
     cache_path: str = CCUSAGE_CACHE_PATH,
     history_limit: int = 7,
     force_refresh: bool = False,
+    account_filter: str | None = None,
 ) -> tuple:
     """Build the response payload for GET /api/usage/current.
 
     Pure function (no HTTP machinery) so unit tests can call it directly.
 
     Args:
-        cache_path:     Path to the JSON cache file written by ccusage_collector.
-        history_limit:  Maximum number of history entries to return (clamped 1-50).
-        force_refresh:  If True, attempt to spawn ccusage_collector --once first.
-                        Default (False) must NEVER spawn ccusage — endpoint stays <50ms.
+        cache_path:      Path to the JSON cache file written by ccusage_collector.
+        history_limit:   Maximum number of history entries to return (clamped 1-50).
+        force_refresh:   If True, attempt to spawn ccusage_collector --once first.
+                         Default (False) must NEVER spawn ccusage — endpoint stays <50ms.
+        account_filter:  Optional account ID to scope the totals field.
+                         None (default) → all-accounts aggregate (unchanged behaviour).
+                         "untagged" → totals from the untagged_bucket.
+                         Any other value → totals from cache["accounts"][value].
+                         When set and found, the response also gains an "account" key.
+                         When set and NOT found, returns ok=False with an error message.
 
     Returns:
         (status_code, response_dict) tuple.
@@ -1620,7 +1641,182 @@ def _build_usage_response(
     # are unaffected because we only ADD a key, never modify existing ones.
     result["weekly"] = _ccusage_heuristics.evaluate_weekly(cache)
 
+    # XACA-0280 Phase A.2: optional per-account totals filter.
+    # When account_filter is None (default), result is returned unchanged so
+    # all existing callers see exactly the same response as before.
+    if account_filter is not None:
+        if account_filter == "untagged":
+            bucket = cache.get("untagged_bucket")
+            if bucket is None:
+                return 200, {
+                    "ok": False,
+                    "stale": False,
+                    "error": "account not found: untagged",
+                    "current": result.get("current"),
+                    "projection": result.get("projection"),
+                    "calibration": result.get("calibration"),
+                    "history": result.get("history", []),
+                    "totals": None,
+                    "weekly": result.get("weekly"),
+                }
+            account_totals = {
+                "today_tokens": bucket.get("today_tokens", 0),
+                "today_cost_usd": bucket.get("today_cost_usd", 0.0),
+                "last_7d_tokens": bucket.get("last_7d_tokens", 0),
+                "last_7d_cost_usd": bucket.get("last_7d_cost_usd", 0.0),
+            }
+            result = dict(result)
+            result["totals"] = account_totals
+            result["account"] = {
+                "account_id": "untagged",
+                "nickname": bucket.get("nickname", "Untagged (pre-isolation)"),
+            }
+        else:
+            accounts = cache.get("accounts", {})
+            acct_data = accounts.get(account_filter)
+            if acct_data is None:
+                return 200, {
+                    "ok": False,
+                    "stale": False,
+                    "error": f"account not found: {account_filter}",
+                    "current": result.get("current"),
+                    "projection": result.get("projection"),
+                    "calibration": result.get("calibration"),
+                    "history": result.get("history", []),
+                    "totals": None,
+                    "weekly": result.get("weekly"),
+                }
+            if not isinstance(acct_data, dict):
+                return 200, {
+                    "ok": False,
+                    "stale": False,
+                    "error": f"account data malformed: {account_filter}",
+                    "current": result.get("current"),
+                    "projection": result.get("projection"),
+                    "calibration": result.get("calibration"),
+                    "history": result.get("history", []),
+                    "totals": None,
+                    "weekly": result.get("weekly"),
+                }
+            account_totals = {
+                "today_tokens": acct_data.get("today_tokens", 0),
+                "today_cost_usd": acct_data.get("today_cost_usd", 0.0),
+                "last_7d_tokens": acct_data.get("last_7d_tokens", 0),
+                "last_7d_cost_usd": acct_data.get("last_7d_cost_usd", 0.0),
+            }
+            result = dict(result)
+            result["totals"] = account_totals
+            result["account"] = {
+                "account_id": account_filter,
+                "nickname": acct_data.get("nickname", account_filter),
+            }
+
     return 200, result
+
+
+def _build_by_account_response(
+    cache_path: str = CCUSAGE_CACHE_PATH,
+) -> tuple:
+    """Build the response payload for GET /api/usage/by-account — XACA-0280 Phase A.2.
+
+    Pure function (no HTTP machinery) so unit tests can call it directly.
+
+    Returns a flat list of per-account usage summaries plus the untagged bucket and
+    all-accounts totals.  burn_rate is null in this phase — per-account burn-rate
+    derivation from ccusage session data is a future follow-up.
+
+    Args:
+        cache_path:  Path to the JSON cache file written by ccusage_collector.
+
+    Returns:
+        (status_code, response_dict) tuple.
+        status_code is always 200; callers must not 500 on errors so the UI
+        always has something to render.
+    """
+    # Case 1: heuristics module not importable.
+    if not CCUSAGE_HEURISTICS_AVAILABLE:
+        return 200, {
+            "ok": False,
+            "stale": True,
+            "error": "ccusage_heuristics module not available",
+            "accounts": [],
+            "untagged": None,
+            "totals": None,
+            "collected_at": None,
+        }
+
+    # Case 2: cache file missing.
+    if not os.path.exists(cache_path):
+        return 200, {
+            "ok": False,
+            "stale": True,
+            "error": "collector not running",
+            "accounts": [],
+            "untagged": None,
+            "totals": None,
+            "collected_at": None,
+        }
+
+    # Case 3: JSON parse failure.
+    try:
+        with open(cache_path, "r", encoding="utf-8") as _f:
+            cache = json.load(_f)
+    except (OSError, json.JSONDecodeError) as exc:
+        return 200, {
+            "ok": False,
+            "stale": True,
+            "error": str(exc),
+            "accounts": [],
+            "untagged": None,
+            "totals": None,
+            "collected_at": None,
+        }
+
+    # Check staleness using the shared _is_cache_stale helper.
+    collected_at = cache.get("collected_at")
+    stale = _is_cache_stale(cache.get("collected_at_unix"))
+
+    # Build accounts list from cache["accounts"] (schema v3).
+    raw_accounts = cache.get("accounts", {})
+    accounts_list = []
+    for acct_id, acct_data in raw_accounts.items():
+        accounts_list.append({
+            "account_id": acct_id,
+            "nickname": acct_data.get("nickname", acct_id),
+            "tokens": acct_data.get("last_7d_tokens", 0),
+            "cost_usd": acct_data.get("last_7d_cost_usd", 0.0),
+            "today_tokens": acct_data.get("today_tokens", 0),
+            "today_cost_usd": acct_data.get("today_cost_usd", 0.0),
+            "burn_rate": None,  # Per-account burn_rate is a follow-up task
+        })
+
+    # Sort by 7-day tokens descending so the largest consumer is on top.
+    accounts_list.sort(key=lambda a: a["tokens"], reverse=True)
+
+    # Build untagged bucket summary (null when absent — v2 caches pre-XACA-0280).
+    untagged = None
+    untagged_raw = cache.get("untagged_bucket")
+    if untagged_raw is not None:
+        untagged = {
+            "nickname": untagged_raw.get("nickname", "Untagged (pre-isolation)"),
+            "tokens": untagged_raw.get("last_7d_tokens", 0),
+            "cost_usd": untagged_raw.get("last_7d_cost_usd", 0.0),
+            "today_tokens": untagged_raw.get("today_tokens", 0),
+            "today_cost_usd": untagged_raw.get("today_cost_usd", 0.0),
+            "cwds": untagged_raw.get("cwds", []),
+        }
+
+    # Totals are the all-accounts aggregate from the top-level cache field (v2+).
+    totals = cache.get("totals")
+
+    return 200, {
+        "ok": True,
+        "stale": stale,
+        "collected_at": collected_at,
+        "accounts": accounts_list,
+        "untagged": untagged,
+        "totals": totals,
+    }
 
 
 # XACA-0333-003: TBD sentinel values for copyright fields — server-side single source of truth.
@@ -9413,6 +9609,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0243-003: Claude usage monitor
         elif path == '/api/usage/current':
             self.serve_usage_current()
+        # XACA-0280 Phase A.2: per-account usage breakdown
+        elif path == '/api/usage/by-account':
+            self.serve_usage_by_account()
         # Alert ingestion endpoints (XACA-0334-002)
         elif path == '/api/alerts':
             self.serve_alerts_list(parsed.query)
@@ -11979,6 +12178,9 @@ end tell
                              reading the cache.  Default behaviour (no param)
                              never spawns ccusage so the endpoint stays <50ms.
             history_limit=N  Return at most N history entries (default 7, max 50).
+            account=<id>     XACA-0280: Filter totals to a specific account ID.
+                             Special value "untagged" targets the pre-isolation bucket.
+                             Omit for all-accounts aggregate (unchanged default).
         """
         parsed = urlparse(self.path)
         qs = parse_qs(parsed.query)
@@ -11989,16 +12191,46 @@ end tell
         except (ValueError, IndexError):
             history_limit = 7
 
+        # XACA-0280 Phase A.2: optional per-account filter.
+        account_values = qs.get("account", [])
+        account_filter = account_values[0] if account_values else None
+
         _status_code, payload = _build_usage_response(
             cache_path=CCUSAGE_CACHE_PATH,
             history_limit=history_limit,
             force_refresh=force_refresh,
+            account_filter=account_filter,
         )
 
         # Send response with Cache-Control: no-store in addition to the
         # standard CORS + Content-Type headers from _send_json_response.
         # We cannot piggyback on _send_json_response because it calls
         # end_headers() internally, so we build the response manually here.
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(_status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def serve_usage_by_account(self):
+        """GET /api/usage/by-account — XACA-0280 Phase A.2.
+
+        Returns a flat list of per-account usage summaries from the ccusage
+        collector cache (schema v3).  Includes the untagged pre-isolation bucket
+        and all-accounts totals.
+
+        No query parameters in this phase.  burn_rate is null per-account;
+        per-account burn-rate derivation is a follow-up task.
+        """
+        _status_code, payload = _build_by_account_response(
+            cache_path=CCUSAGE_CACHE_PATH,
+        )
+
         body = json.dumps(payload).encode("utf-8")
         self.send_response(_status_code)
         self.send_header("Content-Type", "application/json")

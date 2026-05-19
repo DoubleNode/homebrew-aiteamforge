@@ -1363,6 +1363,10 @@
                         <header class="usage-widget-title">
                             <span class="usage-widget-title-text">CLAUDE USAGE  ·  5H WINDOW</span>
                             <span class="usage-stale-badge" id="uw-stale-badge" style="display:none;"></span>
+                            <!-- Account selector dropdown (XACA-0280): populated from /api/usage/by-account -->
+                            <select id="usage-account-selector" class="lcars-select usage-account-selector" aria-label="Filter by account" title="Filter by Anthropic account">
+                                <option value="">All accounts</option>
+                            </select>
                             <!-- Refresh button: sends ?refresh=1 which triggers a one-shot collector run (~2min) -->
                             <button
                                 class="usage-refresh-btn"
@@ -1372,6 +1376,14 @@
                             >&#9655;</button>
                             <span class="usage-spinner" id="uw-spinner" aria-hidden="true" style="display:none;">...</span>
                         </header>
+
+                        <!-- Per-account chip (XACA-0280): shown when an account filter is active -->
+                        <div id="usage-account-chip" class="usage-account-chip" style="display:none;"></div>
+                        <!-- Per-account semantic footnote (XACA-0280) -->
+                        <p id="usage-account-footnote" class="usage-footnote" style="display:none;">
+                            Per-account view shows session-lifetime tokens for sessions active in this window.
+                            All-accounts view shows window-only spend. These totals will not match.
+                        </p>
 
                         <!-- SECTION: CURRENT WINDOW -->
                         <!-- title set by JS when weekly section is hidden (006 tooltip) -->
@@ -1476,10 +1488,10 @@
 
                         <!-- SECTION: TOTALS -->
                         <section class="usage-section usage-totals" aria-label="Usage totals">
-                            <div class="usage-section-title">TOTALS</div>
+                            <div class="usage-section-title" id="uw-totals-title">TOTALS</div>
                             <div class="usage-totals-grid" id="uw-totals-grid">
                                 <div class="usage-total-row">
-                                    <span class="usage-total-label">Today:</span>
+                                    <span class="usage-total-label" id="uw-today-label">Today:</span>
                                     <span class="usage-total-value" id="uw-today-tokens">--</span>
                                     <span class="usage-total-sep">·</span>
                                     <span class="usage-total-value usage-total-cost" id="uw-today-cost">--</span>
@@ -1489,6 +1501,11 @@
                                     <span class="usage-total-value" id="uw-7d-tokens">--</span>
                                     <span class="usage-total-sep">·</span>
                                     <span class="usage-total-value usage-total-cost" id="uw-7d-cost">--</span>
+                                </div>
+                                <!-- Burn rate row (per-account filter: all-accounts metrics labelled clearly) -->
+                                <div class="usage-total-row" id="uw-burn-rate-row" style="display:none;">
+                                    <span class="usage-total-label" id="uw-burn-rate-label">Burn rate (all accounts):</span>
+                                    <span class="usage-total-value" id="uw-burn-rate-value">--</span>
                                 </div>
                             </div>
                         </section>
@@ -2335,11 +2352,22 @@
         return b.toUpperCase();
     }
 
+    // ── Account filter state (XACA-0280-007/008/009) ─────────────────────────
+    // Empty string = all-accounts view; account_id string = filtered view.
+    let _currentAccountFilter = '';
+    // Timestamp of last fetch response's collected_at field (ms epoch).
+    let _lastCollectedAt = 0;
+    // Timer for auto-populating the selector every 60 s.
+    let _accountSelectorTimer = null;
+
     // ── DOM refs ─────────────────────────────────────────────────────────────
     const widget       = document.getElementById('usage-widget');
     const staleBadge   = document.getElementById('uw-stale-badge');
     const refreshBtn   = document.getElementById('uw-refresh-btn');
     const spinner      = document.getElementById('uw-spinner');
+    const accountSelector  = document.getElementById('usage-account-selector');
+    const accountChip      = document.getElementById('usage-account-chip');
+    const accountFootnote  = document.getElementById('usage-account-footnote');
     const offlineMsg   = document.getElementById('uw-offline-msg');
     const currentBarWrap = document.getElementById('uw-current-bar-wrap');
     const currentBar   = document.getElementById('uw-current-bar');
@@ -2434,6 +2462,31 @@
         return col;
     }
 
+    // ── Per-account chip + footnote render (XACA-0280-008) ──────────────────
+    function renderAccountChip(d) {
+        const isFiltered = !!_currentAccountFilter;
+        if (!isFiltered) {
+            if (accountChip) accountChip.style.display = 'none';
+            if (accountFootnote) accountFootnote.style.display = 'none';
+            return;
+        }
+        // Derive display name from response or selector
+        let chipLabel = _currentAccountFilter === 'untagged'
+            ? 'UNTAGGED (PRE-ISOLATION)'
+            : (_currentAccountFilter);
+        if (d && d.account && d.account.nickname) {
+            chipLabel = d.account.nickname.toUpperCase();
+        } else if (accountSelector) {
+            const sel = accountSelector.options[accountSelector.selectedIndex];
+            if (sel && sel.value) chipLabel = sel.textContent.trim().toUpperCase();
+        }
+        if (accountChip) {
+            accountChip.textContent = chipLabel;
+            accountChip.style.display = '';
+        }
+        if (accountFootnote) accountFootnote.style.display = '';
+    }
+
     // ── Main render function ─────────────────────────────────────────────────
     function applyUsage(d) {
         const ok      = d.ok !== false;
@@ -2444,6 +2497,11 @@
         const cal     = d.calibration || null;
         const history = d.history || [];
         const band    = (current && current.band) ? current.band.toLowerCase() : (ok ? 'none' : 'unknown');
+
+        // Track collected_at for smart-refresh logic (XACA-0280-009)
+        if (d.collected_at) {
+            _lastCollectedAt = new Date(d.collected_at).getTime();
+        }
 
         widget.dataset.ok    = ok ? 'true' : 'false';
         widget.dataset.stale = stale ? 'true' : 'false';
@@ -2457,6 +2515,9 @@
             usagePill.dataset.ok    = widget.dataset.ok;
             usagePill.dataset.stale = widget.dataset.stale;
         }
+
+        // Render account chip + footnote (XACA-0280-008)
+        renderAccountChip(d);
 
         // ── Stale badge ──────────────────────────────────────────────────────
         if (stale && d.stale_age_seconds != null) {
@@ -2578,12 +2639,35 @@
             });
         }
 
-        // ── Totals ───────────────────────────────────────────────────────────
+        // ── Totals (XACA-0280-008: honest labeling for per-account view) ─────
+        const todayLabel = document.getElementById('uw-today-label');
+        const totalsTitle = document.getElementById('uw-totals-title');
+        const burnRateRow = document.getElementById('uw-burn-rate-row');
+        const burnRateLabel = document.getElementById('uw-burn-rate-label');
+        const burnRateValue = document.getElementById('uw-burn-rate-value');
         if (totals) {
+            if (_currentAccountFilter) {
+                // Per-account view: today_tokens is session-lifetime, not window-only
+                if (todayLabel) todayLabel.textContent = 'Session tokens (today):';
+                if (totalsTitle) totalsTitle.textContent = 'TOTALS (ACCOUNT)';
+            } else {
+                if (todayLabel) todayLabel.textContent = 'Today:';
+                if (totalsTitle) totalsTitle.textContent = 'TOTALS';
+            }
             todayTokens.textContent = formatTokens(totals.today_tokens) + ' tokens';
             todayCost.textContent   = formatCost(totals.today_cost_usd);
             d7Tokens.textContent    = formatTokens(totals.last_7d_tokens) + ' tokens';
             d7Cost.textContent      = formatCost(totals.last_7d_cost_usd);
+        }
+
+        // When per-account filter is active, show burn-rate labelled as all-accounts
+        if (burnRateRow && current && current.burn_tokens_per_minute != null && _currentAccountFilter) {
+            const burnTok = formatTokens(current.burn_tokens_per_minute) + ' tok/min';
+            if (burnRateLabel) burnRateLabel.textContent = 'Burn rate (all accounts):';
+            if (burnRateValue) burnRateValue.textContent = burnTok;
+            burnRateRow.style.display = '';
+        } else if (burnRateRow) {
+            burnRateRow.style.display = 'none';
         }
 
         // ── Calibration footer ───────────────────────────────────────────────
@@ -2814,8 +2898,13 @@
     }
 
     async function pollUsage() {
+        // Build URL with optional account filter (XACA-0280-007)
+        let url = '/api/usage/current?history_limit=7';
+        if (_currentAccountFilter) {
+            url += '&account=' + encodeURIComponent(_currentAccountFilter);
+        }
         try {
-            const resp = await fetch('/api/usage/current?history_limit=7');
+            const resp = await fetch(url);
             if (resp.ok) {
                 applyUsage(await resp.json());
             } else {
@@ -2834,16 +2923,109 @@
         }
     });
 
+    // ── Account selector change handler (XACA-0280-007) ──────────────────────
+    if (accountSelector) {
+        accountSelector.addEventListener('change', function () {
+            _currentAccountFilter = accountSelector.value;
+            clearTimeout(usageTimeout);
+            pollUsage();
+        });
+    }
+
+    // ── Populate the account selector dropdown (XACA-0280-007) ───────────────
+    // Fetches /api/usage/by-account; idempotent (preserves current selection).
+    async function populateAccountSelector() {
+        if (!accountSelector) return;
+        try {
+            const resp = await fetch('/api/usage/by-account');
+            if (!resp.ok) return;
+            const data = await resp.json();
+            const accounts = (data.accounts || []);
+            const untagged = data.untagged || null;
+
+            // Preserve the currently-selected value
+            const currentVal = accountSelector.value;
+
+            // Rebuild options: always start with "All accounts"
+            while (accountSelector.options.length > 0) accountSelector.remove(0);
+            const allOpt = document.createElement('option');
+            allOpt.value = '';
+            allOpt.textContent = 'All accounts';
+            accountSelector.appendChild(allOpt);
+
+            accounts.forEach(function (acct) {
+                if (!acct.account_id) return;
+                const opt = document.createElement('option');
+                opt.value = acct.account_id;
+                opt.textContent = acct.nickname || acct.account_id;
+                accountSelector.appendChild(opt);
+            });
+
+            // Add "Untagged" bucket if it has any tokens
+            if (untagged && untagged.tokens > 0) {
+                const uOpt = document.createElement('option');
+                uOpt.value = 'untagged';
+                uOpt.textContent = 'Untagged (pre-isolation)';
+                accountSelector.appendChild(uOpt);
+            }
+
+            // Restore previously-selected value if it still exists
+            if (currentVal) {
+                const matchingOpt = Array.from(accountSelector.options).find(o => o.value === currentVal);
+                if (matchingOpt) {
+                    accountSelector.value = currentVal;
+                } else {
+                    // Option no longer present; reset to all-accounts
+                    accountSelector.value = '';
+                    _currentAccountFilter = '';
+                }
+            }
+        } catch (_) {
+            // Network error — leave selector as-is
+        }
+    }
+
+    // Refresh selector every 60 s
+    function scheduleAccountSelectorRefresh() {
+        if (_accountSelectorTimer !== null) clearTimeout(_accountSelectorTimer);
+        _accountSelectorTimer = setTimeout(function () {
+            populateAccountSelector();
+            scheduleAccountSelectorRefresh();
+        }, 60000);
+    }
+
     // ── Refresh button: ?refresh=1 triggers a one-shot collector run (~2min) ─
+    // XACA-0280-009: when per-account filter active AND cache is fresh (<3 min),
+    // skip the collector spawn and just re-render from the cached endpoint.
     // NOTE: This is the ONLY place in index.html that uses ?refresh=1.
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async function () {
             if (refreshBtn.disabled) return;
             refreshBtn.disabled = true;
+
+            // Smart-refresh: skip ?refresh=1 if filter is active and cache is fresh
+            const CACHE_FRESH_MS = 3 * 60 * 1000; // 3 minutes
+            const cacheAge = Date.now() - _lastCollectedAt;
+            if (_currentAccountFilter && _lastCollectedAt > 0 && cacheAge < CACHE_FRESH_MS) {
+                // Cache is fresh — just re-render without triggering collector
+                if (typeof showToast === 'function') {
+                    showToast('Cache fresh — skipped refresh', 'info', 1500);
+                }
+                clearTimeout(usageTimeout);
+                refreshBtn.disabled = false;
+                pollUsage();
+                return;
+            }
+
             spinner.style.display = '';
             clearTimeout(usageTimeout);
+            // Build refresh URL with optional account filter
+            let refreshUrl = '/api/usage/current?refresh=1';
+            if (_currentAccountFilter) {
+                refreshUrl += '&account=' + encodeURIComponent(_currentAccountFilter);
+            }
             try {
-                const resp = await fetch('/api/usage/current?refresh=1');
+                const resp = await fetch(refreshUrl);
                 if (resp.ok) {
                     applyUsage(await resp.json());
                 } else {
@@ -2858,10 +3040,19 @@
         });
     }
 
+    // ── Expose populateAccountSelector for lcars.js tab-activation hook ─────
+    // (XACA-0280-007: switchSection('usage') in lcars.js calls this to refresh)
+    window._populateUsageAccountSelector = populateAccountSelector;
+
     // ── Initial fetch ─────────────────────────────────────────────────────────
-    document.addEventListener('DOMContentLoaded', pollUsage);
+    function initUsageWidget() {
+        populateAccountSelector();
+        scheduleAccountSelectorRefresh();
+        pollUsage();
+    }
+    document.addEventListener('DOMContentLoaded', initUsageWidget);
     // Fire immediately if DOM is already ready (inline scripts run after DOMContentLoaded fires)
-    if (document.readyState !== 'loading') pollUsage();
+    if (document.readyState !== 'loading') initUsageWidget();
 
 }());
 </script>

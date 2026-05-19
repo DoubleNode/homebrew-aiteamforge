@@ -874,3 +874,90 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
 .usage-indicator.full .usage-weekly .uw-weekly-editor-msg.error {
     color: var(--lcars-red, #cc4444);
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   XACA-0280 — Per-account selector, chip, footnote, agent-panel toggle
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Account selector dropdown in widget header */
+.usage-account-selector {
+    font-size: 10px;
+    padding: 3px 24px 3px 10px;
+    min-width: 120px;
+    border-radius: 10px;
+    margin-left: 6px;
+    letter-spacing: 0.5px;
+    /* Shrink arrow SVG so it fits the smaller control */
+    background-position: right 8px center;
+    background-size: 8px 6px;
+}
+
+/* Per-account chip shown below header when a filter is active */
+.usage-account-chip {
+    display: inline-block;
+    background: rgba(153, 204, 255, 0.15);
+    border: 1px solid var(--lcars-cyan, #99ccff);
+    border-radius: 12px;
+    color: var(--lcars-cyan, #99ccff);
+    font-family: 'Antonio', 'SF Mono', monospace;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    padding: 3px 12px;
+    margin: 4px 0 2px 0;
+    text-transform: uppercase;
+}
+
+/* Semantic footnote shown when per-account filter is active */
+.usage-footnote {
+    font-size: 9px;
+    color: rgba(255,255,255,0.45);
+    font-style: italic;
+    margin: 2px 0 4px 0;
+    line-height: 1.4;
+    max-width: 480px;
+}
+
+/* ── Agent-panel account toggle pill (XACA-0280-010) ── */
+.usage-account-toggle {
+    display: flex;
+    gap: 2px;
+    justify-content: center;
+    margin-bottom: 3px;
+    width: 100%;
+}
+
+.usage-account-toggle button {
+    background: transparent;
+    border: 1px solid rgba(255,255,255,0.25);
+    border-radius: 8px;
+    color: rgba(255,255,255,0.5);
+    cursor: pointer;
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+    padding: 2px 8px;
+    text-transform: uppercase;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    line-height: 1.4;
+}
+
+.usage-account-toggle button.active {
+    background: rgba(153,204,255,0.18);
+    border-color: var(--lcars-cyan, #99ccff);
+    color: var(--lcars-cyan, #99ccff);
+}
+
+.usage-account-toggle button:hover:not(.active) {
+    border-color: rgba(255,255,255,0.45);
+    color: rgba(255,255,255,0.8);
+}
+
+/* Small "?" indicator when current-account is not identifiable */
+.usage-account-unknown {
+    font-size: 9px;
+    color: rgba(255,255,255,0.4);
+    margin-left: 4px;
+    vertical-align: middle;
+}

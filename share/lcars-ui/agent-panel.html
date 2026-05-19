@@ -159,6 +159,12 @@
 <script src="js/usage-helpers.js"></script>
 </head>
 <body>
+    <!-- Account toggle pill (XACA-0280-010): CURRENT = most-active account, ALL = all-accounts view -->
+    <div class="usage-account-toggle" id="ui-account-toggle">
+        <button id="ui-account-current" class="active" title="Show most-recently-active account">CURRENT</button>
+        <button id="ui-account-all" title="Show all-accounts aggregate">ALL</button>
+    </div>
+
     <!-- Usage Indicator — XACA-0243-004 / XACA-0250-004
          data-band:        green|amber|red|unknown|none  (dominant band; worst of 5h + weekly)
          data-band-weekly: green|amber|red|unknown|none  (weekly-only band for row coloring)
@@ -364,6 +370,26 @@
         // Number formatters live in js/usage-helpers.js (shared with index.html).
         const { formatTokens, formatCost, formatMinutes, formatPct } = window.UsageHelpers;
 
+        // ── Account toggle state (XACA-0280-010) ─────────────────────────────
+        // Persisted to localStorage so the preference survives page refreshes.
+        // 'current' = show the most-recently-active account (highest today_tokens)
+        // 'all'     = all-accounts aggregate (original behaviour)
+        //
+        // KNOWN LIMITATION: 'current' uses a client-side heuristic (highest
+        // today_tokens in /api/usage/by-account). A proper solution would require
+        // a server-side team→account mapping hint. Flagged as follow-up:
+        //   RECOMMENDED FOLLOW-UP: extend /api/usage/by-account to include
+        //   team_hint: <slug> per account, then match against the panel's team.
+        const LS_KEY = 'usage_agent_panel_account_mode';
+        let _accountMode = (function () {
+            try { return localStorage.getItem(LS_KEY) || 'current'; }
+            catch (_) { return 'current'; }
+        }());
+        // The account_id resolved from the by-account list for 'current' mode.
+        let _resolvedAccountId = '';
+        // Timestamp of the last by-account fetch (avoid re-fetching on every poll).
+        let _byAccountFetchedAt = 0;
+
         // ── DOM references ───────────────────────────────────────────────────
         const indicator      = document.getElementById('usage-indicator');
         const row5h          = document.getElementById('ui-row-5h');
@@ -375,6 +401,9 @@
         const weeklyLabelEl  = document.getElementById('ui-weekly-label');
         const weeklyBarFill  = document.getElementById('ui-weekly-bar-fill');
         const weeklyStatsEl  = document.getElementById('ui-weekly-stats');
+        // Toggle pill DOM
+        const toggleCurrent  = document.getElementById('ui-account-current');
+        const toggleAll      = document.getElementById('ui-account-all');
 
         // ── Render helpers ───────────────────────────────────────────────────
         function setBar(pct) {
@@ -564,6 +593,43 @@
             }
         }
 
+        // ── Resolve current-account from by-account list (XACA-0280-010) ──────
+        // Fetches /api/usage/by-account and picks the account with the highest
+        // today_tokens as the "current" account. Re-fetches every 5 minutes.
+        async function resolveCurrentAccount() {
+            try {
+                const resp = await fetch('/api/usage/by-account');
+                if (!resp.ok) return;
+                const data = await resp.json();
+                const accounts = data.accounts || [];
+                _byAccountFetchedAt = Date.now();
+                if (accounts.length === 0) {
+                    _resolvedAccountId = '';
+                    return;
+                }
+                // Pick the account with the most today_tokens
+                let best = accounts[0];
+                accounts.forEach(function (a) {
+                    if ((a.today_tokens || 0) > (best.today_tokens || 0)) best = a;
+                });
+                _resolvedAccountId = best.account_id || '';
+            } catch (_) {
+                _resolvedAccountId = '';
+            }
+        }
+
+        // ── Update toggle pill visual state ─────────────────────────────────
+        function syncToggleState() {
+            if (!toggleCurrent || !toggleAll) return;
+            if (_accountMode === 'all') {
+                toggleCurrent.classList.remove('active');
+                toggleAll.classList.add('active');
+            } else {
+                toggleCurrent.classList.add('active');
+                toggleAll.classList.remove('active');
+            }
+        }
+
         // ── Polling loop (setTimeout recursive, visibility-aware) ────────────
         let usageTimeout = null;
 
@@ -573,10 +639,33 @@
         }
 
         async function pollUsage() {
+            // Refresh the resolved-account occasionally
+            const RESOLVE_INTERVAL_MS = 5 * 60 * 1000;
+            if (_accountMode === 'current' && (Date.now() - _byAccountFetchedAt) > RESOLVE_INTERVAL_MS) {
+                await resolveCurrentAccount();
+            }
+
+            // Build URL
+            let url = '/api/usage/current';
+            if (_accountMode === 'current' && _resolvedAccountId) {
+                url += '?account=' + encodeURIComponent(_resolvedAccountId);
+                // Show "?" indicator on the label when resolved (debugging aid)
+                // — we don't modify the DOM status label here; the existing label
+                //   will show normally from applyUsage.
+            } else if (_accountMode === 'current' && !_resolvedAccountId) {
+                // Can't resolve — fall back to all-accounts and show "?" hint
+                // (accountMode stays 'current' so toggle still shows CURRENT active)
+                url = '/api/usage/current';
+            }
+
             try {
-                const resp = await fetch('/api/usage/current');
+                const resp = await fetch(url);
                 if (resp.ok) {
                     const data = await resp.json();
+                    // Append a "?" hint in the label if mode=current but no account identified
+                    if (_accountMode === 'current' && !_resolvedAccountId) {
+                        data._noAccountResolved = true;
+                    }
                     applyUsage(data);
                 } else {
                     applyUsage({ ok: false });
@@ -594,9 +683,47 @@
             }
         });
 
-        document.addEventListener('DOMContentLoaded', pollUsage);
+        // ── Toggle button wiring (XACA-0280-010) ─────────────────────────────
+        function setAccountMode(mode) {
+            _accountMode = mode;
+            try { localStorage.setItem(LS_KEY, mode); } catch (_) {}
+            if (mode === 'current') {
+                // Re-resolve immediately so the switch is snappy
+                resolveCurrentAccount().then(function () {
+                    clearTimeout(usageTimeout);
+                    pollUsage();
+                });
+            } else {
+                clearTimeout(usageTimeout);
+                pollUsage();
+            }
+            syncToggleState();
+        }
+
+        if (toggleCurrent) {
+            toggleCurrent.addEventListener('click', function () {
+                if (_accountMode !== 'current') setAccountMode('current');
+            });
+        }
+        if (toggleAll) {
+            toggleAll.addEventListener('click', function () {
+                if (_accountMode !== 'all') setAccountMode('all');
+            });
+        }
+
+        // ── Init ─────────────────────────────────────────────────────────────
+        function initAgentPanelUsage() {
+            syncToggleState();
+            if (_accountMode === 'current') {
+                resolveCurrentAccount().then(function () { pollUsage(); });
+            } else {
+                pollUsage();
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', initAgentPanelUsage);
         // Fire immediately if DOM is already ready (inline scripts run after DOMContentLoaded fires)
-        if (document.readyState !== 'loading') pollUsage();
+        if (document.readyState !== 'loading') initAgentPanelUsage();
 
     }());
     // ── End Usage Indicator ──────────────────────────────────────────────────
