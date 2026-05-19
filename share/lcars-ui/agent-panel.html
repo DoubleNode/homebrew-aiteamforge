@@ -95,6 +95,22 @@
         color: var(--text-secondary);
         line-height: 1.4;
     }
+    .account-nickname {
+        font-size: 1.5rem;
+        font-weight: 700;
+        color: var(--theme-highlight);
+        text-align: center;
+        margin-bottom: 8px;
+        letter-spacing: 0.5px;
+        line-height: 1.2;
+    }
+    .account-nickname.account-nickname-empty {
+        font-size: 0.75rem;
+        font-weight: 400;
+        color: var(--text-secondary);
+        margin-bottom: 6px;
+        letter-spacing: 0;
+    }
     .terminal-badge {
         display: inline-block;
         background: var(--theme-color);
@@ -204,6 +220,7 @@
             <div class="badge-row" id="badges"></div>
             <div class="badge-names" id="badge-names"></div>
         </div>
+        <div class="account-nickname" id="account-nickname"></div>
         <span class="terminal-badge" id="terminal-badge"></span>
         <div class="hostname-label" id="hostname-label"></div>
     </div>
@@ -273,6 +290,18 @@
             ambHandle.textContent = '';
             badgesEl.textContent = '';
             badgeNamesEl.textContent = '';
+        }
+
+        // Account nickname — XACA-0279-010
+        // Shows 🔐 + nickname when configured; dim fallback label when empty.
+        const nickEl = document.getElementById('account-nickname');
+        const nickname = (data.account_nickname || '').trim();
+        if (nickname) {
+            nickEl.textContent = '🔐 ' + nickname;
+            nickEl.classList.remove('account-nickname-empty');
+        } else {
+            nickEl.textContent = '(default OAuth — no per-team account)';
+            nickEl.classList.add('account-nickname-empty');
         }
 
         document.getElementById('terminal-badge').textContent = data.terminal || '';
