@@ -78,9 +78,10 @@ if [ -z "$_extracted_funcs" ]; then
   return 0
 fi
 
-# Defaults that the extracted functions reference are sourced from constants.sh
-# via aiteamforge-migrate.sh at load time.  FLEET_MONITOR_PORT is injected via
-# the run_update_launchagents() helper below; no local mirror needed here.
+# FLEET_MONITOR_PORT is injected via the run_update_launchagents() helper
+# below; the constants.sh default is unreachable in this test path because
+# migrate.sh is never sourced — its functions are awk-extracted and eval'd
+# here. No local mirror needed.
 
 eval "$_extracted_funcs"
 
