@@ -4,6 +4,10 @@
   DoubleNode Dev-Team Infrastructure (AITeamForge)
 
   Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+
+  Sections: OVERVIEW, ORGANIZATIONS, MACHINES, ANALYTICS, SETTINGS, ADMIN, AI ENGINES
+  AI ENGINES section (XACA-0281): Fleet-wide account registry. See /lcars/lcars-dashboard.html
+  or the classic SPA (all.html + app.js) for the full implementation.
 -->
 
 <html lang="en">
@@ -11,22 +15,30 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="refresh" content="0; url=/lcars/lcars-index.html">
-    <title>Redirecting to LCARS Fleet Monitor...</title>
+    <title>Fleet Monitor — AI ENGINES Registry</title>
     <style>
         body {
             background: #000;
             color: #ff9900;
             font-family: 'Antonio', 'Helvetica Neue', sans-serif;
             display: flex;
+            flex-direction: column;
             align-items: center;
             justify-content: center;
             height: 100vh;
             margin: 0;
+            gap: 8px;
+        }
+        .redirect-subtitle {
+            font-size: 0.75rem;
+            color: #cc9966;
+            letter-spacing: 1px;
         }
     </style>
 </head>
 <body>
     <p>Redirecting to LCARS Fleet Monitor...</p>
+    <p class="redirect-subtitle">AI ENGINES — Fleet-wide account registry available in ENGINES section</p>
     <script>
         window.location.href = '/lcars/lcars-index.html';
     </script>

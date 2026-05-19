@@ -848,3 +848,385 @@ body {
 .hidden {
     display: none;
 }
+
+/* ============================================================================
+   AI ENGINES REGISTRY (XACA-0281)
+   ============================================================================ */
+
+/* Security notice */
+.engines-security-notice {
+    background: rgba(255, 204, 0, 0.07);
+    border: 1px solid var(--lcars-tan);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    line-height: 1.6;
+    margin-bottom: 15px;
+}
+
+.engines-security-notice code {
+    color: var(--lcars-orange);
+    font-family: var(--font-mono);
+    background: rgba(255, 153, 102, 0.1);
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+/* Engine card */
+.engine-card {
+    background: var(--bg-panel);
+    border: 2px solid var(--lcars-tan);
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 20px;
+}
+
+.engine-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 18px;
+    background: var(--bg-secondary);
+    border-bottom: 2px solid var(--lcars-tan);
+}
+
+.engine-card-name {
+    font-size: 1.1rem;
+    font-weight: bold;
+    color: var(--lcars-tan);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+
+.engine-card-body {
+    padding: 14px 18px;
+}
+
+/* Add account button */
+.btn-engines-add {
+    background: var(--lcars-blue);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 20px;
+    padding: 6px 14px;
+    font-family: var(--font-primary);
+    font-size: 0.7rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-engines-add:hover {
+    background: var(--lcars-purple);
+    box-shadow: 0 0 10px rgba(204, 153, 204, 0.4);
+}
+
+/* Account table */
+.engine-accounts-table-wrapper {
+    overflow-x: auto;
+}
+
+.engine-accounts-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.78rem;
+}
+
+.engine-accounts-table th {
+    text-align: left;
+    padding: 8px 10px;
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    border-bottom: 1px solid #333;
+    white-space: nowrap;
+}
+
+.engine-accounts-table td {
+    padding: 9px 10px;
+    color: var(--text-primary);
+    border-bottom: 1px solid #1e1e1e;
+    vertical-align: middle;
+}
+
+.engine-accounts-table tbody tr:hover td {
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.engine-col-account-id code,
+.engine-col-env-var code {
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    color: var(--lcars-blue);
+}
+
+.engine-col-created,
+.engine-col-validated {
+    font-size: 0.7rem;
+    color: var(--text-secondary);
+    white-space: nowrap;
+}
+
+.engine-col-actions {
+    white-space: nowrap;
+}
+
+/* Action buttons in table rows */
+.btn-engine-action {
+    border: none;
+    border-radius: 12px;
+    padding: 4px 10px;
+    font-family: var(--font-primary);
+    font-size: 0.65rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    margin-right: 6px;
+    transition: all 0.2s ease;
+}
+
+.btn-engine-edit {
+    background: var(--lcars-blue);
+    color: var(--bg-primary);
+}
+
+.btn-engine-edit:hover {
+    background: var(--lcars-purple);
+}
+
+.btn-engine-delete {
+    background: var(--lcars-red);
+    color: var(--text-primary);
+}
+
+.btn-engine-delete:hover {
+    background: var(--status-offline);
+}
+
+/* Empty / loading / error states */
+.engines-accounts-empty,
+.engines-empty,
+.engines-loading {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    padding: 15px 0;
+    font-style: italic;
+}
+
+.engines-error {
+    color: var(--status-offline);
+    font-size: 0.8rem;
+    padding: 15px 0;
+}
+
+/* Usage info in delete modal */
+.engines-usage-ok {
+    color: var(--status-online);
+    font-size: 0.85rem;
+}
+
+.engines-usage-warn {
+    color: var(--status-warning);
+    font-size: 0.85rem;
+    margin-bottom: 8px;
+}
+
+.engines-usage-list {
+    padding-left: 18px;
+    margin: 0;
+}
+
+.engines-usage-list li {
+    color: var(--text-secondary);
+    font-size: 0.8rem;
+    margin-bottom: 4px;
+    font-family: var(--font-mono);
+}
+
+/* Modal overlay (shared with existing pattern) */
+.engines-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+}
+
+.engines-modal.active {
+    opacity: 1;
+    visibility: visible;
+}
+
+.engines-modal-content {
+    background: var(--bg-panel);
+    border: 2px solid var(--lcars-orange);
+    border-radius: 12px;
+    max-width: 520px;
+    width: 92%;
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+    overflow: hidden;
+}
+
+.engines-modal.active .engines-modal-content {
+    transform: scale(1);
+}
+
+.engines-modal-header {
+    background: var(--lcars-blue);
+    padding: 14px 20px;
+}
+
+.engines-modal-header.danger {
+    background: var(--lcars-red);
+}
+
+.engines-modal-title {
+    font-size: 1rem;
+    font-weight: bold;
+    color: var(--text-primary);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+
+.engines-modal-body {
+    padding: 20px;
+}
+
+.engines-modal-footer {
+    padding: 14px 20px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    border-top: 1px solid #333;
+}
+
+/* Form elements inside engines modals */
+.engines-form-group {
+    margin-bottom: 18px;
+}
+
+.engines-form-label {
+    display: block;
+    font-size: 0.7rem;
+    font-weight: bold;
+    color: var(--lcars-tan);
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    margin-bottom: 6px;
+}
+
+.engines-form-input {
+    width: 100%;
+    padding: 9px 12px;
+    background: var(--bg-secondary);
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: var(--text-primary);
+    font-family: var(--font-primary);
+    font-size: 0.9rem;
+    transition: border-color 0.2s ease;
+    box-sizing: border-box;
+}
+
+.engines-form-input:focus {
+    outline: none;
+    border-color: var(--lcars-blue);
+}
+
+.engines-form-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.engines-form-hint {
+    font-size: 0.65rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+    letter-spacing: 0.5px;
+}
+
+.engines-form-error {
+    font-size: 0.7rem;
+    color: var(--status-offline);
+    margin-top: 4px;
+}
+
+/* Buttons inside engines modals */
+.btn-engines-secondary {
+    background: var(--bg-secondary);
+    color: var(--text-secondary);
+    border: 1px solid #555;
+    border-radius: 20px;
+    padding: 8px 16px;
+    font-family: var(--font-primary);
+    font-size: 0.7rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-engines-secondary:hover {
+    border-color: #888;
+    color: var(--text-primary);
+}
+
+.btn-engines-primary {
+    background: var(--lcars-blue);
+    color: var(--bg-primary);
+    border: none;
+    border-radius: 20px;
+    padding: 8px 16px;
+    font-family: var(--font-primary);
+    font-size: 0.7rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-engines-primary:hover {
+    background: var(--lcars-purple);
+}
+
+.btn-engines-danger {
+    background: var(--lcars-red);
+    color: var(--text-primary);
+    border: none;
+    border-radius: 20px;
+    padding: 8px 16px;
+    font-family: var(--font-primary);
+    font-size: 0.7rem;
+    font-weight: bold;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.btn-engines-danger:hover:not(:disabled) {
+    background: var(--status-offline);
+}
+
+.btn-engines-danger:disabled,
+.btn-engines-primary:disabled,
+.btn-engines-secondary:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}

@@ -717,3 +717,471 @@ window.addEventListener('beforeunload', () => {
         clearInterval(refreshTimer);
     }
 });
+
+// ============================================================================
+// === XACA-0281: AI Engines Registry ===
+// ============================================================================
+
+const ENGINES_API = '/api/engines';
+
+// Validation regexes — mirror server-side rules
+const SLUG_RE    = /^[a-z][a-z0-9-]*$/;
+const ENV_VAR_RE = /^[A-Z][A-Z0-9_]*$/;
+const MAX_LEN    = 200;
+
+// Active engine/account for modal operations
+let _activeEngineSlug  = null;
+let _activeAccountSlug = null;
+
+/**
+ * Fetch /api/engines and render engine cards into #engines-container.
+ */
+async function loadEngines() {
+    const container = document.getElementById('engines-container');
+    if (!container) return;
+
+    container.innerHTML = '<div class="engines-loading">LOADING...</div>';
+
+    try {
+        const resp = await fetch(ENGINES_API);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}: ${resp.statusText}`);
+        const data    = await resp.json();
+        const engines = data.engines || [];
+
+        container.innerHTML = '';
+        if (engines.length === 0) {
+            container.innerHTML = '<div class="engines-empty">No AI engines registered.</div>';
+            return;
+        }
+        engines.forEach(engine => container.appendChild(renderEngineCard(engine)));
+
+    } catch (err) {
+        console.error('[ENGINES] loadEngines error:', err);
+        container.innerHTML = `<div class="engines-error">Error loading engines: ${escHtml(err.message)}</div>`;
+    }
+}
+
+/**
+ * Build a card DOM element for one engine.
+ */
+function renderEngineCard(engine) {
+    const card = document.createElement('div');
+    card.className = 'engine-card';
+    card.id = `engine-card-${escHtml(engine.slug)}`;
+
+    const header = document.createElement('div');
+    header.className = 'engine-card-header';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'engine-card-name';
+    nameEl.textContent = engine.name || engine.slug;
+
+    const addBtn = document.createElement('button');
+    addBtn.className = 'btn-engines-add';
+    addBtn.textContent = '+ ADD ACCOUNT';
+    addBtn.addEventListener('click', () =>
+        openAddAccountModal(engine.slug, engine.name || engine.slug)
+    );
+
+    header.appendChild(nameEl);
+    header.appendChild(addBtn);
+    card.appendChild(header);
+
+    const body = document.createElement('div');
+    body.className = 'engine-card-body';
+    body.id = `engine-accounts-${engine.slug}`;
+
+    if (!engine.accounts || engine.accounts.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'engines-accounts-empty';
+        empty.textContent = 'No accounts registered yet. Click + ADD ACCOUNT to define one.';
+        body.appendChild(empty);
+    } else {
+        body.appendChild(renderAccountTable(engine));
+    }
+
+    card.appendChild(body);
+    return card;
+}
+
+/**
+ * Build an accounts table for one engine.
+ */
+function renderAccountTable(engine) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'engine-accounts-table-wrapper';
+
+    const table = document.createElement('table');
+    table.className = 'engine-accounts-table';
+    table.innerHTML = `
+        <thead><tr>
+            <th>NICKNAME</th>
+            <th>ACCOUNT ID</th>
+            <th>ENV VAR</th>
+            <th>CREATED</th>
+            <th>LAST VALIDATED</th>
+            <th>ACTIONS</th>
+        </tr></thead>
+    `;
+
+    const tbody = document.createElement('tbody');
+    engine.accounts.forEach(account =>
+        tbody.appendChild(renderAccountRow(engine.slug, account))
+    );
+    table.appendChild(tbody);
+    wrapper.appendChild(table);
+    return wrapper;
+}
+
+/**
+ * Build one table row for an account.
+ */
+function renderAccountRow(engineSlug, account) {
+    const tr = document.createElement('tr');
+    tr.id = `account-row-${engineSlug}-${account.slug}`;
+
+    const acctIdDisplay = account.account_id
+        ? (account.account_id.substring(0, 12) + (account.account_id.length > 12 ? '...' : ''))
+        : '—';
+
+    tr.innerHTML = `
+        <td class="engine-col-nickname">${escHtml(account.nickname || '—')}</td>
+        <td class="engine-col-account-id" title="${escHtml(account.account_id || '')}"><code>${escHtml(acctIdDisplay)}</code></td>
+        <td class="engine-col-env-var"><code>${escHtml(account.env_var_name || '—')}</code></td>
+        <td class="engine-col-created">${fmtEngineDate(account.created_at)}</td>
+        <td class="engine-col-validated">${fmtEngineDate(account.last_validated_at)}</td>
+        <td class="engine-col-actions"></td>
+    `;
+
+    const actionsCell = tr.querySelector('.engine-col-actions');
+
+    const editBtn = document.createElement('button');
+    editBtn.className = 'btn-engine-action btn-engine-edit';
+    editBtn.textContent = 'EDIT';
+    editBtn.addEventListener('click', () => openEditAccountModal(engineSlug, account));
+
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'btn-engine-action btn-engine-delete';
+    deleteBtn.textContent = 'DELETE';
+    deleteBtn.addEventListener('click', () => openDeleteConfirmModal(engineSlug, account.slug));
+
+    actionsCell.appendChild(editBtn);
+    actionsCell.appendChild(deleteBtn);
+    return tr;
+}
+
+// === MODALS ===
+
+function openAddAccountModal(engineSlug, engineName) {
+    _activeEngineSlug  = engineSlug;
+    _activeAccountSlug = null;
+
+    const labelEl = document.getElementById('engines-add-engine-label');
+    if (labelEl) labelEl.textContent = engineName;
+
+    ['engines-add-slug', 'engines-add-account-id', 'engines-add-nickname', 'engines-add-env-var']
+        .forEach(id => { const el = document.getElementById(id); if (el) el.value = ''; });
+
+    clearEnginesErrors('add');
+    showEnginesModal('engines-add-modal');
+}
+
+function openEditAccountModal(engineSlug, account) {
+    _activeEngineSlug  = engineSlug;
+    _activeAccountSlug = account.slug;
+
+    const setVal = (id, v) => { const el = document.getElementById(id); if (el) el.value = v || ''; };
+    setVal('engines-edit-slug',       account.slug);
+    setVal('engines-edit-account-id', account.account_id);
+    setVal('engines-edit-nickname',   account.nickname);
+    setVal('engines-edit-env-var',    account.env_var_name);
+
+    clearEnginesErrors('edit');
+    showEnginesModal('engines-edit-modal');
+}
+
+async function openDeleteConfirmModal(engineSlug, accountSlug) {
+    _activeEngineSlug  = engineSlug;
+    _activeAccountSlug = accountSlug;
+
+    const slugLabel  = document.getElementById('engines-delete-slug-label');
+    const usageInfo  = document.getElementById('engines-delete-usage-info');
+    const confirmBtn = document.getElementById('engines-delete-confirm-btn');
+    const serverErr  = document.getElementById('engines-delete-server-err');
+
+    if (slugLabel)  slugLabel.textContent = accountSlug;
+    if (usageInfo)  usageInfo.innerHTML   = '<div class="engines-loading">Checking usage...</div>';
+    if (confirmBtn) confirmBtn.disabled   = true;
+    if (serverErr)  serverErr.style.display = 'none';
+
+    showEnginesModal('engines-delete-modal');
+
+    // Dry-run DELETE (no ?confirm=true)
+    try {
+        const resp = await fetch(
+            `${ENGINES_API}/${encodeURIComponent(engineSlug)}/accounts/${encodeURIComponent(accountSlug)}`,
+            { method: 'DELETE' }
+        );
+        const data = await resp.json();
+
+        if (!resp.ok) {
+            if (usageInfo) usageInfo.innerHTML = `<div class="engines-error">Could not check usage: ${escHtml(data.error || 'Unknown error')}</div>`;
+            return;
+        }
+
+        const usage = data.usage || [];
+        if (usageInfo) {
+            if (usage.length === 0) {
+                usageInfo.innerHTML = '<div class="engines-usage-ok">Not currently in use by any team.</div>';
+            } else {
+                usageInfo.innerHTML =
+                    `<div class="engines-usage-warn">This account is currently used by ${usage.length} team(s):</div>` +
+                    '<ul class="engines-usage-list">' +
+                    usage.map(u => `<li>${escHtml(u)}</li>`).join('') +
+                    '</ul>';
+            }
+        }
+        if (confirmBtn) confirmBtn.disabled = false;
+
+    } catch (err) {
+        console.error('[ENGINES] dry-run delete error:', err);
+        if (usageInfo) usageInfo.innerHTML = `<div class="engines-error">Failed to check usage: ${escHtml(err.message)}</div>`;
+    }
+}
+
+// === SUBMIT ===
+
+async function submitAddAccount() {
+    const slug      = (document.getElementById('engines-add-slug')?.value       || '').trim();
+    const accountId = (document.getElementById('engines-add-account-id')?.value || '').trim();
+    const nickname  = (document.getElementById('engines-add-nickname')?.value   || '').trim();
+    const envVar    = (document.getElementById('engines-add-env-var')?.value     || '').trim();
+
+    clearEnginesErrors('add');
+
+    let valid = true;
+    if (!slug) {
+        showEnginesFieldError('engines-add-slug-err', 'Slug is required.'); valid = false;
+    } else if (!SLUG_RE.test(slug)) {
+        showEnginesFieldError('engines-add-slug-err', 'Must match ^[a-z][a-z0-9-]*$ (lowercase-kebab-case).'); valid = false;
+    } else if (slug.length > 64) {
+        showEnginesFieldError('engines-add-slug-err', 'Max 64 characters.'); valid = false;
+    }
+    if (!accountId) {
+        showEnginesFieldError('engines-add-account-id-err', 'Account ID is required.'); valid = false;
+    } else if (accountId.length > MAX_LEN) {
+        showEnginesFieldError('engines-add-account-id-err', `Max ${MAX_LEN} characters.`); valid = false;
+    }
+    if (!nickname) {
+        showEnginesFieldError('engines-add-nickname-err', 'Nickname is required.'); valid = false;
+    } else if (nickname.length > MAX_LEN) {
+        showEnginesFieldError('engines-add-nickname-err', `Max ${MAX_LEN} characters.`); valid = false;
+    }
+    if (!envVar) {
+        showEnginesFieldError('engines-add-env-var-err', 'Env var name is required.'); valid = false;
+    } else if (!ENV_VAR_RE.test(envVar)) {
+        showEnginesFieldError('engines-add-env-var-err', 'Must match ^[A-Z][A-Z0-9_]*$ (e.g. ANTHROPIC_API_KEY_DARREN).'); valid = false;
+    }
+    if (!valid) return;
+
+    const saveBtn = document.getElementById('engines-add-save-btn');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'SAVING...'; }
+
+    try {
+        const resp = await fetch(`${ENGINES_API}/${encodeURIComponent(_activeEngineSlug)}/accounts`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ slug, account_id: accountId, nickname, env_var_name: envVar })
+        });
+        const data = await resp.json();
+        if (!resp.ok) {
+            showEnginesServerError('engines-add-server-err', data.error || `Server error (${resp.status})`);
+            return;
+        }
+        hideEnginesModal('engines-add-modal');
+        await loadEngines();
+    } catch (err) {
+        console.error('[ENGINES] submitAddAccount error:', err);
+        showEnginesServerError('engines-add-server-err', `Network error: ${err.message}`);
+    } finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'SAVE'; }
+    }
+}
+
+async function submitEditAccount() {
+    const accountId = (document.getElementById('engines-edit-account-id')?.value || '').trim();
+    const nickname  = (document.getElementById('engines-edit-nickname')?.value   || '').trim();
+    const envVar    = (document.getElementById('engines-edit-env-var')?.value    || '').trim();
+
+    clearEnginesErrors('edit');
+
+    let valid = true;
+    if (!accountId) {
+        showEnginesFieldError('engines-edit-account-id-err', 'Account ID is required.'); valid = false;
+    } else if (accountId.length > MAX_LEN) {
+        showEnginesFieldError('engines-edit-account-id-err', `Max ${MAX_LEN} characters.`); valid = false;
+    }
+    if (!nickname) {
+        showEnginesFieldError('engines-edit-nickname-err', 'Nickname is required.'); valid = false;
+    } else if (nickname.length > MAX_LEN) {
+        showEnginesFieldError('engines-edit-nickname-err', `Max ${MAX_LEN} characters.`); valid = false;
+    }
+    if (!envVar) {
+        showEnginesFieldError('engines-edit-env-var-err', 'Env var name is required.'); valid = false;
+    } else if (!ENV_VAR_RE.test(envVar)) {
+        showEnginesFieldError('engines-edit-env-var-err', 'Must match ^[A-Z][A-Z0-9_]*$ (e.g. ANTHROPIC_API_KEY_DARREN).'); valid = false;
+    }
+    if (!valid) return;
+
+    const saveBtn = document.getElementById('engines-edit-save-btn');
+    if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'SAVING...'; }
+
+    try {
+        const resp = await fetch(
+            `${ENGINES_API}/${encodeURIComponent(_activeEngineSlug)}/accounts/${encodeURIComponent(_activeAccountSlug)}`,
+            {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ account_id: accountId, nickname, env_var_name: envVar })
+            }
+        );
+        const data = await resp.json();
+        if (!resp.ok) {
+            showEnginesServerError('engines-edit-server-err', data.error || `Server error (${resp.status})`);
+            return;
+        }
+        hideEnginesModal('engines-edit-modal');
+        await loadEngines();
+    } catch (err) {
+        console.error('[ENGINES] submitEditAccount error:', err);
+        showEnginesServerError('engines-edit-server-err', `Network error: ${err.message}`);
+    } finally {
+        if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'SAVE'; }
+    }
+}
+
+async function submitDeleteAccount() {
+    const confirmBtn = document.getElementById('engines-delete-confirm-btn');
+    const serverErr  = document.getElementById('engines-delete-server-err');
+
+    if (confirmBtn) { confirmBtn.disabled = true; confirmBtn.textContent = 'DELETING...'; }
+    if (serverErr)  serverErr.style.display = 'none';
+
+    try {
+        const resp = await fetch(
+            `${ENGINES_API}/${encodeURIComponent(_activeEngineSlug)}/accounts/${encodeURIComponent(_activeAccountSlug)}?confirm=true`,
+            { method: 'DELETE' }
+        );
+        const data = await resp.json();
+        if (!resp.ok) {
+            if (serverErr) { serverErr.textContent = data.error || `Server error (${resp.status})`; serverErr.style.display = 'block'; }
+            return;
+        }
+        hideEnginesModal('engines-delete-modal');
+        await loadEngines();
+    } catch (err) {
+        console.error('[ENGINES] submitDeleteAccount error:', err);
+        if (serverErr) { serverErr.textContent = `Network error: ${err.message}`; serverErr.style.display = 'block'; }
+    } finally {
+        if (confirmBtn) { confirmBtn.disabled = false; confirmBtn.textContent = 'CONFIRM DELETE'; }
+    }
+}
+
+// === MODAL / ERROR HELPERS ===
+
+function showEnginesModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.add('active');
+}
+
+function hideEnginesModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('active');
+}
+
+function showEnginesFieldError(errId, msg) {
+    const el = document.getElementById(errId);
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+
+function showEnginesServerError(errId, msg) {
+    const el = document.getElementById(errId);
+    if (!el) return;
+    el.textContent = msg;
+    el.style.display = 'block';
+}
+
+function clearEnginesErrors(prefix) {
+    const ids = prefix === 'add'
+        ? ['engines-add-slug-err', 'engines-add-account-id-err', 'engines-add-nickname-err', 'engines-add-env-var-err', 'engines-add-server-err']
+        : ['engines-edit-account-id-err', 'engines-edit-nickname-err', 'engines-edit-env-var-err', 'engines-edit-server-err'];
+    ids.forEach(id => {
+        const el = document.getElementById(id);
+        if (el) { el.textContent = ''; el.style.display = 'none'; }
+    });
+}
+
+function escHtml(str) {
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
+}
+
+function fmtEngineDate(iso) {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return '—';
+    return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+// Wire up engines UI once DOM is ready
+document.addEventListener('DOMContentLoaded', () => {
+    // Sidebar navigation for engines section
+    const enginesSidebarBtn = document.querySelector('[data-section="engines"]');
+    if (enginesSidebarBtn) {
+        enginesSidebarBtn.addEventListener('click', () => loadEngines());
+    }
+
+    // Refresh button
+    const refreshBtn = document.getElementById('engines-refresh-btn');
+    if (refreshBtn) refreshBtn.addEventListener('click', () => loadEngines());
+
+    // Add modal
+    const addSave   = document.getElementById('engines-add-save-btn');
+    const addCancel = document.getElementById('engines-add-cancel-btn');
+    if (addSave)   addSave.addEventListener('click',   submitAddAccount);
+    if (addCancel) addCancel.addEventListener('click', () => hideEnginesModal('engines-add-modal'));
+
+    // Edit modal
+    const editSave   = document.getElementById('engines-edit-save-btn');
+    const editCancel = document.getElementById('engines-edit-cancel-btn');
+    if (editSave)   editSave.addEventListener('click',   submitEditAccount);
+    if (editCancel) editCancel.addEventListener('click', () => hideEnginesModal('engines-edit-modal'));
+
+    // Delete modal
+    const delConfirm = document.getElementById('engines-delete-confirm-btn');
+    const delCancel  = document.getElementById('engines-delete-cancel-btn');
+    if (delConfirm) delConfirm.addEventListener('click', submitDeleteAccount);
+    if (delCancel)  delCancel.addEventListener('click',  () => hideEnginesModal('engines-delete-modal'));
+
+    // Backdrop click to close
+    ['engines-add-modal', 'engines-edit-modal', 'engines-delete-modal'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('click', e => { if (e.target === el) el.classList.remove('active'); });
+    });
+
+    // Escape to close
+    document.addEventListener('keydown', e => {
+        if (e.key === 'Escape') {
+            document.querySelectorAll('.engines-modal.active').forEach(m => m.classList.remove('active'));
+        }
+    });
+});
+
+// === /XACA-0281 ===

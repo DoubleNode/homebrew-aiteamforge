@@ -736,6 +736,78 @@
                         <div class="section-bar"></div>
                     </div>
                     <div class="team-config-form">
+                        <!-- XACA-0281: AI Engine Account Routing subsection -->
+                        <!-- NOTE: "Anthropic" removed from label — future engines (other providers, multiple
+                             accounts per engine) will appear here. Technical field names
+                             (anthropic_account_id, etc.) are contract from A.1 and unchanged. -->
+                        <div class="team-config-row team-config-row-header" id="team-account-routing-header">
+                            <div class="team-config-row-left">
+                                <label class="team-config-label">AI Engine Account Routing</label>
+                                <span class="team-config-hint">
+                                    Per-team AI engine account assignment. Maps each team to an engine account
+                                    and API key env var sourced from ~/.zshrc.secrets. Configuration stored in
+                                    ~/.aiteamforge/team-paths.json (schema v2). (XACA-0281)
+                                </span>
+                            </div>
+                        </div>
+
+                        <div id="team-account-list" class="team-account-list">
+                            <!-- Populated at runtime by lcars-team-account.js — one .team-account-row per team -->
+                        </div>
+
+                        <!--
+                            Row template: instantiated by JS for each team entry.
+                            Data attributes on the rendered row:
+                              data-team="<team_slug>"
+                              data-account-id="<anthropic_account_id>"
+                              data-nickname="<anthropic_account_nickname>"
+                              data-env-var="<anthropic_api_key_env_var>"
+                              data-credential-status="ok|missing|unvalidated"
+                        -->
+                        <template id="team-account-row-template">
+                            <div class="team-config-row team-account-row" data-team="" data-account-id="" data-nickname="" data-env-var="" data-credential-status="unvalidated">
+                                <div class="team-config-row-left">
+                                    <span class="team-config-label team-account-team-name"><!-- team slug --></span>
+                                    <span class="team-config-hint">
+                                        <span class="team-account-account-id"><!-- first 8 chars + ellipsis --></span>
+                                        &nbsp;&middot;&nbsp;
+                                        <em class="team-account-nickname"><!-- nickname or (not set) --></em>
+                                    </span>
+                                </div>
+                                <div class="team-config-row-right">
+                                    <!--
+                                        XACA-0281-022: Account picker — PRIMARY path.
+                                        Populated at runtime by lcars-team-account.js from /api/engines/list.
+                                        Selecting an option triggers POST /api/team-config/account/assign.
+                                        The "MANUAL" button below is the deprecated override path.
+                                    -->
+                                    <!-- picker injected here by renderTeamRow() -->
+
+                                    <!--
+                                        Status dot states (JS toggles data-credential-status on the row):
+                                          ok          → green  (has_credentials true + last_validated_at recent)
+                                          missing     → red    (env var not set / no credentials)
+                                          unvalidated → amber  (env var set but never validated)
+                                    -->
+                                    <span class="team-account-status-dot" aria-label="credential status"></span>
+
+                                    <!--
+                                        MANUAL button — SECONDARY / override path.
+                                        Visually demoted (smaller, muted) so the picker is the obvious primary.
+                                        JS renames "EDIT" to "MANUAL" and adds .team-account-manual-btn class.
+                                    -->
+                                    <button class="lcars-btn lcars-btn-secondary team-account-edit-btn"
+                                            type="button"
+                                            data-team=""
+                                            onclick="openTeamAccountEditModal(this.dataset.team)">
+                                        EDIT
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
+
+                        <div class="team-config-section-divider"></div>
+
                         <!-- XACA-0292: CR/CAB support toggle -->
                         <div class="team-config-row" id="team-config-cr-row">
                             <div class="team-config-row-left">
@@ -2302,8 +2374,187 @@
         </div>
     </div>
 
+    <!-- XACA-0281-002: Team Account Edit Modal -->
+    <div id="team-account-edit-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeTeamAccountEditModal()"></div>
+        <div class="lcars-modal-content">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title" id="team-account-edit-modal-title">EDIT ACCOUNT ROUTING</span>
+                <button class="lcars-modal-close" onclick="closeTeamAccountEditModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <input type="hidden" id="team-account-edit-team-slug" value="">
+
+                <div class="form-group">
+                    <label for="team-account-edit-account-id">Account ID</label>
+                    <input type="text"
+                           id="team-account-edit-account-id"
+                           placeholder="e.g. acct_01J9X…"
+                           autocomplete="off"
+                           spellcheck="false">
+                    <small class="form-hint">AI engine account ID (e.g. Anthropic: <code>acct_01J9X…</code> from console.anthropic.com). Leave blank to use the default OAuth account.</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="team-account-edit-nickname">Account Nickname</label>
+                    <input type="text"
+                           id="team-account-edit-nickname"
+                           placeholder='e.g. "Main Event Production"'
+                           autocomplete="off">
+                    <small class="form-hint">Human-readable label shown in the LCARS panel and cc-whoami output.</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="team-account-edit-env-var">API Key Env Var</label>
+                    <input type="text"
+                           id="team-account-edit-env-var"
+                           placeholder="e.g. TEAM_ACADEMY_API_KEY"
+                           pattern="^[A-Z][A-Z0-9_]*$"
+                           autocomplete="off"
+                           spellcheck="false">
+                    <small class="form-hint">Uppercase env var name sourced from ~/.zshrc.secrets. Pattern: <code>TEAM_&lt;TEAM&gt;_API_KEY</code>. Must match <code>^[A-Z][A-Z0-9_]*$</code>.</small>
+                </div>
+
+                <div id="team-account-test-status" role="status" aria-live="polite"></div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button"
+                        class="lcars-btn lcars-btn-secondary"
+                        id="team-account-test-btn"
+                        onclick="testTeamAccountConnection()">
+                    TEST CONNECTION
+                </button>
+                <div class="modal-footer-spacer"></div>
+                <button type="button"
+                        class="lcars-btn lcars-btn-secondary"
+                        id="team-account-cancel-btn"
+                        onclick="closeTeamAccountEditModal()">
+                    CANCEL
+                </button>
+                <button type="button"
+                        class="lcars-btn lcars-btn-primary"
+                        id="team-account-save-btn"
+                        onclick="saveTeamAccountConfig()">
+                    SAVE
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- XACA-0281-007: Running-sessions warning modal -->
+    <!-- Shown before committing an account swap when active sessions exist on the old account. -->
+    <div id="team-account-running-sessions-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeRunningSessionsModal()"></div>
+        <div class="lcars-modal-content" onclick="event.stopPropagation()">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">SESSIONS ON OLD ACCOUNT</span>
+                <button class="lcars-modal-close" onclick="closeRunningSessionsModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <!-- Dynamic content injected by openRunningSessionsModal() -->
+                <p id="team-account-sessions-summary" class="team-account-sessions-summary"></p>
+                <p class="team-config-hint">
+                    Claude only reads <code>ANTHROPIC_AUTH_TOKEN</code> at startup. These sessions
+                    will continue using the old account until they exit and restart.
+                </p>
+                <div id="team-account-sessions-list" class="team-account-sessions-list">
+                    <!-- One .team-account-session-item per session, rendered by JS -->
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button"
+                        class="lcars-btn lcars-btn-secondary"
+                        onclick="closeRunningSessionsModal()">
+                    CANCEL
+                </button>
+                <div class="modal-footer-spacer"></div>
+                <!--
+                    TODO XACA-0281 followup: "Save and Notify" should send a desktop
+                    notification to the running sessions (e.g. via osascript or a
+                    WebSocket push channel). For now it proceeds identically to
+                    "Save Anyway" — the distinction is a UX placeholder for the
+                    notification mechanism to be wired in a future ticket.
+                -->
+                <button type="button"
+                        class="lcars-btn lcars-btn-secondary"
+                        id="team-account-sessions-notify-btn"
+                        disabled>
+                    SAVE AND NOTIFY (coming soon)
+                </button>
+                <button type="button"
+                        class="lcars-btn lcars-btn-primary"
+                        id="team-account-sessions-proceed-btn"
+                        onclick="confirmRunningSessionsAndProceed('anyway')">
+                    SAVE ANYWAY
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- XACA-0281-008: Resume-ID handling modal -->
+    <!-- Shown after a successful account swap when resume points exist on the old account. -->
+    <div id="team-account-resume-ids-modal" class="lcars-modal" style="display: none;">
+        <div class="lcars-modal-backdrop" onclick="closeResumeIdsModal()"></div>
+        <div class="lcars-modal-content">
+            <div class="lcars-modal-header">
+                <span class="lcars-modal-title">RESUME POINTS ON OLD ACCOUNT</span>
+                <button class="lcars-modal-close" onclick="closeResumeIdsModal()">&times;</button>
+            </div>
+            <div class="lcars-modal-body">
+                <p id="team-account-resume-ids-summary" class="team-account-sessions-summary"></p>
+
+                <div class="form-group team-account-resume-radio-group">
+                    <label class="team-account-radio-label">
+                        <input type="radio"
+                               name="resume-id-action"
+                               value="preserve"
+                               id="resume-action-preserve"
+                               checked>
+                        <strong>Preserve</strong> — keep segregated under the old account (recommended)
+                    </label>
+                    <label class="team-account-radio-label">
+                        <input type="radio"
+                               name="resume-id-action"
+                               value="archive"
+                               id="resume-action-archive">
+                        <strong>Archive to backup</strong> — move entries to a timestamped archive file
+                    </label>
+                    <label class="team-account-radio-label">
+                        <input type="radio"
+                               name="resume-id-action"
+                               value="clear"
+                               id="resume-action-clear">
+                        <strong>Clear</strong> — permanently remove entries (destructive)
+                    </label>
+                </div>
+            </div>
+            <div class="lcars-modal-footer">
+                <button type="button"
+                        class="lcars-btn lcars-btn-secondary"
+                        onclick="closeResumeIdsModal()">
+                    CANCEL
+                </button>
+                <div class="modal-footer-spacer"></div>
+                <button type="button"
+                        class="lcars-btn lcars-btn-primary"
+                        id="team-account-resume-ids-apply-btn"
+                        onclick="applyResumeIdsAction()">
+                    APPLY
+                </button>
+            </div>
+        </div>
+    </div>
+
     <!-- Scan line animation overlay -->
     <div class="scanline"></div>
+
+    <!--
+        XACA-0281-022: Fleet Monitor URL for picker "ADD NEW" affordance.
+        NOTE: serve_file() does not template HTML, so the meta tag below was
+        never substituted. Removed — lcars-team-account.js uses the :8080
+        heuristic as the canonical path (see getFleetMonitorUrl()).
+        TODO XACA-0281 follow-up: dynamic Fleet Monitor URL discovery.
+    -->
 
     <!-- LCARS Sound Manager — must load before lcars.js -->
     <script src="js/lcars-sound.js?v=2.0"></script>
@@ -2334,6 +2585,8 @@
 <!-- XACA-0351: popup must load BEFORE daily-overview.js so openDailyOverviewPopup is in scope. -->
 <script src="js/daily-overview-popup.js"></script>
 <script src="js/daily-overview.js"></script>
+<!-- XACA-0281-022: Per-team account picker dropdown — must load after lcars.js (needs apiUrl, showToast, CONFIG) -->
+<script src="js/lcars-team-account.js"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- XACA-0243-005: Full usage widget polling JS                             -->
