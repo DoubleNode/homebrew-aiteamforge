@@ -299,6 +299,9 @@ def _prune_old_secrets_jobs():
         for jid in stale:
             del jobs_dict[jid]
 
+# XACA-0281 Phase A.3: Fleet Monitor sidecar URL (proxy + cache for engines registry)
+FLEET_MONITOR_URL = os.environ.get('FLEET_MONITOR_URL', 'http://localhost:8080')
+
 # ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
 CCUSAGE_CACHE_PATH = "/tmp/lcars-ccusage-cache.json"
 CCUSAGE_PID_PATH = "/tmp/lcars-ccusage-collector.pid"
@@ -1984,6 +1987,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0292: Team config (CR/CAB support flag)
         elif path == '/api/team-config':
             self.handle_update_team_config()
+        # XACA-0281 Phase A.3: Team account config endpoints
+        elif path == '/api/team-config/account/save':
+            self.handle_team_account_save()
+        elif path == '/api/team-config/account/test-connection':
+            self.handle_team_account_test_connection()
+        # === XACA-0281: AI engines registry consumer ===
+        elif path == '/api/team-config/account/assign':
+            self.handle_team_account_assign()
+        # XACA-0281 Phase A.3: Resume-ID management
+        elif path == '/api/team-config/account/resume-ids':
+            self.handle_team_account_resume_ids()
         # CR transition endpoint (XACA-0328-005)
         elif path.startswith('/api/kanban/cr/') and path.endswith('/transition'):
             cr_id = path[len('/api/kanban/cr/'):-len('/transition')]
@@ -8847,6 +8861,874 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] ERROR writing copyright config for {team}: {e}")
             return str(e)
 
+    # =========================================================================
+    # TEAM CONFIG ACCOUNT API — XACA-0281 (Phase A.3)
+    # =========================================================================
+
+    # Validation-cache path: persisted across requests; updated by test-connection
+    _ACCOUNT_VALIDATION_CACHE_PATH = Path.home() / '.aiteamforge' / 'account-validation.json'
+
+    # Env-var name regex: must start with uppercase letter, only uppercase + digits + underscore
+    _ENV_VAR_NAME_RE = re.compile(r'^[A-Z][A-Z0-9_]*$')
+
+    def _load_account_validation_cache(self):
+        """Load the account validation timestamp cache from disk.
+
+        Returns a dict mapping env_var_name -> ISO timestamp string, or {} on any error.
+        """
+        try:
+            p = self._ACCOUNT_VALIDATION_CACHE_PATH
+            if p.exists():
+                with open(p, 'r') as f:
+                    return json.load(f)
+        except Exception as e:
+            print(f"[LCARS] WARNING reading account-validation cache: {e}")
+        return {}
+
+    def _save_account_validation_cache(self, cache: dict):
+        """Atomically persist the account validation cache to disk."""
+        p = self._ACCOUNT_VALIDATION_CACHE_PATH
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = p.with_suffix(f'.json.tmp.{os.getpid()}')
+        try:
+            with open(tmp_path, 'w') as f:
+                json.dump(cache, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp_path), str(p))
+        except Exception as e:
+            print(f"[LCARS] WARNING writing account-validation cache: {e}")
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _read_team_paths_raw(self):
+        """Read team-paths.json via the mtime cache. Returns (data_dict, error_str)."""
+        team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
+        if not team_paths_file.exists():
+            return None, f'team-paths.json not found at {team_paths_file}'
+        try:
+            current_mtime_ns = os.stat(team_paths_file).st_mtime_ns
+        except OSError as e:
+            return None, str(e)
+        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+            cached = LCARSHandler._TEAM_PATHS_CACHE
+            if cached['mtime_ns'] == current_mtime_ns and cached['data'] is not None:
+                return cached['data'], None
+            try:
+                with open(team_paths_file, 'r') as f:
+                    data = json.load(f)
+                LCARSHandler._TEAM_PATHS_CACHE = {'mtime_ns': current_mtime_ns, 'data': data}
+                return data, None
+            except Exception as e:
+                return None, str(e)
+
+    def serve_team_account_current(self, query_string: str):
+        """GET /api/team-config/account/current?team=<id>
+
+        Returns {account_id, account_nickname, env_var_name, has_credentials, last_validated_at}.
+        NEVER returns the actual key value — has_credentials is a bool derived from
+        bool(os.environ.get(env_var_name)).
+
+        XACA-0281-003
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0] or LCARS_TEAM
+
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            data, err = self._read_team_paths_raw()
+            if err:
+                self._send_json_response({'error': err}, status=500)
+                return
+
+            team_block = data.get('teams', {}).get(team) or {}
+            account_id = team_block.get('anthropic_account_id') or ''
+            account_nickname = team_block.get('anthropic_account_nickname') or ''
+            env_var_name = team_block.get('anthropic_api_key_env_var') or ''
+
+            # Derive has_credentials without ever touching the key value
+            has_credentials = bool(env_var_name and os.environ.get(env_var_name))
+
+            # Read last_validated_at from the validation-cache file
+            cache = self._load_account_validation_cache()
+            last_validated_at = cache.get(env_var_name) if env_var_name else None
+
+            self._send_json_response({
+                'account_id': account_id,
+                'account_nickname': account_nickname,
+                'env_var_name': env_var_name,
+                'has_credentials': has_credentials,
+                'last_validated_at': last_validated_at,
+            })
+        except Exception as e:
+            print(f"[LCARS] ERROR in serve_team_account_current: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    def handle_team_account_save(self):
+        """POST /api/team-config/account/save
+
+        Body: {team, account_id, account_nickname, env_var_name}
+        Writes the three schema-v2 account fields into ~/.aiteamforge/team-paths.json
+        for the specified team. Uses fcntl file-lock + atomic rename.
+        NEVER stores or echoes the actual key value.
+
+        XACA-0281-004
+        """
+        import fcntl
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length))
+
+            team = body.get('team') or LCARS_TEAM
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'success': False, 'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            account_id = body.get('account_id', '')
+            account_nickname = body.get('account_nickname', '')
+            env_var_name = body.get('env_var_name', '')
+
+            # Validate: all three must be non-empty strings
+            if not isinstance(account_id, str) or not account_id.strip():
+                self._send_json_response({'success': False, 'error': 'account_id must be a non-empty string'}, status=400)
+                return
+            if not isinstance(account_nickname, str) or not account_nickname.strip():
+                self._send_json_response({'success': False, 'error': 'account_nickname must be a non-empty string'}, status=400)
+                return
+            if not isinstance(env_var_name, str) or not self._ENV_VAR_NAME_RE.match(env_var_name):
+                self._send_json_response({'success': False, 'error': 'env_var_name must match ^[A-Z][A-Z0-9_]*$'}, status=400)
+                return
+
+            # Write to team-paths.json via fcntl lock + atomic rename
+            team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
+            if not team_paths_file.exists():
+                self._send_json_response({'success': False, 'error': f'team-paths.json not found'}, status=500)
+                return
+
+            lock_file = team_paths_file.with_suffix('.json.lock')
+            try:
+                with open(lock_file, 'w') as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    try:
+                        with open(team_paths_file, 'r') as f:
+                            data = json.load(f)
+
+                        if team not in data.get('teams', {}):
+                            self._send_json_response({'success': False, 'error': f"Team '{team}' not found in team-paths.json"}, status=400)
+                            return
+
+                        # Merge only the three account fields; all other fields untouched
+                        data['teams'][team]['anthropic_account_id'] = account_id.strip()
+                        data['teams'][team]['anthropic_account_nickname'] = account_nickname.strip()
+                        data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
+
+                        # Atomic write
+                        tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
+                        try:
+                            with open(tmp_path, 'w') as f:
+                                json.dump(data, f, indent=2)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            os.replace(str(tmp_path), str(team_paths_file))
+                        except Exception:
+                            try:
+                                tmp_path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            raise
+
+                        # Invalidate the mtime cache
+                        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                            LCARSHandler._TEAM_PATHS_CACHE = {'mtime_ns': None, 'data': None}
+
+                        print(f"[LCARS] Account config saved for '{team}': account_id={account_id.strip()!r} env_var={env_var_name!r}")
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            except Exception:
+                raise
+
+            self._send_json_response({
+                'success': True,
+                'team': team,
+                'account_id': account_id.strip(),
+                'env_var_name': env_var_name,
+            })
+        except Exception as e:
+            print(f"[LCARS] ERROR in handle_team_account_save: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
+    def handle_team_account_test_connection(self):
+        """POST /api/team-config/account/test-connection
+
+        Body: {team} OR {env_var_name}
+        Resolves the env-var name (from team-paths.json if team is given),
+        reads the key from the LCARS process environment (NEVER from the request body),
+        probes the Anthropic API with the smallest valid payload,
+        and returns {ok, account_fingerprint, model_access, error}.
+
+        On success, caches the validation timestamp so
+        serve_team_account_current can return last_validated_at.
+        NEVER returns or logs the actual key value.
+
+        XACA-0281-005
+        """
+        import urllib.request
+        import urllib.error
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length))
+
+            # Resolve env_var_name: prefer explicit field, fall back to team lookup
+            env_var_name = body.get('env_var_name', '').strip()
+            if not env_var_name:
+                team = body.get('team', '').strip() or LCARS_TEAM
+                if team not in TEAM_KANBAN_DIRS:
+                    self._send_json_response({'ok': False, 'error': f'Unknown team: {team}'}, status=400)
+                    return
+                data, err = self._read_team_paths_raw()
+                if err:
+                    self._send_json_response({'ok': False, 'error': err}, status=500)
+                    return
+                env_var_name = (data.get('teams', {}).get(team) or {}).get('anthropic_api_key_env_var', '')
+
+            if not env_var_name:
+                self._send_json_response({'ok': False, 'error': 'No env_var_name could be resolved'}, status=400)
+                return
+
+            # Read the actual key from the process environment — NEVER from the request
+            api_key = os.environ.get(env_var_name, '')
+            if not api_key:
+                self._send_json_response({
+                    'ok': False,
+                    'account_fingerprint': None,
+                    'model_access': None,
+                    'error': f'Environment variable {env_var_name!r} is not set or empty',
+                }, status=400)
+                return
+
+            # Build a fingerprint from the key: mask middle chars, show only last 4
+            # e.g. sk-ant-api03-XXXX...XXXX -> "sk-ant-…YYYY" (no secrets in logs)
+            if len(api_key) >= 8:
+                account_fingerprint = api_key[:8].replace(api_key[4:8], '****') + '…' + api_key[-4:]
+            else:
+                account_fingerprint = '****…' + api_key[-4:] if len(api_key) >= 4 else '****'
+
+            # Probe Anthropic API — smallest valid payload
+            probe_payload = json.dumps({
+                'model': 'claude-haiku-4-5',
+                'max_tokens': 1,
+                'messages': [{'role': 'user', 'content': 'ping'}],
+            }).encode('utf-8')
+
+            req = urllib.request.Request(
+                'https://api.anthropic.com/v1/messages',
+                data=probe_payload,
+                headers={
+                    'x-api-key': api_key,
+                    'anthropic-version': '2023-06-01',
+                    'content-type': 'application/json',
+                },
+                method='POST',
+            )
+
+            model_access = None
+            ok = False
+            error_msg = None
+            try:
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    resp_body = json.loads(resp.read().decode('utf-8'))
+                    # A 200 response with a message object means credentials are valid
+                    if resp_body.get('type') in ('message', 'error'):
+                        ok = True
+                        model_access = resp_body.get('model')
+            except urllib.error.HTTPError as http_err:
+                raw = http_err.read().decode('utf-8', errors='replace')
+                try:
+                    err_json = json.loads(raw)
+                    # Strip any fragment that looks like an API key from error text
+                    error_msg = err_json.get('error', {}).get('message', str(http_err))
+                except Exception:
+                    error_msg = f'HTTP {http_err.code}'
+                # Sanitize: remove any key-like substrings from error message
+                if api_key and api_key in error_msg:
+                    error_msg = error_msg.replace(api_key, '[REDACTED]')
+                ok = False
+            except Exception as e:
+                error_msg = str(e)
+                ok = False
+
+            # On success, cache the validation timestamp
+            if ok:
+                from datetime import datetime, timezone
+                ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+                cache = self._load_account_validation_cache()
+                cache[env_var_name] = ts
+                self._save_account_validation_cache(cache)
+
+            response = {
+                'ok': ok,
+                'account_fingerprint': account_fingerprint if ok else None,
+                'model_access': model_access,
+                'error': error_msg,
+            }
+            self._send_json_response(response)
+        except Exception as e:
+            print(f"[LCARS] ERROR in handle_team_account_test_connection: {e}")
+            self._send_json_response({'ok': False, 'error': str(e)}, status=500)
+
+    def serve_team_account_running_sessions(self, query_string: str):
+        """GET /api/team-config/account/running-sessions?team=<id>
+
+        Reads ~/.claude/.session-account-map.jsonl, filters for entries whose
+        team == <id> AND whose pid is still alive (os.kill(pid, 0) in try/except).
+        Returns {sessions: [{pid, terminal, started_at, cwd, account_id}]} sorted
+        most-recent-first. Handles a missing JSONL file gracefully.
+
+        XACA-0281-006
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0] or LCARS_TEAM
+
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            session_map_path = Path.home() / '.claude' / '.session-account-map.jsonl'
+            sessions = []
+
+            if session_map_path.exists():
+                try:
+                    with open(session_map_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+
+                            if entry.get('team') != team:
+                                continue
+
+                            # Check if the pid is still alive
+                            pid = entry.get('pid')
+                            if not isinstance(pid, int):
+                                continue
+                            try:
+                                os.kill(pid, 0)
+                                # pid is alive — include this session
+                                sessions.append({
+                                    'pid': pid,
+                                    'terminal': entry.get('terminal', ''),
+                                    'started_at': entry.get('started_at', ''),
+                                    'cwd': entry.get('cwd', ''),
+                                    'account_id': entry.get('account_id', ''),
+                                })
+                            except OSError:
+                                # pid not alive — skip
+                                pass
+                except Exception as e:
+                    print(f"[LCARS] WARNING reading session-account-map.jsonl: {e}")
+
+            # Sort most-recent-first by started_at (ISO string sort works correctly)
+            sessions.sort(key=lambda s: s.get('started_at', ''), reverse=True)
+
+            self._send_json_response({'sessions': sessions})
+        except Exception as e:
+            print(f"[LCARS] ERROR in serve_team_account_running_sessions: {e}")
+            self._send_json_response({'error': str(e)}, status=500)
+
+    # === XACA-0281: AI engines registry consumer ===
+
+    # Local cache path for engines registry (written on each successful Fleet Monitor fetch)
+    _ENGINES_CACHE_PATH = Path.home() / '.aiteamforge' / 'engines-cache.json'
+
+    def _fetch_engines_from_fleet_monitor(self):
+        """Try to fetch /api/engines from Fleet Monitor. Returns (data_dict, error_str).
+
+        On success returns the parsed JSON dict and None error.
+        On any failure (timeout, refused, non-200, parse error) returns (None, description).
+        """
+        try:
+            url = f"{FLEET_MONITOR_URL}/api/engines"
+            req = urllib.request.Request(url, headers={'Accept': 'application/json'})
+            with urllib.request.urlopen(req, timeout=2) as resp:
+                if resp.status != 200:
+                    return None, f"Fleet Monitor returned HTTP {resp.status}"
+                raw = resp.read()
+            data = json.loads(raw)
+            return data, None
+        except urllib.error.URLError as e:
+            return None, f"Fleet Monitor unreachable: {e.reason}"
+        except Exception as e:
+            return None, f"Fleet Monitor fetch error: {e}"
+
+    def _write_engines_cache(self, data: dict):
+        """Atomically write engines data to the local cache file."""
+        p = self._ENGINES_CACHE_PATH
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp_path = p.with_suffix(f'.json.tmp.{os.getpid()}')
+        try:
+            with open(tmp_path, 'w') as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(str(tmp_path), str(p))
+        except Exception as e:
+            print(f"[LCARS] WARNING writing engines cache: {e}")
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+    def _read_engines_cache(self):
+        """Read the local engines cache. Returns (data_dict, cache_age_seconds, error_str).
+
+        cache_age_seconds is None when there is no cache. error_str is None on success.
+        """
+        p = self._ENGINES_CACHE_PATH
+        if not p.exists():
+            return None, None, "No local engines cache available"
+        try:
+            mtime = os.stat(p).st_mtime
+            cache_age = int(time.time() - mtime)
+            with open(p, 'r') as f:
+                data = json.load(f)
+            return data, cache_age, None
+        except Exception as e:
+            return None, None, f"Error reading engines cache: {e}"
+
+    def _get_engines_registry(self, force_refresh: bool = False):
+        """Return engines registry data, populating/updating cache as needed.
+
+        Returns (data_dict, source_str, cache_age_or_None, error_str_or_None).
+        source is one of: 'fleet_monitor', 'local_cache', 'empty'.
+        Never raises — always returns a usable result.
+        """
+        _CACHE_TTL_SECONDS = 300  # 5 minutes
+
+        if not force_refresh:
+            # Fast cache-first path: return cached data without hitting Fleet Monitor
+            # when the cache is fresh (< TTL).  This avoids blocking every engines/list
+            # request on a network round-trip to Fleet Monitor.
+            cached, cache_age, cache_err = self._read_engines_cache()
+            if cached is not None and cache_age is not None and cache_age < _CACHE_TTL_SECONDS:
+                response = dict(cached)
+                response['_source'] = 'local_cache'
+                response['_cache_age_seconds'] = cache_age
+                return cached, 'local_cache', cache_age, None
+
+        # Cache stale/missing or force_refresh=True: try Fleet Monitor first
+        data, fetch_err = self._fetch_engines_from_fleet_monitor()
+        if data is not None:
+            # Success: refresh local cache and return fleet_monitor result
+            self._write_engines_cache(data)
+            return data, 'fleet_monitor', None, None
+
+        # Fleet Monitor unavailable: fall back to local cache
+        cached, cache_age, cache_err = self._read_engines_cache()
+        if cached is not None:
+            return cached, 'local_cache', cache_age, fetch_err
+
+        # Neither available: return graceful empty payload
+        err_msg = fetch_err or cache_err or "No engines data available"
+        return {'version': 1, 'engines': []}, 'empty', None, err_msg
+
+    def serve_engines_list(self, query_string: str):
+        """GET /api/engines/list[?refresh=true]
+
+        Proxies the Fleet Monitor /api/engines endpoint with a local cache fallback
+        so team startup is not gated on Fleet Monitor reachability.
+
+        Response always has HTTP 200. Clients check _source to decide UI state:
+          _source == 'fleet_monitor' → freshly fetched
+          _source == 'local_cache'   → stale; _cache_age_seconds is set
+          _source == 'empty'         → no data; _error is set; show empty picker + banner
+
+        XACA-0281-020
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            force_refresh = params.get('refresh', [''])[0].lower() in ('1', 'true', 'yes')
+
+            data, source, cache_age, error = self._get_engines_registry(force_refresh=force_refresh)
+
+            response = dict(data)  # shallow copy — don't mutate the cache
+            response['_source'] = source
+            if cache_age is not None:
+                response['_cache_age_seconds'] = cache_age
+            if error:
+                response['_error'] = error
+
+            self._send_json_response(response)
+        except Exception as e:
+            print(f"[LCARS] ERROR in serve_engines_list: {e}")
+            self._send_json_response({
+                'version': 1,
+                'engines': [],
+                '_source': 'empty',
+                '_error': str(e),
+            })
+
+    def handle_team_account_assign(self):
+        """POST /api/team-config/account/assign
+
+        Body: {team, engine_slug, account_slug}
+
+        Copy-on-select: looks up the named account in the engines registry and mirrors
+        its fields into team-paths.json so XACA-0279 Phase A.1's resolver continues
+        to work without modification.
+
+        Writes these team-paths.json fields:
+          anthropic_account_id       ← registry account.account_id
+          anthropic_account_nickname ← registry account.nickname
+          anthropic_api_key_env_var  ← registry account.env_var_name
+          anthropic_account_ref      ← "{engine_slug}/{account_slug}" (drift pointer)
+
+        Response: {success, team, engine_slug, account_slug, mirrored: {...}, has_credentials}
+        NEVER returns the actual key value.
+
+        XACA-0281-022
+        """
+        import fcntl
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length))
+
+            team = (body.get('team') or '').strip()
+            engine_slug = (body.get('engine_slug') or '').strip()
+            account_slug = (body.get('account_slug') or '').strip()
+
+            # --- Validate required fields ---
+            if not team:
+                self._send_json_response({'success': False, 'error': 'team is required'}, status=400)
+                return
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'success': False, 'error': f'Unknown team: {team}'}, status=400)
+                return
+            if not engine_slug:
+                self._send_json_response({'success': False, 'error': 'engine_slug is required'}, status=400)
+                return
+            if not account_slug:
+                self._send_json_response({'success': False, 'error': 'account_slug is required'}, status=400)
+                return
+
+            # --- Resolve account from registry (fresh fetch preferred; cache fallback) ---
+            reg_data, source, _cache_age, fetch_err = self._get_engines_registry(force_refresh=True)
+
+            if source == 'empty':
+                # Registry completely unavailable and no cache
+                self._send_json_response({
+                    'success': False,
+                    'error': f'Engines registry unavailable: {fetch_err}',
+                }, status=502)
+                return
+
+            # Find the engine by slug
+            matched_engine = None
+            for engine in reg_data.get('engines', []):
+                if engine.get('slug') == engine_slug:
+                    matched_engine = engine
+                    break
+
+            if matched_engine is None:
+                self._send_json_response({
+                    'success': False,
+                    'error': f"Engine '{engine_slug}' not found in registry (source: {source})",
+                }, status=400)
+                return
+
+            # Find the account by slug within that engine
+            matched_account = None
+            for acct in matched_engine.get('accounts', []):
+                if acct.get('slug') == account_slug:
+                    matched_account = acct
+                    break
+
+            if matched_account is None:
+                self._send_json_response({
+                    'success': False,
+                    'error': f"Account '{account_slug}' not found under engine '{engine_slug}' (source: {source})",
+                }, status=400)
+                return
+
+            # Extract the fields to mirror
+            account_id = matched_account.get('account_id', '')
+            account_nickname = matched_account.get('nickname', '')
+            env_var_name = matched_account.get('env_var_name', '')
+            account_ref = f"{engine_slug}/{account_slug}"
+
+            # --- Write to team-paths.json (fcntl lock + atomic rename) ---
+            team_paths_file = Path.home() / '.aiteamforge' / 'team-paths.json'
+            if not team_paths_file.exists():
+                self._send_json_response({'success': False, 'error': 'team-paths.json not found'}, status=500)
+                return
+
+            lock_file = team_paths_file.with_suffix('.json.lock')
+            try:
+                with open(lock_file, 'w') as lock:
+                    fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+                    try:
+                        with open(team_paths_file, 'r') as f:
+                            tp_data = json.load(f)
+
+                        if team not in tp_data.get('teams', {}):
+                            self._send_json_response({
+                                'success': False,
+                                'error': f"Team '{team}' not found in team-paths.json",
+                            }, status=400)
+                            return
+
+                        # Mirror account fields; preserve all other fields untouched
+                        tp_data['teams'][team]['anthropic_account_id'] = account_id
+                        tp_data['teams'][team]['anthropic_account_nickname'] = account_nickname
+                        tp_data['teams'][team]['anthropic_api_key_env_var'] = env_var_name
+                        tp_data['teams'][team]['anthropic_account_ref'] = account_ref
+
+                        # Atomic write
+                        tmp_path = team_paths_file.with_suffix(f'.json.tmp.{os.getpid()}')
+                        try:
+                            with open(tmp_path, 'w') as f:
+                                json.dump(tp_data, f, indent=2)
+                                f.flush()
+                                os.fsync(f.fileno())
+                            os.replace(str(tmp_path), str(team_paths_file))
+                        except Exception:
+                            try:
+                                tmp_path.unlink(missing_ok=True)
+                            except OSError:
+                                pass
+                            raise
+
+                        # Invalidate the mtime cache so next read sees the new data
+                        with LCARSHandler._TEAM_PATHS_CACHE_LOCK:
+                            LCARSHandler._TEAM_PATHS_CACHE = {'mtime_ns': None, 'data': None}
+
+                        print(
+                            f"[LCARS] Account assigned for '{team}': "
+                            f"ref={account_ref!r} account_id={account_id!r} env_var={env_var_name!r}"
+                        )
+                    finally:
+                        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                        try:
+                            lock_file.unlink(missing_ok=True)
+                        except OSError:
+                            pass
+            except Exception:
+                raise
+
+            # has_credentials: true if the env var is set in the LCARS process environment
+            # NEVER return the actual key value
+            has_credentials = bool(env_var_name and os.environ.get(env_var_name))
+
+            self._send_json_response({
+                'success': True,
+                'team': team,
+                'engine_slug': engine_slug,
+                'account_slug': account_slug,
+                'mirrored': {
+                    'account_id': account_id,
+                    'account_nickname': account_nickname,
+                    'env_var_name': env_var_name,
+                },
+                'has_credentials': has_credentials,
+            })
+        except Exception as e:
+            print(f"[LCARS] ERROR in handle_team_account_assign: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
+    # ------------------------------------------------------------------
+    # XACA-0281 Phase A.3: Resume-ID management endpoints
+    # ------------------------------------------------------------------
+
+    def _resume_id_slugify(self, account_id: str) -> str:
+        """Slugify an account_id for use in archive filenames.
+
+        Keeps alphanumerics and hyphens only, lowercased. Falls back to
+        'unknown' if nothing survives the filter.
+        """
+        import re
+        slug = re.sub(r'[^a-z0-9\-]', '', account_id.lower())
+        return slug or 'unknown'
+
+    def serve_team_account_resume_ids_count(self, query_string: str):
+        """GET /api/team-config/account/resume-ids/count?team=<id>&old_account_id=<id>
+
+        Returns {count: <int>} — the number of session-account-map.jsonl entries
+        that match both team and old_account_id. Used by the UI to display how
+        many resume points will be affected before the user chooses an action.
+
+        XACA-0281 Phase A.3
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0]
+            old_account_id = params.get('old_account_id', [None])[0]
+
+            if not team or not old_account_id:
+                self._send_json_response(
+                    {'error': 'Missing required query params: team, old_account_id'},
+                    status=400,
+                )
+                return
+
+            session_map_path = os.path.expanduser('~/.claude/.session-account-map.jsonl')
+            count = 0
+
+            if os.path.exists(session_map_path):
+                try:
+                    with open(session_map_path, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                entry = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            if (entry.get('team') == team
+                                    and entry.get('account_id') == old_account_id):
+                                count += 1
+                except Exception as e:
+                    print(f"[LCARS] WARNING reading session-account-map.jsonl in count: {e}")
+
+            self._send_json_response({'count': count})
+        except Exception as e:
+            print(f"[LCARS] ERROR in serve_team_account_resume_ids_count: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
+    def handle_team_account_resume_ids(self):
+        """POST /api/team-config/account/resume-ids
+
+        Body: {team, old_account_id, action}
+          action = "preserve" | "archive" | "clear"
+
+        preserve:
+          No-op. Confirms that XACA-0279 Phase A.1 segregation already keeps
+          the resume IDs isolated under the old account.
+          Returns {success, action, affected: 0, message}.
+
+        archive:
+          Reads ~/.claude/.session-account-map.jsonl, pulls entries matching
+          team + old_account_id, writes them to a timestamped archive file,
+          then rewrites the live map with those entries removed (atomic via
+          write-to-tmp + os.replace).
+          Returns {success, action, affected, archive_path}.
+
+        clear:
+          Same as archive but WITHOUT writing the archive — matching entries
+          are simply dropped from the live map. Destructive; UI must confirm
+          before calling. No second confirm required in the body.
+          Returns {success, action, affected}.
+
+        XACA-0281 Phase A.3
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            body = json.loads(self.rfile.read(content_length)) if content_length else {}
+
+            team = body.get('team')
+            old_account_id = body.get('old_account_id')
+            action = body.get('action')
+
+            if not team or not old_account_id or action not in ('preserve', 'archive', 'clear'):
+                self._send_json_response(
+                    {'success': False,
+                     'error': 'Missing or invalid fields: team, old_account_id, action '
+                              '(must be preserve|archive|clear)'},
+                    status=400,
+                )
+                return
+
+            # --- preserve: pure no-op ---
+            if action == 'preserve':
+                self._send_json_response({
+                    'success': True,
+                    'action': 'preserve',
+                    'affected': 0,
+                    'message': 'Resume IDs remain segregated under the old account.',
+                })
+                return
+
+            # --- archive / clear: read, split, rewrite ---
+            session_map_path = os.path.expanduser('~/.claude/.session-account-map.jsonl')
+
+            matched_lines = []    # raw JSON strings for affected entries
+            remaining_lines = []  # raw JSON strings for everything else
+
+            if os.path.exists(session_map_path):
+                with open(session_map_path, 'r') as f:
+                    for raw in f:
+                        stripped = raw.strip()
+                        if not stripped:
+                            continue
+                        try:
+                            entry = json.loads(stripped)
+                        except json.JSONDecodeError:
+                            # Keep malformed lines so we don't silently lose them
+                            remaining_lines.append(stripped)
+                            continue
+                        if (entry.get('team') == team
+                                and entry.get('account_id') == old_account_id):
+                            matched_lines.append(stripped)
+                        else:
+                            remaining_lines.append(stripped)
+
+            affected = len(matched_lines)
+
+            # archive: write matched lines to a timestamped archive file first
+            archive_path = None
+            if action == 'archive' and matched_lines:
+                from datetime import datetime
+                ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+                slug = self._resume_id_slugify(old_account_id)
+                archive_filename = f'.session-account-map.archive-{slug}-{ts}.jsonl'
+                archive_path = os.path.expanduser(f'~/.claude/{archive_filename}')
+
+                with open(archive_path, 'w') as af:
+                    for line in matched_lines:
+                        af.write(line + '\n')
+
+            # Rewrite live map (atomic) — skip if nothing changed
+            if matched_lines:
+                tmp_path = session_map_path + f'.tmp.{os.getpid()}'
+                try:
+                    with open(tmp_path, 'w') as tf:
+                        for line in remaining_lines:
+                            tf.write(line + '\n')
+                    os.replace(tmp_path, session_map_path)
+                except Exception:
+                    # Clean up tmp on failure; do not leave partial writes
+                    try:
+                        os.remove(tmp_path)
+                    except OSError:
+                        pass
+                    raise
+
+            response = {
+                'success': True,
+                'action': action,
+                'affected': affected,
+            }
+            if action == 'archive':
+                response['archive_path'] = archive_path or ''
+
+            self._send_json_response(response)
+        except Exception as e:
+            print(f"[LCARS] ERROR in handle_team_account_resume_ids: {e}")
+            self._send_json_response({'success': False, 'error': str(e)}, status=500)
+
     def handle_connect_apple_calendar(self):
         """POST /api/calendar/connect/apple - Connect Apple Calendar with CalDAV credentials"""
         try:
@@ -9603,6 +10485,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # XACA-0292: Team config (CR/CAB support flag)
         elif path == '/api/team-config':
             self.serve_team_config(parsed.query)
+        # XACA-0281 Phase A.3: Team account config endpoints
+        elif path == '/api/team-config/account/current':
+            self.serve_team_account_current(parsed.query)
+        elif path == '/api/team-config/account/running-sessions':
+            self.serve_team_account_running_sessions(parsed.query)
+        # XACA-0281 Phase A.3: Resume-ID count
+        elif path == '/api/team-config/account/resume-ids/count':
+            self.serve_team_account_resume_ids_count(parsed.query)
+        # === XACA-0281: AI engines registry consumer ===
+        elif path == '/api/engines/list':
+            self.serve_engines_list(parsed.query)
         # XACA-0220 Phase 3b: daily artifact audit results
         elif path == '/api/artifact-audit':
             self.serve_artifact_audit()

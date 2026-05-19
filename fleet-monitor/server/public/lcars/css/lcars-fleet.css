@@ -523,6 +523,9 @@ body {
     background: var(--lcars-orange);
     border-bottom: 2px solid var(--lcars-black);
 }
+.sidebar-button[data-section="engines"] {
+    background: var(--lcars-amber);
+}
 
 /* Active state - invert colors */
 .sidebar-button.active {
@@ -548,6 +551,10 @@ body {
 .sidebar-button[data-section="admin"].active {
     background: var(--lcars-black);
     color: var(--lcars-orange);
+}
+.sidebar-button[data-section="engines"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-amber);
 }
 
 /* Active indicator bar on left edge */

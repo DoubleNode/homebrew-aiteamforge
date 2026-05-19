@@ -15185,6 +15185,174 @@ body {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
+   XACA-0281: Anthropic Account Routing — status dots & per-team rows
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Container for the runtime-rendered team account rows */
+.team-account-list {
+    min-height: 0;
+}
+
+/* Status dot: shared base */
+.team-account-status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    background: var(--lcars-amber, #ffcc00);
+    box-shadow: 0 0 4px currentColor;
+    opacity: 0.9;
+}
+
+/* Green: credentials set and recently validated */
+.team-account-row[data-credential-status="ok"] .team-account-status-dot {
+    background: var(--lcars-green, #99cc99);
+    color: var(--lcars-green, #99cc99);
+}
+
+/* Red: env var not set / no credentials found */
+.team-account-row[data-credential-status="missing"] .team-account-status-dot {
+    background: var(--lcars-red, #cc6666);
+    color: var(--lcars-red, #cc6666);
+}
+
+/* Amber (default): env var set but never validated */
+.team-account-row[data-credential-status="unvalidated"] .team-account-status-dot {
+    background: var(--lcars-amber, #ffcc00);
+    color: var(--lcars-amber, #ffcc00);
+}
+
+/* Team account nickname — italic, slightly muted */
+.team-account-nickname {
+    font-style: italic;
+    opacity: 0.75;
+}
+
+/* Team account truncated ID — monospace feel */
+.team-account-account-id {
+    font-family: 'SF Mono', 'Menlo', monospace;
+    font-size: 10px;
+    opacity: 0.8;
+    letter-spacing: 0.3px;
+}
+
+/* Edit button sizing — smaller than default lcars-btn */
+.team-account-edit-btn {
+    font-size: 11px;
+    padding: 3px 10px;
+    letter-spacing: 0.5px;
+}
+
+/* XACA-0281-022: Picker dropdown — PRIMARY account selection affordance */
+.team-account-picker {
+    background: rgba(0, 0, 0, 0.60);
+    border: 1px solid rgba(255, 153, 0, 0.55);
+    color: var(--lcars-peach, #ffcc99);
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    letter-spacing: 0.3px;
+    padding: 4px 8px;
+    border-radius: 3px;
+    max-width: 220px;
+    min-width: 140px;
+    outline: none;
+    cursor: pointer;
+    transition: border-color 0.2s, box-shadow 0.2s;
+    /* Suppress native arrow styling on some browsers */
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    /* Custom arrow via background image */
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%23ff9900' opacity='0.7'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 8px center;
+    padding-right: 24px;
+}
+
+.team-account-picker:hover,
+.team-account-picker:focus {
+    border-color: var(--lcars-orange, #ff9900);
+    box-shadow: 0 0 4px rgba(255, 153, 0, 0.35);
+}
+
+.team-account-picker:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.team-account-picker optgroup {
+    color: var(--lcars-amber, #ffcc00);
+    font-style: normal;
+    font-weight: bold;
+    background: #0a0a0a;
+}
+
+.team-account-picker option {
+    background: #111;
+    color: var(--lcars-peach, #ffcc99);
+}
+
+/* XACA-0281-022: MANUAL button — SECONDARY / deprecated override path.
+   Visually demoted: smaller, lower opacity, muted color so the picker
+   is the obvious primary affordance. */
+.team-account-manual-btn {
+    font-size: 10px !important;
+    padding: 2px 8px !important;
+    letter-spacing: 0.3px !important;
+    opacity: 0.5;
+    color: var(--lcars-blue, #8888cc) !important;
+    border-color: rgba(136, 136, 204, 0.4) !important;
+    transition: opacity 0.2s;
+}
+
+.team-account-manual-btn:hover {
+    opacity: 0.85;
+}
+
+/* Loading / error state inside #team-account-list */
+.team-account-loading {
+    padding: 12px 16px;
+    font-size: 12px;
+    color: var(--lcars-blue, #8888cc);
+    opacity: 0.8;
+    letter-spacing: 0.3px;
+}
+
+.team-account-loading.team-account-error {
+    color: var(--lcars-red, #cc6666);
+}
+
+/* Modal: team account edit (XACA-0281-002) */
+#team-account-edit-modal .lcars-modal-content {
+    max-width: 520px;
+    width: 100%;
+}
+
+/* Test status pill area */
+#team-account-test-status {
+    min-height: 24px;
+    font-size: 12px;
+    letter-spacing: 0.4px;
+    padding: 6px 0 2px;
+    color: var(--lcars-blue);
+    transition: color 0.2s;
+}
+
+#team-account-test-status.status-ok {
+    color: var(--lcars-green, #99cc99);
+}
+
+#team-account-test-status.status-error {
+    color: var(--lcars-red, #cc6666);
+}
+
+#team-account-test-status.status-testing {
+    color: var(--lcars-blue);
+    opacity: 0.8;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
    EXPORT / IMPORT — Per-team archive UI (import-specific elements)
    ═══════════════════════════════════════════════════════════════════════════ */
 
