@@ -1,0 +1,108 @@
+# Team transfer configuration: iOS (MainEventApp-iOS)
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#   {claude_project_dir_name} — Claude project slug
+#
+# NOTE: This repo lives under /Users/Shared/, NOT under $HOME. Using Option B:
+# home_relative_root is empty and patterns that reference the repo root use
+# absolute paths directly, since fnmatch compares strings without Path.resolve().
+
+team: ios
+# Repo root: /Users/Shared/Development/Main Event/MainEventApp-iOS
+# Pass --repo-root to generator explicitly for this team.
+home_relative_root: ""
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "ios-board.json"
+ticket_prefix: "XIOS-"
+
+# Claude project directory name under ~/.claude/projects/.
+claude_project_dir_name: "-Users-Shared-Development-Main-Event-MainEventApp-iOS"
+
+# SQLite databases to probe for structural integrity.
+# No data/ directory exists in this repo.
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+defaults:
+  rules:
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
+    # ~/dev-team/ios/ — scripts and configs AITeamForge ships for the iOS team.
+    - pattern: "{home}/dev-team/{team}/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/{team}/**"
+      channel: aiteamforge_product
+    # Personas live inside the Shared repo (absolute path required).
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/.claude/agents/*"
+      channel: aiteamforge_product
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/.claude/agents/**"
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/worf/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/worf/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/beverly/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/beverly/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/deanna/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/deanna/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/geordi/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/geordi/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/picard/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/picard/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/wesley/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/wesley/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/data/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/data/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # Absolute path required: repo is under /Users/Shared/, not $HOME.
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/*"
+      channel: git
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/**"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/worktrees/**"
+      channel: export_kanban
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/**/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/**/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/secrets/*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/MainEventApp-iOS/secrets/**"
+      channel: secrets_export
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+overrides: []

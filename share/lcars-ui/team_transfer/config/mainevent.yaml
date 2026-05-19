@@ -1,0 +1,114 @@
+# Team transfer configuration: MainEvent (cross-platform coordination team)
+# Alias: command (command is the ticket prefix and a common team alias)
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash; empty here — see below)
+#   {team}  — team name
+#
+# SHARED-PATH EDGE CASE — Option B chosen (absolute patterns):
+#   working_dir is /Users/Shared/Development/Main Event/dev-team — outside ~/ entirely.
+#   Option A ({home}/../Shared/Development/Main Event/dev-team) would fail because
+#   fnmatch.fnmatchcase() does NOT resolve '..' in glob patterns; the literal '../'
+#   will never match an absolute path like /Users/Shared/...
+#   Option B: home_relative_root is set to "" and all non-home patterns use explicit
+#   absolute paths. {home}/{root} degrades to {home}/ which we avoid entirely in rules
+#   that reference the ME repo — those rules spell out the absolute path literally.
+
+team: mainevent
+home_relative_root: ""
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+# The MainEvent coordination board lives in the ME dev-team repo kanban directory.
+board_filename: "command-board.json"
+ticket_prefix: "XCMD-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Derived from the absolute path: /Users/Shared/Development/Main Event/dev-team
+# Slashes → dashes, spaces → dashes: -Users-Shared-Development-Main-Event-dev-team
+claude_project_dir_name: "-Users-Shared-Development-Main-Event-dev-team"
+
+# SQLite databases to probe for structural integrity.
+# No data/ directory exists in the ME dev-team repo as of 2026-05-19.
+# NOTE: Use bare section header (not "databases: []") — the hand YAML parser in
+# _parse_team_yaml treats inline "[]" as the string "[]", not an empty list.
+# A bare header with no entries leaves the parser default (list) intact.
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+defaults:
+  rules:
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
+    # Academy dev-team mainevent subdirectory (personas, scripts, terminals)
+    - pattern: "{home}/dev-team/{team}/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/{team}/**"
+      channel: aiteamforge_product
+    # ME repo .claude/agents/ — deployed persona copies for this team repo
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/.claude/agents/*"
+      channel: aiteamforge_product
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/.claude/agents/**"
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+    # Mainevent persona knowledge dirs (shared names: janeway, paris, emh/doctor)
+    - pattern: "{home}/knowledge/agents/janeway/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/janeway/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/paris/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/paris/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/emh/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/emh/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the ME dev-team repo working tree -----
+    # Absolute path required — repo is under /Users/Shared, not ~/
+    # domain_git decides per-file whether something is tracked; this rule covers
+    # the *repo root* as a fallback.
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/*"
+      channel: git
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/kanban/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/kanban/**"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/worktrees/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/worktrees/**"
+      channel: export_kanban
+
+    # ----- EXPORT_DATABASE: SQLite databases (none currently — placeholder for future) -----
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/data/*"
+      channel: export_database
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/data/**"
+      channel: export_database
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/**/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/**/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/secrets/*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Main Event/dev-team/secrets/**"
+      channel: secrets_export
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+overrides: []

@@ -276,6 +276,55 @@ Confirm all `export_database` entries pass SCHEMA.
 
 ---
 
+## Per-Team Config Catalog
+
+The transfer toolkit ships one YAML per canonical team plus alias symlinks where two team names share a working_dir.
+
+### Canonical configs (17)
+
+| Team | YAML | Working dir | Board | Prefix |
+|---|---|---|---|---|
+| finance | finance.yaml | ~/finance/personal | finance-personal-board.json | XFIN- |
+| academy | academy.yaml | ~/dev-team | academy-board.json | XACA- |
+| mainevent | mainevent.yaml | /Users/Shared/Development/Main Event/dev-team | command-board.json | XCMD- |
+| ios | ios.yaml | /Users/Shared/Development/Main Event/MainEventApp-iOS | ios-board.json | XIOS- |
+| android | android.yaml | /Users/Shared/Development/Main Event/MainEventApp-Android | android-board.json | XAND- |
+| firebase | firebase.yaml | /Users/Shared/Development/Main Event/MainEventApp-Functions | firebase-board.json | XFIR- |
+| dns | dns.yaml | /Users/Shared/Development/DNSFramework | dns-board.json | XDNS- |
+| legal-coparenting | legal-coparenting.yaml | ~/legal/coparenting | legal-coparenting-board.json | XLCP- |
+| medical-general | medical-general.yaml | ~/medical/general | medical-general-board.json | XMED- |
+| freelance-doublenode-starwords | freelance-doublenode-starwords.yaml | /Users/Shared/Development/DoubleNode/Starwords | freelance-doublenode-starwords-board.json | XFSW- |
+| freelance-doublenode-caravan | freelance-doublenode-caravan.yaml | /Users/Shared/Development/DoubleNode/Caravan | freelance-doublenode-caravan-board.json | XVAN- |
+| freelance-doublenode-awaysentry | freelance-doublenode-awaysentry.yaml | /Users/Shared/Development/DoubleNode/AwaySentry | freelance-doublenode-awaysentry-board.json | XFAS- |
+| freelance-doublenode-appplanning | freelance-doublenode-appplanning.yaml | /Users/Shared/Development/DoubleNode/appPlanning | freelance-doublenode-appplanning-board.json | XFAP- |
+| freelance-doublenode-workstats | freelance-doublenode-workstats.yaml | /Users/Shared/Development/DoubleNode/WorkStats | freelance-doublenode-workstats-board.json | XFWS- |
+| freelance-doublenode-lifeboard | freelance-doublenode-lifeboard.yaml | /Users/Shared/Development/DoubleNode/LifeBoard | freelance-doublenode-lifeboard-board.json | XFLB- |
+| freelance-liquidstyle-agentbadges-app | freelance-liquidstyle-agentbadges-app.yaml | /Users/Shared/Development/Liquidstyle/AgentBadges-APP | freelance-liquidstyle-agentbadges-app-board.json | XFLA- |
+| freelance-liquidstyle-agentbadges-ios | freelance-liquidstyle-agentbadges-ios.yaml | /Users/Shared/Development/Liquidstyle/AgentBadges-IOS | freelance-liquidstyle-agentbadges-ios-board.json | XFLI- |
+
+### Alias symlinks
+
+- `freelance.yaml` → `academy.yaml`
+- `command.yaml` → `mainevent.yaml`
+- `medical.yaml` → `medical-general.yaml`
+
+---
+
+### Parser quirks
+
+**`databases: []` does NOT work.** The hand-rolled YAML parser in `channels.py::_parse_team_yaml` treats inline `[]` as the literal string `"[]"`, not an empty list. Downstream code calls `.get()` on entries and crashes. Use a bare `databases:` header (no value) — the parser's default `[]` survives. Same quirk applies to `overrides: []` for some code paths.
+
+**Shared-path teams (under /Users/Shared/) need one of two approaches.** The `{home}/{root}` substitution is pure string replacement (no `Path.resolve`), so a `root` like `"../Shared/..."` produces a literal-with-double-dot pattern. Two approaches both work today (chosen per-team during XACA-0521):
+
+- Option A: `home_relative_root: "../Shared/Development/Main Event/..."` — patterns retain `{home}/{root}` tokens; both the file walk and the matcher use the literal `..` form, so they line up. Used by dns and 6 doublenode-freelance.
+- Option B: `home_relative_root: ""` — patterns spelled as absolute paths (`/Users/Shared/Development/Main Event/...`). Used by mainevent, ios, android, firebase, and 2 liquidstyle-freelance.
+
+Both approaches validate. Inconsistency is acknowledged; standardization deferred to a follow-up ticket.
+
+**Shared-path teams require explicit `--repo-root` to the generator** because the default falls back to `{home}/{home_relative_root}` and Path.home() != /Users/Shared.
+
+---
+
 ## References
 
 - **ADR:** [ADR Channel Split](../../../kanban/plans/XACA-0488/ADR-channel-split.md) — decision context and rationale

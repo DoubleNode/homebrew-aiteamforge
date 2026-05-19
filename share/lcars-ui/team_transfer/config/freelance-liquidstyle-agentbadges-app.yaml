@@ -1,0 +1,87 @@
+# Team transfer configuration: Freelance — Liquidstyle AgentBadges APP
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#
+# Shared-path note: working_dir is under /Users/Shared/Development/, which is
+# outside $HOME. home_relative_root is "" and all repo-scoped patterns use
+# absolute paths (Option B) so {home}/{root}/... substitution is not used for
+# repo content. Only {home}/... tokens are used for HOME-rooted paths such as
+# ~/.claude/projects/ and ~/knowledge/agents/.
+
+team: freelance-liquidstyle-agentbadges-app
+home_relative_root: ""
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "freelance-liquidstyle-agentbadges-app-board.json"
+ticket_prefix: "XFLA-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Actual dir found at: ~/.claude/projects/-Users-Shared-Development-Liquidstyle-AgentBadges-APP-develop
+# Matches the develop-branch checkout path for this client project.
+claude_project_dir_name: "-Users-Shared-Development-Liquidstyle-AgentBadges-APP-develop"
+
+# SQLite databases to probe for structural integrity.
+# No data/ directory found in /Users/Shared/Development/Liquidstyle/AgentBadges-APP/.
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+defaults:
+  rules:
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/reed/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/reed/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # Repo checkout lives at /Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/
+    # (client project; not aiteamforge-installed). domain_git handles per-file routing
+    # and respects .gitignore (Pods/, build/, vendor/, node_modules/ are excluded there).
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/*"
+      channel: git
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + worktrees listing -----
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban/**"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/worktrees/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/worktrees/**"
+      channel: export_kanban
+
+    # ----- EXPORT_DATABASE: SQLite databases (require explicit scp/rsync + SCHEMA verify) -----
+    # No data/ directory currently present — rules kept as structural scaffolding.
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/data/*"
+      channel: export_database
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/data/**"
+      channel: export_database
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/**/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/**/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/secrets/*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/develop/secrets/**"
+      channel: secrets_export
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+# Entries here layer on top of defaults (later rules win).
+overrides: []

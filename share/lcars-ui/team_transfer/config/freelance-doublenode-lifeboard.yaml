@@ -1,0 +1,87 @@
+# Team transfer configuration: Freelance — DoubleNode LifeBoard
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string  (e.g. /Users/darrenehlers)
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#   {claude_project_dir_name} — Claude project dir slug
+#
+# SHARED-PATH NOTE (Option B — absolute paths):
+# working_dir is /Users/Shared/Development/DoubleNode/LifeBoard, which cannot be
+# expressed as {home}/{root}.  All pattern rules below use absolute paths directly.
+# home_relative_root uses a ../ trick so the generator's default repo_root resolves
+# correctly without needing --repo-root; token {root} is NOT used in any rule here.
+
+team: freelance-doublenode-lifeboard
+home_relative_root: "../Shared/Development/DoubleNode/LifeBoard"
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "freelance-doublenode-lifeboard-board.json"
+ticket_prefix: "XFLB-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Discovered via: ls ~/.claude/projects/ | grep -i lifeboard
+claude_project_dir_name: "-Users-Shared-Development-DoubleNode-LifeBoard-develop"
+
+# SQLite databases to probe for structural integrity.
+# No data/ directory found under working_dir — list is empty.
+# NOTE: Use bare section key (no inline []) — the custom YAML parser treats
+# "databases: []" as a string, not an empty list. Bare "databases:" with no
+# items under it leaves the default empty list intact.
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+# Client-owned repo: no aiteamforge_product rules (installer does not manage this repo).
+defaults:
+  rules:
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # NOTE: domain_git decides per-file whether something is tracked; this rule covers
+    # the *repo root* as a fallback. domain_git overrides this for gitignored files
+    # (DB -> export_database, .env -> secrets_export).
+    # Absolute path required: {home}/../Shared/... resolves to an unresolved '..' path
+    # that fnmatch cannot match. Use literal absolute path (Option B).
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/*"
+      channel: git
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/kanban/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/kanban/**"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/worktrees/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/worktrees/**"
+      channel: export_kanban
+
+    # ----- EXPORT_DATABASE: SQLite databases (require explicit scp/rsync + SCHEMA verify) -----
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/data/*"
+      channel: export_database
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/data/**"
+      channel: export_database
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/**/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/**/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/secrets/*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DoubleNode/LifeBoard/secrets/**"
+      channel: secrets_export
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+overrides: []

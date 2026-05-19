@@ -1,0 +1,125 @@
+# Team transfer configuration: Academy
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#
+# Freelance alias: freelance.yaml is a symlink to this file.
+# The 'freelance' team entry in team-paths.json uses the same working_dir
+# (~/dev-team) as academy, so both teams share this config.
+
+team: academy
+home_relative_root: "dev-team"
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "academy-board.json"
+ticket_prefix: "XACA-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Derived value: -Users-<user>-<home_relative_root with / replaced by ->
+# Override here if the derivation doesn't match what Claude Code created.
+claude_project_dir_name: "-Users-darrenehlers-dev-team"
+
+# SQLite databases to probe for structural integrity.
+# No .db files found in ~/dev-team/data/ — list is empty.
+# NOTE: Use bare section key (no inline []) — the custom YAML parser treats
+# "databases: []" as a string, not an empty list. Bare "databases:" with no
+# items under it leaves the default empty list intact.
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+# These reproduce the hardcoded defaults from the original academy_platform.migration
+# channels.py exactly (back-compat boundary for XACA-0495).
+defaults:
+  rules:
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
+    - pattern: "{home}/dev-team/{team}/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/{team}/**"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/.claude/agents/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/.claude/agents/**"
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/thok/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/thok/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/emh/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/emh/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/nahla/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/nahla/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/nahla-ake/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/nahla-ake/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/reno/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/reno/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/jett-reno/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/jett-reno/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # NOTE: domain_git decides per-file whether something is tracked; this rule covers
+    # the *repo root* as a fallback. domain_git overrides this for gitignored files
+    # (DB -> export_database, .env -> secrets_export, sensitive docs -> icloud_excluded).
+    # homebrew-tap/ is a tracked git submodule — domain_git handles it via the git
+    # channel (separate inner repo, but still tracked by the outer repo gitlink).
+    - pattern: "{home}/{root}/*"
+      channel: git
+    - pattern: "{home}/{root}/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    # worktrees/ is gitignored ephemeral state; must be explicitly routed here
+    # rather than relying on domain_git (which won't see gitignored paths).
+    - pattern: "{home}/{root}/kanban/*"
+      channel: export_kanban
+    - pattern: "{home}/{root}/kanban/**"
+      channel: export_kanban
+    - pattern: "{home}/{root}/worktrees/*"
+      channel: export_kanban
+    - pattern: "{home}/{root}/worktrees/**"
+      channel: export_kanban
+
+    # ----- EXPORT_DATABASE: SQLite databases (require explicit scp/rsync + SCHEMA verify) -----
+    # No databases currently in ~/dev-team/data/ — rules kept as structural scaffolding
+    # so new databases are captured automatically if added in future.
+    - pattern: "{home}/{root}/data/*"
+      channel: export_database
+    - pattern: "{home}/{root}/data/**"
+      channel: export_database
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "{home}/{root}/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/**"
+      channel: secrets_export
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+# Entries here layer on top of defaults (later rules win).
+overrides: []

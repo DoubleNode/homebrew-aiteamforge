@@ -1,0 +1,142 @@
+# Team transfer configuration: DNS
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#
+# UMBRELLA-REPO LAYOUT: /Users/Shared/Development/DNSFramework contains multiple
+# sub-repos (DNSFramework-iOS, DNSFramework-Android, etc.) each potentially with
+# their own .git. The umbrella kanban lives at DNSFramework/kanban/ — that is the
+# canonical board. Sub-repo file routing is handled by domain_git per-file.
+#
+# SHARED-PATH NOTE: This repo lives under /Users/Shared/, NOT under {home}.
+# home_relative_root uses a relative path (../Shared/...) so the generator can
+# derive the correct repo_root via Path.home() / root_rel when no --repo-root is
+# passed. However, {home}/{root} in patterns resolves to an unresolved path with
+# '..' in it (e.g. /Users/darrenehlers/../Shared/...) which fnmatch cannot match
+# against real absolute paths.
+#
+# OPTION B: home_relative_root kept for default repo_root derivation; all channel
+# rule patterns use the literal absolute path /Users/Shared/Development/DNSFramework/
+# to avoid unresolved '..' in fnmatch glob strings. Same approach as mainevent.yaml.
+
+team: dns
+home_relative_root: "../Shared/Development/DNSFramework"
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "dns-board.json"
+ticket_prefix: "XDNS-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Discovered via: ls ~/.claude/projects/ | grep -i dns
+claude_project_dir_name: "-Users-Shared-Development-DNSFramework"
+
+# SQLite databases to probe for structural integrity.
+# No data/ directory found in /Users/Shared/Development/DNSFramework/ — list is empty.
+# NOTE: Use bare section key (no inline []) — the custom YAML parser treats
+# "databases: []" as a string, not an empty list. Bare "databases:" with no
+# items under it leaves the default empty list intact.
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+defaults:
+  rules:
+    # ----- GIT: anything tracked under the repo working tree -----
+    # NOTE: domain_git decides per-file whether something is tracked; this rule covers
+    # the umbrella working tree as a fallback. domain_git overrides this for gitignored
+    # files (DB -> export_database, .env -> secrets_export).
+    # UMBRELLA LAYOUT: sub-repos (DNSFramework-iOS, DNSFramework-Android, etc.) each
+    # have their own .git or are plain directories; domain_git handles routing per-file.
+    # NOTE: absolute path required — {home}/{root} resolves to an unresolved '..'
+    # path that fnmatch cannot match. Use Option B (literal absolute path) like mainevent.yaml.
+    - pattern: "/Users/Shared/Development/DNSFramework/*"
+      channel: git
+    - pattern: "/Users/Shared/Development/DNSFramework/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    # The umbrella kanban/ is the canonical DNS board. worktrees/ exists at the umbrella
+    # level and must be explicitly routed (gitignored paths won't surface via domain_git).
+    - pattern: "/Users/Shared/Development/DNSFramework/kanban/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/DNSFramework/kanban/**"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/DNSFramework/worktrees/*"
+      channel: export_kanban
+    - pattern: "/Users/Shared/Development/DNSFramework/worktrees/**"
+      channel: export_kanban
+
+    # ----- EXPORT_DATABASE: SQLite databases (require explicit scp/rsync + SCHEMA verify) -----
+    # No databases currently found — rules kept as structural scaffolding so new
+    # databases are captured automatically if added in future.
+    - pattern: "/Users/Shared/Development/DNSFramework/data/*"
+      channel: export_database
+    - pattern: "/Users/Shared/Development/DNSFramework/data/**"
+      channel: export_database
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "/Users/Shared/Development/DNSFramework/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DNSFramework/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DNSFramework/**/.env"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DNSFramework/**/.env.*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DNSFramework/secrets/*"
+      channel: secrets_export
+    - pattern: "/Users/Shared/Development/DNSFramework/secrets/**"
+      channel: secrets_export
+
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
+    # Placed AFTER the broad git rule so these more-specific patterns win (later rules win).
+    # DNS personas are deployed to the umbrella .claude/agents/ directory (not ~/dev-team/dns/).
+    - pattern: "/Users/Shared/Development/DNSFramework/.claude/agents/*"
+      channel: aiteamforge_product
+    - pattern: "/Users/Shared/Development/DNSFramework/.claude/agents/**"
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    # Placed AFTER git for same reason — these paths are not under {root} so ordering
+    # vs git does not matter here, but consistent style with finance.yaml.
+    # Claude project session state — mandatory per CHANNELS.md.
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+    # DNS agent knowledge dirs (all 7 DNS personas have entries in ~/knowledge/agents/).
+    - pattern: "{home}/knowledge/agents/boimler/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/boimler/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/mariner/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/mariner/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/ransom/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/ransom/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/rutherford/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/rutherford/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/shaxs/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/shaxs/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/tana/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/tana/**"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/tendi/*"
+      channel: user_state
+    - pattern: "{home}/knowledge/agents/tendi/**"
+      channel: user_state
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+# Entries here layer on top of defaults (later rules win).
+overrides: []

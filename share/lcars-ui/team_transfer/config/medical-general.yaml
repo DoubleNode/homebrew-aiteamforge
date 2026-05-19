@@ -1,0 +1,91 @@
+# Team transfer configuration: Medical (General)
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#
+# HIPAA note: This repo contains medical records and PHI. The repo is
+# git-tracked (~/medical/general/.git exists), so domain_git handles
+# per-file routing. Files excluded via .gitignore are routed to the
+# appropriate channel (secrets_export or icloud_excluded) rather than git.
+# No special override rules are required here beyond standard patterns.
+
+team: medical-general
+home_relative_root: "medical/general"
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "medical-general-board.json"
+ticket_prefix: "XMED-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Derived value: -Users-<user>-<home_relative_root with / replaced by ->
+# Override here if the derivation doesn't match what Claude Code created.
+claude_project_dir_name: "-Users-darrenehlers-medical-general"
+
+# SQLite databases to probe for structural integrity.
+# (none for this team — add entries as "- path: ...\n  cls: schema" if a DB is added later)
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+defaults:
+  rules:
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
+    - pattern: "{home}/dev-team/{team}/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/{team}/**"
+      channel: aiteamforge_product
+    - pattern: "{home}/medical/.claude/agents/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/medical/.claude/agents/**"
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # NOTE: domain_git decides per-file whether something is tracked; this rule covers
+    # the *repo root* as a fallback. domain_git overrides this for gitignored files
+    # (DB -> export_database, .env -> secrets_export, sensitive docs -> icloud_excluded).
+    # PHI/medical records are git-tracked in this repo; domain_git applies per-file
+    # exclusion for anything the .gitignore marks as excluded.
+    - pattern: "{home}/{root}/*"
+      channel: git
+    - pattern: "{home}/{root}/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    - pattern: "{home}/{root}/kanban/*"
+      channel: export_kanban
+    - pattern: "{home}/{root}/kanban/**"
+      channel: export_kanban
+    - pattern: "{home}/{root}/worktrees/*"
+      channel: export_kanban
+    - pattern: "{home}/{root}/worktrees/**"
+      channel: export_kanban
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "{home}/{root}/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/**"
+      channel: secrets_export
+
+    # ----- ICLOUD_EXCLUDED: sensitive docs archived to iCloud -----
+    # No subdirectories currently archived to iCloud for this team.
+    # Add entries here if any medical record subdirs are moved to iCloud-only storage.
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+overrides: []

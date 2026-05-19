@@ -1,0 +1,91 @@
+# Team transfer configuration: Legal (Co-parenting)
+#
+# Placeholder tokens resolved at runtime by load_team_config():
+#   {home}  — Path.home() as POSIX string
+#   {root}  — home_relative_root value (no leading slash)
+#   {team}  — team name
+#
+# Sensitive-doc note: court-filings/, evidence/, communications/ are tracked
+# inside this git repo. domain_git handles per-file routing (respects .gitignore
+# for any excluded files). No separate icloud_excluded rules needed here unless
+# specific subdirectories are deliberately archived out.
+
+team: legal-coparenting
+home_relative_root: "legal/coparenting"
+
+# Board filename and kanban ticket prefix (used by domain_kanban + verifier).
+board_filename: "legal-coparenting-board.json"
+ticket_prefix: "XLCP-"
+
+# Claude project directory name under ~/.claude/projects/.
+# Derived value: -Users-<user>-<home_relative_root with / replaced by ->
+# Override here if the derivation doesn't match what Claude Code created.
+claude_project_dir_name: "-Users-darrenehlers-legal-coparenting"
+
+# SQLite databases to probe for structural integrity.
+# (none for this team — add entries as "- path: ...\n  cls: schema" if a DB is added later)
+databases:
+
+# Default channel rules. Order: more-specific AFTER more-general (later rules win).
+defaults:
+  rules:
+    # ----- AITEAMFORGE_PRODUCT: installer-owned product files (AITeamForge ships these) -----
+    - pattern: "{home}/dev-team/{team}/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/dev-team/{team}/**"
+      channel: aiteamforge_product
+    - pattern: "{home}/legal/.claude/agents/*"
+      channel: aiteamforge_product
+    - pattern: "{home}/legal/.claude/agents/**"
+      channel: aiteamforge_product
+
+    # ----- USER_STATE: Claude memory/session logs + authored knowledge (user-owned) -----
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/*"
+      channel: user_state
+    - pattern: "{home}/.claude/projects/{claude_project_dir_name}/**"
+      channel: user_state
+
+    # ----- GIT: anything tracked under the repo working tree -----
+    # NOTE: domain_git decides per-file whether something is tracked; this rule covers
+    # the *repo root* as a fallback. domain_git overrides this for gitignored files
+    # (DB -> export_database, .env -> secrets_export, sensitive docs -> icloud_excluded).
+    # Sensitive subdirectories (court-filings/, evidence/, communications/) are git-tracked
+    # and covered here; domain_git applies per-file exclusion for anything in .gitignore.
+    - pattern: "{home}/{root}/*"
+      channel: git
+    - pattern: "{home}/{root}/**"
+      channel: git
+
+    # ----- EXPORT_KANBAN: kanban tree (fully gitignored) + project state -----
+    - pattern: "{home}/{root}/kanban/*"
+      channel: export_kanban
+    - pattern: "{home}/{root}/kanban/**"
+      channel: export_kanban
+    - pattern: "{home}/{root}/worktrees/*"
+      channel: export_kanban
+    - pattern: "{home}/{root}/worktrees/**"
+      channel: export_kanban
+
+    # ----- SECRETS_EXPORT: env files, credential files, secrets/ directory -----
+    - pattern: "{home}/{root}/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env"
+      channel: secrets_export
+    - pattern: "{home}/{root}/**/.env.*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/*"
+      channel: secrets_export
+    - pattern: "{home}/{root}/secrets/**"
+      channel: secrets_export
+
+    # ----- ICLOUD_EXCLUDED: sensitive docs archived to iCloud -----
+    # No subdirectories currently archived to iCloud for this team.
+    # Add entries here if court-filings/ or evidence/ subdirs are ever
+    # moved to iCloud-only storage.
+
+  icloud_excluded: []
+
+# User override slot — list of {pattern, channel} maps layered on top of defaults (later rules win).
+overrides: []
