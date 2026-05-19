@@ -264,7 +264,7 @@ TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 
 # Archive job tracking
-EXPORT_JOBS = {}         # {job_id: {status, progress, message, filename, fileSize, error, ...}}
+EXPORT_JOBS = {}         # {job_id: {status, progress, message, filename, fileSize, error, pairedSecretsJobId, secretsSummary, ...}}
 SECRETS_EXPORT_JOBS = {} # {job_id: {status, progress, message, filename, fileSize, error, pairedExportId, manifestUsed, ...}}
 IMPORT_JOBS = {}         # {job_id: {status, progress, message, manifest, stagedPath, ...}}
 SECRETS_IMPORT_JOBS = {} # {job_id: {status, progress, message, manifest, stagedPath, targetTeam, fileCount, createdAt, error, wrongPasswordAttempts, ...}}
@@ -494,21 +494,85 @@ def _strip_label_prefix(name: str, label: str) -> str:
     return name
 
 
+def _compute_secrets_summary(team_id: str, paired_export_id) -> dict:
+    """Build the top-level secrets_summary dict for stamping into manifest + EXPORT_JOBS.
+
+    XACA-0520-005: UI-gated, non-blocking.  Called at export time (after manifest
+    generation, before zip seal) so the summary is embedded in the archive itself.
+
+    Fields:
+        expected   — number of secret sources declared in the team config/manifest.
+        discovered — number of those sources that actually exist on disk at export time.
+        paired_status — job status string: 'none' | 'pending' | 'complete' | 'failed'
+                        or the status field value from SECRETS_EXPORT_JOBS if available.
+        paired_job_id — the paired_export_id that was passed in, or null.
+
+    'expected' / 'discovered' are source-counts (not file-counts) — each entry in
+    sources[] returned by discover_secrets_sources() is one source.
+    """
+    discovery = discover_secrets_sources(team_id)
+    sources = discovery.get("sources", [])
+    expected = len(sources)
+
+    # Count sources that actually exist on disk right now.
+    discovered = 0
+    for src_entry in sources:
+        src_path = Path(src_entry.get("src", ""))
+        if src_path.exists():
+            discovered += 1
+
+    # Resolve paired job status.
+    if paired_export_id is None:
+        paired_status = "none"
+    else:
+        sec_job = SECRETS_EXPORT_JOBS.get(paired_export_id)
+        if sec_job is None:
+            paired_status = "none"
+        else:
+            raw_status = sec_job.get("status", "pending")
+            # Normalise to the documented enum values.
+            if raw_status in ("completed", "skipped"):
+                paired_status = "complete"
+            elif raw_status == "failed":
+                paired_status = "failed"
+            else:
+                # running / queued / any other in-flight state
+                paired_status = "pending"
+
+    return {
+        "expected": expected,
+        "discovered": discovered,
+        "paired_status": paired_status,
+        "paired_job_id": paired_export_id,
+    }
+
+
 def generate_export(job_id, team_id):
     """Generate a per-team export zip (runs in background thread).
 
-    Archive contents:
-    - All files under TEAM_KANBAN_DIRS[team_id] (the project kanban tree)
-    - For multi-project teams, also ~/dev-team/kanban/<base>/knowledge/
-      (out-of-tree knowledge, placed under __out_of_tree__/knowledge/ in the zip)
-    - export-manifest.json at the zip root
+    XACA-0520-003: Manifest-driven packing. The team_transfer generator is called
+    first to produce a canonical manifest.json and PRE_EXPORT_CHECKLIST.md into a
+    persistent staging dir under ~/team-transfers/. The zip is then assembled by
+    walking manifest.domains[*].files[*] and packing each entry flat
+    (arcname = file_entry.relpath), mirroring the kb-team-export wrapper behavior.
+    Channels 'secrets_export' and 'icloud_excluded' are skipped; all remaining
+    channels are included in the main zip. manifest.json, PRE_EXPORT_CHECKLIST.md,
+    and verifier-report.txt are added at the zip root. The legacy hardcoded kanban +
+    knowledge walk has been removed; the manifest is now the sole source of truth
+    for archive contents.
 
-    Matches kanban-backup.py exclusion rules: *.lock, *-debug.log, .DS_Store,
-    firebase-debug.log.
+    XACA-0520-005: After manifest generation, secrets_summary is computed and
+    patched into manifest_data before the zip is sealed (and into EXPORT_JOBS).
     """
+    import subprocess
+    import sys
     import zipfile
-    import socket
     from datetime import datetime, timezone
+
+    # Channels that must NOT be included in the main export zip.
+    # secrets_export is handled by generate_secrets_export(); icloud_excluded
+    # files cannot be reliably transferred via a flat zip bundle.
+    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
 
     try:
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
@@ -518,105 +582,169 @@ def generate_export(job_id, team_id):
         filename = f"lcars-export-{team_id}-{timestamp}.zip"
         output_path = EXPORT_DIR / filename
 
-        kanban_dir = TEAM_KANBAN_DIRS.get(team_id)
-        if kanban_dir is None or not kanban_dir.exists():
+        # Resolve the team_transfer config key (team_id may be a derived form
+        # like "finance-personal"; fall back to base_team).
+        lcars_ui_dir = Path(__file__).parent
+        tt_config_dir = lcars_ui_dir / "team_transfer" / "config"
+        tt_team = team_id if (tt_config_dir / f"{team_id}.yaml").exists() else (
+            base_team if (tt_config_dir / f"{base_team}.yaml").exists() else None
+        )
+
+        if tt_team is None:
             EXPORT_JOBS[job_id].update({
                 'status': 'failed',
                 'progress': 0,
-                'message': f'Kanban directory not found for team {team_id}',
-                'error': f'TEAM_KANBAN_DIRS has no entry for {team_id} or path does not exist',
+                'message': f'No team_transfer config for team {team_id}',
+                'error': f'No team_transfer config found for team_id={team_id!r} or base_team={base_team!r}',
             })
             return
 
-        out_of_tree_dir = _base_team_knowledge_dir(base_team)
+        # Step 1: Generate manifest + checklist into a persistent staging dir
+        # under $HOME so the generator's home-guard emits PRE_EXPORT_CHECKLIST.md.
+        staging_dir = Path.home() / "team-transfers" / f"{team_id}-{timestamp}"
+        staging_dir.mkdir(parents=True, exist_ok=True)
+        tt_manifest_path = staging_dir / "manifest.json"
+        checklist_path = staging_dir / "PRE_EXPORT_CHECKLIST.md"
 
-        EXPORT_JOBS[job_id]['message'] = 'Scanning files...'
+        EXPORT_JOBS[job_id]['message'] = 'Generating manifest...'
         EXPORT_JOBS[job_id]['progress'] = 5
 
-        # Collect in-tree files (project kanban directory).
-        # For academy: skip ~/dev-team/kanban/<base>/ subdirs for other
-        # multi-project base teams — those belong to the finance/legal/medical/
-        # freelance teams and get handled as their own out-of-tree knowledge.
-        # Including them here would let an academy restore stomp other teams'
-        # knowledge, which violates the merge-not-overwrite policy.
-        skip_top_segments = MULTI_PROJECT_BASE_TEAMS if team_id == 'academy' else frozenset()
+        gen_result = subprocess.run(
+            [sys.executable, "-m", "team_transfer.generator",
+             "--team", tt_team,
+             "--output", str(tt_manifest_path),
+             "--allow-untagged"],
+            cwd=str(lcars_ui_dir),
+            env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+            capture_output=True, text=True, timeout=120,
+        )
+        gen_output = (gen_result.stdout + gen_result.stderr).strip()
 
-        in_tree_files = []
-        for item in kanban_dir.rglob("*"):
-            if not item.is_file() or _export_should_exclude(item):
-                continue
-            rel = item.relative_to(kanban_dir)
-            if rel.parts and rel.parts[0] in skip_top_segments:
-                continue
-            in_tree_files.append((item, rel))
+        # exit 0 = clean, exit 1 = untagged gaps (warn only), exit 2 = config error
+        if gen_result.returncode == 2 or not tt_manifest_path.exists():
+            EXPORT_JOBS[job_id].update({
+                'status': 'failed',
+                'progress': 0,
+                'message': 'Manifest generation failed',
+                'error': f'team_transfer.generator exited {gen_result.returncode}: {gen_output[:300]}',
+            })
+            return
 
-        # Collect out-of-tree knowledge files (multi-project teams only)
-        out_of_tree_files = []
-        if out_of_tree_dir and out_of_tree_dir.exists():
-            for item in out_of_tree_dir.rglob("*"):
-                if item.is_file() and not _export_should_exclude(item):
-                    out_of_tree_files.append((item, item.relative_to(out_of_tree_dir)))
+        print(f"[LCARS Export] Generator exit={gen_result.returncode} for team={tt_team}")
 
-        total_files = len(in_tree_files) + len(out_of_tree_files)
+        # Step 2: Run pre-flight verifier, capture summary.
+        EXPORT_JOBS[job_id]['message'] = 'Running pre-flight verifier...'
+        EXPORT_JOBS[job_id]['progress'] = 20
+
+        ver_result = subprocess.run(
+            [sys.executable, "-m", "team_transfer.verifier",
+             "--manifest", str(tt_manifest_path), "--quiet"],
+            cwd=str(lcars_ui_dir),
+            env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+            capture_output=True, text=True, timeout=120,
+        )
+        verifier_output = ver_result.stdout + ver_result.stderr
+        verifier_exit = ver_result.returncode
+        verifier_report_path = staging_dir / "verifier-report.txt"
+        verifier_report_path.write_text(verifier_output, encoding="utf-8")
+
+        counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+        for line in verifier_output.splitlines():
+            m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)", line)
+            if m:
+                counts[m.group(1)] = int(m.group(2))
+
+        print(
+            f"[LCARS Export] Verifier: exit={verifier_exit} "
+            f"PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']}"
+        )
+
+        # Step 3: Walk manifest, collect packable file entries.
+        EXPORT_JOBS[job_id]['message'] = 'Scanning manifest...'
+        EXPORT_JOBS[job_id]['progress'] = 30
+
+        manifest_data = json.loads(tt_manifest_path.read_text(encoding="utf-8"))
+        domains = manifest_data.get("domains", {})
+
+        packable = []
+        for _dname, dblock in domains.items():
+            files = dblock.get("files", []) if isinstance(dblock, dict) else []
+            for fe in files:
+                if fe.get("channel") in SKIP_CHANNELS:
+                    continue
+                packable.append(fe)
+
+        total_files = len(packable)
         if total_files == 0:
             EXPORT_JOBS[job_id].update({
                 'status': 'failed',
                 'progress': 0,
-                'message': 'No files to export',
-                'error': 'Kanban directory is empty',
+                'message': 'No packable files found in manifest',
+                'error': 'All manifest entries are in skipped channels or manifest is empty',
             })
             return
 
+        # Step 3.5 (XACA-0520-005): Compute secrets_summary and patch it into the
+        # manifest before the zip is sealed.  Non-blocking — if the paired secrets
+        # job is still running, paired_status == 'pending'; we don't wait for it.
+        # paired_export_id is not passed to generate_export(), so we use None here;
+        # EXPORT_JOBS[job_id] may be populated with 'pairedSecretsJobId' by the HTTP
+        # handler if the operator started both jobs simultaneously.
+        paired_secrets_id = EXPORT_JOBS[job_id].get('pairedSecretsJobId')
+        secrets_summary = _compute_secrets_summary(team_id, paired_secrets_id)
+        manifest_data['secrets_summary'] = secrets_summary
+        # Re-serialise to the staging manifest file so the zip picks up the updated copy.
+        tt_manifest_path.write_text(
+            json.dumps(manifest_data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(
+            f"[LCARS Export] secrets_summary: expected={secrets_summary['expected']} "
+            f"discovered={secrets_summary['discovered']} "
+            f"paired_status={secrets_summary['paired_status']}"
+        )
+
+        # Step 4: Pack files flat (arcname = relpath), add root artifacts.
         EXPORT_JOBS[job_id]['message'] = f'Compressing {total_files} files...'
-        EXPORT_JOBS[job_id]['progress'] = 10
+        EXPORT_JOBS[job_id]['progress'] = 35
 
+        skipped = 0
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            processed = 0
+            # Root artifacts first so they appear early in the central directory.
+            zipf.write(str(tt_manifest_path), "manifest.json")
 
-            # In-tree project data → kanban/ prefix inside zip
-            for src, rel in in_tree_files:
-                try:
-                    zipf.write(src, f"kanban/{rel}")
-                except (PermissionError, FileNotFoundError) as e:
-                    print(f"[LCARS Export] Skipped: {rel} ({e.__class__.__name__})")
-                processed += 1
-                if processed % 50 == 0:
-                    EXPORT_JOBS[job_id]['progress'] = 10 + int((processed / total_files) * 80)
-                    EXPORT_JOBS[job_id]['message'] = f'Compressing... ({processed}/{total_files} files)'
+            if checklist_path.exists():
+                zipf.write(str(checklist_path), "PRE_EXPORT_CHECKLIST.md")
+            else:
+                print(f"[LCARS Export] WARN: PRE_EXPORT_CHECKLIST.md not found at {checklist_path}")
 
-            # Out-of-tree knowledge → __out_of_tree__/knowledge/ prefix
-            for src, rel in out_of_tree_files:
-                try:
-                    zipf.write(src, f"__out_of_tree__/knowledge/{rel}")
-                except (PermissionError, FileNotFoundError) as e:
-                    print(f"[LCARS Export] Skipped: {rel} ({e.__class__.__name__})")
-                processed += 1
-                if processed % 50 == 0:
-                    EXPORT_JOBS[job_id]['progress'] = 10 + int((processed / total_files) * 80)
-                    EXPORT_JOBS[job_id]['message'] = f'Compressing... ({processed}/{total_files} files)'
+            zipf.write(str(verifier_report_path), "verifier-report.txt")
 
-            # Write manifest
-            EXPORT_JOBS[job_id]['message'] = 'Writing manifest...'
-            EXPORT_JOBS[job_id]['progress'] = 92
+            # Data files: flat layout, relpath is the arcname.
+            for i, fe in enumerate(packable, start=1):
+                src_path = fe.get("path", "")
+                relpath = fe.get("relpath", "")
 
-            manifest = {
-                "version": "1.0",
-                "kind": "lcars-team-export",
-                "team": team_id,
-                "baseTeam": base_team,
-                "projectParams": project_params,
-                "sourceHost": socket.gethostname(),
-                "sourceKanbanDir": str(kanban_dir),
-                "sourceOutOfTreeKnowledgeDir": str(out_of_tree_dir) if out_of_tree_dir else None,
-                "createdAt": datetime.now(timezone.utc).isoformat(),
-                "fileCount": {
-                    "inTree": len(in_tree_files),
-                    "outOfTree": len(out_of_tree_files),
-                    "total": total_files,
-                },
-                "excludePatterns": sorted(EXPORT_EXCLUDE_NAMES | {f'*{s}' for s in EXPORT_EXCLUDE_SUFFIXES} | EXPORT_EXCLUDE_PATTERNS),
-            }
-            zipf.writestr("export-manifest.json", json.dumps(manifest, indent=2))
+                if not src_path or not Path(src_path).exists():
+                    print(f"[LCARS Export] WARN: source missing, skipping: {src_path}")
+                    skipped += 1
+                else:
+                    try:
+                        zipf.write(src_path, relpath)
+                    except (PermissionError, OSError) as e:
+                        print(f"[LCARS Export] Skipped: {relpath} ({e.__class__.__name__})")
+                        skipped += 1
+
+                if i % 50 == 0:
+                    EXPORT_JOBS[job_id]['progress'] = 35 + int((i / total_files) * 55)
+                    EXPORT_JOBS[job_id]['message'] = f'Compressing... ({i}/{total_files} files)'
+
+        # Step 5: Finalize job status with verifier summary + secrets summary.
+        # XACA-0520-005: Re-poll secrets job status in case it completed during packing.
+        paired_secrets_id_final = EXPORT_JOBS[job_id].get('pairedSecretsJobId')
+        if paired_secrets_id_final and paired_secrets_id_final == paired_secrets_id:
+            # Re-compute to capture any status change since Step 3.5.
+            secrets_summary = _compute_secrets_summary(team_id, paired_secrets_id_final)
 
         file_size = output_path.stat().st_size
         EXPORT_JOBS[job_id].update({
@@ -626,99 +754,19 @@ def generate_export(job_id, team_id):
             'filename': filename,
             'fileSize': format_bytes_export(file_size),
             'fileSizeBytes': file_size,
-            'totalFiles': total_files,
-            'manifest': manifest,
+            'totalFiles': total_files - skipped,
+            'skippedFiles': skipped,
+            'verifierSummary': {
+                'exit': verifier_exit,
+                'pass': counts['PASS'],
+                'warn': counts['WARN'],
+                'fail': counts['FAIL'],
+                'reportPath': 'verifier-report.txt',
+                'manifestPath': 'manifest.json',
+            },
+            # XACA-0520-005: expose secrets pairing status to the UI.
+            'secretsSummary': secrets_summary,
         })
-
-        # XACA-0496-004: Append team_transfer manifest + verifier report as
-        # supplementary audit artifacts. Failures here are non-fatal — the
-        # core export already succeeded; we only update verifierSummary.
-        try:
-            import subprocess
-            import sys
-            import tempfile
-
-            # Determine which team name the team_transfer config is keyed by.
-            # Config lives in lcars-ui/team_transfer/config/<team>.yaml.
-            # If team_id is a derived form (e.g. "finance-personal"), fall back
-            # to base_team; if both fail, skip gracefully.
-            lcars_ui_dir = Path(__file__).parent
-            tt_config_dir = lcars_ui_dir / "team_transfer" / "config"
-            tt_team = team_id if (tt_config_dir / f"{team_id}.yaml").exists() else (
-                base_team if (tt_config_dir / f"{base_team}.yaml").exists() else None
-            )
-
-            if tt_team is None:
-                EXPORT_JOBS[job_id]['verifierSummary'] = {
-                    'exit': -1,
-                    'error': f'No team_transfer config found for team_id={team_id!r} or base_team={base_team!r}',
-                }
-            else:
-                EXPORT_JOBS[job_id]['message'] = 'Generating team_transfer manifest...'
-
-                with tempfile.TemporaryDirectory() as tmp_str:
-                    tmp = Path(tmp_str)
-                    tt_manifest_path = tmp / "manifest.json"
-
-                    gen_result = subprocess.run(
-                        [sys.executable, "-m", "team_transfer.generator",
-                         "--team", tt_team,
-                         "--output", str(tt_manifest_path),
-                         "--allow-untagged"],
-                        cwd=str(lcars_ui_dir),
-                        env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
-                        capture_output=True, text=True, timeout=120,
-                    )
-
-                    if gen_result.returncode not in (0, 1) or not tt_manifest_path.exists():
-                        # exit 2 = config error; or manifest was not written
-                        gen_err = (gen_result.stderr or gen_result.stdout or "").strip()
-                        EXPORT_JOBS[job_id]['verifierSummary'] = {
-                            'exit': -1,
-                            'error': f'team_transfer.generator failed (rc={gen_result.returncode}): {gen_err[:200]}',
-                        }
-                    else:
-                        ver_result = subprocess.run(
-                            [sys.executable, "-m", "team_transfer.verifier",
-                             "--manifest", str(tt_manifest_path), "--quiet"],
-                            cwd=str(lcars_ui_dir),
-                            env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
-                            capture_output=True, text=True, timeout=120,
-                        )
-                        verifier_output = ver_result.stdout + ver_result.stderr
-                        verifier_exit = ver_result.returncode
-
-                        # Parse pass/warn/fail counts from the SUMMARY block.
-                        counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
-                        for line in verifier_output.splitlines():
-                            m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)", line)
-                            if m:
-                                counts[m.group(1)] = int(m.group(2))
-
-                        # Append both files into the already-written zip.
-                        with zipfile.ZipFile(output_path, 'a', zipfile.ZIP_DEFLATED) as zipf:
-                            zipf.write(str(tt_manifest_path), "team_transfer/manifest.json")
-                            zipf.writestr("team_transfer/verifier-report.txt", verifier_output)
-
-                        EXPORT_JOBS[job_id]['verifierSummary'] = {
-                            'exit': verifier_exit,
-                            'pass': counts['PASS'],
-                            'warn': counts['WARN'],
-                            'fail': counts['FAIL'],
-                            'reportPath': 'team_transfer/verifier-report.txt',
-                            'manifestPath': 'team_transfer/manifest.json',
-                        }
-                        print(
-                            f"[LCARS Export] team_transfer: exit={verifier_exit} "
-                            f"PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']}"
-                        )
-
-        except Exception as tt_exc:
-            print(f"[LCARS Export] team_transfer step failed (non-fatal): {tt_exc}")
-            EXPORT_JOBS[job_id]['verifierSummary'] = {
-                'exit': -1,
-                'error': str(tt_exc)[:200],
-            }
 
     except Exception as e:
         EXPORT_JOBS[job_id].update({
@@ -943,164 +991,350 @@ def _rewrite_team_ids_in_file(filepath, old_team_id, new_team_id):
 
 
 def apply_import(job_id):
-    """Apply a staged import to the target team's kanban dir (background thread).
+    """Apply a staged import to the target filesystem (background thread).
 
-    Steps:
-    1. Extract staged zip to a temp scratch dir
-    2. Validate manifest (should already be validated at upload time)
-    3. Overwrite target kanban dir with contents of kanban/ from zip
-    4. If source team ID ≠ target team ID, rewrite references in JSON/MD files
-       and rename <old>-board.json → <new>-board.json
-    5. Merge out-of-tree knowledge (if present) into ~/dev-team/kanban/<base>/knowledge/
-       with rename-on-conflict semantics for knowledge files and INDEX.md
+    XACA-0520-004: supports the new manifest-driven format (import_format == 'new')
+    where files are packed flat (arcname = file_entry.relpath) and the manifest lives
+    at zip root. The destination path for each entry is Path.home() / fe.relpath —
+    consistent with the manifest schema definition of relpath as "relative-to-home".
+
+    Steps (new format):
+    1. Extract manifest.json and PRE_EXPORT_CHECKLIST.md from zip to a persistent
+       staging dir (~/team-transfers/<team>-<timestamp>-restore/).
+    2. Walk manifest.domains[*].files[*]; skip secrets_export + icloud_excluded.
+    3. For each remaining entry, extract the flat-packed file (arcname = relpath)
+       to Path.home() / fe.relpath, creating parent dirs as needed.
+    4. Re-run team_transfer.verifier against the destination filesystem and surface
+       per-channel PASS/WARN/FAIL in the job status.
     """
+    import re
+    import subprocess
+    import sys
     import zipfile
     import shutil
-    import socket
     from datetime import datetime, timezone
+
+    # Channels that are never extracted from the main zip.
+    SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
 
     job = IMPORT_JOBS.get(job_id)
     if not job:
         return
+
+    import_format = job.get('importFormat', 'legacy')
 
     try:
         staged_path = Path(job['stagedPath'])
         if not staged_path.exists():
             raise FileNotFoundError(f'Staged archive missing: {staged_path}')
 
-        source_team = job['manifest']['team']
         target_team = job['targetTeam']
-        source_base, _ = _split_team_id(source_team)
-        target_base, _ = _split_team_id(target_team)
 
-        if source_base != target_base:
-            raise ValueError(
-                f'Base team mismatch: source={source_base}, target={target_base}. '
-                f'Archive can only be imported into the same base team.'
-            )
+        if import_format == 'new':
+            # ------------------------------------------------------------------ #
+            # NEW FORMAT: manifest-driven, flat zip layout (XACA-0520-003+004)   #
+            # ------------------------------------------------------------------ #
+            IMPORT_JOBS[job_id]['message'] = 'Reading manifest from archive...'
+            IMPORT_JOBS[job_id]['progress'] = 10
 
-        target_kanban_dir = TEAM_KANBAN_DIRS.get(target_team)
-        if target_kanban_dir is None:
-            raise ValueError(f'No kanban directory configured for target team {target_team}')
-        if not target_kanban_dir.exists():
-            raise FileNotFoundError(
-                f'Target kanban directory does not exist: {target_kanban_dir}. '
-                f'Install the team via AITeamForge before importing.'
-            )
+            timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
+            restore_staging = Path.home() / "team-transfers" / f"{target_team}-{timestamp}-restore"
+            restore_staging.mkdir(parents=True, exist_ok=True)
 
-        scratch_dir = IMPORT_STAGING_DIR / f"extract-{job_id}"
-        if scratch_dir.exists():
-            shutil.rmtree(scratch_dir)
-        scratch_dir.mkdir(parents=True)
+            with zipfile.ZipFile(staged_path, 'r') as zipf:
+                zip_names = set(zipf.namelist())
 
-        IMPORT_JOBS[job_id]['message'] = 'Extracting archive...'
-        IMPORT_JOBS[job_id]['progress'] = 10
+                # Extract root artifacts to the restore staging dir.
+                manifest_dest = restore_staging / "manifest.json"
+                manifest_dest.write_bytes(zipf.read('manifest.json'))
 
-        with zipfile.ZipFile(staged_path, 'r') as zipf:
-            zipf.extractall(scratch_dir)
+                checklist_dest = None
+                if 'PRE_EXPORT_CHECKLIST.md' in zip_names:
+                    checklist_dest = restore_staging / "PRE_EXPORT_CHECKLIST.md"
+                    checklist_dest.write_bytes(zipf.read('PRE_EXPORT_CHECKLIST.md'))
+                else:
+                    print(f'[LCARS Import] WARN: PRE_EXPORT_CHECKLIST.md not in archive.')
 
-        # --- Step 1: Overwrite project kanban tree ---
-        IMPORT_JOBS[job_id]['message'] = 'Overwriting project kanban tree...'
-        IMPORT_JOBS[job_id]['progress'] = 30
+                # Parse manifest to get the file list.
+                manifest_data = json.loads(manifest_dest.read_text(encoding='utf-8'))
+                domains = manifest_data.get('domains', {})
 
-        extracted_kanban = scratch_dir / "kanban"
-        if not extracted_kanban.exists():
-            raise FileNotFoundError('Archive missing kanban/ directory')
+                packable = []
+                for _dname, dblock in domains.items():
+                    files = dblock.get('files', []) if isinstance(dblock, dict) else []
+                    for fe in files:
+                        if fe.get('channel') in SKIP_CHANNELS:
+                            continue
+                        packable.append(fe)
 
-        # Clear target kanban contents (except the dir itself) then copy extracted
-        for item in list(target_kanban_dir.iterdir()):
-            if item.is_dir():
-                shutil.rmtree(item)
-            else:
-                item.unlink()
+            total = len(packable)
+            IMPORT_JOBS[job_id]['message'] = f'Extracting {total} files...'
+            IMPORT_JOBS[job_id]['progress'] = 20
 
-        for src in extracted_kanban.rglob("*"):
-            if src.is_file():
-                rel = src.relative_to(extracted_kanban)
-                dest = target_kanban_dir / rel
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dest)
+            dest_home = Path.home()
+            extracted = 0
+            skipped = 0
 
-        # --- Step 2: Team ID rewrite if source ≠ target ---
-        renames = 0
-        if source_team != target_team:
-            IMPORT_JOBS[job_id]['message'] = f'Rewriting team IDs ({source_team} → {target_team})...'
-            IMPORT_JOBS[job_id]['progress'] = 55
-
-            # Rename board file if present
-            old_board = target_kanban_dir / f"{source_team}-board.json"
-            new_board = target_kanban_dir / f"{target_team}-board.json"
-            if old_board.exists():
-                old_board.rename(new_board)
-                renames += 1
-
-            # Grep-rewrite JSON and MD files
-            for f in target_kanban_dir.rglob("*"):
-                if f.is_file() and f.suffix in ('.json', '.md'):
-                    if _rewrite_team_ids_in_file(f, source_team, target_team):
-                        renames += 1
-
-        # --- Step 3: Merge out-of-tree knowledge ---
-        merged_files = 0
-        renamed_conflicts = 0
-        extracted_oot = scratch_dir / "__out_of_tree__" / "knowledge"
-        if extracted_oot.exists():
-            IMPORT_JOBS[job_id]['message'] = 'Merging out-of-tree knowledge...'
-            IMPORT_JOBS[job_id]['progress'] = 75
-
-            target_oot = _base_team_knowledge_dir(target_base)
-            if target_oot is None:
-                # Single-project team on target — shouldn't have out-of-tree data
-                # but the source sent some. Log and skip.
-                print(f'[LCARS Import] Warning: source has out-of-tree knowledge but target '
-                      f'base team {target_base} is single-project. Skipping merge.')
-            else:
-                target_oot.mkdir(parents=True, exist_ok=True)
-                source_host = job['manifest'].get('sourceHost', 'unknown')
-                import_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-
-                for src in extracted_oot.rglob("*"):
-                    if not src.is_file():
+            with zipfile.ZipFile(staged_path, 'r') as zipf:
+                zip_names = set(zipf.namelist())
+                for i, fe in enumerate(packable, start=1):
+                    relpath = fe.get('relpath', '')
+                    if not relpath:
+                        print(f'[LCARS Import] WARN: manifest entry missing relpath, skipping.')
+                        skipped += 1
                         continue
-                    rel = src.relative_to(extracted_oot)
-                    dest = target_oot / rel
+
+                    if relpath not in zip_names:
+                        print(f'[LCARS Import] WARN: relpath not in archive: {relpath}')
+                        skipped += 1
+                        continue
+
+                    dest_path = dest_home / relpath
+                    dest_path.parent.mkdir(parents=True, exist_ok=True)
+                    try:
+                        dest_path.write_bytes(zipf.read(relpath))
+                        extracted += 1
+                    except OSError as exc:
+                        print(f'[LCARS Import] WARN: could not write {dest_path}: {exc}')
+                        skipped += 1
+
+                    if i % 50 == 0:
+                        IMPORT_JOBS[job_id]['progress'] = 20 + int((i / total) * 55)
+                        IMPORT_JOBS[job_id]['message'] = f'Extracting... ({i}/{total} files)'
+
+            print(f'[LCARS Import] Extraction complete: {extracted} written, {skipped} skipped.')
+
+            # Step 4: Post-restore verifier run against destination filesystem.
+            IMPORT_JOBS[job_id]['message'] = 'Running post-restore verifier...'
+            IMPORT_JOBS[job_id]['progress'] = 80
+
+            post_verifier_summary: dict = {'present': True, 'phase': 'post-restore'}
+            try:
+                lcars_ui_dir = Path(__file__).parent
+                ver_result = subprocess.run(
+                    [sys.executable, "-m", "team_transfer.verifier",
+                     "--manifest", str(manifest_dest), "--quiet"],
+                    cwd=str(lcars_ui_dir),
+                    env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+                    capture_output=True, text=True, timeout=300,
+                )
+                verifier_output = ver_result.stdout + ver_result.stderr
+                verifier_exit = ver_result.returncode
+
+                # Write verifier report alongside the manifest in the restore staging dir.
+                (restore_staging / "post-restore-verifier-report.txt").write_text(
+                    verifier_output, encoding='utf-8'
+                )
+
+                # Parse overall counts.
+                overall_counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+                for line in verifier_output.splitlines():
+                    m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)$", line)
+                    if m:
+                        overall_counts[m.group(1)] = int(m.group(2))
+
+                # Parse per-channel stats.
+                per_channel: dict = {}
+                in_per_channel = False
+                for line in verifier_output.splitlines():
+                    if '=== PER-CHANNEL ===' in line:
+                        in_per_channel = True
+                        continue
+                    if in_per_channel:
+                        if line.startswith('===') or line.strip() == '':
+                            in_per_channel = False
+                            continue
+                        ch_m = re.match(
+                            r'\s*[vx]\s+(\S+)\s+PASS:\s*(\d+)\s+WARN:\s*(\d+)\s+FAIL:\s*(\d+)',
+                            line,
+                        )
+                        if ch_m:
+                            ch_name = ch_m.group(1)
+                            per_channel[ch_name] = {
+                                'state': 'FAIL' if int(ch_m.group(4)) > 0
+                                         else ('WARN' if int(ch_m.group(3)) > 0 else 'PASS'),
+                                'counts': {
+                                    'pass': int(ch_m.group(2)),
+                                    'warn': int(ch_m.group(3)),
+                                    'fail': int(ch_m.group(4)),
+                                },
+                            }
+
+                overall_state = (
+                    'FAIL' if overall_counts['FAIL'] > 0
+                    else ('WARN' if overall_counts['WARN'] > 0 else 'PASS')
+                )
+                post_verifier_summary = {
+                    'present': True,
+                    'exit': verifier_exit,
+                    'perChannel': per_channel,
+                    'overall': overall_state,
+                    'pass': overall_counts['PASS'],
+                    'warn': overall_counts['WARN'],
+                    'fail': overall_counts['FAIL'],
+                    'tail': "\n".join(verifier_output.splitlines()[-20:]),
+                    'phase': 'post-restore',
+                    'reportPath': str(restore_staging / "post-restore-verifier-report.txt"),
+                }
+                print(
+                    f"[LCARS Import] post-restore verifier: exit={verifier_exit} "
+                    f"PASS={overall_counts['PASS']} WARN={overall_counts['WARN']} "
+                    f"FAIL={overall_counts['FAIL']}"
+                )
+            except Exception as ver_exc:
+                print(f"[LCARS Import] post-restore verifier failed (non-fatal): {ver_exc}")
+                post_verifier_summary = {
+                    'present': True,
+                    'exit': -1,
+                    'error': str(ver_exc)[:200],
+                    'phase': 'post-restore',
+                }
+
+            IMPORT_JOBS[job_id].update({
+                'status': 'completed',
+                'progress': 100,
+                'message': 'Import complete',
+                'stats': {
+                    'extracted': extracted,
+                    'skipped': skipped,
+                    'total': total,
+                },
+                'verifierSummary': post_verifier_summary,
+                'restoreStagingDir': str(restore_staging),
+                'checklistPath': str(checklist_dest) if checklist_dest else None,
+            })
+
+            # Cleanup staged zip (keep restore staging dir — operator may need to review).
+            try:
+                staged_path.unlink()
+            except Exception:
+                pass
+
+        else:
+            # ------------------------------------------------------------------ #
+            # LEGACY FORMAT: kanban/ + __out_of_tree__/knowledge/ walk           #
+            # This path is retained for backward-compat but will not be reached  #
+            # in normal operation — the upload handler rejects legacy zips since  #
+            # XACA-0520. Kept here so in-flight jobs created before the upgrade  #
+            # can still complete.                                                 #
+            # ------------------------------------------------------------------ #
+            source_team = job['manifest'].get('team', '')
+            target_base = job.get('targetBase', '')
+
+            target_kanban_dir = TEAM_KANBAN_DIRS.get(target_team)
+            if target_kanban_dir is None:
+                raise ValueError(f'No kanban directory configured for target team {target_team}')
+            if not target_kanban_dir.exists():
+                raise FileNotFoundError(
+                    f'Target kanban directory does not exist: {target_kanban_dir}. '
+                    f'Install the team via AITeamForge before importing.'
+                )
+
+            scratch_dir = IMPORT_STAGING_DIR / f"extract-{job_id}"
+            if scratch_dir.exists():
+                shutil.rmtree(scratch_dir)
+            scratch_dir.mkdir(parents=True)
+
+            IMPORT_JOBS[job_id]['message'] = 'Extracting archive...'
+            IMPORT_JOBS[job_id]['progress'] = 10
+
+            with zipfile.ZipFile(staged_path, 'r') as zipf:
+                zipf.extractall(scratch_dir)
+
+            # Step 1: Overwrite project kanban tree.
+            IMPORT_JOBS[job_id]['message'] = 'Overwriting project kanban tree...'
+            IMPORT_JOBS[job_id]['progress'] = 30
+
+            extracted_kanban = scratch_dir / "kanban"
+            if not extracted_kanban.exists():
+                raise FileNotFoundError('Archive missing kanban/ directory')
+
+            for item in list(target_kanban_dir.iterdir()):
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+
+            for src in extracted_kanban.rglob("*"):
+                if src.is_file():
+                    rel = src.relative_to(extracted_kanban)
+                    dest = target_kanban_dir / rel
                     dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
 
-                    if not dest.exists():
-                        shutil.copy2(src, dest)
-                        merged_files += 1
-                    else:
-                        # Conflict: keep both with rename suffix
-                        suffix = dest.suffix
-                        stem = dest.stem
-                        if stem == "INDEX":
-                            # INDEX.md → INDEX.imported-<host>-<ts>.md
-                            rename_target = dest.with_name(
-                                f"INDEX.imported-{source_host}-{import_ts}{suffix}"
-                            )
+            # Step 2: Team ID rewrite if source ≠ target.
+            renames = 0
+            if source_team and source_team != target_team:
+                IMPORT_JOBS[job_id]['message'] = f'Rewriting team IDs ({source_team} -> {target_team})...'
+                IMPORT_JOBS[job_id]['progress'] = 55
+
+                old_board = target_kanban_dir / f"{source_team}-board.json"
+                new_board = target_kanban_dir / f"{target_team}-board.json"
+                if old_board.exists():
+                    old_board.rename(new_board)
+                    renames += 1
+
+                for f in target_kanban_dir.rglob("*"):
+                    if f.is_file() and f.suffix in ('.json', '.md'):
+                        if _rewrite_team_ids_in_file(f, source_team, target_team):
+                            renames += 1
+
+            # Step 3: Merge out-of-tree knowledge.
+            merged_files = 0
+            renamed_conflicts = 0
+            extracted_oot = scratch_dir / "__out_of_tree__" / "knowledge"
+            if extracted_oot.exists():
+                IMPORT_JOBS[job_id]['message'] = 'Merging out-of-tree knowledge...'
+                IMPORT_JOBS[job_id]['progress'] = 75
+
+                target_oot = _base_team_knowledge_dir(target_base)
+                if target_oot is None:
+                    print(f'[LCARS Import] Warning: source has out-of-tree knowledge but '
+                          f'target base team {target_base} is single-project. Skipping.')
+                else:
+                    target_oot.mkdir(parents=True, exist_ok=True)
+                    source_host = job['manifest'].get('sourceHost', 'unknown')
+                    import_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+
+                    for src in extracted_oot.rglob("*"):
+                        if not src.is_file():
+                            continue
+                        rel = src.relative_to(extracted_oot)
+                        dest = target_oot / rel
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+
+                        if not dest.exists():
+                            shutil.copy2(src, dest)
+                            merged_files += 1
                         else:
-                            rename_target = dest.with_name(
-                                f"{stem}.imported-{source_host}-{import_ts}{suffix}"
-                            )
-                        shutil.copy2(src, rename_target)
-                        renamed_conflicts += 1
+                            suffix = dest.suffix
+                            stem = dest.stem
+                            if stem == "INDEX":
+                                rename_target = dest.with_name(
+                                    f"INDEX.imported-{source_host}-{import_ts}{suffix}"
+                                )
+                            else:
+                                rename_target = dest.with_name(
+                                    f"{stem}.imported-{source_host}-{import_ts}{suffix}"
+                                )
+                            shutil.copy2(src, rename_target)
+                            renamed_conflicts += 1
 
-        IMPORT_JOBS[job_id].update({
-            'status': 'completed',
-            'progress': 100,
-            'message': 'Import complete',
-            'stats': {
-                'inTreeRenames': renames,
-                'outOfTreeMerged': merged_files,
-                'outOfTreeConflicts': renamed_conflicts,
-            },
-        })
+            IMPORT_JOBS[job_id].update({
+                'status': 'completed',
+                'progress': 100,
+                'message': 'Import complete',
+                'stats': {
+                    'inTreeRenames': renames,
+                    'outOfTreeMerged': merged_files,
+                    'outOfTreeConflicts': renamed_conflicts,
+                },
+            })
 
-        # Cleanup scratch + staged zip
-        try:
-            shutil.rmtree(scratch_dir)
-        except Exception:
-            pass
+            try:
+                shutil.rmtree(scratch_dir)
+            except Exception:
+                pass
 
     except Exception as e:
         IMPORT_JOBS[job_id].update({
@@ -12322,16 +12556,58 @@ end tell
         staged_path = IMPORT_STAGING_DIR / f"{job_id}.zip"
         staged_path.write_bytes(file_bytes)
 
-        # Validate the zip and extract manifest
+        # XACA-0520-004: Detect new manifest-driven format vs legacy format.
+        # New format: manifest.json at zip root (schema_version key, kind absent).
+        # Legacy format: export-manifest.json with kind == 'lcars-team-export'.
+        # Policy: reject legacy layout with a clear deprecation error — no silent fallback.
+        import_format = None   # 'new' or 'legacy'
+        manifest = {}
         try:
             with zipfile.ZipFile(staged_path, 'r') as zipf:
                 names = zipf.namelist()
-                if 'export-manifest.json' not in names:
-                    raise ValueError('Archive missing export-manifest.json')
-                manifest_raw = zipf.read('export-manifest.json').decode('utf-8')
-                manifest = json.loads(manifest_raw)
-                if manifest.get('kind') != 'lcars-team-export':
-                    raise ValueError(f'Unexpected archive kind: {manifest.get("kind")}')
+
+                has_new = 'manifest.json' in names
+                has_legacy = 'export-manifest.json' in names
+                # Legacy-only zip that accidentally contains team_transfer/manifest.json
+                # (old XACA-0496 append) is still a legacy zip — check new first.
+                if has_new:
+                    manifest_raw = zipf.read('manifest.json').decode('utf-8')
+                    manifest = json.loads(manifest_raw)
+                    # Sanity: new manifests have schema_version; legacy manifests don't.
+                    if 'schema_version' not in manifest:
+                        raise ValueError(
+                            'manifest.json found but missing schema_version — '
+                            'archive may be malformed.'
+                        )
+                    import_format = 'new'
+                elif has_legacy:
+                    # Legacy zip: reject with deprecation error per XACA-0520 policy.
+                    print(
+                        f'[LCARS Import] DEPRECATED: zip has export-manifest.json '
+                        f'(old lcars-team-export format) but no root manifest.json. '
+                        f'Rejecting with 400. staged={staged_path}'
+                    )
+                    try:
+                        staged_path.unlink()
+                    except Exception:
+                        pass
+                    self._send_json_response(
+                        {
+                            'error': (
+                                'Legacy archive format detected (export-manifest.json). '
+                                'Re-export using LCARS UI with XACA-0520 or later to '
+                                'generate a manifest.json-based archive.'
+                            ),
+                            'code': 'LEGACY_ARCHIVE_FORMAT',
+                        },
+                        status=400,
+                    )
+                    return
+                else:
+                    raise ValueError(
+                        'Archive missing both manifest.json and export-manifest.json. '
+                        'Not a valid LCARS team export.'
+                    )
         except (zipfile.BadZipFile, ValueError, json.JSONDecodeError) as e:
             try:
                 staged_path.unlink()
@@ -12342,10 +12618,18 @@ end tell
             )
             return
 
-        source_team = manifest.get('team', '')
-        source_base = manifest.get('baseTeam', '')
-        target_base, _ = _split_team_id(LCARS_TEAM)
-        base_match = (source_base == target_base)
+        # XACA-0520-004: new-format manifest (schema_version field, no 'team'/'baseTeam').
+        # For new format: team matching is deferred to the verifier; base_match is True.
+        # For legacy format: this code path is unreachable (we already rejected above).
+        if import_format == 'new':
+            source_team = ''
+            source_base = ''
+            base_match = True
+        else:
+            source_team = manifest.get('team', '')
+            source_base = manifest.get('baseTeam', '')
+            target_base, _ = _split_team_id(LCARS_TEAM)
+            base_match = (source_base == target_base)
 
         # XACA-0460-001: pre-flight dual-board check for the import target.
         # Importing into a team that has a dual-board state would corrupt kanban data
@@ -12378,98 +12662,147 @@ end tell
             )
             return
 
-        # XACA-0496-005: Check for team_transfer/manifest.json in the uploaded zip.
-        # If present, run the verifier and include the summary in the pre-flight response.
-        # This is supplementary — failure here never fails the upload.
-        tt_verifier_summary: dict = {'present': False}
+        # XACA-0520-004: For the new manifest-driven format, run the verifier against
+        # the SOURCE manifest (pre-flight gate at upload time) and parse per-channel
+        # stats. For legacy format this block is unreachable (rejected above).
+        # NOTE: `re` is module-level (line 29); do NOT re-import here. A local
+        # `import re` would shadow the module-level binding for the whole function
+        # under Py 3.14 scoping rules and break the earlier re.search() at the
+        # multipart-boundary parser. See XACA-0520-007.
+        import subprocess
+        import sys
+        import tempfile
+
+        verifier_summary: dict = {'present': True}
         try:
-            import re
-            import subprocess
-            import sys
-            import tempfile
+            lcars_ui_dir = Path(__file__).parent
 
-            with zipfile.ZipFile(staged_path, 'r') as _zf:
-                has_tt_manifest = 'team_transfer/manifest.json' in _zf.namelist()
-
-            if has_tt_manifest:
+            with tempfile.TemporaryDirectory() as tmp_str:
+                tmp = Path(tmp_str)
+                preflight_manifest_path = tmp / "manifest.json"
+                # Extract manifest.json from zip to a temp file for the verifier CLI.
                 with zipfile.ZipFile(staged_path, 'r') as _zf:
-                    tt_manifest_bytes = _zf.read('team_transfer/manifest.json')
+                    preflight_manifest_path.write_bytes(_zf.read('manifest.json'))
 
-                lcars_ui_dir = Path(__file__).parent
+                ver_result = subprocess.run(
+                    [sys.executable, "-m", "team_transfer.verifier",
+                     "--manifest", str(preflight_manifest_path), "--quiet"],
+                    cwd=str(lcars_ui_dir),
+                    env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
+                    capture_output=True, text=True, timeout=120,
+                )
+                verifier_output = ver_result.stdout + ver_result.stderr
+                verifier_exit = ver_result.returncode
 
-                with tempfile.TemporaryDirectory() as tmp_str:
-                    tmp = Path(tmp_str)
-                    tt_manifest_path = tmp / "manifest.json"
-                    tt_manifest_path.write_bytes(tt_manifest_bytes)
+                # Parse overall PASS/WARN/FAIL counts from the SUMMARY block.
+                overall_counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+                for line in verifier_output.splitlines():
+                    m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)$", line)
+                    if m:
+                        overall_counts[m.group(1)] = int(m.group(2))
 
-                    ver_result = subprocess.run(
-                        [sys.executable, "-m", "team_transfer.verifier",
-                         "--manifest", str(tt_manifest_path), "--quiet"],
-                        cwd=str(lcars_ui_dir),
-                        env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
-                        capture_output=True, text=True, timeout=120,
-                    )
-                    verifier_output = ver_result.stdout + ver_result.stderr
-                    verifier_exit = ver_result.returncode
+                # Parse per-channel stats from the PER-CHANNEL block.
+                # Format:  "  v export_database     PASS:    2  WARN:   0  FAIL:   0  skipped:   0"
+                per_channel: dict = {}
+                in_per_channel = False
+                for line in verifier_output.splitlines():
+                    if '=== PER-CHANNEL ===' in line:
+                        in_per_channel = True
+                        continue
+                    if in_per_channel:
+                        if line.startswith('===') or line.strip() == '':
+                            in_per_channel = False
+                            continue
+                        ch_m = re.match(
+                            r'\s*[vx]\s+(\S+)\s+PASS:\s*(\d+)\s+WARN:\s*(\d+)\s+FAIL:\s*(\d+)',
+                            line,
+                        )
+                        if ch_m:
+                            ch_name = ch_m.group(1)
+                            per_channel[ch_name] = {
+                                'state': 'FAIL' if int(ch_m.group(4)) > 0
+                                         else ('WARN' if int(ch_m.group(3)) > 0 else 'PASS'),
+                                'counts': {
+                                    'pass': int(ch_m.group(2)),
+                                    'warn': int(ch_m.group(3)),
+                                    'fail': int(ch_m.group(4)),
+                                },
+                            }
 
-                    # Parse pass/warn/fail counts from the SUMMARY block.
-                    counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
-                    for line in verifier_output.splitlines():
-                        m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)", line)
-                        if m:
-                            counts[m.group(1)] = int(m.group(2))
+                overall_state = (
+                    'FAIL' if overall_counts['FAIL'] > 0
+                    else ('WARN' if overall_counts['WARN'] > 0 else 'PASS')
+                )
 
-                    # Last 20 lines for UI display.
-                    tail_lines = verifier_output.splitlines()[-20:]
-                    tail = "\n".join(tail_lines)
+                # Last 20 lines for UI display.
+                tail = "\n".join(verifier_output.splitlines()[-20:])
 
-                    tt_verifier_summary = {
-                        'present': True,
-                        'exit': verifier_exit,
-                        'pass': counts['PASS'],
-                        'warn': counts['WARN'],
-                        'fail': counts['FAIL'],
-                        'tail': tail,
-                    }
-                    print(
-                        f"[LCARS Import] team_transfer verifier: exit={verifier_exit} "
-                        f"PASS={counts['PASS']} WARN={counts['WARN']} FAIL={counts['FAIL']}"
-                    )
+                verifier_summary = {
+                    'present': True,
+                    'exit': verifier_exit,
+                    'perChannel': per_channel,
+                    'overall': overall_state,
+                    'pass': overall_counts['PASS'],
+                    'warn': overall_counts['WARN'],
+                    'fail': overall_counts['FAIL'],
+                    'tail': tail,
+                    'phase': 'preflight',
+                }
+                print(
+                    f"[LCARS Import] preflight verifier: exit={verifier_exit} "
+                    f"PASS={overall_counts['PASS']} WARN={overall_counts['WARN']} "
+                    f"FAIL={overall_counts['FAIL']}"
+                )
 
-        except Exception as tt_exc:
-            print(f"[LCARS Import] team_transfer verifier step failed (non-fatal): {tt_exc}")
-            tt_verifier_summary = {
+        except Exception as ver_exc:
+            print(f"[LCARS Import] preflight verifier step failed (non-fatal): {ver_exc}")
+            verifier_summary = {
                 'present': True,
                 'exit': -1,
-                'error': str(tt_exc)[:200],
+                'error': str(ver_exc)[:200],
+                'phase': 'preflight',
             }
+
+        # Resolve target_base for the job record (defined only for legacy format above).
+        if import_format == 'new':
+            target_base_val = _split_team_id(LCARS_TEAM)[0]
+        else:
+            target_base_val = target_base  # type: ignore[possibly-undefined]
 
         IMPORT_JOBS[job_id] = {
             'status': 'staged',
             'progress': 0,
             'message': 'Archive staged. Review pre-flight and apply.',
             'manifest': manifest,
+            'importFormat': import_format,
             'stagedPath': str(staged_path),
             'targetTeam': LCARS_TEAM,
-            'targetBase': target_base,
+            'targetBase': target_base_val,
             'baseMatch': base_match,
-            'idRenameRequired': (source_team != LCARS_TEAM),
+            'idRenameRequired': (source_team != LCARS_TEAM) if source_team else False,
             'createdAt': datetime.now(timezone.utc).isoformat(),
-            'teamTransferVerifierSummary': tt_verifier_summary,
+            'verifierSummary': verifier_summary,
         }
 
         self._send_json_response({
             'jobId': job_id,
             'status': 'staged',
             'manifest': manifest,
+            'importFormat': import_format,
             'targetTeam': LCARS_TEAM,
             'baseMatch': base_match,
-            'idRenameRequired': (source_team != LCARS_TEAM),
-            'teamTransferVerifierSummary': tt_verifier_summary,
+            'idRenameRequired': (source_team != LCARS_TEAM) if source_team else False,
+            'verifierSummary': verifier_summary,
         })
 
     def handle_import_apply(self, job_id):
-        """POST /api/import/apply/<job_id> — actually perform the import."""
+        """POST /api/import/apply/<job_id> — actually perform the import.
+
+        Body JSON (optional):
+            acknowledgeMissingSecrets (bool, default false) — operator override that
+            allows the import to proceed even when secrets_summary.discovered > 0 but
+            no paired secrets zip was supplied.  Logs a prominent warning when used.
+        """
         import threading
 
         job = IMPORT_JOBS.get(job_id)
@@ -12487,6 +12820,68 @@ end tell
                           f'into {job.get("targetBase")}'}, status=400
             )
             return
+
+        # XACA-0520-005: Secrets coordination gate.
+        # If the manifest embeds a secrets_summary with discovered > 0 the operator
+        # is expected to supply a paired secrets zip alongside the main zip.  Since
+        # the current workflow uploads main zip first and secrets zip separately, we
+        # treat "no paired secrets job recorded in the job metadata" as the signal
+        # that the operator has NOT supplied secrets.  The operator can bypass with
+        # acknowledgeMissingSecrets=true in the POST body, which logs a warning and
+        # proceeds — this is the intentional "this team has no live secrets" override.
+        body_json = {}
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 0:
+                raw = self.rfile.read(content_length)
+                body_json = json.loads(raw.decode('utf-8'))
+        except Exception:
+            pass  # malformed / empty body → treat as no override
+
+        # XACA-0520-008: type-aware coercion. `bool("false")` is True in Python, so
+        # plain bool() on a JSON string would let `{"acknowledgeMissingSecrets":"false"}`
+        # bypass the secrets gate — unacceptable on a security-relevant override.
+        # Accept only: True (bool), 1 (int), "true"/"yes"/"1" (case-insensitive strings).
+        _ack_raw = body_json.get('acknowledgeMissingSecrets', False)
+        if isinstance(_ack_raw, bool):
+            acknowledge_missing = _ack_raw
+        elif isinstance(_ack_raw, int):
+            acknowledge_missing = _ack_raw == 1
+        elif isinstance(_ack_raw, str):
+            acknowledge_missing = _ack_raw.strip().lower() in ('true', 'yes', '1')
+        else:
+            acknowledge_missing = False
+
+        manifest = job.get('manifest', {})
+        secrets_summary = manifest.get('secrets_summary', {})
+        discovered = int(secrets_summary.get('discovered', 0))
+        paired_secrets_provided = job.get('pairedSecretsJobId') is not None
+
+        if discovered > 0 and not paired_secrets_provided and not acknowledge_missing:
+            expected = int(secrets_summary.get('expected', discovered))
+            self._send_json_response(
+                {
+                    'error': 'missing_paired_secrets',
+                    'message': (
+                        f'This export has {discovered} discoverable secrets source(s) '
+                        f'({expected} declared in config) but no paired secrets zip was '
+                        f'provided.  Re-run the import after uploading the secrets zip, '
+                        f'or set acknowledgeMissingSecrets=true to proceed without it.'
+                    ),
+                    'expected': expected,
+                    'discovered': discovered,
+                    'override_flag': 'acknowledgeMissingSecrets',
+                },
+                status=409,
+            )
+            return
+
+        if discovered > 0 and not paired_secrets_provided and acknowledge_missing:
+            print(
+                f'[LCARS Import] OPERATOR OVERRIDE: proceeding without paired secrets zip '
+                f'(job={job_id}, discovered={discovered}). '
+                f'acknowledgeMissingSecrets=true was set by the operator.'
+            )
 
         IMPORT_JOBS[job_id]['status'] = 'applying'
         IMPORT_JOBS[job_id]['progress'] = 5
