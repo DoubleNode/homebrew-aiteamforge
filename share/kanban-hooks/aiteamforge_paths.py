@@ -580,6 +580,88 @@ def get_team_kanban_dir(team: str) -> Path:
     return Path(entry["kanban_dir"]).expanduser()
 
 
+def get_team_memory_dir(team: str) -> Path | None:
+    """Return the Claude auto-memory directory for the given team, or None.
+
+    Claude Code encodes the project working directory as a directory name
+    under ``~/.claude/projects/`` by replacing every ``/`` with ``-`` and
+    prepending a ``-`` (so the leading ``/`` of an absolute path becomes a
+    leading ``-``).  For example::
+
+        /Users/darrenehlers/dev-team
+        ->  -Users-darrenehlers-dev-team
+        /Users/Shared/Development/Main Event/MainEventApp-iOS-DEV
+        ->  -Users-Shared-Development-Main-Event-MainEventApp-iOS-DEV
+
+    However, spaces in path components are also replaced with ``-``, so
+    ``Main Event`` becomes ``Main-Event``.  The resulting slug is the name
+    of the project directory, and the memory subdirectory lives inside it.
+
+    Derivation strategy (in order):
+      1. Derive the encoded slug from the team's ``working_dir``.
+      2. Probe ``~/.claude/projects/<slug>/memory/`` for existence.
+      3. If the derived slug doesn't exist, scan ``~/.claude/projects/``
+         for a directory whose name starts with the derived slug (handles
+         the ``-develop`` / ``-DEV`` suffix variants Claude Code appends
+         when the working-dir checkout has a branch suffix).
+      4. If no match exists, return ``None`` (memory dir absent — team has
+         never been opened in Claude Code, or has no memory yet).
+
+    Notes:
+      - The function never raises for a missing team — it returns ``None``.
+      - The function never creates the directory; it is read-only.
+      - The team must exist in the config; otherwise ``KeyError`` is raised
+        (consistent with ``get_team_kanban_dir``).
+
+    Raises:
+        KeyError: if the team is not found in the config.
+
+    Returns:
+        Path to the memory directory, or ``None`` if it does not exist.
+    """
+    config = load_config()
+    entry = config["teams"].get(team)
+    if entry is None:
+        hint = _available_teams_hint(config)
+        raise KeyError(
+            f"Team '{team}' not found. Available: {hint} — "
+            f"edit {get_config_path()} or run `aiteamforge-paths init`."
+        )
+
+    working_dir = Path(entry["working_dir"]).expanduser()
+
+    # Encode the working_dir path as Claude Code does:
+    #   1. Replace spaces with hyphens (spaces in dir names map to -)
+    #   2. Replace / with -  (each path separator becomes -)
+    #   3. The result already starts with - because abs path starts with /
+    encoded = working_dir.as_posix().replace(" ", "-").replace("/", "-")
+    # encoded now looks like: -Users-darrenehlers-dev-team
+
+    projects_root = Path.home() / ".claude" / "projects"
+
+    # Strategy 1: exact match
+    exact = projects_root / encoded / "memory"
+    if exact.is_dir():
+        return exact
+
+    # Strategy 2: prefix scan — handles -DEV, -develop, and other suffixes
+    # that Claude Code appends when the working dir itself has a branch suffix
+    # or when the user opened a subdirectory.
+    try:
+        for candidate in sorted(projects_root.iterdir()):
+            if not candidate.is_dir():
+                continue
+            if candidate.name == encoded or candidate.name.startswith(encoded + "-"):
+                mem = candidate / "memory"
+                if mem.is_dir():
+                    return mem
+    except OSError:
+        pass
+
+    # No memory directory found for this team
+    return None
+
+
 def get_team_working_dir(team: str) -> Path:
     """Return the working directory Path for the given team.
 
