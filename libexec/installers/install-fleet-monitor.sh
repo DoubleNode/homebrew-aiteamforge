@@ -7,12 +7,13 @@ set -euo pipefail
 # Source common utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
+source "$SCRIPT_DIR/../lib/constants.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
 #──────────────────────────────────────────────────────────────────────────────
 
-FLEET_MONITOR_PORT="${FLEET_MONITOR_PORT:-3000}"
+FLEET_MONITOR_PORT="${FLEET_MONITOR_PORT:-$FLEET_MONITOR_PORT_DEFAULT}"
 FLEET_MODE="${FLEET_MODE:-standalone}"  # standalone | client | server
 TAILSCALE_FUNNEL_PORT="${TAILSCALE_FUNNEL_PORT:-443}"
 
