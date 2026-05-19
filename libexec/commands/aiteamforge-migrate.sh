@@ -49,11 +49,6 @@ ROLLBACK_FROM=""
 MIGRATION_STATE_FILE="${HOME}/.aiteamforge/migration-state.json"
 MIGRATION_LOG="${HOME}/.aiteamforge/migration.log"
 
-# NOTE: FLEET_MONITOR_PORT default mirrors install-fleet-monitor.sh:15. If
-# you change one, change the other. Sibling-drift consolidation is a pending
-# follow-up (mirrors the pattern XACA-0516 fixed for KANBAN_BACKUP_INTERVAL).
-readonly XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000
-
 # Usage
 usage() {
   cat <<EOF
@@ -564,7 +559,7 @@ _render_fleet_template() {
     return 1
   fi
 
-  local fleet_port="${FLEET_MONITOR_PORT:-$XACA_0512_FLEET_MONITOR_PORT_DEFAULT}"
+  local fleet_port="${FLEET_MONITOR_PORT:-$FLEET_MONITOR_PORT_DEFAULT}"
   local homebrew_prefix
   homebrew_prefix="$(brew --prefix 2>/dev/null || echo '/opt/homebrew')"
 
