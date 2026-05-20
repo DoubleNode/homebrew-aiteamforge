@@ -573,8 +573,24 @@ const app = express();
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
+
+/**
+ * Cache-Control header helper for static asset mounts (XACA-0528).
+ * - HTML files:       no-cache, must-revalidate  (browser must revalidate; 304 avoids re-download)
+ * - JS / CSS files:   no-cache                   (always conditionally GET; prevents stale-cache boot hang)
+ * - Everything else:  Express default             (images, fonts, json, webmanifest — heuristic caching fine)
+ */
+function setStaticCacheHeaders(res, filePath) {
+    const ext = path.extname(filePath).toLowerCase();
+    if (ext === '.html') {
+        res.set('Cache-Control', 'no-cache, must-revalidate');
+    } else if (ext === '.js' || ext === '.css') {
+        res.set('Cache-Control', 'no-cache');
+    }
+}
+
 // Disable directory redirect to allow explicit route handlers for /lcars
-app.use(express.static(path.join(__dirname, 'public'), { redirect: false }));
+app.use(express.static(path.join(__dirname, 'public'), { redirect: false, setHeaders: setStaticCacheHeaders }));
 
 // Request logging
 app.use((req, res, next) => {
@@ -2840,6 +2856,7 @@ app.delete('/api/epics/:team/:epicId', (req, res) => {
  * Serve dashboard
  */
 app.get('/', (req, res) => {
+    res.set('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
 
@@ -2848,6 +2865,7 @@ app.get('/', (req, res) => {
  * Serve full fleet dashboard (all teams)
  */
 app.get('/all', (req, res) => {
+    res.set('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'public', 'all.html'));
 });
 
@@ -2856,6 +2874,7 @@ app.get('/all', (req, res) => {
  * Serve Main Event filtered dashboard
  */
 app.get('/mainevent', (req, res) => {
+    res.set('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'public', 'mainevent.html'));
 });
 
@@ -2864,6 +2883,7 @@ app.get('/mainevent', (req, res) => {
  * Serve DoubleNode filtered dashboard (includes Academy)
  */
 app.get('/doublenode', (req, res) => {
+    res.set('Cache-Control', 'no-cache, must-revalidate');
     res.sendFile(path.join(__dirname, 'public', 'doublenode.html'));
 });
 
@@ -2914,7 +2934,7 @@ app.get('/lcars/all', (req, res) => {
  * Serve LCARS static assets (CSS, JS, images)
  * Must come AFTER explicit routes to prevent directory redirect on /lcars
  */
-app.use('/lcars', express.static(path.join(__dirname, 'public/lcars')));
+app.use('/lcars', express.static(path.join(__dirname, 'public/lcars'), { setHeaders: setStaticCacheHeaders }));
 
 // ============================================================================
 // BACKGROUND TASKS

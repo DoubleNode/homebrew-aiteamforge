@@ -687,7 +687,8 @@
     <div class="scanline"></div>
 
     <!-- LCARS Fleet Core JavaScript -->
-    <script src="js/lcars-fleet-core.js"></script>
+    <!-- ?v= is a manual cache-bust for the boot-critical core; bump the date to force-evict a stale copy (XACA-0528) -->
+    <script src="js/lcars-fleet-core.js?v=20260520"></script>
     <!-- Fleet Analytics: Session Activity Chart -->
     <script src="js/lcars-analytics-fleet.js"></script>
     <!-- LCARS Analytics: Kanban Charts Module — dispatches lcars:kanbanDataReady -->
