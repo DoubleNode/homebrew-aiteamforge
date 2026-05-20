@@ -12,6 +12,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source shared libraries
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
+source "${LIBEXEC_DIR}/lib/constants.sh"
 
 # Version — read from VERSION file (single source of truth)
 if [ -f "${LIBEXEC_DIR}/../VERSION" ]; then
@@ -136,7 +137,8 @@ gather_status_data() {
 
   if [ -d "${WORKING_DIR}/fleet-monitor/server" ]; then
     FLEET_HAS_SERVER=true
-    for port in 3000 3001 3002; do
+    # shellcheck disable=SC2086
+    for port in $FLEET_MONITOR_PORT_SCAN_RANGE; do
       if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
         FLEET_RUNNING=true
         FLEET_PORT=$port

@@ -12,6 +12,7 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source shared libraries
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
+source "${LIBEXEC_DIR}/lib/constants.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -217,7 +218,8 @@ start_fleet() {
   if [ "$has_server" = true ]; then
     # Check if already running
     local server_running=false
-    for port in 3000 3001 3002; do
+    # shellcheck disable=SC2086
+    for port in $FLEET_MONITOR_PORT_SCAN_RANGE; do
       if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
         print_warning "Fleet Monitor server already running on port ${port}"
         server_running=true
@@ -245,7 +247,8 @@ start_fleet() {
 
       # Check if it started successfully
       local started=false
-      for port in 3000 3001 3002; do
+      # shellcheck disable=SC2086
+      for port in $FLEET_MONITOR_PORT_SCAN_RANGE; do
         if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
           print_success "Fleet Monitor server started (PID: ${pid}, port: ${port})"
           print_info "Access at: http://localhost:${port}"

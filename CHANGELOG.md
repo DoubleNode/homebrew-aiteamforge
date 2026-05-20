@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Refactor: XACA-0524 — Consolidate Fleet Monitor port-scan range to shared constant
+
+- **`libexec/lib/constants.sh`** — Adds `FLEET_MONITOR_PORT_SCAN_RANGE` (default `3000 3001 3002`) using the same `: "${VAR:=value}"` + `readonly` idiom established by XACA-0516 and XACA-0519. Documented with consumer list, override semantics, and cross-reference to `FLEET_MONITOR_PORT_DEFAULT`.
+- **`libexec/commands/aiteamforge-start.sh`** — Sources `lib/constants.sh`; replaces two literal `for port in 3000 3001 3002` loops with `for port in $FLEET_MONITOR_PORT_SCAN_RANGE` (SC2086 suppressed at each loop — intentional word-splitting). Loop bodies and `break` statements preserved verbatim.
+- **`libexec/commands/aiteamforge-status.sh`** — Sources `lib/constants.sh`; replaces one literal triplet loop. Same treatment.
+- **`libexec/commands/aiteamforge-doctor.sh`** — Sources `lib/constants.sh`; replaces one literal triplet loop. Same treatment.
+- **Sibling-drift sweep clean.** `grep -rn "3000 3001 3002" libexec/` returns only the canonical definition in `constants.sh` — zero consumer occurrences.
+- **Behavior preserved.** Default scan order 3000 → 3001 → 3002 and early-`break` unchanged. Env-var override (`FLEET_MONITOR_PORT_SCAN_RANGE='3000 3001'` set before sourcing) is honored.
+- **Test results.** `test-cli.sh` 18/18 pass. `test-doctor-fix.sh` 53/53 pass. Zero new shellcheck warnings.
+- **Pattern lineage.** XACA-0516 (`KANBAN_BACKUP_INTERVAL_DEFAULT`) → XACA-0519 (`FLEET_MONITOR_PORT_DEFAULT`) → XACA-0524 (this scan range). Third and final outstanding sibling-drift literal in the tap command files.
+
 ### Fix: XACA-0516 — Consolidate `KANBAN_BACKUP_INTERVAL` default to a shared constant
 
 - **`libexec/lib/constants.sh`** (NEW) — Single source of truth for shared shell constants. Uses `: "${VAR:=default}"` followed by `readonly` so the file is safe to source twice, env-var overrides set before sourcing still win, and the value cannot be mutated after the fact.
