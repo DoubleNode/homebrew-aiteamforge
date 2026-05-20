@@ -111,6 +111,12 @@
                     <span class="candy-value">0000</span>
                     <span class="candy-label">AUX-2</span>
                 </div>
+                <!-- Sound mute toggle pill (XACA-0533) — engine requires id="sound-toggle" + #sound-status child -->
+                <div class="candy-pill sound-pill" id="sound-toggle" role="button" tabindex="0"
+                     onclick="LCARSSound.toggleMute()"
+                     onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}">
+                    <span id="sound-status">SOUND</span>
+                </div>
             </div>
 
             <!-- Sidebar navigation -->
@@ -703,5 +709,7 @@
     <script src="../shared/js/lcars-kiosk.js"></script>
     <!-- AI Engines Registry UI (XACA-0281) — load after core so lcars:sectionChange is available -->
     <script src="js/lcars-engines.js"></script>
+    <!-- LCARS Sound Engine (XACA-0533) — button tap audio feedback with persistent mute -->
+    <script src="js/lcars-sound.js?v=1.0"></script>
 </body>
 </html>

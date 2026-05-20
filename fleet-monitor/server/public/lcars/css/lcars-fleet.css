@@ -1473,3 +1473,39 @@ body.kiosk-active .kiosk-fab {
     background: var(--lcars-dark);
     border-radius: 6px;
 }
+
+/* ============================================================================
+   Sound Toggle — candy-pill mute/unmute button (XACA-0533)
+   Sits in .lcars-data-bar alongside the metric candy-pills.
+   Engine requires #sound-toggle (outer) + #sound-status (inner span).
+   ============================================================================ */
+
+.lcars-data-bar .candy-pill.sound-pill {
+    background: var(--lcars-rose);
+    cursor: pointer;
+    user-select: none;
+    -webkit-user-select: none;
+    font-size: 0.65rem;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+    flex: 0 0 auto;
+    min-width: 3.5rem;
+    justify-content: center;
+    transition:
+        background-color 0.15s ease,
+        opacity 0.15s ease,
+        filter 0.15s ease;
+}
+
+.lcars-data-bar .candy-pill.sound-pill:hover {
+    filter: brightness(1.3);
+}
+
+.lcars-data-bar .candy-pill.sound-pill:active {
+    filter: brightness(0.7);
+}
+
+/* Muted state — dim the pill so state is visually obvious */
+.lcars-data-bar .candy-pill.sound-pill.sound-muted {
+    opacity: 0.4;
+}
