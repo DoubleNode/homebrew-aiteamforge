@@ -113,6 +113,7 @@
                 </div>
                 <!-- Sound mute toggle pill (XACA-0533) — engine requires id="sound-toggle" + #sound-status child -->
                 <div class="candy-pill sound-pill" id="sound-toggle" role="button" tabindex="0"
+                     aria-label="Toggle interface sounds" aria-pressed="false"
                      onclick="LCARSSound.toggleMute()"
                      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();LCARSSound.toggleMute()}">
                     <span id="sound-status">SOUND</span>

@@ -87,11 +87,11 @@
      */
     function _addTone(buf, offsetSamples, freq, durationSec, gain) {
         var count = Math.floor(durationSec * SAMPLE_RATE);
+        // Exponential decay constant — hoisted out of the per-sample loop (XACA-0533 review).
+        // Approximates Web Audio exponentialRampToValue(0.001, duration).
+        var decayRate = -Math.log(0.001) / durationSec;
         for (var i = 0; i < count; i++) {
             var t = i / SAMPLE_RATE;
-            // Exponential decay: gain * e^(-t * decayRate)
-            // Approximate the Web Audio exponentialRampToValue(0.001, duration)
-            var decayRate = -Math.log(0.001) / durationSec;
             var envelope = gain * Math.exp(-decayRate * t);
             var sample = Math.sin(2 * Math.PI * freq * t) * envelope;
             var idx = offsetSamples + i;
@@ -242,12 +242,25 @@
     // -------------------------------------------------------------------------
     var STORAGE_KEY = 'lcars-sound-muted';
 
-    var _muted = localStorage.getItem(STORAGE_KEY) === 'true';
+    // localStorage can throw (Private Browsing, disabled storage, SecurityError).
+    // Guard every access so a throw never aborts engine init before
+    // window.LCARSSound is exported. (XACA-0533 review)
+    function _lsGet(key) {
+        try { return localStorage.getItem(key); }
+        catch (e) { return null; }
+    }
+    function _lsSet(key, val) {
+        try { localStorage.setItem(key, val); }
+        catch (e) { /* storage unavailable — mute pref won't persist; non-fatal */ }
+    }
+
+    var _muted = _lsGet(STORAGE_KEY) === 'true';
 
     function _updateToggleUI() {
         var pill = document.getElementById('sound-toggle');
         if (pill) {
             pill.classList.toggle('sound-muted', _muted);
+            pill.setAttribute('aria-pressed', _muted ? 'true' : 'false'); // XACA-0533 review: expose mute state to screen readers
         }
         var label = document.getElementById('sound-status');
         if (label) {
@@ -278,13 +291,13 @@
 
         mute: function () {
             _muted = true;
-            localStorage.setItem(STORAGE_KEY, 'true');
+            _lsSet(STORAGE_KEY, 'true');
             _updateToggleUI();
         },
 
         unmute: function () {
             _muted = false;
-            localStorage.setItem(STORAGE_KEY, 'false');
+            _lsSet(STORAGE_KEY, 'false');
             _updateToggleUI();
         },
 
@@ -355,7 +368,7 @@
             target.closest('[data-priority]') ||
             target.closest('[data-category]') ||
             target.closest('[data-tag]') ||
-            target.closest('.candy-pill') ||            // Fleet Monitor: data-bar metric pills
+            target.closest('.candy-pill:not([data-candy])') ||  // Fleet Monitor: interactive pills only — metric display pills carry data-candy (XACA-0533 review)
             target.closest('#sound-toggle')
         ) {
             // sound-toggle is handled by toggleMute directly; skip double-play
