@@ -47,6 +47,7 @@ migrate to this module (Wave 3, XACA-0168-006 onwards).  For now both exist.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import sys
@@ -323,6 +324,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
 _CONFIG_CACHE: dict | None = None
 _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
+_A1_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0522)
 
 SUPPORTED_SCHEMA_VERSION = 3
 
@@ -423,7 +425,7 @@ def load_config() -> dict:
     Returns a dict with at least {"schema_version": int, "teams": dict}.
     Never raises.
     """
-    global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD
+    global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED
 
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -508,6 +510,14 @@ def load_config() -> dict:
         )
         config["teams"] = DEFAULT_TEAMS
 
+    # A.1 backfill (XACA-0522) — flag-flipped BEFORE the call so even a failed
+    # disk write doesn't cause a second lock attempt within the same process.
+    if not _A1_BACKFILL_ATTEMPTED:
+        _A1_BACKFILL_ATTEMPTED = True
+        maybe_upgraded = _backfill_a1_fields_on_disk(config_path, config)
+        if maybe_upgraded is not None:
+            config = maybe_upgraded
+
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
     return _CONFIG_CACHE
@@ -524,10 +534,11 @@ def upgrade_config_to_v3(config: dict) -> dict:
       - anthropic_api_key_env_var: "TEAM_<SLUG_UPPER>_API_KEY" derived from
         the team slug (hyphens replaced with underscores, uppercased)
 
-    This function does NOT write anything to disk and is NOT called
-    automatically from load_config().  It is reserved for the interactive
-    account-routing wizard (XACA-0279 subitem 003) to invoke explicitly after
-    the user has acknowledged the migration.
+    This function is a pure transformer — it never touches disk.  It IS now
+    called automatically from ``load_config()`` (XACA-0522) via the
+    ``_backfill_a1_fields_on_disk`` wrapper, which adds the disk-write half.
+    The pure half remains here for unit-testability and for any future
+    explicit-invocation path.
 
     The input config is never mutated; a deep copy is returned.
 
@@ -552,6 +563,99 @@ def upgrade_config_to_v3(config: dict) -> dict:
             entry["anthropic_api_key_env_var"] = env_var
 
     return upgraded
+
+
+def diff_missing_anthropic_fields(config: dict) -> list[tuple[str, list[str]]]:
+    """Return [(team_slug, [missing_field_names, ...]), ...] for teams needing backfill.
+
+    Empty list means no migration needed (skip-fast).  The three fields checked
+    are ``anthropic_account_id``, ``anthropic_account_nickname``, and
+    ``anthropic_api_key_env_var``.
+
+    A field is considered missing only when the KEY is absent from the team
+    entry.  An empty-string value is NOT missing and is preserved as-is by the
+    subsequent upgrade.
+    """
+    _FIELDS = ("anthropic_account_id", "anthropic_account_nickname", "anthropic_api_key_env_var")
+    result = []
+    for slug, entry in sorted(config.get("teams", {}).items()):
+        missing = [f for f in _FIELDS if f not in entry]
+        if missing:
+            result.append((slug, missing))
+    return result
+
+
+def _backfill_a1_fields_on_disk(config_path: Path, current: dict) -> dict | None:
+    """Snapshot, lock, upgrade, and atomically write the config if any team lacks A.1 fields.
+
+    Returns the upgraded config dict on success (disk write or in-memory fallback).
+    Returns None only when no fields are missing (skip-fast — no lock, no backup, no write).
+    Never raises.
+    """
+    if not diff_missing_anthropic_fields(current):
+        return None
+
+    try:
+        lock_file = config_path.with_suffix(".json.lock")
+        with open(lock_file, "w") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # TOCTOU defense — re-read under the lock in case another process raced
+                try:
+                    reread = json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    reread = current
+
+                if not diff_missing_anthropic_fields(reread):
+                    # Someone else won the race; the in-memory current is stale but
+                    # we should still return the in-memory upgraded form so this
+                    # process sees the correct fields.
+                    return upgrade_config_to_v3(current)
+
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = config_path.with_name(
+                    f"{config_path.name}.bak-pre-a1-backfill-{timestamp}"
+                )
+                try:
+                    backup_path.write_bytes(config_path.read_bytes())
+                except OSError as exc:
+                    print(
+                        f"[aiteamforge-paths] A.1 backfill: snapshot failed ({exc}) — aborting disk write",
+                        file=sys.stderr,
+                    )
+                    return upgrade_config_to_v3(current)
+
+                upgraded = upgrade_config_to_v3(reread)
+                tmp_path = config_path.with_suffix(f".json.tmp.{os.getpid()}")
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(upgraded, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(str(tmp_path), str(config_path))
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+
+                for slug, fields in diff_missing_anthropic_fields(current):
+                    print(
+                        f"[aiteamforge-paths] A.1 backfill: team={slug} fields={fields}",
+                        file=sys.stderr,
+                    )
+                print(
+                    f"[aiteamforge-paths] A.1 backfill: snapshot={backup_path}",
+                    file=sys.stderr,
+                )
+                return upgraded
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                lock_file.unlink(missing_ok=True)
+    except Exception as exc:
+        print(
+            f"[aiteamforge-paths] A.1 backfill: disk write failed ({exc}) — degrading to in-memory upgrade",
+            file=sys.stderr,
+        )
+        return upgrade_config_to_v3(current)
 
 
 # ---------------------------------------------------------------------------
