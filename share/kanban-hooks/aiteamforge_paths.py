@@ -240,6 +240,18 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_LIQUIDSTYLE_AGENTBADGES_IOS_API_KEY",
     },
 
+    # ── Freelance — Bandwear ──────────────────────────────────────────────
+    "freelance-bandwear-android": {
+        "kanban_dir": "/Users/Shared/Development/Bandwear/Android/kanban",
+        "working_dir": "/Users/Shared/Development/Bandwear/Android",
+        "lcars_port_base": 8400,
+        "lcars_port_range": 100,
+        "lcars_port": 8478,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_FREELANCE_BANDWEAR_ANDROID_API_KEY",
+    },
+
     # ── Legal ─────────────────────────────────────────────────────────────
     "legal-coparenting": {
         "kanban_dir": f"{_HOME}/legal/coparenting/kanban",

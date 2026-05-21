@@ -163,6 +163,7 @@ def _hardcoded_team_kanban_dirs() -> dict:
         "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
         "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
         "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
+        "freelance-bandwear-android": Path("/Users/Shared/Development/Bandwear/Android/kanban"),
         "legal-coparenting": _home / "legal" / "coparenting" / "kanban",
         "medical-general": _home / "medical" / "general" / "kanban",
         "finance-personal": _home / "finance" / "personal" / "kanban",
@@ -3596,6 +3597,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'XFAS': TEAM_KANBAN_DIRS.get('freelance-doublenode-awaysentry'),
             'XFLA': TEAM_KANBAN_DIRS.get('freelance-liquidstyle-agentbadges-app'),
             'XFLI': TEAM_KANBAN_DIRS.get('freelance-liquidstyle-agentbadges-ios'),
+            'XBWA': TEAM_KANBAN_DIRS.get('freelance-bandwear-android'),
             'XFIN': TEAM_KANBAN_DIRS.get('finance-personal'),
         }
 
@@ -3648,6 +3650,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         'XFAS': 'freelance-doublenode-awaysentry',
         'XFLA': 'freelance-liquidstyle-agentbadges-app',
         'XFLI': 'freelance-liquidstyle-agentbadges-ios',
+        'XBWA': 'freelance-bandwear-android',
         # Legal projects
         'XLCP': 'legal-coparenting',
         # Finance projects
@@ -10875,6 +10878,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'freelance-doublenode-awaysentry': 'freelance',
             'freelance-liquidstyle-agentbadges-app': 'freelance',
             'freelance-liquidstyle-agentbadges-ios': 'freelance',
+            'freelance-bandwear-android': 'freelance',
             'freelance-workstats': 'freelance',
             'freelance-starwords': 'freelance',
             'freelance-appplanning': 'freelance',
