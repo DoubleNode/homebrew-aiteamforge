@@ -122,14 +122,16 @@ aiteamforge_config_path() {
 # ─────────────────────────────────────────────────────────────────────────────
 # Baked-in defaults (shell representation)
 #
-# Schema columns (XACA-0463): team_id, kanban_dir, working_dir, lcars_port,
-#   lcars_port_base, lcars_port_range
+# Schema columns (XACA-0463, XACA-0542): team_id, kanban_dir, working_dir,
+#   lcars_port, lcars_port_base, lcars_port_range, team_code
 #
 # Format: one line per team, TAB-separated:
-#   team_id<TAB>kanban_dir<TAB>working_dir<TAB>lcars_port<TAB>lcars_port_base<TAB>lcars_port_range
+#   team_id<TAB>kanban_dir<TAB>working_dir<TAB>lcars_port<TAB>lcars_port_base<TAB>lcars_port_range<TAB>team_code
 # lcars_port is empty string when not yet allocated (pre-migration install).
 # lcars_port_base is the first port in the template's band (XACA-0463).
 # lcars_port_range is the inclusive count of ports in the band (XACA-0463).
+# team_code is the 3-letter identifier (e.g. ACA, IOS) used in item prefixes
+#   like XACA-0001.  Empty for alias entries. (XACA-0542)
 # DEPRECATED: lcars_port — use lcars_port_base/lcars_port_range for band queries.
 #
 # THIS LIST MUST MIRROR DEFAULT_TEAMS in kanban-hooks/aiteamforge_paths.py.
@@ -150,9 +152,10 @@ aiteamforge_config_path() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 _AITEAMFORGE_DEFAULT_TEAMS_DATA() {
-    # Emit: team_id TAB kanban_dir TAB working_dir TAB lcars_port TAB lcars_port_base TAB lcars_port_range
+    # Emit: team_id TAB kanban_dir TAB working_dir TAB lcars_port TAB lcars_port_base TAB lcars_port_range TAB team_code
     # lcars_port is empty when not yet allocated; lcars_port_base/lcars_port_range are always set.
-    # Schema version: XACA-0463 (6 columns)
+    # team_code is the 3-letter code (e.g. ACA); empty for alias entries with no own code.
+    # Schema version: XACA-0463 + XACA-0542 (7 columns)
 
     # Resolve org-driven path prefix for the primary org's shared projects.
     # Falls back to the hardcoded legacy prefix when the resolver is not yet
@@ -183,33 +186,34 @@ _AITEAMFORGE_DEFAULT_TEAMS_DATA() {
     # (DNSFramework, Liquidstyle) — these never carry the org name.
     local _shared_prefix="${_shared_dev}"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "academy"      "${HOME}/dev-team/kanban"                                    "${HOME}/dev-team"                                          "8203"  "8200" "10"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "academy"      "${HOME}/dev-team/kanban"                                    "${HOME}/dev-team"                                          "8203"  "8200" "10"  "ACA"
     # xaca-0139:allowed — MainEventApp-* are stable per-project repo directory names (not org branding); resolved via _org_prefix
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "ios"           "${_org_prefix}/MainEventApp-iOS/kanban"                    "${_org_prefix}/MainEventApp-iOS"                           "8260"  "8260" "10"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "android"       "${_org_prefix}/MainEventApp-Android/kanban"                "${_org_prefix}/MainEventApp-Android"                       "8280"  "8280" "10" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "firebase"      "${_org_prefix}/MainEventApp-Functions/kanban"              "${_org_prefix}/MainEventApp-Functions"                     "8240"  "8240" "10" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "command"       "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8234"  "8230" "10"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "dns"           "${_shared_prefix}/DNSFramework/kanban"                     "${_shared_prefix}/DNSFramework"                            "8180"  "8180" "10"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "ios"           "${_org_prefix}/MainEventApp-iOS/kanban"                    "${_org_prefix}/MainEventApp-iOS"                           "8260"  "8260" "10"  "IOS"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "android"       "${_org_prefix}/MainEventApp-Android/kanban"                "${_org_prefix}/MainEventApp-Android"                       "8280"  "8280" "10"  "AND" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "firebase"      "${_org_prefix}/MainEventApp-Functions/kanban"              "${_org_prefix}/MainEventApp-Functions"                     "8240"  "8240" "10"  "FIR" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "command"       "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8234"  "8230" "10"  "CMD"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "dns"           "${_shared_prefix}/DNSFramework/kanban"                     "${_shared_prefix}/DNSFramework"                            "8180"  "8180" "10"  "DNS"
     # xaca-0139:allowed — freelance-doublenode-* are stable team slug / disk path constants; DoubleNode is a project-family dir name
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-starwords"    "${_shared_prefix}/DoubleNode/Starwords/kanban"     "${_shared_prefix}/DoubleNode/Starwords"     "8505"  "8500" "100"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-appplanning"  "${_shared_prefix}/DoubleNode/appPlanning/kanban"  "${_shared_prefix}/DoubleNode/appPlanning"  "8505"  "8500" "100" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-workstats"    "${_shared_prefix}/DoubleNode/WorkStats/kanban"    "${_shared_prefix}/DoubleNode/WorkStats"    "8505"  "8500" "100" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-lifeboard"    "${_shared_prefix}/DoubleNode/LifeBoard/kanban"    "${_shared_prefix}/DoubleNode/LifeBoard"    "8505"  "8500" "100" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-caravan"      "${_shared_prefix}/DoubleNode/Caravan/kanban"      "${_shared_prefix}/DoubleNode/Caravan"      "8505"  "8500" "100" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-awaysentry"   "${_shared_prefix}/DoubleNode/AwaySentry/kanban"   "${_shared_prefix}/DoubleNode/AwaySentry"   "8505"  "8500" "100" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-liquidstyle-agentbadges-app" "${_shared_prefix}/Liquidstyle/AgentBadges-APP/kanban" "${_shared_prefix}/Liquidstyle/AgentBadges-APP" "8960"  "8500" "100"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-liquidstyle-agentbadges-ios" "${_shared_prefix}/Liquidstyle/AgentBadges-IOS/kanban" "${_shared_prefix}/Liquidstyle/AgentBadges-IOS" "8970"  "8500" "100"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "legal-coparenting"  "${HOME}/legal/coparenting/kanban"                     "${HOME}/legal/coparenting"          "null" "8320" "10"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "medical-general"    "${HOME}/medical/general/kanban"                       "${HOME}/medical/general"            "null" "8340" "10"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "finance-personal"   "${HOME}/finance/personal/kanban"                      "${HOME}/finance/personal"           "null" "8360" "10"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-starwords"    "${_shared_prefix}/DoubleNode/Starwords/kanban"     "${_shared_prefix}/DoubleNode/Starwords"     "8505"  "8500" "100" "FSW"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-appplanning"  "${_shared_prefix}/DoubleNode/appPlanning/kanban"  "${_shared_prefix}/DoubleNode/appPlanning"  "8505"  "8500" "100" "FAP" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-workstats"    "${_shared_prefix}/DoubleNode/WorkStats/kanban"    "${_shared_prefix}/DoubleNode/WorkStats"    "8505"  "8500" "100" "FWS" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-lifeboard"    "${_shared_prefix}/DoubleNode/LifeBoard/kanban"    "${_shared_prefix}/DoubleNode/LifeBoard"    "8505"  "8500" "100" "FLB" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-caravan"      "${_shared_prefix}/DoubleNode/Caravan/kanban"      "${_shared_prefix}/DoubleNode/Caravan"      "8505"  "8500" "100" "VAN" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-doublenode-awaysentry"   "${_shared_prefix}/DoubleNode/AwaySentry/kanban"   "${_shared_prefix}/DoubleNode/AwaySentry"   "8505"  "8500" "100" "FAS" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-liquidstyle-agentbadges-app" "${_shared_prefix}/Liquidstyle/AgentBadges-APP/kanban" "${_shared_prefix}/Liquidstyle/AgentBadges-APP" "8960"  "8500" "100" "FLA"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-liquidstyle-agentbadges-ios" "${_shared_prefix}/Liquidstyle/AgentBadges-IOS/kanban" "${_shared_prefix}/Liquidstyle/AgentBadges-IOS" "8970"  "8500" "100" "FLI"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance-bandwear-android"            "${_shared_prefix}/Bandwear/Android/kanban"            "${_shared_prefix}/Bandwear/Android"            "8478"  "8400" "100" "BWA"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "legal-coparenting"  "${HOME}/legal/coparenting/kanban"                     "${HOME}/legal/coparenting"          "null" "8320" "10"  "LCP"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical-general"    "${HOME}/medical/general/kanban"                       "${HOME}/medical/general"            "null" "8340" "10"  "MED"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "finance-personal"   "${HOME}/finance/personal/kanban"                      "${HOME}/finance/personal"           "null" "8360" "10"  "FIN"
     # Legacy alias kept for backward compatibility with pre-XACA-0139 installs.
     # The "mainevent" team ID was used before the org plugin system existed; # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
     # new installs use the "command" team or enable the primary org plugin.
     # xaca-0139:allowed — "mainevent" is a registered legacy team slug (backward-compat alias, not user-facing org branding)
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve collision with command (band 8230–8239).
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "mainevent"     "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8400"  "8400" "10"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "medical"        "${HOME}/medical/general/kanban"                           "${HOME}/medical/general"            "null" "8340" "10"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "freelance"      "${HOME}/dev-team/kanban"                                  "${HOME}/dev-team"                                          "8505"  "8500" "100"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "mainevent"     "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8400"  "8400" "10"  "MEV"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical"        "${HOME}/medical/general/kanban"                           "${HOME}/medical/general"            "null" "8340" "10"  ""
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance"      "${HOME}/dev-team/kanban"                                  "${HOME}/dev-team"                                          "8505"  "8500" "100" "FRE"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,7 +233,7 @@ _aiteamforge_write_defaults() {
     mkdir -p "$config_dir" 2>/dev/null || true
 
     # Build JSON from the default data using python3 (always available on macOS)
-    # Schema: team_id TAB kanban_dir TAB working_dir TAB lcars_port TAB lcars_port_base TAB lcars_port_range
+    # Schema: team_id TAB kanban_dir TAB working_dir TAB lcars_port TAB lcars_port_base TAB lcars_port_range TAB team_code
     "${AITEAMFORGE_PYTHON:-python3}" - "$config_path" <<'PYEOF'
 import sys, json
 from pathlib import Path
@@ -252,10 +256,13 @@ for line in sys.stdin:
     port_str = parts[3] if len(parts) > 3 else ''
     base_str = parts[4] if len(parts) > 4 else ''
     range_str = parts[5] if len(parts) > 5 else ''
+    team_code = parts[6].strip() if len(parts) > 6 else ''
     entry = {"kanban_dir": kanban_dir, "working_dir": working_dir}
     entry["lcars_port"] = int(port_str) if (port_str and port_str != 'null') else None
     entry["lcars_port_base"] = int(base_str) if (base_str and base_str != 'null') else None
     entry["lcars_port_range"] = int(range_str) if (range_str and range_str != 'null') else None
+    if team_code:
+        entry["team_code"] = team_code
     teams[team_id] = entry
 
 config = {"schema_version": 1, "teams": teams}
@@ -268,7 +275,7 @@ PYEOF
 # Internal: low-level field lookup
 #
 # _aiteamforge_get_field <team> <field>
-#   field: kanban_dir | working_dir | lcars_port | lcars_port_base | lcars_port_range
+#   field: kanban_dir | working_dir | lcars_port | lcars_port_base | lcars_port_range | team_code
 #
 # Priority:
 #   1. Parse config file with jq (fast, reliable)
@@ -343,7 +350,7 @@ PYEOF
     local found_team=0
     local result=""
 
-    while IFS=$'\t' read -r t kanban_dir working_dir lcars_port lcars_port_base lcars_port_range; do
+    while IFS=$'\t' read -r t kanban_dir working_dir lcars_port lcars_port_base lcars_port_range team_code; do
         # Expand $HOME / ${HOME} in paths (heredoc uses literal ${HOME})
         kanban_dir="${kanban_dir/\$\{HOME\}/$home}"
         kanban_dir="${kanban_dir/\$HOME/$home}"
@@ -358,6 +365,7 @@ PYEOF
                 lcars_port)       result="$lcars_port" ;;
                 lcars_port_base)  result="$lcars_port_base" ;;
                 lcars_port_range) result="$lcars_port_range" ;;
+                team_code)        result="$team_code" ;;
             esac
             break
         fi
@@ -423,6 +431,57 @@ aiteamforge_team_lcars_port() {
     echo "$result"
 }
 
+# aiteamforge_team_code <team>
+# Prints the 3-letter team code (e.g. ACA) for the given team, or returns
+# nonzero with no output for teams that have no own code (alias entries).
+# XACA-0542: exposes team_code from the registry to shell consumers so they
+# can derive code<->team maps without hardcoded case statements.
+aiteamforge_team_code() {
+    local team="$1"
+    local result
+    result=$(_aiteamforge_get_field "$team" "team_code") || return 1
+    if [ -z "$result" ] || [ "$result" = "null" ]; then
+        return 1  # alias entry — no own code
+    fi
+    echo "$result"
+}
+
+# aiteamforge_team_from_code <code>
+# Prints the team id for the given 3-letter code (e.g. ACA → academy),
+# or returns nonzero if not found.  Searches the live config first, then
+# the baked-in defaults.
+# XACA-0542: reverse lookup so shell consumers can resolve item prefixes
+# (XACA-0001 → code ACA → team academy) via the registry.
+aiteamforge_team_from_code() {
+    local code="$1"
+    local code_upper
+    code_upper=$(echo "$code" | tr '[:lower:]' '[:upper:]')
+
+    # ── Try jq on live config ─────────────────────────────────────────────
+    local config_path
+    config_path=$(aiteamforge_config_path)
+    if [ -f "$config_path" ] && command -v jq &>/dev/null; then
+        local result
+        result=$(jq -r --arg c "$code_upper" \
+            '.teams | to_entries[] | select(.value.team_code == $c) | .key' \
+            "$config_path" 2>/dev/null | head -1)
+        if [ -n "$result" ] && [ "$result" != "null" ]; then
+            echo "$result"
+            return 0
+        fi
+    fi
+
+    # ── Scan baked-in defaults ────────────────────────────────────────────
+    while IFS=$'\t' read -r t _ _ _ _ _ team_code; do
+        if [ "$(echo "$team_code" | tr '[:lower:]' '[:upper:]')" = "$code_upper" ]; then
+            echo "$t"
+            return 0
+        fi
+    done < <(_AITEAMFORGE_DEFAULT_TEAMS_DATA)
+
+    return 1  # not found
+}
+
 # aiteamforge_compute_instance_port <template_id> [<team_paths_json_path>]
 #
 # Allocate the lowest free port in template_id's band per XACA-0463 /
@@ -462,7 +521,7 @@ aiteamforge_compute_instance_port() {
     if [ -z "$base" ] || [ "$base" = "null" ]; then
         local prefix
         prefix="${template_id}-"
-        while IFS=$'\t' read -r t _kd _wd _lp lb lr; do
+        while IFS=$'\t' read -r t _kd _wd _lp lb lr _tc; do
             if [[ "$t" == "$prefix"* ]] && [ -n "$lb" ] && [ "$lb" != "null" ]; then
                 base="$lb"
                 range="$lr"
