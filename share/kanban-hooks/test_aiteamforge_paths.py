@@ -17,6 +17,34 @@ import unittest
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
+# All 20 canonical teams with their expected 3-letter codes.
+# XACA-0542-015: This table is the parity fixture — any drift between
+# DEFAULT_TEAMS team_code values and this list will fail the test.
+# ---------------------------------------------------------------------------
+_EXPECTED_TEAM_CODES: dict[str, str] = {
+    "academy":                             "ACA",
+    "ios":                                 "IOS",
+    "android":                             "AND",
+    "firebase":                            "FIR",
+    "command":                             "CMD",
+    "dns":                                 "DNS",
+    "freelance-doublenode-starwords":      "FSW",
+    "freelance-doublenode-appplanning":    "FAP",
+    "freelance-doublenode-workstats":      "FWS",
+    "freelance-doublenode-lifeboard":      "FLB",
+    "freelance-doublenode-caravan":        "VAN",
+    "freelance-doublenode-awaysentry":     "FAS",
+    "freelance-liquidstyle-agentbadges-app": "FLA",
+    "freelance-liquidstyle-agentbadges-ios": "FLI",
+    "freelance-bandwear-android":          "BWA",
+    "legal-coparenting":                   "LCP",
+    "medical-general":                     "MED",
+    "finance-personal":                    "FIN",
+    "mainevent":                           "MEV",
+    "freelance":                           "FRE",
+}
+
+# ---------------------------------------------------------------------------
 # Ensure kanban-hooks/ is on the path regardless of invocation directory.
 # ---------------------------------------------------------------------------
 _HERE = Path(__file__).parent
@@ -24,7 +52,12 @@ if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
 import aiteamforge_paths  # noqa: E402
-from aiteamforge_paths import compute_instance_port  # noqa: E402
+from aiteamforge_paths import (  # noqa: E402
+    build_team_code_map,
+    compute_instance_port,
+    get_team_code,
+    get_team_from_code,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -152,6 +185,145 @@ class TestComputeInstancePort(unittest.TestCase):
         original = copy.deepcopy(existing)
         compute_instance_port("finance", existing)
         self.assertEqual(existing, original)
+
+
+# ---------------------------------------------------------------------------
+# XACA-0542-015: Team-code registry parity tests
+# ---------------------------------------------------------------------------
+# These tests lock the parity between build_team_code_map() / get_team_code()
+# / get_team_from_code() and the expected codes for all 20 canonical teams.
+# Any future drift (new team added to DEFAULT_TEAMS without an entry here, or
+# a code changed without updating the other side) will fail these tests.
+# ---------------------------------------------------------------------------
+
+class TestTeamCodeParity(unittest.TestCase):
+    """XACA-0542-015: Parity regression for team_code registry coverage."""
+
+    # ── build_team_code_map coverage ──────────────────────────────────────
+
+    def test_build_team_code_map_all_20_teams_present(self):
+        """build_team_code_map() must contain an entry for all 20 canonical teams."""
+        code_map = build_team_code_map()  # {code -> team_id}
+        # Invert for easy lookup: {team_id -> code}
+        team_to_code = {team_id: code for code, team_id in code_map.items()}
+        missing = [t for t in _EXPECTED_TEAM_CODES if t not in team_to_code]
+        self.assertEqual(
+            missing, [],
+            f"build_team_code_map() is missing teams: {missing}",
+        )
+
+    def test_build_team_code_map_correct_codes(self):
+        """build_team_code_map() must map every team to its canonical 3-letter code."""
+        code_map = build_team_code_map()  # {code -> team_id}
+        team_to_code = {team_id: code for code, team_id in code_map.items()}
+        mismatches = []
+        for team, expected_code in _EXPECTED_TEAM_CODES.items():
+            actual_code = team_to_code.get(team, "")
+            if actual_code.upper() != expected_code.upper():
+                mismatches.append(f"{team}: expected {expected_code}, got {actual_code}")
+        self.assertEqual(mismatches, [], "\n".join(mismatches))
+
+    def test_build_team_code_map_xfre_present(self):
+        """XFRE (freelance) must appear in build_team_code_map() — was absent in pre-XACA-0542 hardcoded dict."""
+        code_map = build_team_code_map()
+        self.assertIn(
+            "FRE", code_map,
+            "build_team_code_map() missing FRE (freelance); XFRE→freelance routing broken",
+        )
+        self.assertEqual(code_map["FRE"], "freelance")
+
+    def test_build_team_code_map_xmed_present(self):
+        """XMED (medical-general) must appear in build_team_code_map() — was absent in pre-XACA-0542 hardcoded dict."""
+        code_map = build_team_code_map()
+        self.assertIn(
+            "MED", code_map,
+            "build_team_code_map() missing MED (medical-general); XMED→medical-general routing broken",
+        )
+        self.assertEqual(code_map["MED"], "medical-general")
+
+    # ── get_team_code forward lookup ──────────────────────────────────────
+
+    def test_get_team_code_all_20_teams(self):
+        """get_team_code() must return the correct 3-letter code for each of the 20 canonical teams."""
+        mismatches = []
+        for team, expected_code in _EXPECTED_TEAM_CODES.items():
+            actual = get_team_code(team)
+            if actual.upper() != expected_code.upper():
+                mismatches.append(f"get_team_code({team!r}) -> {actual!r}, want {expected_code!r}")
+        self.assertEqual(mismatches, [], "\n".join(mismatches))
+
+    def test_get_team_code_unknown_returns_empty(self):
+        """get_team_code() returns '' for an unregistered team."""
+        result = get_team_code("nonexistent-team-xyz")
+        self.assertEqual(result, "")
+
+    # ── get_team_from_code reverse lookup ────────────────────────────────
+
+    def test_get_team_from_code_all_20_codes(self):
+        """get_team_from_code() must return the correct team_id for each of the 20 canonical codes."""
+        mismatches = []
+        for team, code in _EXPECTED_TEAM_CODES.items():
+            actual = get_team_from_code(code)
+            if actual != team:
+                mismatches.append(f"get_team_from_code({code!r}) -> {actual!r}, want {team!r}")
+        self.assertEqual(mismatches, [], "\n".join(mismatches))
+
+    def test_get_team_from_code_case_insensitive(self):
+        """get_team_from_code() must work with lowercase code input."""
+        result = get_team_from_code("aca")
+        self.assertEqual(result, "academy")
+
+    def test_get_team_from_code_unknown_returns_empty(self):
+        """get_team_from_code() returns '' for an unknown code."""
+        result = get_team_from_code("ZZZ")
+        self.assertEqual(result, "")
+
+    # ── bidirectional roundtrip ───────────────────────────────────────────
+
+    def test_roundtrip_team_code_to_team(self):
+        """get_team_code(team) → code → get_team_from_code(code) must round-trip for all 20 teams."""
+        mismatches = []
+        for team in _EXPECTED_TEAM_CODES:
+            code = get_team_code(team)
+            round_tripped = get_team_from_code(code)
+            if round_tripped != team:
+                mismatches.append(
+                    f"Roundtrip failed: {team!r} -> code={code!r} -> {round_tripped!r}"
+                )
+        self.assertEqual(mismatches, [], "\n".join(mismatches))
+
+    # ── _ITEM_PREFIX_TO_TEAM parity ───────────────────────────────────────
+
+    def test_item_prefix_to_team_includes_xfre_and_xmed(self):
+        """_ITEM_PREFIX_TO_TEAM must include XFRE and XMED added by XACA-0542 registry derivation."""
+        # We derive the map the same way server.py does — via build_team_code_map.
+        code_map = build_team_code_map()
+        item_prefix_map = {f"X{code}": team_id for code, team_id in code_map.items()}
+        self.assertIn(
+            "XFRE", item_prefix_map,
+            "XFRE missing from _ITEM_PREFIX_TO_TEAM equivalent; freelance items won't route",
+        )
+        self.assertEqual(item_prefix_map["XFRE"], "freelance")
+        self.assertIn(
+            "XMED", item_prefix_map,
+            "XMED missing from _ITEM_PREFIX_TO_TEAM equivalent; medical-general items won't route",
+        )
+        self.assertEqual(item_prefix_map["XMED"], "medical-general")
+
+    def test_item_prefix_to_team_all_20_entries(self):
+        """_ITEM_PREFIX_TO_TEAM must include X<code> prefixes for all 20 canonical teams."""
+        code_map = build_team_code_map()
+        item_prefix_map = {f"X{code}": team_id for code, team_id in code_map.items()}
+        missing = []
+        for team, code in _EXPECTED_TEAM_CODES.items():
+            prefix = f"X{code}"
+            if prefix not in item_prefix_map:
+                missing.append(f"{prefix} ({team})")
+            elif item_prefix_map[prefix] != team:
+                missing.append(
+                    f"{prefix}: expected {team!r}, got {item_prefix_map[prefix]!r}"
+                )
+        self.assertEqual(missing, [], f"_ITEM_PREFIX_TO_TEAM parity failures: {missing}")
 
 
 # ---------------------------------------------------------------------------
