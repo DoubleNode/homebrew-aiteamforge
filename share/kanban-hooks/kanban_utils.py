@@ -320,28 +320,50 @@ def update_board_safely(board_file, update_func):
 # Maps the 3-letter team code (positions 1-3 of an item ID like XACA-0001)
 # to the team name used in TEAM_KANBAN_DIRS (built from aiteamforge_paths).
 # Mirrors _kb_get_team_from_code() in kanban-helpers.sh.
-_TEAM_CODE_MAP = {
-    "IOS": "ios",
-    "AND": "android",
-    "FIR": "firebase",
-    "FRE": "freelance",
-    "FSW": "freelance-doublenode-starwords",
-    "FWS": "freelance-doublenode-workstats",
-    "FAP": "freelance-doublenode-appplanning",
-    "FLB": "freelance-doublenode-lifeboard",
-    "VAN": "freelance-doublenode-caravan",
-    "FAS": "freelance-doublenode-awaysentry",
-    "FLA": "freelance-liquidstyle-agentbadges-app",
-    "FLI": "freelance-liquidstyle-agentbadges-ios",
-    "BWA": "freelance-bandwear-android",
-    "ACA": "academy",
-    "DNS": "dns",
-    "CMD": "command",
-    "MEV": "mainevent",
-    "LCP": "legal-coparenting",
-    "MED": "medical-general",
-    "FIN": "finance-personal",
-}
+#
+# XACA-0542: Derived at import time from aiteamforge_paths.build_team_code_map()
+# so the registry (DEFAULT_TEAMS + team-paths.json) is the single source of
+# truth.  The hardcoded fallback below is retained ONLY as a safety net for
+# environments where aiteamforge_paths is unavailable (CI, bootstrap).
+def _build_team_code_map() -> dict:
+    """Build _TEAM_CODE_MAP from aiteamforge_paths registry."""
+    try:
+        from aiteamforge_paths import build_team_code_map  # noqa: PLC0415
+        result = build_team_code_map()
+        if result:
+            return result
+    except Exception as _exc:
+        warnings.warn(
+            f"kanban_utils: could not load team_code map from aiteamforge_paths ({_exc}); "
+            "falling back to hardcoded _TEAM_CODE_MAP",
+            stacklevel=2,
+        )
+    # Hardcoded fallback — only reached if registry import fails.
+    # MUST EXACTLY MIRROR DEFAULT_TEAMS team_code values in aiteamforge_paths.py.
+    return {
+        "IOS": "ios",
+        "AND": "android",
+        "FIR": "firebase",
+        "FRE": "freelance",
+        "FSW": "freelance-doublenode-starwords",
+        "FWS": "freelance-doublenode-workstats",
+        "FAP": "freelance-doublenode-appplanning",
+        "FLB": "freelance-doublenode-lifeboard",
+        "VAN": "freelance-doublenode-caravan",
+        "FAS": "freelance-doublenode-awaysentry",
+        "FLA": "freelance-liquidstyle-agentbadges-app",
+        "FLI": "freelance-liquidstyle-agentbadges-ios",
+        "BWA": "freelance-bandwear-android",
+        "ACA": "academy",
+        "DNS": "dns",
+        "CMD": "command",
+        "MEV": "mainevent",
+        "LCP": "legal-coparenting",
+        "MED": "medical-general",
+        "FIN": "finance-personal",
+    }
+
+_TEAM_CODE_MAP: dict = _build_team_code_map()
 
 
 def get_parent_item_id(item_or_subitem_id: str) -> str:

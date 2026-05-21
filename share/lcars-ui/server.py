@@ -49,11 +49,17 @@ if _KANBAN_HOOKS_DIR not in sys.path:
 
 # Import team path config from shared module (XACA-0168)
 try:
-    from aiteamforge_paths import get_team_kanban_dir, get_team_lcars_port, list_teams, load_config as _aiteamforge_load_config
+    from aiteamforge_paths import (  # noqa: PLC0415
+        get_team_kanban_dir, get_team_lcars_port, list_teams,
+        load_config as _aiteamforge_load_config,
+        build_team_code_map as _aiteamforge_build_team_code_map,
+    )
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError as e:
     _AITEAMFORGE_PATHS_AVAILABLE = False
     print(f"[LCARS] Warning: aiteamforge_paths not available, using hardcoded dirs: {e}")
+    def _aiteamforge_build_team_code_map():  # type: ignore[no-redef]
+        return {}
 
 # Import kanban activity logging from kanban-hooks
 try:
@@ -260,6 +266,47 @@ def _build_team_kanban_dirs() -> dict:
     return _filter_contract_violating_teams(_hardcoded_team_kanban_dirs())
 
 TEAM_KANBAN_DIRS = _build_team_kanban_dirs()
+
+# ---------------------------------------------------------------------------
+# XACA-0542: Item-prefix→team map derived from registry
+# ---------------------------------------------------------------------------
+# Replaces the hardcoded ITEM_PREFIX_TO_TEAM class attribute in
+# KanbanBoardHandler. Built once at module load from build_team_code_map()
+# so a new team added to DEFAULT_TEAMS automatically gets its X<CODE>
+# prefix mapped without editing this file.
+#
+# Fallback: hardcoded dict for the same 19 teams that were previously
+# hardcoded. Only reached if aiteamforge_paths is unavailable.
+
+def _build_item_prefix_to_team() -> dict:
+    """Return {X<CODE>: team_id} derived from the registry."""
+    registry_map = _aiteamforge_build_team_code_map()
+    if registry_map:
+        return {f"X{code}": team_id for code, team_id in registry_map.items()}
+    # Hardcoded fallback — identical results to pre-XACA-0542 hardcoded dict.
+    # MUST EXACTLY MIRROR DEFAULT_TEAMS team_code values in aiteamforge_paths.py.
+    return {
+        'XIOS': 'ios',
+        'XAND': 'android',
+        'XFIR': 'firebase',
+        'XACA': 'academy',
+        'XCMD': 'command',
+        'XDNS': 'dns',
+        'XMEV': 'mainevent',
+        'XFSW': 'freelance-doublenode-starwords',
+        'XFAP': 'freelance-doublenode-appplanning',
+        'XFWS': 'freelance-doublenode-workstats',
+        'XFLB': 'freelance-doublenode-lifeboard',
+        'XVAN': 'freelance-doublenode-caravan',
+        'XFAS': 'freelance-doublenode-awaysentry',
+        'XFLA': 'freelance-liquidstyle-agentbadges-app',
+        'XFLI': 'freelance-liquidstyle-agentbadges-ios',
+        'XBWA': 'freelance-bandwear-android',
+        'XLCP': 'legal-coparenting',
+        'XFIN': 'finance-personal',
+    }
+
+_ITEM_PREFIX_TO_TEAM: dict = _build_item_prefix_to_team()
 
 # Legacy fallback for backwards compatibility
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
@@ -3580,25 +3627,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         prefix = item_id.split('-')[0].upper()
 
-        # Map team prefix to kanban directory (distributed structure)
+        # Map team prefix to kanban directory (distributed structure).
+        # XACA-0542: derived from _ITEM_PREFIX_TO_TEAM (registry-backed) so new
+        # teams don't require editing this method.
         team_paths = {
-            'XACA': TEAM_KANBAN_DIRS.get('academy'),
-            'XIOS': TEAM_KANBAN_DIRS.get('ios'),
-            'XAND': TEAM_KANBAN_DIRS.get('android'),
-            'XFIR': TEAM_KANBAN_DIRS.get('firebase'),
-            'XCMD': TEAM_KANBAN_DIRS.get('command'),
-            'XDNS': TEAM_KANBAN_DIRS.get('dns'),
-            'XLCP': TEAM_KANBAN_DIRS.get('legal-coparenting'),
-            'XFSW': TEAM_KANBAN_DIRS.get('freelance-doublenode-starwords'),
-            'XFAP': TEAM_KANBAN_DIRS.get('freelance-doublenode-appplanning'),
-            'XFWS': TEAM_KANBAN_DIRS.get('freelance-doublenode-workstats'),
-            'XFLB': TEAM_KANBAN_DIRS.get('freelance-doublenode-lifeboard'),
-            'XVAN': TEAM_KANBAN_DIRS.get('freelance-doublenode-caravan'),
-            'XFAS': TEAM_KANBAN_DIRS.get('freelance-doublenode-awaysentry'),
-            'XFLA': TEAM_KANBAN_DIRS.get('freelance-liquidstyle-agentbadges-app'),
-            'XFLI': TEAM_KANBAN_DIRS.get('freelance-liquidstyle-agentbadges-ios'),
-            'XBWA': TEAM_KANBAN_DIRS.get('freelance-bandwear-android'),
-            'XFIN': TEAM_KANBAN_DIRS.get('finance-personal'),
+            x_code: TEAM_KANBAN_DIRS.get(team_id)
+            for x_code, team_id in _ITEM_PREFIX_TO_TEAM.items()
         }
 
         # If prefix is found, use it
@@ -3633,29 +3667,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # =========================================================================
 
     # XACA-0037: Item ID prefix to team mapping
-    ITEM_PREFIX_TO_TEAM = {
-        'XIOS': 'ios',
-        'XAND': 'android',
-        'XFIR': 'firebase',
-        'XACA': 'academy',
-        'XCMD': 'command',
-        'XDNS': 'dns',
-        'XMEV': 'mainevent',
-        # Freelance projects (each has unique prefix)
-        'XFSW': 'freelance-doublenode-starwords',
-        'XFAP': 'freelance-doublenode-appplanning',
-        'XFWS': 'freelance-doublenode-workstats',
-        'XFLB': 'freelance-doublenode-lifeboard',
-        'XVAN': 'freelance-doublenode-caravan',
-        'XFAS': 'freelance-doublenode-awaysentry',
-        'XFLA': 'freelance-liquidstyle-agentbadges-app',
-        'XFLI': 'freelance-liquidstyle-agentbadges-ios',
-        'XBWA': 'freelance-bandwear-android',
-        # Legal projects
-        'XLCP': 'legal-coparenting',
-        # Finance projects
-        'XFIN': 'finance-personal',
-    }
+    # XACA-0542: Derived from registry at class definition time via
+    # _ITEM_PREFIX_TO_TEAM (module-level, built by _build_item_prefix_to_team).
+    ITEM_PREFIX_TO_TEAM = _ITEM_PREFIX_TO_TEAM
 
     def _extract_team_from_item_id(self, item_id):
         """XACA-0037: Extract team from item ID prefix

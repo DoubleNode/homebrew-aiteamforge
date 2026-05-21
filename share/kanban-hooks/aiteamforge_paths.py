@@ -96,6 +96,7 @@ _HOME = str(Path.home())
 DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     # ── Main Event Teams ──────────────────────────────────────────────────
     "academy": {
+        "team_code": "ACA",
         "kanban_dir": f"{_HOME}/dev-team/kanban",
         "working_dir": f"{_HOME}/dev-team",
         "lcars_port_base": 8200,
@@ -106,6 +107,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_ACADEMY_API_KEY",
     },
     "ios": {
+        "team_code": "IOS",
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS",
         "lcars_port_base": 8260,
@@ -116,6 +118,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_IOS_API_KEY",
     },
     "android": {
+        "team_code": "AND",
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android",
         "lcars_port_base": 8280,
@@ -126,6 +129,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_ANDROID_API_KEY",
     },
     "firebase": {
+        "team_code": "FIR",
         "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions",
         "lcars_port_base": 8240,
@@ -136,6 +140,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FIREBASE_API_KEY",
     },
     "command": {
+        "team_code": "CMD",
         "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/dev-team",
         "lcars_port_base": 8230,
@@ -146,6 +151,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_COMMAND_API_KEY",
     },
     "dns": {
+        "team_code": "DNS",
         "kanban_dir": "/Users/Shared/Development/DNSFramework/kanban",
         "working_dir": "/Users/Shared/Development/DNSFramework",
         "lcars_port_base": 8180,
@@ -158,6 +164,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
     # ── Freelance — DoubleNode ────────────────────────────────────────────
     "freelance-doublenode-starwords": {
+        "team_code": "FSW",
         "kanban_dir": "/Users/Shared/Development/DoubleNode/Starwords/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/Starwords",
         "lcars_port_base": 8500,
@@ -168,6 +175,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_STARWORDS_API_KEY",
     },
     "freelance-doublenode-appplanning": {
+        "team_code": "FAP",
         "kanban_dir": "/Users/Shared/Development/DoubleNode/appPlanning/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/appPlanning",
         "lcars_port_base": 8500,
@@ -178,6 +186,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_APPPLANNING_API_KEY",
     },
     "freelance-doublenode-workstats": {
+        "team_code": "FWS",
         "kanban_dir": "/Users/Shared/Development/DoubleNode/WorkStats/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/WorkStats",
         "lcars_port_base": 8500,
@@ -188,6 +197,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_WORKSTATS_API_KEY",
     },
     "freelance-doublenode-lifeboard": {
+        "team_code": "FLB",
         "kanban_dir": "/Users/Shared/Development/DoubleNode/LifeBoard/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/LifeBoard",
         "lcars_port_base": 8500,
@@ -198,6 +208,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_LIFEBOARD_API_KEY",
     },
     "freelance-doublenode-caravan": {
+        "team_code": "VAN",
         "kanban_dir": "/Users/Shared/Development/DoubleNode/Caravan/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/Caravan",
         "lcars_port_base": 8500,
@@ -208,6 +219,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_CARAVAN_API_KEY",
     },
     "freelance-doublenode-awaysentry": {
+        "team_code": "FAS",
         "kanban_dir": "/Users/Shared/Development/DoubleNode/AwaySentry/kanban",
         "working_dir": "/Users/Shared/Development/DoubleNode/AwaySentry",
         "lcars_port_base": 8500,
@@ -220,6 +232,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
     # ── Freelance — Liquidstyle ───────────────────────────────────────────
     "freelance-liquidstyle-agentbadges-app": {
+        "team_code": "FLA",
         "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban",
         "working_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP",
         "lcars_port_base": 8500,
@@ -230,6 +243,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_FREELANCE_LIQUIDSTYLE_AGENTBADGES_APP_API_KEY",
     },
     "freelance-liquidstyle-agentbadges-ios": {
+        "team_code": "FLI",
         "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban",
         "working_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS",
         "lcars_port_base": 8500,
@@ -242,6 +256,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
     # ── Freelance — Bandwear ──────────────────────────────────────────────
     "freelance-bandwear-android": {
+        "team_code": "BWA",
         "kanban_dir": "/Users/Shared/Development/Bandwear/Android/kanban",
         "working_dir": "/Users/Shared/Development/Bandwear/Android",
         "lcars_port_base": 8400,
@@ -254,6 +269,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
     # ── Legal ─────────────────────────────────────────────────────────────
     "legal-coparenting": {
+        "team_code": "LCP",
         "kanban_dir": f"{_HOME}/legal/coparenting/kanban",
         "working_dir": f"{_HOME}/legal/coparenting",
         "lcars_port_base": 8320,
@@ -266,6 +282,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
     # ── Medical ───────────────────────────────────────────────────────────
     "medical-general": {
+        "team_code": "MED",
         "kanban_dir": f"{_HOME}/medical/general/kanban",
         "working_dir": f"{_HOME}/medical/general",
         "lcars_port_base": 8340,
@@ -278,6 +295,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 
     # ── Finance ───────────────────────────────────────────────────────────
     "finance-personal": {
+        "team_code": "FIN",
         "kanban_dir": f"{_HOME}/finance/personal/kanban",
         "working_dir": f"{_HOME}/finance/personal",
         "lcars_port_base": 8360,
@@ -297,6 +315,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     # live team-paths.json entries; DEFAULT_TEAMS reflects the correct post-migration
     # value here so fresh installs get the right port immediately.
     "mainevent": {
+        "team_code": "MEV",
         "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
         "working_dir": "/Users/Shared/Development/Main Event/dev-team",
         "lcars_port_base": 8400,
@@ -307,7 +326,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
     },
     "medical": {
-        # alias for medical-general
+        # alias for medical-general — no team_code: aliases share code with canonical entry
         "kanban_dir": f"{_HOME}/medical/general/kanban",
         "working_dir": f"{_HOME}/medical/general",
         "lcars_port_base": 8340,
@@ -318,7 +337,9 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_MEDICAL_API_KEY",
     },
     "freelance": {
-        # generic fallback — mirrors kanban_utils.py
+        # generic fallback alias — no team_code: FRE is the canonical code but this
+        # alias intentionally points to Academy kanban for pre-init fallback behavior.
+        "team_code": "FRE",
         "kanban_dir": f"{_HOME}/dev-team/kanban",
         "working_dir": f"{_HOME}/dev-team",
         "lcars_port_base": 8500,
@@ -811,6 +832,102 @@ def get_team_lcars_port(team: str) -> int | None:
         )
     port = entry.get("lcars_port")
     return int(port) if port is not None else None
+
+
+# ---------------------------------------------------------------------------
+# XACA-0542: Team-code registry accessors
+# ---------------------------------------------------------------------------
+# team_code is the 3-letter code (e.g. "ACA", "IOS") stored in each team
+# entry in DEFAULT_TEAMS.  These accessors allow consumers to derive the
+# code<->team mapping from the registry instead of maintaining parallel
+# hardcoded dicts / case statements.
+#
+# Aliases (entries without team_code) are intentionally skipped in the
+# reverse-lookup to avoid ambiguous code→team resolution.
+
+
+def get_team_code(team: str) -> str:
+    """Return the 3-letter team code for the given team id, or "" if unknown.
+
+    Lookup strategy (in priority order):
+    1. Live config (team-paths.json overlaid on DEFAULT_TEAMS) if team_code present.
+    2. DEFAULT_TEAMS directly — covers migration case where live config doesn't
+       yet have team_code fields (pre-XACA-0542 installs).
+    Returns "" for aliases (entries with no team_code field).
+    """
+    # 1. Live config
+    try:
+        config = load_config()
+        entry = config["teams"].get(team)
+        if entry is not None:
+            code = entry.get("team_code", "")
+            if code:
+                return code
+    except Exception:
+        pass
+    # 2. DEFAULT_TEAMS fallback (loader unavailable OR live config lacks team_code)
+    entry = DEFAULT_TEAMS.get(team)
+    if entry is not None:
+        return entry.get("team_code", "")
+    return ""
+
+
+def get_team_from_code(code: str) -> str:
+    """Return the team id for the given 3-letter code, or "" if unknown.
+
+    Lookup strategy (in priority order):
+    1. Live config (team-paths.json overlaid on DEFAULT_TEAMS) if team_code present.
+    2. DEFAULT_TEAMS directly — covers migration case where live config doesn't
+       yet have team_code fields (pre-XACA-0542 installs).
+    Skips alias entries (entries with no team_code field) to avoid ambiguity.
+    """
+    code_upper = code.upper()
+    # 1. Live config
+    try:
+        config = load_config()
+        for team_id, entry in config["teams"].items():
+            if entry.get("team_code", "").upper() == code_upper:
+                return team_id
+    except Exception:
+        pass
+    # 2. DEFAULT_TEAMS fallback (loader unavailable OR live config lacks team_code)
+    for team_id, entry in DEFAULT_TEAMS.items():
+        if entry.get("team_code", "").upper() == code_upper:
+            return team_id
+    return ""
+
+
+def build_team_code_map() -> dict[str, str]:
+    """Return a mapping of {3-letter-code: team-id} derived from the registry.
+
+    Lookup strategy (in priority order):
+    1. Live config (team-paths.json overlaid on DEFAULT_TEAMS) if team_code present.
+    2. DEFAULT_TEAMS directly — covers migration case where live config doesn't
+       yet have team_code fields (pre-XACA-0542 installs).
+    Only includes entries with a non-empty team_code field.
+
+    This is the authoritative source for the code->team mapping.
+    Consumers that previously maintained hardcoded _TEAM_CODE_MAP dicts
+    should use this function instead. (XACA-0542)
+    """
+    result: dict[str, str] = {}
+    # 1. Try live config
+    try:
+        config = load_config()
+        for team_id, entry in config["teams"].items():
+            code = entry.get("team_code", "")
+            if code:
+                result[code.upper()] = team_id
+    except Exception:
+        pass
+    # 2. If live config yielded no team_code entries (migration: pre-XACA-0542
+    # installs), fall back to DEFAULT_TEAMS which always has team_code set.
+    if not result:
+        for team_id, entry in DEFAULT_TEAMS.items():
+            code = entry.get("team_code", "")
+            if code:
+                result[code.upper()] = team_id
+    return result
 
 
 def _resolve_template_band(template_id: str) -> tuple[int, int]:
