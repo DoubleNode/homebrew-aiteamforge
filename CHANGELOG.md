@@ -7,6 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0535 — Tap-hygiene guard allow-lists freelance-<client> configs
+
+- **`scripts/check-tap-hygiene.sh`** — Check 3 (XACA-0252 debrand guard) did a blanket case-insensitive `git ls-files | grep -iE 'doublenode'`, which flagged the 6 legitimate freelance CLIENT configs created by XACA-0521 (`share/lcars-ui/team_transfer/config/freelance-doublenode-{appplanning,awaysentry,caravan,lifeboard,starwords,workstats}.yaml`) as stale rebrand debt. These are not rebrand leftovers — `doublenode` is the client name (working dir `/Users/Shared/Development/DoubleNode/...`), parallel to `freelance-liquidstyle-*`; renaming would break team_transfer identity + `amb-session-map.json` refs.
+- **Fix.** Added `REBRAND_ALLOWLIST_GLOB="share/lcars-ui/team_transfer/config/freelance-*.yaml"` alongside the existing exact-match allow-list; the skip loop now `continue`s on glob matches (intentional unquoted glob in `case`, SC2254 suppressed with a documented directive). The glob stays narrow to the one config dir, so a genuine rebrand leftover elsewhere still fails.
+- **`tests/xaca-0361-tap-hygiene-guard.bats`** — Added Test 5 (a freelance client config with `doublenode` in its name is allow-listed → exits 0) and Test 6 (allow-list stays narrow: a `doublenode` file outside the config dir still fails even when a legit freelance config is present). All 6 tests pass; shellcheck clean.
+- **Context.** Surfaced during XACA-0528 tap sync, which was committed with `--no-verify` to bypass this false-positive.
+
 ### Refactor: XACA-0524 — Consolidate Fleet Monitor port-scan range to shared constant
 
 - **`libexec/lib/constants.sh`** — Adds `FLEET_MONITOR_PORT_SCAN_RANGE` (default `3000 3001 3002`) using the same `: "${VAR:=value}"` + `readonly` idiom established by XACA-0516 and XACA-0519. Documented with consumer list, override semantics, and cross-reference to `FLEET_MONITOR_PORT_DEFAULT`.

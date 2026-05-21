@@ -108,3 +108,47 @@ teardown() {
   [ "$status" -eq 1 ]
   [[ "$output" =~ "foo-doublenode.html" ]]
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 5: Freelance client config matching 'doublenode' is allow-listed (XACA-0535)
+# freelance-<client>-*.yaml under team_transfer/config is the CLIENT name, not
+# rebrand debt — it must NOT trip Check 3. Regression guard for the false-positive
+# that forced a --no-verify bypass during XACA-0528.
+# ─────────────────────────────────────────────────────────────────────────────
+@test "xaca-0361: freelance client config (doublenode) is allow-listed and passes" {
+  # Add a tracked freelance client config whose name contains 'doublenode'
+  mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config"
+  printf 'team: freelance-doublenode-foo\n' \
+    > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml"
+  git -C "${FIXTURE_DIR}" add share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml
+  git -C "${FIXTURE_DIR}" commit -q -m "add freelance client config"
+
+  run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
+  [ "$status" -eq 0 ]
+  [[ "$output" =~ "passed" ]]
+  # The allow-listed config must not appear as a failure
+  [[ ! "$output" =~ "Stale rebrand filename" ]]
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 6: Allow-list stays narrow — a doublenode file OUTSIDE the freelance config
+# dir still fails even when a legit freelance config is also present.
+# ─────────────────────────────────────────────────────────────────────────────
+@test "xaca-0361: allow-list is narrow — doublenode file outside config dir still fails" {
+  mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config"
+  printf 'team: freelance-doublenode-foo\n' \
+    > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml"
+  # A genuine rebrand leftover elsewhere must NOT be excused by the glob
+  mkdir -p "${FIXTURE_DIR}/fleet-monitor/legacy"
+  touch "${FIXTURE_DIR}/fleet-monitor/legacy/bar-doublenode.js"
+  git -C "${FIXTURE_DIR}" add \
+    share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml \
+    fleet-monitor/legacy/bar-doublenode.js
+  git -C "${FIXTURE_DIR}" commit -q -m "add freelance config + stale file"
+
+  run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
+  [ "$status" -eq 1 ]
+  [[ "$output" =~ "bar-doublenode.js" ]]
+  # The freelance config must NOT be among the flagged files
+  [[ ! "$output" =~ "freelance-doublenode-foo.yaml" ]]
+}
