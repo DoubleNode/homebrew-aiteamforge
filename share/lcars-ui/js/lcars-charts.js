@@ -20,9 +20,14 @@
  * Requires: Chart.js 4.x (loaded via CDN before this script)
  */
 
-// CANONICAL SOURCE: This file is the single source of truth for LCARS chart theming.
-// Fleet Monitor references this via symlink at fleet-monitor/server/public/lcars/js/lcars-charts.js
-// Do NOT create copies — edit this file only.
+// CANONICAL SOURCE: This file is the source of truth for LCARS chart theming.
+// Fleet Monitor ships a MATERIALIZED REAL COPY at
+// fleet-monitor/server/public/lcars/js/lcars-charts.js (converted from a symlink in
+// XACA-0536 because sync-tap.sh's `find -type f` silently skips symlinks, which left
+// the tap copy stale on remote `brew install`). When you edit THIS file you MUST also
+// refresh the served copy and re-sync the tap so Gate 3.5 stays accurate:
+//   cp lcars-ui/js/lcars-charts.js fleet-monitor/server/public/lcars/js/lcars-charts.js
+//   ./sync-tap.sh
 
 /* global Chart */
 
