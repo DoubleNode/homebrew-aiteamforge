@@ -107,16 +107,17 @@ fi
 # from the DoubleNode rebrand (XACA-0252). Check is filename-only, not content.
 #
 # Allow-list (two forms, both skipped):
-#   - REBRAND_ALLOWLIST      exact path: the bats test that references the term.
-#   - REBRAND_ALLOWLIST_GLOB glob path: freelance CLIENT configs created by
+#   - REBRAND_ALLOWLIST     exact path: the bats test that references the term.
+#   - REBRAND_ALLOWLIST_DIR config dir for freelance CLIENT configs created by
 #     XACA-0521. Here "doublenode" is the CLIENT name (working dir
 #     /Users/Shared/Development/DoubleNode/...), parallel to freelance-liquidstyle-*,
 #     NOT rebrand debt. Renaming would break team_transfer identity +
-#     amb-session-map.json refs. The glob stays narrow (one config dir) so a
-#     genuine rebrand leftover elsewhere still fails. (XACA-0535)
+#     amb-session-map.json refs. Only DIRECT children matching freelance-*.yaml
+#     are excused (dirname guard) so a genuine rebrand leftover — whether
+#     elsewhere in the tree or nested under this dir — still fails. (XACA-0535)
 # ─────────────────────────────────────────────────────────────────────────────
 REBRAND_ALLOWLIST="tests/xaca-0139-debrand-guard.bats"
-REBRAND_ALLOWLIST_GLOB="share/lcars-ui/team_transfer/config/freelance-*.yaml"
+REBRAND_ALLOWLIST_DIR="share/lcars-ui/team_transfer/config"
 
 stale_found=false
 while IFS= read -r tracked_file; do
@@ -124,18 +125,25 @@ while IFS= read -r tracked_file; do
   if [ "$tracked_file" = "$REBRAND_ALLOWLIST" ]; then
     continue
   fi
-  # Skip allow-listed freelance client configs (client name, not rebrand debt).
-  # The unquoted variable in the case pattern is an intentional glob match.
-  # shellcheck disable=SC2254  # glob expansion of REBRAND_ALLOWLIST_GLOB is deliberate
+  # Skip allow-listed freelance client configs — DIRECT children of the flat
+  # config dir only. The quoted dir + literal `freelance-*.yaml` glob matches
+  # the family; the dirname guard then rejects any nested path the glob's `*`
+  # would otherwise span (e.g. config/freelance-X/evil-doublenode.yaml stays a
+  # failure). Keeps the allow-list narrow to where 'doublenode' is the CLIENT
+  # name, not rebrand debt. (XACA-0535)
   case "$tracked_file" in
-    $REBRAND_ALLOWLIST_GLOB) continue ;;
+    "$REBRAND_ALLOWLIST_DIR"/freelance-*.yaml)
+      if [ "$(dirname "$tracked_file")" = "$REBRAND_ALLOWLIST_DIR" ]; then
+        continue
+      fi
+      ;;
   esac
   fail "Stale rebrand filename: ${tracked_file} (tracked filename contains 'doublenode' — remove or rename)"
   stale_found=true
 done < <(git -C "$TAP_ROOT" ls-files | grep -iE 'doublenode' || true)
 
 if [ "$stale_found" = false ]; then
-  ok "No stale rebrand filenames found (allow-listed: ${REBRAND_ALLOWLIST}, ${REBRAND_ALLOWLIST_GLOB})"
+  ok "No stale rebrand filenames found (allow-listed: ${REBRAND_ALLOWLIST}, ${REBRAND_ALLOWLIST_DIR}/freelance-*.yaml)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

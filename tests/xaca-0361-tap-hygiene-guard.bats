@@ -152,3 +152,28 @@ teardown() {
   # The freelance config must NOT be among the flagged files
   [[ ! "$output" =~ "freelance-doublenode-foo.yaml" ]]
 }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test 7: dirname guard — a NESTED path under the freelance config dir is NOT
+# excused. The allow-list glob's '*' would otherwise span '/'; the dirname guard
+# keeps the allow-list to direct children of the flat config dir. (XACA-0535)
+# ─────────────────────────────────────────────────────────────────────────────
+@test "xaca-0361: nested path under freelance config dir still fails (dirname guard)" {
+  # A direct-child freelance config (allow-listed) ...
+  mkdir -p "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-X"
+  printf 'team: freelance-doublenode-foo\n' \
+    > "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml"
+  # ... and a NESTED doublenode file the bare glob would wrongly excuse
+  touch "${FIXTURE_DIR}/share/lcars-ui/team_transfer/config/freelance-X/evil-doublenode.yaml"
+  git -C "${FIXTURE_DIR}" add \
+    share/lcars-ui/team_transfer/config/freelance-doublenode-foo.yaml \
+    share/lcars-ui/team_transfer/config/freelance-X/evil-doublenode.yaml
+  git -C "${FIXTURE_DIR}" commit -q -m "add direct + nested config"
+
+  run bash "${FIXTURE_DIR}/scripts/check-tap-hygiene.sh"
+  [ "$status" -eq 1 ]
+  # The nested file is flagged ...
+  [[ "$output" =~ "freelance-X/evil-doublenode.yaml" ]]
+  # ... but the direct-child config is still excused
+  [[ ! "$output" =~ "freelance-doublenode-foo.yaml" ]]
+}
