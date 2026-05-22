@@ -530,8 +530,8 @@ window.LCARS_CORE = window.LCARS_CORE || {};
     // =========================================================================
 
     LCARS.sections = {
-        // Available sections in order
-        list: ['overview', 'organizations', 'machines', 'settings'],
+        // Available sections in order (XACA-0540: added 'engines')
+        list: ['overview', 'organizations', 'machines', 'settings', 'engines'],
 
         // Current state
         active: 'overview',
@@ -630,6 +630,9 @@ window.LCARS_CORE = window.LCARS_CORE || {};
             }
 
             console.log('[LCARS] Switched to section:', sectionName);
+
+            // XACA-0540: Emit section-change event for modules (e.g. lcars-engines.js)
+            document.dispatchEvent(new CustomEvent('lcars:sectionChange', { detail: { section: sectionName } }));
         },
 
         /**
@@ -685,6 +688,14 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                     if (e.code === 'Digit4' || e.code === 'Numpad4') {
                         e.preventDefault();
                         self.switchSection(self.list[3]);
+                        return;
+                    }
+                    // XACA-0540: Digit5 → engines
+                    if (e.code === 'Digit5' || e.code === 'Numpad5') {
+                        if (self.list.length > 4) {
+                            e.preventDefault();
+                            self.switchSection(self.list[4]);
+                        }
                         return;
                     }
 

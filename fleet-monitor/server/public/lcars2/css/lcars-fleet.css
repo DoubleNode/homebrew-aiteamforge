@@ -1081,3 +1081,343 @@ body {
 .bg-org-doublenode { background: var(--org-doublenode); }
 .bg-org-devteam { background: var(--org-devteam); }
 .bg-org-academy { background: var(--org-academy); }
+
+/* ===============================================================================
+   SECTION 18: AI ENGINES REGISTRY (XACA-0540 port from lcars/)
+   Styles for the ENGINES tab — engine cards, account table, modals, forms, buttons
+   =============================================================================== */
+
+/* Sidebar button color for engines */
+.sidebar-button[data-section="engines"] {
+    background: var(--lcars-amber);
+}
+.sidebar-button[data-section="engines"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-amber);
+}
+
+/* ---------------------------------------------------------------------------
+   BUTTONS (btn-lcars) — shared with engines modals
+   --------------------------------------------------------------------------- */
+.btn-lcars {
+    padding: 10px 20px;
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    border: none;
+    border-radius: 20px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+.btn-lcars-primary {
+    background: var(--lcars-blue);
+    color: var(--lcars-black);
+}
+.btn-lcars-primary:hover {
+    background: var(--lcars-cyan);
+    box-shadow: 0 0 15px rgba(153, 204, 255, 0.4);
+}
+.btn-lcars-secondary {
+    background: var(--lcars-tan);
+    color: var(--lcars-black);
+}
+.btn-lcars-secondary:hover {
+    background: var(--lcars-peach);
+}
+.btn-lcars-danger {
+    background: var(--lcars-red);
+    color: var(--lcars-white);
+}
+.btn-lcars-danger:hover {
+    background: var(--lcars-alert-red);
+    box-shadow: 0 0 15px rgba(255, 102, 102, 0.4);
+}
+.btn-lcars:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.btn-lcars-new {
+    padding: 8px 16px;
+    font-size: 11px;
+    background: var(--lcars-green-dark);
+    color: var(--lcars-black);
+}
+.btn-lcars-new:hover {
+    background: var(--lcars-green);
+}
+
+/* ---------------------------------------------------------------------------
+   MODAL OVERLAY & CONTENT
+   --------------------------------------------------------------------------- */
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.8);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    opacity: 0;
+    visibility: hidden;
+    transition: all 0.3s ease;
+}
+.modal-overlay.active {
+    opacity: 1;
+    visibility: visible;
+}
+.modal-content {
+    background: var(--lcars-darker);
+    border: 2px solid var(--lcars-red);
+    border-radius: 12px;
+    padding: 0;
+    max-width: 400px;
+    width: 90%;
+    transform: scale(0.9);
+    transition: transform 0.3s ease;
+}
+.modal-overlay.active .modal-content {
+    transform: scale(1);
+}
+.modal-header {
+    background: var(--lcars-red);
+    padding: 15px 20px;
+    border-top-left-radius: 10px;
+    border-top-right-radius: 10px;
+}
+.modal-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--lcars-white);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+}
+.modal-body {
+    padding: 25px 20px;
+}
+.modal-message {
+    font-size: 14px;
+    color: var(--lcars-peach);
+    line-height: 1.6;
+    margin-bottom: 10px;
+}
+.modal-warning {
+    font-size: 12px;
+    color: var(--lcars-alert-red);
+    font-weight: 600;
+    letter-spacing: 0.5px;
+}
+.modal-footer {
+    padding: 15px 20px;
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    border-top: 1px solid var(--lcars-surface);
+}
+
+/* ---------------------------------------------------------------------------
+   FORM ELEMENTS
+   --------------------------------------------------------------------------- */
+.form-group {
+    margin-bottom: 20px;
+}
+.form-label {
+    display: block;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--lcars-tan);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    margin-bottom: 8px;
+}
+.form-input {
+    width: 100%;
+    padding: 10px 14px;
+    background: var(--lcars-dark);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 4px;
+    color: var(--lcars-peach);
+    font-family: 'Antonio', sans-serif;
+    font-size: 14px;
+    letter-spacing: 1px;
+    transition: border-color 0.2s ease, box-shadow 0.2s ease;
+    box-sizing: border-box;
+}
+.form-input:focus {
+    outline: none;
+    border-color: var(--lcars-blue);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.3);
+}
+.form-input:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+.form-input::placeholder {
+    color: var(--lcars-tan);
+    opacity: 0.6;
+}
+.form-error {
+    font-size: 11px;
+    color: var(--lcars-alert-red);
+    margin-top: 4px;
+    letter-spacing: 0.5px;
+}
+
+/* ---------------------------------------------------------------------------
+   ENGINES SECTION COMPONENTS
+   --------------------------------------------------------------------------- */
+
+/* Security notice banner */
+.engines-security-notice {
+    background: rgba(255, 204, 0, 0.08);
+    border: 1px solid var(--lcars-amber);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-size: 12px;
+    color: var(--lcars-peach);
+    letter-spacing: 0.5px;
+    line-height: 1.6;
+}
+.engines-security-notice code {
+    color: var(--lcars-amber);
+    font-family: monospace;
+    background: rgba(255, 204, 0, 0.1);
+    padding: 1px 4px;
+    border-radius: 3px;
+}
+
+/* Engine card (one per engine, e.g. Anthropic) */
+.engine-card {
+    background: var(--lcars-darker);
+    border: 1px solid var(--lcars-surface);
+    border-radius: 8px;
+    overflow: hidden;
+    margin-bottom: 20px;
+}
+.engine-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 20px;
+    background: var(--lcars-dark);
+    border-bottom: 2px solid var(--lcars-amber);
+}
+.engine-card-name {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--lcars-amber);
+    letter-spacing: 3px;
+    text-transform: uppercase;
+}
+.engine-card-body {
+    padding: 16px 20px;
+}
+.engine-add-btn {
+    flex-shrink: 0;
+}
+
+/* Account table */
+.engine-accounts-table-wrapper {
+    overflow-x: auto;
+}
+.engine-accounts-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+.engine-accounts-table thead tr {
+    border-bottom: 1px solid var(--lcars-surface);
+}
+.engine-accounts-table th {
+    text-align: left;
+    padding: 8px 10px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--lcars-tan);
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+.engine-accounts-table td {
+    padding: 10px 10px;
+    color: var(--lcars-peach);
+    border-bottom: 1px solid rgba(37, 37, 64, 0.5);
+    vertical-align: middle;
+}
+.engine-accounts-table tbody tr:hover td {
+    background: rgba(37, 37, 64, 0.4);
+}
+.engine-col-account-id code,
+.engine-col-env-var code {
+    font-family: monospace;
+    font-size: 11px;
+    color: var(--lcars-cyan);
+    background: rgba(153, 204, 255, 0.06);
+    padding: 2px 5px;
+    border-radius: 3px;
+}
+.engine-col-created,
+.engine-col-validated {
+    font-size: 11px;
+    color: var(--lcars-tan);
+    white-space: nowrap;
+}
+.engine-col-actions {
+    white-space: nowrap;
+}
+.engine-action-btn {
+    padding: 5px 10px !important;
+    font-size: 10px !important;
+    letter-spacing: 1px !important;
+    margin-right: 6px;
+}
+
+/* Empty / loading / error states */
+.engines-accounts-empty,
+.engines-empty,
+.engines-loading {
+    color: rgba(255, 204, 153, 0.4);
+    font-family: 'Antonio', sans-serif;
+    font-size: 12px;
+    padding: 20px 0;
+    letter-spacing: 1px;
+}
+.engines-error {
+    color: var(--lcars-alert-red);
+    font-size: 12px;
+    padding: 20px 0;
+}
+
+/* Usage info in delete modal */
+.engines-usage-ok {
+    color: var(--lcars-green);
+    font-size: 13px;
+    letter-spacing: 0.5px;
+}
+.engines-usage-warn {
+    color: var(--lcars-amber);
+    font-size: 13px;
+    margin-bottom: 8px;
+    letter-spacing: 0.5px;
+}
+.engines-usage-list {
+    padding-left: 18px;
+    margin: 0;
+    list-style: disc;
+}
+.engines-usage-list li {
+    color: var(--lcars-peach);
+    font-size: 12px;
+    margin-bottom: 4px;
+    font-family: monospace;
+}
+
+/* Wider modal content for engines (more form fields) */
+.engines-modal-content {
+    max-width: 520px !important;
+    width: 92% !important;
+}

@@ -1,11 +1,18 @@
 //
-//  lcars-engines.js
+//  lcars-engines.js  (lcars2 variant)
 //  DoubleNode Dev-Team Infrastructure (AITeamForge)
 //
 //  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
 //
+//  XACA-0540: Port of lcars/js/lcars-engines.js into the lcars2 UI variant.
+//
+//  Section-hook approach: lcars2/js/lcars-fleet-core.js switchSection() now
+//  dispatches document CustomEvent 'lcars:sectionChange' (added in XACA-0540).
+//  This module listens for that event — same mechanism as the lcars/ variant —
+//  so the two variants share identical init/load patterns.
+//
 
-// === XACA-0281: AI Engines Registry UI ===
+// === XACA-0540: AI Engines Registry UI (lcars2 variant) ===
 
 (function() {
     'use strict';
@@ -25,7 +32,6 @@
     // STATE
     // =========================================================================
 
-    // Current engine slug being operated on by modals
     var _activeEngineSlug  = null;
     var _activeAccountSlug = null;
     var _initialized       = false;
@@ -547,7 +553,7 @@
         if (_initialized) return;
         _initialized = true;
 
-        console.log('[ENGINES] Initializing AI Engines UI (XACA-0281)...');
+        console.log('[ENGINES] Initializing AI Engines UI (XACA-0540 lcars2 port)...');
 
         // Wire REFRESH button
         var refreshBtn = document.getElementById('engines-refresh-btn');
@@ -593,7 +599,8 @@
             }
         });
 
-        // Load data when the ENGINES section is activated
+        // Load data when the ENGINES section is activated.
+        // lcars2's switchSection() dispatches 'lcars:sectionChange' (XACA-0540 addition).
         document.addEventListener('lcars:sectionChange', function(e) {
             if (e.detail && e.detail.section === 'engines') {
                 LCARS_ENGINES.loadEngines();
@@ -606,7 +613,7 @@
             LCARS_ENGINES.loadEngines();
         }
 
-        console.log('[ENGINES] AI Engines UI ready.');
+        console.log('[ENGINES] AI Engines UI ready (lcars2).');
     }
 
     // Expose globally so console debugging works
@@ -621,4 +628,4 @@
 
 })();
 
-// === /XACA-0281 ===
+// === /XACA-0540 ===

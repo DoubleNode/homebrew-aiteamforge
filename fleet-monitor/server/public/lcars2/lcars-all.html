@@ -119,6 +119,10 @@
                 <div class="sidebar-button" data-section="settings">
                     <span>SETTINGS</span>
                 </div>
+                <!-- AI ENGINES button - account registry (XACA-0540) -->
+                <div class="sidebar-button" data-section="engines">
+                    <span>ENGINES</span>
+                </div>
                 <div class="sidebar-spacer"></div>
                 <div class="sidebar-info stacked">
                     <div class="info-row">
@@ -298,6 +302,173 @@
                     </section>
                 </div><!-- End SETTINGS section -->
 
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <!-- SECTION: AI ENGINES - Fleet-wide account registry (XACA-0540)       -->
+                <!-- ═══════════════════════════════════════════════════════════════════ -->
+                <div class="lcars-section" data-section="engines">
+                    <section>
+                        <div class="section-header" style="border-color: var(--lcars-amber);">
+                            <span class="section-title" style="color: var(--lcars-amber);">AI ENGINES</span>
+                            <div class="section-bar" style="background: var(--lcars-amber);"></div>
+                        </div>
+
+                        <!-- Security notice -->
+                        <div class="engines-security-notice" style="margin-top: 15px;">
+                            API keys are NOT stored here. Each machine consuming this account must define
+                            <code>$ENV_VAR_NAME</code> in its own <code>~/.zshrc.secrets</code>.
+                            This registry stores only the variable name and account metadata.
+                        </div>
+
+                        <!-- Controls bar -->
+                        <div style="margin-top: 15px; display: flex; justify-content: flex-end; gap: 10px;">
+                            <button class="btn-lcars btn-lcars-secondary" id="engines-refresh-btn">
+                                REFRESH
+                            </button>
+                        </div>
+
+                        <!-- Engine cards container — populated by lcars-engines.js -->
+                        <div id="engines-container" style="margin-top: 15px;">
+                            <div style="color: rgba(255,204,153,0.5); font-family: 'Antonio', sans-serif; font-size: 12px; padding: 20px 0;">
+                                LOADING...
+                            </div>
+                        </div>
+                    </section>
+
+                    <!-- ADD ACCOUNT MODAL -->
+                    <div class="modal-overlay engines-modal" id="engines-add-modal" role="dialog" aria-modal="true" aria-labelledby="engines-add-modal-title">
+                        <div class="modal-content engines-modal-content">
+                            <div class="modal-header" style="background: var(--lcars-blue);">
+                                <span class="modal-title" id="engines-add-modal-title">ADD ACCOUNT</span>
+                            </div>
+                            <div class="modal-body">
+                                <p class="modal-message" style="margin-bottom: 20px; font-size: 12px; color: var(--lcars-tan);">
+                                    Adding account to engine: <strong id="engines-add-engine-label" style="color: var(--lcars-peach);">—</strong>
+                                </p>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-add-slug">Account Slug *</label>
+                                    <input class="form-input" type="text" id="engines-add-slug"
+                                        placeholder="e.g. darren-personal"
+                                        autocomplete="off" spellcheck="false">
+                                    <div class="form-error" id="engines-add-slug-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        lowercase-kebab-case — IMMUTABLE after creation (e.g. darren-personal)
+                                    </div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-add-account-id">Account ID *</label>
+                                    <input class="form-input" type="text" id="engines-add-account-id"
+                                        placeholder="e.g. acc_01AbCdEf..." style="font-family: monospace;"
+                                        autocomplete="off" spellcheck="false">
+                                    <div class="form-error" id="engines-add-account-id-err" style="display:none;"></div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-add-nickname">Nickname *</label>
+                                    <input class="form-input" type="text" id="engines-add-nickname"
+                                        placeholder="e.g. Darren Personal Account"
+                                        autocomplete="off">
+                                    <div class="form-error" id="engines-add-nickname-err" style="display:none;"></div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-add-env-var">Env Var Name *</label>
+                                    <input class="form-input" type="text" id="engines-add-env-var"
+                                        placeholder="e.g. ANTHROPIC_API_KEY_DARREN"
+                                        autocomplete="off" spellcheck="false" style="font-family: monospace;">
+                                    <div class="form-error" id="engines-add-env-var-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        Must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code> on every machine that uses this account.
+                                        NEVER paste your actual API key here.
+                                    </div>
+                                </div>
+
+                                <div class="form-error" id="engines-add-server-err" style="display:none; margin-top: 10px;"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button class="btn-lcars btn-lcars-secondary" id="engines-add-cancel-btn">CANCEL</button>
+                                <button class="btn-lcars btn-lcars-primary" id="engines-add-save-btn">SAVE</button>
+                            </div>
+                        </div>
+                    </div><!-- End ADD ACCOUNT MODAL -->
+
+                    <!-- EDIT ACCOUNT MODAL -->
+                    <div class="modal-overlay engines-modal" id="engines-edit-modal" role="dialog" aria-modal="true" aria-labelledby="engines-edit-modal-title">
+                        <div class="modal-content engines-modal-content">
+                            <div class="modal-header" style="background: var(--lcars-blue);">
+                                <span class="modal-title" id="engines-edit-modal-title">EDIT ACCOUNT</span>
+                            </div>
+                            <div class="modal-body">
+                                <div class="form-group">
+                                    <label class="form-label">Account Slug (IMMUTABLE)</label>
+                                    <input class="form-input" type="text" id="engines-edit-slug" disabled
+                                        style="font-family: monospace; opacity: 0.6;">
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        Slug cannot be changed after creation.
+                                    </div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-edit-account-id">Account ID *</label>
+                                    <input class="form-input" type="text" id="engines-edit-account-id"
+                                        autocomplete="off" spellcheck="false" style="font-family: monospace;">
+                                    <div class="form-error" id="engines-edit-account-id-err" style="display:none;"></div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-edit-nickname">Nickname *</label>
+                                    <input class="form-input" type="text" id="engines-edit-nickname"
+                                        autocomplete="off">
+                                    <div class="form-error" id="engines-edit-nickname-err" style="display:none;"></div>
+                                </div>
+
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-edit-env-var">Env Var Name *</label>
+                                    <input class="form-input" type="text" id="engines-edit-env-var"
+                                        autocomplete="off" spellcheck="false" style="font-family: monospace;">
+                                    <div class="form-error" id="engines-edit-env-var-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        Must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code> on every machine using this account.
+                                    </div>
+                                </div>
+
+                                <div class="form-error" id="engines-edit-server-err" style="display:none; margin-top: 10px;"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button class="btn-lcars btn-lcars-secondary" id="engines-edit-cancel-btn">CANCEL</button>
+                                <button class="btn-lcars btn-lcars-primary" id="engines-edit-save-btn">SAVE</button>
+                            </div>
+                        </div>
+                    </div><!-- End EDIT ACCOUNT MODAL -->
+
+                    <!-- DELETE CONFIRMATION MODAL -->
+                    <div class="modal-overlay engines-modal" id="engines-delete-modal" role="dialog" aria-modal="true" aria-labelledby="engines-delete-modal-title">
+                        <div class="modal-content engines-modal-content">
+                            <div class="modal-header">
+                                <span class="modal-title" id="engines-delete-modal-title">CONFIRM DELETION</span>
+                            </div>
+                            <div class="modal-body">
+                                <p class="modal-message">
+                                    Delete account <strong id="engines-delete-slug-label" style="color: var(--lcars-peach); font-family: monospace;">—</strong>?
+                                </p>
+                                <div id="engines-delete-usage-info" style="margin-top: 15px; min-height: 40px;">
+                                    <div style="color: rgba(255,204,153,0.5); font-size: 12px;">Checking usage...</div>
+                                </div>
+                                <p class="modal-warning" style="margin-top: 15px;">
+                                    This action cannot be undone.
+                                </p>
+                                <div class="form-error" id="engines-delete-server-err" style="display:none; margin-top: 10px;"></div>
+                            </div>
+                            <div class="modal-footer">
+                                <button class="btn-lcars btn-lcars-secondary" id="engines-delete-cancel-btn">CANCEL</button>
+                                <button class="btn-lcars btn-lcars-danger" id="engines-delete-confirm-btn" disabled>CONFIRM DELETE</button>
+                            </div>
+                        </div>
+                    </div><!-- End DELETE CONFIRMATION MODAL -->
+
+                </div><!-- End AI ENGINES section -->
+
             </div>
         </main>
     </div>
@@ -307,6 +478,8 @@
 
     <!-- LCARS Fleet Core JavaScript -->
     <script src="js/lcars-fleet-core.js"></script>
+    <!-- AI Engines Registry UI (XACA-0540) — load after fleet-core so lcars:sectionChange is available -->
+    <script src="js/lcars-engines.js"></script>
     <!-- Kiosk Mode: Auto-Rotation on Idle (shared) -->
     <script src="../shared/js/lcars-kiosk.js"></script>
     <!-- All Fleet Dashboard Application -->
