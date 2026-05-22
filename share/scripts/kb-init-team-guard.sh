@@ -170,8 +170,18 @@ kb_ensure_team_initialized() {
     else
         # Derive from this file's own location: scripts/kb-init-team-guard.sh
         # → sibling: scripts/kb-init-team
-        local _guard_dir
-        _guard_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        # Shell-agnostic self-location: BASH_SOURCE is EMPTY under zsh (every
+        # *-startup.sh caller is #!/bin/zsh), so fall back to zsh's prompt-
+        # expansion %x (file of the source currently executing) then $0. (XACA-0548)
+        local _self _guard_dir
+        if [ -n "${BASH_SOURCE:-}" ]; then
+            _self="${BASH_SOURCE[0]}"
+        elif [ -n "${ZSH_VERSION:-}" ]; then
+            _self="${(%):-%x}"
+        else
+            _self="$0"
+        fi
+        _guard_dir="$(cd "$(dirname "$_self")" && pwd)"
         kbit_bin="${_guard_dir}/kb-init-team"
     fi
 
