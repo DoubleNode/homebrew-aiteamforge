@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Chore: XACA-0547 — Reconcile divergent LCARS ports (mirror sync)
+
+- **`share/kanban-hooks/aiteamforge_paths.py`, `libexec/lib/aiteamforge-paths.sh`** — `DEFAULT_TEAMS` / `_AITEAMFORGE_DEFAULT_TEAMS_DATA` `lcars_port` values for 9 teams reconciled to their authoritative `team-paths.json` ports via `kb-port-reconcile --apply` (canonical source in dev-team): finance-personal→8360, freelance-doublenode-{appplanning→8500, awaysentry→8501, caravan→8502, lifeboard→8503, starwords→8504, workstats→8506}, freelance-liquidstyle-agentbadges-ios→8970, legal-coparenting→8320. Resolves pre-existing three-way divergence so the shipped registry matches the live overlay.
+
 ### Feat: XACA-0545 — Tap startup snapshot adopts kb-init-team-guard (auto-init on startup)
 
 Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did not source the new `kb_ensure_team_initialized` guard, so shipped installs never got auto-init-on-startup detection. Closes the full chain: snapshot sources the guard → installer deploys the guard → install-time path rewrite aligns the two.
