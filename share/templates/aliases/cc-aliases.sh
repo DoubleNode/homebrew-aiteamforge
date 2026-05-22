@@ -124,6 +124,7 @@ PY
 
     # Collapse whitespace, strip pipes (record separator), cap at 40 chars.
     name="${name//$'\n'/ }"
+    name="${name//$'\r'/ }"
     name="${name//|/ }"
     if (( ${#name} > 40 )); then
         name="${name:0:37}..."
@@ -228,6 +229,7 @@ _cc_launch() {
     # Sanitize regardless of source: collapse newlines/whitespace, strip pipes,
     # cap at 40 chars (mirrors the sanitize block in _cc_derive_session_name).
     _cc_name="${_cc_name//$'\n'/ }"
+    _cc_name="${_cc_name//$'\r'/ }"
     _cc_name="${_cc_name//|/ }"
     if (( ${#_cc_name} > 40 )); then
         _cc_name="${_cc_name:0:37}..."
