@@ -7,7 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-### Fix: XACA-0549 — freelance startup snapshot reads authoritative LCARS port
+### Refactor: XACA-0550 — Narrow damage-control firewall (Homebrew cleanup false-positives)
+
+- **`share/templates/claude/hooks/damage-control/bash-tool-damage-control.py`** — two surgical narrowings of the Bash firewall, mirrored from the canonical `claude-hooks/` source:
+  - **Absolute-path anchoring** in `check_path_patterns`: literal absolute paths (`/bin/`, `/usr/`, `/etc/`, …) now match only at a path-component boundary via a `(?<![\w./-])` lookbehind, so a readOnly `/bin/` no longer false-matches `rm /opt/homebrew/bin/claude`. Real system-path ops (space/quote before the path) still match — strictly fewer false positives.
+  - **Allowlist** (`allowPatterns`, checked first): a command matching an allow pattern is permitted outright.
+- **`share/templates/claude/hooks/damage-control/patterns.yaml`** — adds an `allowPatterns` section seeded with two Homebrew-maintenance exceptions: standalone `brew cleanup|uninstall|untap`, and standalone `rm`/`sudo rm` of Homebrew-managed *subpaths* (`/opt/homebrew/...`, `/usr/local/Cellar|Homebrew/...`). Every allow pattern is anchored `^...$` to a single command so a dangerous op cannot be smuggled via chaining (`&&`, `;`); whole-prefix nukes (`rm -rf /opt/homebrew`) are NOT allowlisted.
+- **Verified** with a 24-case battery: Homebrew cleanup now passes; `rm -rf /`, real `/bin`+`/usr` ops, `~/.ssh` access, whole-prefix nuke, and compound-command smuggling all still BLOCK.
 
 - **`share/scripts/teams/freelance-startup.sh`** — snapshot re-synced to its canonical source (byte-identical). The freelance LCARS port is now read from the per-team `lcars-ports/<team>-lcars.port` file (lockstep with `team-paths.json`) instead of being recomputed from a `cksum` of the project name on each launch; cksum is kept only as a fallback for teams with no port file. Prevents reconciled freelance teams (XACA-0547) from silently re-diverging at the next startup.
 

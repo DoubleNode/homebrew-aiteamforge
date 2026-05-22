@@ -179,6 +179,19 @@ def check_path_patterns(command: str, path: str, patterns: List[Tuple[str, str]]
         escaped_expanded = re.escape(expanded)
         escaped_original = re.escape(path)
 
+        # Absolute paths must match at a path-component boundary, not embedded
+        # inside a longer path. Without this, readOnly '/bin/' matches
+        # 'rm /opt/homebrew/bin/claude' and '/usr/' matches '/opt/.../usr/...'.
+        # The lookbehind rejects a match preceded by a path char (\w . / -), so
+        # 'rm /bin/ls' (space before) still matches but '/opt/homebrew/bin/'
+        # does not. Strictly reduces false positives; real system-path ops
+        # remain blocked.
+        boundary = r'(?<![\w./-])'
+        if expanded.startswith('/'):
+            escaped_expanded = boundary + escaped_expanded
+        if path.startswith('/'):
+            escaped_original = boundary + escaped_original
+
         for pattern_template, operation in patterns:
             # Check both expanded path (/Users/x/.ssh/) and original tilde form (~/.ssh/)
             pattern_expanded = pattern_template.replace("{path}", escaped_expanded)
@@ -204,6 +217,20 @@ def check_command(command: str, config: Dict[str, Any]) -> Tuple[bool, bool, str
     zero_access_paths = config.get("zeroAccessPaths", [])
     read_only_paths = config.get("readOnlyPaths", [])
     no_delete_paths = config.get("noDeletePaths", [])
+    allow_patterns = config.get("allowPatterns", [])
+
+    # 0. Allowlist: explicit, tightly-scoped exceptions checked FIRST. A command
+    #    matching any allowPattern is permitted outright (bypasses the block/ask
+    #    rules below). Allow patterns MUST be anchored to a single command
+    #    (^...$) so dangerous operations cannot be smuggled via chaining
+    #    (&&, ;, |) — see allowPatterns in patterns.yaml.
+    for item in allow_patterns:
+        pattern = item.get("pattern", "")
+        try:
+            if pattern and re.search(pattern, command, re.IGNORECASE):
+                return False, False, ""  # explicitly allowed
+        except re.error:
+            continue
 
     # 1. Check against patterns from YAML (may block or ask)
     for item in patterns:

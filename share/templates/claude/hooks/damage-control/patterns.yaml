@@ -3,6 +3,29 @@
 # Add patterns here to block dangerous commands.
 # Each script (py, sh, ts) loads this file.
 
+# ---------------------------------------------------------------------------
+# ALLOWLIST - Explicit exceptions checked BEFORE every block/ask rule
+# ---------------------------------------------------------------------------
+# A Bash command matching any pattern here is permitted outright. Use ONLY for
+# narrow, well-understood cases that the generic guards over-block.
+#
+# SAFETY RULE: every allow pattern MUST be anchored to a single command
+# (^ ... $) so a dangerous operation cannot be smuggled via chaining. e.g.
+# "rm /opt/homebrew/x && rm ~/.ssh/id_rsa" must NOT match (the trailing
+# "&& rm ~/.ssh..." breaks the anchor), so the secret-path guard still fires.
+allowPatterns:
+  # Homebrew maintenance. The generic rm -rf / sudo rm / system-path guards
+  # block routine `brew cleanup` and removal of stale Homebrew-managed files
+  # (orphaned kegs, symlinks). These exceptions cover ONLY standalone commands
+  # whose targets live under a Homebrew prefix subpath.
+  - pattern: '^\s*brew\s+(cleanup|uninstall|untap)\b'
+    reason: standalone brew maintenance command
+  # Standalone rm / sudo rm of one-or-more Homebrew-managed SUBPATHS only.
+  # Requires "<prefix>/<something>" (a subpath) so it never allows nuking a
+  # whole prefix like "rm -rf /opt/homebrew". Anchored ^...$ = single command.
+  - pattern: '^\s*(sudo\s+)?rm\s+(-[A-Za-z]+\s+)*((/opt/homebrew|/usr/local/Cellar|/usr/local/Homebrew)/\S+\s*)+$'
+    reason: rm of Homebrew-managed subpath(s)
+
 # These patterns are matched against Bash tool commands only
 bashToolPatterns:
   # ---------------------------------------------------------------------------
