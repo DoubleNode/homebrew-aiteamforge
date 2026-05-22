@@ -858,6 +858,17 @@ if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
         "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
     echo "  ✓ scripts/lcars-launch-helpers.sh"
 
+    # XACA-0545: install the kanban init guard and provisioner alongside lcars-launch-helpers.sh.
+    # The tap startup-script snapshots now source kb-init-team-guard.sh at launch (same relative
+    # position as lcars-launch-helpers.sh), so both must be deployed together. $AITEAMFORGE_DIR/scripts
+    # was already mkdir'd above; no need to repeat it here.
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/kb-init-team-guard.sh" \
+        "$AITEAMFORGE_DIR/scripts/kb-init-team-guard.sh"
+    echo "  ✓ scripts/kb-init-team-guard.sh"
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/kb-init-team" \
+        "$AITEAMFORGE_DIR/scripts/kb-init-team"
+    echo "  ✓ scripts/kb-init-team"
+
     # XACA-0484: install per-agent startup scripts (and team banner) referenced
     # by the master parametric script. Without these, tmux sessions never form
     # because the master script's [ -f "$script" ] guard silently skips missing files.

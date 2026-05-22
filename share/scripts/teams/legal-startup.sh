@@ -7,6 +7,7 @@
 # Example: ./legal-startup.sh coparenting
 
 source "$HOME/dev-team/scripts/lcars-launch-helpers.sh" || { echo "fatal: scripts/lcars-launch-helpers.sh missing or unreadable" >&2; exit 1; }
+source "$HOME/dev-team/scripts/kb-init-team-guard.sh" || true
 
 # ============================================================================
 # Require project ID argument BEFORE any other output
@@ -80,6 +81,9 @@ echo "   tmux socket: $TMUX_SOCKET"
 LCARS_PORT="$LEGAL_LCARS_PORT"
 echo "   LCARS Port: $LCARS_PORT"
 echo ""
+
+# Guard: verify kanban board is initialized before any kanban-dependent work.
+kb_ensure_team_initialized "legal-${PROJECTID}" "$PROJECT_DIR/kanban" || true
 
 # Base terminal names (actual script filenames)
 # LCARS is first - provides the kanban overview

@@ -6,6 +6,7 @@
 # Example: ./freelance-startup.sh AcmeCorp WidgetTracker
 
 source "$HOME/dev-team/scripts/lcars-launch-helpers.sh" || { echo "fatal: scripts/lcars-launch-helpers.sh missing or unreadable" >&2; exit 1; }
+source "$HOME/dev-team/scripts/kb-init-team-guard.sh" || true
 
 # ============================================================================
 # Cleanup orphaned processes from previous crashed sessions
@@ -89,6 +90,10 @@ fi
 GROUP_LOWER=$(echo "$GROUPID" | tr '[:upper:]' '[:lower:]')
 PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
 SESSION_PREFIX="freelance-${GROUP_LOWER}-${PROJECT_LOWER}"
+
+# Guard: verify kanban board is initialized before any kanban-dependent work.
+# Kanban dir is at the project root (parent of the 'develop' worktree), not inside it.
+kb_ensure_team_initialized "$SESSION_PREFIX" "$(dirname "$PROJECT_DIR")/kanban" || true
 
 # Generate unique port for LCARS based on project name (8080-8999 range)
 LCARS_PORT=$((8080 + $(echo "${GROUP_LOWER}-${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 900))

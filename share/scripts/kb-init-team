@@ -1,0 +1,1368 @@
+#!/usr/bin/env bash
+# kb-init-team — Initialize a new kanban team across all infrastructure sites.
+#
+# XACA-0542 subitem 002: Standalone provisioner for new teams.
+#
+# USAGE
+#   kb-init-team [OPTIONS]
+#
+# OPTIONS
+#   --team-id <id>         Team identifier, e.g. freelance-acme-ios (required)
+#   --team-code <CODE>     3-letter code, e.g. FAI (required; must be globally unique)
+#   --team-name <name>     Display name, e.g. "ACME IOS" (default: uppercase of team-id)
+#   --org-name <name>      Organization display name, e.g. "ACME" (default: derived)
+#   --org-color <hex>      Hex color for LCARS org badge, e.g. #2ECC71 (default: #888888)
+#   --kanban-dir <path>    Absolute path to kanban directory (required)
+#   --working-dir <path>   Absolute path to working/project dir (default: parent of kanban-dir)
+#   --series <SERIES>      Star Trek series for crew config: ENT|TNG|DS9|TOS|LD|VOY|MED|LEG|FER
+#                          (default: ENT)
+#   --asset-dir <dir>      Asset dir family name for image serving (default: derived from team-id)
+#   --lcars-port <port>    Explicit port number (default: auto-computed via port band)
+#   --port-band-base <N>   Port band base for auto-compute (default: 8500 for freelance, else 8600)
+#   --port-band-range <N>  Port band size (default: 100)
+#   --dry-run              Print all changes without applying any (exit 0)
+#   --check-only           Verify team is fully registered; exit 0 if complete, 1 if not
+#   --non-interactive      Fail instead of prompting; exit 1 if required inputs missing
+#   --help                 Show this help
+#
+# REGISTRATION SITES (what this tool writes)
+#   PRIMARY (must write — registry sources):
+#     1. kanban-hooks/aiteamforge_paths.py — DEFAULT_TEAMS entry (the SSoT)
+#     2. homebrew-tap/libexec/lib/aiteamforge-paths.sh — _AITEAMFORGE_DEFAULT_TEAMS_DATA row
+#     3. lcars-ports/<team-id>-lcars.port — port file
+#     4. ~/.aiteamforge/team-paths.json — live runtime overlay
+#
+#   FALLBACK INSURANCE (hardcoded case statements; must stay mirrored with registry):
+#     5.  kanban-helpers.sh _kb_get_team_code() case
+#     6.  kanban-helpers.sh _kb_get_team_from_code() case
+#     7.  kanban-helpers.sh _kb_get_kanban_dir() case
+#     8.  kanban-helpers.sh _kb_team_lcars_port() case
+#     9.  claude/statusline-command.sh _get_team_kanban_dir() case
+#
+#   STATIC MAPS (not derivable from registry):
+#     10. lcars-ui/server.py team_dir_map (asset dir for image serving)
+#     11. amb-session-map.json (terminal-session → persona entries)
+#
+#   BOARD + DIRECTORY TREE (provisioning, not registration):
+#     12. <kanban-dir>/<team-id>-board.json
+#     13. <kanban-dir>/config/ activity/ plans/ knowledge/
+#     14. Knowledge INDEX.md files per crew member
+#
+#   DERIVES AUTOMATICALLY (no explicit insert needed after #1):
+#     - kanban_utils._TEAM_CODE_MAP — built from build_team_code_map() at import
+#     - server._ITEM_PREFIX_TO_TEAM — built from _build_item_prefix_to_team() at module load
+#     - server.get_board_for_item() prefix map — built from _ITEM_PREFIX_TO_TEAM
+#     - server.TEAM_KANBAN_DIRS — built from aiteamforge_paths.list_teams() at startup
+#     - kanban_utils.TEAM_KANBAN_DIRS — built from DEFAULT_TEAMS at import
+#
+# IDEMPOTENCY
+#   Every write checks if the entry already exists before inserting. Running
+#   kb-init-team twice on the same team is safe. --check-only verifies all sites.
+#
+# TAP MIRROR NOTE
+#   aiteamforge_paths.py has a mirror at homebrew-tap/share/kanban-hooks/.
+#   kanban_utils.py also has a tap mirror, but it derives from registry so
+#   its fallback hardcoded dict only needs updating when the registry import
+#   would fail — the tap-side copy updates automatically when sync-tap.sh runs.
+#   This script edits the CANONICAL source (dev-team). Run sync-tap.sh (or
+#   use kb-edit-shared where applicable) after registering to keep tap aligned.
+
+set -euo pipefail
+
+# ── Locate dev-team root ──────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEV_TEAM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+AITEAMFORGE_PATHS_PY="${DEV_TEAM_ROOT}/kanban-hooks/aiteamforge_paths.py"
+AITEAMFORGE_PATHS_SH="${DEV_TEAM_ROOT}/homebrew-tap/libexec/lib/aiteamforge-paths.sh"
+KANBAN_HELPERS="${DEV_TEAM_ROOT}/kanban-helpers.sh"
+STATUSLINE_SH="${DEV_TEAM_ROOT}/claude/statusline-command.sh"
+SERVER_PY="${DEV_TEAM_ROOT}/lcars-ui/server.py"
+AMB_SESSION_MAP="${DEV_TEAM_ROOT}/amb-session-map.json"
+LCARS_PORTS_DIR="${DEV_TEAM_ROOT}/lcars-ports"
+BOARD_TEMPLATE="${DEV_TEAM_ROOT}/homebrew-tap/share/templates/kanban/board-template.json"
+TEAM_PATHS_JSON="${HOME}/.aiteamforge/team-paths.json"
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+
+RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; NC='\033[0m'
+_ok()   { echo -e "${GREEN}  [OK]${NC} $*"; }
+_skip() { echo -e "${CYAN}[SKIP]${NC} $* (already registered)"; }
+_info() { echo -e "       $*"; }
+_warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+_fail() { echo -e "${RED}[FAIL]${NC} $*" >&2; }
+_dry()  { echo -e "${CYAN} [DRY]${NC} $*"; }
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+TEAM_ID=""
+TEAM_CODE=""
+TEAM_NAME=""
+ORG_NAME=""
+ORG_COLOR="#888888"
+KANBAN_DIR=""
+WORKING_DIR=""
+SERIES="ENT"
+ASSET_DIR=""
+LCARS_PORT=""
+PORT_BAND_BASE=""
+PORT_BAND_RANGE="100"
+DRY_RUN=0
+CHECK_ONLY=0
+NON_INTERACTIVE=0
+
+usage() {
+    head -60 "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "${1-}" in
+        --team-id)          TEAM_ID="${2:?--team-id requires a value}";      shift 2 ;;
+        --team-code)        TEAM_CODE="${2:?--team-code requires a value}";  shift 2 ;;
+        --team-name)        TEAM_NAME="${2:?--team-name requires a value}";  shift 2 ;;
+        --org-name)         ORG_NAME="${2:?--org-name requires a value}";    shift 2 ;;
+        --org-color)        ORG_COLOR="${2:?--org-color requires a value}";  shift 2 ;;
+        --kanban-dir)       KANBAN_DIR="${2:?--kanban-dir requires a value}"; shift 2 ;;
+        --working-dir)      WORKING_DIR="${2:?--working-dir requires a value}"; shift 2 ;;
+        --series)           SERIES="${2:?--series requires a value}";        shift 2 ;;
+        --asset-dir)        ASSET_DIR="${2:?--asset-dir requires a value}";  shift 2 ;;
+        --lcars-port)       LCARS_PORT="${2:?--lcars-port requires a value}"; shift 2 ;;
+        --port-band-base)   PORT_BAND_BASE="${2:?--port-band-base requires a value}"; shift 2 ;;
+        --port-band-range)  PORT_BAND_RANGE="${2:?--port-band-range requires a value}"; shift 2 ;;
+        --dry-run)          DRY_RUN=1;          shift ;;
+        --check-only)       CHECK_ONLY=1;       shift ;;
+        --non-interactive)  NON_INTERACTIVE=1;  shift ;;
+        --help|-h)          usage ;;
+        *) _fail "Unknown option: ${1}"; exit 1 ;;
+    esac
+done
+
+# ── Interactive prompts (when --non-interactive is NOT set) ───────────────────
+
+_prompt() {
+    local var_name="$1" prompt_text="$2" default="${3-}"
+    local current
+    current=$(eval "echo \"\${$var_name}\"")
+    if [[ -n "$current" ]]; then return 0; fi
+    if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
+        if [[ -n "$default" ]]; then
+            eval "${var_name}=\"${default}\""
+        else
+            _fail "--non-interactive set but required param ${var_name} is missing"
+            exit 1
+        fi
+    else
+        local response
+        if [[ -n "$default" ]]; then
+            read -r -p "  ${prompt_text} [${default}]: " response
+            eval "${var_name}=\"${response:-${default}}\""
+        else
+            read -r -p "  ${prompt_text}: " response
+            if [[ -z "$response" ]]; then
+                _fail "${var_name} is required"
+                exit 1
+            fi
+            eval "${var_name}=\"${response}\""
+        fi
+    fi
+}
+
+# ── Validation helpers ────────────────────────────────────────────────────────
+
+_team_in_default_teams() {
+    python3 - "${AITEAMFORGE_PATHS_PY}" "${1}" <<'PYEOF'
+import sys, ast
+
+def _iter_default_teams(path):
+    """Yield (key_constant, value_dict) for DEFAULT_TEAMS. Handles Assign and AnnAssign."""
+    src = open(path).read()
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        targets = []
+        value = None
+        if isinstance(node, ast.Assign):
+            targets = node.targets; value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]; value = node.value
+        for t in targets:
+            if isinstance(t, ast.Name) and t.id == "DEFAULT_TEAMS":
+                if isinstance(value, ast.Dict):
+                    for k in value.keys:
+                        if isinstance(k, ast.Constant) and k.value == sys.argv[2]:
+                            print("yes"); sys.exit(0)
+
+_iter_default_teams(sys.argv[1])
+print("no")
+PYEOF
+}
+
+_team_code_in_default_teams() {
+    # Returns "yes" if team_code already registered for ANY team
+    python3 - "${AITEAMFORGE_PATHS_PY}" "${1}" <<'PYEOF'
+import sys, ast
+src = open(sys.argv[1]).read()
+tree = ast.parse(src)
+target_code = sys.argv[2].upper()
+for node in ast.walk(tree):
+    targets = []
+    value = None
+    if isinstance(node, ast.Assign):
+        targets = node.targets; value = node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        targets = [node.target]; value = node.value
+    for t in targets:
+        if isinstance(t, ast.Name) and t.id == "DEFAULT_TEAMS":
+            if isinstance(value, ast.Dict):
+                for val in value.values:
+                    if isinstance(val, ast.Dict):
+                        for k, v in zip(val.keys, val.values):
+                            if isinstance(k, ast.Constant) and k.value == "team_code":
+                                if isinstance(v, ast.Constant) and str(v.value).upper() == target_code:
+                                    print("yes"); sys.exit(0)
+print("no")
+PYEOF
+}
+
+_port_in_use() {
+    local port="$1"
+    # Check lcars-ports/ files
+    if grep -r "^${port}$" "${LCARS_PORTS_DIR}"/ 2>/dev/null | grep -q .; then
+        return 0
+    fi
+    # Check team-paths.json
+    if [[ -f "${TEAM_PATHS_JSON}" ]]; then
+        if python3 -c "
+import json, sys
+d = json.load(open('${TEAM_PATHS_JSON}'))
+ports = [str(v.get('lcars_port','')) for v in d.get('teams',{}).values()]
+sys.exit(0 if '${port}' in ports else 1)
+" 2>/dev/null; then
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# ── Derive defaults ───────────────────────────────────────────────────────────
+
+_derive_defaults() {
+    # TEAM_NAME: uppercase hyphen-separated id
+    if [[ -z "$TEAM_NAME" ]]; then
+        TEAM_NAME=$(echo "$TEAM_ID" | tr '[:lower:]-' '[:upper:] ' | tr -s ' ')
+    fi
+
+    # ORG_NAME: first capital segment of team-id
+    if [[ -z "$ORG_NAME" ]]; then
+        ORG_NAME=$(echo "$TEAM_ID" | cut -d'-' -f1 | tr '[:lower:]' '[:upper:]')
+    fi
+
+    # WORKING_DIR: parent of kanban-dir
+    if [[ -z "$WORKING_DIR" ]]; then
+        WORKING_DIR="$(dirname "${KANBAN_DIR}")"
+    fi
+
+    # ASSET_DIR: derive from team-id prefix segment
+    if [[ -z "$ASSET_DIR" ]]; then
+        local first_seg="${TEAM_ID%%-*}"
+        case "$first_seg" in
+            freelance) ASSET_DIR="freelance" ;;
+            legal)     ASSET_DIR="legal" ;;
+            medical)   ASSET_DIR="medical" ;;
+            finance)   ASSET_DIR="finance" ;;
+            dns)       ASSET_DIR="dns-framework" ;;
+            *)         ASSET_DIR="${TEAM_ID}" ;;
+        esac
+    fi
+
+    # PORT_BAND_BASE: default based on team-id prefix
+    if [[ -z "$PORT_BAND_BASE" ]]; then
+        local first_seg="${TEAM_ID%%-*}"
+        case "$first_seg" in
+            freelance) PORT_BAND_BASE="8500" ;;
+            legal)     PORT_BAND_BASE="8320" ;;
+            medical)   PORT_BAND_BASE="8340" ;;
+            finance)   PORT_BAND_BASE="8360" ;;
+            dns)       PORT_BAND_BASE="8180" ;;
+            *)         PORT_BAND_BASE="8600" ;;
+        esac
+    fi
+}
+
+# ── Series configuration ──────────────────────────────────────────────────────
+
+_series_to_subtitle() {
+    case "$1" in
+        ENT) echo "STAR TREK: ENTERPRISE" ;;
+        TNG) echo "STAR TREK: THE NEXT GENERATION" ;;
+        DS9) echo "STAR TREK: DEEP SPACE NINE" ;;
+        TOS) echo "STAR TREK: THE ORIGINAL SERIES" ;;
+        LD)  echo "STAR TREK: LOWER DECKS" ;;
+        VOY) echo "STAR TREK: VOYAGER" ;;
+        MED) echo "HOUSE, M.D." ;;
+        LEG) echo "THE PRACTICE" ;;
+        FER) echo "STAR TREK: FERENGI ALLIANCE" ;;
+        *)   echo "STAR TREK" ;;
+    esac
+}
+
+_series_to_ship() {
+    case "$1" in
+        ENT) echo "Enterprise NX-01" ;;
+        TNG) echo "U.S.S. Enterprise NCC-1701-D" ;;
+        DS9) echo "Deep Space 9" ;;
+        TOS) echo "U.S.S. Enterprise NCC-1701" ;;
+        LD)  echo "U.S.S. Cerritos" ;;
+        VOY) echo "U.S.S. Voyager" ;;
+        MED) echo "Princeton-Plainsboro" ;;
+        LEG) echo "Law Offices" ;;
+        FER) echo "Tower of Commerce" ;;
+        *)   echo "Unknown Vessel" ;;
+    esac
+}
+
+# Returns a multi-line list of "terminal:avatar" pairs for the series
+_series_terminals() {
+    case "$1" in
+        ENT) cat <<'EOF'
+command:captain-archer
+engineering:tucker
+science:tpol
+sickbay:phlox
+tactical:reed
+comms:sato
+helm:travis-mayweather
+EOF
+            ;;
+        TNG) cat <<'EOF'
+bridge:picard
+engineering:geordi
+stellar:data
+sickbay:crusher
+holodeck:worf
+observation:troi
+EOF
+            ;;
+        DS9) cat <<'EOF'
+ops:sisko
+engineering:obrien
+stellar:dax
+sickbay:bashir
+holodeck:odo
+observation:kira
+promenade:quark
+EOF
+            ;;
+        TOS) cat <<'EOF'
+bridge:kirk
+engineering:scotty
+science:spock
+sickbay:mccoy
+navigation:chekov
+communications:uhura
+helm:sulu
+EOF
+            ;;
+        LD) cat <<'EOF'
+command:mariner
+build:rutherford
+refactor:tendi
+bugbay:tana
+testing:shaxs
+apidesign:boimler
+docs:ransom
+EOF
+            ;;
+        VOY) cat <<'EOF'
+command:janeway
+engineering:torres
+science:seven
+sickbay:doctor
+tactical:tuvok
+comms:kim
+EOF
+            ;;
+        MED) cat <<'EOF'
+diagnostics:house
+oncology:wilson
+immunology:cameron
+surgery:chase
+neurology:foreman
+emergency:cuddy
+EOF
+            ;;
+        LEG) cat <<'EOF'
+chambers:advocate
+discovery:paralegal
+research:lawclerk
+filings:courtclerk
+mediation:mediator
+timeline:casemanager
+EOF
+            ;;
+        FER) cat <<'EOF'
+nagus:zek
+bar:quark-fin
+vault:nog
+fca:brunt
+workshop:rom
+EOF
+            ;;
+        *) echo "command:unknown" ;;
+    esac
+}
+
+# ── Port computation ──────────────────────────────────────────────────────────
+
+_compute_port() {
+    # Try aiteamforge_compute_instance_port first (needs aiteamforge-paths.sh sourced)
+    local port
+    if source "${AITEAMFORGE_PATHS_SH}" 2>/dev/null && \
+       declare -f aiteamforge_compute_instance_port &>/dev/null; then
+        # Attempt to compute using the band base already known to the registry.
+        # For a brand-new team, pass a synthetic entry by injecting a temp env.
+        # Use python3 fallback — simpler and no side effects.
+        port=""
+    fi
+
+    # Python-based scan: find first free port in band
+    port=$(python3 - "${TEAM_PATHS_JSON}" "${PORT_BAND_BASE}" "${PORT_BAND_RANGE}" 2>/dev/null <<'PYEOF'
+import sys, json
+from pathlib import Path
+
+team_paths_file, base_str, range_str = sys.argv[1], sys.argv[2], sys.argv[3]
+base = int(base_str)
+band_range = int(range_str)
+
+used = set()
+if Path(team_paths_file).exists():
+    try:
+        config = json.loads(Path(team_paths_file).read_text(encoding="utf-8"))
+        for entry in config.get("teams", {}).values():
+            p = entry.get("lcars_port")
+            if p is not None:
+                try:
+                    used.add(int(p))
+                except (ValueError, TypeError):
+                    pass
+    except Exception:
+        pass
+
+for port in range(base, base + band_range):
+    if port not in used:
+        print(port)
+        sys.exit(0)
+print("", end="")
+sys.exit(1)
+PYEOF
+)
+    echo "$port"
+}
+
+# ── Python helper: insert into aiteamforge_paths.py DEFAULT_TEAMS ─────────────
+
+_insert_default_teams() {
+    local team_id="$1" team_code="$2" kanban_dir="$3" working_dir="$4"
+    local lcars_port="$5" port_base="$6" port_range="$7"
+
+    python3 - "${AITEAMFORGE_PATHS_PY}" \
+        "$team_id" "$team_code" "$kanban_dir" "$working_dir" \
+        "$lcars_port" "$port_base" "$port_range" <<'PYEOF'
+import sys, re, ast
+
+path = sys.argv[1]
+team_id, team_code, kanban_dir, working_dir = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+lcars_port, port_base, port_range = sys.argv[6], sys.argv[7], sys.argv[8]
+
+src = open(path).read()
+
+# Check already present using AST (handles AnnAssign)
+def _already_in_default_teams(src, tid):
+    tree = ast.parse(src)
+    for node in ast.walk(tree):
+        targets = []
+        value = None
+        if isinstance(node, ast.Assign):
+            targets = node.targets; value = node.value
+        elif isinstance(node, ast.AnnAssign) and node.value is not None:
+            targets = [node.target]; value = node.value
+        for t in targets:
+            if isinstance(t, ast.Name) and t.id == "DEFAULT_TEAMS":
+                if isinstance(value, ast.Dict):
+                    for k in value.keys:
+                        if isinstance(k, ast.Constant) and k.value == tid:
+                            return True
+    return False
+
+if _already_in_default_teams(src, team_id):
+    sys.exit(0)  # Already present, no-op
+
+# Build the new entry block
+# Use a raw-string multiline insert to avoid f-string quoting issues
+port_value = "None" if lcars_port in ("None", "null", "") else lcars_port
+new_entry = f'''    "{team_id}": {{
+        "team_code": "{team_code}",
+        "kanban_dir": "{kanban_dir}",
+        "working_dir": "{working_dir}",
+        "lcars_port_base": {port_base},
+        "lcars_port_range": {port_range},
+        "lcars_port": {port_value},
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "",
+    }},'''
+
+# Insert before the closing "# ── Aliases" comment or before the final closing }
+# Strategy: find the last entry's closing brace + comma, insert after it.
+# Look for "    }" followed by optional comma then newline, before closing DEFAULT_TEAMS }
+# We insert before the "# ── Aliases" section or before `}` at the end of DEFAULT_TEAMS.
+
+# Find insertion point: before the "# ── Aliases" comment block inside DEFAULT_TEAMS,
+# or before the last closing brace of the dict.
+aliases_pattern = r'(\n    # ── Aliases [^\n]*\n)'
+m = re.search(aliases_pattern, src)
+if m:
+    insert_pos = m.start()
+    new_src = src[:insert_pos] + "\n" + new_entry + src[insert_pos:]
+else:
+    # Fallback: insert before the closing brace of DEFAULT_TEAMS
+    # Find the last "    }," block and insert after it
+    pattern = r'(    \},?\n\n}\n)'
+    m2 = re.search(pattern, src[::-1])
+    if m2:
+        # Reverse the search — find last occurrence of a closing brace sequence
+        insert_pos = len(src) - m2.end()
+        new_src = src[:insert_pos] + new_entry + "\n" + src[insert_pos:]
+    else:
+        # Last resort: insert before the final "}"
+        last_brace = src.rfind("\n}")
+        if last_brace == -1:
+            print(f"ERROR: could not find insertion point in {path}", file=sys.stderr)
+            sys.exit(1)
+        new_src = src[:last_brace] + "\n" + new_entry + src[last_brace:]
+
+open(path, "w").write(new_src)
+sys.exit(0)
+PYEOF
+}
+
+# ── Shell helper: idempotent case-arm insert ───────────────────────────────────
+
+_insert_case_arm() {
+    local file="$1"
+    local func_name="$2"
+    local new_arm="$3"   # the arm to insert, e.g. "        myteam) echo \"MTM\" ;;"
+    local sentinel="$4"  # text before which to insert (e.g. "        *)")
+
+    # Check if already present (the team-id would be at the start of the arm)
+    local arm_key
+    arm_key=$(echo "$new_arm" | sed "s/^[[:space:]]*//" | cut -d')' -f1)
+    if grep -q "^[[:space:]]*${arm_key})[[:space:]]" "$file" 2>/dev/null; then
+        return 0  # Already present
+    fi
+
+    # Insert before the sentinel line. XACA-0542-018: scope the sentinel search to
+    # within the named function's body, since multiple case statements in the same
+    # file share the same default sentinel (e.g. "        *)") — an unscoped search
+    # would insert the arm into the FIRST such function rather than func_name.
+    python3 - "$file" "$func_name" "$sentinel" "$new_arm" <<'PYEOF'
+import sys
+path, func_name, sentinel, new_arm = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+src = open(path).read()
+# Anchor the search at the function definition so we land in the right function.
+func_idx = src.find(func_name + '()')
+if func_idx == -1:
+    print(f"WARNING: function '{func_name}' not found in {path}", file=sys.stderr)
+    sys.exit(1)
+idx = src.find(sentinel, func_idx)
+if idx == -1:
+    print(f"WARNING: sentinel '{sentinel}' not found in {path} (function {func_name})", file=sys.stderr)
+    sys.exit(1)
+# Find the start of the line containing the sentinel
+line_start = src.rfind('\n', 0, idx) + 1
+new_src = src[:line_start] + new_arm + '\n' + src[line_start:]
+open(path, 'w').write(new_src)
+PYEOF
+}
+
+# ── Insert into server.py team_dir_map ────────────────────────────────────────
+
+_insert_team_dir_map() {
+    local team_id="$1" asset_dir="$2"
+    python3 - "${SERVER_PY}" "$team_id" "$asset_dir" <<'PYEOF'
+import sys, re
+path, team_id, asset_dir = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(path).read()
+
+# Check already present
+if f"'{team_id}': '{asset_dir}'" in src or f'"{team_id}": "{asset_dir}"' in src:
+    sys.exit(0)
+
+# Find team_dir_map dict closing brace
+pattern = r'(        team_dir_map = \{[^}]+\})'
+m = re.search(pattern, src, re.DOTALL)
+if not m:
+    print(f"ERROR: team_dir_map not found in {path}", file=sys.stderr)
+    sys.exit(1)
+
+# Insert before the closing brace
+dict_text = m.group(0)
+insert_line = f"            '{team_id}': '{asset_dir}',"
+closing_brace_idx = dict_text.rfind('}')
+new_dict = dict_text[:closing_brace_idx] + insert_line + '\n        ' + dict_text[closing_brace_idx:]
+new_src = src[:m.start()] + new_dict + src[m.end():]
+open(path, 'w').write(new_src)
+PYEOF
+}
+
+# ── Insert into amb-session-map.json ─────────────────────────────────────────
+
+_insert_amb_session_map() {
+    local team_id="$1"
+    local terminals_and_avatars="$2"  # newline-separated "terminal:avatar" pairs
+
+    python3 - "${AMB_SESSION_MAP}" "$team_id" "$terminals_and_avatars" <<'PYEOF'
+import sys, json
+from pathlib import Path
+
+path = Path(sys.argv[1])
+team_id = sys.argv[2]
+pairs = [line.strip() for line in sys.argv[3].strip().splitlines() if ':' in line.strip()]
+
+data = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+changed = False
+for pair in pairs:
+    terminal, avatar = pair.split(':', 1)
+    key = f"{team_id}-{terminal}"
+    if key not in data:
+        data[key] = avatar
+        changed = True
+
+if changed:
+    path.write_text(json.dumps(data, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PYEOF
+}
+
+# ── Insert into aiteamforge-paths.sh heredoc ─────────────────────────────────
+
+_insert_paths_sh_heredoc() {
+    local team_id="$1" kanban_dir="$2" working_dir="$3" lcars_port="$4"
+    local port_base="$5" port_range="$6" team_code="$7"
+
+    python3 - "${AITEAMFORGE_PATHS_SH}" \
+        "$team_id" "$kanban_dir" "$working_dir" "$lcars_port" \
+        "$port_base" "$port_range" "$team_code" <<'PYEOF'
+import sys, re
+
+path = sys.argv[1]
+team_id, kanban_dir, working_dir = sys.argv[2], sys.argv[3], sys.argv[4]
+lcars_port, port_base, port_range, team_code = sys.argv[5], sys.argv[6], sys.argv[7], sys.argv[8]
+
+src = open(path).read()
+
+# Check if already present
+if f'"{team_id}"' in src or f"'{team_id}'" in src:
+    # Simple heuristic: check for the team_id in the heredoc lines
+    for line in src.splitlines():
+        stripped = line.strip()
+        if stripped.startswith(f'printf') and f'"{team_id}"' in stripped:
+            sys.exit(0)
+    # Also check literal printf with the team_id
+    if re.search(r'printf[^\n]+' + re.escape(team_id), src):
+        sys.exit(0)
+
+# Normalise lcars_port — "null" or empty → "null" for the shell heredoc
+port_val = "null" if lcars_port in ("None", "null", "") else lcars_port
+
+# Build the new printf line (matching existing format)
+new_line = (
+    f'    printf \'%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\' '
+    f'"{team_id}"'
+    f'     "{kanban_dir}"'
+    f'     "{working_dir}"'
+    f'     "{port_val}"  "{port_base}" "{port_range}" "{team_code}"'
+)
+
+# Insert before the legacy alias block or before the closing brace of the function
+# Sentinel: the "# Legacy alias" comment or the closing "}" of _AITEAMFORGE_DEFAULT_TEAMS_DATA
+sentinel = '    # Legacy alias'
+idx = src.find(sentinel)
+if idx == -1:
+    # Try the freelance alias line
+    sentinel = '    printf \'%s\\t%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n\' "freelance"'
+    idx = src.find(sentinel)
+if idx == -1:
+    # Insert before the closing } of the function
+    # Find _AITEAMFORGE_DEFAULT_TEAMS_DATA closing brace
+    func_end = src.rfind('\n}\n', 0, src.find('_aiteamforge_is_interactive'))
+    if func_end == -1:
+        print(f"ERROR: could not find insertion point in {path}", file=sys.stderr)
+        sys.exit(1)
+    idx = func_end + 1  # after \n, before }
+
+line_start = src.rfind('\n', 0, idx) + 1
+new_src = src[:line_start] + new_line + '\n' + src[line_start:]
+open(path, 'w').write(new_src)
+PYEOF
+}
+
+# ── Insert into team-paths.json ───────────────────────────────────────────────
+
+_insert_team_paths_json() {
+    local team_id="$1" team_code="$2" kanban_dir="$3" working_dir="$4"
+    local lcars_port="$5" port_base="$6" port_range="$7"
+
+    python3 - "${TEAM_PATHS_JSON}" \
+        "$team_id" "$team_code" "$kanban_dir" "$working_dir" \
+        "$lcars_port" "$port_base" "$port_range" <<'PYEOF'
+import sys, json
+from pathlib import Path
+
+path = Path(sys.argv[1])
+team_id, team_code, kanban_dir, working_dir = sys.argv[2], sys.argv[3], sys.argv[4], sys.argv[5]
+lcars_port_str, port_base_str, port_range_str = sys.argv[6], sys.argv[7], sys.argv[8]
+
+lcars_port = None if lcars_port_str in ("None", "null", "") else int(lcars_port_str)
+
+config = {"teams": {}}
+if path.exists():
+    try:
+        config = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        config = {"teams": {}}
+
+if team_id in config.get("teams", {}):
+    sys.exit(0)  # Already present
+
+if "teams" not in config:
+    config["teams"] = {}
+
+config["teams"][team_id] = {
+    "team_code": team_code,
+    "kanban_dir": kanban_dir,
+    "working_dir": working_dir,
+    "lcars_port": lcars_port,
+    "lcars_port_base": int(port_base_str),
+    "lcars_port_range": int(port_range_str),
+    "anthropic_account_id": "",
+    "anthropic_account_nickname": "",
+    "anthropic_api_key_env_var": "",
+}
+
+path.parent.mkdir(parents=True, exist_ok=True)
+path.write_text(json.dumps(config, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+PYEOF
+}
+
+# ── Create board JSON ─────────────────────────────────────────────────────────
+
+_create_board_json() {
+    local team_id="$1" team_name="$2" org_name="$3" org_color="$4"
+    local kanban_dir="$5" series="$6"
+    local board_file="${kanban_dir}/${team_id}-board.json"
+
+    if [[ -f "$board_file" ]]; then
+        return 0  # Already exists
+    fi
+
+    local subtitle ship
+    subtitle=$(_series_to_subtitle "$series")
+    ship=$(_series_to_ship "$series")
+
+    local terminals_json
+    terminals_json=$(python3 - "$(_series_terminals "$series")" "$team_id" <<'PYEOF'
+import sys, json
+
+pairs_raw = sys.argv[1]
+team_id = sys.argv[2]
+terminals = {}
+for line in pairs_raw.strip().splitlines():
+    line = line.strip()
+    if ':' not in line:
+        continue
+    terminal, avatar = line.split(':', 1)
+    terminals[terminal] = {
+        "active": True,
+        "agent": avatar,
+        "agentId": f"{team_id}-{terminal}"
+    }
+print(json.dumps(terminals, indent=2))
+PYEOF
+)
+
+    python3 - "${BOARD_TEMPLATE}" "$board_file" \
+        "$team_id" "$team_name" "$subtitle" "$ship" "$series" \
+        "$org_name" "$org_color" "$kanban_dir" "$terminals_json" <<'PYEOF'
+import sys, json, datetime
+from pathlib import Path
+
+template_path = sys.argv[1]
+board_file = sys.argv[2]
+team_id, team_name, subtitle, ship, series = sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6], sys.argv[7]
+org_name, org_color, kanban_dir = sys.argv[8], sys.argv[9], sys.argv[10]
+terminals_json = sys.argv[11]
+
+template = json.loads(Path(template_path).read_text(encoding='utf-8'))
+
+board = template.copy()
+board['team'] = team_id
+board['teamName'] = team_name
+board['subtitle'] = subtitle
+board['ship'] = ship
+board['series'] = series
+board['organization'] = org_name
+board['orgColor'] = org_color
+board['kanbanDir'] = kanban_dir
+board['lastUpdated'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+board['terminals'] = json.loads(terminals_json)
+
+Path(board_file).write_text(json.dumps(board, indent=2) + '\n', encoding='utf-8')
+PYEOF
+}
+
+# ── Create directory tree + knowledge INDEX files ─────────────────────────────
+
+_create_dir_tree() {
+    local kanban_dir="$1" team_id="$2" team_name="$3" series="$4"
+
+    local today
+    today=$(date +%Y-%m-%d)
+
+    # Core dirs
+    mkdir -p "${kanban_dir}/config"
+    mkdir -p "${kanban_dir}/activity"
+    mkdir -p "${kanban_dir}/plans"
+    local knowledge_dir="${kanban_dir}/knowledge"
+    mkdir -p "${knowledge_dir}"
+
+    # Knowledge INDEX files per crew member + TEAM
+    while IFS=':' read -r terminal avatar; do
+        [[ -z "$terminal" ]] && continue
+        local agent_dir="${knowledge_dir}/${avatar}"
+        mkdir -p "$agent_dir"
+        local index_file="${agent_dir}/INDEX.md"
+        if [[ ! -f "$index_file" ]]; then
+            cat > "$index_file" <<EOF
+# ${team_name} - ${avatar} Knowledge Index
+
+**Team:** ${team_id}
+**Agent:** ${avatar}
+**Terminal:** ${terminal}
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+_No entries yet._
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+        fi
+    done < <(_series_terminals "$series")
+
+    # Team-level knowledge index
+    local team_dir="${knowledge_dir}/TEAM"
+    mkdir -p "$team_dir"
+    local team_index="${team_dir}/INDEX.md"
+    if [[ ! -f "$team_index" ]]; then
+        cat > "$team_index" <<EOF
+# ${team_name} - Team Knowledge Index
+
+**Team:** ${team_id}
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+_No entries yet._
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+    fi
+}
+
+# ── Check-only mode ───────────────────────────────────────────────────────────
+
+_check_site() {
+    local name="$1" check_cmd="$2"
+    if eval "$check_cmd" 2>/dev/null; then
+        _ok "${name}"
+        return 0
+    else
+        _fail "${name} — NOT registered"
+        return 1
+    fi
+}
+
+_run_check_only() {
+    echo ""
+    echo "=== kb-init-team --check-only: ${TEAM_ID} ==="
+    echo ""
+    local all_ok=0
+
+    # 1. DEFAULT_TEAMS
+    _check_site "aiteamforge_paths.py DEFAULT_TEAMS" \
+        "[[ \"\$(_team_in_default_teams '${TEAM_ID}')\" == 'yes' ]]" || all_ok=1
+
+    # 2. aiteamforge-paths.sh heredoc
+    _check_site "aiteamforge-paths.sh heredoc" \
+        "grep -q '\"${TEAM_ID}\"' '${AITEAMFORGE_PATHS_SH}'" || all_ok=1
+
+    # 3. lcars-ports file
+    _check_site "lcars-ports/${TEAM_ID}-lcars.port" \
+        "[[ -f '${LCARS_PORTS_DIR}/${TEAM_ID}-lcars.port' ]]" || all_ok=1
+
+    # 4. team-paths.json
+    _check_site "~/.aiteamforge/team-paths.json" \
+        "python3 -c \"import json; d=json.load(open('${TEAM_PATHS_JSON}')); assert '${TEAM_ID}' in d.get('teams',{})\"" || all_ok=1
+
+    # 5. kanban-helpers.sh _kb_get_team_code
+    # Scope to the function region and match team_id as a case label (before | or )).
+    # Pattern (^|[[:space:]|])TEAM[|)] handles:
+    #   - standard arm:            "    teamA)  ..."
+    #   - piped arm:               "    teamA|teamB)  ..."
+    #   - backslash-continued arm: "teamA|teamB)" on a continuation line (starts at col 0)
+    _check_site "kanban-helpers.sh _kb_get_team_code" \
+        "awk '/^_kb_get_team_code\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+
+    # 6. kanban-helpers.sh _kb_get_team_from_code
+    _check_site "kanban-helpers.sh _kb_get_team_from_code" \
+        "awk '/^_kb_get_team_from_code\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_CODE}[|)]'" || all_ok=1
+
+    # 7. kanban-helpers.sh _kb_get_kanban_dir
+    _check_site "kanban-helpers.sh _kb_get_kanban_dir" \
+        "awk '/^_kb_get_kanban_dir\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+
+    # 8. kanban-helpers.sh _kb_team_lcars_port
+    # Presence of the case label within the function is sufficient; the port value
+    # may be on a separate line (e.g. backslash-continued multi-team arm).
+    # Previously used a two-pipe grep|grep that required _port= on the same line as
+    # the label — false-negative for freelance-doublenode-awaysentry (line 11646).
+    _check_site "kanban-helpers.sh _kb_team_lcars_port port entry" \
+        "awk '/^_kb_team_lcars_port\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+
+    # 9. statusline-command.sh
+    _check_site "statusline-command.sh _get_team_kanban_dir" \
+        "awk '/^_get_team_kanban_dir\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${STATUSLINE_SH}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+
+    # 10. server.py team_dir_map
+    _check_site "server.py team_dir_map" \
+        "grep -q \"'${TEAM_ID}'\" '${SERVER_PY}'" || all_ok=1
+
+    # 11. amb-session-map.json
+    _check_site "amb-session-map.json" \
+        "python3 -c \"import json; d=json.load(open('${AMB_SESSION_MAP}')); assert any(k.startswith('${TEAM_ID}-') for k in d)\"" || all_ok=1
+
+    # 12. board.json
+    _check_site "board.json exists" \
+        "[[ -f '${KANBAN_DIR}/${TEAM_ID}-board.json' ]]" || all_ok=1
+
+    echo ""
+    if [[ "$all_ok" -eq 0 ]]; then
+        echo -e "${GREEN}All sites registered. Team '${TEAM_ID}' is fully provisioned.${NC}"
+    else
+        echo -e "${RED}Some sites not yet registered. Run kb-init-team without --check-only to provision.${NC}"
+    fi
+    return "$all_ok"
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+main() {
+    # Collect required params
+    _prompt TEAM_ID      "Team ID (e.g. freelance-acme-ios)"
+
+    # XACA-0542-017: validate team-id charset BEFORE it is interpolated into any
+    # eval string (_check_site) or python source (TEAM_CODE derivation below) —
+    # injection hardening. Lowercase alphanumeric with internal dashes only.
+    if [[ ! "$TEAM_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
+        _fail "team_id must be lowercase alphanumeric with dashes (got: '${TEAM_ID}')"
+        exit 1
+    fi
+
+    # --check-only: TEAM_CODE is optional — derive from registry if not provided.
+    # This allows "kb-init-team --team-id <id> --check-only" without specifying --team-code.
+    if [[ "$CHECK_ONLY" -eq 1 && -z "$TEAM_CODE" ]]; then
+        TEAM_CODE=$(python3 -c "
+import sys; sys.path.insert(0, '${AITEAMFORGE_PATHS_PY%/*}')
+from aiteamforge_paths import get_team_code
+print(get_team_code('${TEAM_ID}'))
+" 2>/dev/null || echo "")
+    fi
+
+    _prompt TEAM_CODE    "Team code (3 uppercase letters, e.g. FAI)"
+    _prompt KANBAN_DIR   "Kanban directory (absolute path)"
+
+    # Validate team code length
+    TEAM_CODE=$(echo "$TEAM_CODE" | tr '[:lower:]' '[:upper:]')
+    if [[ ${#TEAM_CODE} -ne 3 ]]; then
+        _fail "team_code must be exactly 3 characters; got: '${TEAM_CODE}'"
+        exit 1
+    fi
+    # XACA-0542-017: charset-restrict team-code too (interpolated into eval/python).
+    if [[ ! "$TEAM_CODE" =~ ^[A-Z0-9]{3}$ ]]; then
+        _fail "team_code must be 3 uppercase alphanumeric characters; got: '${TEAM_CODE}'"
+        exit 1
+    fi
+
+    # XACA-0542-021: KANBAN_DIR is interpolated into the _check_site eval strings,
+    # so reject non-absolute paths and shell metacharacters before any eval runs
+    # (completes the injection hardening started for team-id/team-code in 017).
+    if [[ "$KANBAN_DIR" != /* ]] || [[ "$KANBAN_DIR" == *[\;\|\&\$\`\(\)\<\>\"\'\!]* ]] || [[ "$KANBAN_DIR" == *$'\n'* ]]; then
+        _fail "kanban_dir must be an absolute path without shell metacharacters; got: '${KANBAN_DIR}'"
+        exit 1
+    fi
+
+    _derive_defaults
+
+    # --check-only mode
+    if [[ "$CHECK_ONLY" -eq 1 ]]; then
+        _run_check_only
+        exit $?
+    fi
+
+    echo ""
+    echo "=== kb-init-team: registering '${TEAM_ID}' (${TEAM_CODE}) ==="
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}  DRY-RUN mode — no files will be written${NC}"
+    fi
+    echo ""
+
+    # ── Conflict detection ────────────────────────────────────────────────
+
+    local team_exists code_exists
+    team_exists=$(_team_in_default_teams "$TEAM_ID")
+    code_exists=$(_team_code_in_default_teams "$TEAM_CODE")
+
+    if [[ "$team_exists" == "yes" ]]; then
+        _warn "Team '${TEAM_ID}' already exists in DEFAULT_TEAMS — treating as idempotent re-run"
+    fi
+    if [[ "$code_exists" == "yes" ]]; then
+        # Check if it's OUR team or someone else's
+        local existing_team
+        existing_team=$(python3 -c "
+import sys; sys.path.insert(0, '${DEV_TEAM_ROOT}/kanban-hooks')
+from aiteamforge_paths import get_team_from_code
+print(get_team_from_code('${TEAM_CODE}'))
+" 2>/dev/null || echo "")
+        if [[ "$existing_team" != "$TEAM_ID" && -n "$existing_team" ]]; then
+            _fail "Team code '${TEAM_CODE}' is already used by team '${existing_team}'"
+            _fail "Choose a different team_code"
+            exit 1
+        fi
+    fi
+
+    # ── Compute port if not provided ──────────────────────────────────────
+
+    if [[ -z "$LCARS_PORT" ]]; then
+        if [[ "$DRY_RUN" -eq 0 ]]; then
+            LCARS_PORT=$(_compute_port)
+            if [[ -z "$LCARS_PORT" ]]; then
+                _fail "Could not allocate a port in band [${PORT_BAND_BASE}, $((PORT_BAND_BASE + PORT_BAND_RANGE)))"
+                _fail "Specify --lcars-port <port> or extend the band"
+                exit 1
+            fi
+        else
+            LCARS_PORT="<auto: band [${PORT_BAND_BASE}, $((PORT_BAND_BASE + PORT_BAND_RANGE))]>"
+        fi
+    else
+        # Validate provided port is not in use (unless already our team)
+        if [[ "$team_exists" != "yes" ]] && _port_in_use "$LCARS_PORT"; then
+            _fail "Port ${LCARS_PORT} is already in use"
+            exit 1
+        fi
+    fi
+
+    _info "Team ID    : ${TEAM_ID}"
+    _info "Team Code  : ${TEAM_CODE}"
+    _info "Team Name  : ${TEAM_NAME}"
+    _info "LCARS Port : ${LCARS_PORT}"
+    _info "Kanban Dir : ${KANBAN_DIR}"
+    _info "Series     : ${SERIES}"
+    echo ""
+
+    local TERMINALS_LIST
+    TERMINALS_LIST=$(_series_terminals "$SERIES")
+
+    # ── Site 1: aiteamforge_paths.py DEFAULT_TEAMS ────────────────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert '${TEAM_ID}' into DEFAULT_TEAMS in aiteamforge_paths.py"
+    else
+        if [[ "$(_team_in_default_teams "$TEAM_ID")" == "yes" ]]; then
+            _skip "aiteamforge_paths.py DEFAULT_TEAMS"
+        else
+            _insert_default_teams "$TEAM_ID" "$TEAM_CODE" "$KANBAN_DIR" "$WORKING_DIR" \
+                "$LCARS_PORT" "$PORT_BAND_BASE" "$PORT_BAND_RANGE"
+            _ok "aiteamforge_paths.py DEFAULT_TEAMS"
+        fi
+    fi
+
+    # ── Site 2: aiteamforge-paths.sh heredoc ─────────────────────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert printf row for '${TEAM_ID}' into _AITEAMFORGE_DEFAULT_TEAMS_DATA"
+    else
+        if grep -q "\"${TEAM_ID}\"" "${AITEAMFORGE_PATHS_SH}" 2>/dev/null; then
+            _skip "aiteamforge-paths.sh _AITEAMFORGE_DEFAULT_TEAMS_DATA"
+        else
+            _insert_paths_sh_heredoc "$TEAM_ID" "$KANBAN_DIR" "$WORKING_DIR" \
+                "$LCARS_PORT" "$PORT_BAND_BASE" "$PORT_BAND_RANGE" "$TEAM_CODE"
+            _ok "aiteamforge-paths.sh _AITEAMFORGE_DEFAULT_TEAMS_DATA"
+        fi
+    fi
+
+    # ── Site 3: lcars-ports file ──────────────────────────────────────────
+
+    local port_file="${LCARS_PORTS_DIR}/${TEAM_ID}-lcars.port"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would create ${port_file} with port ${LCARS_PORT}"
+    else
+        if [[ -f "$port_file" ]]; then
+            _skip "lcars-ports/${TEAM_ID}-lcars.port"
+        else
+            mkdir -p "$LCARS_PORTS_DIR"
+            printf '%s\n' "$LCARS_PORT" > "$port_file"
+            _ok "lcars-ports/${TEAM_ID}-lcars.port"
+        fi
+    fi
+
+    # ── Site 4: ~/.aiteamforge/team-paths.json ────────────────────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert '${TEAM_ID}' into ${TEAM_PATHS_JSON}"
+    else
+        if [[ -f "$TEAM_PATHS_JSON" ]] && python3 -c "
+import json, sys
+d = json.load(open('${TEAM_PATHS_JSON}'))
+sys.exit(0 if '${TEAM_ID}' in d.get('teams', {}) else 1)
+" 2>/dev/null; then
+            _skip "~/.aiteamforge/team-paths.json"
+        else
+            _insert_team_paths_json "$TEAM_ID" "$TEAM_CODE" "$KANBAN_DIR" "$WORKING_DIR" \
+                "$LCARS_PORT" "$PORT_BAND_BASE" "$PORT_BAND_RANGE"
+            _ok "~/.aiteamforge/team-paths.json"
+        fi
+    fi
+
+    # ── Site 5: kanban-helpers.sh _kb_get_team_code ───────────────────────
+
+    local code_arm="        ${TEAM_ID})                           echo \"${TEAM_CODE}\" ;;"
+    local code_sentinel="        *)
+            # Smart fallback"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert case arm for '${TEAM_ID}' in _kb_get_team_code()"
+    else
+        if grep -q "^[[:space:]]*${TEAM_ID})[[:space:]]" "${KANBAN_HELPERS}"; then
+            _skip "kanban-helpers.sh _kb_get_team_code"
+        else
+            _insert_case_arm "${KANBAN_HELPERS}" "_kb_get_team_code" \
+                "$code_arm" "$code_sentinel" && _ok "kanban-helpers.sh _kb_get_team_code" \
+                || _warn "kanban-helpers.sh _kb_get_team_code — sentinel not found, manual edit needed"
+        fi
+    fi
+
+    # ── Site 6: kanban-helpers.sh _kb_get_team_from_code ─────────────────
+
+    local from_code_arm="        ${TEAM_CODE}) echo \"${TEAM_ID}\" ;;"
+    local from_code_sentinel="        *)   echo \"\" ;;  # Unknown code"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert case arm for '${TEAM_CODE}' in _kb_get_team_from_code()"
+    else
+        if grep -q "^[[:space:]]*${TEAM_CODE})[[:space:]]" "${KANBAN_HELPERS}"; then
+            _skip "kanban-helpers.sh _kb_get_team_from_code"
+        else
+            _insert_case_arm "${KANBAN_HELPERS}" "_kb_get_team_from_code" \
+                "$from_code_arm" "$from_code_sentinel" && _ok "kanban-helpers.sh _kb_get_team_from_code" \
+                || _warn "kanban-helpers.sh _kb_get_team_from_code — sentinel not found, manual edit needed"
+        fi
+    fi
+
+    # ── Site 7: kanban-helpers.sh _kb_get_kanban_dir ─────────────────────
+
+    local kanban_dir_arm="        ${TEAM_ID})
+            echo \"${KANBAN_DIR}\"
+            ;;"
+    local kanban_dir_sentinel="        # Legal Projects"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert case arm for '${TEAM_ID}' in _kb_get_kanban_dir()"
+    else
+        # Check for duplicate — the team_id may appear in _kb_get_team_code too, so be specific
+        local kanban_dir_func_region
+        kanban_dir_func_region=$(awk '/^_kb_get_kanban_dir\(\)/{found=1} found{print} /^}$/{if(found) exit}' "${KANBAN_HELPERS}")
+        if echo "$kanban_dir_func_region" | grep -q "^[[:space:]]*${TEAM_ID})[[:space:]]*$\|^[[:space:]]*${TEAM_ID})$"; then
+            _skip "kanban-helpers.sh _kb_get_kanban_dir"
+        else
+            _insert_case_arm "${KANBAN_HELPERS}" "_kb_get_kanban_dir" \
+                "$kanban_dir_arm" "$kanban_dir_sentinel" && _ok "kanban-helpers.sh _kb_get_kanban_dir" \
+                || _warn "kanban-helpers.sh _kb_get_kanban_dir — sentinel not found, manual edit needed"
+        fi
+    fi
+
+    # ── Site 8: kanban-helpers.sh _kb_team_lcars_port ────────────────────
+
+    local port_arm="        ${TEAM_ID})                           _port=\"${LCARS_PORT}\" ;;"
+    local port_sentinel="        *)                                      _port=\"\" ;;"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert case arm for '${TEAM_ID}' in _kb_team_lcars_port()"
+    else
+        local port_func_region
+        port_func_region=$(awk '/^_kb_team_lcars_port\(\)/{found=1} found{print} /^}$/{if(found) exit}' "${KANBAN_HELPERS}")
+        if echo "$port_func_region" | grep -q "${TEAM_ID}"; then
+            _skip "kanban-helpers.sh _kb_team_lcars_port"
+        else
+            _insert_case_arm "${KANBAN_HELPERS}" "_kb_team_lcars_port" \
+                "$port_arm" "$port_sentinel" && _ok "kanban-helpers.sh _kb_team_lcars_port" \
+                || _warn "kanban-helpers.sh _kb_team_lcars_port — sentinel not found, manual edit needed"
+        fi
+    fi
+
+    # ── Site 9: statusline-command.sh _get_team_kanban_dir ───────────────
+
+    local statusline_arm="        ${TEAM_ID})     echo \"${KANBAN_DIR}\" ;;"
+    local statusline_sentinel="        *)                              echo \"\${HOME}/dev-team/kanban\" ;;"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert case arm for '${TEAM_ID}' in statusline _get_team_kanban_dir()"
+    else
+        if grep -q "^[[:space:]]*${TEAM_ID})" "${STATUSLINE_SH}"; then
+            _skip "statusline-command.sh _get_team_kanban_dir"
+        else
+            _insert_case_arm "${STATUSLINE_SH}" "_get_team_kanban_dir" \
+                "$statusline_arm" "$statusline_sentinel" && _ok "statusline-command.sh _get_team_kanban_dir" \
+                || _warn "statusline-command.sh — sentinel not found, manual edit needed"
+        fi
+    fi
+
+    # ── Site 10: server.py team_dir_map ──────────────────────────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert '${TEAM_ID}': '${ASSET_DIR}' into server.py team_dir_map"
+    else
+        if grep -q "'${TEAM_ID}'" "${SERVER_PY}"; then
+            _skip "server.py team_dir_map"
+        else
+            _insert_team_dir_map "$TEAM_ID" "$ASSET_DIR"
+            _ok "server.py team_dir_map"
+        fi
+    fi
+
+    # ── Site 11: amb-session-map.json ─────────────────────────────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would insert $(echo "$TERMINALS_LIST" | wc -l | tr -d ' ') entries into amb-session-map.json"
+    else
+        if python3 -c "
+import json, sys
+d=json.load(open('${AMB_SESSION_MAP}'))
+sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
+" 2>/dev/null; then
+            _skip "amb-session-map.json"
+        else
+            _insert_amb_session_map "$TEAM_ID" "$TERMINALS_LIST"
+            _ok "amb-session-map.json"
+        fi
+    fi
+
+    # ── Site 12: board.json ───────────────────────────────────────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would create ${KANBAN_DIR}/${TEAM_ID}-board.json"
+    else
+        if [[ -f "${KANBAN_DIR}/${TEAM_ID}-board.json" ]]; then
+            _skip "board.json"
+        else
+            mkdir -p "$KANBAN_DIR"
+            _create_board_json "$TEAM_ID" "$TEAM_NAME" "$ORG_NAME" "$ORG_COLOR" \
+                "$KANBAN_DIR" "$SERIES"
+            _ok "board.json → ${KANBAN_DIR}/${TEAM_ID}-board.json"
+        fi
+    fi
+
+    # ── Site 13+14: directory tree + knowledge INDEX files ───────────────
+
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        _dry "Would create kanban/ directory tree and knowledge INDEX.md files"
+    else
+        _create_dir_tree "$KANBAN_DIR" "$TEAM_ID" "$TEAM_NAME" "$SERIES"
+        _ok "Directory tree (config/ activity/ plans/ knowledge/)"
+    fi
+
+    # ── Validation ────────────────────────────────────────────────────────
+
+    if [[ "$DRY_RUN" -eq 0 ]]; then
+        echo ""
+        echo "=== Validation ==="
+
+        # py_compile checks
+        local py_ok=1
+        for py_file in "${AITEAMFORGE_PATHS_PY}" \
+                       "${DEV_TEAM_ROOT}/kanban-hooks/kanban_utils.py" \
+                       "${SERVER_PY}"; do
+            if python3 -m py_compile "$py_file" 2>/dev/null; then
+                _ok "py_compile: $(basename $py_file)"
+            else
+                _fail "py_compile FAILED: $py_file"
+                py_ok=0
+            fi
+        done
+
+        # bash -n checks
+        for sh_file in "${KANBAN_HELPERS}" "${STATUSLINE_SH}" "${AITEAMFORGE_PATHS_SH}"; do
+            if bash -n "$sh_file" 2>/dev/null; then
+                _ok "bash -n: $(basename $sh_file)"
+            else
+                _fail "bash -n FAILED: $sh_file"
+                py_ok=0
+            fi
+        done
+
+        # JSON checks
+        for json_file in "${AMB_SESSION_MAP}" "${TEAM_PATHS_JSON}"; do
+            if [[ -f "$json_file" ]]; then
+                if python3 -c "import json; json.load(open('$json_file'))" 2>/dev/null; then
+                    _ok "json valid: $(basename $json_file)"
+                else
+                    _fail "JSON INVALID: $json_file"
+                    py_ok=0
+                fi
+            fi
+        done
+
+        if [[ "$py_ok" -eq 1 ]]; then
+            echo ""
+            _ok "All validation checks passed."
+        else
+            echo ""
+            _fail "One or more validation checks failed. Review files before committing."
+            exit 1
+        fi
+    fi
+
+    echo ""
+    echo "=== Summary ==="
+    echo ""
+    _info "Team '${TEAM_ID}' (${TEAM_CODE}) registration complete."
+    _info "Port: ${LCARS_PORT} | Series: ${SERIES} | Asset dir: ${ASSET_DIR}"
+    echo ""
+    _info "Next steps:"
+    _info "  1. Run ./sync-tap.sh to sync canonical sources to homebrew-tap/share/"
+    _info "  2. Commit: git add <changed-files> && git commit -m 'feat: register team ${TEAM_ID}'"
+    _info "  3. The tap's share/kanban-hooks/ copies sync via sync-tap.sh (XACA-0340 rule)"
+    _info "  4. LCARS server restart needed to pick up new team_dir_map entry in server.py"
+    _info "  5. kanban_utils and server prefix maps derive at next import — no restart needed"
+    echo ""
+}
+
+main "$@"

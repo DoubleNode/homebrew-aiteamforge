@@ -6,6 +6,7 @@
 # Example: ./medical-startup.sh clinic1
 
 source "$HOME/dev-team/scripts/lcars-launch-helpers.sh" || { echo "fatal: scripts/lcars-launch-helpers.sh missing or unreadable" >&2; exit 1; }
+source "$HOME/dev-team/scripts/kb-init-team-guard.sh" || true
 
 # ============================================================================
 # Cleanup orphaned processes from previous crashed sessions
@@ -77,6 +78,9 @@ fi
 # Create project-specific session names
 PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
 SESSION_PREFIX="medical-${PROJECT_LOWER}"
+
+# Guard: verify kanban board is initialized before any kanban-dependent work.
+kb_ensure_team_initialized "$SESSION_PREFIX" "$PROJECT_DIR/kanban" || true
 
 # Generate unique port for LCARS based on project name (8300-8379 range for medical)
 LCARS_PORT=$((8300 + $(echo "${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 80))
