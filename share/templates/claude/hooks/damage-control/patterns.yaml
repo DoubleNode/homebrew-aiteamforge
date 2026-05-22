@@ -10,20 +10,26 @@
 # narrow, well-understood cases that the generic guards over-block.
 #
 # SAFETY RULE: every allow pattern MUST be anchored to a single command
-# (^ ... $) so a dangerous operation cannot be smuggled via chaining. e.g.
-# "rm /opt/homebrew/x && rm ~/.ssh/id_rsa" must NOT match (the trailing
-# "&& rm ~/.ssh..." breaks the anchor), so the secret-path guard still fires.
+# (^ ... $) AND its free portions (args/paths) must use a charset that
+# EXCLUDES shell metacharacters (& ; | ` $ ( ) < > space), so a dangerous
+# operation cannot be smuggled via chaining. A bare `\S+` is NOT safe here:
+# it would swallow ";reboot" or "&& rm ~/.ssh". e.g.
+#   "brew cleanup && rm ~/.ssh/id_rsa"  -> must NOT match
+#   "rm /opt/homebrew/Cellar/x;reboot"  -> must NOT match
+# so the downstream block/zero-access guards still fire.
 allowPatterns:
   # Homebrew maintenance. The generic rm -rf / sudo rm / system-path guards
   # block routine `brew cleanup` and removal of stale Homebrew-managed files
   # (orphaned kegs, symlinks). These exceptions cover ONLY standalone commands
-  # whose targets live under a Homebrew prefix subpath.
-  - pattern: '^\s*brew\s+(cleanup|uninstall|untap)\b'
+  # whose targets live under a Homebrew prefix subpath. Args/paths are limited
+  # to [\w.@/=+-] (formula names, flags, version dirs) — no metacharacters.
+  - pattern: '^[ \t]*brew[ \t]+(cleanup|uninstall|untap)([ \t]+[\w.@/=+-]+)*[ \t]*$'
     reason: standalone brew maintenance command
   # Standalone rm / sudo rm of one-or-more Homebrew-managed SUBPATHS only.
   # Requires "<prefix>/<something>" (a subpath) so it never allows nuking a
-  # whole prefix like "rm -rf /opt/homebrew". Anchored ^...$ = single command.
-  - pattern: '^\s*(sudo\s+)?rm\s+(-[A-Za-z]+\s+)*((/opt/homebrew|/usr/local/Cellar|/usr/local/Homebrew)/\S+\s*)+$'
+  # whole prefix like "rm -rf /opt/homebrew". Anchored ^...$ = single command;
+  # path chars limited to [\w.@/=+-] so ";"/"&"/"|" can't be smuggled.
+  - pattern: '^[ \t]*(sudo[ \t]+)?rm[ \t]+(-[A-Za-z]+[ \t]+)*((/opt/homebrew|/usr/local/Cellar|/usr/local/Homebrew)/[\w.@/=+-]+[ \t]*)+$'
     reason: rm of Homebrew-managed subpath(s)
 
 # These patterns are matched against Bash tool commands only
