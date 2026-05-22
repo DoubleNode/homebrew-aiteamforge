@@ -7,7 +7,13 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
-### Fix: XACA-0535 — Tap-hygiene guard allow-lists freelance-<client> configs
+### Feature: XACA-0541 — Auto-name Claude sessions + pin session UUID at launch
+
+- **`share/templates/aliases/cc-aliases.sh`** — Ported the dev-side `_cc_launch`/`_cc_save_session` changes into the shipped installer template so installed teams get the same behavior:
+  - **`_cc_launch`** now sets a session display name via `claude -n/--name`. The name is taken from the `CC_SESSION_NAME` env var (set by the kb-run*/kb-work* launchers as `<ITEM-ID>: <title>` with `[Review]`/`[Test]`/`[Debug]` mode prefixes), falling back to the kanban/transcript-derived name from `_cc_derive_session_name`. Sanitized (newlines/pipes collapsed) and truncated to 40 chars; the flag is omitted entirely when empty. The name surfaces in the `/resume` picker, prompt box, and terminal title instead of "Untitled".
+  - **`_cc_launch`** also pre-generates a lowercase UUID and passes `claude --session-id <uuid>` so the session id is known before launch. Both flags are feature-detected against `claude --help` and spliced via an array so unsupported/empty values vanish cleanly.
+  - **`_cc_save_session`** accepts the pinned UUID as an optional `$1`; when supplied it is used directly, retiring the `ls -t *.jsonl | head -1` heuristic on the fresh-launch path. The heuristic is preserved as the fallback for `ccc`'s `--resume`/`--continue` calls (which remain untouched — `--session-id` is incompatible with `--resume` without `--fork-session`).
+- **Scope.** Single change point in `_cc_launch`; `cc`, `ccc`, and the resume/continue paths are unchanged.
 
 - **`scripts/check-tap-hygiene.sh`** — Check 3 (XACA-0252 debrand guard) did a blanket case-insensitive `git ls-files | grep -iE 'doublenode'`, which flagged the 6 legitimate freelance CLIENT configs created by XACA-0521 (`share/lcars-ui/team_transfer/config/freelance-doublenode-{appplanning,awaysentry,caravan,lifeboard,starwords,workstats}.yaml`) as stale rebrand debt. These are not rebrand leftovers — `doublenode` is the client name (working dir `/Users/Shared/Development/DoubleNode/...`), parallel to `freelance-liquidstyle-*`; renaming would break team_transfer identity + `amb-session-map.json` refs.
 - **Fix.** Added `REBRAND_ALLOWLIST_DIR="share/lcars-ui/team_transfer/config"` alongside the existing exact-match allow-list; the skip loop excuses only DIRECT children matching `freelance-*.yaml` via a `case` glob plus a `dirname` guard. The dirname guard rejects any nested path the glob's `*` would otherwise span (e.g. `config/freelance-X/evil-doublenode.yaml` still fails), and quoting the dir keeps the pattern a literal glob so no SC2254 suppression is needed. A genuine rebrand leftover — elsewhere in the tree or nested under this dir — still fails.

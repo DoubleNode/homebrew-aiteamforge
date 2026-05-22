@@ -136,28 +136,44 @@ PY
 # dir so ccc can cd back to it on resume (XACA-0177). Sidecar file format is
 # "<uuid>|<name>|<project_dir>" (pipe-delimited; name and dir may be empty).
 # Skipped outside tmux — no per-window scope to attach to.
+#
+# XACA-0541 — Optional $1: a known session UUID (pinned via --session-id at
+# launch). When supplied and valid, skips the ls -t heuristic entirely — no
+# project_dir lookup needed. Callers that don't supply $1 (ccc --resume /
+# --continue) keep the existing ls -t fallback behaviour unchanged.
 _cc_save_session() {
     [[ -z "$SESSION_CODE" ]] && return 0
 
     local window_suffix
     window_suffix=$(_cc_window_suffix) || return 0
 
-    local encoded_dir
-    encoded_dir=$(_cc_encode_project_dir)
-    local project_dir="$HOME/.claude/projects/-${encoded_dir}"
+    # Accept an optional known UUID from the caller (e.g. _cc_launch pinned id).
+    local _cc_known_id="${1:-}"
 
-    [[ ! -d "$project_dir" ]] && return 0
+    local session_id=""
+    local latest_file=""
 
-    # Find the most recently modified session .jsonl file
-    local latest_file
-    latest_file=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
-    [[ -z "$latest_file" ]] && return 0
+    if [[ "$_cc_known_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+        # Fast path: use the pinned UUID directly; no filesystem probe needed.
+        session_id="$_cc_known_id"
+        # latest_file stays empty — _cc_derive_session_name handles that gracefully.
+    else
+        # Fallback path (used by ccc --resume / --continue): probe the project dir.
+        local encoded_dir
+        encoded_dir=$(_cc_encode_project_dir)
+        local project_dir="$HOME/.claude/projects/-${encoded_dir}"
 
-    local session_id
-    session_id=$(basename "$latest_file" .jsonl)
+        [[ ! -d "$project_dir" ]] && return 0
 
-    # Validate UUID format
-    [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 0
+        # Find the most recently modified session .jsonl file
+        latest_file=$(ls -t "$project_dir"/*.jsonl 2>/dev/null | head -1)
+        [[ -z "$latest_file" ]] && return 0
+
+        session_id=$(basename "$latest_file" .jsonl)
+
+        # Validate UUID format
+        [[ "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] || return 0
+    fi
 
     local session_name
     session_name=$(_cc_derive_session_name "$latest_file")
@@ -203,12 +219,37 @@ _cc_launch() {
         return 1
     fi
 
+    # --- XACA-0541: session name -------------------------------------------
+    # Start from caller-supplied env var; fall back to kanban/transcript derive.
+    local _cc_name="${CC_SESSION_NAME:-}"
+    if [[ -z "$_cc_name" ]]; then
+        _cc_name=$(_cc_derive_session_name "")
+    fi
+    # Sanitize regardless of source: collapse newlines/whitespace, strip pipes,
+    # cap at 40 chars (mirrors the sanitize block in _cc_derive_session_name).
+    _cc_name="${_cc_name//$'\n'/ }"
+    _cc_name="${_cc_name//|/ }"
+    if (( ${#_cc_name} > 40 )); then
+        _cc_name="${_cc_name:0:37}..."
+    fi
+
+    # --- XACA-0541: pinned session-id --------------------------------------
+    # Feature-detect once; generate a lowercase UUID when supported.
+    local _cc_has_session_id=""
+    claude --help 2>/dev/null | grep -q -- "--session-id" && _cc_has_session_id=1
+    local _cc_pinned_id=""
+    if [[ -n "$_cc_has_session_id" ]]; then
+        _cc_pinned_id=$(uuidgen | tr 'A-Z' 'a-z')
+    fi
+
     if [[ "$CC_DEBUG" == "1" ]]; then
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "CC_DEBUG=1 — Preview Only"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "Prompt file: $prompt_file"
         echo "Prompt length: ${#CLAUDE_SYSTEM_PROMPT} chars"
+        echo "Session name: ${_cc_name:-(none)}"
+        echo "Pinned session-id: ${_cc_pinned_id:-(none — feature not supported)}"
         echo ""
         echo "First 500 chars:"
         echo "${CLAUDE_SYSTEM_PROMPT:0:500}"
@@ -216,10 +257,16 @@ _cc_launch() {
         return 0
     fi
 
-    claude --permission-mode bypassPermissions --append-system-prompt "$CLAUDE_SYSTEM_PROMPT" \
+    # Build optional flag array — empty values are simply omitted.
+    local -a _cc_extra_args=()
+    [[ -n "$_cc_name" ]] && _cc_extra_args+=(--name "$_cc_name")
+    [[ -n "$_cc_pinned_id" ]] && _cc_extra_args+=(--session-id "$_cc_pinned_id")
+
+    claude --permission-mode bypassPermissions "${_cc_extra_args[@]}" --append-system-prompt "$CLAUDE_SYSTEM_PROMPT" \
         "If an AMB heartbeat system reminder is present, call mcp__amb__heartbeat first, then introduce yourself briefly."
 
-    _cc_save_session
+    # Pass the pinned UUID so _cc_save_session can skip the ls -t heuristic.
+    _cc_save_session "$_cc_pinned_id"
 
     if command -v kb-clear &> /dev/null; then
         kb-clear
