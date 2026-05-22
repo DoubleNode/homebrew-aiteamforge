@@ -144,11 +144,11 @@ done
 _prompt() {
     local var_name="$1" prompt_text="$2" default="${3-}"
     local current
-    current=$(eval "echo \"\${$var_name}\"")
+    current="${!var_name}"
     if [[ -n "$current" ]]; then return 0; fi
     if [[ "$NON_INTERACTIVE" -eq 1 ]]; then
         if [[ -n "$default" ]]; then
-            eval "${var_name}=\"${default}\""
+            printf -v "$var_name" '%s' "$default"
         else
             _fail "--non-interactive set but required param ${var_name} is missing"
             exit 1
@@ -157,14 +157,14 @@ _prompt() {
         local response
         if [[ -n "$default" ]]; then
             read -r -p "  ${prompt_text} [${default}]: " response
-            eval "${var_name}=\"${response:-${default}}\""
+            printf -v "$var_name" '%s' "${response:-$default}"
         else
             read -r -p "  ${prompt_text}: " response
             if [[ -z "$response" ]]; then
                 _fail "${var_name} is required"
                 exit 1
             fi
-            eval "${var_name}=\"${response}\""
+            printf -v "$var_name" '%s' "$response"
         fi
     fi
 }
@@ -895,9 +895,66 @@ EOF
 
 # ── Check-only mode ───────────────────────────────────────────────────────────
 
+# membership in DEFAULT_TEAMS (delegates to existing injection-safe python helper)
+_chk_default_teams() { [[ "$(_team_in_default_teams "$1")" == "yes" ]]; }
+
+# fixed-string grep (no regex) for a literal token in a file
+_chk_grep_literal() { grep -qF -- "$1" "$2"; }
+
+# file exists
+_chk_file_exists() { [[ -f "$1" ]]; }
+
+# team_id present as a key under JSON "teams" map
+_chk_json_team_in_teams() {
+    python3 - "$1" "$2" <<'PYEOF'
+import sys, json
+d = json.load(open(sys.argv[1]))
+sys.exit(0 if sys.argv[2] in d.get("teams", {}) else 1)
+PYEOF
+}
+
+# any top-level JSON key starts with "<team_id>-"
+_chk_json_key_prefix() {
+    python3 - "$1" "$2" <<'PYEOF'
+import sys, json
+d = json.load(open(sys.argv[1]))
+prefix = sys.argv[2] + "-"
+sys.exit(0 if any(k.startswith(prefix) for k in d) else 1)
+PYEOF
+}
+
+# case-label <label> present within shell function <func> region of <file>.
+# Reproduces the original anchoring (^|[[:space:]|])LABEL[|)] but matches the
+# label via awk index() — a pure string compare, never an ERE — so the
+# (already-inert, charset-gated) regex-injection surface is removed at the root
+# per XACA-0546-001. <func> is always a hard-coded caller literal, so its use in
+# the function-region regex carries no user-input injection surface.
+_chk_case_label() {
+    local func="$1" file="$2" label="$3"
+    awk -v fn="$func" -v lab="$label" '
+        function has_label(line,   n, p, abs, before, after, off) {
+            n = length(lab); off = 1
+            while ((p = index(substr(line, off), lab)) > 0) {
+                abs = off + p - 1
+                before = (abs == 1) ? "" : substr(line, abs - 1, 1)
+                after  = substr(line, abs + n, 1)
+                if ((abs == 1 || before ~ /[[:space:]]/ || before == "|") \
+                    && (after == "|" || after == ")"))
+                    return 1
+                off = abs + 1
+            }
+            return 0
+        }
+        $0 ~ "^" fn "\\(\\)" { f = 1 }
+        f && /^\}$/ { exit found ? 0 : 1 }
+        f && has_label($0) { found = 1 }
+        END { exit found ? 0 : 1 }
+    ' "$file"
+}
+
 _check_site() {
-    local name="$1" check_cmd="$2"
-    if eval "$check_cmd" 2>/dev/null; then
+    local name="$1"; shift
+    if "$@" >/dev/null 2>&1; then
         _ok "${name}"
         return 0
     else
@@ -914,19 +971,19 @@ _run_check_only() {
 
     # 1. DEFAULT_TEAMS
     _check_site "aiteamforge_paths.py DEFAULT_TEAMS" \
-        "[[ \"\$(_team_in_default_teams '${TEAM_ID}')\" == 'yes' ]]" || all_ok=1
+        _chk_default_teams "$TEAM_ID" || all_ok=1
 
     # 2. aiteamforge-paths.sh heredoc
     _check_site "aiteamforge-paths.sh heredoc" \
-        "grep -q '\"${TEAM_ID}\"' '${AITEAMFORGE_PATHS_SH}'" || all_ok=1
+        _chk_grep_literal "\"${TEAM_ID}\"" "$AITEAMFORGE_PATHS_SH" || all_ok=1
 
     # 3. lcars-ports file
     _check_site "lcars-ports/${TEAM_ID}-lcars.port" \
-        "[[ -f '${LCARS_PORTS_DIR}/${TEAM_ID}-lcars.port' ]]" || all_ok=1
+        _chk_file_exists "${LCARS_PORTS_DIR}/${TEAM_ID}-lcars.port" || all_ok=1
 
     # 4. team-paths.json
     _check_site "~/.aiteamforge/team-paths.json" \
-        "python3 -c \"import json; d=json.load(open('${TEAM_PATHS_JSON}')); assert '${TEAM_ID}' in d.get('teams',{})\"" || all_ok=1
+        _chk_json_team_in_teams "$TEAM_PATHS_JSON" "$TEAM_ID" || all_ok=1
 
     # 5. kanban-helpers.sh _kb_get_team_code
     # Scope to the function region and match team_id as a case label (before | or )).
@@ -935,15 +992,15 @@ _run_check_only() {
     #   - piped arm:               "    teamA|teamB)  ..."
     #   - backslash-continued arm: "teamA|teamB)" on a continuation line (starts at col 0)
     _check_site "kanban-helpers.sh _kb_get_team_code" \
-        "awk '/^_kb_get_team_code\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+        _chk_case_label _kb_get_team_code "$KANBAN_HELPERS" "$TEAM_ID" || all_ok=1
 
     # 6. kanban-helpers.sh _kb_get_team_from_code
     _check_site "kanban-helpers.sh _kb_get_team_from_code" \
-        "awk '/^_kb_get_team_from_code\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_CODE}[|)]'" || all_ok=1
+        _chk_case_label _kb_get_team_from_code "$KANBAN_HELPERS" "$TEAM_CODE" || all_ok=1
 
     # 7. kanban-helpers.sh _kb_get_kanban_dir
     _check_site "kanban-helpers.sh _kb_get_kanban_dir" \
-        "awk '/^_kb_get_kanban_dir\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+        _chk_case_label _kb_get_kanban_dir "$KANBAN_HELPERS" "$TEAM_ID" || all_ok=1
 
     # 8. kanban-helpers.sh _kb_team_lcars_port
     # Presence of the case label within the function is sufficient; the port value
@@ -951,23 +1008,23 @@ _run_check_only() {
     # Previously used a two-pipe grep|grep that required _port= on the same line as
     # the label — false-negative for freelance-doublenode-awaysentry (line 11646).
     _check_site "kanban-helpers.sh _kb_team_lcars_port port entry" \
-        "awk '/^_kb_team_lcars_port\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${KANBAN_HELPERS}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+        _chk_case_label _kb_team_lcars_port "$KANBAN_HELPERS" "$TEAM_ID" || all_ok=1
 
     # 9. statusline-command.sh
     _check_site "statusline-command.sh _get_team_kanban_dir" \
-        "awk '/^_get_team_kanban_dir\(\)/{f=1} f{print} /^\}$/{if(f)exit}' '${STATUSLINE_SH}' | grep -Eq '(^|[[:space:]|])${TEAM_ID}[|)]'" || all_ok=1
+        _chk_case_label _get_team_kanban_dir "$STATUSLINE_SH" "$TEAM_ID" || all_ok=1
 
     # 10. server.py team_dir_map
     _check_site "server.py team_dir_map" \
-        "grep -q \"'${TEAM_ID}'\" '${SERVER_PY}'" || all_ok=1
+        _chk_grep_literal "'${TEAM_ID}'" "$SERVER_PY" || all_ok=1
 
     # 11. amb-session-map.json
     _check_site "amb-session-map.json" \
-        "python3 -c \"import json; d=json.load(open('${AMB_SESSION_MAP}')); assert any(k.startswith('${TEAM_ID}-') for k in d)\"" || all_ok=1
+        _chk_json_key_prefix "$AMB_SESSION_MAP" "$TEAM_ID" || all_ok=1
 
     # 12. board.json
     _check_site "board.json exists" \
-        "[[ -f '${KANBAN_DIR}/${TEAM_ID}-board.json' ]]" || all_ok=1
+        _chk_file_exists "${KANBAN_DIR}/${TEAM_ID}-board.json" || all_ok=1
 
     echo ""
     if [[ "$all_ok" -eq 0 ]]; then
@@ -985,8 +1042,9 @@ main() {
     _prompt TEAM_ID      "Team ID (e.g. freelance-acme-ios)"
 
     # XACA-0542-017: validate team-id charset BEFORE it is interpolated into any
-    # eval string (_check_site) or python source (TEAM_CODE derivation below) —
-    # injection hardening. Lowercase alphanumeric with internal dashes only.
+    # _chk_* helper argument or python source (TEAM_CODE derivation below) —
+    # injection hardening (defense-in-depth; eval removed in XACA-0546).
+    # Lowercase alphanumeric with internal dashes only.
     if [[ ! "$TEAM_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
         _fail "team_id must be lowercase alphanumeric with dashes (got: '${TEAM_ID}')"
         exit 1
@@ -1011,15 +1069,15 @@ print(get_team_code('${TEAM_ID}'))
         _fail "team_code must be exactly 3 characters; got: '${TEAM_CODE}'"
         exit 1
     fi
-    # XACA-0542-017: charset-restrict team-code too (interpolated into eval/python).
+    # XACA-0542-017: charset-restrict team-code too (interpolated into _chk_* args/python).
     if [[ ! "$TEAM_CODE" =~ ^[A-Z0-9]{3}$ ]]; then
         _fail "team_code must be 3 uppercase alphanumeric characters; got: '${TEAM_CODE}'"
         exit 1
     fi
 
-    # XACA-0542-021: KANBAN_DIR is interpolated into the _check_site eval strings,
-    # so reject non-absolute paths and shell metacharacters before any eval runs
-    # (completes the injection hardening started for team-id/team-code in 017).
+    # XACA-0542-021: KANBAN_DIR is passed as an argument to _chk_* helpers;
+    # reject non-absolute paths and shell metacharacters as defense-in-depth
+    # (eval removed in XACA-0546; hardening started for team-id/team-code in 017).
     if [[ "$KANBAN_DIR" != /* ]] || [[ "$KANBAN_DIR" == *[\;\|\&\$\`\(\)\<\>\"\'\!]* ]] || [[ "$KANBAN_DIR" == *$'\n'* ]]; then
         _fail "kanban_dir must be an absolute path without shell metacharacters; got: '${KANBAN_DIR}'"
         exit 1
