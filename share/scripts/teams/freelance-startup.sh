@@ -95,9 +95,26 @@ SESSION_PREFIX="freelance-${GROUP_LOWER}-${PROJECT_LOWER}"
 # Kanban dir is at the project root (parent of the 'develop' worktree), not inside it.
 kb_ensure_team_initialized "$SESSION_PREFIX" "$(dirname "$PROJECT_DIR")/kanban" || true
 
-# Generate unique port for LCARS based on project name (8080-8999 range)
-LCARS_PORT=$((8080 + $(echo "${GROUP_LOWER}-${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 900))
-echo "   LCARS Port: $LCARS_PORT"
+# Resolve the LCARS port (XACA-0549).
+# Authoritative source = the per-team port file written at provisioning/reconcile
+# time (kb-init-team / kb-port-reconcile), which is kept in lockstep with
+# team-paths.json (what the kb-* helpers curl). Reading it here makes the server
+# bind the same port the helpers reach, retiring the old cksum recompute that
+# silently re-diverged registered teams (e.g. doublenode ports 8500-8506).
+# Fall back to the legacy deterministic cksum derivation ONLY for teams not yet
+# registered with a port file, preserving backward-compat for ad-hoc projects.
+LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+LCARS_PORT_FILE="${LCARS_PORTS_DIR}/${SESSION_PREFIX}-lcars.port"
+LCARS_PORT=""
+if [[ -f "$LCARS_PORT_FILE" ]]; then
+    LCARS_PORT="$(tr -dc '0-9' < "$LCARS_PORT_FILE")"
+fi
+if [[ -n "$LCARS_PORT" ]]; then
+    echo "   LCARS Port: $LCARS_PORT (from ${SESSION_PREFIX}-lcars.port)"
+else
+    LCARS_PORT=$((8080 + $(echo "${GROUP_LOWER}-${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 900))
+    echo "   LCARS Port: $LCARS_PORT (cksum fallback — no port file for ${SESSION_PREFIX})"
+fi
 
 # Base terminal names (actual script filenames)
 # LCARS is first - provides the kanban overview

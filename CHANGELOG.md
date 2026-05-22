@@ -7,6 +7,10 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0549 — freelance startup snapshot reads authoritative LCARS port
+
+- **`share/scripts/teams/freelance-startup.sh`** — snapshot re-synced to its canonical source (byte-identical). The freelance LCARS port is now read from the per-team `lcars-ports/<team>-lcars.port` file (lockstep with `team-paths.json`) instead of being recomputed from a `cksum` of the project name on each launch; cksum is kept only as a fallback for teams with no port file. Prevents reconciled freelance teams (XACA-0547) from silently re-diverging at the next startup.
+
 ### Chore: XACA-0547 — Reconcile divergent LCARS ports (mirror sync)
 
 - **`share/kanban-hooks/aiteamforge_paths.py`, `libexec/lib/aiteamforge-paths.sh`** — `DEFAULT_TEAMS` / `_AITEAMFORGE_DEFAULT_TEAMS_DATA` `lcars_port` values for 9 teams reconciled to their authoritative `team-paths.json` ports via `kb-port-reconcile --apply` (canonical source in dev-team): finance-personal→8360, freelance-doublenode-{appplanning→8500, awaysentry→8501, caravan→8502, lifeboard→8503, starwords→8504, workstats→8506}, freelance-liquidstyle-agentbadges-ios→8970, legal-coparenting→8320. Resolves pre-existing three-way divergence so the shipped registry matches the live overlay.
