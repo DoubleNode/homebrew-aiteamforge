@@ -26,6 +26,18 @@ const { spawn } = require('child_process');
 // XACA-0281: AI engines registry store helpers
 const enginesStore = require('./lib/engines-store');
 
+// XACA-0537-012: AI engines registry API routes, extracted into a mountable
+// module so integration tests exercise the REAL handlers (not an inline copy).
+const { registerEnginesRoutes } = require('./lib/engines-routes');
+
+// XACA-0537-004: Secret Vault store helpers + crypto
+const vaultStore = require('./lib/vault-store');
+const { ensureReady: vaultEnsureReady } = require('./lib/vault-crypto');
+
+// XACA-0537-012: Secret Vault API routes, extracted into a mountable module so
+// integration tests exercise the REAL handlers (not an inline re-implementation).
+const { registerVaultRoutes } = require('./lib/vault-routes');
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -1996,254 +2008,33 @@ app.get('/api/machines/list', (req, res) => {
 // Accounts carry only metadata — never actual key values.
 // ============================================================================
 
-/**
- * Validation helpers for engines routes.
- */
-const ACCOUNT_SLUG_RE    = /^[a-z][a-z0-9-]*$/;
-const ENV_VAR_NAME_RE    = /^[A-Z][A-Z0-9_]*$/;
-const MAX_FIELD_LEN      = 200;
-const MAX_SLUG_LEN       = 64;
+// XACA-0537-012: The engines route handlers (and the validateAccountBody
+// helper) live in lib/engines-routes.js as a mountable module so the
+// integration tests exercise the SAME code shipped here. registerEnginesRoutes
+// mounts them on `app` exactly as if they were defined inline below.
+registerEnginesRoutes(app);
 
-function validateAccountBody(body) {
-    const errors = [];
-    const { slug, account_id, nickname, env_var_name } = body;
+// ============================================================================
+// SECRET VAULT API (XACA-0537-004)
+//
+// Implements design doc §7 (fleet-monitor/docs/SECRET-VAULT-DESIGN.md).
+//
+// HARD RULE: no endpoint returns plaintext. No endpoint calls crypto_box_seal_open.
+// The server holds opaque ciphertext sealed to machine public keys; only the
+// machine with the matching private key can open it. Routes validate shape and
+// length of ciphertext — they intentionally cannot verify content.
+//
+// Auth caveat: none of these routes are authenticated in A.4.1 (Non-Goals §1,
+// Residual Risk R1). EPIC-0019 layers transport auth on top. Routes are shaped
+// so auth middleware can wrap them without reshaping the contracts.
+//
+// XACA-0537-012: The route handlers themselves live in lib/vault-routes.js as a
+// mountable module so the integration tests exercise the SAME code shipped here
+// (not an inline re-implementation). registerVaultRoutes mounts them on `app`
+// exactly as if they were defined inline below.
+// ============================================================================
 
-    if (!slug || typeof slug !== 'string') {
-        errors.push('slug is required');
-    } else if (!ACCOUNT_SLUG_RE.test(slug)) {
-        errors.push('slug must match ^[a-z][a-z0-9-]*$');
-    } else if (slug.length > MAX_SLUG_LEN) {
-        errors.push(`slug max length is ${MAX_SLUG_LEN}`);
-    }
-
-    if (!account_id || typeof account_id !== 'string' || !account_id.trim()) {
-        errors.push('account_id is required and must be non-empty');
-    } else if (account_id.trim().length > MAX_FIELD_LEN) {
-        errors.push(`account_id max length is ${MAX_FIELD_LEN}`);
-    }
-
-    if (!nickname || typeof nickname !== 'string' || !nickname.trim()) {
-        errors.push('nickname is required and must be non-empty');
-    } else if (nickname.trim().length > MAX_FIELD_LEN) {
-        errors.push(`nickname max length is ${MAX_FIELD_LEN}`);
-    }
-
-    if (!env_var_name || typeof env_var_name !== 'string') {
-        errors.push('env_var_name is required');
-    } else if (!ENV_VAR_NAME_RE.test(env_var_name)) {
-        errors.push('env_var_name must match ^[A-Z][A-Z0-9_]*$');
-    } else if (env_var_name.length > MAX_FIELD_LEN) {
-        errors.push(`env_var_name max length is ${MAX_FIELD_LEN}`);
-    }
-
-    return errors;
-}
-
-/**
- * GET /api/engines
- * Return the full engines registry (version, updated_at, engines with accounts).
- */
-app.get('/api/engines', (req, res) => {
-    try {
-        const registry = enginesStore.readEngines();
-        res.json({
-            version: registry.version,
-            updated_at: registry.updated_at,
-            engines: registry.engines
-        });
-    } catch (error) {
-        console.error('Error reading engines registry:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-/**
- * GET /api/engines/:engineSlug
- * Return a single engine with its accounts.
- */
-app.get('/api/engines/:engineSlug', (req, res) => {
-    try {
-        const { engineSlug } = req.params;
-        const engine = enginesStore.findEngine(engineSlug);
-        if (!engine) {
-            return res.status(404).json({ error: `Engine '${engineSlug}' not found` });
-        }
-        res.json(engine);
-    } catch (error) {
-        console.error('Error reading engine:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-/**
- * POST /api/engines/:engineSlug/accounts
- * Add a new account to an engine.
- * Body: { slug, account_id, nickname, env_var_name }
- * Returns 201 + new account on success.
- * Returns 404 if engineSlug unknown, 409 on slug collision, 400 on validation failure.
- */
-app.post('/api/engines/:engineSlug/accounts', (req, res) => {
-    try {
-        const { engineSlug } = req.params;
-        const registry = enginesStore.readEngines();
-        const engineIdx = registry.engines.findIndex(e => e.slug === engineSlug);
-        if (engineIdx === -1) {
-            return res.status(404).json({ error: `Engine '${engineSlug}' not found` });
-        }
-
-        const errors = validateAccountBody(req.body);
-        if (errors.length > 0) {
-            return res.status(400).json({ error: 'Validation failed', details: errors });
-        }
-
-        const { slug, account_id, nickname, env_var_name } = req.body;
-        const engine = registry.engines[engineIdx];
-
-        // 409 on slug collision
-        if (engine.accounts.some(a => a.slug === slug)) {
-            return res.status(409).json({ error: `Account slug '${slug}' already exists in engine '${engineSlug}'` });
-        }
-
-        const now = new Date().toISOString();
-        const newAccount = {
-            slug,
-            account_id: account_id.trim(),
-            nickname: nickname.trim(),
-            env_var_name,
-            created_at: now,
-            updated_at: now,
-            last_validated_at: null
-        };
-
-        engine.accounts.push(newAccount);
-        engine.updated_at = now;
-        registry.updated_at = now;
-
-        if (!enginesStore.writeEngines(registry)) {
-            return res.status(500).json({ error: 'Failed to save engines registry' });
-        }
-
-        console.log(`✓ Added account '${slug}' to engine '${engineSlug}'`);
-        res.status(201).json(newAccount);
-    } catch (error) {
-        console.error('Error adding account:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-/**
- * PUT /api/engines/:engineSlug/accounts/:accountSlug
- * Update an existing account (account_id, nickname, env_var_name are mutable; slug is immutable).
- * Returns the updated account; 404 if engine or account missing; 400 on validation failure.
- */
-app.put('/api/engines/:engineSlug/accounts/:accountSlug', (req, res) => {
-    try {
-        const { engineSlug, accountSlug } = req.params;
-        const registry = enginesStore.readEngines();
-        const engineIdx = registry.engines.findIndex(e => e.slug === engineSlug);
-        if (engineIdx === -1) {
-            return res.status(404).json({ error: `Engine '${engineSlug}' not found` });
-        }
-
-        const engine = registry.engines[engineIdx];
-        const accountIdx = engine.accounts.findIndex(a => a.slug === accountSlug);
-        if (accountIdx === -1) {
-            return res.status(404).json({ error: `Account '${accountSlug}' not found in engine '${engineSlug}'` });
-        }
-
-        // Validate only the fields provided — build a merged candidate for validation
-        const existing = engine.accounts[accountIdx];
-        const candidate = {
-            slug: accountSlug, // slug is immutable
-            account_id:   req.body.account_id  !== undefined ? req.body.account_id  : existing.account_id,
-            nickname:     req.body.nickname     !== undefined ? req.body.nickname     : existing.nickname,
-            env_var_name: req.body.env_var_name !== undefined ? req.body.env_var_name : existing.env_var_name
-        };
-
-        const errors = validateAccountBody(candidate);
-        if (errors.length > 0) {
-            return res.status(400).json({ error: 'Validation failed', details: errors });
-        }
-
-        const now = new Date().toISOString();
-        engine.accounts[accountIdx] = {
-            ...existing,
-            account_id:   candidate.account_id.trim(),
-            nickname:     candidate.nickname.trim(),
-            env_var_name: candidate.env_var_name,
-            updated_at:   now
-        };
-        engine.updated_at = now;
-        registry.updated_at = now;
-
-        if (!enginesStore.writeEngines(registry)) {
-            return res.status(500).json({ error: 'Failed to save engines registry' });
-        }
-
-        console.log(`✓ Updated account '${accountSlug}' in engine '${engineSlug}'`);
-        res.json(engine.accounts[accountIdx]);
-    } catch (error) {
-        console.error('Error updating account:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-/**
- * DELETE /api/engines/:engineSlug/accounts/:accountSlug
- * Remove an account from an engine.
- * Requires ?confirm=true to execute; without it returns usage info for a confirmation prompt.
- * Response always includes a `usage` field listing teams currently referencing this account
- * (populated in a future phase when machines push team-paths attribution data).
- * Returns { deleted: true, slug, usage } on success; 404 if engine or account missing.
- */
-app.delete('/api/engines/:engineSlug/accounts/:accountSlug', (req, res) => {
-    try {
-        const { engineSlug, accountSlug } = req.params;
-        const { confirm } = req.query;
-
-        const registry = enginesStore.readEngines();
-        const engineIdx = registry.engines.findIndex(e => e.slug === engineSlug);
-        if (engineIdx === -1) {
-            return res.status(404).json({ error: `Engine '${engineSlug}' not found` });
-        }
-
-        const engine = registry.engines[engineIdx];
-        const accountIdx = engine.accounts.findIndex(a => a.slug === accountSlug);
-        if (accountIdx === -1) {
-            return res.status(404).json({ error: `Account '${accountSlug}' not found in engine '${engineSlug}'` });
-        }
-
-        // Build usage list: teams referencing this account.
-        // Phase A.3+ will populate this from machine-pushed attribution data.
-        // For now returns empty array — the shape is established for forward compatibility.
-        const usage = [];
-
-        if (confirm !== 'true') {
-            // Dry-run: return usage info without deleting, so the UI can prompt the user
-            return res.status(200).json({
-                deleted: false,
-                slug: accountSlug,
-                message: 'Send ?confirm=true to execute deletion',
-                usage
-            });
-        }
-
-        engine.accounts.splice(accountIdx, 1);
-        const now = new Date().toISOString();
-        engine.updated_at = now;
-        registry.updated_at = now;
-
-        if (!enginesStore.writeEngines(registry)) {
-            return res.status(500).json({ error: 'Failed to save engines registry' });
-        }
-
-        console.log(`✓ Deleted account '${accountSlug}' from engine '${engineSlug}'`);
-        res.json({ deleted: true, slug: accountSlug, usage });
-    } catch (error) {
-        console.error('Error deleting account:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
+registerVaultRoutes(app);
 
 // ============================================================================
 // TEAM CONFIGURATION API (Auto-Discovery)

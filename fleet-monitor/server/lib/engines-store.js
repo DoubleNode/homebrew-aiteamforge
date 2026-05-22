@@ -15,7 +15,11 @@
 const fs   = require('fs');
 const path = require('path');
 
-const ENGINES_FILE = path.join(__dirname, '..', 'data', 'engines.json');
+// Default path is unchanged production behavior. FLEET_ENGINES_FILE is an ADDITIVE
+// test seam (XACA-0537-006): when set, the store reads/writes that path instead,
+// letting tests point at isolated temp files so they never touch the real
+// data/engines.json. Default (env unset) is byte-identical to prior behavior.
+const ENGINES_FILE = process.env.FLEET_ENGINES_FILE || path.join(__dirname, '..', 'data', 'engines.json');
 
 /** Seed shape written when engines.json does not yet exist. */
 const SEED = {
