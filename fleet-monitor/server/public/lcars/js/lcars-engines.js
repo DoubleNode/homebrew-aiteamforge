@@ -378,10 +378,25 @@
                     secret = ''; // drop our reference to plaintext ASAP
                     if (secretEl) secretEl.value = '';
                     if (!sealedOk) {
-                        // Account saved but secret sealing failed: keep the modal open so
-                        // the user can retry the secret via Edit. Refresh the list so the
-                        // new account (without a vault secret yet) shows.
+                        // The account WAS created — only the secret seal/upload failed.
+                        // Retrying via this Add modal would 409 (the account now exists),
+                        // so transition the user into EDIT mode for the just-created
+                        // account. The Edit flow uses upsert (PUT) semantics, so a retry
+                        // there succeeds. Refresh the list first so the new account shows.
+                        // XACA-0538-015.
                         await LCARS_ENGINES.loadEngines();
+                        var createdAccount = {
+                            slug:         slug,
+                            account_id:   accountId,
+                            nickname:     nickname,
+                            env_var_name: envVar
+                        };
+                        hideModal('engines-add-modal');
+                        LCARS_ENGINES.openEditAccountModal(_activeEngineSlug, createdAccount);
+                        showFieldError(
+                            'engines-edit-secret-err',
+                            'Account created, but sealing the secret failed. Re-enter the secret and SAVE to retry.'
+                        );
                         return;
                     }
                 }
