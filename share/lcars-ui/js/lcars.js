@@ -3652,7 +3652,11 @@ function createBacklogItem(item, index) {
                 const effortSpan = document.createElement('span');
                 effortSpan.className = 'item-time-worked item-active-effort';
                 effortSpan.textContent = ` ⏱ ${effortStr}`;
-                effortSpan.title = item.workStartedAt
+                // XACA-0552: only label "live" when the span is actually accruing —
+                // a completed/cancelled item with a stale workStartedAt is frozen.
+                const isLiveEffort = item.workStartedAt
+                    && item.status !== 'completed' && item.status !== 'cancelled';
+                effortSpan.title = isLiveEffort
                     ? `Active effort (including live session): ${effortStr}`
                     : `Active effort: ${effortStr}`;
                 timestamp.appendChild(effortSpan);
@@ -3731,9 +3735,13 @@ function createBacklogItem(item, index) {
             if (effortStr) {
                 const effortEl = document.createElement('span');
                 effortEl.className = 'item-metrics-effort';
-                const liveIndicator = item.workStartedAt ? ' (live)' : '';
+                // XACA-0552: a completed/cancelled item with a stale workStartedAt is
+                // frozen — don't tag it "(live)".
+                const isLiveEffort = item.workStartedAt
+                    && item.status !== 'completed' && item.status !== 'cancelled';
+                const liveIndicator = isLiveEffort ? ' (live)' : '';
                 effortEl.innerHTML = `<span class="item-metrics-label">Active effort:</span> ${effortStr}${liveIndicator}`;
-                effortEl.title = item.workStartedAt
+                effortEl.title = isLiveEffort
                     ? `Accumulated effort plus current in-flight session`
                     : `Total accumulated active effort`;
                 metricsRow.appendChild(effortEl);
