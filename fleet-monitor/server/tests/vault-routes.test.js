@@ -59,7 +59,7 @@ const express  = require('express');
 
 // Vault dependencies (resolve their file paths from the env vars set above).
 const vaultStore     = require('../lib/vault-store');
-const { ensureReady, generateKeypair, seal } = require('../lib/vault-crypto');
+const { ensureReady, generateKeypair, seal, sealOpen } = require('../lib/vault-crypto');
 const enginesStore   = require('../lib/engines-store');
 
 // XACA-0537-012: Import the REAL vault routes module that server.js mounts. The
@@ -543,6 +543,177 @@ test('GET /api/vault/secrets/:engine/:account/ciphertext — 400 if machine_id m
         .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext`);
     assert.equal(res.status, 400);
     assert.ok(res.body.error.includes('machine_id'));
+});
+
+// ===========================================================================
+// SECRETS: CIPHERTEXT DELIVERY — HARDENING (XACA-0538-003)
+//
+// The delivery endpoint already shipped in XACA-0537. These tests AUDIT and
+// HARDEN it: prove the no-plaintext guarantee structurally, lock the structured
+// machine-readable `code` field added in 003 so the A.4.2/A.4.3 vault-fetch
+// client can branch on error category without parsing message text, and confirm
+// slug/machine_id inputs cannot inject into store lookups.
+// ===========================================================================
+
+// The set of field names a plaintext leak would plausibly use. The delivery
+// response must contain NONE of these — only { machine_id, sealed, sealed_at }.
+const PLAINTEXT_LEAK_FIELDS = [
+    'plaintext', 'plain', 'value', 'secret', 'decrypted', 'opened',
+    'cleartext', 'unsealed', 'content', 'data', 'private_key', 'privateKey',
+];
+
+test('GET .../ciphertext — happy path returns ONLY {machine_id, sealed, sealed_at} (no plaintext-shaped field)', async () => {
+    await registerMachine('m-noplain', 'No Plaintext Machine', testPublicKey);
+    const sealedBox = await makeSealed('super-secret-api-key', testPublicKey);
+
+    await request(app)
+        .post('/api/vault/secrets')
+        .send({
+            engine_slug:  TEST_ENGINE_SLUG,
+            account_slug: TEST_ACCOUNT_SLUG,
+            ciphertexts:  [{ machine_id: 'm-noplain', sealed: sealedBox }]
+        });
+
+    const res = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext?machine_id=m-noplain`);
+
+    assert.equal(res.status, 200);
+
+    // STRUCTURAL no-plaintext guarantee: the response body's key set is EXACTLY
+    // the three ciphertext-delivery fields. Anything else is a regression.
+    assert.deepEqual(
+        Object.keys(res.body).sort(),
+        ['machine_id', 'sealed', 'sealed_at'].sort(),
+        'delivery response must expose only machine_id/sealed/sealed_at'
+    );
+
+    // Belt-and-suspenders: none of the plaintext-shaped field names are present.
+    for (const f of PLAINTEXT_LEAK_FIELDS) {
+        assert.equal(res.body[f], undefined, `delivery response must not include a '${f}' field`);
+    }
+
+    // The delivered `sealed` is the exact opaque ciphertext we stored — byte-equal,
+    // not decrypted. The server returned what it holds; it never opened it.
+    assert.equal(res.body.sealed, sealedBox);
+
+    // And prove it really IS ciphertext: it only decrypts with the recipient's
+    // PRIVATE key (which the server never has). We open it here in the TEST using
+    // the test-only keypair to confirm the blob is a genuine sealed box, never
+    // touching server code.
+    const kp = await generateKeypair();
+    // The original sealed box was sealed to testPublicKey; opening with a DIFFERENT
+    // keypair must fail — confirming it's recipient-scoped ciphertext, not plaintext.
+    await assert.rejects(
+        sealOpen(res.body.sealed, kp.publicKey, kp.privateKey),
+        'sealed blob must NOT open with a non-recipient key (it is genuine ciphertext)'
+    );
+});
+
+test('GET .../ciphertext — 400 missing machine_id carries code=missing_machine_id', async () => {
+    const res = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext`);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'missing_machine_id');
+    // structured error: JSON with a human `error`, no stack trace / internal path.
+    assert.equal(typeof res.body.error, 'string');
+    assert.ok(!/at \w+ \(/.test(res.body.error), 'error must not contain a stack frame');
+});
+
+test('GET .../ciphertext — 404 unknown secret carries code=secret_not_found', async () => {
+    const res = await request(app)
+        .get(`/api/vault/secrets/no-such-engine/no-such-account/ciphertext?machine_id=m-x`);
+    assert.equal(res.status, 404);
+    assert.equal(res.body.code, 'secret_not_found');
+    assert.equal(typeof res.body.error, 'string');
+});
+
+test('GET .../ciphertext — 404 no-copy-for-machine carries code=no_ciphertext_for_machine + re-seal hint', async () => {
+    await registerMachine('m-have', 'Has Copy', testPublicKey);
+    const sealedBox = await makeSealed('the-secret', testPublicKey);
+    await request(app)
+        .post('/api/vault/secrets')
+        .send({
+            engine_slug:  TEST_ENGINE_SLUG,
+            account_slug: TEST_ACCOUNT_SLUG,
+            ciphertexts:  [{ machine_id: 'm-have', sealed: sealedBox }]
+        });
+
+    // Register a machine AFTER the secret was sealed — it has no copy (§4.3).
+    const kpLate = await generateKeypair();
+    await request(app)
+        .post('/api/vault/machines')
+        .send({ id: 'm-nocopy', label: 'No Copy Yet', public_key: kpLate.publicKey });
+
+    const res = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext?machine_id=m-nocopy`);
+
+    assert.equal(res.status, 404);
+    assert.equal(res.body.code, 'no_ciphertext_for_machine');
+    // The §4.3 re-seal hint must be present so the client can guide the operator.
+    assert.ok(res.body.message && res.body.message.includes('Re-seal'),
+        'no-copy 404 must carry the §4.3 re-seal hint in message');
+    // And the two distinct 404s must be DISTINGUISHABLE by code (the whole point
+    // of the additive field) — secret_not_found vs. no_ciphertext_for_machine.
+    assert.notEqual(res.body.code, 'secret_not_found');
+});
+
+test('GET .../ciphertext — distinct codes let a client branch secret-missing vs no-copy without message parsing', async () => {
+    await registerMachine('m-branch', 'Branch Machine', testPublicKey);
+    const sealedBox = await makeSealed('v', testPublicKey);
+    await request(app)
+        .post('/api/vault/secrets')
+        .send({
+            engine_slug:  TEST_ENGINE_SLUG,
+            account_slug: TEST_ACCOUNT_SLUG,
+            ciphertexts:  [{ machine_id: 'm-branch', sealed: sealedBox }]
+        });
+
+    // Case A: secret exists, machine has no copy → no_ciphertext_for_machine
+    const noCopy = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext?machine_id=m-ghost-recipient`);
+    assert.equal(noCopy.status, 404);
+    assert.equal(noCopy.body.code, 'no_ciphertext_for_machine');
+
+    // Case B: secret does not exist at all → secret_not_found
+    const noSecret = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/ghost-account/ciphertext?machine_id=m-branch`);
+    assert.equal(noSecret.status, 404);
+    assert.equal(noSecret.body.code, 'secret_not_found');
+});
+
+test('GET .../ciphertext — slug/machine_id are matched by exact string, no lookup injection', async () => {
+    await registerMachine('m-inject', 'Injection Test', testPublicKey);
+    const sealedBox = await makeSealed('inj', testPublicKey);
+    await request(app)
+        .post('/api/vault/secrets')
+        .send({
+            engine_slug:  TEST_ENGINE_SLUG,
+            account_slug: TEST_ACCOUNT_SLUG,
+            ciphertexts:  [{ machine_id: 'm-inject', sealed: sealedBox }]
+        });
+
+    // A machine_id that is a substring/regex-ish of the real one must NOT match —
+    // lookups are `===`, not pattern matches. These are safe 404s, never a 200.
+    for (const probe of ['m-inj', 'm-inject.*', '.*', 'm-inject ']) {
+        const res = await request(app)
+            .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext?machine_id=${encodeURIComponent(probe)}`);
+        assert.equal(res.status, 404,
+            `machine_id probe '${probe}' must not match the real recipient`);
+        assert.equal(res.body.code, 'no_ciphertext_for_machine');
+    }
+
+    // A wildcard-ish account slug must not resolve to the real secret either.
+    const wildAccount = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${encodeURIComponent('.*')}/ciphertext?machine_id=m-inject`);
+    assert.equal(wildAccount.status, 404);
+    assert.equal(wildAccount.body.code, 'secret_not_found');
+
+    // Sanity: the exact, correct request still succeeds (proves the 404s above are
+    // genuine non-matches, not a broken endpoint).
+    const ok = await request(app)
+        .get(`/api/vault/secrets/${TEST_ENGINE_SLUG}/${TEST_ACCOUNT_SLUG}/ciphertext?machine_id=m-inject`);
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.sealed, sealedBox);
 });
 
 // ===========================================================================

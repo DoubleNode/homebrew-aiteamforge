@@ -312,11 +312,12 @@
                             <div class="section-bar" style="background: var(--lcars-amber);"></div>
                         </div>
 
-                        <!-- Security notice -->
+                        <!-- Security notice (XACA-0538-002: encrypted-vault model) -->
                         <div class="engines-security-notice" style="margin-top: 15px;">
-                            API keys are NOT stored here. Each machine consuming this account must define
-                            <code>$ENV_VAR_NAME</code> in its own <code>~/.zshrc.secrets</code>.
-                            This registry stores only the variable name and account metadata.
+                            Secrets are stored only as ciphertext, sealed in your browser to each authorized
+                            machine's public key — the server can never read them. Each machine decrypts locally
+                            with a private key that never leaves it. The <code>$ENV_VAR_NAME</code> in
+                            <code>~/.zshrc.secrets</code> remains the failover path.
                         </div>
 
                         <!-- Controls bar -->
@@ -379,8 +380,22 @@
                                         autocomplete="off" spellcheck="false" style="font-family: monospace;">
                                     <div class="form-error" id="engines-add-env-var-err" style="display:none;"></div>
                                     <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
-                                        Must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code> on every machine that uses this account.
-                                        NEVER paste your actual API key here.
+                                        Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code>
+                                        on machines without the vault secret.
+                                    </div>
+                                </div>
+
+                                <!-- Write-only sealed secret value (XACA-0538-001) -->
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-add-secret">Secret Value (optional)</label>
+                                    <input class="form-input" type="password" id="engines-add-secret"
+                                        placeholder="paste the API key to seal it to authorized machines"
+                                        autocomplete="off" spellcheck="false" style="font-family: monospace;">
+                                    <div class="form-error" id="engines-add-secret-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        Sealed in your browser to each authorized machine's public key on save; the
+                                        server stores only ciphertext and can never read it. <strong>Never displayed</strong> —
+                                        leave blank to skip.
                                     </div>
                                 </div>
 
@@ -429,7 +444,21 @@
                                         autocomplete="off" spellcheck="false" style="font-family: monospace;">
                                     <div class="form-error" id="engines-edit-env-var-err" style="display:none;"></div>
                                     <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
-                                        Must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code> on every machine using this account.
+                                        Failover env var: must exist in <code style="color: var(--lcars-peach);">~/.zshrc.secrets</code>
+                                        on machines without the vault secret.
+                                    </div>
+                                </div>
+
+                                <!-- Write-only sealed secret value (XACA-0538-001); ALWAYS opens empty -->
+                                <div class="form-group">
+                                    <label class="form-label" for="engines-edit-secret">Secret Value (leave blank to keep existing)</label>
+                                    <input class="form-input" type="password" id="engines-edit-secret"
+                                        placeholder="enter a new value to re-seal; blank = unchanged"
+                                        autocomplete="off" spellcheck="false" style="font-family: monospace;">
+                                    <div class="form-error" id="engines-edit-secret-err" style="display:none;"></div>
+                                    <div style="font-size: 10px; color: var(--lcars-tan); margin-top: 4px; letter-spacing: 0.5px;">
+                                        Write-only: the existing secret is <strong>never displayed</strong>. Enter a value
+                                        to re-seal it to all authorized machines; leave blank to leave the stored secret unchanged.
                                     </div>
                                 </div>
 
@@ -478,6 +507,15 @@
 
     <!-- LCARS Fleet Core JavaScript -->
     <script src="js/lcars-fleet-core.js"></script>
+    <!-- Secret Vault offline-mode warning popup (XACA-0538-005): loaded after fleet-core,
+         which calls window.VaultOfflinePopup.check() at startup. -->
+    <script src="js/vault-offline-popup.js"></script>
+    <!-- Secret Vault crypto (XACA-0538): libsodium base + wrappers, then the seal helper.
+         Order matters — libsodium.js sets window.libsodium, then libsodium-wrappers.js
+         reads it and sets window.sodium; vault-seal.js + lcars-engines.js use window.sodium. -->
+    <script src="js/vendor/libsodium.js"></script>
+    <script src="js/vendor/libsodium-wrappers.js"></script>
+    <script src="js/vault-seal.js"></script>
     <!-- AI Engines Registry UI (XACA-0540) — load after fleet-core so lcars:sectionChange is available -->
     <script src="js/lcars-engines.js"></script>
     <!-- Kiosk Mode: Auto-Rotation on Idle (shared) -->

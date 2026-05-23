@@ -1248,6 +1248,13 @@ window.LCARS_CORE = window.LCARS_CORE || {};
                 LCARS.sections.init();
             }
 
+            // XACA-0538-005: Check vault mode signal once after startup.
+            // Shows a one-time warning popup if secrets are in env-var failover mode.
+            // Fully defensive — absent endpoint or any error = silent no-op.
+            if (window.VaultOfflinePopup && typeof window.VaultOfflinePopup.check === 'function') {
+                window.VaultOfflinePopup.check();
+            }
+
             console.log('[LCARS] Core initialized');
         };
 

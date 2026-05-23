@@ -2,7 +2,7 @@
 //  lcars-engines.js
 //  DoubleNode Dev-Team Infrastructure (AITeamForge)
 //
-//  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+//  Copyright © 2026 - 2025 DoubleNode.com. All rights reserved.
 //
 
 // === XACA-0281: AI Engines Registry UI ===
@@ -136,6 +136,7 @@
                 '<th>NICKNAME</th>' +
                 '<th>ACCOUNT ID</th>' +
                 '<th>ENV VAR</th>' +
+                '<th>VAULT</th>' +
                 '<th>CREATED</th>' +
                 '<th>LAST VALIDATED</th>' +
                 '<th>ACTIONS</th>' +
@@ -171,6 +172,7 @@
                 '<td class="engine-col-account-id" title="' + escHtml(account.account_id || '') + '">' +
                     '<code>' + escHtml(accountIdDisplay) + '</code></td>',
                 '<td class="engine-col-env-var"><code>' + escHtml(account.env_var_name || '—') + '</code></td>',
+                '<td class="engine-col-vault">' + vaultBadge(account) + '</td>',
                 '<td class="engine-col-created">' + fmtDate(account.created_at) + '</td>',
                 '<td class="engine-col-validated">' + fmtDate(account.last_validated_at) + '</td>',
                 '<td class="engine-col-actions"></td>'
@@ -211,6 +213,9 @@
             document.getElementById('engines-add-account-id').value   = '';
             document.getElementById('engines-add-nickname').value     = '';
             document.getElementById('engines-add-env-var').value      = '';
+            // Write-only secret field: always start empty (never echoed back). XACA-0538-001.
+            var addSecret = document.getElementById('engines-add-secret');
+            if (addSecret) addSecret.value = '';
 
             clearAddErrors();
             showModal('engines-add-modal');
@@ -228,6 +233,11 @@
             document.getElementById('engines-edit-account-id').value = account.account_id  || '';
             document.getElementById('engines-edit-nickname').value   = account.nickname    || '';
             document.getElementById('engines-edit-env-var').value    = account.env_var_name || '';
+            // Write-only secret field: MUST open EMPTY on edit — the plaintext is never
+            // available to echo. Empty on save = leave the existing sealed secret unchanged.
+            // XACA-0538-001.
+            var editSecret = document.getElementById('engines-edit-secret');
+            if (editSecret) editSecret.value = '';
 
             clearEditErrors();
             showModal('engines-edit-modal');
@@ -294,6 +304,9 @@
             var accountId = (document.getElementById('engines-add-account-id').value || '').trim();
             var nickname  = (document.getElementById('engines-add-nickname').value || '').trim();
             var envVar    = (document.getElementById('engines-add-env-var').value || '').trim();
+            // Secret value is NOT trimmed — a secret may legitimately contain whitespace.
+            var secretEl  = document.getElementById('engines-add-secret');
+            var secret    = secretEl ? (secretEl.value || '') : '';
 
             clearAddErrors();
 
@@ -355,6 +368,24 @@
                     return;
                 }
 
+                // If a secret value was supplied, seal it client-side and store it.
+                // The account was just created, so the new secret cannot pre-exist;
+                // POST is correct (409 only if a stray secret already exists). XACA-0538-001.
+                if (secret) {
+                    var sealedOk = await sealAndStoreSecret(
+                        _activeEngineSlug, slug, secret, 'POST', 'engines-add-secret-err'
+                    );
+                    secret = ''; // drop our reference to plaintext ASAP
+                    if (secretEl) secretEl.value = '';
+                    if (!sealedOk) {
+                        // Account saved but secret sealing failed: keep the modal open so
+                        // the user can retry the secret via Edit. Refresh the list so the
+                        // new account (without a vault secret yet) shows.
+                        await LCARS_ENGINES.loadEngines();
+                        return;
+                    }
+                }
+
                 hideModal('engines-add-modal');
                 await LCARS_ENGINES.loadEngines();
 
@@ -362,6 +393,8 @@
                 console.error('[ENGINES] submitAddAccount error:', err);
                 showServerError('engines-add-server-err', 'Network error: ' + err.message);
             } finally {
+                secret = ''; // belt-and-suspenders: never leave plaintext in scope
+                if (secretEl) secretEl.value = '';
                 saveBtn.disabled = false;
                 saveBtn.textContent = 'SAVE';
             }
@@ -375,6 +408,10 @@
             var accountId = (document.getElementById('engines-edit-account-id').value || '').trim();
             var nickname  = (document.getElementById('engines-edit-nickname').value || '').trim();
             var envVar    = (document.getElementById('engines-edit-env-var').value || '').trim();
+            // Secret value is NOT trimmed. Empty == leave the existing sealed secret
+            // unchanged (write-only field; plaintext is never echoed). XACA-0538-001.
+            var secretEl  = document.getElementById('engines-edit-secret');
+            var secret    = secretEl ? (secretEl.value || '') : '';
 
             clearEditErrors();
 
@@ -426,6 +463,21 @@
                     return;
                 }
 
+                // Non-empty secret == replace/re-seal. Empty == leave existing sealed
+                // secret untouched. Use upsert (PUT, fall back to POST on 404) so this
+                // works whether or not a secret already exists. XACA-0538-001.
+                if (secret) {
+                    var sealedOk = await sealAndStoreSecret(
+                        _activeEngineSlug, _activeAccountSlug, secret, 'UPSERT', 'engines-edit-secret-err'
+                    );
+                    secret = '';
+                    if (secretEl) secretEl.value = '';
+                    if (!sealedOk) {
+                        await LCARS_ENGINES.loadEngines();
+                        return;
+                    }
+                }
+
                 hideModal('engines-edit-modal');
                 await LCARS_ENGINES.loadEngines();
 
@@ -433,6 +485,8 @@
                 console.error('[ENGINES] submitEditAccount error:', err);
                 showServerError('engines-edit-server-err', 'Network error: ' + err.message);
             } finally {
+                secret = '';
+                if (secretEl) secretEl.value = '';
                 saveBtn.disabled = false;
                 saveBtn.textContent = 'SAVE';
             }
@@ -499,6 +553,25 @@
         return d.toLocaleDateString() + ' ' + d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     }
 
+    /**
+     * Render the vault-provisioned status badge for an account, using the additive
+     * read-time fields from /api/engines (has_vault_secret, vault_recipient_count).
+     * Read-only display only — no recompute. XACA-0538-006.
+     * @param {object} account
+     * @returns {string} HTML for the badge cell content
+     */
+    function vaultBadge(account) {
+        if (account && account.has_vault_secret) {
+            var n = (typeof account.vault_recipient_count === 'number') ? account.vault_recipient_count : 0;
+            var noun = (n === 1) ? 'machine' : 'machines';
+            return '<span class="engine-vault-badge engine-vault-badge--provisioned" ' +
+                'title="A secret is sealed to ' + n + ' authorized ' + noun + '">' +
+                'VAULT: ' + n + ' ' + noun + '</span>';
+        }
+        return '<span class="engine-vault-badge engine-vault-badge--none" ' +
+            'title="No vault secret stored for this account">VAULT: not provisioned</span>';
+    }
+
     function showModal(id) {
         var el = document.getElementById(id);
         if (el) el.classList.add('active');
@@ -525,7 +598,7 @@
 
     function clearAddErrors() {
         ['engines-add-slug-err', 'engines-add-account-id-err', 'engines-add-nickname-err',
-            'engines-add-env-var-err', 'engines-add-server-err'].forEach(function(id) {
+            'engines-add-env-var-err', 'engines-add-secret-err', 'engines-add-server-err'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) { el.textContent = ''; el.style.display = 'none'; }
         });
@@ -533,10 +606,117 @@
 
     function clearEditErrors() {
         ['engines-edit-account-id-err', 'engines-edit-nickname-err',
-            'engines-edit-env-var-err', 'engines-edit-server-err'].forEach(function(id) {
+            'engines-edit-env-var-err', 'engines-edit-secret-err', 'engines-edit-server-err'].forEach(function(id) {
             var el = document.getElementById(id);
             if (el) { el.textContent = ''; el.style.display = 'none'; }
         });
+    }
+
+    // =========================================================================
+    // VAULT SECRET SEALING (XACA-0538-001)
+    // =========================================================================
+
+    /**
+     * Seal a plaintext secret to every registered vault machine and store the
+     * resulting ciphertext array. The plaintext is sealed CLIENT-SIDE via
+     * window.LCARS_VAULT_SEAL (libsodium crypto_box_seal); only base64 ciphertext
+     * leaves the browser. The server never receives or stores plaintext.
+     *
+     * @param {string} engineSlug
+     * @param {string} accountSlug
+     * @param {string} secret      plaintext (never logged; caller clears its own ref)
+     * @param {'POST'|'PUT'|'UPSERT'} mode  POST=create, PUT=replace, UPSERT=PUT then POST-on-404
+     * @param {string} errId       field-error element id to surface failures into
+     * @returns {Promise<boolean>} true on success; false (and an error is shown) on failure
+     */
+    async function sealAndStoreSecret(engineSlug, accountSlug, secret, mode, errId) {
+        if (!window.LCARS_VAULT_SEAL) {
+            showFieldError(errId, 'Vault crypto library not loaded — cannot seal secret. Reload the page and retry.');
+            return false;
+        }
+
+        var ciphertexts;
+        try {
+            // Build the per-machine sealed-box array. Throws on zero machines or a
+            // malformed public key (handled below as a field error — never an upload).
+            ciphertexts = await window.LCARS_VAULT_SEAL.sealSecret(secret);
+        } catch (sealErr) {
+            console.error('[ENGINES] seal error:', sealErr);
+            showFieldError(errId, sealErr.message || 'Failed to seal secret.');
+            return false;
+        }
+
+        var base = '/api/vault/secrets';
+        var per  = base + '/' + encodeURIComponent(engineSlug) + '/' + encodeURIComponent(accountSlug);
+
+        try {
+            var ok;
+            if (mode === 'POST') {
+                ok = await postSecret(base, engineSlug, accountSlug, ciphertexts, errId);
+            } else if (mode === 'PUT') {
+                ok = await putSecret(per, ciphertexts, errId);
+            } else { // UPSERT: try PUT (re-seal), fall back to POST if it doesn't exist yet.
+                var putResp = await fetch(per, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ engine_slug: engineSlug, account_slug: accountSlug, ciphertexts: ciphertexts })
+                });
+                if (putResp.status === 404) {
+                    ok = await postSecret(base, engineSlug, accountSlug, ciphertexts, errId);
+                } else {
+                    ok = await handleSecretResponse(putResp, errId);
+                }
+            }
+            return ok;
+        } catch (netErr) {
+            console.error('[ENGINES] store secret error:', netErr);
+            showFieldError(errId, 'Network error storing secret: ' + netErr.message);
+            return false;
+        } finally {
+            // Drop the local reference to the sealed bytes too (defensive).
+            ciphertexts = null;
+        }
+    }
+
+    async function postSecret(base, engineSlug, accountSlug, ciphertexts, errId) {
+        var resp = await fetch(base, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ engine_slug: engineSlug, account_slug: accountSlug, ciphertexts: ciphertexts })
+        });
+        if (resp.status === 409) {
+            showFieldError(errId, 'A vault secret already exists for this account — use EDIT to replace it.');
+            return false;
+        }
+        return handleSecretResponse(resp, errId);
+    }
+
+    async function putSecret(per, ciphertexts, errId) {
+        var resp = await fetch(per, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ciphertexts: ciphertexts })
+        });
+        return handleSecretResponse(resp, errId);
+    }
+
+    /**
+     * Surface a structured vault API response. Renders 400 validation `details`,
+     * 404, and other errors into the given field-error element.
+     * @returns {Promise<boolean>} true if 2xx
+     */
+    async function handleSecretResponse(resp, errId) {
+        if (resp.ok) return true;
+        var body = null;
+        try { body = await resp.json(); } catch (_) { /* non-JSON */ }
+        var msg = (body && body.error) ? body.error : ('Server error (' + resp.status + ')');
+        if (body && Array.isArray(body.details) && body.details.length) {
+            msg += ': ' + body.details.join('; ');
+        } else if (body && body.message) {
+            msg += ' — ' + body.message;
+        }
+        showFieldError(errId, msg);
+        return false;
     }
 
     // =========================================================================

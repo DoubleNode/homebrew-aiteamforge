@@ -233,6 +233,28 @@ function registerVaultRoutes(app) {
      * This endpoint returns ciphertext — NEVER plaintext. The machine decrypts
      * locally using its private key (which never leaves the machine).
      * This is the endpoint cc-launch (A.4.3) calls at boot.
+     *
+     * RECIPIENT MODEL — why this is NOT a hole (design doc §2, §3.2, §7.2):
+     *   Delivery is intentionally NOT gated by caller identity. The `sealed` blob
+     *   is an anonymous libsodium sealed box — it is cryptographically useless to
+     *   anyone who does not hold the recipient machine's X25519 PRIVATE key, which
+     *   never leaves that machine. "Registered recipient" is enforced by the seal
+     *   targeting, NOT by an auth check here: only the machine whose pubkey the
+     *   ciphertext was sealed to can open it. A server-side attacker who reads this
+     *   response gains only ciphertext they already could read off disk (Residual
+     *   Risk R1 — transport auth is deferred to EPIC-0019). Returning ciphertext
+     *   to an unauthenticated caller leaks nothing the threat model doesn't already
+     *   grant the attacker. Do NOT "fix" this with a recipient check before A.4.1's
+     *   auth story (EPIC-0019) lands — it would add false assurance, not security.
+     *
+     * STRUCTURED ERROR `code` field (additive, machine-readable — XACA-0538-003):
+     *   Each error carries a stable `code` so the A.4.2/A.4.3 vault-fetch client can
+     *   branch WITHOUT string-matching human-readable `message` text:
+     *     'missing_machine_id'    (400) — caller bug; supply ?machine_id=<id>.
+     *     'secret_not_found'      (404) — no such (engine, account) secret exists.
+     *     'no_ciphertext_for_machine' (404) — secret exists but has no copy for this
+     *                                          machine; re-seal client-side (§4.3).
+     *     'internal_error'        (500) — unexpected server fault; details suppressed.
      */
     app.get('/api/vault/secrets/:engineSlug/:accountSlug/ciphertext', (req, res) => {
         try {
@@ -240,23 +262,31 @@ function registerVaultRoutes(app) {
             const { machine_id }              = req.query;
 
             if (!machine_id) {
-                return res.status(400).json({ error: 'machine_id query parameter is required' });
+                return res.status(400).json({
+                    error: 'machine_id query parameter is required',
+                    code:  'missing_machine_id',
+                });
             }
 
             const secret = vaultStore.findSecret(engineSlug, accountSlug);
             if (!secret) {
-                return res.status(404).json({ error: `Secret '${engineSlug}/${accountSlug}' not found` });
+                return res.status(404).json({
+                    error: `Secret '${engineSlug}/${accountSlug}' not found`,
+                    code:  'secret_not_found',
+                });
             }
 
             const ct = secret.ciphertexts.find(c => c.machine_id === machine_id);
             if (!ct) {
                 return res.status(404).json({
                     error:   `No ciphertext for machine '${machine_id}' on secret '${engineSlug}/${accountSlug}'`,
+                    code:    'no_ciphertext_for_machine',
                     message: 'Machine may have been registered after this secret was last sealed. Re-seal the secret client-side to include this machine (design doc §4.3).'
                 });
             }
 
             // Return ciphertext for client-side decryption. NEVER call sealOpen here.
+            // The server holds no private key and cannot open this blob.
             res.json({
                 machine_id: ct.machine_id,
                 sealed:     ct.sealed,
@@ -264,7 +294,7 @@ function registerVaultRoutes(app) {
             });
         } catch (error) {
             console.error('Error fetching secret ciphertext:', error);
-            res.status(500).json({ error: 'Internal server error' });
+            res.status(500).json({ error: 'Internal server error', code: 'internal_error' });
         }
     });
 
