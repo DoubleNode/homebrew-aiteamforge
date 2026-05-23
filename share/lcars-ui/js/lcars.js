@@ -6351,7 +6351,11 @@ function calculateParentWorkTime(item) {
 function calculateActiveEffort(item) {
     if (!item) return 0;
     const accumulated = Number(item.timeWorkedMs) || 0;
-    if (item.workStartedAt) {
+    // XACA-0552: freeze the clock for completed/cancelled items. A stale
+    // workStartedAt left on a finished item would otherwise make the live span
+    // (now - workStartedAt) tick up forever. Only in-flight items get the span.
+    const finished = item.status === 'completed' || item.status === 'cancelled';
+    if (!finished && item.workStartedAt) {
         // Guard against malformed timestamps: Math.max(0, NaN) is NaN, not 0.
         const started = new Date(item.workStartedAt).getTime();
         if (Number.isFinite(started)) {
