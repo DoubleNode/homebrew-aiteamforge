@@ -17202,6 +17202,12 @@ let exportPollingInterval = null;
 let currentImportJobId = null;
 let importPollingInterval = null;
 let stagedImportFile = null;
+// XACA-0554: tracks inline secrets file + discovered count for main import flow
+let stagedImportSecretsFile = null;
+let currentImportSecretsDiscovered = 0;
+// XACA-0554: pending secrets apply — set after main apply starts, consumed by onImportComplete
+let _pendingSecretsApplyJobId = null;
+let _pendingSecretsApplyPassword = null;
 let currentSecretsExportJobId = null;
 let secretsExportPollingInterval = null;
 
@@ -17607,8 +17613,41 @@ function renderImportPreflight(data) {
     document.getElementById('preflight-file-counts').textContent =
         `${counts.inTree || 0} / ${counts.outOfTree || 0}`;
 
-    const applyBtn = document.getElementById('import-apply-btn');
-    if (applyBtn) applyBtn.disabled = !data.baseMatch;
+    // XACA-0554: store baseMatch on the apply button for updateImportApplyEnabled() to read
+    const applyBtnRef = document.getElementById('import-apply-btn');
+    if (applyBtnRef) applyBtnRef.setAttribute('data-base-match', data.baseMatch ? 'true' : 'false');
+
+    // XACA-0554: gate Apply on secrets when export declares secrets
+    const secretsSummary = manifest.secrets_summary || {};
+    const discovered = typeof secretsSummary.discovered === 'number' ? secretsSummary.discovered : 0;
+    currentImportSecretsDiscovered = discovered;
+
+    const secretsSection = document.getElementById('import-secrets-required');
+    const explainerEl = document.getElementById('import-secrets-explainer');
+    if (secretsSection) {
+        if (discovered > 0) {
+            secretsSection.style.display = 'block';
+            if (explainerEl) {
+                explainerEl.textContent =
+                    `This export declares ${discovered} secret source${discovered !== 1 ? 's' : ''} — provide the secrets zip + password to continue.`;
+            }
+        } else {
+            secretsSection.style.display = 'none';
+        }
+    }
+
+    // Reset staged secrets file on each new preflight
+    stagedImportSecretsFile = null;
+    const fnLabel = document.getElementById('import-secrets-filename');
+    if (fnLabel) fnLabel.textContent = '';
+    const secretsPwInput = document.getElementById('import-secrets-password-input');
+    if (secretsPwInput) secretsPwInput.value = '';
+    const secretsErrEl = document.getElementById('import-secrets-error');
+    if (secretsErrEl) secretsErrEl.style.display = 'none';
+    const secretsFileInput = document.getElementById('import-secrets-file-input');
+    if (secretsFileInput) secretsFileInput.value = '';
+
+    updateImportApplyEnabled();
 
     preflightEl.style.display = 'block';
 }
@@ -17616,26 +17655,182 @@ function renderImportPreflight(data) {
 function cancelImport() {
     currentImportJobId = null;
     stagedImportFile = null;
+    // XACA-0554: reset inline secrets state (incl. any pending paired-apply
+    // job + plaintext password, belt-and-suspenders against future UI rearrangement)
+    stagedImportSecretsFile = null;
+    currentImportSecretsDiscovered = 0;
+    _pendingSecretsApplyJobId = null;
+    _pendingSecretsApplyPassword = null;
     const preflightEl = document.getElementById('import-preflight');
     if (preflightEl) preflightEl.style.display = 'none';
     const btn = document.getElementById('import-btn');
     if (btn) btn.disabled = false;
     const input = document.getElementById('import-file-input');
     if (input) input.value = '';
+    // Hide secrets section and clear its inputs
+    const secretsSection = document.getElementById('import-secrets-required');
+    if (secretsSection) secretsSection.style.display = 'none';
+    const secretsPwInput = document.getElementById('import-secrets-password-input');
+    if (secretsPwInput) secretsPwInput.value = '';
+    const secretsFileInput = document.getElementById('import-secrets-file-input');
+    if (secretsFileInput) secretsFileInput.value = '';
+    const fnLabel = document.getElementById('import-secrets-filename');
+    if (fnLabel) fnLabel.textContent = '';
+    const secretsErrEl = document.getElementById('import-secrets-error');
+    if (secretsErrEl) secretsErrEl.style.display = 'none';
+}
+
+// XACA-0554: file-picker handler for the inline secrets zip in main import preflight
+function handleInlineSecretsFileSelected(input) {
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    if (!file.name.toLowerCase().endsWith('.zip')) {
+        alert('Please select a .zip file.');
+        input.value = '';
+        return;
+    }
+    stagedImportSecretsFile = file;
+    const fnLabel = document.getElementById('import-secrets-filename');
+    if (fnLabel) fnLabel.textContent = file.name;
+    updateImportApplyEnabled();
+}
+
+// XACA-0554: re-evaluates whether Apply button should be enabled.
+// Conditions: baseMatch (stored on the apply button's data attr) AND
+// (no secrets required OR (secrets file staged AND password non-empty)).
+function updateImportApplyEnabled() {
+    const applyBtn = document.getElementById('import-apply-btn');
+    if (!applyBtn) return;
+    // We need to know if baseMatch — read it from the preflight DOM.
+    // The base-match span has color #9f9 when matched; simpler to store on the button.
+    // We set data-base-match when rendering, so check that.
+    const baseMatch = applyBtn.getAttribute('data-base-match') === 'true';
+    if (!baseMatch) {
+        applyBtn.disabled = true;
+        return;
+    }
+    if (currentImportSecretsDiscovered > 0) {
+        const secretsPwInput = document.getElementById('import-secrets-password-input');
+        const password = secretsPwInput ? secretsPwInput.value : '';
+        applyBtn.disabled = !(stagedImportSecretsFile && password.length > 0);
+    } else {
+        applyBtn.disabled = false;
+    }
 }
 
 async function applyTeamImport() {
+    // XACA-0554: orchestrate secrets upload + verify before main apply when secrets required.
     if (!currentImportJobId) return;
 
     const preflightEl = document.getElementById('import-preflight');
     const progressEl = document.getElementById('import-progress');
     const resultEl = document.getElementById('import-result');
+    const secretsErrEl = document.getElementById('import-secrets-error');
+
+    // Helper: restore preflight panel on inline error so operator can retry
+    function _showInlineSecretsError(msg) {
+        if (progressEl) progressEl.style.display = 'none';
+        if (preflightEl) preflightEl.style.display = 'block';
+        if (secretsErrEl) { secretsErrEl.textContent = msg; secretsErrEl.style.display = 'block'; }
+        const applyBtn = document.getElementById('import-apply-btn');
+        if (applyBtn) applyBtn.disabled = false;
+        const secretsSelectBtn = document.getElementById('import-secrets-select-btn');
+        if (secretsSelectBtn) secretsSelectBtn.disabled = false;
+    }
+
     if (preflightEl) preflightEl.style.display = 'none';
     if (progressEl) progressEl.style.display = 'block';
     if (resultEl) resultEl.style.display = 'none';
-
     updateImportProgress(0, 'IMPORTING...', 'Starting...');
 
+    // ── SECRETS PATH (discovered > 0) ──
+    if (currentImportSecretsDiscovered > 0) {
+        // Step 1: upload secrets zip
+        updateImportProgress(5, 'IMPORTING...', 'Uploading secrets zip...');
+        const team = (window.serverConfig && window.serverConfig.team) || '';
+        const secretsFormData = new FormData();
+        secretsFormData.append('file', stagedImportSecretsFile);
+        secretsFormData.append('team', team);
+
+        let secretsJobId;
+        try {
+            const uploadResp = await fetch('/api/import/secrets/upload', {
+                method: 'POST',
+                body: secretsFormData,
+            });
+            const uploadData = await uploadResp.json();
+            if (!uploadResp.ok) {
+                _showInlineSecretsError(`Secrets upload failed: ${uploadData.error || 'unknown error'}`);
+                return;
+            }
+            secretsJobId = uploadData.jobId;
+        } catch (err) {
+            console.error('Secrets upload error:', err);
+            _showInlineSecretsError('Secrets upload failed — see console');
+            return;
+        }
+
+        // Step 2: verify password — read from DOM, zero immediately after use
+        updateImportProgress(15, 'IMPORTING...', 'Verifying secrets password...');
+        const secretsPwInput = document.getElementById('import-secrets-password-input');
+        const password = secretsPwInput ? secretsPwInput.value : '';
+        try {
+            const preflightResp = await fetch(`/api/import/secrets/preflight/${secretsJobId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ password }),
+            });
+            // Zero password from input now — we hold it in the local `password` var only
+            // through the remaining fetches in this call stack, then it falls out of scope.
+            if (secretsPwInput) secretsPwInput.value = '';
+
+            const preflightData = await preflightResp.json();
+            if (!preflightResp.ok) {
+                let msg = preflightData.error || 'Wrong password — please try again.';
+                if (typeof preflightData.attemptsRemaining === 'number') {
+                    msg += ` (${preflightData.attemptsRemaining} attempt${preflightData.attemptsRemaining !== 1 ? 's' : ''} remaining)`;
+                }
+                _showInlineSecretsError(msg);
+                return;
+            }
+        } catch (err) {
+            if (secretsPwInput) secretsPwInput.value = '';
+            console.error('Secrets preflight error:', err);
+            _showInlineSecretsError('Secrets password verification failed — see console');
+            return;
+        }
+
+        // Step 3: POST main apply with paired secrets job ID
+        updateImportProgress(25, 'IMPORTING...', 'Applying import...');
+        try {
+            const applyResp = await fetch(`/api/import/apply/${currentImportJobId}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pairedSecretsJobId: secretsJobId }),
+            });
+            const applyData = await applyResp.json();
+            if (!applyResp.ok) {
+                alert(`Import failed: ${applyData.error || applyData.message || 'unknown error'}`);
+                if (progressEl) progressEl.style.display = 'none';
+                return;
+            }
+        } catch (err) {
+            console.error('Apply import failed:', err);
+            alert('Import request failed — see console');
+            if (progressEl) progressEl.style.display = 'none';
+            return;
+        }
+
+        // Step 4: poll main import to completion; secrets apply follows in onImportComplete
+        // Stash secretsJobId and password on the polling context so the completion handler can use them.
+        // Password is now '' in the DOM; we pass it via closure from the local var above.
+        _pendingSecretsApplyJobId = secretsJobId;
+        _pendingSecretsApplyPassword = password;
+        importPollingInterval = setInterval(() => pollImportStatus(currentImportJobId), 1000);
+        return;
+    }
+
+    // ── NO SECRETS PATH (original behavior) ──
     try {
         const response = await fetch(`/api/import/apply/${currentImportJobId}`, { method: 'POST' });
         const data = await response.json();
@@ -17710,6 +17905,15 @@ function onImportComplete(data) {
     const titleEl = document.getElementById('import-result-title');
     const statsEl = document.getElementById('import-result-stats');
 
+    // XACA-0554: if a paired secrets job is pending, apply it now (main import complete first).
+    if (_pendingSecretsApplyJobId) {
+        _applyPairedSecretsImport(_pendingSecretsApplyJobId, _pendingSecretsApplyPassword, data);
+        // Clear immediately — password must not outlive this call
+        _pendingSecretsApplyJobId = null;
+        _pendingSecretsApplyPassword = null;
+        return;
+    }
+
     updateImportProgress(100, 'COMPLETE', 'Import applied successfully');
     if (progressEl) progressEl.style.display = 'none';
     if (resultEl) resultEl.style.display = 'block';
@@ -17727,7 +17931,121 @@ function onImportComplete(data) {
     if (input) input.value = '';
 }
 
+// XACA-0554: step 5 — apply secrets extraction after main import succeeds.
+// `password` is the decrypted value passed by value from applyTeamImport's closure;
+// it is already zeroed from the DOM at this point. We zero the local var after the fetch.
+async function _applyPairedSecretsImport(secretsJobId, password, mainImportData) {
+    const progressEl = document.getElementById('import-progress');
+    const resultEl = document.getElementById('import-result');
+    const titleEl = document.getElementById('import-result-title');
+    const statsEl = document.getElementById('import-result-stats');
+
+    if (progressEl) progressEl.style.display = 'block';
+    if (resultEl) resultEl.style.display = 'none';
+    updateImportProgress(50, 'EXTRACTING SECRETS...', 'Applying paired secrets...');
+
+    try {
+        const applyResp = await fetch(`/api/import/secrets/apply/${secretsJobId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password }),
+        });
+        // Zero password from local var by overwriting (GC will handle cleanup; this limits window)
+        password = '';
+
+        const applyData = await applyResp.json();
+        if (!applyResp.ok) {
+            updateImportProgress(100, 'COMPLETE', 'Main import done');
+            if (progressEl) progressEl.style.display = 'none';
+            if (resultEl) resultEl.style.display = 'block';
+            if (titleEl) titleEl.textContent = '✓ IMPORT COMPLETE — ✗ SECRETS FAILED';
+            if (statsEl) {
+                while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+                renderImportStatsDOM(statsEl, mainImportData.stats || {});
+                const errDiv = document.createElement('div');
+                errDiv.style.color = '#f66';
+                errDiv.textContent = `Secrets extraction failed: ${applyData.error || 'unknown error'}`;
+                statsEl.appendChild(errDiv);
+            }
+            const btn = document.getElementById('import-btn');
+            if (btn) btn.disabled = false;
+            return;
+        }
+
+        // Poll secrets status to completion
+        let secretsPollingHandle = setInterval(async () => {
+            try {
+                const statusResp = await fetch(`/api/import/secrets/status/${secretsJobId}`);
+                const statusData = await statusResp.json();
+                const pct = Math.round(50 + (statusData.progress || 0) * 0.5);
+                updateImportProgress(pct, 'EXTRACTING SECRETS...', statusData.message || '');
+
+                if (statusData.status === 'completed') {
+                    clearInterval(secretsPollingHandle);
+                    updateImportProgress(100, 'COMPLETE', 'Import and secrets applied successfully');
+                    if (progressEl) progressEl.style.display = 'none';
+                    if (resultEl) resultEl.style.display = 'block';
+                    if (titleEl) titleEl.textContent = '✓ IMPORT COMPLETE + SECRETS EXTRACTED';
+                    if (statsEl) {
+                        while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+                        renderImportStatsDOM(statsEl, mainImportData.stats || {});
+                        const secDiv = document.createElement('div');
+                        secDiv.textContent = `Secrets extracted: ${statusData.fileCount != null ? statusData.fileCount + ' file(s)' : 'complete'}`;
+                        statsEl.appendChild(secDiv);
+                    }
+                    setTimeout(() => {
+                        if (typeof loadBoardData === 'function') loadBoardData();
+                    }, 500);
+                    const btn = document.getElementById('import-btn');
+                    if (btn) btn.disabled = false;
+                    const input = document.getElementById('import-file-input');
+                    if (input) input.value = '';
+                } else if (statusData.status === 'failed') {
+                    clearInterval(secretsPollingHandle);
+                    if (progressEl) progressEl.style.display = 'none';
+                    if (resultEl) resultEl.style.display = 'block';
+                    if (titleEl) titleEl.textContent = '✓ IMPORT COMPLETE — ✗ SECRETS FAILED';
+                    if (statsEl) {
+                        while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+                        renderImportStatsDOM(statsEl, mainImportData.stats || {});
+                        const errDiv = document.createElement('div');
+                        errDiv.style.color = '#f66';
+                        errDiv.textContent = `Secrets extraction failed: ${statusData.error || statusData.message || 'unknown error'}`;
+                        statsEl.appendChild(errDiv);
+                    }
+                    const btn = document.getElementById('import-btn');
+                    if (btn) btn.disabled = false;
+                }
+            } catch (pollErr) {
+                console.error('Secrets apply poll error:', pollErr);
+            }
+        }, 1500);
+    } catch (err) {
+        password = '';
+        console.error('Paired secrets apply error:', err);
+        if (progressEl) progressEl.style.display = 'none';
+        if (resultEl) resultEl.style.display = 'block';
+        if (titleEl) titleEl.textContent = '✓ IMPORT COMPLETE — ✗ SECRETS FAILED';
+        if (statsEl) {
+            while (statsEl.firstChild) statsEl.removeChild(statsEl.firstChild);
+            renderImportStatsDOM(statsEl, mainImportData.stats || {});
+            const errDiv = document.createElement('div');
+            errDiv.style.color = '#f66';
+            errDiv.textContent = 'Secrets extraction request failed — see console';
+            statsEl.appendChild(errDiv);
+        }
+        const btn = document.getElementById('import-btn');
+        if (btn) btn.disabled = false;
+    }
+}
+
 function onImportFailed(data) {
+    // XACA-0554: a main-import failure must not leave a staged secrets job +
+    // plaintext password lingering — clear them so a later import can't pick up
+    // stale state, and so the password doesn't outlive the failed attempt.
+    _pendingSecretsApplyJobId = null;
+    _pendingSecretsApplyPassword = null;
+
     const progressEl = document.getElementById('import-progress');
     const resultEl = document.getElementById('import-result');
     const titleEl = document.getElementById('import-result-title');

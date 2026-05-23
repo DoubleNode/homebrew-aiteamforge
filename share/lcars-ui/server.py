@@ -12873,10 +12873,46 @@ end tell
         else:
             acknowledge_missing = False
 
+        # XACA-0554: Accept pairedSecretsJobId in the POST body so the UI can link a
+        # password-verified secrets-import job to this main import apply.  Validate the
+        # reference strictly — an explicit-but-broken link is an error, not a "no secrets"
+        # case, and must never fall through to the 409 or the acknowledge-override path.
+        paired_secrets_job_id = body_json.get('pairedSecretsJobId') or None
+        if paired_secrets_job_id is not None:
+            sec_job = SECRETS_IMPORT_JOBS.get(paired_secrets_job_id)
+            if sec_job is None:
+                self._send_json_response(
+                    {'error': 'invalid_paired_secrets',
+                     'message': f'Secrets import job {paired_secrets_job_id!r} not found.'},
+                    status=400,
+                )
+                return
+            if sec_job.get('status') not in ('ready', 'applying', 'completed'):
+                self._send_json_response(
+                    {'error': 'invalid_paired_secrets',
+                     'message': f'Secrets import job {paired_secrets_job_id!r} has not been '
+                                f'password-verified (status={sec_job.get("status")!r}). '
+                                f'Complete the secrets preflight before applying.'},
+                    status=400,
+                )
+                return
+            if sec_job.get('targetTeam') != job.get('targetTeam'):
+                self._send_json_response(
+                    {'error': 'paired_secrets_team_mismatch',
+                     'message': f'Secrets import job {paired_secrets_job_id!r} targets team '
+                                f'{sec_job.get("targetTeam")!r} but this import targets '
+                                f'{job.get("targetTeam")!r}.'},
+                    status=400,
+                )
+                return
+            # All validations passed — record the link so paired_secrets_provided is True.
+            IMPORT_JOBS[job_id]['pairedSecretsJobId'] = paired_secrets_job_id
+
         manifest = job.get('manifest', {})
         secrets_summary = manifest.get('secrets_summary', {})
         discovered = int(secrets_summary.get('discovered', 0))
-        paired_secrets_provided = job.get('pairedSecretsJobId') is not None
+        # Evaluate AFTER the block above may have set pairedSecretsJobId on the job.
+        paired_secrets_provided = IMPORT_JOBS[job_id].get('pairedSecretsJobId') is not None
 
         if discovered > 0 and not paired_secrets_provided and not acknowledge_missing:
             expected = int(secrets_summary.get('expected', discovered))

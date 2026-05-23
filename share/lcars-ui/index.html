@@ -1254,6 +1254,34 @@
                         <div class="preflight-warning">
                             ⚠ Project kanban data on this machine will be <strong>overwritten</strong>. This cannot be undone.
                         </div>
+
+                        <!-- XACA-0554: Inline secrets requirement — shown only when export declares secrets -->
+                        <div id="import-secrets-required" style="display: none; margin-top: 14px; border: 1px solid #336; padding: 12px; background: #0a0a1a;">
+                            <div class="preflight-header">SECRETS REQUIRED</div>
+                            <div id="import-secrets-explainer" style="margin: 8px 0 10px; font-size: 0.9em; color: #9cf;">
+                                This export declares secret source(s) — provide the secrets zip + password to continue.
+                            </div>
+                            <div class="import-actions" style="margin-bottom: 10px;">
+                                <input type="file" id="import-secrets-file-input" accept=".zip" style="display: none;"
+                                       onchange="handleInlineSecretsFileSelected(this)">
+                                <button class="lcars-button import-btn" id="import-secrets-select-btn"
+                                        onclick="document.getElementById('import-secrets-file-input').click()"
+                                        aria-label="Select secrets zip for this import">
+                                    SELECT SECRETS ZIP
+                                </button>
+                                <span id="import-secrets-filename" style="margin-left: 10px; font-size: 0.85em; color: #6af; vertical-align: middle;"></span>
+                            </div>
+                            <div style="margin-bottom: 8px;">
+                                <input type="password" id="import-secrets-password-input"
+                                       autocomplete="current-password"
+                                       placeholder="Secrets zip encryption password"
+                                       style="width: 100%; box-sizing: border-box; padding: 8px; background: #111; color: #9cf; border: 1px solid #336; font-family: inherit; font-size: 0.95em;"
+                                       oninput="updateImportApplyEnabled()">
+                            </div>
+                            <div id="import-secrets-error"
+                                 style="display: none; color: #f66; margin: 4px 0 6px; font-size: 0.9em;"></div>
+                        </div>
+
                         <div class="import-confirm-actions">
                             <button class="lcars-button import-cancel-btn" onclick="cancelImport()" aria-label="Cancel import">CANCEL</button>
                             <button class="lcars-button import-apply-btn" id="import-apply-btn" onclick="applyTeamImport()" aria-label="Apply import">APPLY IMPORT</button>
