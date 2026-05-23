@@ -6350,10 +6350,13 @@ function calculateParentWorkTime(item) {
 // Returns total ms, or 0 if no effort data is present.
 function calculateActiveEffort(item) {
     if (!item) return 0;
-    const accumulated = item.timeWorkedMs || 0;
+    const accumulated = Number(item.timeWorkedMs) || 0;
     if (item.workStartedAt) {
-        const inFlight = Math.max(0, Date.now() - new Date(item.workStartedAt).getTime());
-        return accumulated + inFlight;
+        // Guard against malformed timestamps: Math.max(0, NaN) is NaN, not 0.
+        const started = new Date(item.workStartedAt).getTime();
+        if (Number.isFinite(started)) {
+            return accumulated + Math.max(0, Date.now() - started);
+        }
     }
     return accumulated;
 }
@@ -6377,9 +6380,12 @@ function formatLeadTime(ms) {
 // Anchors on creation origin (same as completed lead time) so the number doesn't jump on completion.
 function calculateLiveLeadTime(item) {
     if (!item) return 0;
-    const origin = item.createdAt || item.addedAt;
-    if (!origin) return 0;
-    return Math.max(0, Date.now() - new Date(origin).getTime());
+    const originStr = item.createdAt || item.addedAt;
+    if (!originStr) return 0;
+    // Guard against malformed timestamps: Math.max(0, NaN) is NaN, not 0.
+    const origin = new Date(originStr).getTime();
+    if (!Number.isFinite(origin)) return 0;
+    return Math.max(0, Date.now() - origin);
 }
 
 function getShortName(fullName) {
