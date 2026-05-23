@@ -17205,9 +17205,6 @@ let stagedImportFile = null;
 // XACA-0554: tracks inline secrets file + discovered count for main import flow
 let stagedImportSecretsFile = null;
 let currentImportSecretsDiscovered = 0;
-// XACA-0554: pending secrets apply — set after main apply starts, consumed by onImportComplete
-let _pendingSecretsApplyJobId = null;
-let _pendingSecretsApplyPassword = null;
 let currentSecretsExportJobId = null;
 let secretsExportPollingInterval = null;
 
@@ -17655,12 +17652,9 @@ function renderImportPreflight(data) {
 function cancelImport() {
     currentImportJobId = null;
     stagedImportFile = null;
-    // XACA-0554: reset inline secrets state (incl. any pending paired-apply
-    // job + plaintext password, belt-and-suspenders against future UI rearrangement)
+    // XACA-0554: reset inline secrets state
     stagedImportSecretsFile = null;
     currentImportSecretsDiscovered = 0;
-    _pendingSecretsApplyJobId = null;
-    _pendingSecretsApplyPassword = null;
     const preflightEl = document.getElementById('import-preflight');
     if (preflightEl) preflightEl.style.display = 'none';
     const btn = document.getElementById('import-btn');
@@ -17821,12 +17815,28 @@ async function applyTeamImport() {
             return;
         }
 
-        // Step 4: poll main import to completion; secrets apply follows in onImportComplete
-        // Stash secretsJobId and password on the polling context so the completion handler can use them.
-        // Password is now '' in the DOM; we pass it via closure from the local var above.
-        _pendingSecretsApplyJobId = secretsJobId;
-        _pendingSecretsApplyPassword = password;
-        importPollingInterval = setInterval(() => pollImportStatus(currentImportJobId), 1000);
+        // Step 4: poll main import to completion; on success, apply the paired secrets.
+        // XACA-0554 (PR #469 review): the password lives ONLY in this call's closure —
+        // never a module-scope var — so it cannot outlive the operation or leak into a
+        // later import session. Once the interval is cleared the closure is released.
+        const mainJobId = currentImportJobId;
+        importPollingInterval = setInterval(async () => {
+            try {
+                const statusResp = await fetch(`/api/import/status/${mainJobId}`);
+                const statusData = await statusResp.json();
+                if (!statusResp.ok) { stopImportPolling(); return; }
+                updateImportProgress(statusData.progress, 'IMPORTING...', statusData.message);
+                if (statusData.status === 'completed') {
+                    stopImportPolling();
+                    _applyPairedSecretsImport(secretsJobId, password, statusData);
+                } else if (statusData.status === 'failed') {
+                    stopImportPolling();
+                    onImportFailed(statusData);
+                }
+            } catch (pollErr) {
+                console.error('Import poll error:', pollErr);
+            }
+        }, 1000);
         return;
     }
 
@@ -17904,15 +17914,6 @@ function onImportComplete(data) {
     const resultEl = document.getElementById('import-result');
     const titleEl = document.getElementById('import-result-title');
     const statsEl = document.getElementById('import-result-stats');
-
-    // XACA-0554: if a paired secrets job is pending, apply it now (main import complete first).
-    if (_pendingSecretsApplyJobId) {
-        _applyPairedSecretsImport(_pendingSecretsApplyJobId, _pendingSecretsApplyPassword, data);
-        // Clear immediately — password must not outlive this call
-        _pendingSecretsApplyJobId = null;
-        _pendingSecretsApplyPassword = null;
-        return;
-    }
 
     updateImportProgress(100, 'COMPLETE', 'Import applied successfully');
     if (progressEl) progressEl.style.display = 'none';
@@ -18040,12 +18041,6 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
 }
 
 function onImportFailed(data) {
-    // XACA-0554: a main-import failure must not leave a staged secrets job +
-    // plaintext password lingering — clear them so a later import can't pick up
-    // stale state, and so the password doesn't outlive the failed attempt.
-    _pendingSecretsApplyJobId = null;
-    _pendingSecretsApplyPassword = null;
-
     const progressEl = document.getElementById('import-progress');
     const resultEl = document.getElementById('import-result');
     const titleEl = document.getElementById('import-result-title');
