@@ -3599,6 +3599,34 @@ function createBacklogItem(item, index) {
                 timestamp.appendChild(workTimeSpan);
             }
         }
+        // XACA-0551: Active effort on the parent item itself
+        const activeEffort = calculateActiveEffort(item);
+        if (activeEffort > 0) {
+            const effortStr = formatWorkTime(activeEffort);
+            if (effortStr) {
+                const effortSpan = document.createElement('span');
+                effortSpan.className = 'item-time-worked item-active-effort';
+                effortSpan.textContent = ` ⏱ ${effortStr}`;
+                effortSpan.title = `Active effort: ${effortStr}`;
+                timestamp.appendChild(effortSpan);
+            }
+        }
+        // XACA-0551: Lead time for completed items (createdAt||addedAt → completedAt)
+        const leadOrigin = item.createdAt || item.addedAt;
+        const leadTimeMs = item.leadTimeMs ||
+            ((item.completedAt && leadOrigin)
+                ? Math.max(0, new Date(item.completedAt).getTime() - new Date(leadOrigin).getTime())
+                : 0);
+        if (leadTimeMs > 0) {
+            const leadStr = formatLeadTime(leadTimeMs);
+            if (leadStr) {
+                const leadSpan = document.createElement('span');
+                leadSpan.className = 'item-lead-time';
+                leadSpan.textContent = ` · ${leadStr} lead`;
+                leadSpan.title = `Lead time (created → completed): ${leadStr}`;
+                timestamp.appendChild(leadSpan);
+            }
+        }
     } else {
         const displayTime = item.updatedAt || item.addedAt;
         timestamp.textContent = formatRelativeTime(displayTime);
@@ -3614,6 +3642,34 @@ function createBacklogItem(item, index) {
                 workTimeSpan.textContent = ` (${workTimeStr} worked)`;
                 workTimeSpan.title = `Time worked on completed subitems: ${workTimeStr}`;
                 timestamp.appendChild(workTimeSpan);
+            }
+        }
+        // XACA-0551: Active effort on parent item (accumulated + any live in-flight span)
+        const activeEffort = calculateActiveEffort(item);
+        if (activeEffort > 0) {
+            const effortStr = formatWorkTime(activeEffort);
+            if (effortStr) {
+                const effortSpan = document.createElement('span');
+                effortSpan.className = 'item-time-worked item-active-effort';
+                effortSpan.textContent = ` ⏱ ${effortStr}`;
+                effortSpan.title = item.workStartedAt
+                    ? `Active effort (including live session): ${effortStr}`
+                    : `Active effort: ${effortStr}`;
+                timestamp.appendChild(effortSpan);
+            }
+        }
+        // XACA-0551: Live lead time for in-progress items (startedAt/createdAt → now)
+        if (item.status === 'in_progress' || item.activelyWorking) {
+            const liveLeadMs = calculateLiveLeadTime(item);
+            if (liveLeadMs > 0) {
+                const leadStr = formatLeadTime(liveLeadMs);
+                if (leadStr) {
+                    const leadSpan = document.createElement('span');
+                    leadSpan.className = 'item-lead-time item-lead-time-live';
+                    leadSpan.textContent = ` · ${leadStr} open`;
+                    leadSpan.title = `Lead time so far (created → now): ${leadStr}`;
+                    timestamp.appendChild(leadSpan);
+                }
             }
         }
     }
@@ -3650,6 +3706,58 @@ function createBacklogItem(item, index) {
     contentArea.appendChild(timestamp);
 
     div.appendChild(contentArea);
+
+    // XACA-0551: Time metrics detail row — shown in expanded view (CSS controls visibility).
+    // Displays Active effort and Lead time with clear labels when data is present.
+    (function appendTimeMetricsRow() {
+        const activeEffort = calculateActiveEffort(item);
+        const isInProgress = item.status === 'in_progress' || item.activelyWorking;
+        const liveLeadMs = (isCompleted || isInProgress) ? calculateLiveLeadTime(item) : 0;
+        const leadOriginMetrics = item.createdAt || item.addedAt;
+        const leadTimeMs = item.leadTimeMs ||
+            ((isCompleted && item.completedAt && leadOriginMetrics)
+                ? Math.max(0, new Date(item.completedAt).getTime() - new Date(leadOriginMetrics).getTime())
+                : liveLeadMs);
+
+        const hasEffort = activeEffort > 0;
+        const hasLead = leadTimeMs > 0;
+        if (!hasEffort && !hasLead) return;
+
+        const metricsRow = document.createElement('div');
+        metricsRow.className = 'item-time-metrics-row';
+
+        if (hasEffort) {
+            const effortStr = formatWorkTime(activeEffort);
+            if (effortStr) {
+                const effortEl = document.createElement('span');
+                effortEl.className = 'item-metrics-effort';
+                const liveIndicator = item.workStartedAt ? ' (live)' : '';
+                effortEl.innerHTML = `<span class="item-metrics-label">Active effort:</span> ${effortStr}${liveIndicator}`;
+                effortEl.title = item.workStartedAt
+                    ? `Accumulated effort plus current in-flight session`
+                    : `Total accumulated active effort`;
+                metricsRow.appendChild(effortEl);
+            }
+        }
+
+        if (hasLead) {
+            const leadStr = formatLeadTime(leadTimeMs);
+            if (leadStr) {
+                const leadEl = document.createElement('span');
+                leadEl.className = 'item-metrics-lead';
+                const leadLabel = isCompleted ? 'Lead time:' : 'Open for:';
+                leadEl.innerHTML = `<span class="item-metrics-label">${leadLabel}</span> ${leadStr}`;
+                leadEl.title = isCompleted
+                    ? `Wall-clock time from creation to completion`
+                    : `Wall-clock time since first started (creation → now)`;
+                metricsRow.appendChild(leadEl);
+            }
+        }
+
+        if (metricsRow.childNodes.length > 0) {
+            div.appendChild(metricsRow);
+        }
+    })();
 
     // Subitems container (collapsed/expanded state handled by CSS)
     if (hasSubitems) {
@@ -6236,6 +6344,42 @@ function calculateParentWorkTime(item) {
     return item.subitems
         .filter(sub => sub.status === 'completed' && sub.timeWorkedMs)
         .reduce((total, sub) => total + (sub.timeWorkedMs || 0), 0);
+}
+
+// XACA-0551: Calculate active effort for an item — accumulated ms plus any live in-flight span.
+// Returns total ms, or 0 if no effort data is present.
+function calculateActiveEffort(item) {
+    if (!item) return 0;
+    const accumulated = item.timeWorkedMs || 0;
+    if (item.workStartedAt) {
+        const inFlight = Math.max(0, Date.now() - new Date(item.workStartedAt).getTime());
+        return accumulated + inFlight;
+    }
+    return accumulated;
+}
+
+// XACA-0551: Format lead time — same granularity as formatWorkTime but semantically distinct.
+// Lead times are typically hours/days so we always show days when >= 1d.
+function formatLeadTime(ms) {
+    if (!ms || ms <= 0) return '';
+
+    const minutes = Math.floor(ms / 60000);
+    const hours = Math.floor(minutes / 60);
+    const days = Math.floor(hours / 24);
+
+    if (minutes < 1) return '< 1m';
+    if (minutes < 60) return `${minutes}m`;
+    if (hours < 24) return `${hours}h ${minutes % 60}m`;
+    return `${days}d ${hours % 24}h`;
+}
+
+// XACA-0551: Calculate live lead time ms for an in-progress item (createdAt||addedAt → now).
+// Anchors on creation origin (same as completed lead time) so the number doesn't jump on completion.
+function calculateLiveLeadTime(item) {
+    if (!item) return 0;
+    const origin = item.createdAt || item.addedAt;
+    if (!origin) return 0;
+    return Math.max(0, Date.now() - new Date(origin).getTime());
 }
 
 function getShortName(fullName) {

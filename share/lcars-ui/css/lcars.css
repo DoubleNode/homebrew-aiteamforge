@@ -5037,6 +5037,63 @@ body {
     opacity: 0.85;
 }
 
+/* XACA-0551: Active effort highlight (parent item's own ⏱ effort) */
+.item-active-effort {
+    color: var(--lcars-blue);
+    font-weight: 600;
+    font-style: normal;
+}
+
+/* XACA-0551: Lead time display — muted; lives next to timestamp */
+.item-lead-time {
+    color: var(--lcars-tan);
+    font-style: normal;
+    font-size: 9px;
+    opacity: 0.9;
+}
+
+.item-lead-time-live {
+    color: var(--lcars-mauve);
+    opacity: 0.85;
+}
+
+/* XACA-0551: Time metrics detail row — hidden on collapsed cards, shown when expanded */
+.item-time-metrics-row {
+    display: none;
+    align-items: center;
+    gap: 16px;
+    padding: 3px 8px 3px 24px;
+    font-size: 10px;
+    color: var(--lcars-tan);
+    border-top: 1px solid rgba(255, 255, 255, 0.05);
+    flex-wrap: wrap;
+}
+
+.backlog-item.expanded .item-time-metrics-row,
+.backlog-item.has-subitems.expanded .item-time-metrics-row {
+    display: flex;
+}
+
+/* Also show on items without subitems when they have timing data — always visible */
+.backlog-item:not(.has-subitems) .item-time-metrics-row {
+    display: flex;
+}
+
+.item-metrics-label {
+    color: var(--lcars-mauve);
+    font-style: italic;
+    margin-right: 3px;
+}
+
+.item-metrics-effort {
+    color: var(--lcars-blue);
+    font-weight: 500;
+}
+
+.item-metrics-lead {
+    color: var(--lcars-tan);
+}
+
 /* Tags in subitem header - pushed to right */
 .subitem-header-tags {
     margin-left: auto;
