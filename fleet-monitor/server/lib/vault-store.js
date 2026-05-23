@@ -421,6 +421,46 @@ function removeSecret(engineSlug, accountSlug) {
 }
 
 // ---------------------------------------------------------------------------
+// Vault mode detection (XACA-0539 — /api/vault/mode endpoint)
+// ---------------------------------------------------------------------------
+
+/**
+ * Detect whether the server is running in full vault mode or env-var failover.
+ *
+ * Heuristic (per VAULT-MODE-SIGNAL-CONTRACT.md §Implementation Notes):
+ *   - If the vault store file exists and is readable → "vault" mode.
+ *     The file may be empty/seeded (no machines/secrets yet), but its presence
+ *     means the server is using the encrypted-at-rest data path.
+ *   - If the file is absent or cannot be read → "env_failover".
+ *     This signals that vault has not been provisioned on this server and the
+ *     LCARS popup should warn the operator.
+ *
+ * NOTE: This function never reads secret data — only tests file existence and
+ * parsability (no crypto, no plaintext, no private keys). Safe to call from
+ * any route handler. NEVER returns any credential material in its result.
+ *
+ * @returns {{ mode: 'vault'|'env_failover', source: string }}
+ */
+function getVaultMode() {
+    try {
+        if (fs.existsSync(VAULT_FILE)) {
+            // Verify the file is parseable (not corrupted) — parse-then-discard.
+            JSON.parse(fs.readFileSync(VAULT_FILE, 'utf8'));
+            return {
+                mode:   'vault',
+                source: 'encrypted vault',
+            };
+        }
+    } catch (_) {
+        // File exists but is unreadable or unparseable → treat as failover.
+    }
+    return {
+        mode:   'env_failover',
+        source: 'environment variable fallback (FLEET_VAULT_KEY)',
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Exports
 // ---------------------------------------------------------------------------
 
@@ -440,6 +480,8 @@ module.exports = {
     validateMachineFields,
     validateSecretFields,
     validateCiphertextFields,
+    // Mode detection (XACA-0539)
+    getVaultMode,
     // Constants (exported for route layer + tests)
     VAULT_FILE,
     MAX_FIELD_LEN,

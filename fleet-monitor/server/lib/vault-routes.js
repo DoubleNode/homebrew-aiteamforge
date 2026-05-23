@@ -44,6 +44,39 @@ function registerVaultRoutes(app) {
     // ============================================================================
 
     /**
+     * GET /api/vault/mode
+     * XACA-0539: Report whether the server is delivering secrets from the
+     * encrypted vault store or from the env-var failover path.
+     *
+     * Per VAULT-MODE-SIGNAL-CONTRACT.md:
+     *   - mode = "vault"        → store initialized from vault.json (normal)
+     *   - mode = "env_failover" → vault.json absent/unreadable; env-var fallback
+     *
+     * Auth: none (consistent with all /api/vault/* routes — auth is deferred to
+     * EPIC-0019). This endpoint is read-only and never returns any credential
+     * material. `source` is a human-readable label only.
+     *
+     * Always returns 200; both states are valid operational states, not errors.
+     */
+    app.get('/api/vault/mode', (req, res) => {
+        try {
+            const modeInfo = vaultStore.getVaultMode();
+            res.json(modeInfo);
+        } catch (error) {
+            // Defensive catch — getVaultMode is designed not to throw, but guard
+            // against unexpected runtime failures so this never emits a 5xx for a
+            // normal operational state.
+            console.error('Error reading vault mode:', error);
+            // Return env_failover on unexpected error (conservative — better to
+            // surface the warning popup than silently claim vault is healthy).
+            res.json({
+                mode:   'env_failover',
+                source: 'environment variable fallback (FLEET_VAULT_KEY)',
+            });
+        }
+    });
+
+    /**
      * GET /api/vault/machines
      * List all registered vault machines.
      * Returns metadata only: id, label, public_key, registered_at, updated_at.

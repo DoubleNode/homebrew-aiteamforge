@@ -824,3 +824,69 @@ test('PUT /api/vault/secrets — 404 if secret does not exist', async () => {
 
     assert.equal(res.status, 404);
 });
+
+// ===========================================================================
+// GET /api/vault/mode — XACA-0539 Vault Mode Signal
+// ===========================================================================
+
+test('GET /api/vault/mode — returns 200 with mode and source fields', async () => {
+    const res = await request(app).get('/api/vault/mode');
+
+    assert.equal(res.status, 200);
+    // Required fields per VAULT-MODE-SIGNAL-CONTRACT.md.
+    assert.ok(typeof res.body.mode === 'string', 'mode must be a string');
+    assert.ok(typeof res.body.source === 'string', 'source must be a string');
+    assert.ok(res.body.source.length > 0, 'source must be non-empty');
+    // Only the two defined mode values are valid.
+    assert.ok(
+        res.body.mode === 'vault' || res.body.mode === 'env_failover',
+        `mode must be "vault" or "env_failover", got: ${res.body.mode}`
+    );
+});
+
+test('GET /api/vault/mode — returns "vault" when vault.json exists and is readable', async () => {
+    // beforeEach wipes vault.json; reading the vault auto-seeds it. Seed it now
+    // so it exists on disk — this is the normal operational state.
+    vaultStore.readVault(); // auto-seeds vault.json via FLEET_VAULT_FILE
+
+    const res = await request(app).get('/api/vault/mode');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.mode, 'vault');
+    assert.equal(res.body.source, 'encrypted vault');
+});
+
+test('GET /api/vault/mode — returns "env_failover" when vault.json is absent', async () => {
+    // beforeEach already wiped vault.json; do not call readVault() so the file
+    // stays absent. This simulates a server that has never had vault provisioned.
+    try { fs.unlinkSync(TEST_VAULT_FILE); } catch (_) {}
+
+    const res = await request(app).get('/api/vault/mode');
+
+    assert.equal(res.status, 200);
+    assert.equal(res.body.mode, 'env_failover');
+    assert.ok(res.body.source.includes('FLEET_VAULT_KEY'),
+        'env_failover source label must mention FLEET_VAULT_KEY');
+});
+
+test('GET /api/vault/mode — response body contains only mode and source (no credential fields)', async () => {
+    const res = await request(app).get('/api/vault/mode');
+
+    assert.equal(res.status, 200);
+    // Structural no-credential guarantee: the response key set must be EXACTLY
+    // the two documented fields. Anything else (key material, internal paths,
+    // stack traces) is a regression.
+    const keys = Object.keys(res.body).sort();
+    assert.deepEqual(keys, ['mode', 'source'].sort(),
+        'GET /api/vault/mode must expose only mode and source fields');
+    // Belt-and-suspenders: none of the response KEYS are credential-shaped.
+    // (We check KEYS only, not values — the `source` field intentionally mentions
+    // key names like FLEET_VAULT_KEY as a human-readable label.)
+    for (const forbidden of ['token', 'private', 'password', 'credential', 'secret', 'apikey', 'api_key']) {
+        assert.ok(!keys.includes(forbidden),
+            `mode response keys must not include credential-shaped field: ${forbidden}`);
+    }
+    // The values must also be strings (not objects that could smuggle nested data).
+    assert.equal(typeof res.body.mode,   'string', 'mode field must be a string');
+    assert.equal(typeof res.body.source, 'string', 'source field must be a string');
+});
