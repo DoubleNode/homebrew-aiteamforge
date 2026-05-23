@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-05-23
+
 ### Refactor: XACA-0550 — Narrow damage-control firewall (Homebrew cleanup false-positives)
 
 - **`share/templates/claude/hooks/damage-control/bash-tool-damage-control.py`** — two surgical narrowings of the Bash firewall, mirrored from the canonical `claude-hooks/` source:
