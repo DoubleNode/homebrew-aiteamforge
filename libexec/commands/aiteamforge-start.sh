@@ -143,57 +143,117 @@ validate_boards() {
   fi
 }
 
-# Start LCARS server
+# Start LCARS server(s) — one per configured team instance.
+#
+# XACA-0555: server.py (0.12.0+) enforces the team-id contract and FATALs at
+# boot when LCARS_TEAM is unset (validate_lcars_team_or_die, team-id-contract
+# §6). Previously this launched a single bare `python3 server.py <port>` with
+# no LCARS_TEAM, so the server died immediately. We now loop the configured
+# team instances, resolve each team's LCARS port from the aiteamforge_paths
+# registry, and launch one server per team with LCARS_TEAM / LCARS_SESSION_NAME
+# set — matching the per-team startup scripts.
 start_lcars() {
   print_section "Starting LCARS Kanban Server"
 
   local lcars_dir="${WORKING_DIR}/lcars-ui"
-
-  # Read port from config file (set by install-kanban.sh), default to 8080
-  local port=8080
-  if [ -f "${lcars_dir}/.lcars-port" ]; then
-    port="$(cat "${lcars_dir}/.lcars-port" 2>/dev/null || echo 8080)"
-  fi
 
   if [ ! -d "$lcars_dir" ]; then
     print_error "LCARS UI not found: ${lcars_dir}"
     return 1
   fi
 
-  # Check if already running (try root URL — server has no /health endpoint)
-  if curl -s -o /dev/null -w '%{http_code}' http://localhost:${port}/ 2>/dev/null | grep -q '200'; then
-    print_warning "LCARS server already running on port ${port}"
+  # Per-team port resolver: provides aiteamforge_team_lcars_port <team>.
+  # shellcheck source=/dev/null
+  source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
+
+  # Resolve configured team instance ids (e.g. "academy", "finance-personal").
+  local teams_str
+  teams_str=$(get_configured_teams)
+  if [ -z "$teams_str" ]; then
+    print_warning "No configured teams found — skipping LCARS startup"
     return 0
   fi
 
-  # Start server in background
-  print_info "Starting LCARS server on port ${port}..."
+  # XACA-0486: resolve the brew venv python so runtime imports (pyzipper,
+  # requests, …) work on tap-installed machines. Bare `python3` is the system
+  # interpreter and lacks those deps. Fall back to system python3 on the
+  # dev-team source machine (deps available globally; no brew venv present).
+  local lcars_python="python3"
+  local _brew_aitf_prefix
+  if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" \
+      && [ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]; then
+    lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
+  fi
 
-  pushd "$lcars_dir" > /dev/null
-  nohup python3 server.py "$port" > /tmp/lcars-server.log 2>&1 &
-  local pid=$!
-  popd > /dev/null
+  local -a teams=()
+  read -ra teams <<< "$teams_str"
 
-  # Wait for startup
-  sleep 3
+  local -a started_teams=()
+  local -a started_ports=()
 
-  # Check if process is still alive (confirms no crash on startup)
-  if kill -0 "$pid" 2>/dev/null; then
-    print_success "LCARS server started (PID: ${pid})"
-    print_info "Access at: http://localhost:${port}"
+  local team
+  for team in "${teams[@]}"; do
+    [ -z "$team" ] && continue
 
-    # Open browser if requested
-    if [ "$OPEN_BROWSER" = true ]; then
-      print_info "Opening browser..."
-      open "http://localhost:${port}" 2>/dev/null || true
+    # Resolve this team's LCARS port from the aiteamforge_paths registry.
+    local port=""
+    if ! port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null) || [ -z "$port" ]; then
+      print_warning "No LCARS port allocated for '${team}' — skipping"
+      continue
     fi
 
+    # Already serving on this port? Treat as success.
+    if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
+      print_warning "LCARS already running for '${team}' on port ${port}"
+      continue
+    fi
+
+    print_info "Starting LCARS for '${team}' on port ${port}..."
+
+    # Launch in a subshell so the cd does not leak. LCARS_TEAM is mandatory
+    # (server FATALs without it); LCARS_SESSION_NAME scopes the team's tmp dir.
+    # Append (>>) so concurrent team servers do not truncate each other's log.
+    (
+      cd "$lcars_dir" || exit 1
+      LCARS_TEAM="$team" LCARS_SESSION_NAME="${team}-lcars" \
+        nohup "$lcars_python" server.py "$port" >> /tmp/lcars-server.log 2>&1 &
+    )
+
+    started_teams+=("$team")
+    started_ports+=("$port")
+  done
+
+  if [ ${#started_teams[@]} -eq 0 ]; then
+    print_warning "No LCARS servers were launched"
     return 0
-  else
-    print_error "Failed to start LCARS server"
-    print_info "Check logs: /tmp/lcars-server.log"
-    return 1
   fi
+
+  # Give servers a moment to bind, then verify each port responds.
+  sleep 3
+
+  local idx=0
+  local ok=0
+  for team in "${started_teams[@]}"; do
+    local port="${started_ports[$idx]}"
+    idx=$((idx + 1))
+    if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
+      print_success "LCARS server started for '${team}' (port ${port})"
+      print_info "Access at: http://localhost:${port}"
+      ok=$((ok + 1))
+      if [ "$OPEN_BROWSER" = true ]; then
+        print_info "Opening browser for '${team}'..."
+        open "http://localhost:${port}" 2>/dev/null || true
+      fi
+    else
+      print_error "LCARS server for '${team}' failed to respond on port ${port}"
+      print_info "Check logs: /tmp/lcars-server.log"
+    fi
+  done
+
+  if [ "$ok" -gt 0 ]; then
+    return 0
+  fi
+  return 1
 }
 
 # Start Fleet Monitor (server and/or reporter client)

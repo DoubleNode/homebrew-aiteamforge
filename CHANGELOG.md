@@ -7,6 +7,26 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0555 — `aiteamforge start` launches server.py without LCARS_TEAM (server FATALs on boot)
+
+`aiteamforge start` (and `start lcars`) launched `nohup python3 server.py <port>` with no
+`LCARS_TEAM` in the environment. The 0.12.0 server enforces the team-id contract
+(`validate_lcars_team_or_die`, team-id-contract §6) and hard-exits at boot with
+`FATAL: LCARS_TEAM is not set`, so the dashboard never came up — `/tmp/lcars-server.log`
+showed only the fatal.
+
+- **`libexec/commands/aiteamforge-start.sh`** — `start_lcars()` now loops the configured
+  team instances (`get_configured_teams`), resolves each team's LCARS port from the
+  `aiteamforge_paths` registry (`aiteamforge_team_lcars_port`, via `libexec/lib/aiteamforge-paths.sh`),
+  and launches one server per team with `LCARS_TEAM=<team> LCARS_SESSION_NAME=<team>-lcars`
+  set — matching the per-team startup scripts. Teams without an allocated port are skipped
+  with a warning; ports already serving are treated as already-running. Liveness is now
+  verified per port via an HTTP poll (replacing the old single-PID `kill -0` check), and the
+  startup log is appended (`>>`) so concurrent team servers don't clobber each other's output.
+- **Brew venv python (XACA-0486)** — the launch resolves `$(brew --prefix aiteamforge)/libexec/venv/bin/python3`
+  when present (falling back to system `python3`) so runtime imports (pyzipper, requests, …)
+  resolve on tap-installed machines.
+
 ## [0.12.0] - 2026-05-23
 
 ### Refactor: XACA-0550 — Narrow damage-control firewall (Homebrew cleanup false-positives)
