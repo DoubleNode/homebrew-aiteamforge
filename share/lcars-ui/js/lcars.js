@@ -16561,19 +16561,22 @@ async function fetchImportPreview() {
             body: JSON.stringify({ ticketId: ticketId })
         });
 
-        const result = await response.json();
-
-        if (result.success && result.issue) {
-            importState.issue = result.issue;
-            importState.provider = result.provider;
+        const result = await readJsonResponse(response);
+        if (!result.ok || result.parseError) {
+            showImportError(_httpErrorMessage('Failed to fetch issue', result));
+            return;
+        }
+        if (result.data.success && result.data.issue) {
+            importState.issue = result.data.issue;
+            importState.provider = result.data.provider;
             importState.ticketId = ticketId;
-            displayImportPreview(result.issue, result.provider);
+            displayImportPreview(result.data.issue, result.data.provider);
             if (confirmBtn) confirmBtn.disabled = false;
         } else {
-            showImportError(result.error || 'Failed to fetch issue');
+            showImportError(result.data.error || 'Failed to fetch issue');
         }
     } catch (error) {
-        showImportError('Network error: ' + error.message);
+        showImportError('Fetch issue failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
     } finally {
         if (loading) loading.style.display = 'none';
     }
@@ -16802,22 +16805,25 @@ async function executeImport() {
             })
         });
 
-        const result = await response.json();
-
-        if (result.success) {
+        const result = await readJsonResponse(response);
+        if (!result.ok || result.parseError) {
+            showImportError(_httpErrorMessage('Import failed', result));
+            return;
+        }
+        if (result.data.success) {
             hideImportModal();
             // Refresh the board to show new item
             loadBoardData();
             // Show success notification
-            const msg = result.createdId
-                ? `Imported as ${result.createdId}`
+            const msg = result.data.createdId
+                ? `Imported as ${result.data.createdId}`
                 : 'Import successful!';
             alert(msg);
         } else {
-            showImportError(result.error || 'Import failed');
+            showImportError(result.data.error || 'Import failed');
         }
     } catch (error) {
-        showImportError('Network error: ' + error.message);
+        showImportError('Import failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
     } finally {
         if (confirmBtn) {
             confirmBtn.disabled = false;
@@ -17814,11 +17820,16 @@ async function applyTeamImport() {
             // through the remaining fetches in this call stack, then it falls out of scope.
             if (secretsPwInput) secretsPwInput.value = '';
 
-            const preflightData = await preflightResp.json();
-            if (!preflightResp.ok) {
-                let msg = preflightData.error || 'Wrong password — please try again.';
-                if (typeof preflightData.attemptsRemaining === 'number') {
-                    msg += ` (${preflightData.attemptsRemaining} attempt${preflightData.attemptsRemaining !== 1 ? 's' : ''} remaining)`;
+            const preflightResult = await readJsonResponse(preflightResp);
+            if (!preflightResult.ok || preflightResult.parseError) {
+                let msg;
+                if (preflightResult.parseError) {
+                    msg = _httpErrorMessage('Secrets password verification failed', preflightResult);
+                } else {
+                    msg = (preflightResult.data && preflightResult.data.error) || 'Wrong password — please try again.';
+                    if (preflightResult.data && typeof preflightResult.data.attemptsRemaining === 'number') {
+                        msg += ` (${preflightResult.data.attemptsRemaining} attempt${preflightResult.data.attemptsRemaining !== 1 ? 's' : ''} remaining)`;
+                    }
                 }
                 _showInlineSecretsError(msg);
                 return;
@@ -17826,7 +17837,7 @@ async function applyTeamImport() {
         } catch (err) {
             if (secretsPwInput) secretsPwInput.value = '';
             console.error('Secrets preflight error:', err);
-            _showInlineSecretsError('Secrets password verification failed — see console');
+            _showInlineSecretsError('Secrets password verification failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
             return;
         }
 
@@ -17838,15 +17849,15 @@ async function applyTeamImport() {
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ pairedSecretsJobId: secretsJobId }),
             });
-            const applyData = await applyResp.json();
-            if (!applyResp.ok) {
-                alert(`Import failed: ${applyData.error || applyData.message || 'unknown error'}`);
+            const applyResult = await readJsonResponse(applyResp);
+            if (!applyResult.ok || applyResult.parseError) {
+                alert(_httpErrorMessage('Import failed', applyResult));
                 if (progressEl) progressEl.style.display = 'none';
                 return;
             }
         } catch (err) {
             console.error('Apply import failed:', err);
-            alert('Import request failed — see console');
+            alert('Import failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
             if (progressEl) progressEl.style.display = 'none';
             return;
         }
@@ -17879,15 +17890,17 @@ async function applyTeamImport() {
     // ── NO SECRETS PATH (original behavior) ──
     try {
         const response = await fetch(`/api/import/apply/${currentImportJobId}`, { method: 'POST' });
-        const data = await response.json();
-        if (!response.ok) {
-            alert(`Import failed: ${data.error || 'unknown error'}`);
+        const result = await readJsonResponse(response);
+        if (!result.ok || result.parseError) {
+            alert(_httpErrorMessage('Import failed', result));
             if (progressEl) progressEl.style.display = 'none';
             return;
         }
         importPollingInterval = setInterval(() => pollImportStatus(currentImportJobId), 1000);
     } catch (error) {
         console.error('Apply import failed:', error);
+        alert('Import failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
+        if (progressEl) progressEl.style.display = 'none';
     }
 }
 
@@ -17990,8 +18003,8 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
         // Zero password from local var by overwriting (GC will handle cleanup; this limits window)
         password = '';
 
-        const applyData = await applyResp.json();
-        if (!applyResp.ok) {
+        const pairedApplyResult = await readJsonResponse(applyResp);
+        if (!pairedApplyResult.ok || pairedApplyResult.parseError) {
             updateImportProgress(100, 'COMPLETE', 'Main import done');
             if (progressEl) progressEl.style.display = 'none';
             if (resultEl) resultEl.style.display = 'block';
@@ -18001,7 +18014,7 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
                 renderImportStatsDOM(statsEl, mainImportData.stats || {});
                 const errDiv = document.createElement('div');
                 errDiv.style.color = '#f66';
-                errDiv.textContent = `Secrets extraction failed: ${applyData.error || 'unknown error'}`;
+                errDiv.textContent = _httpErrorMessage('Secrets extraction failed', pairedApplyResult);
                 statsEl.appendChild(errDiv);
             }
             const btn = document.getElementById('import-btn');
@@ -18182,12 +18195,18 @@ async function verifySecretsImportPassword() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password }),
         });
-        const data = await response.json();
+        const prefResult = await readJsonResponse(response);
 
-        if (!response.ok) {
+        if (!prefResult.ok || prefResult.parseError) {
+            if (prefResult.parseError) {
+                if (errEl) { errEl.textContent = _httpErrorMessage('Password verification failed', prefResult); errEl.style.display = 'block'; }
+                if (verifyBtn) verifyBtn.disabled = false;
+                return;
+            }
             // Wrong password (HTTP 400) — show inline error, keep panel open for retry.
             // If budget exhausted the server returns a different error string and the
             // job transitions to 'failed', so _resetSecretsImportToFileArea() is called.
+            const data = prefResult.data || {};
             let msg = data.error || 'Wrong password — please try again.';
             if (
                 data.error === 'Too many failed password attempts. Re-upload the secrets zip to try again.' ||
@@ -18215,10 +18234,11 @@ async function verifySecretsImportPassword() {
         if (pwPanel)        pwPanel.style.display        = 'none';
         if (preflightPanel) preflightPanel.style.display = 'block';
 
+        const data = prefResult.data || {};
         renderSecretsImportPreflight(data.manifest || {}, data.fileCount, data.targetTeam, data.warning);
     } catch (err) {
         console.error('Secrets preflight error:', err);
-        if (errEl) { errEl.textContent = 'Network error — see console.'; errEl.style.display = 'block'; }
+        if (errEl) { errEl.textContent = 'Password verification failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.'; errEl.style.display = 'block'; }
         if (pwInput) { pwInput.value = ''; pwInput.focus(); }
         if (verifyBtn) verifyBtn.disabled = false;
     }
@@ -18295,14 +18315,14 @@ async function applySecretsImport() {
         // Zero the password from the input immediately after the POST
         if (pwInput) pwInput.value = '';
 
-        const data = await response.json();
-        if (!response.ok) {
+        const applyResult = await readJsonResponse(response);
+        if (!applyResult.ok || applyResult.parseError) {
             if (progressEl) progressEl.style.display = 'none';
-            alert(`Secrets extraction failed: ${data.error || 'unknown error'}`);
+            alert(_httpErrorMessage('Secrets extraction failed', applyResult));
             _resetSecretsImportToFileArea();
             return;
         }
-        // data.status === "applying" — start polling
+        // applyResult.data.status === "applying" — start polling
         secretsImportPollingInterval = setInterval(
             () => pollSecretsImportStatus(currentSecretsImportJobId), 1500
         );
@@ -18310,7 +18330,7 @@ async function applySecretsImport() {
         console.error('Secrets apply error:', err);
         if (pwInput) pwInput.value = '';
         if (progressEl) progressEl.style.display = 'none';
-        alert('Secrets extraction request failed — see console');
+        alert('Secrets extraction failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
         _resetSecretsImportToFileArea();
     }
 }
