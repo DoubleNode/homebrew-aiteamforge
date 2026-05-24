@@ -54,6 +54,9 @@ KB_PORT_FIX_PATH = (
     REPO_ROOT / "homebrew-tap" / "libexec" / "commands" / "kb-port-fix.py"
 )
 
+PORTFIX_PATH = REPO_ROOT / "kanban-hooks" / "portfix_runner.py"
+
+
 def _import_wizard():
     """Import aiteamforge-team-paths-wizard as a module."""
     spec = importlib.util.spec_from_file_location("wizard", WIZARD_PATH)
@@ -62,7 +65,16 @@ def _import_wizard():
     return mod
 
 
+def _import_portfix():
+    """Import the shared portfix_runner module directly."""
+    spec = importlib.util.spec_from_file_location("portfix_runner", PORTFIX_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 WIZARD = _import_wizard()
+PORTFIX = _import_portfix()
 
 
 # ---------------------------------------------------------------------------
@@ -230,14 +242,19 @@ class TestRunPortCollisionFix(unittest.TestCase):
     # Test 5: gracefully non-fatal when kb-port-fix.py is not found
     # ------------------------------------------------------------------
     def test_graceful_when_kbfix_not_found(self):
-        """Does not raise or exit when kb-port-fix.py cannot be located."""
+        """Does not raise or exit when kb-port-fix.py cannot be located.
+
+        The resolver/runner live in the shared portfix_runner module now, so we
+        patch its resolve_kb_port_fix (which the wizard wrapper delegates to).
+        """
+        portfix = WIZARD._load_portfix_runner()
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Path(tmpdir) / "team-paths.json"
             _write_team_paths(cfg, {"a": {"lcars_port": 8200}})
 
             buf_out = io.StringIO()
             buf_err = io.StringIO()
-            with patch.object(WIZARD, "_resolve_kb_port_fix", return_value=None):
+            with patch.object(portfix, "resolve_kb_port_fix", return_value=None):
                 with patch("sys.stdout", buf_out):
                     with patch("sys.stderr", buf_err):
                         # Must not raise
@@ -360,6 +377,63 @@ class TestKbTeamImportFixPorts(unittest.TestCase):
         # Should mention "fix" or "OK" in output
         combined = result.stdout + result.stderr
         self.assertRegex(combined.lower(), r"fix|ok|no changes")
+
+
+class TestPortfixRunnerModule(unittest.TestCase):
+    """The shared portfix_runner module (single resolver/runner, PR #472)."""
+
+    def test_resolve_finds_dev_tree_path(self):
+        if not KB_PORT_FIX_PATH.exists():
+            self.skipTest("kb-port-fix.py not found — dev tree required")  # pragma: no cover
+        resolved = PORTFIX.resolve_kb_port_fix()
+        self.assertIsNotNone(resolved)
+        self.assertTrue(str(resolved).endswith("kb-port-fix.py"))
+
+    def test_resolve_returns_none_when_not_found(self):
+        with tempfile.TemporaryDirectory() as fake_home_dir:
+            fake_home = Path(fake_home_dir)
+            with patch.object(Path, "home", return_value=fake_home):
+                with patch("subprocess.run", side_effect=FileNotFoundError):
+                    self.assertIsNone(PORTFIX.resolve_kb_port_fix())
+
+    def test_run_makes_config_collision_free(self):
+        """run_port_collision_fix() on a duplicate-port config yields unique ports.
+
+        Uses real team names (matching the wizard integration test) so
+        kb-port-fix can resolve each team's port band and renumber the clash.
+        """
+        if not KB_PORT_FIX_PATH.exists():
+            self.skipTest("kb-port-fix.py not found — dev tree required")  # pragma: no cover
+        teams = {
+            "academy":  {"lcars_port": 8260},   # collision
+            "ios":      {"lcars_port": 8260},   # collision
+            "android":  {"lcars_port": 8280},
+        }
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Path(tmpdir) / "team-paths.json"
+            _write_team_paths(cfg, teams)
+            self.assertTrue(_has_port_collision(_read_team_paths(cfg)["teams"]))
+            with patch("sys.stdout", io.StringIO()):
+                rc = PORTFIX.run_port_collision_fix(cfg)
+            self.assertEqual(rc, 0)
+            self.assertFalse(_has_port_collision(_read_team_paths(cfg)["teams"]))
+
+    def test_run_graceful_when_not_found(self):
+        """Returns 0 and warns (never raises) when kb-port-fix.py is absent."""
+        buf_err = io.StringIO()
+        with patch.object(PORTFIX, "resolve_kb_port_fix", return_value=None):
+            with patch("sys.stdout", io.StringIO()):
+                with patch("sys.stderr", buf_err):
+                    rc = PORTFIX.run_port_collision_fix(None)
+        self.assertEqual(rc, 0)
+        self.assertIn("WARNING", buf_err.getvalue())
+
+    def test_main_no_args_is_non_fatal(self):
+        """CLI with no args targets the default config and always returns 0."""
+        with patch.object(PORTFIX, "run_port_collision_fix", return_value=7) as mock_run:
+            rc = PORTFIX.main([])
+        self.assertEqual(rc, 0)  # non-fatal contract regardless of underlying code
+        mock_run.assert_called_once_with(None)
 
 
 if __name__ == "__main__":

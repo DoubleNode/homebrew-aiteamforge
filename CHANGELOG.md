@@ -29,6 +29,9 @@ attempt to bind.
   but continues (degrade gracefully). Gate is wired into both `all` and `lcars|kanban` service paths.
 - **`libexec/commands/test_kb_port_fix.py`** — four new `TestCheckMode` test cases covering:
   clean config → exit 0, collision → exit 1, null port → exit 1, `main()` dispatch → exit 0.
+- **Review follow-up (PR #472):** `check_port_health()` now holds its resolved command in a
+  bash array and invokes it as `"${port_fix_cmd[@]}" --check`, so a libexec path containing
+  spaces survives without word-splitting.
 
 ### Bugfix: XACA-0555 — `aiteamforge start` launches server.py without LCARS_TEAM (server FATALs on boot)
 

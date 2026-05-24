@@ -132,86 +132,52 @@ def _separator(char: str = "-", width: int = 70) -> None:
 # Port-collision auto-fix (XACA-0557)
 # ---------------------------------------------------------------------------
 
+# kb-port-fix resolution + invocation live in the shared portfix_runner module
+# (kanban-hooks/) so the brew/dev path layout is defined in exactly one place,
+# shared with kb-team-import (XACA-0557, PR #472 review consolidation).
+_PORTFIX_MOD = None
+
+
+def _load_portfix_runner():
+    """Import portfix_runner from the sibling kanban-hooks/ directory (cached)."""
+    global _PORTFIX_MOD
+    if _PORTFIX_MOD is not None:
+        return _PORTFIX_MOD
+    script_dir = Path(__file__).resolve().parent
+    # scripts/ is a sibling of kanban-hooks/ (same in dev tree and tap share/).
+    candidates = [
+        script_dir.parent / "kanban-hooks" / "portfix_runner.py",
+        script_dir / "portfix_runner.py",  # fallback: same dir
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            spec = importlib.util.spec_from_file_location("portfix_runner", candidate)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _PORTFIX_MOD = mod
+            return mod
+    print(
+        "ERROR: Cannot find portfix_runner.py.\n"
+        "Expected it at: kanban-hooks/portfix_runner.py (relative to dev-team root).",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+
+
 def _resolve_kb_port_fix() -> Path | None:
-    """Locate kb-port-fix.py — dev-tree path first, then brew-installed fallback.
-
-    Mirrors the resolution order used by the kb-port-fix() shell function so
-    the wizard works both in the dev worktree and on an end-user machine.
-    """
-    dev_path = Path.home() / "dev-team" / "homebrew-tap" / "libexec" / "commands" / "kb-port-fix.py"
-    if dev_path.exists():
-        return dev_path
-
-    # Brew-installed fallback.
-    try:
-        brew_prefix = subprocess.run(
-            ["brew", "--prefix"],
-            capture_output=True, text=True, timeout=10,
-        ).stdout.strip()
-        if brew_prefix:
-            brew_path = Path(brew_prefix) / "opt" / "aiteamforge" / "libexec" / "libexec" / "commands" / "kb-port-fix.py"
-            if brew_path.exists():
-                return brew_path
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        pass  # brew not on PATH or timed out — skip fallback silently
-
-    return None
+    """Locate kb-port-fix.py (delegates to the shared portfix_runner module)."""
+    return _load_portfix_runner().resolve_kb_port_fix()
 
 
 def _run_port_collision_fix(config_path: Path) -> None:
     """Detect and auto-fix lcars_port collisions in the written config.
 
-    Invokes ``kb-port-fix.py --apply --yes`` (non-interactive) via the
-    resolved script path.  Captures and surfaces its full output so the user
-    sees exactly what changed.  Exits 0 whether or not changes were made.
-
-    If kb-port-fix.py cannot be located, prints a warning with manual
-    remediation instructions and continues (non-fatal — the wizard has already
-    written the config; port collisions are caught again at LCARS boot time).
+    Thin wrapper around ``portfix_runner.run_port_collision_fix`` (the single
+    shared implementation) with the wizard's section separators. Non-fatal: a
+    leftover collision is caught again by the LCARS startup guard at boot.
     """
     _separator()
-    print("Checking for LCARS port collisions …")
-
-    kbfix = _resolve_kb_port_fix()
-    if kbfix is None:
-        print(
-            "WARNING: kb-port-fix.py not found — cannot auto-fix port collisions.\n"
-            "Run `kb-port-fix --apply` manually after ensuring AITeamForge is installed.",
-            file=sys.stderr,
-        )
-        _separator()
-        return
-
-    env = {**os.environ, "AITEAMFORGE_CONFIG": str(config_path)}
-    try:
-        result = subprocess.run(
-            [sys.executable, str(kbfix), "--apply", "--yes"],
-            env=env,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        print(
-            f"WARNING: kb-port-fix invocation failed: {exc}\n"
-            "Run `kb-port-fix --apply` manually to resolve any collisions.",
-            file=sys.stderr,
-        )
-        _separator()
-        return
-
-    # Surface combined output (stdout + stderr) to the user.
-    combined = (result.stdout + result.stderr).strip()
-    if combined:
-        print(combined)
-
-    if result.returncode == 0:
-        print("Port collision check: OK")
-    else:
-        print(
-            f"WARNING: kb-port-fix exited {result.returncode} — review the output above.",
-            file=sys.stderr,
-        )
+    _load_portfix_runner().run_port_collision_fix(config_path)
     _separator()
 
 

@@ -103,23 +103,25 @@ print_header "AITEAMFORGE START"
 # If collisions or null ports are found, print an actionable message and abort.
 # Degrades gracefully if the tool is not installed (warn, continue).
 check_port_health() {
-  # Resolve the port-fix script: prefer the on-PATH bin stub, fall back to libexec.
-  local port_fix_cmd=""
+  # Resolve the port-fix command: prefer the on-PATH bin stub, fall back to
+  # libexec. Held as an array so a libexec path containing spaces survives
+  # invocation without word-splitting. (XACA-0557 review, PR #472)
+  local port_fix_cmd=()
   if command -v aiteamforge-port-fix &>/dev/null; then
-    port_fix_cmd="aiteamforge-port-fix"
+    port_fix_cmd=(aiteamforge-port-fix)
   else
     local _libexec_pf="${SCRIPT_DIR}/kb-port-fix.py"
     if [ -x "$_libexec_pf" ]; then
-      port_fix_cmd="python3 $_libexec_pf"
+      port_fix_cmd=(python3 "$_libexec_pf")
     fi
   fi
 
-  if [ -z "$port_fix_cmd" ]; then
+  if [ ${#port_fix_cmd[@]} -eq 0 ]; then
     print_warning "kb-port-fix not found — skipping port health check (degrade gracefully)"
     return 0
   fi
 
-  if ! $port_fix_cmd --check 2>/dev/null; then
+  if ! "${port_fix_cmd[@]}" --check 2>/dev/null; then
     print_error "LCARS port collision or null-port detected in team-paths.json."
     print_error "LCARS servers may fail to bind to the correct ports."
     print_error "Fix with: aiteamforge-port-fix --apply"
