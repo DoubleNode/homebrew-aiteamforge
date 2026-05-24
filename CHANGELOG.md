@@ -7,6 +7,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0558 — `aiteamforge upgrade` now syncs kanban-hooks + helper scripts (in-place upgrades left them stale)
+
+`aiteamforge upgrade` only re-synced LCARS UI, templates, shell helpers, skills, and
+LaunchAgents. It never synced `share/kanban-hooks` or several standalone helper scripts,
+so an in-place `brew upgrade` that shipped a new `kanban-hooks/aiteamforge_paths.py` to the
+Cellar left the runtime copy stale. The visible symptom was a LCARS warning
+`cannot import name build_team_code_map` (XACA-0542) followed by a fall back to hardcoded
+directories. Fresh installs were unaffected because `install-kanban.sh` recopies these
+components — the defect bit in-place upgrades only.
+
+- **`libexec/commands/aiteamforge-upgrade.sh`** — adds two sync stages, wired into the run
+  sequence after `update_lcars`:
+  - `update_kanban_hooks()` — additive `rsync` of `share/kanban-hooks/` → `kanban-hooks/`
+    (no `--delete`, preserves operator-added hooks) + `chmod +x` on `*.py`. Mirrors
+    `install_kanban_hooks`. This is the primary fix.
+  - `update_aux_scripts()` — refreshes the standalone scripts `install-kanban.sh` copies
+    individually but the upgrade path skipped: `kanban-board-check.sh`,
+    `kanban-restore-helper.sh`, `kanban-backup.py` (→ working-dir root) and `kb-cr.sh`
+    (→ `scripts/`). Uses the existing per-file `-nt || --force` freshness + `chmod +x`
+    convention; only refreshes scripts already installed.
+  - `--help` "What Gets Updated" list updated to mention kanban hooks and helper scripts.
+- **Audit note:** `lcars-ports` is *not* synced — the tap does not ship `share/lcars-ports`,
+  and the runtime directory holds stateful per-team port/theme/order assignments that an
+  upgrade must never overwrite.
+
 ### Bugfix: XACA-0557 — Make `aiteamforge-port-fix` reachable as a command, add `--check` gate, wire into startup
 
 `kb-port-fix.py` shipped without an exec bit and had no PATH-accessible bin stub, making

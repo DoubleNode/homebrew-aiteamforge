@@ -40,6 +40,8 @@ What Gets Updated:
   • Homebrew formula (if newer version available)
   • Template files (re-processed with current config)
   • LCARS UI files (updated from framework)
+  • Kanban hooks (Python lifecycle hooks, e.g. aiteamforge_paths.py)
+  • Helper scripts (board-check, restore-helper, backup, kb-cr)
   • Shell aliases and helpers (re-sourced)
   • Skills (symlinks verified or re-copied)
   • LaunchAgents (updated if changed)
@@ -238,6 +240,95 @@ update_lcars() {
     print_success "LCARS UI updated"
   else
     echo "Would sync: ${lcars_source}/ -> ${lcars_target}/"
+  fi
+}
+
+# Update kanban hooks (Python lifecycle hooks consumed by LCARS + kanban-helpers).
+# BUGFIX XACA-0558: in-place upgrades previously never synced kanban-hooks, so a
+# `brew upgrade` that shipped a new aiteamforge_paths.py to the Cellar left the
+# runtime copy stale (e.g. missing build_team_code_map -> LCARS import warning,
+# fallback to hardcoded dirs). Fresh installs were unaffected because
+# install-kanban.sh recopies the directory. Mirrors install_kanban_hooks.
+update_kanban_hooks() {
+  print_section "Updating Kanban Hooks"
+
+  local hooks_source="${FRAMEWORK_DIR}/share/kanban-hooks"
+  local hooks_target="${WORKING_DIR}/kanban-hooks"
+
+  if [ ! -d "$hooks_source" ]; then
+    print_warning "Kanban hooks not found in framework"
+    return
+  fi
+
+  if [ ! -d "$hooks_target" ]; then
+    print_warning "Kanban hooks not installed in working directory"
+    return
+  fi
+
+  print_info "Syncing kanban hooks..."
+
+  if [ "$DRY_RUN" = false ]; then
+    # Additive sync (no --delete) mirrors install_kanban_hooks: refresh
+    # framework-shipped hooks while preserving any operator-added files.
+    rsync -av "${hooks_source}/" "${hooks_target}/"
+    chmod +x "${hooks_target}"/*.py 2>/dev/null || true
+    print_success "Kanban hooks updated"
+  else
+    echo "Would sync: ${hooks_source}/ -> ${hooks_target}/"
+  fi
+}
+
+# Update standalone helper scripts that install-kanban.sh copies individually but
+# the upgrade path previously skipped (same bug class as kanban-hooks, XACA-0558).
+# Each entry is "source_filename|destination_path"; sources live under
+# share/scripts. Only refreshes scripts that are already installed (matches the
+# update_shell_helpers convention — upgrade does not create newly-shipped files).
+update_aux_scripts() {
+  print_section "Updating Helper Scripts"
+
+  local scripts_source="${FRAMEWORK_DIR}/share/scripts"
+  local updated=0
+
+  local script_map=(
+    "kanban-board-check.sh|${WORKING_DIR}/kanban-board-check.sh"
+    "kanban-restore-helper.sh|${WORKING_DIR}/kanban-restore-helper.sh"
+    "kanban-backup.py|${WORKING_DIR}/kanban-backup.py"
+    "kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh"
+  )
+
+  local entry name target source
+  for entry in "${script_map[@]}"; do
+    name="${entry%%|*}"
+    target="${entry#*|}"
+    source="${scripts_source}/${name}"
+
+    if [ ! -f "$source" ]; then
+      continue
+    fi
+
+    if [ ! -f "$target" ]; then
+      continue
+    fi
+
+    if [ "$source" -nt "$target" ] || [ "$FORCE" = true ]; then
+      print_info "Updating ${name}..."
+      if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$(dirname "$target")"
+        cp "$source" "$target"
+        chmod +x "$target"
+        print_success "Updated ${name}"
+        updated=$((updated + 1))
+      else
+        echo "Would update: ${name}"
+        updated=$((updated + 1))
+      fi
+    fi
+  done
+
+  if [ $updated -eq 0 ]; then
+    print_success "All helper scripts up to date"
+  else
+    print_success "Updated ${updated} helper script(s)"
   fi
 }
 
@@ -521,6 +612,8 @@ show_changelog() {
 check_brew_updates
 update_templates
 update_lcars
+update_kanban_hooks
+update_aux_scripts
 update_shell_helpers
 update_skills
 update_launchagents
