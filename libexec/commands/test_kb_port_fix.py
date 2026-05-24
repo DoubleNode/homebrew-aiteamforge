@@ -342,6 +342,75 @@ class TestExitCodes(unittest.TestCase):
             self.assertEqual(ret, 0)
 
 
+class TestCheckMode(unittest.TestCase):
+    """Test 12: --check flag exits 0 when clean, 1 when collisions or null ports found."""
+
+    def test_check_clean_exits_0(self):
+        """check mode returns 0 when all ports are unique and non-null."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "team-paths.json"
+            data = _make_team_paths(
+                academy=_entry(8200),
+                ios=_entry(8260),
+                android=_entry(8280),
+            )
+            with config_path.open("w") as f:
+                json.dump(data, f)
+            with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(config_path)}):
+                import argparse
+                args = argparse.Namespace(check=True, apply=False, yes=False, json=False)
+                ret = kpf.cmd_check(args)
+            self.assertEqual(ret, 0, "cmd_check should return 0 when no issues found")
+
+    def test_check_collision_exits_1(self):
+        """check mode returns 1 when a port collision is present."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "team-paths.json"
+            data = _make_team_paths(
+                **{
+                    "command": _entry(8234, added_at="2024-01-01T00:00:00Z"),
+                    "mainevent": _entry(8234, added_at="2025-06-01T00:00:00Z"),
+                }
+            )
+            with config_path.open("w") as f:
+                json.dump(data, f)
+            with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(config_path)}):
+                import argparse
+                args = argparse.Namespace(check=True, apply=False, yes=False, json=False)
+                ret = kpf.cmd_check(args)
+            self.assertEqual(ret, 1, "cmd_check should return 1 when a collision is present")
+
+    def test_check_null_port_exits_1(self):
+        """check mode returns 1 when a null port is present."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "team-paths.json"
+            data = _make_team_paths(**{"finance-personal": {"lcars_port": None}})
+            with config_path.open("w") as f:
+                json.dump(data, f)
+            with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(config_path)}):
+                import argparse
+                args = argparse.Namespace(check=True, apply=False, yes=False, json=False)
+                ret = kpf.cmd_check(args)
+            self.assertEqual(ret, 1, "cmd_check should return 1 when a null port is present")
+
+    def test_check_mode_dispatched_from_main(self):
+        """main() dispatches to cmd_check when --check is parsed."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = Path(tmpdir) / "team-paths.json"
+            data = _make_team_paths(academy=_entry(8200))
+            with config_path.open("w") as f:
+                json.dump(data, f)
+            with patch.dict(os.environ, {"AITEAMFORGE_CONFIG": str(config_path)}):
+                import sys as _sys
+                old_argv = _sys.argv
+                _sys.argv = ["kb-port-fix", "--check"]
+                try:
+                    ret = kpf.main()
+                finally:
+                    _sys.argv = old_argv
+            self.assertEqual(ret, 0, "main() with --check on clean config should return 0")
+
+
 class TestMalformedRootGuard(unittest.TestCase):
     """XACA-0463-013: defend against non-dict root or non-dict ``teams`` value."""
 

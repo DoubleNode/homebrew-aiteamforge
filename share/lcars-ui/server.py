@@ -14193,7 +14193,8 @@ def _xaca0463_assert_no_port_conflicts(team_paths_data: dict, active_instance) -
     Scans team-paths.json for any port held by two or more instances.
     Also refuses if the active LCARS_TEAM's instance has a null lcars_port.
     Exits with a non-zero status and a loud, user-facing error message
-    pointing at `kb-port-fix`.
+    pointing at `aiteamforge-port-fix --apply` (shipped installs) and
+    `kb-port-fix --apply` (dev checkouts).
 
     Args:
         team_paths_data: parsed team-paths.json contents (or load result).
@@ -14252,7 +14253,9 @@ def _xaca0463_assert_no_port_conflicts(team_paths_data: dict, active_instance) -
         )
         print("", file=sys.stderr)
 
-    print("  Fix: run  kb-port-fix --apply", file=sys.stderr)
+    print("  To fix:", file=sys.stderr)
+    print("    Shipped install : aiteamforge-port-fix --apply", file=sys.stderr)
+    print("    Dev checkout    : kb-port-fix --apply", file=sys.stderr)
     print(
         "  Spec: docs/architecture/team-id-contract.md §4.1, §6 (XACA-0463)",
         file=sys.stderr,

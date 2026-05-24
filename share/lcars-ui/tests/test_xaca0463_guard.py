@@ -165,10 +165,15 @@ class TestXaca0463Guard(unittest.TestCase):
         self.assertIn("8200", stderr)
 
     # ------------------------------------------------------------------
-    # Test 4: collision message points at kb-port-fix
+    # Test 4: collision message points at both remedy commands
     # ------------------------------------------------------------------
     def test_guard_collision_points_at_kb_port_fix(self):
-        """Stderr must mention kb-port-fix so the user knows the fix."""
+        """Stderr must mention both fix commands so the user knows the remedy.
+
+        aiteamforge-port-fix is the PATH command on shipped installs;
+        kb-port-fix is the dev-checkout alias.  Both must appear so the
+        message is correct in all environments.
+        """
         data = {
             "teams": {
                 "x": {"lcars_port": 9000},
@@ -179,6 +184,7 @@ class TestXaca0463Guard(unittest.TestCase):
             server._xaca0463_assert_no_port_conflicts, data, "x"
         )
         self.assertIn("kb-port-fix", stderr)
+        self.assertIn("aiteamforge-port-fix", stderr)
 
     # ------------------------------------------------------------------
     # Test 5: active instance has null port → SystemExit(2)
@@ -352,6 +358,7 @@ class TestXaca0463Guard(unittest.TestCase):
         self.assertIn("my-team", stderr)
         self.assertIn("8200", stderr)
         self.assertIn("kb-port-fix", stderr)
+        self.assertIn("aiteamforge-port-fix", stderr)
 
 
 if __name__ == "__main__":

@@ -308,7 +308,8 @@ def _print_report(config_path: Path, plan: dict, include_new_ports: bool = False
     print(f"Summary: {total_changes} entry/entries {verb} renumbered, "
           f"{sum(1 for _ in plan['collisions'])} collision group(s) resolved.")
     if not include_new_ports:
-        print("Run `kb-port-fix --apply` to make these changes.")
+        print("Run `aiteamforge-port-fix --apply` to make these changes.")
+        print("Run `aiteamforge-port-fix --check` to use as a script gate (exit 0=clean, 1=issues).")
     print()
 
 
@@ -352,6 +353,39 @@ def _atomic_write(data: dict, target: Path) -> None:
         except OSError:
             pass
         raise
+
+
+# ---------------------------------------------------------------------------
+# Check mode (script-usable gate — exits 1 on issues, 0 when clean)
+# ---------------------------------------------------------------------------
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    """Check mode: exit 0 if clean, exit 1 if any collisions or null ports found.
+
+    Designed for use as a startup gate or CI check — outputs a concise summary
+    and returns a standard exit code (0 = OK, 1 = issues found) rather than
+    the detect-mode 2 (which signals "work available" rather than "error").
+    """
+    config_path = Path(
+        os.environ.get("AITEAMFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
+    )
+
+    data = _load_team_paths(config_path)
+    plan = _build_plan(data)
+
+    if plan["needs_work"]:
+        collision_count = sum(len(g["renumber"]) for g in plan["collisions"])
+        null_count = len(plan["null_ports"])
+        print(
+            f"ERROR: LCARS port issues detected in {config_path}: "
+            f"{collision_count} collision(s), {null_count} null port(s). "
+            f"Run `aiteamforge-port-fix --apply` to fix.",
+            file=sys.stderr,
+        )
+        return 1
+
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -459,10 +493,22 @@ def _build_parser() -> argparse.ArgumentParser:
             "in ~/.aiteamforge/team-paths.json.\n\n"
             "Default (no args): print a report. Exit 0 if nothing to fix,\n"
             "exit 2 if changes are needed.\n\n"
+            "--check: script-usable gate. Exit 0 if clean, exit 1 if issues\n"
+            "  found. Suitable for use in startup scripts and CI.\n\n"
             "--apply: show plan, ask for confirmation, backup, write.\n"
             "--json: machine-readable JSON report (detect mode only)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        default=False,
+        help=(
+            "Script-usable gate: exit 0 if all ports are unique and non-null, "
+            "exit 1 if any collision or null port is found. "
+            "Suitable for startup scripts and CI."
+        ),
     )
     parser.add_argument(
         "--apply",
@@ -494,7 +540,9 @@ def main() -> int:
     parser = _build_parser()
     args = parser.parse_args()
 
-    if args.apply:
+    if args.check:
+        return cmd_check(args)
+    elif args.apply:
         return cmd_apply(args)
     else:
         return cmd_detect(args)

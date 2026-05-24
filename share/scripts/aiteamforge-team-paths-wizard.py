@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -125,6 +126,93 @@ def _prompt_yes_no(msg: str, default_yes: bool = True) -> bool:
 
 def _separator(char: str = "-", width: int = 70) -> None:
     print(char * width)
+
+
+# ---------------------------------------------------------------------------
+# Port-collision auto-fix (XACA-0557)
+# ---------------------------------------------------------------------------
+
+def _resolve_kb_port_fix() -> Path | None:
+    """Locate kb-port-fix.py — dev-tree path first, then brew-installed fallback.
+
+    Mirrors the resolution order used by the kb-port-fix() shell function so
+    the wizard works both in the dev worktree and on an end-user machine.
+    """
+    dev_path = Path.home() / "dev-team" / "homebrew-tap" / "libexec" / "commands" / "kb-port-fix.py"
+    if dev_path.exists():
+        return dev_path
+
+    # Brew-installed fallback.
+    try:
+        brew_prefix = subprocess.run(
+            ["brew", "--prefix"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout.strip()
+        if brew_prefix:
+            brew_path = Path(brew_prefix) / "opt" / "aiteamforge" / "libexec" / "libexec" / "commands" / "kb-port-fix.py"
+            if brew_path.exists():
+                return brew_path
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass  # brew not on PATH or timed out — skip fallback silently
+
+    return None
+
+
+def _run_port_collision_fix(config_path: Path) -> None:
+    """Detect and auto-fix lcars_port collisions in the written config.
+
+    Invokes ``kb-port-fix.py --apply --yes`` (non-interactive) via the
+    resolved script path.  Captures and surfaces its full output so the user
+    sees exactly what changed.  Exits 0 whether or not changes were made.
+
+    If kb-port-fix.py cannot be located, prints a warning with manual
+    remediation instructions and continues (non-fatal — the wizard has already
+    written the config; port collisions are caught again at LCARS boot time).
+    """
+    _separator()
+    print("Checking for LCARS port collisions …")
+
+    kbfix = _resolve_kb_port_fix()
+    if kbfix is None:
+        print(
+            "WARNING: kb-port-fix.py not found — cannot auto-fix port collisions.\n"
+            "Run `kb-port-fix --apply` manually after ensuring AITeamForge is installed.",
+            file=sys.stderr,
+        )
+        _separator()
+        return
+
+    env = {**os.environ, "AITEAMFORGE_CONFIG": str(config_path)}
+    try:
+        result = subprocess.run(
+            [sys.executable, str(kbfix), "--apply", "--yes"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        print(
+            f"WARNING: kb-port-fix invocation failed: {exc}\n"
+            "Run `kb-port-fix --apply` manually to resolve any collisions.",
+            file=sys.stderr,
+        )
+        _separator()
+        return
+
+    # Surface combined output (stdout + stderr) to the user.
+    combined = (result.stdout + result.stderr).strip()
+    if combined:
+        print(combined)
+
+    if result.returncode == 0:
+        print("Port collision check: OK")
+    else:
+        print(
+            f"WARNING: kb-port-fix exited {result.returncode} — review the output above.",
+            file=sys.stderr,
+        )
+    _separator()
 
 
 def _print_summary_table(teams_dict: dict) -> None:
@@ -224,6 +312,8 @@ def run_accept_defaults(
     if success:
         print(f"Written: {config_path}")
         print(f"Teams:   {len(default_teams)}")
+        if not dry_run:
+            _run_port_collision_fix(config_path)
     return 0 if success else 1
 
 
@@ -366,6 +456,7 @@ def run_interactive(
     if success:
         print(f"\nWritten: {config_path}")
         print(f"Teams configured: {len(configured_teams)}")
+        _run_port_collision_fix(config_path)
     return 0 if success else 1
 
 

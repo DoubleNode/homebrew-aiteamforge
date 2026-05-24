@@ -7,6 +7,29 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0557 — Make `aiteamforge-port-fix` reachable as a command, add `--check` gate, wire into startup
+
+`kb-port-fix.py` shipped without an exec bit and had no PATH-accessible bin stub, making
+it unreachable after a tap install. Added `--check` mode for script-usable gating, and
+wired the check into `aiteamforge start` so port collisions are caught before LCARS servers
+attempt to bind.
+
+- **`libexec/commands/kb-port-fix.py`** — exec bit added (100644 → 100755). New `--check`
+  flag: exits 0 when all ports are unique and non-null, exits 1 if any collision or null
+  port is detected. Suitable for use in startup scripts and CI. Bare-invocation behaviour
+  (detect mode, exit 2 on issues) is unchanged. Updated argparse description and
+  `_print_report` to reference `aiteamforge-port-fix` bin stub name.
+- **`Formula/aiteamforge.rb`** — adds `aiteamforge-port-fix` bin stub (analogous to the
+  existing `aiteamforge-doctor` stub) that invokes `python3 <libexec>/libexec/commands/kb-port-fix.py`.
+  Matching `chmod 0755` and `assert_path_exists` in `test do`. Formula passes `ruby -c` syntax check.
+- **`libexec/commands/aiteamforge-start.sh`** — `check_port_health()` function runs
+  `aiteamforge-port-fix --check` (falling back to the libexec path) before LCARS servers
+  are launched. On failure, prints an actionable message naming the exact remedy command
+  (`aiteamforge-port-fix --apply`) and aborts startup. If the tool is not installed, warns
+  but continues (degrade gracefully). Gate is wired into both `all` and `lcars|kanban` service paths.
+- **`libexec/commands/test_kb_port_fix.py`** — four new `TestCheckMode` test cases covering:
+  clean config → exit 0, collision → exit 1, null port → exit 1, `main()` dispatch → exit 0.
+
 ### Bugfix: XACA-0555 — `aiteamforge start` launches server.py without LCARS_TEAM (server FATALs on boot)
 
 `aiteamforge start` (and `start lcars`) launched `nohup python3 server.py <port>` with no

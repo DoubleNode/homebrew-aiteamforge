@@ -99,6 +99,38 @@ WORKING_DIR=$(get_working_dir)
 [[ -t 1 ]] && clear
 print_header "AITEAMFORGE START"
 
+# Gate: check for LCARS port collisions before launching servers.
+# If collisions or null ports are found, print an actionable message and abort.
+# Degrades gracefully if the tool is not installed (warn, continue).
+check_port_health() {
+  # Resolve the port-fix script: prefer the on-PATH bin stub, fall back to libexec.
+  local port_fix_cmd=""
+  if command -v aiteamforge-port-fix &>/dev/null; then
+    port_fix_cmd="aiteamforge-port-fix"
+  else
+    local _libexec_pf="${SCRIPT_DIR}/kb-port-fix.py"
+    if [ -x "$_libexec_pf" ]; then
+      port_fix_cmd="python3 $_libexec_pf"
+    fi
+  fi
+
+  if [ -z "$port_fix_cmd" ]; then
+    print_warning "kb-port-fix not found — skipping port health check (degrade gracefully)"
+    return 0
+  fi
+
+  if ! $port_fix_cmd --check 2>/dev/null; then
+    print_error "LCARS port collision or null-port detected in team-paths.json."
+    print_error "LCARS servers may fail to bind to the correct ports."
+    print_error "Fix with: aiteamforge-port-fix --apply"
+    print_error "Then re-run: aiteamforge start"
+    return 1
+  fi
+
+  print_success "LCARS port health check passed"
+  return 0
+}
+
 # Validate kanban boards for all configured teams
 # Runs first so any board issues can be resolved before agents start.
 validate_boards() {
@@ -395,11 +427,15 @@ case "$SERVICE" in
     # Board validation runs only for full startup — individual services
     # (lcars, fleet, agents) don't require kanban boards to function.
     validate_boards
+    # Port health gate: abort on collisions/null ports before launching servers.
+    check_port_health || exit 1
     start_lcars
     start_fleet
     start_agents
     ;;
   lcars|kanban)
+    # Port health gate: abort on collisions/null ports before launching servers.
+    check_port_health || exit 1
     start_lcars
     ;;
   fleet)

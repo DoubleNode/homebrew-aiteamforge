@@ -52,9 +52,19 @@ class Aiteamforge < Formula
       exec "#{libexec}/bin/aiteamforge-doctor.sh" "$@"
     EOS
 
+    (bin/"aiteamforge-port-fix").write <<~EOS
+      #!/bin/bash
+      # AITeamForge LCARS port collision detector and fixer (XACA-0463/XACA-0557)
+      AITEAMFORGE_HOME="#{libexec}"
+      export AITEAMFORGE_HOME
+      [ -f "#{HOMEBREW_PREFIX}/var/aiteamforge/env.sh" ] && . "#{HOMEBREW_PREFIX}/var/aiteamforge/env.sh"
+      exec python3 "#{libexec}/libexec/commands/kb-port-fix.py" "$@"
+    EOS
+
     chmod 0755, bin/"aiteamforge"
     chmod 0755, bin/"aiteamforge-setup"
     chmod 0755, bin/"aiteamforge-doctor"
+    chmod 0755, bin/"aiteamforge-port-fix"
   end
 
   def post_install
@@ -150,6 +160,7 @@ class Aiteamforge < Formula
     # Verify main commands exist and are executable
     assert_path_exists bin/"aiteamforge"
     assert_path_exists bin/"aiteamforge-setup"
+    assert_path_exists bin/"aiteamforge-port-fix"
 
     # Verify core directories exist (libexec/ subdir mirrors repo structure)
     assert_path_exists libexec/"libexec/commands"
