@@ -13,6 +13,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
+# aiteamforge-paths.sh provides aiteamforge_team_lcars_port (used by start_lcars).
+# It carries its own include-guard, so sourcing here is idempotent.
+source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -162,13 +165,12 @@ start_lcars() {
     return 1
   fi
 
-  # Per-team port resolver: provides aiteamforge_team_lcars_port <team>.
-  # shellcheck source=/dev/null
-  source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
-
   # Resolve configured team instance ids (e.g. "academy", "finance-personal").
-  local teams_str
-  teams_str=$(get_configured_teams)
+  # `|| true` keeps `set -e` from aborting `aiteamforge start` when the config
+  # file is missing entirely (get_configured_teams returns 1); the empty-string
+  # check below then handles that case gracefully.
+  local teams_str=""
+  teams_str=$(get_configured_teams) || true
   if [ -z "$teams_str" ]; then
     print_warning "No configured teams found — skipping LCARS startup"
     return 0

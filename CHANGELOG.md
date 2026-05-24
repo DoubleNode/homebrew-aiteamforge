@@ -26,6 +26,11 @@ showed only the fatal.
 - **Brew venv python (XACA-0486)** — the launch resolves `$(brew --prefix aiteamforge)/libexec/venv/bin/python3`
   when present (falling back to system `python3`) so runtime imports (pyzipper, requests, …)
   resolve on tap-installed machines.
+- **Review hardening (PR #470):** `get_configured_teams` is now `|| true`-guarded so a missing
+  config file can't `set -e`-abort `aiteamforge start` before the graceful "no teams" path
+  (#001); `aiteamforge-paths.sh` is sourced at top-of-file alongside the other libs for
+  consistency (#002). (A larger anti-drift refactor sharing the canonical launch helper — #003 —
+  is deferred to its own PR.)
 
 ## [0.12.0] - 2026-05-23
 
