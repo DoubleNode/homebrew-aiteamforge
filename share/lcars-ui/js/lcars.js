@@ -17215,6 +17215,31 @@ function initExportImportPanel() {
     }
 }
 
+// ───── EXPORT / IMPORT shared helpers ─────
+
+// Reads a fetch Response, classifying the outcome. Never throws on a bad body.
+// Returns { ok, status, statusText, data, parseError }.
+// Use this instead of bare `await response.json()` so a non-JSON body (HTML error
+// page, empty body, reverse-proxy error) does not masquerade as a true network reject.
+async function readJsonResponse(response) {
+    let data = null, parseError = null;
+    try { data = await response.json(); }
+    catch (e) { parseError = e; }
+    return { ok: response.ok, status: response.status, statusText: response.statusText, data, parseError };
+}
+
+// Builds a human-readable error string from a readJsonResponse result.
+// mode: 'http'  → HTTP <status> + server reason (for non-OK status)
+//       'parse' → unreadable response (for ok-but-parse-failed)
+function _httpErrorMessage(prefix, result) {
+    if (!result.ok) {
+        const reason = (result.data && (result.data.error || result.data.message)) || result.statusText || 'unknown error';
+        return `${prefix}: HTTP ${result.status} ${reason}`;
+    }
+    // ok=true but parseError set
+    return `${prefix}: server returned an unreadable response`;
+}
+
 // ───── EXPORT ─────
 
 async function startTeamExport() {
@@ -17234,19 +17259,20 @@ async function startTeamExport() {
 
     try {
         const response = await fetch('/api/export/create', { method: 'POST' });
-        const data = await response.json();
-        if (!response.ok) {
+        const result = await readJsonResponse(response);
+        if (!result.ok || result.parseError) {
             if (statusEl) statusEl.textContent = 'ERROR';
             if (btn) btn.disabled = false;
-            alert(`Export failed: ${data.error || 'unknown error'}`);
+            alert(_httpErrorMessage('Export failed', result));
             return;
         }
-        currentExportJobId = data.jobId;
-        exportPollingInterval = setInterval(() => pollExportStatus(data.jobId), 1000);
+        currentExportJobId = result.data.jobId;
+        exportPollingInterval = setInterval(() => pollExportStatus(result.data.jobId), 1000);
     } catch (error) {
         console.error('Export request failed:', error);
         if (statusEl) statusEl.textContent = 'ERROR';
         if (btn) btn.disabled = false;
+        alert('Export failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
     }
 }
 
@@ -17392,28 +17418,38 @@ async function startSecretsExport() {
         pw = '';
         body.password = '';
 
-        const data = await response.json();
-        if (!response.ok) {
-            updateSecretsExportProgress(0, 'FAILED', data.error || 'Request failed');
+        const result = await readJsonResponse(response);
+        if (!result.ok) {
+            // non-OK HTTP status: show code + server reason
+            const msg = _httpErrorMessage('Secrets export failed', result);
+            updateSecretsExportProgress(0, 'FAILED', (result.data && result.data.error) || `HTTP ${result.status}`);
+            if (statusMsgEl) { statusMsgEl.textContent = msg; statusMsgEl.style.display = 'block'; }
+            if (btn) btn.disabled = false;
+            return;
+        }
+        if (result.parseError) {
+            // OK status but body was not valid JSON
+            updateSecretsExportProgress(0, 'FAILED', 'Unreadable response');
             if (statusMsgEl) {
-                statusMsgEl.textContent = `Secrets export failed: ${data.error || 'unknown error'}`;
+                statusMsgEl.textContent = 'Secrets export failed: server returned an unreadable response';
                 statusMsgEl.style.display = 'block';
             }
             if (btn) btn.disabled = false;
             return;
         }
-        currentSecretsExportJobId = data.jobId;
+        currentSecretsExportJobId = result.data.jobId;
         secretsExportPollingInterval = setInterval(
-            () => pollSecretsExportStatus(data.jobId),
+            () => pollSecretsExportStatus(result.data.jobId),
             1500
         );
     } catch (error) {
+        // True fetch reject — server unreachable (TypeError from fetch itself)
         pw = '';
         body.password = '';
         console.error('Secrets export request failed:', error);
-        updateSecretsExportProgress(0, 'FAILED', 'Network error');
+        updateSecretsExportProgress(0, 'FAILED', 'Server unreachable');
         if (statusMsgEl) {
-            statusMsgEl.textContent = 'Secrets export request failed — check network.';
+            statusMsgEl.textContent = 'Secrets export failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.';
             statusMsgEl.style.display = 'block';
         }
         if (btn) btn.disabled = false;
@@ -17569,17 +17605,17 @@ async function uploadImportFile(file) {
             method: 'POST',
             body: formData,
         });
-        const data = await response.json();
-        if (!response.ok) {
-            alert(`Import upload failed: ${data.error || 'unknown error'}`);
+        const result = await readJsonResponse(response);
+        if (!result.ok || result.parseError) {
+            alert(_httpErrorMessage('Import upload failed', result));
             if (btn) btn.disabled = false;
             return;
         }
-        currentImportJobId = data.jobId;
-        renderImportPreflight(data);
+        currentImportJobId = result.data.jobId;
+        renderImportPreflight(result.data);
     } catch (error) {
         console.error('Import upload failed:', error);
-        alert('Import upload failed — see console');
+        alert('Import upload failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
         if (btn) btn.disabled = false;
     }
 }
@@ -17752,15 +17788,15 @@ async function applyTeamImport() {
                 method: 'POST',
                 body: secretsFormData,
             });
-            const uploadData = await uploadResp.json();
-            if (!uploadResp.ok) {
-                _showInlineSecretsError(`Secrets upload failed: ${uploadData.error || 'unknown error'}`);
+            const uploadResult = await readJsonResponse(uploadResp);
+            if (!uploadResult.ok || uploadResult.parseError) {
+                _showInlineSecretsError(_httpErrorMessage('Secrets upload failed', uploadResult));
                 return;
             }
-            secretsJobId = uploadData.jobId;
+            secretsJobId = uploadResult.data.jobId;
         } catch (err) {
             console.error('Secrets upload error:', err);
-            _showInlineSecretsError('Secrets upload failed — see console');
+            _showInlineSecretsError('Secrets upload failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
             return;
         }
 
@@ -18096,14 +18132,14 @@ async function uploadSecretsImportFile(file) {
             method: 'POST',
             body: formData,
         });
-        const data = await response.json();
-        if (!response.ok) {
-            alert(`Secrets upload failed: ${data.error || 'unknown error'}`);
+        const result = await readJsonResponse(response);
+        if (!result.ok || result.parseError) {
+            alert(_httpErrorMessage('Secrets upload failed', result));
             if (selectBtn) selectBtn.disabled = false;
             return;
         }
         // Backend returns { jobId, status: "awaiting-password" }
-        currentSecretsImportJobId = data.jobId;
+        currentSecretsImportJobId = result.data.jobId;
 
         // Hide file picker, show password panel
         const fileArea = document.getElementById('secretsImport-file-area');
@@ -18118,7 +18154,7 @@ async function uploadSecretsImportFile(file) {
         if (errEl) errEl.style.display = 'none';
     } catch (err) {
         console.error('Secrets upload error:', err);
-        alert('Secrets upload failed — see console');
+        alert('Secrets upload failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
         if (selectBtn) selectBtn.disabled = false;
     }
 }
