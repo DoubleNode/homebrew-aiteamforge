@@ -33,6 +33,11 @@ fi
 # Lookup function — linear scan replaces the eval'd _TDIR_<team> variables.
 _get_team_working_dir() {
     local team="$1"
+    # Guard for bash 3.2: iterating an empty array under `set -u` throws
+    # "unbound variable" on macOS /bin/bash. Reachable if a caller invokes this
+    # without TEAM_WORKING_DIRS_STR set (XACA-0559 — same bug class as the
+    # empty-teams board loop below).
+    [ ${#_TEAM_WORKING_DIRS[@]} -eq 0 ] && return 1
     for entry in "${_TEAM_WORKING_DIRS[@]}"; do
         local _key="${entry%%:*}"
         local _val="${entry#*:}"
@@ -1033,23 +1038,33 @@ install_kanban_system() {
         fi
     fi
 
-    # Default to empty if no teams found (don't assume academy)
+    # XACA-0559: Shared components (helpers, hooks, LCARS UI, port mgmt, backup,
+    # LaunchAgents) are DECOUPLED from team presence. They must refresh whenever
+    # install_kanban_system is invoked — including on an upgrade where teams may
+    # resolve empty — otherwise an upgrade leaves stale hooks/UI/helpers behind
+    # (the "gate stayed 0" bug). Per-team board init is the ONLY step gated on
+    # teams being non-empty; init_kanban_board already skips existing boards, so
+    # board preservation is unaffected.
     if [ ${#teams[@]} -eq 0 ]; then
-        warning "No teams specified for kanban boards"
-        return 0
+        info "No teams specified — refreshing shared kanban components only"
+    else
+        info "Setting up kanban boards for teams: ${teams[*]}"
     fi
-
-    info "Setting up kanban boards for teams: ${teams[*]}"
 
     # Install core kanban components (non-fatal if templates missing)
     install_kanban_helpers
     install_board_check_scripts
     install_kanban_hooks
 
-    # Initialize kanban boards for each team
-    for team in "${teams[@]}"; do
-        init_kanban_board "$team"
-    done
+    # Initialize kanban boards for each team (skipped when no teams resolved —
+    # shared components above still refresh). Guarded for bash 3.2: iterating an
+    # empty array under `set -u` throws "unbound variable" on macOS /bin/bash,
+    # and the empty-teams upgrade path now reaches this loop (XACA-0559).
+    if [ ${#teams[@]} -gt 0 ]; then
+        for team in "${teams[@]}"; do
+            init_kanban_board "$team"
+        done
+    fi
 
     # Install LCARS UI (non-fatal if source missing)
     install_lcars_ui
@@ -1079,7 +1094,11 @@ install_kanban_system() {
 
     info ""
     info "Kanban System Ready:"
-    info "  • Boards initialized for: ${teams[*]}"
+    if [ ${#teams[@]} -gt 0 ]; then
+        info "  • Boards initialized for: ${teams[*]}"
+    else
+        info "  • Shared components refreshed (no team boards changed)"
+    fi
     [ -d "$AITEAMFORGE_DIR/lcars-ui" ] && info "  • LCARS UI: http://localhost:$lcars_port"
     [ -f "$AITEAMFORGE_DIR/kanban-backup.py" ] && info "  • Backup system: Automated (every 15 min)"
     [ -f "$AITEAMFORGE_DIR/kanban-helpers.sh" ] && info "  • Helper functions: source $AITEAMFORGE_DIR/kanban-helpers.sh"

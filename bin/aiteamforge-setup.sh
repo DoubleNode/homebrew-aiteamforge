@@ -491,23 +491,55 @@ fi
 echo ""
 echo "Installing to: ${INSTALL_DIR}"
 
-# Check if already exists
+# Check if already exists.
+#
+# Three outcomes when a prior install is present:
+#   Upgrade     — refresh components in place, keep teams/config (default)
+#   Preserve    — exit, change nothing
+#   Reconfigure — re-run the full wizard (re-prompt teams + features)
+#
+# --upgrade on the CLI already set IS_UPGRADE=true (arg parser); honor it
+# without prompting. Non-interactive mode auto-upgrades (preserves prior
+# behavior). Interactive mode shows the three-way menu.
 if is_configured; then
   echo ""
   echo -e "${YELLOW}⚠ Existing installation found${NC}"
 
-  if [ "$MODE" = "non-interactive" ]; then
+  if [ "$IS_UPGRADE" = "true" ]; then
+    # --upgrade flag was passed explicitly; skip the menu.
+    echo "Upgrading existing installation (--upgrade)"
+  elif [ "$MODE" = "non-interactive" ]; then
     echo "Upgrading existing installation (non-interactive mode)"
     IS_UPGRADE="true"
   else
     echo ""
-    read -p "Upgrade existing installation? (yes/no): " upgrade_existing
-
-    if [ "$upgrade_existing" != "yes" ]; then
-      echo "Setup cancelled"
-      exit 0
-    fi
-    IS_UPGRADE="true"
+    echo "  [U] Upgrade     - refresh components, keep teams/config"
+    echo "  [P] Preserve    - exit, change nothing"
+    echo "  [R] Reconfigure - re-run the full wizard"
+    echo ""
+    # Loop until we get a recognized choice. Empty input defaults to Upgrade.
+    while true; do
+      read -p "Choice [U]: " _setup_choice
+      case "$(printf '%s' "${_setup_choice:-U}" | tr '[:upper:]' '[:lower:]')" in
+        u|upgrade)
+          IS_UPGRADE="true"
+          echo -e "${GREEN}✓${NC} Upgrade — refreshing components, keeping teams/config"
+          break
+          ;;
+        p|preserve)
+          echo -e "${GREEN}✓${NC} Preserved — no changes made"
+          exit 0
+          ;;
+        r|reconfigure)
+          IS_UPGRADE="false"
+          echo -e "${GREEN}✓${NC} Reconfigure — re-running the full wizard"
+          break
+          ;;
+        *)
+          echo -e "${YELLOW}⚠ Unrecognized choice: '${_setup_choice}'. Enter U, P, or R.${NC}"
+          ;;
+      esac
+    done
   fi
 fi
 
@@ -530,6 +562,77 @@ TEAMS_DIR="${AITEAMFORGE_HOME}/share/teams"
 source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# UPGRADE HYDRATION (XACA-0559)
+#
+# On an upgrade (IS_UPGRADE=true) we refresh the EXISTING install in place:
+# re-read the prior selection from .aiteamforge-config rather than re-prompting.
+# This populates SELECTED_TEAMS, the per-team _WORKDIR_<team> vars, and the
+# INSTALL_* feature flags so the team-install loops and the kanban refresh run
+# against exactly the teams the user already has. INSTALL_KANBAN is FORCED to
+# "yes" so the shared-component refresh (hooks/UI/helpers) always runs — that
+# refresh is the whole point of an upgrade.
+#
+# Degrades gracefully: if jq or the config is missing/unparseable, we fall
+# through to the interactive wizard (UPGRADE_HYDRATED stays "false"), so the
+# user is never left with an empty selection on a broken config.
+#
+# Cockpit upgrades are intentionally excluded — cockpit installs have no teams
+# and the dedicated cockpit passes handle their own refresh.
+# ═══════════════════════════════════════════════════════════════════════════
+UPGRADE_HYDRATED="false"
+
+if [ "$IS_UPGRADE" = "true" ] && [ "$INSTALL_PROFILE" != "cockpit" ]; then
+  _cfg="${INSTALL_DIR}/.aiteamforge-config"
+  if command -v jq &>/dev/null && [ -f "$_cfg" ] && jq -e . "$_cfg" >/dev/null 2>&1; then
+    echo ""
+    echo -e "${BOLD}Upgrade: reading existing configuration${NC}"
+
+    # Teams (JSON array of team id strings) → SELECTED_TEAMS
+    SELECTED_TEAMS=()
+    while IFS= read -r _t; do
+      [ -n "$_t" ] && SELECTED_TEAMS+=("$_t")
+    done < <(jq -r '.teams[]? // empty' "$_cfg" 2>/dev/null)
+
+    if [ ${#SELECTED_TEAMS[@]} -gt 0 ]; then
+      # Per-team working dirs from team_paths.<team>.working_dir → _WORKDIR_<team>
+      # (also restore client_id/project_id so the config rewrite preserves them).
+      for _ht in "${SELECTED_TEAMS[@]}"; do
+        _hwdir="$(jq -r --arg t "$_ht" '.team_paths[$t].working_dir // empty' "$_cfg" 2>/dev/null)"
+        _hproj="$(jq -r --arg t "$_ht" '.team_paths[$t].project_id // empty' "$_cfg" 2>/dev/null)"
+        _hclient="$(jq -r --arg t "$_ht" '.team_paths[$t].client_id // empty' "$_cfg" 2>/dev/null)"
+        [ -n "$_hwdir" ] && eval "_WORKDIR_${_ht}=\"${_hwdir}\""
+        [ -n "$_hproj" ] && eval "_PROJECT_${_ht}=\"${_hproj}\""
+        [ -n "$_hclient" ] && eval "_CLIENT_${_ht}=\"${_hclient}\""
+      done
+
+      # Feature flags from features.* (JSON booleans) → INSTALL_* (yes/no).
+      _bool_to_yn() { [ "$1" = "true" ] && echo "yes" || echo "no"; }
+      INSTALL_SHELL="$(_bool_to_yn "$(jq -r '.features.shell_environment // false' "$_cfg" 2>/dev/null)")"
+      INSTALL_CLAUDE="$(_bool_to_yn "$(jq -r '.features.claude_code_config // false' "$_cfg" 2>/dev/null)")"
+      INSTALL_FLEET="$(_bool_to_yn "$(jq -r '.features.fleet_monitor // false' "$_cfg" 2>/dev/null)")"
+      FLEET_MODE="$(jq -r '.features.fleet_mode // "standalone"' "$_cfg" 2>/dev/null)"
+      FLEET_SERVER_URL="$(jq -r '.features.fleet_server_url // ""' "$_cfg" 2>/dev/null)"
+
+      # Force kanban refresh: the shared-component refresh is the point of an
+      # upgrade, so kanban always runs regardless of the prior feature flag.
+      INSTALL_KANBAN="yes"
+
+      # Restore the machine name so the config rewrite + summary keep it.
+      _hmachine="$(jq -r '.machine_name // empty' "$_cfg" 2>/dev/null)"
+      [ -n "$_hmachine" ] && MACHINE_NAME="$_hmachine"
+
+      UPGRADE_HYDRATED="true"
+      echo -e "${GREEN}✓${NC} Upgrading installed teams: ${SELECTED_TEAMS[*]}"
+      echo -e "${GREEN}✓${NC} Refreshing components (kanban refresh forced on)"
+    else
+      echo -e "${YELLOW}⚠ Config has no teams — falling back to interactive selection${NC}"
+    fi
+  else
+    echo -e "${YELLOW}⚠ Could not read ${INSTALL_DIR}/.aiteamforge-config (jq/config missing) — falling back to interactive selection${NC}"
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 # STEP 1: MACHINE IDENTITY
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -541,7 +644,11 @@ echo ""
 
 DEFAULT_MACHINE_NAME="$(hostname -s 2>/dev/null || echo "my-mac")"
 
-if [ "$MODE" = "non-interactive" ]; then
+if [ "$UPGRADE_HYDRATED" = "true" ]; then
+  # Machine name already restored from config; don't re-prompt on upgrade.
+  MACHINE_NAME="${MACHINE_NAME:-$DEFAULT_MACHINE_NAME}"
+  echo "Keeping existing machine name (upgrade)."
+elif [ "$MODE" = "non-interactive" ]; then
   MACHINE_NAME="$DEFAULT_MACHINE_NAME"
 else
   read -p "Machine name [${DEFAULT_MACHINE_NAME}]: " MACHINE_NAME
@@ -555,16 +662,24 @@ echo -e "${GREEN}✓${NC} Machine name: ${MACHINE_NAME}"
 # STEP 2: TEAM SELECTION
 # Skipped in cockpit mode — all connect scripts render for ALL teams
 # unconditionally; no team working dirs are installed.
+# Skipped on a hydrated upgrade — SELECTED_TEAMS is already populated from the
+# existing config (XACA-0559); re-prompting would defeat "refresh in place".
 # ═══════════════════════════════════════════════════════════════════════════
 
-SELECTED_TEAMS=()
-
-if [ "$INSTALL_PROFILE" = "cockpit" ]; then
+if [ "$UPGRADE_HYDRATED" = "true" ]; then
+  echo ""
+  echo -e "${BOLD}Step 2: Team Selection${NC}"
+  echo -e "  ${CYAN}[UPGRADE] Keeping existing teams: ${SELECTED_TEAMS[*]}${NC}"
+  echo ""
+elif [ "$INSTALL_PROFILE" = "cockpit" ]; then
+  SELECTED_TEAMS=()
   echo ""
   echo -e "${BOLD}Step 2: Team Selection${NC}"
   echo -e "  ${CYAN}[COCKPIT MODE] Skipping team selection — all connect scripts will be rendered${NC}"
   echo ""
 else
+
+SELECTED_TEAMS=()
 
 echo ""
 echo -e "${BOLD}Step 2: Select Teams${NC}"
@@ -709,7 +824,18 @@ fi  # end: if INSTALL_PROFILE != cockpit (team selection block)
 # Skipped in cockpit mode — all heavy features are off; only cockpit-required
 # components (venv, iterm2 scripts, dynamic profile) are installed via the
 # pre-installer block that runs unconditionally before this section.
+# Skipped on a hydrated upgrade — INSTALL_* flags are already populated from the
+# existing config (with INSTALL_KANBAN forced "yes") by the upgrade-hydration
+# block above (XACA-0559). Do NOT reset them here, or the refresh selection is
+# lost and the kanban refresh never runs.
 # ═══════════════════════════════════════════════════════════════════════════
+
+if [ "$UPGRADE_HYDRATED" = "true" ]; then
+  echo ""
+  echo -e "${BOLD}Step 3: Feature Selection${NC}"
+  echo -e "  ${CYAN}[UPGRADE] Refreshing existing features: shell=${INSTALL_SHELL}, claude=${INSTALL_CLAUDE}, kanban=${INSTALL_KANBAN}, fleet=${INSTALL_FLEET}${NC}"
+  echo ""
+else
 
 INSTALL_SHELL="no"
 INSTALL_CLAUDE="no"
@@ -800,6 +926,8 @@ else
   echo ""
 fi
 
+fi  # end: if UPGRADE_HYDRATED (Step 3 feature selection wrapper, XACA-0559)
+
 echo -e "${GREEN}✓${NC} Features selected"
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -835,6 +963,9 @@ echo ""
 
 if [ "$MODE" = "non-interactive" ]; then
   echo "Proceeding with installation (Non-interactive mode)..."
+elif [ "$UPGRADE_HYDRATED" = "true" ]; then
+  # User already chose Upgrade at the three-way prompt — don't re-confirm.
+  echo "Proceeding with upgrade (refreshing existing installation)..."
 elif [ "$INSTALL_PROFILE" = "cockpit" ]; then
   echo "Proceeding with cockpit installation..."
 else

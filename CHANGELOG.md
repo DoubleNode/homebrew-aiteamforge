@@ -7,6 +7,38 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0559 — `aiteamforge setup` now fully refreshes the runtime on upgrade; bare setup offers Upgrade/Preserve/Reconfigure
+
+`aiteamforge setup --upgrade` behaved identically to a plain run: the `IS_UPGRADE`
+flag was set but never read, so there was no "force refresh" path. Worse, when an
+upgrade resolved an empty team list, `install-kanban.sh` returned *before* the
+shared-component installs, leaving kanban hooks / LCARS UI / helper scripts stale
+(the "gate stayed 0" symptom). Bare `aiteamforge setup` on an existing install only
+offered a yes/no "Upgrade?" prompt — anything but `yes` exited, with no clean way to
+refresh components while keeping config.
+
+This is the `setup` wizard counterpart to XACA-0558's fix for the standalone
+`aiteamforge upgrade` command; the two share no code.
+
+- **`bin/aiteamforge-setup.sh`** — `IS_UPGRADE` now drives behavior. On upgrade the
+  wizard hydrates `SELECTED_TEAMS`, per-team working dirs, and the feature flags from
+  the existing `.aiteamforge-config` (via `jq`; degrades to interactive if jq/config
+  is missing or unparseable), forces `INSTALL_KANBAN=yes`, and skips the team- and
+  feature-selection prompts so it refreshes exactly the installed teams in place.
+  Boards are preserved (`init_kanban_board` already skips existing boards).
+  - Bare setup on an existing install now shows a three-way prompt:
+    **[U] Upgrade** (default — refresh components, keep teams/config),
+    **[P] Preserve** (exit, change nothing), **[R] Reconfigure** (re-run the full
+    wizard). Accepts case-insensitive `U`/`P`/`R` or the full words; re-prompts on
+    unrecognized input. Non-interactive mode and the `--upgrade` flag auto-upgrade
+    without prompting (preserves prior behavior).
+- **`libexec/installers/install-kanban.sh`** — `install_kanban_system()` no longer
+  early-returns when no teams resolve. Shared components (helpers, board-check, hooks,
+  LCARS UI, profile script, iTerm2 window manager, port management, backup,
+  LaunchAgents) now ALWAYS refresh when the function is invoked; only the per-team
+  `init_kanban_board` loop is gated on teams being non-empty. Empty-team runs warn
+  "refreshed shared components only" and return cleanly.
+
 ### Bugfix: XACA-0558 — `aiteamforge upgrade` now syncs kanban-hooks + helper scripts (in-place upgrades left them stale)
 
 `aiteamforge upgrade` only re-synced LCARS UI, templates, shell helpers, skills, and
