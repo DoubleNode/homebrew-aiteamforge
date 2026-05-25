@@ -9,13 +9,25 @@
 #
 # Usage example (in a team-startup script):
 #
-#   source "$HOME/dev-team/scripts/lcars-launch-helpers.sh"
+#   source "${AITEAMFORGE_DIR:-$HOME/dev-team}/scripts/lcars-launch-helpers.sh"
 #
 #   if start_lcars_server "academy" "$LCARS_PORT" "academy-lcars"; then
 #       echo "Server is up"
 #   else
 #       echo "Server timed out — continuing anyway"
 #   fi
+#
+# PORTABILITY (XACA-0562): this is the single canonical helper shared by BOTH the
+# dev machine (per-team *-startup.sh scripts) AND tap-installed machines
+# (`aiteamforge start`). All dev-team paths are resolved from a portable base:
+#   _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+# On the dev source machine AITEAMFORGE_DIR is unset → $HOME/dev-team (the
+# historical hardcoded location). On a tap-installed machine AITEAMFORGE_DIR is
+# set (e.g. $HOME/aiteamforge) and this helper lives at
+# $AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh, so the base resolves to the
+# installed tree. We deliberately do NOT self-locate via ${BASH_SOURCE[0]}: the
+# 11 callers are #!/bin/zsh scripts and BASH_SOURCE is empty under zsh
+# (feedback_bash_source_empty_under_zsh).
 #
 #   open_lcars_tab "$LCARS_PORT" "$ITERM_WINDOW_NAME" "LCARS" \
 #       "$TMUX_SOCKET" "academy-lcars" "$ITERM_STARTUP_LOG" \
@@ -39,18 +51,36 @@
 # start_lcars_server <team> <port> [session_name]
 #
 # Writes the router redirect file, kills any stale server on <port>, starts a
-# fresh server.py in the background, then polls /api/status for up to 5 seconds.
+# fresh server.py in the background (capturing its stderr to a per-team log),
+# then polls /api/status for up to 15 seconds (30 × 0.5s) for first boot.
+#
+# Unlike the previous version (which discarded all output and polled a fixed
+# 5s), this:
+#   - captures server.py's stderr to ${AITEAMFORGE_DIR:-<dev-team>}/logs/
+#     lcars-server-<team>.log so a FATAL boot error is recoverable;
+#   - tracks the server PID and short-circuits the poll the instant the process
+#     dies, surfacing the REAL exit status + the log tail (a crashed server is
+#     never going to answer /api/status — don't burn the whole window);
+#   - on a slow/hung-but-alive boot, surfaces the log tail instead of a bare
+#     "did not respond" message.
+#
+# Soft-fail contract is preserved: callers continue regardless of the return.
 #
 # Returns:
 #   0  — server responded within the polling window
-#   1  — server did not respond in time (caller may proceed anyway)
+#   1  — server crashed on boot, or did not respond in time (caller may proceed)
 # ---------------------------------------------------------------------------
 start_lcars_server() {
     local team="${1:?start_lcars_server: team argument is required}"
     local port="${2:?start_lcars_server: port argument is required}"
     local session_name="${3:-${team}-lcars}"
 
-    local lcars_ui_dir="$HOME/dev-team/lcars-ui"
+    # XACA-0562: portable base. Dev machine (AITEAMFORGE_DIR unset) → $HOME/dev-team
+    # (== the historical /Users/darrenehlers/dev-team hardcode). Tap machine →
+    # $AITEAMFORGE_DIR (e.g. $HOME/aiteamforge). LCARS_UI_DIR allows an explicit
+    # override if ever needed.
+    local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+    local lcars_ui_dir="${LCARS_UI_DIR:-${_atf_base}/lcars-ui}"
 
     # Write the router redirect so the UI knows which team dashboard to show.
     # This must happen BEFORE the server starts; the file is read on first load.
@@ -61,50 +91,94 @@ start_lcars_server() {
     # expected when nothing is running; suppress them.
     pkill -f "server.py.*${port}" 2>/dev/null
 
-    # XACA-0486: Resolve the brew venv python so runtime imports (pyzipper,
-    # requests, etc. listed in share/requirements.txt) actually work. Bare
-    # `python3` resolves to the system python which does NOT have these deps.
+    # XACA-0486 / XACA-0562: Resolve the python that has the LCARS runtime imports
+    # (pyzipper, requests, etc. from share/requirements.txt). Bare `python3` is the
+    # system interpreter and does NOT have these deps — it is only the last-resort
+    # fallback (the dev-team source machine has the deps globally; tap machines do
+    # not, so the venv MUST win there).
     #
-    # The Formula creates a venv at $(brew --prefix)/var/aiteamforge/venv and
-    # exports AITEAMFORGE_PYTHON via env.sh. Use that env var (canonical) when
-    # available; otherwise probe known paths; bare python3 as last resort.
+    # Two formula conventions have shipped over time, so we probe BOTH (XACA-0562
+    # unified the dev `libexec/venv` chain with the older tap `env.sh`/var-venv chain):
+    #   1. `brew --prefix aiteamforge`/libexec/venv  — current formula convention
+    #                                                  (XACA-0486; installed by the Formula)
+    #   2. env.sh → $AITEAMFORGE_PYTHON               — older convention; env.sh exports
+    #                                                  the canonical interpreter path
+    #   3. $(brew --prefix)/var/aiteamforge/venv      — older var-located venv
+    #   4. $AITEAMFORGE_DIR/share/venv                — bundled-share venv layout
+    #   5. python3                                    — last resort (dev source machine)
+    # On the dev machine probes 1-4 all miss (no brew aiteamforge / no env.sh) and
+    # we fall straight through to bare python3 — identical to prior behavior.
     local lcars_python="python3"  # last-resort fallback (dev-team source machine)
-    local _atf_env_sh="$(brew --prefix 2>/dev/null)/var/aiteamforge/env.sh"
-    if [[ -f "$_atf_env_sh" ]]; then
-        # shellcheck disable=SC1090
-        source "$_atf_env_sh"
-    fi
-    if [[ -n "${AITEAMFORGE_PYTHON:-}" ]] && [[ -x "$AITEAMFORGE_PYTHON" ]]; then
-        lcars_python="$AITEAMFORGE_PYTHON"
-    elif [[ -x "$(brew --prefix 2>/dev/null)/var/aiteamforge/venv/bin/python3" ]]; then
-        lcars_python="$(brew --prefix)/var/aiteamforge/venv/bin/python3"
-    elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
-        lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
+    local _brew_aitf_prefix
+    if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
+        lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
+    else
+        # Older convention: env.sh exports AITEAMFORGE_PYTHON (canonical interpreter).
+        local _brew_prefix _atf_env_sh
+        _brew_prefix="$(brew --prefix 2>/dev/null)"
+        _atf_env_sh="${_brew_prefix}/var/aiteamforge/env.sh"
+        if [[ -f "$_atf_env_sh" ]]; then
+            # shellcheck disable=SC1090
+            source "$_atf_env_sh"
+        fi
+        if [[ -n "${AITEAMFORGE_PYTHON:-}" ]] && [[ -x "$AITEAMFORGE_PYTHON" ]]; then
+            lcars_python="$AITEAMFORGE_PYTHON"
+        elif [[ -x "$(brew --prefix 2>/dev/null)/var/aiteamforge/venv/bin/python3" ]]; then
+            lcars_python="$(brew --prefix)/var/aiteamforge/venv/bin/python3"
+        elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
+            lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
+        fi
     fi
 
-    # Start the server in a background subshell. stdout/stderr are discarded
-    # because server.py is chatty and we only care about the /api/status poll.
-    (
-        cd "${lcars_ui_dir}" || return 1
+    # Resolve a log dir consistent with the rendered-template convention
+    # (team-startup.sh.template logs to $AITEAMFORGE_DIR/logs/lcars-server-<team>.log).
+    # On the dev machine $AITEAMFORGE_DIR is unset, so fall back to dev-team/logs.
+    # Use _atf_base (not dirname of lcars_ui_dir) so an LCARS_UI_DIR override does
+    # not relocate the logs away from the canonical tree.
+    local _log_dir="${_atf_base}/logs"
+    mkdir -p "${_log_dir}" 2>/dev/null
+    local _server_log="${_log_dir}/lcars-server-${team}.log"
+
+    # Cap unbounded log growth: roll to a single .old backup past ~256KB.
+    if [[ -f "${_server_log}" ]] && (( $(wc -c < "${_server_log}" 2>/dev/null || echo 0) > 262144 )); then
+        mv -f "${_server_log}" "${_server_log}.old" 2>/dev/null || true
+    fi
+
+    # Start the server in the background. We `exec` into python inside the
+    # subshell so that $! is the python process itself (testable with kill -0).
+    # stdout is discarded (server.py is chatty); stderr is appended to the
+    # per-team log so a FATAL boot error is recoverable.
+    ( cd "${lcars_ui_dir}" && exec env \
         LCARS_TEAM="${team}" LCARS_SESSION_NAME="${session_name}" \
-            "${lcars_python}" server.py "${port}" > /dev/null 2>&1 &
-    )
+        "${lcars_python}" server.py "${port}" ) >/dev/null 2>>"${_server_log}" &
+    local _server_pid=$!
 
-    # Poll /api/status for up to 5s (10 × 0.5s). A ready response means the
-    # server is serving routes; a timeout is a soft warning — the browser tab
-    # may still load once iTerm2 opens it (the server often wins the race).
+    # Poll /api/status for up to 15s (30 × 0.5s). A ready response means the
+    # server is serving routes. If the process dies before answering, a crashed
+    # server is never going to respond — short-circuit and surface the real
+    # exit status + log tail instead of waiting out the full window.
     local _poll_i
-    for _poll_i in {1..10}; do
-        if curl -s "http://localhost:${port}/api/status" > /dev/null 2>&1; then
+    for _poll_i in {1..30}; do
+        if curl -s "http://localhost:${port}/api/status" >/dev/null 2>&1; then
             echo "    ✅ LCARS server ready on port ${port}"
             return 0
+        fi
+        if ! kill -0 "${_server_pid}" 2>/dev/null; then
+            wait "${_server_pid}" 2>/dev/null; local _rc=$?
+            echo "    ❌ LCARS server for team '${team}' on port ${port} exited (status ${_rc}) before becoming ready." >&2
+            echo "       Last lines of ${_server_log}:" >&2
+            tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
+            return 1
         fi
         sleep 0.5
     done
 
-    # Do NOT abort here. The tab may still work; log a warning and let the
-    # caller decide whether to proceed.
-    echo "    ⚠️  LCARS server on port ${port} did not respond within 5s — continuing" >&2
+    # Window elapsed but the process is still alive (slow/hung boot). Surface
+    # the log tail instead of a bare timeout. Do NOT abort — the tab may still
+    # work once iTerm2 opens it; let the caller decide whether to proceed.
+    echo "    ⚠️  LCARS server for team '${team}' on port ${port} did not become ready within 15s (process still running, pid ${_server_pid})." >&2
+    echo "       Recent ${_server_log}:" >&2
+    tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
     return 1
 }
 
@@ -144,8 +218,11 @@ open_lcars_tab() {
     local startup_log="${6:?open_lcars_tab: startup_log argument is required}"
 
     local lcars_url="http://localhost:${port}"
-    local setter_script="$HOME/dev-team/scripts/set-lcars-profile-browser.py"
-    local wm_script="$HOME/dev-team/iterm2_window_manager.py"
+    # XACA-0562: portable base — identical to start_lcars_server. Dev machine
+    # (AITEAMFORGE_DIR unset) → $HOME/dev-team; tap machine → $AITEAMFORGE_DIR.
+    local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+    local setter_script="${_atf_base}/scripts/set-lcars-profile-browser.py"
+    local wm_script="${_atf_base}/iterm2_window_manager.py"
 
     # ---- Step 1: Update the Dynamic Profile URL ----
     #

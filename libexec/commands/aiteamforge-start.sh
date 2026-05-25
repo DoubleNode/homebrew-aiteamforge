@@ -185,10 +185,20 @@ validate_boards() {
 # XACA-0555: server.py (0.12.0+) enforces the team-id contract and FATALs at
 # boot when LCARS_TEAM is unset (validate_lcars_team_or_die, team-id-contract
 # §6). Previously this launched a single bare `python3 server.py <port>` with
-# no LCARS_TEAM, so the server died immediately. We now loop the configured
-# team instances, resolve each team's LCARS port from the aiteamforge_paths
-# registry, and launch one server per team with LCARS_TEAM / LCARS_SESSION_NAME
-# set — matching the per-team startup scripts.
+# no LCARS_TEAM, so the server died immediately. We loop the configured team
+# instances, resolve each team's LCARS port from the aiteamforge_paths registry,
+# and launch one server per team with LCARS_TEAM / LCARS_SESSION_NAME set.
+#
+# XACA-0562 (full canonicalization): the actual launch + readiness poll is now
+# delegated to start_lcars_server() in the SHARED lcars-launch-helpers.sh — the
+# same helper sourced by the 11 per-team *-startup.sh scripts. On a tap machine
+# get_working_dir() returns $AITEAMFORGE_DIR and the helper is installed at
+# $AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh, so ${WORKING_DIR}/scripts/...
+# is exactly that installed helper. This kills the weaker inline launch (sleep 3
+# + curl, one shared /tmp/lcars-server.log, no PID/crash detection) in favor of
+# the hardened helper (per-team log, 15s first-boot, crash short-circuit). We
+# keep the "already serving → leave it alone" check here so a healthy running
+# server is never killed by the helper's pkill (least surprise).
 start_lcars() {
   print_section "Starting LCARS Kanban Server"
 
@@ -198,6 +208,17 @@ start_lcars() {
     print_error "LCARS UI not found: ${lcars_dir}"
     return 1
   fi
+
+  # XACA-0562: source the shared launch helper. ${WORKING_DIR}/scripts/... is the
+  # SAME installed file the per-team startup scripts source, so the launch/poll
+  # behavior is identical across `aiteamforge start` and team startup.
+  local _helper="${WORKING_DIR}/scripts/lcars-launch-helpers.sh"
+  if [ ! -r "$_helper" ]; then
+    print_warning "Shared LCARS launch helper not found at ${_helper} — cannot start LCARS"
+    return 1
+  fi
+  # shellcheck source=/dev/null
+  source "$_helper"
 
   # Resolve configured team instance ids (e.g. "academy", "finance-personal").
   # `|| true` keeps `set -e` from aborting `aiteamforge start` when the config
@@ -210,23 +231,13 @@ start_lcars() {
     return 0
   fi
 
-  # XACA-0486: resolve the brew venv python so runtime imports (pyzipper,
-  # requests, …) work on tap-installed machines. Bare `python3` is the system
-  # interpreter and lacks those deps. Fall back to system python3 on the
-  # dev-team source machine (deps available globally; no brew venv present).
-  local lcars_python="python3"
-  local _brew_aitf_prefix
-  if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" \
-      && [ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]; then
-    lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
-  fi
-
   local -a teams=()
   read -ra teams <<< "$teams_str"
 
   local -a started_teams=()
   local -a started_ports=()
 
+  local ok=0
   local team
   for team in "${teams[@]}"; do
     [ -z "$team" ] && continue
@@ -238,7 +249,9 @@ start_lcars() {
       continue
     fi
 
-    # Already serving on this port? Treat as success.
+    # Already serving on this port? Treat as success and LEAVE IT RUNNING.
+    # (Do NOT fall through to start_lcars_server — its pkill would kill a healthy
+    # server. Preserving this least-surprise behavior is intentional, XACA-0562.)
     if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
       print_warning "LCARS already running for '${team}' on port ${port}"
       continue
@@ -246,45 +259,27 @@ start_lcars() {
 
     print_info "Starting LCARS for '${team}' on port ${port}..."
 
-    # Launch in a subshell so the cd does not leak. LCARS_TEAM is mandatory
-    # (server FATALs without it); LCARS_SESSION_NAME scopes the team's tmp dir.
-    # Append (>>) so concurrent team servers do not truncate each other's log.
-    (
-      cd "$lcars_dir" || exit 1
-      LCARS_TEAM="$team" LCARS_SESSION_NAME="${team}-lcars" \
-        nohup "$lcars_python" server.py "$port" >> /tmp/lcars-server.log 2>&1 &
-    )
-
-    started_teams+=("$team")
-    started_ports+=("$port")
+    # Delegate launch + readiness poll to the shared helper. It prints its own
+    # ✅/⚠️/❌ readiness lines, tracks the server PID, and short-circuits on crash.
+    #
+    # GUARD: this script runs under `set -eo pipefail` and start_lcars_server
+    # returns 1 on soft-fail (slow/hung boot, or crash). The `if` consumes that
+    # non-zero return so `set -e` does NOT abort the whole `aiteamforge start`.
+    if start_lcars_server "$team" "$port" "${team}-lcars"; then
+      ok=$((ok + 1))
+      started_teams+=("$team")
+      started_ports+=("$port")
+      print_info "Access at: http://localhost:${port}"
+      [ "$OPEN_BROWSER" = true ] && open "http://localhost:${port}" 2>/dev/null || true
+    else
+      print_error "LCARS server for '${team}' failed to become ready on port ${port}"
+    fi
   done
 
-  if [ ${#started_teams[@]} -eq 0 ]; then
+  if [ ${#started_teams[@]} -eq 0 ] && [ "$ok" -eq 0 ]; then
     print_warning "No LCARS servers were launched"
     return 0
   fi
-
-  # Give servers a moment to bind, then verify each port responds.
-  sleep 3
-
-  local idx=0
-  local ok=0
-  for team in "${started_teams[@]}"; do
-    local port="${started_ports[$idx]}"
-    idx=$((idx + 1))
-    if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${port}/" 2>/dev/null | grep -q '200'; then
-      print_success "LCARS server started for '${team}' (port ${port})"
-      print_info "Access at: http://localhost:${port}"
-      ok=$((ok + 1))
-      if [ "$OPEN_BROWSER" = true ]; then
-        print_info "Opening browser for '${team}'..."
-        open "http://localhost:${port}" 2>/dev/null || true
-      fi
-    else
-      print_error "LCARS server for '${team}' failed to respond on port ${port}"
-      print_info "Check logs: /tmp/lcars-server.log"
-    fi
-  done
 
   if [ "$ok" -gt 0 ]; then
     return 0
@@ -459,6 +454,9 @@ print_section "Services Started"
 print_success "Dev-team services are now running"
 echo ""
 print_info "Check status: aiteamforge status"
-print_info "View logs: /tmp/lcars-server.log, /tmp/fleet-monitor.log"
+# XACA-0562: LCARS now logs per-team via the shared helper to
+# ${AITEAMFORGE_DIR}/logs/lcars-server-<team>.log (not the old shared
+# /tmp/lcars-server.log). Fleet monitor still logs to /tmp.
+print_info "View logs: ${WORKING_DIR}/logs/lcars-server-<team>.log, /tmp/fleet-monitor.log"
 
 exit 0

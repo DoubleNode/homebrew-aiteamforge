@@ -7,6 +7,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Refactor: XACA-0562 — `aiteamforge start` now sources the shared LCARS launch helper
+
+`aiteamforge start`'s `start_lcars()` carried its own inline LCARS launcher
+(`sleep 3` + curl readiness check, one shared `/tmp/lcars-server.log`, no PID or
+crash detection), which had drifted from the hardened helper used by the per-team
+startup scripts. It now sources `${WORKING_DIR}/scripts/lcars-launch-helpers.sh` —
+the same `lcars-launch-helpers.sh` installed at `$AITEAMFORGE_DIR/scripts/` — and
+delegates each team's launch + readiness poll to `start_lcars_server` (per-team
+log at `$AITEAMFORGE_DIR/logs/lcars-server-<team>.log`, 15s first-boot poll, crash
+short-circuit). The "already serving → leave it running" guard is preserved so a
+healthy server is never killed; the helper's soft-fail return is guarded so
+`set -eo pipefail` does not abort startup. The shipped seed
+`share/scripts/lcars-launch-helpers.sh` is now drift-gated by `sync-tap.sh` and is
+a byte-for-byte mirror of the dev-team canonical (portable: it resolves all paths
+from `${AITEAMFORGE_DIR:-$HOME/dev-team}`, so the SAME file works on dev and tap
+machines).
+
 ### Bugfix: XACA-0560 — `aiteamforge stop` / `restart` / `uninstall` / `migrate` now actually find the running LCARS server
 
 `aiteamforge stop` (and `restart`) reported "LCARS server not running" even when
