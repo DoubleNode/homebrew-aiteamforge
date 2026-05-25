@@ -198,7 +198,8 @@ rollback_migration() {
   fi
 
   # Stop services. LCARS launches relatively (`python3 server.py <port>`), so
-  # match `server.py <port>` not a path prefix (XACA-0560).
+  # match `server.py <port>` not a path prefix (XACA-0560). Port-less = kill-all
+  # teardown by design; see aiteamforge-stop.sh (XACA-0560-001).
   log "Stopping services..."
   pkill -f "server\.py [0-9]" 2>/dev/null || true
   pkill -f "fleet-monitor/server" 2>/dev/null || true
@@ -828,7 +829,8 @@ main() {
   if [[ "${DRY_RUN}" != "true" ]]; then
     log "Stopping services..."
     # LCARS launches relatively (`python3 server.py <port>`); match the port
-    # arg, not a path prefix (XACA-0560).
+    # arg, not a path prefix (XACA-0560). Port-less = kill-all teardown by
+    # design; see aiteamforge-stop.sh (XACA-0560-001).
     pkill -f "server\.py [0-9]" 2>/dev/null || true
     pkill -f "fleet-monitor/server" 2>/dev/null || true
     echo ""

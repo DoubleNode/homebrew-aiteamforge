@@ -102,6 +102,12 @@ stop_lcars() {
   # NO "lcars-ui/" substring (XACA-0560). The old `lcars-ui/server.py` pattern
   # never matched, making stop/restart silent no-ops. The trailing [0-9]
   # anchors on the port arg so we don't match e.g. an editor open on server.py.
+  #
+  # DELIBERATELY PORT-LESS (kill-all): `aiteamforge stop` tears down ALL LCARS
+  # servers, so this matcher omits the port on purpose. Do NOT "align" it with
+  # the per-port helper matcher in scripts/lcars-restart-helpers.sh
+  # (`server\.py.*<port>`, kill-one) during a future sibling-drift audit —
+  # narrowing this to one port would silently break stop-all. (XACA-0560-001)
   local pids
   pids=$(pgrep -f "server\.py [0-9]" 2>/dev/null || true)
 

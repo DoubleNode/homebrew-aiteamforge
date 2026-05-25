@@ -140,7 +140,9 @@ stop_services() {
 
   # Stop LCARS server. Match `server.py <port>` not a path prefix: LCARS is
   # launched relatively (`cd lcars-ui && python3 server.py <port>`), so the
-  # running cmdline has no "lcars-ui/" substring (XACA-0560).
+  # running cmdline has no "lcars-ui/" substring (XACA-0560). Port-less on
+  # purpose (kill-all teardown) — see aiteamforge-stop.sh for the full rationale
+  # on why this must NOT be narrowed to a per-port matcher (XACA-0560-001).
   if pgrep -f "server\.py [0-9]" &>/dev/null; then
     print_info "Stopping LCARS server..."
     pkill -f "server\.py [0-9]" || true
