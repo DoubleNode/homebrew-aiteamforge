@@ -222,6 +222,15 @@ Every test gets a clean environment:
 - `$AITEAMFORGE_HOME` - Points to tap root
 - No modification of real system files
 
+**Installer-test sandboxing rule (XACA-0564):** Tests that source `install-kanban.sh`
+MUST `export AITEAMFORGE_DIR=$TEST_TMP_DIR/aiteamforge` BEFORE the source call.
+If `kanban-helpers.sh` is also sourced (e.g. for `kb-*` helpers), it RESETS
+`AITEAMFORGE_DIR` to the dev path — re-export after any such source. Rationale:
+`install_kanban_helpers()` now hard-aborts if `$AITEAMFORGE_DIR` is a git work-tree
+or the target `kanban-helpers.sh` is git-tracked, unless `AITEAMFORGE_ALLOW_DEV_OVERWRITE=1`
+is set. Unsandboxed tests WILL trip this guard and abort. See
+`test-xaca-0564-kanban-helpers-overwrite-guard.sh` for the regression-test coverage.
+
 ## Test Coverage
 
 | Component | Test File | Coverage |

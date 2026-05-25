@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0564 — `install_kanban_helpers` now refuses to overwrite a git work-tree / git-tracked `kanban-helpers.sh`
+
+Root cause (XACA-0559 post-mortem): an installer test that did not sandbox
+`$AITEAMFORGE_DIR` let `install_kanban_helpers()` overwrite the dev source-of-truth
+`kanban-helpers.sh` with the small aliases template, silently dropping `kb-sweep` /
+`kb-merge` and breaking PR merge gates on the next shell session.
+
+- **`libexec/installers/install-kanban.sh`** — `install_kanban_helpers()` now probes
+  `$AITEAMFORGE_DIR` before writing. If the destination resolves to a git work-tree
+  (detected via `git rev-parse --git-dir`) or the target file is git-tracked
+  (`git ls-files --error-unmatch`), the function **hard-aborts** the entire install
+  rather than silently overwriting. The opt-in escape hatch
+  `AITEAMFORGE_ALLOW_DEV_OVERWRITE=1` bypasses the guard for intentional dev
+  workflows where clobbering a tracked file is expected.
+- **`tests/test-xaca-0564-kanban-helpers-overwrite-guard.sh`** — sandboxed regression
+  test covering: (a) guard trips and aborts when `$AITEAMFORGE_DIR` is inside the git
+  work-tree, (b) opt-in env var suppresses the abort, (c) untracked / non-git paths
+  proceed normally.
+
 ### Bugfix: XACA-0559 — `aiteamforge setup` now fully refreshes the runtime on upgrade; bare setup offers Upgrade/Preserve/Reconfigure
 
 `aiteamforge setup --upgrade` behaved identically to a plain run: the `IS_UPGRADE`

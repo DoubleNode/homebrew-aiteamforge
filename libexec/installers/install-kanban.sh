@@ -466,6 +466,43 @@ install_kanban_helpers() {
     fi
     local target="$AITEAMFORGE_DIR/kanban-helpers.sh"
 
+    # XACA-0559 / XACA-0564: refuse to overwrite a git-tracked kanban-helpers.sh.
+    # On a real install $AITEAMFORGE_DIR is ~/.aiteamforge (never a git repo) so
+    # this guard is a no-op.  On a dev checkout the sed-redirect would silently
+    # replace the full source-of-truth helpers with the tiny aliases template,
+    # dropping kb-sweep/kb-merge and breaking PR merge gates.
+    # Set AITEAMFORGE_ALLOW_DEV_OVERWRITE=1 to override (sandboxed tests only).
+    if command -v git >/dev/null 2>&1; then
+        local _is_dev_repo=0
+        # Check 1: $AITEAMFORGE_DIR is the root of a git work-tree.
+        local _git_toplevel
+        _git_toplevel="$(git -C "$AITEAMFORGE_DIR" rev-parse --show-toplevel 2>/dev/null)" || true
+        if [ -n "$_git_toplevel" ]; then
+            local _norm_dir _norm_top
+            _norm_dir="$(cd "$AITEAMFORGE_DIR" 2>/dev/null && pwd)" || _norm_dir="$AITEAMFORGE_DIR"
+            _norm_top="$(cd "$_git_toplevel" 2>/dev/null && pwd)" || _norm_top="$_git_toplevel"
+            if [ "$_norm_dir" = "$_norm_top" ]; then
+                _is_dev_repo=1
+            fi
+        fi
+        # Check 2: kanban-helpers.sh is git-tracked there (catches subdir case).
+        if [ "$_is_dev_repo" = "0" ]; then
+            if git -C "$AITEAMFORGE_DIR" ls-files --error-unmatch kanban-helpers.sh >/dev/null 2>&1; then
+                _is_dev_repo=1
+            fi
+        fi
+        if [ "$_is_dev_repo" = "1" ]; then
+            if [ "${AITEAMFORGE_ALLOW_DEV_OVERWRITE:-}" = "1" ]; then
+                warning "AITEAMFORGE_ALLOW_DEV_OVERWRITE=1 set — overwriting kanban-helpers.sh inside a git work-tree / tracked repo ($AITEAMFORGE_DIR). Proceed with caution."
+            else
+                error "$AITEAMFORGE_DIR looks like a git work-tree or kanban-helpers.sh is git-tracked there."
+                error "Refusing to overwrite the source-of-truth helpers with the installer template (XACA-0559 / XACA-0564)."
+                error "Set AITEAMFORGE_ALLOW_DEV_OVERWRITE=1 to override (sandboxed tests only)."
+                exit 1
+            fi
+        fi
+    fi
+
     if [ -z "$template" ] || [ ! -f "$template" ]; then
         warning "Kanban helpers template not found (skipping)"
         return 0
