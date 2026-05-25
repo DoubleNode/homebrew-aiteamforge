@@ -234,9 +234,6 @@ start_lcars() {
   local -a teams=()
   read -ra teams <<< "$teams_str"
 
-  local -a started_teams=()
-  local -a started_ports=()
-
   local ok=0
   local team
   for team in "${teams[@]}"; do
@@ -267,8 +264,6 @@ start_lcars() {
     # non-zero return so `set -e` does NOT abort the whole `aiteamforge start`.
     if start_lcars_server "$team" "$port" "${team}-lcars"; then
       ok=$((ok + 1))
-      started_teams+=("$team")
-      started_ports+=("$port")
       print_info "Access at: http://localhost:${port}"
       [ "$OPEN_BROWSER" = true ] && open "http://localhost:${port}" 2>/dev/null || true
     else
@@ -276,7 +271,7 @@ start_lcars() {
     fi
   done
 
-  if [ ${#started_teams[@]} -eq 0 ] && [ "$ok" -eq 0 ]; then
+  if [ "$ok" -eq 0 ]; then
     print_warning "No LCARS servers were launched"
     return 0
   fi
