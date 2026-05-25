@@ -38,6 +38,12 @@ This is the `setup` wizard counterpart to XACA-0558's fix for the standalone
   LaunchAgents) now ALWAYS refresh when the function is invoked; only the per-team
   `init_kanban_board` loop is gated on teams being non-empty. Empty-team runs warn
   "refreshed shared components only" and return cleanly.
+- **bash 3.2 / `set -u` robustness** — guarded the empty-array iterations the upgrade
+  path now reaches (`install-kanban.sh` board-init loop and `_get_team_working_dir`;
+  macOS `/bin/bash` 3.2 throws *unbound variable* on `"${arr[@]}"` when `arr` is empty).
+  Config-derived team ids are passed through `_sanitize_id` before being interpolated
+  into `eval`'d variable names, and the sanitizer is defined ahead of the hydration
+  block so the upgrade and interactive paths share one copy.
 
 ### Bugfix: XACA-0558 — `aiteamforge upgrade` now syncs kanban-hooks + helper scripts (in-place upgrades left them stale)
 

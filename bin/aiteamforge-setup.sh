@@ -561,6 +561,13 @@ TEAMS_DIR="${AITEAMFORGE_HOME}/share/teams"
 # Source common utilities (used by installer modules)
 source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
 
+# Sanitize an id before it is interpolated into an `eval`'d variable NAME.
+# Allow only alphanumerics, dot, hyphen, underscore. Defined here (before the
+# upgrade-hydration block) so BOTH the hydration path and the later
+# project-based-team loop can use it — the loop's own copy lived inside the
+# team-selection block, which the hydrated-upgrade path skips (XACA-0559).
+_sanitize_id() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9._-]//g'; }
+
 # ═══════════════════════════════════════════════════════════════════════════
 # UPGRADE HYDRATION (XACA-0559)
 #
@@ -590,6 +597,11 @@ if [ "$IS_UPGRADE" = "true" ] && [ "$INSTALL_PROFILE" != "cockpit" ]; then
     # Teams (JSON array of team id strings) → SELECTED_TEAMS
     SELECTED_TEAMS=()
     while IFS= read -r _t; do
+      # Sanitize the config-derived id before it flows into the eval var-NAMEs
+      # below (and into every downstream _WORKDIR_<team> read) — defense-in-depth
+      # so a tampered .aiteamforge-config can't inject via the eval name. Done
+      # once here so the array value and the eval name stay consistent (XACA-0559).
+      _t="$(_sanitize_id "$_t")"
       [ -n "$_t" ] && SELECTED_TEAMS+=("$_t")
     done < <(jq -r '.teams[]? // empty' "$_cfg" 2>/dev/null)
 
@@ -745,8 +757,8 @@ echo -e "${GREEN}✓${NC} Selected teams: ${SELECTED_TEAMS[*]}"
 # Uses eval instead of declare -A (bash 3.2 compatible)
 # Variables: _PROJECT_<team_id>, _WORKDIR_<team_id>, _CLIENT_<team_id>
 # -----------------------------------------------------------------------
-# Sanitize user input before eval — allow only alphanumeric, hyphens, underscores, dots
-_sanitize_id() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9._-]//g'; }
+# _sanitize_id is defined earlier (before the upgrade-hydration block) so it is
+# available on both the hydrated-upgrade and interactive paths (XACA-0559).
 
 for team_id in "${SELECTED_TEAMS[@]}"; do
   conf_file="${TEAMS_DIR}/${team_id}.conf"
