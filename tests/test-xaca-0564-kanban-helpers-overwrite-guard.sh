@@ -25,6 +25,44 @@ SENTINEL="# SENTINEL-SOURCE-OF-TRUTH — must not be overwritten"
 TEMPLATE_MARKER="kb-list"
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Standalone framework: provide no-op stubs when test-runner.sh has not exported
+# the real harness functions, and manage our own pass/fail counters.  Lets a
+# developer run `bash tests/test-xaca-0564-...sh` directly OR via test-runner.sh.
+# (Pattern mirrors test-xaca-0498-twd-guard.sh — PR #476 review follow-up.)
+# ─────────────────────────────────────────────────────────────────────────────
+_STANDALONE=false
+if ! type -t test_start >/dev/null 2>&1; then
+    _STANDALONE=true
+    _PASS_COUNT=0
+    _FAIL_COUNT=0
+    _CURRENT_TEST=""
+
+    test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
+    test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
+    test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST — $1" >&2; }
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temp directory: use the runner-supplied TEST_TMP_DIR or create our own.
+# Canonicalize via `cd && pwd -P` so the guard's own `cd && pwd` comparisons
+# match on macOS, where /var and /tmp are symlinks into /private/...
+# ─────────────────────────────────────────────────────────────────────────────
+if [ -z "${TEST_TMP_DIR:-}" ] || [ ! -d "${TEST_TMP_DIR:-}" ]; then
+    TEST_TMP_DIR="$(mktemp -d -t xaca0564-guard-test.XXXXXX)"
+    _OWN_TMP=true
+else
+    _OWN_TMP=false
+fi
+TEST_TMP_DIR="$(cd "$TEST_TMP_DIR" && pwd -P)"
+
+cleanup() {
+    if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
+        rm -rf "$TEST_TMP_DIR"
+    fi
+}
+trap cleanup EXIT
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helper: run install_kanban_helpers in an isolated subshell.
 #
 # Usage: run_guard <aiteamforge_dir> [AITEAMFORGE_ALLOW_DEV_OVERWRITE=1]
@@ -179,5 +217,14 @@ else
   test_fail "exit=$CASE4_EXIT (want non-0); sentinel_intact=$(echo "$CASE4_CONTENT" | grep -q "SENTINEL-SOURCE-OF-TRUTH" && echo "yes" || echo "no")"
 fi
 
-# Done
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary (standalone mode only — test-runner.sh tallies pass/fail from output).
+# ─────────────────────────────────────────────────────────────────────────────
+if [ "$_STANDALONE" = true ]; then
+    echo ""
+    echo "Results: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
+    if [ "$_FAIL_COUNT" -gt 0 ]; then
+        exit 1
+    fi
+fi
 exit 0
