@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-05-25
+
 ### Refactor: XACA-0563 — rendered startup templates now use the shared LCARS launch helper
 
 The two startup-script templates (`share/templates/team-startup.sh.template` and
@@ -57,6 +59,20 @@ healthy server is never killed; the helper's soft-fail return is guarded so
 a byte-for-byte mirror of the dev-team canonical (portable: it resolves all paths
 from `${AITEAMFORGE_DIR:-$HOME/dev-team}`, so the SAME file works on dev and tap
 machines).
+
+### Bugfix: XACA-0561 — `lcars-health-check.sh` and `lcars-smoke-test.sh` derive LCARS ports at runtime
+
+`lcars-health-check.sh` and `lcars-ui/lcars-smoke-test.sh` hardcoded per-team LCARS ports that
+had drifted from canonical (`finance-personal` claimed 8427 vs canonical 8360;
+`legal-coparenting` claimed 8230 vs canonical 8320 — both stale since XACA-0168), so the
+health-check relaunched servers on the wrong ports and the smoke-test silently targeted dead
+endpoints. Both scripts now resolve ports at runtime from a new shared CLI,
+`kanban-hooks/lcars_ports.py`, which reads canonical (live `team-paths.json` overlay →
+`DEFAULT_TEAMS` fallback) and skips missing/`None` ports — a single source of the derivation
+logic so the two scripts can no longer diverge. The canonical path is resolved relative to the
+script (`${0:A:h}/…/kanban-hooks`) so it works in both the dev tree and the shipped tap layout.
+`scripts/kb-port-reconcile` gains a `--check` read-site regression guard that exits non-zero if
+either script re-hardcodes a port that diverges from canonical.
 
 ### Bugfix: XACA-0560 — `aiteamforge stop` / `restart` / `uninstall` / `migrate` now actually find the running LCARS server
 
@@ -218,6 +234,48 @@ showed only the fatal.
   (#001); `aiteamforge-paths.sh` is sourced at top-of-file alongside the other libs for
   consistency (#002). (A larger anti-drift refactor sharing the canonical launch helper — #003 —
   is deferred to its own PR.)
+
+### Bugfix: XACA-0556 — startup surfaces real LCARS boot failures instead of a generic 5s timeout (printed twice)
+
+When `server.py` FATALed on boot (port collision, missing dependency, …), `start_lcars_server()`
+(`scripts/lcars-launch-helpers.sh`) discarded all server output inside a PID-orphaning subshell
+and only polled `/api/status` for a fixed 5s, so the crash was invisible — the poll timed out
+with a generic "did not respond within 5s — continuing" while each of the 11 `*-startup.sh`
+callers appended its own "timed out" echo (the "printed twice" symptom). `start_lcars_server()`
+now captures the server's stderr to a per-team log
+(`$AITEAMFORGE_DIR/logs/lcars-server-<team>.log`), tracks the real python PID, and polls 15s but
+**short-circuits the instant the process dies**, surfacing the real exit status plus the last
+~15 log lines rather than burning the full window. All 11 startup scripts drop their redundant
+caller-side echo (the helper now owns the failure message); the helper size-caps the per-team
+log, and `scripts/lcars-restart-helpers.sh` drops the now-stale "within 5s" restart fallback.
+
+### Bugfix: XACA-0554 — fix secrets-import dead-end (import never linked paired secrets; UI couldn't acknowledge)
+
+Importing any team whose export manifest declared `secrets_summary.discovered > 0` failed hard
+with HTTP 409 `missing_paired_secrets` and could not be completed through the LCARS UI — a
+blocker for migrating any secrets-bearing team. The apply gate checked
+`job.get('pairedSecretsJobId')`, but nothing ever set that field on an *import* job, and the
+only override (`acknowledgeMissingSecrets`) was unreachable because the UI's apply POST sent no
+body. The import-apply handler now accepts an optional `pairedSecretsJobId`, validating that the
+referenced secrets job exists, has been password-verified, and targets the same team before
+linking it (invalid/wrong-state/team-mismatch references return a clear `400`). The UI shows an
+inline secrets file-picker + password in the preflight panel and keeps **Apply Import** disabled
+until both are supplied, orchestrating upload → verify → apply with a combined progress view.
+The secrets password is read from the DOM, zeroed immediately after verification, and held only
+in the apply call's closure — never a module-scope variable.
+
+### Bugfix: XACA-0553 — LCARS export/import fetch errors show HTTP status and server reason instead of a generic "Network error"
+
+Every user-initiated fetch in the export/import flows used the `json()`-before-`ok` anti-pattern:
+calling `await response.json()` on a non-OK response threw when the server returned a non-JSON
+error body, and the caller's generic `catch` surfaced "Network error" — the same message shown
+when the server is completely unreachable, making the three failure modes indistinguishable. Two
+new shared helpers — `readJsonResponse()` (reads any fetch `Response` without throwing) and
+`_httpErrorMessage()` — now distinguish a true fetch reject (server unreachable: "LCARS server
+not responding on this port…", with the password zeroed before the message shows), a non-OK HTTP
+status ("HTTP <status> <reason>" from `data.error`/`message`/`statusText`), and an OK-but-
+unreadable body. Applied to all 12 user-initiated export/import fetch sites; interval status-poll
+fetches are intentionally left unchanged.
 
 ## [0.12.0] - 2026-05-23
 
