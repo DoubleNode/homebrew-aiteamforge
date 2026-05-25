@@ -820,30 +820,34 @@ if [[ ! -f "$SHUTDOWN_TEMPLATE" ]]; then
     SHUTDOWN_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-shutdown.sh.template"
 fi
 
+# XACA-0483 / XACA-0563: path-substitution install helper — rewrite ~/dev-team
+# and $HOME/dev-team references to $AITEAMFORGE_DIR. One special case: dev-team
+# has iterm2_window_manager.py at the top level, but the tap installs it under
+# scripts/. Handle that first. Defined here (outside the mode branch) because the
+# rendered-template path below (XACA-0563) also installs lcars-launch-helpers.sh
+# through it, so both install paths use one mechanism.
+_xaca0483_install_script() {
+    local src="$1" dst="$2"
+    # The dev-team source uses ~/dev-team/iterm2_window_manager.py (top-level),
+    # but the tap installs iterm2_window_manager.py under scripts/. Rewrite
+    # that specific case first, then the general ~/dev-team → $AITEAMFORGE_DIR
+    # path mapping. Covers all three reference forms: ~, $HOME, ${HOME}.
+    sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
+        -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
+        -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
+        "$src" > "$dst"
+    chmod +x "$dst"
+}
+
 # XACA-0483: parametric mode — copy dev-team source scripts verbatim with
 # path substitution from ~/dev-team/* to $AITEAMFORGE_DIR/*. Skips template
 # substitution entirely. The dev-team scripts already implement the parametric
 # pattern correctly (accept project/client args at runtime, compute instance id
 # from them, set LCARS_TEAM accordingly via scripts/lcars-launch-helpers.sh).
 if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
-    # Path-substitution helper: rewrite ~/dev-team and $HOME/dev-team references
-    # to $AITEAMFORGE_DIR. One special case: dev-team has iterm2_window_manager.py
-    # at the top level, but the tap installs it under scripts/. Handle that first.
-    _xaca0483_install_script() {
-        local src="$1" dst="$2"
-        # The dev-team source uses ~/dev-team/iterm2_window_manager.py (top-level),
-        # but the tap installs iterm2_window_manager.py under scripts/. Rewrite
-        # that specific case first, then the general ~/dev-team → $AITEAMFORGE_DIR
-        # path mapping. Covers all three reference forms: ~, $HOME, ${HOME}.
-        sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
-            -e "s|\${HOME}/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
-            -e "s|~/dev-team/iterm2_window_manager.py|$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py|g" \
-            -e "s|\$HOME/dev-team|$AITEAMFORGE_DIR|g" \
-            -e "s|\${HOME}/dev-team|$AITEAMFORGE_DIR|g" \
-            -e "s|~/dev-team|$AITEAMFORGE_DIR|g" \
-            "$src" > "$dst"
-        chmod +x "$dst"
-    }
     _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh" "$STARTUP_SCRIPT"
     echo "  ✓ $TEAM_STARTUP_SCRIPT (parametric, XACA-0483)"
     _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-shutdown.sh" "$SHUTDOWN_SCRIPT"
@@ -927,6 +931,17 @@ PYEOF
     rm -f "${STARTUP_SCRIPT}.tmp"
     chmod +x "$STARTUP_SCRIPT"
     echo "  ✓ $TEAM_STARTUP_SCRIPT"
+
+    # XACA-0563: the rendered startup script sources lcars-launch-helpers.sh for
+    # the hardened, shared LCARS launch (start_lcars_server). The parametric
+    # branch installs it above; the rendered-template path must install it too —
+    # no other install step ships it for non-parametric teams. Same mechanism as
+    # the parametric branch (idempotent re-install; the on-disk copy diverges from
+    # source by path rewrite by design, so a content-equality guard would trip).
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" \
+        "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+    echo "  ✓ scripts/lcars-launch-helpers.sh"
 else
     echo "  ⚠️  Template not found: $TEAM_STARTUP_SCRIPT.template (will create basic version)"
     cat > "$STARTUP_SCRIPT" <<EOF

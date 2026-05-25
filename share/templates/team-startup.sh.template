@@ -370,31 +370,26 @@ echo ""
 # Start LCARS server
 # ============================================================================
 echo "  Starting LCARS server on port $LCARS_PORT..."
-echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
-echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
-# Note: cleanup_orphans() already killed any stale server on this port above
 
-# Log directory for LCARS server stderr — created here so the path is ready before launch.
-# Note: log files are not auto-rotated; if disk space is a concern, periodically clear
-# $AITEAMFORGE_DIR/logs/lcars-server-*.log (e.g. via logrotate or a cron job).
+# LCARS server log path — written and size-rotated by start_lcars_server() in
+# lcars-launch-helpers.sh. Defined here so the health-check summary below can
+# still reference "$LCARS_SERVER_LOG".
 LCARS_LOG_DIR="$AITEAMFORGE_DIR/logs"
-mkdir -p "$LCARS_LOG_DIR"
 LCARS_SERVER_LOG="${LCARS_LOG_DIR}/lcars-server-${TEAM_ID}.log"
 
-(cd "$AITEAMFORGE_DIR/lcars-ui" && \
-    LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
-    python3 server.py "$LCARS_PORT" > /dev/null 2>>"$LCARS_SERVER_LOG" &)
+# XACA-0563: launch + readiness via the shared, hardened helper — the single
+# source of truth also used by the dev *-startup.sh scripts and `aiteamforge
+# start` (XACA-0562). It pkills any stale server, captures the server PID and
+# short-circuits on a crash with the log tail, polls for 15s, size-rotates the
+# log, and writes window.LCARS_TARGET_TEAM to lcars-ui/lcars-target.js. Soft-fail
+# is preserved: startup continues regardless of the return so the tabs still open.
+source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+start_lcars_server "$TEAM_ID" "$LCARS_PORT" "${TEAM_ID}-lcars" || true
 
-for i in {1..10}; do
-    curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1 && break
-    sleep 0.5
-done
-
-if curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1; then
-    echo "  LCARS server ready: http://localhost:$LCARS_PORT"
-else
-    echo "  Warning: LCARS server may not have started (check: $LCARS_SERVER_LOG)"
-fi
+# start_lcars_server truncates lcars-target.js to just LCARS_TARGET_TEAM; re-append
+# LCARS_TARGET_SESSION (consumed by redirect.html) so the inline browser targets
+# this team's LCARS session.
+echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
 
 # ============================================================================
 # Create iTerm2 tabs

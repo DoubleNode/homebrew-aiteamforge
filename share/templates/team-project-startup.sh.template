@@ -437,23 +437,19 @@ echo ""
 # Start LCARS server
 # ============================================================================
 echo "  Starting LCARS server on port $LCARS_PORT..."
-echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
+
+# XACA-0563: launch + readiness via the shared, hardened helper — the single
+# source of truth also used by the dev *-startup.sh scripts and `aiteamforge
+# start` (XACA-0562). It pkills any stale server, captures the server PID and
+# short-circuits on a crash with the log tail, polls for 15s, and logs stderr to
+# $AITEAMFORGE_DIR/logs/lcars-server-<team>.log (previously discarded here). It
+# also writes window.LCARS_TARGET_TEAM. Soft-fail preserved: startup continues.
+source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+start_lcars_server "$TEAM_ID" "$LCARS_PORT" "${TEAM_ID}-lcars" || true
+
+# start_lcars_server truncates lcars-target.js to just LCARS_TARGET_TEAM; re-append
+# LCARS_TARGET_SESSION (consumed by redirect.html).
 echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
-pkill -f "server.py.*$LCARS_PORT" 2>/dev/null
-(cd "$AITEAMFORGE_DIR/lcars-ui" && \
-    LCARS_TEAM="$TEAM_ID" LCARS_SESSION_NAME="${TEAM_ID}-lcars" \
-    python3 server.py "$LCARS_PORT" > /dev/null 2>&1 &)
-
-for i in {1..10}; do
-    curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1 && break
-    sleep 0.5
-done
-
-if curl -s "http://localhost:$LCARS_PORT/api/status" > /dev/null 2>&1; then
-    echo "  LCARS server ready: http://localhost:$LCARS_PORT"
-else
-    echo "  Warning: LCARS server may not have started"
-fi
 
 # ============================================================================
 # Create iTerm2 tabs — each tab attaches to its tmux session

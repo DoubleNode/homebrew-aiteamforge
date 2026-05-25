@@ -7,6 +7,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Refactor: XACA-0563 — rendered startup templates now use the shared LCARS launch helper
+
+The two startup-script templates (`share/templates/team-startup.sh.template` and
+`team-project-startup.sh.template`) each carried their own inline LCARS launcher:
+a `(cd … python3 server.py … &)` subshell whose `&` made the server PID
+unrecoverable, a fixed 5-second readiness poll (`{1..10}` × 0.5s), no
+crash detection, and a generic "may not have started" message
+(`team-project` discarded the server's stderr entirely). They now `source`
+`$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh` and delegate to
+`start_lcars_server` — the same hardened helper already used by the dev-team
+`*-startup.sh` scripts and `aiteamforge start` (XACA-0562). This brings PID
+capture + crash short-circuit with a log tail, a 15s first-boot poll, a
+size-rotated per-team log at `$AITEAMFORGE_DIR/logs/lcars-server-<team>.log`,
+and venv-aware Python resolution. `window.LCARS_TARGET_SESSION` (consumed by
+`redirect.html`) is re-appended after the call since the helper writes only
+`LCARS_TARGET_TEAM`. This removes the last LCARS-launch code path that had
+drifted from the shared helper.
+
+`install-team.sh` now installs `lcars-launch-helpers.sh` to
+`$AITEAMFORGE_DIR/scripts/` on the **rendered-template (non-parametric) path**
+too — previously only the parametric path shipped it, so the rendered script's
+`source` would have failed at runtime. The path-substitution install helper
+(`_xaca0483_install_script`) was hoisted out of the parametric branch so both
+install paths use one mechanism.
+
 ### Refactor: XACA-0562 — `aiteamforge start` now sources the shared LCARS launch helper
 
 `aiteamforge start`'s `start_lcars()` carried its own inline LCARS launcher
