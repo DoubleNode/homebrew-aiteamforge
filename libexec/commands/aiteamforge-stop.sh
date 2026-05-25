@@ -96,9 +96,14 @@ print_header "AITEAMFORGE STOP"
 stop_lcars() {
   print_section "Stopping LCARS Kanban Server"
 
-  # Find LCARS server process
+  # Find LCARS server process. Match `server.py <port>` rather than a path
+  # prefix: start.sh and the per-team startup scripts launch LCARS via
+  # `cd lcars-ui && python3 server.py <port>`, so the running cmdline carries
+  # NO "lcars-ui/" substring (XACA-0560). The old `lcars-ui/server.py` pattern
+  # never matched, making stop/restart silent no-ops. The trailing [0-9]
+  # anchors on the port arg so we don't match e.g. an editor open on server.py.
   local pids
-  pids=$(pgrep -f "lcars-ui/server.py" 2>/dev/null || true)
+  pids=$(pgrep -f "server\.py [0-9]" 2>/dev/null || true)
 
   if [ -z "$pids" ]; then
     print_info "LCARS server not running"
@@ -119,7 +124,7 @@ stop_lcars() {
   # Wait a moment and verify
   sleep 1
 
-  if ! pgrep -f "lcars-ui/server.py" &>/dev/null; then
+  if ! pgrep -f "server\.py [0-9]" &>/dev/null; then
     print_success "LCARS server stopped"
     return 0
   else

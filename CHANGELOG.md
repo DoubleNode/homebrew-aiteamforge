@@ -7,6 +7,34 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0560 — `aiteamforge stop` / `restart` / `uninstall` / `migrate` now actually find the running LCARS server
+
+`aiteamforge stop` (and `restart`) reported "LCARS server not running" even when
+LCARS was up, then `restart` could not rebind the port still held by the
+un-killed process. Root cause: the stop path matched processes with
+`pgrep -f "lcars-ui/server.py"`, but `start.sh` and every per-team `*-lcars-startup.sh`
+launch LCARS **relatively** (`cd lcars-ui && python3 server.py <port>`), so the
+running command line is `python3 server.py <port>` with **no `lcars-ui/` substring**.
+The path-prefixed pattern never matched, so stop/restart were silent no-ops. The
+identical broken pattern lived in three command scripts; all are aligned to the
+port-anchored matcher already proven in `lcars-launch-helpers.sh` /
+`lcars-restart-helpers.sh` (`server\.py.*<port>`).
+
+- **`libexec/commands/aiteamforge-stop.sh`** — `stop_lcars()` now finds and
+  verifies LCARS via `pgrep -f "server\.py [0-9]"` (both the discovery and the
+  post-kill verification sites). The trailing `[0-9]` anchors on the port
+  argument, so it matches both relative (`server.py 8203`) and absolute
+  (`/…/lcars-ui/server.py 8203`) launches without matching an incidental
+  `vim server.py` (no port arg).
+- **`libexec/commands/aiteamforge-uninstall.sh`** — `stop_services()` LCARS
+  detect/kill switched to the same `server\.py [0-9]` matcher.
+- **`libexec/commands/aiteamforge-migrate.sh`** — both rollback / migrate
+  service-stop sites switched to the same matcher.
+
+No launcher changes: the matcher fix is launch-style-agnostic, and the relative
+launch is shared by `start.sh` and all per-team startup scripts. The
+`fleet-monitor/server` matchers are unaffected (separate Node service).
+
 ### Bugfix: XACA-0564 — `install_kanban_helpers` now refuses to overwrite a git work-tree / git-tracked `kanban-helpers.sh`
 
 Root cause (XACA-0559 post-mortem): an installer test that did not sandbox

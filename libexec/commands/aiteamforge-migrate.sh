@@ -197,9 +197,10 @@ rollback_migration() {
     fi
   fi
 
-  # Stop services
+  # Stop services. LCARS launches relatively (`python3 server.py <port>`), so
+  # match `server.py <port>` not a path prefix (XACA-0560).
   log "Stopping services..."
-  pkill -f "lcars-ui/server.py" 2>/dev/null || true
+  pkill -f "server\.py [0-9]" 2>/dev/null || true
   pkill -f "fleet-monitor/server" 2>/dev/null || true
 
   # Restore backup
@@ -826,7 +827,9 @@ main() {
   # Stop running services
   if [[ "${DRY_RUN}" != "true" ]]; then
     log "Stopping services..."
-    pkill -f "lcars-ui/server.py" 2>/dev/null || true
+    # LCARS launches relatively (`python3 server.py <port>`); match the port
+    # arg, not a path prefix (XACA-0560).
+    pkill -f "server\.py [0-9]" 2>/dev/null || true
     pkill -f "fleet-monitor/server" 2>/dev/null || true
     echo ""
   fi

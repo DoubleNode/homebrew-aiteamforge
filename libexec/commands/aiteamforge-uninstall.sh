@@ -138,10 +138,12 @@ fi
 stop_services() {
   print_section "Stopping Services"
 
-  # Stop LCARS server
-  if pgrep -f "lcars-ui/server.py" &>/dev/null; then
+  # Stop LCARS server. Match `server.py <port>` not a path prefix: LCARS is
+  # launched relatively (`cd lcars-ui && python3 server.py <port>`), so the
+  # running cmdline has no "lcars-ui/" substring (XACA-0560).
+  if pgrep -f "server\.py [0-9]" &>/dev/null; then
     print_info "Stopping LCARS server..."
-    pkill -f "lcars-ui/server.py" || true
+    pkill -f "server\.py [0-9]" || true
     print_success "LCARS server stopped"
   fi
 
