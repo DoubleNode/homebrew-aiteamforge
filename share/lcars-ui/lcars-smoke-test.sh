@@ -33,28 +33,90 @@
 #             run manually or from cron:
 #               */30 * * * * /path/to/lcars-ui/lcars-smoke-test.sh >> /tmp/lcars-smoke.log 2>&1
 #
-# Port map source of truth: lcars-health-check.sh LCARS_SERVERS array
-# (XACA-0168 maintenance note: local_port must agree with
-#  aiteamforge_paths.DEFAULT_TEAMS lcars_port for same team)
+# NOTE (XACA-0561): Both this script and lcars-health-check.sh derive lcars_port
+# at runtime from kanban-hooks/aiteamforge_paths.py (DEFAULT_TEAMS[team]["lcars_port"]).
+# Port numbers are NOT hardcoded here. To add a team, add it to the TEAMS list
+# below AND to aiteamforge_paths.py DEFAULT_TEAMS.
 # ============================================================================
 
 # ============================================================================
-# Port-to-Team Mapping
-# Canonical source: ~/dev-team/lcars-health-check.sh LCARS_SERVERS[]
-# Format: "local_port:expected_team"
-# Update this array whenever lcars-health-check.sh LCARS_SERVERS changes.
+# Team List — used to build PORT_TEAM_MAP at runtime
+# Format: "team:expected_team" — expected_team is usually identical to team.
+# Ports are derived from aiteamforge_paths.py; they are NOT hardcoded here.
 # ============================================================================
-declare -a PORT_TEAM_MAP=(
-    "8260:ios"
-    "8280:android"
-    "8240:firebase"
-    "8203:academy"
-    "8180:dns"
-    "8505:freelance"
-    "8234:command"
-    "8427:finance-personal"
-    "8230:legal-coparenting"
+declare -a _SMOKE_TEAMS=(
+    "ios:ios"
+    "android:android"
+    "firebase:firebase"
+    "academy:academy"
+    "dns:dns"
+    "freelance:freelance"
+    "command:command"
+    "finance-personal:finance-personal"
+    "legal-coparenting:legal-coparenting"
 )
+
+# Derive lcars_port for each team from the canonical source at runtime.
+# lcars-smoke-test.sh lives in lcars-ui/ — one level below the script root in
+# both dev-tree (lcars-ui/ inside dev-team/) and shipped tap layout
+# (share/lcars-ui/ inside share/). kanban-hooks/ is always the sibling of
+# lcars-ui/'s parent, so we go one level up.
+_SCRIPT_DIR="${0:A:h}"
+_KANBAN_HOOKS_DIR="${_SCRIPT_DIR}/../kanban-hooks"
+
+# Extract team keys for the python lookup.
+_SMOKE_TEAM_KEYS=()
+for _e in "${_SMOKE_TEAMS[@]}"; do
+    _SMOKE_TEAM_KEYS+=("${_e%%:*}")
+done
+
+# One python3 call emitting "team:port" lines; missing/None → stderr warning,
+# omitted from output so we never build a PORT_TEAM_MAP entry with a bogus port.
+_PORT_LOOKUP=$(python3 -c "
+import sys
+khdir = sys.argv[1]
+teams = sys.argv[2:]
+sys.path.insert(0, khdir)
+try:
+    from aiteamforge_paths import DEFAULT_TEAMS, load_config
+    try:
+        cfg = load_config()
+        live = cfg.get('teams', {})
+    except Exception:
+        live = {}
+    for t in teams:
+        entry = live.get(t) or DEFAULT_TEAMS.get(t)
+        if entry is None:
+            print(\"WARNING: team '\" + t + \"' not in aiteamforge_paths — skipping\", file=sys.stderr)
+            continue
+        port = entry.get('lcars_port')
+        if port is None:
+            print(\"WARNING: team '\" + t + \"' lcars_port is None — skipping\", file=sys.stderr)
+            continue
+        print(t + ':' + str(port))
+except ImportError as e:
+    print('ERROR: cannot import aiteamforge_paths from ' + khdir + ': ' + str(e), file=sys.stderr)
+    sys.exit(1)
+" "$_KANBAN_HOOKS_DIR" "${_SMOKE_TEAM_KEYS[@]}")
+
+# Build a team->port associative array.
+typeset -A _TEAM_PORT
+while IFS=':' read -r _t _p; do
+    [[ -n "$_t" && -n "$_p" ]] && _TEAM_PORT[$_t]=$_p
+done <<< "$_PORT_LOOKUP"
+
+# Build PORT_TEAM_MAP by combining team list with derived ports.
+# Format: "local_port:expected_team"
+declare -a PORT_TEAM_MAP=()
+for _e in "${_SMOKE_TEAMS[@]}"; do
+    IFS=':' read -r _team _expected <<< "$_e"
+    _lp="${_TEAM_PORT[$_team]}"
+    if [[ -z "$_lp" ]]; then
+        print "WARNING: no canonical lcars_port for team '$_team' — skipping smoke-test entry" >&2
+        continue
+    fi
+    PORT_TEAM_MAP+=("${_lp}:${_expected}")
+done
 
 # ============================================================================
 # Defaults
