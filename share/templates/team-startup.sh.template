@@ -383,6 +383,12 @@ LCARS_SERVER_LOG="${LCARS_LOG_DIR}/lcars-server-${TEAM_ID}.log"
 # short-circuits on a crash with the log tail, polls for 15s, size-rotates the
 # log, and writes window.LCARS_TARGET_TEAM to lcars-ui/lcars-target.js. Soft-fail
 # is preserved: startup continues regardless of the return so the tabs still open.
+#
+# Hand the helper the interpreter this template already resolved ($VENV_PYTHON,
+# from $HOME/.aiteamforge/venv / $AITEAMFORGE_DIR/.venv) so the server launches
+# under the venv that has the LCARS deps — the helper's own probe chain does not
+# cover those paths and would otherwise fall back to bare python3 (XACA-0563).
+export LCARS_PYTHON="$VENV_PYTHON"
 source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
 start_lcars_server "$TEAM_ID" "$LCARS_PORT" "${TEAM_ID}-lcars" || true
 

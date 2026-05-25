@@ -91,14 +91,22 @@ start_lcars_server() {
     # expected when nothing is running; suppress them.
     pkill -f "server.py.*${port}" 2>/dev/null
 
-    # XACA-0486 / XACA-0562: Resolve the python that has the LCARS runtime imports
-    # (pyzipper, requests, etc. from share/requirements.txt). Bare `python3` is the
-    # system interpreter and does NOT have these deps — it is only the last-resort
-    # fallback (the dev-team source machine has the deps globally; tap machines do
-    # not, so the venv MUST win there).
+    # XACA-0486 / XACA-0562 / XACA-0563: Resolve the python that has the LCARS
+    # runtime imports (pyzipper, requests, etc. from share/requirements.txt). Bare
+    # `python3` is the system interpreter and does NOT have these deps — it is only
+    # the last-resort fallback (the dev-team source machine has the deps globally;
+    # tap machines do not, so the venv MUST win there).
     #
-    # Two formula conventions have shipped over time, so we probe BOTH (XACA-0562
-    # unified the dev `libexec/venv` chain with the older tap `env.sh`/var-venv chain):
+    # Probe order:
+    #   0. $LCARS_PYTHON (env override)              — XACA-0563: an explicit, caller-
+    #                                                  resolved interpreter wins. The rendered
+    #                                                  tap startup templates export their own
+    #                                                  $VENV_PYTHON (resolved from
+    #                                                  $HOME/.aiteamforge/venv or
+    #                                                  $AITEAMFORGE_DIR/.venv — paths the chain
+    #                                                  below does NOT cover). Unset on the dev
+    #                                                  machine + per-team scripts → chain runs
+    #                                                  unchanged there.
     #   1. `brew --prefix aiteamforge`/libexec/venv  — current formula convention
     #                                                  (XACA-0486; installed by the Formula)
     #   2. env.sh → $AITEAMFORGE_PYTHON               — older convention; env.sh exports
@@ -106,27 +114,33 @@ start_lcars_server() {
     #   3. $(brew --prefix)/var/aiteamforge/venv      — older var-located venv
     #   4. $AITEAMFORGE_DIR/share/venv                — bundled-share venv layout
     #   5. python3                                    — last resort (dev source machine)
-    # On the dev machine probes 1-4 all miss (no brew aiteamforge / no env.sh) and
-    # we fall straight through to bare python3 — identical to prior behavior.
-    local lcars_python="python3"  # last-resort fallback (dev-team source machine)
-    local _brew_aitf_prefix
-    if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
-        lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
+    # On the dev machine the override is unset and probes 1-4 all miss (no brew
+    # aiteamforge / no env.sh), so we fall straight through to bare python3 —
+    # identical to prior behavior.
+    local lcars_python
+    if [[ -n "${LCARS_PYTHON:-}" ]] && [[ -x "${LCARS_PYTHON}" ]]; then
+        lcars_python="${LCARS_PYTHON}"
     else
-        # Older convention: env.sh exports AITEAMFORGE_PYTHON (canonical interpreter).
-        local _brew_prefix _atf_env_sh
-        _brew_prefix="$(brew --prefix 2>/dev/null)"
-        _atf_env_sh="${_brew_prefix}/var/aiteamforge/env.sh"
-        if [[ -f "$_atf_env_sh" ]]; then
-            # shellcheck disable=SC1090
-            source "$_atf_env_sh"
-        fi
-        if [[ -n "${AITEAMFORGE_PYTHON:-}" ]] && [[ -x "$AITEAMFORGE_PYTHON" ]]; then
-            lcars_python="$AITEAMFORGE_PYTHON"
-        elif [[ -x "$(brew --prefix 2>/dev/null)/var/aiteamforge/venv/bin/python3" ]]; then
-            lcars_python="$(brew --prefix)/var/aiteamforge/venv/bin/python3"
-        elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
-            lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
+        lcars_python="python3"  # last-resort fallback (dev-team source machine)
+        local _brew_aitf_prefix
+        if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
+            lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
+        else
+            # Older convention: env.sh exports AITEAMFORGE_PYTHON (canonical interpreter).
+            local _brew_prefix _atf_env_sh
+            _brew_prefix="$(brew --prefix 2>/dev/null)"
+            _atf_env_sh="${_brew_prefix}/var/aiteamforge/env.sh"
+            if [[ -f "$_atf_env_sh" ]]; then
+                # shellcheck disable=SC1090
+                source "$_atf_env_sh"
+            fi
+            if [[ -n "${AITEAMFORGE_PYTHON:-}" ]] && [[ -x "$AITEAMFORGE_PYTHON" ]]; then
+                lcars_python="$AITEAMFORGE_PYTHON"
+            elif [[ -x "$(brew --prefix 2>/dev/null)/var/aiteamforge/venv/bin/python3" ]]; then
+                lcars_python="$(brew --prefix)/var/aiteamforge/venv/bin/python3"
+            elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
+                lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
+            fi
         fi
     fi
 

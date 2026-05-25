@@ -32,6 +32,15 @@ too — previously only the parametric path shipped it, so the rendered script's
 (`_xaca0483_install_script`) was hoisted out of the parametric branch so both
 install paths use one mechanism.
 
+`start_lcars_server` now honors an `LCARS_PYTHON` env override as the
+highest-priority probe; the rendered templates `export LCARS_PYTHON="$VENV_PYTHON"`
+(their own resolution of `$HOME/.aiteamforge/venv` / `$AITEAMFORGE_DIR/.venv` —
+paths the helper's brew-venv probe chain does not cover) so the LCARS server
+launches under the venv that has its deps rather than bare `python3`. The
+override is unset on the dev source machine and per-team scripts, so their
+behavior is unchanged. `share/scripts/lcars-launch-helpers.sh` is re-synced from
+the dev-team canonical (drift-gated).
+
 ### Refactor: XACA-0562 — `aiteamforge start` now sources the shared LCARS launch helper
 
 `aiteamforge start`'s `start_lcars()` carried its own inline LCARS launcher
