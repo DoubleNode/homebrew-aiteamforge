@@ -99,3 +99,31 @@ get_kanban_dir() {
     # 3. Nothing found — signal failure
     return 1
 }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# get_board_id <team>
+#
+# Maps a TEMPLATE key (as stored in .aiteamforge-config teams[]) to its
+# canonical INSTANCE id, which is what board filenames actually use on disk.
+# Personal-org teams ship a single instance whose id differs from the template
+# key (e.g. "finance" in the config → "finance-personal" on disk).
+# Returns the instance id, or the input unchanged if it is already an instance
+# id (the common case for multi-user teams like "academy", "ios", etc.).
+#
+# This MUST stay a deterministic map — NOT a "${team}*-board.json" glob —
+# because a glob would match BOTH the canonical finance-personal-board.json AND
+# a legacy finance-board.json stub that _kb_check_dual_boards
+# (kanban-helpers.sh) intentionally tolerates.  See worktree-helpers.sh:1566
+# for the same template→instance precedent (XACA-0180 / XACA-0565).
+# Note: aiteamforge_paths.py _resolve_template_band maps the OPPOSITE direction
+# (instance→template) and is not reusable here.
+# ──────────────────────────────────────────────────────────────────────────────
+get_board_id() {
+    local team="$1"
+    case "$team" in
+        finance)  echo "finance-personal"  ;;
+        legal)    echo "legal-coparenting" ;;
+        medical)  echo "medical-general"   ;;
+        *)        echo "$team"             ;;
+    esac
+}

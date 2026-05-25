@@ -7,6 +7,27 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0565 — startup board validator now resolves template keys to instance ids
+
+`kanban-board-check.sh`'s `validate_kanban_board()` received TEMPLATE keys from
+`.aiteamforge-config` (e.g. `"finance"`) but constructed board file paths directly
+from that key (e.g. `finance-board.json`), while boards on disk use the INSTANCE id
+(`finance-personal-board.json`). This caused a false "board missing" alarm on every
+`aiteamforge start` for personal-org teams, presenting the Restore / Create / Skip
+menu while `finance-personal-board.json` sat right there.
+
+A new `get_board_id()` function in `kanban-paths.sh` maps template keys to their
+canonical instance ids (`finance`→`finance-personal`, `legal`→`legal-coparenting`,
+`medical`→`medical-general`; all other keys pass through unchanged). The lookup is a
+deterministic `case` statement — not a glob — to avoid false-matching legacy stub
+files that `_kb_check_dual_boards` intentionally tolerates. `validate_kanban_board()`
+now calls `get_board_id()` immediately after the empty-team guard, before any
+path or filename construction, so the resolved instance id threads through the entire
+downstream call chain (`_kbc_get_kanban_dir`, `_kbc_handle_missing_board`,
+`_kbc_restore_from_backup`, `_kbc_find_latest_backup`) in one stroke. Follows the
+same template→instance precedent established in `worktree-helpers.sh:1566`
+(XACA-0180).
+
 ## [0.12.1] - 2026-05-25
 
 ### Refactor: XACA-0563 — rendered startup templates now use the shared LCARS launch helper

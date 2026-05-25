@@ -366,6 +366,12 @@ validate_kanban_board() {
         return 1
     fi
 
+    # XACA-0565: .aiteamforge-config teams[] stores TEMPLATE keys (e.g. "finance"),
+    # but board files on disk use the INSTANCE id (e.g. "finance-personal"). Resolve
+    # to the instance id before any path/filename construction so we don't false-alarm
+    # "board missing" while finance-personal-board.json sits right beside us.
+    team=$(get_board_id "$team")
+
     # ── Resolve paths ─────────────────────────────────────────────────────────
     local kanban_dir
     kanban_dir=$(_kbc_get_kanban_dir "$team")
