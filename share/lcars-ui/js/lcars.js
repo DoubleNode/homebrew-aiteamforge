@@ -17720,7 +17720,7 @@ function renderImportPreflight(data) {
     //        export declared sources that weren't present.  Show picker with warning.
     // (F3) secrets_summary absent entirely (pre-XACA-0520-005): leave picker hidden;
     //        the file-exists guard catches it downstream.  No false-positive here.
-    const secretsSummary = manifest.secrets_summary || {};
+    const secretsSummary = (data.manifest && data.manifest.secrets_summary) || {};
     const discovered = typeof secretsSummary.discovered === 'number' ? secretsSummary.discovered : 0;
     const expected   = typeof secretsSummary.expected   === 'number' ? secretsSummary.expected   : 0;
     const detectionFailed = secretsSummary.detection_failed === true;
