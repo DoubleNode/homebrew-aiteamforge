@@ -7,6 +7,76 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-05-26
+
+### Bugfix: XACA-0568 — LCARS import pre-flight false ✓ MATCH + Apply enabled with 0 files (v2 manifest schema drift)
+
+Mirrors dev-team canonical fix (PR #484) into `homebrew-tap/share/`. The import pre-flight
+panel rendered a false ✓ MATCH and an enabled APPLY button against the v2 manifest schema
+because `renderImportPreflight()` still read legacy keys (`manifest.fileCount.inTree/outOfTree`,
+`manifest.baseTeam`, `manifest.secrets_summary`) that no longer exist. Fixes are split across
+the JS preflight rendering, the JS apply-gate, and the Python upload/apply paths:
+
+- **`share/lcars-ui/js/lcars.js` `renderImportPreflight`:** rewritten to read v2 keys.
+  `data.sourceIdentity?.hostname` drives the SOURCE HOST row; `data.totalFileCount` drives a
+  single FILES count (replacing dead `manifest.fileCount.inTree/outOfTree`). SOURCE TEAM row
+  now displays `'(N/A in v2 manifest)'`. The former "BASE MATCH" row is now a VERIFIER pill
+  rendering `PASS`/`WARN`/`FAIL` with `data-state` for CSS coloring; on `WARN`/`FAIL` a
+  collapsible `<details>` block exposes `verifierSummary.tail`. Added `data-test-id`
+  attributes on gate-relevant elements.
+- **`share/lcars-ui/js/lcars.js` `updateImportApplyEnabled`:** added two floors before the
+  existing secrets gate — disable on `verifierState === 'FAIL'` or `!baseMatch` (tooltip
+  "Verifier reported FAIL — import blocked") and disable on `totalFileCount <= 0` (tooltip
+  "Empty archive — nothing to import"). Apply button stores `data-base-match`,
+  `data-verifier-state`, `data-total-file-count` for gate evaluation. Existing secrets-gating
+  preserved as Floor 3.
+- **`share/lcars-ui/js/lcars.js` `applyTeamImport` race-condition fix:** previously only
+  `!currentImportJobId` guarded early-return. A fast double-click during the brief
+  enable→fetch window could have bypassed the gate. Added defensive `applyBtn.disabled`
+  re-check at call-time so the canonical disabled state is the gate.
+- **`share/lcars-ui/js/lcars.js` `renderImportPreflight` ReferenceError fix (PR #484 tester
+  review):** the initial commit removed `const manifest = data.manifest || {};` from the top
+  of the function when cleaning up legacy field reads but missed the secrets-summary read
+  that still referenced bare `manifest.secrets_summary`. At runtime this threw
+  `ReferenceError: manifest is not defined`, crashing the entire preflight panel for every
+  v2 upload. Now reads via `(data.manifest && data.manifest.secrets_summary) || {}` so the
+  function is self-contained on `data`. Audited remaining v2 read sites — no other bare
+  `manifest.` references remain.
+
+### Refactor: XACA-0568 (002+003) — v2 sourceIdentity, totalFileCount, verifier-derived baseMatch
+
+- **`share/lcars-ui/server.py` `handle_import_upload`:** replaced dead `source_team=''` /
+  `source_base=''` / `base_match=True` stubs with real v2 extraction. `source_identity` dict
+  (`hostname`, `user`, `home`, `generatedAt`, `schemaVersion`) is read from v2 manifest keys.
+  `total_file_count` is summed from `domains[*].stats.file_count` with a `len(files)` fallback.
+- **`share/lcars-ui/server.py` verifier-derived `baseMatch`:** after preflight verifier runs,
+  `verifier_state` is normalized from `verifierSummary.overall` (`PASS`/`WARN`/`FAIL`; unknown
+  → `WARN`, not `PASS`). `base_match = (verifier_state != 'FAIL')` replaces the hardcoded
+  `True`. Both `verifierState` and `baseMatch` are stored in `IMPORT_JOBS` and emitted in the
+  HTTP response alongside `sourceIdentity` and `totalFileCount`.
+- **`share/lcars-ui/server.py` `assert import_format == 'new'` → explicit if + 400 (PR #484
+  review #012):** asserts are stripped under `python -O` and would otherwise raise
+  `AssertionError` with a 500 / no JSON body. Replaced with an explicit
+  `if import_format != 'new'` that calls `_send_json_response` with status 400 and a
+  `UPSTREAM_REJECTION_FAILED` code so the client can render a meaningful error.
+- **`share/lcars-ui/server.py` verifier-crash semantics (PR #484 review #013 + #014):**
+  previously a verifier subprocess crash stamped `verifier_summary={'present': True,
+  'error': ...}` (no `overall` key) → derivation defaulted to `WARN` → `baseMatch=True` →
+  Apply ENABLED on verifier crash. Two changes: (a) `verifier_summary` now initializes with
+  `present=False`; the success path explicitly sets `present=True` once a real summary is
+  parsed; the exception path leaves `present=False` and adds the `error` key. (b) Derivation
+  now treats `present=False` as `verifier_state='FAIL'` (safer than WARN — a crash leaves
+  the verifier in an unknown state and Apply must NOT bypass). Together: verifier crash →
+  `verifierState=FAIL` → `baseMatch=False` → Apply blocked.
+- **`share/lcars-ui/server.py` dead `_si` local removal (PR #484 review #015):** removed
+  unused `_si = job.get('sourceIdentity') or {}` from `apply_import` and tightened the
+  surrounding comment to clarify that `source_team` is intentionally empty for v2 jobs
+  (sourceIdentity carries hostname/user but not team), while legacy in-flight jobs still
+  expose `manifest['team']` for the board-rename path.
+- **`share/lcars-ui/server.py` `apply_import` legacy sibling-drift sites:** legacy branch
+  now reads `sourceIdentity` from `IMPORT_JOBS` for `source_host` (falling back to
+  `source_hostname` → `sourceHost` → `'unknown'`); `source_team` call site unchanged.
+
 ## [0.12.2] - 2026-05-26
 
 ### Bugfix: XACA-0566 — LCARS import panel stuck button + secrets inline-picker detection
