@@ -1300,10 +1300,10 @@ def apply_import(job_id):
             # any in-flight legacy jobs already evaporate on server restart, so   #
             # the dead-code window is effectively zero post-deploy.               #
             # ------------------------------------------------------------------ #
-            # v2 manifests have no 'team' key; fall back to sourceIdentity (set by
-            # handle_import_upload for new-format jobs) or empty string for legacy jobs
-            # that pre-date sourceIdentity.  Used only for board-file rename below.
-            _si = job.get('sourceIdentity') or {}
+            # v2 manifests have no 'team' key (sourceIdentity has hostname/user but not
+            # team), so source_team is empty for v2 jobs.  Legacy in-flight jobs (pre-v2,
+            # process-local in IMPORT_JOBS) still expose manifest['team'].  Used only for
+            # board-file rename below; empty string skips the rename path.
             source_team = job['manifest'].get('team', '')
             target_base = job.get('targetBase', '')
 
@@ -12674,13 +12674,22 @@ end tell
             return
 
         # XACA-0520-004: new-format manifest (schema_version=2; no 'team'/'baseTeam' keys).
-        # Legacy archives are rejected upstream (has_legacy branch above).  assert here
-        # so any future regression surfaces immediately rather than silently producing a
-        # malformed job — the verifier path below depends on import_format == 'new'.
-        assert import_format == 'new', (
-            f'legacy import_format {import_format!r} should have been rejected upstream '
-            f'(see XACA-0520 legacy-rejection block); reaching here is a bug'
-        )
+        # Legacy archives are rejected upstream (has_legacy branch above).  An explicit
+        # if-check is used rather than `assert` because asserts are stripped under
+        # `python -O`, and an AssertionError otherwise produces a 500 with no JSON body
+        # the client can render.  (PR #484 review.)
+        if import_format != 'new':
+            self._send_json_response(
+                {
+                    'error': (
+                        f'Internal error: legacy import_format {import_format!r} reached '
+                        'the v2 path. Upstream rejection failed; please report this.'
+                    ),
+                    'code': 'UPSTREAM_REJECTION_FAILED',
+                },
+                status=400,
+            )
+            return
 
         # Extract source identity fields from v2 manifest.
         source_identity = {
@@ -12749,7 +12758,11 @@ end tell
         import sys
         import tempfile
 
-        verifier_summary: dict = {'present': True}
+        # Initialize with present=False so any path that exits before the verifier
+        # actually produces a parseable summary (early-return inside try, exception,
+        # missing subprocess) is correctly classified as 'verifier did not run'.
+        # (PR #484 review #014: previously hardcoded True regardless of outcome.)
+        verifier_summary: dict = {'present': False, 'phase': 'preflight'}
         try:
             lcars_ui_dir = Path(__file__).parent
 
@@ -12832,22 +12845,31 @@ end tell
 
         except Exception as ver_exc:
             print(f"[LCARS Import] preflight verifier step failed (non-fatal): {ver_exc}")
+            # present=False (not True): the verifier crashed before producing a parseable
+            # summary; the client should distinguish "verifier didn't run" from a clean
+            # PASS/WARN/FAIL.  (PR #484 review #014.)
             verifier_summary = {
-                'present': True,
+                'present': False,
                 'exit': -1,
                 'error': str(ver_exc)[:200],
                 'phase': 'preflight',
             }
 
-        # Derive verifier_state from verifier_summary.overall.
-        # If the verifier did not produce an 'overall' key (failed to run or parse),
-        # default to 'WARN' — unknown is NOT pass.  Normalize to one of PASS/WARN/FAIL.
-        _raw_overall = verifier_summary.get('overall', '')
-        if _raw_overall in ('PASS', 'WARN', 'FAIL'):
-            verifier_state = _raw_overall
+        # Derive verifier_state from verifier_summary.  Order matters:
+        #   1) verifier crashed / didn't run  →  FAIL (safer than WARN; a crash leaves
+        #      the verifier in an unknown state and Apply must NOT bypass on a crash —
+        #      PR #484 review #013).
+        #   2) verifier produced a valid 'overall' in {PASS, WARN, FAIL}  →  use it.
+        #   3) anything else (parse error, sentinel missing)  →  WARN.
+        # Normalize to one of PASS/WARN/FAIL for the wire.
+        if not verifier_summary.get('present', False):
+            verifier_state = 'FAIL'
         else:
-            # verifier failed to produce a parseable summary — treat as WARN, not PASS.
-            verifier_state = 'WARN'
+            _raw_overall = verifier_summary.get('overall', '')
+            if _raw_overall in ('PASS', 'WARN', 'FAIL'):
+                verifier_state = _raw_overall
+            else:
+                verifier_state = 'WARN'
 
         # base_match: True unless the verifier explicitly reports FAIL.
         # This replaces the previous hardcoded True and the legacy baseTeam string-compare.
