@@ -1300,6 +1300,10 @@ def apply_import(job_id):
             # any in-flight legacy jobs already evaporate on server restart, so   #
             # the dead-code window is effectively zero post-deploy.               #
             # ------------------------------------------------------------------ #
+            # v2 manifests have no 'team' key; fall back to sourceIdentity (set by
+            # handle_import_upload for new-format jobs) or empty string for legacy jobs
+            # that pre-date sourceIdentity.  Used only for board-file rename below.
+            _si = job.get('sourceIdentity') or {}
             source_team = job['manifest'].get('team', '')
             target_base = job.get('targetBase', '')
 
@@ -1375,7 +1379,15 @@ def apply_import(job_id):
                           f'target base team {target_base} is single-project. Skipping.')
                 else:
                     target_oot.mkdir(parents=True, exist_ok=True)
-                    source_host = job['manifest'].get('sourceHost', 'unknown')
+                    # v2 manifests have no 'sourceHost' key; read from sourceIdentity
+                    # dict stored in IMPORT_JOBS by handle_import_upload, falling back
+                    # to the manifest's source_hostname for forward-compat, then 'unknown'.
+                    _si_apply = job.get('sourceIdentity') or {}
+                    source_host = (
+                        _si_apply.get('hostname')
+                        or job['manifest'].get('source_hostname', '')
+                        or job['manifest'].get('sourceHost', 'unknown')
+                    )
                     import_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
                     for src in extracted_oot.rglob("*"):
@@ -12661,18 +12673,39 @@ end tell
             )
             return
 
-        # XACA-0520-004: new-format manifest (schema_version field, no 'team'/'baseTeam').
-        # For new format: team matching is deferred to the verifier; base_match is True.
-        # For legacy format: this code path is unreachable (we already rejected above).
-        if import_format == 'new':
-            source_team = ''
-            source_base = ''
-            base_match = True
-        else:
-            source_team = manifest.get('team', '')
-            source_base = manifest.get('baseTeam', '')
-            target_base, _ = _split_team_id(LCARS_TEAM)
-            base_match = (source_base == target_base)
+        # XACA-0520-004: new-format manifest (schema_version=2; no 'team'/'baseTeam' keys).
+        # Legacy archives are rejected upstream (has_legacy branch above).  assert here
+        # so any future regression surfaces immediately rather than silently producing a
+        # malformed job — the verifier path below depends on import_format == 'new'.
+        assert import_format == 'new', (
+            f'legacy import_format {import_format!r} should have been rejected upstream '
+            f'(see XACA-0520 legacy-rejection block); reaching here is a bug'
+        )
+
+        # Extract source identity fields from v2 manifest.
+        source_identity = {
+            'hostname': manifest.get('source_hostname', ''),
+            'user': manifest.get('source_user', ''),
+            'home': manifest.get('home', ''),
+            'generatedAt': manifest.get('generated_at', ''),
+            'schemaVersion': manifest.get('schema_version', 0),
+        }
+
+        # Compute total file count from v2 domain stats; fall back to len(files) if
+        # domain stats.file_count is missing (sparse manifests from older exporters).
+        total_file_count = sum(
+            (d.get('stats') or {}).get('file_count', 0)
+            for d in (manifest.get('domains') or {}).values()
+        )
+        if total_file_count == 0:
+            total_file_count = sum(
+                len((d.get('files') or []))
+                for d in (manifest.get('domains') or {}).values()
+            )
+
+        # base_match will be derived from verifier_state after the verifier runs below.
+        # Placeholder; overwritten once verifier_summary is populated.
+        base_match = True  # updated below after verifier
 
         # XACA-0460-001: pre-flight dual-board check for the import target.
         # Importing into a team that has a dual-board state would corrupt kanban data
@@ -12806,11 +12839,24 @@ end tell
                 'phase': 'preflight',
             }
 
-        # Resolve target_base for the job record (defined only for legacy format above).
-        if import_format == 'new':
-            target_base_val = _split_team_id(LCARS_TEAM)[0]
+        # Derive verifier_state from verifier_summary.overall.
+        # If the verifier did not produce an 'overall' key (failed to run or parse),
+        # default to 'WARN' — unknown is NOT pass.  Normalize to one of PASS/WARN/FAIL.
+        _raw_overall = verifier_summary.get('overall', '')
+        if _raw_overall in ('PASS', 'WARN', 'FAIL'):
+            verifier_state = _raw_overall
         else:
-            target_base_val = target_base  # type: ignore[possibly-undefined]
+            # verifier failed to produce a parseable summary — treat as WARN, not PASS.
+            verifier_state = 'WARN'
+
+        # base_match: True unless the verifier explicitly reports FAIL.
+        # This replaces the previous hardcoded True and the legacy baseTeam string-compare.
+        # handle_import_apply gates on job['baseMatch']; FAIL state blocks apply here.
+        # baseMatch is verifier-derived; a FAIL verifier state already blocks apply via
+        # this gate without requiring a separate team-name comparison.
+        base_match = (verifier_state != 'FAIL')
+
+        target_base_val = _split_team_id(LCARS_TEAM)[0]
 
         IMPORT_JOBS[job_id] = {
             'status': 'staged',
@@ -12822,7 +12868,10 @@ end tell
             'targetTeam': LCARS_TEAM,
             'targetBase': target_base_val,
             'baseMatch': base_match,
-            'idRenameRequired': (source_team != LCARS_TEAM) if source_team else False,
+            'verifierState': verifier_state,
+            'sourceIdentity': source_identity,
+            'totalFileCount': total_file_count,
+            'idRenameRequired': False,
             'createdAt': datetime.now(timezone.utc).isoformat(),
             'verifierSummary': verifier_summary,
         }
@@ -12834,7 +12883,10 @@ end tell
             'importFormat': import_format,
             'targetTeam': LCARS_TEAM,
             'baseMatch': base_match,
-            'idRenameRequired': (source_team != LCARS_TEAM) if source_team else False,
+            'verifierState': verifier_state,
+            'sourceIdentity': source_identity,
+            'totalFileCount': total_file_count,
+            'idRenameRequired': False,
             'verifierSummary': verifier_summary,
         })
 
@@ -12858,9 +12910,15 @@ end tell
             )
             return
         if not job.get('baseMatch'):
+            # baseMatch is verifier-derived (verifierState == 'FAIL' → baseMatch=False).
+            # The legacy baseTeam string-compare is gone; error message uses verifierState.
+            _vs = job.get('verifierState', 'FAIL')
+            _src = (job.get('sourceIdentity') or {}).get('hostname', 'unknown')
             self._send_json_response(
-                {'error': f'Base team mismatch: cannot import {job["manifest"].get("baseTeam")} '
-                          f'into {job.get("targetBase")}'}, status=400
+                {'error': f'Preflight verifier state is {_vs!r} for source {_src!r}; '
+                          f'cannot apply into {job.get("targetBase")!r}. '
+                          f'Review verifierSummary for details.'},
+                status=400,
             )
             return
 

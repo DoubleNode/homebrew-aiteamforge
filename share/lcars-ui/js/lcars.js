@@ -17634,31 +17634,82 @@ function renderImportPreflight(data) {
     const preflightEl = document.getElementById('import-preflight');
     if (!preflightEl) return;
 
-    const manifest = data.manifest || {};
-    document.getElementById('preflight-source-team').textContent = manifest.team || '--';
-    document.getElementById('preflight-source-host').textContent = manifest.sourceHost || '--';
-    document.getElementById('preflight-target-team').textContent = data.targetTeam || '--';
-
-    const baseMatchEl = document.getElementById('preflight-base-match');
-    if (data.baseMatch) {
-        baseMatchEl.textContent = '✓ MATCH';
-        baseMatchEl.style.color = '#9f9';
-    } else {
-        baseMatchEl.textContent = `✗ MISMATCH (${manifest.baseTeam} → ${(data.targetTeam || '').split('-')[0]})`;
-        baseMatchEl.style.color = '#f99';
+    // v2 manifest: no .team, .sourceHost, .baseTeam, or .fileCount — read from top-level data.
+    const sourceHostEl = document.getElementById('preflight-source-host');
+    if (sourceHostEl) {
+        sourceHostEl.textContent = (data.sourceIdentity && data.sourceIdentity.hostname) || '--';
+        sourceHostEl.setAttribute('data-test-id', 'preflight-source-host');
     }
 
+    // v2 manifests carry no source team field; display explicit N/A so users know it's intentional.
+    const sourceTeamEl = document.getElementById('preflight-source-team');
+    if (sourceTeamEl) sourceTeamEl.textContent = '(N/A in v2 manifest)';
+
+    document.getElementById('preflight-target-team').textContent = data.targetTeam || '--';
+
+    // Verifier pill: replace old MATCH/MISMATCH with PASS/WARN/FAIL semantic.
+    // DOM row label stays "Base Match" in HTML (avoid churn) but we set the pill text to verifierState.
+    const baseMatchEl = document.getElementById('preflight-base-match');
+    if (baseMatchEl) {
+        const verifierState = data.verifierState || 'FAIL';
+        baseMatchEl.textContent = verifierState;
+        baseMatchEl.setAttribute('data-state', verifierState);
+        baseMatchEl.setAttribute('data-test-id', 'preflight-verifier-state');
+        if (verifierState === 'PASS') {
+            baseMatchEl.style.color = '#9f9';
+        } else if (verifierState === 'WARN') {
+            baseMatchEl.style.color = '#fa0';
+        } else {
+            baseMatchEl.style.color = '#f99';
+        }
+
+        // For WARN or FAIL: render a collapsible details block with verifier tail output.
+        const existingDetails = document.getElementById('preflight-verifier-details');
+        if (existingDetails) existingDetails.remove();
+        if ((verifierState === 'WARN' || verifierState === 'FAIL') &&
+                data.verifierSummary && data.verifierSummary.tail) {
+            const detailsEl = document.createElement('details');
+            detailsEl.id = 'preflight-verifier-details';
+            detailsEl.style.cssText = 'margin-top: 6px; font-size: 0.85em; color: #9cf;';
+            const summaryEl = document.createElement('summary');
+            summaryEl.style.cssText = 'cursor: pointer; color: #fa0;';
+            summaryEl.textContent = 'Verifier output (' + verifierState + ')';
+            const preEl = document.createElement('pre');
+            preEl.style.cssText = 'margin: 6px 0 0; padding: 8px; background: #0a0a1a; border: 1px solid #336; overflow-x: auto; white-space: pre-wrap; word-break: break-all; color: #9cf;';
+            preEl.textContent = data.verifierSummary.tail;
+            detailsEl.appendChild(summaryEl);
+            detailsEl.appendChild(preEl);
+            // Insert after the preflight-row containing the base-match value
+            const parentRow = baseMatchEl.closest('.preflight-row');
+            if (parentRow && parentRow.parentNode) {
+                parentRow.parentNode.insertBefore(detailsEl, parentRow.nextSibling);
+            } else {
+                baseMatchEl.parentNode.appendChild(detailsEl);
+            }
+        }
+    }
+
+    // v2 manifests carry no source team; idRenameRequired is always false for v2.
     document.getElementById('preflight-id-rename').textContent = data.idRenameRequired
-        ? `Required: ${manifest.team} → ${data.targetTeam}`
+        ? `Required: ${data.targetTeam}`
         : 'Not required (same team ID)';
 
-    const counts = manifest.fileCount || {};
-    document.getElementById('preflight-file-counts').textContent =
-        `${counts.inTree || 0} / ${counts.outOfTree || 0}`;
+    // v2: single totalFileCount instead of in-tree/out-of-tree split.
+    const fileCountEl = document.getElementById('preflight-file-counts');
+    if (fileCountEl) {
+        fileCountEl.textContent = String(data.totalFileCount ?? 0);
+        fileCountEl.setAttribute('data-test-id', 'preflight-file-counts');
+    }
 
-    // XACA-0554: store baseMatch on the apply button for updateImportApplyEnabled() to read
+    // Store gate data on apply button for updateImportApplyEnabled() to read.
+    // baseMatch is verifier-derived (verifierState !== 'FAIL') per server 002+003.
     const applyBtnRef = document.getElementById('import-apply-btn');
-    if (applyBtnRef) applyBtnRef.setAttribute('data-base-match', data.baseMatch ? 'true' : 'false');
+    if (applyBtnRef) {
+        applyBtnRef.setAttribute('data-base-match', data.baseMatch ? 'true' : 'false');
+        applyBtnRef.setAttribute('data-verifier-state', data.verifierState || '');
+        applyBtnRef.setAttribute('data-total-file-count', String(data.totalFileCount ?? 0));
+        applyBtnRef.setAttribute('data-test-id', 'import-apply-btn');
+    }
 
     // XACA-0554 / XACA-0566 (BUG B): gate Apply on secrets when export declares secrets.
     // Three cases show the inline picker:
@@ -17770,32 +17821,55 @@ function handleInlineSecretsFileSelected(input) {
     updateImportApplyEnabled();
 }
 
-// XACA-0554: re-evaluates whether Apply button should be enabled.
-// Conditions: baseMatch (stored on the apply button's data attr) AND
-// (no secrets required OR (secrets file staged AND password non-empty)).
+// XACA-0554 / XACA-0568: re-evaluates whether Apply button should be enabled.
+// Floor 1: verifier must not have FAILed (data-verifier-state != 'FAIL' AND data-base-match == 'true').
+// Floor 2: archive must contain at least one file (data-total-file-count > 0).
+// Floor 3 (existing): when secrets are present, secrets file and password must both be provided.
 function updateImportApplyEnabled() {
     const applyBtn = document.getElementById('import-apply-btn');
     if (!applyBtn) return;
-    // We need to know if baseMatch — read it from the preflight DOM.
-    // The base-match span has color #9f9 when matched; simpler to store on the button.
-    // We set data-base-match when rendering, so check that.
+
+    const verifierState = applyBtn.getAttribute('data-verifier-state') || '';
+    const totalFiles = parseInt(applyBtn.getAttribute('data-total-file-count') || '0', 10);
     const baseMatch = applyBtn.getAttribute('data-base-match') === 'true';
-    if (!baseMatch) {
+
+    // Floor 1: verifier must not have FAILed
+    if (verifierState === 'FAIL' || !baseMatch) {
         applyBtn.disabled = true;
+        applyBtn.title = 'Verifier reported FAIL — import blocked';
         return;
     }
+
+    // Floor 2: archive must contain files
+    if (!Number.isFinite(totalFiles) || totalFiles <= 0) {
+        applyBtn.disabled = true;
+        applyBtn.title = 'Empty archive — nothing to import';
+        return;
+    }
+
+    // Floor 3 (existing): secrets gating
     if (currentImportSecretsDiscovered > 0) {
         const secretsPwInput = document.getElementById('import-secrets-password-input');
         const password = secretsPwInput ? secretsPwInput.value : '';
-        applyBtn.disabled = !(stagedImportSecretsFile && password.length > 0);
-    } else {
-        applyBtn.disabled = false;
+        const ok = !!(stagedImportSecretsFile && password.length > 0);
+        applyBtn.disabled = !ok;
+        applyBtn.title = ok ? '' : 'Secrets detected — provide secrets file and password';
+        return;
     }
+
+    applyBtn.disabled = false;
+    applyBtn.title = '';
 }
 
 async function applyTeamImport() {
     // XACA-0554: orchestrate secrets upload + verify before main apply when secrets required.
     if (!currentImportJobId) return;
+
+    // XACA-0568: belt-and-suspenders guard against double-click or stale onclick firing
+    // before updateImportApplyEnabled() has disabled the button. The button's disabled
+    // state is the canonical gate; re-checking here closes the brief enable window race.
+    const _applyBtnGuard = document.getElementById('import-apply-btn');
+    if (_applyBtnGuard && _applyBtnGuard.disabled) return;
 
     const preflightEl = document.getElementById('import-preflight');
     const progressEl = document.getElementById('import-progress');
