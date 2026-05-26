@@ -28,6 +28,15 @@ downstream call chain (`_kbc_get_kanban_dir`, `_kbc_handle_missing_board`,
 same template→instance precedent established in `worktree-helpers.sh:1566`
 (XACA-0180).
 
+Follow-up consolidation: `get_board_id`'s docstring now explicitly identifies it
+as a SHELL-IDENTICAL mirror of the dev-team canonical `_kb_template_to_instance`
+(in `kanban-helpers.sh`) — the tap installs standalone and cannot source dev-team
+helpers at runtime, so the map exists in two places by necessity. The dev-team
+side consolidated three other shell sites (`_kb_check_dual_boards`,
+`worktree-helpers.sh` wt-finish case) to route through the canonical helper, so
+this tap mirror is now the only remaining duplication. Adding a new personal-org
+team = edit `_kb_template_to_instance` (canonical) + edit `get_board_id` here.
+
 ## [0.12.1] - 2026-05-25
 
 ### Refactor: XACA-0563 — rendered startup templates now use the shared LCARS launch helper

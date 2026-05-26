@@ -113,10 +113,22 @@ get_kanban_dir() {
 # This MUST stay a deterministic map — NOT a "${team}*-board.json" glob —
 # because a glob would match BOTH the canonical finance-personal-board.json AND
 # a legacy finance-board.json stub that _kb_check_dual_boards
-# (kanban-helpers.sh) intentionally tolerates.  See worktree-helpers.sh:1566
-# for the same template→instance precedent (XACA-0180 / XACA-0565).
-# Note: aiteamforge_paths.py _resolve_template_band maps the OPPOSITE direction
-# (instance→template) and is not reusable here.
+# (kanban-helpers.sh) intentionally tolerates.
+#
+# ── CANONICAL MIRROR (XACA-0565) ─────────────────────────────────────────────
+# This is a SHELL-identical mirror of `_kb_template_to_instance` in the dev-team
+# canonical kanban-helpers.sh. The tap installs standalone and CANNOT source
+# dev-team helpers at runtime, so the map must exist in two places by necessity.
+# The CASE BODIES MUST STAY IN SYNC — adding a new personal-org team requires
+# editing BOTH this function AND `_kb_template_to_instance` in kanban-helpers.sh.
+# All other dev-team consumers (`_kb_check_dual_boards`, `worktree-helpers.sh`
+# wt-finish case) route through the canonical helper, so this mirror is the only
+# duplication that remains. See worktree-helpers.sh:1566 for the original
+# template→instance precedent (XACA-0180); XACA-0565 consolidated the rest.
+#
+# Sister concern (different ecosystem, OPPOSITE direction): aiteamforge_paths.py
+# `_resolve_template_band` strips an instance suffix (finance-personal → finance)
+# and is intentionally separate (Python, opposite direction).
 # ──────────────────────────────────────────────────────────────────────────────
 get_board_id() {
     local team="$1"
