@@ -7,6 +7,44 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-05-26
+
+### Bugfix: XACA-0566 — LCARS import panel stuck button + secrets inline-picker detection
+
+Two related defects in the LCARS import flow, both surfacing only after a failed
+upload/apply. **Bug A (import-btn stuck disabled):** `uploadImportFile()` disabled
+the import button before its upload fetch but only re-enabled it on the error
+paths; on success it called `renderImportPreflight()` and left the button
+permanently disabled, so any downstream apply or secrets failure had no retry
+path short of a page reload. The success branch now re-enables `import-btn`
+unconditionally — all three paths (error / success / catch) restore the button
+in lockstep. A sibling audit of `startTeamExport()` (`export-btn`) and
+`uploadSecretsImportFile()` (`secretsImport-select-btn`) confirmed their
+disable/re-enable paths are balanced.
+
+**Bug B (secrets inline-picker never fired on F1/F2 failure modes):**
+`server.py` now stamps `detection_failed=True` (plus a `detection_reason`)
+on the export `secrets_summary` when `SECRETS_EXPORT_LIB_AVAILABLE` is False
+(F1 — module-import failure), so the import-side preflight can surface a warning
+instead of silently hiding the inline picker. `renderImportPreflight()` broadens
+its trigger from `discovered>0` to also fire on `detection_failed===true` (F1)
+and on `expected>0 && discovered===0` (F2 — detection ran but found nothing
+under a non-default secrets dir). Each case shows context-appropriate copy and
+sets `currentImportSecretsDiscovered = Math.max(discovered, 1)` so the
+apply-gate + secrets-upload path engage. The atomic file-exists guard's 409
+message is rewritten to direct operators to the inline picker (with the
+standalone secrets-import flow as fallback) and reports `detection_failed` in
+both the message and JSON payload — guard *behavior* unchanged.
+
+Reviewer-bot follow-up: `_compute_secrets_summary()` is called at two sites in
+`generate_export()` (manifest path + EXPORT_JOBS status path). PR #482 stamped
+`detection_failed` only at the first call; the second copy missed and would
+have re-diverged on any status-endpoint consumer. Factored the stamp into a
+small `_stamp_detection_failed_if_unavailable()` helper applied at both sites.
+No user-visible change today (no consumer reads `detection_failed` from
+`/api/export/status/<job_id>`) but eliminates a latent sibling-heuristic
+divergence — same pattern that caught XACA-0565, XACA-0563, XACA-0501.
+
 ### Bugfix: XACA-0565 — startup board validator now resolves template keys to instance ids
 
 `kanban-board-check.sh`'s `validate_kanban_board()` received TEMPLATE keys from
