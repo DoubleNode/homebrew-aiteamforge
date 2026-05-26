@@ -17619,6 +17619,10 @@ async function uploadImportFile(file) {
         }
         currentImportJobId = result.data.jobId;
         renderImportPreflight(result.data);
+        // Re-enable the file picker so the operator can start over if a downstream
+        // apply or secrets-import step fails. cancelImport() is wired to the CANCEL
+        // button in the preflight panel and provides the full reset path.
+        if (btn) btn.disabled = false;
     } catch (error) {
         console.error('Import upload failed:', error);
         alert('Import upload failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
@@ -17656,19 +17660,54 @@ function renderImportPreflight(data) {
     const applyBtnRef = document.getElementById('import-apply-btn');
     if (applyBtnRef) applyBtnRef.setAttribute('data-base-match', data.baseMatch ? 'true' : 'false');
 
-    // XACA-0554: gate Apply on secrets when export declares secrets
+    // XACA-0554 / XACA-0566 (BUG B): gate Apply on secrets when export declares secrets.
+    // Three cases show the inline picker:
+    //   (F0) discovered > 0 — normal path: export ran fine, found sources on disk.
+    //   (F1) detection_failed — secrets_export_lib was missing on source host; discovery
+    //        returned zeros but may have missed real secrets.  Show picker with warning.
+    //   (F2) expected > 0 && discovered === 0 — lib ran but found no files at pack time;
+    //        export declared sources that weren't present.  Show picker with warning.
+    // (F3) secrets_summary absent entirely (pre-XACA-0520-005): leave picker hidden;
+    //        the file-exists guard catches it downstream.  No false-positive here.
     const secretsSummary = manifest.secrets_summary || {};
     const discovered = typeof secretsSummary.discovered === 'number' ? secretsSummary.discovered : 0;
-    currentImportSecretsDiscovered = discovered;
+    const expected   = typeof secretsSummary.expected   === 'number' ? secretsSummary.expected   : 0;
+    const detectionFailed = secretsSummary.detection_failed === true;
+
+    // showSecretsSection: true for F0, F1, F2.
+    const showSecretsSection = (discovered > 0) || detectionFailed || (expected > 0 && discovered === 0);
+
+    // currentImportSecretsDiscovered drives apply-gating and the upload path in
+    // applyTeamImport().  Set it to 1 (non-zero) for F1/F2 so those paths engage.
+    currentImportSecretsDiscovered = showSecretsSection ? Math.max(discovered, 1) : 0;
 
     const secretsSection = document.getElementById('import-secrets-required');
     const explainerEl = document.getElementById('import-secrets-explainer');
     if (secretsSection) {
-        if (discovered > 0) {
+        if (showSecretsSection) {
             secretsSection.style.display = 'block';
             if (explainerEl) {
-                explainerEl.textContent =
-                    `This export declares ${discovered} secret source${discovered !== 1 ? 's' : ''} — provide the secrets zip + password to continue.`;
+                let explainerText;
+                if (detectionFailed) {
+                    // F1: lib missing — discovery may have been incomplete
+                    explainerText =
+                        'WARNING: Secret source detection was unavailable on the source host. ' +
+                        'This export may contain secrets — provide the secrets zip + password ' +
+                        'to continue, or re-export from a fully configured host.';
+                } else if (expected > 0 && discovered === 0) {
+                    // F2: lib ran but no files found at pack time
+                    explainerText =
+                        `This export declared ${expected} secret source${expected !== 1 ? 's' : ''} ` +
+                        'but none were present on disk at export time. ' +
+                        'If the secrets files were missing intentionally, proceed; ' +
+                        'otherwise re-export with secrets in place. ' +
+                        'Provide the secrets zip + password to continue.';
+                } else {
+                    // F0: normal path
+                    explainerText =
+                        `This export declares ${discovered} secret source${discovered !== 1 ? 's' : ''} — provide the secrets zip + password to continue.`;
+                }
+                explainerEl.textContent = explainerText;
             }
         } else {
             secretsSection.style.display = 'none';

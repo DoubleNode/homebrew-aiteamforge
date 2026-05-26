@@ -603,6 +603,22 @@ def _compute_secrets_summary(team_id: str, paired_export_id) -> dict:
     }
 
 
+def _stamp_detection_failed_if_unavailable(summary: dict) -> dict:
+    """Stamp detection_failed flag onto a secrets_summary dict when secrets_export_lib is unavailable.
+
+    Returns the same dict (mutated in place) for call-chaining convenience.
+    Both _compute_secrets_summary() call sites in generate_export() use this to keep
+    the manifest copy and the EXPORT_JOBS copy consistent.
+    """
+    if not SECRETS_EXPORT_LIB_AVAILABLE:
+        summary['detection_failed'] = True
+        summary['detection_reason'] = (
+            'secrets_export_lib unavailable on source host — '
+            'secret source discovery did not run; re-export from a fully configured host'
+        )
+    return summary
+
+
 def generate_export(job_id, team_id):
     """Generate a per-team export zip (runs in background thread).
 
@@ -747,6 +763,11 @@ def generate_export(job_id, team_id):
         # handler if the operator started both jobs simultaneously.
         paired_secrets_id = EXPORT_JOBS[job_id].get('pairedSecretsJobId')
         secrets_summary = _compute_secrets_summary(team_id, paired_secrets_id)
+        # XACA-0566 (BUG B / F1): if secrets_export_lib failed to import, discovery
+        # returned an empty stub — expected=0, discovered=0 — which silently hides the
+        # inline secrets picker on the import side.  Stamp detection_failed so the
+        # client can surface an actionable warning instead of silently skipping secrets.
+        _stamp_detection_failed_if_unavailable(secrets_summary)
         manifest_data['secrets_summary'] = secrets_summary
         # Re-serialise to the staging manifest file so the zip picks up the updated copy.
         tt_manifest_path.write_text(
@@ -800,6 +821,7 @@ def generate_export(job_id, team_id):
         if paired_secrets_id_final and paired_secrets_id_final == paired_secrets_id:
             # Re-compute to capture any status change since Step 3.5.
             secrets_summary = _compute_secrets_summary(team_id, paired_secrets_id_final)
+            _stamp_detection_failed_if_unavailable(secrets_summary)
 
         file_size = output_path.stat().st_size
         EXPORT_JOBS[job_id].update({
@@ -12916,17 +12938,28 @@ end tell
 
         if discovered > 0 and not paired_secrets_provided and not acknowledge_missing:
             expected = int(secrets_summary.get('expected', discovered))
+            detection_failed = bool(secrets_summary.get('detection_failed'))
+            detection_hint = (
+                '  NOTE: secrets_export_lib was unavailable on the source host — '
+                'discovery may be incomplete.  Re-export from a fully configured host '
+                'if you believe this team has secrets that were missed.'
+                if detection_failed else ''
+            )
             self._send_json_response(
                 {
                     'error': 'missing_paired_secrets',
                     'message': (
                         f'This export has {discovered} discoverable secrets source(s) '
                         f'({expected} declared in config) but no paired secrets zip was '
-                        f'provided.  Re-run the import after uploading the secrets zip, '
-                        f'or set acknowledgeMissingSecrets=true to proceed without it.'
+                        f'provided.  Use the inline secrets picker in the preflight panel '
+                        f'to supply the secrets zip, or use the standalone Secrets Import '
+                        f'flow if the inline picker is unavailable.  '
+                        f'To skip secrets entirely, set acknowledgeMissingSecrets=true.'
+                        f'{detection_hint}'
                     ),
                     'expected': expected,
                     'discovered': discovered,
+                    'detection_failed': detection_failed,
                     'override_flag': 'acknowledgeMissingSecrets',
                 },
                 status=409,
