@@ -7,6 +7,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Feature: XACA-0569 — LCARS static-asset cache-bust + GET/HEAD/CSS parity
+
+Mirrors dev-team canonical fix into `homebrew-tap/share/`. LCARS HTTP server now stamps
+mtime-based `?v=<mtime>` query strings onto local `<script src>` / `<link href>` refs in
+served HTML, routes `.css` through the no-cache helper alongside `.js`/`.html`, and mirrors
+the static-no-cache dispatch on HEAD so curl `-I` / tooling probes see the same headers as
+GET. Eliminates the recurring "shipped fix looks missing" trap most recently surfaced by
+XACA-0568 v2 import pre-flight on 2026-05-26 (operators saw stale `lcars.js` until a manual
+hard-reload).
+
+- **`share/lcars-ui/server.py` dispatcher (~L10830):** added `.css` to the static no-cache
+  branch alongside `.js` / `.html` / `/`. CSS was previously falling through to
+  `super().do_GET()` (SimpleHTTPRequestHandler default — no `Cache-Control` header).
+- **`share/lcars-ui/server.py` `serve_no_cache_static`:** added `text/css` content-type
+  branch and new `head_only=False` parameter so HEAD callers reuse the same path. HTML
+  responses now run through new helper `_version_html_refs` which rewrites local `.js`/`.css`
+  refs to append `?v=<mtime>` (asset file mtime under `UI_DIR`). Skips absolute URLs
+  (`http://`, `https://`, `//`, `data:`), refs that already carry a query string (so
+  hand-versioned tags like `lcars.css?v=31.1` are preserved), and refs whose target is
+  missing on disk (safe-fail). Module-level compiled regex `_STATIC_REF_RE`.
+- **`share/lcars-ui/server.py` `do_HEAD`:** mirrors GET static dispatch — HEAD requests for
+  `.js` / `.html` / `.css` / `/` now go through `serve_no_cache_static(..., head_only=True)`
+  instead of falling through to `super().do_HEAD()`. Closes a parity gap where HEAD returned
+  the default cache headers while GET returned `Cache-Control: no-cache, no-store,
+  must-revalidate` + `Pragma: no-cache` + `Expires: 0`.
+
 ## [0.12.3] - 2026-05-26
 
 ### Bugfix: XACA-0568 — LCARS import pre-flight false ✓ MATCH + Apply enabled with 0 files (v2 manifest schema drift)

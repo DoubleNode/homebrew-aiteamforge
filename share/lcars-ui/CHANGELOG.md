@@ -11,6 +11,15 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0569: static-asset cache-bust — mtime-versioned URLs + no-cache parity -->
+
+### Added
+- **XACA-0569: mtime-based version query strings on `<script src>` / `<link href>` in served HTML.** `serve_no_cache_static` now rewrites local `.js`/`.css` refs to append `?v=<mtime>` when the served file is HTML (helper: `_version_html_refs`). Absolute URLs (http/https/protocol-relative/data:) and refs that already carry a query string are preserved as-is, so CDN refs and hand-versioned tags (e.g. `lcars.css?v=31.1`, `lcars.js?v=3.18`) keep their existing version. Eliminates the recurring "shipped fix looks missing" trap (most recently XACA-0568 v2 import pre-flight) without requiring operator hard-reloads.
+
+### Changed
+- **XACA-0569: `.css` now flows through `serve_no_cache_static`.** Dispatcher updated to route `.js` / `.html` / `.css` (and `/`) to the no-cache helper; everything else (images, fonts) still falls through to `super().do_GET()` with default caching. CSS responses now carry `Content-Type: text/css` + `Cache-Control: no-cache, no-store, must-revalidate` + `Pragma: no-cache` + `Expires: 0` instead of the SimpleHTTPRequestHandler default (no Cache-Control header).
+- **XACA-0569: HEAD parity with GET for static `.js` / `.html` / `.css`.** `do_HEAD` now mirrors the GET static dispatch and calls `serve_no_cache_static(path, head_only=True)`. Curl `-I` and other tooling probes see the same no-cache headers as a GET — closes a parity gap where HEAD fell through to `super().do_HEAD()` and returned the default cache headers.
+
 <!-- XACA-0281 Phase A.3: LCARS Settings → Team Config tab (account control surface) -->
 
 ### Added

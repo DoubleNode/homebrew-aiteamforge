@@ -10827,15 +10827,51 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # (404 when absent — HTML loader handles the no-override case gracefully).
         elif path == '/lcars-target.local.js':
             self.serve_lcars_target_local()
-        elif path.endswith('.js') or path.endswith('.html') or path == '/':
-            # Serve JS and HTML with no-cache headers to prevent stale code
+        elif path.endswith('.js') or path.endswith('.html') or path.endswith('.css') or path == '/':
+            # XACA-0569: JS/HTML/CSS all flow through the no-cache helper.
+            # HTML responses also get mtime version stamps on local script/link
+            # refs so canonical edits surface without a manual hard-reload.
             self.serve_no_cache_static(path)
         else:
-            # Serve other static files (images, css with normal caching)
+            # Serve other static files (images, fonts) with default caching
             super().do_GET()
 
-    def serve_no_cache_static(self, path):
-        """Serve JS and HTML files with no-cache headers to prevent stale code"""
+    # XACA-0569: regex used to inject ?v=<mtime> into local <script src> / <link href>
+    # refs. Skips absolute URLs (http/https/protocol-relative/data:) and refs that
+    # already carry a query string, so hand-versioned tags (e.g. lcars.css?v=31.1)
+    # stay untouched until someone removes the hand-coded version.
+    _STATIC_REF_RE = re.compile(rb'\b(src|href)=(["\'])([^"\'?]+\.(?:js|css))\2')
+
+    def _version_html_refs(self, html_bytes):
+        """Append ?v=<mtime> to local .js/.css refs in HTML for cache-busting.
+
+        Used by serve_no_cache_static when serving .html files. mtime is read
+        from the file on disk under UI_DIR; if the file is missing or its
+        mtime can't be read, the ref is left alone so we never break a page
+        because of a versioning failure.
+        """
+        def _sub(match):
+            attr, quote, url = match.group(1), match.group(2), match.group(3)
+            url_str = url.decode('utf-8', errors='replace')
+            # Skip absolute / protocol-relative / data: URLs.
+            if url_str.startswith(('http://', 'https://', '//', 'data:')):
+                return match.group(0)
+            ref_path = UI_DIR / url_str.lstrip('/')
+            try:
+                mtime = int(ref_path.stat().st_mtime)
+            except OSError:
+                return match.group(0)
+            return b'%s=%s%s?v=%d%s' % (attr, quote, url, mtime, quote)
+
+        return self._STATIC_REF_RE.sub(_sub, html_bytes)
+
+    def serve_no_cache_static(self, path, head_only=False):
+        """Serve JS/HTML/CSS files with no-cache headers to prevent stale code.
+
+        For HTML responses, also rewrites local <script src> / <link href> tags
+        to append ?v=<mtime> for cache-busting (XACA-0569). head_only honors
+        HEAD requests by sending headers only.
+        """
         # Handle root path
         if path == '/' or path == '':
             path = '/index.html'
@@ -10856,6 +10892,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 content_type = 'application/javascript'
             elif path.endswith('.html'):
                 content_type = 'text/html'
+                # XACA-0569: stamp mtime version on local script/link refs.
+                data = self._version_html_refs(data)
+            elif path.endswith('.css'):
+                content_type = 'text/css'
             else:
                 content_type = 'application/octet-stream'
 
@@ -10866,7 +10906,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Pragma', 'no-cache')
             self.send_header('Expires', '0')
             self.end_headers()
-            self.wfile.write(data)
+            if not head_only:
+                self.wfile.write(data)
         except Exception as e:
             self.send_error(500, f"Error serving {path}: {e}")
 
@@ -13869,12 +13910,17 @@ end tell
 
         Browsers GET <script> tags so the local-override route doesn't strictly
         need HEAD, but tooling (curl -I, health checks) expects HEAD/GET parity.
-        Falls through to the parent handler for everything else.
+        XACA-0569: extend HEAD parity to .js / .html / .css served via
+        serve_no_cache_static so HEAD probes see the same no-cache headers as
+        GET. Falls through to the parent handler for everything else.
         """
         from urllib.parse import urlparse
         path = urlparse(self.path).path
         if path == '/lcars-target.local.js':
             self.serve_lcars_target_local(head_only=True)
+            return
+        if path.endswith('.js') or path.endswith('.html') or path.endswith('.css') or path == '/':
+            self.serve_no_cache_static(path, head_only=True)
             return
         super().do_HEAD()
 
