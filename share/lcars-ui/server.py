@@ -25,6 +25,7 @@ import http.server
 import socketserver
 import copy
 import json
+import mimetypes
 import os
 import re
 import shlex
@@ -41,6 +42,14 @@ import glob
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlparse, urlencode, parse_qs
+
+# Defensive MIME registrations — idempotent even if the OS db already maps these.
+# RFC 8081 defines font/woff2 and font/woff; macOS mimetypes DB covers woff2 in
+# Python 3.8+ but can drift across OS versions. Register explicitly so
+# SimpleHTTPRequestHandler.guess_type() always returns the correct type for
+# font files served under /fonts/. (XACA-0572)
+mimetypes.add_type('font/woff2', '.woff2')
+mimetypes.add_type('font/woff', '.woff')
 
 # Add kanban-hooks to path (shared modules: kanban_utils, aiteamforge_paths)
 _KANBAN_HOOKS_DIR = str(Path(__file__).parent.parent / "kanban-hooks")
@@ -10903,6 +10912,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 data = self._version_html_refs(data)
             elif path.endswith('.css'):
                 content_type = 'text/css'
+            elif path.endswith('.woff2'):
+                content_type = 'font/woff2'
+            elif path.endswith('.woff'):
+                content_type = 'font/woff'
             else:
                 content_type = 'application/octet-stream'
 

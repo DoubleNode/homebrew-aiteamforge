@@ -7,6 +7,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Feature: XACA-0572 — Ship Antonio font locally (lcars-ui mirror)
+
+Mirrors dev-team canonical changes into `homebrew-tap/share/`. LCARS UI now serves the
+Antonio variable font (4 weights via wght axis) from `share/lcars-ui/fonts/antonio/`
+instead of fetching it from `fonts.googleapis.com` / `fonts.gstatic.com` at runtime.
+Works offline; no CDN-eviction FOUT; no content-blocker breakage.
+
+- **`share/lcars-ui/fonts/antonio/`:** new dir with `Antonio-Variable.woff2` (latin,
+  ~26KB) + `Antonio-Variable-LatinExt.woff2` (latin-ext, ~16KB) + OFL `LICENSE.txt`.
+- **`share/lcars-ui/css/lcars.css`:** 8 `@font-face` rules (4 weights × 2 subsets)
+  pointing at relative `../fonts/antonio/` paths, `font-display: swap`, exact
+  `unicode-range` strings matching Google's CDN response.
+- **`share/lcars-ui/index.html`:** removed Google Fonts `<link>` + `<preconnect>` tags;
+  bumped `lcars.css?v=31.1` → `?v=32.0`.
+- **`share/lcars-ui/server.py`:** defensive `mimetypes.add_type('font/woff2', '.woff2')`
+  at module load + `.woff2`/`.woff` arms in `serve_no_cache_static`.
+- Net runtime: ~43KB on disk; zero external font requests on page load.
+
 ### Feature: XACA-0569 — LCARS static-asset cache-bust + GET/HEAD/CSS parity
 
 Mirrors dev-team canonical fix into `homebrew-tap/share/`. LCARS HTTP server now stamps
