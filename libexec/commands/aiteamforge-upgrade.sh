@@ -306,6 +306,7 @@ update_aux_scripts() {
     "kanban-backup.py|${WORKING_DIR}/kanban-backup.py"
     "kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh"
     "auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh"
+    "cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh"
   )
 
   local entry name target source
