@@ -10840,7 +10840,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # refs. Skips absolute URLs (http/https/protocol-relative/data:) and refs that
     # already carry a query string, so hand-versioned tags (e.g. lcars.css?v=31.1)
     # stay untouched until someone removes the hand-coded version.
-    _STATIC_REF_RE = re.compile(rb'\b(src|href)=(["\'])([^"\'?]+\.(?:js|css))\2')
+    # Lookbehind `(?<=[\s<])` (XACA-0569-009) requires the attr name to follow
+    # whitespace or `<` so `data-src="..."` / `data-href="..."` / other suffixed
+    # attribute names don't get over-matched by a bare `\b(src|href)=`.
+    # `[^"\'?#]+\.(?:js|css)` (XACA-0569-010) excludes `#` from the URL portion
+    # so fragmented refs (e.g. `foo.css#dark`) are simply skipped rather than
+    # mis-rewritten — fragment placement after the query string is RFC-3986
+    # territory not worth the complexity for an unused case.
+    _STATIC_REF_RE = re.compile(rb'(?<=[\s<])(src|href)=(["\'])([^"\'?#]+\.(?:js|css))\2')
 
     def _version_html_refs(self, html_bytes):
         """Append ?v=<mtime> to local .js/.css refs in HTML for cache-busting.
