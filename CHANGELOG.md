@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-05-27
+
 ### Fix: XACA-0575 — `kb-tap-release` outer-remote configurability (mirror)
 
 Mirrors dev-team canonical fix into `share/scripts/kb-tap-release`. The previous
@@ -583,3 +585,6 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **`tests/test-xaca-0510-launchagent-render.sh`** — 12 test cases covering: both targets absent → both skipped; fresh render → content written with no `{{…}}` placeholders; rendered content contains resolved `WORKING_DIR`; second run → no-op (mtime unchanged, no tempfile leak); `FORCE=true` → mtime changes; `DRY_RUN=true` → sentinel content preserved, "Would update" printed, no tempfile leak; missing template → warning without crash; both sentinels → both rendered clean.
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
+
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.3...v0.12.4
