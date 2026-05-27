@@ -902,6 +902,14 @@ uninstall_lcars_health_launchagent() {
 #
 # This is intentionally NOT a persistent daemon (no KeepAlive, no RunAtLoad) —
 # it only acts when files actually change.
+#
+# XACA-0571-014 SIBLING-DRIFT NOTE: this installer uses inline sed for first-time
+# render. A SECOND renderer lives at libexec/commands/aiteamforge-upgrade.sh
+# (_render_launchagent_template) which re-renders the SAME template on every
+# `aiteamforge upgrade`. Both must understand the SAME placeholder vocabulary
+# ({{AITEAMFORGE_BIN}}, {{LCARS_UI_DIR}}, {{LOG_DIR}}, {{AITEAMFORGE_DIR}},
+# {{HOME_DIR}}) — adding a placeholder here requires updating the upgrade-side
+# renderer too, otherwise upgraded plists ship with unresolved {{...}} tokens.
 install_lcars_watch_launchagent() {
     local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/lcars-watch-launchagent.template.plist"
     local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-watch.plist"
@@ -1146,6 +1154,14 @@ test_lcars_server() {
 #
 # Version-pin:  echo "v0.12.3" > ~/.aiteamforge/version-pin
 # Quiet mode:   echo "AITEAMFORGE_AUTO_UPGRADE_QUIET=1" > ~/.aiteamforge/auto-upgrade.env
+#
+# XACA-0571-014 SIBLING-DRIFT NOTE: this installer uses inline sed for first-time
+# render. A SECOND renderer lives at libexec/commands/aiteamforge-upgrade.sh
+# (_render_launchagent_template) which re-renders the SAME template on every
+# `aiteamforge upgrade`. Both must understand the SAME placeholder vocabulary
+# ({{AUTO_UPGRADE_SCRIPT}}, {{LOG_DIR}}, {{AITEAMFORGE_DIR}}, {{HOME_DIR}}) —
+# adding a placeholder here requires updating the upgrade-side renderer too,
+# otherwise upgraded plists ship with unresolved {{...}} tokens.
 install_auto_upgrade_launchagent() {
     local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/auto-upgrade-launchagent.template.plist"
     local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist"

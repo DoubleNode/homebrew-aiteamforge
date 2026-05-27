@@ -38,15 +38,21 @@ LOG_FILE="$LOG_DIR/auto-upgrade.log"
 LOG_MAX_BYTES=5242880  # 5 MB
 PIN_FILE="$AITEAMFORGE_DIR/version-pin"
 ENV_FILE="$AITEAMFORGE_DIR/auto-upgrade.env"
-TIMESTAMP=$(date "+%Y-%m-%d %H:%M:%S")
 
 # ── Optional env override file ────────────────────────────────────────────────
 
 # Source the env file before any logic so AITEAMFORGE_AUTO_UPGRADE_QUIET can be
-# set there as well as in the plist EnvironmentVariables.
+# set there as well as in the plist EnvironmentVariables. XACA-0571-016: relax
+# `set -u` while sourcing — operator typos that reference an unset variable
+# inside the override file would otherwise abort the entire upgrade run before
+# the log is initialized, leaving no diagnostic trail. The error path captures
+# the source failure into $_ENV_SOURCE_ERROR for later logging.
+_ENV_SOURCE_ERROR=""
 if [ -f "$ENV_FILE" ]; then
+    set +u
     # shellcheck source=/dev/null
-    source "$ENV_FILE"
+    source "$ENV_FILE" 2>/dev/null || _ENV_SOURCE_ERROR="failed to source $ENV_FILE (operator typo? unset variable?)"
+    set -u
 fi
 
 QUIET="${AITEAMFORGE_AUTO_UPGRADE_QUIET:-0}"
@@ -57,18 +63,25 @@ _ensure_log_dir() {
     mkdir -p "$LOG_DIR"
 }
 
+# XACA-0571-017: use `mv -n` (no-clobber) so a concurrent LaunchAgent + manual
+# invocation race cannot overwrite the just-archived .1 with a fresh oversize
+# log. The losing invocation's mv is a silent no-op; both proceed to write to
+# the (now-empty) live log.
 _rotate_log() {
     if [ -f "$LOG_FILE" ]; then
         local size
         size=$(wc -c < "$LOG_FILE" 2>/dev/null || echo 0)
         if [ "$size" -ge "$LOG_MAX_BYTES" ]; then
-            mv "$LOG_FILE" "${LOG_FILE}.1"
+            mv -n "$LOG_FILE" "${LOG_FILE}.1" 2>/dev/null || true
         fi
     fi
 }
 
+# XACA-0571-013: re-evaluate `date` per log line so multi-minute upgrade runs
+# (brew update + brew upgrade + aiteamforge upgrade) show per-step timestamps
+# rather than the frozen script-start time.
 log() {
-    printf '[%s] %s\n' "$TIMESTAMP" "$*" >> "$LOG_FILE"
+    printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*" >> "$LOG_FILE"
 }
 
 log_cmd_output() {
@@ -79,6 +92,18 @@ log_cmd_output() {
 
 # ── Notification helper ───────────────────────────────────────────────────────
 
+# XACA-0571-011: escape backslashes + double-quotes so $message can be safely
+# interpolated into the AppleScript source. Current callers feed regex-validated
+# version strings or fixed log paths, but the helper hardens future callers and
+# documents the invariant.
+_escape_for_osascript() {
+    # macOS AppleScript string literals use \\ for backslash, \" for quote.
+    local s="$1"
+    s="${s//\\/\\\\}"  # backslashes first (escape order matters)
+    s="${s//\"/\\\"}"  # then double quotes
+    printf '%s' "$s"
+}
+
 notify() {
     local message="$1"
     # Respect opt-out; silently skip on headless machines where osascript is absent
@@ -86,7 +111,9 @@ notify() {
         return 0
     fi
     if command -v osascript &>/dev/null; then
-        osascript -e "display notification \"$message\" with title \"AITeamForge Auto-Upgrade\"" 2>/dev/null || true
+        local safe
+        safe=$(_escape_for_osascript "$message")
+        osascript -e "display notification \"$safe\" with title \"AITeamForge Auto-Upgrade\"" 2>/dev/null || true
     fi
 }
 
@@ -133,6 +160,12 @@ _rotate_log
 
 log "===== auto-upgrade start ====="
 
+# XACA-0571-016: surface any deferred error from the env-source step now that
+# the log file exists.
+if [ -n "$_ENV_SOURCE_ERROR" ]; then
+    log "WARNING: $_ENV_SOURCE_ERROR — continuing with default settings"
+fi
+
 # Step 1: verify brew is installed
 if ! command -v brew &>/dev/null; then
     log "ERROR: brew not found on PATH ($PATH) — cannot run auto-upgrade"
@@ -175,21 +208,33 @@ if command -v jq &>/dev/null; then
 fi
 
 # Step 6: check version-pin sentinel
+# XACA-0571-012: fail-closed when a pin is set but the available version
+# cannot be determined. Previously a missing jq OR a failed `brew info` both
+# fell through to "ignoring pin and upgrading" — that's unsafe: the operator
+# explicitly held the upgrade at $PINNED_VERSION and a transient brew/jq
+# failure should not silently bypass that gate. New behavior: pin active +
+# unknown available version → HOLD (refuse upgrade), log the diagnostic.
 PINNED_VERSION=$(_read_pin)
 
-if [ -n "$PINNED_VERSION" ] && [ -n "$AVAILABLE_VERSION" ]; then
+if [ -n "$PINNED_VERSION" ]; then
+    if [ -z "$AVAILABLE_VERSION" ]; then
+        if command -v jq &>/dev/null; then
+            log "HELD: pin=$PINNED_VERSION but 'brew info aiteamforge --json' returned no version — refusing upgrade (fail-closed under active pin)"
+        else
+            log "HELD: pin=$PINNED_VERSION but jq is not on PATH (cannot determine available version) — refusing upgrade (fail-closed under active pin)"
+        fi
+        notify "Upgrade held at pin v$PINNED_VERSION (available version unknown)"
+        log "===== auto-upgrade complete (held by pin, version unknown) ====="
+        exit 0
+    fi
     log "Version-pin active: pinned=$PINNED_VERSION  available=$AVAILABLE_VERSION"
     if _version_gt "$AVAILABLE_VERSION" "$PINNED_VERSION"; then
         log "HELD: available version ($AVAILABLE_VERSION) > pin ($PINNED_VERSION) — refusing upgrade"
         notify "Upgrade held at pin v$PINNED_VERSION (available: $AVAILABLE_VERSION)"
         log "===== auto-upgrade complete (held by pin) ====="
         exit 0
-    else
-        log "Available version ($AVAILABLE_VERSION) does not exceed pin ($PINNED_VERSION) — proceeding"
     fi
-elif [ -n "$PINNED_VERSION" ]; then
-    # jq absent — can't compare; log a warning and skip pin enforcement
-    log "WARNING: jq not found — cannot compare versions; ignoring pin $PINNED_VERSION and upgrading"
+    log "Available version ($AVAILABLE_VERSION) does not exceed pin ($PINNED_VERSION) — proceeding"
 fi
 
 # Step 7: run the brew upgrade

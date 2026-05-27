@@ -506,6 +506,15 @@ _cleanup_upgrade_tmpfiles() {
 # sibling-drift bugs.
 # Usage: _render_launchagent_template <template_path> <dest_path>
 # Returns: 0 on success, 1 if template not found.
+#
+# XACA-0571-014 SIBLING-DRIFT NOTE: this renderer handles ALL LaunchAgent
+# templates during `aiteamforge upgrade`. First-time install renders happen
+# in libexec/installers/install-kanban.sh via inline sed (install_*_launchagent
+# functions). Both renderers must understand the same placeholder vocabulary;
+# adding a placeholder to a new template requires updating BOTH this function
+# AND the matching install-kanban.sh installer. The full placeholder list is
+# the sed -e chain below — when adding a new {{VAR}}, add it here AND in the
+# corresponding inline install sed.
 _render_launchagent_template() {
   local template="$1"
   local dest="$2"
