@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0577 — LCARS import preflight cache-buster bump (mirror)
+
+Mirrors the dev-team canonical bump (`lcars.js?v=3.18 → 3.19`) into
+`share/lcars-ui/index.html`. Without this, browsers continue serving the
+cached April 15 lcars.js for tap-installed consumers, so the XACA-0554 /
+XACA-0566 / XACA-0568 import-preflight schema-drift fixes never take
+effect at the UI layer regardless of how many times the source is patched.
+
+- **`share/lcars-ui/index.html`:** mirrored from canonical
+  `dev-team/lcars-ui/index.html` via `sync-tap.sh`.
+
 ## [0.12.4] - 2026-05-27
 
 ### Fix: XACA-0575 — `kb-tap-release` outer-remote configurability (mirror)
