@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Feature: XACA-0578 — Cellar-watch LaunchAgent + close XACA-0571 uninstall gap
+
+- New `com.aiteamforge.cellar-watch` LaunchAgent fires `aiteamforge upgrade --non-interactive` on Homebrew Cellar mtime change. Closes the silent-drift gap where manual `brew upgrade aiteamforge` left the runtime working-dir copy at `$AITEAMFORGE_DIR/lcars-ui/` (and friends) stale — XACA-0571's `auto-upgrade.sh` handled this for the daily LaunchAgent path, but manual `brew upgrade` skipped the chain entirely.
+- New template `share/templates/auto-upgrade/cellar-watch-launchagent.template.plist`: WatchPaths on `{{BREW_CELLAR_DIR}}` (resolves to `$(brew --prefix)/Cellar/aiteamforge` — a real dir, not a symlink, so launchd fires reliably on versioned-subdir creation/removal). ThrottleInterval=60s (one mtime event per brew op, vs lcars-watch's 30s for per-file copy bursts). No `KeepAlive`, no `RunAtLoad` — trigger-only.
+- New trigger script `share/scripts/cellar-watch-trigger.sh` (mirrored from canonical dev-team `scripts/cellar-watch-trigger.sh`): three-guard wrapper checks `brew` on PATH, `brew list aiteamforge` (formula installed), and `command -v aiteamforge` before chaining the upgrade. Handles the uninstall-fires-watcher race — brew uninstall also mutates the Cellar parent dir mtime and would otherwise call `aiteamforge upgrade` with no formula present. Logs to `$AITEAMFORGE_DIR/logs/cellar-watch.log`.
+- New installer functions `install_cellar_watch_launchagent` + `uninstall_cellar_watch_launchagent` in `libexec/installers/install-kanban.sh`, wired into `install_kanban_system` / `uninstall_kanban_system`. Brew-prefix resolved via `brew --prefix` with `/opt/homebrew` fallback (Intel/Apple Silicon parity).
+- `libexec/commands/aiteamforge-upgrade.sh` extensions: `_render_launchagent_template` gains `{{CELLAR_WATCH_TRIGGER}}` + `{{BREW_CELLAR_DIR}}` sed clauses; agent list in `update_launchagents` adds `com.aiteamforge.cellar-watch.plist`. End-of-upgrade stamp step writes `$WORKING_DIR/.installed-version` from the framework `VERSION` file — gives the doctor backstop a reliable working-dir version source (the pre-existing `.aiteamforge-config` `"version"` field was install-time only, never updated by upgrade).
+- `libexec/commands/aiteamforge-doctor.sh`: new `check_version_drift()` (wired into both `version-drift` named-component and `all` dispatch). Four scenarios: MATCH (green), DRIFT (yellow + remediation `aiteamforge upgrade --non-interactive`), Cellar VERSION missing (red), both stamps missing (yellow). Falls back to `get_installed_version()` from config when `.installed-version` absent, with an explicit advisory that drift detection is less reliable in fallback mode.
+- `libexec/commands/aiteamforge-uninstall.sh`: `remove_launchagents` extended to remove `com.aiteamforge.auto-upgrade.plist`, `com.aiteamforge.lcars-watch.plist`, and `com.aiteamforge.cellar-watch.plist`. Closes a pre-existing XACA-0571 gap where the first two were added to install but not to the top-level uninstall path — orphan-agent risk on `aiteamforge uninstall`.
+- All verification gates pass: `bash -n` on all four modified scripts, `plutil -lint` on new template, `shellcheck` on new trigger script (no new findings).
+
 ## [0.12.5] - 2026-05-27
 
 ### Fix: XACA-0577 — LCARS import preflight cache-buster bump (mirror)

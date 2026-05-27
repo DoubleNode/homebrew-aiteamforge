@@ -969,6 +969,96 @@ uninstall_lcars_watch_launchagent() {
     fi
 }
 
+# Install Cellar WatchPaths LaunchAgent — triggers upgrade on Homebrew Cellar changes (XACA-0578)
+#
+# Creates a passive launchd watcher on $(brew --prefix)/Cellar/aiteamforge. When
+# Homebrew upgrades the formula (creating a new versioned subdir in the Cellar
+# parent directory), launchd fires cellar-watch-trigger.sh which chains
+# `aiteamforge upgrade --non-interactive` (ThrottleInterval=60s debounces the
+# uninstall+reinstall double-fire scenario).
+#
+# WHY THE CELLAR DIR, NOT THE OPT SYMLINK: watching the opt symlink is unreliable
+# because launchd holds a kernel event descriptor on the original inode — when
+# brew retargets the symlink, the watched inode no longer backs the name. The
+# Cellar parent directory is mutated in-place (new versioned subdir created/removed),
+# so WatchPaths fires reliably.
+#
+# This is intentionally NOT a persistent daemon (no KeepAlive, no RunAtLoad).
+#
+# XACA-0578 SIBLING-DRIFT NOTE: this installer uses inline sed for first-time
+# render. A SECOND renderer lives at libexec/commands/aiteamforge-upgrade.sh
+# (_render_launchagent_template) which re-renders the SAME template on every
+# `aiteamforge upgrade`. Both must understand the SAME placeholder vocabulary
+# ({{CELLAR_WATCH_TRIGGER}}, {{BREW_CELLAR_DIR}}, {{LOG_DIR}}, {{HOME_DIR}},
+# {{AITEAMFORGE_DIR}}) — adding a placeholder here requires updating the
+# upgrade-side renderer too, otherwise upgraded plists ship with unresolved
+# {{...}} tokens.
+install_cellar_watch_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/cellar-watch-launchagent.template.plist"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.cellar-watch.plist"
+    local script_src="$INSTALL_ROOT/share/scripts/cellar-watch-trigger.sh"
+    local script_dest="$AITEAMFORGE_DIR/scripts/cellar-watch-trigger.sh"
+
+    # Copy the trigger script into place
+    if [ ! -f "$script_src" ]; then
+        warning "cellar-watch-trigger.sh not found at $script_src (skipping cellar-watch LaunchAgent)"
+        return 0
+    fi
+
+    if [ ! -f "$plist_template" ]; then
+        warning "Cellar watch LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    # Resolve the Homebrew prefix for the Cellar path
+    local brew_prefix
+    if command -v brew &>/dev/null; then
+        brew_prefix="$(brew --prefix)"
+    else
+        brew_prefix="/opt/homebrew"
+    fi
+
+    info "Installing com.aiteamforge.cellar-watch LaunchAgent..."
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    cp "$script_src" "$script_dest"
+    chmod +x "$script_dest"
+
+    sed \
+        -e "s|{{CELLAR_WATCH_TRIGGER}}|${script_dest}|g" \
+        -e "s|{{BREW_CELLAR_DIR}}|${brew_prefix}/Cellar/aiteamforge|g" \
+        -e "s|{{LOG_DIR}}|${AITEAMFORGE_DIR}/logs|g" \
+        -e "s|{{HOME_DIR}}|${HOME}|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
+        "$plist_template" > "$plist_dest"
+
+    launchctl unload "$plist_dest" 2>/dev/null || true
+
+    if launchctl load "$plist_dest"; then
+        success "Cellar watch LaunchAgent installed — will auto-upgrade on brew upgrade (XACA-0578)"
+        info "Trigger: $script_dest"
+        info "Watches: ${brew_prefix}/Cellar/aiteamforge"
+    else
+        warning "Failed to load cellar-watch LaunchAgent (may need manual activation)"
+        info "Load manually: launchctl load $plist_dest"
+    fi
+}
+
+# Uninstall Cellar WatchPaths LaunchAgent
+uninstall_cellar_watch_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.cellar-watch.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading cellar watch LaunchAgent"
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed cellar watch LaunchAgent"
+    fi
+}
+
 # Install CR Confluence Poller LaunchAgents — one per team (XACA-0350)
 #
 # Scans cr-drafted CRs every 10 min per team; detects appended CR-Proper links
@@ -1293,6 +1383,7 @@ install_kanban_system() {
     install_cr_confluence_poller_launchagent
     install_auto_upgrade_launchagent
     install_lcars_watch_launchagent
+    install_cellar_watch_launchagent
 
     success "LCARS Kanban System installed successfully"
 
@@ -1326,6 +1417,7 @@ uninstall_kanban_system() {
     # Unload LaunchAgents
     uninstall_backup_launchagent
     uninstall_cr_confluence_poller_launchagent
+    uninstall_cellar_watch_launchagent
     uninstall_auto_upgrade_launchagent
     uninstall_lcars_watch_launchagent
 

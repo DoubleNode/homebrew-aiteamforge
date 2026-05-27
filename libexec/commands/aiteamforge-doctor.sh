@@ -47,6 +47,7 @@ Options:
 Components:
   dependencies    External dependencies (brew, node, python, etc.)
   framework       Framework installation integrity
+  version-drift   Cellar vs working-dir version drift (XACA-0578)
   config          Configuration files and validity
   services        Running services (LCARS, Fleet Monitor)
   launchagents    LaunchAgent status
@@ -277,6 +278,78 @@ check_framework() {
     check_result pass "Wizard UI library"
   else
     check_result fail "Wizard UI library missing"
+  fi
+}
+
+# Check: Cellar-vs-working-dir version drift (XACA-0578)
+# Detects when `brew upgrade aiteamforge` ran but `aiteamforge upgrade --non-interactive`
+# did NOT follow (e.g. cellar-watch LaunchAgent is disabled/missing/broken).
+# The .installed-version stamp is written by `aiteamforge upgrade` (Edit A); if it
+# is absent the check falls back to the "version" field in .aiteamforge-config
+# (install-time only — less reliable for drift detection).
+check_version_drift() {
+  print_section "Checking Cellar vs Working-Dir Version"
+
+  local framework_dir working_dir
+  framework_dir=$(get_framework_dir)
+  working_dir=$(get_working_dir)
+
+  # --- Cellar VERSION (what brew upgraded to) ---
+  local cellar_version=""
+  local cellar_version_file=""
+  for _candidate in "${framework_dir}/../VERSION" "${framework_dir}/VERSION"; do
+    if [ -f "$_candidate" ]; then
+      cellar_version_file="$_candidate"
+      cellar_version="$(cat "$_candidate" | tr -d '[:space:]' | sed 's/^v//')"
+      break
+    fi
+  done
+  unset _candidate
+
+  if [ -z "$cellar_version" ]; then
+    check_result fail "Cellar VERSION file not found (checked ${framework_dir}/../VERSION)" \
+      "Verify FRAMEWORK_DIR resolves correctly: ${framework_dir}"
+    return
+  fi
+
+  # --- Working-dir installed version ---
+  local installed_version=""
+  local drift_mode=""
+  local stamp_file="${working_dir}/.installed-version"
+
+  if [ -f "$stamp_file" ]; then
+    installed_version="$(cat "$stamp_file" | tr -d '[:space:]' | sed 's/^v//')"
+    drift_mode="stamp"
+  else
+    # Fallback: config "version" field (install-time only — less reliable)
+    installed_version="$(get_installed_version | tr -d '[:space:]' | sed 's/^v//')"
+    drift_mode="config-fallback"
+  fi
+
+  # --- Diagnostics for missing stamp ---
+  if [ -z "$installed_version" ]; then
+    check_result warn "Cannot determine working-dir version (no .installed-version stamp and no version in config)" \
+      "Run: aiteamforge upgrade --non-interactive  to refresh and stamp"
+    return
+  fi
+
+  # Fallback mode advisory
+  if [ "$drift_mode" = "config-fallback" ]; then
+    print_info "  Note: .installed-version stamp absent — using config version (less reliable; run 'aiteamforge upgrade --non-interactive' to stamp)"
+  fi
+
+  # --- Compare ---
+  if [ "$cellar_version" = "$installed_version" ]; then
+    check_result pass "Cellar v${cellar_version} matches working-dir v${installed_version}" \
+      "Version stamp mode: ${drift_mode}"
+  else
+    check_result warn "Cellar v${cellar_version} BUT working-dir v${installed_version} — run: aiteamforge upgrade --non-interactive" \
+      "Stamp file: ${stamp_file} | Drift mode: ${drift_mode}"
+    if [ "$VERBOSE" = true ]; then
+      echo "    Cellar VERSION file: ${cellar_version_file}"
+      echo "    Working-dir stamp:   ${stamp_file}"
+      echo "    Stamp mode:          ${drift_mode}"
+    fi
   fi
 }
 
@@ -544,6 +617,9 @@ case "$CHECK_COMPONENT" in
   framework)
     check_framework
     ;;
+  version-drift)
+    check_version_drift
+    ;;
   config)
     check_config
     ;;
@@ -565,6 +641,7 @@ case "$CHECK_COMPONENT" in
   all)
     check_dependencies
     check_framework
+    check_version_drift
     check_config
     check_services
     check_launchagents

@@ -170,6 +170,11 @@ remove_launchagents() {
   local agents=(
     "com.aiteamforge.kanban-backup.plist"
     "com.aiteamforge.lcars-health.plist"
+    # Close pre-existing gap — XACA-0571 added these plists but did not update
+    # top-level uninstall; XACA-0578 closes the gap before adding a third agent.
+    "com.aiteamforge.auto-upgrade.plist"
+    "com.aiteamforge.lcars-watch.plist"
+    "com.aiteamforge.cellar-watch.plist"
   )
 
   for agent in "${agents[@]}"; do

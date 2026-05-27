@@ -1,0 +1,123 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Cellar WatchPaths LaunchAgent — XACA-0578
+  ==========================================
+  Passive watcher that detects when Homebrew upgrades the aiteamforge formula
+  in the Cellar and fires the cellar-watch-trigger.sh script to refresh the
+  runtime working-dir copy at $AITEAMFORGE_DIR.
+
+  PROBLEM THIS SOLVES:
+  After `brew upgrade aiteamforge`, the Cellar is updated but the working-dir
+  copy at $AITEAMFORGE_DIR/lcars-ui/ stays stale. This agent detects the
+  Cellar mutation and chains aiteamforge upgrade --non-interactive to sync
+  the working-dir copy.
+
+  (a) WHY WE WATCH THE CELLAR PARENT DIR, NOT THE OPT SYMLINK:
+  The Homebrew opt path (/opt/homebrew/opt/aiteamforge) is a SYMLINK that
+  gets retargeted on upgrade. launchd WatchPaths holds a kernel event
+  descriptor on the INODE of the original symlink target — when brew
+  atomically retargets the symlink to a new versioned Cellar dir, launchd
+  does NOT reliably detect the change because the inode it was watching no
+  longer backs the name. The Cellar parent directory
+  (/opt/homebrew/Cellar/aiteamforge) is a REAL DIRECTORY whose directory
+  entries are mutated in-place: brew creates a new versioned subdir (e.g.
+  Cellar/aiteamforge/0.12.6/) inside it, which bumps the parent dir's mtime.
+  WatchPaths fires reliably because it's an in-place mutation, not a swap.
+
+  (b) WHY ThrottleInterval IS 60s (not 30s like lcars-watch):
+  The lcars-watch agent uses 30s to debounce the burst of dozens of `cp`
+  calls during an in-place lcars-ui refresh. The Cellar parent dir, by
+  contrast, sees only ONE or TWO directory entry mutations per brew upgrade
+  (new versioned subdir created; old versioned subdir removed). There is no
+  per-file burst. We use 60s — double lcars-watch's value — to ensure that
+  in the uninstall+reinstall scenario (two separate mtime bumps arriving
+  seconds apart), both events are coalesced into a single trigger fire. The
+  60s window lets the first event (uninstall) and any immediately-following
+  second event (reinstall start) coalesce, so the trigger only runs once the
+  Cellar is fully settled.
+
+  (c) UNINSTALL-RACE GUARD (trigger script responsibility):
+  When the user runs `brew uninstall aiteamforge`, launchd fires this watcher
+  because the Cellar parent dir's mtime changes. At that moment the formula
+  is absent and calling `aiteamforge upgrade --non-interactive` directly
+  would fail confusingly. We invoke a dedicated trigger script
+  ({{CELLAR_WATCH_TRIGGER}}) instead of calling aiteamforge directly. The
+  trigger script performs three guards before chaining the upgrade:
+    Guard 1 — brew is on PATH
+    Guard 2 — formula is installed (`brew list aiteamforge`)
+    Guard 3 — aiteamforge CLI is reachable
+  If any guard fails the script exits 0 (non-error) with a log entry
+  explaining why it skipped the upgrade.
+
+  (d) DOWNSTREAM CHAIN — NO RECURSION RISK:
+  cellar-watch fires → cellar-watch-trigger.sh runs →
+    aiteamforge upgrade --non-interactive runs →
+      writes to $AITEAMFORGE_DIR/lcars-ui/ →
+        lcars-watch fires → aiteamforge restart lcars
+  cellar-watch and lcars-watch watch DISJOINT filesystem subtrees:
+    cellar-watch: $(brew --prefix)/Cellar/aiteamforge/  (Homebrew Cellar)
+    lcars-watch:  $AITEAMFORGE_DIR/lcars-ui/             (working-dir copy)
+  The upgrade step writes only to $AITEAMFORGE_DIR, NOT to the Cellar.
+  The LCARS restart step writes nothing to either watched path.
+  There is no feedback loop. The chain is a linear DAG.
+
+  NO KeepAlive  — this is a trigger, not a persistent daemon.
+  NO RunAtLoad  — that would fire the trigger on every login, defeating the point.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.cellar-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Use absolute path to the trigger script: launchd PATH is minimal
+             and does not include Homebrew bin by default. {{CELLAR_WATCH_TRIGGER}}
+             is substituted by the installer to the full path of
+             cellar-watch-trigger.sh. The trigger script (not aiteamforge
+             directly) is invoked so it can apply the uninstall-race guards
+             described in comment (c) above before chaining the upgrade. -->
+        <string>{{CELLAR_WATCH_TRIGGER}}</string>
+    </array>
+
+    <!--
+      WatchPaths: launchd fires when the directory entry (mtime) of this path
+      changes. {{BREW_CELLAR_DIR}} is substituted at install time to:
+        Apple Silicon: /opt/homebrew/Cellar/aiteamforge
+        Intel:         /usr/local/Cellar/aiteamforge
+      Watching the parent Cellar directory (not the opt symlink) is deliberate —
+      see comment (a) above.
+    -->
+    <key>WatchPaths</key>
+    <array>
+        <string>{{BREW_CELLAR_DIR}}</string>
+    </array>
+
+    <!--
+      ThrottleInterval: minimum seconds between successive job launches.
+      Set to 60s (vs. lcars-watch's 30s) to coalesce the uninstall+reinstall
+      double-fire scenario into a single trigger. See comment (b) above.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/cellar-watch.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/cellar-watch.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Include both Apple Silicon and Intel Homebrew prefixes so
+             the trigger script can locate brew regardless of architecture. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>{{HOME_DIR}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
+    </dict>
+</dict>
+</plist>

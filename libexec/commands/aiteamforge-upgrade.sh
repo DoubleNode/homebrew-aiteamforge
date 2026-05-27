@@ -534,6 +534,10 @@ _render_launchagent_template() {
   local aiteamforge_bin
   aiteamforge_bin="$(command -v aiteamforge 2>/dev/null || echo "/opt/homebrew/bin/aiteamforge")"
 
+  # XACA-0578: resolve Homebrew prefix for cellar-watch plist ({{BREW_CELLAR_DIR}}).
+  local brew_prefix
+  brew_prefix="$(command -v brew &>/dev/null && brew --prefix 2>/dev/null || echo "/opt/homebrew")"
+
   sed -e "s|{{USER_HOME}}|$HOME|g" \
       -e "s|{{HOME_DIR}}|$HOME|g" \
       -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
@@ -543,6 +547,8 @@ _render_launchagent_template() {
       -e "s|{{LOG_DIR}}|${WORKING_DIR}/logs|g" \
       -e "s|{{LCARS_UI_DIR}}|${WORKING_DIR}/lcars-ui|g" \
       -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
+      -e "s|{{CELLAR_WATCH_TRIGGER}}|${WORKING_DIR}/scripts/cellar-watch-trigger.sh|g" \
+      -e "s|{{BREW_CELLAR_DIR}}|${brew_prefix}/Cellar/aiteamforge|g" \
       "$template" > "$dest"
 }
 
@@ -558,6 +564,7 @@ update_launchagents() {
     "com.aiteamforge.lcars-health.plist:kanban/lcars-health-plist.template"
     "com.aiteamforge.auto-upgrade.plist:auto-upgrade/auto-upgrade-launchagent.template.plist"
     "com.aiteamforge.lcars-watch.plist:auto-upgrade/lcars-watch-launchagent.template.plist"
+    "com.aiteamforge.cellar-watch.plist:auto-upgrade/cellar-watch-launchagent.template.plist"
   )
 
   # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
@@ -652,6 +659,27 @@ update_aux_scripts
 update_shell_helpers
 update_skills
 update_launchagents
+
+# XACA-0578: Stamp the installed version so `aiteamforge doctor` can detect
+# Cellar-vs-working-dir drift if a user runs `brew upgrade aiteamforge` without
+# chaining `aiteamforge upgrade --non-interactive`. The cellar-watch LaunchAgent
+# normally handles this automatically, but the stamp is the diagnostic backstop.
+# Skipped under --dry-run (stamp is a side-effect, not a preview).
+if [ "$DRY_RUN" = false ]; then
+  _stamp_version_file=""
+  for _stamp_candidate in "${FRAMEWORK_DIR}/../VERSION" "${FRAMEWORK_DIR}/VERSION" "${LIBEXEC_DIR}/../VERSION"; do
+    if [ -f "$_stamp_candidate" ]; then
+      _stamp_version_file="$_stamp_candidate"
+      break
+    fi
+  done
+  if [ -n "$_stamp_version_file" ] && [ -d "$WORKING_DIR" ]; then
+    if cp "$_stamp_version_file" "$WORKING_DIR/.installed-version" 2>/dev/null; then
+      print_info "Stamped working-dir version: $(cat "$WORKING_DIR/.installed-version" | tr -d '[:space:]')"
+    fi
+  fi
+  unset _stamp_version_file _stamp_candidate
+fi
 
 # Show changelog (only if not dry run)
 if [ "$DRY_RUN" = false ]; then
