@@ -646,6 +646,20 @@ install_lcars_profile_script() {
         warning "kb-cr.sh not found (skipping)"
     fi
 
+    # Install kb-tap-release — one-shot homebrew-tap release-cut script (XACA-0570).
+    # Reads VERSION, computes next semver, promotes CHANGELOG [Unreleased] -> dated
+    # [X.Y.Z], maintains compare-URL footer, bumps VERSION + Formula tag/version,
+    # commits + tags + pushes the tap inner, then bumps the outer-repo submodule
+    # pointer + commits + pushes. 12 preflight checks with --dry-run / --no-push.
+    local kbtaprelease_src="$INSTALL_ROOT/share/scripts/kb-tap-release"
+    if [ -f "$kbtaprelease_src" ]; then
+        cp "$kbtaprelease_src" "$scripts_dest/kb-tap-release"
+        chmod +x "$scripts_dest/kb-tap-release"
+        info "Installed: kb-tap-release"
+    else
+        warning "kb-tap-release not found (skipping)"
+    fi
+
     # Install migrate-cr-schema.py — one-shot migration tool that upgrades
     # kanban board JSON from pre-v2.0.0 cr fields to the crs[] container schema.
     # Operators run this manually after upgrading if they have existing CR data.

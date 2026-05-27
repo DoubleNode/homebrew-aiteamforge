@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Feature: XACA-0574 — Wire `kb-tap-release` through the tap install pipeline (XACA-0570 follow-up)
+
+Ships the `kb-tap-release` one-shot release-cut script (introduced canonically in XACA-0570, PR #487) to brew-install consumers. Maintainers running from `~/dev-team` already had it; this lands the install hook + canonical→tap mirror so it arrives on every machine after `brew upgrade aiteamforge`.
+
+- **`share/scripts/kb-tap-release`:** canonical-source mirror of `dev-team/scripts/kb-tap-release` (driven by `sync-tap.sh`). Executable.
+- **`libexec/installers/install-kanban.sh`:** new install hook copies `kb-tap-release` from `$INSTALL_ROOT/share/scripts/` into the user's `$AITEAMFORGE_DIR/scripts/` (+x), mirroring the `kb-cr.sh` / `migrate-cr-schema.py` pattern. Skips with a `warning` if the source is missing.
+- Background: XACA-0570 originally proposed shipping this in one PR. The orchestrator pivoted to outer-only when sync-tap drift surfaced a parallel session mid-work (XACA-0572 mirror pushed before its canonical landed on develop). XACA-0572 has since merged; the canonical/mirror align cleanly now, so the deferred tap wiring lands here without race risk.
+
 ### Feature: XACA-0571 — Daily auto-upgrade LaunchAgent with version-pin and operator notifications
 
 - New `share/templates/auto-upgrade/auto-upgrade-launchagent.template.plist`: `com.aiteamforge.auto-upgrade` LaunchAgent runs `auto-upgrade.sh` daily at 03:15, `RunAtLoad: true`, `ThrottleInterval: 60`. Standard sed placeholders for script path, log dir, home, and AITEAMFORGE_DIR.

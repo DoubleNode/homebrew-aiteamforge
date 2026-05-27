@@ -1,0 +1,677 @@
+#!/usr/bin/env bash
+# kb-tap-release — One-shot homebrew-tap release-cut command.
+#
+# Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--help]
+#
+# Cuts a release of the AITeamForge homebrew tap:
+#   Phase 1: Compute new version, edit CHANGELOG.md / VERSION / Formula
+#   Phase 2: Tap inner commit + tag + push (origin main)
+#   Phase 3: Outer pointer bump commit + push (origin develop)
+#
+# XACA-0570
+
+set -euo pipefail
+
+# ─── usage ───────────────────────────────────────────────────────────────────
+
+usage() {
+  cat <<'EOF'
+Usage: kb-tap-release {patch|minor|major} [--dry-run] [--no-push] [--help]
+
+Cut a release of the AITeamForge homebrew tap.
+
+Positional:
+  patch | minor | major   Required. Which semver component to bump.
+
+Flags:
+  --dry-run     Print intended actions, write nothing, commit nothing, push nothing.
+                Runs all preconditions; exits 0 if they pass, nonzero if any fail.
+  --no-push     Perform local commits + tags but skip both git push calls.
+  -h, --help    Print this usage and exit 0.
+
+Preconditions (all checked before any mutation, including --dry-run):
+  1.  Run from outer repo (not a worktree).
+  2.  Outer branch is develop.
+  3.  Outer working tree is clean.
+  4.  Outer develop is up-to-date with origin/develop.
+  5.  Tap submodule is initialized (homebrew-tap/.git exists).
+  6.  Tap inner branch is main.
+  7.  Tap inner working tree is clean.
+  8.  Tap inner is up-to-date with origin/main.
+  9.  sync-tap drift check passes (./sync-tap.sh --check).
+  10. CHANGELOG [Unreleased] section is non-empty.
+  11. VERSION, Formula tag, and Formula version all agree.
+  12. Computed new version tag does not already exist.
+
+Partial-failure recovery:
+  The release runs in three phases. If a step fails partway through, the
+  remaining steps are skipped and the script exits nonzero. Recovery depends
+  on which step failed:
+
+  Phase 2 — tap inner push (main) succeeds, tag push fails:
+    cd homebrew-tap
+    git push origin "vX.Y.Z"
+    cd ..
+    git add homebrew-tap
+    git commit -m "chore: Bump homebrew-tap submodule to vX.Y.Z"
+    git push origin develop
+
+  Phase 2 — tap inner commit + tag landed locally, neither pushed:
+    Re-run with --no-push aborted-partway is the same recovery — push by hand:
+    cd homebrew-tap && git push origin main && git push origin "vX.Y.Z" && cd ..
+    git add homebrew-tap && git commit -m "..." && git push origin develop
+
+  Phase 3 — outer commit landed locally, push failed:
+    git push origin develop    # retry; nothing else to undo
+
+  In all cases: do NOT re-run kb-tap-release after a partial publish. The
+  tag-collision preflight will block. Finish the publish by hand instead.
+EOF
+}
+
+# ─── argument parsing ─────────────────────────────────────────────────────────
+
+LEVEL=""
+DRY_RUN=0
+NO_PUSH=0
+
+for arg in "$@"; do
+  case "$arg" in
+    patch|minor|major)
+      LEVEL="$arg"
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      ;;
+    --no-push)
+      NO_PUSH=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $arg" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+if [ -z "$LEVEL" ]; then
+  echo "Error: bump level is required (patch, minor, or major)." >&2
+  usage >&2
+  exit 1
+fi
+
+# ─── helpers ─────────────────────────────────────────────────────────────────
+
+PASS_COUNT=0
+FAIL_COUNT=0
+
+check_pass() {
+  echo "  [PASS] $1"
+  PASS_COUNT=$((PASS_COUNT + 1))
+}
+
+check_fail() {
+  echo "  [FAIL] $1"
+  FAIL_COUNT=$((FAIL_COUNT + 1))
+}
+
+abort_on_failures() {
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo ""
+    echo "Preflight failed: $FAIL_COUNT check(s) did not pass. Aborting."
+    exit 1
+  fi
+}
+
+# bump_version CURRENT_VERSION LEVEL
+# Outputs the new version string; validates input format first.
+bump_version() {
+  local cur="$1"
+  local lvl="$2"
+  # validate format
+  case "$cur" in
+    [0-9]*.[0-9]*.[0-9]*)
+      ;;
+    *)
+      echo "Error: current version '$cur' does not match X.Y.Z format." >&2
+      exit 1
+      ;;
+  esac
+  local major minor patch
+  # Use IFS trick safe on bash 3.2 — no arrays needed
+  local oldIFS="$IFS"
+  IFS="."
+  # shellcheck disable=SC2086
+  read -r major minor patch <<EOF
+$cur
+EOF
+  IFS="$oldIFS"
+  # strip any whitespace
+  major="${major%%[[:space:]]*}"
+  minor="${minor%%[[:space:]]*}"
+  patch="${patch%%[[:space:]]*}"
+  case "$lvl" in
+    patch)
+      patch=$((patch + 1))
+      ;;
+    minor)
+      minor=$((minor + 1))
+      patch=0
+      ;;
+    major)
+      major=$((major + 1))
+      minor=0
+      patch=0
+      ;;
+  esac
+  echo "${major}.${minor}.${patch}"
+}
+
+# ─── python3 CHANGELOG footer rewriter ───────────────────────────────────────
+# Embedded as a heredoc to avoid multi-line bash regex fragility.
+# Called as: python3 <(cat <<'PYEOF' ...) <changelog_path> <old_version> <new_version>
+# Or via a temp file — we use a temp file to be safe on all bash versions.
+
+FOOTER_SCRIPT=$(mktemp /tmp/kb-tap-release-footer.XXXXXX.py)
+trap 'rm -f "$FOOTER_SCRIPT"' EXIT INT TERM
+
+cat > "$FOOTER_SCRIPT" <<'PYEOF'
+#!/usr/bin/env python3
+"""
+Maintains the CHANGELOG.md comparison-link footer block.
+
+Footer format (at END of file, no blank lines between entries):
+  [Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/vNEW...HEAD
+  [X.Y.Z]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/vPREV...vX.Y.Z
+  [PREV]: ...
+
+First run (no footer): append blank line + new footer block.
+Subsequent runs: update [Unreleased] anchor, insert [NEW] line below it.
+"""
+import sys
+import re
+
+BASE_URL = "https://github.com/DoubleNode/homebrew-aiteamforge/compare"
+CHANGELOG_PATH = sys.argv[1]
+OLD_VERSION    = sys.argv[2]  # version BEFORE the bump (CUR_VERSION)
+NEW_VERSION    = sys.argv[3]  # version AFTER the bump
+
+with open(CHANGELOG_PATH, "r") as fh:
+    content = fh.read()
+
+lines = content.splitlines()
+
+# Detect footer: a trailing block of consecutive lines matching
+# [something]: https://... OR [Unreleased]: https://...
+# We scan from the bottom up.
+LINK_RE = re.compile(r'^\[([^\]]+)\]:\s+https://')
+
+footer_start = None
+i = len(lines) - 1
+# skip trailing blank lines
+while i >= 0 and lines[i].strip() == "":
+    i -= 1
+# now scan upward while lines look like footer entries
+while i >= 0 and LINK_RE.match(lines[i]):
+    footer_start = i
+    i -= 1
+
+if footer_start is None:
+    # No footer exists — first run. Create one.
+    unreleased_line = "[Unreleased]: {base}/v{new}...HEAD".format(
+        base=BASE_URL, new=NEW_VERSION)
+    new_line = "[{new}]: {base}/v{old}...v{new}".format(
+        base=BASE_URL, old=OLD_VERSION, new=NEW_VERSION)
+    # If file doesn't end with a newline, add one before footer
+    footer_block = "\n" + unreleased_line + "\n" + new_line + "\n"
+    # Ensure there's exactly one blank line separating body from footer
+    stripped = content.rstrip("\n")
+    new_content = stripped + "\n" + footer_block
+else:
+    # Footer exists — update it.
+    footer_lines = lines[footer_start:]
+    body_lines = lines[:footer_start]
+
+    # Locate [Unreleased] line in footer
+    unreleased_idx = None
+    for idx, fl in enumerate(footer_lines):
+        if fl.startswith("[Unreleased]:"):
+            unreleased_idx = idx
+            break
+
+    # Build new [Unreleased] line and new [NEW_VERSION] line
+    new_unreleased = "[Unreleased]: {base}/v{new}...HEAD".format(
+        base=BASE_URL, new=NEW_VERSION)
+    new_version_line = "[{new}]: {base}/v{old}...v{new}".format(
+        base=BASE_URL, old=OLD_VERSION, new=NEW_VERSION)
+
+    if unreleased_idx is not None:
+        # Replace the existing [Unreleased] line; insert [NEW] below it
+        updated_footer = (
+            footer_lines[:unreleased_idx]
+            + [new_unreleased, new_version_line]
+            + footer_lines[unreleased_idx + 1:]
+        )
+    else:
+        # No [Unreleased] line found — prepend it plus [NEW]
+        updated_footer = [new_unreleased, new_version_line] + footer_lines
+
+    all_lines = body_lines + updated_footer
+    new_content = "\n".join(all_lines) + "\n"
+
+with open(CHANGELOG_PATH, "w") as fh:
+    fh.write(new_content)
+
+print("Footer updated.")
+PYEOF
+
+# ─── locate tap dir ───────────────────────────────────────────────────────────
+
+OUTER_DIR="$(pwd)"
+TAP_DIR="${OUTER_DIR}/homebrew-tap"
+
+# ─── preflight ────────────────────────────────────────────────────────────────
+
+echo ""
+echo "=== kb-tap-release preflight ==="
+echo ""
+
+# 1. Not in a worktree
+GIT_COMMON_DIR="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+if [ "$GIT_COMMON_DIR" = ".git" ]; then
+  check_pass "Outer repo is not a worktree."
+else
+  check_fail "Cannot release from a worktree. Run from ~/dev-team."
+fi
+
+# 2. Outer branch is develop
+OUTER_BRANCH="$(git branch --show-current 2>/dev/null || true)"
+if [ "$OUTER_BRANCH" = "develop" ]; then
+  check_pass "Outer branch is develop."
+else
+  check_fail "Outer repo must be on 'develop'. Current: ${OUTER_BRANCH}."
+fi
+
+# 3. Outer working tree clean
+OUTER_STATUS="$(git status --porcelain 2>/dev/null || true)"
+if [ -z "$OUTER_STATUS" ]; then
+  check_pass "Outer working tree is clean."
+else
+  check_fail "Outer working tree has uncommitted changes. Commit or stash first."
+fi
+
+# 4. Outer up-to-date with origin/develop
+git fetch origin develop 2>/dev/null || true
+LOCAL_SHA="$(git rev-parse develop 2>/dev/null || true)"
+REMOTE_SHA="$(git rev-parse origin/develop 2>/dev/null || true)"
+if [ -z "$LOCAL_SHA" ] || [ -z "$REMOTE_SHA" ]; then
+  check_fail "Could not determine develop vs origin/develop SHAs. Check git remote."
+elif [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
+  check_pass "Outer develop is up-to-date with origin/develop."
+else
+  # Determine direction
+  MERGE_BASE="$(git merge-base develop origin/develop 2>/dev/null || true)"
+  if [ "$MERGE_BASE" = "$LOCAL_SHA" ]; then
+    check_fail "Outer develop is BEHIND origin/develop. Pull develop first."
+  elif [ "$MERGE_BASE" = "$REMOTE_SHA" ]; then
+    check_fail "Outer develop is AHEAD of origin/develop — push or rebase first."
+  else
+    check_fail "Outer develop diverged from origin/develop — push or rebase first."
+  fi
+fi
+
+# 5. Tap submodule initialized
+if [ -e "${TAP_DIR}/.git" ]; then
+  check_pass "Tap submodule is initialized (homebrew-tap/.git exists)."
+else
+  check_fail "Tap submodule is not initialized. Run: git submodule update --init homebrew-tap"
+fi
+
+# Only run tap-inner checks if submodule exists; otherwise they'll fail loudly
+TAP_OK=0
+if [ -e "${TAP_DIR}/.git" ]; then
+  TAP_OK=1
+fi
+
+# 6. Tap inner branch is main
+if [ "$TAP_OK" -eq 1 ]; then
+  TAP_BRANCH="$(git -C "${TAP_DIR}" branch --show-current 2>/dev/null || true)"
+  if [ "$TAP_BRANCH" = "main" ]; then
+    check_pass "Tap inner branch is main."
+  elif [ -z "$TAP_BRANCH" ]; then
+    check_fail "Tap is in detached HEAD. Check it out to main: cd homebrew-tap && git checkout main"
+    TAP_OK=0
+  else
+    check_fail "Tap inner branch must be 'main'. Current: ${TAP_BRANCH}. Run: cd homebrew-tap && git checkout main"
+    TAP_OK=0
+  fi
+else
+  check_fail "Tap inner branch check skipped (submodule not initialized)."
+fi
+
+# 7. Tap inner working tree clean
+if [ "$TAP_OK" -eq 1 ]; then
+  TAP_STATUS="$(git -C "${TAP_DIR}" status --porcelain 2>/dev/null || true)"
+  if [ -z "$TAP_STATUS" ]; then
+    check_pass "Tap inner working tree is clean."
+  else
+    check_fail "Tap working tree has uncommitted changes. Commit or stash first."
+    TAP_OK=0
+  fi
+else
+  check_fail "Tap inner working-tree check skipped (submodule not initialized or not on main)."
+fi
+
+# 8. Tap inner up-to-date with origin/main
+if [ "$TAP_OK" -eq 1 ]; then
+  git -C "${TAP_DIR}" fetch origin main 2>/dev/null || true
+  TAP_LOCAL="$(git -C "${TAP_DIR}" rev-parse HEAD 2>/dev/null || true)"
+  TAP_REMOTE="$(git -C "${TAP_DIR}" rev-parse origin/main 2>/dev/null || true)"
+  if [ -z "$TAP_LOCAL" ] || [ -z "$TAP_REMOTE" ]; then
+    check_fail "Could not determine tap HEAD vs origin/main SHAs."
+    TAP_OK=0
+  elif [ "$TAP_LOCAL" = "$TAP_REMOTE" ]; then
+    check_pass "Tap inner is up-to-date with origin/main."
+  else
+    TAP_MERGE_BASE="$(git -C "${TAP_DIR}" merge-base HEAD origin/main 2>/dev/null || true)"
+    if [ "$TAP_MERGE_BASE" = "$TAP_LOCAL" ]; then
+      check_fail "Tap is BEHIND origin/main. Run: cd homebrew-tap && git pull origin main"
+      TAP_OK=0
+    else
+      check_fail "Tap has diverged from origin/main. Reconcile before releasing."
+      TAP_OK=0
+    fi
+  fi
+else
+  check_fail "Tap origin/main check skipped (earlier check failed)."
+fi
+
+# 9. sync-tap drift check
+SYNCTAP_SCRIPT="${OUTER_DIR}/sync-tap.sh"
+if [ -x "$SYNCTAP_SCRIPT" ]; then
+  SYNCTAP_OUT="$("${SYNCTAP_SCRIPT}" --check 2>&1)" && SYNCTAP_EXIT=0 || SYNCTAP_EXIT=$?
+  if [ "$SYNCTAP_EXIT" -eq 0 ]; then
+    check_pass "sync-tap drift check passed."
+  else
+    check_fail "Tap mirror is drifted from canonical. Run ./sync-tap.sh and commit the result first."
+    echo "    sync-tap.sh --check output:"
+    echo "$SYNCTAP_OUT" | sed 's/^/      /'
+  fi
+else
+  check_fail "sync-tap.sh not found or not executable at: $SYNCTAP_SCRIPT"
+fi
+
+# 10. [Unreleased] block is non-empty (only if tap submodule is accessible)
+TAP_CHANGELOG="${TAP_DIR}/CHANGELOG.md"
+UNRELEASED_CONTENT=""
+if [ -f "$TAP_CHANGELOG" ]; then
+  # Extract lines between ## [Unreleased] and next ## [ header
+  # Use python3 for reliable multi-line parsing
+  UNRELEASED_CONTENT="$(python3 - "$TAP_CHANGELOG" <<'PYEOF'
+import sys, re
+path = sys.argv[1]
+with open(path) as fh:
+    content = fh.read()
+# Find [Unreleased] block
+m = re.search(r'## \[Unreleased\](.*?)(?=\n## \[)', content, re.DOTALL)
+if not m:
+    sys.exit(0)
+block = m.group(1)
+# Strip blank lines; output non-blank lines
+lines = [l.strip() for l in block.splitlines() if l.strip()]
+print('\n'.join(lines))
+PYEOF
+  )"
+  if [ -n "$UNRELEASED_CONTENT" ]; then
+    check_pass "CHANGELOG [Unreleased] section has content."
+  else
+    check_fail "CHANGELOG [Unreleased] section is empty. Add release notes before cutting."
+  fi
+else
+  check_fail "homebrew-tap/CHANGELOG.md not found."
+fi
+
+# 11. VERSION matches Formula (read current versions)
+TAP_VERSION_FILE="${TAP_DIR}/VERSION"
+TAP_FORMULA="${TAP_DIR}/Formula/aiteamforge.rb"
+CUR_VERSION=""
+FORMULA_TAG=""
+FORMULA_VERSION=""
+
+if [ -f "$TAP_VERSION_FILE" ] && [ -f "$TAP_FORMULA" ]; then
+  CUR_VERSION="$(tr -d '[:space:]' < "$TAP_VERSION_FILE")"
+  FORMULA_TAG="$(grep -oE 'tag: "v[0-9]+\.[0-9]+\.[0-9]+"' "$TAP_FORMULA" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  FORMULA_VERSION="$(grep -oE '^[[:space:]]*version "[0-9]+\.[0-9]+\.[0-9]+"' "$TAP_FORMULA" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+
+  if [ "$CUR_VERSION" = "$FORMULA_TAG" ] && [ "$CUR_VERSION" = "$FORMULA_VERSION" ]; then
+    check_pass "VERSION ($CUR_VERSION) matches Formula tag and version."
+  else
+    check_fail "Version drift detected: VERSION=${CUR_VERSION}, Formula tag=${FORMULA_TAG}, Formula version=${FORMULA_VERSION}. Reconcile before releasing."
+  fi
+else
+  check_fail "homebrew-tap/VERSION or Formula/aiteamforge.rb not found."
+fi
+
+# 12. Computed new version doesn't already exist as a tag
+if [ -n "$CUR_VERSION" ]; then
+  NEW_VERSION="$(bump_version "$CUR_VERSION" "$LEVEL")"
+
+  # Check local tags
+  EXISTING_LOCAL="$(git -C "${TAP_DIR}" tag --list "v${NEW_VERSION}" 2>/dev/null || true)"
+  # Check remote tags (fetch already done in step 8)
+  EXISTING_REMOTE="$(git -C "${TAP_DIR}" ls-remote --tags origin "refs/tags/v${NEW_VERSION}" 2>/dev/null || true)"
+
+  if [ -n "$EXISTING_LOCAL" ] || [ -n "$EXISTING_REMOTE" ]; then
+    check_fail "Tag v${NEW_VERSION} already exists locally or on origin. Pick a different bump level."
+  else
+    check_pass "Tag v${NEW_VERSION} does not yet exist (safe to create)."
+  fi
+else
+  check_fail "Cannot compute new version — CUR_VERSION is empty (VERSION file missing or unreadable)."
+fi
+
+echo ""
+echo "=== Preflight: $PASS_COUNT passed, $FAIL_COUNT failed ==="
+echo ""
+
+abort_on_failures
+
+# ─── dry-run output ──────────────────────────────────────────────────────────
+
+TODAY="$(date +%Y-%m-%d)"
+
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo "[DRY-RUN] Would compute: ${CUR_VERSION} -> ${NEW_VERSION} (${LEVEL})"
+  echo "[DRY-RUN] Would edit:    homebrew-tap/CHANGELOG.md   (promote [Unreleased] -> [${NEW_VERSION}] - ${TODAY})"
+  echo "[DRY-RUN] Would edit:    homebrew-tap/CHANGELOG.md   (footer: insert [${NEW_VERSION}] compare line; update [Unreleased] anchor)"
+  echo "[DRY-RUN] Would edit:    homebrew-tap/VERSION        (${CUR_VERSION} -> ${NEW_VERSION})"
+  echo "[DRY-RUN] Would edit:    homebrew-tap/Formula/aiteamforge.rb  (tag + version -> ${NEW_VERSION})"
+  echo "[DRY-RUN] Would commit:  homebrew-tap  \"chore: Release AITeamForge ${NEW_VERSION}\""
+  echo "[DRY-RUN] Would tag:     v${NEW_VERSION}"
+  if [ "$NO_PUSH" -eq 1 ]; then
+    echo "[DRY-RUN] Would push:    (skipped — --no-push)"
+  else
+    echo "[DRY-RUN] Would push:    homebrew-tap  origin main + tag v${NEW_VERSION}"
+    echo "[DRY-RUN] Would commit:  outer         \"chore: Bump homebrew-tap submodule to v${NEW_VERSION}\""
+    echo "[DRY-RUN] Would push:    outer         origin develop"
+  fi
+  echo ""
+  echo "Dry run complete. No changes made."
+  exit 0
+fi
+
+# ─── phase 1: compute & edit ─────────────────────────────────────────────────
+
+echo "=== Phase 1: Editing tap files ==="
+echo ""
+
+echo "  Bumping: ${CUR_VERSION} -> ${NEW_VERSION} (${LEVEL})"
+echo ""
+
+# a. CHANGELOG.md — promote [Unreleased] to [NEW_VERSION] - DATE
+# We need to replace the FIRST occurrence of "## [Unreleased]" with:
+#   ## [Unreleased]
+#   (blank line)
+#   ## [NEW_VERSION] - DATE
+# Use python3 for reliable editing.
+
+python3 - "$TAP_CHANGELOG" "$NEW_VERSION" "$TODAY" <<'PYEOF'
+import sys, re
+
+path       = sys.argv[1]
+new_ver    = sys.argv[2]
+today      = sys.argv[3]
+
+with open(path) as fh:
+    content = fh.read()
+
+# Count [Unreleased] occurrences — must be exactly one
+count = len(re.findall(r'^## \[Unreleased\]', content, re.MULTILINE))
+if count != 1:
+    print("Error: expected exactly 1 '## [Unreleased]' line in CHANGELOG.md; found {}.".format(count), file=sys.stderr)
+    sys.exit(1)
+
+replacement = "## [Unreleased]\n\n## [{}] - {}".format(new_ver, today)
+new_content = re.sub(r'^## \[Unreleased\]', replacement, content, count=1, flags=re.MULTILINE)
+
+with open(path, "w") as fh:
+    fh.write(new_content)
+
+# Verify
+with open(path) as fh:
+    verify = fh.read()
+verify_count = len(re.findall(r'^## \[Unreleased\]', verify, re.MULTILINE))
+if verify_count != 1:
+    print("Error: post-edit verification failed — found {} [Unreleased] lines.".format(verify_count), file=sys.stderr)
+    sys.exit(1)
+
+print("CHANGELOG.md: promoted [Unreleased] -> [{}] - {}".format(new_ver, today))
+PYEOF
+
+# b. CHANGELOG.md footer
+python3 "$FOOTER_SCRIPT" "$TAP_CHANGELOG" "$CUR_VERSION" "$NEW_VERSION"
+
+echo "  CHANGELOG.md: footer updated."
+
+# c. VERSION
+echo "$NEW_VERSION" > "${TAP_VERSION_FILE}"
+echo "  VERSION: ${CUR_VERSION} -> ${NEW_VERSION}"
+
+# d. Formula/aiteamforge.rb — two sed expressions
+cd "${TAP_DIR}"
+
+sed -i.bak -E "s/tag: \"v[0-9]+\.[0-9]+\.[0-9]+\"/tag: \"v${NEW_VERSION}\"/" Formula/aiteamforge.rb
+sed -i.bak2 -E "s/^([[:space:]]*)version \"[0-9]+\.[0-9]+\.[0-9]+\"/\1version \"${NEW_VERSION}\"/" Formula/aiteamforge.rb
+rm -f Formula/aiteamforge.rb.bak Formula/aiteamforge.rb.bak2
+
+# Verify both lines updated
+FORMULA_TAG_AFTER="$(grep -oE 'tag: "v[0-9]+\.[0-9]+\.[0-9]+"' Formula/aiteamforge.rb | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+FORMULA_VER_AFTER="$(grep -oE '^[[:space:]]*version "[0-9]+\.[0-9]+\.[0-9]+"' Formula/aiteamforge.rb | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+
+if [ "$FORMULA_TAG_AFTER" != "$NEW_VERSION" ]; then
+  echo "Error: Formula tag not updated correctly — got '${FORMULA_TAG_AFTER}', expected '${NEW_VERSION}'." >&2
+  exit 1
+fi
+if [ "$FORMULA_VER_AFTER" != "$NEW_VERSION" ]; then
+  echo "Error: Formula version not updated correctly — got '${FORMULA_VER_AFTER}', expected '${NEW_VERSION}'." >&2
+  exit 1
+fi
+
+echo "  Formula/aiteamforge.rb: tag and version -> ${NEW_VERSION}"
+
+cd "${OUTER_DIR}"
+
+echo ""
+echo "=== Phase 1 complete. ==="
+echo ""
+
+# ─── phase 2: tap inner commit + tag + push ──────────────────────────────────
+
+echo "=== Phase 2: Tap inner commit + tag ==="
+echo ""
+
+git -C "${TAP_DIR}" add CHANGELOG.md VERSION Formula/aiteamforge.rb
+
+# Verify staged
+STAGED="$(git -C "${TAP_DIR}" diff --cached --name-only)"
+STAGED_OK=0
+echo "$STAGED" | grep -q "CHANGELOG.md" && echo "$STAGED" | grep -q "VERSION" && echo "$STAGED" | grep -q "Formula/aiteamforge.rb" && STAGED_OK=1
+
+if [ "$STAGED_OK" -eq 0 ]; then
+  echo "Error: expected CHANGELOG.md, VERSION, and Formula/aiteamforge.rb to be staged. Got:" >&2
+  echo "$STAGED" >&2
+  exit 1
+fi
+
+git -C "${TAP_DIR}" commit -m "chore: Release AITeamForge ${NEW_VERSION}"
+TAP_COMMIT_SHA="$(git -C "${TAP_DIR}" rev-parse HEAD)"
+echo "  Committed: ${TAP_COMMIT_SHA} (chore: Release AITeamForge ${NEW_VERSION})"
+
+git -C "${TAP_DIR}" tag "v${NEW_VERSION}"
+echo "  Tagged: v${NEW_VERSION}"
+
+if [ "$NO_PUSH" -eq 0 ]; then
+  echo "  Pushing tap main..."
+  git -C "${TAP_DIR}" push origin main
+  echo "  Pushing tap tag v${NEW_VERSION}..."
+  git -C "${TAP_DIR}" push origin "v${NEW_VERSION}"
+  echo "  Tap push complete."
+else
+  echo "  (Skipping push — --no-push)"
+fi
+
+echo ""
+echo "=== Phase 2 complete. ==="
+echo ""
+
+# ─── phase 3: outer pointer bump ─────────────────────────────────────────────
+
+echo "=== Phase 3: Outer submodule pointer bump ==="
+echo ""
+
+git add homebrew-tap
+
+# Verify staged
+OUTER_STAGED="$(git diff --cached --name-only)"
+if echo "$OUTER_STAGED" | grep -q "homebrew-tap"; then
+  echo "  Staged: homebrew-tap submodule pointer."
+else
+  echo "Error: homebrew-tap not staged after 'git add homebrew-tap'." >&2
+  exit 1
+fi
+
+git commit -m "chore: Bump homebrew-tap submodule to v${NEW_VERSION}"
+OUTER_COMMIT_SHA="$(git rev-parse HEAD)"
+echo "  Committed: ${OUTER_COMMIT_SHA} (chore: Bump homebrew-tap submodule to v${NEW_VERSION})"
+
+if [ "$NO_PUSH" -eq 0 ]; then
+  echo "  Pushing outer develop..."
+  git push origin develop
+  echo "  Outer push complete."
+else
+  echo "  (Skipping push — --no-push)"
+fi
+
+echo ""
+echo "=== Phase 3 complete. ==="
+echo ""
+
+# ─── success banner ──────────────────────────────────────────────────────────
+
+if [ "$NO_PUSH" -eq 0 ]; then
+  PUSHED_NOTE="pushed"
+else
+  PUSHED_NOTE="local only (--no-push)"
+fi
+
+echo "Released v${NEW_VERSION}"
+echo ""
+echo "  Tap commit:    ${TAP_COMMIT_SHA}  on main"
+echo "  Tap tag:       v${NEW_VERSION} (${PUSHED_NOTE})"
+echo "  Outer commit:  ${OUTER_COMMIT_SHA}  on develop (${PUSHED_NOTE})"
+echo ""
+echo "  Compare: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v${CUR_VERSION}...v${NEW_VERSION}"
