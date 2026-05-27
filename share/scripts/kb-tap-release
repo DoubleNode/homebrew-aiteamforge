@@ -6,9 +6,14 @@
 # Cuts a release of the AITeamForge homebrew tap:
 #   Phase 1: Compute new version, edit CHANGELOG.md / VERSION / Formula
 #   Phase 2: Tap inner commit + tag + push (origin main)
-#   Phase 3: Outer pointer bump commit + push (origin develop)
+#   Phase 3: Outer pointer bump commit + push (<outer-remote>/develop)
 #
-# XACA-0570
+# Outer-remote name: defaults via auto-detect (prefer "origin", fall back to
+# "dev-team") so this works on both standard clones and on the dev-team source
+# of truth, which uses "dev-team" as its remote name. Override explicitly with
+# KB_TAP_RELEASE_OUTER_REMOTE. Tap inner remote is always "origin".
+#
+# XACA-0570, XACA-0575
 
 set -euo pipefail
 
@@ -29,11 +34,16 @@ Flags:
   --no-push     Perform local commits + tags but skip both git push calls.
   -h, --help    Print this usage and exit 0.
 
+Environment:
+  KB_TAP_RELEASE_OUTER_REMOTE   Outer-repo remote name (default: auto-detect —
+                                 prefer "origin", fall back to "dev-team").
+                                 Tap inner remote is always "origin".
+
 Preconditions (all checked before any mutation, including --dry-run):
   1.  Run from outer repo (not a worktree).
   2.  Outer branch is develop.
   3.  Outer working tree is clean.
-  4.  Outer develop is up-to-date with origin/develop.
+  4.  Outer develop is up-to-date with <outer-remote>/develop.
   5.  Tap submodule is initialized (homebrew-tap/.git exists).
   6.  Tap inner branch is main.
   7.  Tap inner working tree is clean.
@@ -46,7 +56,8 @@ Preconditions (all checked before any mutation, including --dry-run):
 Partial-failure recovery:
   The release runs in three phases. If a step fails partway through, the
   remaining steps are skipped and the script exits nonzero. Recovery depends
-  on which step failed:
+  on which step failed. Examples below use "origin" for the outer remote;
+  substitute your outer-remote name if different (e.g. "dev-team").
 
   Phase 2 — tap inner push (main) succeeds, tag push fails:
     cd homebrew-tap
@@ -54,15 +65,15 @@ Partial-failure recovery:
     cd ..
     git add homebrew-tap
     git commit -m "chore: Bump homebrew-tap submodule to vX.Y.Z"
-    git push origin develop
+    git push <outer-remote> develop
 
   Phase 2 — tap inner commit + tag landed locally, neither pushed:
     Re-run with --no-push aborted-partway is the same recovery — push by hand:
     cd homebrew-tap && git push origin main && git push origin "vX.Y.Z" && cd ..
-    git add homebrew-tap && git commit -m "..." && git push origin develop
+    git add homebrew-tap && git commit -m "..." && git push <outer-remote> develop
 
   Phase 3 — outer commit landed locally, push failed:
-    git push origin develop    # retry; nothing else to undo
+    git push <outer-remote> develop    # retry; nothing else to undo
 
   In all cases: do NOT re-run kb-tap-release after a partial publish. The
   tag-collision preflight will block. Finish the publish by hand instead.
@@ -102,6 +113,22 @@ if [ -z "$LEVEL" ]; then
   echo "Error: bump level is required (patch, minor, or major)." >&2
   usage >&2
   exit 1
+fi
+
+# ─── outer-remote resolution ──────────────────────────────────────────────────
+# Default is the env override; otherwise prefer "origin", else "dev-team".
+# If neither remote exists we keep the literal "origin" so downstream commands
+# fail with their normal error (which is still clearer than a silent skip).
+
+OUTER_REMOTE="${KB_TAP_RELEASE_OUTER_REMOTE:-}"
+if [ -z "$OUTER_REMOTE" ]; then
+  if git remote get-url origin >/dev/null 2>&1; then
+    OUTER_REMOTE="origin"
+  elif git remote get-url dev-team >/dev/null 2>&1; then
+    OUTER_REMOTE="dev-team"
+  else
+    OUTER_REMOTE="origin"
+  fi
 fi
 
 # ─── helpers ─────────────────────────────────────────────────────────────────
@@ -304,23 +331,23 @@ else
   check_fail "Outer working tree has uncommitted changes. Commit or stash first."
 fi
 
-# 4. Outer up-to-date with origin/develop
-git fetch origin develop 2>/dev/null || true
+# 4. Outer up-to-date with <outer-remote>/develop
+git fetch "${OUTER_REMOTE}" develop 2>/dev/null || true
 LOCAL_SHA="$(git rev-parse develop 2>/dev/null || true)"
-REMOTE_SHA="$(git rev-parse origin/develop 2>/dev/null || true)"
+REMOTE_SHA="$(git rev-parse "${OUTER_REMOTE}/develop" 2>/dev/null || true)"
 if [ -z "$LOCAL_SHA" ] || [ -z "$REMOTE_SHA" ]; then
-  check_fail "Could not determine develop vs origin/develop SHAs. Check git remote."
+  check_fail "Could not determine develop vs ${OUTER_REMOTE}/develop SHAs. Check git remote."
 elif [ "$LOCAL_SHA" = "$REMOTE_SHA" ]; then
-  check_pass "Outer develop is up-to-date with origin/develop."
+  check_pass "Outer develop is up-to-date with ${OUTER_REMOTE}/develop."
 else
   # Determine direction
-  MERGE_BASE="$(git merge-base develop origin/develop 2>/dev/null || true)"
+  MERGE_BASE="$(git merge-base develop "${OUTER_REMOTE}/develop" 2>/dev/null || true)"
   if [ "$MERGE_BASE" = "$LOCAL_SHA" ]; then
-    check_fail "Outer develop is BEHIND origin/develop. Pull develop first."
+    check_fail "Outer develop is BEHIND ${OUTER_REMOTE}/develop. Pull develop first."
   elif [ "$MERGE_BASE" = "$REMOTE_SHA" ]; then
-    check_fail "Outer develop is AHEAD of origin/develop — push or rebase first."
+    check_fail "Outer develop is AHEAD of ${OUTER_REMOTE}/develop — push or rebase first."
   else
-    check_fail "Outer develop diverged from origin/develop — push or rebase first."
+    check_fail "Outer develop diverged from ${OUTER_REMOTE}/develop — push or rebase first."
   fi
 fi
 
@@ -497,7 +524,7 @@ if [ "$DRY_RUN" -eq 1 ]; then
   else
     echo "[DRY-RUN] Would push:    homebrew-tap  origin main + tag v${NEW_VERSION}"
     echo "[DRY-RUN] Would commit:  outer         \"chore: Bump homebrew-tap submodule to v${NEW_VERSION}\""
-    echo "[DRY-RUN] Would push:    outer         origin develop"
+    echo "[DRY-RUN] Would push:    outer         ${OUTER_REMOTE} develop"
   fi
   echo ""
   echo "Dry run complete. No changes made."
@@ -649,8 +676,8 @@ OUTER_COMMIT_SHA="$(git rev-parse HEAD)"
 echo "  Committed: ${OUTER_COMMIT_SHA} (chore: Bump homebrew-tap submodule to v${NEW_VERSION})"
 
 if [ "$NO_PUSH" -eq 0 ]; then
-  echo "  Pushing outer develop..."
-  git push origin develop
+  echo "  Pushing outer develop to ${OUTER_REMOTE}..."
+  git push "${OUTER_REMOTE}" develop
   echo "  Outer push complete."
 else
   echo "  (Skipping push — --no-push)"

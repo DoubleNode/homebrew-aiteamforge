@@ -7,6 +7,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0575 — `kb-tap-release` outer-remote configurability (mirror)
+
+Mirrors dev-team canonical fix into `share/scripts/kb-tap-release`. The previous
+release-cut script hardcoded `origin` as the outer-repo remote name across four
+sites (develop fetch, `origin/develop` rev-parse, merge-base direction check,
+final `git push origin develop`). The dev-team source-of-truth uses `dev-team`
+as its remote, so the preflight aborted with "Outer develop diverged from
+origin/develop" and a push would have died on the same. Adds (a) auto-detect —
+prefer `origin`, fall back to `dev-team`, default to `origin` if neither is
+configured so downstream commands fail with their normal error; (b) explicit
+`KB_TAP_RELEASE_OUTER_REMOTE` env override. Preflight messages, dry-run banner,
+and the partial-failure-recovery docs all use the resolved remote name. Tap
+inner remote (`origin`) is unaffected.
+
+- **`share/scripts/kb-tap-release`:** mirrored from canonical
+  `dev-team/scripts/kb-tap-release` via `sync-tap.sh`. Executable bit preserved.
+
 ### Feature: XACA-0574 — Wire `kb-tap-release` through the tap install pipeline (XACA-0570 follow-up)
 
 Ships the `kb-tap-release` one-shot release-cut script (introduced canonically in XACA-0570, PR #487) to brew-install consumers. Maintainers running from `~/dev-team` already had it; this lands the install hook + canonical→tap mirror so it arrives on every machine after `brew upgrade aiteamforge`.
