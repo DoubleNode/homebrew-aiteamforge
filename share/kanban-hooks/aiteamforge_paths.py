@@ -1033,6 +1033,12 @@ def compute_instance_port(template_id: str, existing_team_paths: dict) -> int:
 # XACA-0579: Import preflight path-map derivation
 # ---------------------------------------------------------------------------
 
+# Subdirectory name under $HOME on a tap-installed AITeamForge machine.
+_TAP_SUBDIR = "aiteamforge"
+# Subdirectory name under $HOME on a dev-team monorepo machine (the source of
+# truth for development; never installed alongside the tap — see CLAUDE.md).
+_DEV_SUBDIR = "dev-team"
+
 
 def build_import_path_maps(manifest: dict) -> list[str]:
     """Derive --path-map SRC=DST strings for the import-preflight verifier.
@@ -1091,11 +1097,6 @@ def build_import_path_maps(manifest: dict) -> list[str]:
             return []
 
         dst_home = str(Path.home()).rstrip("/")
-
-        # Constant: the subdirectory name under home on a tap-install machine.
-        _TAP_SUBDIR = "aiteamforge"
-        # Constant: the subdirectory name under home on a dev-team monorepo machine.
-        _DEV_SUBDIR = "dev-team"
 
         dst_aiteamforge_root = dst_home + "/" + _TAP_SUBDIR
         src_devteam_root = src_home + "/" + _DEV_SUBDIR

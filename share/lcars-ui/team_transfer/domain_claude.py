@@ -2,8 +2,14 @@
 
 - ~/.claude/projects/<project_dir>/memory/  (exact)
 - ~/.claude/projects/<project_dir>/*.jsonl  (present — drifts)
-- ~/.claude/projects/<project_dir>/<UUID>/  (present)
 - ~/<team_root>/.claude/agents/             (exact)
+
+UUID-named subdirs under <project_dir>/ are intentionally NOT inventoried —
+directory-typed manifest entries cannot round-trip through the file-based zip
+pipeline (see XACA-0579 and the inline comment in `inventory()` for the full
+explanation). The primary `<UUID>.jsonl` session transcripts at the glob line
+above carry the conversation history that matters for migration; subagent
+transcripts inside `<UUID>/subagents/` are ephemeral debug content.
 
 The project directory name is read from team_config['claude_project_dir_name'].
 If team_config is None, falls back to the explicit `claude_root` argument.
