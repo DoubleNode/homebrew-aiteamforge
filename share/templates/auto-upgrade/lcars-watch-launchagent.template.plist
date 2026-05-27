@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  LCARS WatchPaths LaunchAgent — XACA-0571
+  =========================================
+  Passive watcher that triggers "aiteamforge restart lcars" when the installed
+  lcars-ui directory changes. This fires automatically after brew upgrades
+  replace the lcars-ui content under the AITEAMFORGE_DIR working copy.
+
+  Watched path: {{LCARS_UI_DIR}}
+  This is the USER working-dir copy ($AITEAMFORGE_DIR/lcars-ui), NOT the
+  Homebrew Cellar path. Watching the Cellar/<version>/ path would break on
+  every version upgrade because launchd holds the WatchPaths descriptor and
+  the directory is replaced (not modified in-place). The installer copies
+  lcars-ui into $AITEAMFORGE_DIR and that copy is what we watch — it gets
+  refreshed in-place on every upgrade, which reliably triggers WatchPaths.
+
+  Note on WatchPaths and brew symlink retargeting:
+  When brew upgrades and calls `install_lcars_ui`, it copies new files into
+  $AITEAMFORGE_DIR/lcars-ui (in-place directory refresh). This DOES fire
+  WatchPaths because the directory's content (mtime/inode events) changes.
+  If brew were to atomically swap the watched directory itself (e.g. via
+  symlink retargeting at {{LCARS_UI_DIR}}), launchd WatchPaths would NOT
+  fire reliably on macOS — the kernel event is on the symlink target, not
+  the name. The copy-based install strategy avoids this class of gotcha.
+
+  ThrottleInterval = 30s: upgrade file operations arrive in a burst (dozens of
+  cp calls). We want exactly ONE restart per upgrade, not one per file copied.
+  30s is generous enough to let the full copy settle before restart fires.
+
+  NO KeepAlive  — this is a trigger, not a persistent daemon.
+  NO RunAtLoad  — that would restart LCARS on every login, defeating the point.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.lcars-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Use absolute path: launchd PATH is minimal and does not include
+             Homebrew bin by default. {{AITEAMFORGE_BIN}} is substituted by
+             the installer to the brew-prefix bin/aiteamforge path. -->
+        <string>{{AITEAMFORGE_BIN}}</string>
+        <string>restart</string>
+        <string>lcars</string>
+    </array>
+
+    <!--
+      WatchPaths: launchd fires when any file inside this directory tree is
+      created, modified, or deleted. The installer populates this with
+      $AITEAMFORGE_DIR/lcars-ui — the working copy that the upgrade refreshes.
+    -->
+    <key>WatchPaths</key>
+    <array>
+        <string>{{LCARS_UI_DIR}}</string>
+    </array>
+
+    <!--
+      ThrottleInterval: minimum seconds between successive job launches.
+      Brew upgrade generates many file events in quick succession; 30s
+      debounces the burst to a single restart once the copy finishes.
+    -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/lcars-watch.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/lcars-watch.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Include both Apple Silicon and Intel Homebrew prefixes so
+             aiteamforge binary is reachable regardless of architecture. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>{{HOME_DIR}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
+    </dict>
+</dict>
+</plist>

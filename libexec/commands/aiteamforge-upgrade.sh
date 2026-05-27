@@ -21,6 +21,7 @@ VERSION="$(_find_version)"
 # Options
 DRY_RUN=false
 FORCE=false
+NON_INTERACTIVE=false  # XACA-0571: auto-answer 'yes' to all prompts; for cron / auto-upgrade
 
 # Usage
 usage() {
@@ -33,6 +34,7 @@ Usage: aiteamforge upgrade [options]
 Options:
   --dry-run         Show what would be updated without making changes
   --force           Force upgrade even if up to date
+  --non-interactive Auto-answer 'yes' to all prompts (for cron / auto-upgrade)
   -v, --version     Show version
   -h, --help        Show this help
 
@@ -72,6 +74,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --force)
       FORCE=true
+      shift
+      ;;
+    --non-interactive|--yes|-y)
+      NON_INTERACTIVE=true
       shift
       ;;
     -v|--version)
@@ -140,7 +146,12 @@ check_brew_updates() {
     print_warning "Update available: ${available_version}"
 
     if [ "$DRY_RUN" = false ]; then
-      if prompt_yes_no "Upgrade Homebrew formula?" "y"; then
+      # XACA-0571: skip the brew step entirely under --non-interactive — the
+      # auto-upgrade LaunchAgent has already run `brew upgrade aiteamforge`
+      # before invoking this command; re-running it here would be redundant.
+      if [ "$NON_INTERACTIVE" = true ]; then
+        print_info "Skipping brew upgrade prompt (--non-interactive); caller already handled brew"
+      elif prompt_yes_no "Upgrade Homebrew formula?" "y"; then
         print_info "Upgrading via Homebrew..."
         brew upgrade aiteamforge
         print_success "Formula upgraded"
@@ -294,6 +305,7 @@ update_aux_scripts() {
     "kanban-restore-helper.sh|${WORKING_DIR}/kanban-restore-helper.sh"
     "kanban-backup.py|${WORKING_DIR}/kanban-backup.py"
     "kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh"
+    "auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh"
   )
 
   local entry name target source
@@ -452,7 +464,8 @@ update_skills() {
       print_warning "Expected: ${skills_source}"
 
       if [ "$DRY_RUN" = false ]; then
-        if prompt_yes_no "Fix symlink?" "y"; then
+        # XACA-0571: --non-interactive auto-accepts the symlink fix (default was 'y')
+        if [ "$NON_INTERACTIVE" = true ] || prompt_yes_no "Fix symlink?" "y"; then
           rm "$skills_target"
           ln -s "$skills_source" "$skills_target"
           print_success "Symlink fixed"
@@ -488,8 +501,9 @@ _cleanup_upgrade_tmpfiles() {
 
 # Render a LaunchAgent template to a tempfile.
 # Applies the full substitution map (USER_HOME, AITEAMFORGE_DIR,
-# BACKUP_INTERVAL, PYTHON3_PATH) so that every template gets every
-# substitution — harmless extras prevent sibling-drift bugs.
+# BACKUP_INTERVAL, PYTHON3_PATH, plus XACA-0571 auto-upgrade placeholders)
+# so that every template gets every substitution — harmless extras prevent
+# sibling-drift bugs.
 # Usage: _render_launchagent_template <template_path> <dest_path>
 # Returns: 0 on success, 1 if template not found.
 _render_launchagent_template() {
@@ -507,10 +521,19 @@ _render_launchagent_template() {
   # install and upgrade will silently re-pin the plist interpreter. See XACA-0510.
   python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
 
+  # XACA-0571: resolve aiteamforge binary for the LCARS watch plist.
+  local aiteamforge_bin
+  aiteamforge_bin="$(command -v aiteamforge 2>/dev/null || echo "/opt/homebrew/bin/aiteamforge")"
+
   sed -e "s|{{USER_HOME}}|$HOME|g" \
+      -e "s|{{HOME_DIR}}|$HOME|g" \
       -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
       -e "s|{{BACKUP_INTERVAL}}|${kanban_backup_interval}|g" \
       -e "s|{{PYTHON3_PATH}}|${python3_path}|g" \
+      -e "s|{{AUTO_UPGRADE_SCRIPT}}|${WORKING_DIR}/scripts/auto-upgrade.sh|g" \
+      -e "s|{{LOG_DIR}}|${WORKING_DIR}/logs|g" \
+      -e "s|{{LCARS_UI_DIR}}|${WORKING_DIR}/lcars-ui|g" \
+      -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
       "$template" > "$dest"
 }
 
@@ -518,11 +541,14 @@ _render_launchagent_template() {
 update_launchagents() {
   print_section "Updating LaunchAgents"
 
-  # Pairs of "plist-filename:template-basename" — order matters for logging.
-  # Templates live at ${FRAMEWORK_DIR}/share/templates/kanban/<basename>.
+  # Pairs of "plist-filename:template-subpath" — order matters for logging.
+  # Templates resolve to ${FRAMEWORK_DIR}/share/templates/<subpath>.
+  # (XACA-0571 widened this to allow subdirs other than kanban/.)
   local agents=(
-    "com.aiteamforge.kanban-backup.plist:backup-plist.template"
-    "com.aiteamforge.lcars-health.plist:lcars-health-plist.template"
+    "com.aiteamforge.kanban-backup.plist:kanban/backup-plist.template"
+    "com.aiteamforge.lcars-health.plist:kanban/lcars-health-plist.template"
+    "com.aiteamforge.auto-upgrade.plist:auto-upgrade/auto-upgrade-launchagent.template.plist"
+    "com.aiteamforge.lcars-watch.plist:auto-upgrade/lcars-watch-launchagent.template.plist"
   )
 
   # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
@@ -535,8 +561,8 @@ update_launchagents() {
 
   for entry in "${agents[@]}"; do
     local agent="${entry%%:*}"
-    local tmpl_basename="${entry##*:}"
-    local template="${FRAMEWORK_DIR}/share/templates/kanban/${tmpl_basename}"
+    local tmpl_subpath="${entry##*:}"
+    local template="${FRAMEWORK_DIR}/share/templates/${tmpl_subpath}"
     local target="${launchagents_dir}/${agent}"
     local tmpfile="${target}.new"
     _upgrade_tmpfiles+=("$tmpfile")

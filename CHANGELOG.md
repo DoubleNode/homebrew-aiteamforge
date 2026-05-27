@@ -7,6 +7,17 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Feature: XACA-0571 — Daily auto-upgrade LaunchAgent with version-pin and operator notifications
+
+- New `share/templates/auto-upgrade/auto-upgrade-launchagent.template.plist`: `com.aiteamforge.auto-upgrade` LaunchAgent runs `auto-upgrade.sh` daily at 03:15, `RunAtLoad: true`, `ThrottleInterval: 60`. Standard sed placeholders for script path, log dir, home, and AITEAMFORGE_DIR.
+- New `share/scripts/auto-upgrade.sh`: `brew update` + `brew upgrade aiteamforge` with 5 MB log rotation, version-pin sentinel (`~/.aiteamforge/version-pin`), and macOS operator notifications on success/failure. Quiet mode via `AITEAMFORGE_AUTO_UPGRADE_QUIET=1`. Silently skips `osascript` on headless machines.
+- `libexec/installers/install-kanban.sh`: added `install_auto_upgrade_launchagent` / `uninstall_auto_upgrade_launchagent`, wired into `install_kanban_system` / `uninstall_kanban_system`.
+- New `share/templates/auto-upgrade/lcars-watch-launchagent.template.plist`: `com.aiteamforge.lcars-watch` passive WatchPaths LaunchAgent. Monitors `$AITEAMFORGE_DIR/lcars-ui` and fires `aiteamforge restart lcars` once per upgrade burst (ThrottleInterval=30s). No KeepAlive, no RunAtLoad — trigger-only. Watches the user working-dir copy to avoid the launchd symlink-retargeting gotcha.
+- `libexec/installers/install-kanban.sh`: added `install_lcars_watch_launchagent` / `uninstall_lcars_watch_launchagent` as sibling to the auto-upgrade installer, wired into `install_kanban_system` / `uninstall_kanban_system`.
+- New operator documentation: dev-team `docs/auto-upgrade-runbook.md` (mirrored into tap during sync). Comprehensive runbook for M1Pro/M4Mini/other tap-installed consumers covering daily auto-upgrade setup, forcing upgrades, pausing, version pinning, log inspection, notification control, the upgrade chain, and troubleshooting common issues.
+- `libexec/commands/aiteamforge-upgrade.sh`: extended shared `_render_launchagent_template` with `{{AUTO_UPGRADE_SCRIPT}}`, `{{LOG_DIR}}`, `{{HOME_DIR}}`, `{{AITEAMFORGE_BIN}}`, `{{LCARS_UI_DIR}}` placeholders; added both new plists (auto-upgrade + lcars-watch) to `update_launchagents` agents array; added `auto-upgrade.sh` to `update_aux_scripts` script_map. Future template changes now refresh both installed plists + the script via `aiteamforge upgrade` (closes Thok forward-compat finding).
+- `libexec/commands/aiteamforge-upgrade.sh`: new `--non-interactive` / `--yes` / `-y` flag. Skips the redundant brew-upgrade prompt (caller already ran it) and auto-accepts the symlink-fix prompt. Used by `auto-upgrade.sh` to chain `aiteamforge upgrade --non-interactive` after `brew upgrade aiteamforge` succeeds — this is what actually refreshes `$AITEAMFORGE_DIR/lcars-ui` so the WatchPaths watcher fires and LCARS picks up the new assets.
+
 ### Feature: XACA-0572 — Ship Antonio font locally (lcars-ui mirror)
 
 Mirrors dev-team canonical changes into `homebrew-tap/share/`. LCARS UI now serves the

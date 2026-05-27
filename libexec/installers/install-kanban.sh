@@ -880,6 +880,73 @@ uninstall_lcars_health_launchagent() {
     fi
 }
 
+# Install LCARS WatchPaths LaunchAgent — triggers restart on lcars-ui changes (XACA-0571)
+#
+# Creates a passive launchd watcher on $AITEAMFORGE_DIR/lcars-ui. When the
+# upgrade process refreshes that directory, launchd fires "aiteamforge restart
+# lcars" exactly once (ThrottleInterval=30s debounces the burst of file events).
+#
+# This is intentionally NOT a persistent daemon (no KeepAlive, no RunAtLoad) —
+# it only acts when files actually change.
+install_lcars_watch_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/lcars-watch-launchagent.template.plist"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-watch.plist"
+    local lcars_ui_dir="$AITEAMFORGE_DIR/lcars-ui"
+
+    if [ ! -f "$plist_template" ]; then
+        warning "LCARS watch LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    if [ ! -d "$lcars_ui_dir" ]; then
+        info "LCARS UI not yet installed, skipping watch LaunchAgent (will install on next kanban install)"
+        return 0
+    fi
+
+    # Resolve the aiteamforge binary path from Homebrew prefix
+    local brew_prefix
+    if command -v brew &>/dev/null; then
+        brew_prefix="$(brew --prefix)"
+    else
+        brew_prefix="/opt/homebrew"
+    fi
+    local aiteamforge_bin="${brew_prefix}/bin/aiteamforge"
+
+    info "Installing LCARS watch LaunchAgent..."
+
+    mkdir -p "$HOME/Library/LaunchAgents"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
+
+    sed \
+        -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
+        -e "s|{{LCARS_UI_DIR}}|${lcars_ui_dir}|g" \
+        -e "s|{{LOG_DIR}}|${AITEAMFORGE_DIR}/logs|g" \
+        -e "s|{{HOME_DIR}}|${HOME}|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
+        "$plist_template" > "$plist_dest"
+
+    launchctl unload "$plist_dest" 2>/dev/null || true
+
+    if launchctl load "$plist_dest"; then
+        success "LCARS watch LaunchAgent installed — will auto-restart LCARS on upgrade"
+    else
+        warning "Failed to load LCARS watch LaunchAgent (may need manual activation)"
+        info "Load manually: launchctl load $plist_dest"
+    fi
+}
+
+# Uninstall LCARS WatchPaths LaunchAgent
+uninstall_lcars_watch_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-watch.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading LCARS watch LaunchAgent"
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed LCARS watch LaunchAgent"
+    fi
+}
+
 # Install CR Confluence Poller LaunchAgents — one per team (XACA-0350)
 #
 # Scans cr-drafted CRs every 10 min per team; detects appended CR-Proper links
@@ -1054,6 +1121,74 @@ test_lcars_server() {
     fi
 }
 
+# Install auto-upgrade LaunchAgent (XACA-0571)
+#
+# Installs a daily LaunchAgent that runs `brew upgrade aiteamforge` at 03:15
+# local time, with version-pin support and macOS operator notifications.
+#
+# Script installed to: $AITEAMFORGE_DIR/scripts/auto-upgrade.sh
+# Plist:               ~/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist
+# Log:                 $AITEAMFORGE_DIR/logs/auto-upgrade.log
+#
+# Version-pin:  echo "v0.12.3" > ~/.aiteamforge/version-pin
+# Quiet mode:   echo "AITEAMFORGE_AUTO_UPGRADE_QUIET=1" > ~/.aiteamforge/auto-upgrade.env
+install_auto_upgrade_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/auto-upgrade-launchagent.template.plist"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist"
+    local script_src="$INSTALL_ROOT/share/scripts/auto-upgrade.sh"
+    local script_dest="$AITEAMFORGE_DIR/scripts/auto-upgrade.sh"
+
+    # Copy the upgrade script into place
+    if [ ! -f "$script_src" ]; then
+        warning "auto-upgrade.sh not found at $script_src (skipping auto-upgrade LaunchAgent)"
+        return 0
+    fi
+
+    if [ ! -f "$plist_template" ]; then
+        warning "auto-upgrade LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    info "Installing auto-upgrade LaunchAgent..."
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    cp "$script_src" "$script_dest"
+    chmod +x "$script_dest"
+
+    sed \
+        -e "s|{{AUTO_UPGRADE_SCRIPT}}|$script_dest|g" \
+        -e "s|{{LOG_DIR}}|$AITEAMFORGE_DIR/logs|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        -e "s|{{HOME_DIR}}|$HOME|g" \
+        "$plist_template" > "$plist_dest"
+
+    launchctl unload "$plist_dest" 2>/dev/null || true
+
+    if launchctl load "$plist_dest"; then
+        success "Auto-upgrade LaunchAgent installed (daily at 03:15)"
+        info "Script:  $script_dest"
+        info "Log:     $AITEAMFORGE_DIR/logs/auto-upgrade.log"
+        info "Pin:     echo \"v0.12.3\" > $AITEAMFORGE_DIR/version-pin"
+    else
+        warning "Failed to load auto-upgrade LaunchAgent (may need manual activation)"
+    fi
+}
+
+# Uninstall auto-upgrade LaunchAgent
+uninstall_auto_upgrade_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading auto-upgrade LaunchAgent..."
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed auto-upgrade LaunchAgent"
+    fi
+}
+
 #──────────────────────────────────────────────────────────────────────────────
 # Main Installation Function
 #──────────────────────────────────────────────────────────────────────────────
@@ -1126,6 +1261,8 @@ install_kanban_system() {
     install_backup_launchagent
     install_lcars_health_launchagent
     install_cr_confluence_poller_launchagent
+    install_auto_upgrade_launchagent
+    install_lcars_watch_launchagent
 
     success "LCARS Kanban System installed successfully"
 
@@ -1159,6 +1296,8 @@ uninstall_kanban_system() {
     # Unload LaunchAgents
     uninstall_backup_launchagent
     uninstall_cr_confluence_poller_launchagent
+    uninstall_auto_upgrade_launchagent
+    uninstall_lcars_watch_launchagent
 
     # Remove installed files
     info "Removing kanban system files"
