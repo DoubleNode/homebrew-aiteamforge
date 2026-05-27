@@ -50,6 +50,7 @@ edit on each side.
 
 - `libexec/lib/kanban-paths.sh`: refactor `get_kanban_dir()` + add `get_template_id()`
 - `share/scripts/kanban-board-check.sh`: classify known-broken vs truly-unknown teams
+- `share/scripts/kb-init-team-guard.sh`: `_kb_board_is_present` resolves TEMPLATE→INSTANCE board filename — closes the parallel resolver gap surfaced by reviewer on PR #494 (startup scripts pass `"finance"` to `kb_ensure_team_initialized`, but the fast-path guard previously constructed `finance-board.json` raw without instance resolution and missed the canonical `finance-personal-board.json`, prompting the operator on every restart).
 - `tests/test-multi-team.sh`: 3 new regression cases
 
 ### Feature: XACA-0578 — Cellar-watch LaunchAgent + close XACA-0571 uninstall gap

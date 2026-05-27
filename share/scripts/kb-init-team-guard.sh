@@ -87,8 +87,24 @@ _kb_board_is_present() {
         return 1
     fi
 
-    # 2. Board JSON file must exist.
+    # 2. Board JSON file must exist. XACA-0576: profile-scoped teams have split
+    #    ids (TEMPLATE "finance" vs INSTANCE "finance-personal"). The startup
+    #    scripts now pass the TEMPLATE form (XACA-0576-005), but board files
+    #    on disk use the INSTANCE form. Build a candidate list covering input
+    #    + instance-equivalent so the fast-path doesn't false-alarm "missing
+    #    board" and prompt the operator on every startup. Case bodies MUST
+    #    stay in sync with _kb_template_to_instance (kanban-helpers.sh) and
+    #    get_board_id (homebrew-tap/libexec/lib/kanban-paths.sh).
+    local _board_instance="$team_id"
+    case "$team_id" in
+        finance)  _board_instance="finance-personal"  ;;
+        legal)    _board_instance="legal-coparenting" ;;
+        medical)  _board_instance="medical-general"   ;;
+    esac
     local board_file="${kanban_dir}/${team_id}-board.json"
+    if [[ ! -f "$board_file" ]] && [[ "$_board_instance" != "$team_id" ]]; then
+        board_file="${kanban_dir}/${_board_instance}-board.json"
+    fi
     if [[ ! -f "$board_file" ]]; then
         return 1
     fi
