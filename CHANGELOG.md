@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.6] - 2026-05-27
+
 ### Fix: XACA-0579 — team-transfer import preflight ghost UUID entries + path-map bridging
 
 - `share/lcars-ui/team_transfer/domain_claude.py`: drop the `iterdir() + is_dir()` block that emitted directory-typed manifest entries for UUID session subdirs. Directories cannot round-trip through the file-based zip pipeline (`zipfile.write(dir)` stores `relpath/` with trailing slash; import loop checks `relpath` without trailing slash → entries always skipped → verifier reports `FAIL: missing on destination` for every UUID dir). Primary session transcripts (`<UUID>.jsonl`) remain unaffected. Sibling-drift k501 datapoint: both croot enumeration paths now emit file-type entries only.
@@ -662,6 +664,7 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.5...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.6...HEAD
+[0.12.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.5...v0.12.6
 [0.12.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.4...v0.12.5
 [0.12.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.3...v0.12.4
