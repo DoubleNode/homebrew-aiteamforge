@@ -54,18 +54,40 @@ unset _KANBAN_PATHS_SCRIPT
 # ──────────────────────────────────────────────────────────────────────────────
 # Internal: resolve the kanban directory for a given team ID.
 # Thin wrapper around get_kanban_dir() from kanban-paths.sh.
-# Falls back to the academy directory with a warning for unknown teams so that
-# callers continue to get a usable path (matching previous behaviour).
+#
+# Behavior:
+#   - On success, prints the resolved directory.
+#   - On failure for a KNOWN profile-scoped team (finance/medical/legal in
+#     either template or instance form), prints an actionable error pointing
+#     at the broken .aiteamforge-config and returns non-zero. We DO NOT
+#     silently redirect a known team to the academy directory — that masks
+#     installer corruption and produces "unknown team finance-personal"
+#     warnings when the team is anything but unknown. (XACA-0576)
+#   - On failure for a truly-unrecognized team id, prints a warning and
+#     falls back to academy (legacy callers depend on a usable path here).
 # ──────────────────────────────────────────────────────────────────────────────
 _kbc_get_kanban_dir() {
     local team="$1"
     local dir
     if dir=$(get_kanban_dir "$team" 2>/dev/null); then
         echo "$dir"
-    else
-        print_warning "kanban-board-check: unknown team '${team}', defaulting to academy directory"
-        echo "${HOME}/aiteamforge/kanban"
+        return 0
     fi
+
+    # Resolution failed. Classify: known profile-scoped team (config
+    # corruption) vs truly-unknown team (caller bug).
+    case "$team" in
+        finance|finance-personal|legal|legal-coparenting|medical|medical-general)
+            print_error "kanban-board-check: team '${team}' is registered but its .aiteamforge-config entry is missing or unreadable."
+            print_error "  Re-run the installer to repair team_paths, or check ~/aiteamforge/.aiteamforge-config for the '${team}' entry."
+            return 1
+            ;;
+        *)
+            print_warning "kanban-board-check: unknown team '${team}', defaulting to academy directory"
+            echo "${HOME}/aiteamforge/kanban"
+            return 0
+            ;;
+    esac
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -373,8 +395,15 @@ validate_kanban_board() {
     team=$(get_board_id "$team")
 
     # ── Resolve paths ─────────────────────────────────────────────────────────
+    # XACA-0576: _kbc_get_kanban_dir now returns non-zero (with an actionable
+    # error already printed) for known profile-scoped teams whose config is
+    # corrupted. Honor that signal — don't fall through to the missing-board
+    # recovery prompt, which would just confuse the operator with a second,
+    # less specific error.
     local kanban_dir
-    kanban_dir=$(_kbc_get_kanban_dir "$team")
+    if ! kanban_dir=$(_kbc_get_kanban_dir "$team"); then
+        return 1
+    fi
 
     local board_file="${kanban_dir}/${team}-board.json"
 

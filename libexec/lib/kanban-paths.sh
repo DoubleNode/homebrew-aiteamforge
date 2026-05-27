@@ -70,19 +70,43 @@ get_kanban_dir() {
     #
     # The config file records team_paths with working_dir for each team.
     # Board files live at <working_dir>/kanban/ or <install_dir>/kanban/.
+    #
+    # XACA-0576: profile-scoped teams have split IDs (TEMPLATE 'finance' vs
+    # INSTANCE 'finance-personal'). The installer writes config under the
+    # TEMPLATE key, but XACA-0565 normalizes inputs to the INSTANCE key before
+    # any path lookup. Without a bidirectional candidate set, the config
+    # lookup misses and the wrapper falls back to academy with a misleading
+    # warning. Build a candidate list covering input + template-equivalent +
+    # instance-equivalent so the lookup succeeds regardless of which form the
+    # caller passes.
 
-    # 1. Try .aiteamforge-config (written by setup wizard)
     local config_file="${HOME}/aiteamforge/.aiteamforge-config"
-    if [ -f "$config_file" ] && command -v jq &>/dev/null; then
-        local working_dir
-        working_dir=$(jq -r ".team_paths.\"${team}\".working_dir // empty" "$config_file" 2>/dev/null)
-        if [ -n "$working_dir" ]; then
-            echo "${working_dir}/kanban"
-            return 0
-        fi
+
+    # 1. Build candidate list: input, template-equivalent, instance-equivalent.
+    local -a candidates=("$team")
+    local _tpl _inst
+    _tpl=$(get_template_id "$team")
+    if [ -n "$_tpl" ] && [ "$_tpl" != "$team" ]; then
+        candidates+=("$_tpl")
+    fi
+    _inst=$(get_board_id "$team")
+    if [ -n "$_inst" ] && [ "$_inst" != "$team" ]; then
+        candidates+=("$_inst")
     fi
 
-    # 2. Default: boards live under the install dir's kanban/ directory
+    # 2. Try each candidate against .aiteamforge-config
+    if [ -f "$config_file" ] && command -v jq &>/dev/null; then
+        local cand working_dir
+        for cand in "${candidates[@]}"; do
+            working_dir=$(jq -r ".team_paths.\"${cand}\".working_dir // empty" "$config_file" 2>/dev/null)
+            if [ -n "$working_dir" ]; then
+                echo "${working_dir}/kanban"
+                return 0
+            fi
+        done
+    fi
+
+    # 3. Default: boards live under the install dir's kanban/ directory
     local install_dir="${HOME}/aiteamforge"
     if [ -f "$config_file" ] && command -v jq &>/dev/null; then
         local cfg_dir
@@ -96,7 +120,7 @@ get_kanban_dir() {
         return 0
     fi
 
-    # 3. Nothing found — signal failure
+    # 4. Nothing found — signal failure
     return 1
 }
 
@@ -137,5 +161,31 @@ get_board_id() {
         legal)    echo "legal-coparenting" ;;
         medical)  echo "medical-general"   ;;
         *)        echo "$team"             ;;
+    esac
+}
+
+# ──────────────────────────────────────────────────────────────────────────────
+# get_template_id <team>
+#
+# REVERSE of get_board_id: maps an INSTANCE id back to its TEMPLATE key.
+# Returns the template id, or the input unchanged when no reverse mapping
+# applies (the common case for multi-user teams and non-profile-scoped ids).
+#
+# Cases MUST stay in lock-step with get_board_id above and with the bash
+# helper `_kb_instance_to_template` in dev-team/kanban-helpers.sh.
+#
+# XACA-0576: introduced so get_kanban_dir() can look up the
+# .aiteamforge-config under whichever key the installer wrote (template) AND
+# whichever form the caller passes (often the instance, post-XACA-0565
+# normalization). Without this, profile-scoped teams hit the silent "default
+# to academy" fallback in _kbc_get_kanban_dir.
+# ──────────────────────────────────────────────────────────────────────────────
+get_template_id() {
+    local team="$1"
+    case "$team" in
+        finance-personal)  echo "finance"  ;;
+        legal-coparenting) echo "legal"    ;;
+        medical-general)   echo "medical"  ;;
+        *)                 echo "$team"    ;;
     esac
 }

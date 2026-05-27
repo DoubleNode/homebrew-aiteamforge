@@ -769,5 +769,80 @@ for t in $expected_teams; do
 done
 test_pass
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0576: bidirectional template↔instance resolution for profile-scoped
+# teams. The installer keys config by TEMPLATE id ("finance"), but XACA-0565
+# normalizes inputs to the INSTANCE form ("finance-personal") before path
+# lookup. Without bidirectional resolution the lookup misses and the wrapper
+# falls back to a silent "default to academy" path.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "get_template_id reverses get_board_id for profile-scoped teams"
+# shellcheck source=/dev/null
+source "$KANBAN_PATHS_LIB"
+for pair in "finance:finance-personal" "legal:legal-coparenting" "medical:medical-general"; do
+  tpl="${pair%%:*}"
+  inst="${pair#*:}"
+  assert_equal "$(get_board_id "$tpl")" "$inst" "get_board_id($tpl) should yield $inst"
+  assert_equal "$(get_template_id "$inst")" "$tpl" "get_template_id($inst) should yield $tpl"
+  # Idempotency on already-resolved input
+  assert_equal "$(get_board_id "$inst")" "$inst" "get_board_id($inst) should be idempotent"
+  assert_equal "$(get_template_id "$tpl")" "$tpl" "get_template_id($tpl) should be idempotent"
+done
+test_pass
+
+test_start "get_template_id passes through non-profile-scoped ids unchanged"
+# shellcheck source=/dev/null
+source "$KANBAN_PATHS_LIB"
+for t in academy ios android firebase command dns freelance-bigbang-acme; do
+  assert_equal "$(get_template_id "$t")" "$t" "get_template_id($t) should pass through"
+  assert_equal "$(get_board_id "$t")" "$t" "get_board_id($t) should pass through"
+done
+test_pass
+
+test_start "get_kanban_dir resolves an instance id via the template config key"
+# Simulates the M1Pro v0.12.4 cascade: installer wrote config keyed by
+# "finance" (template), XACA-0565 normalizes input to "finance-personal"
+# (instance), so the resolver must try both candidates to find the entry.
+if command -v jq &>/dev/null; then
+  (
+    # Sandbox HOME so we don't touch the dev machine's real config
+    export HOME="$TEST_TMP_DIR/home"
+    mkdir -p "$HOME/aiteamforge"
+    cat > "$HOME/aiteamforge/.aiteamforge-config" <<EOF
+{
+  "version": "1.3.0",
+  "install_dir": "$HOME/aiteamforge",
+  "teams": ["finance"],
+  "team_paths": {
+    "finance": {"working_dir": "$TEST_TMP_DIR/finance-wd"}
+  },
+  "installed_features": ["lcars_kanban"]
+}
+EOF
+    mkdir -p "$TEST_TMP_DIR/finance-wd/kanban"
+
+    # shellcheck source=/dev/null
+    unset _KANBAN_PATHS_LOADED
+    source "$KANBAN_PATHS_LIB"
+
+    # Look up under the INSTANCE form — must hit the template entry via the
+    # XACA-0576 candidate fallback and return the finance working_dir, NOT
+    # the academy/install_dir default.
+    dir=$(get_kanban_dir "finance-personal")
+    assert_equal "$dir" "$TEST_TMP_DIR/finance-wd/kanban" \
+      "get_kanban_dir('finance-personal') must resolve via the 'finance' template key"
+
+    # Look up under the TEMPLATE form — must still hit (no regression for the
+    # already-working case).
+    dir=$(get_kanban_dir "finance")
+    assert_equal "$dir" "$TEST_TMP_DIR/finance-wd/kanban" \
+      "get_kanban_dir('finance') must resolve directly (no regression)"
+  )
+  test_pass
+else
+  print_warning "jq not available, skipping"
+  test_pass
+fi
+
 # Success!
 exit 0

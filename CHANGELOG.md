@@ -7,6 +7,51 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Bugfix: XACA-0576 — Bidirectional template↔instance resolution for profile-scoped teams
+
+Closes the cascade gap left by XACA-0460 + XACA-0463 + XACA-0565. v0.12.4 still
+warned `unknown team finance-personal, defaulting to academy directory` and
+prompted the operator to skip on a finance-installed machine, even though
+finance is a registered team. The same latent failure shape exists for
+`medical-general` and `legal-coparenting`.
+
+**Root cause:** `get_kanban_dir()` (kanban-paths.sh) reads `.aiteamforge-config`
+keyed by TEMPLATE id (`finance`), but XACA-0565's `validate_kanban_board()`
+normalizes inputs to INSTANCE id (`finance-personal`) via `get_board_id()` at
+line 373 BEFORE the config lookup. With only forward (template→instance)
+resolution, the lookup misses, falls through to a silent academy fallback, and
+emits the misleading "unknown team" warning.
+
+**Fix:**
+- New `get_template_id()` in `libexec/lib/kanban-paths.sh` — reverse of
+  `get_board_id()` (instance→template, idempotent on already-template input).
+- `get_kanban_dir()` now builds a candidate list (input + template-equivalent +
+  instance-equivalent) and tries each against `.aiteamforge-config` so resolution
+  succeeds regardless of which form the caller passes.
+- `_kbc_get_kanban_dir()` in `share/scripts/kanban-board-check.sh` no longer
+  silently redirects a KNOWN profile-scoped team (finance/medical/legal in
+  either form) to the academy directory; it prints an actionable error pointing
+  at the broken `.aiteamforge-config` entry and returns non-zero so callers
+  can stop the cascade instead of prompting the operator with a misleading
+  recovery menu. Truly-unknown ids retain the legacy academy fallback.
+- `validate_kanban_board()` honors the new non-zero return and bails out cleanly
+  for the known-broken case.
+
+**Tests:** three new cases in `tests/test-multi-team.sh` cover (1) bidirectional
+`get_board_id`↔`get_template_id` mapping and idempotency, (2) pass-through for
+non-profile-scoped ids (academy, ios, freelance-*, etc.), and (3) the full
+`get_kanban_dir('finance-personal')` cascade against a sandbox config keyed
+under the template form — the M1Pro v0.12.4 reproducer. Full suite: 41/41 pass.
+
+**Dual-mirror reminder:** the tap-side `get_board_id`/`get_template_id` map MUST
+stay in sync with `_kb_template_to_instance`/`_kb_instance_to_template` in
+dev-team's `kanban-helpers.sh`. Adding a new profile-scoped team = one canonical
+edit on each side.
+
+- `libexec/lib/kanban-paths.sh`: refactor `get_kanban_dir()` + add `get_template_id()`
+- `share/scripts/kanban-board-check.sh`: classify known-broken vs truly-unknown teams
+- `tests/test-multi-team.sh`: 3 new regression cases
+
 ### Feature: XACA-0578 — Cellar-watch LaunchAgent + close XACA-0571 uninstall gap
 
 - New `com.aiteamforge.cellar-watch` LaunchAgent fires `aiteamforge upgrade --non-interactive` on Homebrew Cellar mtime change. Closes the silent-drift gap where manual `brew upgrade aiteamforge` left the runtime working-dir copy at `$AITEAMFORGE_DIR/lcars-ui/` (and friends) stale — XACA-0571's `auto-upgrade.sh` handled this for the daily LaunchAgent path, but manual `brew upgrade` skipped the chain entirely.
