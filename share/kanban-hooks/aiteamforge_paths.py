@@ -1030,6 +1030,112 @@ def compute_instance_port(template_id: str, existing_team_paths: dict) -> int:
 
 
 # ---------------------------------------------------------------------------
+# XACA-0579: Import preflight path-map derivation
+# ---------------------------------------------------------------------------
+
+
+def build_import_path_maps(manifest: dict) -> list[str]:
+    """Derive --path-map SRC=DST strings for the import-preflight verifier.
+
+    The verifier runs on the *destination* machine against a manifest generated
+    on the *source* machine.  When the two machines have different directory
+    layouts (e.g. M3Pro dev-team monorepo vs M1Pro tap-install), absolute paths
+    in the manifest will not exist at their literal locations on the destination.
+    This function derives the minimal set of prefix mappings needed to bridge
+    the gap so the verifier can resolve source paths to destination equivalents.
+
+    Layout detection strategy
+    -------------------------
+    1.  Examine the destination's local working dirs (from aiteamforge_paths
+        config).  Any team whose working_dir falls under ``~/aiteamforge/``
+        is on a TAP-INSTALL machine.
+
+    2.  Examine the source home prefix from ``manifest["home"]``.  The source
+        machine is ALWAYS assumed to be a DEV-TEAM machine (monorepo layout) when
+        the destination is a tap install — this is the only migration scenario
+        that crosses layout boundaries in this codebase.  If both src and dst are
+        dev-team machines, their working_dirs share the same relative structure
+        under home; only a home-prefix rewrite is needed (handled by the verifier
+        natively when ``src_home != dst_home``), so no explicit --path-map is
+        required.
+
+    3.  For each unique ``(src_top_prefix, dst_top_prefix)`` pair discovered
+        across all teams, emit one ``"SRC=DST"`` string.  De-duplicated so we
+        don't emit the same mapping twice.
+
+    Concrete example (M3Pro → M1Pro, same username):
+        Destination config has:  working_dir = /Users/darrenehlers/aiteamforge/finance/personal
+        Manifest has:            home = /Users/darrenehlers
+        Inferred src working_dir: /Users/darrenehlers/dev-team/finance/personal
+        Emitted mapping:         /Users/darrenehlers/dev-team=/Users/darrenehlers/aiteamforge
+
+    Cross-user example (M3Pro → M1Pro, different username):
+        Destination config has:  working_dir = /Users/alice/aiteamforge/finance/personal
+        Manifest has:            home = /Users/developer
+        Emitted mapping:         /Users/developer/dev-team=/Users/alice/aiteamforge
+        (home-prefix rewrite handles the user part; tap-vs-devteam handled here)
+
+    Args:
+        manifest: The parsed manifest dict (from json.loads of manifest.json).
+                  Must contain at least ``home`` (str).
+
+    Returns:
+        List of ``"SRC=DST"`` strings to pass as ``--path-map`` arguments.
+        Empty list if no mapping is needed (same-layout machines or no config).
+
+    Never raises.
+    """
+    try:
+        src_home = manifest.get("home", "").rstrip("/")
+        if not src_home:
+            return []
+
+        dst_home = str(Path.home()).rstrip("/")
+
+        # Constant: the subdirectory name under home on a tap-install machine.
+        _TAP_SUBDIR = "aiteamforge"
+        # Constant: the subdirectory name under home on a dev-team monorepo machine.
+        _DEV_SUBDIR = "dev-team"
+
+        dst_aiteamforge_root = dst_home + "/" + _TAP_SUBDIR
+        src_devteam_root = src_home + "/" + _DEV_SUBDIR
+
+        config = load_config()
+        teams = config.get("teams", {})
+
+        # Check if any team on the destination lives under ~/aiteamforge/.
+        # A single such team is sufficient to establish that this machine is a
+        # tap install and needs the dev-team → aiteamforge prefix mapping.
+        tap_install_detected = False
+        for _team_id, entry in teams.items():
+            working_dir = entry.get("working_dir", "")
+            if not working_dir:
+                continue
+            dst_working = Path(working_dir).expanduser().as_posix()
+            if dst_working.startswith(dst_aiteamforge_root + "/") or dst_working == dst_aiteamforge_root:
+                tap_install_detected = True
+                break
+
+        if not tap_install_detected:
+            # Destination is a dev-team monorepo or unknown layout.
+            # The verifier's built-in home-prefix rewrite handles cross-user cases.
+            return []
+
+        # Destination is a tap install.  Emit one top-level mapping:
+        #   <src_home>/dev-team  →  <dst_home>/aiteamforge
+        # This covers all teams under aiteamforge/ and the shared infra under
+        # aiteamforge/lcars-ui/, aiteamforge/kanban/, etc.
+        return [f"{src_devteam_root}={dst_aiteamforge_root}"]
+
+    except Exception as exc:
+        print(
+            f"[aiteamforge-paths] build_import_path_maps: error deriving path maps: {exc}",
+            file=sys.stderr,
+        )
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Wizard hook (for subitem 002 — interactive setup wizard)
 # ---------------------------------------------------------------------------
 

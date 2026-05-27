@@ -55,22 +55,15 @@ def inventory(
         for p in croot.glob("*.jsonl"):
             if p.is_file() and not is_excluded(p):
                 _emit(manifest, p, _home, channels, PRESENT)
-        # UUID-named subdirs -> present (per-session state)
-        for d in croot.iterdir():
-            if d.is_dir() and d.name != "memory":
-                files_in = sum(1 for _ in walk_files(d))
-                fe = FileEntry(
-                    path=str(d),
-                    relpath=d.relative_to(_home).as_posix(),
-                    sha256=None,
-                    size=0,
-                    mtime=d.stat().st_mtime,
-                    cls=PRESENT,
-                    channel=channels.resolve(str(d)) if channels.resolve(str(d)) != UNTAGGED else USER_STATE,
-                    domain=DOMAIN,
-                    probe={"file_count": files_in, "kind": "session_subdir"},
-                )
-                manifest.add_file(DOMAIN, fe)
+        # UUID-named subdirs (subagent transcript containers) are intentionally
+        # NOT emitted as directory-typed entries.  Directories cannot round-trip
+        # through the file-based zip pipeline: zipfile.write(dir, relpath) stores
+        # relpath/ (trailing slash) but the import loop checks for relpath (no
+        # slash), so the entry is skipped and the directory is never created on
+        # the destination.  The primary session transcript (<UUID>.jsonl) is
+        # the artifact that matters for resume; subagent transcripts inside
+        # <UUID>/subagents/ are ephemeral debug content acceptable to omit.
+        # (XACA-0579 — sibling-drift fix; see XACA-0579-001_AUDIT.md)
 
     if froot.exists():
         for p in walk_files(froot):

@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0579 — team-transfer import preflight ghost UUID entries + path-map bridging
+
+- `share/lcars-ui/team_transfer/domain_claude.py`: drop the `iterdir() + is_dir()` block that emitted directory-typed manifest entries for UUID session subdirs. Directories cannot round-trip through the file-based zip pipeline (`zipfile.write(dir)` stores `relpath/` with trailing slash; import loop checks `relpath` without trailing slash → entries always skipped → verifier reports `FAIL: missing on destination` for every UUID dir). Primary session transcripts (`<UUID>.jsonl`) remain unaffected. Sibling-drift k501 datapoint: both croot enumeration paths now emit file-type entries only.
+- `share/lcars-ui/server.py`: pass `--path-map` derived from local `aiteamforge_paths` config to the import-preflight verifier. The verifier runs on the destination machine but the manifest was generated on the source (M3Pro dev-team layout). Without path-map, `~/dev-team/<team>/` source paths fail `Path.exists()` on a tap-install destination that has `~/aiteamforge/<team>/` instead. `build_import_path_maps()` in `kanban-hooks/aiteamforge_paths.py` detects the tap-install layout via the local working_dir config and emits `<src_home>/dev-team=<dst_home>/aiteamforge`. Returns `[]` for same-layout machines (dev-team → dev-team) to avoid redundant mappings.
+- `kanban-hooks/aiteamforge_paths.py`: new `build_import_path_maps(manifest_dict)` helper encapsulating the derivation logic.
+
 ### Bugfix: XACA-0576 — Bidirectional template↔instance resolution for profile-scoped teams
 
 Closes the cascade gap left by XACA-0460 + XACA-0463 + XACA-0565. v0.12.4 still

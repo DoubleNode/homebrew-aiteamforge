@@ -62,6 +62,7 @@ try:
         get_team_kanban_dir, get_team_lcars_port, list_teams,
         load_config as _aiteamforge_load_config,
         build_team_code_map as _aiteamforge_build_team_code_map,
+        build_import_path_maps as _aiteamforge_build_import_path_maps,
     )
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError as e:
@@ -69,6 +70,8 @@ except ImportError as e:
     print(f"[LCARS] Warning: aiteamforge_paths not available, using hardcoded dirs: {e}")
     def _aiteamforge_build_team_code_map():  # type: ignore[no-redef]
         return {}
+    def _aiteamforge_build_import_path_maps(_manifest: dict) -> list:  # type: ignore[no-redef]
+        return []
 
 # Import kanban activity logging from kanban-hooks
 try:
@@ -12834,9 +12837,28 @@ end tell
                 with zipfile.ZipFile(staged_path, 'r') as _zf:
                     preflight_manifest_path.write_bytes(_zf.read('manifest.json'))
 
+                # XACA-0579: Derive --path-map args so the verifier can resolve
+                # source-machine paths (e.g. ~/dev-team/<team>/ on M3Pro) to
+                # destination-machine paths (e.g. ~/aiteamforge/<team>/ on a
+                # tap-install M1Pro).  build_import_path_maps() reads local
+                # aiteamforge_paths config to detect the destination layout and
+                # the manifest's 'home' field to reconstruct the source prefix.
+                # Returns [] when no layout difference is detected (same-layout
+                # machines — the verifier's built-in home-prefix rewrite handles
+                # cross-user cases without explicit path maps).
+                _path_map_pairs = _aiteamforge_build_import_path_maps(manifest)
+                _path_map_args: list[str] = []
+                for _pair in _path_map_pairs:
+                    _path_map_args.extend(["--path-map", _pair])
+                if _path_map_pairs:
+                    print(
+                        f"[LCARS Import] preflight verifier path-maps: {_path_map_pairs}"
+                    )
+
                 ver_result = subprocess.run(
                     [sys.executable, "-m", "team_transfer.verifier",
-                     "--manifest", str(preflight_manifest_path), "--quiet"],
+                     "--manifest", str(preflight_manifest_path), "--quiet"]
+                    + _path_map_args,
                     cwd=str(lcars_ui_dir),
                     env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
                     capture_output=True, text=True, timeout=120,
