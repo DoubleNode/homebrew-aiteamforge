@@ -791,21 +791,22 @@ def test_synthetic_e2e_fault_present_class_removed(
     tmp_path,
     capsys,
 ):
-    """Verifier must FAIL when a PRESENT-class aiteamforge_product file is absent.
+    """Verifier must FAIL when a PRESENT-class file is absent.
 
     PRESENT-class only checks existence, not SHA — but absence is still a FAIL.
-    session.jsonl (user_state channel, PRESENT) and aiteamforge_product files both
-    follow this path.  We test with quark.md (aiteamforge_product) because its
-    cls=present invariant is explicitly enforced by the verifier's class guard.
+    We test with session.jsonl (user_state channel, PRESENT). Note: aiteamforge_product
+    files are also PRESENT-class but are SKIPPED entirely (XACA-0581 — installer-owned,
+    not part of the transfer payload), so they can no longer exercise this fault; a
+    non-skipped PRESENT channel (user_state) is required here.
     """
     src, dst, manifest_path, argv = _golden_flow_up_to_move(
         synthetic_source, synthetic_destination, synthetic_team_config,
         synthetic_repo, tmp_path,
     )
 
-    quark_md = dst / "dev-team" / "finance" / "personas" / "agents" / "quark.md"
-    assert quark_md.exists(), "test setup: quark.md must exist after move"
-    quark_md.unlink()
+    session_log = dst / ".claude" / "projects" / "-Users-synth-finance-personal" / "session.jsonl"
+    assert session_log.exists(), "test setup: session.jsonl must exist after move"
+    session_log.unlink()
 
     from team_transfer.verifier import main as verifier_main
     rc = verifier_main(argv)
@@ -813,8 +814,8 @@ def test_synthetic_e2e_fault_present_class_removed(
 
     assert rc != 0, f"Expected FAIL when PRESENT-class file removed; got rc={rc}.\n{out}"
     assert "FAIL" in out
-    assert "missing" in out.lower() or "aiteamforge_product" in out or "quark.md" in out, (
-        f"Expected 'missing' or aiteamforge_product signal; got:\n{out}"
+    assert "missing" in out.lower() or "user_state" in out or "session.jsonl" in out, (
+        f"Expected 'missing' or user_state signal; got:\n{out}"
     )
 
 

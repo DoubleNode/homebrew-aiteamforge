@@ -600,8 +600,26 @@ class TestPathMap:
             )
 
 
-def test_invariant_aiteamforge_product_rejects_exact(tmp_path):
-    """aiteamforge_product entries with cls=exact must fail the invariant check."""
+def test_aiteamforge_product_entries_skipped_when_missing(tmp_path):
+    """XACA-0581: aiteamforge_product is installer-owned and SKIPPED by the
+    preflight — a missing file must not FAIL (it would be a false negative on a
+    tap install, where these files live at a different subdirectory layout)."""
+    p = tmp_path / "agent.sh"
+    p.write_bytes(b"#!/bin/sh\n")
+    m = _make_manifest_with_entry(p, channels.AITEAMFORGE_PRODUCT, PRESENT)
+    mp = tmp_path / "manifest.json"
+    mp.write_text(m.to_json())
+    p.unlink()  # would normally FAIL, but aiteamforge_product is skipped
+    rc, out = _run_verifier(mp)
+    assert rc == 0, f"aiteamforge_product missing file must be skipped, not fail; got: {out}"
+    assert "skipped:   1" in out
+    assert "channel-class invariant violated" not in out
+
+
+def test_aiteamforge_product_skipped_regardless_of_cls(tmp_path):
+    """XACA-0581: because the channel is skipped before _check_one, the former
+    cls invariant for aiteamforge_product is no longer enforced — an exact-class
+    entry no longer raises a channel-class violation (it is simply skipped)."""
     p = tmp_path / "agent.sh"
     p.write_bytes(b"#!/bin/sh\n")
     m = _make_manifest_with_entry(p, channels.AITEAMFORGE_PRODUCT, EXACT,
@@ -609,21 +627,9 @@ def test_invariant_aiteamforge_product_rejects_exact(tmp_path):
     mp = tmp_path / "manifest.json"
     mp.write_text(m.to_json())
     rc, out = _run_verifier(mp)
-    assert rc == 1
-    assert "channel-class invariant violated" in out
-    assert "aiteamforge_product" in out
-
-
-def test_invariant_aiteamforge_product_passes_present(tmp_path):
-    """aiteamforge_product entries with cls=present must pass the invariant check."""
-    p = tmp_path / "agent.sh"
-    p.write_bytes(b"#!/bin/sh\n")
-    m = _make_manifest_with_entry(p, channels.AITEAMFORGE_PRODUCT, PRESENT)
-    mp = tmp_path / "manifest.json"
-    mp.write_text(m.to_json())
-    rc, out = _run_verifier(mp)
-    assert rc == 0
+    assert rc == 0, f"skipped channel must not fail on cls; got: {out}"
     assert "channel-class invariant violated" not in out
+    assert "skipped:   1" in out
 
 
 def test_invariant_export_database_rejects_present(tmp_path):

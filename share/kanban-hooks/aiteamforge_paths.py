@@ -1157,6 +1157,15 @@ def build_import_path_maps(manifest: dict) -> list[str]:
             src_wd = (src_entry or {}).get("working_dir", "").rstrip("/")
             if not src_wd:
                 continue
+            # XACA-0581: teams whose source working_dir IS the dev-team root
+            # (e.g. academy, freelance) are already covered by shared_infra_map.
+            # Emitting a per-team map keyed on the same src prefix collides with
+            # it — identical prefix length means the verifier's longest-first sort
+            # falls back to stable insertion order, and the per-team map would
+            # mis-route dev-team paths into a team subdir (e.g. ~/academy) instead
+            # of ~/aiteamforge. Skip them; shared-infra is the correct mapping.
+            if src_wd == src_devteam_root:
+                continue
             dst_entry = local_teams.get(slug) or {}
             dst_wd_raw = (dst_entry or {}).get("working_dir", "")
             if not dst_wd_raw:

@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0581: import-preflight follow-up to XACA-0580. (1) `kanban-hooks/aiteamforge_paths.py` `build_import_path_maps()`: skip the per-team map when `src_wd == dev-team root` — academy/freelance both report `working_dir == ~/dev-team` and were emitting maps that collide with the shared-infra `~/dev-team`→`~/aiteamforge` map (equal prefix length → stable-sort tiebreak; the academy map was dead-by-luck and actively wrong). (2) `share/lcars-ui/team_transfer/verifier.py`: SKIP the `aiteamforge_product` channel (installer-owned files the tap lays down with its own subdir layout, not carried by the transfer; a flat prefix path-map cannot bridge the reshape, so FAILing on them is a false negative). Removed the now-unreachable `aiteamforge_product` channel-class invariant. Verified live on M1Pro: 73→47 FAILs (all 26 in-scope false negatives eliminated). Regression tests mirrored under `share/lcars-ui/tests/team_transfer/`.
+
 ## [0.12.7] - 2026-05-28
 
 - XACA-0580: per-team path-map derivation + broadened tap-install detection in `build_import_path_maps()`; `Manifest` dataclass gains `teams` field for per-team working_dir snapshot.

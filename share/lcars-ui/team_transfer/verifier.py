@@ -42,6 +42,19 @@ Canonical layouts — path translation across machine types:
   the source and destination homes differ, the verifier falls back to simple home-prefix
   rewriting (src_home → dst_home). This handles the common case where the username changes
   but the relative directory structure is preserved.
+
+Skipped channels (XACA-0581):
+
+  The aiteamforge_product channel (installer-owned files: personas, terminal logos,
+  zshrc profiles, team logos) is SKIPPED, not checked. On a tap install the destination
+  lays these files down with its own directory layout — personas at
+  ~/aiteamforge/<team>/personas/agents/*.md, the team logo at
+  ~/aiteamforge/<team>/personas/avatars/<logo>.png — which differs structurally from the
+  source (~/<team>/.claude/agents/* flattened, ~/dev-team/<team>/<logo>.png). They are not
+  part of the migration transfer payload, so a flat prefix path-map cannot bridge the
+  subdirectory reshape; FAILing on them is a false negative. Persona copies additionally
+  carry a .synced-from-master marker (regenerated on the destination by kb-sync-personas).
+  See _SKIP_CHANNELS below.
 """
 from __future__ import annotations
 
@@ -52,7 +65,7 @@ from collections import defaultdict
 from pathlib import Path
 
 # stdlib-only imports above; the package modules below are also stdlib-only.
-from .channels import ALL_CHANNELS, ICLOUD_EXCLUDED
+from .channels import AITEAMFORGE_PRODUCT, ALL_CHANNELS, ICLOUD_EXCLUDED
 from .checksum import sha256_file
 from .db_integrity import compare_probes, probe_db
 from .manifest import EXACT, Manifest, PRESENT, SCHEMA
@@ -60,12 +73,28 @@ from .manifest import EXACT, Manifest, PRESENT, SCHEMA
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 
+# Channels skipped entirely by the import preflight (counted as "skipped", never
+# PASS/WARN/FAIL).
+#   - icloud_excluded: not part of the transfer payload by design.
+#   - aiteamforge_product (XACA-0581): installer-owned files. The tap install lays
+#     these down on the destination with its OWN directory layout (e.g.
+#     ~/aiteamforge/<team>/personas/agents/*.md, personas/avatars/<logo>.png), which
+#     differs structurally from the source layout (~/<team>/.claude/agents/* flattened,
+#     ~/dev-team/<team>/<logo>.png). They are NOT carried by the migration transfer, so
+#     a flat prefix path-map cannot resolve them and FAILing on them is a false negative.
+#     Persona copies additionally carry a .synced-from-master marker — regenerated on the
+#     destination by kb-sync-personas. Their integrity is the installer's responsibility,
+#     not the migration verifier's.
+_SKIP_CHANNELS = frozenset({ICLOUD_EXCLUDED, AITEAMFORGE_PRODUCT})
+
 # Per-channel cls invariants (ADR §3.2).
 # Keys are channel names; values are the *allowed* cls values for entries in that channel.
 # Channels absent from this dict have no enforced constraint (git, secrets_export,
 # icloud_excluded vary by per-entry logic and carry no blanket restriction).
 _CHANNEL_CLASS_INVARIANTS: dict[str, frozenset[str]] = {
-    "aiteamforge_product": frozenset({"present"}),
+    # NOTE: aiteamforge_product has no entry here on purpose (XACA-0581). The channel
+    # is now skipped entirely (see _SKIP_CHANNELS) before _check_one runs, so any
+    # invariant listed here would be dead code. Do not re-add it.
     # user_state is intentionally mixed: EXACT for authored memory/knowledge,
     # PRESENT for ephemeral session logs.
     "user_state": frozenset({"exact", "present"}),
@@ -148,8 +177,9 @@ def main(argv: list[str] | None = None) -> int:
 
     for dname, dblock in manifest.domains.items():
         for fe in dblock.files:
-            # iCloud-excluded entries: silently skip.
-            if fe.channel == ICLOUD_EXCLUDED:
+            # Skipped channels (icloud_excluded, aiteamforge_product): not part of
+            # the migration transfer payload — counted as skipped, never checked.
+            if fe.channel in _SKIP_CHANNELS:
                 by_channel[fe.channel]["skipped"] += 1
                 by_domain[dname]["skipped"] += 1
                 continue

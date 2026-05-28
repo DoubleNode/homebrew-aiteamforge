@@ -542,3 +542,64 @@ def test_exception_safety():
     assert result == [], (
         f"Exception in load_config() must produce []; got: {result}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Test 11 — XACA-0581: dev-team-root teams must not emit a colliding per-team map
+# ---------------------------------------------------------------------------
+
+def test_dev_team_root_teams_skip_per_team_mapping():
+    """Teams whose source working_dir IS the dev-team root (academy, freelance)
+    must NOT emit a per-team map. Such a map would be keyed on the same
+    ``<src_home>/dev-team`` prefix as shared_infra_map; with an identical prefix
+    length the verifier's longest-first sort falls back to stable insertion order,
+    and the per-team map (e.g. dev-team -> ~/academy) would shadow / mis-route the
+    correct shared-infra map (dev-team -> ~/aiteamforge).
+
+    Reproduces the M1Pro field collision: academy AND freelance both report
+    working_dir == ~/dev-team in the manifest teams snapshot.
+    """
+    src_home = "/Users/src"
+    dst_home = "/Users/dst"
+
+    manifest = {
+        "home": src_home,
+        "teams": {
+            "academy": {"working_dir": f"{src_home}/dev-team"},
+            "freelance": {"working_dir": f"{src_home}/dev-team"},
+            # A normal scope-suffix team to prove non-colliding teams still map.
+            "finance": {"working_dir": f"{src_home}/finance"},
+        },
+    }
+
+    mock_config = {
+        "teams": {
+            "academy": {"working_dir": f"{dst_home}/academy"},
+            "freelance": {"working_dir": f"{dst_home}/freelance"},
+            "finance": {"working_dir": f"{dst_home}/finance/personal"},
+        }
+    }
+
+    is_dir_se, exists_se = _make_tap_path_mock(dst_home, is_dir=True, sentinel_exists=False)
+
+    with patch.object(_ap, "load_config", return_value=mock_config), \
+         patch("aiteamforge_paths.Path.home", return_value=Path(dst_home)), \
+         patch("pathlib.Path.is_dir", is_dir_se), \
+         patch("pathlib.Path.exists", exists_se):
+
+        result = build_import_path_maps(manifest)
+
+    shared_infra = f"{src_home}/dev-team={dst_home}/aiteamforge"
+    finance_map = f"{src_home}/finance={dst_home}/finance/personal"
+
+    # Exactly one mapping is keyed on the bare dev-team root — the shared-infra map.
+    devteam_keyed = [m for m in result if m.split("=", 1)[0] == f"{src_home}/dev-team"]
+    assert devteam_keyed == [shared_infra], (
+        "Only the shared-infra map may be keyed on the dev-team root; "
+        f"academy/freelance must be skipped. got dev-team-keyed: {devteam_keyed}"
+    )
+    # The colliding team destinations must never appear.
+    assert not any(f"{dst_home}/academy" in m for m in result), f"academy collision present: {result}"
+    assert not any(f"{dst_home}/freelance" in m for m in result), f"freelance collision present: {result}"
+    # Non-colliding scope-suffix team still maps normally.
+    assert finance_map in result, f"finance per-team map missing: {result}"
