@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.8] - 2026-05-28
+
 - XACA-0583: import-preflight trustworthiness (XACA-0581 follow-up). `share/lcars-ui/team_transfer/verifier.py` gains a `--phase {pre-import,post-restore}` flag (default `post-restore` = legacy behavior) and two informational dispositions for absent files: `PENDING-IMPORT` (carried payload absent during a pre-import audit — the import will create it, so it is not a FAIL) and `EXPECTED-MISSING` (machine-local/ephemeral state — Claude session transcripts under `.claude/projects/*.jsonl` — that can never round-trip cross-machine). Neither sets the exit code. The upload-time import-preflight in `share/lcars-ui/server.py` GATES the apply (`FAIL>0` → `baseMatch=False` → HTTP 400); it now runs `--phase pre-import` so legitimately-absent carried payload reports PENDING-IMPORT and the apply proceeds (a genuine mismatch still FAILs and blocks). All three verifier call-sites are phase-tagged (import-preflight = pre-import, post-restore import = post-restore, source-side export preflight = post-restore). Both destination call-sites surface `pendingImport`/`expectedMissing` counts. The 47 field FAILs decompose to ~19 expected-missing + ~17 pending-import + ~9 stale-manifest drift. Regression tests mirrored under `share/lcars-ui/tests/team_transfer/`.
 - XACA-0581: import-preflight follow-up to XACA-0580. (1) `kanban-hooks/aiteamforge_paths.py` `build_import_path_maps()`: skip the per-team map when `src_wd == dev-team root` — academy/freelance both report `working_dir == ~/dev-team` and were emitting maps that collide with the shared-infra `~/dev-team`→`~/aiteamforge` map (equal prefix length → stable-sort tiebreak; the academy map was dead-by-luck and actively wrong). (2) `share/lcars-ui/team_transfer/verifier.py`: SKIP the `aiteamforge_product` channel (installer-owned files the tap lays down with its own subdir layout, not carried by the transfer; a flat prefix path-map cannot bridge the reshape, so FAILing on them is a false negative). Removed the now-unreachable `aiteamforge_product` channel-class invariant. Verified live on M1Pro: 73→47 FAILs (all 26 in-scope false negatives eliminated). Regression tests mirrored under `share/lcars-ui/tests/team_transfer/`.
 
@@ -671,7 +673,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.7...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.8...HEAD
+[0.12.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.7...v0.12.8
 [0.12.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.6...v0.12.7
 [0.12.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.5...v0.12.6
 [0.12.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.4...v0.12.5
