@@ -53,6 +53,11 @@ class Manifest:
     channel_stats: dict[str, dict[str, int]] = field(default_factory=dict)
     untagged_gaps: list[str] = field(default_factory=list)
     domains: dict[str, DomainBlock] = field(default_factory=dict)
+    teams: dict[str, dict[str, str]] = field(default_factory=dict)
+    # Per-team source layout snapshot: { team_id: {"working_dir": "/abs/path"} }
+    # Consumed by the destination's build_import_path_maps() to derive per-team
+    # src_wd→dst_wd mappings that handle scope-suffix layout differences
+    # (e.g. source ~/finance vs destination ~/finance/personal).
 
     def to_json(self) -> str:
         return json.dumps(_to_jsonable(self), indent=2, sort_keys=True)
@@ -69,6 +74,7 @@ class Manifest:
             channels=raw.get("channels", []),
             channel_stats=raw.get("channel_stats", {}),
             untagged_gaps=raw.get("untagged_gaps", []),
+            teams=raw.get("teams", {}),
         )
         for dname, dblock in raw.get("domains", {}).items():
             files = [
@@ -129,6 +135,23 @@ def _to_jsonable(obj: Any) -> Any:
 def new_manifest() -> Manifest:
     """Create a manifest pre-populated with source metadata."""
     from .channels import ALL_CHANNELS
+    teams_snapshot: dict[str, dict[str, str]] = {}
+    try:
+        # Import is local + best-effort: manifest must still succeed if
+        # aiteamforge_paths is unavailable (tests, partial installs).
+        import sys as _sys
+        from pathlib import Path as _P
+        _hooks = _P(__file__).resolve().parent.parent.parent / "kanban-hooks"
+        if str(_hooks) not in _sys.path:
+            _sys.path.insert(0, str(_hooks))
+        from aiteamforge_paths import load_config as _load_config
+        cfg = _load_config()
+        for slug, entry in (cfg.get("teams") or {}).items():
+            wd = (entry or {}).get("working_dir", "")
+            if wd:
+                teams_snapshot[slug] = {"working_dir": str(_P(wd).expanduser())}
+    except Exception:
+        pass
     return Manifest(
         schema_version=SCHEMA_VERSION,
         generated_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -136,4 +159,5 @@ def new_manifest() -> Manifest:
         source_user=os.environ.get("USER", ""),
         home=str(Path.home()),
         channels=list(ALL_CHANNELS),
+        teams=teams_snapshot,
     )

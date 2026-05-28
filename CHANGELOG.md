@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0580: per-team path-map derivation + broadened tap-install detection in `build_import_path_maps()`; `Manifest` dataclass gains `teams` field for per-team working_dir snapshot.
+
 ## [0.12.6] - 2026-05-27
 
 ### Fix: XACA-0579 — team-transfer import preflight ghost UUID entries + path-map bridging

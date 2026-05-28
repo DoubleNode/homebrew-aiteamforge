@@ -1052,9 +1052,15 @@ def build_import_path_maps(manifest: dict) -> list[str]:
 
     Layout detection strategy
     -------------------------
-    1.  Examine the destination's local working dirs (from aiteamforge_paths
-        config).  Any team whose working_dir falls under ``~/aiteamforge/``
-        is on a TAP-INSTALL machine.
+    1.  Check whether the destination machine has the tap install root
+        (``~/aiteamforge/``) present on disk or holds a ``.installed-version``
+        sentinel inside it.  This is the canonical tap-install indicator and
+        does NOT require any team working_dir to live under ``~/aiteamforge/``
+        — many real machines route teams to canonical home paths (e.g.
+        ``~/finance/personal``, ``~/academy``) while still being tap-installs.
+        The previous approach (XACA-0579) walked team working_dirs looking for
+        an ``~/aiteamforge/`` prefix — this failed for every M1Pro layout
+        where teams live at their canonical home paths.
 
     2.  Examine the source home prefix from ``manifest["home"]``.  The source
         machine is ALWAYS assumed to be a DEV-TEAM machine (monorepo layout) when
@@ -1065,20 +1071,30 @@ def build_import_path_maps(manifest: dict) -> list[str]:
         natively when ``src_home != dst_home``), so no explicit --path-map is
         required.
 
-    3.  For each unique ``(src_top_prefix, dst_top_prefix)`` pair discovered
-        across all teams, emit one ``"SRC=DST"`` string.  De-duplicated so we
-        don't emit the same mapping twice.
+    3.  Emit two classes of mappings:
 
-    Concrete example (M3Pro → M1Pro, same username):
-        Destination config has:  working_dir = /Users/darrenehlers/aiteamforge/finance/personal
-        Manifest has:            home = /Users/darrenehlers
-        Inferred src working_dir: /Users/darrenehlers/dev-team/finance/personal
-        Emitted mapping:         /Users/darrenehlers/dev-team=/Users/darrenehlers/aiteamforge
+        a.  Shared-infra mapping: ``<src_home>/dev-team → <dst_home>/aiteamforge``.
+            Covers lcars-ui/, kanban-hooks/, scripts/, etc.
+
+        b.  Per-team mappings derived from ``manifest["teams"]`` (source layout
+            snapshot) and local config (destination layout).  For each team where
+            ``src_wd != dst_wd``, emit ``"src_wd=dst_wd"``.  Handles scope-suffix
+            drift (e.g. source ``~/finance`` vs destination ``~/finance/personal``).
+
+        All mappings are de-duplicated and sorted longest-src-prefix first so
+        the verifier's first-match-wins logic picks the most specific mapping.
+
+    Concrete example (M3Pro → M1Pro, scope-suffix drift):
+        Manifest["teams"]["finance"]["working_dir"]: /Users/darrenehlers/finance
+        Destination config:  working_dir = /Users/darrenehlers/finance/personal
+        Emitted mappings:
+            /Users/darrenehlers/finance=/Users/darrenehlers/finance/personal  (per-team)
+            /Users/darrenehlers/dev-team=/Users/darrenehlers/aiteamforge      (shared-infra)
 
     Cross-user example (M3Pro → M1Pro, different username):
-        Destination config has:  working_dir = /Users/alice/aiteamforge/finance/personal
-        Manifest has:            home = /Users/developer
-        Emitted mapping:         /Users/developer/dev-team=/Users/alice/aiteamforge
+        Destination has:  ~/aiteamforge/.installed-version  (tap indicator)
+        Manifest has:     home = /Users/developer
+        Emitted mapping:  /Users/developer/dev-team=/Users/alice/aiteamforge
         (home-prefix rewrite handles the user part; tap-vs-devteam handled here)
 
     Args:
@@ -1102,31 +1118,58 @@ def build_import_path_maps(manifest: dict) -> list[str]:
         src_devteam_root = src_home + "/" + _DEV_SUBDIR
 
         config = load_config()
-        teams = config.get("teams", {})
 
-        # Check if any team on the destination lives under ~/aiteamforge/.
-        # A single such team is sufficient to establish that this machine is a
-        # tap install and needs the dev-team → aiteamforge prefix mapping.
-        tap_install_detected = False
-        for _team_id, entry in teams.items():
-            working_dir = entry.get("working_dir", "")
-            if not working_dir:
-                continue
-            dst_working = Path(working_dir).expanduser().as_posix()
-            if dst_working.startswith(dst_aiteamforge_root + "/") or dst_working == dst_aiteamforge_root:
-                tap_install_detected = True
-                break
+        # Tap-install detection: check for the canonical tap install root, which
+        # exists IFF this machine has the homebrew tap installed.  Team working_dirs
+        # are NOT required to live under ~/aiteamforge/ — many real machines route
+        # teams to canonical home paths (e.g. ~/finance/personal, ~/academy) while
+        # still being tap-installs.  Heuristic-on-team-paths was the XACA-0579 bug.
+        dst_aiteamforge_dir = Path(dst_aiteamforge_root)
+        tap_install_detected = (
+            dst_aiteamforge_dir.is_dir()
+            or (dst_aiteamforge_dir / ".installed-version").exists()
+        )
 
         if not tap_install_detected:
             # Destination is a dev-team monorepo or unknown layout.
             # The verifier's built-in home-prefix rewrite handles cross-user cases.
             return []
 
-        # Destination is a tap install.  Emit one top-level mapping:
-        #   <src_home>/dev-team  →  <dst_home>/aiteamforge
-        # This covers all teams under aiteamforge/ and the shared infra under
-        # aiteamforge/lcars-ui/, aiteamforge/kanban/, etc.
-        return [f"{src_devteam_root}={dst_aiteamforge_root}"]
+        # Destination is a tap install.  Build path mappings:
+        #   1. Shared-infra: <src_home>/dev-team → <dst_home>/aiteamforge
+        #      Covers lcars-ui/, kanban-hooks/, scripts/, etc.
+        #   2. Per-team: src_wd → dst_wd for teams where layout differs between
+        #      source (manifest snapshot) and destination (local config).
+        #      Handles scope-suffix drift (e.g. ~/finance vs ~/finance/personal).
+        shared_infra_map = f"{src_devteam_root}={dst_aiteamforge_root}"
+
+        mappings: list[str] = [shared_infra_map]
+
+        # Per-team mappings from manifest teams snapshot vs local config.
+        manifest_teams: dict = manifest.get("teams") or {}
+        local_teams: dict = config.get("teams") or {}
+        seen: set[str] = {shared_infra_map}
+
+        for slug, src_entry in manifest_teams.items():
+            src_wd = (src_entry or {}).get("working_dir", "").rstrip("/")
+            if not src_wd:
+                continue
+            dst_entry = local_teams.get(slug) or {}
+            dst_wd_raw = (dst_entry or {}).get("working_dir", "")
+            if not dst_wd_raw:
+                continue
+            dst_wd = str(Path(dst_wd_raw).expanduser()).rstrip("/")
+            if not dst_wd or src_wd == dst_wd:
+                continue
+            mapping = f"{src_wd}={dst_wd}"
+            if mapping not in seen:
+                seen.add(mapping)
+                mappings.append(mapping)
+
+        # Sort longest src prefix first — verifier uses first-match-wins so the
+        # most specific (per-team) mapping must precede the generic shared-infra one.
+        mappings.sort(key=lambda m: len(m.split("=", 1)[0]), reverse=True)
+        return mappings
 
     except Exception as exc:
         print(
