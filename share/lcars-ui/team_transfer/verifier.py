@@ -55,10 +55,30 @@ Skipped channels (XACA-0581):
   subdirectory reshape; FAILing on them is a false negative. Persona copies additionally
   carry a .synced-from-master marker (regenerated on the destination by kb-sync-personas).
   See _SKIP_CHANNELS below.
+
+Phases and absent-file dispositions (XACA-0583):
+
+  --phase {pre-import, post-restore}  (default: post-restore — legacy behavior)
+
+  A file present in the manifest but absent on the destination is one of three things,
+  and only one is a failure:
+
+    EXPECTED-MISSING  Machine-local / ephemeral state (Claude session transcripts under
+                      .claude/projects/*.jsonl). Per-machine; will NEVER match across
+                      machines. Reported in ANY phase; never a FAIL. See _EPHEMERAL_GLOBS.
+    PENDING-IMPORT    Carried payload (a real transfer channel) absent during a PRE-IMPORT
+                      audit. The import will create it; FAILing here is a false negative
+                      that makes the pre-import preflight untrustworthy. PRE-IMPORT only.
+    FAIL              Carried payload absent POST-RESTORE — the import should have placed
+                      it. This is the legacy "missing on destination" failure.
+
+  Only FAIL sets the process exit code. A pre-import audit whose only absences are
+  pending-import + expected-missing reports an honest EXIT 0.
 """
 from __future__ import annotations
 
 import argparse
+import fnmatch
 import os
 import sys
 from collections import defaultdict
@@ -72,6 +92,38 @@ from .manifest import EXACT, Manifest, PRESENT, SCHEMA
 
 
 PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
+# XACA-0583: two informational dispositions for files that are absent on the
+# destination but are NOT failures. Neither sets the process exit code.
+#   - PENDING_IMPORT: a carried-payload entry (real transfer channel) that is absent
+#     during a PRE-IMPORT audit. The import will create it; reporting FAIL here is a
+#     false negative that makes the pre-import preflight untrustworthy. Becomes a
+#     genuine FAIL in the POST-RESTORE phase (the import should have placed it).
+#   - EXPECTED_MISSING: a machine-local / ephemeral file (e.g. per-machine Claude
+#     session transcripts) that will NEVER match cross-machine. Expected-missing in
+#     ANY phase — same class of false negative the XACA-0581 skip-channels eliminated.
+PENDING_IMPORT, EXPECTED_MISSING = "PENDING-IMPORT", "EXPECTED-MISSING"
+
+# Execution phases. Default is post-restore so existing callers (and the server's
+# import-side verifier call) keep today's behavior with no change.
+PRE_IMPORT, POST_RESTORE = "pre-import", "post-restore"
+
+# Ephemeral / machine-local path globs (matched against the manifest relpath, which is
+# relative-to-home). A carried file matching one of these is treated as EXPECTED_MISSING
+# when absent, regardless of phase — it is per-machine state that cannot round-trip.
+#   - .claude/projects/*.jsonl: Claude session transcripts (per-machine UUID-named).
+# fnmatch '*' spans '/', so the glob matches nested UUID-dir layouts too.
+# Extend this tuple (or the external override mechanism) for additional machine-local
+# files; finance.db is intentionally NOT listed here pending the per-file field audit
+# (XACA-0583 plan §3.2 / §6).
+_EPHEMERAL_GLOBS = (
+    ".claude/projects/*.jsonl",
+)
+
+
+def _is_ephemeral(fe) -> bool:
+    """True if the entry is machine-local state that legitimately cannot exist here."""
+    rel = getattr(fe, "relpath", "") or ""
+    return any(fnmatch.fnmatchcase(rel, g) for g in _EPHEMERAL_GLOBS)
 
 # Channels skipped entirely by the import preflight (counted as "skipped", never
 # PASS/WARN/FAIL).
@@ -130,6 +182,18 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--quiet", action="store_true", help="Only print summary + failures.")
     ap.add_argument("--max-fail-display", type=int, default=50)
     ap.add_argument(
+        "--phase",
+        choices=[PRE_IMPORT, POST_RESTORE],
+        default=POST_RESTORE,
+        help=(
+            "Execution phase (XACA-0583). 'post-restore' (default) is the legacy "
+            "behavior: a carried-payload file absent on the destination is a FAIL. "
+            "'pre-import' treats carried-payload-absent as PENDING-IMPORT (informational) "
+            "— the import will create it — so a pre-import audit reports an honest "
+            "0-FAIL when the only 'missing' files are pending-import or expected-missing."
+        ),
+    )
+    ap.add_argument(
         "--path-map",
         action="append",
         default=[],
@@ -169,11 +233,13 @@ def main(argv: list[str] | None = None) -> int:
     rewrite = src_home != dst_home
 
     # Counters
-    overall = {PASS: 0, WARN: 0, FAIL: 0}
-    by_channel: dict[str, dict[str, int]] = defaultdict(lambda: {PASS: 0, WARN: 0, FAIL: 0, "skipped": 0})
-    by_domain: dict[str, dict[str, int]] = defaultdict(lambda: {PASS: 0, WARN: 0, FAIL: 0, "skipped": 0})
+    overall = {PASS: 0, WARN: 0, FAIL: 0, PENDING_IMPORT: 0, EXPECTED_MISSING: 0}
+    _zero = lambda: {PASS: 0, WARN: 0, FAIL: 0, PENDING_IMPORT: 0, EXPECTED_MISSING: 0, "skipped": 0}
+    by_channel: dict[str, dict[str, int]] = defaultdict(_zero)
+    by_domain: dict[str, dict[str, int]] = defaultdict(_zero)
     failures: list[str] = []
     warnings: list[str] = []
+    pending: list[str] = []
 
     for dname, dblock in manifest.domains.items():
         for fe in dblock.files:
@@ -197,7 +263,7 @@ def main(argv: list[str] | None = None) -> int:
                 dst_path_str = dst_home + dst_path_str[len(src_home):]
             dst_path = Path(dst_path_str)
 
-            verdict, msg = _check_one(fe, dst_path)
+            verdict, msg = _check_one(fe, dst_path, args.phase)
             overall[verdict] += 1
             by_channel[fe.channel][verdict] += 1
             by_domain[dname][verdict] += 1
@@ -205,6 +271,8 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(f"  [FAIL] {dst_path}: {msg}")
             elif verdict == WARN:
                 warnings.append(f"  [WARN] {dst_path}: {msg}")
+            elif verdict == PENDING_IMPORT:
+                pending.append(f"  [PENDING-IMPORT] {dst_path}: {msg}")
             elif verdict == PASS and not args.quiet:
                 pass  # don't spam PASS lines
 
@@ -223,18 +291,21 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  path-map:    {_src} -> {_dst}")
         print()
 
+    print(f"Phase  : {args.phase}")
     print("=== PER-CHANNEL ===")
     for ch in manifest.channels or list(by_channel.keys()):
-        c = by_channel.get(ch, {PASS: 0, WARN: 0, FAIL: 0, "skipped": 0})
+        c = by_channel.get(ch) or _zero()
         marker = "v" if c[FAIL] == 0 else "x"
-        print(f"  {marker} {ch:18s} PASS:{c[PASS]:5d}  WARN:{c[WARN]:4d}  FAIL:{c[FAIL]:4d}  skipped:{c['skipped']:4d}")
+        print(f"  {marker} {ch:18s} PASS:{c[PASS]:5d}  WARN:{c[WARN]:4d}  FAIL:{c[FAIL]:4d}  "
+              f"PENDING:{c[PENDING_IMPORT]:4d}  EXP-MISS:{c[EXPECTED_MISSING]:4d}  skipped:{c['skipped']:4d}")
 
     print()
     print("=== PER-DOMAIN ===")
     for dname in sorted(by_domain):
         c = by_domain[dname]
         marker = "v" if c[FAIL] == 0 else "x"
-        print(f"  {marker} {dname:14s} PASS:{c[PASS]:5d}  WARN:{c[WARN]:4d}  FAIL:{c[FAIL]:4d}  skipped:{c['skipped']:4d}")
+        print(f"  {marker} {dname:14s} PASS:{c[PASS]:5d}  WARN:{c[WARN]:4d}  FAIL:{c[FAIL]:4d}  "
+              f"PENDING:{c[PENDING_IMPORT]:4d}  EXP-MISS:{c[EXPECTED_MISSING]:4d}  skipped:{c['skipped']:4d}")
 
     if warnings:
         print()
@@ -243,6 +314,14 @@ def main(argv: list[str] | None = None) -> int:
             print(w)
         if len(warnings) > args.max_fail_display:
             print(f"  ... and {len(warnings) - args.max_fail_display} more")
+
+    if pending:
+        print()
+        print(f"=== PENDING-IMPORT ({len(pending)}) — carried payload the import will create ===")
+        for pline in pending[: args.max_fail_display]:
+            print(pline)
+        if len(pending) > args.max_fail_display:
+            print(f"  ... and {len(pending) - args.max_fail_display} more")
 
     if failures:
         print()
@@ -257,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  PASS: {overall[PASS]}")
     print(f"  WARN: {overall[WARN]}")
     print(f"  FAIL: {overall[FAIL]}")
+    print(f"  PENDING-IMPORT: {overall[PENDING_IMPORT]}")
+    print(f"  EXPECTED-MISSING: {overall[EXPECTED_MISSING]}")
 
     if manifest.untagged_gaps:
         print(f"\n  Warning: Manifest itself reports {len(manifest.untagged_gaps)} untagged gaps from generation.")
@@ -266,14 +347,25 @@ def main(argv: list[str] | None = None) -> int:
     return exit_code
 
 
-def _check_one(fe, dst_path: Path) -> tuple[str, str]:
+def _check_one(fe, dst_path: Path, phase: str = POST_RESTORE) -> tuple[str, str]:
     # Enforce per-channel cls invariants early — misclassified entries fail fast with
     # a clear channel-class message rather than producing confusing SHA-mismatch reports.
+    # A misclassification is a real defect, so it FAILs even pre-import (not "pending").
     inv = _check_channel_class_invariant(fe)
     if inv is not None:
         return inv
 
     if not dst_path.exists():
+        # XACA-0583: three distinct kinds of "absent" — only one is a failure.
+        #   1. Ephemeral / machine-local (session transcripts): will NEVER exist here.
+        #   2. Carried payload absent during a PRE-IMPORT audit: the import will create
+        #      it — reporting FAIL is a false negative. (Skip-channels never reach here;
+        #      they are filtered before _check_one, so any entry here is real payload.)
+        #   3. Carried payload absent POST-RESTORE: the import should have placed it → FAIL.
+        if _is_ephemeral(fe):
+            return EXPECTED_MISSING, "machine-local/ephemeral; expected-missing cross-machine"
+        if phase == PRE_IMPORT:
+            return PENDING_IMPORT, "carried payload absent pre-import; the import will create it"
         return FAIL, "missing on destination"
 
     try:

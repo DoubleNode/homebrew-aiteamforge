@@ -708,3 +708,163 @@ def test_invariant_git_channel_has_no_constraint(tmp_path):
     rc, out = _run_verifier(mp)
     assert rc == 0
     assert "channel-class invariant violated" not in out
+
+
+# ---------------------------------------------------------------------------
+# TestPhaseDispositions — XACA-0583: PENDING-IMPORT / EXPECTED-MISSING / --phase
+# ---------------------------------------------------------------------------
+
+def _manifest_with_custom_relpath(
+    path: str, relpath: str, channel: str, cls: str, sha: str | None = None, size: int = 0,
+) -> Manifest:
+    """Build a single-entry manifest with an arbitrary (path, relpath) pair.
+
+    relpath drives ephemeral detection (matched against _EPHEMERAL_GLOBS); path drives
+    the filesystem existence check. Same-machine (home unchanged) so no path rewrite.
+    """
+    m = new_manifest()
+    fe = FileEntry(
+        path=path, relpath=relpath, sha256=sha, size=size, mtime=0.0,
+        cls=cls, channel=channel, domain="git_repo",
+    )
+    m.add_file("git_repo", fe)
+    m.recompute_channel_stats()
+    return m
+
+
+class TestPhaseDispositions:
+    """The XACA-0583 verdict matrix: carried-payload-absent and machine-local-absent
+    must NOT be lumped into FAIL, and the discriminator is execution phase.
+
+    Calls verifier_main() directly with capsys for speed (no subprocess round-trip).
+    """
+
+    # -- PENDING-IMPORT: carried payload, absent, pre-import -----------------
+    def test_carried_payload_absent_pre_import_is_pending_not_fail(self, tmp_path, capsys):
+        ghost = str(tmp_path / "ghost" / "MEMORY.md")  # never created
+        m = _manifest_with_custom_relpath(ghost, "MEMORY.md", channels.USER_STATE, EXACT, sha="deadbeef")
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 0, f"pending-import must not set exit code. Output:\n{out}"
+        assert "FAIL: 0" in out
+        assert "PENDING-IMPORT: 1" in out
+        assert "the import will create it" in out
+
+    # -- FAIL: same entry, post-restore --------------------------------------
+    def test_carried_payload_absent_post_restore_is_fail(self, tmp_path, capsys):
+        ghost = str(tmp_path / "ghost" / "MEMORY.md")
+        m = _manifest_with_custom_relpath(ghost, "MEMORY.md", channels.USER_STATE, EXACT, sha="deadbeef")
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "post-restore"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, f"post-restore absent carried payload must FAIL. Output:\n{out}"
+        assert "FAIL: 1" in out
+        assert "missing on destination" in out
+        assert "PENDING-IMPORT: 0" in out
+
+    # -- default phase is post-restore (no behavior change for legacy callers)
+    def test_default_phase_is_post_restore(self, tmp_path, capsys):
+        ghost = str(tmp_path / "ghost" / "MEMORY.md")
+        m = _manifest_with_custom_relpath(ghost, "MEMORY.md", channels.USER_STATE, EXACT, sha="deadbeef")
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp)])  # no --phase
+        out, _ = capsys.readouterr()
+        assert rc == 1, f"default phase must be post-restore (legacy FAIL). Output:\n{out}"
+        assert "FAIL: 1" in out
+
+    # -- EXPECTED-MISSING: ephemeral session log, absent, BOTH phases --------
+    @pytest.mark.parametrize("phase", ["pre-import", "post-restore"])
+    def test_ephemeral_session_log_absent_is_expected_missing(self, tmp_path, capsys, phase):
+        ghost = str(tmp_path / "ghost" / "abc.jsonl")  # never created
+        relpath = ".claude/projects/-Users-x-finance-personal/abc.jsonl"
+        m = _manifest_with_custom_relpath(ghost, relpath, channels.USER_STATE, PRESENT)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", phase])
+        out, _ = capsys.readouterr()
+        assert rc == 0, f"ephemeral absent must never FAIL (phase={phase}). Output:\n{out}"
+        assert "FAIL: 0" in out
+        assert "EXPECTED-MISSING: 1" in out
+        assert "PENDING-IMPORT: 0" in out, "ephemeral must NOT be counted as pending"
+
+    # -- ephemeral that DOES exist still passes normally ---------------------
+    def test_ephemeral_present_passes(self, tmp_path, capsys):
+        f = tmp_path / "abc.jsonl"
+        f.write_bytes(b"{}")
+        relpath = ".claude/projects/proj/abc.jsonl"
+        m = _manifest_with_custom_relpath(str(f), relpath, channels.USER_STATE, PRESENT)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 0
+        assert "EXPECTED-MISSING: 0" in out, "present ephemeral is a normal PASS, not expected-missing"
+
+    # -- a present-but-mismatched carried file is a real FAIL even pre-import -
+    def test_sha_mismatch_is_fail_even_pre_import(self, tmp_path, capsys):
+        f = tmp_path / "code.py"
+        f.write_bytes(b"actual")
+        m = _manifest_with_custom_relpath(str(f), "code.py", channels.GIT, EXACT,
+                                          sha=_sha256(b"expected-different"), size=6)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, "a mismatch is a real defect, not 'pending' — must FAIL pre-import too"
+        assert "sha256 mismatch" in out
+        assert "PENDING-IMPORT: 0" in out
+
+    # -- a present carried file passes pre-import (no spurious pending) -------
+    def test_present_carried_file_passes_pre_import(self, tmp_path, capsys):
+        f = tmp_path / "code.py"
+        f.write_bytes(b"matched")
+        m = _manifest_with_custom_relpath(str(f), "code.py", channels.GIT, EXACT,
+                                          sha=_sha256(b"matched"), size=7)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 0
+        assert "FAIL: 0" in out
+        assert "PENDING-IMPORT: 0" in out
+
+    # -- summary always reports the two informational lines ------------------
+    def test_summary_includes_pending_and_expected_lines(self, tmp_path, capsys):
+        f = tmp_path / "ok.txt"
+        f.write_bytes(b"x")
+        m = _make_manifest_with_file(f)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp)])
+        out, _ = capsys.readouterr()
+        assert rc == 0
+        assert "PENDING-IMPORT: 0" in out
+        assert "EXPECTED-MISSING: 0" in out
+        assert "Phase  : post-restore" in out
+
+    # -- a NON-ephemeral PRESENT-class carried file absent post-restore FAILs -
+    #    (preserves the contract the synthetic-E2E test used to cover via session.jsonl)
+    def test_present_class_non_ephemeral_absent_is_fail(self, tmp_path, capsys):
+        ghost = str(tmp_path / "ghost" / "kanban.lock")  # never created
+        m = _manifest_with_custom_relpath(ghost, "kanban/kanban.lock", channels.EXPORT_KANBAN, PRESENT)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "post-restore"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, f"non-ephemeral PRESENT carried file absent post-restore must FAIL.\n{out}"
+        assert "FAIL: 1" in out
+        assert "EXPECTED-MISSING: 0" in out
+
+    # -- invalid --phase value is rejected by argparse -----------------------
+    def test_invalid_phase_rejected(self, tmp_path, capsys):
+        f = tmp_path / "ok.txt"
+        f.write_bytes(b"x")
+        m = _make_manifest_with_file(f)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        with pytest.raises(SystemExit):
+            verifier_main(["--manifest", str(mp), "--phase", "bogus"])

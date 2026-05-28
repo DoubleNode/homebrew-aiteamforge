@@ -1201,7 +1201,11 @@ def apply_import(job_id):
                 lcars_ui_dir = Path(__file__).parent
                 ver_result = subprocess.run(
                     [sys.executable, "-m", "team_transfer.verifier",
-                     "--manifest", str(manifest_dest), "--quiet"],
+                     "--manifest", str(manifest_dest), "--quiet",
+                     # XACA-0583: files have just been restored, so a still-absent
+                     # carried-payload entry is a genuine FAIL — post-restore phase.
+                     # (Machine-local session logs still report EXPECTED-MISSING, not FAIL.)
+                     "--phase", "post-restore"],
                     cwd=str(lcars_ui_dir),
                     env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
                     capture_output=True, text=True, timeout=300,
@@ -1214,12 +1218,25 @@ def apply_import(job_id):
                     verifier_output, encoding='utf-8'
                 )
 
-                # Parse overall counts.
+                # Parse overall counts. XACA-0583: also capture the two informational
+                # dispositions (PENDING-IMPORT, EXPECTED-MISSING) so the UI reports them
+                # honestly instead of folding their absences into FAIL. The anchored
+                # FAIL pattern does not false-match 'PENDING-IMPORT:'/'EXPECTED-MISSING:'.
                 overall_counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+                pending_import = 0
+                expected_missing = 0
                 for line in verifier_output.splitlines():
                     m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)$", line)
                     if m:
                         overall_counts[m.group(1)] = int(m.group(2))
+                        continue
+                    mp = re.search(r"^\s*PENDING-IMPORT:\s*(\d+)$", line)
+                    if mp:
+                        pending_import = int(mp.group(1))
+                        continue
+                    me = re.search(r"^\s*EXPECTED-MISSING:\s*(\d+)$", line)
+                    if me:
+                        expected_missing = int(me.group(1))
 
                 # Parse per-channel stats.
                 per_channel: dict = {}
@@ -1260,6 +1277,8 @@ def apply_import(job_id):
                     'pass': overall_counts['PASS'],
                     'warn': overall_counts['WARN'],
                     'fail': overall_counts['FAIL'],
+                    'pendingImport': pending_import,
+                    'expectedMissing': expected_missing,
                     'tail': "\n".join(verifier_output.splitlines()[-20:]),
                     'phase': 'post-restore',
                     'reportPath': str(restore_staging / "post-restore-verifier-report.txt"),

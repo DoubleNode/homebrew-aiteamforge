@@ -780,10 +780,10 @@ def test_synthetic_e2e_fault_missing_path_map(
 
 
 # ---------------------------------------------------------------------------
-# Fault class 8 — PRESENT-class file removed (aiteamforge_product channel)
+# Fault class 8 — session transcript removed (XACA-0583: EXPECTED-MISSING)
 # ---------------------------------------------------------------------------
 
-def test_synthetic_e2e_fault_present_class_removed(
+def test_synthetic_e2e_session_log_removed_is_expected_missing(
     synthetic_source,
     synthetic_destination,
     synthetic_team_config,
@@ -791,13 +791,15 @@ def test_synthetic_e2e_fault_present_class_removed(
     tmp_path,
     capsys,
 ):
-    """Verifier must FAIL when a PRESENT-class file is absent.
+    """XACA-0583: a removed Claude session transcript (.claude/projects/*.jsonl) is
+    machine-local / ephemeral — it must report EXPECTED-MISSING, NOT FAIL, in any phase.
 
-    PRESENT-class only checks existence, not SHA — but absence is still a FAIL.
-    We test with session.jsonl (user_state channel, PRESENT). Note: aiteamforge_product
-    files are also PRESENT-class but are SKIPPED entirely (XACA-0581 — installer-owned,
-    not part of the transfer payload), so they can no longer exercise this fault; a
-    non-skipped PRESENT channel (user_state) is required here.
+    This was previously asserted as a FAIL (the only non-skipped PRESENT-class file the
+    fixture offered). XACA-0583 reclassifies session transcripts: they cannot round-trip
+    cross-machine, so FAILing on their absence is a false negative — the same class of
+    false negative the XACA-0581 skip-channels eliminated. The 'missing PRESENT-class
+    carried file = FAIL' contract is preserved at the unit level
+    (test_present_class_non_ephemeral_absent_is_fail in test_migration_verifier.py).
     """
     src, dst, manifest_path, argv = _golden_flow_up_to_move(
         synthetic_source, synthetic_destination, synthetic_team_config,
@@ -812,11 +814,9 @@ def test_synthetic_e2e_fault_present_class_removed(
     rc = verifier_main(argv)
     out, _ = capsys.readouterr()
 
-    assert rc != 0, f"Expected FAIL when PRESENT-class file removed; got rc={rc}.\n{out}"
-    assert "FAIL" in out
-    assert "missing" in out.lower() or "user_state" in out or "session.jsonl" in out, (
-        f"Expected 'missing' or user_state signal; got:\n{out}"
-    )
+    assert rc == 0, f"Ephemeral session log absence must NOT FAIL (XACA-0583); got rc={rc}.\n{out}"
+    assert "EXPECTED-MISSING: 1" in out, f"Expected the session log to be EXPECTED-MISSING; got:\n{out}"
+    assert _parse_fail_count(out) == 0, f"Expected 0 FAILs; got:\n{out}"
 
 
 # ---------------------------------------------------------------------------
