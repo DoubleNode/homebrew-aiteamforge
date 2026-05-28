@@ -35,10 +35,12 @@ Test coverage in this file
         Same-layout (both dev-team) → empty path-map list.
 
 5.  test_build_import_path_maps_returns_mapping_for_tap_dst
-        M1Pro tap-install destination → mapping emitted.
+        M1Pro tap-install destination (~/aiteamforge/ dir present) → mapping emitted.
+        Updated XACA-0580: detection now uses dir presence, not working_dir prefix.
 
 6.  test_build_import_path_maps_handles_cross_user
         Username differs between source and destination → correct src home used.
+        Updated XACA-0580: mock simulates ~/aiteamforge/ dir existence for dst.
 
 7.  test_build_import_path_maps_empty_manifest
         Defensive: empty / missing "home" key → returns [] without raising.
@@ -373,24 +375,34 @@ def test_build_import_path_maps_returns_empty_for_dev_team_dst():
 # ---------------------------------------------------------------------------
 
 def test_build_import_path_maps_returns_mapping_for_tap_dst():
-    """When destination is a tap install (working_dir under ~/aiteamforge/),
-    the function returns exactly one SRC=DST mapping string.
+    """When destination is a tap install (~/aiteamforge/ exists as a directory),
+    the function returns the shared-infra SRC=DST mapping string.
 
     Concrete case: M3Pro → M1Pro, same username (darrenehlers).
+
+    Updated (XACA-0580): tap-install is now detected by ~/aiteamforge/ directory
+    presence, NOT by inspecting team working_dir prefixes. The mock must
+    simulate is_dir()=True on the aiteamforge root path.
     """
     fake_home = "/Users/darrenehlers"
+    aiteamforge_root = f"{fake_home}/aiteamforge"
     mock_config = {
         "schema_version": 1,
-        "teams": {
-            "finance": {"working_dir": f"{fake_home}/aiteamforge/finance/personal"},
-        },
+        "teams": {},
     }
 
-    with patch.object(_ap, "load_config", return_value=mock_config), \
-         patch("aiteamforge_paths.Path") as mock_path_cls:
+    def _is_dir(self):
+        if str(self) == aiteamforge_root:
+            return True
+        return type(self).is_dir(self)
 
-        mock_path_cls.home.return_value = Path(fake_home)
-        mock_path_cls.side_effect = lambda *args, **kwargs: Path(*args, **kwargs)
+    def _exists(self):
+        return type(self).exists(self)
+
+    with patch.object(_ap, "load_config", return_value=mock_config), \
+         patch("aiteamforge_paths.Path.home", return_value=Path(fake_home)), \
+         patch("pathlib.Path.is_dir", _is_dir), \
+         patch("pathlib.Path.exists", _exists):
 
         result = build_import_path_maps({"home": fake_home})
 
@@ -410,24 +422,32 @@ def test_build_import_path_maps_handles_cross_user():
     while the dst prefix comes from the destination's aiteamforge root.
 
     Scenario:
-      Destination: /Users/alice/aiteamforge/finance/personal (tap install)
+      Destination: tap install at /Users/alice/aiteamforge/ (directory exists)
       Source manifest home: /Users/developer
     Expected mapping: /Users/developer/dev-team=/Users/alice/aiteamforge
+
+    Updated (XACA-0580): tap-install now detected by ~/aiteamforge/ dir presence.
     """
     dst_home = "/Users/alice"
     src_home = "/Users/developer"
+    aiteamforge_root = f"{dst_home}/aiteamforge"
     mock_config = {
         "schema_version": 1,
-        "teams": {
-            "finance": {"working_dir": f"{dst_home}/aiteamforge/finance/personal"},
-        },
+        "teams": {},
     }
 
-    with patch.object(_ap, "load_config", return_value=mock_config), \
-         patch("aiteamforge_paths.Path") as mock_path_cls:
+    def _is_dir(self):
+        if str(self) == aiteamforge_root:
+            return True
+        return type(self).is_dir(self)
 
-        mock_path_cls.home.return_value = Path(dst_home)
-        mock_path_cls.side_effect = lambda *args, **kwargs: Path(*args, **kwargs)
+    def _exists(self):
+        return type(self).exists(self)
+
+    with patch.object(_ap, "load_config", return_value=mock_config), \
+         patch("aiteamforge_paths.Path.home", return_value=Path(dst_home)), \
+         patch("pathlib.Path.is_dir", _is_dir), \
+         patch("pathlib.Path.exists", _exists):
 
         result = build_import_path_maps({"home": src_home})
 

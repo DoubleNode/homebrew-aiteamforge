@@ -1108,7 +1108,10 @@ def build_import_path_maps(manifest: dict) -> list[str]:
     Never raises.
     """
     try:
-        src_home = manifest.get("home", "").rstrip("/")
+        # XACA-0580-012: strip whitespace BEFORE rstrip("/"); a whitespace-only
+        # "home" must fail the early-exit check, otherwise a garbage manifest
+        # could produce a bogus path-map on a tap-install destination.
+        src_home = manifest.get("home", "").strip().rstrip("/")
         if not src_home:
             return []
 
