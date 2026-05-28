@@ -721,7 +721,15 @@ def generate_export(job_id, team_id):
 
         ver_result = subprocess.run(
             [sys.executable, "-m", "team_transfer.verifier",
-             "--manifest", str(tt_manifest_path), "--quiet"],
+             "--manifest", str(tt_manifest_path), "--quiet",
+             # XACA-0583: phase tagged explicitly at every call-site (sibling-drift / k501).
+             # This runs on the SOURCE right after the manifest was generated FROM that
+             # source, so every entry's file exists; there are no carried-payload absences
+             # to be "pending". An absence here would be a genuine source gap (e.g. a file
+             # deleted between generation and verification), which must FAIL — so post-restore
+             # (absent ⇒ FAIL) is the correct, stricter semantics. pre-import would wrongly
+             # mask such a gap as PENDING-IMPORT. This call is non-blocking (informational).
+             "--phase", "post-restore"],
             cwd=str(lcars_ui_dir),
             env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
             capture_output=True, text=True, timeout=120,
@@ -12876,7 +12884,17 @@ end tell
 
                 ver_result = subprocess.run(
                     [sys.executable, "-m", "team_transfer.verifier",
-                     "--manifest", str(preflight_manifest_path), "--quiet"]
+                     "--manifest", str(preflight_manifest_path), "--quiet",
+                     # XACA-0583: THIS is the pre-import gate. It runs at UPLOAD time,
+                     # before restore — so NOTHING is imported yet and every carried-payload
+                     # file is legitimately absent. Under the default (post-restore) phase
+                     # those absences are FAIL → overall_state='FAIL' → baseMatch=False →
+                     # handle_import_apply refuses with HTTP 400. That is the chicken-and-egg
+                     # deadlock (XACA-0581 field report: 47 FAILs blocked apply). --phase
+                     # pre-import reclassifies carried-payload-absent as PENDING-IMPORT
+                     # (informational, exit 0) so the apply is allowed; a genuine mismatch
+                     # (present file, wrong content) still FAILs and still blocks.
+                     "--phase", "pre-import"]
                     + _path_map_args,
                     cwd=str(lcars_ui_dir),
                     env={**os.environ, "PYTHONPATH": str(lcars_ui_dir)},
@@ -12886,11 +12904,25 @@ end tell
                 verifier_exit = ver_result.returncode
 
                 # Parse overall PASS/WARN/FAIL counts from the SUMMARY block.
+                # XACA-0583: also capture the two informational dispositions so the
+                # preflight UI shows "N pending-import / M expected-missing" instead of
+                # folding their absences into a scary FAIL. Anchored patterns do not
+                # false-match 'PENDING-IMPORT:'/'EXPECTED-MISSING:'.
                 overall_counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
+                preflight_pending_import = 0
+                preflight_expected_missing = 0
                 for line in verifier_output.splitlines():
                     m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)$", line)
                     if m:
                         overall_counts[m.group(1)] = int(m.group(2))
+                        continue
+                    mp = re.search(r"^\s*PENDING-IMPORT:\s*(\d+)$", line)
+                    if mp:
+                        preflight_pending_import = int(mp.group(1))
+                        continue
+                    me = re.search(r"^\s*EXPECTED-MISSING:\s*(\d+)$", line)
+                    if me:
+                        preflight_expected_missing = int(me.group(1))
 
                 # Parse per-channel stats from the PER-CHANNEL block.
                 # Format:  "  v export_database     PASS:    2  WARN:   0  FAIL:   0  skipped:   0"
@@ -12936,6 +12968,8 @@ end tell
                     'pass': overall_counts['PASS'],
                     'warn': overall_counts['WARN'],
                     'fail': overall_counts['FAIL'],
+                    'pendingImport': preflight_pending_import,
+                    'expectedMissing': preflight_expected_missing,
                     'tail': tail,
                     'phase': 'preflight',
                 }

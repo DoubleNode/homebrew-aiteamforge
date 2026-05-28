@@ -859,6 +859,39 @@ class TestPhaseDispositions:
         assert "FAIL: 1" in out
         assert "EXPECTED-MISSING: 0" in out
 
+    # -- upload-time import-preflight gate scenario (server.py:12878) ---------
+    #    At upload time nothing is imported yet, so ALL carried payload is absent
+    #    plus the ephemeral session logs. The server gates apply on FAIL==0
+    #    (baseMatch). pre-import MUST yield exit 0 (apply allowed); the same manifest
+    #    in post-restore MUST yield exit 1 (a real post-restore failure that blocks).
+    #    This is the regression guarding the XACA-0583 server wiring.
+    def test_import_preflight_all_carried_absent_pre_import_allows_apply(self, tmp_path, capsys):
+        m = new_manifest()
+        for rel in ("MEMORY.md", "knowledge/quark/INDEX.md", "uv.lock"):
+            m.add_file("git_repo", FileEntry(
+                path=str(tmp_path / "ghost" / rel), relpath=rel, sha256="dead", size=0,
+                mtime=0.0, cls=EXACT, channel=channels.USER_STATE, domain="git_repo"))
+        m.add_file("git_repo", FileEntry(
+            path=str(tmp_path / "ghost" / "s.jsonl"),
+            relpath=".claude/projects/-Users-x-finance/s.jsonl", sha256=None, size=0,
+            mtime=0.0, cls=PRESENT, channel=channels.USER_STATE, domain="git_repo"))
+        m.recompute_channel_stats()
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+
+        rc_pre = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out_pre, _ = capsys.readouterr()
+        assert rc_pre == 0, f"pre-import must allow apply (FAIL=0). Output:\n{out_pre}"
+        assert "FAIL: 0" in out_pre
+        assert "PENDING-IMPORT: 3" in out_pre
+        assert "EXPECTED-MISSING: 1" in out_pre
+
+        rc_post = verifier_main(["--manifest", str(mp), "--phase", "post-restore"])
+        out_post, _ = capsys.readouterr()
+        assert rc_post == 1, f"post-restore with absent carried payload must FAIL. Output:\n{out_post}"
+        assert "FAIL: 3" in out_post
+        assert "EXPECTED-MISSING: 1" in out_post
+
     # -- invalid --phase value is rejected by argparse -----------------------
     def test_invalid_phase_rejected(self, tmp_path, capsys):
         f = tmp_path / "ok.txt"
