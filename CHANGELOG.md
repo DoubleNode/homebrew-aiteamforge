@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0582: import-apply preflight-delta override — `acknowledgePreflightDeltas` operator in `share/lcars-ui/server.py` unblocks migration import-apply when preflight FAILs are expected payload deltas (path-map drift, pending-import files). LCARS UI (`share/lcars-ui/js/lcars.js`, `share/lcars-ui/index.html`) gains the corresponding toggle control. Mirror of canonical lcars-ui changes.
+
 ## [0.12.8] - 2026-05-28
 
 - XACA-0583: import-preflight trustworthiness (XACA-0581 follow-up). `share/lcars-ui/team_transfer/verifier.py` gains a `--phase {pre-import,post-restore}` flag (default `post-restore` = legacy behavior) and two informational dispositions for absent files: `PENDING-IMPORT` (carried payload absent during a pre-import audit — the import will create it, so it is not a FAIL) and `EXPECTED-MISSING` (machine-local/ephemeral state — Claude session transcripts under `.claude/projects/*.jsonl` — that can never round-trip cross-machine). Neither sets the exit code. The upload-time import-preflight in `share/lcars-ui/server.py` GATES the apply (`FAIL>0` → `baseMatch=False` → HTTP 400); it now runs `--phase pre-import` so legitimately-absent carried payload reports PENDING-IMPORT and the apply proceeds (a genuine mismatch still FAILs and blocks). All three verifier call-sites are phase-tagged (import-preflight = pre-import, post-restore import = post-restore, source-side export preflight = post-restore). Both destination call-sites surface `pendingImport`/`expectedMissing` counts. The 47 field FAILs decompose to ~19 expected-missing + ~17 pending-import + ~9 stale-manifest drift. Regression tests mirrored under `share/lcars-ui/tests/team_transfer/`.

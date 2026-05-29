@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0582: acknowledgePreflightDeltas operator override for migration import-apply -->
+
+### Added
+- **XACA-0582: `acknowledgePreflightDeltas` operator override in `handle_import_apply`.** New body-JSON flag (bool, default false) that lets a migration import proceed when the preflight verifier reports `baseMatch=false`. The gate is circular for migration payloads: files such as `user_state`, `export_kanban`, `export_database`, and `git` are "missing on destination" only because the import that creates them has not run yet. Type-aware coercion mirrors `acknowledgeMissingSecrets` exactly (only `true` bool / int `1` / case-insensitive `"true"/"yes"/"1"` are accepted; `"false"` string → false). Emits a prominent `[LCARS Import] OPERATOR OVERRIDE` audit log line when the override is active. The HTTP 400 error response now includes `override_flag: 'acknowledgePreflightDeltas'` so the UI knows the override name. Body-JSON parse block hoisted above the baseMatch gate so both override flags are available before any gate decision.
+
 <!-- XACA-0569: static-asset cache-bust — mtime-versioned URLs + no-cache parity -->
 
 ### Added

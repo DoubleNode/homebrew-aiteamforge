@@ -13055,6 +13055,15 @@ end tell
             acknowledgeMissingSecrets (bool, default false) — operator override that
             allows the import to proceed even when secrets_summary.discovered > 0 but
             no paired secrets zip was supplied.  Logs a prominent warning when used.
+
+            acknowledgePreflightDeltas (bool, default false) — operator override that
+            allows the import to proceed even when the preflight verifier reports
+            baseMatch=false (verifierState != 'PASS').  Use for migration imports where
+            the preflight FAILs are the expected payload deltas — i.e. the files that
+            will be created by this very import (user_state, export_kanban,
+            export_database, git) are "missing on destination" only because the import
+            that creates them has not run yet; the baseMatch gate is circular in this
+            case.  Logs a prominent audit line when used.  XACA-0582.
         """
         import threading
 
@@ -13067,18 +13076,54 @@ end tell
                 {'error': f'Job is in state {job["status"]}, not staged'}, status=400
             )
             return
+
+        # Hoist body-JSON parse ABOVE the baseMatch gate so acknowledgePreflightDeltas
+        # can be read before the gate decides.  Content-Length can only be read once
+        # from self.rfile — this single parse is shared with the secrets gate below.
+        # XACA-0520-005 / XACA-0582.
+        body_json = {}
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length > 0:
+                raw = self.rfile.read(content_length)
+                body_json = json.loads(raw.decode('utf-8'))
+        except Exception:
+            pass  # malformed / empty body → treat as no override
+
+        # XACA-0582: type-aware coercion for acknowledgePreflightDeltas.
+        # Mirrors the acknowledgeMissingSecrets coercion shape exactly (XACA-0520-008).
+        # Accept only: True (bool), 1 (int), "true"/"yes"/"1" (case-insensitive strings).
+        # Everything else — including the string "false" — coerces to False.
+        _apd_raw = body_json.get('acknowledgePreflightDeltas', False)
+        if isinstance(_apd_raw, bool):
+            acknowledge_preflight_deltas = _apd_raw
+        elif isinstance(_apd_raw, int):
+            acknowledge_preflight_deltas = _apd_raw == 1
+        elif isinstance(_apd_raw, str):
+            acknowledge_preflight_deltas = _apd_raw.strip().lower() in ('true', 'yes', '1')
+        else:
+            acknowledge_preflight_deltas = False
+
         if not job.get('baseMatch'):
             # baseMatch is verifier-derived (verifierState == 'FAIL' → baseMatch=False).
             # The legacy baseTeam string-compare is gone; error message uses verifierState.
             _vs = job.get('verifierState', 'FAIL')
             _src = (job.get('sourceIdentity') or {}).get('hostname', 'unknown')
-            self._send_json_response(
-                {'error': f'Preflight verifier state is {_vs!r} for source {_src!r}; '
-                          f'cannot apply into {job.get("targetBase")!r}. '
-                          f'Review verifierSummary for details.'},
-                status=400,
+            if not acknowledge_preflight_deltas:
+                self._send_json_response(
+                    {'error': f'Preflight verifier state is {_vs!r} for source {_src!r}; '
+                              f'cannot apply into {job.get("targetBase")!r}. '
+                              f'Review verifierSummary for details.',
+                     'override_flag': 'acknowledgePreflightDeltas'},
+                    status=400,
+                )
+                return
+            # XACA-0582: operator override — fall through and proceed.
+            print(
+                f'[LCARS Import] OPERATOR OVERRIDE: proceeding despite preflight verifier '
+                f'state {_vs!r} for source {_src!r} into {job.get("targetBase")!r} '
+                f'(job={job_id}). acknowledgePreflightDeltas=true was set by the operator.'
             )
-            return
 
         # XACA-0520-005: Secrets coordination gate.
         # If the manifest embeds a secrets_summary with discovered > 0 the operator
@@ -13088,14 +13133,6 @@ end tell
         # that the operator has NOT supplied secrets.  The operator can bypass with
         # acknowledgeMissingSecrets=true in the POST body, which logs a warning and
         # proceeds — this is the intentional "this team has no live secrets" override.
-        body_json = {}
-        try:
-            content_length = int(self.headers.get('Content-Length', 0))
-            if content_length > 0:
-                raw = self.rfile.read(content_length)
-                body_json = json.loads(raw.decode('utf-8'))
-        except Exception:
-            pass  # malformed / empty body → treat as no override
 
         # XACA-0520-008: type-aware coercion. `bool("false")` is True in Python, so
         # plain bool() on a JSON string would let `{"acknowledgeMissingSecrets":"false"}`

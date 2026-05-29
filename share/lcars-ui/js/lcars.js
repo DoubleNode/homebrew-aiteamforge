@@ -17765,6 +17765,16 @@ function renderImportPreflight(data) {
         }
     }
 
+    // XACA-0582: show the preflight-delta acknowledge checkbox only when verifier FAILed.
+    const preflightDeltaAckEl = document.getElementById('import-preflight-delta-ack');
+    const preflightDeltaCheckbox = document.getElementById('import-acknowledge-preflight-deltas');
+    if (preflightDeltaAckEl) {
+        const verifierStateForAck = data.verifierState || 'FAIL';
+        preflightDeltaAckEl.style.display = (verifierStateForAck === 'FAIL') ? 'block' : 'none';
+    }
+    // Reset acknowledge checkbox on each new preflight
+    if (preflightDeltaCheckbox) preflightDeltaCheckbox.checked = false;
+
     // Reset staged secrets file on each new preflight
     stagedImportSecretsFile = null;
     const fnLabel = document.getElementById('import-secrets-filename');
@@ -17833,11 +17843,17 @@ function updateImportApplyEnabled() {
     const totalFiles = parseInt(applyBtn.getAttribute('data-total-file-count') || '0', 10);
     const baseMatch = applyBtn.getAttribute('data-base-match') === 'true';
 
-    // Floor 1: verifier must not have FAILed
+    // Floor 1: verifier must not have FAILed — unless operator has acknowledged the deltas.
+    // XACA-0582: acknowledgePreflightDeltas checkbox lets the apply proceed when verifier FAILed.
     if (verifierState === 'FAIL' || !baseMatch) {
-        applyBtn.disabled = true;
-        applyBtn.title = 'Verifier reported FAIL — import blocked';
-        return;
+        const ackCheckbox = document.getElementById('import-acknowledge-preflight-deltas');
+        const ackChecked = ackCheckbox ? ackCheckbox.checked : false;
+        if (!ackChecked) {
+            applyBtn.disabled = true;
+            applyBtn.title = 'Verifier reported FAIL — check "I acknowledge expected migration deltas" to proceed';
+            return;
+        }
+        // Acknowledged: fall through to remaining floor checks.
     }
 
     // Floor 2: archive must contain files
@@ -17891,6 +17907,10 @@ async function applyTeamImport() {
     if (progressEl) progressEl.style.display = 'block';
     if (resultEl) resultEl.style.display = 'none';
     updateImportProgress(0, 'IMPORTING...', 'Starting...');
+
+    // XACA-0582: read acknowledgePreflightDeltas before branching — used in both paths.
+    const _ackDeltaCheckbox = document.getElementById('import-acknowledge-preflight-deltas');
+    const _acknowledgePreflightDeltas = _ackDeltaCheckbox ? _ackDeltaCheckbox.checked : false;
 
     // ── SECRETS PATH (discovered > 0) ──
     if (currentImportSecretsDiscovered > 0) {
@@ -17960,7 +17980,10 @@ async function applyTeamImport() {
             const applyResp = await fetch(`/api/import/apply/${currentImportJobId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ pairedSecretsJobId: secretsJobId }),
+                body: JSON.stringify({
+                    pairedSecretsJobId: secretsJobId,
+                    acknowledgePreflightDeltas: _acknowledgePreflightDeltas,
+                }),
             });
             const applyResult = await readJsonResponse(applyResp);
             if (!applyResult.ok || applyResult.parseError) {
@@ -18002,7 +18025,11 @@ async function applyTeamImport() {
 
     // ── NO SECRETS PATH (original behavior) ──
     try {
-        const response = await fetch(`/api/import/apply/${currentImportJobId}`, { method: 'POST' });
+        const response = await fetch(`/api/import/apply/${currentImportJobId}`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ acknowledgePreflightDeltas: _acknowledgePreflightDeltas }),
+        });
         const result = await readJsonResponse(response);
         if (!result.ok || result.parseError) {
             alert(_httpErrorMessage('Import failed', result));
