@@ -17769,7 +17769,11 @@ function renderImportPreflight(data) {
     const preflightDeltaAckEl = document.getElementById('import-preflight-delta-ack');
     const preflightDeltaCheckbox = document.getElementById('import-acknowledge-preflight-deltas');
     if (preflightDeltaAckEl) {
-        const verifierStateForAck = data.verifierState || 'FAIL';
+        // XACA-0582-009: default to '' (not 'FAIL') so the override checkbox only
+        // appears when the verifier EXPLICITLY reports FAIL — matching data-verifier-state
+        // (line ~17710) which the apply-button gate reads. A missing verifierState means
+        // there is nothing to override, so the checkbox stays hidden.
+        const verifierStateForAck = data.verifierState || '';
         preflightDeltaAckEl.style.display = (verifierStateForAck === 'FAIL') ? 'block' : 'none';
     }
     // Reset acknowledge checkbox on each new preflight
