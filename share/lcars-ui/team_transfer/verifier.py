@@ -448,6 +448,16 @@ def _verify_board_schema(fe, dst_path: Path, phase: str = POST_RESTORE) -> tuple
     cur_ids: set[str] = set()
     prefix = _infer_prefix(cap_ids)
 
+    # NOTE (prefix-filter caveat): _walk collects destination board IDs that
+    # START WITH the source-inferred ticket prefix (e.g. "XFIN-" for a finance
+    # manifest).  Destination-only items that carry a DIFFERENT ticket prefix
+    # (e.g. "XACA-" items left over from a prior import of a different team)
+    # will NOT enter cur_ids and therefore will NOT appear in the `extra`
+    # (data-loss) set.  This is intentional: verifier.py operates per-manifest
+    # and only guarantees intra-prefix integrity.  The cross-team / cross-prefix
+    # case is backstopped by the wrong-team base-comparison guard in
+    # server.py::handle_import_upload (XACA-0586-010), which blocks an import
+    # before it reaches the verifier whenever source_base != target_base.
     def _walk(o):
         if isinstance(o, dict):
             i = o.get("id")

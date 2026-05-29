@@ -12929,6 +12929,7 @@ end tell
                     ms = re.search(r"^\s*STALE-OK:\s*(\d+)$", line)
                     if ms:
                         preflight_stale_ok = int(ms.group(1))
+                        continue
 
                 # Parse per-channel stats from the PER-CHANNEL block.
                 # Format:  "  v export_database     PASS:    2  WARN:   0  FAIL:   0  skipped:   0"
@@ -13030,9 +13031,14 @@ end tell
         target_base_val = _split_team_id(LCARS_TEAM)[0]
 
         # XACA-0586-010: wrong-team guard — compare source base vs target base.
+        # XACA-0586-011: track wrong_team separately so handle_import_apply can require
+        # a DISTINCT acknowledgeWrongTeam flag (not the generic acknowledgePreflightDeltas)
+        # for cross-team imports — a categorically harder error than ordinary staleness.
         source_base = _split_team_id(source_identity.get('team') or '')[0]
+        wrong_team = False
         if source_base and source_base != target_base_val:
             base_match = False
+            wrong_team = True
             verifier_state = 'FAIL'   # surface as a hard block in the UI/wire
             print(f"[LCARS Import] WRONG-TEAM block: source base '{source_base}' != target base '{target_base_val}'")
 
@@ -13046,6 +13052,7 @@ end tell
             'targetTeam': LCARS_TEAM,
             'targetBase': target_base_val,
             'baseMatch': base_match,
+            'wrongTeam': wrong_team,
             'verifierState': verifier_state,
             'sourceIdentity': source_identity,
             'totalFileCount': total_file_count,
@@ -13061,6 +13068,7 @@ end tell
             'importFormat': import_format,
             'targetTeam': LCARS_TEAM,
             'baseMatch': base_match,
+            'wrongTeam': wrong_team,
             'verifierState': verifier_state,
             'sourceIdentity': source_identity,
             'totalFileCount': total_file_count,
@@ -13084,6 +13092,14 @@ end tell
             export_database, git) are "missing on destination" only because the import
             that creates them has not run yet; the baseMatch gate is circular in this
             case.  Logs a prominent audit line when used.  XACA-0582.
+
+            acknowledgeWrongTeam (bool, default false) — operator override EXCLUSIVELY
+            for cross-team imports (job.wrongTeam=True), i.e. where the source archive
+            was generated for a different team base than the import target.  This is a
+            categorically harder error than ordinary preflight staleness and requires a
+            DISTINCT, deliberate acknowledgement.  acknowledgePreflightDeltas does NOT
+            satisfy this gate.  Logs an OPERATOR OVERRIDE audit line when used.
+            XACA-0586-011.
         """
         import threading
 
@@ -13123,6 +13139,44 @@ end tell
             acknowledge_preflight_deltas = _apd_raw.strip().lower() in ('true', 'yes', '1')
         else:
             acknowledge_preflight_deltas = False
+
+        # XACA-0586-011: type-aware coercion for acknowledgeWrongTeam.
+        # Same shape as acknowledgePreflightDeltas. This is the ONLY flag that bypasses
+        # the wrong-team gate. acknowledgePreflightDeltas does NOT bypass it.
+        _awt_raw = body_json.get('acknowledgeWrongTeam', False)
+        if isinstance(_awt_raw, bool):
+            acknowledge_wrong_team = _awt_raw
+        elif isinstance(_awt_raw, int):
+            acknowledge_wrong_team = _awt_raw == 1
+        elif isinstance(_awt_raw, str):
+            acknowledge_wrong_team = _awt_raw.strip().lower() in ('true', 'yes', '1')
+        else:
+            acknowledge_wrong_team = False
+
+        # XACA-0586-011: wrong-team gate — checked BEFORE the generic baseMatch gate.
+        # A cross-team import (job.wrongTeam=True) is a categorically harder error than
+        # ordinary preflight staleness. It requires a DISTINCT, deliberate acknowledgement
+        # (acknowledgeWrongTeam=true). acknowledgePreflightDeltas does NOT satisfy this
+        # gate — an operator who sets only acknowledgePreflightDeltas is expressing intent
+        # to bypass staleness/delta errors, not cross-team imports.
+        if job.get('wrongTeam'):
+            _src_base = _split_team_id((job.get('sourceIdentity') or {}).get('team') or '')[0]
+            _tgt_base = job.get('targetBase', '')
+            if not acknowledge_wrong_team:
+                self._send_json_response(
+                    {'error': f"Source team base {_src_base!r} does not match import target "
+                              f"base {_tgt_base!r}; a cross-team import requires "
+                              f"acknowledgeWrongTeam=true.",
+                     'override_flag': 'acknowledgeWrongTeam'},
+                    status=400,
+                )
+                return
+            # XACA-0586-011: operator override — log prominently and fall through.
+            print(
+                f'[LCARS Import] OPERATOR OVERRIDE: proceeding despite WRONG-TEAM mismatch '
+                f'(source base {_src_base!r} != target base {_tgt_base!r}) '
+                f'(job={job_id}). acknowledgeWrongTeam=true was set by the operator.'
+            )
 
         if not job.get('baseMatch'):
             # baseMatch is verifier-derived (verifierState == 'FAIL' → baseMatch=False).
