@@ -48,6 +48,7 @@ class Manifest:
     generated_at: str = ""
     source_hostname: str = ""
     source_user: str = ""
+    source_team: str = ""        # team slug this archive was exported for (e.g. "finance"); base-compared at import to block wrong-team imports
     home: str = ""               # source $HOME — verifier rewrites this to its own $HOME
     channels: list[str] = field(default_factory=list)
     channel_stats: dict[str, dict[str, int]] = field(default_factory=dict)
@@ -70,6 +71,7 @@ class Manifest:
             generated_at=raw.get("generated_at", ""),
             source_hostname=raw.get("source_hostname", ""),
             source_user=raw.get("source_user", ""),
+            source_team=raw.get("source_team", ""),
             home=raw.get("home", ""),
             channels=raw.get("channels", []),
             channel_stats=raw.get("channel_stats", {}),

@@ -12789,6 +12789,7 @@ end tell
             'home': manifest.get('home', ''),
             'generatedAt': manifest.get('generated_at', ''),
             'schemaVersion': manifest.get('schema_version', 0),
+            'team': manifest.get('source_team', ''),
         }
 
         # Compute total file count from v2 domain stats; fall back to len(files) if
@@ -12911,6 +12912,7 @@ end tell
                 overall_counts = {'PASS': 0, 'WARN': 0, 'FAIL': 0}
                 preflight_pending_import = 0
                 preflight_expected_missing = 0
+                preflight_stale_ok = 0
                 for line in verifier_output.splitlines():
                     m = re.search(r"^\s*(PASS|WARN|FAIL):\s*(\d+)$", line)
                     if m:
@@ -12923,6 +12925,10 @@ end tell
                     me = re.search(r"^\s*EXPECTED-MISSING:\s*(\d+)$", line)
                     if me:
                         preflight_expected_missing = int(me.group(1))
+                        continue
+                    ms = re.search(r"^\s*STALE-OK:\s*(\d+)$", line)
+                    if ms:
+                        preflight_stale_ok = int(ms.group(1))
 
                 # Parse per-channel stats from the PER-CHANNEL block.
                 # Format:  "  v export_database     PASS:    2  WARN:   0  FAIL:   0  skipped:   0"
@@ -12970,6 +12976,7 @@ end tell
                     'fail': overall_counts['FAIL'],
                     'pendingImport': preflight_pending_import,
                     'expectedMissing': preflight_expected_missing,
+                    'staleOk': preflight_stale_ok,
                     'tail': tail,
                     'phase': 'preflight',
                 }
@@ -13007,14 +13014,27 @@ end tell
             else:
                 verifier_state = 'WARN'
 
-        # base_match: True unless the verifier explicitly reports FAIL.
-        # This replaces the previous hardcoded True and the legacy baseTeam string-compare.
-        # handle_import_apply gates on job['baseMatch']; FAIL state blocks apply here.
-        # baseMatch is verifier-derived; a FAIL verifier state already blocks apply via
-        # this gate without requiring a separate team-name comparison.
+        # base_match: initially True unless the verifier explicitly reports FAIL.
+        # XACA-0586: Three conditions block apply:
+        #   1) verifier FAIL (includes DATA-LOSS dispositions) — blocked here.
+        #   2) STALE-OK and PENDING-IMPORT dispositions are informational — they do not
+        #      set the verifier exit code and do not flip overall_state to FAIL, so apply
+        #      is allowed when only staleness/pending-import is present.
+        #   3) XACA-0586-010: wrong-team guard — manifest now carries source_team (the
+        #      team the archive was generated for). Compare its BASE against the import
+        #      target's base so scope-suffix differences (e.g. source 'finance' vs target
+        #      'finance-personal') still MATCH. Empty source_team = legacy manifest
+        #      (pre-XACA-0586) — cannot enforce, so skip gracefully rather than false-block.
         base_match = (verifier_state != 'FAIL')
 
         target_base_val = _split_team_id(LCARS_TEAM)[0]
+
+        # XACA-0586-010: wrong-team guard — compare source base vs target base.
+        source_base = _split_team_id(source_identity.get('team') or '')[0]
+        if source_base and source_base != target_base_val:
+            base_match = False
+            verifier_state = 'FAIL'   # surface as a hard block in the UI/wire
+            print(f"[LCARS Import] WRONG-TEAM block: source base '{source_base}' != target base '{target_base_val}'")
 
         IMPORT_JOBS[job_id] = {
             'status': 'staged',

@@ -102,6 +102,13 @@ PASS, WARN, FAIL = "PASS", "WARN", "FAIL"
 #     session transcripts) that will NEVER match cross-machine. Expected-missing in
 #     ANY phase — same class of false negative the XACA-0581 skip-channels eliminated.
 PENDING_IMPORT, EXPECTED_MISSING = "PENDING-IMPORT", "EXPECTED-MISSING"
+# XACA-0586: STALE_OK — a present-but-mismatched (EXACT sha differs, or SCHEMA board
+# behind source) carried payload in PRE-IMPORT phase. The overwrite-import will refresh
+# the file; reporting FAIL here is a false negative that blocks apply unnecessarily.
+# Like PENDING_IMPORT this is informational: never sets the exit code, never folds into
+# overall_state/FAIL. POST-RESTORE keeps the prior FAIL semantics (an import should have
+# placed the correct content).
+STALE_OK = "STALE-OK"
 
 # Execution phases. Default is post-restore so existing callers (and the server's
 # import-side verifier call) keep today's behavior with no change.
@@ -233,13 +240,14 @@ def main(argv: list[str] | None = None) -> int:
     rewrite = src_home != dst_home
 
     # Counters
-    overall = {PASS: 0, WARN: 0, FAIL: 0, PENDING_IMPORT: 0, EXPECTED_MISSING: 0}
-    _zero = lambda: {PASS: 0, WARN: 0, FAIL: 0, PENDING_IMPORT: 0, EXPECTED_MISSING: 0, "skipped": 0}
+    overall = {PASS: 0, WARN: 0, FAIL: 0, PENDING_IMPORT: 0, EXPECTED_MISSING: 0, STALE_OK: 0}
+    _zero = lambda: {PASS: 0, WARN: 0, FAIL: 0, PENDING_IMPORT: 0, EXPECTED_MISSING: 0, STALE_OK: 0, "skipped": 0}
     by_channel: dict[str, dict[str, int]] = defaultdict(_zero)
     by_domain: dict[str, dict[str, int]] = defaultdict(_zero)
     failures: list[str] = []
     warnings: list[str] = []
     pending: list[str] = []
+    stale: list[str] = []
 
     for dname, dblock in manifest.domains.items():
         for fe in dblock.files:
@@ -273,6 +281,8 @@ def main(argv: list[str] | None = None) -> int:
                 warnings.append(f"  [WARN] {dst_path}: {msg}")
             elif verdict == PENDING_IMPORT:
                 pending.append(f"  [PENDING-IMPORT] {dst_path}: {msg}")
+            elif verdict == STALE_OK:
+                stale.append(f"  [STALE-OK] {dst_path}: {msg}")
             elif verdict == PASS and not args.quiet:
                 pass  # don't spam PASS lines
 
@@ -297,7 +307,8 @@ def main(argv: list[str] | None = None) -> int:
         c = by_channel.get(ch) or _zero()
         marker = "v" if c[FAIL] == 0 else "x"
         print(f"  {marker} {ch:18s} PASS:{c[PASS]:5d}  WARN:{c[WARN]:4d}  FAIL:{c[FAIL]:4d}  "
-              f"PENDING:{c[PENDING_IMPORT]:4d}  EXP-MISS:{c[EXPECTED_MISSING]:4d}  skipped:{c['skipped']:4d}")
+              f"PENDING:{c[PENDING_IMPORT]:4d}  EXP-MISS:{c[EXPECTED_MISSING]:4d}  "
+              f"STALE-OK:{c[STALE_OK]:4d}  skipped:{c['skipped']:4d}")
 
     print()
     print("=== PER-DOMAIN ===")
@@ -305,7 +316,8 @@ def main(argv: list[str] | None = None) -> int:
         c = by_domain[dname]
         marker = "v" if c[FAIL] == 0 else "x"
         print(f"  {marker} {dname:14s} PASS:{c[PASS]:5d}  WARN:{c[WARN]:4d}  FAIL:{c[FAIL]:4d}  "
-              f"PENDING:{c[PENDING_IMPORT]:4d}  EXP-MISS:{c[EXPECTED_MISSING]:4d}  skipped:{c['skipped']:4d}")
+              f"PENDING:{c[PENDING_IMPORT]:4d}  EXP-MISS:{c[EXPECTED_MISSING]:4d}  "
+              f"STALE-OK:{c[STALE_OK]:4d}  skipped:{c['skipped']:4d}")
 
     if warnings:
         print()
@@ -323,6 +335,14 @@ def main(argv: list[str] | None = None) -> int:
         if len(pending) > args.max_fail_display:
             print(f"  ... and {len(pending) - args.max_fail_display} more")
 
+    if stale:
+        print()
+        print(f"=== STALE-OK ({len(stale)}) — present-but-stale payload; overwrite-import will refresh ===")
+        for sline in stale[: args.max_fail_display]:
+            print(sline)
+        if len(stale) > args.max_fail_display:
+            print(f"  ... and {len(stale) - args.max_fail_display} more")
+
     if failures:
         print()
         print(f"=== FAILURES ({len(failures)}) ===")
@@ -338,6 +358,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  FAIL: {overall[FAIL]}")
     print(f"  PENDING-IMPORT: {overall[PENDING_IMPORT]}")
     print(f"  EXPECTED-MISSING: {overall[EXPECTED_MISSING]}")
+    print(f"  STALE-OK: {overall[STALE_OK]}")
 
     if manifest.untagged_gaps:
         print(f"\n  Warning: Manifest itself reports {len(manifest.untagged_gaps)} untagged gaps from generation.")
@@ -383,6 +404,8 @@ def _check_one(fe, dst_path: Path, phase: str = POST_RESTORE) -> tuple[str, str]
         except OSError as e:
             return FAIL, f"hash error: {e}"
         if current != fe.sha256:
+            if phase == PRE_IMPORT:
+                return STALE_OK, f"sha differs pre-import; overwrite-import will refresh (manifest={fe.size} disk={st.st_size})"
             return FAIL, f"sha256 mismatch (size: manifest={fe.size} disk={st.st_size})"
         return PASS, ""
 
@@ -401,14 +424,14 @@ def _check_one(fe, dst_path: Path, phase: str = POST_RESTORE) -> tuple[str, str]
         # Board JSON files: identified by probe payload containing 'item_ids'.
         # This is team-agnostic — no hardcoded filename needed.
         if fe.path.endswith(".json") and fe.probe and "item_ids" in fe.probe:
-            return _verify_board_schema(fe, dst_path)
+            return _verify_board_schema(fe, dst_path, phase)
         # Unknown schema-class — fall back to existence check.
         return PASS, ""
 
     return WARN, f"unknown class {fe.cls!r}"
 
 
-def _verify_board_schema(fe, dst_path: Path) -> tuple[str, str]:
+def _verify_board_schema(fe, dst_path: Path, phase: str = POST_RESTORE) -> tuple[str, str]:
     import json
     try:
         with open(dst_path, "r", encoding="utf-8") as f:
@@ -437,8 +460,17 @@ def _verify_board_schema(fe, dst_path: Path) -> tuple[str, str]:
                 _walk(v)
     _walk(board)
 
-    missing = cap_ids - cur_ids
+    missing = cap_ids - cur_ids   # destination BEHIND source — normal staleness
+    extra   = cur_ids - cap_ids   # destination-only items — overwrite would DELETE → DATA-LOSS
+
+    if extra:
+        # DATA-LOSS blocks in EVERY phase: an overwrite-import deletes these
+        # destination-only items. Message starts with "DATA-LOSS:" so it is
+        # distinguishable in the failures/tail list.
+        return FAIL, f"DATA-LOSS: destination board has {len(extra)} item(s) absent from source; overwrite would DELETE: {sorted(extra)[:10]}"
     if missing:
+        if phase == PRE_IMPORT:
+            return STALE_OK, f"board behind source by {len(missing)} item(s); overwrite-import will add them: {sorted(missing)[:10]}"
         return FAIL, f"board missing items: {sorted(missing)[:10]}"
     return PASS, ""
 

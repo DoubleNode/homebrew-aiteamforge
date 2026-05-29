@@ -70,3 +70,42 @@ def test_collect_untagged_finds_untagged_entries():
     gaps = m.collect_untagged()
     assert gaps == ["/orphan"]
     assert m.untagged_gaps == ["/orphan"]
+
+
+# XACA-0586-010: source_team round-trip and legacy default tests
+
+def test_source_team_round_trips_through_json():
+    """source_team set on a Manifest survives to_json -> from_json intact."""
+    m = new_manifest()
+    m.source_team = "finance"
+    blob = m.to_json()
+    m2 = Manifest.from_json(blob)
+    assert m2.source_team == "finance"
+
+
+def test_source_team_defaults_to_empty_for_legacy_manifests():
+    """Legacy manifests (no source_team key) deserialize with source_team == ""."""
+    import json
+    raw = {
+        "schema_version": 2,
+        "generated_at": "2026-01-01T00:00:00+00:00",
+        "source_hostname": "oldhost",
+        "source_user": "user",
+        "home": "/Users/user",
+        "channels": [],
+        "channel_stats": {},
+        "untagged_gaps": [],
+        "domains": {},
+        "teams": {},
+        # source_team intentionally absent — simulates a pre-XACA-0586 manifest
+    }
+    m = Manifest.from_json(json.dumps(raw))
+    assert m.source_team == ""
+
+
+def test_source_team_scope_suffix_round_trips():
+    """scope-suffixed team slug (e.g. 'finance-personal') round-trips correctly."""
+    m = new_manifest()
+    m.source_team = "finance-personal"
+    m2 = Manifest.from_json(m.to_json())
+    assert m2.source_team == "finance-personal"

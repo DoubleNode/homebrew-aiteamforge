@@ -65,6 +65,9 @@ def main(argv: list[str] | None = None) -> int:
         team_config=team_config,
     )
     manifest = new_manifest()
+    # XACA-0586-010: record the export team slug so the import preflight wrong-team gate
+    # can compare source base against target base and block cross-team imports.
+    manifest.source_team = args.team
 
     print(f"[generator] Team: {args.team}", flush=True)
     print(f"[generator] Repo root: {repo_root}", flush=True)

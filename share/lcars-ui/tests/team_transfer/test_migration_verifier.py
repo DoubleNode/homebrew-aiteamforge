@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from team_transfer import channels
-from team_transfer.manifest import EXACT, FileEntry, Manifest, PRESENT, new_manifest
+from team_transfer.manifest import EXACT, FileEntry, Manifest, PRESENT, SCHEMA, new_manifest
 from team_transfer.verifier import main as verifier_main
 
 
@@ -804,8 +804,11 @@ class TestPhaseDispositions:
         assert rc == 0
         assert "EXPECTED-MISSING: 0" in out, "present ephemeral is a normal PASS, not expected-missing"
 
-    # -- a present-but-mismatched carried file is a real FAIL even pre-import -
-    def test_sha_mismatch_is_fail_even_pre_import(self, tmp_path, capsys):
+    # -- XACA-0586-002: a present-but-mismatched carried file in PRE-IMPORT is STALE-OK
+    #    (the overwrite-import will refresh it — reporting FAIL is a false negative that
+    #    blocks apply unnecessarily). POST-RESTORE still FAILs (the import should have
+    #    placed the correct content).
+    def test_sha_mismatch_pre_import_is_stale_ok(self, tmp_path, capsys):
         f = tmp_path / "code.py"
         f.write_bytes(b"actual")
         m = _manifest_with_custom_relpath(str(f), "code.py", channels.GIT, EXACT,
@@ -814,9 +817,24 @@ class TestPhaseDispositions:
         mp.write_text(m.to_json())
         rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
         out, _ = capsys.readouterr()
-        assert rc == 1, "a mismatch is a real defect, not 'pending' — must FAIL pre-import too"
-        assert "sha256 mismatch" in out
+        assert rc == 0, "pre-import sha mismatch is STALE-OK (informational) — must not set exit code"
+        assert "FAIL: 0" in out
+        assert "STALE-OK: 1" in out
+        assert "sha differs pre-import" in out
         assert "PENDING-IMPORT: 0" in out
+
+    def test_sha_mismatch_post_restore_is_fail(self, tmp_path, capsys):
+        f = tmp_path / "code.py"
+        f.write_bytes(b"actual")
+        m = _manifest_with_custom_relpath(str(f), "code.py", channels.GIT, EXACT,
+                                          sha=_sha256(b"expected-different"), size=6)
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+        rc = verifier_main(["--manifest", str(mp), "--phase", "post-restore"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, "post-restore sha mismatch must FAIL (import should have placed correct content)"
+        assert "sha256 mismatch" in out
+        assert "STALE-OK: 0" in out
 
     # -- a present carried file passes pre-import (no spurious pending) -------
     def test_present_carried_file_passes_pre_import(self, tmp_path, capsys):
@@ -901,3 +919,154 @@ class TestPhaseDispositions:
         mp.write_text(m.to_json())
         with pytest.raises(SystemExit):
             verifier_main(["--manifest", str(mp), "--phase", "bogus"])
+
+
+# ---------------------------------------------------------------------------
+# TestBoardSchemaPhaseDispositions — XACA-0586: STALE-OK for board-schema entries
+#
+# The M1Pro field scenario: a board manifest whose captured item set is a SUPERSET
+# of the on-disk board (board behind source, e.g. missing XFIN-0027-005..012) must
+# yield STALE-OK + exit 0 under --phase pre-import, and FAIL + exit 1 under the
+# default (post-restore) phase.  DATA-LOSS direction (destination board has items
+# not in the manifest) must FAIL in BOTH phases.
+# ---------------------------------------------------------------------------
+
+import json as _json
+
+
+def _make_board_manifest(
+    tmp_path: Path,
+    board_items: list[str],
+    cap_item_ids: list[str],
+    name: str = "board.json",
+) -> Path:
+    """Write a board JSON to disk + a single-entry SCHEMA manifest with the given probe."""
+    board_path = tmp_path / name
+    board_data = {"items": [{"id": i} for i in board_items]}
+    board_path.write_text(_json.dumps(board_data))
+    m = new_manifest()
+    fe = FileEntry(
+        path=str(board_path),
+        relpath=f"kanban/{name}",
+        sha256=None,
+        size=board_path.stat().st_size,
+        mtime=board_path.stat().st_mtime,
+        cls=SCHEMA,
+        channel=channels.EXPORT_KANBAN,
+        domain="kanban",
+        probe={"item_ids": cap_item_ids},
+    )
+    m.add_file("kanban", fe)
+    m.recompute_channel_stats()
+    mp = tmp_path / f"manifest_{name}.json"
+    mp.write_text(m.to_json())
+    return mp
+
+
+class TestBoardSchemaPhaseDispositions:
+    """_verify_board_schema: STALE-OK (board behind source, pre-import),
+    FAIL (board behind source, post-restore), DATA-LOSS (board ahead of
+    source, any phase), and the combined-direction edge case."""
+
+    # -- board behind source: pre-import must be STALE-OK, exit 0 ------------
+    def test_board_behind_pre_import_is_stale_ok(self, tmp_path, capsys):
+        """Destination board has fewer items than manifest captured (board behind source).
+        Pre-import: STALE-OK + exit 0 — overwrite-import will add the missing items."""
+        disk_items = [f"XFIN-{i:04d}" for i in range(1, 4)]
+        cap_items = [f"XFIN-{i:04d}" for i in range(1, 13)]
+        mp = _make_board_manifest(tmp_path, disk_items, cap_items, "board_behind.json")
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 0, f"board-behind pre-import must be STALE-OK (exit 0), got rc={rc}\n{out}"
+        assert "STALE-OK: 1" in out
+        assert "FAIL: 0" in out
+        assert "board behind source" in out
+
+    # -- board behind source: post-restore must FAIL, exit 1 -----------------
+    def test_board_behind_post_restore_is_fail(self, tmp_path, capsys):
+        """Same scenario post-restore: the import should have added the items → FAIL."""
+        disk_items = [f"XFIN-{i:04d}" for i in range(1, 4)]
+        cap_items = [f"XFIN-{i:04d}" for i in range(1, 13)]
+        mp = _make_board_manifest(tmp_path, disk_items, cap_items, "board_behind_post.json")
+        rc = verifier_main(["--manifest", str(mp), "--phase", "post-restore"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, f"board-behind post-restore must FAIL (exit 1), got rc={rc}\n{out}"
+        assert "FAIL: 1" in out
+        assert "STALE-OK: 0" in out
+
+    # -- DATA-LOSS direction: pre-import must FAIL (blocks apply) -------------
+    def test_board_data_loss_pre_import_is_fail(self, tmp_path, capsys):
+        """Destination board has items the manifest does NOT capture (cur_ids - cap_ids).
+        An overwrite-import would DELETE these items.  Must FAIL with 'DATA-LOSS:' prefix
+        message in pre-import phase — this is the real blocking signal."""
+        disk_items = ["XFIN-0001", "XFIN-0002", "XFIN-0003", "XFIN-0004", "XFIN-0005"]
+        cap_items = ["XFIN-0001", "XFIN-0002", "XFIN-0003"]
+        mp = _make_board_manifest(tmp_path, disk_items, cap_items, "board_dataloss_pre.json")
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, f"DATA-LOSS pre-import must FAIL (exit 1), got rc={rc}\n{out}"
+        assert "FAIL: 1" in out
+        assert "DATA-LOSS:" in out, "Failure message must start with 'DATA-LOSS:' prefix"
+
+    # -- DATA-LOSS direction: post-restore must also FAIL ---------------------
+    def test_board_data_loss_post_restore_is_fail(self, tmp_path, capsys):
+        """DATA-LOSS blocks in post-restore phase too — the missing items are a real defect."""
+        disk_items = ["XFIN-0001", "XFIN-0002", "XFIN-0003", "XFIN-0004", "XFIN-0005"]
+        cap_items = ["XFIN-0001", "XFIN-0002", "XFIN-0003"]
+        mp = _make_board_manifest(tmp_path, disk_items, cap_items, "board_dataloss_post.json")
+        rc = verifier_main(["--manifest", str(mp), "--phase", "post-restore"])
+        out, _ = capsys.readouterr()
+        assert rc == 1, f"DATA-LOSS post-restore must FAIL (exit 1), got rc={rc}\n{out}"
+        assert "FAIL: 1" in out
+        assert "DATA-LOSS:" in out
+
+    # -- both behind AND ahead: DATA-LOSS wins over STALE-OK ------------------
+    def test_board_both_behind_and_ahead_data_loss_wins(self, tmp_path, capsys):
+        """Destination board has BOTH: items the manifest does not list (ahead, DATA-LOSS)
+        AND is missing items the manifest captured (behind, STALE-OK candidate).
+        DATA-LOSS must take priority — result is FAIL, not STALE-OK."""
+        disk_items = ["XFIN-0001", "XFIN-0002", "XFIN-0003", "XFIN-9999"]  # 9999 is extra
+        cap_items = [f"XFIN-{i:04d}" for i in range(1, 6)]  # missing 0004, 0005 on disk
+        mp = _make_board_manifest(tmp_path, disk_items, cap_items, "board_mixed.json")
+        for phase in ("pre-import", "post-restore"):
+            rc = verifier_main(["--manifest", str(mp), "--phase", phase])
+            out, _ = capsys.readouterr()
+            assert rc == 1, (
+                f"Mixed behind+ahead ({phase}): DATA-LOSS must win → FAIL (exit 1), "
+                f"got rc={rc}\n{out}"
+            )
+            assert "DATA-LOSS:" in out, f"Expected DATA-LOSS: prefix ({phase})\n{out}"
+            assert "STALE-OK: 0" in out, (
+                f"STALE-OK must be 0 when DATA-LOSS is present ({phase})\n{out}"
+            )
+
+    # -- board exactly matches: PASS in both phases ---------------------------
+    def test_board_exact_match_passes_both_phases(self, tmp_path, capsys):
+        """Board on disk matches captured probe exactly: PASS + exit 0 in both phases."""
+        items = ["XFIN-0001", "XFIN-0002", "XFIN-0003"]
+        mp = _make_board_manifest(tmp_path, items, items, "board_exact.json")
+        for phase in ("pre-import", "post-restore"):
+            rc = verifier_main(["--manifest", str(mp), "--phase", phase])
+            out, _ = capsys.readouterr()
+            assert rc == 0, f"Exact board match must PASS in {phase}, got rc={rc}\n{out}"
+            assert "FAIL: 0" in out
+            assert "STALE-OK: 0" in out
+
+    # -- server.py STALE-OK regex smoke-test ----------------------------------
+    def test_stale_ok_summary_line_matches_server_regex(self, tmp_path, capsys):
+        """The '  STALE-OK: N' summary line must match server.py's parsing regex
+        r'^\\s*STALE-OK:\\s*(\\d+)$' so verifierSummary.staleOk is populated."""
+        import re
+        disk_items = ["XFIN-0001"]
+        cap_items = ["XFIN-0001", "XFIN-0002", "XFIN-0003"]  # board behind by 2
+        mp = _make_board_manifest(tmp_path, disk_items, cap_items, "board_regex_check.json")
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 0
+        server_re = re.compile(r"^\s*STALE-OK:\s*(\d+)$", re.MULTILINE)
+        mo = server_re.search(out)
+        assert mo is not None, (
+            f"Server regex r'^\\s*STALE-OK:\\s*(\\d+)$' did not match verifier output.\n"
+            f"Output:\n{out}"
+        )
+        assert int(mo.group(1)) == 1, f"Expected STALE-OK count=1, got {mo.group(1)}"
