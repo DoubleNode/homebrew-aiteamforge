@@ -277,6 +277,58 @@ assert_file_not_exists \
     "$CASE6_DIR/lcars-health-check.sh" \
     "No lcars-health-check.sh should be written when source is missing"
 
+# ═══════════════════════════════════════════════════════════════════════════
+# TEST 7: interpreter correctness — the plist must invoke the script under the
+#         interpreter the script is actually written for.
+#
+# REGRESSION INTENT (XACA-0585 review catch): the plist ProgramArguments[0] is an
+# EXPLICIT interpreter, which OVERRIDES the script's #!/bin/zsh shebang. The script
+# uses zsh-only syntax (typeset -A, `(N)` glob qualifier). If the plist names
+# /bin/bash, launchd runs the zsh script through bash and it dies with a parse error
+# (exit 2) on every 300s tick — turning the exit-127 file-not-found bug into an
+# exit-2 parse bug. Either way LCARS servers never auto-restart. The fix is the
+# only thing that makes this script actually RUN, so the interpreter must be /bin/zsh.
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "Plist invokes lcars-health-check.sh under /bin/zsh (not /bin/bash)"
+PLIST_TEMPLATE="$TAP_ROOT/share/templates/kanban/lcars-health-plist.template"
+if [ -f "$PLIST_TEMPLATE" ]; then
+    plist_content="$(cat "$PLIST_TEMPLATE")"
+    assert_contains \
+        "$plist_content" \
+        "/bin/zsh" \
+        "plist must invoke the health-check script via /bin/zsh (script is #!/bin/zsh)"
+    if [[ "$plist_content" == *"/bin/bash"* ]]; then
+        test_fail "plist must NOT use /bin/bash — the script uses zsh-only syntax and bash exits 2 (parse error)"
+    else
+        test_pass
+    fi
+else
+    test_fail "lcars-health-plist.template not found at $PLIST_TEMPLATE — cannot verify interpreter"
+fi
+
+test_start "Shipped tap script parses under its declared interpreter (zsh -n)"
+TAP_SCRIPT="$TAP_ROOT/share/scripts/lcars-health-check.sh"
+if command -v zsh >/dev/null 2>&1; then
+    if zsh -n "$TAP_SCRIPT" >/dev/null 2>&1; then
+        test_pass
+    else
+        test_fail "share/scripts/lcars-health-check.sh failed 'zsh -n' syntax check"
+    fi
+else
+    echo "     SKIP: zsh not available to parse-check the script"
+    test_pass
+fi
+
+test_start "Interpreter choice is load-bearing: script does NOT parse under bash (documents why /bin/zsh)"
+# Confirms the script genuinely requires zsh — if this ever passes under bash, the
+# interpreter requirement has changed and the plist/test pairing should be revisited.
+if bash -n "$TAP_SCRIPT" >/dev/null 2>&1; then
+    test_fail "script parsed under bash -n — unexpected; the zsh interpreter requirement may have changed (revisit plist)"
+else
+    test_pass
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone mode only — test-runner.sh tallies from its own counters).
 # ─────────────────────────────────────────────────────────────────────────────

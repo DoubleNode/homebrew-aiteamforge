@@ -493,7 +493,8 @@ check_launchagents() {
   else
     check_result fail "LCARS health check script missing: ${AITEAMFORGE_DIR}/lcars-health-check.sh"
     if [ "$VERBOSE" = true ]; then
-      echo "    Fix: aiteamforge upgrade  (re-installs helper scripts)"
+      echo "    Fix: aiteamforge setup  (re-runs the installer lay-down)"
+      echo "    Note: 'aiteamforge upgrade' will NOT create a missing script — update_aux_scripts skips absent targets."
     fi
   fi
 

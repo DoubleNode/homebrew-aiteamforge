@@ -6,7 +6,7 @@
     <string>com.aiteamforge.lcars-health</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/bin/bash</string>
+        <string>/bin/zsh</string>
         <string>{{AITEAMFORGE_DIR}}/lcars-health-check.sh</string>
     </array>
     <key>StartInterval</key>
