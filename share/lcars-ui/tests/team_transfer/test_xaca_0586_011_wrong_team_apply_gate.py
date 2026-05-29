@@ -3,9 +3,13 @@ not the generic acknowledgePreflightDeltas.
 
 server.py handle_import_apply is not unit-testable in isolation (requires a live
 HTTP socket and environment). The gate decision logic is factored here as a pure
-helper that mirrors the exact coercion + gate path in the handler, covering the
-flag-coercion shapes and the critical invariant: acknowledgePreflightDeltas alone
-does NOT bypass a wrongTeam job; only acknowledgeWrongTeam does.
+helper that mirrors the coercion + two-gate path in the handler (wrong-team gate
+then baseMatch gate, with fall-through — NO early return on the wrong-team
+override, matching production), covering the flag-coercion shapes and the critical
+invariant: acknowledgePreflightDeltas alone does NOT bypass a wrongTeam job; the
+wrong-team gate requires acknowledgeWrongTeam, and because a wrongTeam job also
+carries baseMatch=False the import additionally requires acknowledgePreflightDeltas
+to clear the baseMatch gate (a cross-team import needs BOTH flags).
 """
 from __future__ import annotations
 
@@ -47,14 +51,19 @@ def _apply_gate_decision(job: dict, body_json: dict) -> tuple[bool, str]:
         body_json.get('acknowledgeWrongTeam', False)
     )
 
-    # XACA-0586-011: wrong-team gate must be checked before the generic baseMatch gate.
+    # XACA-0586-011: wrong-team gate is checked before the generic baseMatch gate.
+    # IMPORTANT — production (handle_import_apply) does NOT early-return on the
+    # wrong-team override: it logs the override and FALLS THROUGH to the baseMatch
+    # gate below. Because the wrong-team guard sets BOTH wrongTeam=True AND
+    # baseMatch=False on the job, a real cross-team import must clear BOTH gates —
+    # acknowledgeWrongTeam (here) AND acknowledgePreflightDeltas (baseMatch gate).
+    # This helper models that exact two-gate path (no early return on override).
     if job.get('wrongTeam'):
         if not acknowledge_wrong_team:
             return False, 'wrongTeam_blocked'
-        # operator override — fall through
-        return True, 'wrongTeam_override'
+        # operator acknowledged the cross-team error — fall through to the baseMatch gate
 
-    # Generic baseMatch gate (verifier FAIL / staleness).
+    # Generic baseMatch gate (verifier FAIL / staleness / wrong-team-induced).
     if not job.get('baseMatch'):
         if not acknowledge_preflight_deltas:
             return False, 'baseMatch_blocked'
@@ -155,23 +164,27 @@ class TestWrongTeamApplyGate:
         )
         assert reason == 'wrongTeam_blocked'
 
-    def test_wrong_team_allowed_when_acknowledge_wrong_team(self):
-        """acknowledgeWrongTeam=true must allow a cross-team import to proceed."""
+    def test_wrong_team_acknowledge_alone_clears_wrongteam_gate_but_basematch_still_blocks(self):
+        """acknowledgeWrongTeam clears the wrong-team gate, but the wrongTeam job also
+        carries baseMatch=False, so it then blocks at the baseMatch gate (production
+        falls through). A cross-team import needs BOTH flags — acknowledgeWrongTeam
+        alone is insufficient."""
         body = {'acknowledgeWrongTeam': True}
         allowed, reason = _apply_gate_decision(_wrong_team_job(), body)
-        assert allowed is True
-        assert reason == 'wrongTeam_override'
+        assert allowed is False
+        assert reason == 'baseMatch_blocked'
 
-    def test_wrong_team_allowed_when_both_flags_set(self):
-        """Both flags set — still allowed (acknowledgeWrongTeam present)."""
+    def test_wrong_team_allowed_only_when_both_flags_set(self):
+        """Both flags set — cleared past the wrong-team gate AND the baseMatch gate."""
         body = {'acknowledgeWrongTeam': True, 'acknowledgePreflightDeltas': True}
         allowed, reason = _apply_gate_decision(_wrong_team_job(), body)
         assert allowed is True
-        assert reason == 'wrongTeam_override'
+        assert reason == 'preflight_override'
 
     def test_wrong_team_string_coercion_true(self):
-        """acknowledgeWrongTeam accepts string 'true'."""
-        body = {'acknowledgeWrongTeam': 'true'}
+        """acknowledgeWrongTeam accepts string 'true' (clears the wrong-team gate);
+        paired with acknowledgePreflightDeltas the cross-team import proceeds."""
+        body = {'acknowledgeWrongTeam': 'true', 'acknowledgePreflightDeltas': True}
         allowed, _ = _apply_gate_decision(_wrong_team_job(), body)
         assert allowed is True
 
