@@ -549,6 +549,25 @@ install_board_check_scripts() {
     success "Installed: $restore_helper_dest"
 }
 
+# XACA-0585: Install LCARS health check script to AITEAMFORGE_DIR
+# Must run before install_lcars_health_launchagent so the script the LaunchAgent
+# invokes actually exists at ${AITEAMFORGE_DIR}/lcars-health-check.sh.
+install_lcars_health_check_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local health_check_src="${scripts_src}/lcars-health-check.sh"
+    local health_check_dest="$AITEAMFORGE_DIR/lcars-health-check.sh"
+
+    if [ ! -f "$health_check_src" ]; then
+        warning "LCARS health check script not found at: ${health_check_src} (skipping)"
+        return 0
+    fi
+
+    info "Installing LCARS health check script"
+    cp "$health_check_src" "$health_check_dest"
+    chmod +x "$health_check_dest"
+    success "Installed: $health_check_dest"
+}
+
 # Install kanban hooks
 install_kanban_hooks() {
     local hooks_src="$INSTALL_ROOT/share/kanban-hooks"
@@ -1346,6 +1365,7 @@ install_kanban_system() {
     # Install core kanban components (non-fatal if templates missing)
     install_kanban_helpers
     install_board_check_scripts
+    install_lcars_health_check_script
     install_kanban_hooks
 
     # Initialize kanban boards for each team (skipped when no teams resolved —

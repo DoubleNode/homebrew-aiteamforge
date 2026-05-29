@@ -8,6 +8,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 - XACA-0582: import-apply preflight-delta override — `acknowledgePreflightDeltas` operator in `share/lcars-ui/server.py` unblocks migration import-apply when preflight FAILs are expected payload deltas (path-map drift, pending-import files). LCARS UI (`share/lcars-ui/js/lcars.js`, `share/lcars-ui/index.html`) gains the corresponding toggle control. Mirror of canonical lcars-ui changes.
+- XACA-0585: Ship `lcars-health-check.sh` through the tap install/upgrade pipeline. `share/scripts/lcars-health-check.sh` added; `install_lcars_health_check_script()` in `install-kanban.sh` lays it down before `install_lcars_health_launchagent`; `update_aux_scripts` script_map in `aiteamforge-upgrade.sh` keeps it current on upgrade; `aiteamforge-doctor` gains a missing-script check. Fixes exit 127 on the `com.aiteamforge.lcars-health` LaunchAgent (StartInterval 300) that caused dead LCARS servers to never auto-restart.
 
 ## [0.12.8] - 2026-05-28
 

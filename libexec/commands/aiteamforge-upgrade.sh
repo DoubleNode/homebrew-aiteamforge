@@ -304,6 +304,7 @@ update_aux_scripts() {
     "kanban-board-check.sh|${WORKING_DIR}/kanban-board-check.sh"
     "kanban-restore-helper.sh|${WORKING_DIR}/kanban-restore-helper.sh"
     "kanban-backup.py|${WORKING_DIR}/kanban-backup.py"
+    "lcars-health-check.sh|${WORKING_DIR}/lcars-health-check.sh"
     "kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh"
     "auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh"
     "cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh"

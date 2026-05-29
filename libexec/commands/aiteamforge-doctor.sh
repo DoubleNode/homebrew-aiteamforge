@@ -487,6 +487,15 @@ check_launchagents() {
       echo "    Load: launchctl load ~/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
     fi
   fi
+  # XACA-0585: script the LaunchAgent invokes must exist; missing = exit 127 on every tick
+  if [ -f "${AITEAMFORGE_DIR}/lcars-health-check.sh" ]; then
+    check_result pass "LCARS health check script present"
+  else
+    check_result fail "LCARS health check script missing: ${AITEAMFORGE_DIR}/lcars-health-check.sh"
+    if [ "$VERBOSE" = true ]; then
+      echo "    Fix: aiteamforge upgrade  (re-installs helper scripts)"
+    fi
+  fi
 
   # Fleet reporter agent
   if launchctl list 2>/dev/null | grep -q "com.aiteamforge.fleet-reporter"; then
