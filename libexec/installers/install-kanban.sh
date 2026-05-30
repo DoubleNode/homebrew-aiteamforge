@@ -568,6 +568,27 @@ install_lcars_health_check_script() {
     success "Installed: $health_check_dest"
 }
 
+# XACA-0584: Install worktree persona deployment helper to AITEAMFORGE_DIR/scripts/.
+# The wt-new hook (-x guard) calls this script to copy master personas into each
+# new worktree's .claude/agents/ dir on tap machines where gitignored personas are
+# absent after checkout. Without this seed the entire wt-new -x feature is a no-op.
+install_worktree_personas_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local src="${scripts_src}/deploy-worktree-personas.sh"
+    local dest="$AITEAMFORGE_DIR/scripts/deploy-worktree-personas.sh"
+
+    if [ ! -f "$src" ]; then
+        warning "deploy-worktree-personas.sh not found at: ${src} (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    info "Installing worktree persona deployment helper"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    success "Installed: $dest"
+}
+
 # Install kanban hooks
 install_kanban_hooks() {
     local hooks_src="$INSTALL_ROOT/share/kanban-hooks"
@@ -1366,6 +1387,7 @@ install_kanban_system() {
     install_kanban_helpers
     install_board_check_scripts
     install_lcars_health_check_script
+    install_worktree_personas_script
     install_kanban_hooks
 
     # Initialize kanban boards for each team (skipped when no teams resolved —
