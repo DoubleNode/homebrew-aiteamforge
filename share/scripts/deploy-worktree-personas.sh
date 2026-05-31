@@ -4,7 +4,18 @@
 #
 # Usage:
 #   deploy-worktree-personas.sh <worktree_path> <team> [--dry-run] [--force] [--verbose]
+#   deploy-worktree-personas.sh --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]
 #   deploy-worktree-personas.sh selftest
+#
+# Single-worktree mode:
+#   Deploys personas from the tap install path into one worktree's .claude/agents/.
+#   Called automatically by the wt-new hook on every new worktree creation.
+#
+# --all backfill mode:
+#   Enumerates ALL existing worktrees under <main_repo>/worktrees/ and deploys
+#   personas into each one. Tap-machine equivalent of `kb-sync-personas sync-worktrees --all`
+#   for pre-existing worktrees (e.g. after a fresh tap install on a machine that already
+#   has worktrees). <main_repo_path> defaults to cwd's git common dir root when omitted.
 #
 # Source resolution (in priority order):
 #   PRIMARY : ${AITEAMFORGE_DIR:-$HOME/aiteamforge}/<team>/personas/agents/
@@ -246,50 +257,23 @@ _write_marker() {
 }
 
 # ---------------------------------------------------------------------------
-# Main deployment logic
+# Core deployment logic — operates on a pre-validated canon_target path.
+# Called by both _deploy (single-worktree) and _deploy_all (batch backfill).
+# Arguments: canon_target team primary_src aiteamforge_dir
+# Returns: 0 success/no-op, 2 write failure
 # ---------------------------------------------------------------------------
 
-_deploy() {
-  local wt_path="$1"
+_deploy_core() {
+  local canon_target="$1"
   local team="$2"
+  local primary_src="$3"
+  local aiteamforge_dir="$4"
 
-  # --- Resolve source directory ---
-  local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
-  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
-  local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
-
-  if [ ! -d "$primary_src" ]; then
-    # Check dev-machine fallback
-    if [ -d "$devmachine_fallback" ]; then
-      _info "[${team}] Dev-machine detected: use kb-sync-personas sync-worktrees ${team} instead."
-      return 0
-    fi
-    _warn "[${team}] No personas found at ${primary_src} — skipping."
-    return 0
-  fi
-
-  # --- Validate worktree target via guard ---
-  local main_root
-  main_root=$(_main_root_from_wt "$wt_path") || return 1
-
-  local canon_target
-  # _guard_worktree_target prints the canonical target path on success, or
-  # returns non-zero on failure. The main-repo-is-wt case returns 0 but prints
-  # nothing — we detect that by checking if canon_target is empty.
-  canon_target=$(_guard_worktree_target "$wt_path" "$main_root") || {
-    _err "[${team}] Guard rejected worktree target. Aborting."
-    return 1
-  }
-
-  if [ -z "$canon_target" ]; then
-    # Benign: main repo root passed as wt_path (guard already warned).
-    return 0
-  fi
+  local marker="${canon_target}/.synced-from-tap"
 
   # --- Idempotency check ---
-  local marker="${canon_target}/.synced-from-tap"
   if [ "${OPT_FORCE:-false}" != "true" ] && [ -f "$marker" ]; then
-    _info "[${team}] Already deployed (use --force to refresh)."
+    _info "[${team}] Already deployed at ${canon_target} (use --force to refresh)."
     return 0
   fi
 
@@ -385,6 +369,144 @@ _deploy() {
   fi
 
   _info "[${team}] Done: ${deployed} deployed, ${skipped} skipped."
+}
+
+# ---------------------------------------------------------------------------
+# Single-worktree deployment: resolve source + guard, then call _deploy_core.
+# ---------------------------------------------------------------------------
+
+_deploy() {
+  local wt_path="$1"
+  local team="$2"
+
+  # --- Resolve source directory ---
+  local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
+  local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
+
+  if [ ! -d "$primary_src" ]; then
+    # Check dev-machine fallback
+    if [ -d "$devmachine_fallback" ]; then
+      _info "[${team}] Dev-machine detected: use kb-sync-personas sync-worktrees ${team} instead."
+      return 0
+    fi
+    _warn "[${team}] No personas found at ${primary_src} — skipping."
+    return 0
+  fi
+
+  # --- Validate worktree target via guard ---
+  local main_root
+  main_root=$(_main_root_from_wt "$wt_path") || return 1
+
+  local canon_target
+  # _guard_worktree_target prints the canonical target path on success, or
+  # returns non-zero on failure. The main-repo-is-wt case returns 0 but prints
+  # nothing — we detect that by checking if canon_target is empty.
+  canon_target=$(_guard_worktree_target "$wt_path" "$main_root") || {
+    _err "[${team}] Guard rejected worktree target. Aborting."
+    return 1
+  }
+
+  if [ -z "$canon_target" ]; then
+    # Benign: main repo root passed as wt_path (guard already warned).
+    return 0
+  fi
+
+  _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir"
+}
+
+# ---------------------------------------------------------------------------
+# Batch backfill: enumerate all worktrees under <main_repo>/worktrees/ and
+# deploy personas into each. Tap-machine equivalent of:
+#   kb-sync-personas sync-worktrees --all
+# for pre-existing worktrees on tap machines.
+#
+# Arguments: team [main_repo_path]
+# main_repo_path defaults to cwd's git common dir root when omitted.
+# ---------------------------------------------------------------------------
+
+_deploy_all() {
+  local team="$1"
+  local main_repo="${2:-}"
+
+  # --- Resolve main repo if not provided ---
+  if [ -z "$main_repo" ]; then
+    main_repo=$(_main_root_from_wt "$PWD") || {
+      _err "Cannot determine main repo root from cwd. Pass <main_repo_path> explicitly."
+      return 1
+    }
+  fi
+
+  # Canonicalize main_repo
+  local canon_main
+  canon_main=$(_canon_path "$main_repo") || {
+    _err "Cannot canonicalize main repo path: $main_repo"
+    return 1
+  }
+
+  local worktrees_dir="${canon_main}/worktrees"
+  if [ ! -d "$worktrees_dir" ]; then
+    _info "[${team}] No worktrees/ directory at ${canon_main} — nothing to backfill."
+    return 0
+  fi
+
+  # --- Resolve source directory (shared with single-worktree mode) ---
+  local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
+  local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
+
+  if [ ! -d "$primary_src" ]; then
+    if [ -d "$devmachine_fallback" ]; then
+      _info "[${team}] Dev-machine detected: use kb-sync-personas sync-worktrees ${team} instead."
+      return 0
+    fi
+    _warn "[${team}] No personas found at ${primary_src} — skipping."
+    return 0
+  fi
+
+  # --- Enumerate worktrees via git porcelain output ---
+  # Parse "worktree <path>" lines; skip the first entry (main worktree).
+  local wt_paths
+  wt_paths=()
+  local first=true
+  local wt_line
+  while IFS= read -r wt_line; do
+    if [[ "$wt_line" == worktree\ * ]]; then
+      local wt_candidate="${wt_line#worktree }"
+      if [ "$first" = true ]; then
+        first=false
+        continue   # skip main worktree
+      fi
+      # Only include worktrees under <main_repo>/worktrees/
+      local canon_candidate
+      canon_candidate=$(_canon_path "$wt_candidate") || continue
+      if [[ "$canon_candidate" == "${worktrees_dir}/"* ]]; then
+        wt_paths+=("$canon_candidate")
+      fi
+    fi
+  done < <(git -C "$canon_main" worktree list --porcelain 2>/dev/null) || true
+
+  if [ ${#wt_paths[@]} -eq 0 ]; then
+    _info "[${team}] No worktrees found under ${worktrees_dir} — nothing to backfill."
+    return 0
+  fi
+
+  _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s) under ${worktrees_dir}..."
+
+  local overall_rc=0
+  for wt_path in "${wt_paths[@]}"; do
+    local canon_target
+    canon_target=$(_guard_worktree_target "$wt_path" "$canon_main") || {
+      _warn "[${team}] Guard rejected: ${wt_path} — skipping."
+      continue
+    }
+    if [ -z "$canon_target" ]; then
+      continue
+    fi
+    _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || overall_rc=$?
+  done
+
+  return $overall_rc
 }
 
 # ---------------------------------------------------------------------------
@@ -645,6 +767,49 @@ PERSONA
   fi
 
   # -----------------------------------------------------------------------
+  # Test 13: --all happy-path — 2 worktrees both get personas
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 13: --all backfill: 2 worktrees both get personas...\n'
+  local fake_main2="${tmp}/fake-main2"
+  local fake_wt_a="${fake_main2}/worktrees/feature-aaa"
+  local fake_wt_b="${fake_main2}/worktrees/feature-bbb"
+  mkdir -p "${fake_main2}/.git"
+  mkdir -p "$fake_wt_a"
+  mkdir -p "$fake_wt_b"
+
+  local t13_out t13_rc=0
+  t13_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all_with_fake_wts "testteam" "$fake_main2" "$fake_aitf" \
+      "$fake_wt_a" "$fake_wt_b" 2>&1) || t13_rc=$?
+
+  local wt_a_agents="${fake_wt_a}/.claude/agents"
+  local wt_b_agents="${fake_wt_b}/.claude/agents"
+  if [ -f "${wt_a_agents}/testteam_alpha_engineer_persona.md" ] && \
+     [ -f "${wt_b_agents}/testteam_alpha_engineer_persona.md" ] && \
+     [ "$t13_rc" -eq 0 ]; then
+    _pass "Test 13 (--all backfill: both worktrees got personas, exit 0)"
+  else
+    _fail "Test 13 — --all backfill: missing persona files or bad rc=${t13_rc}. out: ${t13_out}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 14: --all with no worktrees — benign no-op (exit 0, no crash)
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 14: --all backfill: no worktrees → benign no-op...\n'
+  local fake_main3="${tmp}/fake-main3"
+  mkdir -p "${fake_main3}/.git"
+  # No worktrees/ subdir at all
+
+  local t14_out t14_rc=0
+  t14_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all_with_fake_wts "testteam" "$fake_main3" "$fake_aitf" 2>&1) || t14_rc=$?
+  if [ "$t14_rc" -eq 0 ]; then
+    _pass "Test 14 (--all backfill: no worktrees → benign no-op, exit 0)"
+  else
+    _fail "Test 14 — expected exit 0 with no worktrees, got rc=${t14_rc}: ${t14_out}"
+  fi
+
+  # -----------------------------------------------------------------------
   # Summary
   # -----------------------------------------------------------------------
   printf '\n[selftest] Results: %d/%d passed\n' "$pass" "$total"
@@ -657,13 +822,15 @@ PERSONA
 }
 
 # Helper: like _deploy but with git-common-dir stubbed for selftest
-# (fake_wt has no real git repo; we bypass _main_root_from_wt)
+# (fake_wt has no real git repo; we bypass _main_root_from_wt).
+# Uses _deploy_core directly after guard validation — no logic duplication.
 _deploy_with_fake_git() {
   local wt_path="$1"
   local main_root="$2"
   local team="$3"
 
-  local primary_src="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/${team}/personas/agents"
+  local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
   local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
 
   if [ ! -d "$primary_src" ]; then
@@ -685,68 +852,7 @@ _deploy_with_fake_git() {
     return 0
   fi
 
-  local marker="${canon_target}/.synced-from-tap"
-  if [ "${OPT_FORCE:-false}" != "true" ] && [ -f "$marker" ]; then
-    _info "[${team}] Already deployed (use --force to refresh)."
-    return 0
-  fi
-
-  local persona_files
-  persona_files=()
-  while IFS= read -r -d '' f; do
-    persona_files+=("$f")
-  done < <(find "$primary_src" -maxdepth 1 -name '*.md' -type f -print0 | sort -z) || true
-
-  if [ ${#persona_files[@]} -eq 0 ]; then
-    _warn "[${team}] No .md files found in ${primary_src} — skipping."
-    return 0
-  fi
-
-  if [ "${OPT_DRY_RUN:-false}" != "true" ]; then
-    mkdir -p "$canon_target" || { _err "[${team}] Failed to create target dir"; return 2; }
-  fi
-
-  local deployed=0 skipped=0
-
-  for src_file in "${persona_files[@]}"; do
-    local bname
-    bname=$(basename "$src_file")
-    local char_name
-    char_name=$(_char_from_filename "$bname")
-    local dest_file="${canon_target}/${bname}"
-
-    if [ "${OPT_DRY_RUN:-false}" = "true" ]; then
-      _info "[${team}] [DRY-RUN] Would transform+copy: ${bname} (name: ${char_name})"
-      deployed=$((deployed + 1))
-      continue
-    fi
-
-    local transform_out transform_rc=0
-    transform_out=$(_transform_persona "$src_file" "$char_name") || transform_rc=$?
-
-    case "$transform_rc" in
-      0)
-        local old_name
-        old_name=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$src_file" \
-          | sed 's/^name[[:space:]]*:[[:space:]]*//')
-        printf '%s\n' "$transform_out" > "$dest_file" || return 2
-        _info "[${team}] transform+copy ${bname} (name: ${old_name} → ${char_name})"
-        deployed=$((deployed + 1))
-        ;;
-      2) _warn "[${team}] ${bname}: no YAML frontmatter — copying verbatim"
-         cp "$src_file" "$dest_file" || return 2; deployed=$((deployed + 1)) ;;
-      3) _warn "[${team}] ${bname}: no 'name:' in frontmatter — copying verbatim"
-         printf '%s\n' "$transform_out" > "$dest_file" || return 2; deployed=$((deployed + 1)) ;;
-      *) _warn "[${team}] ${bname}: transform error (rc=${transform_rc}) — skipping"
-         skipped=$((skipped + 1)) ;;
-    esac
-  done
-
-  if [ "${OPT_DRY_RUN:-false}" != "true" ]; then
-    _write_marker "$canon_target" "$team" "$primary_src" "${AITEAMFORGE_DIR:-$HOME/aiteamforge}" || return 2
-  fi
-
-  _info "[${team}] Done: ${deployed} deployed, ${skipped} skipped."
+  _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir"
 }
 
 # Helper: test the dev-machine/no-personas detection path in isolation
@@ -768,6 +874,45 @@ _deploy_devmachine_check() {
   fi
 }
 
+# Helper: --all mode with a pre-built fake git worktree list (bypasses real git)
+# Arguments: team main_root aiteamforge_dir [wt_path ...]
+_deploy_all_with_fake_wts() {
+  local team="$1"
+  local canon_main="$2"
+  local aiteamforge_dir="$3"
+  shift 3
+  local wt_paths=("$@")
+
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
+
+  if [ ! -d "$primary_src" ]; then
+    _warn "[${team}] No personas found at ${primary_src} — skipping."
+    return 0
+  fi
+
+  if [ ${#wt_paths[@]} -eq 0 ]; then
+    _info "[${team}] No worktrees found — nothing to backfill."
+    return 0
+  fi
+
+  _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s)..."
+
+  local overall_rc=0
+  for wt_path in "${wt_paths[@]}"; do
+    local canon_target
+    canon_target=$(_guard_worktree_target "$wt_path" "$canon_main") || {
+      _warn "[${team}] Guard rejected: ${wt_path} — skipping."
+      continue
+    }
+    if [ -z "$canon_target" ]; then
+      continue
+    fi
+    _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || overall_rc=$?
+  done
+
+  return $overall_rc
+}
+
 # ---------------------------------------------------------------------------
 # Argument parsing + entry point
 # ---------------------------------------------------------------------------
@@ -775,12 +920,49 @@ _deploy_devmachine_check() {
 main() {
   if [ $# -eq 0 ]; then
     printf 'Usage: %s <worktree_path> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+    printf '       %s --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s selftest\n' "$PROG" >&2
     exit 1
   fi
 
   if [ "$1" = "selftest" ]; then
     _selftest
+    return
+  fi
+
+  OPT_DRY_RUN=false
+  OPT_FORCE=false
+  OPT_VERBOSE=false
+
+  # --all backfill mode: deploy to all existing worktrees
+  if [ "$1" = "--all" ]; then
+    shift
+    if [ $# -eq 0 ]; then
+      printf 'Usage: %s --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+      exit 1
+    fi
+    local all_team="$1"
+    shift
+    local all_repo=""
+    # Consume optional positional main_repo_path (not starting with --)
+    if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+      all_repo="$1"
+      shift
+    fi
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dry-run)  OPT_DRY_RUN=true  ;;
+        --force)    OPT_FORCE=true    ;;
+        --verbose)  OPT_VERBOSE=true  ;;
+        *)
+          _err "Unknown option: $1"
+          exit 1
+          ;;
+      esac
+      shift
+    done
+    export OPT_DRY_RUN OPT_FORCE OPT_VERBOSE
+    _deploy_all "$all_team" "$all_repo"
     return
   fi
 
@@ -792,10 +974,6 @@ main() {
   local wt_path="$1"
   local team="$2"
   shift 2
-
-  OPT_DRY_RUN=false
-  OPT_FORCE=false
-  OPT_VERBOSE=false
 
   while [ $# -gt 0 ]; do
     case "$1" in

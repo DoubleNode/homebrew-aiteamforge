@@ -244,6 +244,8 @@ is set. Unsandboxed tests WILL trip this guard and abort. See
 | Migration | `test-migration.sh` | ✓ Check, migrate, dry-run |
 | Installers | `test-installers.sh` | ✓ All installer modules |
 | Integration | `test-integration.sh` | ✓ Full workflows |
+| XACA-0585 lcars-health lay-down | `test-xaca-0585-lcars-health-script-laydown.sh` | ✓ Tap ships script, installer seeds it +x, plist ordering, upgrade script_map, idempotent, missing-source graceful |
+| XACA-0588 deploy-worktree-personas lay-down | `test-xaca-0588-deploy-worktree-personas-laydown.sh` | ✓ Tap ships script, installer seeds to scripts/ +x, hook guard path, upgrade script_map, idempotent, missing-source graceful |
 
 ## CI/CD Integration
 
