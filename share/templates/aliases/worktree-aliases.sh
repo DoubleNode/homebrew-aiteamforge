@@ -106,6 +106,14 @@ wt-create() {
         echo ""
         echo "✓ Created worktree successfully"
         echo "To switch: cd $worktree_dir"
+
+        # XACA-0593: deploy team personas into the new worktree's .claude/agents on TAP machines.
+        # (wt-create is the tap-native worktree path; the dev wt-new hook from XACA-0588 doesn't run here.)
+        # No-op if the helper isn't installed; never aborts worktree creation.
+        local _dwp="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/scripts/deploy-worktree-personas.sh"
+        if [ -x "$_dwp" ]; then
+            "$_dwp" "$worktree_dir" "$WT_CURRENT_PROJECT" || true
+        fi
     fi
 }
 
