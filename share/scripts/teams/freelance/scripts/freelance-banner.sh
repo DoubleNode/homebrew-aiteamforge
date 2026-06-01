@@ -70,10 +70,14 @@ HOSTNAME="%m"
 USERNAME="%n"
 WORKING_PATH="%~"
 
-# Ensure worktree helpers are loaded (defensive check for race conditions)
-if ! command -v wt-current &> /dev/null; then
+# Defensive: try to source worktree-helpers.sh, then fall back to stubs.
+# tap installs don't ship worktree-helpers.sh; dev-team installs typically have
+# it sourced via .zshrc but the source may race with banner display.
+if ! command -v wt-current >/dev/null 2>&1; then
     source ~/dev-team/worktree-helpers.sh 2>/dev/null || true
 fi
+if ! command -v wt-current >/dev/null 2>&1; then wt-current() { echo "(no worktree)"; }; fi
+if ! command -v wt-project >/dev/null 2>&1; then wt-project() { echo "(no worktree)"; }; fi
 
 clear
 tmux clear-history -t $SESSION_CODE:$TERMINAL_NUMBER
@@ -96,11 +100,25 @@ print -P "${WHITE}${BOLD}    Role: ${SESSION_ROLE}${RESET}"
 _saved=$(_cc_saved_session_label 2>/dev/null)
 [[ -n "$_saved" ]] && print -P "${WHITE}${BOLD}    Saved Session: ${RESET}${WHITE}${_saved}${RESET}"
 unset _saved
-# Defensive stubs: tap installs don't ship worktree-helpers.sh; dev-team installs
-# typically have it sourced via .zshrc. If either function is missing, fall back
-# to a no-op string so the banner renders without command-not-found errors.
-if ! command -v wt-current >/dev/null 2>&1; then wt-current() { echo "(no worktree)"; }; fi
-if ! command -v wt-project >/dev/null 2>&1; then wt-project() { echo "(no worktree)"; }; fi
+# Active account display (XACA-0279)
+_active_nickname=""
+if [[ -f "$HOME/.aiteamforge/team-paths.json" ]] && command -v python3 >/dev/null 2>&1; then
+    _active_nickname=$(python3 -c "
+import json, sys
+try:
+    with open('$HOME/.aiteamforge/team-paths.json') as f:
+        cfg = json.load(f)
+    print(cfg.get('teams', {}).get('freelance', {}).get('anthropic_account_nickname', ''))
+except Exception:
+    pass
+" 2>/dev/null)
+fi
+if [[ -n "$_active_nickname" ]]; then
+    print -P "${WHITE}${BOLD}    Active Account: ${RESET}${WHITE}${_active_nickname}${RESET}"
+else
+    print -P "${WHITE}    Active Account: ${RESET}\e[2m(default OAuth)\e[0m"
+fi
+unset _active_nickname
 print -P "${WHITE}${BOLD}    Worktree: $(wt-project status-name) - $(wt-project status-code)${RESET}"
 print -P "${WHITE}${BOLD}              $(wt-current short)${RESET}"
 print -P "${WHITE}              $(wt-project status-short)${RESET}"

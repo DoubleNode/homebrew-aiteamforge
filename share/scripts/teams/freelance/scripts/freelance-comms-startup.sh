@@ -22,7 +22,7 @@ if [ -n "$FREELANCE_PROJECT_DIR" ]; then
     PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
     SESSION_CODE="${SESSION_TYPE}-${GROUP_LOWER}-${PROJECT_LOWER}-${SESSION_NAME}"
 else
-    SESSION_DIRECTORY="/Users/Shared/Development/AcmeCorp"
+    SESSION_DIRECTORY="/Users/Shared/Development/DoubleNode"
     GROUPID=""
     PROJECTID=""
     SESSION_CODE="${SESSION_TYPE}-${SESSION_NAME}"

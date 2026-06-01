@@ -80,10 +80,19 @@ PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
 SESSION_PREFIX="finance-${PROJECT_LOWER}"
 
 # Guard: verify kanban board is initialized before any kanban-dependent work.
-kb_ensure_team_initialized "$SESSION_PREFIX" "$PROJECT_DIR/kanban" || true
+# XACA-0576: pass the TEMPLATE id ("finance"), not the project-scoped session
+# prefix. board-check resolves template→instance via get_board_id() and the
+# config lookup tolerates either form. Passing SESSION_PREFIX was masking
+# real config issues with a misleading "unknown team" warning.
+kb_ensure_team_initialized "finance" "$PROJECT_DIR/kanban" || true
 
-# Generate unique port for LCARS based on project name (8360-8439 range for finance)
-LCARS_PORT=$((8360 + $(echo "${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 80))
+# Resolve LCARS port from the canonical registry (XACA-0590).
+# resolve_lcars_port reads team-paths.json via kanban-hooks/lcars_ports.py —
+# the same single source of truth used by kb-port-reconcile and lcars-health-check.sh.
+# Fall back to the legacy deterministic cksum derivation ONLY for prefixes not yet
+# registered, preserving backward-compat for new/unregistered projects.
+LCARS_PORT="$(resolve_lcars_port "${SESSION_PREFIX}")" || \
+    LCARS_PORT=$((8360 + $(echo "${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 80))
 echo "   LCARS Port: $LCARS_PORT"
 
 # Base terminal names (actual script filenames)
@@ -187,7 +196,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     # Start the LCARS server BEFORE the tab creation loop to avoid changing cwd.
     # start_lcars_server writes the team line to lcars-target.js; append the session line after.
     echo "    Starting Finance LCARS server on port $LCARS_PORT..."
-    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  LCARS server did not respond on port $LCARS_PORT within 5s — continuing without it"
+    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see details above)."
     echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
 
     # iTerm2 automation using Python API for window management

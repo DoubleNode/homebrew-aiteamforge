@@ -95,26 +95,16 @@ SESSION_PREFIX="freelance-${GROUP_LOWER}-${PROJECT_LOWER}"
 # Kanban dir is at the project root (parent of the 'develop' worktree), not inside it.
 kb_ensure_team_initialized "$SESSION_PREFIX" "$(dirname "$PROJECT_DIR")/kanban" || true
 
-# Resolve the LCARS port (XACA-0549).
-# Authoritative source = the per-team port file written at provisioning/reconcile
-# time (kb-init-team / kb-port-reconcile), which is kept in lockstep with
-# team-paths.json (what the kb-* helpers curl). Reading it here makes the server
-# bind the same port the helpers reach, retiring the old cksum recompute that
-# silently re-diverged registered teams (e.g. doublenode ports 8500-8506).
-# Fall back to the legacy deterministic cksum derivation ONLY for teams not yet
-# registered with a port file, preserving backward-compat for ad-hoc projects.
-LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
-LCARS_PORT_FILE="${LCARS_PORTS_DIR}/${SESSION_PREFIX}-lcars.port"
-LCARS_PORT=""
-if [[ -f "$LCARS_PORT_FILE" ]]; then
-    LCARS_PORT="$(tr -dc '0-9' < "$LCARS_PORT_FILE")"
-fi
-if [[ -n "$LCARS_PORT" ]]; then
-    echo "   LCARS Port: $LCARS_PORT (from ${SESSION_PREFIX}-lcars.port)"
-else
+# Resolve LCARS port from the canonical registry (XACA-0590).
+# resolve_lcars_port reads team-paths.json via kanban-hooks/lcars_ports.py —
+# the same single source of truth used by kb-port-reconcile and lcars-health-check.sh.
+# This supersedes the prior XACA-0549 .port-file-read approach with the authoritative
+# registry query (team-paths.json wins, DEFAULT_TEAMS fallback).
+# Fall back to the legacy deterministic cksum derivation ONLY for prefixes not yet
+# registered, preserving backward-compat for ad-hoc projects.
+LCARS_PORT="$(resolve_lcars_port "${SESSION_PREFIX}")" || \
     LCARS_PORT=$((8080 + $(echo "${GROUP_LOWER}-${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 900))
-    echo "   LCARS Port: $LCARS_PORT (cksum fallback — no port file for ${SESSION_PREFIX})"
-fi
+echo "   LCARS Port: $LCARS_PORT"
 
 # Base terminal names (actual script filenames)
 # LCARS is first - provides the kanban overview
@@ -210,7 +200,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     # ── LCARS: start server and open in browser ──
     echo "  Starting Freelance LCARS server on port $LCARS_PORT..."
     # start_lcars_server writes the team line to lcars-target.js; append the session line after.
-    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  Server readiness poll timed out — continuing"
+    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see details above)."
     echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
 
     # ── All tabs ──

@@ -20,7 +20,7 @@ if [ -n "$FREELANCE_PROJECT_DIR" ]; then
     SESSION_CODE="${SESSION_TYPE}-${SESSION_PROJECT}-${SESSION_NAME}"
 else
     SESSION_DIRECTORY="/Users/darrenehlers/dev-team"
-    SESSION_PROJECT="acmecorp-widgettracker"
+    SESSION_PROJECT="doublenode-workstats"
     SESSION_CODE="${SESSION_TYPE}-${SESSION_PROJECT}-${SESSION_NAME}"
 fi
 
@@ -34,7 +34,7 @@ LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
 # Use team-specific tmux socket if set, otherwise use default server
 TMUX_CMD="tmux${TMUX_SOCKET:+ -L $TMUX_SOCKET}"
 
-# Compute LCARS team name for data isolation (e.g., freelance-acmecorp-starwords)
+# Compute LCARS team name for data isolation (e.g., freelance-doublenode-starwords)
 LCARS_TEAM_NAME="${SESSION_TYPE}-${SESSION_PROJECT}"
 
 $TMUX_CMD has-session -t $SESSION_CODE 2>/dev/null

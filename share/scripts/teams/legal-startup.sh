@@ -24,7 +24,16 @@ export PROJECTID
 
 # Calculate derived variables that child scripts expect
 PROJECT_DIR="$HOME/legal/$PROJECTID"
-LCARS_PORT_TEMP=$((8220 + $(echo "legal" | cksum | cut -d' ' -f1) % 20))
+
+# Resolve LCARS port from the canonical registry (XACA-0590).
+# resolve_lcars_port reads team-paths.json via kanban-hooks/lcars_ports.py —
+# the same single source of truth used by kb-port-reconcile and lcars-health-check.sh.
+# Fall back to the legacy deterministic cksum derivation (constant "legal" input) ONLY
+# for prefixes not yet registered, preserving backward-compat for new projects.
+# Note: the old code hashed the constant string "legal", not the PROJECTID — the
+# resolver now uses the full session prefix "legal-<projectid>" for precision.
+LCARS_PORT_TEMP="$(resolve_lcars_port "legal-${PROJECTID}")" || \
+    LCARS_PORT_TEMP=$((8220 + $(echo "legal" | cksum | cut -d' ' -f1) % 20))
 
 # Export variables that child scripts check for
 export LEGAL_PROJECTID="$PROJECTID"
@@ -83,7 +92,12 @@ echo "   LCARS Port: $LCARS_PORT"
 echo ""
 
 # Guard: verify kanban board is initialized before any kanban-dependent work.
-kb_ensure_team_initialized "legal-${PROJECTID}" "$PROJECT_DIR/kanban" || true
+# XACA-0576: pass the TEMPLATE id ("legal"), not the project-scoped form.
+# board-check resolves template→instance via get_board_id() and the config
+# lookup tolerates either form. The previous "legal-${PROJECTID}" handoff
+# worked by accident when PROJECTID="coparenting" matched the canonical
+# instance id; it would fail for any other PROJECTID.
+kb_ensure_team_initialized "legal" "$PROJECT_DIR/kanban" || true
 
 # Base terminal names (actual script filenames)
 # LCARS is first - provides the kanban overview
@@ -163,7 +177,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     # ── LCARS: start server BEFORE tab creation loop ──
     # start_lcars_server writes the team line to lcars-target.js; append the session line after.
     echo "  Starting Legal LCARS server on port $LCARS_PORT..."
-    start_lcars_server "legal-${PROJECTID}" "$LCARS_PORT" "legal-${PROJECTID}-lcars" || echo "    ⚠️  Server readiness poll timed out — continuing"
+    start_lcars_server "legal-${PROJECTID}" "$LCARS_PORT" "legal-${PROJECTID}-lcars" || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see details above)."
     echo "window.LCARS_TARGET_SESSION = 'legal-${PROJECTID}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
 
     # iTerm2 automation using Python API for window management

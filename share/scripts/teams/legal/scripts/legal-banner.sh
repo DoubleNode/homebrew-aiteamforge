@@ -71,7 +71,10 @@ HOSTNAME="%m"
 USERNAME="%n"
 WORKING_PATH="%~"
 
-source ~/dev-team/worktree-helpers.sh 2>/dev/null || true
+# Ensure worktree helpers are loaded (defensive check for race conditions)
+if ! command -v wt-current >/dev/null 2>&1; then
+    source ~/dev-team/worktree-helpers.sh 2>/dev/null || true
+fi
 clear
 tmux clear-history -t $SESSION_CODE:$TERMINAL_NUMBER 2>/dev/null
 
