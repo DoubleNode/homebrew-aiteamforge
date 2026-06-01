@@ -367,6 +367,71 @@ _wt_check_pr_merged() {
     return 1
 }
 
+# Classify a branch's safety for worktree removal.
+# Extracted from wt-finish so that _kb_offer_worktree_cleanup (kanban-helpers.sh)
+# and wt-finish AGREE on the same safety determination — avoiding sibling drift
+# (a single authoritative classifier beats two independent copies, per k501 pattern).
+#
+# Usage: _wt_classify_branch <branch> [worktree_path]
+# Echoes one token:
+#   merged           → PR merged OR no unmerged commits ahead of main (safe to remove)
+#   unmerged-commits → local commits not yet on main/remote (UNSAFE — would lose work)
+#   remote-gone      → remote was deleted but local commits remain (caution)
+# Returns 0 always; classification is via stdout.
+_wt_classify_branch() {
+    local branch="${1-}"
+    local worktree_path="${2-}"
+
+    if [ -z "$branch" ]; then
+        echo "unmerged-commits"
+        return 0
+    fi
+
+    # PRIMARY: GitHub PR state (authoritative for squash merges)
+    local pr_info
+    pr_info=$(_wt_check_pr_merged "$branch")
+    if [ $? -eq 0 ] && [ -n "$pr_info" ]; then
+        echo "merged"
+        return 0
+    fi
+
+    # FALLBACK: git-based heuristic — run from worktree_path or cwd
+    local git_dir="${worktree_path:-.}"
+    local main_branch
+    main_branch=$(_wt_get_main_branch)
+    # Guard: if project context not set, derive main branch from the remote HEAD ref
+    if [ -z "$main_branch" ]; then
+        main_branch=$(git -C "$git_dir" symbolic-ref refs/remotes/origin/HEAD 2>/dev/null | sed 's|refs/remotes/origin/||')
+    fi
+    if [ -z "$main_branch" ]; then
+        main_branch="develop"
+    fi
+
+    local unmerged_commits
+    unmerged_commits=$(git -C "$git_dir" log --oneline "${main_branch}..${branch}" 2>/dev/null | wc -l | tr -d ' ')
+
+    local remote_ref
+    remote_ref=$(git -C "$git_dir" rev-parse --abbrev-ref "${branch}@{upstream}" 2>/dev/null)
+    local remote_exists=$?
+
+    if [ $remote_exists -ne 0 ]; then
+        # Remote branch is gone
+        if [ "${unmerged_commits}" -eq 0 ]; then
+            echo "merged"
+        else
+            echo "remote-gone"
+        fi
+    else
+        # Remote still exists
+        if [ "${unmerged_commits}" -eq 0 ]; then
+            echo "merged"
+        else
+            echo "unmerged-commits"
+        fi
+    fi
+    return 0
+}
+
 # No default project - each terminal's .zshrc sets its own context
 # (iOS/Android/Firebase .zshrc files call wt-project explicitly)
 export WT_BASE=""
@@ -1217,48 +1282,62 @@ wt-finish() {
     # Go back to main repository
     cd "$WT_MAIN" || return 1
 
-    local main_branch=$(_wt_get_main_branch)
-
-    # Determine branch status and recommendation
+    # Determine branch status and recommendation.
+    # Safety classification delegates to _wt_classify_branch (single canonical source)
+    # so wt-finish and _kb_offer_worktree_cleanup always agree on safety.
     local branch_status=""
     local delete_recommendation=""
     local pr_info=""
     local pr_number=""
     local pr_title=""
 
-    # PRIMARY: Check GitHub PR status (handles squash merges correctly)
+    local wt_class
+    wt_class=$(_wt_classify_branch "$branch" "$wt_path")
+
+    # Fetch PR info for display (pr_number/pr_title shown in auto path)
     pr_info=$(_wt_check_pr_merged "$branch")
     if [ $? -eq 0 ] && [ -n "$pr_info" ]; then
         pr_number="${pr_info%%|*}"
         pr_title="${pr_info#*|}"
-        branch_status="✅ PR #$pr_number merged (verified via GitHub)"
-        delete_recommendation="auto"
-    else
-        # FALLBACK: Git-based heuristic (works for non-squash merges / no gh)
-        local unmerged_commits=$(git log --oneline "$main_branch..$branch" 2>/dev/null | wc -l | tr -d ' ')
-        local remote_branch=$(git rev-parse --abbrev-ref "$branch@{upstream}" 2>/dev/null)
-        local remote_exists=$?
-
-        if [ $remote_exists -ne 0 ]; then
-            # Remote is gone
-            if [ "$unmerged_commits" -eq 0 ]; then
-                branch_status="✅ Remote deleted, all commits merged"
-                delete_recommendation="yes"
-            else
-                branch_status="⚠️  Remote deleted, but $unmerged_commits unmerged commit(s)"
-                delete_recommendation="no"
-            fi
-        else
-            # Remote still exists
-            if [ "$unmerged_commits" -eq 0 ]; then
-                branch_status="⚠️  Remote exists, commits appear merged"
-                delete_recommendation="maybe"
-            else
-                branch_status="❌ Remote exists, $unmerged_commits unmerged commit(s)"
-                delete_recommendation="no"
-            fi
-        fi
     fi
+
+    case "$wt_class" in
+        merged)
+            if [ -n "$pr_number" ]; then
+                # PR verified via GitHub — skip interactive prompt (auto path)
+                branch_status="✅ PR #$pr_number merged (verified via GitHub)"
+                delete_recommendation="auto"
+            else
+                # Git heuristic: appears merged but not confirmed; show interactive prompt.
+                # Map back to yes (remote gone) vs maybe (remote still exists) for
+                # branch-deletion UX: "yes" → safe force-delete offer; "maybe" → unclear.
+                local _merge_remote
+                _merge_remote=$(git rev-parse --abbrev-ref "${branch}@{upstream}" 2>/dev/null)
+                if [ $? -ne 0 ]; then
+                    branch_status="✅ Remote deleted, all commits merged"
+                    delete_recommendation="yes"
+                else
+                    branch_status="⚠️  Remote exists, commits appear merged"
+                    delete_recommendation="maybe"
+                fi
+            fi
+            ;;
+        remote-gone)
+            branch_status="⚠️  Remote deleted, but local commits remain"
+            delete_recommendation="no"
+            ;;
+        unmerged-commits|*)
+            # Distinguish remote-exists vs gone for display only (safety stays "no")
+            local remote_ref
+            remote_ref=$(git rev-parse --abbrev-ref "${branch}@{upstream}" 2>/dev/null)
+            if [ $? -ne 0 ]; then
+                branch_status="⚠️  Remote deleted, but unmerged commit(s) remain"
+            else
+                branch_status="❌ Remote exists, unmerged commit(s) present"
+            fi
+            delete_recommendation="no"
+            ;;
+    esac
 
     # Show initial status
     echo "🏁 Finishing worktree: $target_wt"
@@ -2111,6 +2190,9 @@ Cleanup:
   wt-pr-merged           Complete cleanup after PR merged externally (use in Claude Code)
   wt-finish              Finish current worktree (manual cleanup)
   wt-cleanup             Clean up all merged worktrees
+
+  Note: Worktrees auto-created by kb-run* will prompt for cleanup when Claude exits.
+        Disable this prompt with: KB_WT_CLEANUP_PROMPT=0
 
 Examples:
   wt-project ios                    Switch to iOS worktrees
