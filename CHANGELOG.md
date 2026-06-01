@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.10] - 2026-06-01
+
 - XACA-0591: `share/scripts/worktree-helpers.sh` was unmapped in `sync-tap.sh` — the file exists in the tap but was never drift-gated, so it shipped stale in v0.12.9: missing the XACA-0588 `wt-new` persona-deploy hook and the XACA-0565 `finance|legal|medical|dns` board-routing consolidation via `_kb_template_to_instance`. Tap-machine `wt-new` persona auto-deploy was silently dead. Fix: added the file to `sync-tap.sh`'s mirror map; tap copy now re-synced from canonical and verified identical. Follow-up (XACA-0591-001): 4 additional `share/scripts/` files were unmapped in `sync-tap.sh` — same false-green drift class. `share/scripts/cr-confluence-poller.py` re-synced from `scripts/cr-confluence-poller.py` (adds per-team LaunchAgent scheme, auto-approve support, `--board` dev-mode flag). `share/scripts/fleet-reporter.sh` re-synced from `fleet-monitor/client/fleet-reporter.sh` (adds `register_with_endpoint()` / `ensure_registered()` first-run machine registration with `REGISTRATION_SENTINEL`). `share/scripts/kb-cr.sh` re-synced from `scripts/kb-cr.sh` (adds `revert`/`undo`/`revert-history` backwards lifecycle commands and per-item `migrate-legacy --item/--apply`). `share/scripts/migrate-cr-schema.py` re-synced from `scripts/migrate-cr-schema.py` (adds per-item `--item/--board/--apply` mode, `argparse`-based CLI, no-op guard before backup). No regressions: dev-machine path refs already present verbatim in stale tap copies. All 4 post-mirror diffs empty; exec-bit parity preserved.
 
 ## [0.12.9] - 2026-06-01
@@ -683,7 +685,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.9...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.10...HEAD
+[0.12.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.9...v0.12.10
 [0.12.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.8...v0.12.9
 [0.12.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.7...v0.12.8
 [0.12.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.6...v0.12.7
