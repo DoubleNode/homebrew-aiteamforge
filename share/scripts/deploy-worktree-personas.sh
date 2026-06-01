@@ -12,18 +12,21 @@
 #   Called automatically by the wt-new hook on every new worktree creation.
 #
 # --all backfill mode:
-#   Enumerates ALL existing worktrees under <main_repo>/worktrees/ and deploys
-#   personas into each one. Tap-machine equivalent of `kb-sync-personas sync-worktrees --all`
-#   for pre-existing worktrees (e.g. after a fresh tap install on a machine that already
-#   has worktrees). <main_repo_path> defaults to cwd's git common dir root when omitted.
+#   Enumerates ALL registered linked worktrees of the repo (via git worktree list)
+#   and deploys personas into each one. Layout-agnostic — works with dev layout
+#   (<repo>/worktrees/X) and tap/container layout (dirname(repo)/worktrees/X).
+#   Tap-machine equivalent of `kb-sync-personas sync-worktrees --all` for pre-existing
+#   worktrees (e.g. after a fresh tap install on a machine that already has worktrees).
+#   <main_repo_path> defaults to cwd's git common dir root when omitted.
 #
 # Source resolution (in priority order):
 #   PRIMARY : ${AITEAMFORGE_DIR:-$HOME/aiteamforge}/<team>/personas/agents/
 #   FALLBACK: dev-machine detected (agents-master present, PRIMARY absent) → no-op
 #   NONE    : neither present → warning, exit 0
 #
-# Guard: only writes to <worktree>/.claude/agents/ when the worktree lives under
-#        <main_repo>/worktrees/. Rejects path-traversal and main-repo roots.
+# Guard: only writes to <worktree>/.claude/agents/ when the worktree is a
+#        registered linked worktree of the repo (layout-agnostic). Rejects
+#        path-traversal, non-git paths, and main-repo roots.
 #
 # Marker: <wt>/.claude/agents/.synced-from-tap (distinct from kb-sync-personas'
 #         .synced-from-master). Idempotent — no-op if marker present without --force.
@@ -94,8 +97,11 @@ _canon_path() {
 }
 
 # ---------------------------------------------------------------------------
-# Guard: assert write target is <worktree>/.claude/agents/ under repo/worktrees/
-# Mirrors the _guard_worktree_target logic in scripts/kb-sync-personas.
+# Guard: assert write target is a GENUINE LINKED WORKTREE of the repo.
+# Layout-agnostic: accepts both <repo>/worktrees/X (dev layout) and
+# dirname(repo)/worktrees/X (tap/container layout). Traversal safety is
+# preserved by canonicalization + git-registry membership check rather than
+# a fixed path-prefix test.
 # ---------------------------------------------------------------------------
 
 _guard_worktree_target() {
@@ -118,17 +124,50 @@ _guard_worktree_target() {
 
   local canon_target="${canon_wt}/.claude/agents"
 
-  # Must be under <canon_root>/worktrees/ (not the main repo itself).
-  local canon_worktrees="${canon_root}/worktrees"
+  # Benign no-op: wt_path IS the main repo root.
+  # (Caller is wt-new on a non-worktree path, or main repo passed by mistake.)
   if [ "$canon_wt" = "$canon_root" ]; then
-    # wt_path IS the main repo — caller is wt-new on a non-worktree path, or
-    # someone passed the main repo by mistake. Warn and exit 0 (benign no-op).
     _warn "wt_path resolves to the main repo root — not a worktree. Skipping deploy."
     return 0
   fi
 
-  if [[ "$canon_target" != "${canon_worktrees}/"* ]]; then
-    _err "Worktree target does not live under repo worktrees/ dir (${canon_worktrees}): ${canon_target}"
+  # --- Verify canon_wt is a REGISTERED LINKED WORKTREE of this repo ---
+  # Parse 'git worktree list --porcelain' from the main repo.
+  # The first 'worktree <path>' line is always the main worktree; all
+  # subsequent 'worktree <path>' lines are linked worktrees.
+  # We canonicalize each path to handle symlinks robustly.
+  #
+  # Security: a path that appears in git's own registry is by definition
+  # inside the git object store's worktree list — it can't be a path-
+  # traversal artifact injected by the caller, because git resolves each
+  # worktree's on-disk path independently when it writes the worktree list.
+  local found_as_linked=false
+  local wt_line
+  local first_wt=true
+  local git_list_failed=false
+  while IFS= read -r wt_line; do
+    if [[ "$wt_line" == worktree\ * ]]; then
+      local candidate="${wt_line#worktree }"
+      if [ "$first_wt" = true ]; then
+        first_wt=false
+        continue   # skip main worktree entry
+      fi
+      local canon_candidate
+      canon_candidate=$(_canon_path "$candidate") || continue
+      if [ "$canon_candidate" = "$canon_wt" ]; then
+        found_as_linked=true
+        break
+      fi
+    fi
+  done < <(git -C "$canon_root" worktree list --porcelain 2>/dev/null) || git_list_failed=true
+
+  if [ "$git_list_failed" = true ]; then
+    _err "git worktree list failed for repo: ${canon_root}"
+    return 1
+  fi
+
+  if [ "$found_as_linked" != true ]; then
+    _err "Not a registered linked worktree of repo (${canon_root}): ${canon_wt}"
     return 1
   fi
 
@@ -416,8 +455,10 @@ _deploy() {
 }
 
 # ---------------------------------------------------------------------------
-# Batch backfill: enumerate all worktrees under <main_repo>/worktrees/ and
-# deploy personas into each. Tap-machine equivalent of:
+# Batch backfill: enumerate ALL registered linked worktrees of the repo and
+# deploy personas into each. Layout-agnostic: works with both dev layout
+# (<repo>/worktrees/X) and tap/container layout (dirname(repo)/worktrees/X).
+# Tap-machine equivalent of:
 #   kb-sync-personas sync-worktrees --all
 # for pre-existing worktrees on tap machines.
 #
@@ -444,12 +485,6 @@ _deploy_all() {
     return 1
   }
 
-  local worktrees_dir="${canon_main}/worktrees"
-  if [ ! -d "$worktrees_dir" ]; then
-    _info "[${team}] No worktrees/ directory at ${canon_main} — nothing to backfill."
-    return 0
-  fi
-
   # --- Resolve source directory (shared with single-worktree mode) ---
   local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
   local primary_src="${aiteamforge_dir}/${team}/personas/agents"
@@ -464,8 +499,9 @@ _deploy_all() {
     return 0
   fi
 
-  # --- Enumerate worktrees via git porcelain output ---
+  # --- Enumerate ALL linked worktrees via git porcelain output ---
   # Parse "worktree <path>" lines; skip the first entry (main worktree).
+  # No layout-specific path filter — git's own registry is the authority.
   local wt_paths
   wt_paths=()
   local first=true
@@ -477,21 +513,18 @@ _deploy_all() {
         first=false
         continue   # skip main worktree
       fi
-      # Only include worktrees under <main_repo>/worktrees/
       local canon_candidate
       canon_candidate=$(_canon_path "$wt_candidate") || continue
-      if [[ "$canon_candidate" == "${worktrees_dir}/"* ]]; then
-        wt_paths+=("$canon_candidate")
-      fi
+      wt_paths+=("$canon_candidate")
     fi
   done < <(git -C "$canon_main" worktree list --porcelain 2>/dev/null) || true
 
   if [ ${#wt_paths[@]} -eq 0 ]; then
-    _info "[${team}] No worktrees found under ${worktrees_dir} — nothing to backfill."
+    _info "[${team}] No linked worktrees registered for repo at ${canon_main} — nothing to backfill."
     return 0
   fi
 
-  _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s) under ${worktrees_dir}..."
+  _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s)..."
 
   local overall_rc=0
   for wt_path in "${wt_paths[@]}"; do
@@ -531,12 +564,30 @@ _selftest() {
 
   local tmp="$_SELFTEST_TMP"
 
-  # Build a fake main repo tree with a worktrees/ subdir
-  local fake_main="${tmp}/fake-main"
-  local fake_wt="${fake_main}/worktrees/feature-xyz"
-  local fake_wt_agents="${fake_wt}/.claude/agents"
-  mkdir -p "${fake_main}/.git"
-  mkdir -p "$fake_wt"
+  # -----------------------------------------------------------------------
+  # Build real git repos for guard tests (guard now calls git worktree list).
+  # -----------------------------------------------------------------------
+
+  # --- Dev layout: worktree UNDER <repo>/worktrees/X ---
+  # Layout: tmp/dev-repo/  (main repo)
+  #         tmp/dev-repo/worktrees/feature-xyz  (linked worktree, dev layout)
+  local dev_main="${tmp}/dev-repo"
+  local dev_wt="${dev_main}/worktrees/feature-xyz"
+  mkdir -p "$dev_wt"
+  git -C "$dev_main" init -q
+  git -C "$dev_main" commit -q --allow-empty -m "init"
+  git -C "$dev_main" worktree add -q "$dev_wt" -b selftest-dev-layout 2>/dev/null
+
+  # --- Tap/sibling layout: worktree at dirname(repo)/worktrees/X ---
+  # Layout: tmp/tap-base/main/       (main repo)
+  #         tmp/tap-base/worktrees/feature-tapxyz  (linked worktree, sibling layout)
+  local tap_base="${tmp}/tap-base"
+  local tap_main="${tap_base}/main"
+  local tap_wt="${tap_base}/worktrees/feature-tapxyz"
+  mkdir -p "$tap_main" "$tap_wt"
+  git -C "$tap_main" init -q
+  git -C "$tap_main" commit -q --allow-empty -m "init"
+  git -C "$tap_main" worktree add -q "$tap_wt" -b selftest-tap-layout 2>/dev/null
 
   # Seed fake aiteamforge dir with test team personas
   local fake_aitf="${tmp}/fake-aiteamforge"
@@ -594,102 +645,135 @@ PERSONA
   fi
 
   # -----------------------------------------------------------------------
-  # Test 2: _guard_worktree_target — accepts valid worktree path
+  # Test 2: guard — accepts dev layout (worktree UNDER <repo>/worktrees/X)
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 2: _guard_worktree_target accepts valid worktree...\n'
-  local accepted_path
-  accepted_path=$(_guard_worktree_target "$fake_wt" "$fake_main" 2>/dev/null) || true
-  # Canonicalize expected path too — macOS /tmp is a symlink to /private/tmp,
-  # so mktemp returns /tmp/... but _canon_path resolves to /private/tmp/...
-  local expected_path
-  expected_path=$(_canon_path "${fake_wt}/.claude/agents") || expected_path="${fake_wt}/.claude/agents"
-  if [ "$accepted_path" = "$expected_path" ]; then
-    _pass "Test 2 (_guard_worktree_target accepts valid path)"
+  printf '[selftest] Test 2: guard accepts dev-layout worktree (under repo/worktrees/)...\n'
+  local t2_out t2_rc=0
+  t2_out=$(_guard_worktree_target "$dev_wt" "$dev_main" 2>/dev/null) || t2_rc=$?
+  local t2_expected
+  t2_expected=$(_canon_path "${dev_wt}/.claude/agents") || t2_expected="${dev_wt}/.claude/agents"
+  if [ "$t2_rc" -eq 0 ] && [ "$t2_out" = "$t2_expected" ]; then
+    _pass "Test 2 (guard accepts dev-layout worktree)"
   else
-    _fail "Test 2 — expected '${expected_path}', got '${accepted_path}'"
+    _fail "Test 2 — rc=${t2_rc} expected '${t2_expected}', got '${t2_out}'"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 3: _guard_worktree_target — rejects main repo root (not a worktree)
+  # Test 3: guard — accepts tap/sibling layout (worktree at dirname(repo)/worktrees/X)
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 3: _guard_worktree_target rejects main repo as wt_path...\n'
+  printf '[selftest] Test 3: guard accepts tap/sibling-layout worktree (sibling of repo)...\n'
   local t3_out t3_rc=0
-  t3_out=$(_guard_worktree_target "$fake_main" "$fake_main" 2>/dev/null) || t3_rc=$?
-  # Should return 0 (benign) but print empty — the warn-and-return-0 path
-  if [ -z "$t3_out" ] && [ "$t3_rc" -eq 0 ]; then
-    _pass "Test 3 (_guard_worktree_target treats main repo as benign no-op)"
+  t3_out=$(_guard_worktree_target "$tap_wt" "$tap_main" 2>/dev/null) || t3_rc=$?
+  local t3_expected
+  t3_expected=$(_canon_path "${tap_wt}/.claude/agents") || t3_expected="${tap_wt}/.claude/agents"
+  if [ "$t3_rc" -eq 0 ] && [ "$t3_out" = "$t3_expected" ]; then
+    _pass "Test 3 (guard accepts tap/sibling-layout worktree)"
   else
-    _fail "Test 3 — expected empty output + rc=0, got '${t3_out}' rc=${t3_rc}"
+    _fail "Test 3 — rc=${t3_rc} expected '${t3_expected}', got '${t3_out}'"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 4: _guard_worktree_target — rejects path traversal (outside worktrees/)
+  # Test 4: guard — rejects main repo root (benign no-op, exit 0, empty output)
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 4: _guard_worktree_target rejects traversal path...\n'
-  local outside_wt="${tmp}/outside-dir"
-  mkdir -p "$outside_wt"
-  local t4_rc=0
-  _guard_worktree_target "$outside_wt" "$fake_main" 2>/dev/null || t4_rc=$?
-  if [ "$t4_rc" -ne 0 ]; then
-    _pass "Test 4 (_guard_worktree_target rejects path outside worktrees/)"
+  printf '[selftest] Test 4: guard treats main repo root as benign no-op...\n'
+  local t4_out t4_rc=0
+  t4_out=$(_guard_worktree_target "$dev_main" "$dev_main" 2>/dev/null) || t4_rc=$?
+  if [ -z "$t4_out" ] && [ "$t4_rc" -eq 0 ]; then
+    _pass "Test 4 (guard: main repo root → benign no-op, exit 0)"
   else
-    _fail "Test 4 — should have failed (rc=$t4_rc) for path outside worktrees/"
+    _fail "Test 4 — expected empty output + rc=0, got '${t4_out}' rc=${t4_rc}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 5: _transform_persona — rewrites name: correctly
+  # Test 5: guard — rejects a random non-worktree directory (exit 1)
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 5: _transform_persona rewrites name: correctly...\n'
-  local t5_src="${fake_src}/testteam_alpha_engineer_persona.md"
-  local t5_out
-  t5_out=$(_transform_persona "$t5_src" "alpha")
-  local t5_name
-  t5_name=$(printf '%s\n' "$t5_out" | awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}')
-  if [ "$t5_name" = "name: alpha" ]; then
-    _pass "Test 5 (_transform_persona name: rewritten to 'alpha')"
+  printf '[selftest] Test 5: guard rejects random non-worktree directory...\n'
+  local t5_notawt="${tmp}/not-a-worktree"
+  mkdir -p "$t5_notawt"
+  local t5_rc=0
+  _guard_worktree_target "$t5_notawt" "$dev_main" 2>/dev/null || t5_rc=$?
+  if [ "$t5_rc" -ne 0 ]; then
+    _pass "Test 5 (guard rejects non-registered path, exit 1)"
   else
-    _fail "Test 5 — expected 'name: alpha', got '${t5_name}'"
+    _fail "Test 5 — expected exit 1 for non-worktree dir, got rc=${t5_rc}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 6: _transform_persona — body preserved verbatim
+  # Test 6: _transform_persona — rewrites name: correctly
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 6: _transform_persona preserves body...\n'
-  local t6_body
-  t6_body=$(printf '%s\n' "$t5_out" | grep "# Alpha Engineer Body") || true
-  if [ -n "$t6_body" ]; then
-    _pass "Test 6 (_transform_persona body preserved)"
+  printf '[selftest] Test 6: _transform_persona rewrites name: correctly...\n'
+  local t6_src="${fake_src}/testteam_alpha_engineer_persona.md"
+  local t6_out
+  t6_out=$(_transform_persona "$t6_src" "alpha")
+  local t6_name
+  t6_name=$(printf '%s\n' "$t6_out" | awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}')
+  if [ "$t6_name" = "name: alpha" ]; then
+    _pass "Test 6 (_transform_persona name: rewritten to 'alpha')"
   else
-    _fail "Test 6 — body not preserved in transform output"
+    _fail "Test 6 — expected 'name: alpha', got '${t6_name}'"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 7: Full deploy — correct files created + name: rewritten
+  # Test 7: _transform_persona — body preserved verbatim
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 7: Full deploy creates files with rewritten name:...\n'
+  printf '[selftest] Test 7: _transform_persona preserves body...\n'
+  local t7_body
+  t7_body=$(printf '%s\n' "$t6_out" | grep "# Alpha Engineer Body") || true
+  if [ -n "$t7_body" ]; then
+    _pass "Test 7 (_transform_persona body preserved)"
+  else
+    _fail "Test 7 — body not preserved in transform output"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 8: Full deploy (dev layout) — files created + name: rewritten
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 8: Full deploy on dev-layout worktree...\n'
+  local dev_wt_agents="${dev_wt}/.claude/agents"
   AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
-    _deploy_with_fake_git "$fake_wt" "$fake_main" "testteam" 2>/dev/null || true
+    _deploy "$dev_wt" "testteam" 2>/dev/null || true
 
-  local t7_alpha="${fake_wt_agents}/testteam_alpha_engineer_persona.md"
-  local t7_bravo="${fake_wt_agents}/testteam_bravo_tester_persona.md"
-  if [ -f "$t7_alpha" ] && [ -f "$t7_bravo" ]; then
+  local t8_alpha="${dev_wt_agents}/testteam_alpha_engineer_persona.md"
+  local t8_bravo="${dev_wt_agents}/testteam_bravo_tester_persona.md"
+  if [ -f "$t8_alpha" ] && [ -f "$t8_bravo" ]; then
     local n_alpha n_bravo
-    n_alpha=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$t7_alpha")
-    n_bravo=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$t7_bravo")
+    n_alpha=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$t8_alpha")
+    n_bravo=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$t8_bravo")
     if [ "$n_alpha" = "name: alpha" ] && [ "$n_bravo" = "name: bravo" ]; then
-      _pass "Test 7 (full deploy: files present + name: rewritten)"
+      _pass "Test 8 (dev-layout full deploy: files present + name: rewritten)"
     else
-      _fail "Test 7 — name: not rewritten. alpha='${n_alpha}' bravo='${n_bravo}'"
+      _fail "Test 8 — name: not rewritten. alpha='${n_alpha}' bravo='${n_bravo}'"
     fi
   else
-    _fail "Test 7 — deployed files not found"
+    _fail "Test 8 — deployed files not found in dev-layout worktree"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 8: Marker file written with correct fields
+  # Test 9: Full deploy (tap/sibling layout) — files created + name: rewritten
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 8: Marker file written with correct fields...\n'
-  local marker="${fake_wt_agents}/.synced-from-tap"
+  printf '[selftest] Test 9: Full deploy on tap/sibling-layout worktree...\n'
+  local tap_wt_agents="${tap_wt}/.claude/agents"
+  AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy "$tap_wt" "testteam" 2>/dev/null || true
+
+  local t9_alpha="${tap_wt_agents}/testteam_alpha_engineer_persona.md"
+  if [ -f "$t9_alpha" ]; then
+    local t9_name
+    t9_name=$(awk '/^---/{f++} f==1 && /^name[[:space:]]*:/{print; exit}' "$t9_alpha")
+    if [ "$t9_name" = "name: alpha" ]; then
+      _pass "Test 9 (tap/sibling-layout full deploy: file present + name: rewritten)"
+    else
+      _fail "Test 9 — name: not rewritten in tap-layout worktree: '${t9_name}'"
+    fi
+  else
+    _fail "Test 9 — deployed files not found in tap/sibling-layout worktree"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 10: Marker file written with correct fields
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 10: Marker file written with correct fields...\n'
+  local marker="${dev_wt_agents}/.synced-from-tap"
   if [ -f "$marker" ]; then
     local has_at has_team has_src has_aitf
     has_at=$(grep -c "synced_at:" "$marker" 2>/dev/null || true)
@@ -697,116 +781,118 @@ PERSONA
     has_src=$(grep -c "source_path:" "$marker" 2>/dev/null || true)
     has_aitf=$(grep -c "aiteamforge_dir:" "$marker" 2>/dev/null || true)
     if [ "$has_at" -gt 0 ] && [ "$has_team" -gt 0 ] && [ "$has_src" -gt 0 ] && [ "$has_aitf" -gt 0 ]; then
-      _pass "Test 8 (marker file has all required fields)"
+      _pass "Test 10 (marker file has all required fields)"
     else
-      _fail "Test 8 — marker missing fields: at=${has_at} team=${has_team} src=${has_src} aitf=${has_aitf}"
+      _fail "Test 10 — marker missing fields: at=${has_at} team=${has_team} src=${has_src} aitf=${has_aitf}"
     fi
   else
-    _fail "Test 8 — marker file not created at: ${marker}"
+    _fail "Test 10 — marker file not created at: ${marker}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 9: Idempotency — re-running without --force is a no-op
+  # Test 11: Idempotency — re-running without --force is a no-op
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 9: Idempotency (re-run without --force is no-op)...\n'
-  local t9_out
-  t9_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
-    _deploy_with_fake_git "$fake_wt" "$fake_main" "testteam" 2>&1) || true
-  if printf '%s\n' "$t9_out" | grep -q "Already deployed"; then
-    _pass "Test 9 (idempotency: already-deployed message)"
+  printf '[selftest] Test 11: Idempotency (re-run without --force is no-op)...\n'
+  local t11_out
+  t11_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy "$dev_wt" "testteam" 2>&1) || true
+  if printf '%s\n' "$t11_out" | grep -q "Already deployed"; then
+    _pass "Test 11 (idempotency: already-deployed message)"
   else
-    _fail "Test 9 — expected 'Already deployed' message, got: ${t9_out}"
+    _fail "Test 11 — expected 'Already deployed' message, got: ${t11_out}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 10: --force re-deploys even when marker present
+  # Test 12: --force re-deploys even when marker present
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 10: --force re-deploys over existing deployment...\n'
-  local t10_out
-  t10_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=true OPT_VERBOSE=false \
-    _deploy_with_fake_git "$fake_wt" "$fake_main" "testteam" 2>&1) || true
-  if printf '%s\n' "$t10_out" | grep -q "Done:"; then
-    _pass "Test 10 (--force triggers re-deploy)"
+  printf '[selftest] Test 12: --force re-deploys over existing deployment...\n'
+  local t12_out
+  t12_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=true OPT_VERBOSE=false \
+    _deploy "$dev_wt" "testteam" 2>&1) || true
+  if printf '%s\n' "$t12_out" | grep -q "Done:"; then
+    _pass "Test 12 (--force triggers re-deploy)"
   else
-    _fail "Test 10 — expected 'Done:' output, got: ${t10_out}"
+    _fail "Test 12 — expected 'Done:' output, got: ${t12_out}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 11: Dev-machine no-op fallback (PRIMARY absent, agents-master present)
+  # Test 13: Dev-machine no-op fallback (PRIMARY absent, agents-master present)
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 11: Dev-machine no-op fallback...\n'
-  # Make a fake agents-master with the team dir
+  printf '[selftest] Test 13: Dev-machine no-op fallback...\n'
   local fake_devteam="${tmp}/fake-devteam"
   mkdir -p "${fake_devteam}/.claude/agents-master/testteam"
-  # Use an aiteamforge dir that has NO testteam personas
   local fake_aitf_empty="${tmp}/fake-aitf-empty"
   mkdir -p "$fake_aitf_empty"
-  local t11_out
-  t11_out=$(HOME="${tmp}/fake-home-with-devteam" AITEAMFORGE_DIR="$fake_aitf_empty" \
+  local t13_out
+  t13_out=$(AITEAMFORGE_DIR="$fake_aitf_empty" \
     OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
     _deploy_devmachine_check "testteam" "$fake_devteam" "$fake_aitf_empty" 2>&1) || true
-  if printf '%s\n' "$t11_out" | grep -q "Dev-machine detected"; then
-    _pass "Test 11 (dev-machine no-op fallback triggered)"
+  if printf '%s\n' "$t13_out" | grep -q "Dev-machine detected"; then
+    _pass "Test 13 (dev-machine no-op fallback triggered)"
   else
-    _fail "Test 11 — expected dev-machine message, got: ${t11_out}"
+    _fail "Test 13 — expected dev-machine message, got: ${t13_out}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 12: No-personas path (neither source exists) → warning, exit 0
+  # Test 14: No-personas path (neither source exists) → warning, exit 0
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 12: No personas found → warning, no error...\n'
-  local t12_aitf="${tmp}/fake-aitf-nopers"
-  mkdir -p "$t12_aitf"
-  local t12_out t12_rc=0
-  t12_out=$(AITEAMFORGE_DIR="$t12_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
-    _deploy_devmachine_check "testteam" "/nonexistent/devteam" "$t12_aitf" 2>&1) || t12_rc=$?
-  if printf '%s\n' "$t12_out" | grep -q "No personas found" && [ "$t12_rc" -eq 0 ]; then
-    _pass "Test 12 (no-personas: warning + exit 0)"
+  printf '[selftest] Test 14: No personas found → warning, no error...\n'
+  local t14_aitf="${tmp}/fake-aitf-nopers"
+  mkdir -p "$t14_aitf"
+  local t14_out t14_rc=0
+  t14_out=$(AITEAMFORGE_DIR="$t14_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_devmachine_check "testteam" "/nonexistent/devteam" "$t14_aitf" 2>&1) || t14_rc=$?
+  if printf '%s\n' "$t14_out" | grep -q "No personas found" && [ "$t14_rc" -eq 0 ]; then
+    _pass "Test 14 (no-personas: warning + exit 0)"
   else
-    _fail "Test 12 — expected warning + exit 0, got rc=${t12_rc}: ${t12_out}"
+    _fail "Test 14 — expected warning + exit 0, got rc=${t14_rc}: ${t14_out}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 13: --all happy-path — 2 worktrees both get personas
+  # Test 15: --all backfill — both registered worktrees get personas
+  # Real git repo with 2 linked worktrees (both under worktrees/ subdir of main).
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 13: --all backfill: 2 worktrees both get personas...\n'
-  local fake_main2="${tmp}/fake-main2"
-  local fake_wt_a="${fake_main2}/worktrees/feature-aaa"
-  local fake_wt_b="${fake_main2}/worktrees/feature-bbb"
-  mkdir -p "${fake_main2}/.git"
-  mkdir -p "$fake_wt_a"
-  mkdir -p "$fake_wt_b"
+  printf '[selftest] Test 15: --all backfill: 2 worktrees both get personas...\n'
+  local all_main="${tmp}/all-main"
+  local all_wt_a="${all_main}/worktrees/feature-aaa"
+  local all_wt_b="${all_main}/worktrees/feature-bbb"
+  mkdir -p "$all_wt_a" "$all_wt_b"
+  git -C "$all_main" init -q
+  git -C "$all_main" commit -q --allow-empty -m "init"
+  git -C "$all_main" worktree add -q "$all_wt_a" -b selftest-all-aaa 2>/dev/null
+  git -C "$all_main" worktree add -q "$all_wt_b" -b selftest-all-bbb 2>/dev/null
 
-  local t13_out t13_rc=0
-  t13_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
-    _deploy_all_with_fake_wts "testteam" "$fake_main2" "$fake_aitf" \
-      "$fake_wt_a" "$fake_wt_b" 2>&1) || t13_rc=$?
+  local t15_out t15_rc=0
+  t15_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all "testteam" "$all_main" 2>&1) || t15_rc=$?
 
-  local wt_a_agents="${fake_wt_a}/.claude/agents"
-  local wt_b_agents="${fake_wt_b}/.claude/agents"
+  local wt_a_agents="${all_wt_a}/.claude/agents"
+  local wt_b_agents="${all_wt_b}/.claude/agents"
   if [ -f "${wt_a_agents}/testteam_alpha_engineer_persona.md" ] && \
      [ -f "${wt_b_agents}/testteam_alpha_engineer_persona.md" ] && \
-     [ "$t13_rc" -eq 0 ]; then
-    _pass "Test 13 (--all backfill: both worktrees got personas, exit 0)"
+     [ "$t15_rc" -eq 0 ]; then
+    _pass "Test 15 (--all backfill: both worktrees got personas, exit 0)"
   else
-    _fail "Test 13 — --all backfill: missing persona files or bad rc=${t13_rc}. out: ${t13_out}"
+    _fail "Test 15 — --all backfill: missing persona files or bad rc=${t15_rc}. out: ${t15_out}"
   fi
 
   # -----------------------------------------------------------------------
-  # Test 14: --all with no worktrees — benign no-op (exit 0, no crash)
+  # Test 16: --all with no linked worktrees → benign no-op
   # -----------------------------------------------------------------------
-  printf '[selftest] Test 14: --all backfill: no worktrees → benign no-op...\n'
-  local fake_main3="${tmp}/fake-main3"
-  mkdir -p "${fake_main3}/.git"
-  # No worktrees/ subdir at all
+  printf '[selftest] Test 16: --all backfill: no worktrees → benign no-op...\n'
+  local nolink_main="${tmp}/nolink-main"
+  mkdir -p "$nolink_main"
+  git -C "$nolink_main" init -q
+  git -C "$nolink_main" commit -q --allow-empty -m "init"
+  # No 'git worktree add' calls — no linked worktrees
 
-  local t14_out t14_rc=0
-  t14_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
-    _deploy_all_with_fake_wts "testteam" "$fake_main3" "$fake_aitf" 2>&1) || t14_rc=$?
-  if [ "$t14_rc" -eq 0 ]; then
-    _pass "Test 14 (--all backfill: no worktrees → benign no-op, exit 0)"
+  local t16_out t16_rc=0
+  t16_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all "testteam" "$nolink_main" 2>&1) || t16_rc=$?
+  if [ "$t16_rc" -eq 0 ]; then
+    _pass "Test 16 (--all backfill: no linked worktrees → benign no-op, exit 0)"
   else
-    _fail "Test 14 — expected exit 0 with no worktrees, got rc=${t14_rc}: ${t14_out}"
+    _fail "Test 16 — expected exit 0 with no worktrees, got rc=${t16_rc}: ${t16_out}"
   fi
 
   # -----------------------------------------------------------------------
@@ -819,40 +905,6 @@ PERSONA
   fi
   printf '[selftest] All tests passed.\n'
   return 0
-}
-
-# Helper: like _deploy but with git-common-dir stubbed for selftest
-# (fake_wt has no real git repo; we bypass _main_root_from_wt).
-# Uses _deploy_core directly after guard validation — no logic duplication.
-_deploy_with_fake_git() {
-  local wt_path="$1"
-  local main_root="$2"
-  local team="$3"
-
-  local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
-  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
-  local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
-
-  if [ ! -d "$primary_src" ]; then
-    if [ -d "$devmachine_fallback" ]; then
-      _info "[${team}] Dev-machine detected: use kb-sync-personas sync-worktrees ${team} instead."
-      return 0
-    fi
-    _warn "[${team}] No personas found at ${primary_src} — skipping."
-    return 0
-  fi
-
-  local canon_target
-  canon_target=$(_guard_worktree_target "$wt_path" "$main_root") || {
-    _err "[${team}] Guard rejected worktree target. Aborting."
-    return 1
-  }
-
-  if [ -z "$canon_target" ]; then
-    return 0
-  fi
-
-  _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir"
 }
 
 # Helper: test the dev-machine/no-personas detection path in isolation
@@ -872,45 +924,6 @@ _deploy_devmachine_check() {
     _warn "[${team}] No personas found at ${primary_src} — skipping."
     return 0
   fi
-}
-
-# Helper: --all mode with a pre-built fake git worktree list (bypasses real git)
-# Arguments: team main_root aiteamforge_dir [wt_path ...]
-_deploy_all_with_fake_wts() {
-  local team="$1"
-  local canon_main="$2"
-  local aiteamforge_dir="$3"
-  shift 3
-  local wt_paths=("$@")
-
-  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
-
-  if [ ! -d "$primary_src" ]; then
-    _warn "[${team}] No personas found at ${primary_src} — skipping."
-    return 0
-  fi
-
-  if [ ${#wt_paths[@]} -eq 0 ]; then
-    _info "[${team}] No worktrees found — nothing to backfill."
-    return 0
-  fi
-
-  _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s)..."
-
-  local overall_rc=0
-  for wt_path in "${wt_paths[@]}"; do
-    local canon_target
-    canon_target=$(_guard_worktree_target "$wt_path" "$canon_main") || {
-      _warn "[${team}] Guard rejected: ${wt_path} — skipping."
-      continue
-    }
-    if [ -z "$canon_target" ]; then
-      continue
-    fi
-    _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || overall_rc=$?
-  done
-
-  return $overall_rc
 }
 
 # ---------------------------------------------------------------------------
