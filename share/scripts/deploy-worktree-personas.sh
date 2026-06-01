@@ -141,10 +141,15 @@ _guard_worktree_target() {
   # inside the git object store's worktree list — it can't be a path-
   # traversal artifact injected by the caller, because git resolves each
   # worktree's on-disk path independently when it writes the worktree list.
+  local wt_list
+  wt_list=$(git -C "$canon_root" worktree list --porcelain 2>/dev/null) || {
+    _err "git worktree list failed for repo: ${canon_root}"
+    return 1
+  }
+
   local found_as_linked=false
   local wt_line
   local first_wt=true
-  local git_list_failed=false
   while IFS= read -r wt_line; do
     if [[ "$wt_line" == worktree\ * ]]; then
       local candidate="${wt_line#worktree }"
@@ -159,12 +164,7 @@ _guard_worktree_target() {
         break
       fi
     fi
-  done < <(git -C "$canon_root" worktree list --porcelain 2>/dev/null) || git_list_failed=true
-
-  if [ "$git_list_failed" = true ]; then
-    _err "git worktree list failed for repo: ${canon_root}"
-    return 1
-  fi
+  done <<< "$wt_list"
 
   if [ "$found_as_linked" != true ]; then
     _err "Not a registered linked worktree of repo (${canon_root}): ${canon_wt}"
