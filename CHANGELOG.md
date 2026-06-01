@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0591: `share/scripts/worktree-helpers.sh` was unmapped in `sync-tap.sh` — the file exists in the tap but was never drift-gated, so it shipped stale in v0.12.9: missing the XACA-0588 `wt-new` persona-deploy hook and the XACA-0565 `finance|legal|medical|dns` board-routing consolidation via `_kb_template_to_instance`. Tap-machine `wt-new` persona auto-deploy was silently dead. Fix: added the file to `sync-tap.sh`'s mirror map; tap copy now re-synced from canonical and verified identical.
+
 ## [0.12.9] - 2026-06-01
 
 - XACA-0590: `share/scripts/lcars-launch-helpers.sh` gains `resolve_lcars_port()` — resolves a session-prefix's LCARS port from the canonical authority (`kanban-hooks/lcars_ports.py` / `team-paths.json`) instead of recomputing it via a `cksum` hash. Mirror of the canonical `scripts/lcars-launch-helpers.sh` change; the dev-team startup scripts that adopt it are not tap-shipped, but the shared helper is, so the tap copy must carry the resolver too. Fixes tracked `lcars-ports/*.port` files drifting on every launch when the runtime hash disagreed with the reconciled canonical port.

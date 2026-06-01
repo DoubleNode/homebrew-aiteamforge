@@ -805,6 +805,15 @@ wt-new() {
 
         cd "$wt_path"
 
+        # XACA-0588: deploy team personas into the new worktree's .claude/agents
+        # (tap-machine equivalent of kb-sync-personas sync-worktrees, which is dev-only).
+        # No-op on dev machines (helper detects ~/aiteamforge absent) and when the
+        # helper isn't installed. Personas land UNTRACKED — intentionally ephemeral.
+        local _dwp="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/scripts/deploy-worktree-personas.sh"
+        if [ -x "$_dwp" ]; then
+            "$_dwp" "$wt_path" "$WT_PROJECT" || true
+        fi
+
         # Update tmux if in tmux
         if [ -n "$TMUX" ]; then
             tmux set-option @current_worktree "$name" 2>/dev/null
@@ -1563,9 +1572,12 @@ wt-pr-merged() {
             board_file="$kanban_dir/freelance-*${repo_name}*-board.json"
             board_file=$(ls $board_file 2>/dev/null | head -1)
             ;;
-        finance) board_file=$(_kb_get_board_file "finance-personal") ;; # Use canonical resolver — see XACA-0180
-        medical) board_file=$(_kb_get_board_file "medical-general") ;; # Use canonical resolver — see XACA-0180
-        dns)     board_file=$(_kb_get_board_file "dns") ;;              # Use canonical resolver — see XACA-0180
+        # XACA-0565: personal-org & passthrough teams route through the canonical
+        # template→instance helper (_kb_template_to_instance in kanban-helpers.sh).
+        # Adding a new personal-org team only needs a new case there. `legal` was
+        # latently missing from this list before consolidation; now covered.
+        finance|legal|medical|dns)
+            board_file=$(_kb_get_board_file "$(_kb_template_to_instance "$WT_PROJECT")") ;;
     esac
 
     if [ -n "$board_file" ] && [ -f "$board_file" ]; then
