@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.11] - 2026-06-01
+
 - XACA-0593: Wire persona-deploy hook into tap-native `wt-create()` in `share/templates/aliases/worktree-aliases.sh`. XACA-0588 added the hook only to `wt-new()` in `worktree-helpers.sh` (the dev-machine path). On tap machines `worktree-helpers.sh` is not sourced and `wt-new` does not exist — `wt-create` is the only worktree-creation path. After the successful `git worktree add`, a guarded call to `${AITEAMFORGE_DIR}/scripts/deploy-worktree-personas.sh "$worktree_dir" "$WT_CURRENT_PROJECT"` deploys team personas into the new worktree's `.claude/agents/`. The call is on the success path only, wrapped in `[ -x "$_dwp" ]` and `|| true` so it never aborts worktree creation. Variables proven in-scope: `$worktree_dir` (computed above the guard, holds the new worktree absolute path) and `$WT_CURRENT_PROJECT` (exported by `wt-project`). Upgrade path: `aiteamforge-upgrade.sh::update_alias_files()` already refreshes `share/aliases/worktree-aliases.sh` when the tap source is newer — existing tap machines receive the hook on next `aiteamforge upgrade` with no additional wiring needed. **Follow-up (layout-agnostic guard):** `share/scripts/deploy-worktree-personas.sh` — the `_guard_worktree_target` function required the worktree to live under `<repo>/worktrees/` (dev layout only). Tap/container machines create worktrees at `dirname(repo)/worktrees/` via `wt-create` (sibling layout), causing the guard to reject every persona deploy with `ERROR: Worktree target does not live under repo worktrees/ dir`. Guard now checks git-registry membership: parses `git worktree list --porcelain` from the main repo root and accepts any path that appears as a registered linked worktree (not the main/primary entry). Layout-agnostic — git tracks linked worktrees regardless of position relative to the main repo. `--all` mode also updated: the `worktrees_dir` prefix filter removed; it now enumerates all linked worktrees from git directly. Selftest expanded to 16 tests (real `git worktree add` repos in both dev and sibling layouts).
 
 ## [0.12.10] - 2026-06-01
@@ -687,7 +689,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.10...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.11...HEAD
+[0.12.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.10...v0.12.11
 [0.12.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.9...v0.12.10
 [0.12.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.8...v0.12.9
 [0.12.8]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.7...v0.12.8
