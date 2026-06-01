@@ -283,3 +283,54 @@ open_lcars_tab() {
 
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# resolve_lcars_port <session_prefix>
+#
+# Returns the canonical LCARS port for <session_prefix> on stdout.
+#
+# Resolution order (XACA-0590):
+#   1. kanban-hooks/lcars_ports.py via aiteamforge_paths (team-paths.json overlay
+#      wins; DEFAULT_TEAMS is the fallback).  This is the single canonical source.
+#   2. Legacy cksum-based derivation is NOT done here — callers that need a cksum
+#      fallback for unregistered prefixes should supply it after a failed call:
+#
+#       LCARS_PORT="$(resolve_lcars_port "$SESSION_PREFIX")" || \
+#         LCARS_PORT=$((BASE + $(echo "$INPUT" | cksum | cut -d' ' -f1) % RANGE))
+#
+# Returns:
+#   0  — resolved; port is printed on stdout.
+#   1  — prefix is unknown / lcars_port is null; nothing printed on stdout
+#         (warnings go to stderr so the caller's || branch runs cleanly).
+#
+# Portability (mirrors start_lcars_server): uses ${AITEAMFORGE_DIR:-$HOME/dev-team}
+# as the base so it works on dev machines (unset AITEAMFORGE_DIR → ~/dev-team)
+# and tap-installed machines (AITEAMFORGE_DIR exported by the Formula).
+# BASH_SOURCE is empty under zsh — do NOT use it to self-locate (see
+# feedback_bash_source_empty_under_zsh). We rely on the portable base instead.
+# ---------------------------------------------------------------------------
+resolve_lcars_port() {
+    local prefix="${1:?resolve_lcars_port: session_prefix argument is required}"
+    local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+    local _ports_py="${_atf_base}/kanban-hooks/lcars_ports.py"
+
+    if [[ ! -f "$_ports_py" ]]; then
+        echo "resolve_lcars_port: kanban-hooks/lcars_ports.py not found at ${_ports_py}" >&2
+        return 1
+    fi
+
+    # lcars_ports.py prints "prefix:port" on stdout for known prefixes;
+    # unknown/null prefixes emit a WARNING on stderr and produce no stdout output.
+    local _result
+    _result="$(python3 "$_ports_py" "$prefix" 2>/dev/null)"
+
+    if [[ -z "$_result" ]]; then
+        # Emit warning so callers logging stderr understand why the fallback ran.
+        echo "resolve_lcars_port: '${prefix}' not found in canonical registry — caller should use cksum fallback" >&2
+        return 1
+    fi
+
+    # Strip the "prefix:" part; output only the port number.
+    echo "${_result#*:}"
+    return 0
+}
