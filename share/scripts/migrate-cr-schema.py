@@ -7,7 +7,12 @@ v2.0 CR-as-Container pattern: a top-level crs[] collection (mirroring epics[]/
 releases[]) with crAssignment back-pointers on items.
 
 Usage:
+    # Batch mode (whole board):
     migrate-cr-schema.py <board.json>
+
+    # Per-item mode (single item, dry-run by default):
+    migrate-cr-schema.py --item <item-id> --board <board.json>
+    migrate-cr-schema.py --item <item-id> --board <board.json> --apply
 
 Exit codes:
     0 — success (including no-op when already migrated)
@@ -15,6 +20,8 @@ Exit codes:
     2 — input file not found / unreadable
     3 — input file is not valid JSON
     4 — migration produced invalid JSON (rollback attempted from backup)
+    5 — item-id not found on board (--item mode only)
+    6 — item has no CR data to migrate (--item mode only)
 
 Safety:
     - ALWAYS writes a timestamped backup before ANY mutation.
@@ -24,8 +31,10 @@ Safety:
       A mid-flight kill cannot leave a half-written board.
     - No third-party dependencies — stdlib only.
     - Running the script a second time on an already-migrated board is a NO-OP.
+    - --item mode: defaults to dry-run; pass --apply to write changes.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -163,9 +172,15 @@ def _collect_items(board: dict) -> list:
 # Core migration logic
 # ─────────────────────────────────────────────────────────────────────────────
 
-def migrate_board(board: dict) -> tuple:
+def migrate_board(board: dict, item_filter: str | None = None) -> tuple:
     """
     Migrate the board dict in-place.
+
+    Args:
+      board: parsed board JSON dict
+      item_filter: when set, only the item with this id is migrated; all other
+                   items are left untouched (used by migrate_item() to scope
+                   per-item migration). Default None = process all v1 items.
 
     Returns (items_migrated: int, cr_records_created: int, warnings: list[str])
 
@@ -200,6 +215,10 @@ def migrate_board(board: dict) -> tuple:
     # 3. Walk all items and collect CR data from deprecated fields.
     for container_key, idx, item in _collect_items(board):
         item_id = item.get("id", f"{container_key}[{idx}]")
+
+        # Per-item scope: skip every item except the named one.
+        if item_filter is not None and item_id != item_filter:
+            continue
 
         # Already fully migrated — skip.
         if _item_is_already_migrated(item):
@@ -321,8 +340,14 @@ def migrate_board(board: dict) -> tuple:
 
     # 5. Second pass: write crAssignment back-pointers on items that were just
     #    processed (pending_cr_by_id keys) and remove deprecated fields.
+    # When item_filter is set, only mutate the named item. Otherwise the second
+    # pass would silently half-migrate siblings sharing the same cr_id —
+    # writing crAssignment without adding them to itemIds, leaving the
+    # bidirectional invariant broken.
     for container_key, idx, item in _collect_items(board):
         item_id = item.get("id", "")
+        if item_filter is not None and item_id != item_filter:
+            continue
         raw_cr_id = item.get("cr_id")
         if not isinstance(raw_cr_id, str) or not raw_cr_id:
             continue
@@ -359,15 +384,198 @@ def migrate_board(board: dict) -> tuple:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Per-item migration (single-item wrapper around migrate_board)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def migrate_item(board_path: Path, item_id: str, apply: bool) -> int:
+    """
+    Migrate a single item (item_id) on board_path from v1 → v2 shape.
+
+    Validation contract (exits before any backup or write):
+      - Item not found on board           → exit 5
+      - Item has no CR data at all        → exit 6
+      - Item already fully v2 (crAssignment + no deprecated fields) → exit 0 (no-op)
+      - Item has v1 cr_* fields           → dry-run print (no --apply) or migrate
+
+    Returns an integer exit code.
+    """
+    # ── Read board ────────────────────────────────────────────────────────────
+    if not board_path.exists():
+        print(f"ERROR: file not found: {board_path}", file=sys.stderr)
+        return 2
+
+    try:
+        raw = board_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        print(f"ERROR: cannot read {board_path}: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        board = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: {board_path} is not valid JSON: {exc}", file=sys.stderr)
+        return 3
+
+    # ── Locate the item across all known containers ───────────────────────────
+    target_item = None
+    for container_key, _idx, item in _collect_items(board):
+        if isinstance(item, dict) and item.get("id") == item_id:
+            target_item = item
+            break
+
+    if target_item is None:
+        print(
+            f"ERROR: item '{item_id}' not found on board {board_path}",
+            file=sys.stderr,
+        )
+        return 5
+
+    # ── Classify the item ─────────────────────────────────────────────────────
+    has_assignment = bool(target_item.get("crAssignment"))
+    has_deprecated = _item_has_deprecated_cr_fields(target_item)
+
+    if has_assignment and not has_deprecated:
+        # Already fully v2 — idempotent no-op.
+        print(f"no-op (already v2): item '{item_id}' has crAssignment and no deprecated cr_* fields.")
+        return 0
+
+    if not has_deprecated and not has_assignment:
+        # Item exists but has zero CR data — nothing to migrate.
+        print(
+            f"ERROR: item '{item_id}' has no CR data (no cr_* fields, no crAssignment).",
+            file=sys.stderr,
+        )
+        return 6
+
+    # ── At this point the item has v1 cr_* fields → migrate ──────────────────
+    if not apply:
+        print(
+            f"[DRY RUN] item '{item_id}' has v1 CR fields — would migrate to v2 container shape.\n"
+            f"  Pass --apply to write changes."
+        )
+        return 0
+
+    # ── Backup BEFORE any mutation ────────────────────────────────────────────
+    ts_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup_path = board_path.with_suffix(f".backup.{ts_str}")
+
+    try:
+        backup_path.write_text(raw, encoding="utf-8")
+    except OSError as exc:
+        print(
+            f"ERROR: backup write failed — aborting to protect original board.\n"
+            f"  Backup path: {backup_path}\n"
+            f"  Reason: {exc}",
+            file=sys.stderr,
+        )
+        return 1
+
+    # ── Run migration (reuse existing batch logic, scoped to one item) ────────
+    # item_filter pins migrate_board() to the single named item; all other
+    # items on the board are left untouched.
+    items_migrated, new_cr_records, warnings = migrate_board(board, item_filter=item_id)
+
+    for w in warnings:
+        print(w, file=sys.stderr)
+
+    # ── Validate output parses ────────────────────────────────────────────────
+    try:
+        output_json = json.dumps(board, indent=2, ensure_ascii=False)
+        json.loads(output_json)  # round-trip check
+    except (TypeError, ValueError) as exc:
+        print(
+            f"ERROR: migration produced invalid JSON: {exc}\n"
+            f"  Original board preserved. Backup at: {backup_path}",
+            file=sys.stderr,
+        )
+        try:
+            board_path.write_text(raw, encoding="utf-8")
+            print("  Rollback: restored original from in-memory copy.", file=sys.stderr)
+        except OSError as rollback_exc:
+            print(
+                f"  CRITICAL: rollback also failed: {rollback_exc}\n"
+                f"  Manually restore from: {backup_path}",
+                file=sys.stderr,
+            )
+        return 4
+
+    # ── Atomic write ──────────────────────────────────────────────────────────
+    tmp_path = board_path.with_suffix(".tmp")
+    try:
+        tmp_path.write_text(output_json, encoding="utf-8")
+        os.replace(str(tmp_path), str(board_path))
+    except OSError as exc:
+        print(
+            f"ERROR: atomic write failed: {exc}\n"
+            f"  Original board may be intact. Backup at: {backup_path}",
+            file=sys.stderr,
+        )
+        tmp_path.unlink(missing_ok=True)
+        return 1
+
+    # ── Summary ───────────────────────────────────────────────────────────────
+    print(
+        f"Migrated item '{item_id}': {items_migrated} item(s) → {new_cr_records} new CR record(s). "
+        f"Backup: {backup_path}"
+    )
+    return 0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Entry point
 # ─────────────────────────────────────────────────────────────────────────────
 
 def main() -> int:
-    if len(sys.argv) < 2:
-        print("Usage: migrate-cr-schema.py <board.json>", file=sys.stderr)
+    parser = argparse.ArgumentParser(
+        prog="migrate-cr-schema.py",
+        description="Migrate CR schema from v1 (per-item cr_* fields) to v2 (container).",
+        add_help=True,
+    )
+    # Per-item mode flags
+    parser.add_argument(
+        "--item",
+        metavar="ITEM_ID",
+        default=None,
+        help="Migrate a single item by ID (dry-run unless --apply is also given).",
+    )
+    parser.add_argument(
+        "--board",
+        metavar="BOARD_JSON",
+        default=None,
+        help="Path to the board JSON file (required with --item; also accepted in batch mode).",
+    )
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        default=False,
+        help="Write changes to disk (required for --item to mutate; batch mode always applies).",
+    )
+    # Positional: legacy batch-mode invocation (migrate-cr-schema.py <board.json>)
+    parser.add_argument(
+        "board_positional",
+        nargs="?",
+        metavar="board.json",
+        default=None,
+        help="Board JSON file (batch mode — positional, for backwards compatibility).",
+    )
+
+    args = parser.parse_args()
+
+    # ── Resolve board path ────────────────────────────────────────────────────
+    if args.board is not None:
+        board_path = Path(args.board)
+    elif args.board_positional is not None:
+        board_path = Path(args.board_positional)
+    else:
+        parser.print_usage(sys.stderr)
+        print("ERROR: provide a board JSON path (--board or positional argument).", file=sys.stderr)
         return 2
 
-    board_path = Path(sys.argv[1])
+    # ── Per-item mode ─────────────────────────────────────────────────────────
+    if args.item is not None:
+        return migrate_item(board_path, args.item, apply=args.apply)
+
+    # ── Batch mode (original behaviour, always applies) ───────────────────────
 
     # ── Exit 2: input not found / unreadable ─────────────────────────────────
     if not board_path.exists():
@@ -386,6 +594,21 @@ def main() -> int:
     except json.JSONDecodeError as exc:
         print(f"ERROR: {board_path} is not valid JSON: {exc}", file=sys.stderr)
         return 3
+
+    # ── Detect no-op BEFORE writing backup ───────────────────────────────────
+    # A board is already fully initialised if crs[] exists, nextCrSeq is present,
+    # and no items contain deprecated cr_* fields that need migrating.  In that
+    # case we skip the backup entirely (no mutation, no backup needed).
+    _crs_initialised = isinstance(board.get("crs"), list) and isinstance(board.get("nextCrSeq"), int)
+    _has_items_to_migrate = any(
+        _item_has_deprecated_cr_fields(item)
+        for key in ITEM_CONTAINER_KEYS
+        for item in (board.get(key) or [])
+        if isinstance(item, dict)
+    )
+    if _crs_initialised and not _has_items_to_migrate:
+        print("No CR data to migrate. Skipping backup.")
+        return 0
 
     # ── Backup BEFORE any mutation ────────────────────────────────────────────
     ts_str = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

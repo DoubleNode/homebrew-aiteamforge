@@ -1,4 +1,12 @@
 #!/bin/bash
+
+#
+#  fleet-reporter.sh
+#  DoubleNode Dev-Team Infrastructure (AITeamForge)
+#
+#  Copyright (c) 2026 - 2025 DoubleNode.com. All rights reserved.
+#
+
 # Fleet Status Reporter
 # Collects tmux session data and reports to central monitoring server
 # Run via cron every 60 seconds: * * * * * ~/dev-team/fleet-monitor/client/fleet-reporter.sh
@@ -190,9 +198,6 @@ LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
 # Backup status file location
 BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"
 
-# Registration sentinel file — presence means machine has been registered
-# with at least one server endpoint. Stored per-machine alongside the ID file.
-REGISTRATION_SENTINEL="$HOME/.fleet-registered"
 
 # ============================================================================
 # FUNCTIONS
@@ -307,7 +312,6 @@ parse_session_name() {
             project="${PARTS[1]}"
             team="${PARTS[2]}"
         else
-            # xaca-0139:allowed — docstring example uses team slug constants (freelance-doublenode-* are stable slugs, not org branding)
             # If 4+ parts: division-group-project-team (e.g., freelance-doublenode-workstats-command)
             # Join middle parts as project name
             project="${PARTS[1]}"
@@ -364,7 +368,6 @@ discover_team_names() {
 
     # Strategy 3: hardcoded fallback — used when config and dir scan both come up empty
     if [ ${#teams[@]} -eq 0 ]; then
-        # xaca-0139:allowed — "mainevent" is a legacy team slug in the hardcoded fallback list (not user-facing org branding)
         teams=(academy android command dns firebase freelance ios legal mainevent medical)
     fi
 
@@ -617,109 +620,6 @@ send_to_endpoint() {
     return 1
 }
 
-# Attempt machine registration with a single server endpoint.
-# The server's /api/register endpoint accepts the machine-identity payload.
-# Returns 0 on success (HTTP 200/201), 1 on failure.
-register_with_endpoint() {
-    local endpoint="$1"
-    local auth_token="$2"
-
-    # Derive the registration URL from the status endpoint
-    # e.g. http://host/api/status  ->  http://host/api/register
-    local register_url
-    register_url=$(echo "$endpoint" | sed 's|/api/status$|/api/register|')
-
-    # Build registration payload from machine-identity.json if available,
-    # otherwise construct a minimal payload from what we know.
-    local reg_payload
-    if [ -f "$MACHINE_IDENTITY_FILE" ] && command -v jq &>/dev/null; then
-        # Merge identity file with current timestamps and IP
-        reg_payload=$(jq -c \
-            --arg ip "$IP_ADDRESS" \
-            --arg ts "$TIMESTAMP" \
-            '. + {"registeredAt": $ts, "lastSeen": $ts, "ip": $ip}' \
-            "$MACHINE_IDENTITY_FILE" 2>/dev/null)
-    fi
-
-    # Fall back to a minimal JSON payload if identity file is missing/broken
-    if [ -z "$reg_payload" ]; then
-        reg_payload="{\"machineId\":\"$MACHINE_ID\",\"hostname\":\"$HOSTNAME\",\"ip\":\"$IP_ADDRESS\",\"registeredAt\":\"$TIMESTAMP\",\"lastSeen\":\"$TIMESTAMP\"}"
-    fi
-
-    local response http_code
-    if [ -n "$auth_token" ]; then
-        response=$(curl -s -w "\n%{http_code}" \
-            --connect-timeout 10 \
-            --max-time 30 \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -H "Authorization: Bearer $auth_token" \
-            -d "$reg_payload" \
-            "$register_url" 2>&1)
-    else
-        response=$(curl -s -w "\n%{http_code}" \
-            --connect-timeout 10 \
-            --max-time 30 \
-            -X POST \
-            -H "Content-Type: application/json" \
-            -d "$reg_payload" \
-            "$register_url" 2>&1)
-    fi
-
-    http_code=$(echo "$response" | tail -1)
-    if [ "$http_code" = "200" ] || [ "$http_code" = "201" ]; then
-        echo "  ✓ Registered with $register_url"
-        return 0
-    else
-        echo "  ✗ Registration failed at $register_url (HTTP $http_code)"
-        return 1
-    fi
-}
-
-# Ensure this machine is registered with all configured endpoints.
-# Only runs when the registration sentinel file is absent (i.e. fresh install or
-# after sentinel is manually deleted).  On success it writes the sentinel so
-# subsequent runs skip this step entirely.
-ensure_registered() {
-    if [ -f "$REGISTRATION_SENTINEL" ]; then
-        return 0
-    fi
-
-    echo "First-run registration: registering machine with fleet server(s)..."
-
-    local registered=false
-    for endpoint in "${API_ENDPOINTS[@]}"; do
-        local auth=""
-        if [[ "$endpoint" != *"localhost"* ]] && [ -n "${CENTRAL_AUTH_TOKEN:-}" ]; then
-            auth="$CENTRAL_AUTH_TOKEN"
-        fi
-
-        # Retry registration up to 5 times with a short backoff.
-        # The server may not be ready on the very first LaunchAgent fire.
-        local attempt=1
-        local max_attempts=5
-        while [ $attempt -le $max_attempts ]; do
-            if register_with_endpoint "$endpoint" "$auth"; then
-                registered=true
-                break
-            fi
-            if [ $attempt -lt $max_attempts ]; then
-                echo "  Retrying registration in 10s (attempt $attempt/$max_attempts)..."
-                sleep 10
-            fi
-            attempt=$((attempt + 1))
-        done
-    done
-
-    if [ "$registered" = true ]; then
-        # Write sentinel so we skip registration on future runs
-        date -u +"%Y-%m-%dT%H:%M:%SZ" > "$REGISTRATION_SENTINEL"
-        echo "Registration complete. Sentinel written to $REGISTRATION_SENTINEL"
-    else
-        echo "Warning: registration failed for all endpoints. Will retry on next run."
-        # Do NOT write the sentinel — the next run will try again.
-    fi
-}
 
 # Send status to all configured endpoints (XACA-0024 hybrid support)
 send_status() {
@@ -763,9 +663,6 @@ main() {
     echo "Machine: $HOSTNAME ($IP_ADDRESS)"
     echo "Timestamp: $TIMESTAMP"
     echo ""
-
-    # Ensure machine is registered before sending status (first-run only)
-    ensure_registered
 
     # Build payload
     echo "Collecting tmux session data..."

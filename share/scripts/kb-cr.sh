@@ -100,6 +100,19 @@
 #   kb-cr deploy-prod <CR-ID>
 #   kb-cr emergency-deploy <CR-ID> --justification "<text>"
 #
+#   Backwards lifecycle (v2.0 — administrative correction — XACA-0329):
+#   kb-cr revert         <CR-ID|item-id> [--to <state>] [--reason "<text>"]
+#                        Walk back through earlier canonical states. Strips
+#                        later-state timestamps + approver attribution; preserves
+#                        the snapshot in .crs[i].revert_history[].
+#                        Distinct from 'reject' (CAB pushback). Multi-item CRs
+#                        propagate atomically. pushback_count is preserved.
+#                        --reason REQUIRED when reverting from emergency-deployed.
+#   kb-cr undo           <CR-ID|item-id> [--reason "<text>"]
+#                        One-step convenience: revert without --to.
+#   kb-cr revert-history <CR-ID|item-id>
+#                        Read-only display of revert_history[] entries.
+#
 #   Per-item lifecycle (v1 / legacy — argument is an item-id):
 #   kb-cr draft   <item-id> --type <major|emergency|fyi>
 #                 [Phase 3 — 002: creates <team-kanban>/cr-docs/<ITEM-ID>-CR.md]
@@ -314,6 +327,176 @@ _kb_cr_container_get_state() {
     local board_file="$1"
     local cr_idx="$2"
     _kb_jq_read "$board_file" ".crs[$cr_idx].crState // \"\"" -r 2>/dev/null
+}
+
+# ═════════════════════════════════════════════════════════════════════════════
+# REVERT / UNDO INFRASTRUCTURE (XACA-0329)
+# ═════════════════════════════════════════════════════════════════════════════
+#
+# Revert is an ADMINISTRATIVE CORRECTION that walks a CR backwards through
+# its lifecycle. It is DISTINCT from `cr-rejected` (a CAB-process pushback)
+# and from `transition` (a force-write with no field stripping).
+#
+# When reverting from <current> to <target>:
+#   1. Strip the timestamp + auxiliary fields owned by every state with rank
+#      strictly greater than <target>'s rank, IF their evidence is present
+#      on the container (timestamp non-null). Evidence-based stripping is
+#      robust against branches and re-submits.
+#   2. Set crState = <target>.
+#   3. Append a new entry to .crs[i].revert_history[] capturing the snapshot
+#      of stripped values for forensic audit. The stripped data is never lost
+#      — it is preserved inside revert_history.
+#   4. Append an activity-log event of type "cr_state_reverted".
+#
+# Multi-item CR support is FREE: revert operates on .crs[i], and all itemIds[]
+# siblings read state from that container. No per-item v1 fallback exists for
+# revert — the dispatcher routes item-id calls to the container variant via
+# the same _kb_cr_dispatch_item_lifecycle pattern.
+#
+# revert_history[] entry schema:
+#   {
+#     "ts":              "<ISO 8601 UTC>",
+#     "actor":           "<KB_CR_ACTOR or 'kb-cr'>",
+#     "operation":       "revert" | "undo",
+#     "from_state":      "<crState before this revert>",
+#     "to_state":        "<crState after this revert>",
+#     "reason":          "<--reason flag value, or null>",
+#     "stripped_states": ["<state>", ...],
+#     "stripped_fields": {
+#       "<state>": { "<dotted-path-under-.crs[i]>": <old_value>, ... },
+#       ...
+#     }
+#   }
+#
+# Canonical state ranking (used to determine "earlier than"):
+#     cr-drafted=0, cr-submitted=10, cr-rejected=11, cr-held=12,
+#     cr-approved=20, implementing=30, deployed-dev=40, deployed-prod=50,
+#     emergency-deployed=60.
+# cr-rejected and cr-held are positioned between cr-submitted and cr-approved
+# because both are ENTERED from cr-submitted (cr-held may also be entered from
+# cr-approved, which is handled by the evidence-based strip — cr-approved's
+# fields are stripped only if their timestamps are present).
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Echo the canonical rank of a crState. -1 if unknown.
+_kb_cr_state_rank() {
+    case "$1" in
+        cr-drafted)         echo 0  ;;
+        cr-submitted)       echo 10 ;;
+        cr-rejected)        echo 11 ;;
+        cr-held)            echo 12 ;;
+        cr-approved)        echo 20 ;;
+        implementing)       echo 30 ;;
+        deployed-dev)       echo 40 ;;
+        deployed-prod)      echo 50 ;;
+        emergency-deployed) echo 60 ;;
+        *)                  echo -1 ;;
+    esac
+}
+
+# Echo the timestamp + auxiliary fields owned by <state>, one per line, format:
+#     <kind>\t<dotted-path-under-.crs[i]>
+# kind ∈ { ts, obj, scalar } — informational only; del() handles all kinds.
+# Empty output means "<state> owns no strippable fields" (cr-drafted).
+# Non-zero exit means "<state> is unknown".
+#
+# pushback_count and pushback_notes are deliberately PRESERVED on revert from
+# cr-rejected / cr-held: those CAB events did happen and the audit trail of
+# them stays. Revert is an administrative correction of the state-write itself,
+# not erasure of CAB process history. (See revert_history[].reason for the
+# operator's note explaining the correction.)
+_kb_cr_state_strip_spec() {
+    case "$1" in
+        cr-drafted)         ;;
+        cr-submitted)       printf 'ts\ttimestamps.cr_submitted_at\n' ;;
+        cr-rejected)        printf 'ts\ttimestamps.cr_rejected_at\n' ;;
+        cr-held)            printf 'ts\ttimestamps.cr_held_at\n' ;;
+        cr-approved)        printf 'ts\ttimestamps.cr_approved_at\nobj\tapprover\n' ;;
+        implementing)       printf 'ts\ttimestamps.cr_started_dev_at\nts\ttimestamps.cr_started_test_at\n' ;;
+        deployed-dev)       printf 'ts\ttimestamps.cr_deployed_dev_at\n' ;;
+        deployed-prod)      printf 'ts\ttimestamps.cr_deployed_prod_at\n' ;;
+        emergency-deployed) printf 'ts\ttimestamps.cr_emergency_deployed_at\nscalar\temergency_justification\n' ;;
+        *)                  return 1 ;;
+    esac
+    return 0
+}
+
+# Echo every canonical state with rank > <target_rank>, ascending by rank,
+# one per line. Used by the revert driver to enumerate which states' fields
+# may need stripping when walking back to a target state.
+_kb_cr_states_above_rank() {
+    local target_rank="$1"
+    local s r
+    for s in cr-drafted cr-submitted cr-rejected cr-held cr-approved implementing deployed-dev deployed-prod emergency-deployed; do
+        r=$(_kb_cr_state_rank "$s")
+        if (( r > target_rank )); then
+            echo "$s"
+        fi
+    done
+}
+
+# _kb_cr_revert_strip_state_data <board_file> <cr_idx> <state>
+#
+# Strip the fields owned by <state> from .crs[<cr_idx>], capturing their
+# old values into a JSON snapshot which is echoed on stdout. The snapshot
+# is a flat object keyed by the dotted path:
+#     { "timestamps.cr_approved_at": "2026-05-04T...", "approver": {...} }
+# Empty snapshot ({}) is echoed if <state> owns no fields (cr-drafted) or if
+# all of its fields are already null/absent (no-op revert past that state).
+#
+# DOES NOT update crState, updatedAt, or lastUpdated — caller (the revert
+# driver) is responsible for sequencing those writes once at the end of a
+# multi-state strip walk.
+#
+# Returns non-zero only on hard failure (jq error, unknown state).
+_kb_cr_revert_strip_state_data() {
+    local board_file="$1"
+    local cr_idx="$2"
+    local state="$3"
+
+    local spec
+    if ! spec=$(_kb_cr_state_strip_spec "$state"); then
+        echo "kb-cr: ERROR: _kb_cr_revert_strip_state_data — unknown state '$state'" >&2
+        return 1
+    fi
+
+    if [[ -z "$spec" ]]; then
+        echo "{}"
+        return 0
+    fi
+
+    # Build capture and strip jq filters in lockstep.
+    # capture: starts as `{}` and accumulates `.[<path>] = $cr.<path>`
+    # strip:   starts as `.` and accumulates `| del(.crs[$cidx].<path>)`
+    # NOTE: avoid `path` as a local-var name — zsh binds lowercase `path` to
+    # the PATH env var, so `local path=""` empties PATH inside the function
+    # and breaks every external command. Use `field_path` instead.
+    local capture_filter='{}'
+    local strip_filter='.'
+    local kind="" field_path=""
+    while IFS=$'\t' read -r kind field_path; do
+        [[ -z "$field_path" ]] && continue
+        capture_filter+=" | .[\"$field_path\"] = (\$cr.$field_path // null)"
+        strip_filter+=" | del(.crs[\$cidx].$field_path)"
+    done <<< "$spec"
+
+    # Capture old values BEFORE mutation.
+    local snapshot=""
+    snapshot=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_idx] as \$cr | $capture_filter" 2>/dev/null) || snapshot='{}'
+
+    if [[ -z "$snapshot" ]]; then
+        snapshot='{}'
+    fi
+
+    # Apply the strip.
+    if ! _kb_jq_update "$board_file" "$strip_filter" --argjson cidx "$cr_idx"; then
+        echo "kb-cr: ERROR: _kb_cr_revert_strip_state_data — strip write failed for state '$state'" >&2
+        return 1
+    fi
+
+    echo "$snapshot"
+    return 0
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -810,6 +993,69 @@ _kb_cr_container_hold() {
     echo "kb-cr hold: [$cr_id] $current_state -> cr-held (cr_held_at=$ts${reason_msg})"
 }
 
+# kb-cr close <CR-ID> [--reason "<text>"]
+# Transitions a CR to the terminal state cr-closed from any non-closed state.
+# Does NOT increment pushback_count — this is manual archival, not a rejection.
+_kb_cr_container_close() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr close <CR-ID> [--reason \"<text>\"]" >&2
+        return 1
+    fi
+
+    local reason=""
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --reason)   reason="${2:-}"; shift 2 ;;
+            --reason=*) reason="${1#--reason=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr close: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+
+    # Idempotent guard — already closed
+    if [[ "$current_state" == "cr-closed" ]]; then
+        echo "kb-cr close: CR '$cr_id' is already closed." >&2
+        return 1
+    fi
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+
+    _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-closed" "cr_closed_at" "$ts" || return 1
+
+    # Write closed_reason if provided (not pushback_notes — not a pushback).
+    # Unconditional assignment is safe because the idempotent guard above
+    # prevents re-close, so closed_reason is always empty when this runs.
+    if [[ -n "$reason" ]]; then
+        local -a close_args=(--argjson cidx "$cr_idx" --arg reason "$reason" --arg ts "$ts")
+        _kb_jq_update "$_cr_board" '
+            .crs[$cidx].closed_reason = $reason |
+            .crs[$cidx].updatedAt = $ts |
+            .lastUpdated = $ts
+        ' "${close_args[@]}" || return 1
+    fi
+
+    local reason_msg=""
+    [[ -n "$reason" ]] && reason_msg=" reason=\"$reason\""
+    echo "kb-cr close: [$cr_id] $current_state -> cr-closed (cr_closed_at=$ts${reason_msg})"
+}
+
 # kb-cr deploy-dev <CR-ID>
 # Predecessor states: cr-approved, implementing
 _kb_cr_container_deploy_dev() {
@@ -1061,6 +1307,365 @@ _kb_cr_container_emergency_deploy() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_container_revert <CR-ID> [--to <state>] [--reason "<text>"] [--operation revert|undo]
+# (XACA-0329-003)
+#
+# Walk a CR backwards through its lifecycle as an administrative correction.
+# Strips later-state timestamps and approver attribution; preserves an audit
+# trail in .crs[i].revert_history[]. Multi-item CR support is automatic —
+# state lives on the container and propagates to all itemIds[] siblings.
+#
+# Args:
+#   <CR-ID>           — required. Container ID.
+#   --to <state>      — optional. Target state. Must have rank strictly less
+#                       than the current state's rank. Forward walks are
+#                       refused (use `transition` for force-write or use
+#                       the forward verbs).
+#                       If omitted, the predecessor is computed from the
+#                       most-recent timestamp on the container (the latest
+#                       (state, ts) pair whose ts < the current state's ts).
+#   --reason "<text>" — optional but encouraged. Recorded in revert_history.
+#                       Required when reverting from emergency-deployed
+#                       (break-glass operations need an audit trail).
+#   --operation       — internal. "revert" (default) or "undo". Recorded
+#                       in revert_history[].operation; controls the user
+#                       message and helps `revert-history` distinguish.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kb_cr_container_revert() {
+    local cr_id="${1:-}"
+    shift 2>/dev/null
+
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr revert <CR-ID> [--to <state>] [--reason \"<text>\"]" >&2
+        return 1
+    fi
+
+    local target_state="" reason="" operation="revert"
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --to)         target_state="${2:-}"; shift 2 ;;
+            --to=*)       target_state="${1#--to=}"; shift ;;
+            --reason)     reason="${2:-}"; shift 2 ;;
+            --reason=*)   reason="${1#--reason=}"; shift ;;
+            --operation)  operation="${2:-}"; shift 2 ;;
+            --operation=*) operation="${1#--operation=}"; shift ;;
+            *) shift ;;
+        esac
+    done
+
+    if [[ "$operation" != "revert" && "$operation" != "undo" ]]; then
+        echo "kb-cr revert: invalid --operation '$operation' (must be revert|undo)" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr $operation: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+    if [[ -z "$current_state" ]]; then
+        echo "kb-cr $operation: CR '$cr_id' has no crState — nothing to $operation." >&2
+        return 1
+    fi
+
+    local current_rank
+    current_rank=$(_kb_cr_state_rank "$current_state")
+    if (( current_rank < 0 )); then
+        echo "kb-cr $operation: CR '$cr_id' is in unknown state '$current_state'; refusing to $operation." >&2
+        return 1
+    fi
+
+    # ── Compute target state ─────────────────────────────────────────────────
+    if [[ -z "$target_state" ]]; then
+        # Heuristic: pick the (state, ts) pair with the latest ts among those
+        # whose ts is non-null AND < current state's ts. cr-drafted is the
+        # implicit floor (always reachable).
+        target_state=$(_kb_cr_revert_compute_predecessor "$_cr_board" "$cr_idx" "$current_state")
+        if [[ -z "$target_state" ]]; then
+            echo "kb-cr $operation: cannot compute predecessor for state '$current_state' on CR '$cr_id'." >&2
+            echo "  Pass --to <state> to specify the target explicitly." >&2
+            return 1
+        fi
+    fi
+
+    # ── Validate target ──────────────────────────────────────────────────────
+    local target_rank
+    target_rank=$(_kb_cr_state_rank "$target_state")
+    if (( target_rank < 0 )); then
+        echo "kb-cr $operation: target state '$target_state' is not a known crState." >&2
+        echo "  Valid: cr-drafted, cr-submitted, cr-rejected, cr-held, cr-approved," >&2
+        echo "         implementing, deployed-dev, deployed-prod, emergency-deployed" >&2
+        return 1
+    fi
+
+    if [[ "$target_state" == "$current_state" ]]; then
+        echo "kb-cr $operation: target state '$target_state' equals current state — no-op." >&2
+        return 1
+    fi
+
+    if (( target_rank >= current_rank )); then
+        echo "kb-cr $operation: target state '$target_state' (rank $target_rank) is not strictly earlier than current '$current_state' (rank $current_rank)." >&2
+        echo "  $operation only walks backwards. Use 'kb-cr transition' or a forward verb to advance." >&2
+        return 1
+    fi
+
+    # ── Reason mandatory for emergency-deployed reverts ──────────────────────
+    if [[ "$current_state" == "emergency-deployed" && -z "$reason" ]]; then
+        echo "kb-cr $operation: --reason is required when reverting from emergency-deployed." >&2
+        echo "  Break-glass operations need an audit trail. Pass --reason \"<text>\"." >&2
+        return 1
+    fi
+
+    # ── Walk states above target_rank, strip evidence-based ──────────────────
+    local stripped_states_json='[]'
+    local stripped_fields_json='{}'
+    local states_to_strip
+    states_to_strip=$(_kb_cr_states_above_rank "$target_rank")
+
+    local s="" snapshot="" has_data=""
+    while IFS= read -r s; do
+        [[ -z "$s" ]] && continue
+        snapshot=$(_kb_cr_revert_strip_state_data "$_cr_board" "$cr_idx" "$s") || return 1
+        # Only record states whose snapshot has at least one captured field.
+        # cr-drafted always returns {}; states with no evidence return {} too.
+        if [[ -n "$snapshot" && "$snapshot" != "{}" ]]; then
+            has_data=$(echo "$snapshot" | jq -r '[.[] | select(. != null)] | length > 0')
+            if [[ "$has_data" == "true" ]]; then
+                stripped_states_json=$(echo "$stripped_states_json" | jq --arg s "$s" '. + [$s]')
+                stripped_fields_json=$(echo "$stripped_fields_json" | jq --arg s "$s" --argjson v "$snapshot" '. + {($s): $v}')
+            fi
+        fi
+    done <<< "$states_to_strip"
+
+    # ── Set crState = target, bump updatedAt, append revert_history entry ────
+    local now actor
+    now=$(_kb_cr_timestamp)
+    actor="${KB_CR_ACTOR:-kb-cr}"
+
+    local reason_arg="$reason"
+    [[ -z "$reason_arg" ]] && reason_arg="null"
+
+    local revert_entry
+    if [[ -z "$reason" ]]; then
+        revert_entry=$(jq -n \
+            --arg ts "$now" \
+            --arg actor "$actor" \
+            --arg op "$operation" \
+            --arg from "$current_state" \
+            --arg to "$target_state" \
+            --argjson stripped_states "$stripped_states_json" \
+            --argjson stripped_fields "$stripped_fields_json" \
+            '{ts: $ts, actor: $actor, operation: $op, from_state: $from, to_state: $to, reason: null, stripped_states: $stripped_states, stripped_fields: $stripped_fields}')
+    else
+        revert_entry=$(jq -n \
+            --arg ts "$now" \
+            --arg actor "$actor" \
+            --arg op "$operation" \
+            --arg from "$current_state" \
+            --arg to "$target_state" \
+            --arg reason "$reason" \
+            --argjson stripped_states "$stripped_states_json" \
+            --argjson stripped_fields "$stripped_fields_json" \
+            '{ts: $ts, actor: $actor, operation: $op, from_state: $from, to_state: $to, reason: $reason, stripped_states: $stripped_states, stripped_fields: $stripped_fields}')
+    fi
+
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].crState = $target |
+        .crs[$cidx].updatedAt = $now |
+        .crs[$cidx].revert_history = ((.crs[$cidx].revert_history // []) + [$entry]) |
+        .lastUpdated = $now
+    ' \
+    --argjson cidx "$cr_idx" \
+    --arg target "$target_state" \
+    --arg now "$now" \
+    --argjson entry "$revert_entry" \
+    || return 1
+
+    # ── Activity log event ───────────────────────────────────────────────────
+    local event
+    event=$(_kb_cr_activity_event "cr_state_reverted" \
+        "from_state=$current_state" "to_state=$target_state" \
+        "note=$operation${reason:+ — $reason}" 2>/dev/null || echo "")
+    if [[ -n "$event" ]]; then
+        _kb_cr_activity_append "$_cr_board" "$cr_id" "$event" 2>/dev/null || true
+    fi
+
+    # ── User-facing summary ──────────────────────────────────────────────────
+    local n_items
+    n_items=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].itemIds | length" -r 2>/dev/null)
+    n_items="${n_items:-0}"
+
+    local stripped_count
+    stripped_count=$(echo "$stripped_states_json" | jq -r 'length')
+
+    echo "kb-cr $operation: [$cr_id] $current_state -> $target_state (${stripped_count} state(s) stripped, ${n_items} item(s) affected)"
+    if [[ -n "$reason" ]]; then
+        echo "  reason: $reason"
+    fi
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_revert_compute_predecessor <board> <cr_idx> <current_state>
+# Echo the heuristic predecessor for <current_state>: the state with the
+# latest timestamp whose rank < rank(current). cr-drafted is implicit floor.
+# Empty echo on hard failure (current state has no inferable predecessor).
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_revert_compute_predecessor() {
+    local board_file="$1"
+    local cr_idx="$2"
+    local current_state="$3"
+
+    local current_rank
+    current_rank=$(_kb_cr_state_rank "$current_state")
+    if (( current_rank <= 0 )); then
+        # cr-drafted (rank 0) or unknown — no predecessor.
+        echo ""
+        return 0
+    fi
+
+    # Read all canonical timestamps in one jq call. Output: <state>\t<ts>
+    # Only emit lines where ts is non-null AND state's rank < current_rank.
+    local lines=""
+    lines=$(_kb_jq_read "$board_file" '
+        .crs[($cidx | tonumber)] as $c |
+        {
+            "cr-submitted":       $c.timestamps.cr_submitted_at,
+            "cr-rejected":        $c.timestamps.cr_rejected_at,
+            "cr-held":            $c.timestamps.cr_held_at,
+            "cr-approved":        $c.timestamps.cr_approved_at,
+            "implementing":       $c.timestamps.cr_started_dev_at,
+            "deployed-dev":       $c.timestamps.cr_deployed_dev_at,
+            "deployed-prod":      $c.timestamps.cr_deployed_prod_at,
+            "emergency-deployed": $c.timestamps.cr_emergency_deployed_at
+        }
+        | to_entries
+        | map(select(.value != null and .value != ""))
+        | .[]
+        | "\(.key)\t\(.value)"
+    ' --arg cidx "$cr_idx" -r 2>/dev/null)
+
+    # Pick the candidate with the highest ts whose rank < current_rank.
+    # Tie-break on equal timestamps by preferring the HIGHER rank (closer to
+    # current) — same-second forward writes (e.g., kb-cr submit then approve
+    # then start-dev in rapid succession) would otherwise return the first
+    # iterated state instead of the most-recent canonical predecessor.
+    local best_state="" best_ts="" best_rank=-1
+    local candidate_state="" candidate_ts="" candidate_rank=-1
+    local should_update=0
+    while IFS=$'\t' read -r candidate_state candidate_ts; do
+        [[ -z "$candidate_state" ]] && continue
+        candidate_rank=$(_kb_cr_state_rank "$candidate_state")
+        (( candidate_rank >= current_rank )) && continue
+
+        should_update=0
+        if [[ -z "$best_ts" ]]; then
+            should_update=1
+        elif [[ "$candidate_ts" > "$best_ts" ]]; then
+            should_update=1
+        elif [[ "$candidate_ts" == "$best_ts" ]] && (( candidate_rank > best_rank )); then
+            should_update=1
+        fi
+
+        if (( should_update )); then
+            best_state="$candidate_state"
+            best_ts="$candidate_ts"
+            best_rank="$candidate_rank"
+        fi
+    done <<< "$lines"
+
+    # Floor: if no candidate found, fall back to cr-drafted (rank 0).
+    if [[ -z "$best_state" ]]; then
+        echo "cr-drafted"
+        return 0
+    fi
+    echo "$best_state"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_container_revert_history <CR-ID>  (XACA-0329-005)
+# Read-only display of revert_history[] for a CR. Prints a header, then one
+# block per entry in chronological order. Entries are produced by revert/undo;
+# this command is purely informational and does not mutate the board.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kb_cr_container_revert_history() {
+    local cr_id="${1:-}"
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr revert-history <CR-ID|item-id>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr revert-history: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    local current_state
+    current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
+
+    local n_entries
+    n_entries=$(_kb_jq_read "$_cr_board" \
+        ".crs[$cr_idx].revert_history // [] | length" -r 2>/dev/null)
+    n_entries="${n_entries:-0}"
+
+    echo "═══════════════════════════════════════════════════════════════════"
+    echo " Revert History — $cr_id"
+    echo "  current state: $current_state"
+    echo "  entries:       $n_entries"
+    echo "═══════════════════════════════════════════════════════════════════"
+
+    if [[ "$n_entries" == "0" ]]; then
+        echo ""
+        echo "  (no revert/undo operations recorded for this CR)"
+        echo ""
+        return 0
+    fi
+
+    # Render each entry. Use jq to format consistently; pipe to read line by
+    # line for ordering and section breaks.
+    _kb_jq_read "$_cr_board" '
+        .crs[($cidx | tonumber)].revert_history // []
+        | to_entries
+        | .[]
+        | "── #\(.key + 1) ─────────────────────────────────────────────\n"
+          + "  ts:        \(.value.ts)\n"
+          + "  actor:     \(.value.actor)\n"
+          + "  operation: \(.value.operation)\n"
+          + "  from:      \(.value.from_state)\n"
+          + "  to:        \(.value.to_state)\n"
+          + "  reason:    \(.value.reason // "(none)")\n"
+          + "  stripped:  \((.value.stripped_states // []) | join(", "))"
+          + (if ((.value.stripped_fields // {}) | length) > 0 then
+                "\n  preserved field snapshot (audit trail):\n"
+                + ((.value.stripped_fields // {})
+                    | to_entries
+                    | map("    [\(.key)]\n"
+                          + (.value | to_entries | map("      \(.key) = \(.value | tostring)") | join("\n")))
+                    | join("\n"))
+            else "" end)
+    ' --arg cidx "$cr_idx" -r 2>/dev/null
+
+    echo ""
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # _kb_cr_dispatch_item_lifecycle — DD2 routing helper
 #
 # When the user runs a lifecycle verb against an item-id, check whether the item
@@ -1153,6 +1758,80 @@ _kb_cr_dispatch_item_lifecycle() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_dispatch_item_revert — revert/undo dispatcher (XACA-0329)
+#
+# revert/undo are CONTAINER-ONLY operations — there is no v1 per-item fallback
+# because revert mutates timestamps owned by the .crs[i] record. When called
+# with an item-id, route to the container via crAssignment.crId; if the item
+# has no crAssignment, error out with guidance.
+#
+# Usage:
+#   _kb_cr_dispatch_item_revert <verb> <gerund> "$@"
+#     verb   ∈ {revert, undo, revert-history}
+#     gerund — gerund used in the routing diagnostic line
+#     "$@"   — original positional args: item-id [extra flags…]
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kb_cr_dispatch_item_revert() {
+    local verb="$1"
+    local gerund="$2"
+    shift 2
+
+    local item_id="${1:-}"
+    if [[ -z "$item_id" ]]; then
+        echo "Usage: kb-cr $verb <CR-ID|item-id> [flags…]" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    if [[ "$_cr_enabled" != "true" ]]; then
+        _kb_cr_disabled_exit "$_cr_team"
+        return 0
+    fi
+
+    local item_idx
+    item_idx=$(_kb_cr_find_item "$_cr_board" "$item_id")
+    if [[ "$item_idx" == "-1" ]]; then
+        echo "kb-cr $verb: item '$item_id' not found in team '$_cr_team' backlog." >&2
+        return 1
+    fi
+
+    local cr_id
+    cr_id=$(_kb_jq_read "$_cr_board" \
+        ".backlog[$item_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+    if [[ -z "$cr_id" ]]; then
+        echo "kb-cr $verb: item '$item_id' has no crAssignment — no container CR to $verb." >&2
+        echo "  $verb is a container-level operation. v1 single-item CRs are not supported." >&2
+        return 1
+    fi
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr $verb: item '$item_id' has crAssignment.crId='$cr_id' but no matching container found." >&2
+        echo "  Refusing to $verb on an orphaned back-pointer. Re-attach via 'kb-cr attach' first." >&2
+        return 1
+    fi
+
+    local n_items
+    n_items=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].itemIds | length" -r 2>/dev/null)
+    n_items="${n_items:-0}"
+    echo "kb-cr: routing to $cr_id — $gerund $n_items items in this CR." >&2
+
+    shift  # drop item_id; remaining args (--to, --reason, etc.) preserved
+    case "$verb" in
+        revert)          _kb_cr_container_revert "$cr_id" --operation revert "$@" ;;
+        undo)            _kb_cr_container_revert "$cr_id" --operation undo "$@" ;;
+        revert-history)  _kb_cr_container_revert_history "$cr_id" "$@" ;;
+        *)
+            echo "kb-cr: ERROR: _kb_cr_dispatch_item_revert — unknown verb '$verb'" >&2
+            return 1
+            ;;
+    esac
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # kb-cr — main dispatcher
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1169,6 +1848,7 @@ kb-cr() {
         remove-item) _kb_cr_container_remove_item "$@" ;;
         list|ls)     _kb_cr_container_list "$@" ;;
         transition)  _kb_cr_container_transition "$@" ;;
+        close)       _kb_cr_container_close "$@" ;;
         set-doc-link) _kb_cr_container_set_doc_link "$@" ;;
         migrate-legacy) _kb_cr_migrate_legacy "$@" ;;
         show)        _kb_cr_show_dispatch "$@" ;;
@@ -1248,6 +1928,32 @@ kb-cr() {
         # complete has no container variant — routes to v1 only; propagation is
         # a no-op until _kb_cr_container_complete is implemented (XACA-0327-003).
         complete)    _kb_cr_complete "$@" ;;
+        # ── Revert / Undo / Revert-History (XACA-0329) ────────────────────────
+        # Container-only — no v1 fallback. CR-* prefix → direct container call;
+        # item-id prefix → routed via crAssignment.crId.
+        revert)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_revert "$@" ;;
+                *)    _kb_cr_dispatch_item_revert revert reverting "$@" ;;
+            esac ;;
+        undo)
+            # Reject --to on undo (undo is exactly one step; --to belongs on revert)
+            local _ud_arg=""
+            for _ud_arg in "$@"; do
+                if [[ "$_ud_arg" == "--to" || "$_ud_arg" == --to=* ]]; then
+                    echo "kb-cr undo: --to is not valid on undo. Use 'kb-cr revert <ID> --to <state>' for explicit targets." >&2
+                    return 1
+                fi
+            done
+            case "${1:-}" in
+                CR-*) _kb_cr_container_revert "$1" --operation undo "${@:2}" ;;
+                *)    _kb_cr_dispatch_item_revert undo "undoing one step of" "$@" ;;
+            esac ;;
+        revert-history)
+            case "${1:-}" in
+                CR-*) _kb_cr_container_revert_history "$@" ;;
+                *)    _kb_cr_dispatch_item_revert revert-history "showing revert history of" "$@" ;;
+            esac ;;
         backfill)    _kb_cr_backfill "$@" ;;
         # ── Activity log (XACA-0328-002) ──────────────────────────────────────
         activity)
@@ -1262,6 +1968,7 @@ kb-cr() {
                     ;;
             esac ;;
         audit)       _kb_cr_audit "$@" ;;
+        summary)     _kb_cr_summary_main "$@" ;;
         help|--help|-h) _kb_cr_help ;;
         *)
             echo "kb-cr: unknown subcommand '$subcmd'. Run 'kb-cr help' for usage." >&2
@@ -1467,20 +2174,21 @@ _kb_cr_container_create() {
     --arg summary  "$summary" \
     || return 1
 
+    # Append activity log entry (best-effort — never block the create path)
+    local _create_event
+    _create_event=$(_kb_cr_activity_event "cr_created" \
+        "to_state=cr-drafted" \
+        "note=CR container created via kb-cr create${platform:+; platform=${platform}}${cr_type:+; type=${cr_type}}") || true
+    if [[ -n "$_create_event" ]]; then
+        _kb_cr_activity_append "$_cr_board" "$cr_id" "$_create_event" 2>/dev/null || true
+    fi
+
     _kb_cr_increment_seq "$_cr_board"
 
-    # Materialize the local source-of-truth markdown for this CR.
-    # The LCARS CR-doc modal reads this file; the Confluence CR page is
-    # generated FROM this document. Failure here is non-fatal — the CR
-    # record is already written.
-    #
-    # _KB_CR_SKIP_DOC_FILE: set by _kb_cr_draft so the per-item draft path
-    # can create the doc at <ITEM-ID>-CR.md (not <CR-ID>-CR.md) after it
-    # knows the item_id. When this env var is non-empty, doc creation is
-    # suppressed here and delegated to _kb_cr_draft.
-    if [[ -z "${_KB_CR_SKIP_DOC_FILE:-}" ]]; then
-        _kb_cr_create_doc_file "$_cr_board" "$cr_id" "$title" "$cr_type" "$platform" "$summary" || true
-    fi
+    # Doc creation is deferred to first kb-cr add-item — the LCARS UI resolves
+    # CR docs by <item-id>-CR.md filename, so creating the doc here (keyed on
+    # cr_id) would produce an orphan file invisible to the UI. The doc
+    # materializes in _kb_cr_container_add_item when the first item is linked.
 
     echo "Created CR [$cr_id]: $title"
     echo "  Type:  $cr_type"
@@ -1491,6 +2199,7 @@ _kb_cr_container_create() {
     echo "  Next steps:"
     echo "    kb-cr add-item $cr_id <item-id>"
     echo "    kb-cr list"
+    echo "  Local CR markdown will be created on first kb-cr add-item."
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1663,9 +2372,13 @@ _kb_cr_container_add_item() {
         return 1
     fi
 
-    local ts cr_title
+    local ts cr_title cr_type _pre_count
     ts=$(_kb_cr_timestamp)
     cr_title=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].title" -r 2>/dev/null)
+    cr_type=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].type // \"major\"" -r 2>/dev/null)
+
+    # Capture itemIds length BEFORE the update so we know when this is the first item.
+    _pre_count=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].itemIds | length" -r 2>/dev/null)
 
     # Append item to CR's itemIds (de-dupe) and write crAssignment back-pointer on item.
     # crTitle is a snapshot at assign-time — updates to the CR title do not propagate.
@@ -1688,6 +2401,15 @@ _kb_cr_container_add_item() {
     --arg     crTitle "$cr_title" \
     --arg     ts      "$ts" \
     || return 1
+
+    # Materialize the CR doc on the FIRST item linked — keyed on item_id so the
+    # LCARS UI can resolve it via /api/kanban/<item-id>/cr-content.
+    # Idempotent: _kb_cr_create_doc_file returns 0 with a note if file exists.
+    # _KB_CR_SKIP_DOC_FILE=1: suppressed when called from _kb_cr_draft, which
+    # retains exclusive control of doc creation (with proper summary metadata).
+    if [[ "${_pre_count:-0}" -eq 0 && "${_KB_CR_SKIP_DOC_FILE:-}" != "1" ]]; then
+        _kb_cr_create_doc_file "$_cr_board" "$cr_id" "$cr_title" "$cr_type" "" "" "$item_id" || true
+    fi
 
     echo "Added item [$item_id] to CR [$cr_id]"
 }
@@ -1729,11 +2451,14 @@ _kb_cr_container_remove_item() {
     local ts
     ts=$(_kb_cr_timestamp)
 
-    # Remove item from CR's itemIds and delete crAssignment from item
+    # Remove item from CR's itemIds and clear all CR linkage from the item.
+    # Deletes both the v2 crAssignment object and the legacy v1 flat fields
+    # (cr_id, cr_type, cr_created_at, crState) that the attach/draft path
+    # writes for backward compat with LCARS v1 readers (XACA-0348).
     _kb_jq_update "$_cr_board" '
         .crs[$cidx].itemIds -= [$itemId] |
         .crs[$cidx].updatedAt = $ts |
-        .backlog[$iidx] |= del(.crAssignment) |
+        .backlog[$iidx] |= del(.crAssignment, .cr_id, .cr_type, .cr_created_at, .crState) |
         .lastUpdated = $ts
     ' \
     --argjson cidx   "$cr_idx" \
@@ -2225,19 +2950,19 @@ _kb_cr_container_transition() {
         echo "Usage: kb-cr transition <CR-ID> <new-state>" >&2
         echo "Valid states: cr-drafted, cr-submitted, cr-approved, cr-rejected," >&2
         echo "              cr-held, implementing, deployed-dev, deployed-prod," >&2
-        echo "              emergency-deployed" >&2
+        echo "              emergency-deployed, cr-closed" >&2
         return 1
     fi
 
     # Validate the new state against the schema's crStates list
     case "$new_state" in
         cr-drafted|cr-submitted|cr-approved|cr-rejected|cr-held|\
-        implementing|deployed-dev|deployed-prod|emergency-deployed) ;;
+        implementing|deployed-dev|deployed-prod|emergency-deployed|cr-closed) ;;
         *)
             echo "kb-cr transition: invalid state '$new_state'." >&2
             echo "Valid states: cr-drafted, cr-submitted, cr-approved, cr-rejected," >&2
             echo "              cr-held, implementing, deployed-dev, deployed-prod," >&2
-            echo "              emergency-deployed" >&2
+            echo "              emergency-deployed, cr-closed" >&2
             return 1
             ;;
     esac
@@ -2360,7 +3085,9 @@ _kb_cr_draft() {
 
     # Step 2: Write crAssignment back-pointer on the backlog item and append to
     # .crs[CR].itemIds. _kb_cr_container_add_item also uses its own local scope.
-    _kb_cr_container_add_item "$cr_id" "$item_id" || {
+    # Keep _KB_CR_SKIP_DOC_FILE=1 in scope so add-item's first-item doc
+    # materialization is suppressed — _kb_cr_draft owns doc creation (Step 2b).
+    _KB_CR_SKIP_DOC_FILE=1 _kb_cr_container_add_item "$cr_id" "$item_id" || {
         echo "kb-cr draft: WARNING: container created ($cr_id) but add-item back-pointer failed." \
              "Run: kb-cr add-item $cr_id $item_id" >&2
         return 1
@@ -2559,6 +3286,7 @@ PROMPT
     echo ""
 
     # Invoke the skill. Capture stdout to extract the Confluence URL.
+    # `claude -p` (--print) runs one-shot non-interactive mode; reads prompt from stdin.
     local skill_output
     skill_output=$(printf '%s\n' "$skill_prompt" | claude -p 2>&1) || {
         echo "kb-cr publish: skill invocation failed (exit $?)." >&2
@@ -3597,6 +4325,124 @@ _kb_cr_audit_help() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Summary subcommand — XACA-0296-003 (Automation 4)
+# Generates a bi-weekly markdown summary report for external stakeholders
+# (e.g. Cheri Clark). Output is plain markdown — no Confluence publish.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kb_cr_summary_main() {
+    local script_dir="${_KB_CR_SCRIPT_DIR}"
+    local collector="${script_dir}/kb-cr-audit.py"
+
+    if [[ ! -f "$collector" ]]; then
+        echo "kb-cr summary: collector missing at scripts/kb-cr-audit.py" >&2
+        return 2
+    fi
+
+    # ── Defaults ───────────────────────────────────────────────────────────
+    local team="" period="2w" from_date="" to_date="" output_file="" verbose=0
+
+    # ── Arg parse ──────────────────────────────────────────────────────────
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --team)    team="$2";        shift 2 ;;
+            --period)  period="$2";      shift 2 ;;
+            --from)    from_date="$2";   shift 2 ;;
+            --to)      to_date="$2";     shift 2 ;;
+            --output)  output_file="$2"; shift 2 ;;
+            --verbose) verbose=1;        shift   ;;
+            --help|-h)
+                _kb_cr_summary_help
+                return 0
+                ;;
+            *)
+                echo "kb-cr summary: unknown option '$1'. Run 'kb-cr summary --help' for usage." >&2
+                return 2
+                ;;
+        esac
+    done
+
+    # ── Required: --team ───────────────────────────────────────────────────
+    if [[ -z "$team" ]]; then
+        echo "kb-cr summary: --team <slug> is required." >&2
+        echo "Usage: kb-cr summary --team <slug> [--period 2w] [--from <ISO8601>] [--to <ISO8601>]" >&2
+        echo "                     [--output <FILE.md>] [--verbose]" >&2
+        return 2
+    fi
+
+    if [[ ! "$team" =~ ^[a-z0-9_-]+$ ]]; then
+        echo "kb-cr summary: --team must match [a-z0-9_-]+ (got: '$team')." >&2
+        return 2
+    fi
+
+    # ── Validate --period (only when --from/--to not both supplied) ───────
+    if [[ -z "$from_date" || -z "$to_date" ]]; then
+        if [[ ! "$period" =~ ^[0-9]+[wd]$ ]]; then
+            echo "kb-cr summary: --period must look like 2w, 4w, 7d, etc. (got: '$period')." >&2
+            return 2
+        fi
+    fi
+
+    # ── Build python command ───────────────────────────────────────────────
+    local cmd=(python3 "$collector" summary-report --team "$team")
+    [[ -n "$period" ]]    && cmd+=(--period "$period")
+    [[ -n "$from_date" ]] && cmd+=(--from "$from_date")
+    [[ -n "$to_date" ]]   && cmd+=(--to "$to_date")
+    [[ $verbose -eq 1 ]]  && cmd+=(--verbose)
+
+    # ── Run + emit ─────────────────────────────────────────────────────────
+    local output
+    output=$("${cmd[@]}")
+    local rc=$?
+    if [[ $rc -ne 0 ]]; then
+        return $rc
+    fi
+
+    if [[ -n "$output_file" ]]; then
+        printf '%s\n' "$output" | tee "$output_file"
+        echo "kb-cr summary: written → ${output_file}" >&2
+    else
+        printf '%s\n' "$output"
+    fi
+
+    return 0
+}
+
+_kb_cr_summary_help() {
+    echo ""
+    echo "kb-cr summary — bi-weekly CAB workflow summary for external stakeholders"
+    echo ""
+    echo "Usage: kb-cr summary --team <slug> [options]"
+    echo ""
+    echo "Options:"
+    echo "  --team <slug>      REQUIRED. Team identifier (e.g. mainevent, academy)."
+    echo "  --period <PERIOD>  Reporting window (e.g. 2w, 4w, 7d). Default: 2w."
+    echo "  --from <ISO8601>   Window start (overrides --period when both --from and --to set)."
+    echo "  --to   <ISO8601>   Window end   (overrides --period when both --from and --to set)."
+    echo "  --output <FILE.md> Write to FILE.md AND print to stdout (tee)."
+    echo "  --verbose          Enable debug output."
+    echo ""
+    echo "Sections in the report:"
+    echo "  1. Header (period, team, generated timestamp)"
+    echo "  2. Executive summary (throughput trend headline)"
+    echo "  3. Throughput comparison (pre-CAB baseline vs post-CAB)"
+    echo "  4. Estimate-vs-actual deploy accuracy (per-CR delta + aggregate hit rate)"
+    echo "  5. Cycle-time analysis (7 segments, median + P25/P75)"
+    echo "  6. Pushback patterns (rejection / hold reasons + retry count)"
+    echo "  7. Volume by type (major/emergency/fyi)"
+    echo "  8. Volume by approver (top approvers + median approval speed)"
+    echo "  9. Footnotes"
+    echo ""
+    echo "Output:"
+    echo "  Plain markdown — paste into email, Slack, or Confluence (no auto-publish)."
+    echo ""
+    echo "Example:"
+    echo "  kb-cr summary --team academy --period 2w --output /tmp/cab-summary.md"
+    echo "  kb-cr summary --team mainevent --from 2026-04-21 --to 2026-05-04"
+    echo ""
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Help
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -3678,6 +4524,30 @@ _kb_cr_help() {
     echo "              Any state → emergency-deployed  [BREAK-GLASS — no state check]"
     echo "              --justification is REQUIRED (mandatory audit trail)."
     echo "              Writes timestamps.cr_emergency_deployed_at + emergency_justification."
+    echo ""
+    echo "── Backwards Lifecycle (XACA-0329 — administrative correction) ──────────"
+    echo "  NOTE: revert/undo are DISTINCT from 'reject' (a CAB-process pushback)."
+    echo "        Use revert/undo to correct a state-write made in error;"
+    echo "        use reject to record a normal CAB rework decision."
+    echo ""
+    echo "  revert <CR-ID|item-id> [--to <state>] [--reason \"<text>\"]"
+    echo "              Walk the CR backwards through its lifecycle. Strips"
+    echo "              the timestamps + auxiliary fields owned by every state"
+    echo "              with rank > target's rank, preserving the snapshot in"
+    echo "              .crs[i].revert_history[] for forensic audit."
+    echo "              --to defaults to the heuristic predecessor (most-recent"
+    echo "                   timestamp on the container with rank < current)."
+    echo "              --reason is REQUIRED when reverting from emergency-deployed."
+    echo "              Forward walks (target rank ≥ current) are refused."
+    echo "              Multi-item CRs propagate atomically (state lives on .crs[i])."
+    echo "              pushback_count and pushback_notes are PRESERVED."
+    echo "  undo   <CR-ID|item-id> [--reason \"<text>\"]"
+    echo "              One-step convenience: same as 'revert' with no --to."
+    echo "              The --to flag is rejected on undo; use revert for explicit targets."
+    echo "  revert-history <CR-ID|item-id>"
+    echo "              Read-only display of revert_history[] entries."
+    echo "              Shows ts, actor, operation (revert|undo), from→to,"
+    echo "              reason, stripped state list, and field-snapshot audit trail."
     echo ""
     echo "── PROPAGATION: Item-ID Lifecycle Routing ──────────────────────────────"
     echo "  When you run 'kb-cr <verb> <item-id>' (where verb is submit, approve,"
@@ -3762,6 +4632,18 @@ _kb_cr_help() {
     echo "              Orchestrates collector (kb-cr-audit.py),"
     echo "              renderer (kb-cr-audit-render.py), and optionally the"
     echo "              Confluence publisher (kb-cr-audit-publish.py)."
+    echo ""
+    echo "── Bi-weekly Summary ─────────────────────────────────────────────────"
+    echo "  summary --team <slug> [--period 2w|4w|...] [--from DATE] [--to DATE]"
+    echo "          [--output FILE.md] [--verbose]"
+    echo "              Generate a bi-weekly summary report for external stakeholders."
+    echo "              Sections: throughput, estimate accuracy, cycle time, pushback,"
+    echo "              volume by type, volume by approver. Output is plain markdown."
+    echo "              --team is REQUIRED. --period defaults to 2w (14 days)."
+    echo "              --from and --to override --period when both supplied."
+    echo "              --output writes to FILE.md AND prints to stdout (tee)."
+    echo "              Exit 0 on success; exit 2 on user error; exit 1 on Python error."
+    echo "              No Confluence publish — output is a local file for manual handoff."
     echo "              Defaults: --from first day of month · --to now"
     echo "                        --format both · --out-dir ./cab-audit-output/"
     echo "              --publish-confluence is dry-run unless --apply is also passed."
