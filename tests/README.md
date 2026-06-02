@@ -246,6 +246,7 @@ is set. Unsandboxed tests WILL trip this guard and abort. See
 | Integration | `test-integration.sh` | ✓ Full workflows |
 | XACA-0585 lcars-health lay-down | `test-xaca-0585-lcars-health-script-laydown.sh` | ✓ Tap ships script, installer seeds it +x, plist ordering, upgrade script_map, idempotent, missing-source graceful |
 | XACA-0588 deploy-worktree-personas lay-down | `test-xaca-0588-deploy-worktree-personas-laydown.sh` | ✓ Tap ships script, installer seeds to scripts/ +x, hook guard path, upgrade script_map, idempotent, missing-source graceful |
+| XACA-0608 team-script upgrade refresh | `test-xaca-0608-team-script-refresh.sh` | ✓ Upgrade refreshes installed `<team>`-startup/shutdown + station scripts with ~/dev-team→WORKING_DIR rewrite, skips non-installed teams, preserves exec bits, dry-run no-op, missing-source graceful, wired into run sequence |
 
 ## CI/CD Integration
 

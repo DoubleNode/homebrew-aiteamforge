@@ -44,6 +44,7 @@ What Gets Updated:
   • LCARS UI files (updated from framework)
   • Kanban hooks (Python lifecycle hooks, e.g. aiteamforge_paths.py)
   • Helper scripts (board-check, restore-helper, backup, kb-cr)
+  • Team launch scripts (per-team startup/shutdown + station scripts)
   • Shell aliases and helpers (re-sourced)
   • Skills (symlinks verified or re-copied)
   • LaunchAgents (updated if changed)
@@ -373,6 +374,125 @@ update_aux_scripts() {
   fi
 }
 
+# Update per-team startup/shutdown + station scripts (XACA-0608).
+#
+# BUGFIX XACA-0608: in-place upgrades never refreshed the per-team launch
+# scripts that the install path lays into the working dir. install-team.sh
+# (parametric branch, XACA-0483/0484) copies share/scripts/teams/<team>-startup.sh,
+# <team>-shutdown.sh and the station scripts under <team>/scripts/*.sh into
+# WORKING_DIR with a ~/dev-team -> $AITEAMFORGE_DIR path rewrite, but the upgrade
+# command's update_* set omitted them entirely. Result: a machine's working-dir
+# <team>-startup.sh stayed FROZEN at install-time even after `brew upgrade` shipped
+# a newer one to the Cellar (e.g. M1Pro on 0.12.12 still ran the old cksum LCARS
+# port logic, 0 occurrences of resolve_lcars_port, because the XACA-0590 resolver
+# script was never laid down). Same refresh-gap class as XACA-0558 (kanban-hooks)
+# / XACA-0585 (lcars-health) and a k501 sibling-drift datapoint (install grew the
+# team-script laydown; upgrade's refresh map never followed).
+#
+# Design:
+#   • LOOP over the shipped share/scripts/teams/*-startup.sh (self-maintaining —
+#     a newly-added team is covered with no edit here; avoids re-introducing the
+#     hardcoded-list drift this bug came from).
+#   • Refresh ONLY scripts that are ALREADY installed in WORKING_DIR (matches the
+#     update_aux_scripts / update_shell_helpers convention — upgrade must not
+#     materialise files for teams the user never installed).
+#   • Apply the SAME ~/dev-team -> $WORKING_DIR sed rewrite that install's
+#     _xaca0483_install_script() performs. These scripts carry literal ~/dev-team
+#     references (incl. the iterm2_window_manager.py top-level special case); a
+#     plain cp would ship broken paths to tap machines. The on-disk copy diverges
+#     from source by design (path rewrite), so an mtime/-nt guard would either
+#     always trip or never trip depending on clock skew — instead we re-render
+#     unconditionally (cheap) when the target exists, matching the install path's
+#     "always re-install, substitution is cheap" stance for path-rewritten files.
+#   • Preserve exec bits (chmod +x), mirroring the installer.
+#   • These are STATELESS launch scripts: they carry no per-machine rendered values
+#     other than the ~/dev-team -> $AITEAMFORGE_DIR path rewrite (verified: no
+#     {{VAR}} placeholders in share/scripts/teams/). Re-rendering with the same
+#     rewrite install uses is therefore a faithful refresh, not a clobber.
+_xaca0608_render_team_script() {
+  # Mirror of install-team.sh::_xaca0483_install_script — keep these two sed
+  # chains in lockstep (k501 sibling pair). The iterm2_window_manager.py special
+  # case must come BEFORE the general ~/dev-team mapping.
+  local src="$1" dst="$2"
+  sed -e "s|\$HOME/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
+      -e "s|\${HOME}/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
+      -e "s|~/dev-team/iterm2_window_manager.py|${WORKING_DIR}/scripts/iterm2_window_manager.py|g" \
+      -e "s|\$HOME/dev-team|${WORKING_DIR}|g" \
+      -e "s|\${HOME}/dev-team|${WORKING_DIR}|g" \
+      -e "s|~/dev-team|${WORKING_DIR}|g" \
+      "$src" > "$dst"
+  chmod +x "$dst"
+}
+
+update_team_scripts() {
+  print_section "Updating Team Launch Scripts"
+
+  local teams_source="${FRAMEWORK_DIR}/share/scripts/teams"
+
+  if [ ! -d "$teams_source" ]; then
+    print_warning "Team scripts not found in framework"
+    return
+  fi
+
+  local updated=0
+  local startup_src team_id
+
+  # Self-maintaining loop: derive team ids from the shipped *-startup.sh names.
+  for startup_src in "$teams_source"/*-startup.sh; do
+    [ -f "$startup_src" ] || continue
+    team_id="$(basename "$startup_src" -startup.sh)"
+
+    # Top-level startup/shutdown pair: source -> WORKING_DIR/<team>-{startup,shutdown}.sh
+    local kind src target
+    for kind in startup shutdown; do
+      src="${teams_source}/${team_id}-${kind}.sh"
+      target="${WORKING_DIR}/${team_id}-${kind}.sh"
+      [ -f "$src" ] || continue
+      # Refresh only if already installed (do not materialise opted-out teams).
+      [ -f "$target" ] || continue
+      print_info "Updating ${team_id}-${kind}.sh..."
+      if [ "$DRY_RUN" = false ]; then
+        _xaca0608_render_team_script "$src" "$target"
+        print_success "Updated ${team_id}-${kind}.sh"
+      else
+        echo "Would update: ${team_id}-${kind}.sh"
+      fi
+      updated=$((updated + 1))
+    done
+
+    # Station scripts: share/scripts/teams/<team>/scripts/*.sh -> WORKING_DIR/<team>/scripts/*.sh
+    # (XACA-0484 install layout). Only refresh if the team's station dir already exists.
+    local station_src_dir="${teams_source}/${team_id}/scripts"
+    local station_dst_dir="${WORKING_DIR}/${team_id}/scripts"
+    if [ -d "$station_src_dir" ] && [ -d "$station_dst_dir" ]; then
+      local station_src station_name station_dst
+      for station_src in "$station_src_dir"/*.sh; do
+        [ -f "$station_src" ] || continue
+        station_name="$(basename "$station_src")"
+        station_dst="${station_dst_dir}/${station_name}"
+        # Refresh only station scripts that are already installed.
+        [ -f "$station_dst" ] || continue
+        print_info "Updating ${team_id}/scripts/${station_name}..."
+        if [ "$DRY_RUN" = false ]; then
+          _xaca0608_render_team_script "$station_src" "$station_dst"
+          print_success "Updated ${team_id}/scripts/${station_name}"
+        else
+          echo "Would update: ${team_id}/scripts/${station_name}"
+        fi
+        updated=$((updated + 1))
+      done
+    fi
+  done
+
+  if [ $updated -eq 0 ]; then
+    print_success "All team launch scripts up to date"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would update ${updated} team script(s)"
+  else
+    print_success "Updated ${updated} team script(s)"
+  fi
+}
+
 # Update shell helpers
 update_shell_helpers() {
   print_section "Updating Shell Helpers"
@@ -685,6 +805,7 @@ update_templates
 update_lcars
 update_kanban_hooks
 update_aux_scripts
+update_team_scripts
 update_shell_helpers
 update_skills
 update_launchagents
