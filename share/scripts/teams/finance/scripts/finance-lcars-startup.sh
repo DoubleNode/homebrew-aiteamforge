@@ -7,7 +7,7 @@ set +x
 
 SESSION_TYPE="finance"
 SESSION_NAME="lcars"
-SESSION_DIRECTORY="$HOME/dev-team"
+SESSION_DIRECTORY="${AITEAMFORGE_DIR:-$HOME/dev-team}"
 
 # Require environment variables from master startup script
 if [ -z "$FINANCE_PROJECTID" ] || [ -z "$FINANCE_LCARS_PORT" ]; then

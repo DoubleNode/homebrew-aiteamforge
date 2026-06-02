@@ -7,7 +7,7 @@ set +x
 
 SESSION_TYPE="legal"
 SESSION_NAME="lcars"
-SESSION_DIRECTORY="/Users/darrenehlers/dev-team"
+SESSION_DIRECTORY="${AITEAMFORGE_DIR:-$HOME/dev-team}"
 
 # Require environment variables from master startup script
 if [ -z "$LEGAL_PROJECTID" ] || [ -z "$LEGAL_LCARS_PORT" ]; then
