@@ -156,19 +156,26 @@ _kb_cr_timestamp() {
 #   YYYY-MM-DD                 → YYYY-MM-DDT00:00:00Z  (UTC midnight)
 #   YYYY-MM-DDTHH:MMZ          → YYYY-MM-DDTHH:MM:00Z  (pad seconds)
 #   YYYY-MM-DDTHH:MM:SSZ       → pass through as-is
+# The regex enforces calendar/time LEGAL RANGES, not just digit count:
+#   month 01-12, day 01-31, hour 00-23, minute/second 00-59
+#   (so 2026-99-99 / 2026-13-01 / ...T25:99:99Z are rejected). It does NOT
+#   do per-month day limits or leap-year checks (no Feb-29 guard) — a pragmatic
+#   stop; full date validity would need date arithmetic we deliberately avoid.
 # Rejects offset forms (±HH:MM) and anything else — callers must supply UTC.
 # Echoes normalized value on success; prints to stderr and returns 1 on failure.
 _kb_cr_normalize_iso_date() {
     local input="$1"
     local normalized=""
 
-    if [[ "$input" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$ ]]; then
+    # Legal-range building blocks (inline-literal to avoid zsh/bash regex
+    # interpolation differences): date = YYYY-MM-DD, time = HH:MM[:SS].
+    if [[ "$input" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z$ ]]; then
         # Full ISO-8601 UTC timestamp — pass through
         normalized="${input}"
-    elif [[ "$input" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2})Z$ ]]; then
+    elif [[ "$input" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]Z$ ]]; then
         # HH:MM form — pad missing seconds
         normalized="${input%Z}:00Z"
-    elif [[ "$input" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})$ ]]; then
+    elif [[ "$input" =~ ^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$ ]]; then
         # Date-only — normalize to UTC midnight
         normalized="${input}T00:00:00Z"
     else
@@ -2668,6 +2675,11 @@ _kb_cr_container_reschedule() {
         return 1
     fi
 
+    # Validate/normalize the date BEFORE touching the board (matches create) so
+    # a bad date fails fast with no board read.
+    local normalized
+    normalized=$(_kb_cr_normalize_iso_date "$date_input") || return 1
+
     local _cr_team _cr_board _cr_enabled
     _kb_cr_board_preamble || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
@@ -2678,9 +2690,6 @@ _kb_cr_container_reschedule() {
         echo "kb-cr reschedule: CR '$cr_id' not found on board '$_cr_team'." >&2
         return 1
     fi
-
-    local normalized
-    normalized=$(_kb_cr_normalize_iso_date "$date_input") || return 1
 
     local ts
     ts=$(_kb_cr_timestamp)
