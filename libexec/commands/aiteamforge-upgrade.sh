@@ -315,28 +315,69 @@ update_kanban_hooks() {
   fi
 }
 
+# Canonical aux-script map (XACA-0558, extended XACA-0608). SINGLE source of
+# truth: update_aux_scripts consumes it to know what to refresh, and
+# update_runtime_helpers reads the scripts/-destined basenames out of it to
+# EXCLUDE them from its self-maintaining sweep — so no file is refreshed twice
+# (one owner per file). Emit one "source_filename|destination_path" per line.
+_xaca0608_aux_script_map() {
+  cat <<EOF
+kanban-board-check.sh|${WORKING_DIR}/kanban-board-check.sh
+kanban-restore-helper.sh|${WORKING_DIR}/kanban-restore-helper.sh
+kanban-backup.py|${WORKING_DIR}/kanban-backup.py
+lcars-health-check.sh|${WORKING_DIR}/lcars-health-check.sh
+kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh
+auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh
+cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh
+deploy-worktree-personas.sh|${WORKING_DIR}/scripts/deploy-worktree-personas.sh
+worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh
+EOF
+}
+
+# Emit the basenames from the aux map whose destination is WORKING_DIR/scripts/*
+# — update_runtime_helpers uses this to avoid double-refreshing them. Derived
+# from _xaca0608_aux_script_map so the two stay in lockstep automatically.
+_xaca0608_aux_scriptdir_basenames() {
+  local name dst
+  while IFS='|' read -r name dst; do
+    [ -n "$name" ] || continue
+    case "$dst" in
+      "${WORKING_DIR}/scripts/"*) echo "$name" ;;
+    esac
+  done < <(_xaca0608_aux_script_map)
+}
+
 # Update standalone helper scripts that install-kanban.sh copies individually but
 # the upgrade path previously skipped (same bug class as kanban-hooks, XACA-0558).
 # Each entry is "source_filename|destination_path"; sources live under
 # share/scripts. Only refreshes scripts that are already installed (matches the
 # update_shell_helpers convention — upgrade does not create newly-shipped files).
+#
+# XACA-0608 (extended): these are now laid down through the SAME rewrite-aware
+# render the install path uses (_xaca0608_render_team_script), not a plain cp.
+# Several of these files carry the literal ~/dev-team / $HOME/dev-team path
+# pattern (kb-cr.sh, deploy-worktree-personas.sh, lcars-health-check.sh,
+# worktree-helpers.sh) and were previously shipping UN-rewritten on upgrade —
+# the working-dir copy ended up pointing at ~/dev-team on tap machines. The sed
+# rewrite is a safe no-op for the members that don't carry the pattern, so
+# routing the whole map through the render unifies the laydown and closes the
+# latent gap without a separate code path. The render-helper's source-of-truth
+# is install's _xaca0483_install_script (kept in lockstep — k501 sibling pair).
+#
+# AGGREGATE_SCRIPT_DIR_FILES (below) lists the basenames this function owns that
+# land under WORKING_DIR/scripts/; update_runtime_helpers reads it to EXCLUDE
+# them from its self-maintaining sweep so no file is refreshed twice (XACA-0608).
 update_aux_scripts() {
   print_section "Updating Helper Scripts"
 
   local scripts_source="${FRAMEWORK_DIR}/share/scripts"
   local updated=0
 
-  local script_map=(
-    "kanban-board-check.sh|${WORKING_DIR}/kanban-board-check.sh"
-    "kanban-restore-helper.sh|${WORKING_DIR}/kanban-restore-helper.sh"
-    "kanban-backup.py|${WORKING_DIR}/kanban-backup.py"
-    "lcars-health-check.sh|${WORKING_DIR}/lcars-health-check.sh"
-    "kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh"
-    "auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh"
-    "cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh"
-    "deploy-worktree-personas.sh|${WORKING_DIR}/scripts/deploy-worktree-personas.sh"
-    "worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh"
-  )
+  local script_map=()
+  local _aux_line
+  while IFS= read -r _aux_line; do
+    [ -n "$_aux_line" ] && script_map+=("$_aux_line")
+  done < <(_xaca0608_aux_script_map)
 
   local entry name target source
   for entry in "${script_map[@]}"; do
@@ -356,8 +397,10 @@ update_aux_scripts() {
       print_info "Updating ${name}..."
       if [ "$DRY_RUN" = false ]; then
         mkdir -p "$(dirname "$target")"
-        cp "$source" "$target"
-        chmod +x "$target"
+        # XACA-0608: rewrite-aware render (sets exec bit). The ~/dev-team ->
+        # WORKING_DIR sed is a no-op for files without the pattern, so this is a
+        # safe drop-in for the prior `cp` + `chmod +x`.
+        _xaca0608_render_team_script "$source" "$target"
         print_success "Updated ${name}"
         updated=$((updated + 1))
       else
@@ -490,6 +533,98 @@ update_team_scripts() {
     print_success "Would update ${updated} team script(s)"
   else
     print_success "Updated ${updated} team script(s)"
+  fi
+}
+
+# Update top-level runtime helpers laid into WORKING_DIR/scripts/ (XACA-0608, extended).
+#
+# BUGFIX XACA-0608 (extended scope): the install path lays a set of top-level
+# share/scripts/* helpers into $AITEAMFORGE_DIR/scripts/ — some WITH the
+# ~/dev-team -> $AITEAMFORGE_DIR path rewrite (install-team.sh's
+# _xaca0483_install_script: lcars-launch-helpers.sh, kb-init-team-guard.sh,
+# kb-init-team) and some via plain cp (install-shell.sh / install-kanban.sh:
+# agent-panel-display.sh, lcars-tmp-dir.sh, fleet-reporter.sh, iterm2_window_manager.py,
+# cr-confluence-poller.py, …). The upgrade command refreshed NONE of them. The
+# most damaging consequence: lcars-launch-helpers.sh DEFINES resolve_lcars_port
+# (XACA-0590). A machine installed before that helper gained the resolver kept a
+# FROZEN copy with no resolve_lcars_port, so every <team>-startup.sh fell through
+# to the cksum-derived port and served LCARS on the WRONG port even after a brew
+# upgrade. This is the actual root cause the team-script-only fix (this PR's
+# first pass) did not reach — the startup scripts were refreshed, but the helper
+# they source was not. Same refresh-gap / k501 sibling-drift class as the
+# per-team scripts.
+#
+# Design (mirrors update_aux_scripts / update_team_scripts conventions):
+#   • SELF-MAINTAINING sweep over every shipped share/scripts/*.sh, *.py and the
+#     extensionless kb-init-team, targeting WORKING_DIR/scripts/<name>. A newly
+#     shipped helper is covered with NO edit here — this is the whole point, to
+#     stop re-introducing the hardcoded-list drift this bug class keeps causing.
+#   • Refresh ONLY targets that ALREADY exist in WORKING_DIR/scripts/ (upgrade
+#     never materialises files a given machine's install layout did not lay down;
+#     e.g. cr-confluence-poller.py only exists if kanban CR pollers were set up).
+#   • Render through the SAME rewrite-aware _xaca0608_render_team_script the
+#     install path uses. The sed is a safe no-op for files without the pattern,
+#     so a single code path correctly handles both the rewrite-carrying helpers
+#     (lcars-launch-helpers.sh: 10 refs, agent-panel-display.sh: 4, …) and the
+#     plain ones — without a parallel cp branch to drift out of sync.
+#   • EXCLUDE the aux-map's scripts/-destined basenames (kb-cr.sh, auto-upgrade.sh,
+#     cellar-watch-trigger.sh, deploy-worktree-personas.sh) — update_aux_scripts
+#     owns those. One owner per file (no double-refresh). The exclusion set is
+#     DERIVED from _xaca0608_aux_script_map so it can never drift from the map.
+update_runtime_helpers() {
+  print_section "Updating Runtime Helper Scripts"
+
+  local scripts_source="${FRAMEWORK_DIR}/share/scripts"
+  local scripts_dest="${WORKING_DIR}/scripts"
+
+  if [ ! -d "$scripts_source" ]; then
+    print_warning "Framework share/scripts not found"
+    return
+  fi
+  if [ ! -d "$scripts_dest" ]; then
+    print_warning "No working-dir scripts/ directory (nothing to refresh)"
+    return
+  fi
+
+  # Basenames owned by update_aux_scripts (avoid double-refresh). Loaded into a
+  # newline-delimited string for a simple membership test below.
+  local aux_owned
+  aux_owned="$(_xaca0608_aux_scriptdir_basenames)"
+
+  local updated=0
+  local src name target
+  # Sweep shipped helpers. The kb-init-team provisioner is extensionless, so it is
+  # listed explicitly alongside the *.sh / *.py globs.
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team; do
+    [ -f "$src" ] || continue
+    name="$(basename "$src")"
+    target="${scripts_dest}/${name}"
+
+    # Owned by update_aux_scripts? Skip (exact-line match against the derived set).
+    case $'\n'"${aux_owned}"$'\n' in
+      *$'\n'"${name}"$'\n'*) continue ;;
+    esac
+
+    # Refresh only what this machine already installed under scripts/.
+    [ -f "$target" ] || continue
+
+    print_info "Updating scripts/${name}..."
+    if [ "$DRY_RUN" = false ]; then
+      # Rewrite-aware render (sets exec bit). No-op rewrite for plain files.
+      _xaca0608_render_team_script "$src" "$target"
+      print_success "Updated scripts/${name}"
+    else
+      echo "Would update: scripts/${name}"
+    fi
+    updated=$((updated + 1))
+  done
+
+  if [ $updated -eq 0 ]; then
+    print_success "All runtime helper scripts up to date"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would update ${updated} runtime helper script(s)"
+  else
+    print_success "Updated ${updated} runtime helper script(s)"
   fi
 }
 
@@ -806,6 +941,7 @@ update_lcars
 update_kanban_hooks
 update_aux_scripts
 update_team_scripts
+update_runtime_helpers
 update_shell_helpers
 update_skills
 update_launchagents

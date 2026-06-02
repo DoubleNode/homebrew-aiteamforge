@@ -13,7 +13,7 @@
 # port logic instead of the XACA-0590 resolve_lcars_port resolver). Same refresh-
 # gap class as XACA-0558 (kanban-hooks) / XACA-0585 (lcars-health).
 #
-# Assertions:
+# Assertions — TEAM SCRIPTS (update_team_scripts, original XACA-0608):
 #   1. Tap ships team scripts under share/scripts/teams/ (at least one *-startup.sh).
 #   2. update_team_scripts() refreshes an ALREADY-INSTALLED <team>-startup.sh and
 #      applies the ~/dev-team -> WORKING_DIR path rewrite (matches install).
@@ -25,6 +25,26 @@
 #   6. --dry-run makes no on-disk changes.
 #   7. Missing source dir -> function skips gracefully (exit 0, no crash).
 #   8. update_team_scripts is wired into the upgrade run sequence (source grep).
+#
+# Assertions — RUNTIME HELPERS (update_runtime_helpers, XACA-0608 extended):
+#   The root cause the team-script-only fix did NOT reach: the <team>-startup.sh
+#   was refreshed, but the top-level share/scripts/* helpers it SOURCES were not.
+#   Most critically lcars-launch-helpers.sh, which defines resolve_lcars_port
+#   (XACA-0590). A frozen copy lacking the resolver made startups fall through to
+#   the cksum port -> wrong LCARS port even after a brew upgrade.
+#   9.  update_runtime_helpers() refreshes a STALE lcars-launch-helpers.sh so it
+#       regains resolve_lcars_port.
+#  10.  The ~/dev-team / $HOME/dev-team fallback is rewritten to the install-dir
+#       base (no literal ~/dev-team; WORKING_DIR base present).
+#  11.  Refreshed runtime helper keeps its exec bit.
+#  12.  kb-init-team-guard.sh (sourced by every <team>-startup.sh) is refreshed.
+#  13.  Does NOT materialise a helper the machine never installed.
+#  14.  Aux-owned scripts/ files (kb-cr.sh et al) are NOT double-refreshed.
+#  15.  The aux scripts/ exclusion set is DERIVED from the aux map (lockstep).
+#  16.  --dry-run makes no on-disk change to a runtime helper.
+#  17.  Missing WORKING_DIR/scripts/ -> graceful skip (exit 0).
+#  18.  update_runtime_helpers is wired into the run sequence (source grep).
+#  19.  update_aux_scripts now renders via the rewrite-aware helper (no plain cp).
 #
 # All filesystem activity is sandboxed to TEST_TMP_DIR.
 # NEVER touches real $HOME / ~/.aiteamforge — installer-test safety rule.
@@ -127,6 +147,34 @@ declare -f _xaca0608_render_team_script >/dev/null || \
     { echo "FATAL: _xaca0608_render_team_script not extracted from upgrade.sh"; exit 1; }
 declare -f update_team_scripts >/dev/null || \
     { echo "FATAL: update_team_scripts not extracted from upgrade.sh"; exit 1; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0608 (extended): also extract the runtime-helper refresh path —
+# _xaca0608_aux_script_map, _xaca0608_aux_scriptdir_basenames, and
+# update_runtime_helpers — so we can prove the top-level WORKING_DIR/scripts/*
+# helpers (most importantly lcars-launch-helpers.sh, which defines
+# resolve_lcars_port) are refreshed WITH the rewrite, and that aux-owned files
+# are not double-refreshed. Each is captured from its `name() {` header through
+# its first top-level closing brace `^}$`.
+# ─────────────────────────────────────────────────────────────────────────────
+_extract_fn() {
+    # $1 = function name (regex-safe literal). Capture header line through the
+    # first line that is exactly `}` at column 0.
+    awk -v fn="$1" '
+      $0 ~ ("^" fn "\\(\\) \\{") { capture=1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$UPGRADE_SH"
+}
+
+for _fn in _xaca0608_aux_script_map _xaca0608_aux_scriptdir_basenames update_runtime_helpers; do
+    _src="$(_extract_fn "$_fn")"
+    if [ -z "$_src" ]; then
+        echo "FATAL: could not extract $_fn from upgrade.sh"; exit 1
+    fi
+    eval "$_src"
+    declare -f "$_fn" >/dev/null || { echo "FATAL: $_fn not defined after extraction"; exit 1; }
+done
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Pick a real shipped team to drive the data-bearing tests. Derive from the tap's
@@ -260,6 +308,156 @@ if [ -n "$TEST_TEAM" ]; then
         "--dry-run must leave the installed file unchanged"
     test_pass
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# RUNTIME-HELPER REFRESH (XACA-0608 extended) — the actual root-cause coverage:
+# update_runtime_helpers must refresh top-level share/scripts/* helpers laid into
+# WORKING_DIR/scripts/, WITH the ~/dev-team -> WORKING_DIR rewrite, refreshing
+# only already-installed targets, and NOT double-refreshing aux-owned files.
+# ═══════════════════════════════════════════════════════════════════════════
+
+RH_WORKING="$SANDBOX/rh-working"
+RH_SCRIPTS="$RH_WORKING/scripts"
+mkdir -p "$RH_SCRIPTS"
+
+run_update_runtime_helpers() {
+    FRAMEWORK_DIR="$TAP_ROOT" \
+    WORKING_DIR="$RH_WORKING" \
+    update_runtime_helpers 2>&1
+}
+
+# The critical helper this whole bug is about.
+LLH_SRC="$TAP_ROOT/share/scripts/lcars-launch-helpers.sh"
+
+# ── TEST 8: lcars-launch-helpers.sh refreshed + resolve_lcars_port present ──
+test_start "update_runtime_helpers refreshes a STALE lcars-launch-helpers.sh (gains resolve_lcars_port)"
+if [ -f "$LLH_SRC" ]; then
+    INSTALLED_LLH="$RH_SCRIPTS/lcars-launch-helpers.sh"
+    # Seed a stale pre-XACA-0590 copy with NO resolver — exactly the M1Pro
+    # failure mode (frozen copy lacked resolve_lcars_port).
+    printf '#!/bin/bash\n# STALE-LLH-XACA-0608 (no resolver)\nstart_lcars_server() { :; }\n' > "$INSTALLED_LLH"
+    chmod +x "$INSTALLED_LLH"
+    FORCE=false DRY_RUN=false run_update_runtime_helpers >/dev/null 2>&1
+    LLH_AFTER="$(cat "$INSTALLED_LLH" 2>/dev/null)"
+    assert_not_contains "$LLH_AFTER" "STALE-LLH-XACA-0608" \
+        "Stale lcars-launch-helpers.sh must be overwritten with current framework content"
+    assert_contains "$LLH_AFTER" "resolve_lcars_port" \
+        "Refreshed lcars-launch-helpers.sh must define resolve_lcars_port (the XACA-0590 resolver)"
+    test_pass
+
+    # ── TEST 9: rewrite applied (no literal ~/dev-team; WORKING_DIR base present) ──
+    test_start "Refreshed lcars-launch-helpers.sh has ~/dev-team rewritten to WORKING_DIR base"
+    # shellcheck disable=SC2088
+    assert_not_contains "$LLH_AFTER" "~/dev-team" \
+        "Refreshed runtime helper must have literal ~/dev-team rewritten"
+    # Source uses ${AITEAMFORGE_DIR:-$HOME/dev-team}; the $HOME/dev-team fallback
+    # is rewritten to the install-dir base (RH_WORKING). Assert the base appears.
+    assert_contains "$LLH_AFTER" "$RH_WORKING" \
+        "Refreshed runtime helper must contain the install-dir base, not \$HOME/dev-team"
+    test_pass
+
+    # ── TEST 10: refreshed helper keeps exec bit ──
+    test_start "Refreshed lcars-launch-helpers.sh retains exec bit"
+    if [ -x "$INSTALLED_LLH" ]; then test_pass; else
+        test_fail "Refreshed lcars-launch-helpers.sh must remain executable"; fi
+else
+    test_start "lcars-launch-helpers.sh present in share/scripts (root-cause helper)"
+    test_fail "share/scripts/lcars-launch-helpers.sh missing — cannot exercise the root-cause path"
+fi
+
+# ── TEST 11: kb-init-team-guard.sh refreshed (sourced by every <team>-startup.sh) ──
+test_start "update_runtime_helpers refreshes an installed kb-init-team-guard.sh"
+GUARD_SRC="$TAP_ROOT/share/scripts/kb-init-team-guard.sh"
+if [ -f "$GUARD_SRC" ]; then
+    INSTALLED_GUARD="$RH_SCRIPTS/kb-init-team-guard.sh"
+    printf '#!/bin/bash\n# STALE-GUARD-XACA-0608\n' > "$INSTALLED_GUARD"
+    chmod +x "$INSTALLED_GUARD"
+    FORCE=false DRY_RUN=false run_update_runtime_helpers >/dev/null 2>&1
+    GUARD_AFTER="$(cat "$INSTALLED_GUARD" 2>/dev/null)"
+    assert_not_contains "$GUARD_AFTER" "STALE-GUARD-XACA-0608" \
+        "Installed kb-init-team-guard.sh must be refreshed"
+    test_pass
+else
+    test_start "kb-init-team-guard.sh present (skipped — not shipped)"; test_pass
+fi
+
+# ── TEST 12: does NOT materialise a helper the machine never installed ──
+test_start "update_runtime_helpers does NOT create a helper that is not already installed"
+# agent-panel-display.sh ships in share/scripts but we deliberately leave it
+# ABSENT from RH_SCRIPTS — upgrade must not create it.
+rm -f "$RH_SCRIPTS/agent-panel-display.sh"
+FORCE=false DRY_RUN=false run_update_runtime_helpers >/dev/null 2>&1
+assert_file_not_exists "$RH_SCRIPTS/agent-panel-display.sh" \
+    "Upgrade must not materialise a runtime helper the machine never installed"
+test_pass
+
+# ── TEST 13: aux-owned files are NOT refreshed by update_runtime_helpers ──
+# (one owner per file — update_aux_scripts owns kb-cr.sh et al; the runtime
+#  sweep must skip them even when present under scripts/.)
+test_start "update_runtime_helpers does NOT touch aux-owned scripts/ files (no double-refresh)"
+AUX_OWNED_PROBE="$RH_SCRIPTS/kb-cr.sh"
+printf '#!/bin/bash\n# AUX-OWNED-SENTINEL-XACA-0608\n' > "$AUX_OWNED_PROBE"
+chmod +x "$AUX_OWNED_PROBE"
+FORCE=false DRY_RUN=false run_update_runtime_helpers >/dev/null 2>&1
+AUX_AFTER="$(cat "$AUX_OWNED_PROBE" 2>/dev/null)"
+assert_contains "$AUX_AFTER" "AUX-OWNED-SENTINEL-XACA-0608" \
+    "kb-cr.sh is owned by update_aux_scripts; update_runtime_helpers must leave it untouched"
+test_pass
+
+# ── TEST 14: aux exclusion set is DERIVED (lockstep with the aux map) ──
+test_start "Aux scripts/ exclusion set is derived from the aux map (contains kb-cr.sh, excludes root-only files)"
+AUX_BASENAMES="$(_xaca0608_aux_scriptdir_basenames)"
+assert_contains "$AUX_BASENAMES"$'\n' $'kb-cr.sh\n' \
+    "Derived aux exclusion set must include scripts/-destined kb-cr.sh"
+# worktree-helpers.sh is aux-owned but lands at WORKING_DIR root (not scripts/),
+# so it must NOT be in the scripts/ exclusion set.
+assert_not_contains "$AUX_BASENAMES"$'\n' $'worktree-helpers.sh\n' \
+    "Root-destined worktree-helpers.sh must NOT be in the scripts/ exclusion set"
+test_pass
+
+# ── TEST 15: --dry-run makes no on-disk change to a runtime helper ──
+test_start "update_runtime_helpers --dry-run does not modify an installed helper"
+if [ -f "$LLH_SRC" ]; then
+    INSTALLED_LLH="$RH_SCRIPTS/lcars-launch-helpers.sh"
+    printf '#!/bin/bash\n# DRYRUN-LLH-XACA-0608\n' > "$INSTALLED_LLH"
+    chmod +x "$INSTALLED_LLH"
+    FORCE=false DRY_RUN=true run_update_runtime_helpers >/dev/null 2>&1
+    DRY_LLH_AFTER="$(cat "$INSTALLED_LLH" 2>/dev/null)"
+    assert_contains "$DRY_LLH_AFTER" "DRYRUN-LLH-XACA-0608" \
+        "--dry-run must leave the installed runtime helper unchanged"
+    test_pass
+else
+    test_start "dry-run runtime helper (skipped — no LLH)"; test_pass
+fi
+
+# ── TEST 16: missing scripts/ dir -> graceful skip (exit 0) ──
+test_start "update_runtime_helpers skips gracefully when WORKING_DIR/scripts/ is absent (exit 0)"
+RH_MISS_EXIT=$(
+    (
+        FRAMEWORK_DIR="$TAP_ROOT" \
+        WORKING_DIR="$SANDBOX/rh-no-scripts" \
+        DRY_RUN=false FORCE=false \
+        update_runtime_helpers >/dev/null 2>&1
+    )
+    echo $?
+)
+if [ "$RH_MISS_EXIT" = "0" ]; then test_pass; else
+    test_fail "update_runtime_helpers must exit 0 when scripts/ dir missing (got: $RH_MISS_EXIT)"; fi
+
+# ── TEST 17: update_runtime_helpers is wired into the upgrade run sequence ──
+test_start "update_runtime_helpers is invoked in the upgrade run sequence"
+if grep -qE '^update_runtime_helpers$' "$UPGRADE_SH"; then
+    test_pass
+else
+    test_fail "aiteamforge-upgrade.sh run sequence must call update_runtime_helpers"
+fi
+
+# ── TEST 18: update_aux_scripts now uses the rewrite-aware render (no plain cp) ──
+test_start "update_aux_scripts routes through _xaca0608_render_team_script (rewrite-aware)"
+AUX_FN_BODY="$(_extract_fn update_aux_scripts)"
+assert_contains "$AUX_FN_BODY" "_xaca0608_render_team_script" \
+    "update_aux_scripts must render via the rewrite-aware helper, not a plain cp"
+test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
 # TEST 6: missing source dir -> graceful skip (exit 0, no crash)

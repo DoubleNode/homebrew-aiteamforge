@@ -246,7 +246,7 @@ is set. Unsandboxed tests WILL trip this guard and abort. See
 | Integration | `test-integration.sh` | ✓ Full workflows |
 | XACA-0585 lcars-health lay-down | `test-xaca-0585-lcars-health-script-laydown.sh` | ✓ Tap ships script, installer seeds it +x, plist ordering, upgrade script_map, idempotent, missing-source graceful |
 | XACA-0588 deploy-worktree-personas lay-down | `test-xaca-0588-deploy-worktree-personas-laydown.sh` | ✓ Tap ships script, installer seeds to scripts/ +x, hook guard path, upgrade script_map, idempotent, missing-source graceful |
-| XACA-0608 team-script upgrade refresh | `test-xaca-0608-team-script-refresh.sh` | ✓ Upgrade refreshes installed `<team>`-startup/shutdown + station scripts with ~/dev-team→WORKING_DIR rewrite, skips non-installed teams, preserves exec bits, dry-run no-op, missing-source graceful, wired into run sequence |
+| XACA-0608 team-script + runtime-helper upgrade refresh | `test-xaca-0608-team-script-refresh.sh` | ✓ Upgrade refreshes installed `<team>`-startup/shutdown + station scripts AND top-level `scripts/*` helpers (`lcars-launch-helpers.sh` regains `resolve_lcars_port`, `kb-init-team-guard.sh`) with ~/dev-team→WORKING_DIR rewrite; skips non-installed teams/helpers; aux-owned files not double-refreshed (exclusion set derived from aux map); preserves exec bits; dry-run no-op; missing-source graceful; both `update_team_scripts` + `update_runtime_helpers` wired into run sequence; `update_aux_scripts` rewrite-aware |
 
 ## CI/CD Integration
 
