@@ -150,6 +150,35 @@ _kb_cr_timestamp() {
     date -u +%Y-%m-%dT%H:%M:%SZ
 }
 
+# Normalize a user-supplied date string to ISO 8601 UTC for deploy_window_planned.
+# BSD-date-safe: uses pure-shell regex only — no `date -d` (GNU-only).
+# Accepts:
+#   YYYY-MM-DD                 → YYYY-MM-DDT00:00:00Z  (UTC midnight)
+#   YYYY-MM-DDTHH:MMZ          → YYYY-MM-DDTHH:MM:00Z  (pad seconds)
+#   YYYY-MM-DDTHH:MM:SSZ       → pass through as-is
+# Rejects offset forms (±HH:MM) and anything else — callers must supply UTC.
+# Echoes normalized value on success; prints to stderr and returns 1 on failure.
+_kb_cr_normalize_iso_date() {
+    local input="$1"
+    local normalized=""
+
+    if [[ "$input" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2}):([0-9]{2})Z$ ]]; then
+        # Full ISO-8601 UTC timestamp — pass through
+        normalized="${input}"
+    elif [[ "$input" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})T([0-9]{2}):([0-9]{2})Z$ ]]; then
+        # HH:MM form — pad missing seconds
+        normalized="${input%Z}:00Z"
+    elif [[ "$input" =~ ^([0-9]{4}-[0-9]{2}-[0-9]{2})$ ]]; then
+        # Date-only — normalize to UTC midnight
+        normalized="${input}T00:00:00Z"
+    else
+        echo "kb-cr: invalid deploy window '${input}'. Use YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ (UTC)." >&2
+        return 1
+    fi
+
+    echo "$normalized"
+}
+
 # Print the disabled-state message and exit 0 (the isolation gate).
 _kb_cr_disabled_exit() {
     local team="${1:-unknown}"
@@ -1850,6 +1879,7 @@ kb-cr() {
         transition)  _kb_cr_container_transition "$@" ;;
         close)       _kb_cr_container_close "$@" ;;
         set-doc-link) _kb_cr_container_set_doc_link "$@" ;;
+        reschedule)  _kb_cr_container_reschedule "$@" ;;
         migrate-legacy) _kb_cr_migrate_legacy "$@" ;;
         show)        _kb_cr_show_dispatch "$@" ;;
         # ── Lifecycle: route by ID prefix — CR-* → container, else → per-item ─
@@ -2079,6 +2109,7 @@ _kb_cr_container_create() {
     local cr_type="major"
     local platform=""
     local summary=""
+    local deploy_window=""
 
     # Parse args — positional title first, then flags
     while [[ $# -gt 0 ]]; do
@@ -2089,10 +2120,13 @@ _kb_cr_container_create() {
             --platform=*) platform="${1#--platform=}"; shift ;;
             --summary)  summary="${2:-}";   shift 2 ;;
             --summary=*) summary="${1#--summary=}"; shift ;;
+            --deploy-window) deploy_window="${2:-}"; shift 2 ;;
+            --deploy-window=*) deploy_window="${1#--deploy-window=}"; shift ;;
             --help|-h)
                 echo "Usage: kb-cr create <title> [--type major|emergency|fyi]"
                 echo "                             [--platform ios|android|firebase|crossplatform]"
                 echo "                             [--summary \"text\"]"
+                echo "                             [--deploy-window <YYYY-MM-DD|YYYY-MM-DDTHH:MM:SSZ>]"
                 return 0
                 ;;
             *)
@@ -2131,6 +2165,12 @@ _kb_cr_container_create() {
         esac
     fi
 
+    # Validate and normalize deploy_window before touching the board
+    local deploy_window_normalized=""
+    if [[ -n "$deploy_window" ]]; then
+        deploy_window_normalized=$(_kb_cr_normalize_iso_date "$deploy_window") || return 1
+    fi
+
     local _cr_team _cr_board _cr_enabled
     _kb_cr_board_preamble || return 1
     [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
@@ -2164,23 +2204,37 @@ _kb_cr_container_create() {
             else . end
         ) |
         if $summary != "" then (.crs[-1].summary = $summary) else . end |
+        if $deploywin != "" then (.crs[-1].deploy_window_planned = $deploywin) else . end |
         .lastUpdated = $ts
     ' \
-    --arg id       "$cr_id" \
-    --arg title    "$title" \
-    --arg crtype   "$cr_type" \
-    --arg ts       "$ts" \
-    --arg platform "$platform" \
-    --arg summary  "$summary" \
+    --arg id        "$cr_id" \
+    --arg title     "$title" \
+    --arg crtype    "$cr_type" \
+    --arg ts        "$ts" \
+    --arg platform  "$platform" \
+    --arg summary   "$summary" \
+    --arg deploywin "$deploy_window_normalized" \
     || return 1
 
-    # Append activity log entry (best-effort — never block the create path)
+    # Append activity log entries (best-effort — never block the create path)
     local _create_event
     _create_event=$(_kb_cr_activity_event "cr_created" \
         "to_state=cr-drafted" \
         "note=CR container created via kb-cr create${platform:+; platform=${platform}}${cr_type:+; type=${cr_type}}") || true
     if [[ -n "$_create_event" ]]; then
         _kb_cr_activity_append "$_cr_board" "$cr_id" "$_create_event" 2>/dev/null || true
+    fi
+
+    # Emit deploy-window event when set at create time (003)
+    if [[ -n "$deploy_window_normalized" ]]; then
+        local _win_event
+        _win_event=$(_kb_cr_activity_event "cr_deploy_window_set" \
+            "field=deploy_window_planned" \
+            "new_value=${deploy_window_normalized}" \
+            "note=deploy_window_planned set at create time via --deploy-window") || true
+        if [[ -n "$_win_event" ]]; then
+            _kb_cr_activity_append "$_cr_board" "$cr_id" "$_win_event" 2>/dev/null || true
+        fi
     fi
 
     _kb_cr_increment_seq "$_cr_board"
@@ -2195,6 +2249,7 @@ _kb_cr_container_create() {
     echo "  State: cr-drafted"
     [[ -n "$platform" ]] && echo "  Platform: $platform"
     [[ -n "$summary" ]] && echo "  Summary: ${summary:0:80}"
+    [[ -n "$deploy_window_normalized" ]] && echo "  Deploy Window: $deploy_window_normalized"
     echo ""
     echo "  Next steps:"
     echo "    kb-cr add-item $cr_id <item-id>"
@@ -2593,6 +2648,64 @@ _kb_cr_container_set_doc_link() {
     || return 1
 
     echo "Set doc link for CR [$cr_id]: $doc_url"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Subcommand: reschedule <CR-ID> <date>
+#
+# Post-hoc setter for deploy_window_planned. Valid at any crState.
+# Normalizes the supplied date to ISO 8601 UTC via _kb_cr_normalize_iso_date.
+# Accepts: YYYY-MM-DD | YYYY-MM-DDTHH:MM:SSZ | YYYY-MM-DDTHH:MMZ
+# Emits a cr_deploy_window_set activity-log event (best-effort).
+# ─────────────────────────────────────────────────────────────────────────────
+
+_kb_cr_container_reschedule() {
+    local cr_id="${1:-}"
+    local date_input="${2:-}"
+
+    if [[ -z "$cr_id" || -z "$date_input" ]]; then
+        echo "Usage: kb-cr reschedule <CR-ID> <date>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_idx
+    cr_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id")
+    if [[ "$cr_idx" == "-1" ]]; then
+        echo "kb-cr reschedule: CR '$cr_id' not found on board '$_cr_team'." >&2
+        return 1
+    fi
+
+    local normalized
+    normalized=$(_kb_cr_normalize_iso_date "$date_input") || return 1
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].deploy_window_planned = $win |
+        .crs[$cidx].updatedAt = $ts |
+        .lastUpdated = $ts
+    ' \
+    --argjson cidx "$cr_idx" \
+    --arg     win  "$normalized" \
+    --arg     ts   "$ts" \
+    || return 1
+
+    # Emit activity-log event (best-effort — never block the write) (003)
+    local _win_event
+    _win_event=$(_kb_cr_activity_event "cr_deploy_window_set" \
+        "field=deploy_window_planned" \
+        "new_value=${normalized}" \
+        "note=deploy_window_planned updated post-hoc via kb-cr reschedule") || true
+    if [[ -n "$_win_event" ]]; then
+        _kb_cr_activity_append "$_cr_board" "$cr_id" "$_win_event" 2>/dev/null || true
+    fi
+
+    echo "Set deploy window for CR [$cr_id]: $normalized"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4456,7 +4569,10 @@ _kb_cr_help() {
     echo "  create <title> [--type major|emergency|fyi]"
     echo "                 [--platform ios|android|firebase|crossplatform]"
     echo "                 [--summary \"text\"]"
+    echo "                 [--deploy-window <YYYY-MM-DD|YYYY-MM-DDTHH:MM:SSZ>]"
     echo "              Create a new CR container record. Returns CR-ID."
+    echo "              --deploy-window sets deploy_window_planned (UTC-normalized);"
+    echo "              accepts date-only (padded to T00:00:00Z) or full UTC timestamp."
     echo ""
     echo "  add-item <CR-ID> <item-id>"
     echo "              Container-perspective: assign item to CR. Writes back-pointer."
@@ -4481,6 +4597,12 @@ _kb_cr_help() {
     echo "              Valid states: cr-drafted, cr-submitted, cr-approved,"
     echo "              cr-rejected, cr-held, implementing, deployed-dev,"
     echo "              deployed-prod, emergency-deployed"
+    echo "  reschedule <CR-ID> <date>"
+    echo "              Post-hoc setter for deploy_window_planned (UTC-normalized)."
+    echo "              Valid at any crState — no state transition occurs."
+    echo "              <date> accepts: YYYY-MM-DD | YYYY-MM-DDTHH:MM:SSZ | YYYY-MM-DDTHH:MMZ"
+    echo "              Writes deploy_window_planned on the .crs[] record."
+    echo "              Emits a cr_deploy_window_set activity-log event."
     echo ""
     echo "── Container Lifecycle Commands (v2.0 — state + timestamp, atomic) ──"
     echo "  NOTE: When the first argument starts with 'CR-', these subcommands"

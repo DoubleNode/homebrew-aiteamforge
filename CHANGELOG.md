@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0603: Add a public CLI write path for the CR field `deploy_window_planned` in `kb-cr` (`share/scripts/kb-cr.sh` in tap). Previously `kb-cr` only READ `deploy_window_planned` (show, summary, audit, LCARS) with no public verb to WRITE it, forcing operators to hand-edit `board.json`. Adds (1) a `--deploy-window <date>` flag on `kb-cr create` and (2) a post-hoc `kb-cr reschedule <CR-ID> <date>` setter verb. Both write `.crs[].deploy_window_planned` UTC-normalized via a new shared, BSD-`date`-safe `_kb_cr_normalize_iso_date` helper (accepts `YYYY-MM-DD` → `T00:00:00Z`, `YYYY-MM-DDTHH:MMZ` → padded, `YYYY-MM-DDTHH:MM:SSZ` → pass-through; rejects offset/garbage forms), bump `updatedAt`/`lastUpdated`, and emit a best-effort `cr_deploy_window_set` activity-log event.
+
 ## [0.12.12] - 2026-06-02
 
 - XACA-0601: Remove 200-item cap on manifest probe `item_ids` in `lcars-ui/team_transfer/domain_kanban.py` (`share/lcars-ui/team_transfer/domain_kanban.py` in tap). The `[:200]` slice caused a false DATA-LOSS preflight failure on any kanban board with more than 200 items — the verifier diffed the truncated source-item set against the full live board and flagged the uncapped tail as destination-only items an import would delete.
