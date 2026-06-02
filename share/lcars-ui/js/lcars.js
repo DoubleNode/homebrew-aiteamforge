@@ -17207,6 +17207,10 @@ let currentExportJobId = null;
 let exportPollingInterval = null;
 let currentImportJobId = null;
 let importPollingInterval = null;
+// XACA-0602-012: paired-secrets extraction poll handle, tracked at module scope so
+// stopImportPolling()/resetImportState() can cancel an in-flight secrets poll when a
+// new import starts (previously a function-local handle that survived a reset).
+let pairedSecretsPollingInterval = null;
 let stagedImportFile = null;
 // XACA-0554: tracks inline secrets file + discovered count for main import flow
 let stagedImportSecretsFile = null;
@@ -18117,6 +18121,12 @@ function stopImportPolling() {
         clearInterval(importPollingInterval);
         importPollingInterval = null;
     }
+    // XACA-0602-012: also cancel an in-flight paired-secrets poll so a new import
+    // (via resetImportState) cannot leave an orphaned interval re-showing the result panel.
+    if (pairedSecretsPollingInterval) {
+        clearInterval(pairedSecretsPollingInterval);
+        pairedSecretsPollingInterval = null;
+    }
 }
 
 function updateImportProgress(percent, label, message) {
@@ -18216,8 +18226,10 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
             return;
         }
 
-        // Poll secrets status to completion
-        let secretsPollingHandle = setInterval(async () => {
+        // Poll secrets status to completion. Tracked at module scope (XACA-0602-012)
+        // so a new import's resetImportState()/stopImportPolling() can cancel it.
+        stopImportPolling();
+        pairedSecretsPollingInterval = setInterval(async () => {
             try {
                 const statusResp = await fetch(`/api/import/secrets/status/${secretsJobId}`);
                 const statusData = await statusResp.json();
@@ -18225,7 +18237,8 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
                 updateImportProgress(pct, 'EXTRACTING SECRETS...', statusData.message || '');
 
                 if (statusData.status === 'completed') {
-                    clearInterval(secretsPollingHandle);
+                    clearInterval(pairedSecretsPollingInterval);
+                    pairedSecretsPollingInterval = null;
                     updateImportProgress(100, 'COMPLETE', 'Import and secrets applied successfully');
                     if (progressEl) progressEl.style.display = 'none';
                     if (resultEl) resultEl.style.display = 'block';
@@ -18245,7 +18258,8 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
                     const input = document.getElementById('import-file-input');
                     if (input) input.value = '';
                 } else if (statusData.status === 'failed') {
-                    clearInterval(secretsPollingHandle);
+                    clearInterval(pairedSecretsPollingInterval);
+                    pairedSecretsPollingInterval = null;
                     if (progressEl) progressEl.style.display = 'none';
                     if (resultEl) resultEl.style.display = 'block';
                     if (titleEl) titleEl.textContent = '✓ IMPORT COMPLETE — ✗ SECRETS FAILED';
