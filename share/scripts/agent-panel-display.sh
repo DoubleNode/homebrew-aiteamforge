@@ -631,7 +631,7 @@ get_team_lcars_port() {
     local prefix="$1"
     while [[ "$prefix" == *-* ]]; do
         prefix="${prefix%-*}"
-        local port_file="$HOME/dev-team/lcars-ports/${prefix}-lcars.port"
+        local port_file="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports/${prefix}-lcars.port"
         if [[ -f "$port_file" ]]; then
             tr -d '[:space:]' < "$port_file"
             return 0

@@ -25,7 +25,7 @@ TEAM="${2:-freelance}"
 SESSION_NAME="${3:-}"
 URL="http://localhost:$PORT"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+LCARS_PORTS_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports"
 
 # Export team for server
 export LCARS_TEAM="$TEAM"

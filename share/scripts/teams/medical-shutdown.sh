@@ -82,7 +82,7 @@ for session in "${sessions[@]}"; do
 done
 
 # Clean up LCARS port file
-LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+LCARS_PORTS_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports"
 LCARS_PORT_FILE="$LCARS_PORTS_DIR/${SESSION_PREFIX}-lcars.port"
 if [ -f "$LCARS_PORT_FILE" ]; then
     echo "  ✓ Removing LCARS port file: ${SESSION_PREFIX}-lcars.port"

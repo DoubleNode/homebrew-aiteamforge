@@ -193,7 +193,7 @@ OS_TYPE=$(uname -s)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
 # LCARS port files directory
-LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+LCARS_PORTS_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports"
 
 # Backup status file location
 BACKUP_STATUS_FILE="$HOME/aiteamforge-backups/kanban/backup-status.json"

@@ -23,7 +23,7 @@ LCARS_TEAM="legal-${PROJECT_LOWER}"
 LCARS_PORT="$LEGAL_LCARS_PORT"
 
 # Port file directory for fleet-monitor integration
-LCARS_PORTS_DIR="$HOME/dev-team/lcars-ports"
+LCARS_PORTS_DIR="${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports"
 
 # Use team-specific tmux socket if set, otherwise use default server
 TMUX_CMD="tmux${TMUX_SOCKET:+ -L $TMUX_SOCKET}"
