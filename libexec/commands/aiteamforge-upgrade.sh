@@ -244,11 +244,32 @@ update_lcars() {
   print_info "Syncing LCARS UI files..."
 
   if [ "$DRY_RUN" = false ]; then
-    # Sync files (preserving user customizations in config/)
-    rsync -av --exclude 'config/' \
+    # Sync files. Preserve the user-customized TOP-LEVEL runtime dir lcars-ui/config/
+    # (per-team customizations) — but NOTHING else. XACA-0600: the exclude MUST be
+    # anchored with a leading slash so it matches ONLY lcars-ui/config/ at the transfer
+    # root. An unanchored 'config/' matches config/ at ANY depth and silently strips the
+    # SHIPPED data dir lcars-ui/team_transfer/config/ (the per-team .yaml definitions),
+    # which left upgraded tap machines unable to import/export ("No team_transfer config
+    # for team X"). Fresh installs (cp -r) were unaffected; only upgrades dropped it.
+    rsync -av --exclude '/config/' \
       "${lcars_source}/" "${lcars_target}/"
 
     print_success "LCARS UI updated"
+
+    # XACA-0600 regression guard: team_transfer/config/ is shipped data that MUST track
+    # the framework. If the installed yaml count diverges from the share (e.g. a future
+    # exclude-pattern regression or a partial copy), warn loudly but do not fail the
+    # upgrade — a stale config is recoverable, a half-applied upgrade is worse.
+    local tt_src="${lcars_source}/team_transfer/config"
+    local tt_dst="${lcars_target}/team_transfer/config"
+    if [ -d "$tt_src" ]; then
+      local src_n dst_n
+      src_n=$(find "$tt_src" -maxdepth 1 -name '*.yaml' -type f 2>/dev/null | wc -l | tr -d ' ')
+      dst_n=$(find "$tt_dst" -maxdepth 1 -name '*.yaml' -type f 2>/dev/null | wc -l | tr -d ' ')
+      if [ "$src_n" != "$dst_n" ]; then
+        print_warning "team_transfer/config yaml mismatch: installed ${dst_n} vs framework ${src_n} (import/export may be impaired — re-run upgrade or report XACA-0600)"
+      fi
+    fi
   else
     echo "Would sync: ${lcars_source}/ -> ${lcars_target}/"
   fi
