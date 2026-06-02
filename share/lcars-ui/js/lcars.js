@@ -17595,6 +17595,10 @@ function resetSecretsExportUI() {
 function handleImportFileSelected(event) {
     const file = event.target.files[0];
     if (!file) return;
+    // XACA-0602 (re-import fix): wipe any prior completed/failed import's panel +
+    // session state the moment a new file is picked. This is the chosen "reset on
+    // new file-select" UX — the previous result stays visible until exactly this point.
+    resetImportState();
     stagedImportFile = file;
     uploadImportFile(file);
 }
@@ -17602,6 +17606,15 @@ function handleImportFileSelected(event) {
 async function uploadImportFile(file) {
     const btn = document.getElementById('import-btn');
     if (btn) btn.disabled = true;
+
+    // XACA-0602: the /api/import/upload POST does iCloud-materialize + upload +
+    // manifest verify server-side — previously dead air. Reuse the #import-progress
+    // panel as an immediate "PREPARING IMPORT…" indicator covering that whole window.
+    // renderImportPreflight() hides it on success; both error paths below hide it too;
+    // resetImportState() (top of handleImportFileSelected) hides it on the next select.
+    const progressEl = document.getElementById('import-progress');
+    if (progressEl) progressEl.style.display = 'block';
+    updateImportProgress(0, 'PREPARING IMPORT…', 'Materializing, uploading and verifying archive…');
 
     const formData = new FormData();
     formData.append('file', file);
@@ -17613,6 +17626,7 @@ async function uploadImportFile(file) {
         });
         const result = await readJsonResponse(response);
         if (!result.ok || result.parseError) {
+            if (progressEl) progressEl.style.display = 'none';
             alert(_httpErrorMessage('Import upload failed', result));
             if (btn) btn.disabled = false;
             return;
@@ -17624,6 +17638,7 @@ async function uploadImportFile(file) {
         // button in the preflight panel and provides the full reset path.
         if (btn) btn.disabled = false;
     } catch (error) {
+        if (progressEl) progressEl.style.display = 'none';
         console.error('Import upload failed:', error);
         alert('Import upload failed: LCARS server not responding on this port — verify the tab URL/port and that the team server is running.');
         if (btn) btn.disabled = false;
@@ -17792,22 +17807,44 @@ function renderImportPreflight(data) {
 
     updateImportApplyEnabled();
 
+    // XACA-0602: clear the "PREPARING IMPORT…" indicator now that preflight is painted.
+    const progressEl = document.getElementById('import-progress');
+    if (progressEl) progressEl.style.display = 'none';
+
     preflightEl.style.display = 'block';
 }
 
-function cancelImport() {
+// XACA-0602: single source of truth for returning the import session to a clean
+// baseline. Called from cancelImport() (CANCEL button) AND from the top of
+// handleImportFileSelected() (new-file-select) — the latter is the actual re-import
+// fix: a prior completed/failed import's stale state + result panel are wiped the
+// moment the operator picks the next file. NOTE: onImportComplete()/onImportFailed()
+// deliberately do NOT call this — the chosen UX keeps the result panel visible until
+// the next file-select; they only clear the BLOCKING session bits (jobId + polling).
+function resetImportState() {
+    // ── Session state ──
     currentImportJobId = null;
     stagedImportFile = null;
     // XACA-0554: reset inline secrets state
     stagedImportSecretsFile = null;
     currentImportSecretsDiscovered = 0;
+    stopImportPolling();
+
+    // ── Panels ──
     const preflightEl = document.getElementById('import-preflight');
     if (preflightEl) preflightEl.style.display = 'none';
+    const resultEl = document.getElementById('import-result');
+    if (resultEl) resultEl.style.display = 'none';
+    const progressEl = document.getElementById('import-progress');
+    if (progressEl) progressEl.style.display = 'none';
+
+    // ── Re-arm picker + button ──
     const btn = document.getElementById('import-btn');
     if (btn) btn.disabled = false;
     const input = document.getElementById('import-file-input');
     if (input) input.value = '';
-    // Hide secrets section and clear its inputs
+
+    // ── Inline secrets section ──
     const secretsSection = document.getElementById('import-secrets-required');
     if (secretsSection) secretsSection.style.display = 'none';
     const secretsPwInput = document.getElementById('import-secrets-password-input');
@@ -17818,6 +17855,12 @@ function cancelImport() {
     if (fnLabel) fnLabel.textContent = '';
     const secretsErrEl = document.getElementById('import-secrets-error');
     if (secretsErrEl) secretsErrEl.style.display = 'none';
+}
+
+function cancelImport() {
+    // XACA-0602: thin wrapper — resetImportState() is the single reset path.
+    // Keep this function (the CANCEL button's onclick is wired to cancelImport()).
+    resetImportState();
 }
 
 // XACA-0554: file-picker handler for the inline secrets zip in main import preflight
@@ -18123,6 +18166,13 @@ function onImportComplete(data) {
     if (btn) btn.disabled = false;
     const input = document.getElementById('import-file-input');
     if (input) input.value = '';
+
+    // XACA-0602: clear ONLY the blocking session bits so a second import can start.
+    // We intentionally do NOT call resetImportState() here — the chosen UX keeps the
+    // result panel (rendered just above) visible until the operator selects the next
+    // file. handleImportFileSelected() runs the full teardown at that point.
+    currentImportJobId = null;
+    stopImportPolling();
 }
 
 // XACA-0554: step 5 — apply secrets extraction after main import succeeds.
@@ -18251,6 +18301,12 @@ function onImportFailed(data) {
 
     const btn = document.getElementById('import-btn');
     if (btn) btn.disabled = false;
+
+    // XACA-0602: clear ONLY the blocking session bits so the operator can retry.
+    // Do NOT call resetImportState() — the failure result panel must stay visible
+    // until the next file-select (handleImportFileSelected runs the full teardown).
+    currentImportJobId = null;
+    stopImportPolling();
 }
 
 // ═══════════════════════════════════════════════════════════════════
