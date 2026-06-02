@@ -1052,6 +1052,100 @@ class TestBoardSchemaPhaseDispositions:
             assert "FAIL: 0" in out
             assert "STALE-OK: 0" in out
 
+    # -- XACA-0601: probe must NOT cap item_ids at 200 -----------------------
+    def test_probe_item_ids_not_capped_at_200(self, tmp_path, capsys):
+        """XACA-0601 regression: _probe_for must return ALL item ids, not [:200].
+
+        Root cause: domain_kanban.py returned {"item_count": len(ids),
+        "item_ids": ids[:200]}, so boards with >200 items fed a truncated
+        cap_ids set into the verifier.  Any live-board item beyond position 200
+        (alphabetically) appeared in cur_ids - cap_ids → DATA-LOSS false-positive
+        that blocked every UI import.
+
+        Test plan:
+        - Build a board with 210 synthetic XACA-NNNN items (parents) plus 10
+          subitems each for items 001-010, pushing late-alphabet subitems
+          (XACA-0001-001 … XACA-0010-010) past sorted position 200.
+        - Verify _probe_for captures ALL ids (len == item_count).
+        - Run the verifier in pre-import phase with the same board as both
+          source-probe and live destination → must PASS (no DATA-LOSS FAIL).
+
+        This test FAILS against the old [:200] code and PASSES with the fix.
+        """
+        import json as _json
+        from team_transfer.domain_kanban import _probe_for, _walk_ids
+
+        # Build a board with 210 top-level items + 10 subitems each for
+        # items 001-010, giving 310 total IDs.  After sorting alphabetically,
+        # the subitem IDs (XACA-0001-001 … XACA-0010-010) sort BEFORE the
+        # corresponding parent IDs, so the parents at position 200+ land in
+        # cur_ids but NOT in the old [:200] cap_ids → false DATA-LOSS.
+        prefix = "XACA-"
+        parent_ids = [f"XACA-{i:04d}" for i in range(1, 211)]
+        subitem_ids = [
+            f"XACA-{i:04d}-{j:03d}"
+            for i in range(1, 11)
+            for j in range(1, 11)
+        ]
+        all_ids = sorted(parent_ids + subitem_ids)
+        assert len(all_ids) == 310, "Sanity: 210 parents + 100 subitems"
+
+        # Write a board JSON that contains all items (flat list of {id: ...})
+        board_path = tmp_path / "board.json"
+        board_data = {"items": [{"id": i} for i in all_ids]}
+        board_path.write_text(_json.dumps(board_data))
+
+        # --- Part 1: probe completeness ---
+        probe = _probe_for(board_path, ticket_prefix=prefix)
+        assert probe is not None
+        assert probe["item_count"] == 310, (
+            f"item_count must reflect ALL 310 ids, got {probe['item_count']}"
+        )
+        assert len(probe["item_ids"]) == 310, (
+            f"item_ids must contain ALL 310 ids (old code capped at 200), "
+            f"got {len(probe['item_ids'])}"
+        )
+        assert sorted(probe["item_ids"]) == all_ids, (
+            "probe item_ids must match the full sorted id list"
+        )
+
+        # --- Part 2: verifier does NOT false-positive DATA-LOSS ---
+        # Build a manifest whose probe contains ALL ids, and whose board file
+        # IS the same board (source == destination → identical import).
+        from team_transfer.manifest import SCHEMA, FileEntry, new_manifest
+        from team_transfer import channels
+
+        m = new_manifest()
+        fe = FileEntry(
+            path=str(board_path),
+            relpath="kanban/board.json",
+            sha256=None,
+            size=board_path.stat().st_size,
+            mtime=board_path.stat().st_mtime,
+            cls=SCHEMA,
+            channel=channels.EXPORT_KANBAN,
+            domain="kanban",
+            probe=probe,  # full probe from _probe_for
+        )
+        m.add_file("kanban", fe)
+        m.recompute_channel_stats()
+        mp = tmp_path / "manifest.json"
+        mp.write_text(m.to_json())
+
+        rc = verifier_main(["--manifest", str(mp), "--phase", "pre-import"])
+        out, _ = capsys.readouterr()
+        assert rc == 0, (
+            f"XACA-0601 regression: board with 310 items must NOT produce DATA-LOSS "
+            f"false-positive in pre-import when source==destination. "
+            f"rc={rc}\n{out}"
+        )
+        assert "DATA-LOSS" not in out, (
+            f"DATA-LOSS must not appear when source and destination boards are identical.\n{out}"
+        )
+        assert "FAIL: 0" in out, (
+            f"Expected FAIL: 0 for identical source/destination boards.\n{out}"
+        )
+
     # -- server.py STALE-OK regex smoke-test ----------------------------------
     def test_stale_ok_summary_line_matches_server_regex(self, tmp_path, capsys):
         """The '  STALE-OK: N' summary line must match server.py's parsing regex

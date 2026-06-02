@@ -89,7 +89,7 @@ def _probe_for(p: Path, *, ticket_prefix: str | None) -> dict | None:
     except (OSError, json.JSONDecodeError) as e:
         return {"error": str(e)}
     ids = sorted(_walk_ids(board, ticket_prefix=ticket_prefix))
-    return {"item_count": len(ids), "item_ids": ids[:200]}
+    return {"item_count": len(ids), "item_ids": ids}
 
 
 def _walk_ids(obj, *, ticket_prefix: str):
