@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.12.12] - 2026-06-02
+
 - XACA-0601: Remove 200-item cap on manifest probe `item_ids` in `lcars-ui/team_transfer/domain_kanban.py` (`share/lcars-ui/team_transfer/domain_kanban.py` in tap). The `[:200]` slice caused a false DATA-LOSS preflight failure on any kanban board with more than 200 items — the verifier diffed the truncated source-item set against the full live board and flagged the uncapped tail as destination-only items an import would delete.
 - XACA-0600: Anchor the LCARS-UI upgrade exclude so `team_transfer/config/` ships on upgrade. `aiteamforge-upgrade.sh::update_lcars()` rsynced `share/lcars-ui` → `~/aiteamforge/lcars-ui` with an unanchored `--exclude 'config/'`, intended to preserve the user-customized top-level runtime dir `lcars-ui/config/`. Because the pattern had no leading slash it matched `config/` at ANY depth, so it also stripped the SHIPPED data dir `lcars-ui/team_transfer/config/` (the per-team `.yaml` definitions that drive team import/export — currently 20 entries: 17 regular files + 3 intra-dir symlink aliases such as `medical.yaml` → `medical-general.yaml`). Fresh installs (`install-kanban.sh` `cp -r`) were unaffected; only upgrades dropped it, leaving upgrade-only machines (e.g. M1Pro: 0 yaml vs 20 in share) unable to export/import — every attempt died with `No team_transfer config for team X`. Fix: anchor the exclude to the transfer root (`--exclude '/config/'`) so only `lcars-ui/config/` is excluded while `team_transfer/config/` syncs normally. Adds a non-fatal post-sync regression guard that warns when the installed `team_transfer/config` yaml count diverges from the framework share. Tap-native installer change (homebrew-tap two-step; no sync-tap).
 - XACA-0596: Replace hardcoded `SESSION_DIRECTORY` paths with `${AITEAMFORGE_DIR:-$HOME/dev-team}` in the four tap-shipping LCARS startup scripts (`share/scripts/teams/finance/scripts/finance-lcars-startup.sh`, `freelance/scripts/freelance-lcars-startup.sh`, `legal/scripts/legal-lcars-startup.sh`, `medical/scripts/medical-lcars-startup.sh`). These files shipped a literal `/Users/darrenehlers/dev-team` (or the half-portable `$HOME/dev-team` for finance) as the `SESSION_DIRECTORY` default, causing them to point at the wrong directory on any tap install that uses a non-default `AITEAMFORGE_DIR`. The portable form honors `$AITEAMFORGE_DIR` when set and falls back to `$HOME/dev-team` otherwise — identical behavior on the dev machine.
@@ -697,7 +699,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.11...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.12...HEAD
+[0.12.12]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.11...v0.12.12
 [0.12.11]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.10...v0.12.11
 [0.12.10]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.9...v0.12.10
 [0.12.9]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.12.8...v0.12.9
