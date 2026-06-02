@@ -264,8 +264,12 @@ update_lcars() {
     local tt_dst="${lcars_target}/team_transfer/config"
     if [ -d "$tt_src" ]; then
       local src_n dst_n
-      src_n=$(find "$tt_src" -maxdepth 1 -name '*.yaml' -type f 2>/dev/null | wc -l | tr -d ' ')
-      dst_n=$(find "$tt_dst" -maxdepth 1 -name '*.yaml' -type f 2>/dev/null | wc -l | tr -d ' ')
+      # Count regular files AND symlinks: 3 of the per-team configs are intra-dir
+      # symlink aliases (e.g. medical.yaml -> medical-general.yaml). rsync -a ships
+      # them as symlinks, so a -type f count would under-report and let a dropped
+      # alias slip past the guard.
+      src_n=$(find "$tt_src" -maxdepth 1 -name '*.yaml' \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
+      dst_n=$(find "$tt_dst" -maxdepth 1 -name '*.yaml' \( -type f -o -type l \) 2>/dev/null | wc -l | tr -d ' ')
       if [ "$src_n" != "$dst_n" ]; then
         print_warning "team_transfer/config yaml mismatch: installed ${dst_n} vs framework ${src_n} (import/export may be impaired — re-run upgrade or report XACA-0600)"
       fi
