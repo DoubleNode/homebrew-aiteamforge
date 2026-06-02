@@ -381,6 +381,15 @@ _wt_check_pr_merged() {
 _wt_classify_branch() {
     local branch="${1-}"
     local worktree_path="${2-}"
+    # Optional 3rd arg: a pre-fetched _wt_check_pr_merged result. When the caller
+    # already ran the PR check (e.g. wt-finish needs pr_number/pr_title for display),
+    # it threads the result here so we don't pay a second GitHub round-trip
+    # (XACA-0598-012). A non-empty value means "PR is merged".
+    local pr_info pr_prefetched=0
+    if [ $# -ge 3 ]; then
+        pr_info="${3-}"
+        pr_prefetched=1
+    fi
 
     if [ -z "$branch" ]; then
         echo "unmerged-commits"
@@ -388,9 +397,10 @@ _wt_classify_branch() {
     fi
 
     # PRIMARY: GitHub PR state (authoritative for squash merges)
-    local pr_info
-    pr_info=$(_wt_check_pr_merged "$branch")
-    if [ $? -eq 0 ] && [ -n "$pr_info" ]; then
+    if [ "$pr_prefetched" -eq 0 ]; then
+        pr_info=$(_wt_check_pr_merged "$branch")
+    fi
+    if [ -n "$pr_info" ]; then
         echo "merged"
         return 0
     fi
@@ -407,8 +417,24 @@ _wt_classify_branch() {
         main_branch="develop"
     fi
 
+    # Count commits on the branch not yet on main. Capture git's own exit code
+    # (not the pipe's) — if the range can't be resolved (e.g. invalid main_branch
+    # ref), git fails and an empty stdout would otherwise count as 0 → a false
+    # 'merged' classification. Conservative fallback: treat that as unsafe
+    # (XACA-0598-015).
+    local log_out log_rc
+    log_out=$(git -C "$git_dir" log --oneline "${main_branch}..${branch}" 2>/dev/null)
+    log_rc=$?
+    if [ $log_rc -ne 0 ]; then
+        echo "unmerged-commits"
+        return 0
+    fi
     local unmerged_commits
-    unmerged_commits=$(git -C "$git_dir" log --oneline "${main_branch}..${branch}" 2>/dev/null | wc -l | tr -d ' ')
+    if [ -z "$log_out" ]; then
+        unmerged_commits=0
+    else
+        unmerged_commits=$(printf '%s\n' "$log_out" | wc -l | tr -d ' ')
+    fi
 
     local remote_ref
     remote_ref=$(git -C "$git_dir" rev-parse --abbrev-ref "${branch}@{upstream}" 2>/dev/null)
@@ -1291,15 +1317,17 @@ wt-finish() {
     local pr_number=""
     local pr_title=""
 
-    local wt_class
-    wt_class=$(_wt_classify_branch "$branch" "$wt_path")
-
-    # Fetch PR info for display (pr_number/pr_title shown in auto path)
+    # Fetch PR info ONCE, then thread it into the classifier so _wt_check_pr_merged
+    # is not called twice on the happy path (XACA-0598-012).
     pr_info=$(_wt_check_pr_merged "$branch")
-    if [ $? -eq 0 ] && [ -n "$pr_info" ]; then
+    local pr_rc=$?
+    if [ $pr_rc -eq 0 ] && [ -n "$pr_info" ]; then
         pr_number="${pr_info%%|*}"
         pr_title="${pr_info#*|}"
     fi
+
+    local wt_class
+    wt_class=$(_wt_classify_branch "$branch" "$wt_path" "$pr_info")
 
     case "$wt_class" in
         merged)
