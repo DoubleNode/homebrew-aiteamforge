@@ -406,6 +406,37 @@ aiteamforge setup --upgrade
 export PROMPT="%F{blue}[aiteamforge]%f %~ %# "
 ```
 
+### Agent Panel Images Blank (imgcat not installed)
+
+**Symptoms:**
+- Agent panel in LCARS shows blank boxes where avatars/images should appear
+- No error message — images simply do not render
+
+**Diagnosis:**
+
+```bash
+# Check if imgcat is present and executable
+ls -la ~/.iterm2/imgcat
+
+# Verify it is non-empty
+wc -c ~/.iterm2/imgcat
+```
+
+**Solution:**
+
+Re-run setup or upgrade to trigger imgcat provisioning:
+
+```bash
+aiteamforge setup --upgrade
+# or, for a full reinstall of shell components:
+aiteamforge setup
+```
+
+**Remote host / cockpit connect case:**
+If you use cockpit connect (XACA-0607) to SSH into a remote machine and run agents there, imgcat must be present on the **remote** host — not just your local laptop. The agent panel display script runs on whichever host is SSH'd into. Run `aiteamforge setup` (or upgrade) on each remote host to provision `~/.iterm2/imgcat` there.
+
+---
+
 ### PATH Issues
 
 **Symptoms:**

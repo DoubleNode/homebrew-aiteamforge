@@ -13,6 +13,8 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
+# XACA-0611: imgcat provisioning helper (must come after common.sh — uses info/warning/error)
+source "${LIBEXEC_DIR}/lib/imgcat-provision.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -916,6 +918,36 @@ update_launchagents() {
   fi
 }
 
+# Ensure imgcat is present for agent-panel image rendering (XACA-0611).
+#
+# BUGFIX XACA-0611: the upgrade path never re-ensured ~/.iterm2/imgcat, so a
+# machine upgraded to a newer tap still had blank agent-panel avatar/termlogo
+# images if imgcat was missing. Same refresh-gap class as XACA-0608/0610.
+#
+# Non-fatal: a missing imgcat is operational noise, not a data hazard. We warn
+# loudly but do NOT abort the upgrade. The ensure_imgcat call is guarded from
+# tripping `set -e` via the explicit `|| true` on return 1.
+#
+# NOTE: imgcat provisioning is NOT part of the update_runtime_helpers sweep
+# (share/scripts/) or any other update_* sweep. The vendored asset lives under
+# share/iterm2/ and is managed exclusively by ensure_imgcat.
+update_imgcat() {
+  print_section "Provisioning imgcat"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would ensure: ~/.iterm2/imgcat (via bundled share/iterm2/imgcat or network fallback)"
+    return
+  fi
+
+  if ensure_imgcat "${FRAMEWORK_DIR}/share"; then
+    print_success "imgcat provisioned — agent-panel images will render"
+  else
+    print_warning "imgcat provisioning failed — agent-panel avatar/termlogo images will NOT render until this is resolved."
+    print_warning "Expected location: ~/.iterm2/imgcat"
+    print_warning "Manual fix: copy imgcat from ${FRAMEWORK_DIR}/share/iterm2/imgcat or download from https://iterm2.com/utilities/imgcat"
+  fi
+}
+
 # Show changelog
 show_changelog() {
   print_section "What's New"
@@ -943,6 +975,7 @@ update_kanban_hooks
 update_aux_scripts
 update_team_scripts
 update_runtime_helpers
+update_imgcat
 update_shell_helpers
 update_skills
 update_launchagents

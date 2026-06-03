@@ -7,6 +7,8 @@ set -euo pipefail
 # Source common utilities
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
+# imgcat provisioning helper — MUST be sourced after common.sh (uses info/warning/error)
+source "$SCRIPT_DIR/../lib/imgcat-provision.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -319,25 +321,32 @@ install_shell_environment() {
     # Set up Python venv with iterm2 module (non-fatal if Python unavailable)
     install_python_venv
 
-    # Install iTerm2 shell integration (imgcat, it2setkeylabel, etc.)
+    # Install iTerm2 shell integration (it2setkeylabel, etc.)
     # This prevents "Allow Terminal-Initiated Display?" prompts for inline images
     if [ ! -f "$HOME/.iterm2_shell_integration.zsh" ]; then
         info "Installing iTerm2 shell integration..."
         curl -sSL https://iterm2.com/shell_integration/install_shell_integration.sh | bash 2>/dev/null
         if [ -f "$HOME/.iterm2_shell_integration.zsh" ]; then
             success "iTerm2 shell integration installed"
-            # Also install imgcat utility if not already present
-            if [ ! -f "$HOME/.iterm2/imgcat" ]; then
-                mkdir -p "$HOME/.iterm2"
-                curl -sSL https://iterm2.com/utilities/imgcat -o "$HOME/.iterm2/imgcat" 2>/dev/null
-                chmod +x "$HOME/.iterm2/imgcat" 2>/dev/null
-            fi
         else
             warning "iTerm2 shell integration failed — inline images may prompt for permission"
         fi
     else
         success "iTerm2 shell integration already installed"
     fi
+
+    # Provision imgcat unconditionally — runs whether shell integration was just installed
+    # or was already present (the M1Pro/fleet case: integration pre-existed but imgcat was
+    # never laid down, causing blank agent panels).
+    #
+    # NOTE — SSH-delegated remote hosts: cockpit connect (XACA-0607) SSHes into a remote
+    # host and runs agent-panel-display.sh THERE.  The remote host must have
+    # ~/.iterm2/imgcat present.  Re-running `aiteamforge setup` (or upgrade) on the remote
+    # host is the fix for blank agent panels on remote machines.
+    if ! ensure_imgcat "$INSTALL_ROOT/share"; then
+        warning "imgcat could not be provisioned — agent-panel images will not render."
+        warning "Re-run setup after network access is restored, or copy ~/.iterm2/imgcat manually."
+    fi  # non-fatal: imgcat failure must not abort the install
 
     # Suppress iTerm2 permission prompts for inline images and display changes.
     # imgcat uses the 1337;File= protocol which iTerm2 treats as a "download" —
