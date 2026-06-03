@@ -63,8 +63,11 @@ ensure_imgcat() {
     fi
 
     # ── 3. Fallback: curl from iterm2.com ─────────────────────────────────────
+    # -f makes curl exit non-zero on HTTP 4xx/5xx and suppress the error body, so
+    # a server error never lands an empty (or bogus HTML) file that would then be
+    # chmod +x'd and pass the verify below as a fake imgcat.
     mkdir -p "$dest_dir"
-    if curl -sSL https://iterm2.com/utilities/imgcat -o "$dest"; then
+    if curl -fsSL https://iterm2.com/utilities/imgcat -o "$dest"; then
         chmod +x "$dest"
         if [[ -f "$dest" && -x "$dest" && -s "$dest" ]]; then
             info "imgcat provisioned via network fallback"
@@ -73,6 +76,10 @@ ensure_imgcat() {
     fi
 
     # ── 4. All paths failed ───────────────────────────────────────────────────
+    # Remove any partial/empty/bogus artifact a failed copy or curl may have left,
+    # so the next call's no-op guard isn't fooled and a stale zero-byte file does
+    # not linger at ~/.iterm2/imgcat.
+    rm -f "$dest" 2>/dev/null
     error "ensure_imgcat: all provisioning attempts failed — ~/.iterm2/imgcat unavailable"
     return 1
 }

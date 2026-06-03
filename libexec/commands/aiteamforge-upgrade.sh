@@ -925,8 +925,9 @@ update_launchagents() {
 # images if imgcat was missing. Same refresh-gap class as XACA-0608/0610.
 #
 # Non-fatal: a missing imgcat is operational noise, not a data hazard. We warn
-# loudly but do NOT abort the upgrade. The ensure_imgcat call is guarded from
-# tripping `set -e` via the explicit `|| true` on return 1.
+# loudly but do NOT abort the upgrade. A non-zero ensure_imgcat return is consumed
+# by the `if ensure_imgcat ...; then ... else ... fi` construct below, so it never
+# trips `set -e`/`set -eo pipefail` (no `|| true` is needed on the call).
 #
 # NOTE: imgcat provisioning is NOT part of the update_runtime_helpers sweep
 # (share/scripts/) or any other update_* sweep. The vendored asset lives under
