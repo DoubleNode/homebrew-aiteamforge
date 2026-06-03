@@ -257,14 +257,18 @@ kb_ensure_team_initialized() {
     while true; do
         printf '[kb-guard] Initialize this team now? [y/N]: ' >&2
         read -r response </dev/tty 2>/dev/null || { response="n"; break; }
-        case "${response,,}" in
-            y|yes) break ;;
-            n|no|"") response="n"; break ;;
+        # Case-insensitive match via bracket globs + in-loop normalization to a
+        # canonical y/n. Portable across zsh and bash 3.2 — bash-4's lowercase
+        # parameter expansion is a "bad substitution" in both, and this guard is
+        # SOURCED by <team>-startup.sh (#!/bin/zsh), so it runs under zsh. (XACA-0615)
+        case "$response" in
+            [Yy]|[Yy][Ee][Ss]) response="y"; break ;;
+            [Nn]|[Nn][Oo]|"")  response="n"; break ;;
             *) _kbitg_yellow "  Please enter y or n." ;;
         esac
     done
 
-    if [[ "${response,,}" != "y" && "${response,,}" != "yes" ]]; then
+    if [[ "$response" != "y" ]]; then
         _kbitg_yellow "[kb-guard] Skipped. Kanban commands may fail until the team is initialized."
         _kbitg_yellow "           Run: ${kbit_bin} --team-id ${team_id} --kanban-dir ${kanban_dir}"
         return 1
