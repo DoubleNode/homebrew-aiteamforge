@@ -205,6 +205,56 @@ _main_root_from_wt() {
 }
 
 # ---------------------------------------------------------------------------
+# Resolve git root(s) from a path that may be a git repo OR a container dir.
+#
+# Semantics (identical to XACA-0606's _resolve_git_roots in kb-sync-personas):
+#   - If <path> is itself a git repo (toplevel == canonicalized <path>) → print it.
+#   - Else scan immediate child directories for git repos and print each root.
+#   - Prints nothing if no roots found (caller warns).
+#
+# SIBLING-DRIFT NOTE (k501): this helper and the one in kb-sync-personas must
+# be kept semantically in sync.  If either is changed, audit the other.
+# ---------------------------------------------------------------------------
+
+_resolve_git_roots() {
+  local container="$1"
+
+  # Case 1: container is itself a git repo
+  local top
+  top=$(git -C "$container" rev-parse --show-toplevel 2>/dev/null) || top=""
+  if [ -n "$top" ]; then
+    local canon_container canon_top
+    canon_container=$(_canon_path "$container") || canon_container="$container"
+    canon_top=$(_canon_path "$top")             || canon_top="$top"
+    if [ "$canon_container" = "$canon_top" ]; then
+      echo "$top"
+      return 0
+    fi
+  fi
+
+  # Case 2: scan immediate children for git repos (handles container-layout teams
+  # where the container dir itself is not a git repo — e.g. MainEventApp-iOS/).
+  # Declare loop-locals before the loop (k501: zsh local-in-loop stdout-leak).
+  local found=false
+  local child
+  local root
+  for child in "$container"/*/; do
+    [ -d "$child" ] || continue
+    # Quick check: must have a .git entry (file for worktrees, dir for main repo)
+    [ -e "${child}.git" ] || continue
+    # Confirm it is a valid work-tree root
+    if git -C "$child" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      root=$(git -C "$child" rev-parse --show-toplevel 2>/dev/null) || continue
+      echo "$root"
+      found=true
+    fi
+  done
+
+  # Return 0 regardless — caller checks output emptiness and warns.
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Extract character name from tap persona filename
 # e.g. academy_reno_engineer_persona.md → "reno"
 #      ios_worf_leadtester_persona.md   → "worf"
@@ -472,13 +522,15 @@ _deploy_all() {
 
   # --- Resolve main repo if not provided ---
   if [ -z "$main_repo" ]; then
-    main_repo=$(_main_root_from_wt "$PWD") || {
-      _err "Cannot determine main repo root from cwd. Pass <main_repo_path> explicitly."
-      return 1
-    }
+    # Try to resolve from cwd via git common dir.  When cwd is a container (not
+    # a git repo) _main_root_from_wt will fail — fall back to using cwd itself
+    # as the container candidate so _resolve_git_roots can probe its children.
+    local resolved_from_wt
+    resolved_from_wt=$(_main_root_from_wt "$PWD" 2>/dev/null) && main_repo="$resolved_from_wt" \
+      || main_repo="$PWD"
   fi
 
-  # Canonicalize main_repo
+  # Canonicalize the provided/resolved path
   local canon_main
   canon_main=$(_canon_path "$main_repo") || {
     _err "Cannot canonicalize main repo path: $main_repo"
@@ -486,6 +538,7 @@ _deploy_all() {
   }
 
   # --- Resolve source directory (shared with single-worktree mode) ---
+  # Resolved once here; reused across all git roots.
   local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
   local primary_src="${aiteamforge_dir}/${team}/personas/agents"
   local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
@@ -499,44 +552,70 @@ _deploy_all() {
     return 0
   fi
 
-  # --- Enumerate ALL linked worktrees via git porcelain output ---
-  # Parse "worktree <path>" lines; skip the first entry (main worktree).
-  # No layout-specific path filter — git's own registry is the authority.
-  local wt_paths
-  wt_paths=()
-  local first=true
-  local wt_line
-  while IFS= read -r wt_line; do
-    if [[ "$wt_line" == worktree\ * ]]; then
-      local wt_candidate="${wt_line#worktree }"
-      if [ "$first" = true ]; then
-        first=false
-        continue   # skip main worktree
-      fi
-      local canon_candidate
-      canon_candidate=$(_canon_path "$wt_candidate") || continue
-      wt_paths+=("$canon_candidate")
-    fi
-  done < <(git -C "$canon_main" worktree list --porcelain 2>/dev/null) || true
+  # --- Resolve git root(s) from the canonicalized path ---
+  # If canon_main is a plain git repo this yields just canon_main (no regression).
+  # If it is a container dir (iOS/Android/DNS topology) this yields the inner
+  # git repo(s) found as immediate children.
+  local git_roots
+  git_roots=()
+  local gr
+  while IFS= read -r gr; do
+    [ -n "$gr" ] && git_roots+=("$gr")
+  done < <(_resolve_git_roots "$canon_main")
 
-  if [ ${#wt_paths[@]} -eq 0 ]; then
-    _info "[${team}] No linked worktrees registered for repo at ${canon_main} — nothing to backfill."
+  if [ ${#git_roots[@]} -eq 0 ]; then
+    _warn "[${team}] ${canon_main} is not a git repo and has no inner git repos — nothing to backfill."
     return 0
   fi
 
-  _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s)..."
-
+  # --- For each resolved git root: enumerate + deploy linked worktrees ---
+  # Declare all loop-locals BEFORE the loops to avoid the zsh local-in-loop
+  # stdout-leak (k501: `local VAR` inside a loop emits VAR=value on zsh when
+  # VAR is reassigned on the 2nd+ iteration).
   local overall_rc=0
-  for wt_path in "${wt_paths[@]}"; do
-    local canon_target
-    canon_target=$(_guard_worktree_target "$wt_path" "$canon_main") || {
-      _warn "[${team}] Guard rejected: ${wt_path} — skipping."
-      continue
-    }
-    if [ -z "$canon_target" ]; then
+  local git_root
+  local wt_paths
+  local first
+  local wt_line
+  local wt_candidate
+  local canon_candidate
+  local wt_path
+  local canon_target
+  for git_root in "${git_roots[@]}"; do
+    _info "[${team}] Processing git root: ${git_root}"
+
+    # Enumerate all linked worktrees for this root
+    wt_paths=()
+    first=true
+    while IFS= read -r wt_line; do
+      if [[ "$wt_line" == worktree\ * ]]; then
+        wt_candidate="${wt_line#worktree }"
+        if [ "$first" = true ]; then
+          first=false
+          continue   # skip main worktree entry
+        fi
+        canon_candidate=$(_canon_path "$wt_candidate") || continue
+        wt_paths+=("$canon_candidate")
+      fi
+    done < <(git -C "$git_root" worktree list --porcelain 2>/dev/null) || true
+
+    if [ ${#wt_paths[@]} -eq 0 ]; then
+      _info "[${team}] No linked worktrees registered for repo at ${git_root} — nothing to backfill."
       continue
     fi
-    _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || overall_rc=$?
+
+    _info "[${team}] Backfilling ${#wt_paths[@]} worktree(s) under ${git_root}..."
+
+    for wt_path in "${wt_paths[@]}"; do
+      canon_target=$(_guard_worktree_target "$wt_path" "$git_root") || {
+        _warn "[${team}] Guard rejected: ${wt_path} — skipping."
+        continue
+      }
+      if [ -z "$canon_target" ]; then
+        continue
+      fi
+      _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir" || overall_rc=$?
+    done
   done
 
   return $overall_rc
@@ -893,6 +972,83 @@ PERSONA
     _pass "Test 16 (--all backfill: no linked worktrees → benign no-op, exit 0)"
   else
     _fail "Test 16 — expected exit 0 with no worktrees, got rc=${t16_rc}: ${t16_out}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 17: --all backfill with a CONTAINER path (single inner git repo)
+  # The container dir itself is NOT a git repo; the inner repo has 2 worktrees.
+  # Pre-fix code would call `git worktree list` on the container and find nothing.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 17: --all backfill: container path with one inner git repo...\n'
+  local ctr_base="${tmp}/container-single"
+  local ctr_inner="${ctr_base}/DEV"
+  local ctr_wt_a="${ctr_base}/worktrees/feature-c1"
+  local ctr_wt_b="${ctr_base}/worktrees/feature-c2"
+  mkdir -p "$ctr_inner" "$ctr_wt_a" "$ctr_wt_b"
+  git -C "$ctr_inner" init -q
+  git -C "$ctr_inner" commit -q --allow-empty -m "init"
+  git -C "$ctr_inner" worktree add -q "$ctr_wt_a" -b selftest-ctr-c1 2>/dev/null
+  git -C "$ctr_inner" worktree add -q "$ctr_wt_b" -b selftest-ctr-c2 2>/dev/null
+
+  local t17_out t17_rc=0
+  t17_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all "testteam" "$ctr_base" 2>&1) || t17_rc=$?
+
+  if [ -f "${ctr_wt_a}/.claude/agents/testteam_alpha_engineer_persona.md" ] && \
+     [ -f "${ctr_wt_b}/.claude/agents/testteam_alpha_engineer_persona.md" ] && \
+     [ "$t17_rc" -eq 0 ]; then
+    _pass "Test 17 (--all backfill: container→inner-git: both worktrees got personas)"
+  else
+    _fail "Test 17 — container backfill failed. rc=${t17_rc} wt_a=$(ls ${ctr_wt_a}/.claude/agents/ 2>/dev/null || echo MISSING) wt_b=$(ls ${ctr_wt_b}/.claude/agents/ 2>/dev/null || echo MISSING). out: ${t17_out}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 18: --all backfill with a CONTAINER path holding TWO inner git repos
+  # (DNS-style umbrella topology). Each inner repo has one worktree; both
+  # worktrees (2 total, 1 per inner repo) should receive personas.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 18: --all backfill: container path with two inner git repos (DNS topology)...\n'
+  local dns_base="${tmp}/container-dns"
+  local dns_repo_a="${dns_base}/DNSProtocols"
+  local dns_repo_b="${dns_base}/DNSCore"
+  local dns_wt_a1="${dns_base}/worktrees/proto-feat1"
+  local dns_wt_b1="${dns_base}/worktrees/core-feat1"
+  mkdir -p "$dns_repo_a" "$dns_repo_b" "$dns_wt_a1" "$dns_wt_b1"
+  git -C "$dns_repo_a" init -q
+  git -C "$dns_repo_a" commit -q --allow-empty -m "init"
+  git -C "$dns_repo_a" worktree add -q "$dns_wt_a1" -b selftest-dns-a1 2>/dev/null
+  git -C "$dns_repo_b" init -q
+  git -C "$dns_repo_b" commit -q --allow-empty -m "init"
+  git -C "$dns_repo_b" worktree add -q "$dns_wt_b1" -b selftest-dns-b1 2>/dev/null
+
+  local t18_out t18_rc=0
+  t18_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all "testteam" "$dns_base" 2>&1) || t18_rc=$?
+
+  if [ -f "${dns_wt_a1}/.claude/agents/testteam_alpha_engineer_persona.md" ] && \
+     [ -f "${dns_wt_b1}/.claude/agents/testteam_alpha_engineer_persona.md" ] && \
+     [ "$t18_rc" -eq 0 ]; then
+    _pass "Test 18 (--all backfill: DNS container with 2 inner repos: all worktrees got personas)"
+  else
+    _fail "Test 18 — DNS backfill failed. rc=${t18_rc} a1=$(ls ${dns_wt_a1}/.claude/agents/ 2>/dev/null || echo MISSING) b1=$(ls ${dns_wt_b1}/.claude/agents/ 2>/dev/null || echo MISSING). out: ${t18_out}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 19: --all backfill with a CONTAINER that has NO inner git repos
+  # Should warn and return 0 (benign no-op, not an error).
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 19: --all backfill: container with no inner git repos → benign warn + exit 0...\n'
+  local empty_ctr="${tmp}/container-empty"
+  mkdir -p "${empty_ctr}/subdir-notgit"
+
+  local t19_out t19_rc=0
+  t19_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_all "testteam" "$empty_ctr" 2>&1) || t19_rc=$?
+
+  if [ "$t19_rc" -eq 0 ] && printf '%s\n' "$t19_out" | grep -qi "not a git repo\|no inner git"; then
+    _pass "Test 19 (--all backfill: empty container → benign warn + exit 0)"
+  else
+    _fail "Test 19 — expected warn + exit 0 for empty container, got rc=${t19_rc}: ${t19_out}"
   fi
 
   # -----------------------------------------------------------------------
