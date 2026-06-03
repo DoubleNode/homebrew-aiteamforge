@@ -450,8 +450,9 @@ update_aux_scripts() {
 #   • Preserve exec bits (chmod +x), mirroring the installer.
 #   • These are STATELESS launch scripts: they carry no per-machine rendered values
 #     other than the ~/dev-team -> $AITEAMFORGE_DIR path rewrite (verified: no
-#     {{VAR}} placeholders in share/scripts/teams/). Re-rendering with the same
-#     rewrite install uses is therefore a faithful refresh, not a clobber.
+#     un-rendered {{VAR}} template SLOTS in share/scripts/teams/ — the path-only
+#     rewrite leaves any literal {{VAR}} sed-logic/comments untouched). Re-rendering
+#     with the same rewrite install uses is therefore a faithful refresh, not a clobber.
 _xaca0608_render_team_script() {
   # Mirror of install-team.sh::_xaca0483_install_script — keep these two sed
   # chains in lockstep (k501 sibling pair). The iterm2_window_manager.py special
