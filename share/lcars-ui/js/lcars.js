@@ -170,7 +170,7 @@ const KNOWLEDGE_DEBOUNCE_MS = 150;
 let activeSection = 'startup';
 let activeSectionIndex = 0;
 const SECTION_KEY = 'lcars-active-section';
-const SECTIONS = ['startup', 'daily-overview', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
+const SECTIONS = ['startup', 'daily-overview', 'home', 'todos', 'calendar', 'workflow', 'details', 'backlog', 'change-req', 'epics', 'releases', 'roadmap', 'knowledge-graph', 'team-config', 'integrations', 'rag-engines', 'backups', 'commands', 'export-import', 'persona-browser', 'role-matcher', 'change-history', 'usage'];
 const STARTUP_DELAY = 4000; // 4 seconds
 
 // Mode state machine (XACA-0164)
@@ -9515,6 +9515,13 @@ function switchSection(sectionName, skipAnimation = false) {
     // Load epics when switching to epics section
     if (sectionName === 'epics') {
         loadEpics();
+    }
+
+    // Render roadmap when switching to roadmap section (XACA-0625)
+    // renderRoadmap() is defined by the roadmap render module (XACA-0625-004).
+    // Guard prevents crash until that module is loaded.
+    if (sectionName === 'roadmap') {
+        if (typeof renderRoadmap === 'function') renderRoadmap();
     }
 
     // Render calendar when switching to calendar section
@@ -19781,4 +19788,372 @@ async function initChangeReqSection() {
     document.addEventListener('crsupport-changed', (e) => {
         applyChangeReqVisibility(!!(e.detail && e.detail.enabled));
     });
+}
+
+// =============================================================================
+// ROADMAP SECTION — XACA-0625-004
+// =============================================================================
+// =============================================================================
+// ROADMAP EXPORT (XACA-0625-006)
+// =============================================================================
+
+/**
+ * Export the roadmap as a PDF via the browser's native Save-as-PDF dialog.
+ *
+ * Strategy:
+ *   1. Add body.roadmap-printing — this class, combined with the @media print
+ *      rules in lcars.css, hides all non-roadmap chrome (header, sidebar, other
+ *      sections) so only the timeline renders in the print dialog.
+ *   2. Call window.print() to open the browser's print/Save-as-PDF dialog.
+ *   3. Remove body.roadmap-printing on the 'afterprint' event (fired when the
+ *      dialog closes in modern browsers). A synchronous fallback removal runs
+ *      immediately after window.print() returns in browsers that block
+ *      synchronously, guarding against the listener not firing.
+ *
+ * No server-side dependencies, no new libraries.
+ */
+function exportRoadmapPdf() {
+    const body = document.body;
+    const printingClass = 'roadmap-printing';
+
+    // Guard: don't stack multiple print calls
+    if (body.classList.contains(printingClass)) return;
+
+    // Afterprint listener — runs when the print dialog closes
+    function onAfterPrint() {
+        body.classList.remove(printingClass);
+        window.removeEventListener('afterprint', onAfterPrint);
+    }
+    window.addEventListener('afterprint', onAfterPrint);
+
+    // Activate print-only scope
+    body.classList.add(printingClass);
+
+    // Open the print dialog.
+    // In all modern browsers (Chrome, Firefox, Safari) window.print() returns
+    // immediately while the print dialog is open; afterprint fires when the
+    // dialog closes.  Do NOT remove the class here — removing it synchronously
+    // would strip roadmap-printing before the browser renders to PDF, defeating
+    // the purpose of the class.  The afterprint listener is the sole cleanup path.
+    window.print();
+}
+
+// Renders the /api/roadmap response into #roadmap-content.
+// CSS class contract (all styling belongs to XACA-0625-005):
+//
+//   .roadmap-loading          — shown while fetch is in flight
+//   .roadmap-error            — shown when fetch fails
+//   .roadmap-empty            — shown when no epics, releases, or unscheduled items
+//   .roadmap-timeline         — outer wrapper for the dated-axis + lanes block
+//   .roadmap-axis             — date ruler row at the top of the timeline
+//   .roadmap-axis-label       — individual tick label inside the axis
+//   .roadmap-lanes            — scrollable container holding all lane rows
+//   .roadmap-lane             — one horizontal lane row (epics | releases)
+//   .roadmap-lane-label       — the left-gutter label for a lane
+//   .roadmap-lane-track       — the right portion of the lane where bars are placed
+//   .roadmap-bar              — a ranged epic/release bar (has start != end)
+//   .roadmap-milestone        — a point-event marker (start == end)
+//   .roadmap-item-label       — the text label inside a bar or beside a milestone
+//   .roadmap-item-sublabel    — secondary info inside a bar (priority, itemCounts)
+//   .roadmap-tooltip          — tooltip element shown on hover
+//   .roadmap-unscheduled      — wrapper for the unscheduled lane below the timeline
+//   .roadmap-unscheduled-heading — section header text
+//   .roadmap-unscheduled-list — flex container of chips
+//   .roadmap-chip             — individual unscheduled item chip
+//   .roadmap-chip-label       — chip title text
+//   .roadmap-chip-meta        — chip secondary info (status, priority, itemCounts)
+//
+// Data-attributes for CSS color hooks:
+//   [data-color]              — epic color string, e.g. data-color="blue"
+//   [data-type]               — release type string, e.g. data-type="feature"
+//   [data-status]             — item status, e.g. data-status="active"
+//   [data-priority]           — epic priority, e.g. data-priority="high"
+//   [data-kind]               — "epic" or "release" on bar/milestone/chip elements
+// =============================================================================
+
+/**
+ * Render the roadmap section. Called by switchSection('roadmap').
+ * Fetches /api/roadmap and renders a timeline with three conceptual lanes:
+ *   - Epics lane (scheduled epics as bars or milestone markers)
+ *   - Releases lane (scheduled releases as milestone markers)
+ *   - Unscheduled lane (chips for epics + releases with no dates)
+ */
+async function renderRoadmap() {
+    const container = document.getElementById('roadmap-content');
+    if (!container) return;
+
+    // Show loading state immediately
+    container.innerHTML = '<div class="roadmap-loading">Loading roadmap...</div>';
+
+    let data;
+    try {
+        const response = await fetch(apiUrl('/api/roadmap'));
+        if (!response.ok) {
+            const errText = await response.text();
+            throw new Error(`Server returned ${response.status}: ${errText || response.statusText}`);
+        }
+        data = await response.json();
+    } catch (e) {
+        console.error('[roadmap] Could not load roadmap:', e);
+        container.innerHTML = `
+            <div class="roadmap-error">
+                <div class="roadmap-error-icon">&#9888;</div>
+                <div class="roadmap-error-text">Error loading roadmap</div>
+                <div class="roadmap-error-hint">${escapeHtml(e.message)}</div>
+            </div>
+        `;
+        return;
+    }
+
+    const scheduledEpics    = data.epics    || [];
+    const scheduledReleases = data.releases || [];
+    const unschEpics        = (data.unscheduled && data.unscheduled.epics)    || [];
+    const unschReleases     = (data.unscheduled && data.unscheduled.releases) || [];
+    const dateRange         = data.dateRange || null;
+
+    const hasScheduled   = dateRange && (scheduledEpics.length > 0 || scheduledReleases.length > 0);
+    const hasUnscheduled = unschEpics.length > 0 || unschReleases.length > 0;
+
+    // Fully empty state
+    if (!hasScheduled && !hasUnscheduled) {
+        container.innerHTML = `
+            <div class="roadmap-empty">
+                <div class="roadmap-empty-icon">&#x1F5FA;</div>
+                <div class="roadmap-empty-text">No roadmap data yet</div>
+                <div class="roadmap-empty-hint">Add due dates to epic items or target dates to releases to populate the timeline.</div>
+            </div>
+        `;
+        return;
+    }
+
+    // Build HTML into a buffer
+    const parts = [];
+
+    // -----------------------------------------------------------------------
+    // Timeline block (only when dateRange is non-null)
+    // -----------------------------------------------------------------------
+    if (hasScheduled) {
+        const rangeStart = new Date(dateRange.start + 'T00:00:00Z');
+        const rangeEnd   = new Date(dateRange.end   + 'T00:00:00Z');
+        const rangeSpanMs = rangeEnd.getTime() - rangeStart.getTime();
+
+        /**
+         * Convert a YYYY-MM-DD date string to a left-offset percentage within
+         * the range.  Clamped to [0, 100] to keep out-of-range events visible.
+         */
+        function dateToPct(dateStr) {
+            const d = new Date(dateStr + 'T00:00:00Z');
+            if (rangeSpanMs === 0) return 0;
+            const pct = (d.getTime() - rangeStart.getTime()) / rangeSpanMs * 100;
+            return Math.max(0, Math.min(100, pct));
+        }
+
+        /**
+         * Width percentage for a bar from startStr to endStr.
+         * Point events (start == end) get a minimum 0.5% so they remain
+         * clickable; the render layer should switch to .roadmap-milestone class
+         * for visual distinction.
+         */
+        function dateRangeWidthPct(startStr, endStr) {
+            const s = new Date(startStr + 'T00:00:00Z');
+            const e = new Date(endStr   + 'T00:00:00Z');
+            if (rangeSpanMs === 0) return 0;
+            const w = (e.getTime() - s.getTime()) / rangeSpanMs * 100;
+            return Math.max(0, w);
+        }
+
+        // Build month-boundary tick labels for the date axis
+        function buildAxisTicks() {
+            const ticks = [];
+            const cursor = new Date(rangeStart);
+            // Advance to the first day of the next month
+            cursor.setUTCDate(1);
+            cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+
+            const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+            while (cursor.getTime() <= rangeEnd.getTime()) {
+                const pct = (cursor.getTime() - rangeStart.getTime()) / rangeSpanMs * 100;
+                const label = MONTHS[cursor.getUTCMonth()] + ' ' + cursor.getUTCFullYear();
+                ticks.push({ pct, label });
+                cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+            }
+            return ticks;
+        }
+
+        const ticks = buildAxisTicks();
+
+        parts.push('<div class="roadmap-timeline">');
+
+        // Date axis
+        parts.push('<div class="roadmap-axis">');
+        for (const tick of ticks) {
+            parts.push(
+                `<span class="roadmap-axis-label" style="left:${tick.pct.toFixed(2)}%">${escapeHtml(tick.label)}</span>`
+            );
+        }
+        parts.push('</div>'); // .roadmap-axis
+
+        parts.push('<div class="roadmap-lanes">');
+
+        // -- Epics lane --
+        if (scheduledEpics.length > 0) {
+            parts.push('<div class="roadmap-lane" data-kind="epics">');
+            parts.push('<div class="roadmap-lane-label">Epics</div>');
+            parts.push('<div class="roadmap-lane-track">');
+
+            for (const epic of scheduledEpics) {
+                const isPoint = epic.start === epic.end;
+                const leftPct  = dateToPct(epic.start);
+                const widthPct = isPoint ? 0 : dateRangeWidthPct(epic.start, epic.end);
+
+                const label     = epic.shortTitle || epic.title || epic.id;
+                const fullTitle = epic.title || epic.id;
+                const priority  = epic.priority || '';
+                const status    = epic.status || '';
+                const color     = epic.color || '';
+                const counts    = epic.itemCounts || {};
+
+                // Build a tooltip string with key info
+                const inProgress = counts.inProgress || 0;
+                const completed  = counts.completed  || 0;
+                const total      = counts.total      || 0;
+                const tooltipText = [
+                    fullTitle,
+                    epic.start + ' → ' + epic.end,
+                    priority ? 'Priority: ' + priority : '',
+                    total ? (completed + '/' + total + ' done') : '',
+                    epic.description || '',
+                ].filter(Boolean).join(' | ');
+
+                if (isPoint) {
+                    parts.push(
+                        `<div class="roadmap-milestone"` +
+                        ` data-kind="epic"` +
+                        ` data-color="${escapeHtml(color)}"` +
+                        ` data-status="${escapeHtml(status)}"` +
+                        ` data-priority="${escapeHtml(priority)}"` +
+                        ` style="left:${leftPct.toFixed(2)}%"` +
+                        ` title="${escapeHtml(tooltipText)}">` +
+                        `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                        `</div>`
+                    );
+                } else {
+                    parts.push(
+                        `<div class="roadmap-bar"` +
+                        ` data-kind="epic"` +
+                        ` data-color="${escapeHtml(color)}"` +
+                        ` data-status="${escapeHtml(status)}"` +
+                        ` data-priority="${escapeHtml(priority)}"` +
+                        ` style="left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"` +
+                        ` title="${escapeHtml(tooltipText)}">` +
+                        `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                        (priority ? `<span class="roadmap-item-sublabel">${escapeHtml(priority)}` +
+                            (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
+                            `</span>` : '') +
+                        `</div>`
+                    );
+                }
+            }
+
+            parts.push('</div>'); // .roadmap-lane-track
+            parts.push('</div>'); // .roadmap-lane[epics]
+        }
+
+        // -- Releases lane --
+        if (scheduledReleases.length > 0) {
+            parts.push('<div class="roadmap-lane" data-kind="releases">');
+            parts.push('<div class="roadmap-lane-label">Releases</div>');
+            parts.push('<div class="roadmap-lane-track">');
+
+            for (const rel of scheduledReleases) {
+                // All scheduled releases are point events (start == end == targetDate)
+                const leftPct  = dateToPct(rel.start);
+                const label    = rel.shortTitle || rel.name || rel.id;
+                const fullName = rel.name || rel.id;
+                const relType  = rel.type || '';
+                const status   = rel.status || '';
+
+                const tooltipText = [
+                    fullName,
+                    rel.targetDate || rel.start,
+                    relType ? 'Type: ' + relType : '',
+                    status ? 'Status: ' + status : '',
+                ].filter(Boolean).join(' | ');
+
+                parts.push(
+                    `<div class="roadmap-milestone"` +
+                    ` data-kind="release"` +
+                    ` data-type="${escapeHtml(relType)}"` +
+                    ` data-status="${escapeHtml(status)}"` +
+                    ` style="left:${leftPct.toFixed(2)}%"` +
+                    ` title="${escapeHtml(tooltipText)}">` +
+                    `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                    `</div>`
+                );
+            }
+
+            parts.push('</div>'); // .roadmap-lane-track
+            parts.push('</div>'); // .roadmap-lane[releases]
+        }
+
+        parts.push('</div>'); // .roadmap-lanes
+        parts.push('</div>'); // .roadmap-timeline
+    }
+
+    // -----------------------------------------------------------------------
+    // Unscheduled lane (chip list; rendered whether or not timeline exists)
+    // -----------------------------------------------------------------------
+    if (hasUnscheduled) {
+        parts.push('<div class="roadmap-unscheduled">');
+        parts.push('<div class="roadmap-unscheduled-heading">Unscheduled</div>');
+        parts.push('<div class="roadmap-unscheduled-list">');
+
+        for (const epic of unschEpics) {
+            const label    = epic.shortTitle || epic.title || epic.id;
+            const color    = epic.color || '';
+            const priority = epic.priority || '';
+            const status   = epic.status || '';
+            const counts   = epic.itemCounts || {};
+            const total    = counts.total || 0;
+            const completed = counts.completed || 0;
+
+            parts.push(
+                `<div class="roadmap-chip"` +
+                ` data-kind="epic"` +
+                ` data-color="${escapeHtml(color)}"` +
+                ` data-status="${escapeHtml(status)}"` +
+                ` data-priority="${escapeHtml(priority)}"` +
+                ` title="${escapeHtml(epic.title || epic.id)}">` +
+                `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
+                (priority || total ? `<span class="roadmap-chip-meta">${escapeHtml(priority)}` +
+                    (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
+                    `</span>` : '') +
+                `</div>`
+            );
+        }
+
+        for (const rel of unschReleases) {
+            const label   = rel.shortTitle || rel.name || rel.id;
+            const relType = rel.type || '';
+            const status  = rel.status || '';
+
+            parts.push(
+                `<div class="roadmap-chip"` +
+                ` data-kind="release"` +
+                ` data-type="${escapeHtml(relType)}"` +
+                ` data-status="${escapeHtml(status)}"` +
+                ` title="${escapeHtml(rel.name || rel.id)}">` +
+                `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
+                (relType || status ? `<span class="roadmap-chip-meta">${escapeHtml(relType)}` +
+                    (status ? ` &bull; ${escapeHtml(status)}` : '') +
+                    `</span>` : '') +
+                `</div>`
+            );
+        }
+
+        parts.push('</div>'); // .roadmap-unscheduled-list
+        parts.push('</div>'); // .roadmap-unscheduled
+    }
+
+    container.innerHTML = parts.join('\n');
 }

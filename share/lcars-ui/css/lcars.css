@@ -719,6 +719,7 @@ body {
 .sidebar-button[data-section="releases"] { background: var(--lcars-green); }
 .sidebar-button[data-section="epics"] { background: var(--lcars-purple); }
 .sidebar-button[data-section="calendar"] { background: var(--lcars-amber); }
+.sidebar-button[data-section="roadmap"] { background: var(--lcars-cyan); }
 .sidebar-button[data-section="backups"] { background: var(--lcars-tan); }
 .sidebar-button[data-section="commands"] {
     background: var(--lcars-crimson);
@@ -784,6 +785,10 @@ body {
 .sidebar-button[data-section="calendar"].active {
     background: var(--lcars-black);
     color: var(--lcars-amber);
+}
+.sidebar-button[data-section="roadmap"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
 }
 .sidebar-button[data-section="commands"].active {
     background: var(--lcars-black);
@@ -1266,6 +1271,7 @@ body {
 .lcars-content > .releases-section,
 .lcars-content > .epics-section,
 .lcars-content > .calendar-section,
+.lcars-content > .roadmap-section,
 .lcars-content > .todos-section,
 .lcars-content > .commands-section,
 .lcars-content > .backups-section,
@@ -1298,6 +1304,7 @@ body {
 .lcars-content > .releases-section.active,
 .lcars-content > .epics-section.active,
 .lcars-content > .calendar-section.active,
+.lcars-content > .roadmap-section.active,
 .lcars-content > .todos-section.active,
 .lcars-content > .commands-section.active,
 .lcars-content > .backups-section.active,
@@ -1377,6 +1384,7 @@ body {
 .releases-section.active .section-bar,
 .epics-section.active .section-bar,
 .calendar-section.active .section-bar,
+.roadmap-section.active .section-bar,
 .todos-section.active .section-bar,
 .commands-section.active .section-bar,
 .backups-section.active .section-bar,
@@ -1394,6 +1402,7 @@ body {
 .releases-section.active .section-title,
 .epics-section.active .section-title,
 .calendar-section.active .section-title,
+.roadmap-section.active .section-title,
 .todos-section.active .section-title,
 .commands-section.active .section-title,
 .backups-section.active .section-title,
@@ -1432,6 +1441,8 @@ body {
 .epics-section.active .section-bar { transition-delay: 0.10s; }
 .calendar-section.active .section-title { transition-delay: 0.05s; }
 .calendar-section.active .section-bar { transition-delay: 0.10s; }
+.roadmap-section.active .section-title { transition-delay: 0.05s; }
+.roadmap-section.active .section-bar { transition-delay: 0.10s; }
 .todos-section.active .section-title { transition-delay: 0.05s; }
 .todos-section.active .section-bar { transition-delay: 0.10s; }
 
@@ -6199,6 +6210,7 @@ body {
 .tabbar-button[data-section="releases"] { background: var(--lcars-green); }
 .tabbar-button[data-section="epics"] { background: var(--lcars-purple); }
 .tabbar-button[data-section="calendar"] { background: var(--lcars-amber); }
+.tabbar-button[data-section="roadmap"] { background: var(--lcars-cyan); }
 .tabbar-button[data-section="commands"] { background: var(--lcars-crimson); }
 .tabbar-button[data-section="backups"] { background: var(--lcars-tan); }
 
@@ -6234,6 +6246,10 @@ body {
 .tabbar-button[data-section="calendar"].active {
     background: var(--lcars-black);
     color: var(--lcars-amber);
+}
+.tabbar-button[data-section="roadmap"].active {
+    background: var(--lcars-black);
+    color: var(--lcars-cyan);
 }
 .tabbar-button[data-section="commands"].active {
     background: var(--lcars-black);
@@ -7161,6 +7177,7 @@ body {
     .lcars-content > .releases-section.active,
     .lcars-content > .epics-section.active,
     .lcars-content > .calendar-section.active,
+    .lcars-content > .roadmap-section.active,
     .lcars-content > .commands-section.active,
     .lcars-content > .backups-section.active,
     .lcars-content > .integrations-section.active,
@@ -16598,4 +16615,831 @@ body {
     padding: 24px 16px;
     text-align: center;
     opacity: 0.7;
+}
+
+/* ===============================================================================
+   ROADMAP SECTION — LCARS Timeline (XACA-0625-005)
+   CSS-only styling for the semantic markup emitted by renderRoadmap().
+   The render layer sets ONLY positional inline styles (left:X%; width:X%).
+   Everything visual lives here.
+   =============================================================================== */
+
+/* ---------------------------------------------------------------------------
+   Section container — scrollable vertically, clipped horizontally
+   --------------------------------------------------------------------------- */
+.roadmap-section {
+    background: var(--lcars-black);
+    color: var(--lcars-peach);
+    font-family: 'Antonio', 'Helvetica Neue', sans-serif;
+}
+
+#roadmap-content {
+    padding: 12px 20px 40px;
+    box-sizing: border-box;
+    min-height: 100%;
+}
+
+/* ---------------------------------------------------------------------------
+   Loading state
+   --------------------------------------------------------------------------- */
+.roadmap-loading {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 180px;
+    font-size: 1rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--lcars-lavender);
+    opacity: 0.6;
+}
+
+.roadmap-loading::before {
+    content: '';
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--lcars-cyan);
+    margin-right: 10px;
+    animation: roadmap-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes roadmap-pulse {
+    0%, 100% { opacity: 0.3; transform: scale(0.8); }
+    50%       { opacity: 1;   transform: scale(1.2); }
+}
+
+/* ---------------------------------------------------------------------------
+   Error state
+   --------------------------------------------------------------------------- */
+.roadmap-error {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 180px;
+    gap: 8px;
+    padding: 24px;
+}
+
+.roadmap-error-icon {
+    font-size: 2rem;
+    color: var(--lcars-error);
+    line-height: 1;
+}
+
+.roadmap-error-text {
+    font-size: 1rem;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    color: var(--lcars-alert-red);
+    font-weight: 600;
+}
+
+.roadmap-error-hint {
+    font-size: 0.78rem;
+    color: var(--lcars-tan);
+    letter-spacing: 0.05em;
+    opacity: 0.7;
+    text-align: center;
+    max-width: 420px;
+}
+
+/* ---------------------------------------------------------------------------
+   Empty state
+   --------------------------------------------------------------------------- */
+.roadmap-empty {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 200px;
+    gap: 10px;
+    padding: 32px;
+}
+
+.roadmap-empty-icon {
+    font-size: 2.4rem;
+    opacity: 0.45;
+    line-height: 1;
+}
+
+.roadmap-empty-text {
+    font-size: 1rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--lcars-lavender);
+    font-weight: 600;
+}
+
+.roadmap-empty-hint {
+    font-size: 0.78rem;
+    color: var(--lcars-tan);
+    letter-spacing: 0.05em;
+    opacity: 0.65;
+    text-align: center;
+    max-width: 400px;
+    line-height: 1.5;
+}
+
+/* ---------------------------------------------------------------------------
+   Timeline outer wrapper
+   Clips the axis and track horizontally; lets the track scroll.
+   --------------------------------------------------------------------------- */
+.roadmap-timeline {
+    background: var(--lcars-darker);
+    border: 1px solid rgba(153, 204, 255, 0.12);
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 24px;
+}
+
+/* ---------------------------------------------------------------------------
+   Date axis (ruler strip)
+   --------------------------------------------------------------------------- */
+.roadmap-axis {
+    position: relative;
+    height: 28px;
+    background: linear-gradient(180deg, rgba(153, 204, 255, 0.10) 0%, rgba(153, 204, 255, 0.04) 100%);
+    border-bottom: 1px solid rgba(153, 204, 255, 0.20);
+    overflow: hidden;
+}
+
+.roadmap-axis-label {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    font-size: 0.65rem;
+    font-family: 'Antonio', 'Helvetica Neue', sans-serif;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--lcars-cyan);
+    white-space: nowrap;
+    user-select: none;
+    /* Tick mark */
+}
+
+.roadmap-axis-label::before {
+    content: '';
+    display: block;
+    width: 1px;
+    height: 6px;
+    background: var(--lcars-cyan);
+    opacity: 0.4;
+    margin: 0 auto 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Lanes container
+   --------------------------------------------------------------------------- */
+.roadmap-lanes {
+    display: flex;
+    flex-direction: column;
+}
+
+/* ---------------------------------------------------------------------------
+   Individual lane row
+   --------------------------------------------------------------------------- */
+.roadmap-lane {
+    display: flex;
+    align-items: stretch;
+    border-bottom: 1px solid rgba(153, 204, 255, 0.07);
+    min-height: 52px;
+}
+
+.roadmap-lane:last-child {
+    border-bottom: none;
+}
+
+/* Lane label — left gutter */
+.roadmap-lane-label {
+    flex: 0 0 80px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 0 10px 0 8px;
+    font-size: 0.68rem;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    font-weight: 600;
+    white-space: nowrap;
+    border-right: 2px solid rgba(153, 204, 255, 0.15);
+    background: rgba(0, 0, 0, 0.3);
+}
+
+/* Epics lane label — purple accent */
+.roadmap-lane[data-kind="epics"] .roadmap-lane-label {
+    color: var(--lcars-purple);
+    border-right-color: rgba(204, 153, 255, 0.30);
+}
+
+/* Releases lane label — green accent */
+.roadmap-lane[data-kind="releases"] .roadmap-lane-label {
+    color: var(--lcars-green);
+    border-right-color: rgba(153, 255, 153, 0.25);
+}
+
+/* Lane track — positioned area for bars/milestones */
+.roadmap-lane-track {
+    position: relative;
+    flex: 1;
+    min-height: 52px;
+    overflow: hidden;
+}
+
+/* Subtle vertical grid lines aligned to the axis ticks — CSS-only approximation */
+.roadmap-lane-track::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: repeating-linear-gradient(
+        90deg,
+        transparent 0px,
+        transparent calc(10% - 1px),
+        rgba(153, 204, 255, 0.04) calc(10% - 1px),
+        rgba(153, 204, 255, 0.04) 10%
+    );
+    pointer-events: none;
+}
+
+/* ---------------------------------------------------------------------------
+   Bars — ranged items (epics with start != end)
+   Inline style provides: left:X%; width:X%
+   --------------------------------------------------------------------------- */
+.roadmap-bar {
+    position: absolute;
+    top: 50%;
+    transform: translateY(-50%);
+    height: 26px;
+    min-width: 4px;
+    border-radius: 13px;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+    overflow: hidden;
+    cursor: default;
+    white-space: nowrap;
+    box-sizing: border-box;
+    transition: filter 0.15s ease, transform 0.15s ease;
+    z-index: 2;
+    /* Default color — overridden by data-color selectors below */
+    background: var(--lcars-purple);
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+}
+
+.roadmap-bar:hover {
+    filter: brightness(1.25);
+    transform: translateY(-50%) scaleY(1.08);
+    z-index: 10;
+}
+
+/* Epic bar text */
+.roadmap-bar .roadmap-item-label {
+    font-size: 0.70rem;
+    letter-spacing: 0.06em;
+    font-weight: 600;
+    text-transform: uppercase;
+    color: var(--lcars-black);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    flex: 1;
+}
+
+.roadmap-bar .roadmap-item-sublabel {
+    font-size: 0.60rem;
+    letter-spacing: 0.04em;
+    color: rgba(0, 0, 0, 0.55);
+    margin-left: 6px;
+    flex-shrink: 0;
+    white-space: nowrap;
+}
+
+/* ---------------------------------------------------------------------------
+   Milestones — point events (start == end)
+   Inline style provides: left:X%  (no width)
+   Rendered as a diamond marker with a label below.
+   --------------------------------------------------------------------------- */
+.roadmap-milestone {
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 3;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    cursor: default;
+    transition: filter 0.15s ease, transform 0.15s ease;
+}
+
+.roadmap-milestone:hover {
+    filter: brightness(1.3);
+    transform: translate(-50%, -50%) scale(1.15);
+    z-index: 10;
+}
+
+/* Diamond shape via rotated square */
+.roadmap-milestone::before {
+    content: '';
+    display: block;
+    width: 12px;
+    height: 12px;
+    border-radius: 2px;
+    transform: rotate(45deg);
+    margin-bottom: 3px;
+    flex-shrink: 0;
+    /* Default color — overridden per kind/type below */
+    background: var(--lcars-amber);
+    box-shadow: 0 0 6px rgba(255, 204, 0, 0.5);
+}
+
+.roadmap-milestone .roadmap-item-label {
+    font-size: 0.60rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--lcars-peach);
+    text-align: center;
+    max-width: 72px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    line-height: 1.2;
+}
+
+/* ---------------------------------------------------------------------------
+   Epic color mapping via data-color attribute
+   Server-defined keys: purple, blue, teal, green, yellow, orange, red, pink
+   Each bar gets a LCARS-palette solid fill; milestones get a glowing diamond.
+   --------------------------------------------------------------------------- */
+
+/* -- purple (default for epics) -- */
+.roadmap-bar[data-kind="epic"][data-color="purple"],
+.roadmap-bar[data-kind="epic"]:not([data-color]) {
+    background: linear-gradient(90deg, var(--lcars-purple) 0%, var(--lcars-violet) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="purple"]::before,
+.roadmap-milestone[data-kind="epic"]:not([data-color])::before {
+    background: var(--lcars-purple);
+    box-shadow: 0 0 8px rgba(204, 153, 255, 0.6);
+}
+
+/* -- blue -- */
+.roadmap-bar[data-kind="epic"][data-color="blue"] {
+    background: linear-gradient(90deg, var(--lcars-blue) 0%, var(--lcars-navy) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="blue"]::before {
+    background: var(--lcars-blue);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.6);
+}
+
+/* -- teal -- */
+.roadmap-bar[data-kind="epic"][data-color="teal"] {
+    background: linear-gradient(90deg, var(--lcars-cyan) 0%, #5fb0b0 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="teal"]::before {
+    background: var(--lcars-cyan);
+    box-shadow: 0 0 8px rgba(153, 204, 255, 0.6);
+}
+
+/* -- green -- */
+.roadmap-bar[data-kind="epic"][data-color="green"] {
+    background: linear-gradient(90deg, var(--lcars-green) 0%, var(--lcars-green-dark) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="green"]::before {
+    background: var(--lcars-green);
+    box-shadow: 0 0 8px rgba(153, 255, 153, 0.6);
+}
+
+/* -- yellow -- */
+.roadmap-bar[data-kind="epic"][data-color="yellow"] {
+    background: linear-gradient(90deg, var(--lcars-yellow) 0%, var(--lcars-amber) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="yellow"]::before {
+    background: var(--lcars-yellow);
+    box-shadow: 0 0 8px rgba(255, 255, 153, 0.6);
+}
+
+/* -- orange -- */
+.roadmap-bar[data-kind="epic"][data-color="orange"] {
+    background: linear-gradient(90deg, var(--lcars-orange) 0%, var(--lcars-tan) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="orange"]::before {
+    background: var(--lcars-orange);
+    box-shadow: 0 0 8px rgba(255, 153, 0, 0.6);
+}
+
+/* -- red -- */
+.roadmap-bar[data-kind="epic"][data-color="red"] {
+    background: linear-gradient(90deg, var(--lcars-alert-red) 0%, var(--lcars-red) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="red"]::before {
+    background: var(--lcars-alert-red);
+    box-shadow: 0 0 8px rgba(255, 102, 102, 0.6);
+}
+
+/* -- pink -- */
+.roadmap-bar[data-kind="epic"][data-color="pink"] {
+    background: linear-gradient(90deg, var(--lcars-crimson) 0%, var(--lcars-rose) 100%);
+}
+.roadmap-milestone[data-kind="epic"][data-color="pink"]::before {
+    background: var(--lcars-rose);
+    box-shadow: 0 0 8px rgba(255, 102, 136, 0.6);
+}
+
+/* ---------------------------------------------------------------------------
+   Release milestone color mapping via data-type attribute
+   Known types: feature, bugfix, hotfix, maintenance
+   Releases on the roadmap are always milestones (point events).
+   --------------------------------------------------------------------------- */
+.roadmap-milestone[data-kind="release"]::before {
+    /* Default release — gold/amber */
+    background: var(--lcars-amber);
+    box-shadow: 0 0 8px rgba(255, 204, 0, 0.55);
+}
+
+.roadmap-milestone[data-kind="release"][data-type="feature"]::before {
+    background: var(--lcars-blue);
+    box-shadow: 0 0 8px rgba(153, 153, 255, 0.55);
+}
+
+.roadmap-milestone[data-kind="release"][data-type="bugfix"]::before {
+    background: var(--lcars-orange);
+    box-shadow: 0 0 8px rgba(255, 153, 0, 0.55);
+}
+
+.roadmap-milestone[data-kind="release"][data-type="hotfix"]::before {
+    background: var(--lcars-crimson);
+    box-shadow: 0 0 8px rgba(255, 68, 102, 0.55);
+}
+
+.roadmap-milestone[data-kind="release"][data-type="maintenance"]::before {
+    background: var(--lcars-green);
+    box-shadow: 0 0 8px rgba(153, 255, 153, 0.55);
+}
+
+/* Release milestone label color follows type */
+.roadmap-milestone[data-kind="release"] .roadmap-item-label {
+    color: var(--lcars-amber);
+}
+.roadmap-milestone[data-kind="release"][data-type="feature"] .roadmap-item-label {
+    color: var(--lcars-blue);
+}
+.roadmap-milestone[data-kind="release"][data-type="bugfix"] .roadmap-item-label {
+    color: var(--lcars-orange);
+}
+.roadmap-milestone[data-kind="release"][data-type="hotfix"] .roadmap-item-label {
+    color: var(--lcars-crimson);
+}
+.roadmap-milestone[data-kind="release"][data-type="maintenance"] .roadmap-item-label {
+    color: var(--lcars-green);
+}
+
+/* ---------------------------------------------------------------------------
+   Unscheduled section — chip list below the timeline
+   --------------------------------------------------------------------------- */
+.roadmap-unscheduled {
+    padding: 0 0 8px;
+}
+
+.roadmap-unscheduled-heading {
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    font-weight: 700;
+    color: var(--lcars-tan);
+    margin-bottom: 10px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid rgba(204, 153, 102, 0.20);
+}
+
+.roadmap-unscheduled-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+/* Chip — LCARS pill for an unscheduled item */
+.roadmap-chip {
+    display: flex;
+    flex-direction: column;
+    padding: 5px 12px;
+    border-radius: 12px;
+    background: var(--lcars-surface);
+    border: 1px solid rgba(153, 204, 255, 0.15);
+    cursor: default;
+    transition: filter 0.12s ease, border-color 0.12s ease;
+    max-width: 200px;
+}
+
+.roadmap-chip:hover {
+    filter: brightness(1.2);
+    border-color: rgba(153, 204, 255, 0.35);
+}
+
+.roadmap-chip-label {
+    font-size: 0.72rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    /* Default label color */
+    color: var(--lcars-lavender);
+}
+
+.roadmap-chip-meta {
+    font-size: 0.60rem;
+    letter-spacing: 0.04em;
+    color: var(--lcars-tan);
+    margin-top: 2px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    opacity: 0.75;
+}
+
+/* Epic chips: left border color from data-color, label color matches */
+.roadmap-chip[data-kind="epic"] {
+    border-left-width: 3px;
+    border-left-style: solid;
+    border-left-color: var(--lcars-purple);
+}
+.roadmap-chip[data-kind="epic"][data-color="purple"] { border-left-color: var(--lcars-purple); }
+.roadmap-chip[data-kind="epic"][data-color="purple"] .roadmap-chip-label { color: var(--lcars-purple); }
+
+.roadmap-chip[data-kind="epic"][data-color="blue"] { border-left-color: var(--lcars-blue); }
+.roadmap-chip[data-kind="epic"][data-color="blue"] .roadmap-chip-label { color: var(--lcars-blue); }
+
+.roadmap-chip[data-kind="epic"][data-color="teal"] { border-left-color: var(--lcars-cyan); }
+.roadmap-chip[data-kind="epic"][data-color="teal"] .roadmap-chip-label { color: var(--lcars-cyan); }
+
+.roadmap-chip[data-kind="epic"][data-color="green"] { border-left-color: var(--lcars-green); }
+.roadmap-chip[data-kind="epic"][data-color="green"] .roadmap-chip-label { color: var(--lcars-green); }
+
+.roadmap-chip[data-kind="epic"][data-color="yellow"] { border-left-color: var(--lcars-yellow); }
+.roadmap-chip[data-kind="epic"][data-color="yellow"] .roadmap-chip-label { color: var(--lcars-yellow); }
+
+.roadmap-chip[data-kind="epic"][data-color="orange"] { border-left-color: var(--lcars-orange); }
+.roadmap-chip[data-kind="epic"][data-color="orange"] .roadmap-chip-label { color: var(--lcars-orange); }
+
+.roadmap-chip[data-kind="epic"][data-color="red"] { border-left-color: var(--lcars-alert-red); }
+.roadmap-chip[data-kind="epic"][data-color="red"] .roadmap-chip-label { color: var(--lcars-alert-red); }
+
+.roadmap-chip[data-kind="epic"][data-color="pink"] { border-left-color: var(--lcars-rose); }
+.roadmap-chip[data-kind="epic"][data-color="pink"] .roadmap-chip-label { color: var(--lcars-rose); }
+
+/* Release chips: type-based border color */
+.roadmap-chip[data-kind="release"] {
+    border-left-width: 3px;
+    border-left-style: solid;
+    border-left-color: var(--lcars-amber);
+}
+.roadmap-chip[data-kind="release"] .roadmap-chip-label { color: var(--lcars-amber); }
+
+.roadmap-chip[data-kind="release"][data-type="feature"] { border-left-color: var(--lcars-blue); }
+.roadmap-chip[data-kind="release"][data-type="feature"] .roadmap-chip-label { color: var(--lcars-blue); }
+
+.roadmap-chip[data-kind="release"][data-type="bugfix"] { border-left-color: var(--lcars-orange); }
+.roadmap-chip[data-kind="release"][data-type="bugfix"] .roadmap-chip-label { color: var(--lcars-orange); }
+
+.roadmap-chip[data-kind="release"][data-type="hotfix"] { border-left-color: var(--lcars-crimson); }
+.roadmap-chip[data-kind="release"][data-type="hotfix"] .roadmap-chip-label { color: var(--lcars-crimson); }
+
+.roadmap-chip[data-kind="release"][data-type="maintenance"] { border-left-color: var(--lcars-green); }
+.roadmap-chip[data-kind="release"][data-type="maintenance"] .roadmap-chip-label { color: var(--lcars-green); }
+
+/* ---------------------------------------------------------------------------
+   Responsive: allow horizontal scroll on narrow viewports
+   rather than crushing the timeline layout.
+   The lane track overflows internally — the outer wrapper clips it.
+   On very narrow screens, let the timeline scroll horizontally.
+   --------------------------------------------------------------------------- */
+@media (max-width: 600px) {
+    .roadmap-timeline {
+        overflow-x: auto;
+    }
+
+    .roadmap-axis,
+    .roadmap-lanes {
+        min-width: 480px;
+    }
+
+    .roadmap-lane-label {
+        flex: 0 0 60px;
+        font-size: 0.58rem;
+        padding: 0 6px;
+    }
+
+    #roadmap-content {
+        padding: 8px 10px 32px;
+    }
+
+    .roadmap-unscheduled-list {
+        gap: 6px;
+    }
+
+    .roadmap-chip {
+        max-width: 160px;
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   Export PDF button (XACA-0625-006)
+   Sits inside .section-header alongside .section-title and .section-bar.
+   Styled to match the .do-refresh-btn pattern from daily-overview.css but
+   using the gold/amber accent that matches the roadmap section header.
+   --------------------------------------------------------------------------- */
+.roadmap-pdf-btn {
+    font-family: 'Antonio', sans-serif;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--lcars-amber);
+    background: rgba(255, 204, 0, 0.08);
+    border: 1px solid rgba(255, 204, 0, 0.30);
+    border-radius: 10px;
+    padding: 2px 10px;
+    cursor: pointer;
+    white-space: nowrap;
+    flex-shrink: 0;
+    transition: background 0.12s ease, border-color 0.12s ease, opacity 0.12s ease;
+}
+
+.roadmap-pdf-btn:hover {
+    background: rgba(255, 204, 0, 0.18);
+    border-color: rgba(255, 204, 0, 0.60);
+}
+
+.roadmap-pdf-btn:focus-visible {
+    outline: 1px solid rgba(255, 204, 0, 0.70);
+    outline-offset: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Print: body.roadmap-printing scope (XACA-0625-006)
+   Toggled by exportRoadmapPdf() before calling window.print().
+   Hides all chrome so only the roadmap section renders to the PDF.
+   Removed on the 'afterprint' event so normal screen layout is restored.
+
+   Approach chosen: body-class (body.roadmap-printing) over a bare
+   @media print because:
+     1. Only the roadmap tab should trigger "print just the timeline"; other
+        tabs (calendar, backlog, …) must not be affected if the user prints
+        from there.
+     2. The class is added/removed programmatically, giving fine control over
+        cleanup (afterprint event listener).
+   A companion @media print block (below) applies additional rendering
+   fixes (landscape page, explicit lane heights, color-adjust, etc.) that
+   are safe regardless of which section is visible.
+   --------------------------------------------------------------------------- */
+
+/* Hide all chrome when the roadmap-printing class is active */
+body.roadmap-printing .lcars-top-frame,
+body.roadmap-printing .lcars-sidebar,
+body.roadmap-printing .lcars-content > :not(.roadmap-section) {
+    display: none !important;
+}
+
+/* Make the roadmap section fill the page */
+body.roadmap-printing .lcars-main {
+    display: block;
+    margin: 0;
+    padding: 0;
+    width: 100%;
+}
+
+body.roadmap-printing .lcars-content {
+    display: block;
+    overflow: visible;
+    padding: 0;
+    margin: 0;
+    width: 100%;
+}
+
+/* Roadmap section: reset to static flow so the full content renders */
+body.roadmap-printing .roadmap-section {
+    display: block;
+    position: static;
+    overflow: visible;
+    height: auto;
+    width: 100%;
+}
+
+/* ---------------------------------------------------------------------------
+   @media print (XACA-0625-006)
+   Safe for all pages; restores absolute-to-static layout for printing,
+   adds color-adjust, landscape page, and applies all 7 overrides listed
+   in the original notes block.
+   --------------------------------------------------------------------------- */
+@media print {
+    /* Landscape page — the timeline is wide */
+    @page {
+        size: landscape;
+        margin: 12mm 10mm;
+    }
+
+    /* 1. Suppress loading animation (override #1) */
+    .roadmap-loading::before {
+        animation: none;
+    }
+
+    /* 2. Remove grid-line gradient background (override #2) */
+    .roadmap-lane-track::after {
+        display: none;
+    }
+
+    /* 3. Strip box-shadows/glows from bars and milestones (override #3) */
+    .roadmap-bar,
+    .roadmap-milestone::before {
+        box-shadow: none !important;
+    }
+
+    /* 4. Roadmap section: static positioning + full height (override #4) */
+    .roadmap-section {
+        position: static !important;
+        overflow: visible !important;
+        height: auto !important;
+    }
+
+    /* 5. Lane tracks: explicit height so abs-positioned bars aren't collapsed
+          (override #5). Bars are 26px tall + centered at 50%, so 52px
+          (the same min-height as .roadmap-lane) is the safe floor. */
+    .roadmap-lane-track {
+        position: relative !important; /* keep so abs-positioned bars still work */
+        overflow: visible !important;
+        min-height: 52px !important;
+        height: 52px !important;
+    }
+
+    /* 6. Reset hover transforms to base values (override #6) */
+    .roadmap-bar:hover {
+        filter: none;
+        transform: translateY(-50%);
+        z-index: 2;
+    }
+
+    .roadmap-milestone:hover {
+        filter: none;
+        transform: translate(-50%, -50%);
+        z-index: 3;
+    }
+
+    /* 7. Trim roadmap-content padding (override #7) */
+    #roadmap-content {
+        padding-bottom: 8px !important;
+    }
+
+    /* Preserve bar fill colors — critical since the color-coding IS the data.
+       Applied to the timeline and chip containers. */
+    .roadmap-timeline,
+    .roadmap-bar,
+    .roadmap-milestone::before,
+    .roadmap-chip,
+    .roadmap-unscheduled {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    /* Timeline: full printable width, no clipping */
+    .roadmap-timeline {
+        width: 100%;
+        overflow: visible;
+        page-break-inside: avoid;
+    }
+
+    /* Lanes: avoid splits mid-row */
+    .roadmap-lane {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    /* Axis: overflow visible so labels aren't clipped */
+    .roadmap-axis {
+        overflow: visible;
+    }
+
+    /* Unscheduled block: avoid orphaning heading from chips */
+    .roadmap-unscheduled {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    /* Chip list: allow wrapping so long lists page-break cleanly */
+    .roadmap-unscheduled-list {
+        flex-wrap: wrap;
+    }
+
+    /* Chips: avoid breaking a chip across a page */
+    .roadmap-chip {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    /* Hide the Export PDF button itself (no point printing a print button) */
+    .roadmap-pdf-btn {
+        display: none !important;
+    }
 }

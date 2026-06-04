@@ -133,6 +133,9 @@
                             <span>RELEASES</span>
                         </div>
                     </div>
+                    <div class="sidebar-button" data-section="roadmap">
+                        <span>ROADMAP</span>
+                    </div>
                     <div class="sidebar-button" data-section="commands">
                         <span>HELP</span>
                     </div>
@@ -627,6 +630,22 @@
                     </div>
                     <div class="epics-dashboard" id="epics-dashboard">
                         <div class="epics-loading">Loading epics...</div>
+                    </div>
+                </section>
+
+                <!-- Roadmap — XACA-0625 -->
+                <!-- Aggregates Epics + Releases onto a timeline view.           -->
+                <!-- Render logic is populated by renderRoadmap() (XACA-0625-004). -->
+                <section class="roadmap-section" data-mode="kanban">
+                    <div class="section-header gold">
+                        <span class="section-title">ROADMAP</span>
+                        <div class="section-bar"></div>
+                        <!-- Export PDF button — XACA-0625-006 -->
+                        <button class="roadmap-pdf-btn" type="button" onclick="exportRoadmapPdf()" aria-label="Export roadmap as PDF">EXPORT PDF</button>
+                    </div>
+                    <div id="roadmap-content">
+                        <!-- Populated by renderRoadmap() — XACA-0625-004 -->
+                        <div class="roadmap-loading">Loading roadmap...</div>
                     </div>
                 </section>
 
@@ -1674,6 +1693,9 @@
             </div>
             <div class="tabbar-button" data-section="releases">
                 <span class="tabbar-label">RELEASES</span>
+            </div>
+            <div class="tabbar-button" data-section="roadmap">
+                <span class="tabbar-label">ROADMAP</span>
             </div>
             <div class="tabbar-button" data-section="integrations">
                 <span class="tabbar-label">INTEGR</span>

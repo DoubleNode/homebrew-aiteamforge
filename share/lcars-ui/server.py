@@ -5784,6 +5784,187 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         except Exception as e:
             self.send_error(500, f"Error listing epics: {e}")
 
+    def serve_roadmap(self):
+        """GET /api/roadmap - Aggregate epics and releases into a timeline payload.
+
+        Returns scheduled and unscheduled epics + releases for the active team,
+        with epic date ranges rolled up from child item dueDate fields.
+
+        No query parameters — always scoped to LCARS_TEAM (contract §3).
+        XACA-0625.
+        """
+        import fcntl
+        from datetime import datetime
+
+        try:
+            board_file = self._get_board_file()
+
+            # --- Load raw board data once (epics + backlog + releases) ---
+            # We read the file directly so we can access the full backlog including
+            # dueDate.  _get_items_for_epic strips dueDate (line 5685-5695), so we
+            # cannot use it for date rollup (contract §7.1 / §2.2).
+            raw_epics = []
+            raw_backlog = []
+            raw_releases = []
+
+            if board_file.exists():
+                lock_file = board_file.with_suffix('.json.lock')
+                with open(lock_file, 'w') as _lock:
+                    fcntl.flock(_lock.fileno(), fcntl.LOCK_SH)
+                    try:
+                        with open(board_file, 'r') as _f:
+                            _board = json.load(_f)
+                        raw_epics = _board.get('epics', [])
+                        raw_backlog = _board.get('backlog', [])
+                        raw_releases = _board.get('releases', [])
+                    finally:
+                        fcntl.flock(_lock.fileno(), fcntl.LOCK_UN)
+
+            # Build an O(1) lookup: item id → raw item dict
+            backlog_index = {item['id']: item for item in raw_backlog if 'id' in item}
+
+            # --- Date validation helper ---
+            def _parse_date(date_str):
+                """Return date_str if it is a valid YYYY-MM-DD string, else None."""
+                if not date_str or not isinstance(date_str, str):
+                    return None
+                try:
+                    datetime.strptime(date_str, '%Y-%m-%d')
+                    return date_str
+                except ValueError:
+                    print(f"[LCARS] roadmap: skipping malformed date '{date_str}'")
+                    return None
+
+            # --- Process epics ---
+            scheduled_epics = []
+            unscheduled_epics = []
+
+            for epic in raw_epics:
+                epic_id = epic.get('id', '')
+                item_ids = epic.get('itemIds', [])
+
+                # Build a slim item list for _derive_epic_state / _build_epic_item_counts.
+                # These helpers need only 'status'; we include the full raw slice so
+                # they receive any fields they might check in future.
+                child_items = [backlog_index[iid] for iid in item_ids if iid in backlog_index]
+
+                # Date rollup (contract §4.1): eligible = non-cancelled + has dueDate
+                dated_children = []
+                for child in child_items:
+                    if child.get('status') == 'cancelled':
+                        continue
+                    d = _parse_date(child.get('dueDate'))
+                    if d:
+                        dated_children.append(d)
+
+                item_counts = self._build_epic_item_counts(child_items)
+
+                base_epic = {
+                    'id': epic_id,
+                    'title': epic.get('title', ''),
+                    'shortTitle': epic.get('shortTitle', None),
+                    'color': epic.get('color', ''),
+                    'status': epic.get('status', ''),
+                    'priority': epic.get('priority', 'medium'),
+                    'tags': epic.get('tags', []),
+                    'description': epic.get('description', ''),
+                    'childCount': len(item_ids),
+                    'datedChildCount': len(dated_children),
+                    'itemCounts': item_counts,
+                    'addedAt': epic.get('addedAt', ''),
+                    'updatedAt': epic.get('updatedAt', ''),
+                }
+
+                if dated_children:
+                    start_date = min(dated_children)
+                    end_date = max(dated_children)
+                    scheduled_epics.append({
+                        **base_epic,
+                        'start': start_date,
+                        'end': end_date,
+                        'scheduled': True,
+                    })
+                else:
+                    unscheduled_epics.append({
+                        **base_epic,
+                        'scheduled': False,
+                    })
+
+            # --- Process releases (active only — contract §6 "Archived releases") ---
+            scheduled_releases = []
+            unscheduled_releases = []
+
+            for release in raw_releases:
+                if release.get('status') == 'archived':
+                    continue  # exclude archived releases per contract §6
+
+                release_id = release.get('id', '')
+                target_date = _parse_date(release.get('targetDate'))
+
+                base_release = {
+                    'id': release_id,
+                    'name': release.get('name', ''),
+                    'shortTitle': release.get('shortTitle', None),
+                    'type': release.get('type', ''),
+                    'status': release.get('status', ''),
+                    'targetDate': release.get('targetDate'),
+                    'tags': release.get('tags', []),
+                    'team': release.get('team', LCARS_TEAM),
+                    'environments': release.get('environments', []),
+                    'createdAt': release.get('createdAt', ''),
+                }
+
+                if target_date:
+                    # Point event: start == end == targetDate (contract §4.2 / §4.3)
+                    scheduled_releases.append({
+                        **base_release,
+                        'start': target_date,
+                        'end': target_date,
+                        'scheduled': True,
+                    })
+                else:
+                    unscheduled_releases.append({
+                        **base_release,
+                        'scheduled': False,
+                    })
+
+            # --- Compute overall dateRange (contract §5.1) ---
+            all_dates = (
+                [e['start'] for e in scheduled_epics]
+                + [e['end'] for e in scheduled_epics]
+                + [r['start'] for r in scheduled_releases]
+                + [r['end'] for r in scheduled_releases]
+            )
+            if all_dates:
+                date_range = {
+                    'start': min(all_dates),
+                    'end': max(all_dates),
+                }
+            else:
+                date_range = None  # everything unscheduled (contract §6)
+
+            payload = {
+                'team': LCARS_TEAM,
+                'generatedAt': self._get_timestamp(),
+                'dateRange': date_range,
+                'epics': scheduled_epics,
+                'releases': scheduled_releases,
+                'unscheduled': {
+                    'epics': unscheduled_epics,
+                    'releases': unscheduled_releases,
+                },
+            }
+
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Cache-Control', 'no-cache')
+            self.end_headers()
+            self.wfile.write(json.dumps(payload, indent=2).encode())
+
+        except Exception as e:
+            self.send_error(500, f"Error building roadmap: {e}")
+
     def serve_epic_detail(self, epic_id):
         """GET /api/epics/<id> - Get epic details from kanban board
 
@@ -10739,6 +10920,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Epic API endpoints
         elif path == '/api/epics':
             self.serve_epics_list(parsed.query)
+        # Roadmap API endpoint (XACA-0625)
+        elif path == '/api/roadmap':
+            self.serve_roadmap()
         elif path.startswith('/api/epics/') and path.endswith('/items'):
             epic_id = path.replace('/api/epics/', '').replace('/items', '')
             self.serve_epic_items(epic_id)
