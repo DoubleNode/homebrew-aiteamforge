@@ -17303,42 +17303,118 @@ body.roadmap-printing .lcars-content > :not(.roadmap-section) {
     display: none !important;
 }
 
-/* Make the roadmap section fill the page */
+/* Make the roadmap section fill the page.
+   XACA-0629: !important required — base rules use !important on flex/position/overflow. */
 body.roadmap-printing .lcars-main {
-    display: block;
-    margin: 0;
-    padding: 0;
-    width: 100%;
+    display: block !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
 }
 
 body.roadmap-printing .lcars-content {
-    display: block;
-    overflow: visible;
-    padding: 0;
-    margin: 0;
-    width: 100%;
+    display: block !important;
+    overflow: visible !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    position: static !important;
 }
 
-/* Roadmap section: reset to static flow so the full content renders */
-body.roadmap-printing .roadmap-section {
-    display: block;
-    position: static;
-    overflow: visible;
-    height: auto;
-    width: 100%;
+/* Roadmap section: reset to static flow so the full content renders.
+   XACA-0629: Root cause of blank output — the base rule at line ~1285 has
+   "position: absolute !important" (specificity 0,2,0) and the .active rule
+   at ~line 1319 has "overflow-y: auto !important" (specificity 0,3,0).
+   To win the specificity battle on overflow we must match or exceed 0,3,0.
+   We do that by using the full ".lcars-content > .roadmap-section" path
+   combined with "body.roadmap-printing" — giving 0,3,1 (body element + 3
+   classes) — which beats the 0,3,0 .active rule.  The position fix is tied
+   at 0,2,0 + !important vs 0,2,0 + !important, so source-order wins (our
+   rule is later in the file). */
+body.roadmap-printing .lcars-content > .roadmap-section {
+    display: block !important;
+    position: static !important;
+    overflow: visible !important;
+    overflow-y: visible !important;
+    height: auto !important;
+    width: 100% !important;
+    top: auto !important;
+    left: auto !important;
+    right: auto !important;
+    bottom: auto !important;
+    padding-top: 0 !important;
+    padding-bottom: 0 !important;
 }
 
 /* ---------------------------------------------------------------------------
-   @media print (XACA-0625-006)
+   @media print (XACA-0625-006, patched XACA-0629)
    Safe for all pages; restores absolute-to-static layout for printing,
    adds color-adjust, landscape page, and applies all 7 overrides listed
    in the original notes block.
+
+   XACA-0629: Chrome-hide + layout-reset rules are duplicated here (inside
+   @media print, scoped to body.roadmap-printing) so the actual print render
+   matches the screen-preview class-toggled layout.  The outer screen-only
+   block handles the visual preview; this block ensures the rendered PDF
+   output has the same overrides applied.
    --------------------------------------------------------------------------- */
 @media print {
     /* Landscape page — the timeline is wide */
     @page {
         size: landscape;
         margin: 12mm 10mm;
+    }
+
+    /* XACA-0629: hide chrome in the actual print render (mirrors the
+       screen-scope body.roadmap-printing rules above; selectors match
+       for consistent specificity in both screen+print contexts) */
+    body.roadmap-printing .lcars-top-frame,
+    body.roadmap-printing .lcars-sidebar,
+    body.roadmap-printing .lcars-content > :not(.roadmap-section) {
+        display: none !important;
+    }
+
+    body.roadmap-printing .lcars-main {
+        display: block !important;
+        overflow: visible !important;
+        margin: 0 !important;
+        padding: 0 !important;
+        width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+    }
+
+    body.roadmap-printing .lcars-content {
+        display: block !important;
+        overflow: visible !important;
+        padding: 0 !important;
+        margin: 0 !important;
+        width: 100% !important;
+        height: auto !important;
+        min-height: 0 !important;
+        position: static !important;
+    }
+
+    /* XACA-0629: match specificity of .active rule (0,3,0 + element = 0,3,1)
+       to ensure overflow-y: visible beats overflow-y: auto on .active state */
+    body.roadmap-printing .lcars-content > .roadmap-section {
+        display: block !important;
+        position: static !important;
+        overflow: visible !important;
+        overflow-y: visible !important;
+        height: auto !important;
+        width: 100% !important;
+        top: auto !important;
+        left: auto !important;
+        right: auto !important;
+        bottom: auto !important;
+        padding-top: 0 !important;
+        padding-bottom: 0 !important;
     }
 
     /* 1. Suppress loading animation (override #1) */
@@ -17357,11 +17433,17 @@ body.roadmap-printing .roadmap-section {
         box-shadow: none !important;
     }
 
-    /* 4. Roadmap section: static positioning + full height (override #4) */
+    /* 4. Roadmap section: static positioning + full height (override #4).
+          XACA-0629: added top/left/right/bottom resets to neutralise the
+          base rule's top:0/left:0/right:0/bottom:0 anchors. */
     .roadmap-section {
         position: static !important;
         overflow: visible !important;
         height: auto !important;
+        top: auto !important;
+        left: auto !important;
+        right: auto !important;
+        bottom: auto !important;
     }
 
     /* 5. Lane tracks: explicit height so abs-positioned bars aren't collapsed
