@@ -3134,6 +3134,49 @@ function createBacklogItem(item, index) {
     }
     identityZone.appendChild(dueDatePill);
 
+    // XACA-0624: Points (effort estimate) pill — sibling to due-date pill
+    // Displays "<n>h" when estimated, "—" when null/absent.
+    const pointsPill = document.createElement('div');
+    const hasPoints = (item.points != null && typeof item.points === 'number' && item.points >= 0);
+    if (hasPoints) {
+        pointsPill.className = 'backlog-points';
+        pointsPill.textContent = `${item.points}h`;
+        pointsPill.title = `Estimate: ${item.points} developer-hour${item.points === 1 ? '' : 's'}`;
+        pointsPill.setAttribute('aria-label', `Effort estimate: ${item.points}h`);
+        if (!isCompleted) {
+            pointsPill.classList.add('editable');
+            pointsPill.title += ' — Click to edit';
+        }
+    } else {
+        pointsPill.className = 'backlog-points no-estimate';
+        if (!isCompleted) {
+            pointsPill.classList.add('editable');
+            pointsPill.textContent = '—'; // em dash
+            pointsPill.title = 'No estimate — Click to set developer-hours';
+            pointsPill.setAttribute('aria-label', 'No effort estimate set');
+        } else {
+            pointsPill.textContent = '—';
+            pointsPill.title = 'No estimate was set';
+            pointsPill.setAttribute('aria-label', 'No effort estimate');
+        }
+    }
+    if (!isCompleted) {
+        pointsPill.setAttribute('role', 'button');
+        pointsPill.setAttribute('tabindex', '0');
+        pointsPill.addEventListener('click', (e) => {
+            e.stopPropagation();
+            showPointsEditor(pointsPill, item, index);
+        });
+        pointsPill.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' || e.key === ' ') {
+                e.preventDefault();
+                e.stopPropagation();
+                showPointsEditor(pointsPill, item, index);
+            }
+        });
+    }
+    identityZone.appendChild(pointsPill);
+
     // XACA-0067-003: Developer avatar (shows who's working on this item)
     // Try direct workingOnId match first, then fall back to worktreeWindowId lookup
     const workingWindow = getWorkingWindow(item.id);
@@ -3712,7 +3755,8 @@ function createBacklogItem(item, index) {
     div.appendChild(contentArea);
 
     // XACA-0551: Time metrics detail row — shown in expanded view (CSS controls visibility).
-    // Displays Active effort and Lead time with clear labels when data is present.
+    // XACA-0624: Also shows points (effort estimate) when present.
+    // Displays Active effort, Lead time, and Estimate with clear labels when data is present.
     (function appendTimeMetricsRow() {
         const activeEffort = calculateActiveEffort(item);
         const isInProgress = item.status === 'in_progress' || item.activelyWorking;
@@ -3725,10 +3769,21 @@ function createBacklogItem(item, index) {
 
         const hasEffort = activeEffort > 0;
         const hasLead = leadTimeMs > 0;
-        if (!hasEffort && !hasLead) return;
+        // XACA-0624: points is a top-level field (number >=0); null/absent = unestimated
+        const hasPoints = (item.points != null && typeof item.points === 'number' && item.points >= 0);
+        if (!hasEffort && !hasLead && !hasPoints) return;
 
         const metricsRow = document.createElement('div');
         metricsRow.className = 'item-time-metrics-row';
+
+        // XACA-0624: Points (estimate) shown first in the detail row
+        if (hasPoints) {
+            const pointsEl = document.createElement('span');
+            pointsEl.className = 'item-metrics-points';
+            pointsEl.innerHTML = `<span class="item-metrics-label">Estimate:</span> ${item.points}h`;
+            pointsEl.title = `Developer-hours estimate: ${item.points}h`;
+            metricsRow.appendChild(pointsEl);
+        }
 
         if (hasEffort) {
             const effortStr = formatWorkTime(activeEffort);
@@ -4795,6 +4850,194 @@ async function updateItemDueDate(item, newDueDate, element) {
         console.log('Successfully updated due date for', item.id, 'to', newDueDate);
     } catch (error) {
         console.error('Error updating due date:', error);
+    }
+}
+
+/**
+ * XACA-0624: Show inline editor for effort estimate (points)
+ * Mirrors showDueDateEditor — popup with numeric input, common presets, clear, set.
+ * @param {HTMLElement} element - The points pill element
+ * @param {Object} item - The kanban item
+ * @param {number} index - The item index in the backlog
+ */
+function showPointsEditor(element, item, index) {
+    // Remove any existing editor of this type
+    const existingEditor = document.querySelector('.points-editor');
+    if (existingEditor) {
+        existingEditor.remove();
+    }
+
+    const editor = document.createElement('div');
+    editor.className = 'points-editor';
+
+    // Label
+    const label = document.createElement('div');
+    label.style.cssText = 'font-size:10px;color:var(--lcars-cyan);font-weight:600;';
+    label.textContent = 'ESTIMATE (developer-hours)';
+    editor.appendChild(label);
+
+    // Numeric input
+    const numInput = document.createElement('input');
+    numInput.type = 'number';
+    numInput.className = 'points-input';
+    numInput.min = '0';
+    numInput.step = '0.5';
+    numInput.placeholder = 'e.g. 4, 0.5, 1.25';
+    if (item.points != null && typeof item.points === 'number') {
+        numInput.value = item.points;
+    }
+
+    // Common preset values (developer-hours)
+    const presets = document.createElement('div');
+    presets.className = 'points-presets';
+
+    [0.5, 1, 2, 4, 8].forEach(hrs => {
+        const btn = document.createElement('button');
+        btn.className = 'points-preset';
+        btn.textContent = `${hrs}h`;
+        btn.title = `Set estimate to ${hrs} developer-hour${hrs === 1 ? '' : 's'}`;
+        btn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            updateItemPoints(item, hrs, element);
+            editor.remove();
+        });
+        presets.appendChild(btn);
+    });
+
+    // Clear button
+    const clearBtn = document.createElement('button');
+    clearBtn.className = 'points-preset clear';
+    clearBtn.textContent = 'Clear';
+    clearBtn.title = 'Remove estimate (back to unestimated)';
+    clearBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (item.points != null) {
+            updateItemPoints(item, null, element);
+        }
+        editor.remove();
+    });
+    presets.appendChild(clearBtn);
+
+    // Set button for custom value
+    const setBtn = document.createElement('button');
+    setBtn.className = 'points-set';
+    setBtn.textContent = 'Set';
+    setBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        numInput.blur();
+        const raw = numInput.value.trim();
+        if (raw === '' || raw === '-') {
+            editor.remove();
+            return;
+        }
+        const val = parseFloat(raw);
+        if (isNaN(val) || val < 0) {
+            numInput.style.borderColor = 'var(--lcars-red)';
+            numInput.title = 'Must be a non-negative number';
+            return;
+        }
+        updateItemPoints(item, val, element);
+        editor.remove();
+    });
+
+    editor.appendChild(numInput);
+    editor.appendChild(presets);
+    editor.appendChild(setBtn);
+
+    // Position below the pill (mirrors showDueDateEditor positioning)
+    const rect = element.getBoundingClientRect();
+    editor.style.position = 'fixed';
+    editor.style.top = `${rect.bottom + 2}px`;
+    editor.style.left = `${rect.left}px`;
+    editor.style.zIndex = '1000';
+
+    document.body.appendChild(editor);
+    numInput.focus();
+    numInput.select();
+
+    // Close when clicking outside
+    const closeEditor = (e) => {
+        if (!editor.contains(e.target) && e.target !== element) {
+            editor.remove();
+            document.removeEventListener('click', closeEditor);
+        }
+    };
+    setTimeout(() => document.addEventListener('click', closeEditor), 0);
+
+    // Keyboard: Enter = set, Escape = close
+    numInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            const raw = numInput.value.trim();
+            if (raw !== '') {
+                const val = parseFloat(raw);
+                if (!isNaN(val) && val >= 0) {
+                    updateItemPoints(item, val, element);
+                    editor.remove();
+                } else {
+                    numInput.style.borderColor = 'var(--lcars-red)';
+                }
+            } else {
+                editor.remove();
+            }
+        } else if (e.key === 'Escape') {
+            editor.remove();
+        }
+    });
+}
+
+/**
+ * XACA-0624: Update item effort estimate (points) via API
+ * @param {Object} item - The kanban item
+ * @param {number|null} newPoints - Developer-hours (>=0, fractional OK) or null to clear
+ * @param {HTMLElement} element - The points pill element to update visually
+ */
+async function updateItemPoints(item, newPoints, element) {
+    const payload = {
+        team: CONFIG.team,
+        id: item.id,
+        updates: {
+            updatedAt: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
+        }
+    };
+
+    if (newPoints != null) {
+        payload.updates.points = newPoints;  // stored as JSON number by the server
+    } else {
+        // Clearing: delete the field
+        payload.clearFields = ['points'];
+    }
+
+    console.log('Updating points:', payload);
+
+    try {
+        const response = await fetch(apiUrl('/api/update-item'), {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error('Failed to update points:', response.status, errorText);
+            return;
+        }
+
+        // Update item model and pill DOM immediately (optimistic update)
+        item.points = newPoints;
+        if (newPoints != null) {
+            element.className = 'backlog-points editable';
+            element.textContent = `${newPoints}h`;
+            element.title = `Estimate: ${newPoints} developer-hour${newPoints === 1 ? '' : 's'} — Click to edit`;
+            element.setAttribute('aria-label', `Effort estimate: ${newPoints}h`);
+        } else {
+            element.className = 'backlog-points no-estimate editable';
+            element.textContent = '—';
+            element.title = 'No estimate — Click to set developer-hours';
+            element.setAttribute('aria-label', 'No effort estimate set');
+        }
+        console.log('Successfully updated points for', item.id, 'to', newPoints);
+    } catch (error) {
+        console.error('Error updating points:', error);
     }
 }
 

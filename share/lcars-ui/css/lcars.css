@@ -3735,6 +3735,153 @@ body {
     transform: scale(1.02);
 }
 
+/* ═══════════════════════════════════════════════════════════════════════════════
+   XACA-0624: Points (effort estimate) pill
+   Cyan/blue family — distinct from due-date (green/orange/red) and jira (blue-link)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Base pill — mirrors .backlog-due-date structure */
+.backlog-points {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    gap: 3px;
+    color: var(--lcars-black);
+    opacity: 0.7;
+    transition: opacity 0.2s ease;
+    background: var(--lcars-cyan);
+}
+
+.backlog-points:hover {
+    opacity: 1.0;
+}
+
+/* Unestimated state — muted dashed, like .backlog-due-date.no-date */
+.backlog-points.no-estimate {
+    background: rgba(100, 100, 100, 0.5);
+    color: var(--lcars-cyan);
+    border: 1px dashed var(--lcars-cyan);
+    font-size: 9px;
+}
+
+.backlog-points.no-estimate:hover {
+    background: var(--lcars-cyan);
+    color: var(--lcars-black);
+    border-style: solid;
+}
+
+/* Editable affordance */
+.backlog-points.editable {
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.backlog-points.editable:hover {
+    transform: scale(1.1);
+    box-shadow: 0 0 8px rgba(153, 204, 255, 0.4);
+}
+
+.backlog-points:focus {
+    outline: 2px solid var(--lcars-cyan);
+    outline-offset: 2px;
+}
+
+/* Points editor popup — mirrors .due-date-editor using cyan accent */
+.points-editor {
+    background: var(--lcars-black);
+    border: 2px solid var(--lcars-cyan);
+    border-radius: 8px;
+    padding: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+    min-width: 180px;
+}
+
+.points-input {
+    background: var(--lcars-black);
+    border: 1px solid var(--lcars-cyan);
+    border-radius: 4px;
+    color: var(--lcars-peach);
+    padding: 6px 8px;
+    font-size: 12px;
+    width: 100%;
+    box-sizing: border-box;
+}
+
+.points-input:focus {
+    outline: none;
+    border-color: var(--lcars-orange);
+}
+
+.points-presets {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+}
+
+.points-preset {
+    background: var(--lcars-cyan);
+    border: none;
+    border-radius: 4px;
+    color: var(--lcars-black);
+    padding: 4px 8px;
+    font-size: 10px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s ease;
+}
+
+.points-preset:hover {
+    background: var(--lcars-blue);
+    color: white;
+    transform: scale(1.05);
+}
+
+.points-preset.clear {
+    background: var(--lcars-red);
+    color: white;
+}
+
+.points-preset.clear:hover {
+    background: #ff5555;
+}
+
+.points-set {
+    background: var(--lcars-cyan);
+    border: none;
+    border-radius: 4px;
+    color: var(--lcars-black);
+    padding: 6px 12px;
+    font-size: 11px;
+    font-weight: 700;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    width: 100%;
+}
+
+.points-set:hover {
+    background: var(--lcars-blue);
+    color: white;
+    transform: scale(1.02);
+}
+
+/* Points in the detail/metrics row */
+.item-metrics-points {
+    font-size: 11px;
+    color: var(--lcars-cyan);
+}
+
+.item-metrics-points .item-metrics-label {
+    color: var(--lcars-peach);
+    opacity: 0.7;
+}
+
 /* Jira ID editor popup */
 .jira-editor {
     background: var(--lcars-black);
