@@ -57,7 +57,12 @@ def _resolve_amb_handle_from_tmux():
             return None
         with open(session_map_file) as f:
             session_map = json.load(f)
-        return session_map.get(session_name)
+        handle = session_map.get(session_name)
+        # XACA-0628: overlay-only freelance projects reduce to the generic
+        # 'freelance-<terminal>' key (no project-specific map entry exists).
+        if not handle and session_name.startswith("freelance-"):
+            handle = session_map.get("freelance-" + session_name.rsplit("-", 1)[-1])
+        return handle
     except Exception:
         return None
 

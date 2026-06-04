@@ -173,15 +173,12 @@ def _hardcoded_team_kanban_dirs() -> dict:
         "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
         "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
         "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
-        "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-        "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-        "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-        "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-        "freelance-doublenode-caravan": Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
-        "freelance-doublenode-awaysentry": Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
-        "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
-        "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
-        "freelance-bandwear-android": Path("/Users/Shared/Development/Bandwear/Android/kanban"),
+        # Freelance per-client/project slugs (DoubleNode/Liquidstyle/Bandwear) live
+        # ONLY in the per-machine overlay (~/.aiteamforge/team-paths.json) as of
+        # XACA-0628. At runtime _build_team_kanban_dirs() enumerates them via
+        # list_teams()/get_team_kanban_dir(). This hardcoded dict is the
+        # aiteamforge_paths-unavailable fallback; the generic-freelance projects
+        # are intentionally absent here.
         "legal-coparenting": _home / "legal" / "coparenting" / "kanban",
         "medical-general": _home / "medical" / "general" / "kanban",
         "finance-personal": _home / "finance" / "personal" / "kanban",
@@ -305,20 +302,30 @@ def _build_item_prefix_to_team() -> dict:
         'XCMD': 'command',
         'XDNS': 'dns',
         'XMEV': 'mainevent',
-        'XFSW': 'freelance-doublenode-starwords',
-        'XFAP': 'freelance-doublenode-appplanning',
-        'XFWS': 'freelance-doublenode-workstats',
-        'XFLB': 'freelance-doublenode-lifeboard',
-        'XVAN': 'freelance-doublenode-caravan',
-        'XFAS': 'freelance-doublenode-awaysentry',
-        'XFLA': 'freelance-liquidstyle-agentbadges-app',
-        'XFLI': 'freelance-liquidstyle-agentbadges-ios',
-        'XBWA': 'freelance-bandwear-android',
+        # Freelance per-client/project prefixes (XFSW/XFAP/.../XBWA/XBWD) are NOT
+        # listed here — they live only in the per-machine overlay (XACA-0628). The
+        # runtime path derives them from build_team_code_map() (merged overlay), so
+        # this hardcoded dict (reached only if aiteamforge_paths is unavailable)
+        # intentionally omits them along with the generic FRE fallback.
         'XLCP': 'legal-coparenting',
         'XFIN': 'finance-personal',
     }
 
 _ITEM_PREFIX_TO_TEAM: dict = _build_item_prefix_to_team()
+
+# XACA-0628: registry-derived {team_id -> CODE} reverse map for epic/item code
+# generation. Built from build_team_code_map() (merged DEFAULT_TEAMS + the
+# per-machine overlay), so overlay-only freelance projects (FSW/FAP/.../BWA/BWD)
+# resolve to their canonical code instead of falling through to the heuristic.
+# Consulted by KanbanBoardHandler._get_team_code() after its small hardcoded
+# TEAM_CODES table and before the multi-segment heuristic.
+def _build_team_to_code_map() -> dict:
+    registry_map = _aiteamforge_build_team_code_map()  # {CODE -> team_id}
+    if registry_map:
+        return {team_id: code for code, team_id in registry_map.items()}
+    return {}
+
+_TEAM_TO_CODE: dict = _build_team_to_code_map()
 
 # Legacy fallback for backwards compatibility
 KANBAN_DIR = Path.home() / "dev-team" / "kanban"
@@ -2202,7 +2209,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # - Freelance: freelance-{clientId}-{projectId} (e.g., freelance-doublenode-workstats)
     # - Legal: legal-{projectId} (e.g., legal-coparenting)
     # - MainEvent floaters: mainevent-{projectId} (project-specific)
-    PATH_PREFIXES = ['/academy', '/firebase', '/dns', '/freelance-doublenode-workstats', '/freelance-doublenode-starwords', '/freelance-doublenode-appplanning', '/command', '/ios', '/android', '/mainevent', '/legal-coparenting', '/finance-personal']
+    # XACA-0628: the per-client/project freelance prefixes are no longer hardcoded
+    # here — they're derived from the live team registry (TEAM_KANBAN_DIRS, which
+    # is built from list_teams() incl. the per-machine overlay), so EVERY
+    # overlay-only freelance project gets funnel path-stripping, not just a
+    # hardcoded subset. The strip loop is order-independent (startswith match).
+    PATH_PREFIXES = (
+        ['/academy', '/firebase', '/dns', '/command', '/ios', '/android',
+         '/mainevent', '/legal-coparenting', '/finance-personal']
+        + sorted(
+            '/' + _t for _t in TEAM_KANBAN_DIRS
+            if _t.startswith('freelance-')
+        )
+    )
 
     # XACA-0333-002: mtime-based cache for team-paths.json (avoids disk read on every GET)
     _TEAM_PATHS_CACHE: dict = {'mtime_ns': None, 'data': None}
@@ -5489,14 +5508,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # =========================================================================
 
     # Team code mapping for epic IDs (matches kanban-helpers.sh)
+    # XACA-0628: per-client/project freelance slugs are NOT listed here — they
+    # resolve via the registry/overlay-derived _TEAM_TO_CODE map in
+    # _get_team_code(). Only the generic 'freelance' (FRE) stays.
     TEAM_CODES = {
         "ios": "IOS",
         "android": "AND",
         "firebase": "FIR",
         "freelance": "FRE",
-        "freelance-doublenode-starwords": "FSW",
-        "freelance-doublenode-workstats": "FWS",
-        "freelance-doublenode-appplanning": "FAP",
         "academy": "ACA",
         "dns": "DNS",
         "command": "CMD",
@@ -5519,6 +5538,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """Get 3-letter team code for epic IDs"""
         if team in self.TEAM_CODES:
             return self.TEAM_CODES[team]
+        # XACA-0628: consult the registry/overlay-derived map so overlay-only
+        # freelance projects (FSW/FAP/.../BWA/BWD) get their CANONICAL code
+        # rather than the heuristic below (which would mis-derive e.g.
+        # starwords→FST instead of FSW). Empty/unavailable map → heuristic.
+        registry_code = _TEAM_TO_CODE.get(team)
+        if registry_code:
+            return registry_code.upper()
         # Smart fallback for multi-segment names
         if '-' in team:
             first_segment = team.split('-')[0]
@@ -11193,20 +11219,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'legal-coparenting': 'legal',
             'medical-general': 'medical',
             'finance-personal': 'finance',
-            'freelance-doublenode-workstats': 'freelance',
-            'freelance-doublenode-starwords': 'freelance',
-            'freelance-doublenode-appplanning': 'freelance',
-            'freelance-doublenode-lifeboard': 'freelance',
-            'freelance-doublenode-caravan': 'freelance',
-            'freelance-doublenode-awaysentry': 'freelance',
-            'freelance-liquidstyle-agentbadges-app': 'freelance',
-            'freelance-liquidstyle-agentbadges-ios': 'freelance',
-            'freelance-bandwear-android': 'freelance',
-            'freelance-workstats': 'freelance',
-            'freelance-starwords': 'freelance',
-            'freelance-appplanning': 'freelance',
         }
-        team_dir = team_dir_map.get(team, team)
+        # XACA-0628: every per-client/project freelance slug (now overlay-only)
+        # shares the single 'freelance' asset directory. Use a prefix rule rather
+        # than enumerating each project so current AND future overlay-only
+        # freelance slugs resolve their logos/avatars without a hardcoded entry.
+        if team.startswith('freelance-'):
+            team_dir = 'freelance'
+        else:
+            team_dir = team_dir_map.get(team, team)
 
         # Build the actual file path
         dev_team_dir = Path.home() / "dev-team"

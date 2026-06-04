@@ -18,8 +18,13 @@ from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # All 20 canonical teams with their expected 3-letter codes.
-# XACA-0542-015: This table is the parity fixture — any drift between
-# DEFAULT_TEAMS team_code values and this list will fail the test.
+# XACA-0542-015: This table is the parity fixture for the MERGED team-code map
+# (build_team_code_map / get_team_code / get_team_from_code).
+# XACA-0628: the 9 per-client/project freelance slugs (FSW/FAP/FWS/FLB/VAN/FAS/
+# FLA/FLI/BWA) were moved OUT of DEFAULT_TEAMS and now resolve via the per-machine
+# overlay (~/.aiteamforge/team-paths.json) — so the parity tests below validate
+# the merged (DEFAULT_TEAMS + overlay) result, not DEFAULT_TEAMS alone. On this
+# dev machine the overlay supplies those 9 codes; the table stays complete.
 # ---------------------------------------------------------------------------
 _EXPECTED_TEAM_CODES: dict[str, str] = {
     "academy":                             "ACA",
@@ -324,6 +329,140 @@ class TestTeamCodeParity(unittest.TestCase):
                     f"{prefix}: expected {team!r}, got {item_prefix_map[prefix]!r}"
                 )
         self.assertEqual(missing, [], f"_ITEM_PREFIX_TO_TEAM parity failures: {missing}")
+
+
+# ---------------------------------------------------------------------------
+# XACA-0628: build_team_code_map() MERGE semantics.
+#
+# Locks the behavioural contract that the map = DEFAULT_TEAMS team_codes with
+# live-config (team-paths.json) team_codes overlaid ON TOP:
+#   - no overlay codes  → identical to the DEFAULT_TEAMS-derived map (regression)
+#   - overlay-only slug  → additive (per-project freelance code with no
+#                          DEFAULT_TEAMS entry, e.g. BWD → ...bandwear-dashboard)
+#   - overlay collision  → live wins
+#   - non-freelance teams unaffected
+# ---------------------------------------------------------------------------
+
+import unittest.mock as mock  # noqa: E402
+
+from aiteamforge_paths import DEFAULT_TEAMS  # noqa: E402
+
+
+def _default_teams_code_map() -> dict:
+    """The map build_team_code_map() must produce from DEFAULT_TEAMS alone."""
+    return {
+        entry["team_code"].upper(): team_id
+        for team_id, entry in DEFAULT_TEAMS.items()
+        if entry.get("team_code")
+    }
+
+
+class TestBuildTeamCodeMapMerge(unittest.TestCase):
+    """XACA-0628: build_team_code_map() merges overlay on top of DEFAULT_TEAMS.
+
+    The overlay is injected by patching load_config() to return a synthetic
+    team-paths.json dict. We patch rather than write a fixture file so the
+    loader's schema-integrity self-heal (CANONICAL_AT_LEAST_ONE_TEAMS,
+    XACA-0457) can't silently bootstrap DEFAULT_TEAMS over our overlay — the
+    test target is the merge logic in build_team_code_map(), not the loader.
+    """
+
+    def _patch_overlay(self, teams: dict):
+        """Patch load_config() to return {schema_version, teams} for the test
+        body. Returns the patcher context manager (use with `with`)."""
+        cfg = {"schema_version": 1, "teams": teams}
+        return mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg)
+
+    def test_no_overlay_codes_identical_to_default_teams(self):
+        """Overlay carrying NO team_codes → map identical to DEFAULT_TEAMS map.
+
+        Mirrors TODAY's live overlay (all 21 teams present, zero team_code
+        fields). Proves the merge change is regression-identical to the
+        previous exclusive-or behaviour in the current production state.
+        """
+        # Build an overlay that mentions every team but supplies no team_code.
+        codeless = {team_id: {"kanban_dir": "/x"} for team_id in DEFAULT_TEAMS}
+        with self._patch_overlay(codeless):
+            result = build_team_code_map()
+        self.assertEqual(
+            result, _default_teams_code_map(),
+            "With no overlay team_codes the map must equal the DEFAULT_TEAMS-derived map",
+        )
+
+    def test_overlay_only_slug_routes_with_no_default_teams_entry(self):
+        """An overlay-only slug (no DEFAULT_TEAMS entry) with a team_code is
+        additive — XBWD acceptance criterion."""
+        self.assertNotIn(
+            "freelance-bandwear-dashboard", DEFAULT_TEAMS,
+            "Fixture invalid: dashboard slug must NOT exist in DEFAULT_TEAMS",
+        )
+        self.assertNotIn(
+            "BWD", _default_teams_code_map(),
+            "Fixture invalid: BWD must not already be a DEFAULT_TEAMS code",
+        )
+        with self._patch_overlay({
+            "freelance-bandwear-dashboard": {"team_code": "BWD"},
+        }):
+            result = build_team_code_map()
+        self.assertIn("BWD", result, "Overlay-only code BWD must be in the map")
+        self.assertEqual(result["BWD"], "freelance-bandwear-dashboard")
+        # And every DEFAULT_TEAMS code is still present (merge, not replace).
+        for code in _default_teams_code_map():
+            self.assertIn(
+                code, result,
+                f"DEFAULT_TEAMS code {code} dropped — merge regressed to exclusive-or",
+            )
+
+    def test_overlay_freelance_code_absent_from_default_teams_routes(self):
+        """A freelance code present in overlay but absent from DEFAULT_TEAMS
+        (the 006 scenario) still routes via the overlay."""
+        # Simulate post-006: DEFAULT_TEAMS no longer has this slug, overlay does.
+        self.assertNotIn("freelance-newclient-portal", DEFAULT_TEAMS)
+        with self._patch_overlay({
+            "freelance-newclient-portal": {"team_code": "FNP"},
+        }):
+            result = build_team_code_map()
+        self.assertEqual(result.get("FNP"), "freelance-newclient-portal")
+
+    def test_overlay_wins_on_conflict(self):
+        """When overlay supplies a team_code that collides with a DEFAULT_TEAMS
+        code, the overlay value wins (live config is authoritative)."""
+        with self._patch_overlay({
+            "academy-reassigned": {"team_code": "ACA"},
+        }):
+            result = build_team_code_map()
+        self.assertEqual(
+            result["ACA"], "academy-reassigned",
+            "Overlay must win on team_code conflict",
+        )
+
+    def test_non_freelance_teams_unaffected(self):
+        """Adding an overlay-only freelance slug must not perturb the
+        non-freelance team routing."""
+        with self._patch_overlay({
+            "freelance-bandwear-dashboard": {"team_code": "BWD"},
+        }):
+            result = build_team_code_map()
+        for team in (
+            "academy", "ios", "firebase", "dns", "command",
+            "mainevent", "legal-coparenting", "finance-personal",
+        ):
+            code = DEFAULT_TEAMS[team]["team_code"].upper()
+            self.assertEqual(
+                result.get(code), team,
+                f"Non-freelance team {team} ({code}) routing changed unexpectedly",
+            )
+
+    def test_loader_unavailable_falls_back_to_default_teams(self):
+        """If load_config raises, the DEFAULT_TEAMS base is preserved."""
+        with mock.patch.object(
+            aiteamforge_paths, "load_config", side_effect=RuntimeError("boom")
+        ):
+            result = build_team_code_map()
+        self.assertEqual(
+            result, _default_teams_code_map(),
+            "Loader failure must still yield the DEFAULT_TEAMS-derived map",
+        )
 
 
 # ---------------------------------------------------------------------------

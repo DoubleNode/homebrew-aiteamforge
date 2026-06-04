@@ -141,6 +141,10 @@ except ImportError:
                 return True
         return False
 
+    # XACA-0628: per-client/project freelance slugs are overlay-only; this
+    # fallback is reached only if aiteamforge_paths is entirely unavailable, in
+    # which case the registry (and its overlay) can't be consulted anyway. The
+    # generic-freelance projects are intentionally omitted here.
     _FALLBACK_TEAM_DIRS = {
         "academy": Path.home() / "dev-team" / "kanban",
         "ios": Path("/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban"),
@@ -148,10 +152,6 @@ except ImportError:
         "firebase": Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
         "command": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
         "dns": Path("/Users/Shared/Development/DNSFramework/kanban"),
-        "freelance-doublenode-starwords": Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-        "freelance-doublenode-appplanning": Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-        "freelance-doublenode-workstats": Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-        "freelance-doublenode-lifeboard": Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
         "legal-coparenting": Path.home() / "legal" / "coparenting" / "kanban",
     }
 

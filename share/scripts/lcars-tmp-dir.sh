@@ -41,6 +41,35 @@ if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
     unset _lctd_script_dir _lctd_candidate
 fi
 
+# XACA-0628: read kanban_dir for a team slug straight from the per-machine
+# overlay (~/.aiteamforge/team-paths.json). Used for overlay-only freelance
+# projects when the canonical loader isn't sourced. (Sibling-drift cluster
+# k501: the SAME overlay-lookup is applied in statusline-command.sh,
+# kb-init-team-guard.sh, and kb-session-knowledge-check.sh.)
+_lctd_overlay_kanban_dir() {
+    local _team="$1"
+    local _ovl="${HOME}/.aiteamforge/team-paths.json"
+    [ -f "$_ovl" ] || return 1
+    command -v python3 &>/dev/null 2>&1 || return 1
+    python3 - "$_ovl" "$_team" <<'PYEOF'
+import json, sys
+path, team = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+teams = data.get("teams", data)
+entry = teams.get(team) if isinstance(teams, dict) else None
+if not isinstance(entry, dict):
+    sys.exit(1)
+val = entry.get("kanban_dir")
+if not val:
+    sys.exit(1)
+print(val)
+PYEOF
+}
+
 # ---------------------------------------------------------------------------
 # _get_team_kanban_dir_for_tmp()
 #
@@ -61,6 +90,16 @@ _get_team_kanban_dir_for_tmp() {
         fi
     fi
 
+    # XACA-0628: per-client/project freelance slugs are overlay-only.
+    if [ "${team#freelance-}" != "$team" ]; then
+        local _ovl_dir
+        _ovl_dir=$(_lctd_overlay_kanban_dir "$team")
+        if [ -n "$_ovl_dir" ]; then
+            echo "$_ovl_dir"
+            return 0
+        fi
+    fi
+
     # Fallback: built-in case statement (kept for environments without the loader)
     case "$team" in
         # Core teams
@@ -74,17 +113,8 @@ _get_team_kanban_dir_for_tmp() {
         # Freelance — generic fallback (no specific project)
         freelance)                             echo "${HOME}/dev-team/kanban" ;;
 
-        # Freelance — DoubleNode projects
-        freelance-doublenode-starwords)        echo "/Users/Shared/Development/DoubleNode/Starwords/kanban" ;;
-        freelance-doublenode-appplanning)      echo "/Users/Shared/Development/DoubleNode/appPlanning/kanban" ;;
-        freelance-doublenode-workstats)        echo "/Users/Shared/Development/DoubleNode/WorkStats/kanban" ;;
-        freelance-doublenode-lifeboard)        echo "/Users/Shared/Development/DoubleNode/LifeBoard/kanban" ;;
-        freelance-doublenode-caravan)          echo "/Users/Shared/Development/DoubleNode/Caravan/kanban" ;;
-        freelance-doublenode-awaysentry)      echo "/Users/Shared/Development/DoubleNode/AwaySentry/kanban" ;;
-
-        # Freelance — Liquidstyle projects
-        freelance-liquidstyle-agentbadges-app) echo "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban" ;;
-        freelance-liquidstyle-agentbadges-ios) echo "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban" ;;
+        # Freelance per-client/project slugs resolve via the loader or the
+        # overlay-lookup branch above (XACA-0628) — no hardcoded arms here.
 
         # Personal life teams
         legal-coparenting)                     echo "${HOME}/legal/coparenting/kanban" ;;

@@ -36,10 +36,36 @@ KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
 # ---------------------------------------------------------------------------
 
 def _build_team_kanban_dirs() -> dict:
-    """Build TEAM_KANBAN_DIRS from aiteamforge_paths.DEFAULT_TEAMS."""
+    """Build TEAM_KANBAN_DIRS from the aiteamforge_paths registry.
+
+    XACA-0628: enumerate teams via the registry (list_teams() +
+    get_team_kanban_dir()), which reads the per-machine overlay
+    (~/.aiteamforge/team-paths.json) merged with DEFAULT_TEAMS — NOT
+    DEFAULT_TEAMS alone. This is required because the per-client/project
+    freelance slugs are now overlay-only (removed from DEFAULT_TEAMS); the
+    old DEFAULT_TEAMS-only build would silently drop them and route their
+    boards/tmp dirs to the academy default. Mirrors server.py's
+    _build_team_kanban_dirs(), which already used the registry path.
+    """
     try:
         # kanban-hooks/ is always on sys.path when this module is imported
-        from aiteamforge_paths import DEFAULT_TEAMS  # noqa: PLC0415
+        from aiteamforge_paths import (  # noqa: PLC0415
+            list_teams,
+            get_team_kanban_dir,
+            DEFAULT_TEAMS,
+        )
+        teams = list_teams()
+        if teams:
+            result = {}
+            for team in teams:
+                try:
+                    result[team] = Path(get_team_kanban_dir(team)).expanduser()
+                except Exception:
+                    # Skip a single malformed entry rather than losing the map.
+                    continue
+            if result:
+                return result
+        # Empty/failed enumeration → fall back to DEFAULT_TEAMS directly.
         return {
             team: Path(entry["kanban_dir"]).expanduser()
             for team, entry in DEFAULT_TEAMS.items()
@@ -50,6 +76,10 @@ def _build_team_kanban_dirs() -> dict:
             "falling back to hardcoded TEAM_KANBAN_DIRS",
             stacklevel=2,
         )
+        # Hardcoded fallback — only reached if aiteamforge_paths is entirely
+        # unavailable. XACA-0628: per-client/project freelance slugs are
+        # overlay-only and intentionally omitted here; only the generic
+        # 'freelance' fallback remains.
         _h = Path.home()
         return {
             "academy":     _h / "dev-team" / "kanban",
@@ -58,15 +88,6 @@ def _build_team_kanban_dirs() -> dict:
             "firebase":    Path("/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban"),
             "command":     Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
             "dns":         Path("/Users/Shared/Development/DNSFramework/kanban"),
-            "freelance-doublenode-starwords":      Path("/Users/Shared/Development/DoubleNode/Starwords/kanban"),
-            "freelance-doublenode-appplanning":    Path("/Users/Shared/Development/DoubleNode/appPlanning/kanban"),
-            "freelance-doublenode-workstats":      Path("/Users/Shared/Development/DoubleNode/WorkStats/kanban"),
-            "freelance-doublenode-lifeboard":      Path("/Users/Shared/Development/DoubleNode/LifeBoard/kanban"),
-            "freelance-doublenode-caravan":        Path("/Users/Shared/Development/DoubleNode/Caravan/kanban"),
-            "freelance-doublenode-awaysentry":     Path("/Users/Shared/Development/DoubleNode/AwaySentry/kanban"),
-            "freelance-liquidstyle-agentbadges-app": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban"),
-            "freelance-liquidstyle-agentbadges-ios": Path("/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban"),
-            "freelance-bandwear-android":          Path("/Users/Shared/Development/Bandwear/Android/kanban"),
             "legal-coparenting": _h / "legal" / "coparenting" / "kanban",
             "medical-general":   _h / "medical" / "general" / "kanban",
             "medical":           _h / "medical" / "general" / "kanban",
@@ -76,6 +97,35 @@ def _build_team_kanban_dirs() -> dict:
         }
 
 TEAM_KANBAN_DIRS: dict = _build_team_kanban_dirs()
+
+
+def _overlay_kanban_dir(team: str):
+    """Read kanban_dir for a team straight from the per-machine overlay.
+
+    XACA-0628: per-client/project freelance slugs are overlay-only. When the
+    aiteamforge_paths registry is unavailable (so TEAM_KANBAN_DIRS fell back to
+    the hardcoded subset that omits them), resolve their kanban_dir directly
+    from ~/.aiteamforge/team-paths.json — mirroring the overlay-lookup fallback
+    in lcars-tmp-dir.sh / statusline-command.sh. Returns a Path or None.
+    """
+    try:
+        overlay = Path.home() / ".aiteamforge" / "team-paths.json"
+        if not overlay.is_file():
+            return None
+        with open(overlay) as fh:
+            data = json.load(fh)
+        teams = data.get("teams", data)
+        if not isinstance(teams, dict):
+            return None
+        entry = teams.get(team)
+        if not isinstance(entry, dict):
+            return None
+        val = entry.get("kanban_dir")
+        if not val:
+            return None
+        return Path(val).expanduser()
+    except Exception:
+        return None
 
 
 def parse_session_name(session_name):
@@ -107,8 +157,14 @@ def parse_session_name(session_name):
 
 def get_board_file(team):
     """Get path to team's kanban board file using distributed directories."""
-    kanban_dir = str(TEAM_KANBAN_DIRS.get(team, KANBAN_DIR))
-    return os.path.join(kanban_dir, f"{team}-board.json")
+    kanban_dir = TEAM_KANBAN_DIRS.get(team)
+    if kanban_dir is None and isinstance(team, str) and team.startswith("freelance-"):
+        # XACA-0628: overlay-only freelance project not in the map (registry
+        # unavailable) — resolve from the overlay directly.
+        kanban_dir = _overlay_kanban_dir(team)
+    if kanban_dir is None:
+        kanban_dir = KANBAN_DIR
+    return os.path.join(str(kanban_dir), f"{team}-board.json")
 
 
 def get_lcars_tmp_dir(session_name: str) -> str:
@@ -146,6 +202,10 @@ def get_lcars_tmp_dir(session_name: str) -> str:
 
         # Look up team in TEAM_KANBAN_DIRS (built from aiteamforge_paths)
         kanban_dir = TEAM_KANBAN_DIRS.get(team)
+        if kanban_dir is None and team.startswith("freelance-"):
+            # XACA-0628: overlay-only freelance project not in the map (registry
+            # unavailable) — resolve from the overlay directly.
+            kanban_dir = _overlay_kanban_dir(team)
         if kanban_dir is None:
             # Unknown team — use the default
             kanban_dir = Path(KANBAN_DIR)
@@ -340,20 +400,14 @@ def _build_team_code_map() -> dict:
         )
     # Hardcoded fallback — only reached if registry import fails.
     # MUST EXACTLY MIRROR DEFAULT_TEAMS team_code values in aiteamforge_paths.py.
+    # XACA-0628: per-client/project freelance codes (FSW/FAP/.../BWA/BWD) are
+    # overlay-only and resolve via build_team_code_map() above; only the generic
+    # FRE remains here.
     return {
         "IOS": "ios",
         "AND": "android",
         "FIR": "firebase",
         "FRE": "freelance",
-        "FSW": "freelance-doublenode-starwords",
-        "FWS": "freelance-doublenode-workstats",
-        "FAP": "freelance-doublenode-appplanning",
-        "FLB": "freelance-doublenode-lifeboard",
-        "VAN": "freelance-doublenode-caravan",
-        "FAS": "freelance-doublenode-awaysentry",
-        "FLA": "freelance-liquidstyle-agentbadges-app",
-        "FLI": "freelance-liquidstyle-agentbadges-ios",
-        "BWA": "freelance-bandwear-android",
         "ACA": "academy",
         "DNS": "dns",
         "CMD": "command",
@@ -460,7 +514,12 @@ def _resolve_agent_from_tmux():
             return None
         with open(session_map_file) as f:
             session_map = json.load(f)
-        return session_map.get(session_name)
+        handle = session_map.get(session_name)
+        # XACA-0628: overlay-only freelance projects reduce to the generic
+        # 'freelance-<terminal>' key (no project-specific map entry exists).
+        if not handle and session_name.startswith("freelance-"):
+            handle = session_map.get("freelance-" + session_name.rsplit("-", 1)[-1])
+        return handle
     except Exception:
         return None
 

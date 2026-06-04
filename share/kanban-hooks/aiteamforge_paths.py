@@ -162,110 +162,14 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_api_key_env_var": "TEAM_DNS_API_KEY",
     },
 
-    # ── Freelance — DoubleNode ────────────────────────────────────────────
-    "freelance-doublenode-starwords": {
-        "team_code": "FSW",
-        "kanban_dir": "/Users/Shared/Development/DoubleNode/Starwords/kanban",
-        "working_dir": "/Users/Shared/Development/DoubleNode/Starwords",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8504,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_STARWORDS_API_KEY",
-    },
-    "freelance-doublenode-appplanning": {
-        "team_code": "FAP",
-        "kanban_dir": "/Users/Shared/Development/DoubleNode/appPlanning/kanban",
-        "working_dir": "/Users/Shared/Development/DoubleNode/appPlanning",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8500,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_APPPLANNING_API_KEY",
-    },
-    "freelance-doublenode-workstats": {
-        "team_code": "FWS",
-        "kanban_dir": "/Users/Shared/Development/DoubleNode/WorkStats/kanban",
-        "working_dir": "/Users/Shared/Development/DoubleNode/WorkStats",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8506,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_WORKSTATS_API_KEY",
-    },
-    "freelance-doublenode-lifeboard": {
-        "team_code": "FLB",
-        "kanban_dir": "/Users/Shared/Development/DoubleNode/LifeBoard/kanban",
-        "working_dir": "/Users/Shared/Development/DoubleNode/LifeBoard",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8503,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_LIFEBOARD_API_KEY",
-    },
-    "freelance-doublenode-caravan": {
-        "team_code": "VAN",
-        "kanban_dir": "/Users/Shared/Development/DoubleNode/Caravan/kanban",
-        "working_dir": "/Users/Shared/Development/DoubleNode/Caravan",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8502,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_CARAVAN_API_KEY",
-    },
-    "freelance-doublenode-awaysentry": {
-        "team_code": "FAS",
-        "kanban_dir": "/Users/Shared/Development/DoubleNode/AwaySentry/kanban",
-        "working_dir": "/Users/Shared/Development/DoubleNode/AwaySentry",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8501,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_DOUBLENODE_AWAYSENTRY_API_KEY",
-    },
-
-    # ── Freelance — Liquidstyle ───────────────────────────────────────────
-    "freelance-liquidstyle-agentbadges-app": {
-        "team_code": "FLA",
-        "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP/kanban",
-        "working_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-APP",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8960,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_LIQUIDSTYLE_AGENTBADGES_APP_API_KEY",
-    },
-    "freelance-liquidstyle-agentbadges-ios": {
-        "team_code": "FLI",
-        "kanban_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS/kanban",
-        "working_dir": "/Users/Shared/Development/Liquidstyle/AgentBadges-IOS",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8970,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_LIQUIDSTYLE_AGENTBADGES_IOS_API_KEY",
-    },
-
-    # ── Freelance — Bandwear ──────────────────────────────────────────────
-    "freelance-bandwear-android": {
-        "team_code": "BWA",
-        "kanban_dir": "/Users/Shared/Development/Bandwear/Android/kanban",
-        "working_dir": "/Users/Shared/Development/Bandwear/Android",
-        "lcars_port_base": 8400,
-        "lcars_port_range": 100,
-        "lcars_port": 8478,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_BANDWEAR_ANDROID_API_KEY",
-    },
+    # ── Freelance — per-client/project entries (overlay-only, XACA-0628) ──
+    # The 9 per-CLIENT/PROJECT freelance slugs (DoubleNode/Liquidstyle/Bandwear)
+    # were removed from DEFAULT_TEAMS in XACA-0628 and now live solely in the
+    # per-machine overlay (~/.aiteamforge/team-paths.json). build_team_code_map()
+    # MERGES overlay team_codes on top of these defaults, so the overlay entries
+    # (FSW/FAP/FWS/FLB/VAN/FAS/FLA/FLI/BWA/BWD) supply routing on machines that
+    # actually host those client repos. The generic `freelance` (FRE) entry below
+    # STAYS here as the universal fallback.
 
     # ── Legal ─────────────────────────────────────────────────────────────
     "legal-coparenting": {
@@ -900,18 +804,37 @@ def get_team_from_code(code: str) -> str:
 def build_team_code_map() -> dict[str, str]:
     """Return a mapping of {3-letter-code: team-id} derived from the registry.
 
-    Lookup strategy (in priority order):
-    1. Live config (team-paths.json overlaid on DEFAULT_TEAMS) if team_code present.
-    2. DEFAULT_TEAMS directly — covers migration case where live config doesn't
-       yet have team_code fields (pre-XACA-0542 installs).
-    Only includes entries with a non-empty team_code field.
+    Merge strategy (team-paths.json overlaid on DEFAULT_TEAMS — XACA-0628):
+    1. Start from DEFAULT_TEAMS team_codes (the always-present base).
+    2. Overlay live-config (team-paths.json) team_codes ON TOP — live wins on
+       conflict, and overlay-only slugs (per-project freelance codes that have
+       NO DEFAULT_TEAMS entry, e.g. freelance-bandwear-dashboard → BWD) are
+       additive.
+    3. Only include entries with a non-empty team_code field.
+
+    Why a MERGE (not exclusive-or): the previous exclusive-or only fell back to
+    DEFAULT_TEAMS when the live config yielded *zero* team_codes. Once any
+    overlay entry carries a team_code (e.g. per-project freelance codes), that
+    fallback was skipped and every non-overlay team (academy/ios/…) silently
+    dropped out of the map. Merging keeps the DEFAULT_TEAMS base intact while
+    layering per-project overlay codes on top.
+
+    With TODAY's overlay (no overlay team_codes) the result is identical to the
+    DEFAULT_TEAMS-derived map — regression-safe.
 
     This is the authoritative source for the code->team mapping.
     Consumers that previously maintained hardcoded _TEAM_CODE_MAP dicts
-    should use this function instead. (XACA-0542)
+    should use this function instead. (XACA-0542, XACA-0628)
     """
     result: dict[str, str] = {}
-    # 1. Try live config
+    # 1. Base: DEFAULT_TEAMS team_codes (always present, even if the loader is
+    #    entirely unavailable).
+    for team_id, entry in DEFAULT_TEAMS.items():
+        code = entry.get("team_code", "")
+        if code:
+            result[code.upper()] = team_id
+    # 2. Overlay: live-config team_codes on top (live wins on conflict; adds
+    #    overlay-only per-project slugs that have no DEFAULT_TEAMS entry).
     try:
         config = load_config()
         for team_id, entry in config["teams"].items():
@@ -919,14 +842,8 @@ def build_team_code_map() -> dict[str, str]:
             if code:
                 result[code.upper()] = team_id
     except Exception:
+        # Loader unavailable → keep the DEFAULT_TEAMS base built in step 1.
         pass
-    # 2. If live config yielded no team_code entries (migration: pre-XACA-0542
-    # installs), fall back to DEFAULT_TEAMS which always has team_code set.
-    if not result:
-        for team_id, entry in DEFAULT_TEAMS.items():
-            code = entry.get("team_code", "")
-            if code:
-                result[code.upper()] = team_id
     return result
 
 

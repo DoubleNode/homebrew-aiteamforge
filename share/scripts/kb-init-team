@@ -1257,10 +1257,9 @@ sys.exit(0 if '${TEAM_ID}' in d.get('teams', {}) else 1)
     if [[ "$DRY_RUN" -eq 1 ]]; then
         _dry "Would insert case arm for '${TEAM_ID}' in _kb_get_kanban_dir()"
     else
-        # Check for duplicate — the team_id may appear in _kb_get_team_code too, so be specific
-        local kanban_dir_func_region
-        kanban_dir_func_region=$(awk '/^_kb_get_kanban_dir\(\)/{found=1} found{print} /^}$/{if(found) exit}' "${KANBAN_HELPERS}")
-        if echo "$kanban_dir_func_region" | grep -q "^[[:space:]]*${TEAM_ID})[[:space:]]*$\|^[[:space:]]*${TEAM_ID})$"; then
+        # Use _chk_case_label (boundary-anchored) to avoid false-positives from
+        # comments mentioning TEAM_ID inside the function region (k501 sibling-drift fix).
+        if _chk_case_label _kb_get_kanban_dir "${KANBAN_HELPERS}" "${TEAM_ID}"; then
             _skip "kanban-helpers.sh _kb_get_kanban_dir"
         else
             _insert_case_arm "${KANBAN_HELPERS}" "_kb_get_kanban_dir" \
@@ -1276,9 +1275,9 @@ sys.exit(0 if '${TEAM_ID}' in d.get('teams', {}) else 1)
     if [[ "$DRY_RUN" -eq 1 ]]; then
         _dry "Would insert case arm for '${TEAM_ID}' in _kb_team_lcars_port()"
     else
-        local port_func_region
-        port_func_region=$(awk '/^_kb_team_lcars_port\(\)/{found=1} found{print} /^}$/{if(found) exit}' "${KANBAN_HELPERS}")
-        if echo "$port_func_region" | grep -q "${TEAM_ID}"; then
+        # Use _chk_case_label (boundary-anchored) to avoid false-positives from
+        # comments mentioning TEAM_ID inside the function region (k501 sibling-drift fix).
+        if _chk_case_label _kb_team_lcars_port "${KANBAN_HELPERS}" "${TEAM_ID}"; then
             _skip "kanban-helpers.sh _kb_team_lcars_port"
         else
             _insert_case_arm "${KANBAN_HELPERS}" "_kb_team_lcars_port" \
