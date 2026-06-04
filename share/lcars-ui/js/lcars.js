@@ -19806,9 +19806,14 @@ async function initChangeReqSection() {
  *      sections) so only the timeline renders in the print dialog.
  *   2. Call window.print() to open the browser's print/Save-as-PDF dialog.
  *   3. Remove body.roadmap-printing on the 'afterprint' event (fired when the
- *      dialog closes in modern browsers). A synchronous fallback removal runs
- *      immediately after window.print() returns in browsers that block
- *      synchronously, guarding against the listener not firing.
+ *      dialog closes in modern browsers). This is the PRIMARY cleanup path.
+ *      We deliberately do NOT remove the class synchronously after
+ *      window.print(): the call returns immediately while the dialog is still
+ *      open, so a synchronous removal would strip the class before the browser
+ *      renders to PDF (and Chrome's live preview would lose the scoping).
+ *   4. A long safety-timeout janitor removes the class as a last resort if
+ *      'afterprint' never fires (very old / programmatic-print environments).
+ *      The delay is generous (60s) so it cannot race a normal print render.
  *
  * No server-side dependencies, no new libraries.
  */
@@ -19819,22 +19824,27 @@ function exportRoadmapPdf() {
     // Guard: don't stack multiple print calls
     if (body.classList.contains(printingClass)) return;
 
-    // Afterprint listener — runs when the print dialog closes
-    function onAfterPrint() {
+    let janitorId = null;
+    function cleanup() {
         body.classList.remove(printingClass);
         window.removeEventListener('afterprint', onAfterPrint);
+        if (janitorId !== null) { clearTimeout(janitorId); janitorId = null; }
     }
+
+    // Afterprint listener — PRIMARY cleanup, runs when the print dialog closes
+    function onAfterPrint() { cleanup(); }
     window.addEventListener('afterprint', onAfterPrint);
 
     // Activate print-only scope
     body.classList.add(printingClass);
 
-    // Open the print dialog.
-    // In all modern browsers (Chrome, Firefox, Safari) window.print() returns
-    // immediately while the print dialog is open; afterprint fires when the
-    // dialog closes.  Do NOT remove the class here — removing it synchronously
-    // would strip roadmap-printing before the browser renders to PDF, defeating
-    // the purpose of the class.  The afterprint listener is the sole cleanup path.
+    // Last-resort janitor: if 'afterprint' never fires, still remove the class
+    // after a delay long enough to never race the print render (cleanup() is
+    // idempotent, so a normal afterprint simply cancels this timer).
+    janitorId = setTimeout(cleanup, 60000);
+
+    // Open the print dialog. window.print() returns immediately while the
+    // dialog is open; the afterprint listener (or the janitor) clears the class.
     window.print();
 }
 
@@ -19855,7 +19865,6 @@ function exportRoadmapPdf() {
 //   .roadmap-milestone        — a point-event marker (start == end)
 //   .roadmap-item-label       — the text label inside a bar or beside a milestone
 //   .roadmap-item-sublabel    — secondary info inside a bar (priority, itemCounts)
-//   .roadmap-tooltip          — tooltip element shown on hover
 //   .roadmap-unscheduled      — wrapper for the unscheduled lane below the timeline
 //   .roadmap-unscheduled-heading — section header text
 //   .roadmap-unscheduled-list — flex container of chips
@@ -19959,7 +19968,9 @@ async function renderRoadmap() {
             const e = new Date(endStr   + 'T00:00:00Z');
             if (rangeSpanMs === 0) return 0;
             const w = (e.getTime() - s.getTime()) / rangeSpanMs * 100;
-            return Math.max(0, w);
+            // Clamp to [0, 100]: the contract guarantees end <= dateRange.end so
+            // this is defensive, but it keeps a bar from ever overflowing the track.
+            return Math.max(0, Math.min(100, w));
         }
 
         // Build month-boundary tick labels for the date axis

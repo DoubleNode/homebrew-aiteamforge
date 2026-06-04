@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0625: Roadmap MVP — aggregate Epics & Releases into an exportable timeline view -->
+
+### Added
+- **XACA-0625: LCARS Roadmap tab.** New `roadmap` section aggregating the active team's Epics and Releases onto a single timeline. Backend: `GET /api/roadmap` (`serve_roadmap`) returns a pre-computed, single-team envelope `{team, generatedAt, dateRange, epics[], releases[], unscheduled:{epics[],releases[]}}`. Epic dates are rolled up from non-cancelled child-item `dueDate`s (earliest→latest); releases use `targetDate`; entries with no usable date fall into an Unscheduled lane. Date rollup reads `epic['itemIds']` against the raw board backlog directly because `_get_items_for_epic` strips `dueDate`. Frontend (`renderRoadmap()`): three LCARS-styled lanes (Epics / Releases / Unscheduled) with a month-tick date axis, percentage-positioned bars (ranged) and milestones (point events), plus loading/error/empty states. Export: `exportRoadmapPdf()` toggles `body.roadmap-printing` and invokes the browser's native Save-as-PDF via a print-optimized landscape `@media print` stylesheet (chrome hidden, colors preserved). Read-only, single-team scoped (no cross-team aggregation, no filtering). Cache-busters bumped: `lcars.js?v=3.23→3.24`, `lcars.css?v=32.0→32.1`. Child of EPIC-0040.
+
 <!-- XACA-0582: acknowledgePreflightDeltas operator override for migration import-apply -->
 
 ### Added
