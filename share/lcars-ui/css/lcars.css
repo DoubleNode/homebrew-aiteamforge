@@ -17351,6 +17351,13 @@ body.roadmap-printing .lcars-content > .roadmap-section {
     padding-bottom: 0 !important;
 }
 
+/* XACA-0629: #roadmap-content carries min-height:100% (base rule ~16636).
+   Against the now-auto-height section that resolves to 0 per spec, but make
+   it explicit so the content area is unambiguously content-driven in print. */
+body.roadmap-printing #roadmap-content {
+    min-height: 0 !important;
+}
+
 /* ---------------------------------------------------------------------------
    @media print (XACA-0625-006, patched XACA-0629)
    Safe for all pages; restores absolute-to-static layout for printing,
@@ -17415,6 +17422,11 @@ body.roadmap-printing .lcars-content > .roadmap-section {
         bottom: auto !important;
         padding-top: 0 !important;
         padding-bottom: 0 !important;
+    }
+
+    /* XACA-0629: explicit content-driven height in the print render too */
+    body.roadmap-printing #roadmap-content {
+        min-height: 0 !important;
     }
 
     /* 1. Suppress loading animation (override #1) */
