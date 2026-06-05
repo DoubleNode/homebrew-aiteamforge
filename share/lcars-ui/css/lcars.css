@@ -17293,8 +17293,9 @@ body {
 /* ---------------------------------------------------------------------------
    Schedule-source badge (XACA-0627-003)
    Small pill appended inside .roadmap-bar or .roadmap-milestone indicating
-   how an epic's schedule was determined: explicit, derived (estimate), rollup.
+   how an epic's schedule was determined: explicit, derived (estimate), rollup, activity.
    "rollup" is intentionally subdued; "explicit" and "derived" are distinct.
+   "activity" is muted green — actual/historical span derived from item timestamps.
    --------------------------------------------------------------------------- */
 .roadmap-schedule-badge {
     display: inline-block;
@@ -17331,6 +17332,14 @@ body {
     background: rgba(153, 204, 255, 0.18);
     color: rgba(153, 204, 255, 0.65);
     border: 1px solid rgba(153, 204, 255, 0.25);
+}
+
+/* Activity: muted green — actual/historical span derived from child item
+   startedAt→completedAt timestamps; distinct from planned sources (explicit/derived/rollup) */
+.roadmap-schedule-badge--activity {
+    background: rgba(102, 204, 102, 0.18);
+    color: rgba(102, 204, 102, 0.75);
+    border: 1px solid rgba(102, 204, 102, 0.30);
 }
 
 /* On milestones the badge sits below the diamond; float it inline with the label */

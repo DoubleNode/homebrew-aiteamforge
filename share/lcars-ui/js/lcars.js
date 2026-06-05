@@ -20120,7 +20120,7 @@ async function renderRoadmap() {
                 const counts    = epic.itemCounts || {};
 
                 // Phase 2 scheduling fields (XACA-0627-003)
-                const scheduleSource = epic.scheduleSource || '';   // "explicit" | "derived" | "rollup"
+                const scheduleSource = epic.scheduleSource || '';   // "explicit" | "derived" | "rollup" | "activity"
                 const timeEstimate   = epic.timeEstimate   || '';   // e.g. "40h", "3w" or ""
                 const startDate      = epic.startDate      || '';
                 const targetDate     = epic.targetDate     || '';
@@ -20143,11 +20143,13 @@ async function renderRoadmap() {
                 // Schedule-source badge HTML — short pill label per source type.
                 // "rollup" is intentionally subdued (dimmer); "explicit" and "derived"
                 // are visually distinct to signal intent vs. inference.
+                // "activity" is muted green — actual/historical span (real work timestamps).
                 let scheduleBadgeHtml = '';
                 if (scheduleSource) {
                     const badgeLabel = scheduleSource === 'explicit' ? 'EXPLICIT'
                                      : scheduleSource === 'derived'  ? 'EST'
                                      : scheduleSource === 'rollup'   ? 'ROLLUP'
+                                     : scheduleSource === 'activity' ? 'ACTUAL'
                                      : escapeHtml(scheduleSource.toUpperCase());
                     scheduleBadgeHtml =
                         `<span class="roadmap-schedule-badge roadmap-schedule-badge--${escapeHtml(scheduleSource)}"` +

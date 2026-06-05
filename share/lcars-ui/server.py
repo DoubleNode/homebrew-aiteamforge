@@ -5886,6 +5886,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     print(f"[LCARS] roadmap: skipping malformed date '{date_str}'")
                     return None
 
+            def _date_part(ts):
+                """Extract YYYY-MM-DD from an ISO timestamp string (e.g. '2026-06-05T18:50:44Z').
+
+                Takes the first 10 characters and validates via _parse_date.
+                Returns the YYYY-MM-DD string or None if ts is None, non-string,
+                too short, or not a valid date.
+                """
+                if not ts or not isinstance(ts, str) or len(ts) < 10:
+                    return None
+                return _parse_date(ts[:10])
+
             # --- Duration parser helper (Phase 2, XACA-0627) ---
             def _parse_duration(s):
                 """Parse a duration string like '40h', '3d', '2w', '1m' into timedelta.
@@ -5912,6 +5923,62 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if unit == 'm':
                     return timedelta(days=value * 30)
                 return None  # unreachable, but defensive
+
+            # --- Activity-rollup helper (Rule 5.5 + ARCHIVED branch, XACA-0638) ---
+            def _activity_rollup(children):
+                """Return ('activity', start, end) from child activity timestamps, or
+                ('none', None, None) if no resolved start+end can be derived.
+
+                start = MIN(startedAt or addedAt) over non-cancelled children that have
+                completedAt; end = MAX(completedAt) over that same set.
+
+                EXTEND-TO-TODAY: if any non-cancelled child is still open (status not in
+                completed/cancelled), end is clamped to today so the bar extends to the
+                present.  For ARCHIVED epics all non-cancelled children are completed by
+                definition, so this clause naturally does NOT fire — the end stays at
+                max(completedAt), an honest historical finish.
+
+                Returns a 3-tuple:
+                  ('activity', start_str, end_str) on success, or
+                  ('none',     None,      None)     when no resolvable dates exist.
+                """
+                completed_children = [
+                    c for c in children
+                    if c.get('status') not in ('cancelled',) and c.get('completedAt')
+                ]
+                if not completed_children:
+                    return 'none', None, None
+
+                # start: MIN of startedAt (falling back to addedAt) across completed children
+                start_dates = []
+                for c in completed_children:
+                    d = _date_part(c.get('startedAt')) or _date_part(c.get('addedAt'))
+                    if d:
+                        start_dates.append(d)
+
+                # end: MAX of completedAt across completed children
+                end_dates = []
+                for c in completed_children:
+                    d = _date_part(c.get('completedAt'))
+                    if d:
+                        end_dates.append(d)
+
+                if not start_dates or not end_dates:
+                    return 'none', None, None
+
+                activity_start = min(start_dates)
+                activity_end = max(end_dates)
+
+                # EXTEND-TO-TODAY: clamp end forward if any non-cancelled child is still open
+                open_children = [
+                    c for c in children
+                    if c.get('status') not in ('completed', 'cancelled')
+                ]
+                if open_children:
+                    today_str = datetime.now().strftime('%Y-%m-%d')
+                    activity_end = max(activity_end, today_str)
+
+                return 'activity', activity_start, activity_end
 
             # --- Process epics (Phase 2: explicit-first scheduling, XACA-0627) ---
             scheduled_epics = []
@@ -5967,14 +6034,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }
 
                 # --- Scheduling precedence (Phase 2 contract, XACA-0627) ---
-                # ARCHIVED epics are historical, not forward-looking — keep them out of
-                # the scheduled timeline and surface them in the unscheduled Archived
-                # bucket regardless of any explicit dates or child dueDates (XACA-0635).
-                # Only non-archived epics run the precedence ladder below.
+                # ARCHIVED epics are historical, not forward-looking — they must NOT
+                # receive planned bars (explicit/derived/dueDate-rollup) regardless of
+                # any explicit dates or child dueDates (XACA-0635).  However, completed
+                # work DOES have an actual activity span (XACA-0638): attempt an
+                # activity rollup first; fall back to 'none' (unscheduled Archived
+                # bucket) only when no resolvable timestamps exist.
                 if epic_state == 'ARCHIVED':
-                    resolved_start = None
-                    resolved_end = None
-                    schedule_source = 'none'
+                    schedule_source, resolved_start, resolved_end = _activity_rollup(child_items)
 
                 # Rule 1: explicit range — startDate AND targetDate both present
                 elif raw_start_date and raw_target_date:
@@ -6015,7 +6082,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     resolved_end = max(dated_children)
                     schedule_source = 'rollup'
 
-                # Rule 6: none — no explicit dates, no dated children → unscheduled
+                # Rule 5.5: activity rollup — no explicit dates, no dated children, but
+                # some non-cancelled children may have completedAt timestamps.  Delegate
+                # entirely to _activity_rollup (same helper used by the ARCHIVED branch
+                # above) so there is exactly ONE copy of this logic (XACA-0638 DRY fix).
+                # Falls through to Rule 6 ('none') when no resolvable timestamps exist.
+                elif child_items:
+                    schedule_source, resolved_start, resolved_end = _activity_rollup(child_items)
+
+                # Rule 6: none — no explicit dates, no dated children, no activity → unscheduled
                 else:
                     resolved_start = None
                     resolved_end = None
