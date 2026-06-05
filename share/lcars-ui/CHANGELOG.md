@@ -11,6 +11,19 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0636: Fixed/Changed — Roadmap timeline polish + PDF export rework -->
+
+### Fixed
+- **XACA-0636: Roadmap timeline + PDF export overhaul.** A batch of fixes to the LCARS Roadmap tab and its PDF export:
+  - **Scheduled timeline lane stacking** — overlapping epics/releases (an epic bar under a milestone) are now packed into non-overlapping rows instead of drawing on top of each other (`stackRoadmapLanes`, measured after layout, reliably scheduled via double-rAF + `document.fonts.ready` + resize, idempotent). Positioning is html2canvas-safe (explicit pixel `top`, no `translateY` — which html2canvas mis-rendered, clipping bar labels).
+  - **Edge labels** — month axis labels at the range start/end are edge-anchored so they aren't clipped; a milestone whose centered label overran the track edge (e.g. one at `left:0%` showing "…RUCTURE") is nudged horizontally (from `offsetLeft`) so its label reads in full.
+  - **Narrow bars** — a bar too short to hold both its title and sublabel drops the sublabel so the title isn't squeezed to a stub.
+  - **Epic bucketing** — the unscheduled Epics lane now buckets by the epic's own `status` (`planning`→Planned, `active`→Active, `completed`/all-items-done→Archived) via the new server `_derive_epic_roadmap_state`. The previous item-derived `_derive_epic_state` dumped every `planning` epic into Active because real boards almost never use the literal `todo` item status. (Epics tab unchanged.)
+  - **Release sort** — unscheduled release chips are natural-sorted within each bucket so semantic versions order correctly (`V1.0.0 < V2.10.0 < V3.0.0`).
+  - **PDF export reworked** — captures an **off-screen clone** of the roadmap (no scrolling/clipping ancestor) so WKWebView lays out and renders the FULL content (the live `position:absolute; overflow:auto` container left lower rows unrendered, truncating the PDF); **chunked, gap-aware pagination** (one `html2canvas` pass per page region, breaks landing in card gaps) so no page is truncated and no card is sliced; explicit `1122×793` landscape pages; a white **light theme** applied to the clone; and **outer margins** (left/right on every page, top of first page, bottom of last page) with flush internal joins.
+  - **PDF filename** — the export is stashed server-side (`POST /api/roadmap-pdf`) and downloaded from `GET /api/roadmap-pdf/<token>` with a `Content-Disposition` filename, the only mechanism WKWebView honors — so the file saves as `<Team> - Roadmap - YYYYMMDD.pdf` (e.g. `Academy Team - Roadmap - 20260605.pdf`) instead of a random blob name.
+  - Cache-busters bumped `lcars.js?v=3.32→3.39`, `lcars.css?v=32.8→32.12`.
+
 <!-- XACA-0635: Changed — Roadmap unscheduled lane sub-groups by state -->
 
 ### Changed

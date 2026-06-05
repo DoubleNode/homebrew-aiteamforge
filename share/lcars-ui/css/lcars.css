@@ -1321,6 +1321,17 @@ body {
     padding-bottom: 60px;
 }
 
+/* Roadmap section — WKWebView (iTerm2 cockpit) repaint fix (XACA-0636).
+   The absolutely-positioned overflow-y:auto section can fail to repaint
+   scrolled-in content in WKWebView, leaving lower rows blank until interaction.
+   Promote the scroll container to its own compositor layer and enable
+   layer-backed momentum scrolling so newly visible content renders. */
+.lcars-content > .roadmap-section.active {
+    -webkit-overflow-scrolling: touch;
+    transform: translateZ(0);
+    will-change: scroll-position;
+}
+
 /* Knowledge graph section - flex layout for graph container */
 .lcars-content > .knowledge-graph-section.active {
     display: flex !important;
@@ -16984,6 +16995,10 @@ body {
     opacity: 0.4;
     margin: 0 auto 2px;
 }
+/* Edge labels are anchored by their left/right edge (see axisAlignTransform in
+   lcars.js), so the tick mark must sit over that same edge, not the center. */
+.roadmap-axis-label[data-align="start"]::before { margin-left: 0; margin-right: auto; }
+.roadmap-axis-label[data-align="end"]::before   { margin-left: auto; margin-right: 0; }
 
 /* ---------------------------------------------------------------------------
    Lanes container
@@ -17133,6 +17148,24 @@ body {
     transform: translate(-50%, -50%) scale(1.15);
     z-index: 10;
 }
+
+/* Row-stacked items (XACA-0636): top is set per-row in px by stackRoadmapLanes()
+   with NO vertical transform (html2canvas mis-renders translateY, clipping bar
+   labels in the PDF). Milestones keep only horizontal centering; bars none. */
+.roadmap-milestone.roadmap-stacked {
+    transform: translateX(-50%);
+}
+.roadmap-milestone.roadmap-stacked:hover {
+    transform: translateX(-50%) scale(1.15);
+}
+.roadmap-bar.roadmap-stacked {
+    transform: none;
+}
+.roadmap-bar.roadmap-stacked:hover {
+    transform: scaleY(1.08);
+}
+/* Edge milestones are kept readable by a horizontal `left` nudge applied in
+   stackRoadmapLanes() (html2canvas-safe), not a CSS re-anchor — see that fn. */
 
 /* Diamond shape via rotated square */
 .roadmap-milestone::before {
@@ -17535,6 +17568,60 @@ body {
 
 .roadmap-chip[data-kind="release"][data-type="maintenance"] { border-left-color: var(--lcars-green); }
 .roadmap-chip[data-kind="release"][data-type="maintenance"] .roadmap-chip-label { color: var(--lcars-green); }
+
+/* ---------------------------------------------------------------------------
+   PDF light theme (XACA-0636)
+   Applied transiently to #roadmap-content by buildRoadmapPdf() during export and
+   removed immediately after html2canvas capture — NEVER visible on screen. Turns
+   the dark cockpit roadmap into a white-background, dark-text printable document.
+   Structural backgrounds go light and low-contrast (light-on-dark) text goes dark;
+   KIND/STATE/COLOR accents are preserved via card left-borders and bar/diamond
+   fills (which already carry black text), so the document still reads at a glance.
+   --------------------------------------------------------------------------- */
+.roadmap-pdf-light {
+    background: #ffffff !important;
+    color: #1a1a1a !important;
+}
+/* Neutral/structural text that was light-on-dark → dark-on-light */
+.roadmap-pdf-light .roadmap-unscheduled-heading,
+.roadmap-pdf-light .roadmap-axis-label,
+.roadmap-pdf-light .roadmap-chip-meta,
+.roadmap-pdf-light .roadmap-chip-label,
+.roadmap-pdf-light .roadmap-unscheduled-status-label,
+.roadmap-pdf-light .roadmap-milestone .roadmap-item-label {
+    color: #1f1f24 !important;
+}
+.roadmap-pdf-light .roadmap-unscheduled-heading {
+    border-bottom-color: rgba(0, 0, 0, 0.18) !important;
+}
+/* Kind subheadings keep an accent but darkened for contrast on white */
+.roadmap-pdf-light .roadmap-unscheduled-group[data-kind="epics"] .roadmap-unscheduled-subheading {
+    color: #6a2fb5 !important;
+}
+.roadmap-pdf-light .roadmap-unscheduled-group[data-kind="releases"] .roadmap-unscheduled-subheading {
+    color: #1f7a3d !important;
+}
+.roadmap-pdf-light .roadmap-lane[data-kind="epics"] .roadmap-lane-label { color: #6a2fb5 !important; }
+.roadmap-pdf-light .roadmap-lane[data-kind="releases"] .roadmap-lane-label { color: #1f7a3d !important; }
+/* Timeline / axis / lane chrome → light surfaces */
+.roadmap-pdf-light .roadmap-timeline {
+    background: #f5f5f8 !important;
+    border-color: rgba(0, 0, 0, 0.15) !important;
+}
+.roadmap-pdf-light .roadmap-axis {
+    background: #eaeaf1 !important;
+    border-bottom-color: rgba(0, 0, 0, 0.20) !important;
+}
+.roadmap-pdf-light .roadmap-lane { border-bottom-color: rgba(0, 0, 0, 0.08) !important; }
+.roadmap-pdf-light .roadmap-lane-label { background: rgba(0, 0, 0, 0.04) !important; }
+/* Chips → light fill, accent retained via the colored left border */
+.roadmap-pdf-light .roadmap-chip {
+    background: #f0f0f4 !important;
+    border-color: rgba(0, 0, 0, 0.12) !important;
+}
+.roadmap-pdf-light .roadmap-unscheduled-status {
+    border-left-color: rgba(0, 0, 0, 0.12) !important;
+}
 
 /* ---------------------------------------------------------------------------
    Responsive: allow horizontal scroll on narrow viewports

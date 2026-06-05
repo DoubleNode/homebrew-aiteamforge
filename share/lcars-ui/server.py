@@ -337,6 +337,13 @@ IMPORT_JOBS = {}         # {job_id: {status, progress, message, manifest, staged
 SECRETS_IMPORT_JOBS = {} # {job_id: {status, progress, message, manifest, stagedPath, targetTeam, fileCount, createdAt, error, wrongPasswordAttempts, ...}}
 EXPORT_DIR = Path("/tmp/lcars-exports")
 IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
+
+# XACA-0636: short-lived stash for client-built roadmap PDFs so they can be served
+# back with a Content-Disposition filename (the only thing WKWebView honors for the
+# saved name). {token: {'data': bytes, 'filename': str, 'ts': float}}; one-time GET.
+ROADMAP_PDF_STASH = {}
+ROADMAP_PDF_STASH_TTL = 120  # seconds
+ROADMAP_PDF_MAX_BYTES = 25 * 1024 * 1024
 SECRETS_IMPORT_STAGING_DIR = Path("/tmp/lcars-secrets-imports")
 
 # Maximum wrong-password attempts before the staged zip is purged (item 6 spec).
@@ -2251,6 +2258,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         if path == '/api/toggle-collapsed':
             self.handle_toggle_collapsed()
+        elif path == '/api/roadmap-pdf':
+            self.handle_roadmap_pdf_stash()
         elif path == '/api/update-item':
             self.handle_update_item()
         elif path == '/api/update-subitem':
@@ -5683,6 +5692,31 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return 'PLANNED'
         return 'ACTIVE'
 
+    def _derive_epic_roadmap_state(self, epic, items):
+        """Roadmap bucket state for an epic: 'PLANNED' | 'ACTIVE' | 'ARCHIVED'.
+
+        Unlike _derive_epic_state (which infers state purely from child-item
+        statuses and drives the Epics tab), the roadmap buckets epics by the
+        status the user sets directly via `kb-epic status` (planning/active/
+        completed). The item-derived state misclassifies 'planning' epics whose
+        items are unstarted-but-not-literally-'todo' (e.g. null/blocked/ready) as
+        ACTIVE — on a real board almost no item carries the 'todo' status, so the
+        item-derived PLANNED branch effectively never fires and every planning
+        epic is dumped into Active. (XACA-0636)
+
+        Precedence: a terminal status, OR an epic whose every effective item is
+        completed (done even if the status field was never flipped), is ARCHIVED;
+        then 'planning'/unset is PLANNED; everything else (active/on_hold/…) ACTIVE.
+        """
+        status = (epic.get('status') or 'planning').strip().lower()
+        if status in ('completed', 'archived', 'cancelled', 'done'):
+            return 'ARCHIVED'
+        if self._derive_epic_state(items) == 'ARCHIVED':
+            return 'ARCHIVED'
+        if status == 'planning':
+            return 'PLANNED'
+        return 'ACTIVE'
+
     @staticmethod
     def _build_epic_item_counts(items):
         """Build the 8-key itemCounts rollup dict for an epic.
@@ -6014,8 +6048,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 item_counts = self._build_epic_item_counts(child_items)
 
-                # Canonical bucket state (STATE_CONTRACT §1.5): PLANNED | ACTIVE | ARCHIVED.
-                epic_state = self._derive_epic_state(child_items)
+                # Roadmap bucket state from the epic's own status field (planning/
+                # active/completed), with all-items-done detection — see
+                # _derive_epic_roadmap_state. NOT _derive_epic_state (item-derived,
+                # used by the Epics tab), which dumps planning epics into Active when
+                # their items aren't literally 'todo' (XACA-0636).
+                epic_state = self._derive_epic_roadmap_state(epic, child_items)
 
                 # Read explicit scheduling fields from the epic (Phase 2, XACA-0627)
                 raw_start_date = _parse_date(epic.get('startDate'))
@@ -11438,6 +11476,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/export/download/'):
             job_id = path.replace('/api/export/download/', '')
             self.serve_export_download(job_id)
+        elif path.startswith('/api/roadmap-pdf/'):
+            token = path.replace('/api/roadmap-pdf/', '')
+            self.serve_roadmap_pdf_download(token)
         elif path.startswith('/api/export/secrets/status/'):
             job_id = path.replace('/api/export/secrets/status/', '')
             self.serve_secrets_export_status(job_id)
@@ -13238,6 +13279,66 @@ end tell
 
     def serve_export_download(self, job_id):
         """GET /api/export/download/<job_id> — stream the zip"""
+        return self._serve_export_download_impl(job_id)
+
+    def handle_roadmap_pdf_stash(self):
+        """POST /api/roadmap-pdf — stash a client-built PDF, return a one-time token.
+
+        Body JSON: {"pdf": "<base64 or data: URI>", "filename": "<name>.pdf"}.
+        The companion GET /api/roadmap-pdf/<token> streams it back with a
+        Content-Disposition filename so the WKWebView cockpit saves it under the
+        right name (it ignores <a download> / document.title). XACA-0636.
+        """
+        import base64, uuid, os, time
+        try:
+            length = int(self.headers.get('Content-Length', 0))
+            if length <= 0 or length > ROADMAP_PDF_MAX_BYTES * 2:  # base64 ~1.33x
+                self._send_json_response({'error': 'Invalid or oversized payload'}, status=413)
+                return
+            body = json.loads(self.rfile.read(length))
+            raw = body.get('pdf') or ''
+            if ',' in raw and raw.strip().lower().startswith('data:'):
+                raw = raw.split(',', 1)[1]   # strip "data:application/pdf;base64,"
+            data = base64.b64decode(raw, validate=False)
+            if not data or len(data) > ROADMAP_PDF_MAX_BYTES:
+                self._send_json_response({'error': 'Empty or oversized PDF'}, status=413)
+                return
+
+            # Sanitize the filename: basename only (no path traversal), keep it a .pdf.
+            filename = os.path.basename(str(body.get('filename') or 'roadmap.pdf'))
+            filename = filename.replace('"', '').replace('\\', '').strip() or 'roadmap.pdf'
+            if not filename.lower().endswith('.pdf'):
+                filename += '.pdf'
+
+            # Drop expired stash entries (best-effort TTL sweep).
+            now = time.time()
+            for tok in [t for t, v in ROADMAP_PDF_STASH.items() if now - v['ts'] > ROADMAP_PDF_STASH_TTL]:
+                ROADMAP_PDF_STASH.pop(tok, None)
+
+            token = uuid.uuid4().hex
+            ROADMAP_PDF_STASH[token] = {'data': data, 'filename': filename, 'ts': now}
+            self._send_json_response({'token': token, 'filename': filename})
+        except Exception as e:
+            self._send_json_response({'error': f'Stash failed: {e}'}, status=500)
+
+    def serve_roadmap_pdf_download(self, token):
+        """GET /api/roadmap-pdf/<token> — stream a stashed PDF once, then drop it."""
+        import time
+        entry = ROADMAP_PDF_STASH.pop(token, None)
+        if not entry or time.time() - entry['ts'] > ROADMAP_PDF_STASH_TTL:
+            self._send_json_response({'error': 'PDF not found or expired'}, status=404)
+            return
+        data = entry['data']
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/pdf')
+        self.send_header('Content-Disposition', f'attachment; filename="{entry["filename"]}"')
+        self.send_header('Content-Length', str(len(data)))
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _serve_export_download_impl(self, job_id):
         job = EXPORT_JOBS.get(job_id)
         if not job or job['status'] != 'completed' or not job.get('filename'):
             self._send_json_response({'error': 'Export not ready'}, status=404)

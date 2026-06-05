@@ -19844,58 +19844,151 @@ async function buildRoadmapPdf() {
         throw new Error('jsPDF not loaded — vendor script missing');
     }
 
-    const bg = getComputedStyle(document.body).backgroundColor || '#000000';
-
-    const canvas = await window.html2canvas(el, {
-        backgroundColor: bg,
-        scale: 2,
-        useCORS: true,
-        width:  el.scrollWidth,
-        height: el.scrollHeight,
-        windowWidth:  el.scrollWidth,
-        scrollX: 0,
-        scrollY: 0
+    // OFF-SCREEN CLONE CAPTURE (XACA-0636). The live roadmap lives in a
+    // position:absolute; overflow-y:auto scroll container which, in WKWebView, does
+    // NOT lay out / paint its lower off-screen rows — so el.scrollHeight is short and
+    // capturing the live element truncates the PDF (the bottom epics go missing, same
+    // root cause as "scrolling doesn't render more content"). We instead capture a
+    // deep clone appended off-screen to <body> with NO clipping/scrolling ancestor and
+    // an explicit width, so the ENTIRE content lays out and renders. The clone carries
+    // the live stacker's inline styles; at the same width they resolve identically.
+    const liveWidth = el.clientWidth || el.scrollWidth;
+    const clone = el.cloneNode(true);
+    clone.id = 'roadmap-pdf-clone';
+    clone.classList.add('roadmap-pdf-light');   // white-bg light theme for export
+    Object.assign(clone.style, {
+        position: 'absolute', left: '-100000px', top: '0',
+        width: liveWidth + 'px', height: 'auto', minHeight: '0',
+        overflow: 'visible', margin: '0', zIndex: '-1',
     });
+    document.body.appendChild(clone);
 
     const { jsPDF } = window.jspdf;
-    const imgW = canvas.width;
-    const imgH = canvas.height;
+    const PAGE_W = 1122;   // ~A4 landscape width in pt
+    const PAGE_H = 793;    // ~A4 landscape height in pt
+    const doc = new jsPDF({ orientation: 'landscape', unit: 'pt', format: [PAGE_W, PAGE_H] });
 
-    // Landscape page sized to the content; paginate vertically if very tall.
-    const orientation = imgW >= imgH ? 'landscape' : 'portrait';
-    const pdfW   = 1122;   // ~A4 landscape width in pt
-    const pageH  = 793;    // ~A4 landscape height in pt
-    const scaledH = imgW > 0 ? (imgH * pdfW / imgW) : pageH;
-    const firstPageH = Math.min(scaledH, pageH);
+    try {
+        void clone.offsetHeight;  // force a layout flush
+        const fullW = clone.scrollWidth;
+        const fullH = clone.scrollHeight;
 
-    const doc = new jsPDF({ orientation, unit: 'pt', format: [pdfW, firstPageH] });
-    // JPEG (not PNG): jsPDF 2.5.1's PNG parser chokes on some html2canvas
-    // outputs ("Incomplete or corrupt PNG file"); JPEG is robust and the LCARS
-    // background is solid (no transparency needed). Quality 0.92.
-    const img = canvas.toDataURL('image/jpeg', 0.92);
+        // CHUNKED CAPTURE: render the content ONE page-region at a time. Even with the
+        // fully-laid-out clone, a single tall canvas can hit WKWebView's canvas-size
+        // limit; per-page chunks never do.
 
-    if (scaledH <= pageH) {
-        doc.addImage(img, 'JPEG', 0, 0, pdfW, scaledH);
-    } else {
-        // Paginate: render the full image offset across multiple pages so the
-        // content scrolls correctly from page to page.
-        let remaining = scaledH;
-        let yOffset   = 0;
-        let first     = true;
-        while (remaining > 0) {
-            if (!first) doc.addPage([pdfW, pageH]);
-            doc.addImage(img, 'JPEG', 0, -yOffset, pdfW, scaledH);
-            yOffset   += pageH;
-            remaining -= pageH;
-            first      = false;
+        // Gap-aware page breaks in DOM coordinates: never cut through a card. Collect
+        // every content block's vertical span; a break y is "safe" if it lands in a gap
+        // (inside no block).
+        const elTop = clone.getBoundingClientRect().top;
+        const blockSel = '.roadmap-chip, .roadmap-bar, .roadmap-milestone, .roadmap-axis,' +
+            ' .roadmap-unscheduled-heading, .roadmap-unscheduled-subheading,' +
+            ' .roadmap-unscheduled-status-label, .roadmap-lane-label';
+        const blocks = Array.from(clone.querySelectorAll(blockSel)).map(b => {
+            const r = b.getBoundingClientRect();
+            return [r.top - elTop, r.bottom - elTop];
+        });
+        const insideBlock = (yy) => blocks.some(([t, b]) => yy > t + 0.5 && yy < b - 0.5);
+
+        // Paginate only down to the last real content, not the element's trailing
+        // bottom padding — otherwise that padding becomes a blank final page.
+        const contentBottom = blocks.length ? Math.max(...blocks.map(b => b[1])) : fullH;
+        const effH = Math.min(fullH, contentBottom + 14);
+
+        // OUTER MARGINS (XACA-0636): the document perimeter (left/right on every page,
+        // top of the first page, bottom of the last page) gets a white margin so the
+        // content doesn't bleed to the paper edge. INTERNAL page joins stay flush so
+        // the content reads continuously across a break. Content is scaled to the
+        // margined width, consistent across all pages.
+        const M = 16;                       // outer margin, pt
+        const contentW = PAGE_W - 2 * M;    // drawn content width, pt
+        const pxPerPt  = fullW / contentW;  // CSS px per pt at the horizontal scale
+        const ptToPx   = (pt) => pt * pxPerPt;
+
+        // Find a card-gap break at/above `target` (px), never below `minY`.
+        const gapCut = (yStart, target) => {
+            const win = (target - yStart) * 0.30;
+            const minY = yStart + (target - yStart) * 0.5;
+            let cut = target;
+            for (let yy = target; yy > target - win && yy > minY; yy -= 2) {
+                if (!insideBlock(yy)) { cut = yy; break; }
+            }
+            if (cut <= yStart) cut = target;
+            return Math.min(cut, effH);
+        };
+
+        // Greedy pages: interior pages fill flush to the page bottom (seamless join);
+        // the last page keeps a bottom margin. First page has a top margin.
+        const pages = [];
+        let y = 0, idx = 0, guard = 0;
+        while (y < effH - 1 && guard++ < 500) {
+            const topInset = (idx === 0) ? M : 0;
+            const flushCapPx = ptToPx(PAGE_H - topInset);        // content flush to bottom
+            const lastCapPx  = ptToPx(PAGE_H - topInset - M);    // content with bottom margin
+            if (y + lastCapPx >= effH) {                         // remainder is the last page
+                pages.push({ top: y, bottom: effH, topInset });
+                break;
+            }
+            const cut = gapCut(y, y + flushCapPx);
+            pages.push({ top: y, bottom: cut, topInset });
+            y = cut; idx++;
         }
+
+        let rendered = 0;
+        for (const pg of pages) {
+            const chunkTop = pg.top, chunkH = pg.bottom - pg.top;
+            if (chunkH <= 1) continue;
+            const hasContent = blocks.some(([t, b]) => b > chunkTop + 1 && t < chunkTop + chunkH - 1);
+            if (!hasContent) continue;
+
+            const c = await window.html2canvas(clone, {
+                backgroundColor: '#ffffff',
+                scale: 2,
+                useCORS: true,
+                x: 0, y: chunkTop,
+                width: fullW, height: chunkH,
+                windowWidth: fullW, windowHeight: fullH,
+                scrollX: 0, scrollY: 0
+            });
+
+            if (rendered > 0) doc.addPage([PAGE_W, PAGE_H], 'landscape');
+            // JPEG (not PNG): jsPDF 2.5.1's PNG parser chokes on some canvas output.
+            const img = c.toDataURL('image/jpeg', 0.92);
+            const drawH = chunkH / pxPerPt;  // chunk height in pt at the margined scale
+            doc.addImage(img, 'JPEG', M, pg.topInset, contentW, drawH);
+            rendered++;
+        }
+    } finally {
+        clone.remove();
     }
 
-    const team = (CONFIG && CONFIG.team) ? CONFIG.team : 'roadmap';
-    const date = new Date().toISOString().slice(0, 10);
-    const filename = `roadmap-${team}-${date}.pdf`;
+    const filename = buildRoadmapPdfFilename();
+    doc.setProperties({ title: filename.replace(/\.pdf$/i, '') });
 
     return { doc, filename };
+}
+
+/**
+ * Build the export filename: "<Team Name> - Roadmap - YYYYMMDD.pdf"
+ * e.g. "Academy Team - Roadmap - 20260605.pdf".
+ *
+ * Derived deterministically from the team slug (CONFIG.team → title-cased + "Team")
+ * rather than document.title, which is unstable — it gets overwritten with the
+ * session name / org banner depending on load timing. (XACA-0636)
+ */
+function buildRoadmapPdfFilename() {
+    let name = 'Roadmap';
+    const slug = (typeof CONFIG !== 'undefined' && CONFIG && CONFIG.team) ? String(CONFIG.team) : '';
+    if (slug) {
+        const titled = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        name = `${titled} Team`;
+    }
+
+    const d = new Date();
+    const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+    // Sanitize characters illegal in filenames.
+    const safe = name.replace(/[\\/:*?"<>|]+/g, '').trim();
+    return `${safe} - Roadmap - ${ymd}.pdf`;
 }
 
 // Headless verification hook — allows test harnesses to call the builder
@@ -19909,18 +20002,56 @@ async function exportRoadmapPdf() {
     try {
         if (btn) { btn.setAttribute('disabled', 'true'); btn.textContent = 'GENERATING…'; }
         const { doc, filename } = await buildRoadmapPdf();
-        // Primary: trigger a file download (standard browsers + modern WebKit).
-        // Fallback: some embedded WebViews (e.g. iTerm2's WKWebView cockpit) may
-        // not honor <a download>; open the PDF in a new tab so it can be viewed
-        // and saved from the browser's PDF viewer.
+
+        // Primary path (XACA-0636): stash the PDF on the server and download it from
+        // /api/roadmap-pdf/<token>, which streams it with a Content-Disposition
+        // filename. This is the ONLY thing the iTerm2 WKWebView cockpit honors for
+        // the saved name — it ignores <a download> and document.title (it names blob
+        // downloads "<random>-Unknown.pdf"). Mirrors the working Team Export download.
+        let served = false;
         try {
-            doc.save(filename);
-        } catch (saveErr) {
-            const url = doc.output('bloburl');
-            const w = window.open(url, '_blank');
-            if (!w && typeof showToast === 'function') {
-                showToast('PDF generated but the browser blocked the download/open. Try a real browser tab.', 'error');
+            const dataUri = doc.output('datauristring');  // "data:application/pdf;base64,…"
+            const resp = await fetch(apiUrl('/api/roadmap-pdf'), {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pdf: dataUri, filename })
+            });
+            if (resp.ok) {
+                const { token } = await resp.json();
+                if (token) {
+                    const a = document.createElement('a');
+                    a.href = apiUrl('/api/roadmap-pdf/' + token);
+                    a.download = '';  // let the server's Content-Disposition set the name
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                    served = true;
+                }
             }
+        } catch (stashErr) {
+            served = false;  // fall through to client-side blob fallback
+        }
+
+        // Fallback (server unreachable): client-side blob. <a download> works in real
+        // browsers; the new-tab open is the last resort for WebViews.
+        if (!served) {
+            const url = URL.createObjectURL(doc.output('blob'));
+            let downloaded = false;
+            try {
+                const a = document.createElement('a');
+                if ('download' in a) {
+                    a.href = url; a.download = filename; a.rel = 'noopener';
+                    document.body.appendChild(a); a.click(); a.remove();
+                    downloaded = true;
+                }
+            } catch (dlErr) { downloaded = false; }
+            if (!downloaded) {
+                const w = window.open(url, '_blank');
+                if (!w && typeof showToast === 'function') {
+                    showToast('PDF generated but the browser blocked the download/open. Try a real browser tab.', 'error');
+                }
+            }
+            setTimeout(() => URL.revokeObjectURL(url), 20000);
         }
     } catch (e) {
         // showToast renders via textContent (XACA-0217), so do NOT escapeHtml
@@ -20083,18 +20214,38 @@ async function renderRoadmap() {
                 ticks.push({ pct, label });
                 cursor.setUTCMonth(cursor.getUTCMonth() + 1);
             }
+            // Edge-aware anchoring so the first/last month labels are never clipped
+            // by the axis's overflow:hidden. Labels are absolutely positioned at
+            // their tick pct; centering (translateX(-50%)) pushes an edge label half
+            // its width outside the axis. So: anchor the leftmost label's LEFT edge to
+            // the tick (align 'start') and the rightmost label's RIGHT edge to the tick
+            // (align 'end'); everything in between stays centered.
+            for (let i = 0; i < ticks.length; i++) {
+                if (ticks[i].pct <= 6)        ticks[i].align = 'start';
+                else if (ticks[i].pct >= 94)  ticks[i].align = 'end';
+                else                          ticks[i].align = 'center';
+            }
             return ticks;
         }
 
         const ticks = buildAxisTicks();
+
+        // Map an anchor mode to the transform that keeps the label inside the axis.
+        const axisAlignTransform = {
+            start:  'translate(0, -50%)',
+            center: 'translate(-50%, -50%)',
+            end:    'translate(-100%, -50%)',
+        };
 
         parts.push('<div class="roadmap-timeline">');
 
         // Date axis
         parts.push('<div class="roadmap-axis">');
         for (const tick of ticks) {
+            const tf = axisAlignTransform[tick.align] || axisAlignTransform.center;
             parts.push(
-                `<span class="roadmap-axis-label" style="left:${tick.pct.toFixed(2)}%">${escapeHtml(tick.label)}</span>`
+                `<span class="roadmap-axis-label" data-align="${tick.align}"` +
+                ` style="left:${tick.pct.toFixed(2)}%;transform:${tf}">${escapeHtml(tick.label)}</span>`
             );
         }
         parts.push('</div>'); // .roadmap-axis
@@ -20318,14 +20469,24 @@ async function renderRoadmap() {
             );
         };
 
+        // Natural (numeric-aware) compare so version-named items order correctly —
+        // e.g. V2.9.0 < V2.10.0 (a plain string sort would put "10" before "9").
+        const naturalCompare = (a, b) =>
+            String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: 'base' });
+
         // Render one kind group (Releases or Epics) with up to three state sub-rows.
-        const renderKindGroup = (kind, kindLabel, items, chipHtml) => {
+        // When sortKey is supplied, the chips within each state bucket are sorted by
+        // natural compare on that key (XACA-0636).
+        const renderKindGroup = (kind, kindLabel, items, chipHtml, sortKey) => {
             if (items.length === 0) return;
             parts.push(`<div class="roadmap-unscheduled-group" data-kind="${kind}">`);
             parts.push(`<div class="roadmap-unscheduled-subheading">${kindLabel}</div>`);
             for (const st of STATE_ORDER) {
-                const bucket = items.filter(it => stateKey(it) === st.key);
+                let bucket = items.filter(it => stateKey(it) === st.key);
                 if (bucket.length === 0) continue;  // empty status buckets are not rendered
+                if (sortKey) {
+                    bucket = bucket.slice().sort((a, b) => naturalCompare(sortKey(a), sortKey(b)));
+                }
                 parts.push(`<div class="roadmap-unscheduled-status" data-state="${st.key.toLowerCase()}">`);
                 parts.push(`<div class="roadmap-unscheduled-status-label">${st.label}</div>`);
                 parts.push('<div class="roadmap-unscheduled-list">');
@@ -20336,12 +20497,160 @@ async function renderRoadmap() {
             parts.push('</div>'); // .roadmap-unscheduled-group
         };
 
-        // Releases first, then Epics (kind order set in XACA-0634).
-        renderKindGroup('releases', 'Releases', unschReleases, releaseChipHtml);
+        // Releases first, then Epics (kind order set in XACA-0634). Releases are
+        // sorted within each bucket by their display label so semantic versions
+        // (V1.0.0, V2.10.0, V3.0.0…) order correctly.
+        renderKindGroup('releases', 'Releases', unschReleases, releaseChipHtml,
+            r => r.shortTitle || r.name || r.id);
         renderKindGroup('epics', 'Epics', unschEpics, epicChipHtml);
 
         parts.push('</div>'); // .roadmap-unscheduled
     }
 
     container.innerHTML = parts.join('\n');
+
+    // Reflow scheduled-lane items into non-overlapping rows (XACA-0636). Bars/
+    // milestones are absolutely positioned by time, so items overlapping in time
+    // would stack on top of each other; stackRoadmapLanes() packs them into rows
+    // and grows the lane. Scheduled robustly because a single rAF can fire before
+    // the fresh nodes are laid out, and webfont load changes label widths.
+    scheduleRoadmapStack(container);
+}
+
+/**
+ * Robustly (re)run the lane stacker: after layout settles (double rAF) and again
+ * once webfonts load (label widths shift when 'Antonio' arrives), plus on viewport
+ * resize. Idempotent — stackRoadmapLanes resets prior inline layout first. (XACA-0636)
+ */
+function scheduleRoadmapStack(container) {
+    if (!container) return;
+    const run = () => { try { stackRoadmapLanes(container); } catch (e) { /* layout race */ } };
+    requestAnimationFrame(() => requestAnimationFrame(run));
+    if (document.fonts && document.fonts.ready && typeof document.fonts.ready.then === 'function') {
+        document.fonts.ready.then(run).catch(() => {});
+    }
+    if (!window.__roadmapStackResizeBound) {
+        window.__roadmapStackResizeBound = true;
+        let t = null;
+        window.addEventListener('resize', () => {
+            clearTimeout(t);
+            t = setTimeout(() => {
+                const c = document.getElementById('roadmap-content');
+                if (c) { try { stackRoadmapLanes(c); } catch (e) {} }
+            }, 150);
+        });
+    }
+}
+
+/**
+ * Pack each scheduled lane's bars/milestones into non-overlapping horizontal rows,
+ * growing the lane so nothing overlaps. Measures real pixel geometry after layout.
+ * IDEMPOTENT: clears any prior inline layout first, so it can run repeatedly (font
+ * load, resize). Defensive: if a track has no measurable width (hidden/not laid
+ * out) it leaves that lane untouched.
+ *
+ * Positioning is html2canvas-safe: stacked items are placed by an explicit pixel
+ * `top` with NO vertical transform (a translateY(-50%) center is mis-rendered by
+ * html2canvas and clips bar labels in the PDF export). (XACA-0636)
+ */
+function stackRoadmapLanes(root) {
+    if (!root) return;
+    const ROW_GAP = 8;   // vertical gap between stacked rows (px)
+    const COL_GAP = 10;  // min horizontal gap between two items in the same row (px)
+    const PAD = 6;       // top/bottom padding inside a lane track (px)
+
+    root.querySelectorAll('.roadmap-lane-track').forEach(track => {
+        const items = Array.from(track.children).filter(c =>
+            c.classList.contains('roadmap-bar') || c.classList.contains('roadmap-milestone'));
+        if (items.length === 0) return;
+
+        // --- Reset any prior stacking so this run measures the natural layout ---
+        track.style.minHeight = '';
+        const lane = track.closest('.roadmap-lane');
+        if (lane) lane.style.minHeight = '';
+        for (const el of items) {
+            // Stash the original left (the % set at render) once, so edge nudges
+            // below are reapplied from scratch each run rather than accumulating.
+            if (el.dataset.roadmapLeft0 === undefined) el.dataset.roadmapLeft0 = el.style.left || '';
+            el.style.left = el.dataset.roadmapLeft0;
+            el.style.top = '';
+            el.style.transform = '';
+            el.classList.remove('roadmap-stacked');
+            const sub = el.querySelector('.roadmap-item-sublabel');
+            if (sub) sub.style.display = '';
+        }
+
+        const trackRect = track.getBoundingClientRect();
+        if (trackRect.width <= 0) return;  // not laid out yet — keep default layout
+
+        // Measure each item's horizontal footprint relative to the track.
+        const measured = items.map(el => {
+            const r = el.getBoundingClientRect();
+            return {
+                el,
+                left:  r.left  - trackRect.left,
+                right: r.right - trackRect.left,
+                height: r.height,
+                isBar: el.classList.contains('roadmap-bar'),
+            };
+        }).sort((a, b) => a.left - b.left);
+
+        // Greedy row packing: first row whose last item ends (with gap) before this
+        // item's left edge; else open a new row.
+        const rowRightEdge = [];
+        let maxItemH = 0;
+        for (const m of measured) {
+            let row = 0;
+            while (row < rowRightEdge.length && rowRightEdge[row] + COL_GAP > m.left) row++;
+            rowRightEdge[row] = m.right;
+            m.row = row;
+            if (m.height > maxItemH) maxItemH = m.height;
+        }
+
+        const rowH   = maxItemH + ROW_GAP;
+        const nRows  = rowRightEdge.length;
+        const totalH = nRows * rowH - ROW_GAP + PAD * 2;
+
+        track.style.minHeight = totalH + 'px';
+        if (lane) lane.style.minHeight = totalH + 'px';
+
+        for (const m of measured) {
+            const rowTop = PAD + m.row * rowH;
+            m.el.classList.add('roadmap-stacked');
+            if (m.isBar) {
+                // Center the (shorter) bar within the row band; explicit pixel top,
+                // no transform (html2canvas-safe — see fn header).
+                const barH = m.el.getBoundingClientRect().height || 26;
+                m.el.style.top = (rowTop + (maxItemH - barH) / 2) + 'px';
+                // A bar too narrow to hold both title and sublabel squeezes the title
+                // to a stub (e.g. "K"); drop the sublabel so the title gets the room.
+                if ((m.right - m.left) < 110) {
+                    const sub = m.el.querySelector('.roadmap-item-sublabel');
+                    if (sub) sub.style.display = 'none';
+                }
+            } else {
+                m.el.style.top = rowTop + 'px';
+            }
+        }
+
+        // Edge-label correction: a milestone near the track edge has its centered
+        // label clipped (e.g. one at left:0% loses its left half). Nudge the whole
+        // milestone horizontally just enough that its label clears the edge — this
+        // keeps the html2canvas-safe translateX(-50%) centering (re-anchoring via
+        // flex/align is mis-rendered by html2canvas in the PDF export).
+        for (const m of measured) {
+            if (m.isBar) continue;
+            const lab = m.el.querySelector('.roadmap-item-label');
+            if (!lab) continue;
+            const lr = lab.getBoundingClientRect();
+            const overL = (trackRect.left + 1) - lr.left;       // >0 → clipped at left
+            const overR = lr.right - (trackRect.right - 1);     // >0 → clipped at right
+            // Shift from offsetLeft (the PRE-transform left); the milestone carries
+            // translateX(-50%), so nudging by the rendered position would land half a
+            // label-width short. offsetLeft is unaffected by the transform.
+            const preLeft = m.el.offsetLeft;
+            if (overL > 0)      m.el.style.left = (preLeft + overL) + 'px';
+            else if (overR > 0) m.el.style.left = (preLeft - overR) + 'px';
+        }
+    });
 }
