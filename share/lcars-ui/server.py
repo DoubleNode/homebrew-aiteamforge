@@ -5886,7 +5886,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     print(f"[LCARS] roadmap: skipping malformed date '{date_str}'")
                     return None
 
-            # --- Process epics ---
+            # --- Duration parser helper (Phase 2, XACA-0627) ---
+            def _parse_duration(s):
+                """Parse a duration string like '40h', '3d', '2w', '1m' into timedelta.
+
+                Accepts: <int><unit> where unit is h (hours), d (days), w (weeks),
+                m (months, approx 30 days).  Whitespace and case are tolerated.
+                Returns datetime.timedelta on success, None on unparseable input.
+                """
+                import re
+                from datetime import timedelta
+                if not s or not isinstance(s, str):
+                    return None
+                m = re.fullmatch(r'\s*(\d+)\s*([hHdDwWmM])\s*', s.strip())
+                if not m:
+                    return None
+                value = int(m.group(1))
+                unit = m.group(2).lower()
+                if unit == 'h':
+                    return timedelta(hours=value)
+                if unit == 'd':
+                    return timedelta(days=value)
+                if unit == 'w':
+                    return timedelta(weeks=value)
+                if unit == 'm':
+                    return timedelta(days=value * 30)
+                return None  # unreachable, but defensive
+
+            # --- Process epics (Phase 2: explicit-first scheduling, XACA-0627) ---
             scheduled_epics = []
             unscheduled_epics = []
 
@@ -5913,6 +5940,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Canonical bucket state (STATE_CONTRACT §1.5): PLANNED | ACTIVE | ARCHIVED.
                 epic_state = self._derive_epic_state(child_items)
 
+                # Read explicit scheduling fields from the epic (Phase 2, XACA-0627)
+                raw_start_date = _parse_date(epic.get('startDate'))
+                raw_target_date = _parse_date(epic.get('targetDate'))
+                raw_time_estimate = epic.get('timeEstimate') or None
+
                 base_epic = {
                     'id': epic_id,
                     'title': epic.get('title', ''),
@@ -5928,18 +5960,73 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'itemCounts': item_counts,
                     'addedAt': epic.get('addedAt', ''),
                     'updatedAt': epic.get('updatedAt', ''),
+                    # Phase 2 explicit scheduling fields (null when absent)
+                    'startDate': raw_start_date,
+                    'targetDate': raw_target_date,
+                    'timeEstimate': raw_time_estimate,
                 }
 
+                # --- Scheduling precedence (Phase 2 contract, XACA-0627) ---
                 # ARCHIVED epics are historical, not forward-looking — keep them out of
                 # the scheduled timeline and surface them in the unscheduled Archived
-                # bucket regardless of any child dueDates (XACA-0635).
-                if dated_children and epic_state != 'ARCHIVED':
-                    start_date = min(dated_children)
-                    end_date = max(dated_children)
+                # bucket regardless of any explicit dates or child dueDates (XACA-0635).
+                # Only non-archived epics run the precedence ladder below.
+                if epic_state == 'ARCHIVED':
+                    resolved_start = None
+                    resolved_end = None
+                    schedule_source = 'none'
+
+                # Rule 1: explicit range — startDate AND targetDate both present
+                elif raw_start_date and raw_target_date:
+                    resolved_start = raw_start_date
+                    resolved_end = raw_target_date
+                    schedule_source = 'explicit'
+
+                # Rule 2: derived — startDate present, no targetDate, parseable estimate
+                elif raw_start_date and not raw_target_date and raw_time_estimate:
+                    delta = _parse_duration(raw_time_estimate)
+                    if delta is not None:
+                        base_dt = datetime.strptime(raw_start_date, '%Y-%m-%d')
+                        end_dt = base_dt + delta
+                        resolved_start = raw_start_date
+                        resolved_end = end_dt.strftime('%Y-%m-%d')
+                        schedule_source = 'derived'
+                    else:
+                        # Unparseable estimate — fall through to rule 3 (point event)
+                        resolved_start = raw_start_date
+                        resolved_end = raw_start_date
+                        schedule_source = 'explicit'
+
+                # Rule 3: explicit point (start only) — startDate, no targetDate, no parseable estimate
+                elif raw_start_date and not raw_target_date:
+                    resolved_start = raw_start_date
+                    resolved_end = raw_start_date
+                    schedule_source = 'explicit'
+
+                # Rule 4: explicit point (target only) — targetDate, no startDate
+                elif raw_target_date and not raw_start_date:
+                    resolved_start = raw_target_date
+                    resolved_end = raw_target_date
+                    schedule_source = 'explicit'
+
+                # Rule 5: rollup — no explicit dates, use child dueDate min/max
+                elif dated_children:
+                    resolved_start = min(dated_children)
+                    resolved_end = max(dated_children)
+                    schedule_source = 'rollup'
+
+                # Rule 6: none — no explicit dates, no dated children → unscheduled
+                else:
+                    resolved_start = None
+                    resolved_end = None
+                    schedule_source = 'none'
+
+                if schedule_source != 'none':
                     scheduled_epics.append({
                         **base_epic,
-                        'start': start_date,
-                        'end': end_date,
+                        'start': resolved_start,
+                        'end': resolved_end,
+                        'scheduleSource': schedule_source,
                         'scheduled': True,
                     })
                 else:

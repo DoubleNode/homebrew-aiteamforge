@@ -20119,6 +20119,12 @@ async function renderRoadmap() {
                 const color     = epic.color || '';
                 const counts    = epic.itemCounts || {};
 
+                // Phase 2 scheduling fields (XACA-0627-003)
+                const scheduleSource = epic.scheduleSource || '';   // "explicit" | "derived" | "rollup"
+                const timeEstimate   = epic.timeEstimate   || '';   // e.g. "40h", "3w" or ""
+                const startDate      = epic.startDate      || '';
+                const targetDate     = epic.targetDate     || '';
+
                 // Build a tooltip string with key info
                 const inProgress = counts.inProgress || 0;
                 const completed  = counts.completed  || 0;
@@ -20126,10 +20132,40 @@ async function renderRoadmap() {
                 const tooltipText = [
                     fullTitle,
                     epic.start + ' → ' + epic.end,
+                    scheduleSource ? 'Schedule: ' + scheduleSource : '',
+                    (startDate || targetDate) ? (startDate || epic.start) + ' → ' + (targetDate || epic.end) : '',
+                    timeEstimate ? 'Estimate: ' + timeEstimate : '',
                     priority ? 'Priority: ' + priority : '',
                     total ? (completed + '/' + total + ' done') : '',
                     epic.description || '',
                 ].filter(Boolean).join(' | ');
+
+                // Schedule-source badge HTML — short pill label per source type.
+                // "rollup" is intentionally subdued (dimmer); "explicit" and "derived"
+                // are visually distinct to signal intent vs. inference.
+                let scheduleBadgeHtml = '';
+                if (scheduleSource) {
+                    const badgeLabel = scheduleSource === 'explicit' ? 'EXPLICIT'
+                                     : scheduleSource === 'derived'  ? 'EST'
+                                     : scheduleSource === 'rollup'   ? 'ROLLUP'
+                                     : escapeHtml(scheduleSource.toUpperCase());
+                    scheduleBadgeHtml =
+                        `<span class="roadmap-schedule-badge roadmap-schedule-badge--${escapeHtml(scheduleSource)}"` +
+                        ` title="${escapeHtml('Schedule source: ' + scheduleSource)}">${badgeLabel}</span>`;
+                }
+
+                // Estimate label HTML — shown when timeEstimate is present.
+                let estimateLabelHtml = '';
+                if (timeEstimate) {
+                    const estimateTooltip = [
+                        timeEstimate,
+                        startDate  ? 'Start: '  + startDate  : '',
+                        targetDate ? 'Target: ' + targetDate : '',
+                    ].filter(Boolean).join(' | ');
+                    estimateLabelHtml =
+                        `<span class="roadmap-estimate-label"` +
+                        ` title="${escapeHtml(estimateTooltip)}">~${escapeHtml(timeEstimate)}</span>`;
+                }
 
                 if (isPoint) {
                     parts.push(
@@ -20138,9 +20174,12 @@ async function renderRoadmap() {
                         ` data-color="${escapeHtml(color)}"` +
                         ` data-status="${escapeHtml(status)}"` +
                         ` data-priority="${escapeHtml(priority)}"` +
+                        (scheduleSource ? ` data-schedule-source="${escapeHtml(scheduleSource)}"` : '') +
                         ` style="left:${leftPct.toFixed(2)}%"` +
                         ` title="${escapeHtml(tooltipText)}">` +
                         `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                        scheduleBadgeHtml +
+                        estimateLabelHtml +
                         `</div>`
                     );
                 } else {
@@ -20150,12 +20189,15 @@ async function renderRoadmap() {
                         ` data-color="${escapeHtml(color)}"` +
                         ` data-status="${escapeHtml(status)}"` +
                         ` data-priority="${escapeHtml(priority)}"` +
+                        (scheduleSource ? ` data-schedule-source="${escapeHtml(scheduleSource)}"` : '') +
                         ` style="left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"` +
                         ` title="${escapeHtml(tooltipText)}">` +
                         `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
                         (priority ? `<span class="roadmap-item-sublabel">${escapeHtml(priority)}` +
                             (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
                             `</span>` : '') +
+                        scheduleBadgeHtml +
+                        estimateLabelHtml +
                         `</div>`
                     );
                 }

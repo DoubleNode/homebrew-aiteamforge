@@ -17291,6 +17291,80 @@ body {
 }
 
 /* ---------------------------------------------------------------------------
+   Schedule-source badge (XACA-0627-003)
+   Small pill appended inside .roadmap-bar or .roadmap-milestone indicating
+   how an epic's schedule was determined: explicit, derived (estimate), rollup.
+   "rollup" is intentionally subdued; "explicit" and "derived" are distinct.
+   --------------------------------------------------------------------------- */
+.roadmap-schedule-badge {
+    display: inline-block;
+    font-size: 0.52rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    padding: 1px 4px;
+    border-radius: 3px;
+    margin-left: 5px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    vertical-align: middle;
+    line-height: 1.4;
+    /* Default — overridden per source below */
+    background: rgba(0, 0, 0, 0.25);
+    color: rgba(0, 0, 0, 0.55);
+}
+
+/* Explicit: bright cyan — intentionally scheduled, high confidence */
+.roadmap-schedule-badge--explicit {
+    background: var(--lcars-cyan);
+    color: var(--lcars-black);
+}
+
+/* Derived (estimate-based): amber — derived from time estimate, medium confidence */
+.roadmap-schedule-badge--derived {
+    background: var(--lcars-amber);
+    color: var(--lcars-black);
+}
+
+/* Rollup: subdued — computed from children, informational only */
+.roadmap-schedule-badge--rollup {
+    background: rgba(153, 204, 255, 0.18);
+    color: rgba(153, 204, 255, 0.65);
+    border: 1px solid rgba(153, 204, 255, 0.25);
+}
+
+/* On milestones the badge sits below the diamond; float it inline with the label */
+.roadmap-milestone .roadmap-schedule-badge {
+    font-size: 0.50rem;
+    margin-left: 0;
+    margin-top: 2px;
+}
+
+/* ---------------------------------------------------------------------------
+   Estimate label (XACA-0627-003)
+   Small "~3w" annotation shown on/below the bar when timeEstimate is present.
+   --------------------------------------------------------------------------- */
+.roadmap-estimate-label {
+    display: inline-block;
+    font-size: 0.52rem;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    color: rgba(0, 0, 0, 0.50);
+    margin-left: 4px;
+    flex-shrink: 0;
+    white-space: nowrap;
+    vertical-align: middle;
+}
+
+/* On milestones, stack below the diamond label */
+.roadmap-milestone .roadmap-estimate-label {
+    font-size: 0.50rem;
+    margin-left: 0;
+    margin-top: 1px;
+    color: var(--lcars-tan);
+}
+
+/* ---------------------------------------------------------------------------
    Unscheduled section — chip list below the timeline
    --------------------------------------------------------------------------- */
 .roadmap-unscheduled {
