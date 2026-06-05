@@ -17622,6 +17622,45 @@ body {
 .roadmap-pdf-light .roadmap-unscheduled-status {
     border-left-color: rgba(0, 0, 0, 0.12) !important;
 }
+/* Chip meta (status · priority · counts) — full opacity on the light card so
+   archived/maintenance metadata stays crisp (the on-screen 0.75 dim is tuned
+   for the dark surface and reads washed-out on white). */
+.roadmap-pdf-light .roadmap-chip-meta {
+    opacity: 1 !important;
+    color: #3a3a42 !important;
+}
+/* Schedule-source badges (ROLLUP / ACTUAL / EXPLICIT / EST) — XACA-0640.
+   The dark-cockpit versions use translucent pale-on-pale fills tuned to sit
+   *subdued* against dark bars; on the white PDF they wash out to near-invisible
+   (the #1 readability complaint on the light export). Re-skin each to a SOLID
+   light tint + dark, saturated text so the source semantics survive at print
+   contrast: cyan=explicit, amber=derived(EST), blue=rollup, green=activity(ACTUAL).
+   All combos clear WCAG AA on the white background. */
+.roadmap-pdf-light .roadmap-schedule-badge {
+    background: #e3e3ea !important;
+    color: #2a2a30 !important;
+    border: 1px solid rgba(0, 0, 0, 0.20) !important;
+}
+.roadmap-pdf-light .roadmap-schedule-badge--explicit {
+    background: #c6ecf4 !important;
+    color: #0c4753 !important;
+    border-color: #74c2d2 !important;
+}
+.roadmap-pdf-light .roadmap-schedule-badge--derived {
+    background: #ffe4ac !important;
+    color: #6f4d00 !important;
+    border-color: #dcab52 !important;
+}
+.roadmap-pdf-light .roadmap-schedule-badge--rollup {
+    background: #d7e6fb !important;
+    color: #194d87 !important;
+    border-color: #9bbfe9 !important;
+}
+.roadmap-pdf-light .roadmap-schedule-badge--activity {
+    background: #d4eed7 !important;
+    color: #1a6629 !important;
+    border-color: #8cc494 !important;
+}
 
 /* ---------------------------------------------------------------------------
    Responsive: allow horizontal scroll on narrow viewports

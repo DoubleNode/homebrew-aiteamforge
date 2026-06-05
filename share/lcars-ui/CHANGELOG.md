@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0640: Fixed — Roadmap PDF light-theme schedule-badge contrast -->
+
+### Fixed
+- **XACA-0640: Roadmap PDF schedule-badge contrast.** The `ROLLUP` / `ACTUAL` (and `EXPLICIT` / `EST`) schedule-source pills on the Roadmap PDF export were near-invisible on the white page. Their dark-cockpit styling uses translucent pale-on-pale fills tuned to sit *subdued* against dark bars (e.g. rollup contrast ~1.7:1, activity ~2.0:1 on white — far below the WCAG 3:1 floor), and the `.roadmap-pdf-light` export block never re-skinned them. Added light-theme overrides that re-skin each badge to a solid light tint + dark saturated text while preserving the source semantics (cyan=explicit, amber=derived, blue=rollup, green=activity); all combos now clear WCAG AA (4.5:1+). Also bumped chip-meta to full opacity on the light card so archived/maintenance metadata reads crisply. CSS-only, scoped to the transient export clone — no on-screen cockpit change.
+
 <!-- XACA-0636: Fixed/Changed — Roadmap timeline polish + PDF export rework -->
 
 ### Fixed
