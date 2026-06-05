@@ -20374,9 +20374,26 @@ async function renderRoadmap() {
                 const relType  = rel.type || '';
                 const status   = rel.status || '';
 
+                // XACA-0639: archived releases may carry scheduleSource='activity'
+                // (set by server when the span is derived from real item timestamps).
+                // Render the same schedule-source badge pill as the epic lane does.
+                const scheduleSource = rel.scheduleSource || '';
+                let scheduleBadgeHtml = '';
+                if (scheduleSource) {
+                    const badgeLabel = scheduleSource === 'explicit' ? 'EXPLICIT'
+                                     : scheduleSource === 'derived'  ? 'EST'
+                                     : scheduleSource === 'rollup'   ? 'ROLLUP'
+                                     : scheduleSource === 'activity' ? 'ACTUAL'
+                                     : escapeHtml(scheduleSource.toUpperCase());
+                    scheduleBadgeHtml =
+                        `<span class="roadmap-schedule-badge roadmap-schedule-badge--${escapeHtml(scheduleSource)}"` +
+                        ` title="${escapeHtml('Schedule source: ' + scheduleSource)}">${badgeLabel}</span>`;
+                }
+
                 const tooltipText = [
                     fullName,
                     rel.targetDate || rel.start,
+                    scheduleSource ? 'Schedule: ' + scheduleSource : '',
                     relType ? 'Type: ' + relType : '',
                     status ? 'Status: ' + status : '',
                 ].filter(Boolean).join(' | ');
@@ -20386,9 +20403,11 @@ async function renderRoadmap() {
                     ` data-kind="release"` +
                     ` data-type="${escapeHtml(relType)}"` +
                     ` data-status="${escapeHtml(status)}"` +
+                    (scheduleSource ? ` data-schedule-source="${escapeHtml(scheduleSource)}"` : '') +
                     ` style="left:${leftPct.toFixed(2)}%"` +
                     ` title="${escapeHtml(tooltipText)}">` +
                     `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                    scheduleBadgeHtml +
                     `</div>`
                 );
             }

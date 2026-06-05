@@ -5909,6 +5909,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Build an O(1) lookup: item id → raw item dict
             backlog_index = {item['id']: item for item in raw_backlog if 'id' in item}
 
+            # Build a release_id → [items] index.  Releases carry no itemIds; membership
+            # is the inverse pointer: item.releaseAssignment.releaseId (XACA-0639).
+            release_items = {}
+            for _it in raw_backlog:
+                _rid = (_it.get('releaseAssignment') or {}).get('releaseId')
+                if _rid:
+                    release_items.setdefault(_rid, []).append(_it)
+
             # --- Date validation helper ---
             def _parse_date(date_str):
                 """Return date_str if it is a valid YYYY-MM-DD string, else None."""
@@ -5960,7 +5968,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return None  # unreachable, but defensive
 
             # --- Activity-rollup helper (Rule 5.5 + ARCHIVED branch, XACA-0638) ---
-            def _activity_rollup(children):
+            def _activity_rollup(children, extend_to_today=True):
                 """Return ('activity', start, end) from child activity timestamps, or
                 ('none', None, None) if no resolved start+end can be derived.
 
@@ -5970,11 +5978,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 keeps a data-anomaly in-progress item carrying a stale completedAt out
                 of the span — such an item is still counted as open below.
 
-                EXTEND-TO-TODAY: if any non-cancelled child is still open (status not in
-                completed/cancelled), end is clamped to today so the bar extends to the
-                present.  For ARCHIVED epics all non-cancelled children are completed by
-                definition, so this clause naturally does NOT fire — the end stays at
-                max(completedAt), an honest historical finish.
+                EXTEND-TO-TODAY (only when extend_to_today=True): if any non-cancelled
+                child is still open (status not in completed/cancelled), end is clamped
+                to today so the bar extends to the present.  For ARCHIVED epics all
+                non-cancelled children are completed by definition, so this clause
+                naturally does NOT fire — the end stays at max(completedAt), an honest
+                historical finish.  Pass extend_to_today=False for archived releases,
+                which are historical and must never extend to today (XACA-0639).
 
                 Returns a 3-tuple:
                   ('activity', start_str, end_str) on success, or
@@ -6014,16 +6024,50 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if activity_end < activity_start:
                     activity_end = activity_start
 
-                # EXTEND-TO-TODAY: clamp end forward if any non-cancelled child is still open
-                open_children = [
-                    c for c in children
-                    if c.get('status') not in ('completed', 'cancelled')
-                ]
-                if open_children:
-                    today_str = datetime.now().strftime('%Y-%m-%d')
-                    activity_end = max(activity_end, today_str)
+                # EXTEND-TO-TODAY: clamp end forward if any non-cancelled child is still open.
+                # Only fires when extend_to_today=True (default).  Archived releases pass
+                # False — they are historical and end must stay honest (XACA-0639).
+                if extend_to_today:
+                    open_children = [
+                        c for c in children
+                        if c.get('status') not in ('completed', 'cancelled')
+                    ]
+                    if open_children:
+                        today_str = datetime.now().strftime('%Y-%m-%d')
+                        activity_end = max(activity_end, today_str)
 
                 return 'activity', activity_start, activity_end
+
+            def _schedule_archived_release(release):
+                """Derive a historical (start, end) span for an archived release.
+
+                Primary: item activity rollup over all items assigned to the release
+                (via the release_items index built above).  extend_to_today=False —
+                archived releases are historical and must never extend to today even
+                if some assigned items are still open (XACA-0639).
+
+                Fallback: release lifecycle timestamps — createdAt → archivedAt (or
+                targetDate when archivedAt is absent).
+
+                Returns (source, start, end):
+                  ('activity', start_str, end_str) when a span can be derived, or
+                  ('none',     None,      None)     when neither path yields dates.
+                """
+                children = release_items.get(release.get('id', ''), [])
+                src, s, e = _activity_rollup(children, extend_to_today=False)
+                if src == 'activity':
+                    return src, s, e
+
+                # Fallback: use the release's own lifecycle timestamps
+                s2 = _date_part(release.get('createdAt'))
+                e2 = _date_part(release.get('archivedAt') or release.get('targetDate'))
+                if s2 and e2:
+                    # Degenerate guard: if archivedAt < createdAt (data anomaly) clamp to point
+                    if e2 < s2:
+                        e2 = s2
+                    return 'activity', s2, e2
+
+                return 'none', None, None
 
             # --- Process epics (Phase 2: explicit-first scheduling, XACA-0627) ---
             scheduled_epics = []
@@ -6194,14 +6238,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if release.get('status') == 'archived':
                     # Archived releases normally live only in the archive dir (the
                     # archive toggle removes them from board.releases), but if one is
-                    # still on the board, surface it in the Archived bucket here rather
-                    # than dropping it. Its id is already in seen_release_ids so the
-                    # archive-dir pass below won't render it a second time (XACA-0635-001).
+                    # still on the board, surface it here.  Its id is already in
+                    # seen_release_ids so the archive-dir pass below won't double-render
+                    # it (XACA-0635-001).  Derive a historical span from item activity
+                    # or lifecycle timestamps (XACA-0639).
                     base_release = _build_base_release(release, 'ARCHIVED')
-                    unscheduled_releases.append({
-                        **base_release,
-                        'scheduled': False,
-                    })
+                    _src, _start, _end = _schedule_archived_release(release)
+                    if _src != 'none':
+                        scheduled_releases.append({
+                            **base_release,
+                            'start': _start,
+                            'end': _end,
+                            'scheduleSource': _src,
+                            'scheduled': True,
+                        })
+                    else:
+                        unscheduled_releases.append({
+                            **base_release,
+                            'scheduled': False,
+                        })
                     continue
 
                 target_date = _parse_date(release.get('targetDate'))
@@ -6222,10 +6277,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         'scheduled': False,
                     })
 
-            # Archived releases — historical, always surfaced in the unscheduled
-            # Archived bucket regardless of any targetDate (XACA-0635). Deduped against
-            # board releases by id (only non-empty ids dedup, so malformed empty-id
-            # archive files are not collapsed into one entry — XACA-0635-001).
+            # Archived releases from the archive directory — deduped against board
+            # releases by id (only non-empty ids dedup, so malformed empty-id archive
+            # files are not collapsed into one entry — XACA-0635-001).  Each gets a
+            # historical span from item activity or lifecycle timestamps when available;
+            # those without a derivable span fall back to the unscheduled Archived bucket
+            # (XACA-0635 / XACA-0639).
             for release in self._load_archived_releases():
                 release_id = release.get('id', '')
                 if release_id and release_id in seen_release_ids:
@@ -6233,10 +6290,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if release_id:
                     seen_release_ids.add(release_id)
                 base_release = _build_base_release(release, 'ARCHIVED')
-                unscheduled_releases.append({
-                    **base_release,
-                    'scheduled': False,
-                })
+                _src, _start, _end = _schedule_archived_release(release)
+                if _src != 'none':
+                    scheduled_releases.append({
+                        **base_release,
+                        'start': _start,
+                        'end': _end,
+                        'scheduleSource': _src,
+                        'scheduled': True,
+                    })
+                else:
+                    unscheduled_releases.append({
+                        **base_release,
+                        'scheduled': False,
+                    })
 
             # --- Compute overall dateRange (contract §5.1) ---
             all_dates = (
