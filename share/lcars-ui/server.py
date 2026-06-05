@@ -7545,8 +7545,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             points = item.get('points')
             time_worked_ms = item.get('timeWorkedMs')
 
-            has_est = points is not None and points > 0
-            has_time = time_worked_ms is not None and time_worked_ms > 0
+            # Type-guarded numeric check (XACA-0630-013): mirror jq's
+            # `(. | type) == "number"` so a corrupt non-numeric value (e.g. a
+            # string) is treated as missing rather than raising TypeError on the
+            # `> 0` comparison. bool is a subclass of int, so exclude it.
+            def _positive_number(v):
+                return isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+
+            has_est = _positive_number(points)
+            has_time = _positive_number(time_worked_ms)
 
             if has_est and has_time:
                 eligible_items.append(item)
