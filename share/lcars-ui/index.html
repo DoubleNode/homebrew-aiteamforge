@@ -28,7 +28,7 @@
     <link rel="stylesheet" href="css/lcars-fleet.css">
     <link rel="stylesheet" href="css/lcars-fleet-theme.css">
     <!-- KanBan-specific overrides (Division/Org color coordination) -->
-    <link rel="stylesheet" href="css/lcars.css?v=32.3">
+    <link rel="stylesheet" href="css/lcars.css?v=32.4">
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
@@ -342,7 +342,18 @@
                                 </div>
                             </div>
 
-                            <!-- Panels 6+: RAG ENGINE PANELS (dynamically injected by JS) -->
+                            <!-- Panel 6: ESTIMATION ACCURACY (XACA-0630) -->
+                            <div class="carousel-panel" data-panel-index="6" data-home-mode="kanban">
+                                <div class="section-header" style="border-left-color: #FF9900;">
+                                    <span class="section-title" style="color: #FF9900;">ESTIMATION ACCURACY</span>
+                                    <div class="section-bar"></div>
+                                </div>
+                                <div id="home-estimates-content" class="home-estimates-panel">
+                                    <!-- Populated by lcars-estimates.js -->
+                                </div>
+                            </div>
+
+                            <!-- Panels 7+: RAG ENGINE PANELS (dynamically injected by JS) -->
                             <div id="rag-engine-panels-container"></div>
 
                         </div><!-- /.carousel-track -->
@@ -2624,7 +2635,7 @@
     <script src="js/lcars-graph.js?v=1.3"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js"></script>
-<script src="js/lcars.js?v=3.25"></script>
+<script src="js/lcars.js?v=3.26"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
@@ -2647,6 +2658,8 @@
 <script src="js/daily-overview.js"></script>
 <!-- XACA-0281-022: Per-team account picker dropdown — must load after lcars.js (needs apiUrl, showToast, CONFIG) -->
 <script src="js/lcars-team-account.js"></script>
+<!-- XACA-0630: Estimation Accuracy carousel panel — must load after lcars.js (depends on currentHomePanel, escapeHtml) -->
+<script src="js/lcars-estimates.js?v=1.0"></script>
 
 <!-- ═══════════════════════════════════════════════════════════════════════ -->
 <!-- XACA-0243-005: Full usage widget polling JS                             -->

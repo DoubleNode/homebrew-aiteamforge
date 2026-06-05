@@ -145,7 +145,7 @@ let homeCharts = {
 // HOME tab carousel state
 let currentHomePanel = 0;      // Physical panel index (data-panel-index value) of the active panel
 let currentLogicalPanel = 0;   // Logical index within the visible (mode-filtered) panel set — XACA-0164-008
-let TOTAL_HOME_PANELS = 6; // Base panels; increases dynamically with RAG engines
+let TOTAL_HOME_PANELS = 7; // Base panels (0–6, incl. XACA-0630 Estimation Accuracy); increases dynamically with RAG engines
 let carouselAutoTimer = null;
 const CAROUSEL_AUTO_INTERVAL = 10000; // 10 seconds
 let carouselPaused = false;
@@ -706,6 +706,11 @@ function navigateToPanel(logicalIndex) {
         }
     }
 
+    // If leaving the Estimation Accuracy panel (6), cancel its in-flight fetch — XACA-0630
+    if (currentHomePanel === 6 && physicalIndex !== 6 && window.LCARSEstimates) {
+        window.LCARSEstimates.cancelFetch();
+    }
+
     currentLogicalPanel = logicalIndex;
     currentHomePanel = physicalIndex;
 
@@ -872,6 +877,10 @@ function stopCarousel() {
         _ragAbortController.abort();
         _ragAbortController = null;
     }
+    // Cancel any pending Estimation Accuracy panel fetch — XACA-0630
+    if (window.LCARSEstimates) {
+        window.LCARSEstimates.cancelFetch();
+    }
 }
 
 /**
@@ -896,7 +905,7 @@ async function _refreshRAGEnginePanels() {
         if (engines.length !== ragEnginePanelCount) {
             ragEngineData = engines;
             ragEnginePanelCount = engines.length;
-            TOTAL_HOME_PANELS = 6 + ragEnginePanelCount;
+            TOTAL_HOME_PANELS = 7 + ragEnginePanelCount;
             _rebuildRAGPanelsDOM(engines);
             _rebuildCarouselDots();
         } else {
@@ -920,7 +929,7 @@ function _rebuildRAGPanelsDOM(engines) {
     container.textContent = '';
 
     engines.forEach((engine, i) => {
-        const panelIndex = 6 + i;
+        const panelIndex = 7 + i;
         const typeLabel = (engine.type || '').toUpperCase().replace(/-/g, ' ');
         const statusClass = engine.status === 'running' ? 'rag-status-running' :
                            engine.status === 'installed' ? 'rag-status-installed' : 'rag-status-offline';
@@ -1209,14 +1218,16 @@ function _destroyOrphanedChart(canvasId) {
  * create-vs-update internally via homeCharts instance checks.
  *
  * Panel mapping:
- *   0 — MISSION STATUS  : summary metrics (2x2 grid)
- *   1 — MISSION CHARTS  : status doughnut + completion bar
- *   2 — EPIC PROGRESS   : epic progress bars
- *   3 — SUBITEM INTEL   : subitem statistics doughnut
- *   4 — KNOWLEDGE BASE  : knowledge file doughnut + summary metrics
- *   5 — RETRO COVERAGE  : retrospective adoption coverage bar + per-team breakdown
+ *   0 — MISSION STATUS       : summary metrics (2x2 grid)
+ *   1 — MISSION CHARTS       : status doughnut + completion bar
+ *   2 — EPIC PROGRESS        : epic progress bars
+ *   3 — SUBITEM INTEL        : subitem statistics doughnut
+ *   4 — KNOWLEDGE BASE       : knowledge file doughnut + summary metrics
+ *   5 — RETRO COVERAGE       : retrospective adoption coverage bar + per-team breakdown
+ *   6 — ESTIMATION ACCURACY  : estimate-vs-actual handicap analytics (XACA-0630)
+ *   7+ — Dynamic RAG engine panels
  *
- * @param {number} panelIndex - The carousel panel index to render (0–5).
+ * @param {number} panelIndex - The carousel panel index to render (0–6 static, 7+ dynamic).
  */
 function renderHomePanel(panelIndex) {
     if (!boardData) return;
@@ -1255,10 +1266,16 @@ function renderHomePanel(panelIndex) {
         case 5:
             _renderHomeAdoptionStats();
             break;
+        case 6:
+            // ESTIMATION ACCURACY panel (XACA-0630)
+            if (window.LCARSEstimates) {
+                window.LCARSEstimates.renderPanel();
+            }
+            break;
         default:
-            // Dynamic RAG engine panels (index 6+)
-            if (panelIndex >= 6 && panelIndex < 6 + ragEnginePanelCount) {
-                _renderHomeRAGPanel(panelIndex - 6);
+            // Dynamic RAG engine panels (index 7+)
+            if (panelIndex >= 7 && panelIndex < 7 + ragEnginePanelCount) {
+                _renderHomeRAGPanel(panelIndex - 7);
             }
             break;
     }

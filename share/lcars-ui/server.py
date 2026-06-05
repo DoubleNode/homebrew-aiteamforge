@@ -7503,6 +7503,172 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # =========================================================================
 
     # =========================================================================
+    # ESTIMATE-VS-ACTUAL HANDICAP ANALYTICS (XACA-0630-003)
+    # =========================================================================
+
+    def _build_estimates_payload(self, team: str) -> dict:
+        """Compute the estimate-vs-actual handicap payload for *team*.
+
+        Reads the team's board JSON (same file the server already serves),
+        applies the eligibility filter and bucket partitioning defined in the
+        XACA-0630 canonical spec (handicap-spec.md), and returns a dict that
+        exactly matches the §7 JSON payload contract.
+
+        All intermediate arithmetic is performed at full float precision.
+        Rounding to 2 decimal places is applied ONLY to the final emitted
+        values (§6 of the spec).
+        """
+        from datetime import datetime, timezone
+
+        generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+        board_file = get_board_file(team)
+        if not board_file.exists():
+            return None  # caller converts to 404
+
+        with open(board_file, 'r') as f:
+            board_data = json.load(f)
+
+        backlog = board_data.get('backlog', [])
+
+        # --- Eligibility pass (§2) ---
+        eligible_items = []
+        excl_no_estimate = 0
+        excl_no_time = 0
+        excl_both_missing = 0
+
+        for item in backlog:
+            if item.get('status') != 'completed':
+                # Not completed — silently ignore (not counted in exclusions)
+                continue
+
+            points = item.get('points')
+            time_worked_ms = item.get('timeWorkedMs')
+
+            has_est = points is not None and points > 0
+            has_time = time_worked_ms is not None and time_worked_ms > 0
+
+            if has_est and has_time:
+                eligible_items.append(item)
+            elif not has_est and not has_time:
+                excl_both_missing += 1
+            elif not has_est:
+                excl_no_estimate += 1
+            else:
+                excl_no_time += 1
+
+        excluded = {
+            'no_estimate': excl_no_estimate,
+            'no_time': excl_no_time,
+            'both_missing': excl_both_missing,
+            'total': excl_no_estimate + excl_no_time + excl_both_missing,
+        }
+
+        # --- Per-item ratio computation (§3) at full precision ---
+        # Each entry: (points, actual_hours, ratio)
+        item_data = []
+        for item in eligible_items:
+            points = item['points']
+            actual_hours = item['timeWorkedMs'] / 3600000.0
+            ratio = actual_hours / points
+            item_data.append((points, actual_hours, ratio))
+
+        # --- Bucket definitions (§5) — LOCKED ---
+        bucket_defs = [
+            ('<=1h', lambda p: 0 < p <= 1),
+            ('1-4h', lambda p: 1 < p <= 4),
+            ('4-8h', lambda p: 4 < p <= 8),
+            ('>8h',  lambda p: p > 8),
+        ]
+
+        def _compute_aggregate(entries):
+            """Compute handicap + median for a list of (points, actual_hours, ratio) tuples.
+
+            Returns (handicap, median, sum_est, sum_act) all at full precision;
+            caller applies round(x, 2) at serialisation time.
+            handicap and median are None when entries is empty.
+            """
+            if not entries:
+                return None, None, 0.0, 0.0
+
+            sum_est = sum(e[0] for e in entries)
+            sum_act = sum(e[1] for e in entries)
+            handicap = sum_act / sum_est
+
+            ratios = sorted(e[2] for e in entries)
+            n = len(ratios)
+            if n % 2 == 1:
+                median = ratios[n // 2]
+            else:
+                median = (ratios[n // 2 - 1] + ratios[n // 2]) / 2.0
+
+            return handicap, median, sum_est, sum_act
+
+        # --- Global aggregates (§4) ---
+        g_handicap, g_median, g_sum_est, g_sum_act = _compute_aggregate(item_data)
+
+        global_block = {
+            'handicap':          round(g_handicap, 2) if g_handicap is not None else None,
+            'median':            round(g_median, 2)   if g_median   is not None else None,
+            'sumEstimatedHours': round(g_sum_est, 2),
+            'sumActualHours':    round(g_sum_act, 2),
+        }
+
+        # --- Per-bucket aggregates (§5) ---
+        buckets = []
+        for label, pred in bucket_defs:
+            bucket_entries = [(p, a, r) for p, a, r in item_data if pred(p)]
+            b_handicap, b_median, b_sum_est, b_sum_act = _compute_aggregate(bucket_entries)
+            buckets.append({
+                'label':             label,
+                'n':                 len(bucket_entries),
+                'handicap':          round(b_handicap, 2) if b_handicap is not None else None,
+                'median':            round(b_median, 2)   if b_median   is not None else None,
+                'sumEstimatedHours': round(b_sum_est, 2),
+                'sumActualHours':    round(b_sum_act, 2),
+            })
+
+        return {
+            'generatedAt': generated_at,
+            'team':        team,
+            'eligible':    len(eligible_items),
+            'excluded':    excluded,
+            'global':      global_block,
+            'buckets':     buckets,
+        }
+
+    def serve_estimates(self, query_string: str):
+        """GET /api/estimates?team=<slug>
+
+        Returns the estimate-vs-actual handicap analytics payload for a team.
+        Defaults to the server's configured LCARS_TEAM when ?team= is absent.
+
+        Per spec XACA-0630 §8.2.
+        """
+        try:
+            params = parse_qs(query_string) if query_string else {}
+            team = params.get('team', [None])[0] or LCARS_TEAM
+
+            if team not in TEAM_KANBAN_DIRS:
+                self._send_json_response({'error': f'Unknown team: {team}'}, status=400)
+                return
+
+            payload = self._build_estimates_payload(team)
+            if payload is None:
+                self._send_json_response({'error': 'board not found'}, status=404)
+                return
+
+            self._send_json_response(payload)
+
+        except Exception as e:
+            import traceback
+            print(f"[LCARS] ERROR serve_estimates team={team if 'team' in dir() else '?'}: {e}\n{traceback.format_exc()}")
+            self.send_error(500, f"Error generating estimates: {e}")
+
+    # END ESTIMATE-VS-ACTUAL HANDICAP ANALYTICS
+    # =========================================================================
+
+    # =========================================================================
     # WEEKLY ANCHOR API HANDLERS (XACA-0253-003)
     # =========================================================================
 
@@ -11067,6 +11233,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Daily Overview aggregator (XACA-0334-003)
         elif path == '/api/daily-overview':
             self.serve_daily_overview(parsed.query)
+        # Estimate-vs-actual handicap analytics (XACA-0630-003)
+        elif path == '/api/estimates':
+            self.serve_estimates(parsed.query)
         # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
         # This allows the router to work from ANY port - startup scripts write
         # the target team to the static file, and all servers serve the same file.
