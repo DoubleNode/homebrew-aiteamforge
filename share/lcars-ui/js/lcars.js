@@ -20367,8 +20367,12 @@ async function renderRoadmap() {
             parts.push('<div class="roadmap-lane-track">');
 
             for (const rel of scheduledReleases) {
-                // All scheduled releases are point events (start == end == targetDate)
+                // Non-archived releases are point events (start == end == targetDate);
+                // archived releases (XACA-0639) carry a derived start..end span and
+                // render as a ranged bar so their historical extent is visible.
+                const isPoint  = rel.start === rel.end;
                 const leftPct  = dateToPct(rel.start);
+                const widthPct = isPoint ? 0 : dateRangeWidthPct(rel.start, rel.end);
                 const label    = rel.shortTitle || rel.name || rel.id;
                 const fullName = rel.name || rel.id;
                 const relType  = rel.type || '';
@@ -20392,24 +20396,39 @@ async function renderRoadmap() {
 
                 const tooltipText = [
                     fullName,
-                    rel.targetDate || rel.start,
+                    isPoint ? (rel.targetDate || rel.start) : (rel.start + ' → ' + rel.end),
                     scheduleSource ? 'Schedule: ' + scheduleSource : '',
                     relType ? 'Type: ' + relType : '',
                     status ? 'Status: ' + status : '',
                 ].filter(Boolean).join(' | ');
 
-                parts.push(
-                    `<div class="roadmap-milestone"` +
-                    ` data-kind="release"` +
-                    ` data-type="${escapeHtml(relType)}"` +
-                    ` data-status="${escapeHtml(status)}"` +
-                    (scheduleSource ? ` data-schedule-source="${escapeHtml(scheduleSource)}"` : '') +
-                    ` style="left:${leftPct.toFixed(2)}%"` +
-                    ` title="${escapeHtml(tooltipText)}">` +
-                    `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
-                    scheduleBadgeHtml +
-                    `</div>`
-                );
+                if (isPoint) {
+                    parts.push(
+                        `<div class="roadmap-milestone"` +
+                        ` data-kind="release"` +
+                        ` data-type="${escapeHtml(relType)}"` +
+                        ` data-status="${escapeHtml(status)}"` +
+                        (scheduleSource ? ` data-schedule-source="${escapeHtml(scheduleSource)}"` : '') +
+                        ` style="left:${leftPct.toFixed(2)}%"` +
+                        ` title="${escapeHtml(tooltipText)}">` +
+                        `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                        scheduleBadgeHtml +
+                        `</div>`
+                    );
+                } else {
+                    parts.push(
+                        `<div class="roadmap-bar"` +
+                        ` data-kind="release"` +
+                        ` data-type="${escapeHtml(relType)}"` +
+                        ` data-status="${escapeHtml(status)}"` +
+                        (scheduleSource ? ` data-schedule-source="${escapeHtml(scheduleSource)}"` : '') +
+                        ` style="left:${leftPct.toFixed(2)}%;width:${widthPct.toFixed(2)}%"` +
+                        ` title="${escapeHtml(tooltipText)}">` +
+                        `<span class="roadmap-item-label">${escapeHtml(label)}</span>` +
+                        scheduleBadgeHtml +
+                        `</div>`
+                    );
+                }
             }
 
             parts.push('</div>'); // .roadmap-lane-track
