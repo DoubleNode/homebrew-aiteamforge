@@ -5667,6 +5667,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
           PLANNED  — at least one platform AND every platform in the PLANNED env
           ACTIVE   — any platform past PLANNED (or no platform data at all)
         Pure: same input -> same output.
+
+        INTENTIONAL DIVERGENCE (XACA-0635-002): the Releases-tab's Active filter uses
+        `platforms.some(env != 'PLANNED')`, which is False for a release with no
+        platforms — so a platform-less release shows in NEITHER the Planned nor the
+        Active tab. The roadmap must not silently drop such a release, so here a
+        non-archived release with no platform data falls through to ACTIVE and is
+        surfaced in the unscheduled Active bucket.
         """
         if release.get('status') == 'archived':
             return 'ARCHIVED'
@@ -5967,11 +5974,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }
 
             for release in raw_releases:
-                if release.get('status') == 'archived':
-                    continue  # archived releases are loaded from the archive dir below
-
                 release_id = release.get('id', '')
-                seen_release_ids.add(release_id)
+                if release_id:
+                    seen_release_ids.add(release_id)
+
+                if release.get('status') == 'archived':
+                    # Archived releases normally live only in the archive dir (the
+                    # archive toggle removes them from board.releases), but if one is
+                    # still on the board, surface it in the Archived bucket here rather
+                    # than dropping it. Its id is already in seen_release_ids so the
+                    # archive-dir pass below won't render it a second time (XACA-0635-001).
+                    base_release = _build_base_release(release, 'ARCHIVED')
+                    unscheduled_releases.append({
+                        **base_release,
+                        'scheduled': False,
+                    })
+                    continue
+
                 target_date = _parse_date(release.get('targetDate'))
                 rel_state = self._derive_release_state(release)
                 base_release = _build_base_release(release, rel_state)
@@ -5992,12 +6011,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Archived releases — historical, always surfaced in the unscheduled
             # Archived bucket regardless of any targetDate (XACA-0635). Deduped against
-            # board releases by id so a stray archived entry can't appear twice.
+            # board releases by id (only non-empty ids dedup, so malformed empty-id
+            # archive files are not collapsed into one entry — XACA-0635-001).
             for release in self._load_archived_releases():
                 release_id = release.get('id', '')
-                if release_id in seen_release_ids:
+                if release_id and release_id in seen_release_ids:
                     continue
-                seen_release_ids.add(release_id)
+                if release_id:
+                    seen_release_ids.add(release_id)
                 base_release = _build_base_release(release, 'ARCHIVED')
                 unscheduled_releases.append({
                     **base_release,
