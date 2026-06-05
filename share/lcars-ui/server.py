@@ -5659,6 +5659,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return 'ACTIVE'
 
     @staticmethod
+    def _derive_release_state(release):
+        """Derive the roadmap bucket state for a release: 'PLANNED' | 'ACTIVE' | 'ARCHIVED'.
+
+        Mirrors the Releases-tab client-side split (XACA-0238 in lcars.js displayReleases):
+          ARCHIVED — status == 'archived'
+          PLANNED  — at least one platform AND every platform in the PLANNED env
+          ACTIVE   — any platform past PLANNED (or no platform data at all)
+        Pure: same input -> same output.
+        """
+        if release.get('status') == 'archived':
+            return 'ARCHIVED'
+        platforms = release.get('platforms') or {}
+        vals = list(platforms.values()) if isinstance(platforms, dict) else []
+        if vals and all((p.get('environment') or '') == 'PLANNED' for p in vals):
+            return 'PLANNED'
+        return 'ACTIVE'
+
+    @staticmethod
     def _build_epic_item_counts(items):
         """Build the 8-key itemCounts rollup dict for an epic.
 
@@ -5885,12 +5903,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 item_counts = self._build_epic_item_counts(child_items)
 
+                # Canonical bucket state (STATE_CONTRACT §1.5): PLANNED | ACTIVE | ARCHIVED.
+                epic_state = self._derive_epic_state(child_items)
+
                 base_epic = {
                     'id': epic_id,
                     'title': epic.get('title', ''),
                     'shortTitle': epic.get('shortTitle', None),
                     'color': epic.get('color', ''),
                     'status': epic.get('status', ''),
+                    'state': epic_state,
                     'priority': epic.get('priority', 'medium'),
                     'tags': epic.get('tags', []),
                     'description': epic.get('description', ''),
@@ -5901,7 +5923,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     'updatedAt': epic.get('updatedAt', ''),
                 }
 
-                if dated_children:
+                # ARCHIVED epics are historical, not forward-looking — keep them out of
+                # the scheduled timeline and surface them in the unscheduled Archived
+                # bucket regardless of any child dueDates (XACA-0635).
+                if dated_children and epic_state != 'ARCHIVED':
                     start_date = min(dated_children)
                     end_date = max(dated_children)
                     scheduled_epics.append({
@@ -5916,29 +5941,40 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         'scheduled': False,
                     })
 
-            # --- Process releases (active only — contract §6 "Archived releases") ---
+            # --- Process releases ---
+            # Non-archived releases come from the board; archived releases live in a
+            # separate directory (releases-archive/) and are pulled in below so the
+            # unscheduled lane can surface an Archived bucket (XACA-0635). Each release
+            # carries a derived bucket `state` (PLANNED | ACTIVE | ARCHIVED) mirroring
+            # the Releases-tab split (XACA-0238).
             scheduled_releases = []
             unscheduled_releases = []
+            seen_release_ids = set()
 
-            for release in raw_releases:
-                if release.get('status') == 'archived':
-                    continue  # exclude archived releases per contract §6
-
-                release_id = release.get('id', '')
-                target_date = _parse_date(release.get('targetDate'))
-
-                base_release = {
-                    'id': release_id,
+            def _build_base_release(release, state):
+                return {
+                    'id': release.get('id', ''),
                     'name': release.get('name', ''),
                     'shortTitle': release.get('shortTitle', None),
                     'type': release.get('type', ''),
                     'status': release.get('status', ''),
+                    'state': state,
                     'targetDate': release.get('targetDate'),
                     'tags': release.get('tags', []),
                     'team': release.get('team', LCARS_TEAM),
                     'environments': release.get('environments', []),
                     'createdAt': release.get('createdAt', ''),
                 }
+
+            for release in raw_releases:
+                if release.get('status') == 'archived':
+                    continue  # archived releases are loaded from the archive dir below
+
+                release_id = release.get('id', '')
+                seen_release_ids.add(release_id)
+                target_date = _parse_date(release.get('targetDate'))
+                rel_state = self._derive_release_state(release)
+                base_release = _build_base_release(release, rel_state)
 
                 if target_date:
                     # Point event: start == end == targetDate (contract §4.2 / §4.3)
@@ -5953,6 +5989,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         **base_release,
                         'scheduled': False,
                     })
+
+            # Archived releases — historical, always surfaced in the unscheduled
+            # Archived bucket regardless of any targetDate (XACA-0635). Deduped against
+            # board releases by id so a stray archived entry can't appear twice.
+            for release in self._load_archived_releases():
+                release_id = release.get('id', '')
+                if release_id in seen_release_ids:
+                    continue
+                seen_release_ids.add(release_id)
+                base_release = _build_base_release(release, 'ARCHIVED')
+                unscheduled_releases.append({
+                    **base_release,
+                    'scheduled': False,
+                })
 
             # --- Compute overall dateRange (contract §5.1) ---
             all_dates = (

@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0635: Changed — Roadmap unscheduled lane sub-groups by state -->
+
+### Changed
+- **XACA-0635: Roadmap "Unscheduled" lane now sub-groups each kind by state — Planned / Active / Archived.** Building on the Epics/Releases kind split (XACA-0634), the chips inside each kind group are now further divided into Planned, Active, and Archived sub-rows. State uses the existing canonical definitions, so the roadmap agrees with the Epics and Releases tabs: epic state is derived from child-item states (`_derive_epic_state`, STATE_CONTRACT §1.5 — PLANNED / ACTIVE / ARCHIVED), and release state mirrors the Releases-tab split (XACA-0238 — Archived if `status=='archived'`, Planned if every platform is in the `PLANNED` env, else Active) via a new server-side `_derive_release_state` helper. The server now also **loads archived releases** (`_load_archived_releases`) into the roadmap payload — previously they were dropped entirely — so the Releases Archived bucket can populate; they are deduped against board releases by id. Archived epics and releases are always placed in the unscheduled Archived bucket regardless of any date (historical, not forward-looking) and are kept out of the scheduled timeline. Each unscheduled epic/release payload now carries a `state` field. Empty status buckets are not rendered; an unknown/missing state falls back to Active so no chip is dropped. Cache-busters bumped `lcars.js?v=3.29→3.30`, `lcars.css?v=32.5→32.6`.
+
 <!-- XACA-0634: Changed — Roadmap unscheduled lane groups Epics vs Releases -->
 
 ### Changed

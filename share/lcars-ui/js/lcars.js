@@ -19960,6 +19960,8 @@ async function exportRoadmapPdf() {
 //   .roadmap-unscheduled-heading — section header text
 //   .roadmap-unscheduled-group — per-kind subsection (data-kind="epics"|"releases")
 //   .roadmap-unscheduled-subheading — "Epics"/"Releases" label for a group
+//   .roadmap-unscheduled-status — per-state sub-row (data-state="planned"|"active"|"archived")
+//   .roadmap-unscheduled-status-label — "Planned"/"Active"/"Archived" label for a sub-row
 //   .roadmap-unscheduled-list — flex container of chips
 //   .roadmap-chip             — individual unscheduled item chip
 //   .roadmap-chip-label       — chip title text
@@ -20211,71 +20213,88 @@ async function renderRoadmap() {
         parts.push('<div class="roadmap-unscheduled">');
         parts.push('<div class="roadmap-unscheduled-heading">Unscheduled</div>');
 
-        // Epics and Releases are kept in separately-labeled groups so the kind
-        // of each chip is unambiguous — chip border/label color encodes the
-        // epic color / release type, NOT the kind, so without these headings an
-        // epic and a release can look identical (e.g. both blue). Mirrors the
-        // "Epics" / "Releases" lane labels in the scheduled timeline above.
-        if (unschReleases.length > 0) {
-            parts.push('<div class="roadmap-unscheduled-group" data-kind="releases">');
-            parts.push('<div class="roadmap-unscheduled-subheading">Releases</div>');
-            parts.push('<div class="roadmap-unscheduled-list">');
+        // Epics and Releases are kept in separately-labeled kind groups (chip
+        // color encodes the epic color / release type, NOT the kind, so an epic
+        // and a release can otherwise look identical). Within each kind group the
+        // chips are further split by canonical state — Planned / Active / Archived
+        // (epic state per STATE_CONTRACT §1.5; release state per the Releases-tab
+        // split, XACA-0238). The server provides `item.state` as one of
+        // 'PLANNED' | 'ACTIVE' | 'ARCHIVED'. (XACA-0635)
+        const STATE_ORDER = [
+            { key: 'PLANNED',  label: 'Planned'  },
+            { key: 'ACTIVE',   label: 'Active'   },
+            { key: 'ARCHIVED', label: 'Archived' },
+        ];
 
-            for (const rel of unschReleases) {
-                const label   = rel.shortTitle || rel.name || rel.id;
-                const relType = rel.type || '';
-                const status  = rel.status || '';
+        // Normalize to a known bucket; unknown/missing falls back to ACTIVE so a
+        // chip is never silently dropped from the lane.
+        const stateKey = (it) => {
+            const s = (it.state || '').toUpperCase();
+            return (s === 'PLANNED' || s === 'ACTIVE' || s === 'ARCHIVED') ? s : 'ACTIVE';
+        };
 
-                parts.push(
-                    `<div class="roadmap-chip"` +
-                    ` data-kind="release"` +
-                    ` data-type="${escapeHtml(relType)}"` +
-                    ` data-status="${escapeHtml(status)}"` +
-                    ` title="${escapeHtml(rel.name || rel.id)}">` +
-                    `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
-                    (relType || status ? `<span class="roadmap-chip-meta">${escapeHtml(relType)}` +
-                        (status ? ` &bull; ${escapeHtml(status)}` : '') +
-                        `</span>` : '') +
-                    `</div>`
-                );
+        const releaseChipHtml = (rel) => {
+            const label   = rel.shortTitle || rel.name || rel.id;
+            const relType = rel.type || '';
+            const status  = rel.status || '';
+            return (
+                `<div class="roadmap-chip"` +
+                ` data-kind="release"` +
+                ` data-type="${escapeHtml(relType)}"` +
+                ` data-status="${escapeHtml(status)}"` +
+                ` title="${escapeHtml(rel.name || rel.id)}">` +
+                `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
+                (relType || status ? `<span class="roadmap-chip-meta">${escapeHtml(relType)}` +
+                    (status ? ` &bull; ${escapeHtml(status)}` : '') +
+                    `</span>` : '') +
+                `</div>`
+            );
+        };
+
+        const epicChipHtml = (epic) => {
+            const label    = epic.shortTitle || epic.title || epic.id;
+            const color    = epic.color || '';
+            const priority = epic.priority || '';
+            const status   = epic.status || '';
+            const counts   = epic.itemCounts || {};
+            const total    = counts.total || 0;
+            const completed = counts.completed || 0;
+            return (
+                `<div class="roadmap-chip"` +
+                ` data-kind="epic"` +
+                ` data-color="${escapeHtml(color)}"` +
+                ` data-status="${escapeHtml(status)}"` +
+                ` data-priority="${escapeHtml(priority)}"` +
+                ` title="${escapeHtml(epic.title || epic.id)}">` +
+                `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
+                (priority || total ? `<span class="roadmap-chip-meta">${escapeHtml(priority)}` +
+                    (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
+                    `</span>` : '') +
+                `</div>`
+            );
+        };
+
+        // Render one kind group (Releases or Epics) with up to three state sub-rows.
+        const renderKindGroup = (kind, kindLabel, items, chipHtml) => {
+            if (items.length === 0) return;
+            parts.push(`<div class="roadmap-unscheduled-group" data-kind="${kind}">`);
+            parts.push(`<div class="roadmap-unscheduled-subheading">${kindLabel}</div>`);
+            for (const st of STATE_ORDER) {
+                const bucket = items.filter(it => stateKey(it) === st.key);
+                if (bucket.length === 0) continue;  // empty status buckets are not rendered
+                parts.push(`<div class="roadmap-unscheduled-status" data-state="${st.key.toLowerCase()}">`);
+                parts.push(`<div class="roadmap-unscheduled-status-label">${st.label}</div>`);
+                parts.push('<div class="roadmap-unscheduled-list">');
+                for (const it of bucket) parts.push(chipHtml(it));
+                parts.push('</div>'); // .roadmap-unscheduled-list
+                parts.push('</div>'); // .roadmap-unscheduled-status
             }
+            parts.push('</div>'); // .roadmap-unscheduled-group
+        };
 
-            parts.push('</div>'); // .roadmap-unscheduled-list
-            parts.push('</div>'); // .roadmap-unscheduled-group (releases)
-        }
-
-        if (unschEpics.length > 0) {
-            parts.push('<div class="roadmap-unscheduled-group" data-kind="epics">');
-            parts.push('<div class="roadmap-unscheduled-subheading">Epics</div>');
-            parts.push('<div class="roadmap-unscheduled-list">');
-
-            for (const epic of unschEpics) {
-                const label    = epic.shortTitle || epic.title || epic.id;
-                const color    = epic.color || '';
-                const priority = epic.priority || '';
-                const status   = epic.status || '';
-                const counts   = epic.itemCounts || {};
-                const total    = counts.total || 0;
-                const completed = counts.completed || 0;
-
-                parts.push(
-                    `<div class="roadmap-chip"` +
-                    ` data-kind="epic"` +
-                    ` data-color="${escapeHtml(color)}"` +
-                    ` data-status="${escapeHtml(status)}"` +
-                    ` data-priority="${escapeHtml(priority)}"` +
-                    ` title="${escapeHtml(epic.title || epic.id)}">` +
-                    `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
-                    (priority || total ? `<span class="roadmap-chip-meta">${escapeHtml(priority)}` +
-                        (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
-                        `</span>` : '') +
-                    `</div>`
-                );
-            }
-
-            parts.push('</div>'); // .roadmap-unscheduled-list
-            parts.push('</div>'); // .roadmap-unscheduled-group (epics)
-        }
+        // Releases first, then Epics (kind order set in XACA-0634).
+        renderKindGroup('releases', 'Releases', unschReleases, releaseChipHtml);
+        renderKindGroup('epics', 'Epics', unschEpics, epicChipHtml);
 
         parts.push('</div>'); // .roadmap-unscheduled
     }

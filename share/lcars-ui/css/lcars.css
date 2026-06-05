@@ -17332,6 +17332,30 @@ body {
     color: var(--lcars-green);
 }
 
+/* Per-state sub-row within a kind group (Planned / Active / Archived). Indented
+   under the kind subheading; archived dimmed to read as historical. (XACA-0635) */
+.roadmap-unscheduled-status {
+    margin: 0 0 10px 10px;
+    padding-left: 10px;
+    border-left: 1px solid rgba(204, 153, 102, 0.15);
+}
+.roadmap-unscheduled-status:last-child {
+    margin-bottom: 0;
+}
+
+.roadmap-unscheduled-status-label {
+    font-size: 0.56rem;
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    font-weight: 600;
+    color: var(--lcars-tan);
+    margin-bottom: 6px;
+    opacity: 0.85;
+}
+.roadmap-unscheduled-status[data-state="archived"] {
+    opacity: 0.6;
+}
+
 .roadmap-unscheduled-list {
     display: flex;
     flex-wrap: wrap;
