@@ -19923,7 +19923,9 @@ async function exportRoadmapPdf() {
             }
         }
     } catch (e) {
-        const msg = (e && e.message) ? escapeHtml(e.message) : 'unknown error';
+        // showToast renders via textContent (XACA-0217), so do NOT escapeHtml
+        // here — that would display literal &lt; entities. Pass the raw message.
+        const msg = (e && e.message) ? e.message : 'unknown error';
         if (typeof showToast === 'function') {
             showToast('PDF export failed: ' + msg, 'error');
         } else {
