@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0634: Changed — Roadmap unscheduled lane groups Epics vs Releases -->
+
+### Changed
+- **XACA-0634: Roadmap "Unscheduled" lane now splits Epics and Releases into separate labeled groups.** Previously all unscheduled items were rendered in one flat chip list under a single "Unscheduled" header. Because a chip's border/label color encodes the *epic color* or *release type* — never the *kind* — an Epic and a Release could look identical (e.g. both blue), so there was no way to tell which chips were Epics and which were Releases. The lane now renders two `.roadmap-unscheduled-group` subsections, each with a `.roadmap-unscheduled-subheading` ("Releases" first, then "Epics"), mirroring the "Epics"/"Releases" lane labels already used in the scheduled timeline above (and color-matched to them: releases = green, epics = purple). Empty groups are not rendered. Cache-busters bumped `lcars.js?v=3.28→3.29`, `lcars.css?v=32.4→32.5`.
+
 <!-- XACA-0633: Bugfix — Roadmap Export PDF reworked to client-side generation -->
 
 ### Fixed

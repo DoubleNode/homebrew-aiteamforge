@@ -17308,6 +17308,30 @@ body {
     border-bottom: 1px solid rgba(204, 153, 102, 0.20);
 }
 
+/* Per-kind subsection so Epics vs Releases is unambiguous in the chip pile.
+   Color coding mirrors the scheduled timeline lane labels (epics = purple,
+   releases = green). */
+.roadmap-unscheduled-group {
+    margin-bottom: 14px;
+}
+.roadmap-unscheduled-group:last-child {
+    margin-bottom: 0;
+}
+
+.roadmap-unscheduled-subheading {
+    font-size: 0.64rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    font-weight: 700;
+    margin-bottom: 8px;
+}
+.roadmap-unscheduled-group[data-kind="epics"] .roadmap-unscheduled-subheading {
+    color: var(--lcars-purple);
+}
+.roadmap-unscheduled-group[data-kind="releases"] .roadmap-unscheduled-subheading {
+    color: var(--lcars-green);
+}
+
 .roadmap-unscheduled-list {
     display: flex;
     flex-wrap: wrap;

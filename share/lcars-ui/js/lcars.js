@@ -19958,6 +19958,8 @@ async function exportRoadmapPdf() {
 //   .roadmap-item-sublabel    — secondary info inside a bar (priority, itemCounts)
 //   .roadmap-unscheduled      — wrapper for the unscheduled lane below the timeline
 //   .roadmap-unscheduled-heading — section header text
+//   .roadmap-unscheduled-group — per-kind subsection (data-kind="epics"|"releases")
+//   .roadmap-unscheduled-subheading — "Epics"/"Releases" label for a group
 //   .roadmap-unscheduled-list — flex container of chips
 //   .roadmap-chip             — individual unscheduled item chip
 //   .roadmap-chip-label       — chip title text
@@ -20208,52 +20210,73 @@ async function renderRoadmap() {
     if (hasUnscheduled) {
         parts.push('<div class="roadmap-unscheduled">');
         parts.push('<div class="roadmap-unscheduled-heading">Unscheduled</div>');
-        parts.push('<div class="roadmap-unscheduled-list">');
 
-        for (const epic of unschEpics) {
-            const label    = epic.shortTitle || epic.title || epic.id;
-            const color    = epic.color || '';
-            const priority = epic.priority || '';
-            const status   = epic.status || '';
-            const counts   = epic.itemCounts || {};
-            const total    = counts.total || 0;
-            const completed = counts.completed || 0;
+        // Epics and Releases are kept in separately-labeled groups so the kind
+        // of each chip is unambiguous — chip border/label color encodes the
+        // epic color / release type, NOT the kind, so without these headings an
+        // epic and a release can look identical (e.g. both blue). Mirrors the
+        // "Epics" / "Releases" lane labels in the scheduled timeline above.
+        if (unschReleases.length > 0) {
+            parts.push('<div class="roadmap-unscheduled-group" data-kind="releases">');
+            parts.push('<div class="roadmap-unscheduled-subheading">Releases</div>');
+            parts.push('<div class="roadmap-unscheduled-list">');
 
-            parts.push(
-                `<div class="roadmap-chip"` +
-                ` data-kind="epic"` +
-                ` data-color="${escapeHtml(color)}"` +
-                ` data-status="${escapeHtml(status)}"` +
-                ` data-priority="${escapeHtml(priority)}"` +
-                ` title="${escapeHtml(epic.title || epic.id)}">` +
-                `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
-                (priority || total ? `<span class="roadmap-chip-meta">${escapeHtml(priority)}` +
-                    (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
-                    `</span>` : '') +
-                `</div>`
-            );
+            for (const rel of unschReleases) {
+                const label   = rel.shortTitle || rel.name || rel.id;
+                const relType = rel.type || '';
+                const status  = rel.status || '';
+
+                parts.push(
+                    `<div class="roadmap-chip"` +
+                    ` data-kind="release"` +
+                    ` data-type="${escapeHtml(relType)}"` +
+                    ` data-status="${escapeHtml(status)}"` +
+                    ` title="${escapeHtml(rel.name || rel.id)}">` +
+                    `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
+                    (relType || status ? `<span class="roadmap-chip-meta">${escapeHtml(relType)}` +
+                        (status ? ` &bull; ${escapeHtml(status)}` : '') +
+                        `</span>` : '') +
+                    `</div>`
+                );
+            }
+
+            parts.push('</div>'); // .roadmap-unscheduled-list
+            parts.push('</div>'); // .roadmap-unscheduled-group (releases)
         }
 
-        for (const rel of unschReleases) {
-            const label   = rel.shortTitle || rel.name || rel.id;
-            const relType = rel.type || '';
-            const status  = rel.status || '';
+        if (unschEpics.length > 0) {
+            parts.push('<div class="roadmap-unscheduled-group" data-kind="epics">');
+            parts.push('<div class="roadmap-unscheduled-subheading">Epics</div>');
+            parts.push('<div class="roadmap-unscheduled-list">');
 
-            parts.push(
-                `<div class="roadmap-chip"` +
-                ` data-kind="release"` +
-                ` data-type="${escapeHtml(relType)}"` +
-                ` data-status="${escapeHtml(status)}"` +
-                ` title="${escapeHtml(rel.name || rel.id)}">` +
-                `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
-                (relType || status ? `<span class="roadmap-chip-meta">${escapeHtml(relType)}` +
-                    (status ? ` &bull; ${escapeHtml(status)}` : '') +
-                    `</span>` : '') +
-                `</div>`
-            );
+            for (const epic of unschEpics) {
+                const label    = epic.shortTitle || epic.title || epic.id;
+                const color    = epic.color || '';
+                const priority = epic.priority || '';
+                const status   = epic.status || '';
+                const counts   = epic.itemCounts || {};
+                const total    = counts.total || 0;
+                const completed = counts.completed || 0;
+
+                parts.push(
+                    `<div class="roadmap-chip"` +
+                    ` data-kind="epic"` +
+                    ` data-color="${escapeHtml(color)}"` +
+                    ` data-status="${escapeHtml(status)}"` +
+                    ` data-priority="${escapeHtml(priority)}"` +
+                    ` title="${escapeHtml(epic.title || epic.id)}">` +
+                    `<span class="roadmap-chip-label">${escapeHtml(label)}</span>` +
+                    (priority || total ? `<span class="roadmap-chip-meta">${escapeHtml(priority)}` +
+                        (total ? ` &bull; ${escapeHtml(String(completed))}/${escapeHtml(String(total))}` : '') +
+                        `</span>` : '') +
+                    `</div>`
+                );
+            }
+
+            parts.push('</div>'); // .roadmap-unscheduled-list
+            parts.push('</div>'); // .roadmap-unscheduled-group (epics)
         }
 
-        parts.push('</div>'); // .roadmap-unscheduled-list
         parts.push('</div>'); // .roadmap-unscheduled
     }
 
