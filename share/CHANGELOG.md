@@ -7,6 +7,1390 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- feat: XACA-0630 — kb-variance CLI reporter for estimate-vs-actual handicap analytics
+- feat: XACA-0630 — LCARS HOME Estimation Accuracy panel for estimate-vs-actual handicap analytics
+- test: XACA-0630 — parity guard (test_xaca0630_parity.py) — 36 tests confirming CLI kb-variance and server _build_estimates_payload produce identical output; covers live empty-state, §7.2 fixture, bucket boundaries, banker's rounding, exclusion classification
+- feat: XACA-0630 — GET /api/estimates server endpoint for estimate-vs-actual handicap analytics
+- **XACA-0624** — Required effort **points** (estimated developer-hours) on kanban items, enforced at *start* time. Foundation for future developer-time billing (rate→$ conversion + reports are a follow-up epic). Schema: a top-level numeric `points` field on each backlog item (NORMAL-HUMAN developer-hours, not AI-speed; `>= 0`, fractional allowed; stored as a JSON number via `jq --argjson`). Sentinel: `null`/absent = unestimated. Canonical "estimated" predicate (single source of truth, reused everywhere): `.points != null and (.points|type)=="number" and .points >= 0`. **Enforcement is at START, not creation** (deliberate divergence from the original "refuse creation" framing): the ~70 existing `kb-backlog add` callers and all automation keep working, but an item cannot be *started* while unestimated — the coordinating agent estimates it (realistic human-developer hours) before picking it up. New shared gate helper `_kb_require_points` (the ONLY place the predicate lives — anti k501 sibling-drift) wired into every top-level start path: `kb-pick`, `kb-run`, `kb-work` (preconditions), and `_kb_reopen_item` (re-gates only when the reopened item is currently unestimated, so legacy estimated items reopen unchanged). Gate prints `⛔ Cannot start [<id>]: no effort estimate (points).` and instructs `kb-backlog points <id> <hours>` then retry. New CLI surface in `kanban-helpers.sh`: optional `kb-backlog add --points <hours>` / `--points=<hours>` (pre-scan flag parser mirroring `--sub-repo`); `kb-backlog points <id> <hours>` set / `points <id> -` clear / `points <id>` show (modeled on the `due|deadline` case, emits `field_update` activity log); read-only `kb-backlog unestimated` reporter (open + unestimated items via the canonical predicate). `kb-sweep` gains a NON-BLOCKING advisory line for unestimated items — it does NOT touch the `PROTECTED SUBITEMS UNRESOLVED (N)` merge-gate marker or kb-sweep's exit code. All numeric validation uses **variable-form** regexes for the `\.`-bearing float and leading-dot patterns (`local _pts_re_float='^[0-9]+\.[0-9]+$'`) — zsh treats an inline `\.` in `[[ =~ ]]` as regex "any char", which silently accepted scientific notation (`1e3` → 1000h) until QA caught it (XACA-0624-014). Forward-only migration `scripts/migrate-add-points.sh` (board-agnostic, reusable across team boards; `--dry-run`; idempotent) adds `points: null` to existing items lacking the key for schema uniformity — it does NOT fabricate estimates. **LCARS** (`lcars-ui/js/lcars.js`, `lcars-ui/css/lcars.css`, cache-buster `lcars-ui/index.html` `?v=3.23` → `?v=3.24`): an editable points pill on item cards (cyan `<n>h` when estimated, muted dashed `—` when unestimated; click → numeric editor popup with presets, mirrors the due-date editor; POSTs `updates.points` / `clearFields:['points']` to the existing generic `/api/update-item` handler), plus an "Estimate: Nh" entry in the expanded detail metrics row. Docs/skills updated to teach the flag + start-gate (Kanban Manager, Project Planner, Team Mission Status skills; `claude/CLAUDE.md`). `kanban-helpers.sh` and the migration script are dev-only (no tap mirror); `lcars-ui/` is tap-mirrored via `sync-tap.sh` and carries the matching homebrew-tap `[Unreleased]` entry.
+- **XACA-0611** — Bundle vendored imgcat in the tap and extract a shared `ensure_imgcat` provisioning helper. Canonical asset at `scripts/vendor/iterm2/imgcat` (sourced from iterm2.com/utilities/imgcat, 8560 bytes, `#!/usr/bin/env bash` shebang); mirrored to `homebrew-tap/share/iterm2/imgcat` via a new `sync_file` entry in `sync-tap.sh` (dedicated `share/iterm2/` subdir, avoiding the `share/scripts/*.sh|*.py|kb-init-team` upgrade sweep). New shared helper `homebrew-tap/libexec/lib/imgcat-provision.sh` (tap-only, sourced by both `install-shell.sh` and `aiteamforge-upgrade.sh`): exports `ensure_imgcat <share_dir>` — idempotent no-op when `~/.iterm2/imgcat` already present/executable/non-empty; primary path copies bundled asset; curl fallback from iterm2.com; verify (file+exec+size>0) after each attempt; returns non-zero on total failure so callers can emit loud warnings. Call-site wiring lands in subitems 002 (upgrade) and 003 (install).
+
+### Changed
+- **XACA-0628** — Re-architect Freelance from one-team-per-client/project into a single generic **`freelance`** team (code `FRE`). Per-client/project entries (the 9 `freelance-<client>-<project>` slugs: DoubleNode×6, Liquidstyle×2, Bandwear-Android) are **removed from every tracked/tap site** and now live ONLY in the machine-local overlay (`~/.aiteamforge/team-paths.json`), selected at runtime via a `.kb-team` sentinel (`freelance:<client>:<project>`) at each project root. Per-project short codes (e.g. `BWD`→`XBWD-NNNN`) are overlay-only, so existing item IDs and LCARS prefix routing survive unchanged. **Core enabler:** `build_team_code_map()` (`kanban-hooks/aiteamforge_paths.py`) changed from exclusive-OR (live-config *or* DEFAULT_TEAMS) to true **MERGE** semantics — DEFAULT_TEAMS as base, overlay `team_code` entries layered on top (live wins) — exactly as its docstring already claimed. This lets an overlay-only project (`XBWD`, no DEFAULT_TEAMS entry) route correctly while non-freelance teams stay untouched. **Sites migrated** (9 per-project slugs purged, generic `freelance`/FRE kept everywhere): `DEFAULT_TEAMS`; `kanban-helpers.sh` case-arms (×4: `_kb_get_kanban_dir`/`_kb_team_lcars_port`/`_kb_get_team_code`/`_kb_get_team_from_code`) now overlay-first via new `_kb_overlay_lookup`/`_kb_overlay_code_to_slug` helpers + a `freelance:<client>:<project>[:<terminal>]` sentinel branch in `_kb_detect_context`; `lcars-ui/server.py` prefix/kanban-dir/asset maps made registry/overlay-derived (hardcoded fallbacks trimmed); the sibling-drift cluster `statusline-command.sh` / `scripts/lcars-tmp-dir.sh` / `claude-hooks/kb-session-knowledge-check.sh` / `freelance/scripts/kanban-display.sh` all given the same overlay-lookup; `kanban-hooks/kanban_utils.py` + `kanban-backup.py` + `scripts/sync-release-manifests.py` registry-first (import-failure fallbacks trimmed); `amb-session-map.json` per-project blocks removed with a generic-key fallback added to all 7 AMB consumers. **New command** `scripts/kb-freelance` registers a freelance project entirely locally (overlay entry + board/tree + `.kb-team` sentinel + LCARS port file) touching NO tracked/tap site; modes `register`/`--check`/`--dry-run`/`--help`, idempotent. **Tap purge:** `homebrew-tap/libexec/lib/aiteamforge-paths.sh` shell registry trimmed to generic `freelance`/FRE only (no `doublenode`/`liquidstyle`/`bandwear` roster leak); `share/` mirrors re-synced; tap-hygiene + de-brand guards pass. **Also fixes** the `kb-init-team` false-`[OK]` bug: the write-path "already present?" check now uses the boundary-anchored `_chk_case_label` (matching the `--check-only` verify-path) instead of a bare substring grep, so a team named only in a comment no longer counts as a registered case-arm (k501 sibling-drift). **Dogfood:** Bandwear/Dashboard (`XBWD`, port 8507, 42 real backlog items) re-activated through the new path and proven to route via the overlay with no tracked entry. Operator runbook at `docs/freelance-project-runbook.md`. Registry merge + overlay routing + tap mirrors verified (`sync-tap --check` 0 drift / 771 files); the only failing unit tests are 3 pre-existing failures that also fail on develop (documented in `docs/xaca-0628-test-report.md`).
+
+### Fixed
+- **XACA-0617** — Fix `deploy-worktree-personas.sh --all` backfill for container-layout teams (iOS/Android/Firebase/DNS). When a container path (e.g. `MainEventApp-iOS/`) was passed as `<main_repo_path>`, `git worktree list` returned nothing because the container is not itself a git repo — producing a silent "nothing to backfill" false-negative. New `_resolve_git_roots <path>` helper (semantics identical to XACA-0606's helper in `kb-sync-personas`, per SIBLING-DRIFT NOTE): if `<path>` is itself a git repo → emits its toplevel; else scans immediate children for git repos and emits each root (handles DNS-style multi-inner-repo topologies). `_deploy_all` now resolves git roots via this helper before enumerating worktrees: a plain git repo path yields one root (no regression); a container yields inner repo(s); a container with no inner git repos emits a clear warning and returns 0 (benign no-op). All loop-local variables in `_resolve_git_roots` and `_deploy_all` hoisted before their loops (k501: zsh `local`-in-loop stdout-leak). Selftest extended from 16 to 19 tests: container→single-inner-git→two-worktrees backfill (Test 17), DNS container→two-inner-repos→all-worktrees backfill (Test 18), container-with-no-inner-git→benign-warn+exit-0 (Test 19). All 19 tests pass. Also closed the k501 sibling-drift this surfaced: the twin `_resolve_git_roots` in `kb-sync-personas` (XACA-0606) still declared `local root` inside its child-scan loop — hoisted it before the loop so both twins are consistent and leak-free (`kb-sync-personas` is dev-only, not tap-mirrored). `deploy-worktree-personas.sh` is tap-mirrored via `sync-tap.sh`.
+- **XACA-0615** — Fix bash-4 `${var,,}` "bad substitution" crash in `scripts/kb-init-team-guard.sh`. `kb_ensure_team_initialized()` used bash-4's lowercase parameter expansion in the interactive "Initialize this team now?" prompt (two sites: the `case` match and the post-loop confirmation). The guard is **sourced** by `<team>-startup.sh` (`#!/bin/zsh`), so it runs under zsh — where that expansion is a "bad substitution" — and it also fails under macOS's default `/bin/bash` 3.2.57. Because the expansion is evaluated before the `case` matches, **any answer crashed** the prompt. Fixed with portable case-insensitive bracket globs (`[Yy]|[Yy][Ee][Ss]`, `[Nn]|[Nn][Oo]|""`) plus in-loop normalization of `response` to a canonical `y`/`n`, collapsing the post-loop check to `[[ "$response" != "y" ]]` — all portable across zsh and bash 3.2+. Only fires when the board is empty/missing AND a TTY is present (fresh/headless install), which is why it went unnoticed on normally-provisioned machines; discovered running `finance-startup.sh personal` on a freshly-installed tap host (darren-m4-mini, macOS 26.3.1). Audit confirmed these were the only two zsh-incompatible bash-isms in the guard. Verified parse-clean under `zsh -n` and `bash 3.2 -n`, with identical correct branch selection (y/Y/yes/YES→proceed, n/N/no/empty→skip, garbage→reprompt) in both shells. Tap-mirrored (`sync-tap.sh` line 286 → `share/scripts/kb-init-team-guard.sh`).
+- **XACA-0608** — `aiteamforge upgrade` now refreshes per-team launch scripts (homebrew-tap submodule bump → `89f1c29`). New `update_team_scripts()` in `homebrew-tap/libexec/commands/aiteamforge-upgrade.sh` (wired into the run sequence between `update_aux_scripts` and `update_shell_helpers`) refreshes the per-team `<team>-startup.sh` / `<team>-shutdown.sh` and the `<team>/scripts/*.sh` station scripts from `share/scripts/teams/` into the working dir — the files `install-team.sh`'s parametric branch (XACA-0483/0484) lays down but the upgrade path never refreshed. Before this fix the working-dir copies were frozen at install-time, so a `brew upgrade` that shipped a newer startup script to the Cellar left the runtime copy stale (M1Pro on 0.12.12 still ran old `cksum` LCARS-port logic instead of the XACA-0590 `resolve_lcars_port` resolver). Same refresh-gap class as XACA-0558/0585/0594; k501 sibling-drift datapoint. Self-maintaining LOOP over the shipped `*-startup.sh` (new teams auto-covered); refreshes only already-installed scripts; applies the same `~/dev-team` → `$WORKING_DIR` `sed` rewrite (incl. the `iterm2_window_manager.py` special case) install uses; preserves exec bits. Regression test `homebrew-tap/tests/test-xaca-0608-team-script-refresh.sh` (10 assertions). Tap-internal `libexec` change — no `sync-tap` (no dev-team canonical for `libexec`).
+- **XACA-0608 (extended)** — the team-script refresh above did not close the root cause: the `<team>-startup.sh` was refreshed but the top-level `share/scripts/*` helpers it *sources* were not. Most critically `lcars-launch-helpers.sh`, which **defines** `resolve_lcars_port` (XACA-0590) — install lays it into `$AITEAMFORGE_DIR/scripts/` with the `~/dev-team`→install-dir rewrite, but no upgrade function refreshed it, so a machine installed before that resolver landed kept a frozen copy with no `resolve_lcars_port` and every startup fell through to the `cksum` port → wrong LCARS port even after `brew upgrade`. New `update_runtime_helpers()` (wired between `update_team_scripts` and `update_shell_helpers`): self-maintaining sweep over every shipped `share/scripts/*.sh`/`*.py` + `kb-init-team` → `$WORKING_DIR/scripts/<name>`, refreshes only already-installed targets, renders through the same rewrite-aware `_xaca0608_render_team_script` (one code path for rewrite-carrying `lcars-launch-helpers.sh`/`agent-panel-display.sh`/`kb-init-team-guard.sh`/`lcars-tmp-dir.sh`/`fleet-reporter.sh`/`cr-confluence-poller.py` and plain ones alike). `update_aux_scripts()` made rewrite-aware too (was plain-`cp`, shipping `kb-cr.sh`/`deploy-worktree-personas.sh`/`lcars-health-check.sh`/`worktree-helpers.sh` un-rewritten). One owner per file: the runtime sweep EXCLUDES the aux map's `scripts/`-destined basenames, derived from the canonical `_xaca0608_aux_script_map` emitter so the two can't drift. Regression test extended to 21 assertions. Remaining `fleet-monitor/client/fleet-reporter.sh` copy gap (different destination) filed as **XACA-0610**. Tap-internal `libexec` change — no `sync-tap`.
+- **XACA-0606** — Fix `kb-sync-personas sync-worktrees` for container-layout teams (iOS/Android/Firebase/DNS). Three defects resolved: **(A)** `_kbsp_sync_worktrees` called `git worktree list` against the container path (e.g. `MainEventApp-iOS/`) which is NOT a git repo — produced `No active worktrees found` for all 4 live iOS worktrees. New `_resolve_git_roots <container>` helper discovers inner git roots by probing immediate children (handles iOS single-inner-root and DNS multiple-inner-repo topologies; never hardcodes inner-dir name). All three `_list_repo_worktrees "$target_repo"` call sites in `sync-worktrees`, `list`, and `check` updated to first resolve git roots via `_resolve_git_roots`. **(B)** Deployed personas were not listed in the inner git repo's exclude file, making them visible to `git status`. On real sync (non-dry-run), `sync-worktrees` now idempotently adds `.claude/agents/` to `$(git rev-parse --git-common-dir)/info/exclude` for each resolved git root — local-only, never touches tracked `.gitignore`. Dry-run reports what would be added. **(C)** No automated parity check for post-sync persona counts. `selftest` extended with four new tests (12–15): `_resolve_git_roots` single-inner-root (Test 12), multiple-inner-roots/DNS topology (Test 13), full synthetic container→inner-git→registered-worktree deploy round-trip with parity assertion (Test 14), and live iOS parity check reporting per-worktree counts (Test 15 — skipped when iOS repos unavailable). Suite: 18 tests, 0 failures (Test 14 strengthened to drive the real `_kbsp_sync_worktrees` path). SIBLING-DRIFT NOTE added near `_resolve_git_roots` (k501 datapoint: three `_list_repo_worktrees` call sites in `sync`, `list`, `check` must all be kept in sync). Loop-local declarations in the three touched functions hoisted before their loops (k501 zsh `local`-in-loop stdout-leak; verified leak-free when sourced under zsh). `kb-sync-personas` is not tap-mirrored — no homebrew-tap `CHANGELOG.md` entry needed.
+- **XACA-0602** — Fix two LCARS team-transfer IMPORT UX defects in `lcars-ui/js/lcars.js` (cache-buster `lcars-ui/index.html`: `js/lcars.js?v=3.21` → `?v=3.23`). **(1) Silent re-import failure** — after a completed (or failed) import, a second attempt landed in half-dirty state: `onImportComplete()`/`onImportFailed()` re-enabled the button and cleared the file input but never reset session state, so module-level `currentImportJobId` stayed pinned to the finished job, `#import-result`/`#import-preflight` were never hidden, and `currentImportSecretsDiscovered`/`stagedImportSecretsFile` stayed polluted. `cancelImport()` held the only full-reset path and was wired solely to the CANCEL button — success/failure never routed through it. Fix: a single-source-of-truth `resetImportState()` helper (nulls the job id + staged files, `stopImportPolling()`, hides all three panels, re-arms the file input + button, clears the inline-secrets section); `cancelImport()` collapses to a thin wrapper over it; `handleImportFileSelected()` calls it at the very top so selecting a new file wipes any prior import's panel + state (the actual re-import fix). `onImportComplete()`/`onImportFailed()` clear only the blocking bits (`currentImportJobId = null`, `stopImportPolling()`) and leave the completion panel visible (chosen UX: reset-on-next-select, not auto-teardown). **(2) No progress indicator on file select** — `uploadImportFile()` awaited one fat `/api/import/upload` POST (iCloud materialize + upload + manifest verify, all server-side) showing only a disabled button. Fix: an indeterminate `PREPARING IMPORT…` state on the reused `#import-progress` panel shown synchronously on file selection, cleared when `renderImportPreflight()` paints or on any upload error path. No DOM changes (existing panel reused). **(3) Follow-up (XACA-0602-012, review):** promoted `_applyPairedSecretsImport()`'s formerly function-local secrets-poll handle to a module-scoped `pairedSecretsPollingInterval` now cancelled by `stopImportPolling()`/`resetImportState()`, closing the orphaned-interval race where selecting a new file mid-secrets-extraction could leave a poll alive that re-shows the result panel. Tap-mirrored (`sync-tap.sh`); homebrew-tap CHANGELOG carries the matching `[Unreleased]` entry. PR pins the tap pointer atop XACA-0603's tap commit (shared-tap race); `scripts/kb-cr.sh` carries 0603's canonical inherited from the tap to keep parity until #519 merges, at which point it drops out on rebase.
+- **XACA-0601** — Remove 200-item cap on manifest probe `item_ids` in `lcars-ui/team_transfer/domain_kanban.py`. `_probe_for()` returned `{"item_count": len(ids), "item_ids": ids[:200]}` — `item_count` was full but `item_ids` was truncated. The verifier diffed the capped `cap_ids` set against the full live-board `cur_ids` set; any ID beyond position 200 (sorted alphabetically) landed in `cur_ids - cap_ids` → "DATA-LOSS: destination board has N item(s) absent from source" → false-positive that blocked every UI import on boards with more than 200 items. Fix: remove the `[:200]` slice so the probe returns all IDs. Regression test added to `tests/team_transfer/test_migration_verifier.py` (`TestBoardSchemaPhaseDispositions::test_probe_item_ids_not_capped_at_200`): 310-item synthetic board (210 parents + 100 subitems), verifies probe completeness and that pre-import with source==destination passes without DATA-LOSS.
+- **XACA-0599** — Replace fragile `xargs dirname` git-root resolution with space-safe `--path-format=absolute` + quoted `dirname` at 3 sibling sites in `kanban-helpers.sh` (`_kb_create_item_worktree` ~931, `_kb_discover_worktree` ~8264, `kb-plan-doc-path` ~9712). Aligns all three with the XACA-0598 canonical pattern (PR #513 hardened a 4th site). Low-severity consistency fix — the `--show-toplevel` fallback mitigated the space-in-path risk in practice, but the `xargs` split remained a latent hazard. Guard on `-n "$git_common"` ensures the fallback still triggers when `--path-format=absolute` returns empty.
+- **XACA-0597** — Stale-state reaper (`kb-backlog cleanup-all`, `kanban-helpers.sh`) now sweeps items that are **reopened without a worktree**. The board-wide reaper gated ALL clearing behind `worktreeWindowId != null`, so an item reopened with `worktreeWindowId=null, activelyWorking=true, status=todo` fell through and kept `activelyWorking` forever — the LCARS card pulsed in the TODO column (root cause of XACA-0135 pulsing since 2026-03-31, since `lcars.js` keys the pulse off `activelyWorking || status==in_progress`). Fix replaces the single `worktreeWindowId`-gated predicate with **two independent predicates computed from the original object** (so neither masks the other): **Branch A (orphaned worktree)** — `worktreeWindowId` set but not owned by any active window → clears worktree tracking fields; **Branch B (orphaned flag)** — `activelyWorking==true` AND `status!="in_progress"` AND not tracked by any live window (neither via `worktreeWindowId` in the active-id set NOR via `activeWindows[].workingOnId`) → the reopened-no-worktree case. Either match now also clears the stale `workStartedAt` span (Branch A previously left it, same XACA-0551 leak class). The `workingOnId` check preserves genuinely-active no-worktree work tracked purely by a live window. Both predicates apply to items AND subitems. Audit confirmed the fix surface is `cleanup-all` only: the Python per-window path (`clear_orphaned_item_fields`, `kanban-stop.py`) is window-scoped by design (a null-window item never matches its exiting `worktreeWindowId`), and `kb-stop-working`/`kb-pause` are user-driven single-item clears that already drop `workStartedAt`. New regression fixture `tests/bats/kb-cleanup-all-orphaned-flag.bats` (5 tests, exercises the real shipped reaper via a board-file seam): reopened-no-worktree swept, no-worktree-but-tracked preserved, in_progress never swept, classic orphaned-worktree still fully swept (Branch A unbroken), subitem sweep. No tap mirror — `kanban-helpers.sh` is dev-only.
+- **XACA-0596** — Replace hardcoded `SESSION_DIRECTORY` paths with portable `${AITEAMFORGE_DIR:-$HOME/dev-team}` in the four tap-shipping LCARS startup scripts (`finance`, `freelance`, `legal`, `medical`). `freelance-lcars-startup.sh` used the literal `/Users/darrenehlers/dev-team` in its else-branch fallback; `legal-lcars-startup.sh` and `medical-lcars-startup.sh` used the same literal at the top-level assignment; `finance-lcars-startup.sh` used the half-portable `$HOME/dev-team` (correct on the dev machine but wrong for a tap user with a non-default install dir). The canonical form `${AITEAMFORGE_DIR:-$HOME/dev-team}` honors a tap user's explicit install directory and degrades to `$HOME/dev-team` when unset — identical behavior on the dev machine where `AITEAMFORGE_DIR` is not set. For `SESSION_DIRECTORY` specifically, the dev-only startup scripts (academy, ios, android, firebase, command, dns, mainevent) retain the hardcoded path by design; they never ship to tap users. Tap copies updated via `sync-tap.sh`.
+- **XACA-0596** — Also make the `lcars-ports` rendezvous directory portable fleet-wide. The port/theme/order rendezvous dir was hardcoded as `$HOME/dev-team/lcars-ports` in both the file *producers* (every `*-lcars-startup.sh`, the ios/android theme startups, and the finance/legal/medical shutdowns) and the *consumers* (`fleet-monitor/client/fleet-reporter.sh`, `sync-theme-colors.sh`, `sync-tab-orders.sh`, plus `scripts/agent-panel-display.sh` and `scripts/lcars-restart-helpers.sh`). Replaced all 28 canonical references with `${AITEAMFORGE_DIR:-$HOME/dev-team}/lcars-ports`. Because the port-file rendezvous is a *contract* between producers and consumers, every site must move together: changing producers alone would split-brain a tap install with a non-default `AITEAMFORGE_DIR` (producers writing one dir, consumers reading another). Identical behavior on the dev machine where `AITEAMFORGE_DIR` is unset. Tap-shipping copies (4 team startups + finance/legal/medical shutdowns, `fleet-reporter.sh`, `agent-panel-display.sh`) updated via `sync-tap.sh`. The `/tmp/lcars-ports` remote-provisioning paths and `$TEST_TMP_DIR`/`KB_PR_LCARS_PORTS_DIR` test sandboxes are intentionally untouched (separate dirs).
+- **XACA-0594** — Add `worktree-helpers.sh` to `update_aux_scripts()` script_map in `homebrew-tap/libexec/commands/aiteamforge-upgrade.sh`. The file was installed to `${AITEAMFORGE_DIR}/worktree-helpers.sh` (root) by `install_worktree_helpers()` during fresh installs and listed in `aiteamforge-uninstall.sh`, but the upgrade path omitted it — the working-dir copy was frozen at the version shipped at initial install time. Tap upgrades never refreshed it, so features added in later releases (XACA-0588 wt-new persona-deploy hook, XACA-0565 board-routing consolidation) were silently absent on upgraded tap machines. New entry: `"worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh"` placed after the other worktree-related entry (`deploy-worktree-personas.sh`). This is XACA-0593's follow-up; XACA-0591 already fixed the drift-gate gap (sync-tap mirror map); this fixes the upgrade refresh gap.
+- **XACA-0592** — Close the REMAINING `sync-tap.sh` mirror-map orphans (follow-up to XACA-0591). An orphan audit of `homebrew-tap/share/scripts/` found more files with a dev-team canonical but no `sync_file` mapping — the same false-green drift class: `--check` never compared them, so the tap shipped them stale. **Real orphans mapped:** `update_claude_agent.sh` (dev-team repo root → `share/scripts/`, was identical); the 4 parametric (`TEAM_HAS_PROJECTS=true`) teams' `teams/<team>-{startup,shutdown}.sh` (canonical at repo root) and `teams/<team>/scripts/*` station scripts (canonical at `<team>/scripts/`) for finance/freelance/legal/medical. The station-script mapping is **dest-driven** (iterates the files the tap already ships and maps each back to canonical) so the dev-only tooling that also lives in `<team>/scripts/` (`launch-*.sh`, `generate_*.sh`, `prompts/`, `zshrc-profiles/`, `install-zshrc.sh`) is NOT over-shipped; the loop is also self-maintaining (new station scripts are picked up automatically, avoiding future sibling-drift). 16 previously-hidden stale files were detected and re-synced — they were missing forward-fixes the false-green had stranded (XACA-0576 board-check template id, XACA-0590 `resolve_lcars_port`, XACA-0279 active-account banner). **Tap-only files documented, NOT mapped** (no dev-team canonical / no git history; installers source them from `share/scripts/` itself, so the tap is authoritative — a mapping would report MISSING): `aiteamforge-lcars.json`, `aiteamforge-resolve-hostname.sh`, `create-lcars-profile.py`, `init-agent-panel-json.py`, `kanban-board-check.sh`, `kanban-restore-helper.sh`, `register-terminals.sh`. Per-file no-regression check: no dev-machine path (`~/dev-team`, `/Users/...`) leaks into any shipped copy; exec bits preserved (755). Note: `kb-init-team` (named in the ticket) was already mapped — not an orphan. Verified `--check` shows 16 drifted before / 0 drifted, 0 missing after sync. Scope bounded to `share/scripts/`.
+- **XACA-0593** — Wire persona-deploy hook into tap-native `wt-create()` in `homebrew-tap/share/templates/aliases/worktree-aliases.sh`. XACA-0588 hooked only `wt-new()` in `worktree-helpers.sh` (dev-machine path). On tap machines `worktree-helpers.sh` is not sourced — `wt-create` is the only worktree-creation path, so the XACA-0588 auto-deploy goal was entirely unmet on tap. After the successful `git worktree add`, the new hook calls `${AITEAMFORGE_DIR}/scripts/deploy-worktree-personas.sh "$worktree_dir" "$WT_CURRENT_PROJECT"` (guarded `[ -x ]` + `|| true`). Upgrade path: `aiteamforge-upgrade.sh::update_alias_files()` already refreshes `share/aliases/worktree-aliases.sh` when the tap source is newer — no additional wiring needed. **Follow-up (XACA-0593 layout-agnostic guard):** end-to-end testing on M1Pro caught that `_guard_worktree_target` in `scripts/deploy-worktree-personas.sh` required the worktree to live under `<repo>/worktrees/` (dev layout). Tap/container machines create worktrees at `dirname(repo)/worktrees/` (sibling layout via `wt-create`), causing the guard to reject every tap deploy with `ERROR: Worktree target does not live under repo worktrees/ dir`. Guard replaced with a git-registry membership check: parses `git worktree list --porcelain` from the main repo root, canonicalizes each linked-worktree path, and accepts the target only if it appears as a registered linked worktree (not the main/primary entry). Accepts BOTH layouts because git tracks worktrees by path regardless of on-disk position relative to the main repo. Rejects non-registered paths (traversal safety) and the main repo root (benign no-op, exit 0). `_deploy_all`'s `worktrees_dir` prefix filter also removed — it now enumerates all linked worktrees from `git worktree list --porcelain` directly. Selftest expanded from 14 to 16 tests using real `git worktree add` repos in BOTH layouts; old fake-git helpers removed.
+
+### Added
+- **XACA-0607** — Parametric cockpit connect/disconnect scripts for the 4 projects-enabled teams (`TEAM_HAS_PROJECTS=true`: finance, freelance, legal, medical), **replacing** the XACA-0604 flat renders for those teams. The flat renders were wrong for project teams — they run one LCARS server + tmux session-set PER PROJECT, so the connect script needs a project argument and must resolve the instance/port/sessions per project. New dev-team (NOT tap) templates `scripts/templates/team-connect-parametric.sh.template` + `scripts/templates/team-disconnect-parametric.sh.template`, and `scripts/render-cockpit-scripts.sh` extended to render from them whenever a conf has `TEAM_HAS_PROJECTS=true` (else flat, as before; `--check` drift mode covers both). **Host-FIRST signatures** (user's explicit choice): `finance-connect.sh <host> [<project>]` (default `personal` → instance `finance-<project>`, socket `finance`), `medical-connect.sh <host> [<project>]` (default `general`), `legal-connect.sh <host> [<project>]` (default `default`), `freelance-connect.sh <host> <group> [<project>]` (default project `default` → instance `freelance-<group>-<project>`, socket `freelance`). Freelance is the SOLE team with a group/client level — the renderer detects it by team id and renders `TEAM_HAS_GROUP=true` (with an in-code FOLLOW-UP note to formalize via a conf field, e.g. the existing `TEAM_REQUIRES_CLIENT_ID`). Instance ids are lowercased to match team-paths (`finance-personal`, `freelance-doublenode-starwords`). **Remote port resolution + warn-on-drift (XACA-0608):** the connect script reads the REMOTE host's actual running `.port` file (`~/aiteamforge/lcars-ports/<instance>-lcars.port`, then `~/dev-team/...`) and probes THAT serving port; best-effort resolves the canonical port from this cockpit via `resolve_lcars_port <instance>` and prints a non-fatal `⚠ port drift: <host> serving <serving> but canonical is <canonical> (see XACA-0608)` when they differ; falls back serving→canonical→`TEAM_LCARS_PORT_BASE`, failing preflight only if none resolve. **Session discovery (not hardcoded):** after preflight it lists live remote sessions (`ssh <host> tmux -L <socket> list-sessions -F '#{session_name}'`), keeps `<instance>-*`, opens one iTerm tab per session with `<instance>-lcars` as the first/LCARS browser tab (still opens lcars if discovery is racy but the sentinel passed). **Remote AITEAMFORGE_DIR** for the SSH-delegated agent panels is resolved on the remote (`~/aiteamforge` then `~/dev-team`) so it works against a tap-installed remote (e.g. M1Pro). Fail-fast preflight (curl `/api/status` on serving port + `tmux has-session <instance>-lcars`) opens NO iTerm window on failure (exit 1); window title `<instance> @ <host>`; pure viewer (no remote mutations); reuses the flat template's iTerm2 window-manager + LCARS-Web-profile + Terminal.app-fallback machinery. `disconnect` is local-only: closes iTerm windows titled `<team>-… @ …`, resets the LCARS Web profile URL to localhost. Usage errors: missing `<host>` → exit 2; freelance missing `<group>` → exit 2. The 5 non-project teams (academy, android, command, firebase, ios) remain flat and unchanged. Shellcheck-clean (renderer + both templates + all 8 rendered scripts — no SC codes; the parametric scripts avoid the flat template's `SC2034` because they attach to discovered sessions rather than declaring `AGENT_WINDOWS_*`); `--check` exits 0; smoke-tested for usage/exit 2 and unreachable-host fail-fast/exit 1. No tap files modified (parametric templates live in the dev-team repo), so no tap-sync/changelog-completeness gates apply.
+- **XACA-0604** — Render per-team connect/disconnect cockpit scripts into the dev-team env (M3Pro as cockpit). New reusable renderer `scripts/render-cockpit-scripts.sh` reproduces the installer's `install-team.sh --connect-only` substitution recipe (sed for single-line placeholders + a Python pass for the multi-line `{{TEAM_AGENT_WINDOWS_CONFIG}}` block), reading the canonical templates (`homebrew-tap/share/templates/team-{connect,disconnect}.sh.template`) and `homebrew-tap/share/teams/<team>.conf` — **without invoking the tap installer** (prohibited on the dev-source machine). Generates `<team>-connect.sh` + `<team>-disconnect.sh` for the **9 conf-defined teams** (academy, android, command, finance, firebase, freelance, ios, legal, medical) at the repo root, `chmod +x`. `connect` is a pure remote viewer (opens an iTerm2 window onto a team running on another tailnet host — LCARS tab + per-agent SSH/tmux-attach tabs + SSH-delegated agent panels; no remote mutations); `disconnect` is local-only cleanup (closes the windows, resets the LCARS Web profile URL to localhost). The `{{AITEAMFORGE_DIR}}` token renders as the portable literal `$HOME/dev-team` (matching the dev-env `*-startup.sh` convention) rather than a hardcoded absolute path, so the committed scripts work on any clone. The renderer is re-runnable and ships a `--check` drift mode (renders to a temp dir, diffs against the committed scripts, non-zero exit on drift) so the rendered output never silently diverges from the templates. **Parametric/umbrella teams (DNS, MainEvent) are intentionally excluded** — they have no conf and resolve their LCARS port dynamically; the installer itself skips them ("No connect script for parametric teams"). A parametric `<team>-connect.sh <host> <project>` variant is tracked as follow-up XACA-0605. Smoke-tested: no-arg → usage/exit 2; fail-fast against an unreachable host → clear error/exit 1 with no iTerm window opened. Known cosmetic note: rendered connect scripts carry `SC2034` (unused `AGENT_WINDOWS_*`) inherited from the shared template (connect attaches to sessions rather than creating them); the repo has no shellcheck CI gate and the tap template is left untouched to avoid scope creep into the tap-change workflow. No tap files modified (templates read-only), so no tap-sync/changelog-completeness gates apply.
+- **XACA-0603** — Public CLI write path for `deploy_window_planned` in `kb-cr` (`scripts/kb-cr.sh`). Two write surfaces: (1) `kb-cr create --deploy-window <date>` sets the field at create time; (2) `kb-cr reschedule <CR-ID> <date>` is a post-hoc setter valid at any `crState`. Both paths share a new internal helper `_kb_cr_normalize_iso_date` (BSD-`date`-safe, pure-shell regex) that accepts `YYYY-MM-DD` (padded to UTC midnight), `YYYY-MM-DDTHH:MMZ` (seconds padded), or full `YYYY-MM-DDTHH:MM:SSZ`, validating calendar/time legal ranges (rejects e.g. `2026-99-99` / `...T25:00:00Z`); rejects offset forms and other formats with a clear error. Both write surfaces emit a `cr_deploy_window_set` activity-log event (best-effort, `2>/dev/null || true`). `reschedule` is wired into the `kb-cr()` dispatcher alongside `set-doc-link`. Help text updated in `_kb_cr_help`.
+- **XACA-0595** — `kb-release edit` / `kb-release reschedule` CLI subcommands in `kanban-helpers.sh`. `kb-release-edit()` sends a `PUT /api/releases/<id>` request with only the fields explicitly supplied via flags (`--name`, `--short-title`, `--target-date`, `--status`, `--type`, `--project`, `--tags`, `--platform-version` (repeatable)). Payload is built incrementally using `jq` so absent flags emit no key — no clobber risk on untouched fields. `kb-release-reschedule()` is a date-only sugar wrapper that forwards to `kb-release-edit --target-date`. Both are wired into the `kb-release()` dispatcher (`edit|update` and `reschedule` cases) with help text in the dispatcher's help block. No tap mirror needed — `kanban-helpers.sh` is dev-only.
+- **XACA-0598** — `kb-run` / `kb-run-review` / `kb-run-test` / `kb-run-debug` worktree cleanup offer on Claude exit. When `kb-run*` auto-creates a worktree and launches Claude, the user is prompted ON CLAUDE EXIT to optionally remove that worktree via `wt-finish`. **Safety gates:** auto-offer (friendly prompt, default N) only when the branch is SAFE (PR merged / no unmerged commits); LOUD warning + explicit confirm (default N) when UNSAFE (unmerged commits / remote-gone); only fires for worktrees CREATED in that invocation (never reused/attached ones); TTY-guarded (silent in non-interactive shells). **Kill-switch:** `KB_WT_CLEANUP_PROMPT=0` (or `false`/`no`) disables the prompt entirely. User answers the prompt — agents never remove worktrees autonomously. New helper functions: `_wt_classify_branch` (worktree-helpers.sh, shared safe/unsafe classifier yielding tokens `merged`/`unmerged-commits`/`remote-gone`) and `_kb_offer_worktree_cleanup` (kanban-helpers.sh, wired into all four `kb-run*` functions post-cc-exit via the `kb_wt_session_created` flag). `worktree-helpers.sh` IS tap-mirrored (`share/scripts/worktree-helpers.sh`), so its `_wt_classify_branch` addition + `wt-finish` refactor are synced to the tap; `kanban-helpers.sh` is dev-only.
+
+- **XACA-0588** — New standalone helper `scripts/deploy-worktree-personas.sh` that deploys tap-installed personas from `${AITEAMFORGE_DIR:-$HOME/aiteamforge}/<team>/personas/agents/` into a worktree's `.claude/agents/` directory. Fills the gap where `kb-sync-personas sync-worktrees` serves dev machines (source: agents-master) but tap machines had no equivalent for newly-created worktrees. Key behaviors: (1) **Source resolution** — PRIMARY is the tap install path; if absent but `~/dev-team/.claude/agents-master/<team>/` exists the script recognizes a dev machine and exits 0 with a "use kb-sync-personas instead" message; if neither exists it warns and exits 0. (2) **Guard** — mirrors `_guard_worktree_target` from `kb-sync-personas`: canonicalizes both sides via python3/pwd-P fallback, permits writes only into `<worktree>/.claude/agents/` under the repo's own `worktrees/` directory, rejects the main repo root as a benign no-op (exit 0) so `wt-new` continues cleanly, rejects path-traversal with exit 1. (3) **Transform** — source files are named `<team>_<character>_<role>_persona.md` with a role-based `name:` (e.g. `name: engineering`); deployed files keep the same filename but have `name:` rewritten to the character name extracted as the 2nd `_`-delimited filename segment (e.g. `name: reno`). Rewrite targets only the first `name:` within the YAML frontmatter block via python3; body is copied verbatim; files without frontmatter or without a `name:` line are copied verbatim with a warning. (4) **Marker** — writes `<wt>/.claude/agents/.synced-from-tap` (distinct from kb-sync-personas' `.synced-from-master`) with synced_at, team, source_path, aiteamforge_dir. (5) **Idempotency** — no-op if marker present without `--force`. (6) **Dry-run / verbose** — `--dry-run` prints what would happen without writing; `--verbose` adds marker-write confirmation. (7) **`--all` backfill mode** — `deploy-worktree-personas.sh --all <team> [<repo>]` enumerates all worktrees under `<repo>/worktrees/` via `git worktree list --porcelain` and deploys personas to each (skipping those already marked). Tap-machine equivalent of `kb-sync-personas sync-worktrees --all` for pre-existing worktrees. Core deploy logic extracted into `_deploy_core()` (shared with single-worktree mode, DRY). Exit codes: 0 success/benign no-op, 1 guard failure, 2 copy/write failure. Includes a `selftest` subcommand (14 tests: char extraction, guard accept/reject/traversal, transform correctness + body preservation, full deploy with name rewrite, marker fields, idempotency, --force re-deploy, dev-machine fallback, no-personas warning, --all happy-path with 2 worktrees, --all no-worktrees no-op). Canonical source `scripts/deploy-worktree-personas.sh`; tap mirror wired by subitem 004 via `sync-tap.sh`. Called by the git-worktree skill and `worktree-helpers.sh` wt() function (subitem 003). Review follow-ups (PR #504): sync-tap.sh comment corrected from XACA-0584 to XACA-0588 (subitem 010); laydown regression test added to homebrew-tap/tests/ (subitem 011); --all backfill implemented (subitem 012).
+- **XACA-0584** — Worktree-aware persona deployment for container-layout teams. `kb-sync-personas` gains a new opt-in subcommand `sync-worktrees <team|--all> [--dry-run] [--prune]` that deploys persona files into the active worktrees of teams whose `.claude/agents/` is gitignored or uncommitted (e.g. iOS, Android, Firebase, DNS, Command). Teams whose `.claude/agents/` is committed to git (e.g. Academy) are automatically skipped — their worktrees inherit personas via branch checkout. Detection is runtime per-deployment via `git check-ignore` + `ls-files` fallback; no team names are hardcoded (non-git personal repos like Finance/Legal/Medical have no worktrees, so deployment is a no-op there). The existing `sync` guard (`_guard_worktree_path`) is unchanged; the new path introduces a focused `_guard_worktree_target` (with realpath canonicalization to block path-traversal) that permits writes only into `<worktree>/.claude/agents/` under the repo's own `worktrees/` dir. The existing `sync` guard (`_guard_worktree_path`) is unchanged; the new path introduces a focused `_guard_worktree_target` that permits writes only into `<worktree>/.claude/agents/` under the repo's own `worktrees/` dir. `list` shows a `[wt:synced/total]` annotation for container-layout teams. `check` reports WORKTREE-NOT-SYNCED/WORKTREE-DRIFTED/WORKTREE-MISSING per worktree. Selftest covers 12 cases including the new guard accept/reject/traversal cases and the gitignored vs git-tracked detection. The git-worktree skill runs `sync-worktrees` at worktree-creation time; CLAUDE.md documents the behavior and the one-time cross-machine backfill.
+
+### Fixed
+- **XACA-0591** — Add `worktree-helpers.sh` to `sync-tap.sh` mirror map. The file lives at the dev-team repo root but ships to `tap/share/scripts/` (where `install-shell.sh::install_worktree_helpers()` reads it). Because it was not in the map, `sync-tap --check` never detected drift (false green), and v0.12.9 shipped the file stale: missing the XACA-0588 `wt-new` persona-deploy hook and the XACA-0565 `finance|legal|medical|dns` board-routing consolidation. Tap-machine auto-deploy of personas via `wt-new` was silently dead. Fix: single `sync_file` entry added to the "dev-team root → tap/share/scripts/" block with a comment explaining the root-level source location. Verified via `--check` (1 drifted before / 0 drifted after) and diff (identical after sync). **Follow-up (XACA-0591-001):** reviewer orphan-scan uncovered 4 additional `share/scripts/` files present in the tap but unmapped — same false-green class. All 4 mapped and re-synced: `scripts/cr-confluence-poller.py` (all `~/dev-team` refs are docstring/help-text only; canonical carries per-team LaunchAgent scheme, auto-approve, `--board` dev-mode flag not in stale tap copy), `fleet-monitor/client/fleet-reporter.sh` (canonical is in `fleet-monitor/client/`, not `scripts/`; adds `register_with_endpoint()` + `ensure_registered()` first-run registration and `REGISTRATION_SENTINEL` guard; `LCARS_PORTS_DIR=$HOME/dev-team/lcars-ports` already present in old tap copy — not a new regression), `scripts/kb-cr.sh` (adds `revert`/`undo`/`revert-history` backwards lifecycle commands, `--board` dev-mode arg, per-item `migrate-legacy` subcommand with `--apply` flag; `${HOME}/dev-team/scripts/migrate-cr-schema.py` hardcoded path already present in old tap copy at line 1913 — not a new regression), `scripts/migrate-cr-schema.py` (adds per-item `--item`/`--board`/`--apply` mode, `argparse`-based CLI, no-op detection before backup, per-item `migrate_item()` wrapper; no dev-machine paths). No-regression verification: for each file, dev-machine paths already existed verbatim in the stale tap copy (directionality canonical-newer confirmed). Exec-bit parity preserved across all 4 (`.py` executables +x, `kb-cr.sh` non-executable — matching canonical). Verified: `--check` showed 4 drifted before / 0 drifted after; all 4 post-mirror diffs empty.
+- **XACA-0590** — Startup scripts now read the canonical LCARS port from `team-paths.json` (via `kanban-hooks/lcars_ports.py`) instead of recomputing it via a cksum hash. The cksum approach produced a runtime value that diverged from the canonical port (e.g. finance-personal: cksum→8427, canonical→8360), dirtying the git-tracked `lcars-ports/<prefix>-lcars.port` file on every launch. Fix: added `resolve_lcars_port <session_prefix>` to `scripts/lcars-launch-helpers.sh` — calls `lcars_ports.py` (team-paths.json overlay wins, DEFAULT_TEAMS fallback), returns the canonical port on stdout or exits non-zero so callers fall through to the cksum formula for unregistered prefixes. Scripts that source `lcars-launch-helpers.sh` use `resolve_lcars_port`; scripts without that source use an equivalent direct `python3 kanban-hooks/lcars_ports.py` call. Scripts updated: `finance-startup.sh`, `medical-startup.sh`, `medical/scripts/medical-startup.sh`, `legal-startup.sh`, `legal/scripts/legal-startup.sh`, `mainevent-startup.sh`, `freelance-startup.sh` (supersedes prior XACA-0549 .port-file-read approach with the authoritative registry query), `academy-startup.sh`, `command-startup.sh`, `dns-startup.sh` (constant-input cksum values matched canonical by coincidence; resolver now makes the authority explicit). `.port tracking policy` (Chancellor sign-off, Captain Ake): keep git-tracked — once startup writes the canonical value the tracked file stays clean IFF committed==canonical; drift clears naturally on next server restart. Regression tests added in `scripts/tests/test-lcars-port-resolver.sh` (24 assertions: canonical wins, fallback runs on non-zero exit, direct python3 pattern, output format, and — XACA-0590-011 — the resolver's absent-`lcars_ports.py` not-found branch returning rc=1 + empty stdout). Review follow-ups (PR #506): `academy-shutdown.sh` remote port-forward teardown also routed through `resolve_lcars_port` (was an un-migrated cksum recompute of the same drift class — XACA-0590-010); the not-found-branch test case added (XACA-0590-011).
+- **XACA-0502** — Repair `kb-knowledge-search` telemetry so the KB-effectiveness audit has real signal (scope pivoted from audit → instrumentation repair after a pre-work gate found the data unusable). Two defects in the XACA-0500 telemetry block (`kanban-helpers.sh`): **(1) persona always `unknown`** — resolution read `LCARS_TEAM → KB_DETECTED_TEAM`, but `KB_DETECTED_TEAM` is set by *nothing* in the codebase and `KB_TEAM` (the variable every other `kb-*` helper resolves through) was never consulted, so every subagent / worktree / non-interactive search logged `persona=unknown` (86% of accumulated rows). Now falls through to the canonical `_kb_detect_context` resolver (tmux session → `KB_TEAM` env → `.kb-team` sentinel) when `LCARS_TEAM` is unset — *reusing* the existing context chain rather than adding a divergent fifth persona-resolution site (sibling-drift trap, k501). `LCARS_TEAM` precedence is preserved. **(2) per-tier hit distribution uncapturable** — the single `tier` field only ever recorded the `--tier` *filter flag*, never which tiers results came from (always empty for unfiltered searches), so the audit's per-tier read distribution was impossible to compute. Added a new `result_tiers` JSON object (`{agent,subject,team,project,relevant}` counts) tallied per match during the search loop and emitted alongside the flat `results` total (sum invariant: `Σ result_tiers == results`); `tier` retains its filter-flag meaning. Plain integer counters (not an associative array) for macOS bash 3.2 portability. Tests: `tests/bats/kb-knowledge-search.bats` extended +5 (persona-via-`KB_TEAM`, `LCARS_TEAM`-over-`KB_TEAM` precedence, `result_tiers` well-formedness + miss-case all-zero + hit-case sum invariant) and hardened for tmux/sentinel determinism (strip `TMUX`/`TMUX_PANE`, `cd` to a sentinel-free sandbox) — 16/16 pass. Live-verified: `persona=academy`, `result_tiers={agent:25,subject:7}` summing to `results:32`. The audit itself is rescheduled (~3 weeks) to a follow-up ticket to let real telemetry accumulate. **No tap copy** — `kanban-helpers.sh` is dev-only, so no tap gates apply.
+- **XACA-0587** — Fix stale `kb-release-sync` command name in two `kanban-helpers.sh` user-facing strings. The release-manifest sync failure path (the LCARS-unreachable branch hit by `kb-release-assign`/`kb-done`) told users to run `kb-release-sync` to reconcile, and the function's usage comment showed `Usage: kb-release-sync [team]` — but the actual helper is `kb-release-sync-board`. No `kb-release-sync` alias exists anywhere, so anyone following either message hit a `command not found` rabbit hole exactly when recovering from an LCARS-down-at-assignment-time scenario. Both references now name the real `kb-release-sync-board` command. Repo-wide grep confirmed these were the only two stale sites (no sibling drift, no tap-shipped copy carries the string). String-only change — the function definition and all call sites were already correct.
+- **XACA-0585** — Ship `lcars-health-check.sh` through the tap install/upgrade pipeline. Canonical root file now mirrored to `homebrew-tap/share/scripts/lcars-health-check.sh` via `sync-tap.sh`. New `install_lcars_health_check_script()` in `install-kanban.sh` lays it down at `$AITEAMFORGE_DIR/lcars-health-check.sh` before `install_lcars_health_launchagent`. Added to `update_aux_scripts` script_map in `aiteamforge-upgrade.sh` to keep it current on upgrade. `aiteamforge-doctor` gains a missing-script diagnostic check (fix-hint points at `aiteamforge setup`, since `upgrade` skips absent targets). The lcars-health plist now invokes the script via `/bin/zsh` (was `/bin/bash`): the script is `#!/bin/zsh` with zsh-only syntax, and the explicit `/bin/bash` interpreter overrode the shebang and exited 2 (parse error) on every tick — so the lay-down alone would have turned exit-127 into exit-2 without actually restarting servers. The regression test now parse-checks the shipped script under its declared interpreter. Fixes exit 127 on the `com.aiteamforge.lcars-health` LaunchAgent (StartInterval 300) that caused dead LCARS servers to never auto-restart on tap installs.
+- **XACA-0586** — Import preflight gate part 2 (XACA-0583 follow-up): present-but-stale carried payload now reports **`STALE-OK`** instead of FAIL during a *pre-import* audit, and the real blocking signal is **data-loss detection**. Field re-verify on M1Pro v0.12.8 confirmed XACA-0583 works (47→8 FAIL; PENDING-IMPORT 21 + EXPECTED-MISSING 19 correctly classified) but the import was STILL blocked (`baseMatch` FAIL, exit 1) by 8 remaining FAILs that were ALL stale-destination files an overwrite-import would simply replace (`finance-personal-board.json` behind source by XFIN-0027-005..012; 6× `activity/XFIN-*.json` sha mismatch; `migration-manifest.json` self-ref). Same flaw class as part 1, one layer down: part 1 fixed *absent* carried payload → PENDING-IMPORT; *present-but-mismatched* carried payload still FAILed. For a wholesale-overwrite import a destination that differs from source is the NORMAL precondition (it's *why* you import), so FAILing on it is chicken-and-egg. **Verifier** (`team_transfer/verifier.py`): new informational `STALE-OK` disposition (never sets exit code, never folds into `overall_state`); in `--phase pre-import`, EXACT sha mismatch and SCHEMA board behind source (`missing = cap_ids - cur_ids`) → STALE-OK, not FAIL. **Real blocking signal — data-loss**: `_verify_board_schema` now also computes `extra = cur_ids - cap_ids` (items the destination has that the source lacks → an overwrite would DELETE them) → `FAIL` with a `DATA-LOSS:` message prefix in BOTH phases; the `extra` check precedes the `missing` check so data-loss wins when a board is simultaneously behind and ahead. **POST-RESTORE semantics unchanged** — every reclassification is `phase == PRE_IMPORT`-gated; the strict after-the-fact audit still FAILs on sha mismatch / board-behind exactly as before. **Wrong-team guard** (the genuine block re-scoping): the v2 manifest deliberately dropped `team`/`baseTeam`, so a wrong-team import couldn't be detected once staleness stopped FAILing — `manifest.py`/`generator.py` now embed `source_team` (the `--team` the archive was generated for), and `server.py` compares its BASE (`_split_team_id[0]`) against the import target's base (scope-suffix variants like source `finance` vs target `finance-personal` MATCH; empty `source_team` from a legacy manifest skips the check gracefully) → mismatch sets `base_match=False` + `verifier_state='FAIL'`. `migration-manifest.json` self-entry confirmed PRESENT-class (existence-only; cannot sha-mismatch — generator builds it `cls=PRESENT, sha256=None`). `server.py` parses a `  STALE-OK: N` summary line into `verifierSummary.staleOk`; `base_match = (verifier_state != 'FAIL')` expression unchanged (behavior change is verifier-driven). Regression coverage: `TestBoardSchemaPhaseDispositions` (board-behind STALE-OK pre-import / FAIL post-restore; data-loss FAIL both phases; behind+ahead → data-loss wins; STALE-OK summary-line ↔ server regex), wrong-team base-comparison matrix (same/scope-suffix/differing/legacy-empty) + generator `source_team` round-trip. **Review hardening (PR #502):** a wrong-team block is recorded as a distinct `wrongTeam` job flag and gated in `handle_import_apply` by its OWN operator override `acknowledgeWrongTeam` — the generic `acknowledgePreflightDeltas` (XACA-0582, for stale-payload deltas) does NOT waive a cross-team import; the data-loss `extra`-set caveat (prefix-filtered `cur_ids`) is documented inline with the wrong-team guard as its backstop. 229 passing.
+- **XACA-0583** — Import preflight trustworthiness (XACA-0581 follow-up): the pre-import audit lumped three very different situations under a single scary "FAIL". **The upload-time import-preflight (`server.py` `handle_import_upload`) DOES gate the apply** — `FAIL>0` → `verifier_state='FAIL'` → `baseMatch=False` → `handle_import_apply` returns HTTP 400 and refuses. Because carried-payload files are legitimately absent at upload time (nothing imported yet), every one of them FAILed and blocked the import — the real chicken-and-egg deadlock behind the 47-FAIL field report. Fix: the verifier learns a `--phase {pre-import,post-restore}` flag (default `post-restore` = legacy behavior, zero change for existing callers) and two informational dispositions for absent files — **`PENDING-IMPORT`** (carried payload absent during a *pre-import* audit; the import will create it → not a FAIL, becomes FAIL post-restore) and **`EXPECTED-MISSING`** (machine-local / ephemeral state — Claude session transcripts under `.claude/projects/*.jsonl`, matched by `_EPHEMERAL_GLOBS` — that can never round-trip cross-machine; reported in any phase, never a FAIL). Neither sets the process exit code, so the pre-import gate now reports an honest `EXIT 0` (e.g. `0 FAIL · ~19 expected-missing · ~17 pending-import`) and the apply proceeds; a genuine mismatch (present file, wrong content) still FAILs and still blocks. **`server.py` phase-tags all three verifier call-sites**: the import-preflight gate gets `--phase pre-import` (the fix), the post-restore import call gets `--phase post-restore`, and the source-side export preflight is explicitly `post-restore` (an absent source file there is a genuine gap, not "pending"). Both destination call-sites surface `pendingImport`/`expectedMissing` counts. The 47 field FAILs decompose to ~19 machine-local (→ EXPECTED-MISSING), ~17 carried-payload not-yet-imported (→ PENDING-IMPORT), and ~9 stale-manifest drift (cleared by a fresh `generator` run — the manifest self-entry is already PRESENT-class, generator.py:129-144). Regression coverage: `TestPhaseDispositions` (full verdict matrix incl. phase default, ephemeral-in-both-phases, mismatch-still-FAILs-pre-import, and the upload-time gate scenario: all-carried-absent → pre-import EXIT 0 / post-restore EXIT 1) + a non-ephemeral-PRESENT-absent-FAILs unit test; synthetic-e2e fault class 8 retargeted to assert session-log removal is EXPECTED-MISSING.
+- **XACA-0581** — Import preflight: two follow-up fixes to XACA-0580, verified live on M1Pro (73→47 FAILs; all 26 in-scope false negatives eliminated). (1) **dev-team-root team collision** in `build_import_path_maps()`: academy AND freelance both report `working_dir == ~/dev-team`, so the per-team loop emitted maps keyed on the same `~/dev-team` prefix as the shared-infra map (`~/dev-team`→`~/aiteamforge`). Identical prefix length means the verifier's longest-first sort falls back to stable insertion order; the academy map (`~/dev-team`→`~/academy`) was dead only by luck and is actively *wrong*. Fix: skip the per-team map when `src_wd == src_devteam_root` — shared-infra already covers it. (2) **`aiteamforge_product` channel now SKIPPED** by the verifier (alongside `icloud_excluded`): these are installer-owned files the tap lays down with its OWN directory layout (`~/aiteamforge/<team>/personas/agents/*.md`, `personas/avatars/<logo>.png`) that differs structurally from the source (`~/<team>/.claude/agents/*` flattened, `~/dev-team/<team>/<logo>.png`). They are not carried by the migration transfer, so a flat prefix path-map cannot bridge the subdirectory reshape and FAILing on them is a false negative; persona copies additionally carry a `.synced-from-master` marker (regenerated on the destination by kb-sync-personas). The now-unreachable `aiteamforge_product` channel-class invariant was removed. Regression tests: dev-team-root collision case in `test_build_import_path_maps.py`; skip-behavior + cls-agnostic skip in `test_migration_verifier.py`; synthetic-e2e fault class 8 retargeted from a (now-skipped) persona file to a `user_state` session log. Remaining 47 FAILs are genuine state drift / inherently machine-local files (user memory not yet imported, session `.jsonl` logs, evolved boards) — out of scope.
+- **XACA-0580** — `build_import_path_maps()`: broadened tap-install detection to layout indicator (drops team-path-prefix heuristic that missed real M1Pro layouts) and added per-team `src_wd`→`dst_wd` derivation from manifest snapshot. Closes the 101 import-preflight FAILs from XACA-0579 v0.12.6 release verification.
+
+- **XACA-0579** Fix LCARS team-transfer import preflight: drop directory-typed manifest entries from `domain_claude.inventory()` (they could not round-trip through the file-based zip pipeline) and pass `--path-map` to the import-side verifier so M3Pro→M1Pro layout differences (`~/dev-team/` vs `~/aiteamforge/`) are bridged. Unblocks finance-personal migration.
+- XACA-0576 — Bidirectional template↔instance resolution closes the finance/medical/legal split-id cascade gap left by XACA-0460+XACA-0463+XACA-0565. v0.12.4 on M1Pro still emitted "unknown team finance-personal, defaulting to academy directory" and prompted the operator to skip even on a properly-installed finance machine. Root cause: `get_kanban_dir()` (tap-native kanban-paths.sh) reads `.aiteamforge-config` keyed by TEMPLATE id but XACA-0565 normalizes input to INSTANCE id before the lookup. Fix: new `get_template_id()` reverse helper + `get_kanban_dir()` candidate list (input/template/instance) so resolution succeeds regardless of caller form; `_kbc_get_kanban_dir()` now classifies KNOWN profile-scoped teams (returns clear error pointing at broken config) vs truly-unknown teams (legacy academy fallback retained); `validate_kanban_board()` honors the new non-zero return. Mirror dev-team-side: added `_kb_instance_to_template` sister helper next to existing `_kb_template_to_instance` in `kanban-helpers.sh`. Startup scripts updated to hand the TEMPLATE id ("finance"/"medical"/"legal") to `kb_ensure_team_initialized` so board-check normalizes downstream — previous behavior conflated the project-scoped SESSION_PREFIX with the team-id arg and worked only by accident for Darren's specific install. Reviewer (PR #494) caught a parallel-resolver gap: `kb_ensure_team_initialized` runs its own `_kb_board_is_present` fast-path that never invokes `validate_kanban_board`, so the TEMPLATE-id handoff would have prompted the operator on every startup looking for `finance-board.json` instead of the canonical `finance-personal-board.json` — fixed by adding the same TEMPLATE→INSTANCE case-statement fallback inline in `_kb_board_is_present` (canonical `scripts/kb-init-team-guard.sh`, mirrored to tap). Regression tests: 3 new cases in `homebrew-tap/tests/test-multi-team.sh` (bidirectional mapping, pass-through, `get_kanban_dir('finance-personal')` cascade — 41/41); `tests/test-template-instance-mirror-parity.sh` extended to cover the reverse pair (`_kb_instance_to_template` / `get_template_id`) + round-trip invariants — 64/64. **Sibling-drift footprint:** four shell case bodies now live in two files (forward + reverse, dev-team + tap mirror); parity test makes drift a CI-detectable failure.
+- XACA-0578 — Cellar-watch LaunchAgent closes the manual-`brew upgrade` silent-drift gap. After `brew upgrade aiteamforge`, the Cellar refresh held the new content but the runtime working-dir copy at `$AITEAMFORGE_DIR/lcars-ui/` (and `kanban-hooks/`, `scripts/`, `templates/`) stayed at the prior version — LCARS kept serving the old assets despite the brew command reporting success. XACA-0571's `auto-upgrade.sh` handled this by chaining `aiteamforge upgrade --non-interactive` after `brew upgrade`, but **manual** `brew upgrade aiteamforge` users (the natural choice when wanting a fix NOW) skipped step 2 entirely. Hit live on M1Pro during XACA-0577 verification. New `com.aiteamforge.cellar-watch` LaunchAgent watches `$(brew --prefix)/Cellar/aiteamforge` (the parent dir of versioned subdirs — a real directory, NOT a symlink, so launchd WatchPaths fires reliably on in-place mtime mutations) and chains `aiteamforge upgrade --non-interactive` on every brew install/upgrade/reinstall event. Canonical trigger script at `scripts/cellar-watch-trigger.sh` guards against the uninstall-fires-watcher race (brew uninstall also mutates the Cellar parent dir → would fire the watcher with no formula present) — checks `brew list aiteamforge` and `command -v aiteamforge` before chaining the upgrade. ThrottleInterval=60s (vs lcars-watch's 30s) so the downstream `lcars-watch` cascade settles cleanly. Doctor backstop: new `check_version_drift()` in `aiteamforge-doctor.sh` compares `$FRAMEWORK_DIR/../VERSION` (Cellar) vs `$AITEAMFORGE_DIR/.installed-version` (newly stamped at end of `aiteamforge-upgrade.sh`) and prints actionable remediation when they diverge — surfaces the drift state even when the LaunchAgent is disabled or absent. Also closes a pre-existing XACA-0571 gap where `aiteamforge-uninstall.sh`'s top-level `remove_launchagents` did not remove the `lcars-watch` or `auto-upgrade` plists (orphan-agent risk on uninstall); adds all three (`auto-upgrade`, `lcars-watch`, `cellar-watch`) at once. Bumps `homebrew-tap` submodule pointer for the tap-side template + installer/uninstaller/upgrade/doctor changes. Sibling-drift datapoint for k501: this very bug was sibling drift between the LaunchAgent upgrade path (XACA-0571) and the manual-brew upgrade path; fix lifts the constraint that XACA-0571 implicitly assumed (all upgrades go through `auto-upgrade.sh`).
+- XACA-0577 — LCARS import preflight cache-buster bump (`lcars.js?v=3.18 → 3.19`) so XACA-0554/0566/0568 fixes actually reach users. Symptom: import preflight panel kept showing stale `✓ MATCH` / `0 / 0` / empty SOURCE TEAM,HOST regardless of three sequential schema-drift fixes — browsers cached the April 15 build because the `?v=` token in `lcars-ui/index.html` never moved. Adds **pre-commit guard** `claude-hooks/check-lcars-asset-versions.py` (chained off `scripts/hooks/pre-commit`) that auto-discovers every `?v=`-bound asset in `lcars-ui/index.html` and blocks any commit that stages one of them without a matching version bump. Override: `LCARS_SKIP_ASSET_VERSION_CHECK=1`. Generalizes Reno's k001 CSS gotcha to JS and codifies it as enforcement instead of documentation. Bumps `homebrew-tap` submodule pointer for the mirrored `share/lcars-ui/index.html`.
+- XACA-0573 — kb-run warn-and-confirm when worktree already exists (silent-reuse + destructive-recreate branches now prompt; KB_RUN_ASSUME_YES bypass; non-TTY → abort; warning box + prompt emit to stderr so `$(...)` capture in `_kb_create_item_worktree` returns a clean path)
+- XACA-0575 — `kb-tap-release` outer-remote configurability. Previously hardcoded `origin` for the outer dev-team repo (4 sites: develop fetch/rev-parse/merge-base/push). The dev-team source-of-truth uses `dev-team` as its remote name (no `origin`), so the preflight failed with "Outer develop diverged from origin/develop" and a `develop` push would have died on the same name. Adds (a) auto-detect — prefer `origin`, fall back to `dev-team`, default `origin` if neither is configured so downstream commands fail with their normal error; (b) explicit `KB_TAP_RELEASE_OUTER_REMOTE` env override. Preflight messages, dry-run banner, and partial-failure recovery docs all updated to reflect the resolved remote name. Tap inner remote (`origin`) is untouched.
+
+### Feature: XACA-0571 — Daily auto-upgrade LaunchAgent with version-pin + operator notifications
+
+- New canonical script `scripts/auto-upgrade.sh`: runs `brew update` + `brew upgrade aiteamforge` daily at 03:15 via a LaunchAgent. Logs to `~/.aiteamforge/logs/auto-upgrade.log` with 5 MB rotation.
+- Version-pin sentinel: if `~/.aiteamforge/version-pin` exists and the available version exceeds the pinned value, the upgrade is held and the operator is notified. Missing/empty/unparseable pin = upgrade freely. Version comparison uses `sort -V` with a leading-`v` strip. **Fail-closed under an active pin** when the available version cannot be determined (jq absent or `brew info` returns nothing) — the upgrade is held rather than silently bypassing the pin gate.
+- Operator notifications via `osascript display notification` on upgrade success and failure. Opt-out: set `AITEAMFORGE_AUTO_UPGRADE_QUIET=1` in environment or `~/.aiteamforge/auto-upgrade.env`. Silently skips on headless machines where `osascript` is absent.
+- New plist template `homebrew-tap/share/templates/auto-upgrade/auto-upgrade-launchagent.template.plist`: `com.aiteamforge.auto-upgrade` label, `StartCalendarInterval` daily at 03:15, `RunAtLoad: true`, `ThrottleInterval: 60`. Placeholders: `{{AUTO_UPGRADE_SCRIPT}}`, `{{LOG_DIR}}`, `{{AITEAMFORGE_DIR}}`, `{{HOME_DIR}}`.
+- New installer function `install_auto_upgrade_launchagent` (and matching uninstall) in `homebrew-tap/libexec/installers/install-kanban.sh`, wired into `install_kanban_system` / `uninstall_kanban_system`.
+- `sync-tap.sh` entry added: `scripts/auto-upgrade.sh` → `homebrew-tap/share/scripts/auto-upgrade.sh`.
+- All four verification gates pass: `bash -n`, `xmllint`, rendered-plist `xmllint`, `shellcheck`.
+- New plist template `homebrew-tap/share/templates/auto-upgrade/lcars-watch-launchagent.template.plist` (com.aiteamforge.lcars-watch): passive launchd WatchPaths watcher on `$AITEAMFORGE_DIR/lcars-ui`. Fires `aiteamforge restart lcars` once per upgrade burst (ThrottleInterval=30s). No KeepAlive, no RunAtLoad — trigger-only, not a persistent daemon. Watches the user working-dir copy, not the Cellar/symlink path, to avoid the descriptor-held-on-old-directory gotcha when brew atomically retargets symlinks.
+- New `install_lcars_watch_launchagent` / `uninstall_lcars_watch_launchagent` functions in `homebrew-tap/libexec/installers/install-kanban.sh`. Called from `install_kanban_system` (sibling to `install_auto_upgrade_launchagent`) and `uninstall_kanban_system`. Resolves aiteamforge bin via `brew --prefix` with `/opt/homebrew` fallback. Non-fatal if template missing or lcars-ui not yet installed.
+- New operator runbook `docs/auto-upgrade-runbook.md` (XACA-0571-005): comprehensive guide for tap-installed consumers covering daily auto-upgrade LaunchAgent overview, operational tasks (force upgrade, pause/resume, version pinning, log inspection, notification suppression), the upgrade chain explanation, version-pin semantics, and troubleshooting (notifications not appearing, LCARS didn't restart, upgrade errors, pin not working, manual triggers). Audience: M1Pro, M4Mini, and other tap-installed machines (NOT M3Pro dev source).
+
+### Feature: XACA-0574 — Wire `kb-tap-release` through tap install (XACA-0570 follow-up)
+
+Lands the deferred tap-side wiring for `kb-tap-release`. Adds the canonical→tap mirror entry in `sync-tap.sh` and bumps the `homebrew-tap` submodule pointer to inner commit `1e11a4a` (XACA-0574), which carries the install-hook + `share/scripts/kb-tap-release` mirror + tap CHANGELOG entry. After this PR merges and `brew upgrade aiteamforge` runs, consumers get `kb-tap-release` installed automatically.
+
+- **`sync-tap.sh`:** new allow-list entry — canonical `scripts/kb-tap-release` mirrors to `homebrew-tap/share/scripts/kb-tap-release`. Picked up by `--check` drift gate going forward.
+- **`homebrew-tap` submodule pointer:** advanced to `1e11a4a` (XACA-0574 inner commit) which includes the install hook in `libexec/installers/install-kanban.sh` and the mirrored script.
+- Background: XACA-0570 scoped down to outer-only when a parallel session pushed XACA-0572's tap mirror before its canonical landed on develop — `sync-tap` from the worktree would have wiped XACA-0572's Antonio fonts. XACA-0572 has since merged cleanly; the deferred wiring lands here without race risk.
+
+### Feature: XACA-0570 — `kb-tap-release` one-shot tap release-cut
+
+New `scripts/kb-tap-release` collapses the 6-step manual tap release ritual into one command. `kb-tap-release {patch|minor|major}` reads `homebrew-tap/VERSION`, computes the next semver, promotes `homebrew-tap/CHANGELOG.md` `[Unreleased]` → dated `[X.Y.Z]` block, maintains compare-URL footer links, bumps `homebrew-tap/VERSION` and `homebrew-tap/Formula/aiteamforge.rb` (tag + version), commits + tags + pushes the tap inner (origin main), then bumps the outer-repo submodule pointer + commits + pushes (origin develop). 12 preflight checks (worktree guard, branch guards on both repos, clean-tree guards, up-to-date with origin, sync-tap drift gate, non-empty `[Unreleased]`, VERSION/Formula agreement, tag-collision guard) run before any mutation. `--dry-run` exercises all preflights and prints intended actions without writing; `--no-push` runs local commits + tags without publishing.
+
+- **`scripts/kb-tap-release`:** new (executable). macOS bash 3.2 compatible. Pure-shell `bump_version()` helper. Embedded python3 heredoc handles multi-line CHANGELOG section promotion and footer rewriting. First run creates the compare-URL footer; subsequent runs detect it and append.
+- **`scripts/kb-tap-release.completion.bash`:** bash/zsh completion (subcommand + flag). Source manually from `~/.bashrc` / `~/.zshrc`: `[ -r ~/dev-team/scripts/kb-tap-release.completion.bash ] && source ~/dev-team/scripts/kb-tap-release.completion.bash`. Zsh users prepend `autoload -U +X bashcompinit && bashcompinit`.
+- Outer-only scope: canonical script ships in this PR for direct in-repo use by the maintainer running from `~/dev-team`. Tap install hook (`homebrew-tap/libexec/installers/install-kanban.sh`) + `sync-tap.sh` mirror wiring deferred to a follow-up to keep this PR small.
+
+### Feature: XACA-0572 — Ship Antonio font locally (eliminate Google Fonts CDN dependency)
+
+- **`lcars-ui/fonts/antonio/`:** new directory with `Antonio-Variable.woff2` (latin subset, 26KB) + `Antonio-Variable-LatinExt.woff2` (latin-ext subset, 16KB) + OFL `LICENSE.txt`. Variable font — single binary per subset renders all four weights (400/500/600/700) via the `wght` axis.
+- **`lcars-ui/css/lcars.css`:** prepended 8 `@font-face` rules (4 weights × 2 subsets) using local `../fonts/antonio/` paths with the exact `unicode-range` strings Google's CDN returns. `font-display: swap` defensive default.
+- **`lcars-ui/index.html`:** removed `<link rel="preconnect" href="…googleapis.com">`, `<link rel="preconnect" href="…gstatic.com" crossorigin>`, and `<link href="…fonts.googleapis.com/css2?family=Antonio:wght@400;500;600;700&display=swap" rel="stylesheet">`. Bumped `css/lcars.css?v=31.1` → `?v=32.0` to signal cache-bust for the @font-face addition. Single entry HTML in lcars-ui referenced Google Fonts — verified via grep across all *.html.
+- **`lcars-ui/server.py`:** added `mimetypes.add_type('font/woff2', '.woff2')` + `mimetypes.add_type('font/woff', '.woff')` at module load (defensive — macOS Python ships the mapping but the DB can drift across OS versions). Added `.woff2` / `.woff` arms to `serve_no_cache_static`'s content-type block (defensive — fonts actually flow through `super().do_GET()` via SimpleHTTPRequestHandler.guess_type, which now sees the registered type).
+- **Net cost:** ~43KB of woff2 binary on disk; eliminates `fonts.googleapis.com` + `fonts.gstatic.com` from every page-load network graph. Works offline, no FOUT-on-CDN-eviction, no content-blocker breakage. Sibling to XACA-0569/0570/0571 deployment-friction tickets.
+
+### Feature: XACA-0569 — LCARS static-asset cache-bust + GET/HEAD/CSS parity
+
+- **`lcars-ui/server.py` dispatcher (~L10830):** added `.css` to the static no-cache branch. CSS now flows through `serve_no_cache_static` alongside JS/HTML instead of falling through to `super().do_GET()` (which sent no `Cache-Control` header).
+- **`lcars-ui/server.py` `serve_no_cache_static`:** added `text/css` content-type branch + new `head_only=False` parameter so HEAD callers can reuse the same path. HTML responses now run through new helper `_version_html_refs` which rewrites local `<script src=>` / `<link href=>` refs to append `?v=<mtime>` (file mtime of the referenced asset under `UI_DIR`). Skips absolute URLs (`http://`, `https://`, `//`, `data:`), refs that already carry a query string (preserves hand-versioned tags like `lcars.css?v=31.1`), and refs whose file is missing on disk. Eliminates the "shipped fix looks missing" trap (most recently XACA-0568 v2 import pre-flight on 2026-05-26 where operators saw stale `lcars.js` until a manual hard-reload).
+- **`lcars-ui/server.py` `do_HEAD`:** mirrors the GET static dispatch — HEAD requests for `.js` / `.html` / `.css` / `/` now go through `serve_no_cache_static(..., head_only=True)` instead of falling through to `super().do_HEAD()`. Curl `-I` and other tooling now see the same `Cache-Control: no-cache, no-store, must-revalidate` + `Pragma: no-cache` + `Expires: 0` headers as GET.
+- Verified end-to-end with 9 curl probes against a test server on port 9876: GET+HEAD parity on `.js` / `.html` / `.css`; mtime stamps applied to local refs in `index.html` + `agent-panel.html`; hand-versioned `?v=` tags preserved; CDN/Google-Fonts URLs untouched; `redirect.html` + `agent-panel-router.html` unchanged (inline `Date.now()` cache-bust still works).
+### Feature: XACA-0567 — Add tap CHANGELOG [Unreleased] completeness CI gate
+
+- New script `scripts/check-tap-changelog-completeness.sh` (zsh): enforces that every inner-tap commit in the outer PR's submodule-pointer range has a matching XACA id under `[Unreleased]` in `homebrew-tap/CHANGELOG.md`. Skip filter handles release-cut commits, CHANGELOG-only commits, VERSION-only commits, docs-only commits, empty-diff commits, and `Tap-Only-Edit: intentional` trailers. Bypass via `Changelog-Skip: <reason>` outer commit trailer or `changelog-skip` PR label.
+- New CI job `tap-changelog-completeness` in `.github/workflows/sync-tap-check.yml`: triggers on PR + push to develop when `homebrew-tap` pointer or `homebrew-tap/CHANGELOG.md` changes. Hard-blocks merge on uncovered XACA ids using GitHub Actions annotation format.
+- 5 shell tests under `tests/check-tap-changelog/` (missing-entry, covered, skip-mirror-noop, bypass-trailer, multi-commit-one-ticket) + runner `run.sh`. All 5 pass.
+- Root cause: v0.12.0 lost 38/46 CHANGELOG entries (82% invisible), v0.12.1 lost 7/11 (64%). Manual catch held at v0.12.2 but fragile. This gate closes the structural gap.
+- PR #483 review feedback (XACA-0567-005/006): replaced `printf '%b'` accumulation pattern with real-newline `$'\n'` + `printf '%s'` so user-supplied commit subjects aren't subject to backslash-escape interpretation; removed dead `GITHUB_REPOSITORY` env var from the workflow step (script never reads it).
+- PR #483 test feedback (XACA-0567-007 — thok catch): closed the `$(enumerate_commits)` / `$(extract_unreleased_ids)` subshell-exit gate bypass. `exit 2` inside a command substitution only exits the subshell — caller sees empty output and silently exits 0 (false-green). Moved both preconditions (tap submodule initialized, `homebrew-tap/CHANGELOG.md` present) into `main()` BEFORE the subshell calls so `exit 2` propagates. Also removed dead `--pr-number` / `PR_NUMBER` parameter. New regression test `tests/check-tap-changelog/test-precondition-gate.sh` (2 probes — uninit submodule, missing CHANGELOG). All 6/6 suites pass.
+
+### Bugfix: XACA-0568 — LCARS import pre-flight false ✓ MATCH + Apply enabled with 0 files (v2 manifest schema drift)
+
+- **`lcars-ui/js/lcars.js` `renderImportPreflight`:** rewritten to read v2 keys. `data.sourceIdentity?.hostname` → SOURCE HOST row; `data.totalFileCount` → single FILES count (replaces dead `manifest.fileCount.inTree/outOfTree`). SOURCE TEAM row now displays `'(N/A in v2 manifest)'` — explicit instead of empty `--`. The former "BASE MATCH" row is now a VERIFIER pill that renders `PASS`/`WARN`/`FAIL` with `data-state` for CSS color coding; on `WARN`/`FAIL` a collapsible `<details>` block shows `verifierSummary.tail`. Added `data-test-id` attributes on the gate-relevant elements.
+- **`lcars-ui/js/lcars.js` `updateImportApplyEnabled`:** added two floors before the existing secrets gate: (1) disable Apply if `verifierState === 'FAIL'` or `!baseMatch`, with tooltip "Verifier reported FAIL — import blocked"; (2) disable Apply if `totalFileCount <= 0`, tooltip "Empty archive — nothing to import". Existing secrets-gating preserved as Floor 3. Apply button stores `data-base-match`, `data-verifier-state`, `data-total-file-count` for gate evaluation.
+- **`lcars-ui/js/lcars.js` `applyTeamImport` race-condition fix:** previously had only `!currentImportJobId` as early-return guard. A fast double-click during the brief enable→fetch window could have bypassed the gate. Added defensive `applyBtn.disabled` re-check at call-time so the canonical disabled state is the gate.
+- **`lcars-ui/js/lcars.js` `renderImportPreflight` ReferenceError fix (PR #484 tester review):** initial commit removed `const manifest = data.manifest || {};` from the top of the function when cleaning up legacy field reads but missed the secrets-summary read at line 17723 which still referenced bare `manifest.secrets_summary`. At runtime this throws `ReferenceError: manifest is not defined`, crashing the entire preflight panel for every v2 upload. Fix: read via `(data.manifest && data.manifest.secrets_summary) || {}` so the function is self-contained on `data`. Audited remaining 17633-17790 — no other bare `manifest.` references remain.
+- **`lcars-ui/server.py` `assert import_format == 'new'` → explicit if + 400 (PR #484 review #012):** asserts are stripped under `python -O` and would otherwise raise `AssertionError` with a 500 / no JSON body. Replaced with an explicit `if import_format != 'new'` that calls `_send_json_response` with status 400 and a `UPSTREAM_REJECTION_FAILED` code so the client can render a meaningful error.
+- **`lcars-ui/server.py` verifier-crash semantics (PR #484 review #013 + #014):** previously, a verifier subprocess crash stamped `verifier_summary={'present': True, 'error': ...}` (no `overall` key) → derivation defaulted to `WARN` → `baseMatch=True` → Apply ENABLED on verifier crash. Two changes: (a) `verifier_summary` now initializes with `present=False`; the success path explicitly sets `present=True` once a real summary is parsed; the exception path leaves `present=False` and adds the `error` key. (b) Derivation now treats `present=False` as `verifier_state='FAIL'` (safer than WARN — a crash leaves the verifier in an unknown state and Apply must NOT bypass). Together: verifier crash → `verifierState=FAIL` → `baseMatch=False` → Apply blocked.
+- **`lcars-ui/server.py` dead `_si` local at apply_import (PR #484 review #015):** removed unused `_si = job.get('sourceIdentity') or {}` and tightened the surrounding comment to clarify that `source_team` is intentionally empty for v2 jobs (sourceIdentity carries hostname/user but not team), while legacy in-flight jobs still expose `manifest['team']` for the board-rename path.
+
+### Refactor: XACA-0568 (002+003) — v2 sourceIdentity, totalFileCount, verifier-derived baseMatch
+
+- **`lcars-ui/server.py` `handle_import_upload`:** replaced dead `source_team=''`/`source_base=''`/`base_match=True` stubs with real v2 extraction. `source_identity` dict (`hostname`, `user`, `home`, `generatedAt`, `schemaVersion`) is read from v2 manifest keys. `total_file_count` is summed from `domains[*].stats.file_count`, with a `len(files)` fallback. Added `assert import_format == 'new'` defensive guard so any future upstream-rejection regression surfaces immediately.
+- **`handle_import_upload` — verifier-derived `baseMatch`:** after preflight verifier runs, `verifier_state` is normalized from `verifierSummary.overall` (`PASS`/`WARN`/`FAIL`; unknown → `WARN`, not `PASS`). `base_match = (verifier_state != 'FAIL')` replaces the hardcoded `True`. Both `verifierState` and `baseMatch` are stored in `IMPORT_JOBS` and emitted in the HTTP response alongside `sourceIdentity` and `totalFileCount`.
+- **`handle_import_apply` error message:** updated the `baseMatch` gate error to reference `verifierState` + `sourceIdentity.hostname` instead of the legacy `manifest.baseTeam` key (which v2 never has).
+- **`apply_import` sibling drift sites (lines 1303, 1378):** legacy branch now reads `sourceIdentity` from IMPORT_JOBS for `source_host` (falling back to `source_hostname` → `sourceHost` → `'unknown'`). `source_team` call site unchanged (still reads `manifest.get('team', '')` for board-rename logic, which is correct for legacy-format in-flight jobs that pre-date v2).
+
+### Bugfix: XACA-0566 (BUG A) — fix stuck SELECT EXPORT FILE button after successful upload
+
+- **Root cause:** `uploadImportFile()` in `lcars-ui/js/lcars.js` set `import-btn.disabled = true` before the upload fetch, re-enabled it on both error/catch paths, but never re-enabled it on the success path (where `renderImportPreflight()` is called). Any downstream failure after preflight rendered (apply error, secrets-import failure, etc.) left the button permanently disabled with no way to retry without a page reload.
+- **Fix:** added `if (btn) btn.disabled = false` immediately after `renderImportPreflight(result.data)` in the success branch of `uploadImportFile()`. All three paths (error, success, catch) now unconditionally restore the button. The existing `cancelImport()` function (wired to the CANCEL button in the preflight panel) already provides the full start-over reset — restores the file picker, clears preflight DOM, and resets all staged state — so no new cancel/reset logic was needed.
+- **Sibling audit (lines 17259–17348):** `startTeamExport()` (`export-btn`) and `uploadSecretsImportFile()` (`secretsImport-select-btn`) were audited for the same disable/re-enable leak pattern. Both are clean: export re-enables on error, non-ok poll, `onExportComplete`, and `onExportFailed`; secrets-import re-enables on both error paths, and `_resetSecretsImportToFileArea()` covers all reset paths.
+
+### Refactor: XACA-0566 follow-up — extract _stamp_detection_failed_if_unavailable helper (PR #482 review)
+
+- XACA-0566 follow-up: factor `_stamp_detection_failed_if_unavailable` helper so both `_compute_secrets_summary()` call sites in the export flow consistently stamp `detection_failed` (PR #482 review).
+
+### Bugfix: XACA-0566 (BUG B) — secrets inline picker hidden when detection failed or sources absent at pack time
+
+- **Root cause (F1):** If `secrets_export_lib` failed to import on the source host, `_compute_secrets_summary()` ran a stub returning `{sources:[]}`, stamping `expected=0, discovered=0` into the manifest. The client read `discovered === 0` and hid the inline secrets picker — operator never told their secrets detection silently failed.
+- **Root cause (F2):** If the lib loaded but secrets dirs were absent at pack time, `discovered=0` with `expected>0` again hid the picker while an active secrets workflow existed.
+- **Fix (export side, `server.py`):** After `_compute_secrets_summary()` runs, if `SECRETS_EXPORT_LIB_AVAILABLE` is `False`, stamp `detection_failed=True` + `detection_reason` onto the summary before it is written into the manifest. Minimal, non-refactor — no changes to the function itself.
+- **Fix (client side, `lcars-ui/js/lcars.js` `renderImportPreflight`):** Broadened the inline-picker trigger from `discovered > 0` to also fire on `detection_failed === true` (F1) and `expected > 0 && discovered === 0` (F2). Each case shows context-appropriate warning copy. `currentImportSecretsDiscovered` is set to `Math.max(discovered, 1)` when the section shows, so the apply-gating and secrets-upload path in `applyTeamImport()` activate correctly for F1/F2 without further changes. (F3 — pre-XACA-0520-005 exports with no `secrets_summary` key — keeps existing behavior; no false-positive.)
+- **Fix (file-exists guard remediation hint, `server.py`):** Improved the `missing_paired_secrets` 409 error message to direct the operator to the inline picker as the primary path, mention the standalone Secrets Import flow as the fallback, and note when `detection_failed` was set. `detection_failed` is now surfaced in the 409 response JSON for client use.
+
+### Bugfix: XACA-0565 — startup board validator builds finance board name from template not instance + sibling-drift consolidation
+
+- **`homebrew-tap` submodule:** advanced the recorded pointer (tap-only portion carries the `Tap-Only-Edit: intentional` trailer — these tap-native files have no dev-team canonical and are not in `sync-tap.sh`'s mapped set).
+- **Root cause:** `aiteamforge start`'s board validator (`kanban-board-check.sh` `validate_kanban_board`) received TEMPLATE keys from `.aiteamforge-config` (`finance`) but constructed board filenames directly from them (`finance-board.json`), while boards on disk use the INSTANCE id (`finance-personal-board.json`). It therefore false-alarmed "board missing" and presented Restore/Create/Skip on every start for personal-org teams while the real board sat beside it. Sibling-drift: the same template→instance class was already fixed at `worktree-helpers.sh:1566` (XACA-0180); the startup validator never adopted it.
+- **Fix (primary):** new `get_board_id()` in tap `kanban-paths.sh` — a deterministic template→instance map (`finance`→`finance-personal`, `legal`→`legal-coparenting`, `medical`→`medical-general`; others pass through). `validate_kanban_board()` resolves the instance id once, up front, so it threads through the whole downstream chain (dir resolution, filename, backup lookup, restore). Deterministic `case`, not a glob, so it can't false-match a legacy stub that `_kb_check_dual_boards` intentionally tolerates.
+- **Consolidation (sibling-drift refactor — was XACA-0565-009 [Review]):** the template→instance knowledge had grown to 4 shell sites. Consolidated to ONE canonical helper `_kb_template_to_instance` in `kanban-helpers.sh`. Dev-team consumers refactored to route through it: `_kb_check_dual_boards`'s `_checks` array is now template-keyed (was instance-keyed) and derives the instance via the helper; `worktree-helpers.sh:1566`'s case statement folds `finance|legal|medical|dns` into one clause that calls the helper (also closes a latent gap — `legal` was missing from the original case list). Tap's `get_board_id` is a SHELL-IDENTICAL mirror with explicit back-reference (the tap installs standalone and cannot source dev-team helpers at runtime; mirror is the minimum-possible duplication). aiteamforge_paths.py `_resolve_template_band` is the opposite direction (instance→template, Python) and intentionally left separate. Net: adding a new personal-org team = 1 canonical edit + 1 tap mirror edit (was 4 edits).
+- **Behavioral parity:** `diff` of `_kb_check_dual_boards` output between HEAD and refactored under the same sandbox = byte-identical. The intentional dual-board guard is unchanged in effect.
+- **Drift guard (was XACA-0565-010 [Review]):** new `tests/test-template-instance-mirror-parity.sh` (zsh) sources both `_kb_template_to_instance` and the tap `get_board_id` and asserts byte-identical output AND known-correct mappings for 13 inputs (3 personal-org templates + 3 idempotent instance-id inputs + 7 passthrough classes incl. dns/command/freelance-*). New GitHub Actions workflow `.github/workflows/template-instance-mirror-parity.yml` runs the test on PRs/develop pushes touching either function, the test, or the workflow itself (paths-filtered, submodule-aware checkout). Mutation-tested: deliberately breaking the tap mirror's `finance` mapping causes T03 to FAIL with the diagnostic `parity: finance → canonical=finance-personal mirror=finance-BROKEN (DRIFT)` and exit 1; restoring it returns to 28/28 PASS.
+- **Verification:** sandboxed-HOME QA — `finance` now resolves `finance-personal-board.json` (no prompt); negative control confirms the pre-fix code prompted; restore/create paths write the instance filename; single-board teams (`academy`, `ios`) unaffected; `_kb_template_to_instance` unit map verified for finance/legal/medical/passthrough; `zsh -n`/`bash -n`/`shellcheck` clean (no new findings; the pre-existing `bash -n` failure at L9683 is a zsh-glob qualifier — `kanban-helpers.sh` is zsh-targeted). Rolls into a 0.12.2 tap cut.
+
+### Chore: Release AITeamForge 0.12.1 — bump homebrew-tap submodule
+
+- **`homebrew-tap` submodule:** advanced the recorded pointer to the tap's `v0.12.1` release commit on `tap/main`. The tap release rolls 12 changes (XACA-0553, 0554, 0555, 0556, 0557, 0558, 0559, 0560, 0561, 0562, 0563, 0564) from the tap CHANGELOG's `[Unreleased]` into a dated `[0.12.1]` section and bumps `VERSION` + `Formula/aiteamforge.rb` (`tag:`/`version`) from `v0.12.0` → `v0.12.1`.
+- **Completeness sweep:** added 4 entries that had shipped to the tap after the 0.12.0 cut but were never logged — XACA-0553 (export/import fetch error messages), 0554 (secrets-import dead-end), 0556 (real LCARS boot-failure surfacing; merged 8h after the cut, mirror folded into a later sync commit with no ticket id), 0561 (runtime LCARS port derivation).
+- **No source sync needed:** `sync-tap.sh --check` reported 0 drifted / 0 missing across 711 files before the cut — the tap already mirrored current canonical sources.
+
+### Refactor: XACA-0563 — rendered startup templates use the shared LCARS launch helper (last drifted path)
+
+Follow-up to XACA-0562. The two tap startup-script templates
+(`homebrew-tap/share/templates/team-startup.sh.template` and
+`team-project-startup.sh.template`) were the last LCARS-launch code paths still
+carrying their own inline launcher: a `(cd … python3 server.py … &)` subshell
+(PID unrecoverable — the `&` is inside the subshell), a fixed 5s poll
+(`{1..10}`×0.5s), no crash detection, and a generic "may not have started"
+message (`team-project` discarded stderr entirely). Both now `source`
+`$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh` and delegate to
+`start_lcars_server`, inheriting PID capture + crash short-circuit with a log
+tail, the 15s first-boot poll, the size-rotated per-team log, and venv-aware
+python. `window.LCARS_TARGET_SESSION` (consumed by `redirect.html`) is
+re-appended after the call since the helper writes only `LCARS_TARGET_TEAM`.
+
+- **`homebrew-tap/libexec/installers/install-team.sh`**: install
+  `lcars-launch-helpers.sh` to `$AITEAMFORGE_DIR/scripts/` on the
+  rendered-template (non-parametric) path too — previously only the parametric
+  branch shipped it, so a rendered script's `source` would have failed at
+  runtime. The path-substitution install helper (`_xaca0483_install_script`) was
+  hoisted out of the parametric branch so both install paths share one mechanism.
+- **`scripts/lcars-launch-helpers.sh`** (canonical) + **both templates**:
+  `start_lcars_server` now honors an `LCARS_PYTHON` env override as probe 0 (an
+  explicit, caller-resolved interpreter wins over the brew-venv probe chain). The
+  rendered templates `export LCARS_PYTHON="$VENV_PYTHON"` (their own resolution of
+  `$HOME/.aiteamforge/venv` / `$AITEAMFORGE_DIR/.venv` — paths the helper's chain
+  does not cover) before the call, so the LCARS *server* now launches under the
+  venv with its deps instead of bare `python3`. The override is unset on the dev
+  source machine and the 11 per-team `*-startup.sh` scripts + `aiteamforge start`,
+  so their behavior is unchanged (the probe chain runs as before). The tap mirror
+  `share/scripts/lcars-launch-helpers.sh` is re-synced (drift-gated).
+- Tap-side edits are inside the `homebrew-tap` submodule; committed via the
+  two-step (inner commit → outer gitlink bump).
+
+### Refactor: XACA-0562 — share the canonical LCARS launch helper between `aiteamforge start` and per-team startup scripts (full canonicalization)
+
+`scripts/lcars-launch-helpers.sh` was the hardened, single-source launch helper
+(PID tracking, per-team log, 15s first-boot poll, crash short-circuit — XACA-0556)
+sourced by the 11 per-team `*-startup.sh` scripts, but it hardcoded the dev-only
+path `/Users/darrenehlers/dev-team/...`. Meanwhile `aiteamforge start` (tap) carried
+its OWN weaker inline launcher (`sleep 3` + curl, one shared `/tmp/lcars-server.log`,
+no PID/crash detection), and the tap's install seed
+(`homebrew-tap/share/scripts/lcars-launch-helpers.sh`) was a stale divergent copy
+that was never drift-gated. Three copies, three behaviors. This collapses them to one.
+
+- **`scripts/lcars-launch-helpers.sh`** (canonical): made portable. All dev-team
+  paths now resolve from `_atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"` — on the
+  dev machine (`AITEAMFORGE_DIR` unset) this is byte-identical to the old hardcode;
+  on a tap machine it resolves to the installed `$AITEAMFORGE_DIR` tree. `lcars_ui_dir`,
+  `setter_script`, and `wm_script` all use the portable base (with an optional
+  `LCARS_UI_DIR` override); logs derive from `${_atf_base}/logs`. The python probe is
+  unified into one superset chain (`brew --prefix aiteamforge`/libexec/venv →
+  env.sh/`AITEAMFORGE_PYTHON` → `$(brew --prefix)/var/aiteamforge/venv` →
+  `$AITEAMFORGE_DIR/share/venv` → bare `python3`). `BASH_SOURCE` self-location is
+  deliberately avoided (callers are `#!/bin/zsh`; BASH_SOURCE is empty under zsh).
+  Function signatures, return-code contract, PID/crash logic, log rotation, and the
+  15s poll are all preserved. The 11 per-team startup scripts need NO change.
+- **`homebrew-tap/libexec/commands/aiteamforge-start.sh`**: `start_lcars()` now sources
+  `${WORKING_DIR}/scripts/lcars-launch-helpers.sh` (the SAME installed helper the
+  per-team scripts use, since `get_working_dir()` returns `$AITEAMFORGE_DIR`) and
+  delegates each team's launch+poll to `start_lcars_server`. The weaker inline launch,
+  the redundant python-resolution block, the shared `/tmp/lcars-server.log`, and the
+  `sleep 3` + second verify loop are deleted. The per-team "already serving 200 → leave
+  it running" check is preserved so the helper's `pkill` never kills a healthy server;
+  the soft-fail return is guarded so `set -eo pipefail` does not abort startup. Review
+  follow-up (XACA-0562-006): the now-unused `started_teams`/`started_ports` arrays and
+  the redundant `#started_teams -eq 0 && ok -eq 0` guard were removed (use the `ok`
+  counter alone) — no behavior change.
+- **`sync-tap.sh`**: `scripts/lcars-launch-helpers.sh` is now a drift-gated mirror
+  (`dev-team/scripts/ → tap/share/scripts/`), so the install seed can no longer
+  silently diverge from canonical.
+
+### Bugfix: XACA-0561 — `lcars-health-check.sh` and `lcars-smoke-test.sh` now derive LCARS ports at runtime instead of hardcoding them
+
+`lcars-health-check.sh` and `lcars-ui/lcars-smoke-test.sh` hardcoded per-team
+LCARS ports that had drifted from canonical (`finance-personal` claimed 8427 vs
+canonical 8360; `legal-coparenting` claimed 8230 vs canonical 8320 — both stale
+since XACA-0168). The health-check was consequently relaunching servers on the
+wrong ports, and the smoke-test silently targeted dead endpoints. Both scripts
+now derive ports at runtime from `aiteamforge_paths.py` (DEFAULT_TEAMS constant +
+live `team-paths.json` overlay) so they self-correct whenever the canonical source
+is updated. A rogue duplicate `finance-personal` server that had been running on
+the stale 8427 was retired as part of this fix.
+
+`scripts/kb-port-reconcile` gains a regression guard: `--check` now inspects
+these two scripts as read-sites and fails if either re-hardcodes an `lcars_port`
+value that diverges from the canonical port for the same team.
+
+- **`kanban-hooks/lcars_ports.py`** (new): shared CLI that resolves each team's
+  `lcars_port` from canonical (`load_config()`'s live `team-paths.json` overlay →
+  `DEFAULT_TEAMS` fallback), emitting `team:port` lines and skipping missing/`None`
+  ports with a stderr warning. Single source of the derivation logic — both scripts
+  call it, so the resolver itself can't drift between them (XACA-0561-008).
+- **`lcars-health-check.sh`**: the `LCARS_SERVERS` array (formerly
+  `funnel:local:team:socket:pattern` with the port hardcoded) is now built at
+  runtime. An infra-only `_LCARS_INFRA` table holds just `funnel:team:socket:pattern`;
+  ports come from `kanban-hooks/lcars_ports.py`, resolved via `${0:A:h}/kanban-hooks`
+  so it works in both the dev tree and the shipped tap layout.
+- **`lcars-ui/lcars-smoke-test.sh`**: the hardcoded `PORT_TEAM_MAP` becomes a plain
+  `_SMOKE_TEAMS` team list; ports come from the same `lcars_ports.py` helper (resolved
+  via `${0:A:h}/../kanban-hooks`) so smoke-test targets always reflect canonical.
+- **`scripts/kb-port-reconcile`**: `--check` mode extended with a read-site
+  regression guard for `lcars-health-check.sh` and `lcars-smoke-test.sh`; reports
+  any hardcoded port that diverges from canonical and exits non-zero.
+
+### Bugfix: XACA-0560 — `aiteamforge stop`/`restart` could not find the running LCARS server (pgrep pattern vs relative launch)
+
+Tap-only fix (advances the `homebrew-tap` submodule pointer). `aiteamforge stop`
+reported "LCARS server not running" even when LCARS was up, because the stop path
+matched `pgrep -f "lcars-ui/server.py"` while `start.sh` and the per-team
+`*-lcars-startup.sh` scripts launch LCARS relatively (`cd lcars-ui && python3
+server.py <port>`) — the running cmdline has no `lcars-ui/` substring, so the match
+never fired and stop/restart were silent no-ops (restart then could not rebind the
+held port).
+
+- **`homebrew-tap` (submodule bump)** —
+  - `libexec/commands/aiteamforge-stop.sh`: `stop_lcars()` discovery + post-kill
+    verification now use `pgrep -f "server\.py [0-9]"` (port-anchored; matches
+    relative and absolute launches, not a bare editor on `server.py`).
+  - `libexec/commands/aiteamforge-uninstall.sh` + `aiteamforge-migrate.sh`: the
+    identical broken pattern (sibling drift) aligned to the same matcher.
+  See the tap CHANGELOG for the full per-file breakdown.
+
+### Bugfix: XACA-0564 — `install_kanban_helpers` now refuses to overwrite a git work-tree / git-tracked `kanban-helpers.sh`
+
+Tap-only fix (advances the `homebrew-tap` submodule pointer). XACA-0559 post-mortem:
+a test that did not sandbox `$AITEAMFORGE_DIR` let `install_kanban_helpers()` overwrite
+the dev-source `kanban-helpers.sh` with the small aliases template, silently dropping
+`kb-sweep` / `kb-merge` and breaking PR merge gates on the next shell.
+
+- **`homebrew-tap` (submodule bump)** —
+  - `libexec/installers/install-kanban.sh`: `install_kanban_helpers()` now detects
+    whether `$AITEAMFORGE_DIR` is a git work-tree or the target file is git-tracked
+    and **hard-aborts** the install. Set `AITEAMFORGE_ALLOW_DEV_OVERWRITE=1` to opt
+    into clobbering a tracked file (intentional dev workflows only).
+  - `tests/test-xaca-0564-kanban-helpers-overwrite-guard.sh`: sandboxed regression
+    test — guard trips on git work-tree / tracked path; opt-in suppresses abort;
+    non-git paths proceed normally.
+  See the tap CHANGELOG for the full per-file breakdown.
+
+### Bugfix: XACA-0559 — `aiteamforge setup` bare + `--upgrade` did not fully refresh the runtime (preserve vs upgrade semantics)
+
+Tap-only fix (advances the `homebrew-tap` submodule pointer). The `setup` wizard had no
+real upgrade path: `IS_UPGRADE` was set but never read, so `--upgrade` ran identically to a
+plain setup. When an upgrade resolved an empty team list, `install-kanban.sh` returned
+*before* the shared-component installs, leaving kanban hooks / LCARS UI / helper scripts
+stale ("the gate stayed 0"). Bare `setup` on an existing install offered only a yes/no
+"Upgrade?" prompt with no clean preserve-vs-refresh choice. Distinct code path from
+XACA-0558 (which fixed the standalone `aiteamforge upgrade` command).
+
+- **`homebrew-tap` (submodule bump)** —
+  - `bin/aiteamforge-setup.sh`: `IS_UPGRADE` now drives behavior. On upgrade the wizard
+    hydrates teams, per-team working dirs, and feature flags from the existing
+    `.aiteamforge-config` (via `jq`, degrading to interactive if absent/unparseable),
+    forces `INSTALL_KANBAN=yes`, and skips the team/feature prompts to refresh installed
+    teams in place. Bare setup now offers a three-way **Upgrade / Preserve / Reconfigure**
+    prompt (default Upgrade; non-interactive + `--upgrade` auto-upgrade). Board
+    preservation is unchanged.
+  - `libexec/installers/install-kanban.sh`: shared components are decoupled from team
+    presence — they always refresh when `install_kanban_system` runs; only per-team board
+    init is gated on a non-empty team list. The early `return 0` on empty teams is gone.
+  - Robustness: empty-array iterations the upgrade path now reaches are guarded for macOS
+    `/bin/bash` 3.2 under `set -u`, and config-derived team ids are sanitized before being
+    interpolated into `eval`'d variable names.
+  See the tap CHANGELOG for the full per-file breakdown.
+
+### Chore: Compact CLAUDE.md (767 → 622 lines, ~18% smaller)
+
+Reduced the per-session context cost of the global Claude Code guidelines
+(`claude/CLAUDE.md`). Tightened the Per-Team Persona, homebrew-tap, Team
+Initialization, and Account Isolation sections; pointed the Team-Init and
+Account-Isolation detail at their existing runbooks; de-duplicated the persona
+worktree-notes block (now cross-referenced). No operational content removed —
+the PR monitoring loop and all gate-safety notes were preserved verbatim.
+Deployed to the live `~/.claude/CLAUDE.md` copy. (Footer last-updated date set
+to 2026-05-24, the day the pass was pushed.)
+
+### Bugfix: XACA-0558 — `aiteamforge upgrade` skipped kanban-hooks, leaving a stale `aiteamforge_paths.py` on in-place upgrades
+
+Tap-only fix (advances the `homebrew-tap` submodule pointer). The upgrade command synced
+LCARS UI / templates / shell helpers / skills / LaunchAgents but never `share/kanban-hooks`,
+so a `brew upgrade` to a release that changed `aiteamforge_paths.py` (e.g. the XACA-0542
+`build_team_code_map` addition) did not propagate to the runtime copy — LCARS warned
+`cannot import name build_team_code_map` and fell back to hardcoded directories. Fresh
+installs were fine; the bug bit in-place upgrades only.
+
+- **`homebrew-tap` (submodule bump)** — `aiteamforge-upgrade.sh` gains `update_kanban_hooks()`
+  (the fix) and `update_aux_scripts()` (board-check, restore-helper, kanban-backup,
+  kb-cr — the same bug class), wired into the upgrade run sequence. `lcars-ports` was
+  audited and deliberately excluded (not shipped in the tap; stateful per-team data).
+  See the tap CHANGELOG for the full per-function breakdown.
+
+### Bugfix: XACA-0553 — LCARS export/import fetch errors now show HTTP status and server reason instead of a generic "Network error"
+
+Every user-initiated fetch site in the export/import flows used the `json()`-before-`ok`
+anti-pattern: calling `await response.json()` on a non-OK response would throw when the
+server returned a non-JSON error body (e.g., an HTML error page or an empty body from a
+reverse proxy), and the caller's generic `catch` block would surface "Network error" — the
+same message shown when the server is completely unreachable. The three failure modes were
+indistinguishable to the user.
+
+- **`readJsonResponse(response)`** (new shared helper): reads any fetch `Response` without
+  throwing on a bad body. Returns `{ ok, status, statusText, data, parseError }` — always.
+  `data` is the parsed JSON object (or `null`), `parseError` is the parse exception (or `null`).
+- **`_httpErrorMessage(prefix, result)`** (new shared helper): converts a `readJsonResponse`
+  result into a user-facing string, distinguishing three cases:
+  - **True fetch reject** (server unreachable, `TypeError` from `fetch` itself) → `catch`
+    block shows `"<op>: LCARS server not responding on this port — verify the tab URL/port
+    and that the team server is running."` with password-zeroing (`pw = ''`, `body.password = ''`)
+    guaranteed to run before the message is displayed.
+  - **Non-OK HTTP status** (server responded with an error code) → `"<op>: HTTP <status>
+    <reason>"` where reason is `data.error`, `data.message`, `statusText`, or `'unknown error'`
+    in priority order.
+  - **OK status but non-JSON body** (parse failure) → `"<op>: server returned an unreadable
+    response"`.
+- Applied to **all 12 user-initiated** export/import fetch sites:
+  - **Create/upload:** `startTeamExport` (`/api/export/create`), `startSecretsExport`
+    (`/api/export/secrets/create`), `uploadImportFile` (`/api/import/upload`), and both
+    secrets-import upload paths (`/api/import/secrets/upload`).
+  - **Preflight/apply:** `fetchImportPreview` (`/api/import/fetch`), `executeImport`
+    (`/api/import/execute`), `applyTeamImport` (secrets preflight + main apply + secrets apply),
+    `applyMainImport`/no-secrets apply (`/api/import/apply`), `verifySecretsImportPassword`
+    (`/api/import/secrets/preflight`), `_applyPairedSecretsImport` and `applySecretsImport`
+    (`/api/import/secrets/apply`).
+- Status-polling fetches (`/api/.../status/...`) are intentionally left unchanged — they fire
+  on an interval and carry no sensitive payload.
+
+### Bugfix: XACA-0556 — Startup masked real LCARS server boot failures as a generic 5s timeout (printed twice)
+
+When `server.py` FATALed on boot (port collision exit 2, missing dep, etc.),
+`start_lcars_server()` (`scripts/lcars-launch-helpers.sh`) discarded all server output
+(`> /dev/null 2>&1`) inside a PID-orphaning subshell and only polled `/api/status` for a fixed
+5s. The crash was therefore invisible: the poll just timed out and printed a generic
+"did not respond within 5s — continuing", hiding the real cause. Worse, all 11 `*-startup.sh`
+callers appended their own `|| echo "...timed out..."`, so a single failure printed **two**
+timeout lines (the "twice" symptom).
+
+- **`scripts/lcars-launch-helpers.sh`:** `start_lcars_server()` now captures the server's
+  stderr to a per-team log (`${AITEAMFORGE_DIR:-<dev-team>}/logs/lcars-server-<team>.log`,
+  matching the rendered-template path convention), `exec`s into python so `$!` is the python
+  process itself, and tracks that PID. The readiness poll is lengthened 5s → 15s (30 × 0.5s) but
+  **short-circuits the instant the process dies** — a crashed server is never going to answer, so
+  it surfaces the real exit status + the last ~15 log lines instead of burning the full window.
+  A slow/hung-but-alive boot also surfaces the log tail rather than a bare timeout. The soft-fail
+  contract is preserved (0 = ready, 1 otherwise; callers continue either way).
+- **All 11 team startup scripts** (academy, android, command, dns, finance, firebase, freelance,
+  ios, legal, mainevent, medical): removed the redundant caller-side "timed out" echo — the
+  hardened helper now owns the failure message — normalized to a single neutral
+  "Continuing without a confirmed-ready LCARS server (see details above)." line.
+- **Canonical-only:** reaches tap-installed machines via their dev-team clone; the tap
+  render-path template hardening is tracked separately (XACA-0563).
+- **Review follow-ups (PR #471):** `scripts/lcars-restart-helpers.sh` dropped the now-stale
+  "within 5s" restart fallback (the hardened helper prints the real failure detail);
+  `scripts/lcars-launch-helpers.sh` size-caps the per-team log (rolls to one `.old` backup
+  past ~256KB) so it can't grow unbounded; and `lcars-health-check.sh` renamed its local
+  `start_lcars_server()` → `_hc_start_lcars_server` (distinct signature) to avoid name
+  confusion with the canonical helper.
+
+### Bugfix: XACA-0557 — Port collisions abort LCARS startup + the kb-port-fix remedy was unreachable
+
+0.12.0 enforces no-port-collision globally at startup (XACA-0463), but a migrated config could
+carry duplicate per-instance ports, so `server.py` hard-aborted with `SystemExit(2)` and the
+LCARS dashboard never came up. The remedy tool was effectively unreachable on a shipped install:
+it had no exec bit, no PATH-accessible bin stub, and the abort message named no fix command.
+This change attacks the problem in depth — collision-free port generation at import time,
+actionable startup failures, and proper packaging of the fix tool.
+
+- **Migration / import yields collision-free ports (auto-fix + summary).**
+  `scripts/aiteamforge-team-paths-wizard.py` and `scripts/kb-team-import` now run the
+  port-collision fixer after writing config (resolving `kb-port-fix.py` via the dev-tree path,
+  then the brew-installed fallback, invoked as `python3 <path> --apply --yes`), print a summary
+  of any reassignments, and continue. `kb-team-import` also gains a standalone `--fix-ports`
+  mode. Skipped on `--dry-run`; non-fatal if the fixer can't be found (collisions are still
+  caught at boot). New regression test `lcars-ui/tests/test_xaca0557_port_collision_fix.py`
+  proves a config written with duplicate ports ends up collision-free after import.
+- **`lcars-ui/server.py` (`_xaca0463_assert_no_port_conflicts`):** the abort block now prints
+  two remedy lines after listing collisions:
+  ```
+  To fix:
+    Shipped install : aiteamforge-port-fix --apply
+    Dev checkout    : kb-port-fix --apply
+  ```
+  Exit code remains 2; detection logic is unchanged.
+- **`lcars-ui/tests/test_xaca0463_guard.py`:** extended Test 4 and the
+  `test_guard_collision_and_null_active_both_reported` test to assert that both
+  `aiteamforge-port-fix` and `kb-port-fix` appear in captured stderr, regression-protecting the
+  actionable message.
+- **Packaging (homebrew-tap submodule pointer bump).** `kb-port-fix.py` gains an exec bit and a
+  PATH-accessible `aiteamforge-port-fix` bin stub in the formula, a `--check` gate (exit 0 clean
+  / 1 on issues), and a startup gate in `aiteamforge-start.sh` that runs the check before LCARS
+  binds. Details in `homebrew-tap/CHANGELOG.md`; this dev-team commit advances the submodule
+  pointer to that fix.
+- **Review follow-ups (PR #472):** the dev-tree→brew resolver + `--apply --yes` invocation,
+  previously duplicated in the wizard (Python) and `kb-team-import` (shell), are consolidated
+  into one shared module `kanban-hooks/portfix_runner.py` so the brew/dev path layout lives in
+  exactly one place; both callers now delegate to it. `aiteamforge-start.sh`'s `check_port_health`
+  invokes its resolved command via a bash array so a libexec path containing spaces survives
+  without word-splitting.
+
+### Bugfix: XACA-0555 — `aiteamforge start` launched server.py without LCARS_TEAM (server FATALed on boot)
+
+The shipped `aiteamforge start` launcher started `server.py` with no `LCARS_TEAM`, so the
+0.12.0 server hard-exited at boot (`FATAL: LCARS_TEAM is not set`,
+`validate_lcars_team_or_die`, team-id-contract §6) and the dashboard never came up. Fixed in
+the homebrew-tap submodule (`libexec/commands/aiteamforge-start.sh`, tap commit `13e4854`):
+`start_lcars()` now loops the configured team instances, resolves each team's LCARS port via
+`aiteamforge_team_lcars_port`, and launches one server per team with
+`LCARS_TEAM`/`LCARS_SESSION_NAME` set — matching the per-team startup scripts. Also resolves
+the brew venv python (XACA-0486) so runtime imports work on tap-installed machines. PR #470
+review hardening: a `|| true` guard on `get_configured_teams` keeps a missing config from
+`set -e`-aborting before the graceful no-teams path, and `aiteamforge-paths.sh` is sourced at
+top-of-file for consistency. This dev-team commit bumps the submodule pointer to that fix.
+
+### Bugfix: XACA-0554 — Fix secrets-import dead-end (import never linked paired secrets; UI couldn't acknowledge)
+
+Importing any team whose export manifest declared `secrets_summary.discovered > 0` failed
+hard with HTTP 409 `missing_paired_secrets` and could not be completed through the LCARS UI —
+a blocker for migrating any secrets-bearing team. The apply gate checked
+`job.get('pairedSecretsJobId')`, but nothing ever set that field on an *import* job (only on
+export jobs), so `paired_secrets_provided` was always `False`. The only bypass —
+`acknowledgeMissingSecrets=true` in the apply body — was unreachable because the UI's apply
+POST sent no body.
+
+- **Server (`lcars-ui/server.py`):** the import-apply handler now accepts an optional
+  `pairedSecretsJobId` in the POST body. When present it validates that the referenced
+  `SECRETS_IMPORT_JOBS` entry exists, has been password-verified (`status` in
+  `ready`/`applying`/`completed`), and targets the same team; on success it records the link on
+  the import job so the secrets gate passes legitimately. Invalid/wrong-state/team-mismatch
+  references return a clear `400` (never silently fall through to the 409 or the override). The
+  `acknowledgeMissingSecrets` override remains intact as a server-side escape hatch.
+- **UI (`lcars-ui/index.html`, `lcars-ui/js/lcars.js`):** when the main-import preflight detects
+  the export declared secrets, an inline secrets file-picker + password now appears in the same
+  panel and the **Apply Import** button stays disabled until both are supplied — no "import
+  without secrets" path from the UI. On apply, the UI orchestrates the existing secrets endpoints
+  (upload → password verify → main apply with `pairedSecretsJobId` → secrets extract) with a
+  combined progress view. The standalone secrets-import panel is unchanged.
+- **Security/hygiene:** the secrets password is read from the DOM only, zeroed immediately after
+  verification, and otherwise held solely in the apply call's poll closure — never a module-scope
+  variable (PR #469 review) — so it is released when the operation ends and can never leak into a
+  later import session.
+
+### Chore: Release AITeamForge 0.12.0 — bump homebrew-tap submodule
+
+- **`homebrew-tap` submodule:** advanced the recorded pointer to the tap's `v0.12.0` release commit on `tap/main`. The tap release rolls 9 accumulated features (XACA-0550, 0547, 0545, 0541, 0535, 0524, 0516, 0512, 0510) from the tap CHANGELOG's `[Unreleased]` into a dated `[0.12.0]` section and bumps `VERSION` + `Formula/aiteamforge.rb` (`tag:`/`version`) from `v0.11.11` → `v0.12.0`.
+- **No source sync needed:** `sync-tap.sh --check` reported 0 drifted / 0 missing across 707 files before the cut — the tap already mirrored current canonical sources.
+
+### Bugfix: XACA-0552 — Freeze active effort for completed/cancelled items (kb-time + LCARS)
+
+Follow-up to XACA-0551. `kb-time` and the LCARS card computed active effort by adding a
+live `now - workStartedAt` span whenever `workStartedAt` was present — regardless of status.
+Completed/cancelled items that carry a stale `workStartedAt` (forward-only data: 100+ on the
+academy board) therefore showed an active-effort number that ticked upward forever. This is
+the same live-vs-frozen bug class already fixed for lead time in XACA-0551, but it was never
+guarded for active effort.
+
+- **Shell (`kanban-helpers.sh`):** new `_kb_active_effort` helper returns persisted
+  `timeWorkedMs` only for `completed`/`cancelled` nodes (frozen), and the live
+  `_kb_flush_work_time` total otherwise. `kb-time`'s per-item and subitem-rollup paths now
+  route through it. `_kb_flush_work_time` itself is unchanged (still correct at transition time).
+- **UI (`lcars-ui/js/lcars.js`):** `calculateActiveEffort` skips the live in-flight span when
+  `item.status` is `completed`/`cancelled`. The "(live)"/"including live session" effort
+  labels are likewise suppressed for finished items carrying a stale `workStartedAt` (PR #468 review).
+- Read-only: `kb-time` still never mutates the board. No data migration — the stale
+  `workStartedAt` fields are left in place and simply ignored by the reporting paths.
+
+### Feature: XACA-0539 — cc-launch vault integration, migration tool, env-var failover model (EPIC-0016 Phase A.4.3)
+
+Integrates the XACA-0537/XACA-0538 vault infrastructure into the Claude Code launcher so team
+credentials are resolved via a tiered chain: vault → stale offline cache → env-var failover.
+Introduces a non-destructive migration tool to import existing env-key values into the vault,
+and updates all documentation to clarify that env-var keys remain as the permanent failover
+tier (never retired). Achieves end-to-end sealed-secret model on vault-configured machines
+while preserving env-var as the fallback for non-vault machines and degraded scenarios.
+
+- **Launcher vault integration (subitems 001, 003):** `_cc_export_account_credentials()` in
+  `claude_code_cc_aliases.sh` implements the tiered chain: Tier 1 calls `vault-fetch.sh anthropic
+  <team>` (live or cache-hit); Tier 2 reads sealed cache at `~/.aiteamforge/vault-cache/` when
+  server unreachable; Tier 3 reads env-var fallover. Exit code semantics (0/5 success, 3 not-configured,
+  4 unreachable, 6 decrypt-failed) guide tier selection. Fail-closed: vault-configured machine with
+  all tiers failing aborts launch (no empty token). Token passed to claude via env-prefix injection
+  only (never exported to shell; subshell scope). Launcher mode signal written to
+  `~/.aiteamforge/secret-source-mode/<team>.json` (never contains token; tracks resolution mode
+  for LCARS display: vault|cache|env-failover|env-legacy).
+- **Migration tool (subitem 002):** New `scripts/vault-migrate-env-keys.sh` + `.js` imports existing
+  `TEAM_*_API_KEY` env values into vault non-destructively. Stores under engine_slug=`anthropic`,
+  account_slug=`<team-slug>` (contract matches cc-launch consumer). Env vars never unset; secrets
+  files untouched. Dry-run default; `--apply` to execute; `--force` to replace existing vault
+  entries. Round-trip verify post-storage (boolean + length, never plaintext). Exit codes: 0 ok,
+  1 error, 2 partial.
+- **Server-side mode endpoint (subitem 003):** Fleet Monitor's `GET /api/vault/mode` returns
+  `{ mode: "vault" | "env_failover", source }` per VAULT-MODE-SIGNAL-CONTRACT.md. Consumed by
+  already-shipped `vault-offline-popup.js` to warn when env-var failover active (offline scenario).
+- **Documentation updates (subitem 004):** Updated `docs/account-isolation-runbook.md` with new
+  section 4 (Vault Integration) covering tiered resolution chain, machine vault configuration gate,
+  migration workflow, token scoping, launcher mode signal, and env-var permanence. Updated CLAUDE.md
+  XACA-0279 section to clarify vault as PRIMARY on configured machines and env-var as FAILOVER
+  (not deprecated). Updated `home-scripts/.zshrc.secrets.template` with comment block documenting
+  TEAM_*_API_KEY vars as the failover tier and pointing to migration tool + runbook.
+- **Cross-reference note (subitem 005):** Added note clarifying that EPIC-0019 will layer
+  transport-level protections (auth/TLS/127.0.0.1 binding) as defense-in-depth; vault's security
+  does NOT depend on transport hardening (secrets are end-to-end sealed), so transport fixes are
+  additive, not load-bearing. Notes placed in `docs/account-isolation-runbook.md` § 4 and
+  `fleet-monitor/docs/SECRET-VAULT-DESIGN.md` where appropriate.
+- Tests: 28 migration (Node.js) + 4 shell integration (dry-run/execute/force/verify paths).
+  Re-mirrored canonical changes to homebrew-tap submodule (canonical-source rule XACA-0340).
+- **Machine vault configuration gate:** Whether a machine uses vault depends on keypair existence
+  (`~/aiteamforge/<machine_slug>/secret/vault_private.key`). Vault-configured → attempt Tier 1;
+  non-configured → skip vault, use env-var directly (silent). Distinction detected by
+  vault-fetch.sh exit 3.
+
+(No RELNOTES change — this is internal dev infrastructure, not an App Store product.)
+
+### Feature: XACA-0551 — Kanban time tracking: active effort + lead time
+
+Completes and unifies the half-built `timeWorkedMs` work-time accrual so active effort
+is no longer leaked on parent-item transitions, adds wall-clock lead time as a separate
+metric, ships a `kb-time` reporting command, and surfaces both metrics in the LCARS UI.
+
+- **Shared `_kb_flush_work_time` helper (001):** centralized the active-effort accrual
+  math (read `workStartedAt` + `timeWorkedMs`, add the elapsed span) into one compute-only
+  helper. Refactored the four copy-pasted inline subitem call sites to use it, eliminating
+  the drift bait. Behavior is byte-for-byte identical to the prior inline logic.
+- **Flush wired into all status-out transitions (002):** fixed the leak where main-item
+  transitions deleted `workStartedAt` without first banking the elapsed time. `kb-done`,
+  `kb-cancel`, `kb-pause`, `kb-stop-working`, `kb-backlog unpick`, and `kb-backlog sub cancel`
+  (item + subitem paths) now flush active effort into `timeWorkedMs` before clearing the
+  in-flight clock.
+  `kb-pause` ends the span (flush + clear); `kb-resume` starts a fresh span (re-sets
+  `workStartedAt`), so pause/resume round-trips and both spans sum correctly. `kb-pr`
+  operates only on the window swim-lane and intentionally leaves the item's active span
+  running across review.
+- **Lead time capture + formatter (003):** `startedAt` is guaranteed set-once on first
+  in_progress across every entry path. At completion, `kb-done` and `kb-backlog sub done`
+  persist `leadTimeMs` as pure wall-clock (creation→completion, anchored on
+  `createdAt // addedAt` — backlog items use `addedAt`). New `_kb_format_duration` ms→human
+  formatter (largest-two-units). Forward-only: no backfill of existing items; missing
+  anchors skip gracefully.
+- **`kb-time` reporting command (004):** read-only. `kb-time <ID>` shows active effort
+  (persisted + live in-flight span), lead time (frozen `leadTimeMs` when complete/cancelled,
+  live otherwise), and a per-subitem rollup with sum. `kb-time` (no arg) prints a board
+  summary (item count, total effort, lead-time count, average lead). Completed/cancelled
+  nodes without a persisted `leadTimeMs` derive a frozen value from `completedAt - created`
+  instead of an ever-growing live count.
+- **LCARS UI surfacing (005):** kanban cards now show parent active effort (with a live
+  in-flight delta when actively working) and lead time (live "open for" while in progress,
+  frozen once complete). The expanded detail view adds a labeled metrics row
+  ("Active effort" / "Lead time"). New `calculateActiveEffort`, `calculateLiveLeadTime`,
+  and `formatLeadTime` helpers; styling in `lcars.css`. All values guard against missing
+  fields (no `NaN`/`undefined`).
+
+### Feature: XACA-0538 — Secret Vault entry UI + secure delivery endpoint (EPIC-0016 Phase A.4.2)
+
+Extends the Fleet Monitor ENGINES panel so account secrets can be entered/edited as
+ciphertext sealed client-side to authorized machines, plus the client-side fetch+decrypt
+path. Builds on the XACA-0537 vault foundation. lcars + lcars2 variants throughout.
+
+- **Write-only sealed secret field (001):** Add/Edit account modals gain a write-only
+  secret-value field. On save the browser seals the plaintext with libsodium
+  `crypto_box_seal` to every registered machine's X25519 public key (fetched from
+  `/api/vault/machines`) and uploads only the base64 ciphertext array; the edit field
+  always opens EMPTY (never echoes an existing secret), plaintext is zeroized after use
+  and never logged. New `vault-seal.js` browser module (×2 variants) and vendored
+  libsodium browser build under `js/vendor/`. libsodium / libsodium-wrappers are
+  ISC-licensed; the upstream ISC copyright + permission notice was prepended to each
+  vendored file (third-party files keep ONLY their upstream notice — no DoubleNode
+  header — per copyright policy §2.2/§8.5). Zero registered machines is a hard error,
+  not an empty upload. If the account is created but the secret seal/upload then fails,
+  the Add modal now transitions into Edit mode for the just-created account (the Edit
+  flow uses upsert/PUT so the retry succeeds instead of 409-ing on a re-POST).
+- **Encrypted-vault banner copy (002):** replaced the "API keys are NOT stored here…"
+  security notice in all 5 engines-panel pages with copy describing the encrypted-vault
+  model (ciphertext sealed per machine, server cannot read, env var = failover path).
+- **Delivery endpoint hardening (003):** the XACA-0537 ciphertext-delivery endpoint
+  (`GET /api/vault/secrets/:engine/:account/ciphertext?machine_id=`) gains a stable
+  machine-readable `code` field on every error (`missing_machine_id` / `secret_not_found`
+  / `no_ciphertext_for_machine` / `internal_error`) so clients branch without parsing
+  message text; documented the anonymous-recipient model (delivery is ciphertext-only,
+  transport auth deferred to EPIC-0019) and added 6 tests proving the no-plaintext
+  guarantee structurally and cryptographically.
+- **vault-fetch client helper (004):** new `client/vault-fetch.js` + `vault-fetch.sh`
+  fetch a sealed secret, decrypt it locally with the machine's stored private key
+  (`crypto_box_seal_open`, public key re-derived via `crypto_scalarmult_base`), and emit
+  plaintext to stdout. Exit-code contract: 0 ok / 3 not-configured / 4 unreachable
+  (RETRYABLE) / 5 cache-hit / 6 decrypt-failed (NON-retryable — wrong/rotated key or
+  ciphertext sealed to a different machine; re-provision/re-seal). 4 and 6 are kept
+  distinct so a persistent decrypt failure is never retried forever. Engine/account/
+  machine slugs are client-side validated against the canonical server `SLUG_RE`
+  (defense-in-depth path-traversal guard; bad slug = usage error). Plaintext cached at
+  `~/.aiteamforge/vault-cache/` (chmod 600, TTL 300s, `--no-cache` to skip). Consumed
+  by cc-launch in A.4.3. 28 new tests.
+- **OFFLINE-MODE startup popup (005):** new `vault-offline-popup.js` (pure-JS injected,
+  no HTML/CSS edits) wired into LCARS startup; fetches `GET /api/vault/mode` and shows a
+  one-time amber warning when secrets are served from the env-var failover instead of the
+  vault. Fully defensive — absent/broken endpoint is a silent no-op. Interface contract
+  for XACA-0539 documented in `fleet-monitor/docs/VAULT-MODE-SIGNAL-CONTRACT.md`
+  (`{ mode: "vault" | "env_failover", source }`; popup triggers on `env_failover`).
+- **Vault status surface (006):** per-account `VAULT: N machine(s)` / `not provisioned`
+  badge in the engines cards, driven by the existing `has_vault_secret` /
+  `vault_recipient_count` read-time fields on `/api/engines` (no recompute, no new endpoint).
+- Tests: 249 server + 57 client, all green. Re-mirrored canonical fleet-monitor/server
+  changes to the homebrew-tap submodule (canonical-source rule XACA-0340).
+
+(No RELNOTES change — this is internal dev infrastructure, not an App Store product.)
+
+### Fix: XACA-0544 — Add missing copyright headers to fleet-monitor/server lib files
+
+- Added the DoubleNode copyright header (`// Copyright © 2026 - 2025 DoubleNode.com.`) to three
+  `fleet-monitor/server/lib/` modules that had a JSDoc block but no policy header:
+  `vault-crypto.js`, `vault-store.js`, `engines-store.js` (the ticket named the first two; the
+  third was also missing). Header placed above `'use strict';` to match the sibling
+  `vault-routes.js` / `engines-routes.js` convention.
+- **Scope correction:** the ticket's original premise — that `© 2026 - 2025` is an "inverted"
+  range violating an "ascending `YYYY - YYYY`" policy — is incorrect. `COPYRIGHT_POLICY.md` §4.10
+  (Year Range Formats) mandates current-year-first (`<current_year> - <year_start>`) for the
+  academy/dns range template — reiterated by the §4.1 note ("current year first, then year_start",
+  matches the DNSFramework Package.swift convention) — and `kb-header` emits
+  exactly that. The repo follows it uniformly (285 files use `2026 - 2025`; zero use the reverse).
+  No year ranges were flipped — doing so would have made fleet-monitor the only divergent area and
+  would have been reverted by the next `kb-header` backfill.
+- Cosmetic/non-functional; no runtime impact. All 243 fleet-monitor/server tests pass.
+
+(No RELNOTES change — internal dev infrastructure, not an App Store product.)
+
+### Fix: XACA-0548 — Shell-agnostic source-path resolution in kb-init-team-guard.sh
+
+- `kb_ensure_team_initialized` auto-located its sibling `kb-init-team` via `${BASH_SOURCE[0]}`,
+  which is EMPTY under zsh. Every `*-startup.sh` caller is `#!/bin/zsh`, so the resolver fell back
+  to the CWD, the binary was "not found", and the guard returned 1 BEFORE the missing-board
+  warning / interactive "Initialize now?" prompt / `KB_INIT_TEAM_AUTO_YES` auto-provision —
+  defeating the XACA-0542 auto-init-on-startup feature under zsh. Board-PRESENT path was
+  unaffected (returns 0 early); non-blocking (`|| true` in callers) so startup never broke.
+- Fix: shell-agnostic self-location — `${BASH_SOURCE[0]}` (bash) → `${(%):-%x}` (zsh) → `$0`.
+- Pre-existing bug in the XACA-0542 guard, surfaced by XACA-0545 sandbox verification.
+- Added regression test `scripts/tests/test-kb-init-team-guard-shell-resolution.sh` covering
+  bash×zsh × missing×present board.
+- Re-mirrored the canonical guard to the homebrew-tap submodule (canonical-source rule XACA-0340).
+
+(No RELNOTES change — this is internal dev infrastructure, not an App Store product.)
+
+### Refactor: XACA-0550 — Narrow damage-control firewall (stop blocking Homebrew cleanup)
+
+The Bash damage-control firewall over-blocked routine Homebrew maintenance: the
+readOnly `/bin/` rule substring-matched `/opt/homebrew/bin/`, and the generic
+`rm -rf` / `sudo rm` guards blocked removing stale Homebrew-managed files. Two
+surgical narrowings, with no loss of real protection.
+
+- **`claude-hooks/damage-control/bash-tool-damage-control.py`**
+  - **Absolute-path anchoring** in `check_path_patterns`: literal absolute paths
+    now carry a `(?<![\w./-])` left-boundary lookbehind, so `/bin/`, `/usr/`,
+    `/etc/` match only at a real path-component start — `/opt/homebrew/bin/` no
+    longer trips the `/bin/` rule. `rm /bin/ls` (space before) still blocks.
+  - **Allowlist** (`allowPatterns`, checked before all block/ask rules): a
+    command matching an allow pattern is permitted outright.
+- **`claude-hooks/damage-control/patterns.yaml`** — new `allowPatterns` section
+  with two Homebrew-maintenance exceptions: standalone `brew cleanup|uninstall|
+  untap`, and standalone removal of Homebrew-managed *subpaths*
+  (`/opt/homebrew/...`, `/usr/local/Cellar|Homebrew/...`). Each pattern is
+  anchored `^...$` to a single command so chaining (`&&`, `;`) can't smuggle a
+  dangerous op past the allowlist; whole-prefix nukes (`rm -rf /opt/homebrew`)
+  are NOT allowlisted.
+- **Scope.** `check_path_patterns`/`bashToolPatterns` live only in the bash-tool
+  engine (the write/edit-tool engines were checked — no shared logic, no sibling
+  drift). Mirrored into the shipped tap template (two-step submodule commit).
+- **Verified** with a 24-case battery: Homebrew cleanup passes; `rm -rf /`, real
+  `/bin`+`/usr` ops, `~/.ssh` access, whole-prefix nuke, and compound-command
+  smuggling all still BLOCK.
+
+### Fix: XACA-0549 — freelance-startup.sh reads authoritative LCARS port (retire cksum recompute)
+
+- **`freelance-startup.sh`** — the LCARS port is now read from the per-team port file
+  (`lcars-ports/${SESSION_PREFIX}-lcars.port`, kept in lockstep with `team-paths.json` by
+  `kb-init-team`/`kb-port-reconcile`) instead of being recomputed from a `cksum` of the project
+  name on every launch. The cksum derivation silently re-diverged registered teams: after
+  XACA-0547 reconciled the 9 doublenode/liquidstyle teams, a freelance launch would have rebound
+  the old cksum port (e.g. caravan 8601) while `kb-*` helpers curl the reconciled value (8502),
+  re-creating the exact bug XACA-0547 fixed. The cksum formula is retained ONLY as a fallback for
+  ad-hoc teams with no port file (backward-compat). Implements the deferred recommendation from
+  the XACA-0542 design doc (subitem 1). Verified: all 7 affected teams now resolve their
+  reconciled ports; `freelance-bandwear-android` unchanged (8478); unregistered teams still fall
+  back to cksum.
+
+### Chore: XACA-0547 — Reconcile the 9 live divergent teams (kb-port-reconcile --apply)
+
+- Ran `kb-port-reconcile --apply` to converge the 9 pre-existing three-way-divergent teams to
+  their authoritative `team-paths.json` ports across all sites: `finance-personal`→8360,
+  `freelance-doublenode-{appplanning→8500, awaysentry→8501, caravan→8502, lifeboard→8503,
+  starwords→8504, workstats→8506}`, `freelance-liquidstyle-agentbadges-ios`→8970,
+  `legal-coparenting`→8320.
+- Touches: `kanban-hooks/aiteamforge_paths.py` (`DEFAULT_TEAMS`), the 9
+  `lcars-ports/<team>-lcars.port` files, the `kanban-helpers.sh` `_kb_team_lcars_port()` grouped
+  case (doublenode arm split per team), and the `homebrew-tap` submodule mirror (pointer bump to
+  the reconcile commit). `team-paths.json` was the authority and is unchanged. Presence anomalies
+  (7) left untouched — registration decisions out of scope.
+- Runtime: the `finance-personal` (was bound 8427) and `legal-coparenting` (was bound 8230) LCARS
+  servers are restarted post-merge to bind their reconciled ports; the other 7 teams were not
+  running and pick up the correct port on next start.
+
+### Feat: XACA-0545 — Adopt kb-init-team-guard in the tap's shipped startup-script snapshot
+
+Follow-up to XACA-0542, which kept `scripts/kb-init-team-guard.sh` canonical-only to avoid shipping a dead file. Now that the tap's startup snapshot sources the guard, the guard (and `scripts/kb-init-team`) ship with the tap.
+
+- **`sync-tap.sh`** — Re-added two `sync_file` mirror lines so `scripts/kb-init-team-guard.sh` and `scripts/kb-init-team` are mirrored from the canonical source into `homebrew-tap/share/scripts/`. Without these the tap's startup snapshot would source a guard file that never ships, and the `|| true` would silently swallow the missing-file error on every install.
+- Submodule pointer (`homebrew-tap`) advanced to carry the snapshot guard-wiring + installer deploy changes (see homebrew-tap CHANGELOG). Two-step XACA-0300 commit cycle.
+
+### Feat: XACA-0547 — kb-port-reconcile sweep for three-way LCARS-port divergence
+
+- **`scripts/kb-port-reconcile`** — new UPDATE-in-place sibling of `kb-init-team`. Sweeps
+  existing teams for LCARS-port divergence across the three sources that were written at
+  different times by different tools: `DEFAULT_TEAMS` in `kanban-hooks/aiteamforge_paths.py`
+  (baked-in baseline; `lcars_port` deprecated per XACA-0463), `~/.aiteamforge/team-paths.json`
+  (live overlay — what `kb-*` helpers curl), and `lcars-ports/<team>-lcars.port` (what LCARS
+  startup binds the server to). Fixes the latent bug where the server binds to the `.port`
+  value but helpers reach it via `team-paths.json`, so on divergence the helpers curl a dead port.
+- **Authority rule:** authoritative port = `team-paths.json` `lcars_port` → else `DEFAULT_TEAMS`
+  `lcars_port` → else reported UNRESOLVABLE (never guessed). `--prefer portfile` flips precedence
+  to the running `.port` value (for teams whose server must not move).
+- **Modes:** `--check` (read-only report, exit 1 on divergence — CI-friendly), `--check --strict`
+  (also exit 1 on presence anomalies / UNRESOLVABLE), `--dry-run` (default; per-site preview,
+  writes nothing), `--apply` (writes all 5 sites), `--team <id>` (single team),
+  `--prefer team-paths|portfile`. Idempotent; presence anomalies (team in some sources but not
+  others) are reported only, never auto-reconciled (registration is out of scope). When a
+  divergent team is absent from `DEFAULT_TEAMS`, site1 reports an informational skip rather than
+  a scary failure (the team's present sites are still reconciled). [XACA-0547-004, -005]
+- **5 write sites** reconciled per team: canonical `aiteamforge_paths.py`, tap mirror
+  `homebrew-tap/share/kanban-hooks/aiteamforge_paths.py` (skipped + re-derived by `sync-tap.sh`
+  if the submodule is absent), tap heredoc `homebrew-tap/libexec/lib/aiteamforge-paths.sh`,
+  `lcars-ports/<team>-lcars.port`, and the `kanban-helpers.sh` `_kb_team_lcars_port()` case arm.
+  Edits are surgical (only the `lcars_port` field moves; `lcars_port_base`/`range` untouched).
+  **Post-`--apply`:** run `./sync-tap.sh` then commit (canonical-source rule XACA-0340).
+
+### Test: XACA-0547 subitem 002 — kb-port-reconcile test suite
+
+- **`scripts/tests/test-kb-port-reconcile.sh`** — 56-assertion harness over 10 sections using
+  throwaway fixtures (via the script's `KB_PR_*` path-override env vars): detection exit codes,
+  `--check`/`--dry-run` read-only guarantees, `--apply` site-1/site-4 writes with Python-validity
+  and base/range-preservation checks, idempotency, default and `--prefer portfile` authority,
+  tap-absent SKIP, anomaly reporting (no auto-registration), unrelated-team isolation, and a
+  safety invariant proving the live `~/.aiteamforge/team-paths.json` is never mutated.
+
+### Docs: XACA-0547 subitem 003 — Documentation for kb-port-reconcile
+
+- **`docs/team-init-runbook.md`** — added "Port Reconciliation" section (after the kb-init-team workflow), documenting `scripts/kb-port-reconcile` as the UPDATE-in-place sibling of kb-init-team's INSERT provisioner. Covers: three-way LCARS-port divergence detection across (`aiteamforge_paths.py`, `team-paths.json`, `.port` files), the authority/precedence rule (`team-paths` or `--prefer portfile`), the 5 write sites with precedence-dependent activation rules, read-only `--check` mode for CI, `--dry-run` preview mode (default), `--apply` for writes, `--team <id>` for single-team reconciliation, post-apply `sync-tap.sh` requirement (canonical-source rule XACA-0340), and troubleshooting (uninitialized tap submodule, team registration gaps).
+- **`claude/CLAUDE.md`** — added brief 4-line quick-reference pointer to kb-port-reconcile under the existing "Team Initialization (XACA-0542)" section, mentioning it as the reconcile/UPDATE twin of kb-init-team/INSERT and linking to the full runbook. Updated Last Updated line to 2026-05-22 (XACA-0547).
+
+### Refactor: XACA-0546 — Remove all eval from kb-init-team (injection hardening)
+
+- `scripts/kb-init-team` — eliminates the shell-injection class at the root rather than relying solely on input charset gates (XACA-0542 defense-in-depth):
+  - **Site A (`_check_site`):** replaced `eval "$check_cmd"` dispatch with `"$@"` dispatch-by-arguments. Added six small helper functions (`_chk_default_teams`, `_chk_grep_literal`, `_chk_file_exists`, `_chk_json_team_in_teams`, `_chk_json_key_prefix`, `_chk_case_label`) that receive values as positional args — never interpolated into a re-parsed string. All 12 call sites in `_run_check_only()` updated to pass the helper + args directly.
+  - **Site B (`_prompt`):** replaced four `eval` calls with `${!var_name}` indirect read and `printf -v` assignments (bash 3.1+ compatible; no `declare -n`/`local -n` nameref dependency).
+  - **`_chk_case_label` (XACA-0546-001):** matches the case label via awk `index()` (pure string compare) instead of interpolating it into a `grep -E` pattern, removing the last (already-inert, charset-gated) regex-injection surface entirely. Verified behavior-identical to the prior `grep -E` form across all 21 registered teams × 5 case-label checks (209 comparisons, 0 mismatches).
+  - XACA-0542 input charset gates retained as defense-in-depth; no longer load-bearing for injection prevention.
+  - `--check-only` and `--dry-run` output byte-identical before/after.
+
+### Feature: XACA-0541 — Auto-name Claude sessions + pin session UUID at launch
+
+Claude Code sessions launched via `kb-run*`/`kb-work*` (and the `cc-*` persona
+aliases) now get a meaningful display name and a known-ahead-of-time session id,
+instead of showing "Untitled" in the `/resume` picker, prompt box, and terminal
+title.
+
+- **`claude_code_cc_aliases.sh` — `_cc_launch`** now sets `claude -n/--name`. The
+  name comes from the `CC_SESSION_NAME` env var, falling back to the
+  kanban/transcript-derived name (`_cc_derive_session_name`). It is sanitized
+  (newlines, carriage returns, and whitespace collapsed, `|` stripped) and truncated to 40 chars with a
+  `...` suffix; the flag is omitted entirely when empty.
+- **`claude_code_cc_aliases.sh` — `_cc_launch`** also pre-generates a lowercase
+  `uuidgen` and passes `claude --session-id <uuid>` so the session id is known
+  before launch. Both flags are feature-detected against `claude --help` and
+  spliced via a `_cc_extra_args` array so unsupported/empty values vanish cleanly.
+  (Graceful no-op on older `claude` binaries that lack `--session-id`.)
+- **`claude_code_cc_aliases.sh` — `_cc_save_session`** accepts the pinned UUID as
+  an optional `$1`; when supplied it is used directly, retiring the
+  `ls -t *.jsonl | head -1` heuristic on the fresh-launch path and feeding the
+  session→account map directly. The heuristic is preserved as the fallback for
+  `ccc`'s `--resume`/`--continue` calls, which remain untouched (`--session-id`
+  is incompatible with `--resume` without `--fork-session`).
+- **`kanban-helpers.sh`** — the 8 launchers (`kb-run`, `kb-work`,
+  `kb-run-review`, `kb-work-review`, `kb-run-test`, `kb-work-test`,
+  `kb-run-debug`, `kb-work-debug`) `export CC_SESSION_NAME="<PREFIX>${item_id}:
+  ${title}"` before piping to `cc` and `unset` it after. Prefixes: none for
+  run/work, `[Review] `, `[Test] `, `[Debug] ` for the respective variants. The
+  `export` is required because `cc` runs in the pipe's subshell.
+- **`homebrew-tap` (submodule pointer → `25903f7`)** — the same `_cc_launch` /
+  `_cc_save_session` changes are mirrored into the shipped installer template
+  `share/templates/aliases/cc-aliases.sh` so installed teams get parity (two-step
+  submodule commit).
+### Test: XACA-0542 subitem 020 — kb-init-team test suite
+
+- `scripts/tests/test-kb-init-team.sh` — zsh harness (30 assertions) locking in correctness of `--check-only`, `--dry-run`, conflict detection, and input validation for future refactors.
+  - Section A: `--check-only` on registered team (academy, exit 0) and unregistered team (exit 1).
+  - Section B: `--dry-run` for a hypothetical team verifies exit 0, no writes to any file system location (kanban dir, board.json, port file, team-paths.json all absent/unchanged).
+  - Section C: duplicate `--team-code` (ACA already owned by academy) → refused before writes, exit non-zero.
+  - Section D: `--team-id` containing shell metacharacters (`;`, backtick, uppercase) → rejected by charset validation, exit non-zero, no injection side effects confirmed.
+  - Section E (bonus): unit test of `_insert_case_arm` scoping — arm inserted for `func_b` in a fixture file with two functions sharing the same `*)` sentinel lands in `func_b`, not `func_a`.
+  - Section F: safety invariant — `~/.aiteamforge/team-paths.json` checksum unchanged before and after the full suite.
+
+### Fixed: XACA-0542 subitems 017–019, 021 — PR #455 review hardening
+
+- **017** — `kb-init-team` now validates `--team-id` (`^[a-z0-9][a-z0-9-]*$`) and `--team-code` (`^[A-Z0-9]{3}$`) before either value is interpolated into an `eval` string (`_check_site`) or a Python source string (team-code derivation). Prevents shell/Python injection via crafted team identifiers.
+- **021** — `kb-init-team` also validates `--kanban-dir` (absolute path, no shell metacharacters) before it is interpolated into the `_check_site` eval strings, completing the input-injection hardening across all three interpolated inputs.
+- **018** — `_insert_case_arm` now uses its `func_name` argument to anchor the sentinel search at the named function's definition. Previously the argument was unused and the unscoped `*)`-sentinel search could insert a case arm into the FIRST matching function rather than the intended one.
+- **019** — `kb-init-team-guard.sh` passes the board path to its Python board-parse via argv (quoted heredoc) instead of interpolating it into the Python source, so paths containing single quotes no longer break parsing.
+
+### Docs: XACA-0542 subitem 006 — Documentation for kb-init-team + auto-init-on-startup
+
+- **`docs/team-init-runbook.md`** — new runbook covering end-to-end team onboarding with `kb-init-team`: worked example, dry-run/check-only workflow, auto-init-on-startup guard behavior, CI/non-interactive flags, mandatory `sync-tap.sh` post-step (XACA-0340 canonical-source rule), idempotency rules, flag reference, and troubleshooting. Styled to match `docs/account-isolation-runbook.md` and `docs/remote-deployment-runbook.md`.
+- **`claude/CLAUDE.md`** — added "Team Initialization (XACA-0542)" section (~57 lines): what `kb-init-team` does, quick-reference table, the auto-init-on-startup guard behavior, CI caveat for new teams requiring `--team-code`. Updated Last Updated footer to 2026-05-21.
+- **`skills/Initialize Team/SKILL.md`** — light polish: corrected a false claim that `--help` shows avatar mappings (it does not); added missing `--port-band-base` and `--port-band-range` flags to the Parameters table so the table fully matches `kb-init-team --help`.
+
+### Fixed: XACA-0542 subitem 016 — --check-only case-arm detection multi-line-robust
+
+- **`scripts/kb-init-team`** — sites 5–9 in `_run_check_only()` now use awk-scoped function-region extraction + ERE label matching instead of raw `grep` on the full file.
+- Root cause: site 8 (`_kb_team_lcars_port`) used a two-pipe pattern (`grep TEAM_ID | grep _port`) that required `_port=` on the SAME line as the case label. For backslash-continued arms (e.g. `freelance-doublenode-appplanning|freelance-doublenode-awaysentry)` on a continuation line), `_port=` is on the NEXT line, causing a false-negative.
+- Fix: all five case-arm checks (sites 5–9) now extract the function region via `awk '/^FUNC\(\)/{f=1}...'` and then match the team-id label with `grep -Eq '(^|[[:space:]|])TEAM[|)]'`. The pattern handles: standard one-liner arms, piped arms (`teamA|teamB)`), and backslash-continued arms where the team-id appears at column 0 on the continuation line. Presence of the label in the function is the correct sufficient condition — no need to find the value on an adjacent line.
+- Sibling sweep: sites 5–9 all shared the same class of flaw (global grep or brittle pipe); all updated together to prevent divergence.
+
+### Fixed: XACA-0542 subitem 007 — Two bugs in kb-init-team --check-only found and fixed during testing
+
+- **Bug 1: `--check-only` required `--team-code` even when team is already registered** — in `main()`, `_prompt TEAM_CODE` ran before the `--check-only` check, causing a hang/failure when no TTY was available and `--team-code` wasn't supplied. Fix: in `--check-only` mode with no `TEAM_CODE` provided, derive it automatically from the registry via `get_team_code()`. All 20 canonical teams now pass `--check-only` without needing `--team-code` on the command line.
+- **Bug 2: `--check-only` site 8 and 9 false-negatives for teams with piped case arms** — the grep pattern `grep -n 'TEAM_ID)' kanban-helpers.sh | grep -q 'port'` missed entries where the arm is `command|mainevent)` (piped together on one line), causing `command` and `mainevent` to falsely report as "NOT registered". Fix: use ERE `grep -En '(^|[|])([[:space:]]*)TEAM_ID[|)]'` so piped arms are matched regardless of position within the arm. Same fix applied to site 9 (statusline check).
+
+### Added: XACA-0542 subitem 004 — Wire kanban-init guard into all top-level startup scripts
+
+- **All 11 top-level `*-startup.sh` scripts** (`academy`, `android`, `command`, `dns`, `finance`, `firebase`, `freelance`, `ios`, `legal`, `mainevent`, `medical`) now source `scripts/kb-init-team-guard.sh` and call `kb_ensure_team_initialized <team-id> <kanban-dir> || true` before any kanban-dependent work.
+- Each script uses its own runtime-resolved variables for team-id and kanban-dir; no hardcoded guesses, no logic duplicated from the guard.
+- Multi-client scripts (freelance, finance, legal, medical, mainevent) derive team-id from their `SESSION_PREFIX` variable and kanban-dir from their `PROJECT_DIR`. For scripts where `PROJECT_DIR` points to a `develop/` worktree subdirectory (freelance, mainevent with `USE_WORKTREE=true`), kanban-dir is derived as `$(dirname "$PROJECT_DIR")/kanban` to match the project root location used by `team-paths.json`.
+- All scripts use `|| true` on the guard call so a not-initialized board never aborts startup — resilient by design.
+- No pre-existing redundant checks were found; guard is the first and only kanban-init check in all 11 scripts.
+- Top-level startup scripts are NOT mirrored in `homebrew-tap/share/`; no tap sync needed.
+
+### Added: XACA-0542 subitem 003 — Shared startup guard for missing/empty kanban boards
+
+- **`scripts/kb-init-team-guard.sh`** — new sourceable helper providing `kb_ensure_team_initialized <team-id> <kanban-dir>`. Single canonical source of the detect-and-prompt logic; subitem 004 wires it into all 11 top-level `*-startup.sh` scripts.
+- Detection is a lightweight board-present check (kanban dir exists + board JSON exists + `backlog` array is non-empty) — does NOT call `kb-init-team --check-only`, which would be too heavy for startup and over-strict for pre-existing teams.
+- Interactive mode: prompts user to initialize now or cancel; on confirm, invokes `scripts/kb-init-team`.
+- Non-interactive mode triggered by `KB_CI=1`, `CI=1`, or no TTY on stdin. Default safe behavior: logs a warning to stderr, returns 1 WITHOUT provisioning or blocking. Explicit opt-in `KB_INIT_TEAM_AUTO_YES=1` enables unattended auto-provisioning.
+- Return codes: `0` = board present/provisioning succeeded; `1` = not provisioned (caller decides); `2` = provisioning attempted and failed.
+- Double-source guard (`_KB_INIT_TEAM_GUARD_LOADED`) prevents re-execution when multiple startup scripts source the file.
+- Guard is canonical-only (not tap-mirrored): the only consumers are the canonical top-level `*-startup.sh` scripts. The tap's `share/scripts/teams/*-startup.sh` are a separate manual snapshot (XACA-0483) that does not source the guard, so shipping it to the tap would be a dead file. It can be mirrored later, together with updating that snapshot to source it.
+
+### Refactored: XACA-0542 subitem 005 — Initialize Team skill delegates to kb-init-team
+
+- **`skills/Initialize Team/SKILL.md`** — v1→v2 refactor. Eliminated all duplicated per-site provisioning instructions (were out of date with the actual site list). The skill now gathers/confirms parameters, shows a `--dry-run` preview, calls `scripts/kb-init-team` for provisioning, validates with `--check-only`, and reminds operator to run `sync-tap.sh`.
+- Removed stale manual-edit steps that pre-dated XACA-0542: `kanban_utils.py _TEAM_CODE_MAP` (auto-derived), `server.py` prefix maps `get_board_for_item`/`get_board_prefix_map` (auto-derived), `TEAM_PORTS` associative array in kb-restart (uses `_kb_team_lcars_port()` case which kb-init-team covers).
+- `scripts/kb-init-team` is now the single source of provisioning truth; the skill documents the delegation contract only.
+- Skill file is NOT mirrored in `homebrew-tap/share/skills/`; edited directly in `skills/Initialize Team/SKILL.md`.
+
+### Added: XACA-0542 subitem 002 — kb-init-team standalone team provisioner (scripts/kb-init-team)
+
+- **`scripts/kb-init-team`** — new bash script that fully provisions a new kanban team across all infrastructure registration sites. Supports `--dry-run`, `--check-only`, and `--non-interactive` modes.
+- Writes to 11 registration sites in deterministic order: `aiteamforge_paths.py` `DEFAULT_TEAMS` (primary SSoT), `aiteamforge-paths.sh` `_AITEAMFORGE_DEFAULT_TEAMS_DATA` heredoc, `lcars-ports/<team>-lcars.port`, `~/.aiteamforge/team-paths.json`, four `kanban-helpers.sh` fallback case statements (`_kb_get_team_code`, `_kb_get_team_from_code`, `_kb_get_kanban_dir`, `_kb_team_lcars_port`), `statusline-command.sh` `_get_team_kanban_dir` case, `server.py` `team_dir_map`, and `amb-session-map.json`.
+- Provisions board + directory tree: `board.json` from template, `config/`, `activity/`, `plans/`, `knowledge/` with per-crew-member `INDEX.md` files.
+- Port computed once via band scan; conflict detection refuses if `team_code` maps to a different team, `team_id` already in `DEFAULT_TEAMS`, or port already in use.
+- Sites that DERIVE automatically from the registry after step 1 and are NOT patched: `kanban_utils._TEAM_CODE_MAP`, `server._ITEM_PREFIX_TO_TEAM`, `server.get_board_for_item()` prefix map, `server.TEAM_KANBAN_DIRS`, `kanban_utils.TEAM_KANBAN_DIRS`.
+- All 14 idempotent write operations verified: every site checks for existing entry before inserting. `--check-only` confirmed exit 0 for fully-registered team (academy).
+- Script is designed as the reusable engine for subitem 005 (`Initialize Team` skill refactor).
+
+### Feat: XACA-0540 — Port AI Engines screen to the lcars2 Fleet Monitor UI variant
+
+- Ports the AI ENGINES account-registry screen (originally built for the `lcars/` variant in XACA-0281) into the newer `lcars2/` Fleet Monitor UI. Frontend-only — the backend `/api/engines` and `/api/team-config` endpoints already existed and are unchanged.
+- New `fleet-monitor/server/public/lcars2/js/lcars-engines.js` (faithful port of `lcars/js/lcars-engines.js`): lists engines, manages accounts under each (add/edit/delete) via the existing endpoints. Lazy-loads on section activation by listening for the `lcars:sectionChange` event.
+- `lcars2/js/lcars-fleet-core.js`: `switchSection()` now dispatches a `lcars:sectionChange` CustomEvent (lcars2 previously emitted none — minimal one-line hook matching the lcars/ event name so the module ports cleanly); `engines` registered in the section list and bound to the `Digit5`/`Numpad5` keyboard shortcut.
+- `lcars2/css/lcars-fleet.css`: appended engines section, button, modal, and form styles (Section 18). lcars2's CSS variables matched lcars/'s, so no variable remapping was needed.
+- All 4 lcars2 pages (`lcars-index.html`, `lcars-all.html`, `lcars-doublenode.html`, `lcars-mainevent.html`) gain the ENGINES sidebar button, the AI ENGINES section panel, the three account modals (add/edit/delete), and the `lcars-engines.js` script tag loaded after core.
+- Review follow-up (PR #451, XACA-0540-007): normalized `escHtml()` on the `engine-accounts-`/`account-row-` element `.id` writes for consistency with the already-escaped `engine-card-` id. Applied to BOTH `lcars/js/lcars-engines.js` and `lcars2/js/lcars-engines.js` to keep the two variants in sync (avoids lcars/-vs-lcars2 drift). Cosmetic — slugs are server-validated to `^[a-z][a-z0-9-]*$`, so `escHtml` is identity on them and element lookups are unaffected.
+- Canonical-source-first: changes live in `fleet-monitor/` only; the `homebrew-tap` copy syncs via the normal `sync-tap.sh` mechanism. Verified: 156/156 server tests pass (no regression), all 4 pages + assets serve 200 with the engines markup, and `/api/engines` + `/api/team-config` respond. RELNOTES N/A (internal infra tooling, not App Store user-facing).
+
+### Added: XACA-0543 — kb-backlog sub insert and sub rename subcommands
+
+- **`kb-backlog sub insert <parent-id> <pos> "title" [jira] [os]`** — splices a new subitem at a 0-based array position. New ID uses the monotonic max+1 rule (highest existing numeric suffix + 1); existing IDs are never renumbered. Out-of-range positions clamp to append with an informational note. Optional `[jira]` and `[os]` args behave identically to `sub add`.
+- **`kb-backlog sub rename <subitem-id> "new title"`** (alias: `rename-title`) — changes a subitem's visible title text. Takes a full subitem ID (e.g. `XACA-0543-002`). No-op if the title is unchanged. Distinct from `sub rename-id`, which repairs the subitem's identifier rather than its display title.
+
+### Chore: Register freelance-bandwear-android team (kanban + LCARS + AMB)
+
+- Provisions a new freelance project team `freelance-bandwear-android` (group Bandwear, project Android; item prefix `XBWA`, team code `BWA`, LCARS port `8478`). Creates the board JSON, kanban dir tree, and knowledge INDEXes under `/Users/Shared/Development/Bandwear/Android/kanban/`, plus the live `~/.aiteamforge/team-paths.json` entry and `lcars-ports/freelance-bandwear-android-lcars.port`.
+- Registers the team across the resolver footprint: `kanban-hooks/aiteamforge_paths.py` (DEFAULT_TEAMS), `kanban-hooks/kanban_utils.py` (path dict + `_TEAM_CODE_MAP`), `kanban-helpers.sh` (kanban-dir/team-code/reverse-code cases), `lcars-ui/server.py` (path dict + 2 prefix maps + asset-dir map), `claude/statusline-command.sh`, and `amb-session-map.json` (7 terminals).
+- Port `8478` set consistently across the cksum-startup path, the port file, and `team-paths.json` so `freelance-startup.sh` and `kb-restart` agree.
+- Side effects: advances the `homebrew-tap` submodule pointer to mirror the 3 tap-shipped files (`server.py`, `kanban_utils.py`, `aiteamforge_paths.py`).
+### Refactor: XACA-0537-012 — Extract vault + engines routes into mountable router modules (PR #452 review)
+
+- Closed a test-fidelity gap flagged in review: the vault/engine integration suites built local apps (`createVaultApp()`/`createEngineApp()`) that RE-IMPLEMENTED the route handlers inline, so they tested a copy — `server.js` could drift and the tests would stay green.
+- New `fleet-monitor/server/lib/vault-routes.js` (`registerVaultRoutes(app)`, all 9 `/api/vault/*` routes) and `fleet-monitor/server/lib/engines-routes.js` (`registerEnginesRoutes(app)` + `validateAccountBody`, all 5 `/api/engines*` routes incl. the vault reverse-link join + account-deletion cascade). Handler bodies moved byte-for-byte — pure refactor, zero behavior change.
+- `server.js` now requires + mounts both (3511 → 2803 lines; ~712 inline route lines replaced by two `register*Routes(app)` calls at the same registration point). `vault-routes.test.js` and `engine-vault-linkage.test.js` now mount the REAL routers, so divergence between tests and shipped code is caught. No-plaintext guarantee, `await vaultEnsureReady()` ordering, and validation/size limits preserved verbatim (verified: zero `sealOpen` calls; 243 server tests green across 3 runs).
+- Test-runner note: the real handlers `console.log` per op; under node v26's parallel `--test` runner that stdout flood corrupted the IPC framing, so the two refactored suites mute `console.log` in `before()`/restore in `after()`. Production logging is untouched.
+
+### Docs: XACA-0537-013 — Resolve Secret Vault backup open question §8.7 (PR #452 review)
+
+- Investigated backup coverage for `vault.json`: `kanban-backup.py` (the only automated sweep, launchd every 15 min) covers kanban board JSON + auto-memory only and has no extension point — and the PRODUCTION `vault.json` doesn't live on this machine anyway: it's on a Fly.io persistent volume (`fleet_data` → `/app/data`, per `fly.toml`). Local `fleet-monitor/server/data/` is dev-time runtime state only.
+- `SECRET-VAULT-DESIGN.md` §8.7 updated from open question to RESOLVED with a two-layer plan: (1) Fly.io volume scheduled snapshots — implement at A.4.2 before the vault holds production secrets; (2) re-seal recovery from source machines — already documented under R6, zero new work. `kanban-backup.py` deliberately NOT modified (wrong mechanism for a Fly.io-resident file).
+- `.gitignore`: added `fleet-monitor/server/data/vault.json` alongside its sibling runtime files so a secrets-bearing file can never be accidentally committed from a dev machine.
+
+### Fix: XACA-0537-011 — Secret Vault crypto validators fail loud when sodium not initialized (PR #452 review)
+
+- `fleet-monitor/server/lib/vault-crypto.js`: `isValid32ByteKey` / `isValidSealedBox` now `assertReady()` first and THROW a clear error if libsodium WASM is not yet initialized, instead of silently returning `false` (which made VALID input look rejected when a caller forgot `await ensureReady()`). Genuinely-invalid base64 still returns `false`. Routes already `await vaultEnsureReady()` before these validators, so behavior is unchanged in the live path; the change only converts a silent contract violation into a loud one. 243 server tests still green.
+
+### Fix: XACA-0537-006 — Secret Vault test isolation: additive store path overrides, remove --test-concurrency=1 crutch
+
+- Root-caused a test-hygiene defect: the vault/linkage suites operated on the REAL `fleet-monitor/server/data/{vault.json,engines.json}` via a fragile backup/restore pattern. A crashed/interrupted run permanently corrupted real data (one run replaced the `anthropic` engine seed with `ev-test-engine` fixtures, requiring a `git checkout` to recover), and the shared fixed file paths raced under parallel `node --test` — masked by a `--test-concurrency=1` crutch in the `test` script.
+- `fleet-monitor/server/lib/vault-store.js`: `VAULT_FILE` now resolves `process.env.FLEET_VAULT_FILE || <default data/vault.json>`. ADDITIVE seam — default behavior (env unset) is byte-identical to before.
+- `fleet-monitor/server/lib/engines-store.js`: `ENGINES_FILE` now resolves `process.env.FLEET_ENGINES_FILE || <default data/engines.json>`. Same additive pattern.
+- Refactored all three suites (`vault-store.test.js`, `vault-routes.test.js`, `engine-vault-linkage.test.js`) to set those env vars to unique per-process `os.tmpdir()` temp paths BEFORE requiring the stores (paths resolve at module-load time), so they NEVER touch real data. Removed all backup/restore logic; added `before()` guards asserting the store resolves to the temp path (regression guard against the seam being bypassed) and `after()` temp cleanup (including any leftover `.tmp.<pid>` files). Fixed the `writeVault: no .tmp file left behind` test to derive its temp-file prefix from `path.basename(VAULT_FILE)` — the hardcoded `vault.json.tmp.` prefix would never match under the isolated path, silently passing.
+- Removed `--test-concurrency=1` from `fleet-monitor/server/package.json`'s `test` script — the suites are now hermetic and parallel-safe. Verified: the previously-racy vault trio passes 10/10 in parallel; the full server suite runs ~3x faster (1649ms→538ms). After running both suites twice, `git status --short` shows zero modified/created files under `fleet-monitor/server/data/` and no stray temp files in the repo.
+- No production logic changed beyond the additive path seam. No-plaintext guarantee re-verified: no server-side `crypto_box_seal_open`/`sealOpen` call exists; the only `sealed`-emitting route is the per-machine ciphertext delivery endpoint (scoped to one `machine_id`, ciphertext only).
+
+### Feat: XACA-0537-002 — Secret Vault: machine keypair generation + registration (client)
+
+- Added `fleet-monitor/client/vault-keygen.js` — client-side tool that generates a machine X25519 keypair via `libsodium-wrappers` `crypto_box_keypair()` (awaits `sodium.ready` first), stores the PRIVATE key locally, and registers the PUBLIC key with the Fleet Monitor vault registration endpoint per `SECRET-VAULT-DESIGN.md` §7.1. Server-side routes are subitem 004; this codes against the §7 contract, not a live server.
+- Private-key storage: macOS Keychain preferred (generic-password item, service `com.aiteamforge.vault`, account = machine slug); chmod-600 file fallback at `~/.aiteamforge/vault/<slug>.key` (dir 0700) for non-macOS / headless. Key is NEVER printed, logged, returned, or committed; read-back refuses group/world-accessible key files.
+- Registration payload `{ id, label, public_key }` — `public_key` is base64 ORIGINAL of the 32-byte key, validated to decode to exactly 32 bytes before any storage write (no orphaned private key on a malformed pubkey). Server URL configurable via `--server` / `$FLEET_MONITOR_URL` (default `http://localhost:3000`).
+- Idempotence: refuses to overwrite an existing local private key; `--rotate` (PUT in-place key update, §5.4 — caller must re-seal existing secrets afterward) or `--force` to replace. Resolves design open questions §8.1 (client-proposed slug, default = slugified hostname) and §8.2 (in-place rotation via PUT).
+- Added `fleet-monitor/client/vault-keygen.sh` thin wrapper (matches `client/` conventions; auto-installs the client dep into `client/node_modules`) and `fleet-monitor/client/package.json` pinning `libsodium-wrappers ^0.7.16` (aligned to the server's pin — same lib + base64 ORIGINAL variant as 003's `vault-crypto.js`, so client-generated keys interoperate).
+- Added `fleet-monitor/client/tests/vault-keygen.test.js` (29 `node --test` cases): keypair gen → 32-byte pubkey + functional seal/open round-trip; payload well-formedness + 32-byte decode; backend selection (Keychain on macOS / file fallback elsewhere); persistence + read-back perms hygiene; HTTP POST/PUT shape — all with Keychain, fs, and fetch dependency-injected (no real Keychain, no live server). Green.
+
+### Fix: XACA-0535 — Tap-hygiene guard allow-lists freelance-<client> configs
+
+- Advances the `homebrew-tap` submodule pointer to pick up the tap-internal fix to `scripts/check-tap-hygiene.sh` Check 3 (XACA-0252 debrand guard). The blanket `git ls-files | grep -iE 'doublenode'` was flagging the 6 legitimate freelance CLIENT configs created by XACA-0521 (`freelance-doublenode-*.yaml` under `team_transfer/config/`) as stale rebrand debt — `doublenode` is the client name (parallel to `freelance-liquidstyle-*`), not rebrand leftover.
+- Tap-side change adds `REBRAND_ALLOWLIST_DIR` + a `dirname`-guarded `case` glob so only DIRECT children matching `freelance-*.yaml` are excused (nested paths still fail), plus three bats regression cases. See the tap CHANGELOG XACA-0535 entry for detail.
+- Tap-internal script (not mapped by `sync-tap.sh`), so `sync-tap-drift` is unaffected. Surfaced during XACA-0528 tap sync, which used `--no-verify` to bypass the false-positive.
+
+### Fix: XACA-0534 — Shared plan-doc-independent retro resolver (_kb_find_existing_retro)
+
+- Added `_kb_find_existing_retro <ITEM-ID>` to `kanban-helpers.sh`: resolves an existing retrospective file without requiring a plan document. Three-tier resolution: (1) plan-doc-anchored via `kb-retro-path` (no regression for items that have one), (2) `find` in `kanban/plans/<ID>/` subdir, (3) `find` in flat `kanban/` root. Uses `find -name` with a quoted pattern so shell glob expansion is never triggered (zsh nomatch-safe).
+- Wired into `kb-sweep`: replaced the two-branch `kb-retro-path` + error fallback with a single `_kb_find_existing_retro` call; items without a plan doc no longer block merge with "cannot derive filename".
+- Wired into `kb-done` banner: replaced the `kb-retro-path` primary + knowledge-dir fallback loop with `_kb_find_existing_retro`; removed now-unused `kb_item_lower` and `kb_retro_path_result` variables.
+- Wired into `kb-backlog sub done` Retrospective blocking check: replaced `kb-retro-path` + dual error branches with `_kb_find_existing_retro`; error message now shows glob pattern and search paths instead of "no plan document found".
+- Wired into `kb-retro-check` per-item loop: replaced `kb-retro-path` primary + `knowledge_dirs` fallback loop with `_kb_find_existing_retro`; removed now-unused `item_lower`, `matches`, and `knowledge_dirs` setup from the function.
+- Fixes K501 sibling-heuristic-drift cluster: all four detection sites now share one authoritative resolver (XACA-0534).
+
+### Fix: XACA-0530 — Exclude tap-side lcars-target.js from canonical→tap sync mirror
+
+- `sync-tap.sh`: added `-not -name "lcars-target.js"` to the `lcars-ui/` `sync_dir` call. The outer dev-team `lcars-ui/lcars-target.js` is a gitignored per-machine LCARS workspace preference; the previous blanket directory sync copied the local machine value (e.g. `LCARS_TARGET_TEAM='academy'`) over the tap's tracked shipped default (`'command'`) on every sync, perpetually re-dirtying the homebrew-tap submodule (observed in XACA-0526: `'command'`→`'academy'`). The tap now keeps its own committed default and is never overwritten by the local copy.
+- `kanban-helpers.sh`: `kb-edit-shared` now refuses to edit-and-sync `lcars-target.js`, printing guidance (edit it directly for a local change; edit the submodule copy + two-step commit to change the shipped default). Updated the mirrored-surface doc block to note the exclusion. `kb-edit-shared` delegates copying to `sync-tap.sh`, so the exclusion is inherited automatically — the guard prevents a misleading no-op-sync + a failing `git add` of the gitignored canonical.
+- No tap-side change required: the fix lives entirely in outer dev-team files (not mirrored into the submodule), and the submodule was already clean. Deliberately did NOT gitignore the file inside the submodule — the tap copy is tracked and must stay tracked to ship the default; `.gitignore` on a tracked file is a no-op.
+- Spun off from XACA-0526. RELNOTES N/A (internal infra tooling, not App Store user-facing).
+
+### Fix: XACA-0536 — Convert Fleet Monitor served lcars-charts.js + vendor/chart.umd.min.js from symlinks to real files
+
+- Root cause: `sync-tap.sh`'s `sync_dir()` uses `find -type f`, which silently skips symlinks. The tap copies of `lcars-charts.js` and `chart.umd.min.js` materialized once at symlink-creation time and never re-synced; remote `brew install` shipped ~2.5-month-stale chart code (tap `439f401e` vs canonical `186abd79`). Gate 3.5 (sync-tap-drift) was blind to the drift because it also traverses only real files.
+- Converted both served files from symlinks (into `lcars-ui/`) to real file copies: `fleet-monitor/server/public/lcars/js/lcars-charts.js` and `fleet-monitor/server/public/lcars/js/vendor/chart.umd.min.js`. Both now live inside the Docker build context and `sync-tap.sh` will materialize them on every sync.
+- Simplified `fleet-monitor/server/deploy.sh`: dropped the symlink resolve/restore dance (no longer needed); now a thin `fly deploy` wrapper with a fly-CLI preflight check.
+- Updated `fleet-monitor/server/Dockerfile` NOTE comment to reflect real-file reality (XACA-0536).
+- Updated canonical-source comment in `lcars-ui/js/lcars-charts.js` to document the materialized-copy pattern and the must-refresh-both rule (`cp` + `sync-tap.sh`) required when editing the canonical source.
+- Post-review (PR #448): re-`cp`'d the served `lcars-charts.js` from the post-edit canonical so the two are byte-identical — the materialized real file no longer ships the contradictory "references this via symlink / Do NOT create copies" header.
+- Mirrors XACA-0533 (same trap, `lcars-sound.js`).
+
+### Feat: XACA-0533 — Fleet Monitor LCARS button tap sounds
+
+- Extended canonical `lcars-ui/js/lcars-sound.js` click interceptor with Fleet Monitor button selectors: `analytics-page-pill` and `sidebar-link` added to the nav branch; `candy-pill:not([data-candy])` to the alert branch (interactive pills only — metric display pills carry `data-candy` and stay silent); `summary-card`, `btn-lcars`, `lcars-button`, and `kiosk-fab` to the action branch.
+- Deployed `lcars-sound.js` as a real file (not a symlink) to `fleet-monitor/server/public/lcars/js/` — required because `sync-tap.sh`'s `find -type f` skips symlinks and would cause a 404 on remote install.
+- Added a sound mute toggle pill (`id="sound-toggle"`) in the `lcars-data-bar` of `fleet-monitor/server/public/lcars/lcars-dashboard.html` alongside the existing candy-pill metrics. The pill uses `.candy-pill.sound-pill` and includes the `#sound-status` child span required by the engine's `_updateToggleUI()`.
+- Added CSS for the mute toggle to `fleet-monitor/server/public/lcars/css/lcars-fleet.css`: `.lcars-data-bar .candy-pill.sound-pill` hover/active/muted states using `var(--lcars-rose)` and Fleet theme variables.
+- Wired the sound script into `lcars-dashboard.html` via `<script src="js/lcars-sound.js?v=1.0">` after `lcars-engines.js`.
+- Post-review hardening (PR #446): guarded all `localStorage` access in `try/catch` (`_lsGet`/`_lsSet`) so a `SecurityError` in Private Browsing can't abort engine init before `window.LCARSSound` is exported; added `aria-pressed` to the toggle (JS + initial markup) for screen-reader state; hoisted the exponential-decay constant out of the per-sample `_addTone` loop.
+
+### Fix: XACA-0532 — kb-knowledge-validate scans all projects/*/ subdirs
+
+- Fixed: `kb-knowledge-validate` (and `kb-knowledge-reindex` rebuild-all) now enqueue every `${global_root}/projects/*/` directory as a project-tier scan target, mirroring how agent/team/subject dirs are already enumerated. Previously only the single path returned by `_kb_knowledge_project_path` was enqueued — meaning sibling project dirs were never swept, and running from inside the global `~/knowledge` repo resolved to a nonexistent slug and swept zero project entries.
+- De-dupe guard: the resolved `project_path` is still included, but ONLY when it lives outside the global root (in-repo layout via `.knowledge-config.yml` / `KB_KNOWLEDGE_PROJECT_PATH`). This preserves coverage for out-of-root project knowledge dirs without double-validating paths already caught by the glob.
+- Same fix applied to both `kb-knowledge-validate` and the rebuild-all path of `kb-knowledge-reindex` to prevent sibling-heuristic drift between the two global-sweep functions.
+- Header echo in validate updated: `Project: <single-path>` replaced with `Projects: ${global_root}/projects/*  (resolved context: <path>)` to accurately reflect what is now scanned.
+- Closes gap where project-tier frontmatter errors were caught only by the pre-commit hook and not by manual `kb-knowledge-validate` runs (XACA-0525 datapoint).
+- Added `scripts/tests/test-knowledge-validate-all-projects.sh` — regression test that asserts validate detects a broken entry in a non-primary project dir and scans all `projects/*/` even when the resolved slug matches no project dir.
+
+### Chore: XACA-0531 — Stop tracking fleet-monitor runtime state files; add scoped .gitignore patterns
+
+- Removed `fleet-monitor/server/data/machines.json` and `fleet-monitor/server/data/pushed-boards.json` from git tracking via `git rm --cached` (files remain on disk — running server is undisturbed). Both contained only `{}` and are auto-recreated by the server on boot/first-write.
+- Added a scoped `.gitignore` block covering five runtime-state paths: `machines.json`, `pushed-boards.json`, `pushed-knowledge.json`, `registered-teams.json`, and `history/`. Preemptively ignores `pushed-knowledge.json`, `registered-teams.json`, and `history/` before they are first created.
+- Config files `dashboards.json` and `engines.json` remain tracked — these contain user-authored configuration that should be version-controlled.
+
+### Docs: XACA-0207 — Commit EMH knowledge entries k007 (freshness pass) + k008 (reconciliation report)
+
+- Adds two authored EMH knowledge entries that were left uncommitted under `knowledge/agents/emh/` alongside the already-tracked `k009`: `k007` (freshness pass before delegating work on tickets older than 2 weeks) and `k008` (reconciliation report before destructive bulk operations). Both originated from XACA-0207.
+- Docs/knowledge only — no code or behavior change. RELNOTES N/A.
+
+### Fix: XACA-0528 — Fleet Monitor asset cache-busting to prevent stale-cache boot hangs
+
+- `fleet-monitor/server/server.js`: Added `setHeaders` cache-control to both `express.static` mounts (root `public/` and `/lcars`). JS/CSS assets now served with `Cache-Control: no-cache` (browser revalidates via ETag on every load). HTML pages — both static-served files and the `res.sendFile` routes (`/`, `/all`, `/mainevent`, `/doublenode`) — now served with `Cache-Control: no-cache, must-revalidate` (browser re-fetches unconditionally; never serves a stale HTML frame).
+- Root cause: `express.static` defaults to no `Cache-Control` header, so browsers applied their own heuristic TTL. A stale or corrupt cached `lcars-fleet-core.js` left `window.LCARS_CORE` undefined; the splash boot timer never armed and the dashboard hung permanently — click-to-skip was also non-functional because it depends on the same initialisation path.
+- `fleet-monitor/server/public/lcars/lcars-dashboard.html`: Added a `?v=<timestamp>` cache-bust query parameter on the `<script src="lcars-fleet-core.js">` tag so that any in-flight stale cache is broken on the first load after deployment, even for clients whose browser ignores the new `Cache-Control` header.
+- Part of EPIC-0037 (Fleet Monitor stabilisation).
+
+### Fix: XACA-0527 — Remove redundant client-side registration from fleet-reporter.sh
+
+- Removed the redundant `/api/register` registration step from `fleet-monitor/client/fleet-reporter.sh` — specifically the `ensure_registered()` function, `register_with_endpoint()` helper, and `.fleet-registered` sentinel file. This client-side step was attempting to POST to `/api/register`, which does not exist on the server.
+- The non-existent endpoint caused five 404 retries on every fleet-reporter run, creating recurring log noise in `/tmp/fleet-reporter.log`. The `/api/status` endpoint already auto-registers each machine's full identity (hostname, IP, port, version) on first contact, making the redundant client register step legacy code.
+- No functional change — machine registration continues automatically via `/api/status`. Eliminates the noise and simplifies the client contract.
+- Related EPIC: EPIC-0037 (Fleet Monitor reporter↔server contract alignment).
+
+### Fix: XACA-0526 — verify-sources CI checks out homebrew-tap submodule
+
+- The `verify-sources` job in `.github/workflows/deploy-sources-check.yml` now checks out git submodules (`with: submodules: recursive` on the Checkout step). Previously `actions/checkout@v4` left the `homebrew-tap` submodule empty, so the canonical-source template-drift step read `homebrew-tap/share/templates/claude/tmux.conf` as "missing" and exited 1 — making the check perpetually red on develop and every branch.
+- A perpetually-red check defeated the XACA-0340 canonical-source drift guard (real `tmux.conf` template drift would have gone unnoticed) and forced PRs to merge via `--admin` past a red check. Discovered during XACA-0523 (PR #438 merged through this pre-existing failure).
+- No behavior change to the drift logic itself; the check now runs against a fully-populated checkout. RELNOTES not applicable (internal CI infrastructure).
+
+### Refactor: XACA-0524 — Port-scan range consolidation in aiteamforge-{start,status,doctor}.sh
+
+- Advances `homebrew-tap` submodule pointer to commit `0c2bd90` (feature/xaca-0524), which consolidates the duplicated literal Fleet Monitor port-scan range (`for port in 3000 3001 3002`) from four consumer sites across three command files into a shared `FLEET_MONITOR_PORT_SCAN_RANGE` constant in `libexec/lib/constants.sh`.
+- Third and final outstanding sibling-drift literal in the tap command files (XACA-0516 → XACA-0519 → XACA-0524 pattern lineage). Sibling-drift sweep is clean — zero `3000 3001 3002` triplets remain in any `libexec/commands/` file.
+- No behavior change; env-var override and early-`break` semantics preserved. Internal tap refactor — RELNOTES not applicable.
+
+### Docs: XACA-0523 — PR auto-merge monitor template: Gate 3 now gates on marker, not kb-sweep exit code
+
+- PR auto-merge monitor template now gates Gate 3 on the `PROTECTED SUBITEMS UNRESOLVED` marker LINE from kb-sweep's output instead of kb-sweep's exit code.
+- The grep is anchored on the emitter's `(N):` count via `grep -qE "PROTECTED SUBITEMS UNRESOLVED \([0-9]+\)"` — a bare-substring grep false-matches subitem TITLES that merely quote the phrase (caught dogfooding this very ticket, whose subitem titles quote the marker).
+- Fixes both failure modes: exit code over-blocked on framework subitems (XACA-0503); a homegrown board.json re-parse under-blocked and merged PR #435 through an open [Review] (XACA-0519).
+- Added inline reference comment + Critical-notes bullet pointing at the two governing memory files (`feedback_pr_monitor_no_bypass_protected_gates.md` + `feedback_protected_sweep_gate.md`).
+
+### Fix: XACA-0522 — Backfill A.1 anthropic_* fields in existing team-paths.json on first read
+
+- The XACA-0279 Phase A.1 fixture defaults (`anthropic_account_id`, `anthropic_account_nickname`, `anthropic_api_key_env_var`) are now back-filled into existing on-disk configs via `_backfill_a1_fields_on_disk`, called once per process from `load_config()`. Non-empty existing values are preserved; missing field keys get sensible defaults (empty strings for id+nickname, derived `TEAM_<SLUG>_API_KEY` for env_var). A backup snapshot at `~/.aiteamforge/team-paths.json.bak-pre-a1-backfill-<timestamp>` is written BEFORE the upgrade. The write uses fcntl exclusive lock + atomic rename (`os.replace`) with a TOCTOU re-read under the lock. A once-per-process boolean guard (`_A1_BACKFILL_ATTEMPTED`) prevents repeated lock acquisition on cache-invalidation re-loads within the same process. New public helper `diff_missing_anthropic_fields(config)` returns the structured diff payload and enables the skip-fast path (no lock, no backup, no write when all fields are present). Discovered during XACA-0281 UAT — LCARS Team Config tab opened blank inputs and cc-whoami/ccc silently fell back to default OAuth because existing configs lacked the A.1 keys.
+
+### Feat: XACA-0521 — Per-team team_transfer YAML configs (16 new teams + 3 alias symlinks)
+
+- **16 new canonical team configs** authored under `lcars-ui/team_transfer/config/`: `academy.yaml`, `mainevent.yaml`, `ios.yaml`, `android.yaml`, `firebase.yaml`, `dns.yaml`, `legal-coparenting.yaml`, `medical-general.yaml`, 6 × `freelance-doublenode-*.yaml`, 2 × `freelance-liquidstyle-agentbadges-*.yaml`. Each declares team name, board filename, ticket prefix, Claude project dir, and a full default rule set covering all seven channels (`git`, `aiteamforge_product`, `user_state`, `export_kanban`, `export_database`, `secrets_export`, `icloud_excluded`). Every config includes the mandatory `~/.claude/projects/{claude_project_dir_name}/**` user_state rule established by XACA-0207-002.
+- **3 alias symlinks** added so the generator's `--team <alias>` resolves to the canonical config: `freelance.yaml → academy.yaml`, `command.yaml → mainevent.yaml`, `medical.yaml → medical-general.yaml`.
+- **Validation gate cleared:** `team_transfer.generator --team <name>` reports zero `untagged_gaps` for all 17 canonical teams (finance + 16 new) plus all 3 alias names. Sample-team verifier round-trip (legal-coparenting: 211/211 PASS) confirms manifest/verifier integration is end-to-end clean.
+- **Two parser quirks discovered + documented in CHANNELS.md:**
+  1. `databases: []` (inline empty list) is parsed by `_parse_team_yaml` as the string `"[]"` not an empty list — crashes downstream. Workaround: use bare `databases:` (no value), which preserves the parser's default `[]`.
+  2. `{home}/{root}` substitution is pure string-replace (no `Path.resolve`), so a `root` with `../` produces a literal `/Users/<user>/../Shared/...` pattern that `fnmatch` cannot match against the resolved walk-paths. Two equivalent fixes: spell patterns as absolute paths (used by mainevent/ios/android/firebase/liquidstyle) or keep `home_relative_root` with `..` purely as the repo_root-derivation hint while writing patterns as absolutes (used by dns + 6 doublenode after XACA-0521-009 fix).
+- **Docs:** `lcars-ui/team_transfer/config/CHANNELS.md` and `docs/team-transfer/RUNBOOK.md` now index every per-team config (17 canonical + 3 aliases) with working_dir, board filename, and ticket prefix.
+- **Operator note:** Shared-path teams (under `/Users/Shared/Development/...`) require explicit `--repo-root` to the generator because the default `Path.home() / home_relative_root` fallback only matches home-rooted teams. RUNBOOK documents the per-team invocation.
+- **Submodule pointer bump:** `homebrew-tap` advances to `c1d4c42` (mirrors the 16 YAMLs + 3 symlinks + CHANNELS.md into the tap-installed copy).
+- **Follow-up:** Standardizing the Option A/B split across shared-path configs is deferred — both approaches validate; the maintenance cost of the split is currently low. A follow-up ticket can collapse them if desired.
+
+### Docs: XACA-0519-011 — Comment accuracy in launchagent-render test
+
+- `homebrew-tap/tests/test-xaca-0512-migrate-launchagent-render.sh`: Reworded the comment above `eval "$_extracted_funcs"` (lines ~81-84). Previous wording claimed defaults flow "via aiteamforge-migrate.sh at load time", which is misleading — `migrate.sh` is never sourced in this test path. The test extracts functions from migrate.sh via `awk` and `eval`s them; `FLEET_MONITOR_PORT` is injected by `run_update_launchagents()` directly, so the `constants.sh` default is unreachable here. Follow-up to PR #435 (XACA-0519).
+- Submodule pointer advances `84b7b2c → dd7755d` (1 commit in `homebrew-tap`).
+### Refactor: XACA-0519 — FLEET_MONITOR_PORT_DEFAULT sibling-drift consolidation
+
+- `homebrew-tap/libexec/lib/constants.sh`: Added `readonly FLEET_MONITOR_PORT_DEFAULT="3000"` as the shared default port, mirroring the XACA-0516 pattern that consolidated `KANBAN_BACKUP_INTERVAL_DEFAULT`.
+- `homebrew-tap/libexec/installers/install-fleet-monitor.sh`: Now sources `../lib/constants.sh` (alongside `common.sh`) and consumes `${FLEET_MONITOR_PORT:-$FLEET_MONITOR_PORT_DEFAULT}` in place of the inline literal `3000`. Single source of truth; env-var override semantics unchanged.
+- `homebrew-tap/libexec/commands/aiteamforge-migrate.sh`: Removed the temporary `XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000` local mirror plus its paired sibling-drift NOTE comment block. Consumer at `migrate.sh:562` now reads `${FLEET_MONITOR_PORT:-$FLEET_MONITOR_PORT_DEFAULT}` from the shared constants module.
+- `homebrew-tap/tests/test-xaca-0512-migrate-launchagent-render.sh`: Removed stale `readonly XACA_0512_FLEET_MONITOR_PORT_DEFAULT=3000` fixture line; updated the surrounding comment to reflect that defaults flow through constants.sh + `run_update_launchagents()` env injection. Test still passes 17/17.
+- Audit (read-only sweep): zero remaining `XACA_0512_FLEET_MONITOR_*` symbols across `.sh` files; the prior consolidation cycle (XACA-0516) left no orphaned scaffold beyond the three sites this ticket addresses. CHANGELOG-only historical mentions are intentional.
+- Out of scope (captured as follow-up): port-scan range loops (`for port in 3000 3001 3002`) in aiteamforge-start.sh / status.sh / doctor.sh — different pattern, future ticket.
+### Fix: XACA-0520 — Address PR #433 review feedback (subitems 013-016)
+
+- **013 (security):** `scripts/kb-team-export` now skips `secrets_export` channel in addition to `icloud_excluded`. Pre-fix the CLI wrapper would have packed secret-tagged files (env, credentials) into the main zip while the server-side packer correctly excluded them — `SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})`. Brings the CLI in line with `lcars-ui/server.py:generate_export()`.
+- **014 (refactor):** Extracted the SKIP_CHANNELS frozenset to `lcars-ui/server.py:MAIN_ZIP_SKIP_CHANNELS` (module-level constant). Both `generate_export()` and `apply_import()` now alias the canonical constant. Test file mirrors via `EXPECTED_SKIP_CHANNELS` (deliberately kept literal to avoid importing `server` at module load — fixture boots it as subprocess); 5 in-test inline duplicates collapsed to references.
+- **015 (cleanup):** Added an explicit `TODO(XACA-0520-015)` comment to the legacy `else:` branch in `apply_import()` (server.py:~1219) marking it for deletion in the next release cycle (target: AITeamForge v0.10.0). The branch is unreachable in practice since the upload handler rejects legacy zips and IMPORT_JOBS is process-local.
+- **016 (Py 3.14 audit):** Removed 10 redundant function-local `import re` statements in `lcars-ui/server.py` (lines previously at 1017, 2357, 4440, 4875, 7774, 8327, 8443, 9816, 10826, 11931). The module-level `import re` at line 29 is sufficient; the redundant locals shadowed it for the entire function scope under Py 3.14, recreating the same `UnboundLocalError` landmine fixed in XACA-0520-007. `import re as _re` aliases (lines 8050, 8195) are intentional separate bindings and left untouched.
+- All 154 `lcars-ui/tests/team_transfer/` tests still pass; py_compile + shellcheck clean.
+
+### Fix: XACA-0520-008 — Type-aware acknowledgeMissingSecrets parsing in secrets gate
+
+- `lcars-ui/server.py:handle_import_apply()` previously used `bool(body_json.get('acknowledgeMissingSecrets', False))` to derive the operator-override flag. Under Python's truthiness rules, ANY non-empty string (including the JSON string `"false"`) coerced to `True`, accidentally bypassing the secrets-coordination gate — a security-relevant footgun on the override that lets imports proceed without the paired secrets zip.
+- Replaced with a type-aware coercion: accept `True` (bool), `1` (int), or the case-insensitive strings `"true"`, `"yes"`, `"1"`. Everything else (including `"false"`, `"no"`, `None`, missing) blocks the gate.
+- `lcars-ui/tests/team_transfer/test_manifest_walk_edge_cases.py`: removed the `xfail(strict=True)` marker on `test_ack_string_false_is_truthy_bug`; renamed to `test_ack_string_false_blocks_gate` as a regression guard. Suite now 21/21 PASS with no xfails. Full `team_transfer/` suite: 154/154.
+
+### Test: XACA-0520-007 — Extend XACA-0492 synthetic-migration to LCARS UI HTTP round-trip
+
+- `lcars-ui/tests/team_transfer/test_lcars_http_roundtrip.py`: New integration test (7 tests) covering the LCARS UI wrapper layer via real HTTP endpoints. Boots server.py as a subprocess on an ephemeral port with `HOME=<tempdir>` and bypass env vars (`LCARS_SKIP_TEAM_VALIDATION=1`, `LCARS_SKIP_DUAL_BOARD_CHECK=1`). Drives the full export/import cycle, asserts manifest.json at zip root with schema_version + secrets_summary, per-channel verifier PASS/WARN/FAIL shape, and secrets handshake paths A/B/C (0 discovered, >0 without override → 409, >0 with acknowledgeMissingSecrets → 200). Zero regressions in existing 126 team_transfer tests; total team_transfer suite now 133 passed.
+- **Production bug fixed:** `lcars-ui/server.py:handle_import_upload()` crashed on Python 3.14 with `UnboundLocalError: cannot access local variable 're'`. Root cause: an inner `import re` at line ~11761 inside the method made `re` a function-local for the whole scope, breaking the earlier `re.search(r'boundary=(.+)', content_type)` at line 11618 that targets the multipart boundary. Fix: remove the duplicate inner `import re` (the module-level `import re` at line 29 is sufficient) and add a comment warning future contributors not to re-import it inside the function. Surfaced by 5 of 7 new HTTP round-trip tests; all 7 pass post-fix.
+- **Test retry hardening:** `_http_post_json()` in the new test file now retries once on `ConnectionResetError` with a 250 ms backoff. The module-scoped server fixture can leak handler state between heavy tests, producing a transient reset on the next POST (observed 1-in-2 full-file runs pre-fix). With the retry, 5/5 consecutive full-file runs pass cleanly.
+
+### Docs: XACA-0520-006 — Rewrite RUNBOOK.md for LCARS UI primary workflow
+
+- `docs/team-transfer/RUNBOOK.md`: Restructured for the new LCARS UI click-Export-get-two-zips workflow as the primary path. Sections reorganized:
+  - **Overview** now leads with the UI-first workflow (Steps 1-4: source Export → transfer zips → destination Import → per-channel verify).
+  - **Prerequisites** section clarifies LCARS UI availability (fallback to CLI when unavailable).
+  - **Primary workflow — LCARS UI Export & Import** provides step-by-step operator guidance for source export, zips produced, PRE_EXPORT_CHECKLIST.md review, transfer options, destination import, and per-channel verifier results interpretation.
+  - **Fallback / Advanced Paths** demotes CLI generator and verifier to optional/CLI-only sections; manual rsync reframed as partial-transfer/debug-only fallback.
+  - **Manifest schema reference** adds table of manifest.json structure (`domains[*].files[*]`, `secrets_summary` fields).
+  - **Channel reference** condensed to brief table with link to CONFIG_SCHEMA.md for full routing details.
+  - **Troubleshooting** section refactored from 5 historical M3Pro→M1Pro failures (XACA-0487–0491) to current UI-workflow issues: missing PRE_EXPORT_CHECKLIST.md, 409 missing_paired_secrets HTTP error, WARN vs FAIL interpretation, path layout translation, secrets password handling.
+  - **Onboarding**, **Re-generating after fixes**, **Important notes**, **Out of scope** consolidated and updated with XACA-0520 and cross-reference to CHANGELOG.md.
+  - **Quick reference** simplified to UI (no command) + CLI generator/verifier commands only.
+  - Line delta: +57 lines (498→555); no code changes, DOCS ONLY.
+
+### Feat: XACA-0520-005 — Secrets export coordination handshake
+
+- `lcars-ui/server.py` `_compute_secrets_summary()`: New helper (above `generate_export`) that calls `discover_secrets_sources()` to enumerate declared secrets sources (`expected` count) and checks each source path's existence on disk (`discovered` count). Looks up paired secrets job status from `SECRETS_EXPORT_JOBS` and normalises to `none | pending | complete | failed`. Returns the 4-field `secrets_summary` dict (`expected`, `discovered`, `paired_status`, `paired_job_id`).
+- `lcars-ui/server.py` `generate_export()` Step 3.5: After manifest is parsed and packable file list is built, `_compute_secrets_summary()` is called with `EXPORT_JOBS[job_id].get('pairedSecretsJobId')`. The result is patched into `manifest_data['secrets_summary']` and the manifest JSON is re-serialised to disk before zip construction — so the embedded `manifest.json` in the archive carries the summary. A second poll at Step 5 captures any status change during packing. `EXPORT_JOBS[job_id]['secretsSummary']` is stamped for UI consumption. Non-blocking: if paired job is still running, `paired_status == 'pending'`.
+- `lcars-ui/server.py` `handle_import_apply()`: Reads optional JSON body parameter `acknowledgeMissingSecrets` (bool, defaults false). Before dispatching `apply_import()`, checks `manifest.secrets_summary.discovered > 0` AND no `pairedSecretsJobId` in job metadata AND no operator override → returns HTTP 409 `{error: 'missing_paired_secrets', expected, discovered, override_flag}`. If override is set, logs `[LCARS Import] OPERATOR OVERRIDE: proceeding without paired secrets zip` and continues. Gate is UI-driven; the import thread is not blocked waiting on the secrets job.
+- Smoke test: 14/14 paths passing — Path A (no paired job, `paired_status=none`), Path B (completed job, `paired_status=complete`), Path C (failed job, `paired_status=failed`; 409 without override, 200 with override). `skipped` status maps to `complete`; `running` maps to `pending`.
+
+### Feat: XACA-0520-004 — Manifest-driven import handler + per-channel verifier surface
+
+- `lcars-ui/server.py` `handle_import_upload()`: Accept new manifest-driven zip layout (manifest.json at zip root, schema_version field). Reject legacy `export-manifest.json` format with HTTP 400 + LEGACY_ARCHIVE_FORMAT code (deprecation error, no silent fallback). For new-format zips: extract manifest.json to temp dir, run pre-flight verifier against source manifest, parse per-channel PASS/WARN/FAIL stats from PER-CHANNEL block, expose `verifierSummary.perChannel` shape in response. `importFormat` field stored in IMPORT_JOBS for apply-side routing.
+- `lcars-ui/server.py` `apply_import()`: Manifest-driven extraction path for new format. Walk `manifest.domains[*].files[*]`; skip channels in `{secrets_export, icloud_excluded}`; extract each entry from flat-packed zip by `fe.relpath` (arcname) to `Path.home() / fe.relpath`. Creates parent dirs as needed. Extracts `PRE_EXPORT_CHECKLIST.md` and `manifest.json` to a persistent restore staging dir (`~/team-transfers/<team>-<timestamp>-restore/`). Post-restore verifier re-run against destination filesystem; per-channel PASS/WARN/FAIL surfaced in job status. Legacy kanban/knowledge walk retained as dead code path for in-flight jobs pre-upgrade.
+
+### Refactor: XACA-0520-003 — Manifest-driven generate_export() packing
+
+- `lcars-ui/server.py` `generate_export()`: Replace legacy hardcoded kanban+knowledge walk with `team_transfer` manifest-driven packing. Generator runs first into a persistent staging dir under `~/team-transfers/` (keeps PRE_EXPORT_CHECKLIST.md alive past the home-guard). Files are packed flat (`arcname = file_entry.relpath`), mirroring `kb-team-export`. Channels `secrets_export` and `icloud_excluded` are skipped. `manifest.json`, `PRE_EXPORT_CHECKLIST.md`, and `verifier-report.txt` are embedded at zip root (PRE_EXPORT_CHECKLIST.md was previously lost). Verifier summary exposed in `EXPORT_JOBS[job_id]['verifierSummary']` for UI display.
+- Line delta: -36 lines (13199→13163); smoke test PASS (247 files packed, 0 skip-channel leaks, verifier PASS=247 WARN=0 FAIL=0).
+
+### Fix: XACA-0520-002 — Preserve PRE_EXPORT_CHECKLIST.md past kb-team-export tmp-dir trap
+
+- `scripts/kb-team-export`: Generator now emits manifest (and checklist) to a canonical persistent directory `~/team-transfers/<team>-<timestamp>/` inside `$HOME` instead of a `mktemp` temp dir. The generator's `out_under_home` guard (generator.py:160) was suppressing checklist emission when `--output` pointed to `/tmp/...`; canonical path keeps the checklist alive past the EXIT trap cleanup.
+- Final summary block prints `Checklist:` path for operator visibility; warns if checklist was not emitted.
+
+### Fix: XACA-0281 — Manual-save endpoint validation relaxed (account_id / nickname optional)
+
+`POST /api/team-config/account/save` was rejecting any save where `account_id` or `account_nickname` were empty strings — but per the documented architecture, empty fields are a valid state (the team reverts to the OAuth fallback, pre-XACA-0279 behavior). The strict validation contradicted the design and made the manual modal unusable for teams that hadn't yet defined a registry account but wanted to set just the env-var name (or clear an existing manual config). Now: `account_id` and `account_nickname` only need to be strings (empty allowed); `env_var_name` is optional, but if non-empty must still match `^[A-Z][A-Z0-9_]*$`. All three empty = explicit "clear the manual config and use OAuth fallback".
+### Fix: XACA-0281 — Team Config tab UI contrast polish (user-acceptance follow-up to PR #429)
+
+- **Form input contrast bumped.** `.form-group input[type="text"|"url"]` and `.form-group select` borders changed from `--lcars-blue-dark` to `--lcars-blue` on the `--lcars-black` background — the previous combo was nearly invisible. Focus state now adds a soft amber `box-shadow` for clearer affordance. Placeholder text also gets an explicit blue tint so empty fields read as fields. Applies to the XACA-0281 manual-override modal AND every other LCARS form that uses `.form-group` (existing modals get the same lift; no downside).
+- **MANUAL button readability.** `.team-account-manual-btn` opacity raised from `0.5 → 0.85`, color switched from muted blue to `--lcars-peach`, border lifted to match, font-size nudged `10px → 11px` with slightly larger padding. Still visually secondary to the picker (smaller / peach vs picker's standard styling) but actually legible. Hover state intensifies to `--lcars-orange` so the affordance is unmistakable.
+- **Status dot now self-explanatory.** Bumped from 10px to 12px, added a subtle white border + `box-shadow` glow on the dot's own color. `renderTeamRow` now sets a `title` (tooltip) on the dot per state: "Credentials present and validated" / "No credentials — env var not set in this LCARS process" / "Credentials present but never validated — run TEST CONNECTION". `cursor: help` advertises the tooltip.
+- **Discovered during UAT:** Phase A.1 (XACA-0279) added default `anthropic_*` fields to the fixture in `kanban-hooks/aiteamforge_paths.py` but never migrated existing `team-paths.json` files on disk — empty fields meant the manual modal opened with a blank env-var input and TEST CONNECTION refused to run. Migrated locally via a one-shot script; future installs of A.1 should run an idempotent migration step on first boot (filed separately).
+
+### Fix: XACA-0207 PR #430 review follow-ups (subitems 009/010/011)
+
+- **`--yes` / `-y` flag added to `kanban-backup.py`** — suppresses the interactive confirmation prompt in `--restore-memory <team>` for scripted/headless restore scenarios. Default behavior (interactive prompt) unchanged.
+- **kanban-health log path aligned with siblings** — `com.devteam.kanban-health.plist` and the corresponding entry in `scripts/generate-launchagents.py` manifest now log to `~/aiteamforge-backups/kanban/` (matching `kanban-backup`, `kanban-icloud-sync`) instead of the prior `~/dev-team-backups/kanban/`. `--check` will report DRIFT against the installed copy until the user runs `--install --reload`.
+- **`set -euo pipefail` added** to `legal/scripts/install-zshrc.sh` and `medical/scripts/install-zshrc.sh` for consistency with repo shell standards.
+
+### Feat: XACA-0207-002 — Extend kanban-backup.py to snapshot per-team Claude auto-memory directories
+
+- `kanban-hooks/aiteamforge_paths.py`: new `get_team_memory_dir(team)` function that derives each team's `~/.claude/projects/<encoded>/memory/` path using the working_dir encoding Claude Code applies (spaces and `/` → `-`). Includes prefix-scan fallback for `-DEV`/`-develop` suffix variants.
+- `kanban-backup.py`: new `_get_team_memory_dirs()` builds a deduplicated `{team: memory_dir}` map (alias teams sharing a working_dir appear once). `backup_memory_dir()` applies the same DirSnapshot + hash + zip + integrity-check pipeline used by kanban backups, keyed as `<team>:memory` in stored_hashes. Memory zips are named `memory_YYYYMMDD_HHMMSS.zip` inside `~/aiteamforge-backups/kanban/<team>-memory/`. Tiered retention pruning, structured `memory_backup_ok` log events, and `--restore-memory <team>` mode (with newer-file clobber guard; `--force` to override) are all included. `run_backup()` runs memory backups after every kanban cycle; `run_end` log includes `memory_backed_up`/`memory_skipped`/`memory_errors` counts.
+- `kanban-backup-health.py`: `check_cross_run_regressions()` now also scans `<team>-memory/` subdirs (using `memory_*.zip` glob) so memory regressions surface with identical thresholds.
+- `lcars-ui/team_transfer/config/CHANNELS.md`: added mandatory `user_state` rule template that every team YAML must include for `~/.claude/projects/{claude_project_dir_name}/**` to be captured in the Export/Import manifest.
+- `tests/test_memory_backup.py`: 22 new pytest tests (all passing) covering path derivation, deduplication, backup/skip/integrity-fail paths, restore clobber guard, log events, and health regression detection.
+- **Smoke test verified:** 12 teams backed up (academy 62 files, legal 26, finance 14, etc.); all 12 `<team>-memory/` dirs synced to iCloud via `kanban-icloud-sync.py --once`.
+
+### Fix: XACA-0207-003 — Convert installed zshrc copies to symlinks + fix install scripts
+
+- **Live migration:** 57 `~/.zshrc*` regular files (across `home-scripts/`, `legal/terminals/`, `medical/terminals/`) replaced with symlinks to their canonical sources in `~/dev-team/`. Git pull now immediately updates all shell configs.
+- **Install script repair:** `legal/scripts/install-zshrc.sh` and `medical/scripts/install-zshrc.sh` rewritten to use `ln -sf` instead of `cp`. Both resolve target dir from `~/dev-team/` (not script-relative path) so symlinks survive worktree removal. Idempotent: second run prints "Already symlinked" and exits 0.
+- **Setup wizard repair:** `scripts/dev-team-setup.sh` `setup_shell_configs()` rewritten to use symlinks via shared `_link_zshrc_dir()` helper. Covers `home-scripts/`, `legal/terminals/`, and `medical/terminals/`. Idempotent.
+- **New-mac installer repair:** `docs/install-on-new-mac.sh` Phase 6 rewritten from `cp` to symlink helper. Same three source dirs. Idempotent.
+- **Verify hint updated:** `scripts/verify-setup.sh` fix-hint now points to the correct installer instead of raw `cp` command.
+- **12 files left untouched (no canonical):** `academy_emh`, `academy_reno`, `academy_thok`, `ios_wesley`, `finance_brunt/nog/quark-fin/rom/zek`, `zshrc.secrets`. Details in backup dir: `~/aiteamforge-backups/zshrc-pre-symlink-*/NEEDS_USER_REVIEW.md`.
+- **Backup:** pre-migration copies at `~/aiteamforge-backups/zshrc-pre-symlink-2026-05-19T134754/`.
+- **Tests:** `tests/bats/zshrc-symlink-install.bats` — 6 bats tests covering symlink creation, target path validation, and idempotency for both legal and medical installers. All passing.
+
+### Feat: XACA-0207-004 — LaunchAgent plist generator + bring untracked plists into repo
+
+- `scripts/generate-launchagents.py`: new generator/checker/installer for all 5 `com.devteam.*` LaunchAgent plists. Modes: `--generate` (idempotent emit to repo root), `--check` (semantic diff of repo vs installed plists, exits non-zero on drift), `--install` (copy + launchctl load, with `--reload` for already-loaded agents).
+- `com.devteam.kanban-health.plist`: added to version control (was installed but untracked). Runs `kanban-backup-health.py` every 5 min.
+- `com.devteam.lcars-health.plist`: added to version control (was installed but untracked). Runs `lcars-health-check.sh` every 2 min.
+- `tests/test_generate_launchagents.py`: 14 pytest tests covering manifest round-trip, idempotency, drift detection, clean-check, and optional-field handling.
+
+### Feat: XACA-0281 Phase A.3 — LCARS Settings → Team Config tab (account control surface) + Fleet Monitor AI Engines registry
+
+**Architecture pivot during implementation:** initial spec was per-team free-form account fields; mid-feature the design pivoted to a fleet-wide registry (managed in Fleet Monitor) consumed by each team's LCARS Settings via a copy-on-select mirror — team startup stays offline-clean (local team-paths.json is the resolver source-of-truth), Fleet Monitor is only hit when the Settings tab opens. Generic, multi-engine ready schema (today: Anthropic; future: OpenAI, local engines, etc.).
+
+**Fleet Monitor (Node/Express):**
+- `fleet-monitor/server/data/engines.json` (NEW) — versioned registry, seeded with Anthropic engine + empty accounts.
+- `fleet-monitor/server/lib/engines-store.js` (NEW) — `readEngines()`, `writeEngines()`, `findEngine()`, `findAccount()`. Atomic file writes following the existing store pattern.
+- `fleet-monitor/server/server.js` — five new `/api/engines/*` routes: GET registry, GET single engine, POST account, PUT account (slug is immutable), DELETE with dry-run `usage` info unless `?confirm=true`. Validation: account slug `^[a-z][a-z0-9-]*$`, env_var_name `^[A-Z][A-Z0-9_]*$`, 200-char limits on nickname/account_id.
+- `fleet-monitor/server/public/lcars/lcars-dashboard.html` + `js/lcars-engines.js` (NEW) + `lcars-fleet-core.js` (1-line `sections.list` add) — new "AI ENGINES" sidebar section with per-engine cards, account tables, add/edit/delete modals. Delete pre-fetches dry-run usage info before enabling confirm. CSS in `lcars-dashboards.css` + `lcars-fleet.css`. Security notice surfaces prominently: API keys live in `~/.zshrc.secrets` on each machine, NOT in the registry.
+
+**LCARS Settings (Python):**
+- `lcars-ui/server.py` — 9 new endpoints. See `lcars-ui/CHANGELOG.md` for the full per-endpoint breakdown. Highlights: `GET /api/engines/list` (proxy + local cache fallback, always HTTP 200), `POST /api/team-config/account/assign` (copy-on-select mirror; preserves A.1's resolver contract), four per-team handlers (`current`, `save`, `test-connection`, `running-sessions`), two resume-ID handlers (`count` + action endpoint with preserve/archive/clear). Validation cache at `~/.aiteamforge/account-validation.json`. Account fingerprints masked (`sk-an****…XY4Z`); actual key values never leave `os.environ`. urllib only — no new deps.
+- `lcars-ui/index.html` + `css/lcars.css` + `js/lcars-team-account.js` (NEW) — per-team accordion in Team Config tab; AI engine account picker dropdown as the default flow (optgrouped per engine, "+ ADD NEW" links to Fleet Monitor); free-form edit modal demoted to "MANUAL" override; two new modal flows for running-sessions warning (pre-assign) and resume-ID handling (post-assign).
+- A.1's resolver in `kanban-hooks/aiteamforge_paths.py` (XACA-0279) untouched — the mirror keeps `anthropic_account_id` / `anthropic_account_nickname` / `anthropic_api_key_env_var` populated; a new informational `anthropic_account_ref` field captures `<engine_slug>/<account_slug>` for future drift detection.
+### Fix: XACA-0280 — review polish (7 follow-ups: isinstance guards, O(1) cwd dedupe, one-shot stat-error log, drop dead param, _is_cache_stale helper, _empty_untagged_bucket factory)
+
+### Feat: XACA-0280 Phase A.2 frontend — per-account CC-USAGE tab + agent panel toggle
+
+- `lcars-ui/index.html`: account selector dropdown populated from `/api/usage/by-account`; per-account chip badge + semantic footnote; totals labeled honestly (session-lifetime vs window-only); burn-rate labeled "all accounts" when filter active; smart-refresh skips collector spawn when cache is fresh (<3 min).
+- `lcars-ui/js/lcars.js`: `switchSection('usage')` calls `window._populateUsageAccountSelector()` on tab activation.
+- `lcars-ui/agent-panel.html`: CURRENT/ALL toggle pill; localStorage persistence; current-mode resolves most-recently-active account via `/api/usage/by-account` heuristic; graceful fallback to all-accounts when no account identifiable.
+- `lcars-ui/css/usage-indicator.css`: styles for selector, chip, footnote, toggle pill.
+
+### Feat: XACA-0280 Phase A.2 — server.py per-account API endpoints
+
+- `GET /api/usage/current?account=<id>` — optional filter scopes the `totals` field to a specific account; omitting the param preserves all-accounts aggregate (no breaking change). Special value `"untagged"` targets the pre-isolation bucket. Unknown IDs return `{ok: false, error: "account not found: <id>"}`.
+- `GET /api/usage/by-account` — new endpoint returning `{accounts[], untagged, totals, collected_at}`; accounts sorted by 7-day tokens descending; `burn_rate` is null (per-account derivation is a follow-up).
+- `_build_by_account_response()` pure function mirrors `_build_usage_response()` pattern for unit-testability.
+- Route dispatcher extended with `elif path == '/api/usage/by-account'` sibling to `/api/usage/current`.
+
+### Feat: XACA-0280 — ccusage_collector.py per-account attribution & cache schema v3
+
+- `ccusage_collector.py` cache bumped to schema_version 3; adds `accounts` and `untagged_bucket` top-level keys alongside all preserved v2 rollup fields.
+- New `run_ccusage_session()` call alongside existing blocks/weekly to collect per-cwd session rows; failure is tolerated (preserves prev data).
+- `build_accounts()` attributes sessions to accounts via cwd-to-team prefix matching against `team-paths.json`; tiebreaker via `SessionAccountMapIndex`.
+- `SessionAccountMapIndex` auxiliary helper — lazy-loaded, mtime-aware, reverse-indexed by cwd; `by_session_id()`, `by_cwd()`, `most_recent_account_for_cwd()`.
+- `untagged_bucket` aggregates unmapped cwds (no heuristic backfill); includes `cwds` list for diagnostics.
+- `_migrate_cache_if_needed()` in `read_prev_cache()` upgrades v1/v2 caches on first read, mirroring legacy totals into untagged_bucket so historical numbers remain visible.
+
+### Feat: XACA-0279-022 — JSONL compaction subcommand + auto-rotation for session-account-map.py
+
+- **`scripts/session-account-map.py` `compact` subcommand** — new `compact` subcommand accepts `--keep-last N` (default 1000) and `--keep-days D`; when both are specified records meeting EITHER criterion are kept (more permissive). Atomic write via `.tmp` + `os.replace` preserves chronological order. Prints `Compacted: <before> → <after> records`.
+- **Auto-rotation on `record`** — after each successful write, `_maybe_rotate()` counts lines cheaply (binary chunk scan) and fires `_compact_file()` when the count exceeds `SESSION_ACCOUNT_MAP_ROTATE_AT` (default 10000), keeping `SESSION_ACCOUNT_MAP_KEEP_AFTER_ROTATE` records (default 5000). Rotation failure logs to stderr but never fails the `record` call.
+- **Removed `TODO` comment** — lines 16-17 "TODO(future): add a compaction subcommand…" replaced with accurate docstring documenting the new `compact` subcommand and auto-rotation env vars.
+- **New helpers** — `_count_lines()` (binary chunk counter), `_compact_file()` (atomic compaction), `_maybe_rotate()` (threshold guard).
+
+### Test: XACA-0279-021 — pytest coverage for session-account-map + v3 upgrade
+
+- `tests/test_session_account_map.py` (new): 7 cases — happy path record+lookup, append-only invariant (50 sequential writes = 50 lines), lookup-not-found exit code, last-for-terminal ordering (most recent of 3), corrupted-line-in-middle skipped silently, empty optional fields serialised as `""` not `null`, concurrent-writer atomicity (20 parallel subprocesses → exactly 20 valid JSONL lines).
+- `tests/test_aiteamforge_paths_v3_upgrade.py` (new): 8 cases (13 parametrized runs) — v1→v3 upgrade, v2→v3 upgrade, v3→v3 idempotent (existing values not overwritten), `load_config()` v1 tolerance (no WARNING, no rewrite), v2 tolerance, v999 WARNING emitted, deepcopy non-mutation semantics, env-var slug derivation edge cases (hyphens→underscores, uppercase, multi-segment slugs).
+- Both suites use `tmp_path` + `monkeypatch` (`AITEAMFORGE_CONFIG` / `SESSION_ACCOUNT_MAP_PATH` env overrides); user's live config and JSONL are never touched.
+- All 20 tests pass (pytest 9.0.3, Python 3.14.5).
+
+### Docs: XACA-0279-020 — Correct runbook §7.2/§7.4 privacy posture language
+
+- **Issue:** Sections 7.2 and 7.4 incorrectly stated that account IDs are fingerprinted or hashed in the session map and LCARS state files. This overestimated the privacy posture.
+- **Reality:** Account IDs are stored as raw, non-secret identifiers (similar to usernames in a session log). The full value is required in storage for the cross-account resume validation logic (`ccc` performs exact-match comparison).
+- **Display-time fingerprinting:** `cc-whoami` output and resume file names (e.g., `.resume-a-123ab`) show first 8 chars for human readability — this is a presentation convention, not how the data is persisted.
+- **Distinction clarified:** Secrets (API keys, passwords, tokens) are never persisted and are scoped only to runtime subshells. Identifiers (account_id) are persisted in full because they're non-secret and operationally necessary.
+- **Consistency:** §6.3 (Session map forensics) already correctly documented the raw account_id format in JSONL records. §7.2 and §7.4 brought into alignment.
+
+### Chore: XACA-0516 — Bump homebrew-tap submodule pointer to df4cd1b (KANBAN_BACKUP_INTERVAL consolidation)
+
+- **`homebrew-tap` submodule pointer** advanced from `3f325999` (XACA-0512) to `df4cd1b` (DoubleNode/homebrew-aiteamforge#33 squash-merge, 2026-05-18). Linear advance — `develop`'s previous pointer was already at the XACA-0512 commit (`3f325999`), so this is a clean forward step.
+- **Tap-side change (XACA-0516):** new `libexec/lib/constants.sh` as single source of truth for `KANBAN_BACKUP_INTERVAL_DEFAULT=900`. Three consumer scripts (`install-kanban.sh`, `aiteamforge-upgrade.sh`, `aiteamforge-migrate.sh`) now source it. Removes the `XACA_0510_*` and `XACA_0512_*` ticket-prefixed mirror constants; the sibling-drift pattern for this constant family is structurally eliminated.
+- **Tap-side change (XACA-0512, included in squash):** `aiteamforge-migrate.sh::update_launchagents` now renders from templates, matching the fix applied to `aiteamforge-upgrade.sh` in XACA-0510.
+- **Behavioral delta:** `install-kanban.sh` now respects a `KANBAN_BACKUP_INTERVAL` env-var override (previously hard-set literal `900`). Default value is unchanged. All resolution cases (default, override, empty-string fallthrough, readonly enforcement) confirmed by tap PR dual-gate.
+- **Tap PR:** https://github.com/DoubleNode/homebrew-aiteamforge/pull/33
+
+### Feat: XACA-0279-006/007/011 — Entry-point hooks, cc-whoami validator, resume-ID segregation
+
+- **`claude_code_cc_aliases.sh` / `_cc_save_session`** — now writes a parallel per-account resume-id file to `~/.claude/.last-session-per-account/<account_id_safe>.txt` on every session end (XACA-0279-011). Original per-terminal save is unchanged.
+- **`claude_code_cc_aliases.sh` / `_cc_launch`** — after `_cc_save_session`, reads the sidecar to get the session id and calls `session-account-map-record.sh` to append a record to the JSONL map (XACA-0279-006). Also appends a tab-separated line to `~/.claude/.last-account-per-terminal.tsv` recording `<terminal_id>\t<account_id>\t<nickname>\t<timestamp>` for `cc-whoami` last-used lookups.
+- **`claude_code_cc_aliases.sh` / `ccc`** — before invoking `claude --resume`, looks up the session's recorded account in the JSONL map and compares to `CLAUDE_ACTIVE_ACCOUNT_ID`; cross-account mismatch prints a yellow warning and returns 1 unless invoked as `ccc --force` (XACA-0279-011). Also calls `session-account-map-record.sh` after resume exits (XACA-0279-006).
+- **`claude_code_cc_aliases.sh`** — sources `scripts/cc-whoami.sh` to make `cc-whoami` available in every terminal that loads the aliases (XACA-0279-007).
+- **`kanban-helpers.sh` / `kb-run`, `kb-work`** — both functions now call `session-account-map-record.sh` after `cc` exits as a belt-and-suspenders hook for the no-`_cc_launch` fallback path (XACA-0279-006).
+- **`scripts/cc-whoami.sh`** (new) — zsh function `cc-whoami()` prints: active account nickname, account ID fingerprint (sha256-prefixed, never the full value), token env var name + length (never the value), team context, terminal ID, last-used timestamp from `.last-account-per-terminal.tsv`, and up to 5 recent session-map records for the current terminal. Script is both sourceable and directly executable (XACA-0279-007).
+
+### Feat: XACA-0279-010 — Show account nickname at top of agent-panel.html
+
+- **`lcars-ui/agent-panel.html`** — new `.account-nickname` element inserted above `.terminal-badge` in the content block.
+- When `account_nickname` is non-empty: displays `🔐 <nickname>` in 1.5rem bold using `--theme-highlight` (team color) so the active account is immediately visible.
+- When `account_nickname` is empty or missing: displays dim small-text `(default OAuth — no per-team account)` via `.account-nickname-empty` modifier — element always visible so users can spot unconfigured accounts at a glance.
+- `applyData()` JS handler updated to read `data.account_nickname` from the `/api/agent-panel` JSON response (fields added by XACA-0279-009).
+- Server-side verification: `server.py serve_agent_panel_data()` passes the entire JSON blob through without field filtering — new fields flow automatically.
+- Uses `textContent` (not `innerHTML`) for XSS safety consistent with the rest of `applyData()`.
+
+### Feat: XACA-0279-008 — Add 'Active Account' line to 8 team banners
+
+- **`academy/ios/android/firebase/command/dns-framework/freelance/mainevent` banners** — each now prints an "Active Account" line immediately after the "Saved Session" line.
+- Reads `anthropic_account_nickname` from `~/.aiteamforge/team-paths.json` using the banner's own team slug (academy, ios, android, firebase, command, dns, freelance, mainevent).
+- Falls back to dim `(default OAuth)` label when the config file is absent, the nickname field is empty, or Python 3 is unavailable — no crash, no alarm.
+- Display style matches existing "Saved Session" formatting using `${WHITE}${BOLD}` / `${WHITE}` color variables.
+- `_active_nickname` variable is unset after use to avoid polluting the shell environment.
+- DNS banner uses `dns` as the team-paths.json key despite living under `dns-framework/scripts/`.
+
+### Feat: XACA-0279-009 — Add account_id/account_nickname to lcars-agent JSON
+
+- **`scripts/display-agent-avatar.sh`** — `display_agent_avatar()` now writes two new fields to every `lcars-agent-{session}.json` file: `account_id` (value of `CLAUDE_ACTIVE_ACCOUNT_ID`) and `account_nickname` (value of `CLAUDE_ACTIVE_ACCOUNT_NICKNAME`).
+- **Fallback resolution:** when either env var is unset at write time (e.g. a banner-fresh terminal before `cc` is first invoked), the function reads `~/.aiteamforge/team-paths.json` via a single Python one-liner that returns `account_id|account_nickname` for the team slug arg, then splits the result. Both values fall through to empty strings when the file is absent or the team has no account configured yet.
+- **Empty-string semantics:** downstream consumers (agent-panel.html, fleet-monitor) should treat empty `account_id`/`account_nickname` as "no account configured — using default OAuth". No consumer breakage on missing fields from older JSON snapshots.
+- **sys.argv index shift:** file-path arguments bumped from `sys.argv[14]/[15]` to `sys.argv[16]/[17]`; the two new data args occupy positions 14 and 15.
+
+### Docs: XACA-0279-014 — Account-isolation runbook
+
+- **`docs/account-isolation-runbook.md`** (new) — comprehensive 400-line guide covering Phase A.1 operations.
+- **Section 1 (Mental Model):** 30-second overview of per-team account routing, config files, OAuth fallback.
+- **Section 2 (Setup):** step-by-step walkthrough for adding a new account per team, including schema fields, env var naming, and verification with `cc-whoami`.
+- **Section 3 (cc-whoami):** field-by-field interpretation, output examples, how to read account ID fingerprints and token source metadata (no secrets shown).
+- **Section 4 (Resume Segregation):** explanation of why accounts matter for resume IDs, how `_cc_save_session` writes per-terminal + per-account files, `ccc --force` override behavior and when to use it.
+- **Section 5 (Diagnostics):** four common symptoms (wrong LCARS nickname, default OAuth when expecting account, ccc refusal, wrong account charged after the fact) with diagnostic commands and fixes for each.
+- **Section 6 (Forensics):** how to query `~/.claude/.session-account-map.jsonl` programmatically and by hand for audit and troubleshooting.
+- **Section 7 (Security):** no-plaintext-key policy, account ID fingerprinting, credential scoping, session-map contents, gitignore verification.
+- **Section 8 (Rollback):** three-step procedure to revert to single-account OAuth (pre-XACA-0279 behavior).
+- **Section 9 (Preview):** teaser for Phase A.2/B/C/D (wizard, telemetry, budget enforcement, multi-cloud).
+- **Quick-reference table** at end for common commands.
+- **`claude/CLAUDE.md`** — added brief linking section (6 lines) under new header "Per-Team Anthropic Account Isolation (XACA-0279, Phase A.1)" pointing to the full runbook and summarizing the quick setup + rollback.
+
+### Feat: XACA-0279-005 — Add session-account-map.py JSONL writer + shim
+
+- **`scripts/session-account-map.py`** — stdlib-only Python CLI with three subcommands: `record` (append), `lookup` (by session_id), and `last-for-terminal` (most-recent by terminal id). Writes append-only JSONL at `~/.claude/.session-account-map.jsonl`. Each record carries `{session_id, account_id, account_nickname, team, terminal, started_at, cwd, pid}` — the account metadata that CC session JSONLs do not include.
+- **Append-only / atomic write:** opens file in `"a"` mode, single `f.write()` call per line. POSIX single-`write()` atomicity applies (records well under PIPE_BUF). Path is created with `os.makedirs(exist_ok=True)` before first write.
+- **Lookup performance:** reads backwards via `readlines() + reversed()` so recent records are found fast without scanning from the start; corrupted JSON lines are silently skipped.
+- **`scripts/session-account-map-record.sh`** — thin zsh shim that reads `CLAUDE_SESSION_ID`, `CLAUDE_ACTIVE_ACCOUNT_ID`, `CLAUDE_ACTIVE_ACCOUNT_NICKNAME`, `SESSION_TYPE`/`LCARS_TEAM`/`KB_TEAM`, and `TMUX_PANE`/`KB_TERMINAL` from the environment and delegates to `session-account-map.py record`. Silently exits 0 when no session ID is present. Wired into cc/ccc/kb-run/kb-work entry points in XACA-0279-006.
+- No secrets ever persisted — only env var names and non-sensitive session metadata are written.
+
+### Feat: XACA-0279-003 — Add `_cc_export_account_credentials` wrapper to cc-aliases
+
+- **`claude_code_cc_aliases.sh`** — new helper function `_cc_export_account_credentials()` inserted before `_cc_launch()`.
+- Resolves team identity from `SESSION_TYPE` → `LCARS_TEAM` → `KB_TEAM` (first non-empty wins).
+- Reads `~/.aiteamforge/team-paths.json` via Python one-liner; parses `anthropic_account_id`, `anthropic_account_nickname`, and `anthropic_api_key_env_var` fields introduced in XACA-0279-001.
+- Exports `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_ACTIVE_ACCOUNT_ID`, and `CLAUDE_ACTIVE_ACCOUNT_NICKNAME` when a key is configured; falls through silently to default OAuth otherwise.
+- Never logs the token value — nickname/account_id only in the dim stderr confirmation line.
+- Idempotent: re-reads `team-paths.json` on every `_cc_launch` call so live edits take effect without restarting the shell.
+- Called from `_cc_launch` — all ~50 `cc-*` persona aliases inherit the account-routing behavior automatically with no per-alias changes.
+- Graceful on all failure modes: missing `python3`, missing `team-paths.json`, malformed JSON, empty env var — all fall through to default OAuth without noise.
+
+### Feat: XACA-0279-001 — Extend `team-paths.json` schema with Anthropic account fields (v3)
+
+- **`kanban-hooks/aiteamforge_paths.py`** — `SUPPORTED_SCHEMA_VERSION` bumped `1 → 3` (v2 was an intermediate bump; v3 adds per-team Anthropic account routing fields introduced by XACA-0279).
+- **Three new fields added to every `DEFAULT_TEAMS` entry:** `anthropic_account_id` (empty string default; user-populated via upcoming wizard), `anthropic_account_nickname` (human-friendly label; empty default), `anthropic_api_key_env_var` (conventional env-var name auto-derived from team slug: `TEAM_<SLUG_UPPER>_API_KEY`).
+- **Backward-compatible `load_config()`:** schema versions 1, 2, and 3 all load without warning; only unrecognized versions emit the WARNING. Missing `anthropic_*` fields on older configs are silently tolerated — downstream consumers (wrapper subitem 003) must use `.get()` with empty-string fallbacks and treat empty as "no account configured, fall back to default OAuth flow".
+- **`upgrade_config_to_v3(config: dict) -> dict` migration helper added** — deep-copies an existing v1/v2 config, bumps `schema_version` to 3, and back-fills the three new fields with sensible defaults (env var name derived from slug). Does NOT auto-invoke from `load_config()`; reserved for the interactive account-routing wizard.
+- **Live `~/.aiteamforge/team-paths.json` untouched** — only the tracked Python source-of-truth was modified. Wizard/installer flows will migrate live configs in a later subitem.
+
+### Feat: XACA-0279 — Add per-team Anthropic API key slots to secrets template
+
+- **`home-scripts/.zshrc.secrets.template`** — new section inserted after the GitHub PAT block, before the Firebase block. Adds `TEAM_<TEAM>_API_KEY` export slots for all 8 Phase A.1 teams: academy, ios, android, firebase, command, dns, freelance, mainevent.
+- Empty placeholder values only — no real keys committed.
+- Each slot maps to the `anthropic_api_key_env_var` field defined in `team-paths.json` (XACA-0279-001). When set, the `cc-*` session-start hook will export `ANTHROPIC_AUTH_TOKEN` from the matching env var, enabling per-team Anthropic billing. Leave empty to fall back to the default OAuth flow.
+
+### Fix: XACA-0512 — `aiteamforge-migrate.sh::update_launchagents` render-from-template (tap submodule)
+
+- **`homebrew-tap` submodule** — third sibling of the launchagent-render drift. `update_launchagents()` in `aiteamforge-migrate.sh` was doing in-place `sed -i.bak` / `sed -i.bak2` path-rewrites on whatever plist already existed in `~/Library/LaunchAgents` — never rendering from canonical templates. Drifted or hand-edited plists weren't recoverable, and the hack left `.bak`/`.bak2` files behind. This tap-side fix (see `homebrew-tap/CHANGELOG.md` for full detail) brings migrate.sh in line with `install-kanban.sh` and the XACA-0510 fix in `upgrade.sh`: render `*.template` → `*.new` tempfile → diff against live target → atomic `mv` + `launchctl` reload only on change. Tempfiles cleaned up on all no-op / DRY_RUN / interrupt paths via `_cleanup_migrate_tmpfiles` + RETURN trap.
+- **Three-agent, per-template-family dispatch** (the migrate-specific wrinkle that doesn't apply to upgrade.sh): the agent set spans two template directories — `share/templates/kanban/` (USER_HOME, AITEAMFORGE_DIR, BACKUP_INTERVAL, PYTHON3_PATH) and `share/templates/fleet-monitor/` (NODE_PATH, FLEET_SERVER_PATH, LOG_DIR, HOMEBREW_PREFIX, HOME_DIR, FLEET_PORT, AITEAMFORGE_DIR). The two substitution maps are incompatible, so the rework uses per-agent dispatch (`_render_kanban_template` vs `_render_fleet_template`) instead of a single shared sed expression. `{{AITEAMFORGE_DIR}}` resolves to `${NEW_DATA_DIR}` (the migration's destination), not `${WORKING_DIR}` as in upgrade.sh — that's what makes the rewritten plist correct after a migration.
+- **17 test cases** in `tests/test-xaca-0512-migrate-launchagent-render.sh` covering: all-absent → skip; explicit `.bak`/`.bak2` regression assertion; kanban + fleet render with no placeholders; selective opt-in; no-op second run; FORCE re-render; DRY_RUN sentinel preservation on *both* renderer paths (PR #32 [Review] subitem XACA-0512-002 added the fleet-monitor DRY_RUN case); missing-template warning without crash; DRY_RUN + no-change "All LaunchAgents up to date" summary. `LAUNCHAGENTS_DIR` env seam preserved (M3Pro tap-install ban).
+- **Audit-only on sibling `aiteamforge-migrate-check.sh`** — that script's `analyze_launchagents()` has the same `EXPECTED_AGENTS` list but is read-only (presence + `launchctl list`, no render). No change required.
+- **Sibling-heuristic drift, third datapoint:** XACA-0476 (missing `share/` prefix) → XACA-0510 (no template render in `upgrade.sh`) → XACA-0512 (no template render in `migrate.sh`). All three sites in the launchagent-render surface are now consistent. Cross-file consolidation of `KANBAN_BACKUP_INTERVAL` (install-kanban.sh + upgrade.sh + migrate.sh) and `FLEET_MONITOR_PORT` (install-fleet-monitor.sh + migrate.sh) defaults remains tracked under XACA-0516.
+- **PR review cycle:** thok (tester) APPROVED 17/17 + plutil/xmllint clean. reno (reviewer) APPROVED with 3 non-blocking `[Review]` subitems across the two PRs — XACA-0512-002 addressed in tap commit 18b2fc3 (fleet-monitor DRY_RUN test); XACA-0512-003 cancelled as YAGNI per user approval (conditional "if a third template family is ever added" wording); XACA-0512-004 addressed by the rebase that produced this commit (the original PR #425 stanza claimed XACA-0513 was being bundled in this bump; XACA-0513 had already shipped via PR #423, and the rebase reduces the pointer delta to XACA-0512 only).
+- **Submodule pointer bumped from `f45e997a` (XACA-0513) → `3f325999` (DoubleNode/homebrew-aiteamforge#32 squash-merge).** Single-ticket bump after rebase onto develop — no other tap commits included.
+
+### Fix: XACA-0514 — Enforce sync-tap-drift as a merge gate (Gate 3.5) + close path-filter blind spot
+
+- **Gate 3.5 added to PR auto-merge monitoring loop (`claude/CLAUDE.md`).** The loop now checks `sync-tap-drift` conclusion via `gh pr checks --json name,state` before invoking `kb-merge`. A `FAILURE` result breaks the loop and prints remediation instructions. Bypass via `Tap-Only-Edit: intentional` commit trailer OR `tap-only-intentional` PR label — the same two signals `scripts/check-tap-only-edits.sh` already recognizes.
+- **Root cause closed.** 9 tickets / 37 files of tap drift accumulated over ~6 weeks (XACA-0135 through XACA-0497) because `sync-tap-check` was advisory only — a failing CI check with no branch-protection enforcement. The monitoring loop is now the enforcement point: `kb-merge` is never called when `sync-tap-drift` is red and no bypass signal is present.
+- **Path-filter blind spot closed (`.github/workflows/sync-tap-check.yml`).** Added `docs/homebrew-tap/**` to both the `pull_request` and `push` path filters. None of the 9 drift PRs touched this path, but the gap was real — a tap-docs change would have silently skipped the drift check entirely.
+
+### Fix: XACA-0513 — sync-tap.sh: remove `*/tests/*` exclusion for fleet-monitor/server
+
+- **`sync-tap.sh` patch:** removed `-not -path "*/tests/*"` from the fleet-monitor/server `sync_dir` invocation (line ~301). The exclusion was originally intended to prevent dev-only test suites from shipping to the tap, but the Node CI matrix (`Node.js Tests (18/20/22)`) requires the test files to be present in the tap. Updated the comment block to reflect that the test suite IS now synced intentionally (XACA-0513). Also refreshed the `sync_dir` docstring example at line 160 (replaced stale `-not -path '*/tests/*'` example with `-not -name 'fly.toml'` — a pattern still in active use).
+- **6 files now sync to tap:** `tests/helpers.test.js`, `tests/fleet-routes.test.js`, `tests/team-routes.test.js`, `tests/kanban-routes.test.js`, `tests/dashboard-routes.test.js`, `tests/helpers/app-factory.js`.
+- **Tap submodule bumped:** `homebrew-tap` pointer advanced from `593d2658` (XACA-0511) to `f45e997a` (DoubleNode/homebrew-aiteamforge#31, squash-merged). The 6 test files are now present in the tap; Node 18/20/22 CI matrix is green (all three workflows passed on the tap PR before the dev-team pointer bump).
+- **Local verification:** 137/137 tests pass on Node 26 (system). Node 22 has a broken local `libsimdjson.30.dylib` dependency unrelated to these tests; CI matrix (18/20/22) validated by subitem 004.
+- **Closes the CI bypass:** XACA-0476 omnibus merge (PR #420) bypassed Node 18/20/22 via `--admin` because the test wiring from XACA-0135 landed on dev-team without its companion test files in the tap. XACA-0513 closes that bypass — the matrix is now self-validating on every tap PR.
+
+### Fix: XACA-0510 — `update_launchagents` render-from-template (tap submodule)
+
+- **`homebrew-tap` submodule** — `update_launchagents()` in `aiteamforge-upgrade.sh` was looking for pre-rendered plists at `share/launchagents/<agent>` — a directory the tap does not ship. XACA-0476 corrected the `share/` prefix but could not unblock the function, which silently no-op'd on the "source absent" early-out. This tap-side fix (see `homebrew-tap/CHANGELOG.md` for full detail) brings upgrade in line with `install-kanban.sh`: render `*.template` files from `share/templates/kanban/` with the full sed substitution map (`USER_HOME`, `AITEAMFORGE_DIR`, `BACKUP_INTERVAL`, `PYTHON3_PATH`), diff against the live target, and reload only on change.
+- **`FORCE` / `DRY_RUN` / unload+load semantics preserved.** Agents absent from `~/Library/LaunchAgents/` still skipped — upgrade does not silently install agents the user opted out of.
+- **Sibling site `aiteamforge-migrate.sh::update_launchagents`** has a different defect class tracked separately as XACA-0512. Cross-file consolidation of the `KANBAN_BACKUP_INTERVAL=900` default (install-kanban.sh + upgrade.sh) tracked as XACA-0516. Three confirmed datapoints of sibling-heuristic drift now exist in this surface (XACA-0476, XACA-0510, XACA-0512).
+- **Submodule pointer bumped from `593d2658` (XACA-0511) → `ab1a7973` (DoubleNode/homebrew-aiteamforge#30 squash-merge).** Tap-side dual-gate review cycle: bots APPROVED twice; 6 [Review]/[Test] subitems filed and addressed in a follow-up commit before merge.
+
+### Chore: XACA-0511 — Bump `homebrew-tap` submodule pointer → `593d2658` (seed `share/CHANGELOG.md` for `show_changelog`)
+
+- **`homebrew-tap` submodule:** advanced recorded pointer from `78aa0a96` to `593d2658` (DoubleNode/homebrew-aiteamforge#29, squash-merged to tap `main`). That tap PR seeds `share/CHANGELOG.md` from the dev-team root `CHANGELOG.md` and adds a "Refreshing the framework CHANGELOG snapshot" subsection to tap `CONTRIBUTING.md` under "Release Process".
+- **Why XACA-0511 exists:** XACA-0476 fixed the `FRAMEWORK_DIR` prefix at `libexec/commands/aiteamforge-upgrade.sh:442` so `show_changelog()` reads `${FRAMEWORK_DIR}/share/CHANGELOG.md`. But no such file shipped — only the component-specific `share/lcars-ui/CHANGELOG.md`. After this bump, `aiteamforge upgrade` renders the framework Changelog instead of silently no-opping with `"No changelog available"`.
+- **Strategy — snapshot-at-tap-bump cadence:** the tap-side `share/CHANGELOG.md` is refreshed manually before each tap version tag via `cp ../CHANGELOG.md share/CHANGELOG.md` (documented in tap `CONTRIBUTING.md`). The auto-sync alternative — add a `sync_file` rule in `sync-tap.sh` — was rejected because every dev-team commit (which CLAUDE.md mandates carries a CHANGELOG stanza) would trip the pre-push drift check and force a tap re-sync push, taxing every PR.
+- **Verification:** smoke test confirmed `show_changelog` renders `head -n 20 share/CHANGELOG.md` (Changelog header + Unreleased entries through XACA-0476) when `FRAMEWORK_DIR` points at the seeded tap.
+- **Lockstep / drift:** no `sync-tap.sh` change, no `.githooks/pre-push` `SYNC_TAP_PATHS` change, no `.github/workflows/sync-tap-check.yml` paths-filter change. The new tap file has no canonical-source pair entry in `scripts/check-tap-only-edits.sh` (intentional — it's a tap-bump-cadence snapshot, not a per-commit mirror), so the lockstep CI step treats it as unrelated and stays green.
+- **Refs:** closes the follow-up flagged at the end of the XACA-0476 stanza ("XACA-0511 (`show_changelog()` still silently no-ops — no `share/CHANGELOG.md` ships…)").
+
 ### Chore: XACA-0476 — Bump `homebrew-tap` submodule pointer → `78aa0a96` (FRAMEWORK_DIR cluster path fix + omnibus sync-tap drift)
 
 - **`homebrew-tap` submodule:** advanced recorded pointer from `2f1d5768` to `78aa0a96` (DoubleNode/homebrew-aiteamforge#28, squash-merged to tap `main`). That tap PR bundles two distinct change-sets per explicit user direction:
