@@ -5845,7 +5845,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         XACA-0625.
         """
         import fcntl
-        from datetime import datetime
+        from datetime import datetime, timedelta
 
         try:
             board_file = self._get_board_file()
@@ -5893,9 +5893,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 Accepts: <int><unit> where unit is h (hours), d (days), w (weeks),
                 m (months, approx 30 days).  Whitespace and case are tolerated.
                 Returns datetime.timedelta on success, None on unparseable input.
+                (re is a module-level import; timedelta comes from the enclosing
+                serve_roadmap scope — see the import at the top of this method.)
                 """
-                import re
-                from datetime import timedelta
                 if not s or not isinstance(s, str):
                     return None
                 m = re.fullmatch(r'\s*(\d+)\s*([hHdDwWmM])\s*', s.strip())
