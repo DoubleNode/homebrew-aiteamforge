@@ -5929,8 +5929,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 """Return ('activity', start, end) from child activity timestamps, or
                 ('none', None, None) if no resolved start+end can be derived.
 
-                start = MIN(startedAt or addedAt) over non-cancelled children that have
-                completedAt; end = MAX(completedAt) over that same set.
+                start = MIN(startedAt or addedAt) over COMPLETED children (status ==
+                'completed') that have completedAt; end = MAX(completedAt) over that
+                same set.  Requiring status == 'completed' (not merely non-cancelled)
+                keeps a data-anomaly in-progress item carrying a stale completedAt out
+                of the span — such an item is still counted as open below.
 
                 EXTEND-TO-TODAY: if any non-cancelled child is still open (status not in
                 completed/cancelled), end is clamped to today so the bar extends to the
@@ -5944,7 +5947,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 """
                 completed_children = [
                     c for c in children
-                    if c.get('status') not in ('cancelled',) and c.get('completedAt')
+                    if c.get('status') == 'completed' and c.get('completedAt')
                 ]
                 if not completed_children:
                     return 'none', None, None
@@ -5968,6 +5971,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
                 activity_start = min(start_dates)
                 activity_end = max(end_dates)
+
+                # Degenerate-span guard: corrupt timestamps (e.g. a completedAt earlier
+                # than every startedAt/addedAt) could yield end < start, which renders an
+                # invisible/zero-width bar on the frontend.  Clamp end up to start so the
+                # span is at least a point event.
+                if activity_end < activity_start:
+                    activity_end = activity_start
 
                 # EXTEND-TO-TODAY: clamp end forward if any non-cancelled child is still open
                 open_children = [
@@ -6083,10 +6093,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     schedule_source = 'rollup'
 
                 # Rule 5.5: activity rollup — no explicit dates, no dated children, but
-                # some non-cancelled children may have completedAt timestamps.  Delegate
+                # some completed children may have completedAt timestamps.  Delegate
                 # entirely to _activity_rollup (same helper used by the ARCHIVED branch
                 # above) so there is exactly ONE copy of this logic (XACA-0638 DRY fix).
-                # Falls through to Rule 6 ('none') when no resolvable timestamps exist.
+                # The helper itself returns 'none' (handled directly by this branch — the
+                # epic still routes to the unscheduled lane) when no resolvable timestamps
+                # exist; Rule 6 below only catches epics with no child items at all.
                 elif child_items:
                     schedule_source, resolved_start, resolved_end = _activity_rollup(child_items)
 
