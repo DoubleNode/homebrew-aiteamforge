@@ -344,6 +344,7 @@ IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
 ROADMAP_PDF_STASH = {}
 ROADMAP_PDF_STASH_TTL = 120  # seconds
 ROADMAP_PDF_MAX_BYTES = 25 * 1024 * 1024
+ROADMAP_PDF_STASH_MAX_ENTRIES = 10  # cap concurrent live entries (memory DoS guard)
 SECRETS_IMPORT_STAGING_DIR = Path("/tmp/lcars-secrets-imports")
 
 # Maximum wrong-password attempts before the staged zip is purged (item 6 spec).
@@ -13304,9 +13305,13 @@ end tell
                 self._send_json_response({'error': 'Empty or oversized PDF'}, status=413)
                 return
 
-            # Sanitize the filename: basename only (no path traversal), keep it a .pdf.
+            # Sanitize the filename: basename only (no path traversal), strip quotes,
+            # backslashes AND CR/LF/TAB (the last would inject raw headers into the
+            # Content-Disposition response on download — XACA-0636-001), keep it a .pdf.
             filename = os.path.basename(str(body.get('filename') or 'roadmap.pdf'))
-            filename = filename.replace('"', '').replace('\\', '').strip() or 'roadmap.pdf'
+            filename = (filename.replace('"', '').replace('\\', '')
+                                .replace('\r', '').replace('\n', '').replace('\t', '').strip()
+                        or 'roadmap.pdf')
             if not filename.lower().endswith('.pdf'):
                 filename += '.pdf'
 
@@ -13314,6 +13319,13 @@ end tell
             now = time.time()
             for tok in [t for t, v in ROADMAP_PDF_STASH.items() if now - v['ts'] > ROADMAP_PDF_STASH_TTL]:
                 ROADMAP_PDF_STASH.pop(tok, None)
+
+            # Cap concurrent live entries so a burst of POSTs can't exhaust memory
+            # within the TTL window (XACA-0636-002).
+            if len(ROADMAP_PDF_STASH) >= ROADMAP_PDF_STASH_MAX_ENTRIES:
+                self._send_json_response(
+                    {'error': 'Too many pending roadmap PDFs; retry shortly'}, status=429)
+                return
 
             token = uuid.uuid4().hex
             ROADMAP_PDF_STASH[token] = {'data': data, 'filename': filename, 'ts': now}
