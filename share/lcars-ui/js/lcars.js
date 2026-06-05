@@ -19815,54 +19815,126 @@ async function initChangeReqSection() {
 // =============================================================================
 
 /**
- * Export the roadmap as a PDF via the browser's native Save-as-PDF dialog.
+ * Export the roadmap as a PDF using client-side html2canvas + jsPDF.
  *
- * Strategy:
- *   1. Add body.roadmap-printing — this class, combined with the @media print
- *      rules in lcars.css, hides all non-roadmap chrome (header, sidebar, other
- *      sections) so only the timeline renders in the print dialog.
- *   2. Call window.print() to open the browser's print/Save-as-PDF dialog.
- *   3. Remove body.roadmap-printing on the 'afterprint' event (fired when the
- *      dialog closes in modern browsers). This is the PRIMARY cleanup path.
- *      We deliberately do NOT remove the class synchronously after
- *      window.print(): the call returns immediately while the dialog is still
- *      open, so a synchronous removal would strip the class before the browser
- *      renders to PDF (and Chrome's live preview would lose the scoping).
- *   4. A long safety-timeout janitor removes the class as a last resort if
- *      'afterprint' never fires (very old / programmatic-print environments).
- *      The delay is generous (60s) so it cannot race a normal print render.
+ * Strategy (XACA-0633 — replaces window.print() approach):
+ *   window.print() is a no-op in iTerm2's WKWebView cockpit, producing a
+ *   stuck full-window takeover and no PDF.  This implementation captures
+ *   #roadmap-content with html2canvas, builds a landscape jsPDF document
+ *   sized to the content, and downloads it directly via doc.save().
  *
- * No server-side dependencies, no new libraries.
+ *   Requires: window.html2canvas (html2canvas 1.4.1) and window.jspdf.jsPDF
+ *   (jsPDF 2.5.1), both vendored as UMD scripts loaded before lcars.js.
+ *
+ * buildRoadmapPdf() — pure builder, exposed as window.__buildRoadmapPdf for
+ *   headless verification.  Returns { doc, filename }.
+ * exportRoadmapPdf() — save wrapper; handles button state and error toast.
+ *
+ * Does NOT touch body classes, does NOT call window.print(), does NOT register
+ * afterprint listeners, does NOT need a janitor timeout.
  */
-function exportRoadmapPdf() {
-    const body = document.body;
-    const printingClass = 'roadmap-printing';
+async function buildRoadmapPdf() {
+    const el = document.getElementById('roadmap-content');
+    if (!el) throw new Error('roadmap-content not found');
 
-    // Guard: don't stack multiple print calls
-    if (body.classList.contains(printingClass)) return;
-
-    let janitorId = null;
-    function cleanup() {
-        body.classList.remove(printingClass);
-        window.removeEventListener('afterprint', onAfterPrint);
-        if (janitorId !== null) { clearTimeout(janitorId); janitorId = null; }
+    if (typeof window.html2canvas !== 'function') {
+        throw new Error('html2canvas not loaded — vendor script missing');
+    }
+    if (!window.jspdf || typeof window.jspdf.jsPDF !== 'function') {
+        throw new Error('jsPDF not loaded — vendor script missing');
     }
 
-    // Afterprint listener — PRIMARY cleanup, runs when the print dialog closes
-    function onAfterPrint() { cleanup(); }
-    window.addEventListener('afterprint', onAfterPrint);
+    const bg = getComputedStyle(document.body).backgroundColor || '#000000';
 
-    // Activate print-only scope
-    body.classList.add(printingClass);
+    const canvas = await window.html2canvas(el, {
+        backgroundColor: bg,
+        scale: 2,
+        useCORS: true,
+        width:  el.scrollWidth,
+        height: el.scrollHeight,
+        windowWidth:  el.scrollWidth,
+        scrollX: 0,
+        scrollY: 0
+    });
 
-    // Last-resort janitor: if 'afterprint' never fires, still remove the class
-    // after a delay long enough to never race the print render (cleanup() is
-    // idempotent, so a normal afterprint simply cancels this timer).
-    janitorId = setTimeout(cleanup, 60000);
+    const { jsPDF } = window.jspdf;
+    const imgW = canvas.width;
+    const imgH = canvas.height;
 
-    // Open the print dialog. window.print() returns immediately while the
-    // dialog is open; the afterprint listener (or the janitor) clears the class.
-    window.print();
+    // Landscape page sized to the content; paginate vertically if very tall.
+    const orientation = imgW >= imgH ? 'landscape' : 'portrait';
+    const pdfW   = 1122;   // ~A4 landscape width in pt
+    const pageH  = 793;    // ~A4 landscape height in pt
+    const scaledH = imgW > 0 ? (imgH * pdfW / imgW) : pageH;
+    const firstPageH = Math.min(scaledH, pageH);
+
+    const doc = new jsPDF({ orientation, unit: 'pt', format: [pdfW, firstPageH] });
+    // JPEG (not PNG): jsPDF 2.5.1's PNG parser chokes on some html2canvas
+    // outputs ("Incomplete or corrupt PNG file"); JPEG is robust and the LCARS
+    // background is solid (no transparency needed). Quality 0.92.
+    const img = canvas.toDataURL('image/jpeg', 0.92);
+
+    if (scaledH <= pageH) {
+        doc.addImage(img, 'JPEG', 0, 0, pdfW, scaledH);
+    } else {
+        // Paginate: render the full image offset across multiple pages so the
+        // content scrolls correctly from page to page.
+        let remaining = scaledH;
+        let yOffset   = 0;
+        let first     = true;
+        while (remaining > 0) {
+            if (!first) doc.addPage([pdfW, pageH]);
+            doc.addImage(img, 'JPEG', 0, -yOffset, pdfW, scaledH);
+            yOffset   += pageH;
+            remaining -= pageH;
+            first      = false;
+        }
+    }
+
+    const team = (CONFIG && CONFIG.team) ? CONFIG.team : 'roadmap';
+    const date = new Date().toISOString().slice(0, 10);
+    const filename = `roadmap-${team}-${date}.pdf`;
+
+    return { doc, filename };
+}
+
+// Headless verification hook — allows test harnesses to call the builder
+// without triggering a file-save dialog.
+window.__buildRoadmapPdf = buildRoadmapPdf;
+
+async function exportRoadmapPdf() {
+    const btn = document.querySelector('.roadmap-pdf-btn');
+    const prevText = btn ? btn.textContent : null;
+
+    try {
+        if (btn) { btn.setAttribute('disabled', 'true'); btn.textContent = 'GENERATING…'; }
+        const { doc, filename } = await buildRoadmapPdf();
+        // Primary: trigger a file download (standard browsers + modern WebKit).
+        // Fallback: some embedded WebViews (e.g. iTerm2's WKWebView cockpit) may
+        // not honor <a download>; open the PDF in a new tab so it can be viewed
+        // and saved from the browser's PDF viewer.
+        try {
+            doc.save(filename);
+        } catch (saveErr) {
+            const url = doc.output('bloburl');
+            const w = window.open(url, '_blank');
+            if (!w && typeof showToast === 'function') {
+                showToast('PDF generated but the browser blocked the download/open. Try a real browser tab.', 'error');
+            }
+        }
+    } catch (e) {
+        const msg = (e && e.message) ? escapeHtml(e.message) : 'unknown error';
+        if (typeof showToast === 'function') {
+            showToast('PDF export failed: ' + msg, 'error');
+        } else {
+            console.error('Roadmap PDF export failed', e);
+        }
+    } finally {
+        if (btn) {
+            btn.removeAttribute('disabled');
+            if (prevText !== null) btn.textContent = prevText;
+        }
+    }
 }
 
 // Renders the /api/roadmap response into #roadmap-content.

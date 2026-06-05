@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0633: Bugfix — Roadmap Export PDF reworked to client-side generation -->
+
+### Fixed
+- **XACA-0633: Roadmap "Export PDF" now generates a PDF client-side instead of `window.print()`.** LCARS runs inside iTerm2's WKWebView cockpit, where `window.print()` is a no-op — clicking Export added the `body.roadmap-printing` scope, no print dialog ever opened, and `afterprint` never fired, leaving the UI stuck in a full-window takeover with no PDF. Reworked `exportRoadmapPdf()` to capture `#roadmap-content` with **html2canvas** and build a landscape PDF with **jsPDF** (both vendored locally at `js/vendor/`, no runtime/CDN/server deps), downloaded via `doc.save()` with a new-tab `bloburl` fallback for WebViews that don't honor `<a download>`. No more `window.print()`, no body-class takeover. Output is rasterized (JPEG-embedded — jsPDF 2.5.1's PNG parser rejects some html2canvas output). Verified by generating a real PDF headlessly (full timeline + unscheduled lanes captured). The legacy `body.roadmap-printing` / `@media print` CSS is left in place (harmless; still useful if LCARS is opened in a real browser). Cache-buster bumped `lcars.js?v=3.25→3.27`; vendor scripts added.
+
 <!-- XACA-0629: Bugfix — Roadmap PDF export rendered blank -->
 
 ### Fixed
