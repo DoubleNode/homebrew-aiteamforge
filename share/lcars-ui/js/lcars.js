@@ -19904,7 +19904,8 @@ async function buildRoadmapPdf() {
         const elTop = clone.getBoundingClientRect().top;
         const blockSel = '.roadmap-pdf-header, .roadmap-chip, .roadmap-bar, .roadmap-milestone, .roadmap-axis,' +
             ' .roadmap-unscheduled-heading, .roadmap-unscheduled-subheading,' +
-            ' .roadmap-unscheduled-status-label, .roadmap-lane-label';
+            ' .roadmap-unscheduled-status-label, .roadmap-lane-label,' +
+            ' .roadmap-details-heading, .roadmap-details-subheading, .roadmap-details-entry';
         const blocks = Array.from(clone.querySelectorAll(blockSel)).map(b => {
             const r = b.getBoundingClientRect();
             return [r.top - elTop, r.bottom - elTop];
@@ -20585,6 +20586,91 @@ async function renderRoadmap() {
         renderKindGroup('epics', 'Epics', unschEpics, epicChipHtml);
 
         parts.push('</div>'); // .roadmap-unscheduled
+    }
+
+    // -----------------------------------------------------------------------
+    // Details & Reference section (XACA-0642)
+    // Epics group: only epics with a non-empty description.
+    // Releases group: all releases, with detail text derived from existing fields.
+    // Dedup note: scheduled vs unscheduled lists never contain the same item twice,
+    // so [...scheduled, ...unscheduled] concat is safe.
+    // -----------------------------------------------------------------------
+    {
+        const allEpics    = [...scheduledEpics, ...unschEpics];
+        const allReleases = [...scheduledReleases, ...unschReleases];
+
+        const epicsWithDesc = allEpics.filter(e => e.description && e.description.trim());
+        const hasEpicsGroup    = epicsWithDesc.length > 0;
+        const hasReleasesGroup = allReleases.length > 0;
+
+        if (hasEpicsGroup || hasReleasesGroup) {
+            parts.push('<div class="roadmap-details">');
+            parts.push('<div class="roadmap-details-heading">Details &amp; Reference</div>');
+
+            // --- Epics group ---
+            if (hasEpicsGroup) {
+                parts.push('<div class="roadmap-details-group" data-kind="epics">');
+                parts.push('<div class="roadmap-details-subheading">Epics</div>');
+                for (const epic of epicsWithDesc) {
+                    const color  = escapeHtml(epic.color  || '');
+                    const status = escapeHtml(epic.status || '');
+                    parts.push(
+                        `<div class="roadmap-details-entry" data-kind="epic"` +
+                        ` data-color="${color}"` +
+                        ` data-status="${status}">`
+                    );
+                    parts.push(`<div class="roadmap-details-entry-title">${escapeHtml(epic.shortTitle || epic.title || epic.id)}</div>`);
+                    parts.push(`<div class="roadmap-details-entry-body">${escapeHtml(epic.description.trim())}</div>`);
+                    parts.push('</div>'); // .roadmap-details-entry
+                }
+                parts.push('</div>'); // .roadmap-details-group[data-kind="epics"]
+            }
+
+            // --- Releases group ---
+            if (hasReleasesGroup) {
+                parts.push('<div class="roadmap-details-group" data-kind="releases">');
+                parts.push('<div class="roadmap-details-subheading">Releases</div>');
+                for (const rel of allReleases) {
+                    const relType   = escapeHtml(rel.type   || '');
+                    const relStatus = escapeHtml(rel.status || '');
+                    const relState  = escapeHtml(rel.state  || '');
+
+                    // Derive detail text: type (capitalized) · status · state · date
+                    const detailParts = [];
+                    if (rel.type && rel.type.trim()) {
+                        const t = rel.type.trim();
+                        detailParts.push(t.charAt(0).toUpperCase() + t.slice(1));
+                    }
+                    if (rel.status && rel.status.trim()) detailParts.push(rel.status.trim());
+                    if (rel.state  && rel.state.trim())  detailParts.push(rel.state.trim());
+                    // Date: prefer targetDate; fall back to start→end range
+                    if (rel.targetDate && rel.targetDate.trim()) {
+                        detailParts.push(rel.targetDate.trim());
+                    } else if (rel.start && rel.end) {
+                        if (rel.start === rel.end) {
+                            detailParts.push(rel.start);
+                        } else {
+                            detailParts.push(`${rel.start} – ${rel.end}`);
+                        }
+                    }
+                    const detailText = detailParts.length > 0
+                        ? detailParts.join(' · ')
+                        : '(no detail)';
+
+                    parts.push(
+                        `<div class="roadmap-details-entry" data-kind="release"` +
+                        ` data-type="${relType}"` +
+                        ` data-status="${relStatus}">`
+                    );
+                    parts.push(`<div class="roadmap-details-entry-title">${escapeHtml(rel.shortTitle || rel.name || rel.id)}</div>`);
+                    parts.push(`<div class="roadmap-details-entry-body">${escapeHtml(detailText)}</div>`);
+                    parts.push('</div>'); // .roadmap-details-entry
+                }
+                parts.push('</div>'); // .roadmap-details-group[data-kind="releases"]
+            }
+
+            parts.push('</div>'); // .roadmap-details
+        }
     }
 
     container.innerHTML = parts.join('\n');

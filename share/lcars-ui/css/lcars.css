@@ -17593,6 +17593,97 @@ body {
 .roadmap-chip[data-kind="release"][data-type="maintenance"] .roadmap-chip-label { color: var(--lcars-green); }
 
 /* ---------------------------------------------------------------------------
+   Details & Reference section (XACA-0642)
+   Dark-cockpit styles for .roadmap-details* class family.
+   Renders below the unscheduled block — epics (with description) then releases.
+   --------------------------------------------------------------------------- */
+.roadmap-details {
+    margin: 24px 0 0 0;
+    padding: 0 12px 24px 12px;
+    border-top: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.roadmap-details-heading {
+    font-family: 'Antonio', sans-serif;
+    font-size: 0.90rem;
+    font-weight: 700;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--lcars-tan);
+    margin: 0 0 16px 0;
+    padding: 12px 0 8px 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.10);
+}
+
+.roadmap-details-group {
+    margin: 0 0 20px 0;
+}
+
+.roadmap-details-subheading {
+    font-family: 'Antonio', sans-serif;
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.10em;
+    text-transform: uppercase;
+    margin: 0 0 10px 0;
+    padding-bottom: 4px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.roadmap-details-group[data-kind="epics"] .roadmap-details-subheading {
+    color: var(--lcars-purple);
+}
+
+.roadmap-details-group[data-kind="releases"] .roadmap-details-subheading {
+    color: var(--lcars-amber);
+}
+
+.roadmap-details-entry {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    margin: 0 0 10px 0;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.04);
+    border-radius: 3px;
+    border-left: 3px solid var(--lcars-tan);
+}
+
+/* Epic entry: left-border accent mirrors existing chip data-color mapping */
+.roadmap-details-entry[data-kind="epic"][data-color="purple"] { border-left-color: var(--lcars-purple); }
+.roadmap-details-entry[data-kind="epic"][data-color="blue"]   { border-left-color: var(--lcars-blue); }
+.roadmap-details-entry[data-kind="epic"][data-color="teal"]   { border-left-color: var(--lcars-cyan); }
+.roadmap-details-entry[data-kind="epic"][data-color="green"]  { border-left-color: var(--lcars-green); }
+.roadmap-details-entry[data-kind="epic"][data-color="yellow"] { border-left-color: var(--lcars-yellow); }
+.roadmap-details-entry[data-kind="epic"][data-color="orange"] { border-left-color: var(--lcars-orange); }
+.roadmap-details-entry[data-kind="epic"][data-color="red"]    { border-left-color: var(--lcars-alert-red); }
+.roadmap-details-entry[data-kind="epic"][data-color="pink"]   { border-left-color: var(--lcars-rose); }
+
+/* Release entry: left-border accent mirrors existing chip data-type mapping */
+.roadmap-details-entry[data-kind="release"]                          { border-left-color: var(--lcars-amber); }
+.roadmap-details-entry[data-kind="release"][data-type="feature"]     { border-left-color: var(--lcars-blue); }
+.roadmap-details-entry[data-kind="release"][data-type="bugfix"]      { border-left-color: var(--lcars-orange); }
+.roadmap-details-entry[data-kind="release"][data-type="hotfix"]      { border-left-color: var(--lcars-crimson); }
+.roadmap-details-entry[data-kind="release"][data-type="maintenance"] { border-left-color: var(--lcars-green); }
+
+.roadmap-details-entry-title {
+    font-family: 'Antonio', sans-serif;
+    font-size: 0.82rem;
+    font-weight: 700;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--lcars-peach);
+    line-height: 1.2;
+}
+
+.roadmap-details-entry-body {
+    font-size: 0.79rem;
+    color: var(--lcars-lavender);
+    line-height: 1.45;
+    opacity: 0.90;
+}
+
+/* ---------------------------------------------------------------------------
    PDF light theme (XACA-0636)
    Applied transiently to #roadmap-content by buildRoadmapPdf() during export and
    removed immediately after html2canvas capture — NEVER visible on screen. Turns
@@ -17706,6 +17797,50 @@ body {
     background: #d4eed7 !important;
     color: #1a6629 !important;
     border-color: #8cc494 !important;
+}
+/* Details & Reference section light-theme overrides (XACA-0642) */
+.roadmap-pdf-light .roadmap-details {
+    border-top-color: rgba(0, 0, 0, 0.12) !important;
+}
+.roadmap-pdf-light .roadmap-details-heading {
+    color: #5a3a1a !important;
+    border-bottom-color: rgba(0, 0, 0, 0.12) !important;
+}
+.roadmap-pdf-light .roadmap-details-group[data-kind="epics"] .roadmap-details-subheading {
+    color: #6a2fb5 !important;
+    border-bottom-color: rgba(0, 0, 0, 0.08) !important;
+}
+.roadmap-pdf-light .roadmap-details-group[data-kind="releases"] .roadmap-details-subheading {
+    color: #7a5a00 !important;
+    border-bottom-color: rgba(0, 0, 0, 0.08) !important;
+}
+.roadmap-pdf-light .roadmap-details-subheading {
+    border-bottom-color: rgba(0, 0, 0, 0.08) !important;
+}
+.roadmap-pdf-light .roadmap-details-entry {
+    background: rgba(0, 0, 0, 0.03) !important;
+    border-left-color: rgba(0, 0, 0, 0.20) !important;
+}
+/* Accent left-borders: keep kind/type color but darkened for contrast on white */
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="purple"] { border-left-color: #6a2fb5 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="blue"]   { border-left-color: #2a2ab5 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="teal"]   { border-left-color: #1a6080 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="green"]  { border-left-color: #1f7a3d !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="yellow"] { border-left-color: #a07800 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="orange"] { border-left-color: #cc6600 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="red"]    { border-left-color: #b52020 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="epic"][data-color="pink"]   { border-left-color: #b53050 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="release"]                          { border-left-color: #7a5a00 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="release"][data-type="feature"]     { border-left-color: #2a2ab5 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="release"][data-type="bugfix"]      { border-left-color: #cc6600 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="release"][data-type="hotfix"]      { border-left-color: #b52020 !important; }
+.roadmap-pdf-light .roadmap-details-entry[data-kind="release"][data-type="maintenance"] { border-left-color: #1f7a3d !important; }
+.roadmap-pdf-light .roadmap-details-entry-title {
+    color: #1f1f24 !important;
+}
+.roadmap-pdf-light .roadmap-details-entry-body {
+    color: #3a3a4a !important;
+    opacity: 1 !important;
 }
 
 /* ---------------------------------------------------------------------------
