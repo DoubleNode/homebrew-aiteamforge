@@ -20647,10 +20647,12 @@ async function renderRoadmap() {
                     if (rel.targetDate && rel.targetDate.trim()) {
                         detailParts.push(rel.targetDate.trim());
                     } else if (rel.start && rel.end) {
-                        if (rel.start === rel.end) {
-                            detailParts.push(rel.start);
+                        const relStart = rel.start.trim();
+                        const relEnd   = rel.end.trim();
+                        if (relStart === relEnd) {
+                            detailParts.push(relStart);
                         } else {
-                            detailParts.push(`${rel.start} – ${rel.end}`);
+                            detailParts.push(`${relStart} – ${relEnd}`);
                         }
                     }
                     const detailText = detailParts.length > 0

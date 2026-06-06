@@ -17815,6 +17815,9 @@ body {
     border-bottom-color: rgba(0, 0, 0, 0.08) !important;
 }
 .roadmap-pdf-light .roadmap-details-subheading {
+    /* Fallback dark color for any future subheading kind without a qualified
+       override (kind-qualified rules above win by specificity for epics/releases). */
+    color: #5a3a1a !important;
     border-bottom-color: rgba(0, 0, 0, 0.08) !important;
 }
 .roadmap-pdf-light .roadmap-details-entry {
