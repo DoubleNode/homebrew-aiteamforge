@@ -19861,6 +19861,21 @@ async function buildRoadmapPdf() {
         width: liveWidth + 'px', height: 'auto', minHeight: '0',
         overflow: 'visible', margin: '0', zIndex: '-1',
     });
+
+    // Title header for the export (XACA-0641). The on-screen cockpit already carries
+    // a "ROADMAP" section title (outside #roadmap-content, so not captured), but the
+    // PDF opened straight into the timeline with nothing identifying it. Prepend a
+    // header — team name + "Roadmap" + generation date — to the clone only.
+    const hdr = document.createElement('div');
+    hdr.className = 'roadmap-pdf-header';
+    const teamName = roadmapTeamName();
+    const hdrTitle = (teamName ? teamName + ' — ' : '') + 'Roadmap';
+    const gen = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+    hdr.innerHTML =
+        `<div class="roadmap-pdf-title">${escapeHtml(hdrTitle)}</div>` +
+        `<div class="roadmap-pdf-subtitle">Generated ${escapeHtml(gen)}</div>`;
+    clone.insertBefore(hdr, clone.firstChild);
+
     document.body.appendChild(clone);
 
     const { jsPDF } = window.jspdf;
@@ -19870,6 +19885,12 @@ async function buildRoadmapPdf() {
 
     try {
         void clone.offsetHeight;  // force a layout flush
+        // Re-run the lane stacker on the clone (XACA-0641). The clone is laid out at
+        // the live width with overflow:visible and no scroll ancestor — the ideal
+        // context to (re)compute row-packing, the title-priority fit, and external
+        // bar labels, so the PDF reflects them even if the live view's stacker state
+        // was stale or had measured a pre-layout (zero-width) track.
+        try { stackRoadmapLanes(clone); void clone.offsetHeight; } catch (e) { /* layout race */ }
         const fullW = clone.scrollWidth;
         const fullH = clone.scrollHeight;
 
@@ -19881,7 +19902,7 @@ async function buildRoadmapPdf() {
         // every content block's vertical span; a break y is "safe" if it lands in a gap
         // (inside no block).
         const elTop = clone.getBoundingClientRect().top;
-        const blockSel = '.roadmap-chip, .roadmap-bar, .roadmap-milestone, .roadmap-axis,' +
+        const blockSel = '.roadmap-pdf-header, .roadmap-chip, .roadmap-bar, .roadmap-milestone, .roadmap-axis,' +
             ' .roadmap-unscheduled-heading, .roadmap-unscheduled-subheading,' +
             ' .roadmap-unscheduled-status-label, .roadmap-lane-label';
         const blocks = Array.from(clone.querySelectorAll(blockSel)).map(b => {
@@ -19976,14 +19997,17 @@ async function buildRoadmapPdf() {
  * rather than document.title, which is unstable — it gets overwritten with the
  * session name / org banner depending on load timing. (XACA-0636)
  */
-function buildRoadmapPdfFilename() {
-    let name = 'Roadmap';
+function roadmapTeamName() {
     const slug = (typeof CONFIG !== 'undefined' && CONFIG && CONFIG.team) ? String(CONFIG.team) : '';
     if (slug) {
         const titled = slug.replace(/[-_]+/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-        name = `${titled} Team`;
+        return `${titled} Team`;
     }
+    return '';
+}
 
+function buildRoadmapPdfFilename() {
+    const name = roadmapTeamName() || 'Roadmap';
     const d = new Date();
     const ymd = `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
     // Sanitize characters illegal in filenames.
@@ -20172,22 +20196,38 @@ async function renderRoadmap() {
         const rangeEnd   = new Date(dateRange.end   + 'T00:00:00Z');
         const rangeSpanMs = rangeEnd.getTime() - rangeStart.getTime();
 
+        // Edge gutter (XACA-0641): markers/labels are centered on their date via
+        // translateX(-50%), so an item at 0% or 100% has half its width outside the
+        // lane-track and is clipped by its overflow:hidden. Rather than rely solely
+        // on the post-layout px-nudge in stackRoadmapLanes() (which needs a settled
+        // layout to measure and silently no-ops when the track isn't laid out yet),
+        // project the time domain [0,100]% into [GUTTER, 100-GUTTER]% so every edge
+        // item carries a built-in safe margin. The axis ticks share this projection
+        // (projectPct), so a marker and its month tick stay aligned. The runtime
+        // nudge remains as a residual correction for unusually wide labels on narrow
+        // viewports. Deterministic + measurement-free = html2canvas-safe.
+        const EDGE_GUTTER_PCT = 4;
+        const DOMAIN_SCALE = (100 - 2 * EDGE_GUTTER_PCT) / 100;
+        const projectPct = (pct) => EDGE_GUTTER_PCT + pct * DOMAIN_SCALE;
+
         /**
          * Convert a YYYY-MM-DD date string to a left-offset percentage within
-         * the range.  Clamped to [0, 100] to keep out-of-range events visible.
+         * the range. Raw position is clamped to [0, 100] to keep out-of-range
+         * events visible, then projected into the gutter-inset domain.
          */
         function dateToPct(dateStr) {
             const d = new Date(dateStr + 'T00:00:00Z');
-            if (rangeSpanMs === 0) return 0;
+            if (rangeSpanMs === 0) return projectPct(0);
             const pct = (d.getTime() - rangeStart.getTime()) / rangeSpanMs * 100;
-            return Math.max(0, Math.min(100, pct));
+            return projectPct(Math.max(0, Math.min(100, pct)));
         }
 
         /**
          * Width percentage for a bar from startStr to endStr.
          * Point events (start == end) get a minimum 0.5% so they remain
          * clickable; the render layer should switch to .roadmap-milestone class
-         * for visual distinction.
+         * for visual distinction. Width is scaled by DOMAIN_SCALE so a bar's
+         * right edge lands at projectPct(end) — consistent with dateToPct.
          */
         function dateRangeWidthPct(startStr, endStr) {
             const s = new Date(startStr + 'T00:00:00Z');
@@ -20196,7 +20236,7 @@ async function renderRoadmap() {
             const w = (e.getTime() - s.getTime()) / rangeSpanMs * 100;
             // Clamp to [0, 100]: the contract guarantees end <= dateRange.end so
             // this is defensive, but it keeps a bar from ever overflowing the track.
-            return Math.max(0, Math.min(100, w));
+            return Math.max(0, Math.min(100, w)) * DOMAIN_SCALE;
         }
 
         // Build month-boundary tick labels for the date axis
@@ -20209,7 +20249,9 @@ async function renderRoadmap() {
 
             const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
             while (cursor.getTime() <= rangeEnd.getTime()) {
-                const pct = (cursor.getTime() - rangeStart.getTime()) / rangeSpanMs * 100;
+                // Share the gutter-inset projection (XACA-0641) so each month tick
+                // stays aligned with the markers dated within that month.
+                const pct = projectPct((cursor.getTime() - rangeStart.getTime()) / rangeSpanMs * 100);
                 const label = MONTHS[cursor.getUTCMonth()] + ' ' + cursor.getUTCFullYear();
                 ticks.push({ pct, label });
                 cursor.setUTCMonth(cursor.getUTCMonth() + 1);
@@ -20606,6 +20648,9 @@ function stackRoadmapLanes(root) {
         track.style.minHeight = '';
         const lane = track.closest('.roadmap-lane');
         if (lane) lane.style.minHeight = '';
+        // External bar labels (XACA-0641) from a prior run are removed wholesale —
+        // they are re-created below only for bars that still need them this run.
+        track.querySelectorAll('.roadmap-bar-extlabel').forEach(n => n.remove());
         for (const el of items) {
             // Stash the original left (the % set at render) once, so edge nudges
             // below are reapplied from scratch each run rather than accumulating.
@@ -20616,10 +20661,27 @@ function stackRoadmapLanes(root) {
             el.classList.remove('roadmap-stacked');
             const sub = el.querySelector('.roadmap-item-sublabel');
             if (sub) sub.style.display = '';
+            // Restore the schedule badge AND the in-bar title — the narrow-bar fit
+            // below may hide either, and this run must start from natural layout.
+            const bdg = el.querySelector('.roadmap-schedule-badge');
+            if (bdg) bdg.style.display = '';
+            const ttl = el.querySelector('.roadmap-item-label');
+            if (ttl) ttl.style.visibility = '';
         }
 
         const trackRect = track.getBoundingClientRect();
-        if (trackRect.width <= 0) return;  // not laid out yet — keep default layout
+        if (trackRect.width <= 0) {
+            // Not laid out yet (e.g. measured before the roadmap section became
+            // visible). Silently giving up here left the edge nudges and narrow-bar
+            // trims unapplied — a prime suspect for edge clipping persisting
+            // on-screen (XACA-0641). Retry on the next frame, bounded so a genuinely
+            // zero-width track can't spin forever.
+            const tries = (track.__roadmapStackTries || 0) + 1;
+            track.__roadmapStackTries = tries;
+            if (tries <= 30) requestAnimationFrame(() => { try { stackRoadmapLanes(root); } catch (e) {} });
+            return;
+        }
+        track.__roadmapStackTries = 0;
 
         // Measure each item's horizontal footprint relative to the track.
         const measured = items.map(el => {
@@ -20660,35 +20722,69 @@ function stackRoadmapLanes(root) {
                 // no transform (html2canvas-safe — see fn header).
                 const barH = m.el.getBoundingClientRect().height || 26;
                 m.el.style.top = (rowTop + (maxItemH - barH) / 2) + 'px';
-                // A bar too narrow to hold both title and sublabel squeezes the title
-                // to a stub (e.g. "K"); drop the sublabel so the title gets the room.
-                if ((m.right - m.left) < 110) {
-                    const sub = m.el.querySelector('.roadmap-item-sublabel');
-                    if (sub) sub.style.display = 'none';
+                // Title-priority fit (XACA-0641). The title (.roadmap-item-label)
+                // shares the bar with a sublabel + schedule badge that consume width
+                // first. The old scroll-width truncation test proved unreliable (a
+                // flex:1 item with min-width:auto never reports as shrunk), so trim
+                // deterministically instead:
+                //   - drop the sublabel from the bar face ALWAYS (least-important info,
+                //     priority • counts; it stays in the tooltip),
+                //   - drop the schedule badge on a narrow bar (reliable px width),
+                //   - then, only if the title STILL can't fit the bar alone, render it
+                //     OUTSIDE the bar (beside it) like a milestone label so it reads.
+                const barW = m.right - m.left;
+                const sub = m.el.querySelector('.roadmap-item-sublabel');
+                if (sub) sub.style.display = 'none';
+                if (barW < 96) {
+                    const bdg = m.el.querySelector('.roadmap-schedule-badge');
+                    if (bdg) bdg.style.display = 'none';
+                }
+                const title = m.el.querySelector('.roadmap-item-label');
+                if (title) {
+                    void m.el.offsetWidth;  // settle layout after the trims
+                    if (title.scrollWidth > title.clientWidth + 1) {
+                        // Bar too short for the title even alone → externalize it. Hide
+                        // the clipped in-bar title; place a sibling label beside the bar,
+                        // preferring the right, falling back left when the right would
+                        // overflow the track's overflow:hidden edge.
+                        const ext = document.createElement('span');
+                        ext.className = 'roadmap-bar-extlabel';
+                        ext.textContent = title.textContent;
+                        track.appendChild(ext);
+                        const er = ext.getBoundingClientRect();
+                        const lw = er.width, lh = er.height || 14;
+                        const rowCenterY = rowTop + maxItemH / 2;
+                        let exLeft = m.right + 6;
+                        if (exLeft + lw > trackRect.width - 2) {
+                            const leftPlace = m.left - 6 - lw;
+                            if (leftPlace >= 2) exLeft = leftPlace;
+                        }
+                        ext.style.left = exLeft + 'px';
+                        ext.style.top = (rowCenterY - lh / 2) + 'px';
+                        title.style.visibility = 'hidden';
+                    }
                 }
             } else {
                 m.el.style.top = rowTop + 'px';
+                // Center the milestone with an explicit pixel left instead of relying
+                // on translateX(-50%): html2canvas mis-renders transforms, which shifted
+                // markers off their x in the PDF only (overlapping the last two and
+                // flipping their order). With .roadmap-stacked now carrying no transform,
+                // left:% would put the box's LEFT edge on the date — so subtract half the
+                // width to re-center. Rendered identically on-screen and in the PDF. The
+                // gutter (projectPct) keeps the centered box clear of the track edges.
+                const w = m.el.getBoundingClientRect().width;
+                m.el.style.left = (m.el.offsetLeft - w / 2) + 'px';
             }
         }
 
-        // Edge-label correction: a milestone near the track edge has its centered
-        // label clipped (e.g. one at left:0% loses its left half). Nudge the whole
-        // milestone horizontally just enough that its label clears the edge — this
-        // keeps the html2canvas-safe translateX(-50%) centering (re-anchoring via
-        // flex/align is mis-rendered by html2canvas in the PDF export).
-        for (const m of measured) {
-            if (m.isBar) continue;
-            const lab = m.el.querySelector('.roadmap-item-label');
-            if (!lab) continue;
-            const lr = lab.getBoundingClientRect();
-            const overL = (trackRect.left + 1) - lr.left;       // >0 → clipped at left
-            const overR = lr.right - (trackRect.right - 1);     // >0 → clipped at right
-            // Shift from offsetLeft (the PRE-transform left); the milestone carries
-            // translateX(-50%), so nudging by the rendered position would land half a
-            // label-width short. offsetLeft is unaffected by the transform.
-            const preLeft = m.el.offsetLeft;
-            if (overL > 0)      m.el.style.left = (preLeft + overL) + 'px';
-            else if (overR > 0) m.el.style.left = (preLeft - overR) + 'px';
-        }
+        // NOTE (XACA-0641): the former edge-label *nudge* (shifting an edge milestone
+        // horizontally so its centered label cleared the track's overflow:hidden) has
+        // been removed. The gutter-inset time domain (projectPct → [4,96]%) already
+        // guarantees that clearance declaratively, and the nudge actively caused a
+        // regression: the rightmost milestone (at the range end) was shoved left into
+        // its neighbour AFTER row-packing had run, so the last two markers (e.g.
+        // v1.1.0 / v1.2.0) collided on the same row. Relying on the gutter keeps edge
+        // labels readable without disturbing the packed layout.
     });
 }

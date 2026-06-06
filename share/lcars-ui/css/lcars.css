@@ -17115,6 +17115,10 @@ body {
     text-overflow: ellipsis;
     white-space: nowrap;
     flex: 1;
+    /* Allow the flex item to shrink below its content so it ellipsizes instead of
+       overflowing the bar — without this (min-width:auto) a flex:1 label keeps its
+       full intrinsic width and the bar's overflow:hidden hard-cuts it. (XACA-0641) */
+    min-width: 0;
 }
 
 .roadmap-bar .roadmap-item-sublabel {
@@ -17150,13 +17154,17 @@ body {
 }
 
 /* Row-stacked items (XACA-0636): top is set per-row in px by stackRoadmapLanes()
-   with NO vertical transform (html2canvas mis-renders translateY, clipping bar
-   labels in the PDF). Milestones keep only horizontal centering; bars none. */
+   with NO transform at all. html2canvas (PDF export) mis-renders CSS transforms —
+   translateY clipped bar labels, and translateX(-50%) shifted milestones off their
+   x (overlapping the last two markers and flipping their order in the PDF only,
+   XACA-0641). So stacked items carry no transform; the stacker centers milestones
+   with an explicit pixel `left` instead. Hover keeps a pure scale (never captured
+   in the PDF, so it's transform-safe). */
 .roadmap-milestone.roadmap-stacked {
-    transform: translateX(-50%);
+    transform: none;
 }
 .roadmap-milestone.roadmap-stacked:hover {
-    transform: translateX(-50%) scale(1.15);
+    transform: scale(1.15);
 }
 .roadmap-bar.roadmap-stacked {
     transform: none;
@@ -17164,8 +17172,6 @@ body {
 .roadmap-bar.roadmap-stacked:hover {
     transform: scaleY(1.08);
 }
-/* Edge milestones are kept readable by a horizontal `left` nudge applied in
-   stackRoadmapLanes() (html2canvas-safe), not a CSS re-anchor — see that fn. */
 
 /* Diamond shape via rotated square */
 .roadmap-milestone::before {
@@ -17193,6 +17199,23 @@ body {
     overflow: hidden;
     text-overflow: ellipsis;
     line-height: 1.2;
+}
+
+/* External bar label (XACA-0641): a bar too short to hold its title even alone
+   has the in-bar title hidden and its text rendered here, positioned just beside
+   the bar by stackRoadmapLanes() (explicit px left/top — no transform, so it is
+   html2canvas-safe in the PDF export). */
+.roadmap-bar-extlabel {
+    position: absolute;
+    font-size: 0.64rem;
+    letter-spacing: 0.05em;
+    font-weight: 600;
+    text-transform: uppercase;
+    white-space: nowrap;
+    color: var(--lcars-peach);
+    line-height: 1.2;
+    pointer-events: none;
+    z-index: 4;
 }
 
 /* ---------------------------------------------------------------------------
@@ -17582,13 +17605,36 @@ body {
     background: #ffffff !important;
     color: #1a1a1a !important;
 }
+/* Export-only title header (XACA-0641) — prepended to the PDF clone. */
+.roadmap-pdf-header {
+    margin: 0 0 16px 0;
+    padding: 0 2px 12px 2px;
+    border-bottom: 2px solid rgba(0, 0, 0, 0.15);
+    font-family: 'Antonio', sans-serif;
+}
+.roadmap-pdf-header .roadmap-pdf-title {
+    font-size: 1.35rem;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: #1a1a1a;
+    line-height: 1.15;
+}
+.roadmap-pdf-header .roadmap-pdf-subtitle {
+    font-size: 0.74rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: #555;
+    margin-top: 4px;
+}
 /* Neutral/structural text that was light-on-dark → dark-on-light */
 .roadmap-pdf-light .roadmap-unscheduled-heading,
 .roadmap-pdf-light .roadmap-axis-label,
 .roadmap-pdf-light .roadmap-chip-meta,
 .roadmap-pdf-light .roadmap-chip-label,
 .roadmap-pdf-light .roadmap-unscheduled-status-label,
-.roadmap-pdf-light .roadmap-milestone .roadmap-item-label {
+.roadmap-pdf-light .roadmap-milestone .roadmap-item-label,
+.roadmap-pdf-light .roadmap-bar-extlabel {
     color: #1f1f24 !important;
 }
 .roadmap-pdf-light .roadmap-unscheduled-heading {

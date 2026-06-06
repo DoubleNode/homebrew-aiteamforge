@@ -11,6 +11,19 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0641: Fixed — Roadmap timeline clips first/last markers + epic pill label -->
+
+### Fixed
+- **XACA-0641: Roadmap timeline clipping & unreadable labels.** Timeline items were clipped/unreadable on-screen and in the PDF export (which clones the same DOM/CSS): the first/last release markers were sliced at the lane edges, the epic pill showed only a stub title (`FL`), an ultra-narrow archived-release bar showed no title at all, and near-coincident markers overlapped into mush (`V1.0101.0`). Root causes & fixes:
+  - **Edge markers** — items are centered on their date via `translateX(-50%)`, so an item at `0%`/`100%` had half its width outside `.roadmap-lane-track`'s `overflow:hidden`. Fixed by projecting the time domain `[0,100]%` into a gutter-inset `[4,96]%` (`projectPct`), shared by `dateToPct`, `dateRangeWidthPct`, and the month axis ticks so markers stay aligned to their ticks and edge items carry a built-in margin — deterministic, measurement-free, html2canvas-safe.
+  - **Title priority** — a bar's title (`.roadmap-item-label`, `flex:1`) shares space with a fixed sublabel + schedule badge that consume width first, so even a wide-ish bar squeezed the title to a stub. Replaced the old absolute-px trim with a truncation-driven fit: shed the sublabel, then the badge, only while the title is *actually* clipped (`scrollWidth > clientWidth`); both remain in the tooltip.
+  - **External labels** — when a bar is too short for its title even alone, the in-bar title is hidden and rendered as a sibling label beside the bar (preferring the right, falling back left at the track edge), like a milestone label, so it always reads (new `.roadmap-bar-extlabel`).
+  - **PDF clone re-stacked** — `buildRoadmapPdf()` now re-runs `stackRoadmapLanes()` on the off-screen clone, so row-packing (de-overlapping markers), the title fit, and external labels apply in the export instead of depending on possibly-stale live inline styles. The stacker also retries on the next frame instead of giving up on a zero-width (pre-layout) track.
+  - **Removed the legacy edge-nudge** — the gutter now provides edge clearance declaratively, and the old post-pack nudge was shoving the range-end milestone left into its neighbour. Dropping it leaves the packed layout intact.
+  - **Milestones positioned by explicit px (no transform)** — the PDF-only overlap & swapped order of the last two markers (`v1.1.0` / `v1.2.0`) was html2canvas mis-rendering the `translateX(-50%)` centering. Stacked milestones now carry no transform and are centered by an explicit pixel `left` (like bars already are vertically), so they render identically on-screen and in the export. Hover keeps a pure `scale()`.
+  - **Export title header** — the PDF opened straight into the timeline with nothing identifying it. A header (team name + "Roadmap" + generation date) is now prepended to the export clone (PDF only; the on-screen cockpit already has its "ROADMAP" section title). Team name reuses the filename derivation (`roadmapTeamName`).
+  - Cache-busters: `lcars.js?v=3.41` → `?v=3.47`, `lcars.css?v=32.13` → `?v=32.17`.
+
 <!-- XACA-0640: Fixed — Roadmap PDF light-theme schedule-badge contrast -->
 
 ### Fixed
