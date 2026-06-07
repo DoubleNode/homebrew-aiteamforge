@@ -67,6 +67,14 @@ except ImportError as exc:
     print(f"ERROR: Failed to import aiteamforge_paths: {exc}", file=sys.stderr)
     sys.exit(1)
 
+# Parameterized templates whose BARE key (template == instance) violates the
+# team-id contract. Import if available; fall back to a literal so an older
+# aiteamforge_paths (pre-XACA-0643) doesn't break the import. (XACA-0643)
+try:
+    from aiteamforge_paths import _PARAMETERIZED_TEMPLATES  # type: ignore[import]
+except ImportError:
+    _PARAMETERIZED_TEMPLATES = frozenset({"finance", "legal", "medical", "freelance"})
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -84,6 +92,19 @@ BACKUP_SUFFIX_PREFIX = ".bak-xaca0463-"
 def _split_template(instance_id: str) -> str:
     """Return the template id from an instance id (first dash-component)."""
     return instance_id.split("-")[0]
+
+
+def _is_contract_violating_key(instance_id: str) -> bool:
+    """True if *instance_id* is a bare parameterized-template id (contract violation).
+
+    e.g. "medical" or "freelance" — these must be instance ids ("medical-general").
+    kb-port-fix must NOT allocate ports to such keys; aiteamforge_paths scrubs
+    them from team-paths.json on its next load. (XACA-0643)
+    """
+    return (
+        instance_id in _PARAMETERIZED_TEMPLATES
+        and _split_template(instance_id) == instance_id
+    )
 
 
 def _load_team_paths(config_path: Path) -> dict:
@@ -125,6 +146,8 @@ def _build_port_map(data: dict) -> dict[int, list[str]]:
     for instance_id, entry in _safe_teams(data).items():
         if not isinstance(entry, dict):
             continue
+        if _is_contract_violating_key(instance_id):
+            continue  # XACA-0643: never plan ports for bare-template keys
         port = entry.get("lcars_port")
         if port is not None:
             port = int(port)
@@ -133,11 +156,17 @@ def _build_port_map(data: dict) -> dict[int, list[str]]:
 
 
 def _collect_null_ports(data: dict) -> list[str]:
-    """Return a list of instance_ids with lcars_port == null."""
+    """Return a list of instance_ids with lcars_port == null.
+
+    XACA-0643: bare parameterized-template keys ("medical", "freelance") are
+    skipped — they are contract violations and must not be allocated ports.
+    """
     return [
         instance_id
         for instance_id, entry in _safe_teams(data).items()
-        if isinstance(entry, dict) and entry.get("lcars_port") is None
+        if isinstance(entry, dict)
+        and entry.get("lcars_port") is None
+        and not _is_contract_violating_key(instance_id)
     ]
 
 

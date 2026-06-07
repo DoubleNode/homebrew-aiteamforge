@@ -1218,11 +1218,24 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
   [ -z "$team_id" ] && continue  # skip empty entries from removed teams
   _wdir_var="_WORKDIR_${team_id}"
   _proj_var="_PROJECT_${team_id}"
+  _client_var="_CLIENT_${team_id}"
   team_work_dir="${!_wdir_var:-${INSTALL_DIR}/${team_id}}"
   team_project="${!_proj_var:-}"
+  team_client="${!_client_var:-}"
+  # XACA-0643: forward the project/client captured during team selection to
+  # install-team.sh. Without --project, parameterized templates (finance,
+  # legal, medical, freelance) silently fall back to TEAM_DEFAULT_PROJECT and
+  # build the WRONG instance board (e.g. legal-default instead of the requested
+  # legal-coparenting). The startup guard then sees no usable board, tries to
+  # provision via kb-init-team, and collides on the already-registered team
+  # code. Append the flags ONLY when set — install-team.sh REJECTS
+  # --project/--client for non-parameterized templates (TEAM_HAS_PROJECTS=false).
+  _team_param_flags=()
+  [ -n "$team_project" ] && _team_param_flags+=(--project "$team_project")
+  [ -n "$team_client" ]  && _team_param_flags+=(--client "$team_client")
   echo -e "${BLUE}  Installing team: ${team_id} → ${team_work_dir}${NC}"
   if [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
-    AITEAMFORGE_DIR="${INSTALL_DIR}" TEAM_WORKING_DIR="${team_work_dir}" bash "${INSTALLERS_DIR}/install-team.sh" "$team_id" --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/    /' || {
+    AITEAMFORGE_DIR="${INSTALL_DIR}" TEAM_WORKING_DIR="${team_work_dir}" bash "${INSTALLERS_DIR}/install-team.sh" "$team_id" --install-dir "${INSTALL_DIR}" ${_team_param_flags[@]+"${_team_param_flags[@]}"} 2>&1 | sed 's/^/    /' || {
       echo -e "    ${RED}✗ Team ${team_id} had errors (continuing)${NC}"
       INSTALL_ERRORS=$((INSTALL_ERRORS + 1))
     }

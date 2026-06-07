@@ -73,8 +73,12 @@ def _load_aiteamforge_paths_module():
 # Alias teams — included in config output but skipped in interactive prompts
 # ---------------------------------------------------------------------------
 
-# These teams mirror primary teams and are auto-included unchanged.
-ALIAS_TEAMS = {"mainevent", "medical", "freelance"}
+# Non-parameterized alias teams — auto-included unchanged, skipped in prompts.
+# XACA-0643: "medical"/"freelance" removed — they are parameterized templates
+# (instance ids only, e.g. "medical-general") and bare keys violate the team-id
+# contract. "mainevent" stays: it is a single-instance team, so its bare key is
+# legitimate.
+ALIAS_TEAMS = {"mainevent"}
 
 
 # ---------------------------------------------------------------------------

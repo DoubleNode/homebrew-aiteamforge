@@ -74,6 +74,61 @@ _kbitg_yellow() { printf '\033[0;33m%s\033[0m\n' "$*" >&2; }
 _kbitg_green()  { printf '\033[0;32m%s\033[0m\n' "$*" >&2; }
 _kbitg_cyan()   { printf '\033[0;36m%s\033[0m\n' "$*" >&2; }
 
+# ── _kb_resolve_instance_id <team-id> <kanban-dir> ───────────────────────────
+# Resolve a possibly-TEMPLATE team id (e.g. "legal") to its concrete INSTANCE id
+# (e.g. "legal-coparenting") for board-file naming and provisioning.
+#
+# Strategy (first match wins):
+#   1. team-paths.json — return the key whose kanban_dir matches <kanban-dir>.
+#      Generic and table-free: works for ANY project (legal-divorce,
+#      finance-business, …) because the *-startup.sh caller passes the
+#      instance's OWN kanban dir. (XACA-0643 — replaces a brittle 3-entry case
+#      map that only knew the FIRST project of each parameterized template; see
+#      k501 sibling-drift pattern.)
+#   2. Built-in fallback for the canonical first-project of each parameterized
+#      template — covers the pre-registration window before team-paths.json has
+#      the entry on disk.
+#   3. The input team-id unchanged (already an instance, or a single-instance team).
+_kb_resolve_instance_id() {
+    local team_id="$1"
+    local kanban_dir="$2"
+    local resolved=""
+
+    # 1. team-paths.json lookup by kanban_dir (generic, table-free).
+    local cfg="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    if [[ -f "$cfg" ]] && command -v python3 &>/dev/null; then
+        resolved="$(python3 - "$cfg" "$kanban_dir" "$team_id" << 'PYEOF' 2>/dev/null
+import json, os, sys
+cfg, want_dir, team_id = sys.argv[1], sys.argv[2], sys.argv[3]
+def norm(p): return os.path.normpath(os.path.expanduser(p))
+want = norm(want_dir)
+try:
+    teams = json.load(open(cfg)).get("teams", {})
+except Exception:
+    sys.exit(0)
+# Match kanban_dir AND require the key to be the template itself or a
+# template-prefixed instance, so an unrelated team sharing a dir can't win.
+for key, entry in teams.items():
+    kd = entry.get("kanban_dir")
+    if kd and norm(kd) == want and (key == team_id or key.startswith(team_id + "-")):
+        print(key); sys.exit(0)
+PYEOF
+)"
+    fi
+
+    # 2. Built-in fallback for the canonical first-project instances.
+    if [[ -z "$resolved" ]]; then
+        case "$team_id" in
+            finance)  resolved="finance-personal"  ;;
+            legal)    resolved="legal-coparenting" ;;
+            medical)  resolved="medical-general"   ;;
+            *)        resolved="$team_id"          ;;
+        esac
+    fi
+
+    printf '%s' "$resolved"
+}
+
 # ── _kb_board_is_present <team-id> <kanban-dir> ───────────────────────────────
 # Returns 0 if a usable board exists; 1 if it is missing or empty.
 # Usable = kanban dir exists AND board JSON exists AND backlog array is
@@ -89,18 +144,13 @@ _kb_board_is_present() {
 
     # 2. Board JSON file must exist. XACA-0576: profile-scoped teams have split
     #    ids (TEMPLATE "finance" vs INSTANCE "finance-personal"). The startup
-    #    scripts now pass the TEMPLATE form (XACA-0576-005), but board files
-    #    on disk use the INSTANCE form. Build a candidate list covering input
-    #    + instance-equivalent so the fast-path doesn't false-alarm "missing
-    #    board" and prompt the operator on every startup. Case bodies MUST
-    #    stay in sync with _kb_template_to_instance (kanban-helpers.sh) and
-    #    get_board_id (homebrew-tap/libexec/lib/kanban-paths.sh).
-    local _board_instance="$team_id"
-    case "$team_id" in
-        finance)  _board_instance="finance-personal"  ;;
-        legal)    _board_instance="legal-coparenting" ;;
-        medical)  _board_instance="medical-general"   ;;
-    esac
+    #    scripts pass the TEMPLATE form (XACA-0576-005), but board files on disk
+    #    use the INSTANCE form. Resolve the instance generically from
+    #    team-paths.json so the fast-path doesn't false-alarm "missing board" and
+    #    prompt the operator on every startup. (XACA-0643: was a brittle 3-entry
+    #    case map that only knew each template's FIRST project.)
+    local _board_instance
+    _board_instance="$(_kb_resolve_instance_id "$team_id" "$kanban_dir")"
     local board_file="${kanban_dir}/${team_id}-board.json"
     if [[ ! -f "$board_file" ]] && [[ "$_board_instance" != "$team_id" ]]; then
         board_file="${kanban_dir}/${_board_instance}-board.json"
@@ -179,6 +229,13 @@ kb_ensure_team_initialized() {
         return 0
     fi
 
+    # Resolve the concrete INSTANCE id (e.g. legal → legal-coparenting) so any
+    # provisioning targets the right board instead of the bare TEMPLATE id —
+    # passing the template id makes kb-init-team try to re-allocate the team
+    # code and collide with the already-registered instance. (XACA-0643)
+    local instance_id
+    instance_id="$(_kb_resolve_instance_id "$team_id" "$kanban_dir")"
+
     # ── Locate kb-init-team ───────────────────────────────────────────────────
     local kbit_bin
     if [[ -n "${KB_INIT_TEAM_BIN:-}" ]]; then
@@ -204,7 +261,7 @@ kb_ensure_team_initialized() {
     if [[ ! -x "$kbit_bin" ]]; then
         _kbitg_red "[kb-guard] kb-init-team not found or not executable: ${kbit_bin}"
         _kbitg_yellow "[kb-guard] Team '${team_id}' board is missing. Provision manually:"
-        _kbitg_yellow "           ${kbit_bin} --team-id ${team_id} --kanban-dir ${kanban_dir}"
+        _kbitg_yellow "           ${kbit_bin} --team-id ${instance_id} --kanban-dir ${kanban_dir}"
         return 1
     fi
 
@@ -214,7 +271,7 @@ kb_ensure_team_initialized() {
             # Explicit opt-in: auto-provision without prompting.
             _kbitg_yellow "[kb-guard] Non-interactive auto-provision for team '${team_id}' (KB_INIT_TEAM_AUTO_YES=1)"
             "$kbit_bin" \
-                --team-id   "$team_id" \
+                --team-id   "$instance_id" \
                 --kanban-dir "$kanban_dir" \
                 --non-interactive
             local rc=$?
@@ -230,10 +287,10 @@ kb_ensure_team_initialized() {
             _kbitg_yellow ""
             _kbitg_yellow "[kb-guard] WARNING: kanban board missing or empty for team '${team_id}'."
             _kbitg_yellow "  Kanban dir : ${kanban_dir}"
-            _kbitg_yellow "  Board file : ${kanban_dir}/${team_id}-board.json"
+            _kbitg_yellow "  Board file : ${kanban_dir}/${instance_id}-board.json"
             _kbitg_yellow ""
             _kbitg_yellow "  Non-interactive mode — will NOT provision automatically."
-            _kbitg_yellow "  To provision: run kb-init-team --team-id ${team_id} --kanban-dir ${kanban_dir}"
+            _kbitg_yellow "  To provision: run kb-init-team --team-id ${instance_id} --kanban-dir ${kanban_dir}"
             _kbitg_yellow "  To auto-provision in CI: set KB_INIT_TEAM_AUTO_YES=1"
             _kbitg_yellow ""
             return 1
@@ -270,7 +327,7 @@ kb_ensure_team_initialized() {
 
     if [[ "$response" != "y" ]]; then
         _kbitg_yellow "[kb-guard] Skipped. Kanban commands may fail until the team is initialized."
-        _kbitg_yellow "           Run: ${kbit_bin} --team-id ${team_id} --kanban-dir ${kanban_dir}"
+        _kbitg_yellow "           Run: ${kbit_bin} --team-id ${instance_id} --kanban-dir ${kanban_dir}"
         return 1
     fi
 
@@ -281,7 +338,7 @@ kb_ensure_team_initialized() {
     printf '\n' >&2
 
     "$kbit_bin" \
-        --team-id    "$team_id" \
+        --team-id    "$instance_id" \
         --kanban-dir "$kanban_dir"
     local rc=$?
 

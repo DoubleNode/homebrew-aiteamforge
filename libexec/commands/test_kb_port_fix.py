@@ -459,5 +459,52 @@ class TestMalformedRootGuard(unittest.TestCase):
             self.assertEqual(result, {"teams": {}})
 
 
+class TestContractViolatingKeysSkipped(unittest.TestCase):
+    """XACA-0643: bare parameterized-template keys must never get a port."""
+
+    def test_predicate(self):
+        self.assertTrue(kpf._is_contract_violating_key("medical"))
+        self.assertTrue(kpf._is_contract_violating_key("freelance"))
+        self.assertFalse(kpf._is_contract_violating_key("medical-general"))
+        self.assertFalse(kpf._is_contract_violating_key("freelance-acme-app"))
+        self.assertFalse(kpf._is_contract_violating_key("academy"))
+        self.assertFalse(kpf._is_contract_violating_key("mainevent"))
+
+    def test_null_port_collection_skips_bare_keys(self):
+        data = _make_team_paths(
+            **{
+                "academy": _entry(8230),
+                "medical": _entry(None),          # contract violation — skip
+                "freelance": _entry(None),        # contract violation — skip
+                "medical-general": _entry(None),  # real instance — collect
+            }
+        )
+        nulls = kpf._collect_null_ports(data)
+        self.assertEqual(nulls, ["medical-general"])
+
+    def test_port_map_skips_bare_keys(self):
+        data = _make_team_paths(
+            **{
+                "medical": _entry(8340),
+                "medical-general": _entry(8340),
+            }
+        )
+        port_map = kpf._build_port_map(data)
+        # Only the real instance should appear; bare "medical" is skipped, so no
+        # phantom collision is reported on 8340.
+        self.assertEqual(port_map.get(8340), ["medical-general"])
+
+    def test_plan_does_not_allocate_for_bare_keys(self):
+        data = _make_team_paths(
+            **{
+                "academy": _entry(8230),
+                "medical": _entry(None),
+            }
+        )
+        plan = kpf._build_plan(data)
+        self.assertEqual(plan["null_ports"], [])
+        self.assertFalse(plan["needs_work"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

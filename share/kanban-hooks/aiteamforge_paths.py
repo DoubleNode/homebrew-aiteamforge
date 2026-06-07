@@ -229,30 +229,15 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_account_nickname": "",
         "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
     },
-    "medical": {
-        # alias for medical-general — no team_code: aliases share code with canonical entry
-        "kanban_dir": f"{_HOME}/medical/general/kanban",
-        "working_dir": f"{_HOME}/medical/general",
-        "lcars_port_base": 8340,
-        "lcars_port_range": 10,
-        "lcars_port": None,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_MEDICAL_API_KEY",
-    },
-    "freelance": {
-        # generic fallback alias — no team_code: FRE is the canonical code but this
-        # alias intentionally points to Academy kanban for pre-init fallback behavior.
-        "team_code": "FRE",
-        "kanban_dir": f"{_HOME}/dev-team/kanban",
-        "working_dir": f"{_HOME}/dev-team",
-        "lcars_port_base": 8500,
-        "lcars_port_range": 100,
-        "lcars_port": 8505,
-        "anthropic_account_id": "",
-        "anthropic_account_nickname": "",
-        "anthropic_api_key_env_var": "TEAM_FREELANCE_API_KEY",
-    },
+    # XACA-0643: bare "medical" and "freelance" aliases REMOVED. They are
+    # parameterized templates (medical needs a project; freelance needs
+    # client+project) per the team-id contract, so a bare key is a contract
+    # violation — lcars-ui/server.py:_filter_contract_violating_teams() already
+    # drops them with a loud warning on every read. Seeding them here just
+    # produced the warning noise + invalid team-paths.json keys. The concrete
+    # instances ("medical-general", "freelance-<client>-<project>") are the
+    # only valid forms. "mainevent" stays above: it is NOT parameterized
+    # (single instance), so a bare key is legitimate.
 }
 
 # ---------------------------------------------------------------------------
@@ -262,6 +247,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
 _CONFIG_CACHE: dict | None = None
 _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
 _A1_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0522)
+_CONTRACT_SCRUB_ATTEMPTED: bool = False  # once-per-process guard (XACA-0643)
 
 SUPPORTED_SCHEMA_VERSION = 3
 
@@ -272,6 +258,15 @@ CANONICAL_REQUIRED_TEAMS: frozenset[str] = frozenset({"academy"})
 # At least ONE of these must be present.  A config with only "academy" and none
 # of the platform teams is almost certainly a partial-write artifact.  (XACA-0457)
 CANONICAL_AT_LEAST_ONE_TEAMS: frozenset[str] = frozenset({"ios", "android", "firebase", "dns"})
+
+# Templates that REQUIRE one or more parameters (project, or client+project) per
+# the team-id contract (docs/architecture/team-id-contract.md §3). A bare key
+# like "freelance" or "medical" in a config's "teams" map is a contract
+# violation — valid keys are instance ids ("medical-general",
+# "freelance-doublenode-starwords"). This is the SINGLE SOURCE OF TRUTH: both
+# lcars-ui/server.py and homebrew-tap/libexec/commands/kb-port-fix.py import this
+# frozenset (with a literal fallback) so they cannot drift. (XACA-0643)
+_PARAMETERIZED_TEMPLATES: frozenset[str] = frozenset({"finance", "legal", "medical", "freelance"})
 
 
 def _make_default_config() -> dict:
@@ -343,8 +338,9 @@ def _bootstrap(config_path: Path) -> dict:
 def _available_teams_hint(config: dict) -> str:
     """Return a comma-separated list of team names for error messages."""
     teams = list(config.get("teams", {}).keys())
-    # Filter out alias names to keep the hint shorter
-    primary = [t for t in teams if t not in ("mainevent", "medical", "freelance")]
+    # Filter out the non-parameterized alias name to keep the hint shorter.
+    # (medical/freelance bare aliases removed in XACA-0643.)
+    primary = [t for t in teams if t not in ("mainevent",)]
     return ", ".join(sorted(primary)) or "(none)"
 
 
@@ -362,7 +358,7 @@ def load_config() -> dict:
     Returns a dict with at least {"schema_version": int, "teams": dict}.
     Never raises.
     """
-    global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED
+    global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED, _CONTRACT_SCRUB_ATTEMPTED
 
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -446,6 +442,19 @@ def load_config() -> dict:
             file=sys.stderr,
         )
         config["teams"] = DEFAULT_TEAMS
+
+    # Contract scrub (XACA-0643) — self-heal configs written before XACA-0643,
+    # which seeded bare parameterized-template keys ("medical", "freelance").
+    # Those keys are contract violations that lcars-ui/server.py drops with a
+    # loud warning on every read; removing them here stops the noise on existing
+    # machines. Flag-flipped BEFORE the call (same once-per-process discipline
+    # as the A.1 backfill below). Runs first so the backfill operates on the
+    # already-cleaned team set.
+    if not _CONTRACT_SCRUB_ATTEMPTED:
+        _CONTRACT_SCRUB_ATTEMPTED = True
+        maybe_scrubbed = _scrub_contract_violating_keys_on_disk(config_path, config)
+        if maybe_scrubbed is not None:
+            config = maybe_scrubbed
 
     # A.1 backfill (XACA-0522) — flag-flipped BEFORE the call so even a failed
     # disk write doesn't cause a second lock attempt within the same process.
@@ -593,6 +602,102 @@ def _backfill_a1_fields_on_disk(config_path: Path, current: dict) -> dict | None
             file=sys.stderr,
         )
         return upgrade_config_to_v3(current)
+
+
+def _find_contract_violating_keys(config: dict) -> list[str]:
+    """Return bare parameterized-template keys present in config['teams'].
+
+    A key is a violation when its first '-'-segment is a parameterized template
+    AND the whole key equals that segment (no '-instance' suffix), e.g.
+    "medical" or "freelance". Pure predicate — never mutates, never raises.
+    Mirrors lcars-ui/server.py:_filter_contract_violating_teams() logic. (XACA-0643)
+    """
+    out = []
+    for key in config.get("teams", {}):
+        first = key.split("-", 1)[0]
+        if first in _PARAMETERIZED_TEMPLATES and key == first:
+            out.append(key)
+    return out
+
+
+def _scrub_contract_violating_keys_on_disk(config_path: Path, current: dict) -> dict | None:
+    """Snapshot, lock, drop bare parameterized-template keys, atomically rewrite.
+
+    Self-heals configs written before XACA-0643 (which seeded bare "medical"/
+    "freelance"). Mirrors _backfill_a1_fields_on_disk's lock/TOCTOU/backup/
+    atomic-write discipline. Returns the cleaned config dict when a change is
+    made, or None when there is nothing to scrub (skip-fast — no lock, no
+    backup, no write). Never raises.
+    """
+    if not _find_contract_violating_keys(current):
+        return None
+
+    def _clean(cfg: dict) -> dict:
+        import copy
+        out = copy.deepcopy(cfg)
+        teams = out.get("teams", {})
+        for k in _find_contract_violating_keys(cfg):
+            teams.pop(k, None)
+        return out
+
+    try:
+        lock_file = config_path.with_suffix(".json.lock")
+        with open(lock_file, "w") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # TOCTOU defense — re-read under the lock in case another process raced.
+                try:
+                    reread = json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    reread = current
+
+                violations = _find_contract_violating_keys(reread)
+                if not violations:
+                    # Someone else won the race; return the in-memory cleaned form
+                    # so this process still sees the corrected team set.
+                    return _clean(current)
+
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = config_path.with_name(
+                    f"{config_path.name}.bak-pre-contract-scrub-{timestamp}"
+                )
+                try:
+                    backup_path.write_bytes(config_path.read_bytes())
+                except OSError as exc:
+                    print(
+                        f"[aiteamforge-paths] contract scrub: snapshot failed ({exc}) — aborting disk write",
+                        file=sys.stderr,
+                    )
+                    return _clean(current)
+
+                cleaned = _clean(reread)
+                tmp_path = config_path.with_suffix(f".json.tmp.{os.getpid()}")
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(cleaned, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(str(tmp_path), str(config_path))
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+
+                print(
+                    f"[aiteamforge-paths] contract scrub: removed bare "
+                    f"parameterized-template keys {sorted(violations)} from "
+                    f"{config_path} (team-id contract violation); snapshot={backup_path}",
+                    file=sys.stderr,
+                )
+                return cleaned
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                lock_file.unlink(missing_ok=True)
+    except Exception as exc:
+        print(
+            f"[aiteamforge-paths] contract scrub: disk write failed ({exc}) — degrading to in-memory clean",
+            file=sys.stderr,
+        )
+        return _clean(current)
 
 
 # ---------------------------------------------------------------------------

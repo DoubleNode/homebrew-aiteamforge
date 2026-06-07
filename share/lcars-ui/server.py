@@ -190,7 +190,13 @@ def _hardcoded_team_kanban_dirs() -> dict:
 # template id like "freelance" or "medical" appearing as a TEAM_KANBAN_DIRS key
 # is a contract violation — those keys must be instance ids like
 # "finance-personal" or "freelance-doublenode-starwords".
-_PARAMETERIZED_TEMPLATES = frozenset({"finance", "legal", "medical", "freelance"})
+# Single source of truth lives in aiteamforge_paths (XACA-0643) so the server's
+# contract filter and the config-layer scrub can never drift apart. Fall back to
+# a literal when that module is unavailable or predates the export.
+try:
+    from aiteamforge_paths import _PARAMETERIZED_TEMPLATES  # noqa: PLC0415
+except ImportError:
+    _PARAMETERIZED_TEMPLATES = frozenset({"finance", "legal", "medical", "freelance"})
 
 
 def _filter_contract_violating_teams(team_dirs: dict) -> dict:
