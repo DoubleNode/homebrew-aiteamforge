@@ -168,8 +168,12 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     # per-machine overlay (~/.aiteamforge/team-paths.json). build_team_code_map()
     # MERGES overlay team_codes on top of these defaults, so the overlay entries
     # (FSW/FAP/FWS/FLB/VAN/FAS/FLA/FLI/BWA/BWD) supply routing on machines that
-    # actually host those client repos. The generic `freelance` (FRE) entry below
-    # STAYS here as the universal fallback.
+    # actually host those client repos. XACA-0643 removed the bare `freelance`
+    # (FRE) alias that used to sit here — it is a parameterized template, so a
+    # bare key violates the team-id contract (the server dropped it on every
+    # read). freelance therefore has NO seeded instance in DEFAULT_TEAMS; its
+    # canonical port band lives in `_TEMPLATE_PORT_BANDS` so port allocation
+    # still works for freelance-<client>-<project> installs.
 
     # ── Legal ─────────────────────────────────────────────────────────────
     "legal-coparenting": {
@@ -267,6 +271,17 @@ CANONICAL_AT_LEAST_ONE_TEAMS: frozenset[str] = frozenset({"ios", "android", "fir
 # lcars-ui/server.py and homebrew-tap/libexec/commands/kb-port-fix.py import this
 # frozenset (with a literal fallback) so they cannot drift. (XACA-0643)
 _PARAMETERIZED_TEMPLATES: frozenset[str] = frozenset({"finance", "legal", "medical", "freelance"})
+
+# Canonical LCARS port band (base, range) for parameterized templates that have
+# NO seeded instance in DEFAULT_TEAMS — so _resolve_template_band()'s direct/
+# strip-dash/prefix-scan steps can't find a band. freelance is client+project
+# only (XACA-0628 purged the client roster; XACA-0643 removed the bare alias),
+# yet kb-port-fix still needs its band to renumber freelance-<client>-<project>
+# installs. finance/legal/medical resolve via their seeded *-instance entries and
+# intentionally are NOT duplicated here (avoids band drift). (XACA-0643)
+_TEMPLATE_PORT_BANDS: dict[str, tuple[int, int]] = {
+    "freelance": (8500, 100),
+}
 
 
 def _make_default_config() -> dict:
@@ -984,11 +999,20 @@ def _resolve_template_band(template_id: str) -> tuple[int, int]:
                 entry = candidate
                 break
 
+    # 4. Canonical band fallback: parameterized templates with no seeded instance
+    #    in DEFAULT_TEAMS (e.g. freelance — client+project only) declare their
+    #    band in _TEMPLATE_PORT_BANDS so allocation still works. (XACA-0643)
+    if entry is None:
+        base_template = template_id.split("-")[0] if "-" in template_id else template_id
+        band = _TEMPLATE_PORT_BANDS.get(template_id) or _TEMPLATE_PORT_BANDS.get(base_template)
+        if band is not None:
+            return int(band[0]), int(band[1])
+
     if entry is None:
         raise ValueError(
             f"Template '{template_id}' has no lcars_port_base declared "
             f"(not found in DEFAULT_TEAMS directly, by stripping dashes, "
-            f"or via prefix scan)."
+            f"via prefix scan, or in _TEMPLATE_PORT_BANDS)."
         )
 
     base = entry.get("lcars_port_base")
