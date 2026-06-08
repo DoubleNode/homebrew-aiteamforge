@@ -17683,6 +17683,17 @@ body {
     opacity: 0.90;
 }
 
+/* Meta line: ID · dates · progress — secondary/monospace-ish, dimmer than body (XACA-0644) */
+.roadmap-details-entry-meta {
+    font-size: 0.72rem;
+    font-family: 'Courier New', Courier, monospace;
+    color: var(--lcars-tan);
+    opacity: 0.72;
+    line-height: 1.3;
+    margin: 2px 0 1px 0;
+    letter-spacing: 0.02em;
+}
+
 /* ---------------------------------------------------------------------------
    PDF light theme (XACA-0636)
    Applied transiently to #roadmap-content by buildRoadmapPdf() during export and
@@ -17843,6 +17854,11 @@ body {
 }
 .roadmap-pdf-light .roadmap-details-entry-body {
     color: #3a3a4a !important;
+    opacity: 1 !important;
+}
+/* Meta line light-theme override: dark text, full opacity on white background (XACA-0644) */
+.roadmap-pdf-light .roadmap-details-entry-meta {
+    color: #5a4a2a !important;
     opacity: 1 !important;
 }
 
