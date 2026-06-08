@@ -12,10 +12,13 @@
 #   kb_ensure_team_initialized <team-id> <kanban-dir>
 #
 # RETURN CODES
-#   0  — Board is present and non-empty; caller should proceed normally.
-#   1  — Guard detected a missing/empty board AND the user chose NOT to
-#         provision (or the environment is non-interactive and auto-yes is not
-#         set). Caller should decide whether to abort or continue headless.
+#   0  — Board is present and structurally valid; caller should proceed normally.
+#         An empty backlog (freshly-provisioned team) is accepted as valid
+#         (XACA-0646 — previously required at least one backlog item).
+#   1  — Guard detected a missing or structurally invalid board AND the user
+#         chose NOT to provision (or the environment is non-interactive and
+#         auto-yes is not set). Caller should decide whether to abort or
+#         continue headless.
 #   2  — Provisioning was attempted but kb-init-team failed. Caller should
 #         abort or warn loudly.
 #
@@ -55,8 +58,11 @@
 #
 # This guard answers a narrower, cheaper question:
 #   "Is there a board file I can actually use?"
-#   = kanban dir exists  AND  board JSON exists  AND  board has at least one
-#     entry in the "backlog" array (even if all are completed/cancelled).
+#   = kanban dir exists  AND  board JSON exists  AND  the file is a structurally
+#     valid rendered board (JSON object with a list "backlog" — empty is fine —
+#     a non-empty "team" string, and a "nextId" key). XACA-0646: the previous
+#     definition required backlog to be non-empty (at least one item), which
+#     wrongly flagged freshly-provisioned teams as uninitialized.
 #
 # When initialization IS needed, kb-init-team is invoked without --team-id
 # so it prompts interactively, giving the user full control over all options.
@@ -130,9 +136,15 @@ PYEOF
 }
 
 # ── _kb_board_is_present <team-id> <kanban-dir> ───────────────────────────────
-# Returns 0 if a usable board exists; 1 if it is missing or empty.
-# Usable = kanban dir exists AND board JSON exists AND backlog array is
-# non-empty (at least one item, regardless of status).
+# Returns 0 if a usable board exists; 1 if it is missing or structurally invalid.
+# Usable = kanban dir exists AND board JSON exists AND the file is a structurally
+# valid rendered board:
+#   • Parses as a JSON object
+#   • "backlog" key is present and is a list (length 0 is acceptable — a freshly-
+#     provisioned empty board is valid, XACA-0646)
+#   • "team" is a non-empty string (proves substitution ran — not a bare template)
+#   • "nextId" key is present
+# A corrupt file (e.g. {} or random JSON) remains NOT usable.
 _kb_board_is_present() {
     local team_id="$1"
     local kanban_dir="$2"
@@ -159,13 +171,19 @@ _kb_board_is_present() {
         return 1
     fi
 
-    # 3. Board JSON must be non-empty (file size > 10 bytes as a fast pre-check
-    #    before parsing).
+    # 3. Board file must have content (file size > 10 bytes as a fast pre-check
+    #    before parsing — guards against a truncated/zero-byte file).
     if [[ ! -s "$board_file" ]]; then
         return 1
     fi
 
-    # 4. Board must have at least one item in "backlog" (parsed check).
+    # 4. Board must be structurally valid (parsed check). XACA-0646: "usable"
+    #    was previously defined as "backlog non-empty (len > 0)", which wrongly
+    #    rejected freshly-provisioned empty boards (board-template.json ships
+    #    backlog:[]) and caused kb_ensure_team_initialized to prompt re-init on
+    #    every first launch of a new team. The correct definition is structural
+    #    validity: the file is a JSON object, backlog is a list (empty is fine),
+    #    team is a non-empty string, and nextId is present.
     #    Use python3 for reliable JSON parsing; fall back to grep if unavailable.
     if command -v python3 &>/dev/null; then
         # XACA-0542-019: pass board_file as argv (quoted heredoc) rather than
@@ -175,15 +193,29 @@ _kb_board_is_present() {
 import json, sys
 try:
     b = json.load(open(sys.argv[1]))
-    backlog = b.get('backlog', [])
-    sys.exit(0 if isinstance(backlog, list) and len(backlog) > 0 else 1)
+    # Structural validity (XACA-0646): must be a dict, backlog must be a list
+    # (empty OK), team must be a non-empty string, nextId must be present.
+    ok = (
+        isinstance(b, dict)
+        and isinstance(b.get('backlog'), list)
+        and isinstance(b.get('team'), str) and b.get('team', '') != ''
+        and 'nextId' in b
+    )
+    sys.exit(0 if ok else 1)
 except Exception:
     sys.exit(1)
 PYEOF
         return $?
     else
-        # Fallback: grep for at least one item id pattern (e.g. "XACA-0001")
-        if grep -qE '"id"[[:space:]]*:[[:space:]]*"[A-Z]' "$board_file" 2>/dev/null; then
+        # Fallback: grep for the structural markers that every rendered board
+        # carries. XACA-0646: the old grep for item-id patterns failed for
+        # freshly-provisioned empty boards. Check instead for:
+        #   "backlog" key present, "nextId" key present, and a non-empty "team"
+        #   value (a rendered non-template board always has a real team string).
+        # All three must match. Best-effort only — runs only when python3 is absent.
+        if grep -q '"backlog"' "$board_file" 2>/dev/null \
+        && grep -q '"nextId"' "$board_file" 2>/dev/null \
+        && grep -qE '"team"[[:space:]]*:[[:space:]]*"[^"]' "$board_file" 2>/dev/null; then
             return 0
         fi
         return 1
@@ -211,8 +243,8 @@ _kb_is_noninteractive() {
 #   kanban-dir   Absolute path to the team's kanban directory
 #
 # RETURN CODES (see file header for full contract)
-#   0  — board present and usable, or provisioning succeeded
-#   1  — board missing/empty and not provisioned (caller decides what to do)
+#   0  — board present and structurally valid, or provisioning succeeded
+#   1  — board missing/invalid and not provisioned (caller decides what to do)
 #   2  — provisioning was attempted but kb-init-team exited non-zero
 #
 # ENVIRONMENT
@@ -285,7 +317,7 @@ kb_ensure_team_initialized() {
         else
             # Default safe behavior: warn and continue WITHOUT provisioning.
             _kbitg_yellow ""
-            _kbitg_yellow "[kb-guard] WARNING: kanban board missing or empty for team '${team_id}'."
+            _kbitg_yellow "[kb-guard] WARNING: kanban board missing or structurally invalid for team '${team_id}'."
             _kbitg_yellow "  Kanban dir : ${kanban_dir}"
             _kbitg_yellow "  Board file : ${kanban_dir}/${instance_id}-board.json"
             _kbitg_yellow ""
@@ -305,8 +337,8 @@ kb_ensure_team_initialized() {
     _kbitg_yellow "│  Team      : ${team_id}"
     _kbitg_yellow "│  Kanban dir: ${kanban_dir}"
     _kbitg_yellow "│"
-    _kbitg_yellow "│  The board JSON is missing or empty. Without it, kanban commands"
-    _kbitg_yellow "│  (kb-show, kb-backlog, etc.) will fail."
+    _kbitg_yellow "│  The board JSON is missing or structurally invalid. Without it,"
+    _kbitg_yellow "│  kanban commands (kb-show, kb-backlog, etc.) will fail."
     _kbitg_yellow "└─────────────────────────────────────────────────────────────────┘"
     printf '\n' >&2
 
