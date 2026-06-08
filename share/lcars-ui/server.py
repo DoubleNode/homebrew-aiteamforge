@@ -225,12 +225,18 @@ def _filter_contract_violating_teams(team_dirs: dict) -> dict:
 
 
 # Canonical-team guard constants (XACA-0457).
-# list_teams() must include ALL of _CANONICAL_REQUIRED and AT LEAST ONE of
-# _CANONICAL_AT_LEAST_ONE before the result is trusted.  A partial corruption
+# list_teams() must include ALL of _CANONICAL_REQUIRED and AT LEAST ONE OTHER
+# team of any kind before the result is trusted.  A partial corruption
 # (e.g. team-paths.json collapsed to academy-only on 2026-05-07) passes the
 # legacy `if teams:` truthiness check but silently breaks every non-academy
-# team lookup for the server's lifetime.
+# team lookup for the server's lifetime.  NOTE (XACA-0647): the old rule
+# demanded a platform team (ios/android/firebase/dns) and wrongly flagged
+# personal-only machines (academy + finance/legal/medical, no platform team)
+# as corrupt.  The validity check below now accepts any non-academy team.
 _CANONICAL_REQUIRED = {"academy"}
+# Platform teams. RETAINED FOR REFERENCE/documentation only. NOTE (XACA-0647):
+# config validity NO LONGER requires one of these — any non-academy team now
+# satisfies the check (see `has_non_required` in _build_team_kanban_dirs).
 _CANONICAL_AT_LEAST_ONE = {"ios", "android", "firebase", "dns"}
 
 
@@ -240,26 +246,29 @@ def _build_team_kanban_dirs() -> dict:
     # for its lifetime and every team lookup 404s until manual restart. (Bug found
     # 2026-04-22: Android LCARS served empty board after config briefly had no teams.)
     # Partial corruption (e.g. only academy survives a write-race) is also caught:
-    # the canonical-team check below requires academy AND at least one of
-    # ios/android/firebase/dns before the dynamic list is trusted. (XACA-0457)
+    # the canonical-team check below requires academy AND at least one OTHER team
+    # of ANY kind (platform OR personal) before the dynamic list is trusted.
+    # (XACA-0457 / XACA-0647: personal-only machines are valid; academy-alone is not.)
     if _AITEAMFORGE_PATHS_AVAILABLE:
         try:
             teams = list_teams()
             if teams:
                 teams_set = set(teams)
                 missing_required = _CANONICAL_REQUIRED - teams_set
-                has_at_least_one = bool(teams_set & _CANONICAL_AT_LEAST_ONE)
-                if missing_required or not has_at_least_one:
+                # XACA-0647: valid if academy present AND at least one OTHER team
+                # of ANY kind (platform or personal). The old platform-only check
+                # wrongly flagged personal-only machines (academy + finance/legal/
+                # medical) as corrupt. Real corruption = academy collapsed to alone.
+                has_non_required = bool(teams_set - _CANONICAL_REQUIRED)
+                if missing_required or not has_non_required:
                     # Build a precise diagnostic: distinguish missing-required
-                    # from missing-canonical-set so the warning message tells
-                    # the operator exactly which constraint failed. (XACA-0457-011)
+                    # from academy-alone so the warning tells the operator exactly
+                    # which constraint failed. (XACA-0457-011 / XACA-0647)
                     parts = []
                     if missing_required:
                         parts.append(f"missing required: {sorted(missing_required)}")
-                    if not has_at_least_one:
-                        parts.append(
-                            f"none of {sorted(_CANONICAL_AT_LEAST_ONE)} present"
-                        )
+                    if not has_non_required:
+                        parts.append("only academy present (no other teams)")
                     print(
                         f"[LCARS] WARNING: list_teams() returned partial config "
                         f"({'; '.join(parts)}) — using hardcoded team dirs",

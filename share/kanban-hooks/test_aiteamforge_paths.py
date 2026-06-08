@@ -12,7 +12,10 @@ Run:
 
 import copy
 import importlib
+import json
+import os
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -463,6 +466,216 @@ class TestBuildTeamCodeMapMerge(unittest.TestCase):
             result, _default_teams_code_map(),
             "Loader failure must still yield the DEFAULT_TEAMS-derived map",
         )
+
+
+# ---------------------------------------------------------------------------
+# XACA-0647: Canonical-guard regression tests for load_config() corruption check.
+#
+# Before XACA-0647 the guard required at least one platform team
+# (ios/android/firebase/dns) beyond academy. That wrongly re-seeded
+# personal-only machines (e.g. academy + finance-personal) with the full
+# Main Event roster. The fix: a config is corrupt ONLY if it lacks
+# schema_version, OR is missing academy, OR has NO team beyond academy
+# (academy-alone / empty). Any non-academy team — platform OR personal —
+# is sufficient.
+# ---------------------------------------------------------------------------
+
+def _reset_module_cache():
+    """Reset all module-level caches in aiteamforge_paths so load_config()
+    performs a fresh read on the next call."""
+    aiteamforge_paths._CONFIG_CACHE = None
+    aiteamforge_paths._CONFIG_PATH_AT_LOAD = None
+    aiteamforge_paths._A1_BACKFILL_ATTEMPTED = False
+    aiteamforge_paths._CONTRACT_SCRUB_ATTEMPTED = False
+
+
+def _minimal_team_entry(slug: str) -> dict:
+    """Return a minimal valid team entry dict sufficient for load_config()."""
+    return {
+        "kanban_dir": f"/tmp/{slug}/kanban",
+        "working_dir": f"/tmp/{slug}",
+        "lcars_port": 9000,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": f"TEAM_{slug.upper().replace('-', '_')}_API_KEY",
+    }
+
+
+class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
+    """XACA-0647: Regression tests for the load_config() corruption guard.
+
+    Each test writes a synthetic config to a temp file, points
+    AITEAMFORGE_CONFIG at it, and verifies whether load_config() preserves
+    the config as-is (valid) or re-seeds it with DEFAULT_TEAMS (corrupt).
+    """
+
+    def setUp(self):
+        """Create a temp dir and reset module caches before each test."""
+        self._tmp = tempfile.mkdtemp(prefix="xaca0647_test_")
+        self._config_path = os.path.join(self._tmp, "team-paths.json")
+        _reset_module_cache()
+        # Stash any existing AITEAMFORGE_CONFIG so we can restore it.
+        self._orig_env = os.environ.get("AITEAMFORGE_CONFIG")
+        os.environ["AITEAMFORGE_CONFIG"] = self._config_path
+
+    def tearDown(self):
+        """Reset module caches and restore env after each test."""
+        _reset_module_cache()
+        if self._orig_env is None:
+            os.environ.pop("AITEAMFORGE_CONFIG", None)
+        else:
+            os.environ["AITEAMFORGE_CONFIG"] = self._orig_env
+        # Clean up temp files (non-fatal on Windows).
+        import shutil
+        try:
+            shutil.rmtree(self._tmp)
+        except OSError:
+            pass
+
+    def _write_config(self, teams: dict, schema_version: int = 3) -> None:
+        """Write a synthetic config JSON to the temp file."""
+        cfg = {"schema_version": schema_version, "teams": teams}
+        with open(self._config_path, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2)
+
+    # ── VALID personal-only configs (must NOT be re-seeded) ─────────────────
+
+    def test_valid_academy_plus_finance_personal_not_reseeded(self):
+        """academy + finance-personal is a valid personal-only config.
+
+        The guard must accept it as-is — load_config() must return exactly
+        {academy, finance-personal} and must NOT expand it to the Main Event
+        roster (e.g. must not inject 'ios').
+        """
+        self._write_config({
+            "academy": _minimal_team_entry("academy"),
+            "finance-personal": _minimal_team_entry("finance-personal"),
+        })
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn(
+            "finance-personal", teams,
+            "finance-personal must be preserved in a valid personal-only config",
+        )
+        self.assertNotIn(
+            "ios", teams,
+            "ios must NOT be injected into a valid personal-only config (re-seed guard)",
+        )
+        # Ensure the team set is exactly what we wrote — no silent expansion.
+        self.assertEqual(
+            set(teams.keys()), {"academy", "finance-personal"},
+            "load_config() must not add or remove teams from a valid personal-only config",
+        )
+
+    def test_valid_academy_plus_medical_general_not_reseeded(self):
+        """academy + medical-general is a valid personal-only config (no platform team)."""
+        self._write_config({
+            "academy": _minimal_team_entry("academy"),
+            "medical-general": _minimal_team_entry("medical-general"),
+        })
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn("medical-general", teams)
+        self.assertNotIn(
+            "ios", teams,
+            "ios must NOT be injected into a valid academy+medical-general config",
+        )
+        self.assertEqual(set(teams.keys()), {"academy", "medical-general"})
+
+    def test_valid_academy_plus_legal_coparenting_not_reseeded(self):
+        """academy + legal-coparenting is a valid personal-only config."""
+        self._write_config({
+            "academy": _minimal_team_entry("academy"),
+            "legal-coparenting": _minimal_team_entry("legal-coparenting"),
+        })
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn("legal-coparenting", teams)
+        self.assertNotIn(
+            "android", teams,
+            "android must NOT be injected into a valid academy+legal-coparenting config",
+        )
+        self.assertEqual(set(teams.keys()), {"academy", "legal-coparenting"})
+
+    # ── CORRUPT configs (must trigger bootstrap → DEFAULT_TEAMS) ─────────────
+
+    def test_corrupt_academy_alone_is_reseeded(self):
+        """academy as the ONLY team is the partial-write corruption signature.
+
+        load_config() must detect this and bootstrap → DEFAULT_TEAMS which
+        includes 'ios' (and all other canonical teams).
+        """
+        self._write_config({"academy": _minimal_team_entry("academy")})
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn(
+            "ios", teams,
+            "academy-alone config must be re-seeded with DEFAULT_TEAMS (ios expected)",
+        )
+        # DEFAULT_TEAMS has many more teams than just academy.
+        self.assertGreater(
+            len(teams), 1,
+            "Re-seeded config must contain more than one team (full DEFAULT_TEAMS)",
+        )
+
+    def test_corrupt_empty_teams_is_reseeded(self):
+        """Empty teams dict is corrupt — load_config() must bootstrap DEFAULT_TEAMS."""
+        self._write_config({})
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn(
+            "ios", teams,
+            "Empty-teams config must be re-seeded with DEFAULT_TEAMS (ios expected)",
+        )
+        self.assertGreater(len(teams), 1)
+
+    def test_corrupt_missing_academy_is_reseeded(self):
+        """A config with finance-personal but NO academy is corrupt (academy is required)."""
+        self._write_config({"finance-personal": _minimal_team_entry("finance-personal")})
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn(
+            "ios", teams,
+            "Config missing academy must be re-seeded with DEFAULT_TEAMS (ios expected)",
+        )
+        self.assertIn(
+            "academy", teams,
+            "Re-seeded config must include academy from DEFAULT_TEAMS",
+        )
+
+    def test_corrupt_missing_schema_version_is_reseeded(self):
+        """A config without schema_version (partial-write) is corrupt and re-seeded."""
+        # Write raw JSON without schema_version — bypass _write_config's wrapper.
+        cfg = {
+            "teams": {
+                "academy": _minimal_team_entry("academy"),
+                "ios": _minimal_team_entry("ios"),
+            }
+        }
+        with open(self._config_path, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2)
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        # After bootstrap the result must be DEFAULT_TEAMS (schema_version restored).
+        self.assertEqual(
+            result.get("schema_version"), aiteamforge_paths.SUPPORTED_SCHEMA_VERSION,
+            "Bootstrapped config must carry SUPPORTED_SCHEMA_VERSION",
+        )
+        self.assertIn("ios", teams)
 
 
 # ---------------------------------------------------------------------------

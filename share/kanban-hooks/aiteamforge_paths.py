@@ -259,8 +259,11 @@ SUPPORTED_SCHEMA_VERSION = 3
 # considered corrupt and load_config() falls back to _bootstrap().  (XACA-0457)
 CANONICAL_REQUIRED_TEAMS: frozenset[str] = frozenset({"academy"})
 
-# At least ONE of these must be present.  A config with only "academy" and none
-# of the platform teams is almost certainly a partial-write artifact.  (XACA-0457)
+# Platform teams. RETAINED FOR REFERENCE/documentation only. NOTE (XACA-0647):
+# config validity NO LONGER requires one of these. The old rule demanded a
+# platform team and wrongly flagged personal-only machines as corrupt. The
+# validity rule now lives in load_config(): academy MUST be present AND there
+# must be at least one OTHER team of ANY kind (see `has_non_required`). (XACA-0457)
 CANONICAL_AT_LEAST_ONE_TEAMS: frozenset[str] = frozenset({"ios", "android", "firebase", "dns"})
 
 # Templates that REQUIRE one or more parameters (project, or client+project) per
@@ -403,12 +406,18 @@ def load_config() -> dict:
         has_schema = "schema_version" in config
         teams_keys = set(config.get("teams", {}).keys())
         missing_required = CANONICAL_REQUIRED_TEAMS - teams_keys
-        has_canonical_one = bool(CANONICAL_AT_LEAST_ONE_TEAMS & teams_keys)
-        if not has_schema or missing_required or not has_canonical_one:
+        # XACA-0647: a valid config has academy PLUS at least one OTHER team of
+        # ANY kind (platform OR personal). The old check demanded a platform team
+        # (ios/android/firebase/dns), which wrongly flagged personal-only machines
+        # (e.g. fleet-plan M4Mini: academy + finance-personal/legal-coparenting/
+        # medical-general) as corrupt and re-seeded them with the Main Event roster.
+        # The real partial-write signature is academy collapsing to academy-ALONE.
+        has_non_required = bool(teams_keys - CANONICAL_REQUIRED_TEAMS)
+        if not has_schema or missing_required or not has_non_required:
             print(
                 f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "
                 f"(has_schema_version={has_schema}, missing_required={sorted(missing_required)}, "
-                f"has_canonical_subset={has_canonical_one}) — bootstrapping defaults",
+                f"has_non_required_team={has_non_required}) — bootstrapping defaults",
                 file=sys.stderr,
             )
             # Snapshot the corrupt file BEFORE nulling config — _bootstrap may
