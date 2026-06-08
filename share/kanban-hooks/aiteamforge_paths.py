@@ -259,12 +259,27 @@ SUPPORTED_SCHEMA_VERSION = 3
 # considered corrupt and load_config() falls back to _bootstrap().  (XACA-0457)
 CANONICAL_REQUIRED_TEAMS: frozenset[str] = frozenset({"academy"})
 
-# Platform teams. RETAINED FOR REFERENCE/documentation only. NOTE (XACA-0647):
-# config validity NO LONGER requires one of these. The old rule demanded a
-# platform team and wrongly flagged personal-only machines as corrupt. The
-# validity rule now lives in load_config(): academy MUST be present AND there
-# must be at least one OTHER team of ANY kind (see `has_non_required`). (XACA-0457)
-CANONICAL_AT_LEAST_ONE_TEAMS: frozenset[str] = frozenset({"ios", "android", "firebase", "dns"})
+
+def teams_satisfy_canonical_guard(teams_keys) -> tuple[frozenset, bool]:
+    """Canonical-team structural guard — SINGLE SOURCE OF TRUTH (XACA-0647).
+
+    Returns (missing_required, has_non_required) for a set of team-name keys:
+      - missing_required: CANONICAL_REQUIRED_TEAMS absent from the set (academy).
+      - has_non_required: True iff at least one team beyond the required set exists.
+
+    A team map is structurally valid iff `not missing_required and has_non_required`
+    — academy present AND at least one OTHER team of ANY kind (platform OR personal).
+    Academy-alone / empty teams is the partial-write corruption signature.
+
+    Both load_config() (this module) and lcars-ui/server.py's
+    _build_team_kanban_dirs() call this so the validity rule cannot drift across
+    the two sites (ends the k501 two-site sibling drift). (XACA-0457 / XACA-0647)
+    """
+    teams_keys = set(teams_keys)
+    missing_required = CANONICAL_REQUIRED_TEAMS - teams_keys
+    has_non_required = bool(teams_keys - CANONICAL_REQUIRED_TEAMS)
+    return frozenset(missing_required), has_non_required
+
 
 # Templates that REQUIRE one or more parameters (project, or client+project) per
 # the team-id contract (docs/architecture/team-id-contract.md §3). A bare key
@@ -405,14 +420,10 @@ def load_config() -> dict:
     if config is not None:
         has_schema = "schema_version" in config
         teams_keys = set(config.get("teams", {}).keys())
-        missing_required = CANONICAL_REQUIRED_TEAMS - teams_keys
-        # XACA-0647: a valid config has academy PLUS at least one OTHER team of
-        # ANY kind (platform OR personal). The old check demanded a platform team
-        # (ios/android/firebase/dns), which wrongly flagged personal-only machines
-        # (e.g. fleet-plan M4Mini: academy + finance-personal/legal-coparenting/
-        # medical-general) as corrupt and re-seeded them with the Main Event roster.
-        # The real partial-write signature is academy collapsing to academy-ALONE.
-        has_non_required = bool(teams_keys - CANONICAL_REQUIRED_TEAMS)
+        # XACA-0647: validity rule lives in teams_satisfy_canonical_guard() — the
+        # single source of truth shared with lcars-ui/server.py (ends k501 drift).
+        # Valid iff academy present AND at least one OTHER team of any kind.
+        missing_required, has_non_required = teams_satisfy_canonical_guard(teams_keys)
         if not has_schema or missing_required or not has_non_required:
             print(
                 f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "

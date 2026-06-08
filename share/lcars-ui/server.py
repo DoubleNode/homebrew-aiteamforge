@@ -63,6 +63,7 @@ try:
         load_config as _aiteamforge_load_config,
         build_team_code_map as _aiteamforge_build_team_code_map,
         build_import_path_maps as _aiteamforge_build_import_path_maps,
+        teams_satisfy_canonical_guard,
     )
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError as e:
@@ -224,22 +225,6 @@ def _filter_contract_violating_teams(team_dirs: dict) -> dict:
     return filtered
 
 
-# Canonical-team guard constants (XACA-0457).
-# list_teams() must include ALL of _CANONICAL_REQUIRED and AT LEAST ONE OTHER
-# team of any kind before the result is trusted.  A partial corruption
-# (e.g. team-paths.json collapsed to academy-only on 2026-05-07) passes the
-# legacy `if teams:` truthiness check but silently breaks every non-academy
-# team lookup for the server's lifetime.  NOTE (XACA-0647): the old rule
-# demanded a platform team (ios/android/firebase/dns) and wrongly flagged
-# personal-only machines (academy + finance/legal/medical, no platform team)
-# as corrupt.  The validity check below now accepts any non-academy team.
-_CANONICAL_REQUIRED = {"academy"}
-# Platform teams. RETAINED FOR REFERENCE/documentation only. NOTE (XACA-0647):
-# config validity NO LONGER requires one of these — any non-academy team now
-# satisfies the check (see `has_non_required` in _build_team_kanban_dirs).
-_CANONICAL_AT_LEAST_ONE = {"ios", "android", "firebase", "dns"}
-
-
 def _build_team_kanban_dirs() -> dict:
     # Empty result from list_teams() is treated as a load failure and triggers the
     # fallback — otherwise a server started during a config write-race caches {}
@@ -254,12 +239,9 @@ def _build_team_kanban_dirs() -> dict:
             teams = list_teams()
             if teams:
                 teams_set = set(teams)
-                missing_required = _CANONICAL_REQUIRED - teams_set
-                # XACA-0647: valid if academy present AND at least one OTHER team
-                # of ANY kind (platform or personal). The old platform-only check
-                # wrongly flagged personal-only machines (academy + finance/legal/
-                # medical) as corrupt. Real corruption = academy collapsed to alone.
-                has_non_required = bool(teams_set - _CANONICAL_REQUIRED)
+                # XACA-0647: shared single-source rule (see aiteamforge_paths.
+                # teams_satisfy_canonical_guard) — ends the k501 two-site drift.
+                missing_required, has_non_required = teams_satisfy_canonical_guard(teams_set)
                 if missing_required or not has_non_required:
                     # Build a precise diagnostic: distinguish missing-required
                     # from academy-alone so the warning tells the operator exactly

@@ -365,8 +365,8 @@ class TestBuildTeamCodeMapMerge(unittest.TestCase):
 
     The overlay is injected by patching load_config() to return a synthetic
     team-paths.json dict. We patch rather than write a fixture file so the
-    loader's schema-integrity self-heal (CANONICAL_AT_LEAST_ONE_TEAMS,
-    XACA-0457) can't silently bootstrap DEFAULT_TEAMS over our overlay — the
+    loader's schema-integrity self-heal (academy + any other team guard,
+    XACA-0457/0647) can't silently bootstrap DEFAULT_TEAMS over our overlay — the
     test target is the merge logic in build_team_code_map(), not the loader.
     """
 
@@ -676,6 +676,102 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
             "Bootstrapped config must carry SUPPORTED_SCHEMA_VERSION",
         )
         self.assertIn("ios", teams)
+
+    # ── VALID single non-personal team configs (XACA-0647 Task 005) ─────────
+
+    def test_valid_academy_plus_command_not_reseeded(self):
+        """academy + command (single non-personal team) is a valid config.
+
+        The guard must accept it as-is — ios must NOT be injected and the
+        team set must be exactly {academy, command}.
+        """
+        self._write_config({
+            "academy": _minimal_team_entry("academy"),
+            "command": _minimal_team_entry("command"),
+        })
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn(
+            "command", teams,
+            "command must be preserved in a valid academy+command config",
+        )
+        self.assertNotIn(
+            "ios", teams,
+            "ios must NOT be injected into a valid academy+command config",
+        )
+        self.assertEqual(
+            set(teams.keys()), {"academy", "command"},
+            "load_config() must not add or remove teams from a valid academy+command config",
+        )
+
+    def test_valid_academy_plus_mainevent_not_reseeded(self):
+        """academy + mainevent (single-instance alias team) is a valid config.
+
+        The guard must accept it as-is — ios must NOT be injected and the
+        team set must be exactly {academy, mainevent}.
+        """
+        self._write_config({
+            "academy": _minimal_team_entry("academy"),
+            "mainevent": _minimal_team_entry("mainevent"),
+        })
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        self.assertIn(
+            "mainevent", teams,
+            "mainevent must be preserved in a valid academy+mainevent config",
+        )
+        self.assertNotIn(
+            "ios", teams,
+            "ios must NOT be injected into a valid academy+mainevent config",
+        )
+        self.assertEqual(
+            set(teams.keys()), {"academy", "mainevent"},
+            "load_config() must not add or remove teams from a valid academy+mainevent config",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Direct unit tests for teams_satisfy_canonical_guard (XACA-0647 Task 005)
+# ---------------------------------------------------------------------------
+
+class TestTeamsSatisfyCanonicalGuard(unittest.TestCase):
+    """Unit tests for the teams_satisfy_canonical_guard() helper.
+
+    Verifies the four boundary cases: valid (academy + other), academy-alone,
+    empty set, and missing-academy-but-has-other.
+    """
+
+    def setUp(self):
+        from aiteamforge_paths import teams_satisfy_canonical_guard
+        self._guard = teams_satisfy_canonical_guard
+
+    def test_academy_plus_finance_personal_is_valid(self):
+        """academy + finance-personal: no missing required, has non-required."""
+        missing, has_other = self._guard({"academy", "finance-personal"})
+        self.assertEqual(missing, frozenset(), "No required teams should be missing")
+        self.assertTrue(has_other, "finance-personal should count as a non-required team")
+
+    def test_academy_alone_has_no_non_required(self):
+        """academy alone: no missing required but has_non_required is False."""
+        missing, has_other = self._guard({"academy"})
+        self.assertEqual(missing, frozenset(), "academy is present — nothing missing")
+        self.assertFalse(has_other, "academy-alone should yield has_non_required=False")
+
+    def test_empty_set_missing_required_and_no_non_required(self):
+        """Empty set: academy is missing AND has_non_required is False."""
+        missing, has_other = self._guard(set())
+        self.assertEqual(missing, frozenset({"academy"}), "academy must be flagged as missing")
+        self.assertFalse(has_other, "Empty set yields has_non_required=False")
+
+    def test_finance_personal_only_missing_academy(self):
+        """finance-personal only: academy is missing but has_non_required is True."""
+        missing, has_other = self._guard({"finance-personal"})
+        self.assertEqual(missing, frozenset({"academy"}), "academy must be flagged as missing")
+        self.assertTrue(has_other, "finance-personal counts as a non-required team")
 
 
 # ---------------------------------------------------------------------------
