@@ -142,7 +142,10 @@ PYEOF
 #   • Parses as a JSON object
 #   • "backlog" key is present and is a list (length 0 is acceptable — a freshly-
 #     provisioned empty board is valid, XACA-0646)
-#   • "team" is a non-empty string (proves substitution ran — not a bare template)
+#   • "team" is a non-empty string (a rendered board always carries a team id;
+#     this rejects {} / markerless files. Note it does NOT distinguish a raw
+#     "{{TEAM_ID}}" placeholder — but the unrendered template lives only under
+#     share/templates/, never at a team's board path, so that case can't occur.)
 #   • "nextId" key is present
 # A corrupt file (e.g. {} or random JSON) remains NOT usable.
 _kb_board_is_present() {
