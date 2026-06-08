@@ -17694,6 +17694,38 @@ body {
     letter-spacing: 0.02em;
 }
 
+/* Lifecycle sub-section separator within a details group (XACA-0645).
+   Subordinate to .roadmap-details-subheading; one per non-empty Active/
+   Upcoming/Archived bucket. A short uppercase label trailed by a thin rule
+   that fills the row, so each lifecycle band reads as a clear divider. */
+.roadmap-details-substate {
+    font-family: 'Antonio', sans-serif;
+    font-size: 0.66rem;
+    font-weight: 700;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--lcars-tan);
+    margin: 13px 0 7px 0;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.roadmap-details-substate::after {
+    content: '';
+    flex: 1 1 auto;
+    height: 1px;
+    background: currentColor;
+    opacity: 0.28;
+}
+/* First separator right under the group subheading hugs a little tighter. */
+.roadmap-details-subheading + .roadmap-details-substate {
+    margin-top: 5px;
+}
+/* Per-state accent: active = green, upcoming = cyan, archived = dimmed tan. */
+.roadmap-details-substate[data-state="active"]   { color: var(--lcars-green); }
+.roadmap-details-substate[data-state="upcoming"] { color: var(--lcars-cyan); }
+.roadmap-details-substate[data-state="archived"] { color: var(--lcars-tan); opacity: 0.65; }
+
 /* ---------------------------------------------------------------------------
    PDF light theme (XACA-0636)
    Applied transiently to #roadmap-content by buildRoadmapPdf() during export and
@@ -17860,6 +17892,19 @@ body {
 .roadmap-pdf-light .roadmap-details-entry-meta {
     color: #5a4a2a !important;
     opacity: 1 !important;
+}
+/* Lifecycle sub-section separators: dark labels + visible rule on white (XACA-0645).
+   Per-state hues are darkened for AA contrast; archived loses its on-screen dim. */
+.roadmap-pdf-light .roadmap-details-substate {
+    color: #4a3a1a !important;
+    opacity: 1 !important;
+}
+.roadmap-pdf-light .roadmap-details-substate[data-state="active"]   { color: #1f7a3d !important; }
+.roadmap-pdf-light .roadmap-details-substate[data-state="upcoming"] { color: #1a6080 !important; }
+.roadmap-pdf-light .roadmap-details-substate[data-state="archived"] { color: #5a4a2a !important; }
+.roadmap-pdf-light .roadmap-details-substate::after {
+    background: currentColor !important;
+    opacity: 0.35 !important;
 }
 
 /* ---------------------------------------------------------------------------

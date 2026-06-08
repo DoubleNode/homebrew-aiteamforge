@@ -19905,7 +19905,7 @@ async function buildRoadmapPdf() {
         const blockSel = '.roadmap-pdf-header, .roadmap-chip, .roadmap-bar, .roadmap-milestone, .roadmap-axis,' +
             ' .roadmap-unscheduled-heading, .roadmap-unscheduled-subheading,' +
             ' .roadmap-unscheduled-status-label, .roadmap-lane-label,' +
-            ' .roadmap-details-heading, .roadmap-details-subheading, .roadmap-details-entry';
+            ' .roadmap-details-heading, .roadmap-details-subheading, .roadmap-details-substate, .roadmap-details-entry';
         const blocks = Array.from(clone.querySelectorAll(blockSel)).map(b => {
             const r = b.getBoundingClientRect();
             return [r.top - elTop, r.bottom - elTop];
@@ -20589,10 +20589,15 @@ async function renderRoadmap() {
     }
 
     // -----------------------------------------------------------------------
-    // Details & Reference section (XACA-0642, enriched XACA-0644)
+    // Details & Reference section (XACA-0642, enriched XACA-0644, grouped XACA-0645)
     // Epics group: ALL epics (description line omitted when blank). Each entry
     //   renders a meta line: ID · resolved start→target dates · X/Y progress.
     // Releases group: all releases, meta line with REL-id; detail text in body.
+    // XACA-0645: within each group, entries are bucketed by lifecycle state
+    //   (Active → Upcoming → Archived) via the server-derived `state` enum
+    //   (ACTIVE | PLANNED | ARCHIVED), with a sub-section separator per non-empty
+    //   bucket. Active/Upcoming sort by date ascending (soonest first); Archived
+    //   descending (most recently finished first); date-less entries sort last.
     // Dedup note: scheduled vs unscheduled lists never contain the same item twice,
     // so [...scheduled, ...unscheduled] concat is safe.
     // -----------------------------------------------------------------------
@@ -20603,102 +20608,161 @@ async function renderRoadmap() {
         const hasEpicsGroup    = allEpics.length > 0;    // XACA-0644: show ALL epics
         const hasReleasesGroup = allReleases.length > 0;
 
+        // --- XACA-0645 lifecycle bucketing helpers ---
+        // Ordered buckets: label = on-screen separator text, token = data-attr value.
+        const STATE_BUCKETS = [
+            { key: 'ACTIVE',   label: 'Active',   token: 'active'   },
+            { key: 'PLANNED',  label: 'Upcoming', token: 'upcoming' },
+            { key: 'ARCHIVED', label: 'Archived', token: 'archived' },
+        ];
+        // Normalize an entry's server-derived state to a known bucket; unknown/blank
+        // falls to PLANNED (Upcoming) so no entry is ever silently dropped.
+        const bucketKey = (item) => {
+            const s = String(item.state || '').trim().toUpperCase();
+            return (s === 'ACTIVE' || s === 'ARCHIVED') ? s : 'PLANNED';
+        };
+        // Sortable date key (YYYY-MM-DD strings compare lexically). First present of:
+        // epics → targetDate|end|startDate|start; releases also fall back to createdAt.
+        const dateKey = (item) => {
+            const cands = [item.targetDate, item.end, item.startDate, item.start, item.createdAt];
+            for (const c of cands) {
+                if (c && String(c).trim()) return String(c).trim();
+            }
+            return '';
+        };
+        // Comparator: ascending for active/upcoming, descending for archived.
+        // Date-less entries ('') always sort last regardless of direction.
+        const byDate = (descending) => (a, b) => {
+            const da = dateKey(a), db = dateKey(b);
+            if (!da && !db) return 0;
+            if (!da) return 1;
+            if (!db) return -1;
+            if (da === db) return 0;
+            return descending ? (da < db ? 1 : -1) : (da < db ? -1 : 1);
+        };
+
+        // Per-entry HTML builder for an epic (one .roadmap-details-entry div).
+        const epicEntryHtml = (epic) => {
+            const color  = escapeHtml(epic.color  || '');
+            const status = escapeHtml(epic.status || '');
+            const out = [];
+            out.push(
+                `<div class="roadmap-details-entry" data-kind="epic"` +
+                ` data-color="${color}"` +
+                ` data-status="${status}">`
+            );
+            out.push(`<div class="roadmap-details-entry-title">${escapeHtml(epic.shortTitle || epic.title || epic.id)}</div>`);
+
+            // Meta line: ID · resolved dates · progress (XACA-0644)
+            // Date resolution mirrors the bar-tooltip logic (~line 20330):
+            //   startResolved  = explicit startDate (if set) else rollup start
+            //   targetResolved = explicit targetDate (if set) else rollup end
+            const metaParts = [];
+            metaParts.push(escapeHtml(epic.id || ''));
+            const startResolved  = (epic.startDate  && epic.startDate.trim())  ? epic.startDate.trim()  : (epic.start  || '');
+            const targetResolved = (epic.targetDate && epic.targetDate.trim()) ? epic.targetDate.trim() : (epic.end    || '');
+            if (startResolved || targetResolved) {
+                if (startResolved && targetResolved && startResolved === targetResolved) {
+                    metaParts.push(escapeHtml(startResolved));
+                } else if (startResolved && targetResolved) {
+                    metaParts.push(escapeHtml(startResolved) + ' → ' + escapeHtml(targetResolved));
+                } else {
+                    metaParts.push(escapeHtml(startResolved || targetResolved));
+                }
+            }
+            const c = epic.itemCounts || {};
+            if (c.total) {
+                metaParts.push(escapeHtml(String(c.completed || 0)) + '/' + escapeHtml(String(c.total)));
+            }
+            out.push(`<div class="roadmap-details-entry-meta">${metaParts.filter(Boolean).join(' · ')}</div>`);
+
+            // Description body: only when non-empty
+            if (epic.description && epic.description.trim()) {
+                out.push(`<div class="roadmap-details-entry-body">${escapeHtml(epic.description.trim())}</div>`);
+            }
+            out.push('</div>'); // .roadmap-details-entry
+            return out.join('\n');
+        };
+
+        // Per-entry HTML builder for a release (one .roadmap-details-entry div).
+        const releaseEntryHtml = (rel) => {
+            const relType   = escapeHtml(rel.type   || '');
+            const relStatus = escapeHtml(rel.status || '');
+            const out = [];
+
+            // Derive detail text: type (capitalized) · status · date.
+            // (Lifecycle state is now the sub-section header, so it is no longer
+            //  repeated inline here — XACA-0645.)
+            const detailParts = [];
+            if (rel.type && rel.type.trim()) {
+                const t = rel.type.trim();
+                detailParts.push(t.charAt(0).toUpperCase() + t.slice(1));
+            }
+            if (rel.status && rel.status.trim()) detailParts.push(rel.status.trim());
+            // Date: prefer targetDate; fall back to start→end range
+            if (rel.targetDate && rel.targetDate.trim()) {
+                detailParts.push(rel.targetDate.trim());
+            } else if (rel.start && rel.end) {
+                const relStart = rel.start.trim();
+                const relEnd   = rel.end.trim();
+                if (relStart === relEnd) {
+                    detailParts.push(relStart);
+                } else {
+                    detailParts.push(`${relStart} – ${relEnd}`);
+                }
+            }
+            const detailText = detailParts.length > 0
+                ? detailParts.join(' · ')
+                : '(no detail)';
+
+            out.push(
+                `<div class="roadmap-details-entry" data-kind="release"` +
+                ` data-type="${relType}"` +
+                ` data-status="${relStatus}">`
+            );
+            out.push(`<div class="roadmap-details-entry-title">${escapeHtml(rel.shortTitle || rel.name || rel.id)}</div>`);
+            // REL-id on meta line, consistent with epic treatment (XACA-0644).
+            // Omit the line entirely when no id (no empty meta div / stray gap).
+            if (rel.id && String(rel.id).trim()) {
+                out.push(`<div class="roadmap-details-entry-meta">${escapeHtml(String(rel.id).trim())}</div>`);
+            }
+            out.push(`<div class="roadmap-details-entry-body">${escapeHtml(detailText)}</div>`);
+            out.push('</div>'); // .roadmap-details-entry
+            return out.join('\n');
+        };
+
+        // Render one group (epics or releases) bucketed by lifecycle state, with a
+        // sub-section separator per NON-empty bucket in Active→Upcoming→Archived
+        // order; entries within a bucket sorted by date (XACA-0645).
+        const renderStateGroups = (items, entryHtml) => {
+            const buckets = { ACTIVE: [], PLANNED: [], ARCHIVED: [] };
+            for (const it of items) buckets[bucketKey(it)].push(it);
+            for (const b of STATE_BUCKETS) {
+                const list = buckets[b.key];
+                if (!list.length) continue;   // skip empty buckets — no orphan separator
+                list.sort(byDate(b.key === 'ARCHIVED'));
+                parts.push(`<div class="roadmap-details-substate" data-state="${b.token}">${b.label}</div>`);
+                for (const it of list) parts.push(entryHtml(it));
+            }
+        };
+
         if (hasEpicsGroup || hasReleasesGroup) {
             parts.push('<div class="roadmap-details">');
             parts.push('<div class="roadmap-details-heading">Details &amp; Reference</div>');
 
-            // --- Epics group (XACA-0644: enriched with meta line) ---
+            // --- Epics group (XACA-0644 meta line, XACA-0645 lifecycle buckets) ---
             if (hasEpicsGroup) {
                 parts.push('<div class="roadmap-details-group" data-kind="epics">');
                 parts.push('<div class="roadmap-details-subheading">Epics</div>');
-                for (const epic of allEpics) {
-                    const color  = escapeHtml(epic.color  || '');
-                    const status = escapeHtml(epic.status || '');
-                    parts.push(
-                        `<div class="roadmap-details-entry" data-kind="epic"` +
-                        ` data-color="${color}"` +
-                        ` data-status="${status}">`
-                    );
-                    parts.push(`<div class="roadmap-details-entry-title">${escapeHtml(epic.shortTitle || epic.title || epic.id)}</div>`);
-
-                    // Meta line: ID · resolved dates · progress (XACA-0644)
-                    // Date resolution mirrors the bar-tooltip logic (~line 20330):
-                    //   startResolved  = explicit startDate (if set) else rollup start
-                    //   targetResolved = explicit targetDate (if set) else rollup end
-                    const metaParts = [];
-                    metaParts.push(escapeHtml(epic.id || ''));
-                    const startResolved  = (epic.startDate  && epic.startDate.trim())  ? epic.startDate.trim()  : (epic.start  || '');
-                    const targetResolved = (epic.targetDate && epic.targetDate.trim()) ? epic.targetDate.trim() : (epic.end    || '');
-                    if (startResolved || targetResolved) {
-                        if (startResolved && targetResolved && startResolved === targetResolved) {
-                            metaParts.push(escapeHtml(startResolved));
-                        } else if (startResolved && targetResolved) {
-                            metaParts.push(escapeHtml(startResolved) + ' → ' + escapeHtml(targetResolved));
-                        } else {
-                            metaParts.push(escapeHtml(startResolved || targetResolved));
-                        }
-                    }
-                    const c = epic.itemCounts || {};
-                    if (c.total) {
-                        metaParts.push(escapeHtml(String(c.completed || 0)) + '/' + escapeHtml(String(c.total)));
-                    }
-                    parts.push(`<div class="roadmap-details-entry-meta">${metaParts.filter(Boolean).join(' · ')}</div>`);
-
-                    // Description body: only when non-empty
-                    if (epic.description && epic.description.trim()) {
-                        parts.push(`<div class="roadmap-details-entry-body">${escapeHtml(epic.description.trim())}</div>`);
-                    }
-                    parts.push('</div>'); // .roadmap-details-entry
-                }
+                renderStateGroups(allEpics, epicEntryHtml);
                 parts.push('</div>'); // .roadmap-details-group[data-kind="epics"]
             }
 
-            // --- Releases group (XACA-0644: REL-id on meta line) ---
+            // --- Releases group (XACA-0644 REL-id, XACA-0645 lifecycle buckets) ---
             if (hasReleasesGroup) {
                 parts.push('<div class="roadmap-details-group" data-kind="releases">');
                 parts.push('<div class="roadmap-details-subheading">Releases</div>');
-                for (const rel of allReleases) {
-                    const relType   = escapeHtml(rel.type   || '');
-                    const relStatus = escapeHtml(rel.status || '');
-
-                    // Derive detail text: type (capitalized) · status · state · date
-                    const detailParts = [];
-                    if (rel.type && rel.type.trim()) {
-                        const t = rel.type.trim();
-                        detailParts.push(t.charAt(0).toUpperCase() + t.slice(1));
-                    }
-                    if (rel.status && rel.status.trim()) detailParts.push(rel.status.trim());
-                    if (rel.state  && rel.state.trim())  detailParts.push(rel.state.trim());
-                    // Date: prefer targetDate; fall back to start→end range
-                    if (rel.targetDate && rel.targetDate.trim()) {
-                        detailParts.push(rel.targetDate.trim());
-                    } else if (rel.start && rel.end) {
-                        const relStart = rel.start.trim();
-                        const relEnd   = rel.end.trim();
-                        if (relStart === relEnd) {
-                            detailParts.push(relStart);
-                        } else {
-                            detailParts.push(`${relStart} – ${relEnd}`);
-                        }
-                    }
-                    const detailText = detailParts.length > 0
-                        ? detailParts.join(' · ')
-                        : '(no detail)';
-
-                    parts.push(
-                        `<div class="roadmap-details-entry" data-kind="release"` +
-                        ` data-type="${relType}"` +
-                        ` data-status="${relStatus}">`
-                    );
-                    parts.push(`<div class="roadmap-details-entry-title">${escapeHtml(rel.shortTitle || rel.name || rel.id)}</div>`);
-                    // REL-id on meta line, consistent with epic treatment (XACA-0644).
-                    // Omit the line entirely when no id (no empty meta div / stray gap).
-                    if (rel.id && String(rel.id).trim()) {
-                        parts.push(`<div class="roadmap-details-entry-meta">${escapeHtml(String(rel.id).trim())}</div>`);
-                    }
-                    parts.push(`<div class="roadmap-details-entry-body">${escapeHtml(detailText)}</div>`);
-                    parts.push('</div>'); // .roadmap-details-entry
-                }
+                renderStateGroups(allReleases, releaseEntryHtml);
                 parts.push('</div>'); // .roadmap-details-group[data-kind="releases"]
             }
 
