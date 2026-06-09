@@ -210,6 +210,38 @@
 .cr-col-age       { width: 75px; text-align: center; white-space: nowrap; }  /* XACA-0335 */
 .cr-col-docs      { width: 60px; text-align: center; }
 .cr-col-edit      { width: 80px; text-align: center; }
+.cr-col-release   { min-width: 100px; max-width: 160px; }  /* XACA-0657-005: linked release */
+
+/* XACA-0657-005: Release cross-link button in RELEASE column */
+.cr-release-link {
+    background: none;
+    border: 1px solid rgba(153, 204, 255, 0.35);
+    border-radius: 3px;
+    color: var(--lcars-blue, #9999ff);
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 2px 6px;
+    text-align: left;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 155px;
+    display: inline-block;
+}
+
+.cr-release-link:hover {
+    background: rgba(153, 204, 255, 0.18);
+    border-color: rgba(153, 204, 255, 0.65);
+    color: var(--lcars-text, #fff);
+}
+
+.cr-release-link:focus-visible {
+    outline: 2px solid var(--lcars-blue, #9999ff);
+    outline-offset: 2px;
+}
 
 /* TYPE / STATE merged column (XACA-0353): TYPE badge stacked on top of STATE badge */
 .cr-typestate-stack {

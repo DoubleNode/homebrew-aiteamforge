@@ -2293,6 +2293,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/releases/') and path.endswith('/items'):
             release_id = path.replace('/api/releases/', '').replace('/items', '')
             self.handle_assign_item_to_release(release_id)
+        elif path.startswith('/api/releases/') and path.endswith('/crs'):
+            # POST /api/releases/<id>/crs — link a CR to the release (XACA-0657)
+            release_id = path[len('/api/releases/'):-len('/crs')]
+            self.handle_link_cr_to_release(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
             self.handle_promote_release(release_id)
@@ -2467,6 +2471,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.handle_remove_item_from_release(release_id, item_id)
             else:
                 self.send_error(400, "Invalid path format")
+        elif path.startswith('/api/releases/') and '/crs/' in path:
+            # DELETE /api/releases/<id>/crs/<crId> — unlink a CR (XACA-0657)
+            parts = path[len('/api/releases/'):].split('/crs/', 1)
+            if len(parts) == 2:
+                release_id, cr_id = parts
+                self.handle_unlink_cr_from_release(release_id, cr_id)
+            else:
+                self.send_error(400, "Invalid path format for CR unlink")
         elif path.startswith('/api/releases/'):
             release_id = path.replace('/api/releases/', '')
             self.handle_archive_release(release_id)
@@ -5501,6 +5513,306 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._atomic_write_json(board_file, data)
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    # -------------------------------------------------------------------------
+    # CR ↔ Release bidirectional link (XACA-0657)
+    # -------------------------------------------------------------------------
+    # Contract (must be byte-identical to shell helpers _kb_cr_release_link /
+    # _kb_cr_release_unlink):
+    #   CR record (.crs[]):
+    #     "releaseAssignment": {"releaseId", "releaseName"(snapshot), "assignedAt"}
+    #     ABSENT (not null) when unlinked — del the key entirely.
+    #   Release object (.releases[]):
+    #     "linkedCRs": [{"crId", "crTitle"(snapshot), "linkedAt"}]
+    #     [] or absent when none.
+    #   Release manifest (releases/<REL-ID>/manifest.json):
+    #     "crIds": ["<CR-ID>", ...]
+    # -------------------------------------------------------------------------
+
+    def handle_link_cr_to_release(self, release_id):
+        """POST /api/releases/<id>/crs — Link a CR to a release.
+
+        Body: { "crId": "<CR-ID>" }
+
+        Writes all three contract sites atomically via the same
+        _load_releases_config / _save_releases_config +
+        _save_release_manifest helpers used by other release handlers.
+
+        Idempotency:
+          - CR already linked to THIS release → no-op 200.
+          - CR linked to a DIFFERENT release → unlink old, then link new.
+
+        Platform mismatch: non-blocking warning in response payload.
+        """
+        import fcntl
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            if content_length == 0:
+                self._send_json_response({"ok": False, "error": "Empty request body"}, status=400)
+                return
+            body = json.loads(self.rfile.read(content_length))
+
+            cr_id = (body.get("crId") or "").strip()
+            if not cr_id:
+                self._send_json_response({"ok": False, "error": "Missing required field: crId"}, status=400)
+                return
+
+            # Validate CR-ID format
+            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+$", cr_id):
+                self._send_json_response({"ok": False, "error": f"Invalid CR-ID format: {cr_id}"}, status=400)
+                return
+
+            # Resolve board file for the CR (same pattern as handle_cr_transition)
+            m = re.match(r"^CR-([A-Z]+)-", cr_id)
+            if not m:
+                self._send_json_response({"ok": False, "error": f"Cannot parse team from CR-ID: {cr_id}"}, status=400)
+                return
+            cr_team = m.group(1).lower()
+
+            cr_kanban_dir = TEAM_KANBAN_DIRS.get(cr_team)
+            if cr_kanban_dir is None:
+                self._send_json_response({"ok": False, "error": f"Unknown team '{cr_team}' derived from CR-ID"}, status=404)
+                return
+
+            cr_board_file = Path(cr_kanban_dir) / f"{cr_team}-board.json"
+            if not cr_board_file.exists():
+                self._send_json_response({"ok": False, "error": f"Board file not found for team '{cr_team}'"}, status=404)
+                return
+
+            # Path-traversal guard
+            try:
+                cr_board_file.resolve().relative_to(Path(cr_kanban_dir).resolve())
+            except ValueError:
+                self._send_json_response({"ok": False, "error": "Invalid CR-ID (path traversal)"}, status=400)
+                return
+
+            # Load releases config to validate and update release object
+            releases_data = self._load_releases_config()
+            release = self._find_release_by_id(releases_data, release_id)
+            if release is None:
+                self._send_json_response({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
+                return
+
+            release_name_snapshot = release.get("name", release_id)
+
+            # Read CR board file (flock for CR write safety)
+            cr_lock_file = cr_board_file.with_suffix('.json.lock')
+            with open(cr_lock_file, 'w') as cr_lock:
+                fcntl.flock(cr_lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(cr_board_file, 'r', encoding='utf-8') as f:
+                        cr_board = json.load(f)
+
+                    crs = cr_board.get("crs", [])
+                    cr_idx = next((i for i, c in enumerate(crs) if c.get("id") == cr_id), None)
+                    if cr_idx is None:
+                        self._send_json_response({"ok": False, "error": f"CR not found: {cr_id}"}, status=404)
+                        return
+
+                    cr_record = crs[cr_idx]
+                    cr_title_snapshot = (cr_record.get("title") or cr_record.get("name") or cr_id)
+
+                    # Check idempotency: already linked to THIS release
+                    existing_assignment = cr_record.get("releaseAssignment")
+                    if existing_assignment and existing_assignment.get("releaseId") == release_id:
+                        # No-op — already linked to this release
+                        linked_crs = release.get("linkedCRs", [])
+                        manifest = self._load_release_manifest(release_id)
+                        self._send_json_response({
+                            "ok": True,
+                            "alreadyLinked": True,
+                            "crId": cr_id,
+                            "releaseId": release_id,
+                            "releaseName": release_name_snapshot,
+                            "linkedCRs": linked_crs,
+                            "crIds": manifest.get("crIds", []),
+                        })
+                        return
+
+                    # If CR is linked to a DIFFERENT release: unlink-old first
+                    old_release_id = None
+                    if existing_assignment and existing_assignment.get("releaseId"):
+                        old_release_id = existing_assignment["releaseId"]
+
+                    now = self._get_timestamp()
+
+                    # Optional platform-mismatch warning (non-blocking)
+                    warning = None
+                    cr_platform = cr_record.get("platform")
+                    if cr_platform:
+                        release_platforms = release.get("platforms", {})
+                        if release_platforms and cr_platform not in release_platforms:
+                            platform_keys = list(release_platforms.keys())
+                            warning = f"platform mismatch: CR is {cr_platform}, release has {', '.join(platform_keys)}"
+
+                    # Write releaseAssignment onto the CR record
+                    cr_record["releaseAssignment"] = {
+                        "releaseId": release_id,
+                        "releaseName": release_name_snapshot,
+                        "assignedAt": now,
+                    }
+                    # Parity with shell _kb_cr_release_link: stamp cr.updatedAt (XACA-0657)
+                    cr_record["updatedAt"] = now
+
+                    cr_board["lastUpdated"] = now
+                    self._atomic_write_json(cr_board_file, cr_board)
+                finally:
+                    fcntl.flock(cr_lock.fileno(), fcntl.LOCK_UN)
+
+            # --- Now update releases config (release.linkedCRs) ---
+            # If the CR was on a different release, remove it from that release's linkedCRs
+            if old_release_id:
+                old_release = self._find_release_by_id(releases_data, old_release_id)
+                if old_release is not None:
+                    old_release["linkedCRs"] = [
+                        entry for entry in old_release.get("linkedCRs", [])
+                        if entry.get("crId") != cr_id
+                    ]
+                # Also clean up old manifest's crIds
+                try:
+                    old_manifest = self._load_release_manifest(old_release_id)
+                    old_manifest["crIds"] = [
+                        cid for cid in old_manifest.get("crIds", [])
+                        if cid != cr_id
+                    ]
+                    self._save_release_manifest(old_release_id, old_manifest)
+                except Exception:
+                    pass  # Best-effort: don't fail link if old manifest cleanup errors
+
+            # Add to this release's linkedCRs (avoid duplicates)
+            linked_crs = release.setdefault("linkedCRs", [])
+            if not any(entry.get("crId") == cr_id for entry in linked_crs):
+                linked_crs.append({
+                    "crId": cr_id,
+                    "crTitle": cr_title_snapshot,
+                    "linkedAt": now,
+                })
+            # Parity with shell: stamp release.updatedAt (XACA-0657)
+            release["updatedAt"] = now
+
+            self._save_releases_config(releases_data)
+
+            # Update manifest crIds
+            manifest = self._load_release_manifest(release_id)
+            cr_ids = manifest.get("crIds", [])
+            if cr_id not in cr_ids:
+                cr_ids.append(cr_id)
+            manifest["crIds"] = cr_ids
+            self._save_release_manifest(release_id, manifest)
+
+            response = {
+                "ok": True,
+                "crId": cr_id,
+                "releaseId": release_id,
+                "releaseName": release_name_snapshot,
+                "linkedCRs": linked_crs,
+                "crIds": cr_ids,
+            }
+            if warning:
+                response["warning"] = warning
+
+            self._send_json_response(response, status=201)
+
+        except Exception as e:
+            self._send_json_response({"ok": False, "error": f"Error linking CR to release: {e}"}, status=500)
+
+    def handle_unlink_cr_from_release(self, release_id, cr_id):
+        """DELETE /api/releases/<id>/crs/<crId> — Unlink a CR from a release.
+
+        Clears all three contract sites:
+          - CR record: deletes releaseAssignment key entirely (ABSENT, not null)
+          - Release object: removes entry from linkedCRs[]
+          - Release manifest: removes crId from crIds[]
+        """
+        import fcntl
+        try:
+            # Validate CR-ID format
+            if not re.match(r"^CR-[A-Z]+-\d{8}-\d+$", cr_id):
+                self._send_json_response({"ok": False, "error": f"Invalid CR-ID format: {cr_id}"}, status=400)
+                return
+
+            # Validate release exists
+            releases_data = self._load_releases_config()
+            release = self._find_release_by_id(releases_data, release_id)
+            if release is None:
+                self._send_json_response({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
+                return
+
+            # Resolve CR board file (same pattern as handle_cr_transition)
+            m = re.match(r"^CR-([A-Z]+)-", cr_id)
+            if not m:
+                self._send_json_response({"ok": False, "error": f"Cannot parse team from CR-ID: {cr_id}"}, status=400)
+                return
+            cr_team = m.group(1).lower()
+
+            cr_kanban_dir = TEAM_KANBAN_DIRS.get(cr_team)
+            if cr_kanban_dir is None:
+                self._send_json_response({"ok": False, "error": f"Unknown team '{cr_team}' derived from CR-ID"}, status=404)
+                return
+
+            cr_board_file = Path(cr_kanban_dir) / f"{cr_team}-board.json"
+            if not cr_board_file.exists():
+                self._send_json_response({"ok": False, "error": f"Board file not found for team '{cr_team}'"}, status=404)
+                return
+
+            # Path-traversal guard
+            try:
+                cr_board_file.resolve().relative_to(Path(cr_kanban_dir).resolve())
+            except ValueError:
+                self._send_json_response({"ok": False, "error": "Invalid CR-ID (path traversal)"}, status=400)
+                return
+
+            # --- Clear releaseAssignment from the CR record ---
+            cr_lock_file = cr_board_file.with_suffix('.json.lock')
+            with open(cr_lock_file, 'w') as cr_lock:
+                fcntl.flock(cr_lock.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(cr_board_file, 'r', encoding='utf-8') as f:
+                        cr_board = json.load(f)
+
+                    crs = cr_board.get("crs", [])
+                    cr_idx = next((i for i, c in enumerate(crs) if c.get("id") == cr_id), None)
+                    if cr_idx is None:
+                        self._send_json_response({"ok": False, "error": f"CR not found: {cr_id}"}, status=404)
+                        return
+
+                    cr_record = crs[cr_idx]
+                    # Contract: key ABSENT (not null) when unlinked
+                    cr_record.pop("releaseAssignment", None)
+                    # Parity with shell _kb_cr_release_unlink: stamp cr.updatedAt (XACA-0657)
+                    unlink_ts = self._get_timestamp()
+                    cr_record["updatedAt"] = unlink_ts
+
+                    cr_board["lastUpdated"] = unlink_ts
+                    self._atomic_write_json(cr_board_file, cr_board)
+                finally:
+                    fcntl.flock(cr_lock.fileno(), fcntl.LOCK_UN)
+
+            # --- Remove from release.linkedCRs ---
+            release["linkedCRs"] = [
+                entry for entry in release.get("linkedCRs", [])
+                if entry.get("crId") != cr_id
+            ]
+            # Parity with shell: stamp release.updatedAt on unlink (XACA-0657)
+            release["updatedAt"] = self._get_timestamp()
+            self._save_releases_config(releases_data)
+
+            # --- Remove from manifest crIds ---
+            manifest = self._load_release_manifest(release_id)
+            cr_ids = [cid for cid in manifest.get("crIds", []) if cid != cr_id]
+            manifest["crIds"] = cr_ids
+            self._save_release_manifest(release_id, manifest)
+
+            self._send_json_response({
+                "ok": True,
+                "unlinked": cr_id,
+                "releaseId": release_id,
+                "linkedCRs": release.get("linkedCRs", []),
+                "crIds": cr_ids,
+            })
+
+        except Exception as e:
+            self._send_json_response({"ok": False, "error": f"Error unlinking CR from release: {e}"}, status=500)
 
     # =========================================================================
     # END RELEASE MANAGEMENT API

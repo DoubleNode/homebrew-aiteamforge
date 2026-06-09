@@ -484,6 +484,8 @@
             // XACA-0294-007: Phase 4 automation badge fields (optional; absent = automation hasn't fired)
             cr_drafted_reminder_last_at: cr.cr_drafted_reminder_last_at || '',
             delay_flagged_at:            cr.delay_flagged_at || '',
+            // XACA-0657: bidirectional CR↔Release link (absent when CR is not linked to a release)
+            releaseAssignment:          cr.releaseAssignment || null,
         };
     }
 
@@ -829,14 +831,33 @@
         return `<div class="cr-automation-badges">${parts.join('')}</div>`;
     }
 
+    // ─── Release cross-link cell (XACA-0657-005) ─────────────────────────────
+
+    /**
+     * Build the RELEASE column cell for a CR row.
+     * When the CR has a releaseAssignment, renders a clickable button that
+     * navigates to the Releases section and focuses that release card.
+     * When absent, renders a dim "—" placeholder consistent with other empty cells.
+     */
+    function _releaseLink(item) {
+        const ra = item.releaseAssignment;
+        if (!ra || !ra.releaseId) {
+            return '<span class="cr-dim">—</span>';
+        }
+        const releaseId   = escapeHtml(ra.releaseId);
+        const releaseName = escapeHtml(ra.releaseName || ra.releaseId);
+        return `<button class="cr-release-link" data-release-id="${releaseId}" title="Navigate to release: ${releaseName}">${releaseName}</button>`;
+    }
+
     // ─── Row renderer ─────────────────────────────────────────────────────────
 
     // Total column count: chevron, ID, TYPE/STATE (merged, XACA-0353), TITLE,
-    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, AGE (XACA-0335), DOCS, EDIT.
+    // PLATFORM, APPROVER, DEPLOY WINDOW, PUSHBACKS, STAGE AGE, AGE (XACA-0335), DOCS, EDIT,
+    // RELEASE (XACA-0657-005 bidirectional link).
     // PUBLISHED column dropped in XACA-0353 (Confluence link still in DOCS modal).
     // EDIT column added in XACA-0349 (per-row EDIT STATE button).
     // AGE column added in XACA-0335 (total CR age, sourced from cr_created_at).
-    const CR_COL_COUNT = 12;
+    const CR_COL_COUNT = 13;
 
     function _renderRow(item) {
         const crId       = escapeHtml(item.cr_id || '');
@@ -851,6 +872,8 @@
         const ageCell    = _ageCell(item);
         // XACA-0294-007: drafted-24h + delayed automation badges
         const autoBadges = _automationBadges(item);
+        // XACA-0657-005: linked release cross-link
+        const releaseCell = _releaseLink(item);
         const hasChildren = item.linkedItemIds && item.linkedItemIds.length > 0;
         const isExpanded  = _expandedCRs.has(item.cr_id);
 
@@ -887,6 +910,7 @@
             <td class="cr-col-age">${ageCell}</td>
             <td class="cr-col-docs">${detailBtn}</td>
             <td class="cr-col-edit">${editCell}</td>
+            <td class="cr-col-release">${releaseCell}</td>
         </tr>`;
     }
 
@@ -1068,6 +1092,7 @@
                         <th class="cr-col-age">AGE</th>
                         <th class="cr-col-docs">DETAIL</th>
                         <th class="cr-col-edit">EDIT</th>
+                        <th class="cr-col-release">RELEASE</th>
                     </tr>
                 </thead>
                 <tbody>${rows}</tbody>
@@ -1132,6 +1157,19 @@
         // (e.g. restored from a prior render). Newly-expanded rows wire their
         // own copy buttons inside _toggleCRExpansion().
         listEl.querySelectorAll('.cr-child-id-copy').forEach(_wireChildCopyButton);
+
+        // XACA-0657-005: Wire RELEASE cross-link buttons → navigate to Releases section
+        // and focus/highlight the target release card.
+        listEl.querySelectorAll('.cr-release-link[data-release-id]').forEach(btn => {
+            btn.addEventListener('click', e => {
+                e.stopPropagation();
+                const releaseId = btn.dataset.releaseId;
+                if (!releaseId) return;
+                if (typeof navigateToCRLinkedRelease === 'function') {
+                    navigateToCRLinkedRelease(releaseId);
+                }
+            });
+        });
     }
 
     // ─── CR-only modal ────────────────────────────────────────────────────────

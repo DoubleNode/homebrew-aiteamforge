@@ -1992,6 +1992,9 @@ kb-cr() {
                 *)    _kb_cr_dispatch_item_revert revert-history "showing revert history of" "$@" ;;
             esac ;;
         backfill)    _kb_cr_backfill "$@" ;;
+        # ── CR ↔ Release bidirectional link (XACA-0657) ───────────────────────
+        assign-release)   _kb_cr_container_assign_release "$@" ;;
+        unassign-release) _kb_cr_container_unassign_release "$@" ;;
         # ── Activity log (XACA-0328-002) ──────────────────────────────────────
         activity)
             local activity_sub="${1:-}"
@@ -2102,6 +2105,75 @@ _kb_cr_find_container() {
     _kb_jq_read "$board_file" \
         '(.crs // [] | to_entries[] | select(.value.id == $id) | .key) // -1' \
         --arg id "$cr_id" -r 2>/dev/null || echo "-1"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CR ↔ Release bidirectional link subcommands (XACA-0657)
+#
+# FIELD CONTRACT on .crs[] records (readers must default cleanly when absent):
+#
+#   CR record gets:
+#     "releaseAssignment": {
+#       "releaseId":   "<REL-ID>",          -- release this CR is assigned to
+#       "releaseName": "<snapshot>",         -- name snapshot at link time
+#       "assignedAt":  "<ISO8601>"           -- link timestamp
+#     }
+#   ABSENT (never null) when unlinked. A CR links to AT MOST ONE release.
+#
+# SHARED WRITE LOGIC lives in kanban-helpers.sh:
+#   _kb_cr_release_link <board> <team> <cr_id> <rel_id>  — writes all 3 sites
+#   _kb_cr_release_unlink <board> <team> <cr_id>          — clears all 3 sites
+# These functions are defined BEFORE kb-cr.sh is sourced, so they are always
+# available here. The kb-release link-cr / unlink-cr entry points in
+# kanban-helpers.sh are thin wrappers over the same functions — no parallel copy.
+#
+# MIGRATION NOTE: absence of releaseAssignment on any existing CR record simply
+# means "unlinked" — no migration script needed. Readers must use
+#   .crs[$i].releaseAssignment // null | select(. != null)
+# or equivalent (//-null guards) when reading this field.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# kb-cr assign-release <CR-ID> <REL-ID>
+# Link a CR container to a release. Snapshots titles. Writes all three sites:
+#   CR.releaseAssignment, release.linkedCRs[], manifest crIds[].
+# If the CR is already linked to a different release, unlinks it first.
+_kb_cr_container_assign_release() {
+    local cr_id="${1-}"
+    local rel_id="${2-}"
+
+    if [[ -z "$cr_id" || -z "$rel_id" ]]; then
+        echo "Usage: kb-cr assign-release <CR-ID> <REL-ID>" >&2
+        echo "  CR-ID:  CR container ID (e.g., CR-TEAM-20260601-0001)" >&2
+        echo "  REL-ID: Release ID (e.g., REL-IOS-2026-Q2-001)" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    # Delegate to the shared write function in kanban-helpers.sh.
+    # _kb_cr_release_link validates CR and release existence, handles re-link.
+    _kb_cr_release_link "$_cr_board" "$_cr_team" "$cr_id" "$rel_id"
+}
+
+# kb-cr unassign-release <CR-ID>
+# Remove the release link from a CR container. Clears all three sites.
+_kb_cr_container_unassign_release() {
+    local cr_id="${1-}"
+
+    if [[ -z "$cr_id" ]]; then
+        echo "Usage: kb-cr unassign-release <CR-ID>" >&2
+        echo "  CR-ID: CR container ID (e.g., CR-TEAM-20260601-0001)" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled
+    _kb_cr_board_preamble || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    # Delegate to the shared write function in kanban-helpers.sh.
+    _kb_cr_release_unlink "$_cr_board" "$_cr_team" "$cr_id"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -4612,6 +4684,16 @@ _kb_cr_help() {
     echo "              <date> accepts: YYYY-MM-DD | YYYY-MM-DDTHH:MM:SSZ | YYYY-MM-DDTHH:MMZ"
     echo "              Writes deploy_window_planned on the .crs[] record."
     echo "              Emits a cr_deploy_window_set activity-log event."
+    echo "  assign-release <CR-ID> <REL-ID>  [XACA-0657]"
+    echo "              Link a CR to a release. Writes all three sites atomically:"
+    echo "              CR.releaseAssignment (snapshot of release name),"
+    echo "              release.linkedCRs[] (snapshot of CR title),"
+    echo "              manifest crIds[] (<kanban>/releases/<REL-ID>.json)."
+    echo "              A CR links to AT MOST ONE release. Re-linking unlinks the old."
+    echo "              Mirror of: kb-release link-cr <REL-ID> <CR-ID>"
+    echo "  unassign-release <CR-ID>  [XACA-0657]"
+    echo "              Remove a CR's release link. Clears all three sites."
+    echo "              Mirror of: kb-release unlink-cr <REL-ID> <CR-ID>"
     echo ""
     echo "── Container Lifecycle Commands (v2.0 — state + timestamp, atomic) ──"
     echo "  NOTE: When the first argument starts with 'CR-', these subcommands"

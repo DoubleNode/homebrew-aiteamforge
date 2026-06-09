@@ -3018,6 +3018,15 @@ body {
     animation: highlight-pulse-anim 0.5s ease-in-out 4;
 }
 
+/* XACA-0657-005: highlight-pulse for release cards and CR rows (bidirectional nav) */
+.release-card.highlight-pulse {
+    animation: highlight-pulse-anim 0.5s ease-in-out 4;
+}
+
+.cr-row.highlight-pulse {
+    animation: highlight-pulse-anim 0.5s ease-in-out 4;
+}
+
 /* ============================================
    XACA-0025: Subitem Blocker Styling
    ============================================ */
@@ -9154,6 +9163,56 @@ body {
 .platform-env.env-beta { background: rgba(153, 204, 255, 0.2); color: var(--lcars-cyan, #99ccff); }
 .platform-env.env-gamma { background: rgba(255, 153, 0, 0.2); color: var(--lcars-orange, #ff9900); }
 .platform-env.env-prod { background: rgba(153, 255, 153, 0.2); color: var(--lcars-green, #99ff99); }
+
+/* XACA-0657-005: Linked Change Requests section inside release card body */
+.release-linked-crs {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.release-linked-crs-label {
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    color: var(--lcars-muted, #888);
+    text-transform: uppercase;
+    margin-right: 4px;
+    white-space: nowrap;
+}
+
+.release-cr-link {
+    background: none;
+    border: 1px solid rgba(255, 204, 0, 0.30);
+    border-radius: 3px;
+    color: var(--lcars-amber, #ffcc00);
+    cursor: pointer;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    padding: 2px 8px;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+    white-space: nowrap;
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    display: inline-block;
+}
+
+.release-cr-link:hover {
+    background: rgba(255, 204, 0, 0.15);
+    border-color: rgba(255, 204, 0, 0.60);
+    color: var(--lcars-text, #fff);
+}
+
+.release-cr-link:focus-visible {
+    outline: 2px solid var(--lcars-amber, #ffcc00);
+    outline-offset: 2px;
+}
 
 /* Release Card Actions */
 .release-card-actions {

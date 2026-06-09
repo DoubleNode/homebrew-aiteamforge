@@ -6857,6 +6857,42 @@ function navigateToBacklogItemById(itemId) {
     }, 100);
 }
 
+// ─── XACA-0657-005: CR↔Release bidirectional navigation ─────────────────────
+
+/**
+ * Navigate from a CR row to its linked release.
+ * Switches to the Releases section, then focuses and highlights the release card.
+ * Called by the `.cr-release-link` click handler in lcars-cr-tab.js.
+ */
+function navigateToCRLinkedRelease(releaseId) {
+    switchSection('releases');
+    // Wait for the section to become active and releases to render, then scroll/highlight
+    setTimeout(() => {
+        const card = document.querySelector(`.release-card[data-release-id="${CSS.escape(releaseId)}"]`);
+        if (!card) return;
+        card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        card.classList.add('highlight-pulse');
+        setTimeout(() => card.classList.remove('highlight-pulse'), 2000);
+    }, 150);
+}
+
+/**
+ * Navigate from a release's linked-CR chip to the CR row.
+ * Switches to the CHANGE REQ section, then focuses and highlights the CR row.
+ * Called by the `.release-cr-link` click handler inline in renderReleaseCard().
+ */
+function navigateToReleaseCR(crId) {
+    switchSection('change-req');
+    // Wait for renderChangeReqList() to fire (triggered by switchSection change-req hook)
+    setTimeout(() => {
+        const row = document.querySelector(`.cr-row[data-cr-id="${CSS.escape(crId)}"]`);
+        if (!row) return;
+        row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        row.classList.add('highlight-pulse');
+        setTimeout(() => row.classList.remove('highlight-pulse'), 2000);
+    }, 150);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════════
 // DUE DATE HELPERS
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -10691,6 +10727,22 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
     // sets the release search input (handler wired via bindItemTagClicks).
     const tagsHtml = buildItemTagsHtml(release.tags, 'release');
 
+    // XACA-0657-005: Linked CR chips — snapshot crTitle/crId; each chip navigates
+    // to the CHANGE REQ section and highlights the target CR row.
+    const linkedCRs = Array.isArray(release.linkedCRs) ? release.linkedCRs : [];
+    const linkedCRsHtml = linkedCRs.length > 0
+        ? `<div class="release-linked-crs">
+                <span class="release-linked-crs-label">CHANGE REQUESTS</span>
+                ${linkedCRs.map(entry => {
+                    const crId    = entry.crId    ? jsAttrEscape(entry.crId)    : '';
+                    const crTitle = entry.crTitle ? escapeHtml(entry.crTitle)   : escapeHtml(entry.crId || '');
+                    const crIdEsc = entry.crId    ? escapeHtml(entry.crId)      : '';
+                    if (!crId) return '';
+                    return `<button class="release-cr-link" onclick="event.stopPropagation(); navigateToReleaseCR('${crId}')" title="Navigate to CR: ${crTitle}">${crIdEsc} — ${crTitle}</button>`;
+                }).join('')}
+           </div>`
+        : '';
+
     return `
         <div class="release-card ${typeClass} ${expandedClass} ${archivedClass}" data-release-id="${release.id}">
             <div class="release-card-header" onclick="toggleReleaseExpanded('${release.id}')">
@@ -10712,6 +10764,7 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
                 <div class="release-platforms">
                     ${platformsHtml}
                 </div>
+                ${linkedCRsHtml}
             </div>
             <div class="release-card-items" id="release-items-${release.id}">
                 ${isExpanded ? '<div class="release-items-loading">Loading items...</div>' : ''}
