@@ -142,7 +142,8 @@ _resolve_board_template() {
     # suffix defeats randomization and causes "File exists" on the second call.
     # Honor TMPDIR so the file lands in the correct per-user temp directory.
     local _tmp
-    _tmp="$(mktemp "${TMPDIR:-/tmp}/kb-init-team-board-template.XXXXXX")"
+    _tmp="$(mktemp "${TMPDIR:-/tmp}/kb-init-team-board-template.XXXXXX")" \
+        || { _fail "mktemp failed — cannot create embedded board template in ${TMPDIR:-/tmp}"; return 1; }
     cat > "$_tmp" <<'BOARD_TEMPLATE_HEREDOC'
 {
   "team": "{{TEAM_ID}}",
