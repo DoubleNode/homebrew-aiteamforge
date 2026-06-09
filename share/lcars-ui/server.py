@@ -2297,6 +2297,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # POST /api/releases/<id>/crs — link a CR to the release (XACA-0657)
             release_id = path[len('/api/releases/'):-len('/crs')]
             self.handle_link_cr_to_release(release_id)
+        elif path.startswith('/api/releases/') and path.endswith('/platform-gate-status'):
+            # POST /api/releases/<id>/platform-gate-status — persist gate result (XACA-0658-004)
+            release_id = path[len('/api/releases/'):-len('/platform-gate-status')]
+            self.handle_platform_gate_status(release_id)
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
             self.handle_promote_release(release_id)
@@ -2420,7 +2424,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 break
 
         # Release API endpoints
-        if path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote'):
+        if path.startswith('/api/releases/') and not path.endswith('/items') and not path.endswith('/promote') and not path.endswith('/platform-gate-status'):
             release_id = path.replace('/api/releases/', '')
             self.handle_update_release(release_id)
         # Epic API endpoints
@@ -5036,6 +5040,95 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         except Exception as e:
             self.send_error(500, f"Error promoting release: {e}")
+
+    def handle_platform_gate_status(self, release_id):
+        """POST /api/releases/<id>/platform-gate-status — Persist version-gate result (XACA-0658-004).
+
+        Body:
+          {
+            "platform":      "<plat>",           # required
+            "result":        "pass"|"fail"|"skip",  # required
+            "checkedAt":     "<ISO-8601>",        # required
+            "codeVersion":   "<semver>",          # optional (empty string OK for skip)
+            "targetVersion": "<semver>"           # optional (empty string OK for skip)
+          }
+
+        Persists to: release.platforms.<plat>.gateStatus = {result, checkedAt, codeVersion, targetVersion}
+
+        The server NEVER reads version files itself — it only stores what the gate script reports.
+        """
+        try:
+            content_length = int(self.headers.get('Content-Length', 0))
+            if content_length == 0:
+                self._send_json_response({"ok": False, "error": "Empty request body"}, status=400)
+                return
+
+            body = json.loads(self.rfile.read(content_length))
+
+            platform    = (body.get("platform") or "").strip()
+            result      = (body.get("result") or "").strip()
+            checked_at  = (body.get("checkedAt") or "").strip()
+            code_ver    = (body.get("codeVersion") or "").strip()
+            target_ver  = (body.get("targetVersion") or "").strip()
+
+            if not platform:
+                self._send_json_response({"ok": False, "error": "Missing required field: platform"}, status=400)
+                return
+            if result not in ("pass", "fail", "skip"):
+                self._send_json_response(
+                    {"ok": False, "error": f"Invalid result value '{result}': must be pass, fail, or skip"},
+                    status=400
+                )
+                return
+            if not checked_at:
+                # Fall back to server timestamp if caller omitted it
+                checked_at = self._get_timestamp()
+
+            data = self._load_releases_config()
+            release = self._find_release_by_id(data, release_id)
+            if not release:
+                self._send_json_response({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
+                return
+
+            platforms = release.get("platforms", {})
+            if platform not in platforms:
+                self._send_json_response(
+                    {"ok": False, "error": f"Platform '{platform}' not found in release '{release_id}'"},
+                    status=400
+                )
+                return
+
+            # Write gateStatus into the platform sub-object
+            platforms[platform]["gateStatus"] = {
+                "result":        result,
+                "checkedAt":     checked_at,
+                "codeVersion":   code_ver,
+                "targetVersion": target_ver,
+            }
+            release["platforms"] = platforms
+
+            self._save_releases_config(data)
+
+            # XACA-0658 + XACA-0659: gateStatus lives in the platforms object, which the
+            # manifest mirror reflects in full — write it through so manifest.json stays a
+            # faithful mirror of the board's authoritative state. Sync failure must never
+            # abort the gate-status write (board releases[] remains the source of truth).
+            try:
+                self._sync_release_metadata_to_manifest(release, release.get('team'))
+            except Exception as sync_err:
+                print(f"[LCARS] Warning: manifest sync after gate-status write failed: {sync_err}")
+
+            self._send_json_response({
+                "ok":      True,
+                "release": release_id,
+                "platform": platform,
+                "gateStatus": platforms[platform]["gateStatus"],
+            })
+
+        except json.JSONDecodeError as e:
+            self._send_json_response({"ok": False, "error": f"Invalid JSON body: {e}"}, status=400)
+        except Exception as e:
+            self.send_error(500, f"Error persisting gate status: {e}")
 
     # --- PUT Handler ---
 
