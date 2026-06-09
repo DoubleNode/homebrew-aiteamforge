@@ -13,6 +13,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
+# XACA-0650: resolve tap-owned venv Python (sets AITEAMFORGE_PYTHON)
+# shellcheck source=../lib/python-env.sh
+[ -f "${LIBEXEC_DIR}/lib/python-env.sh" ] && source "${LIBEXEC_DIR}/lib/python-env.sh" 2>/dev/null || true
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -46,6 +49,7 @@ Options:
 
 Components:
   dependencies    External dependencies (brew, node, python, etc.)
+  python-venv     Tap-owned Python venv and required packages (XACA-0650)
   framework       Framework installation integrity
   version-drift   Cellar vs working-dir version drift (XACA-0578)
   config          Configuration files and validity
@@ -222,6 +226,65 @@ check_dependencies() {
   else
     check_result warn "ImageMagick not installed (optional)" "Install: brew install imagemagick"
   fi
+}
+
+# Check: Tap-owned Python venv and required deps (XACA-0650)
+# The tap venv is provisioned by the Formula post_install at:
+#   $HOMEBREW_PREFIX/var/aiteamforge/venv
+# If iterm2 or another required dep is missing, the fix is always:
+#   brew postinstall aiteamforge  (re-provisions the venv from requirements.txt)
+check_python_venv() {
+  print_section "Checking Tap-Owned Python Venv"
+
+  # AITEAMFORGE_PYTHON resolved by python-env.sh at the top of this file.
+  local atf_python="${AITEAMFORGE_PYTHON:-}"
+
+  if [ -z "$atf_python" ] || [ "$atf_python" = "python3" ]; then
+    check_result fail "Tap-owned Python venv not found" \
+      "Run: brew postinstall aiteamforge  (provisions the venv with all Python deps)"
+    if [ "$FIX" = true ]; then
+      print_info "  --fix: run 'brew postinstall aiteamforge' to reprovision the venv"
+    fi
+    return
+  fi
+
+  if [ ! -x "$atf_python" ]; then
+    check_result fail "Tap-owned venv Python not executable: ${atf_python}" \
+      "Run: brew postinstall aiteamforge"
+    return
+  fi
+
+  local atf_py_version
+  atf_py_version=$("$atf_python" --version 2>&1 | awk '{print $2}')
+  check_result pass "Tap-owned venv Python (${atf_py_version:-unknown}) — ${atf_python}"
+
+  # Check required deps from requirements.txt using pip show
+  local venv_bin
+  venv_bin="$(dirname "$atf_python")"
+  local venv_pip="${venv_bin}/pip"
+
+  if [ ! -x "$venv_pip" ]; then
+    check_result fail "pip not found in tap venv — venv may be incomplete" \
+      "Run: brew postinstall aiteamforge"
+    return
+  fi
+
+  # Required Python packages (must match share/requirements.txt)
+  local required_packages=("iterm2" "pyzipper")
+
+  for pkg in "${required_packages[@]}"; do
+    if "$venv_pip" show "$pkg" &>/dev/null 2>&1; then
+      local pkg_ver
+      pkg_ver="$("$venv_pip" show "$pkg" 2>/dev/null | grep '^Version:' | awk '{print $2}')"
+      check_result pass "${pkg} package installed (${pkg_ver:-unknown version})"
+    else
+      check_result fail "${pkg} package missing from tap venv" \
+        "Run: brew postinstall aiteamforge  (re-provisions the venv from requirements.txt)"
+      if [ "$FIX" = true ]; then
+        print_info "  --fix: run 'brew postinstall aiteamforge' to reinstall ${pkg}"
+      fi
+    fi
+  done
 }
 
 # Check: Framework Installation
@@ -624,6 +687,9 @@ case "$CHECK_COMPONENT" in
   dependencies)
     check_dependencies
     ;;
+  python-venv)
+    check_python_venv
+    ;;
   framework)
     check_framework
     ;;
@@ -650,6 +716,7 @@ case "$CHECK_COMPONENT" in
     ;;
   all)
     check_dependencies
+    check_python_venv
     check_framework
     check_version_drift
     check_config

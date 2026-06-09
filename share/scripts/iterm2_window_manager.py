@@ -12,8 +12,9 @@ Usage:
     python3 iterm2_window_manager.py --window-title "Team Name" --action create-tab --profile "Default" --tab-name "terminal" --command "tmux attach"
     python3 iterm2_window_manager.py --window-title "Team Name" --action set-title
 
-Note: Requires the 'iterm2' Python package. On Python 3.12+ (PEP 668), use a venv:
-    python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2
+Note: Requires the 'iterm2' Python package. The dep is provisioned in the
+    tap-owned venv at $HOMEBREW_PREFIX/var/aiteamforge/venv by the Formula
+    post_install. If it is missing, run: brew postinstall aiteamforge
 """
 
 import argparse
@@ -22,16 +23,37 @@ import os
 import subprocess
 import sys
 
-# If iterm2 is not available, try re-executing via the venv
+# If iterm2 is not available, try re-executing via the tap-owned venv.
+# The venv is provisioned at $HOMEBREW_PREFIX/var/aiteamforge/venv by the
+# Formula post_install.  If missing, run: brew postinstall aiteamforge
 try:
     import iterm2
 except ImportError:
-    for _venv_dir in ["~/aiteamforge/.venv", "~/dev-team/.venv"]:
-        venv_python = os.path.expanduser(f"{_venv_dir}/bin/python3")
+    import subprocess as _sp
+    _brew_prefix = ""
+    try:
+        _brew_prefix = _sp.check_output(
+            ["brew", "--prefix"], text=True, timeout=5
+        ).strip()
+    except Exception:
+        pass
+    _tap_venv_candidates = [
+        os.path.join(_brew_prefix, "var/aiteamforge/venv") if _brew_prefix else "",
+        "/opt/homebrew/var/aiteamforge/venv",
+        "/usr/local/var/aiteamforge/venv",
+    ]
+    for _venv_dir in _tap_venv_candidates:
+        if not _venv_dir:
+            continue
+        venv_python = os.path.join(_venv_dir, "bin/python3")
         if os.path.isfile(venv_python) and sys.executable != venv_python:
             os.execv(venv_python, [venv_python] + sys.argv)
     print("Error: iterm2 module not installed.", file=sys.stderr)
-    print("Fix with: python3 -m venv ~/aiteamforge/.venv && ~/aiteamforge/.venv/bin/pip install iterm2", file=sys.stderr)
+    print(
+        "The iterm2 package is provisioned in the tap-owned venv by the Formula.\n"
+        "Fix: brew postinstall aiteamforge",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
