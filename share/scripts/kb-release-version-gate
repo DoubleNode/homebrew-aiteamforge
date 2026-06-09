@@ -15,8 +15,11 @@
 # Canonical source: ~/dev-team/scripts/kb-release-version-gate
 # Tap mirror:       homebrew-tap/share/scripts/kb-release-version-gate
 # Canonical-source rule: XACA-0340 — edit here, run ./sync-tap.sh to mirror.
-
-set -euo pipefail
+#
+# Note: set -euo pipefail is applied AFTER sourcing kanban-helpers.sh (below),
+# matching sibling scripts kb-release-version-bump / kb-release-push-promote:
+# kanban-helpers.sh may return non-zero from internal checks and reads unset
+# vars, so we source it permissively and tighten up immediately after.
 
 # ---------------------------------------------------------------------------
 # Self-location: resolve AITEAMFORGE_DIR / kanban-helpers.sh regardless of
@@ -33,6 +36,9 @@ if [[ -f "$_HELPERS" ]]; then
     source "$_HELPERS" 2>/dev/null || true
 fi
 _PATHS_PY="$AITEAMFORGE_DIR/kanban-hooks/aiteamforge_paths.py"
+
+# Tighten shell options now that sourcing is complete (see note above).
+set -euo pipefail
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -134,11 +140,17 @@ else:
 PYEOF
 ) || _port=""
 fi
+# XACA-0658-014: do NOT silently fall back to a hardcoded 8080 — a different
+# service may be listening there, and the gateStatus write is best-effort/non-fatal
+# anyway. If the port can't be resolved, mark LCARS unavailable and skip the write
+# with a clear warning; the version-comparison result (the gate's real job) stands.
+_lcars_unavailable=0
 if [[ -z "$_port" ]] || ! [[ "$_port" =~ ^[0-9]+$ ]]; then
-    _port="8080"
+    _lcars_unavailable=1
+    _lcars_base=""
+else
+    _lcars_base="http://localhost:${_port}"
 fi
-
-_lcars_base="http://localhost:${_port}"
 
 # ---------------------------------------------------------------------------
 # Helper: write gateStatus back to LCARS (best-effort, non-fatal)
@@ -147,6 +159,14 @@ _write_gate_status() {
     local result="$1"
     local code_ver="${2:-}"
     local target_ver="${3:-}"
+
+    # XACA-0658-014: skip the write entirely when the LCARS port couldn't be
+    # resolved (rather than POSTing to a hardcoded 8080 that may be another service).
+    if [[ "${_lcars_unavailable:-0}" -ne 0 ]]; then
+        [[ $_quiet -eq 0 ]] && echo "Warning: LCARS port for team '${_team}' could not be resolved — skipping gateStatus write (non-fatal — gate result stands)" >&2
+        return 0
+    fi
+
     local checked_at
     checked_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || python3 -c "import datetime; print(datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'))")
 

@@ -166,6 +166,18 @@ kb_relnotes_promote() {
         return 1
     fi
 
+    # ── XACA-0658-013: env labels are pipeline stage names (DEV/QA/ALPHA/...) and
+    # are interpolated unquoted into a sed expression below. Reject anything that
+    # isn't a bare alphanumeric/_/- token so no metacharacter can reach sed. ───
+    case "$env_from" in *[!A-Za-z0-9_-]*|'')
+        printf '[kb-relnotes-promote] ERROR: invalid env_from %s (expected an alphanumeric stage label)\n' "$env_from" >&2
+        return 1 ;;
+    esac
+    case "$env_to" in *[!A-Za-z0-9_-]*|'')
+        printf '[kb-relnotes-promote] ERROR: invalid env_to %s (expected an alphanumeric stage label)\n' "$env_to" >&2
+        return 1 ;;
+    esac
+
     # ── derive paths ──────────────────────────────────────────────────────
     local src_file="${relnotes_dir}/RELNOTES-${env_from}.md"
     local dst_file="${relnotes_dir}/RELNOTES-${env_to}.md"
