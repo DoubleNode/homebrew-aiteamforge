@@ -4823,6 +4823,75 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] Warning: Failed to sync item to release manifest: {e}")
             return None
 
+    def _sync_release_metadata_to_manifest(self, release, team=None):
+        """Write-through release metadata from the authoritative board releases[] into manifest.json.
+
+        Board releases[] is the single source of truth; this keeps manifest.json as a
+        faithful read-only mirror so callers that read the manifest file directly get
+        consistent data after any update or promotion.
+
+        Legacy flat scalars (version / versionCode / currentEnvironment) are derived from
+        a representative platform:
+          - Exactly one platform → use that platform's values.
+          - Multiple platforms → use the first platform key in sorted order for
+            determinism.  Legacy manifests predate multi-platform releases; this
+            preserves backward compatibility while not losing multi-platform data
+            (all platforms are also mirrored under manifest['platforms']).
+
+        Only mirrors onto an existing manifest; if none exists yet (e.g. the release
+        was just created before handle_create_release wrote its skeleton) a minimal
+        manifest is created so the write-through still lands.
+        """
+        try:
+            release_id = release.get('id')
+            if not release_id:
+                print("[LCARS] Warning: _sync_release_metadata_to_manifest called with release missing 'id' — skipping")
+                return
+
+            effective_team = team or release.get('team')
+            manifest = self._load_release_manifest(release_id)
+            if manifest is None:
+                # _load_release_manifest always returns a dict (creates a default when
+                # the file is absent), so None is unexpected — guard defensively.
+                manifest = {"releaseId": release_id, "team": effective_team or LCARS_TEAM, "items": [], "createdAt": self._get_timestamp()}
+
+            # Mirror top-level release metadata.
+            manifest['name'] = release.get('name')
+            manifest['shortTitle'] = release.get('shortTitle')
+            manifest['type'] = release.get('type')
+            manifest['status'] = release.get('status')
+            manifest['targetDate'] = release.get('targetDate')
+
+            # Mirror full platforms object so multi-platform data is not lost.
+            platforms = release.get('platforms', {})
+            manifest['platforms'] = platforms
+
+            # Derive legacy flat scalars from a representative platform.
+            if platforms:
+                platform_keys = sorted(platforms.keys())
+                rep_key = platform_keys[0]  # deterministic: first alphabetically
+                rep = platforms[rep_key]
+                manifest['version'] = rep.get('version')
+                manifest['versionCode'] = rep.get('buildNumber')   # legacy name for buildNumber
+                manifest['currentEnvironment'] = rep.get('environment')
+            else:
+                # No platforms — clear legacy scalars so they are not stale.
+                manifest.pop('version', None)
+                manifest.pop('versionCode', None)
+                manifest.pop('currentEnvironment', None)
+
+            # Marker so readers know this file is a derived mirror.
+            manifest['_source'] = 'board.releases[] (authoritative); this manifest is a mirror — do not edit by hand'
+
+            # Ensure team is set (backward compatibility).
+            if effective_team and 'team' not in manifest:
+                manifest['team'] = effective_team
+
+            self._save_release_manifest(release_id, manifest)
+            print(f"[LCARS] Synced release metadata to manifest for {release_id}")
+        except Exception as e:
+            print(f"[LCARS] Warning: Failed to sync release metadata to manifest: {e}")
+
     def _remove_item_from_release_manifest(self, release_id, item_id):
         """Remove item from release manifest when item is unassigned from release.
 
@@ -4947,6 +5016,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self._save_releases_config(data)
 
+            # XACA-0659 (GAP B): Write-through updated environment into manifest.json
+            # so the manifest mirrors the board's authoritative environment state.
+            try:
+                self._sync_release_metadata_to_manifest(release, release.get('team'))
+            except Exception as sync_err:
+                print(f"[LCARS] Warning: manifest sync after promote failed: {sync_err}")
+
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.send_header('Access-Control-Allow-Origin', '*')
@@ -5036,6 +5112,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 release['platforms'] = existing_platforms
 
             self._save_releases_config(data)
+
+            # XACA-0659 (GAP A): Write-through updated release metadata into manifest.json
+            # so the manifest mirrors the board's authoritative values after any field update.
+            try:
+                self._sync_release_metadata_to_manifest(release, release.get('team'))
+            except Exception as sync_err:
+                print(f"[LCARS] Warning: manifest sync after update failed: {sync_err}")
 
             # Update releaseName in board items if name was changed
             if 'name' in post_data:

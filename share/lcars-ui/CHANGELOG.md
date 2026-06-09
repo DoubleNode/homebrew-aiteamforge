@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0659: Fixed — Release manifest stale metadata after update/promote -->
+
+### Fixed
+- **XACA-0659: Release manifest write-through on update and promote.** `handle_update_release` and `handle_promote_release` wrote changes to the authoritative board `releases[]` but left per-release `manifest.json` files carrying stale top-level scalars (`name`, `version`, `versionCode`, `currentEnvironment`, etc.). Added `_sync_release_metadata_to_manifest` helper that mirrors board-authoritative values into the manifest after every save: top-level fields (`name`, `shortTitle`, `type`, `status`, `targetDate`), the full `platforms` object, and legacy flat scalars derived from a representative platform (single-platform → that platform; multi-platform → first alphabetically for determinism). A `_source` marker is stamped so readers know the file is a derived mirror. Sync failures are logged as warnings and never abort the main board write.
+
 <!-- XACA-0641: Fixed — Roadmap timeline clips first/last markers + epic pill label -->
 
 ### Fixed
