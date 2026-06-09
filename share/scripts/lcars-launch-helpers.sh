@@ -48,6 +48,133 @@
 # suppression and logs errors loudly so they are actionable.
 
 # ---------------------------------------------------------------------------
+# _lcars_port_drift_guard <team> <port> <session_name> <atf_base>
+#
+# XACA-0626 startup-time port drift guard.
+#
+# Called from start_lcars_server() BEFORE the server binds, so every LCARS
+# launch — on both the dev source machine and tap-installed consumers — runs
+# this check automatically. No additional per-machine steps are required.
+#
+# Two checks:
+#
+# 1. .port file drift (SELF-HEAL):
+#    Reads lcars-ports/<session_name>.port. If the value differs from <port>
+#    (what the caller resolved via resolve_lcars_port / team-paths.json), the
+#    file is REWRITTEN to <port> and a one-line notice is emitted. This closes
+#    the "no automated sync" gap identified in XACA-0626-003 §6 (MISSING WRITER):
+#    the .port file is written once at provisioning (kb-init-team) and was
+#    never re-synced by any startup path. The 8427 stale cksum residue on M1Pro
+#    is the canonical example — a single startup now self-heals it permanently.
+#
+# 2. team-paths.json vs DEFAULT_TEAMS canonical (WARN-ONLY):
+#    Invokes aiteamforge_paths.py to compare the team-paths.json port (which
+#    resolve_lcars_port already used as <port>) against DEFAULT_TEAMS canonical.
+#    If they differ, a loud actionable warning is emitted pointing the operator
+#    at "kb-port-reconcile --prefer canonical <team>". We do NOT auto-correct
+#    team-paths.json here: that file is written by the installer's allocator, and
+#    rewriting it mid-startup could fight a concurrent install or mask a real
+#    collision that the operator needs to consciously resolve. The .port rewrite
+#    (check 1) is the sufficient, safe self-heal for connectivity; team-paths
+#    drift is a secondary issue that requires informed operator action.
+#
+# Defensive contract: any failure in this guard (missing files, Python errors,
+# unresolvable canonical) emits a stderr warning and returns 0 — the guard
+# NEVER aborts the startup. A broken guard is worse than no guard.
+#
+# Shell compatibility: #!/bin/zsh (macOS system zsh). No bashisms beyond what
+# zsh supports; avoids "local" inside loops (feedback_zsh_local_in_loop_gotcha).
+# ---------------------------------------------------------------------------
+_lcars_port_drift_guard() {
+    local _guard_team="${1:-}"
+    local _guard_port="${2:-}"
+    local _guard_session="${3:-}"
+    local _guard_base="${4:-}"
+
+    # Defensive: skip guard if arguments are missing (should never happen in
+    # normal use, but we promised to never abort startup).
+    if [[ -z "$_guard_team" || -z "$_guard_port" || -z "$_guard_session" || -z "$_guard_base" ]]; then
+        echo "  [port-drift-guard] WARNING: missing arguments — skipping guard" >&2
+        return 0
+    fi
+
+    local _guard_ports_dir="${_guard_base}/lcars-ports"
+    local _guard_port_file="${_guard_ports_dir}/${_guard_session}.port"
+    # Gate Check 2 on the module it actually imports (aiteamforge_paths.py), not a
+    # co-shipped proxy — so the team-paths drift warning can't silently die if the
+    # proxy is ever removed independently. (XACA-0626 review hardening.)
+    local _guard_ports_py="${_guard_base}/kanban-hooks/aiteamforge_paths.py"
+
+    # ------------------------------------------------------------------
+    # Check 1: .port file vs resolved port (SELF-HEAL)
+    # ------------------------------------------------------------------
+    if [[ -f "$_guard_port_file" ]]; then
+        local _guard_current_port
+        _guard_current_port="$(cat "$_guard_port_file" 2>/dev/null | tr -d '[:space:]')"
+        if [[ -n "$_guard_current_port" && "$_guard_current_port" != "$_guard_port" ]]; then
+            # Rewrite .port to the resolved canonical value before server binds.
+            if printf '%s\n' "$_guard_port" > "$_guard_port_file" 2>/dev/null; then
+                echo "  [port-drift-guard] NOTICE: ${_guard_session}.port was ${_guard_current_port}, corrected to ${_guard_port} (stale value self-healed)." >&2
+            else
+                echo "  [port-drift-guard] WARNING: ${_guard_session}.port is stale (${_guard_current_port} vs ${_guard_port}) but could not be rewritten — check permissions on ${_guard_port_file}" >&2
+            fi
+        fi
+    else
+        # Port file does not exist — create it so future checks and connect
+        # scripts have a value to read (mirrors kb-init-team P1 logic).
+        if [[ -d "$_guard_ports_dir" ]]; then
+            if printf '%s\n' "$_guard_port" > "$_guard_port_file" 2>/dev/null; then
+                echo "  [port-drift-guard] NOTICE: ${_guard_session}.port did not exist — created with port ${_guard_port}." >&2
+            fi
+        fi
+    fi
+
+    # ------------------------------------------------------------------
+    # Check 2: team-paths.json port vs DEFAULT_TEAMS canonical (WARN-ONLY)
+    #
+    # resolve_lcars_port (called by the template before start_lcars_server)
+    # already prefers the team-paths.json overlay, so _guard_port == the
+    # team-paths value. Here we fetch the DEFAULT_TEAMS canonical and compare.
+    # A mismatch means the installer's allocator produced a +1 drift (self-
+    # collision) — the operator must run kb-port-reconcile to correct it.
+    # ------------------------------------------------------------------
+    if [[ ! -f "$_guard_ports_py" ]]; then
+        # No Python module available (edge case: stripped install). Skip silently.
+        return 0
+    fi
+
+    local _guard_py_dir
+    _guard_py_dir="$(dirname "$_guard_ports_py")"
+    local _guard_default_port
+    _guard_default_port="$(python3 -c "
+import sys
+sys.path.insert(0, '${_guard_py_dir}')
+try:
+    from aiteamforge_paths import DEFAULT_TEAMS
+    entry = DEFAULT_TEAMS.get('${_guard_team}')
+    if entry:
+        p = entry.get('lcars_port')
+        if p: print(int(p))
+except Exception:
+    pass
+" 2>/dev/null)"
+
+    if [[ -n "$_guard_default_port" && "$_guard_port" != "$_guard_default_port" ]]; then
+        local _guard_drift=$(( _guard_port - _guard_default_port ))
+        local _guard_drift_str
+        if (( _guard_drift > 0 )); then
+            _guard_drift_str="+${_guard_drift}"
+        else
+            _guard_drift_str="${_guard_drift}"
+        fi
+        echo "  [port-drift-guard] WARNING: team-paths.json port for '${_guard_team}' is ${_guard_port} but DEFAULT_TEAMS canonical is ${_guard_default_port} (drift: ${_guard_drift_str})." >&2
+        echo "                     To correct: kb-port-reconcile --prefer canonical ${_guard_team}" >&2
+    fi
+
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # is_headless — returns 0 (true) when no macOS GUI session is available for
 # iTerm2/Terminal.app automation; returns 1 (false) when a GUI is present.
 #
@@ -171,6 +298,11 @@ start_lcars_server() {
     # override if ever needed.
     local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
     local lcars_ui_dir="${LCARS_UI_DIR:-${_atf_base}/lcars-ui}"
+
+    # XACA-0626: startup-time port drift guard.
+    # Must run BEFORE the server binds so the .port file is correct before any
+    # connect script reads it. Soft-fail: guard never aborts startup.
+    _lcars_port_drift_guard "$team" "$port" "$session_name" "$_atf_base" || true
 
     # Write the router redirect so the UI knows which team dashboard to show.
     # This must happen BEFORE the server starts; the file is read on first load.

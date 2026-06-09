@@ -332,6 +332,7 @@ kb-cr.sh|${WORKING_DIR}/scripts/kb-cr.sh
 auto-upgrade.sh|${WORKING_DIR}/scripts/auto-upgrade.sh
 cellar-watch-trigger.sh|${WORKING_DIR}/scripts/cellar-watch-trigger.sh
 deploy-worktree-personas.sh|${WORKING_DIR}/scripts/deploy-worktree-personas.sh
+kb-port-reconcile|${WORKING_DIR}/scripts/kb-port-reconcile
 worktree-helpers.sh|${WORKING_DIR}/worktree-helpers.sh
 EOF
 }
@@ -868,6 +869,10 @@ update_launchagents() {
     "com.aiteamforge.auto-upgrade.plist:auto-upgrade/auto-upgrade-launchagent.template.plist"
     "com.aiteamforge.lcars-watch.plist:auto-upgrade/lcars-watch-launchagent.template.plist"
     "com.aiteamforge.cellar-watch.plist:auto-upgrade/cellar-watch-launchagent.template.plist"
+    # XACA-0626: RunAtLoad agent — starts all configured LCARS servers at login/reboot.
+    # XACA-0578 SIBLING-DRIFT NOTE: paired with install-kanban.sh (install+uninstall),
+    # aiteamforge-migrate.sh::update_launchagents, and the template in share/templates/auto-upgrade/.
+    "com.aiteamforge.lcars-runatload.plist:auto-upgrade/lcars-runatload.template.plist"
   )
 
   # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.

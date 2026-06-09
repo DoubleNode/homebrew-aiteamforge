@@ -1,0 +1,1167 @@
+#!/usr/bin/env bash
+# kb-port-reconcile — Detect and reconcile three-way LCARS-port divergence across teams.
+#
+# XACA-0547 subitem 001: UPDATE-in-place sibling of kb-init-team's INSERT provisioner.
+# XACA-0561 subitem 003: Added read-site guard for health-check and smoke-test scripts.
+#
+# Pre-existing teams accumulated divergent LCARS ports across three sources that were
+# written at different times by different tools. This tool detects that divergence and
+# reconciles every write site to a single authoritative value per team.
+#
+# USAGE
+#   kb-port-reconcile --check            # READ-ONLY scan + comparison table; exit 1 if divergent
+#   kb-port-reconcile --check --strict   # also exit 1 on presence anomalies / UNRESOLVABLE
+#   kb-port-reconcile [--dry-run]        # show what WOULD change (dry-run is the DEFAULT)
+#   kb-port-reconcile --apply            # actually perform the writes
+#   kb-port-reconcile --team <team-id>   # restrict to a single team (with --check/--dry-run/--apply)
+#   kb-port-reconcile --prefer <src>     # precedence: team-paths (default) | portfile | canonical
+#   kb-port-reconcile --help
+#
+# THE THREE PORT SOURCES (and who reads each at runtime)
+#   1. kanban-hooks/aiteamforge_paths.py  DEFAULT_TEAMS[<team>]["lcars_port"]
+#        Baked-in registry baseline. DEPRECATED (XACA-0463) — many teams share a band
+#        default (all freelance-doublenode share 8505), so this is LEAST trustworthy.
+#   2. ~/.aiteamforge/team-paths.json     teams.<team>.lcars_port
+#        Live overlay; what get_team_lcars_port() returns and what kb-* helpers curl.
+#        AUTHORITATIVE SOURCE (user decision).
+#   3. lcars-ports/<team-id>-lcars.port   single-line port file
+#        What the LCARS startup scripts bind the server to.
+#
+# AUTHORITY / PRECEDENCE (default --prefer team-paths)
+#   For each team the authoritative port = first available of:
+#     1. team-paths.json lcars_port  (if a positive integer)
+#     2. else DEFAULT_TEAMS lcars_port (if numeric)  — fallback only
+#     3. else UNRESOLVABLE → report as anomaly, do NOT guess, do NOT write.
+#   --prefer portfile flips precedence so the .port file value wins (a running server
+#   may not want to move). Order then: portfile → team-paths → DEFAULT_TEAMS.
+#   --prefer canonical treats aiteamforge_paths.py DEFAULT_TEAMS as the sole authority
+#        and writes ALL sites (team-paths.json, .port file, kanban-helpers case arm) to
+#        match it. Use this when team-paths.json is the drifted source (XACA-0626,
+#        e.g. M1Pro finance-personal 8361 vs canonical 8360).
+#        Order: DEFAULT_TEAMS only. Teams missing a positive-int entry are skipped.
+#
+# THE 5 WRITE SITES (reconcile updates all that exist for each team)
+#   1. kanban-hooks/aiteamforge_paths.py  — DEFAULT_TEAMS[<team>]["lcars_port"] (CANONICAL)
+#   2. homebrew-tap/share/kanban-hooks/aiteamforge_paths.py — MIRROR of #1 (XACA-0340).
+#        SKIP+warn if absent (uninitialized tap submodule); sync-tap.sh re-derives it.
+#   3. homebrew-tap/libexec/lib/aiteamforge-paths.sh — _AITEAMFORGE_DEFAULT_TEAMS_DATA
+#        heredoc row (TAB-delimited; 4th printf field). SKIP+warn if absent.
+#   4. lcars-ports/<team-id>-lcars.port — overwrite single line (preserve trailing newline).
+#   5. kanban-helpers.sh — _kb_team_lcars_port() fallback case arm. Only teams already
+#        present in the case are updated. Teams NOT in the case are reported, never added.
+#        Grouped alternation arms (e.g. "freelance|...starwords|..." → 8505) are split so
+#        a single team can be retargeted without disturbing its arm-mates.
+#
+# 2 MONITORED READ-SITES (guard-only — derive-based; flagged ONLY if re-hardcoded)
+#   These scripts derive lcars_port at runtime from aiteamforge_paths.py (XACA-0561).
+#   This tool scans them for hardcoded lcars_port literals that would indicate a
+#   regression back to the stale-hardcode pattern. They are NOT write sites — this
+#   tool never modifies them. They are included in --check to make drift visible.
+#   R1. lcars-health-check.sh       (env: KB_PR_HEALTH_CHECK)
+#   R2. lcars-ui/lcars-smoke-test.sh (env: KB_PR_SMOKE_TEST)
+#   Funnel ports (8443-8449) and the non-funneled sentinel (0) are in these scripts
+#   as infrastructure metadata and are explicitly excluded from flagging.
+#
+# TAP MIRROR NOTE
+#   aiteamforge_paths.py has a mirror at homebrew-tap/share/kanban-hooks/. This tool edits
+#   the CANONICAL source first; run sync-tap.sh afterward to keep the tap aligned
+#   (canonical-source rule XACA-0340). In a worktree the tap submodule is usually
+#   uninitialized — sites 2 and 3 SKIP with a warning and the orchestrator's sync-tap pass
+#   reconstructs the mirror from canonical.
+#
+# IDEMPOTENCY
+#   A second --apply (or --check after --apply) reports NO divergence and writes nothing.
+
+set -euo pipefail
+
+# ── Locate dev-team root ──────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEV_TEAM_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+
+# Each site path is env-overridable so the test suite can point the tool at a
+# throwaway fixture tree instead of the live repo / live ~/.aiteamforge overlay.
+# Defaults resolve to the real sites for normal operation.
+AITEAMFORGE_PATHS_PY="${KB_PR_PATHS_PY:-${DEV_TEAM_ROOT}/kanban-hooks/aiteamforge_paths.py}"
+TAP_PATHS_PY="${KB_PR_TAP_PATHS_PY:-${DEV_TEAM_ROOT}/homebrew-tap/share/kanban-hooks/aiteamforge_paths.py}"
+TAP_PATHS_SH="${KB_PR_TAP_PATHS_SH:-${DEV_TEAM_ROOT}/homebrew-tap/libexec/lib/aiteamforge-paths.sh}"
+KANBAN_HELPERS="${KB_PR_KANBAN_HELPERS:-${DEV_TEAM_ROOT}/kanban-helpers.sh}"
+LCARS_PORTS_DIR="${KB_PR_LCARS_PORTS_DIR:-${DEV_TEAM_ROOT}/lcars-ports}"
+TEAM_PATHS_JSON="${KB_PR_TEAM_PATHS_JSON:-${HOME}/.aiteamforge/team-paths.json}"
+# Read-site guard paths (env-overridable for test suite; see KB_PR_HEALTH_CHECK / KB_PR_SMOKE_TEST)
+HEALTH_CHECK_SH="${KB_PR_HEALTH_CHECK:-${DEV_TEAM_ROOT}/lcars-health-check.sh}"
+SMOKE_TEST_SH="${KB_PR_SMOKE_TEST:-${DEV_TEAM_ROOT}/lcars-ui/lcars-smoke-test.sh}"
+
+# ── Colour helpers ────────────────────────────────────────────────────────────
+
+if [[ -t 1 ]]; then
+    RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
+else
+    RED=''; YELLOW=''; GREEN=''; CYAN=''; BOLD=''; NC=''
+fi
+_ok()   { echo -e "${GREEN}  [OK]${NC} $*"; }
+_skip() { echo -e "${CYAN}[SKIP]${NC} $*"; }
+_info() { echo -e "       $*"; }
+_warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+_fail() { echo -e "${RED}[FAIL]${NC} $*" >&2; }
+_dry()  { echo -e "${CYAN} [DRY]${NC} $*"; }
+_chg()  { echo -e "${GREEN}[WRITE]${NC} $*"; }
+
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+MODE="dry-run"          # dry-run | check | apply
+ONLY_TEAM=""
+PREFER="team-paths"     # team-paths | portfile | canonical
+STRICT=0                # --check only: also fail on presence anomalies / UNRESOLVABLE
+DASH="-"                # absent-cell sentinel emitted by _analyze (keep in sync)
+
+usage() {
+    sed -n '2,80p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+    exit 0
+}
+
+while [[ $# -gt 0 ]]; do
+    case "${1-}" in
+        --check|--detect)   MODE="check";     shift ;;
+        --dry-run)          MODE="dry-run";   shift ;;
+        --apply)            MODE="apply";     shift ;;
+        --team)             ONLY_TEAM="${2:?--team requires a value}"; shift 2 ;;
+        --prefer)           PREFER="${2:?--prefer requires a value}";  shift 2 ;;
+        --strict)           STRICT=1;         shift ;;
+        --help|-h)          usage ;;
+        *) _fail "Unknown option: ${1}"; exit 1 ;;
+    esac
+done
+
+case "$PREFER" in
+    team-paths|portfile|canonical) ;;
+    *) _fail "--prefer must be 'team-paths', 'portfile', or 'canonical' (got: ${PREFER})"; exit 1 ;;
+esac
+
+# XACA-0626: --prefer canonical short-circuits the rest of the flow.
+# Treat aiteamforge_paths.py DEFAULT_TEAMS as the sole authority. For each team
+# that has a positive-int DEFAULT_TEAMS lcars_port, write that value to ALL other
+# sites (team-paths.json, .port file, kanban-helpers case arm, tap mirrors).
+# Teams absent from DEFAULT_TEAMS or with None/0 lcars_port are skipped cleanly.
+if [[ "$PREFER" == "canonical" ]]; then
+    _canonical_mode() {
+        echo -e "${BOLD}--prefer canonical: DEFAULT_TEAMS is authoritative — reconciling all other sites${NC}"
+        echo ""
+        # We reuse the standard _analyze infrastructure but force PREFER=team-paths
+        # after overriding team-paths.json to be absent, so DEFAULT_TEAMS is the
+        # only positive-int source. The simpler and more direct approach is to
+        # run the standard flow with the team-paths authority but pointing
+        # TEAM_PATHS_JSON at /dev/null so team-paths cannot win precedence, then
+        # letting _analyze naturally fall back to DEFAULT_TEAMS as authoritative.
+        # Note: _update_team_paths_json will update team-paths.json to the DEFAULT_TEAMS
+        # value, which is the desired write-back for the canonical mode.
+        local orig_prefer="$PREFER"
+        PREFER="team-paths"
+        local orig_tp="$TEAM_PATHS_JSON"
+        # Point team-paths at /dev/null so _analyze sees no team-paths overlay.
+        # The resolver then uses DEFAULT_TEAMS as the only positive-int source.
+        TEAM_PATHS_JSON="/dev/null"
+        _load_records
+        TEAM_PATHS_JSON="$orig_tp"
+        PREFER="$orig_prefer"
+
+        _render_table
+        _render_anomalies
+
+        local rec team d tp pf auth status
+        local mismatch_recs=()
+        N_OK=0; N_MISMATCH=0; N_ANOMALY=0; N_UNRESOLVABLE=0
+        MISMATCH_RECS=()
+        for rec in "${RECORDS[@]}"; do
+            IFS=$'	' read -r team d tp pf auth status <<< "$rec"
+            case "$status" in
+                OK)           N_OK=$((N_OK+1)) ;;
+                MISMATCH)     N_MISMATCH=$((N_MISMATCH+1)); MISMATCH_RECS+=("$rec") ;;
+                ANOMALY_NO_REGISTRY|ANOMALY_NO_PORTFILE) N_ANOMALY=$((N_ANOMALY+1)) ;;
+                UNRESOLVABLE) N_UNRESOLVABLE=$((N_UNRESOLVABLE+1)) ;;
+            esac
+        done
+
+        # Restore PREFER to canonical so _reconcile_team mode-checks work,
+        # then temporarily set it to apply/dry-run for the reconcile pass.
+        local orig_mode="$MODE"
+        if [[ "$MODE" == "apply" ]]; then
+            echo -e "${BOLD}Applying canonical reconciliation...${NC}"
+        elif [[ "$MODE" == "check" ]]; then
+            echo -e "${BOLD}Summary:${NC} ${GREEN}${N_OK} consistent${NC}, ${YELLOW}${N_MISMATCH} divergent${NC} (vs canonical DEFAULT_TEAMS)."
+            if [[ "$N_MISMATCH" -gt 0 ]]; then
+                echo -e "${YELLOW}Divergence detected.${NC} Run with --apply to write canonical values to all sites."
+                exit 1
+            fi
+            echo -e "${GREEN}All sources consistent with canonical DEFAULT_TEAMS.${NC}"
+            exit 0
+        else
+            echo -e "${BOLD}Dry run — changes WOULD be made (use --apply to write):${NC}"
+        fi
+        echo ""
+        PREFER="team-paths"   # _reconcile_team uses PREFER for display only; canonical path sets auth from DEFAULT_TEAMS
+        for rec in "${MISMATCH_RECS[@]}"; do
+            IFS=$'	' read -r team d tp pf auth status <<< "$rec"
+            [[ -z "$auth" ]] && continue
+            _reconcile_team "$team" "$auth" "$d" "$tp" "$pf"
+        done
+        PREFER="$orig_prefer"
+        if [[ "$orig_mode" == "apply" ]]; then
+            echo -e "${BOLD}Summary:${NC} ${GREEN}${N_OK} already consistent${NC}, ${GREEN}${RECONCILED_COUNT} reconciled${NC} to canonical DEFAULT_TEAMS."
+            echo -e "${YELLOW}NEXT STEP:${NC} run ./sync-tap.sh to mirror canonical aiteamforge_paths.py into the tap, then commit."
+        else
+            echo -e "${BOLD}Summary (dry run):${NC} ${GREEN}${N_OK} consistent${NC}, ${YELLOW}${RECONCILED_COUNT} would-reconcile${NC} to canonical DEFAULT_TEAMS."
+            echo -e "Re-run with ${BOLD}--apply${NC} to perform the writes."
+        fi
+        exit 0
+    }
+    # NOTE (XACA-0626): _canonical_mode is DEFINED here but invoked later, in the
+    # main flow — after every helper it calls (_load_records/_render_table/
+    # _render_anomalies/_reconcile_team) is defined. Calling it here would run
+    # before those definitions exist ("_load_records: command not found").
+fi
+
+# ── Core: build the three-way comparison via Python ───────────────────────────
+# Emits one TAB-delimited record per team to stdout:
+#   team \t default \t teampaths \t portfile \t authoritative \t status
+# where each port value is the literal port, "None" (registry None), or "" (absent),
+# authoritative is the resolved port or "" if unresolvable, and status is one of:
+#   OK | MISMATCH | ANOMALY_NO_REGISTRY | ANOMALY_NO_PORTFILE | UNRESOLVABLE
+
+_analyze() {
+    python3 - "${AITEAMFORGE_PATHS_PY}" "${TEAM_PATHS_JSON}" "${LCARS_PORTS_DIR}" "${PREFER}" "${ONLY_TEAM}" <<'PYEOF'
+import sys, ast, json
+from pathlib import Path
+
+paths_py, team_paths_json, ports_dir, prefer, only_team = sys.argv[1:6]
+
+def _is_pos_int(v):
+    try:
+        return int(v) > 0
+    except (TypeError, ValueError):
+        return False
+
+# ── DEFAULT_TEAMS lcars_port ──────────────────────────────────────────────
+default = {}            # team -> port (int) or None (explicit None) ; absent => not in dict
+src = open(paths_py).read()
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    targets = []; value = None
+    if isinstance(node, ast.Assign):
+        targets = node.targets; value = node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        targets = [node.target]; value = node.value
+    for t in targets:
+        if isinstance(t, ast.Name) and t.id == "DEFAULT_TEAMS" and isinstance(value, ast.Dict):
+            for k, v in zip(value.keys, value.values):
+                if isinstance(k, ast.Constant) and isinstance(v, ast.Dict):
+                    port = "ABSENT"
+                    for kk, vv in zip(v.keys, v.values):
+                        if isinstance(kk, ast.Constant) and kk.value == "lcars_port" and isinstance(vv, ast.Constant):
+                            port = vv.value   # int or None
+                    default[k.value] = port
+
+# ── team-paths.json lcars_port ────────────────────────────────────────────
+tp = {}                 # team -> port or None
+p = Path(team_paths_json)
+if p.exists():
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        for k, v in d.get("teams", {}).items():
+            if isinstance(v, dict):
+                tp[k] = v.get("lcars_port")
+    except Exception:
+        pass
+
+# ── port files ────────────────────────────────────────────────────────────
+pf = {}                 # team -> port string or None
+pd = Path(ports_dir)
+if pd.exists():
+    for f in sorted(pd.glob("*-lcars.port")):
+        team = f.name[:-len("-lcars.port")]
+        txt = f.read_text(encoding="utf-8").strip()
+        pf[team] = txt if txt else None
+
+allteams = sorted(set(default) | set(tp) | set(pf))
+if only_team:
+    allteams = [t for t in allteams if t == only_team]
+
+DASH = "-"   # display sentinel for an absent cell (keeps every TAB field non-empty)
+
+for t in allteams:
+    d_present = t in default
+    tp_present = t in tp
+    pf_present = t in pf
+
+    d_val = default.get(t)          # int | None | (absent => not present)
+    tp_val = tp.get(t)              # int | None | (absent)
+    pf_val = pf.get(t)              # str | None | (absent)
+
+    # Cells for display (never empty — use DASH for absent, "None" for explicit None)
+    c_default = DASH if not d_present else ("None" if d_val is None else str(d_val))
+    c_tp      = DASH if not tp_present else ("None" if tp_val is None else str(tp_val))
+    c_pf      = DASH if not pf_present else ("None" if pf_val is None else str(pf_val))
+
+    # Resolve authoritative port by precedence.
+    # Default: team-paths -> DEFAULT_TEAMS. portfile mode: portfile -> team-paths -> DEFAULT_TEAMS.
+    candidates_team_first = []
+    if _is_pos_int(tp_val):  candidates_team_first.append(int(tp_val))
+    if _is_pos_int(d_val):   candidates_team_first.append(int(d_val))
+    if prefer == "portfile":
+        chain = []
+        if pf_present and _is_pos_int(pf_val): chain.append(int(pf_val))
+        chain += candidates_team_first
+    else:
+        chain = candidates_team_first
+    authoritative = chain[0] if chain else None
+
+    in_registry = d_present or tp_present
+
+    # Classification precedence:
+    #   1. ANOMALY_NO_REGISTRY  — port file present but no registry entry (registration decision)
+    #   2. ANOMALY_NO_PORTFILE  — registry entry present but no .port file
+    #   3. UNRESOLVABLE         — no positive-int port anywhere
+    #   4. MISMATCH / OK        — all sources present; compare present positive-int values
+    # Presence anomalies take precedence over MISMATCH: a team missing a whole source is a
+    # registration/provisioning concern, not a value-divergence we silently reconcile.
+    if pf_present and not in_registry:
+        status = "ANOMALY_NO_REGISTRY"
+    elif in_registry and not pf_present:
+        status = "ANOMALY_NO_PORTFILE"
+    elif authoritative is None:
+        status = "UNRESOLVABLE"
+    else:
+        present_vals = []
+        if d_present and _is_pos_int(d_val):   present_vals.append(int(d_val))
+        if tp_present and _is_pos_int(tp_val): present_vals.append(int(tp_val))
+        if pf_present and _is_pos_int(pf_val): present_vals.append(int(pf_val))
+        # A registry None (deprecated field unset) is itself a divergence needing a write.
+        registry_none = (d_present and d_val is None) or (tp_present and tp_val is None)
+        all_match = bool(present_vals) and all(v == authoritative for v in present_vals) and not registry_none
+        status = "OK" if all_match else "MISMATCH"
+
+    auth_str = DASH if authoritative is None else str(authoritative)
+    print("\t".join([t, c_default, c_tp, c_pf, auth_str, status]))
+PYEOF
+}
+
+# ── Site updaters (only invoked in --apply) ───────────────────────────────────
+
+# Site 1 & 2: aiteamforge_paths.py DEFAULT_TEAMS[<team>]["lcars_port"] (surgical AST-located replace)
+_update_paths_py() {
+    local file="$1" team="$2" newport="$3"
+    python3 - "$file" "$team" "$newport" <<'PYEOF'
+import sys, ast
+file, team, newport = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(file).read()
+tree = ast.parse(src)
+
+target_value_node = None
+for node in ast.walk(tree):
+    targets = []; value = None
+    if isinstance(node, ast.Assign):
+        targets = node.targets; value = node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        targets = [node.target]; value = node.value
+    for t in targets:
+        if isinstance(t, ast.Name) and t.id == "DEFAULT_TEAMS" and isinstance(value, ast.Dict):
+            for k, v in zip(value.keys, value.values):
+                if isinstance(k, ast.Constant) and k.value == team and isinstance(v, ast.Dict):
+                    for kk, vv in zip(v.keys, v.values):
+                        if isinstance(kk, ast.Constant) and kk.value == "lcars_port":
+                            target_value_node = vv
+
+if target_value_node is None:
+    print(f"WARNING: lcars_port not found for team '{team}' in {file}", file=sys.stderr)
+    sys.exit(2)
+
+# AST gives us exact source coordinates; splice in the new value, preserving everything else.
+lines = src.splitlines(keepends=True)
+# Compute absolute offsets
+def offset(lineno, col):
+    return sum(len(l) for l in lines[:lineno-1]) + col
+start = offset(target_value_node.lineno, target_value_node.col_offset)
+end = offset(target_value_node.end_lineno, target_value_node.end_col_offset)
+if src[start:end] == newport:
+    sys.exit(0)  # idempotent no-op
+new_src = src[:start] + newport + src[end:]
+# Validate the result still parses
+ast.parse(new_src)
+open(file, "w").write(new_src)
+sys.exit(0)
+PYEOF
+}
+
+# Site 3: aiteamforge-paths.sh heredoc row — replace the 4th printf field (lcars_port)
+_update_paths_sh() {
+    local file="$1" team="$2" newport="$3"
+    python3 - "$file" "$team" "$newport" <<'PYEOF'
+import sys, re
+file, team, newport = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(file).read()
+lines = src.splitlines(keepends=True)
+out = []
+changed = False
+# Each row:  printf '...' "team" "kanban" "working" "PORT" "base" "range" "code"  [# comment]
+row_re = re.compile(r'^(\s*printf\b.*?)(".*")(\s*(#.*)?)$')
+for line in lines:
+    stripped = line.rstrip("\n")
+    if 'printf' in line and f'"{team}"' in line:
+        # Split body from trailing comment (comments only appear after the last quoted field)
+        # Find all double-quoted fields in order.
+        # Locate the team field, then the next three quoted fields are kanban, working, PORT.
+        quotes = [(m.start(), m.end(), m.group(1)) for m in re.finditer(r'"([^"]*)"', line)]
+        # The first quoted field should be the team id; verify.
+        if quotes and quotes[0][2] == team:
+            # field indices: 0=team 1=kanban 2=working 3=port
+            if len(quotes) >= 4:
+                ps, pe, _pv = quotes[3]
+                new_line = line[:ps] + f'"{newport}"' + line[pe:]
+                if new_line != line:
+                    changed = True
+                out.append(new_line)
+                continue
+    out.append(line)
+if not any(f'"{team}"' in l for l in lines if 'printf' in l):
+    print(f"WARNING: no heredoc row for team '{team}' in {file}", file=sys.stderr)
+    sys.exit(2)
+if changed:
+    open(file, "w").write("".join(out))
+sys.exit(0)
+PYEOF
+}
+
+# Site 4: lcars-ports/<team-id>-lcars.port — overwrite single line, preserve trailing newline
+_update_port_file() {
+    local team="$1" newport="$2"
+    local pfile="${LCARS_PORTS_DIR}/${team}-lcars.port"
+    if [[ ! -f "$pfile" ]]; then
+        return 2   # caller decides whether absence is an anomaly
+    fi
+    # Preserve whether the existing file ended with a newline.
+    local trailing_nl=1
+    if [[ -n "$(tail -c1 "$pfile" 2>/dev/null)" ]]; then trailing_nl=0; fi
+    if [[ "$trailing_nl" -eq 1 ]]; then
+        printf '%s\n' "$newport" > "$pfile"
+    else
+        printf '%s' "$newport" > "$pfile"
+    fi
+}
+
+# Site 5: kanban-helpers.sh _kb_team_lcars_port() case arm.
+# Splits grouped alternation arms so one team can be retargeted without moving its peers.
+# Returns: 0 changed, 1 team not present in case (caller reports), 2 file/func problem.
+_update_helpers_case() {
+    local file="$1" team="$2" newport="$3"
+    python3 - "$file" "$team" "$newport" <<'PYEOF'
+import sys, re
+file, team, newport = sys.argv[1], sys.argv[2], sys.argv[3]
+src = open(file).read()
+
+func_idx = src.find("_kb_team_lcars_port()")
+if func_idx == -1:
+    print("WARNING: _kb_team_lcars_port() not found", file=sys.stderr)
+    sys.exit(2)
+
+# Locate the `case "$team" in` ... `esac` block within the function.
+case_start = src.find('case "$team" in', func_idx)
+if case_start == -1:
+    print("WARNING: case block not found in _kb_team_lcars_port()", file=sys.stderr)
+    sys.exit(2)
+esac_idx = src.find("esac", case_start)
+if esac_idx == -1:
+    print("WARNING: esac not found in _kb_team_lcars_port()", file=sys.stderr)
+    sys.exit(2)
+
+block = src[case_start:esac_idx]
+
+# Case arms may span multiple physical lines via trailing backslash line-continuations.
+# Reconstruct logical arms: an arm runs from after the previous arm terminator (;;) up
+# to and including the next `_port="..." ;;`.
+# We work at the logical level: join continued lines, find the arm whose pattern set
+# contains `team`, split that team out into its own arm with the new port.
+
+# Tokenise the block into logical arms by ';;'
+# Keep the leading 'case ... in' header out of arm processing.
+header_end = block.find('\n', block.find('case "$team" in')) + 1
+header = block[:header_end]
+body = block[header_end:]
+
+# An arm = text up to and including its first ';;'
+arms = []
+i = 0
+while i < len(body):
+    j = body.find(';;', i)
+    if j == -1:
+        arms.append(body[i:])   # trailing remainder (whitespace)
+        break
+    arms.append(body[i:j+2])
+    i = j + 2
+
+def patterns_of(arm):
+    # The pattern portion is everything before the ')' that introduces the arm body.
+    # Handle backslash-newline continuations in the pattern set.
+    # Find the first ')' that is the arm-introducer (not inside the body string).
+    # The arm body begins after that ')'. Patterns may contain '|' and '\' continuations.
+    m = re.search(r'\)', arm)
+    if not m:
+        return None, None
+    pat_text = arm[:m.start()]
+    # Strip line continuations and whitespace, split on '|'
+    pat_clean = pat_text.replace('\\\n', '').strip()
+    pats = [p.strip() for p in pat_clean.split('|') if p.strip()]
+    return pats, m.start()
+
+target_arm_index = None
+target_pats = None
+for idx, arm in enumerate(arms):
+    pats, _ = patterns_of(arm)
+    if pats and team in pats:
+        target_arm_index = idx
+        target_pats = pats
+        break
+
+if target_arm_index is None:
+    # Team not present in the case statement — caller will report it.
+    sys.exit(1)
+
+arm = arms[target_arm_index]
+pats, paren_pos = patterns_of(arm)
+arm_body = arm[paren_pos+1:]   # includes the body and the ';;'
+
+# Determine indentation from the original arm's first line.
+lead_ws_m = re.match(r'(\s*)', arm)
+lead_ws = lead_ws_m.group(1) if lead_ws_m else "        "
+# Normalise to the line indent (strip leading newline already consumed by split)
+indent = re.match(r'\n?(\s*)', arm)
+indent_str = indent.group(1) if indent else "        "
+
+new_port_arm = f'{indent_str}{team}){" " * 36}_port="{newport}" ;;'
+
+if len(pats) == 1:
+    # Sole pattern in the arm — just replace its port value in place.
+    # arm_body looks like '   _port="XXXX" ;;' possibly with a leading newline / ws.
+    new_arm = re.sub(r'_port="[^"]*"', f'_port="{newport}"', arm, count=1)
+    if new_arm == arm:
+        sys.exit(0)  # already correct (idempotent)
+    arms[target_arm_index] = new_arm
+else:
+    # Grouped alternation — split `team` out into its own arm, leave the rest untouched.
+    remaining = [p for p in pats if p != team]
+    # Rebuild the remaining arm preserving its original port body.
+    # Extract the original port value from the arm body.
+    pm = re.search(r'_port="([^"]*)"', arm)
+    orig_port = pm.group(1) if pm else ""
+    # Rebuild remaining pattern set. If it's long, keep on one line for simplicity
+    # but match the existing 8-space indent style.
+    remaining_pat = "|".join(remaining)
+    # Reproduce roughly the original body style.
+    body_part = arm_body
+    # Normalise the remaining arm so the pattern is `pat1|pat2)` then original body.
+    # Keep original body text after the ')'.
+    remaining_arm = f'{indent_str}{remaining_pat})' + body_part
+    # Place the new single-team arm immediately before the (now-smaller) remaining arm.
+    arms[target_arm_index] = f'\n{new_port_arm}\n{remaining_arm.lstrip(chr(10))}'
+
+new_body = "".join(arms)
+new_block = header + new_body
+new_src = src[:case_start] + new_block + src[esac_idx:]
+open(file, "w").write(new_src)
+sys.exit(0)
+PYEOF
+    return $?
+}
+
+# ── Helper: is team present in the helpers case (read-only check) ──────────────
+_team_in_helpers_case() {
+    local file="$1" team="$2"
+    python3 - "$file" "$team" <<'PYEOF'
+import sys, re
+file, team = sys.argv[1], sys.argv[2]
+src = open(file).read()
+func_idx = src.find("_kb_team_lcars_port()")
+if func_idx == -1:
+    sys.exit(1)
+case_start = src.find('case "$team" in', func_idx)
+esac_idx = src.find("esac", case_start) if case_start != -1 else -1
+if case_start == -1 or esac_idx == -1:
+    sys.exit(1)
+block = src[case_start:esac_idx]
+# Collect pattern sets; handle backslash-newline continuations.
+joined = block.replace('\\\n', ' ')
+present = False
+for m in re.finditer(r'^\s*([^\n)]*)\)\s*_port=', joined, re.MULTILINE):
+    pats = [p.strip() for p in m.group(1).split('|') if p.strip()]
+    if team in pats:
+        present = True
+        break
+sys.exit(0 if present else 1)
+PYEOF
+}
+
+# ── Helper: get current port for a team from the helpers case (read-only) ──────
+_helpers_case_port() {
+    local file="$1" team="$2"
+    python3 - "$file" "$team" <<'PYEOF'
+import sys, re
+file, team = sys.argv[1], sys.argv[2]
+src = open(file).read()
+func_idx = src.find("_kb_team_lcars_port()")
+case_start = src.find('case "$team" in', func_idx) if func_idx != -1 else -1
+esac_idx = src.find("esac", case_start) if case_start != -1 else -1
+if case_start == -1 or esac_idx == -1:
+    sys.exit(1)
+block = src[case_start:esac_idx].replace('\\\n', ' ')
+for m in re.finditer(r'^\s*([^\n)]*)\)\s*_port="([^"]*)"', block, re.MULTILINE):
+    pats = [p.strip() for p in m.group(1).split('|') if p.strip()]
+    if team in pats:
+        print(m.group(2))
+        sys.exit(0)
+sys.exit(1)
+PYEOF
+}
+
+# ── Read-site guard: scan health-check / smoke-test for hardcoded lcars ports ──
+#
+# After XACA-0561, both scripts derive lcars_port at runtime.  This scanner
+# detects a REGRESSION back to the old hardcoded pattern and fails --check.
+#
+# Detection approach:
+#   Scan each script's non-comment lines for integer literals that fall within
+#   any team's lcars_port band AND appear in a colon-delimited field alongside a
+#   known team name (the old infra-table format was "funnel:local:team:...").
+#   Funnel ports (8443-8449) and the non-funneled sentinel (0) are explicitly
+#   excluded — those are legitimate infrastructure metadata.
+#
+# Emits one line per finding:
+#   <script_label>\t<team>\t<found_port>\t<canonical_port>\tMISMATCH|WARN
+#   or a single line "<script_label>\t\t\t\tOK" when clean.
+#
+_scan_read_sites() {
+    python3 - "${AITEAMFORGE_PATHS_PY}" "${TEAM_PATHS_JSON}" \
+              "${HEALTH_CHECK_SH}" "${SMOKE_TEST_SH}" "${ONLY_TEAM}" <<'PYEOF'
+import sys, ast, json, re
+from pathlib import Path
+
+paths_py, team_paths_json, health_sh, smoke_sh, only_team = sys.argv[1:6]
+
+# ── Rebuild canonical team -> lcars_port map (same logic as _analyze) ────────
+def _is_pos_int(v):
+    try:
+        return int(v) > 0
+    except (TypeError, ValueError):
+        return False
+
+default = {}
+src = open(paths_py).read()
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    targets = []; value = None
+    if isinstance(node, ast.Assign):
+        targets = node.targets; value = node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None:
+        targets = [node.target]; value = node.value
+    for t in targets:
+        if isinstance(t, ast.Name) and t.id == "DEFAULT_TEAMS" and isinstance(value, ast.Dict):
+            for k, v in zip(value.keys, value.values):
+                if isinstance(k, ast.Constant) and isinstance(v, ast.Dict):
+                    port = None; base = None; rng = None
+                    for kk, vv in zip(v.keys, v.values):
+                        if not isinstance(kk, ast.Constant):
+                            continue
+                        if kk.value == "lcars_port" and isinstance(vv, ast.Constant):
+                            port = vv.value
+                        if kk.value == "lcars_port_base" and isinstance(vv, ast.Constant):
+                            base = vv.value
+                        if kk.value == "lcars_port_range" and isinstance(vv, ast.Constant):
+                            rng = vv.value
+                    default[k.value] = {"port": port, "base": base, "range": rng}
+
+# team-paths.json overlay
+tp = {}
+p = Path(team_paths_json)
+if p.exists():
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        for k, v in d.get("teams", {}).items():
+            if isinstance(v, dict):
+                tp[k] = v.get("lcars_port")
+    except Exception:
+        pass
+
+# Build authoritative port map: team -> canonical_port (int > 0 or None)
+canonical = {}
+for team, info in default.items():
+    if only_team and team != only_team:
+        continue
+    tp_val = tp.get(team)
+    d_val = info["port"]
+    if _is_pos_int(tp_val):
+        canonical[team] = int(tp_val)
+    elif _is_pos_int(d_val):
+        canonical[team] = int(d_val)
+    # else: not resolvable — skip (not our job here)
+
+# Funnel ports and the non-funneled sentinel are explicitly allowed.
+# These appear as the FIRST colon-field in the infra table of health-check.sh.
+FUNNEL_PORT_ALLOWLIST = {8443, 8444, 8445, 8446, 8447, 8448, 8449, 0}
+
+# ── Scanner: look for hardcoded lcars-range ports near team names ─────────────
+# Strategy: scan non-comment, non-blank lines for colon-delimited quoted strings
+# that contain BOTH a known team name AND an integer in the high-port range
+# [1024, 65535] that is not a known funnel port.
+# This catches the old infra-table format: "funnel:local:team:socket:pattern"
+# where `local` was a hardcoded lcars_port — whether or not the stale value
+# still falls within the team's current lcars_port band (it may have been
+# reassigned to a new band entirely).
+# Lower bound 1024 excludes well-known ports; upper bound 65535 is max valid port.
+PORT_RANGE_LO = 1024
+PORT_RANGE_HI = 65535
+
+team_names = set(canonical.keys()) | set(default.keys())
+
+def scan_script(script_path, label):
+    findings = []
+    try:
+        lines = Path(script_path).read_text(encoding="utf-8").splitlines()
+    except OSError as e:
+        # Status-first encoding (collapse-proof under tab-IFS): STATUS \t label \t ...
+        print(f"SKIP\t{label}\t{e}")
+        return
+
+    for lineno, line in enumerate(lines, 1):
+        stripped = line.strip()
+        # Skip blank lines and pure comment lines
+        if not stripped or stripped.startswith("#"):
+            continue
+
+        # Look for quoted strings containing colons (the infra table format)
+        # e.g. "8443:8360:finance-personal:finance-personal:finance-personal-lcars"
+        for match in re.finditer(r'"([0-9:a-zA-Z._-]+)"', line):
+            val = match.group(1)
+            if ":" not in val:
+                continue
+            parts = [p.strip() for p in val.split(":")]
+            if len(parts) < 3:
+                continue
+
+            # Find which parts are high-port integers (not funnel ports)
+            int_parts = []
+            for p in parts:
+                try:
+                    n = int(p)
+                    if PORT_RANGE_LO <= n <= PORT_RANGE_HI and n not in FUNNEL_PORT_ALLOWLIST:
+                        int_parts.append(n)
+                except ValueError:
+                    pass
+            if not int_parts:
+                continue
+
+            # Check if the string also contains a known team name
+            found_teams = [t for t in parts if t in team_names]
+            if not found_teams:
+                continue
+
+            # We have a high-port integer AND a team name in the same colon-string.
+            # Deduplicate: a team name may appear more than once in the parts list
+            # (e.g. team name == tmux socket name); report each unique (team, port) once.
+            seen_pairs = set()
+            for found_team in found_teams:
+                canon = canonical.get(found_team)
+                for found_port in int_parts:
+                    pair = (found_team, found_port)
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
+                    if canon is not None and found_port != canon:
+                        verdict = "MISMATCH"
+                    else:
+                        # Hardcoded but currently correct: warn (hardcoding discouraged)
+                        verdict = "WARN"
+                    findings.append((label, found_team, found_port, canon, verdict, lineno))
+
+    # Status-first encoding so the bash reader is immune to tab-IFS field
+    # collapsing (consecutive tabs around empty fields would otherwise merge).
+    # Every emitted line begins with a non-empty STATUS token and has no
+    # empty intermediate fields.
+    if findings:
+        for (lbl, tm, fp, cp, vd, ln) in findings:
+            canon_str = str(cp) if cp is not None else "-"
+            # vd is MISMATCH or WARN
+            print(f"{vd}\t{lbl}\t{tm}\t{fp}\t{canon_str}\tline {ln}")
+    else:
+        print(f"OK\t{label}")
+
+scan_script(health_sh,  "lcars-health-check.sh")
+scan_script(smoke_sh,   "lcars-smoke-test.sh")
+PYEOF
+}
+
+# ── Reporting: render the read-site guard results ─────────────────────────────
+# Emits the scan results and returns 0 if clean, 1 if any MISMATCH was found.
+# Sets the caller's READSITE_MISMATCH variable (must be declared before calling).
+_check_read_sites() {
+    # Status-first record layout (emitted by _scan_read_sites):
+    #   OK       \t <label>
+    #   SKIP     \t <label> \t <message>
+    #   MISMATCH \t <label> \t <team> \t <found_port> \t <canon_port> \t <location>
+    #   WARN     \t <label> \t <team> \t <found_port> \t <canon_port> \t <location>
+    # STATUS is always the first, non-empty field — immune to tab-IFS collapsing.
+    local status label team found_port canon_port location
+    local any_mismatch=0 any_warn=0 any_finding=0 any_skip=0 line_val
+
+    echo ""
+    echo -e "${BOLD}Monitored Read-Sites (regression guard — derive-based; flagged if re-hardcoded)${NC}"
+    echo ""
+
+    while IFS= read -r line_val; do
+        [[ -z "$line_val" ]] && continue
+        IFS=$'\t' read -r status label team found_port canon_port location <<< "$line_val"
+
+        case "$status" in
+            OK)
+                _ok "${label}: no hardcoded lcars_port literals detected" ;;
+            SKIP)
+                # For SKIP the OSError message rides in the third field (team slot).
+                _skip "${label}: ${team}"
+                any_skip=1 ;;
+            MISMATCH)
+                _fail "${label} [${team}]: hardcoded lcars_port ${found_port} at ${location} — canonical is ${canon_port}. REGRESSION: remove hardcode and derive from aiteamforge_paths.py."
+                any_mismatch=1
+                any_finding=1 ;;
+            WARN)
+                _warn "${label} [${team}]: hardcoded lcars_port ${found_port} at ${location} — currently matches canonical (${canon_port}) but hardcoding is discouraged; derive from aiteamforge_paths.py."
+                any_warn=1
+                any_finding=1 ;;
+        esac
+    done < <(_scan_read_sites)
+
+    echo ""
+    if [[ "$any_finding" -eq 0 && "$any_skip" -eq 0 ]]; then
+        echo -e "  Read-sites ${GREEN}clean${NC} — no hardcoded lcars_port literals found."
+    elif [[ "$any_finding" -eq 0 && "$any_skip" -eq 1 ]]; then
+        echo -e "  Read-sites ${YELLOW}partially verified${NC} — one or more scripts could not be read (see SKIP above)."
+    fi
+
+    READSITE_MISMATCH=$any_mismatch
+    return 0
+}
+
+# ── Reporting: render the comparison table ────────────────────────────────────
+
+declare -a RECORDS
+_load_records() {
+    RECORDS=()
+    local line
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        RECORDS+=("$line")
+    done < <(_analyze)
+}
+
+_render_table() {
+    echo ""
+    echo -e "${BOLD}LCARS Port Three-Way Reconciliation${NC}  (authoritative = --prefer ${PREFER})"
+    echo ""
+    printf "%-42s %-9s %-11s %-10s %-12s %s\n" "TEAM" "DEFAULT" "team-paths" ".port" "-> AUTH" "STATUS"
+    printf "%-42s %-9s %-11s %-10s %-12s %s\n" "------------------------------------------" "-------" "----------" "--------" "----------" "------"
+    local rec team d tp pf auth status disp dash="—"
+    for rec in "${RECORDS[@]}"; do
+        IFS=$'\t' read -r team d tp pf auth status <<< "$rec"
+        [[ -z "$d"   ]] && d="$dash"
+        [[ -z "$tp"  ]] && tp="$dash"
+        [[ -z "$pf"  ]] && pf="$dash"
+        [[ -z "$auth" ]] && auth="$dash"
+        local color="$NC"
+        case "$status" in
+            OK)                   color="$GREEN" ;;
+            MISMATCH)             color="$YELLOW" ;;
+            ANOMALY_NO_REGISTRY)  color="$RED" ;;
+            ANOMALY_NO_PORTFILE)  color="$CYAN" ;;
+            UNRESOLVABLE)         color="$RED" ;;
+        esac
+        printf "%-42s %-9s %-11s %-10s %-12s ${color}%s${NC}\n" "$team" "$d" "$tp" "$pf" "$auth" "$status"
+    done
+    echo ""
+}
+
+_render_anomalies() {
+    local rec team d tp pf auth status
+    local printed=0
+    for rec in "${RECORDS[@]}"; do
+        IFS=$'\t' read -r team d tp pf auth status <<< "$rec"
+        case "$status" in
+            ANOMALY_NO_REGISTRY|ANOMALY_NO_PORTFILE|UNRESOLVABLE)
+                if [[ "$printed" -eq 0 ]]; then
+                    echo -e "${BOLD}Presence anomalies${NC} (reported only — NOT auto-reconciled; registration is out of scope):"
+                    printed=1
+                fi
+                case "$status" in
+                    ANOMALY_NO_REGISTRY)
+                        _info "${RED}${team}${NC}: port file present (${pf:-—}) but NO DEFAULT_TEAMS / team-paths.json entry. Registration decision required." ;;
+                    ANOMALY_NO_PORTFILE)
+                        _info "${CYAN}${team}${NC}: registry entry present (auth ${auth:-—}) but NO lcars-ports/${team}-lcars.port file." ;;
+                    UNRESOLVABLE)
+                        _info "${RED}${team}${NC}: no positive-integer port in any source — cannot resolve. NOT writing." ;;
+                esac
+                ;;
+        esac
+    done
+    if [[ "$printed" -eq 1 ]]; then echo ""; fi
+    return 0
+}
+
+# ── Per-team reconcile (dry-run prints, apply writes) ─────────────────────────
+# Echoes the per-site planned/applied changes. Returns 0.
+RECONCILED_COUNT=0
+_reconcile_team() {
+    local team="$1" auth="$2" d="$3" tp="$4" pf="$5"
+    local did_something=0 rc=0
+
+    echo -e "${BOLD}${team}${NC} -> authoritative ${GREEN}${auth}${NC}"
+
+    # Site 1: canonical aiteamforge_paths.py
+    if [[ "$d" == "$DASH" ]]; then
+        # Team legitimately absent from DEFAULT_TEAMS — creating an entry is a registration
+        # decision, out of scope. Report as info, not a scary failure (XACA-0547-004).
+        _info "site1 aiteamforge_paths.py: ${team} not in DEFAULT_TEAMS — skipped (registration decision)"
+    elif [[ -n "$d" && "$d" != "$auth" ]]; then
+        if [[ "$MODE" == "apply" ]]; then
+            rc=0
+            _update_paths_py "$AITEAMFORGE_PATHS_PY" "$team" "$auth" || rc=$?
+            if [[ "$rc" -eq 0 ]]; then
+                _chg "site1 aiteamforge_paths.py DEFAULT_TEAMS: ${d} -> ${auth}"; did_something=1
+            elif [[ "$rc" -eq 2 ]]; then
+                # No lcars_port key for this team — registration decision, not a write failure.
+                _info "site1 aiteamforge_paths.py: ${team} has no lcars_port key — skipped (registration decision)"
+            else
+                _warn "site1 aiteamforge_paths.py update failed for ${team}"
+            fi
+        else
+            _dry "site1 aiteamforge_paths.py DEFAULT_TEAMS: ${d} -> ${auth}"; did_something=1
+        fi
+    fi
+
+    # Site 2: tap mirror aiteamforge_paths.py
+    if [[ -f "$TAP_PATHS_PY" ]]; then
+        # Read current tap value to decide if a write is needed.
+        local tapval
+        tapval=$(python3 - "$TAP_PATHS_PY" "$team" <<'PYEOF'
+import sys, ast
+file, team = sys.argv[1], sys.argv[2]
+src = open(file).read()
+tree = ast.parse(src)
+for node in ast.walk(tree):
+    targets=[]; value=None
+    if isinstance(node, ast.Assign): targets=node.targets; value=node.value
+    elif isinstance(node, ast.AnnAssign) and node.value is not None: targets=[node.target]; value=node.value
+    for t in targets:
+        if isinstance(t, ast.Name) and t.id=="DEFAULT_TEAMS" and isinstance(value, ast.Dict):
+            for k,v in zip(value.keys, value.values):
+                if isinstance(k, ast.Constant) and k.value==team and isinstance(v, ast.Dict):
+                    for kk,vv in zip(v.keys, v.values):
+                        if isinstance(kk, ast.Constant) and kk.value=="lcars_port" and isinstance(vv, ast.Constant):
+                            print("None" if vv.value is None else vv.value); sys.exit(0)
+print("")
+PYEOF
+)
+        if [[ -n "$tapval" && "$tapval" != "$auth" ]]; then
+            if [[ "$MODE" == "apply" ]]; then
+                if _update_paths_py "$TAP_PATHS_PY" "$team" "$auth"; then
+                    _chg "site2 tap aiteamforge_paths.py mirror: ${tapval} -> ${auth}"; did_something=1
+                else
+                    _warn "site2 tap aiteamforge_paths.py update failed for ${team}"
+                fi
+            else
+                _dry "site2 tap aiteamforge_paths.py mirror: ${tapval} -> ${auth}"; did_something=1
+            fi
+        fi
+    else
+        _skip "site2 tap aiteamforge_paths.py absent (uninitialized submodule) — sync-tap.sh re-derives from canonical"
+    fi
+
+    # Site 3: tap aiteamforge-paths.sh heredoc
+    if [[ -f "$TAP_PATHS_SH" ]]; then
+        local shval
+        shval=$(python3 - "$TAP_PATHS_SH" "$team" <<'PYEOF'
+import sys, re
+file, team = sys.argv[1], sys.argv[2]
+for line in open(file):
+    if 'printf' in line and f'"{team}"' in line:
+        quotes = re.findall(r'"([^"]*)"', line)
+        if quotes and quotes[0]==team and len(quotes)>=4:
+            print(quotes[3]); sys.exit(0)
+print("")
+PYEOF
+)
+        if [[ -n "$shval" && "$shval" != "$auth" ]]; then
+            if [[ "$MODE" == "apply" ]]; then
+                if _update_paths_sh "$TAP_PATHS_SH" "$team" "$auth"; then
+                    _chg "site3 tap aiteamforge-paths.sh heredoc: ${shval} -> ${auth}"; did_something=1
+                else
+                    _warn "site3 tap aiteamforge-paths.sh update failed for ${team}"
+                fi
+            else
+                _dry "site3 tap aiteamforge-paths.sh heredoc: ${shval} -> ${auth}"; did_something=1
+            fi
+        fi
+    else
+        _skip "site3 tap aiteamforge-paths.sh absent (uninitialized submodule) — sync-tap.sh re-derives from canonical"
+    fi
+
+    # Site 4: port file
+    if [[ -n "$pf" ]]; then
+        if [[ "$pf" != "$auth" ]]; then
+            if [[ "$MODE" == "apply" ]]; then
+                if _update_port_file "$team" "$auth"; then
+                    _chg "site4 lcars-ports/${team}-lcars.port: ${pf} -> ${auth}"; did_something=1
+                else
+                    _warn "site4 port file write failed for ${team}"
+                fi
+            else
+                _dry "site4 lcars-ports/${team}-lcars.port: ${pf} -> ${auth}"; did_something=1
+            fi
+        fi
+    fi
+
+    # team-paths.json (the authoritative source itself): only written if it diverges from
+    # auth AND auth came from elsewhere (e.g. --prefer portfile flipped precedence).
+    if [[ -n "$tp" && "$tp" != "$auth" ]]; then
+        if [[ "$MODE" == "apply" ]]; then
+            if _update_team_paths_json "$team" "$auth"; then
+                _chg "team-paths.json (authoritative store): ${tp} -> ${auth}"; did_something=1
+            else
+                _warn "team-paths.json update failed for ${team}"
+            fi
+        else
+            _dry "team-paths.json (authoritative store): ${tp} -> ${auth}"; did_something=1
+        fi
+    fi
+
+    # Site 5: kanban-helpers.sh case arm — only if team already present in the case.
+    if _team_in_helpers_case "$KANBAN_HELPERS" "$team"; then
+        local caseport
+        caseport=$(_helpers_case_port "$KANBAN_HELPERS" "$team" 2>/dev/null || echo "")
+        if [[ -n "$caseport" && "$caseport" != "$auth" ]]; then
+            if [[ "$MODE" == "apply" ]]; then
+                if _update_helpers_case "$KANBAN_HELPERS" "$team" "$auth"; then
+                    _chg "site5 kanban-helpers.sh _kb_team_lcars_port case: ${caseport} -> ${auth}"; did_something=1
+                else
+                    _warn "site5 kanban-helpers.sh case update failed for ${team}"
+                fi
+            else
+                _dry "site5 kanban-helpers.sh _kb_team_lcars_port case: ${caseport} -> ${auth} (splits grouped arm if needed)"; did_something=1
+            fi
+        fi
+    else
+        _info "site5 kanban-helpers.sh: ${team} not in _kb_team_lcars_port case — reported, NOT added (registration decision)"
+    fi
+
+    [[ "$did_something" -eq 1 ]] && RECONCILED_COUNT=$((RECONCILED_COUNT + 1))
+    echo ""
+}
+
+# team-paths.json updater (writes the authoritative store; used when --prefer flips it)
+_update_team_paths_json() {
+    local team="$1" newport="$2"
+    python3 - "$TEAM_PATHS_JSON" "$team" "$newport" <<'PYEOF'
+import sys, json
+from pathlib import Path
+path = Path(sys.argv[1]); team = sys.argv[2]; newport = int(sys.argv[3])
+if not path.exists():
+    sys.exit(2)
+config = json.loads(path.read_text(encoding="utf-8"))
+teams = config.get("teams", {})
+if team not in teams:
+    sys.exit(2)
+if teams[team].get("lcars_port") == newport:
+    sys.exit(0)
+teams[team]["lcars_port"] = newport
+path.write_text(json.JSONEncoder(indent=2, sort_keys=True).encode(config) + "\n", encoding="utf-8")
+sys.exit(0)
+PYEOF
+}
+
+# ── Main flow ─────────────────────────────────────────────────────────────────
+
+# XACA-0626: --prefer canonical short-circuits the standard flow. _canonical_mode
+# is defined in the PREFER==canonical block near the top of this script, but is
+# invoked HERE — after every helper it calls has been defined — to avoid a
+# call-before-definition error (the helpers live at lines 850+).
+if [[ "$PREFER" == "canonical" ]]; then
+    _canonical_mode
+fi
+
+_load_records
+
+# Sanity warnings about environment
+[[ -f "$TEAM_PATHS_JSON" ]] || _warn "team-paths.json not found at ${TEAM_PATHS_JSON} — treating overlay as empty"
+[[ -f "$AITEAMFORGE_PATHS_PY" ]] || { _fail "canonical aiteamforge_paths.py not found at ${AITEAMFORGE_PATHS_PY}"; exit 1; }
+
+_render_table
+
+# Count statuses
+N_OK=0; N_MISMATCH=0; N_ANOMALY=0; N_UNRESOLVABLE=0
+MISMATCH_RECS=()   # explicit init — `declare -a` alone leaves it unset under `set -u`
+for rec in "${RECORDS[@]}"; do
+    IFS=$'\t' read -r team d tp pf auth status <<< "$rec"
+    case "$status" in
+        OK)           N_OK=$((N_OK+1)) ;;
+        MISMATCH)     N_MISMATCH=$((N_MISMATCH+1)); MISMATCH_RECS+=("$rec") ;;
+        ANOMALY_NO_REGISTRY|ANOMALY_NO_PORTFILE) N_ANOMALY=$((N_ANOMALY+1)) ;;
+        UNRESOLVABLE) N_UNRESOLVABLE=$((N_UNRESOLVABLE+1)) ;;
+    esac
+done
+
+_render_anomalies
+
+# Read-site regression guard — always run (read-only, no writes)
+READSITE_MISMATCH=0
+_check_read_sites
+
+if [[ "$MODE" == "check" ]]; then
+    echo -e "${BOLD}Summary:${NC} ${GREEN}${N_OK} consistent${NC}, ${YELLOW}${N_MISMATCH} divergent${NC}, ${RED}${N_ANOMALY} presence anomalies${NC}, ${RED}${N_UNRESOLVABLE} unresolvable${NC}."
+    if [[ "$N_MISMATCH" -gt 0 ]]; then
+        echo -e "${YELLOW}Divergence detected.${NC} Run 'kb-port-reconcile --dry-run' to preview fixes, then '--apply' to reconcile."
+        exit 1
+    fi
+    if [[ "$READSITE_MISMATCH" -gt 0 ]]; then
+        echo -e "${RED}Read-site regression detected.${NC} One or more monitored scripts contain hardcoded lcars_port literals — remove them and derive from aiteamforge_paths.py."
+        exit 1
+    fi
+    if [[ "$STRICT" -eq 1 && $(( N_ANOMALY + N_UNRESOLVABLE )) -gt 0 ]]; then
+        echo -e "${YELLOW}--strict:${NC} no value divergence, but ${N_ANOMALY} presence anomaly/ies + ${N_UNRESOLVABLE} unresolvable remain (registration decisions)."
+        exit 1
+    fi
+    echo -e "${GREEN}All sources consistent.${NC}"
+    exit 0
+fi
+
+# dry-run / apply: walk the mismatches
+if [[ "${#MISMATCH_RECS[@]}" -eq 0 ]]; then
+    echo -e "${GREEN}Nothing to reconcile${NC} — no divergent teams found."
+    echo -e "${BOLD}Summary:${NC} ${GREEN}${N_OK} consistent${NC}, 0 divergent, ${RED}${N_ANOMALY} presence anomalies${NC}, ${RED}${N_UNRESOLVABLE} unresolvable${NC}."
+    exit 0
+fi
+
+if [[ "$MODE" == "apply" ]]; then
+    echo -e "${BOLD}Applying reconciliation...${NC}"
+else
+    echo -e "${BOLD}Dry run — the following changes WOULD be made (use --apply to write):${NC}"
+fi
+echo ""
+
+for rec in "${MISMATCH_RECS[@]}"; do
+    IFS=$'\t' read -r team d tp pf auth status <<< "$rec"
+    [[ -z "$auth" ]] && continue
+    _reconcile_team "$team" "$auth" "$d" "$tp" "$pf"
+done
+
+if [[ "$MODE" == "apply" ]]; then
+    echo -e "${BOLD}Summary:${NC} ${GREEN}${N_OK} already consistent${NC}, ${GREEN}${RECONCILED_COUNT} reconciled${NC}, ${RED}${N_ANOMALY} presence anomalies${NC} (untouched), ${RED}${N_UNRESOLVABLE} unresolvable${NC}."
+    echo -e "${YELLOW}NEXT STEP:${NC} run ./sync-tap.sh to mirror canonical aiteamforge_paths.py into the tap, then commit."
+else
+    echo -e "${BOLD}Summary (dry run):${NC} ${GREEN}${N_OK} consistent${NC}, ${YELLOW}${RECONCILED_COUNT} would-reconcile${NC}, ${RED}${N_ANOMALY} presence anomalies${NC}, ${RED}${N_UNRESOLVABLE} unresolvable${NC}."
+    echo -e "Re-run with ${BOLD}--apply${NC} to perform the writes."
+fi
+exit 0

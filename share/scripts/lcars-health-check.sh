@@ -13,8 +13,22 @@
 #   */5 * * * * /Users/darrenehlers/dev-team/lcars-health-check.sh >> /tmp/lcars-health.log 2>&1
 # ============================================================================
 
-DEV_TEAM_DIR="$HOME/dev-team"
-LCARS_UI_DIR="$DEV_TEAM_DIR/lcars-ui"
+# XACA-0626 Defect B fix: derive LCARS_UI_DIR from AITEAMFORGE_DIR instead of
+# hardcoding ~/dev-team. On tap machines the install dir is ~/aiteamforge; on the
+# dev source machine it is ~/dev-team. When AITEAMFORGE_DIR is not exported, probe
+# both well-known dirs (tap first, then dev) — same idiom finance-connect.sh uses —
+# so a manual/cron run on the dev machine resolves ~/dev-team rather than a
+# non-existent ~/aiteamforge. An explicitly-set AITEAMFORGE_DIR always wins.
+# DEV_TEAM_DIR is kept as an alias so any remaining references still compile.
+if [[ -z "${AITEAMFORGE_DIR:-}" ]]; then
+    for _atf_d in "$HOME/aiteamforge" "$HOME/dev-team"; do
+        [[ -d "$_atf_d" ]] && AITEAMFORGE_DIR="$_atf_d" && break
+    done
+    AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+    unset _atf_d
+fi
+DEV_TEAM_DIR="$AITEAMFORGE_DIR"
+LCARS_UI_DIR="$AITEAMFORGE_DIR/lcars-ui"
 LOG_FILE="/tmp/lcars-health.log"
 STATUS_ONLY=false
 DAEMON_MODE=false
@@ -368,26 +382,26 @@ run_health_check() {
             fi
         fi
 
-        # Server not responding - check if it's expected to be running
-        # Method 1: Check if tmux session exists
-        local team_active=false
+        # XACA-0626 Defect C fix: gate on configured-team membership, not on a live
+        # tmux session or zombie process. After a machine reboot no tmux sessions
+        # exist and no processes are running, so the old "team_active" check would
+        # skip ALL teams — preventing the health check from ever restarting LCARS.
+        # Any team that made it into LCARS_SERVERS (i.e., has a valid resolved port
+        # from aiteamforge_paths.py / team-paths.json) is a configured team that
+        # SHOULD have LCARS running. We still log session/process state as a hint.
+        local has_session=false has_process=false
         if check_tmux_session "$tmux_socket" "$session_pattern"; then
-            team_active=true
+            has_session=true
         fi
-
-        # Method 2: Check if server process exists (crashed but was running)
         if check_server_process_exists "$local_port"; then
-            team_active=true
+            has_process=true
         fi
+        log "  [diag] $team: tmux_session=$has_session process=$has_process"
+        # All teams in LCARS_SERVERS are configured; if the server is not responding,
+        # attempt restart regardless of session/process state.
 
-        if [[ "$team_active" == "false" ]]; then
-            log "⏭️  $team:$local_port - team inactive (no session or process)"
-            ((skipped++))
-            continue
-        fi
-
-        # Team is active but server not responding - restart it
-        log "❌ $team:$local_port - NOT RESPONDING (team active)"
+        # Server not responding for a configured team — restart it
+        log "❌ $team:$local_port - NOT RESPONDING (configured team)"
         ((unhealthy++))
 
         if [[ "$STATUS_ONLY" == "false" ]]; then
@@ -399,7 +413,7 @@ run_health_check() {
     done
 
     log "───────────────────────────────────────────────────────"
-    log "Summary: $healthy healthy, $unhealthy unhealthy, $skipped skipped (inactive teams)"
+    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $skipped skipped (port-unresolved)"
 
     if [[ "$STATUS_ONLY" == "false" && $restarted -gt 0 ]]; then
         log "Restarted: $restarted servers"

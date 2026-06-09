@@ -290,7 +290,33 @@ fi
 # pick up the correct instance port automatically because they all reference the
 # same variable.
 _xaca0463_team_paths="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
-if command -v aiteamforge_compute_instance_port >/dev/null 2>&1; then
+# XACA-0626: Self-collision guard — if this INSTANCE_ID already has a valid
+# (positive integer) lcars_port in team-paths.json, REUSE it instead of calling
+# the allocator. The allocator's used-port scan includes ALL in-band entries,
+# so a re-install of an already-provisioned instance would see its own port as
+# "used" and allocate the next one (+1 drift). Short-circuiting on an existing
+# valid port prevents the self-collision while leaving new installs unaffected.
+# Conservative: only short-circuits when a positive-int port is found; any
+# other case (absent, None, 0, negative) falls through to allocate as before.
+_xaca0463_existing_port=""
+if [[ -f "$_xaca0463_team_paths" ]]; then
+    _xaca0463_existing_port=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$_xaca0463_team_paths'))
+    p = d.get('teams', {}).get('$INSTANCE_ID', {}).get('lcars_port')
+    if p and int(p) > 0:
+        print(int(p))
+except Exception:
+    pass
+" 2>/dev/null || true)
+fi
+if [[ -n "$_xaca0463_existing_port" ]]; then
+    TEAM_LCARS_PORT="$_xaca0463_existing_port"
+    unset _xaca0463_existing_port
+    echo "  ✓ XACA-0626: reusing existing port $TEAM_LCARS_PORT for instance $INSTANCE_ID (prevents self-collision on re-install)"
+elif command -v aiteamforge_compute_instance_port >/dev/null 2>&1; then
+    unset _xaca0463_existing_port
     _xaca0463_allocated=""
     if ! _xaca0463_allocated=$(aiteamforge_compute_instance_port "$TEAM_ID" "$_xaca0463_team_paths" 2>&1); then
         echo "❌ XACA-0463 port allocator failed for template '$TEAM_ID':" >&2

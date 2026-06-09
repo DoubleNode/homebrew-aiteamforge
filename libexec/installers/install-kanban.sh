@@ -589,6 +589,30 @@ install_worktree_personas_script() {
     success "Installed: $dest"
 }
 
+# XACA-0626: Install kb-port-reconcile to AITEAMFORGE_DIR/scripts/ so tap machines
+# can self-heal LCARS port drift without requiring a full reinstall or dev-machine access.
+# Without this, --apply cannot run on M1Pro/M4Mini (the tool was dev-only before XACA-0626).
+# SIBLING-DRIFT NOTE: this install function is paired with:
+#   (a) _xaca0608_aux_script_map entry in aiteamforge-upgrade.sh (refresh on upgrade)
+#   (b) remove entry in aiteamforge-uninstall.sh::uninstall_kanban_system (teardown)
+# All three sites must stay in sync when kb-port-reconcile is renamed or moved.
+install_kb_port_reconcile_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local src="${scripts_src}/kb-port-reconcile"
+    local dest="$AITEAMFORGE_DIR/scripts/kb-port-reconcile"
+
+    if [ ! -f "$src" ]; then
+        warning "kb-port-reconcile not found at: ${src} (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    info "Installing kb-port-reconcile (LCARS port drift reconciler)"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    success "Installed: $dest"
+}
+
 # Install kanban hooks
 install_kanban_hooks() {
     local hooks_src="$INSTALL_ROOT/share/kanban-hooks"
@@ -1037,6 +1061,84 @@ uninstall_lcars_watch_launchagent() {
     fi
 }
 
+# Install RunAtLoad LCARS LaunchAgent — starts all configured LCARS servers at login/reboot (XACA-0626)
+#
+# Creates a one-shot launchd agent that fires `aiteamforge start lcars` at every
+# login/reboot. This ensures LCARS servers come up automatically without the user
+# having to manually run a startup script. Already-running servers are left untouched
+# by the idempotent guard in aiteamforge-start.sh.
+#
+# Why: lcars-watch only fires on file changes; lcars-health skips teams with no tmux
+# session after reboot (Defect C, partially fixed in XACA-0626). This agent provides
+# defence-in-depth: fires immediately at login to cover the reboot case.
+#
+# XACA-0578 SIBLING-DRIFT NOTE: this installer is one of five coupled sites for
+# com.aiteamforge.lcars-runatload. All five must move together:
+#   (a) this function  — install side
+#   (b) uninstall_lcars_runatload_launchagent below  — uninstall side
+#   (c) share/templates/auto-upgrade/lcars-runatload.template.plist  — template
+#   (d) aiteamforge-upgrade.sh::update_launchagents agents array  — upgrade re-render
+#   (e) aiteamforge-migrate.sh::update_launchagents agents array  — migrate re-render
+# Adding a new {{PLACEHOLDER}} to the template also requires updating
+# _render_launchagent_template in aiteamforge-upgrade.sh (XACA-0571-014 note).
+install_lcars_runatload_launchagent() {
+    local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/lcars-runatload.template.plist"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-runatload.plist"
+
+    if [ ! -f "$plist_template" ]; then
+        warning "LCARS runatload LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    # Resolve the aiteamforge binary path from Homebrew prefix
+    local brew_prefix
+    if command -v brew &>/dev/null; then
+        brew_prefix="$(brew --prefix)"
+    else
+        brew_prefix="/opt/homebrew"
+    fi
+    local aiteamforge_bin="${brew_prefix}/bin/aiteamforge"
+
+    info "Installing LCARS runatload LaunchAgent (starts LCARS on login/reboot)..."
+
+    mkdir -p "$HOME/Library/LaunchAgents"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
+
+    sed \
+        -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
+        -e "s|{{LOG_DIR}}|${AITEAMFORGE_DIR}/logs|g" \
+        -e "s|{{HOME_DIR}}|${HOME}|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
+        "$plist_template" > "$plist_dest"
+
+    launchctl unload "$plist_dest" 2>/dev/null || true
+
+    # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
+    # installers): verify registration via `launchctl list` rather than trust the
+    # legacy `launchctl load` exit code, which returns 0 even when the job is
+    # rejected. A one-shot RunAtLoad agent stays REGISTERED in the domain after
+    # its run completes (KeepAlive=false governs restart, not registration), so
+    # `launchctl list` still reports it here.
+    launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-runatload"; then
+        success "LCARS runatload LaunchAgent installed — LCARS will start automatically on login/reboot"
+    else
+        warning "LCARS runatload LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
+    fi
+}
+
+# Uninstall RunAtLoad LCARS LaunchAgent
+uninstall_lcars_runatload_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-runatload.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading LCARS runatload LaunchAgent"
+        launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed LCARS runatload LaunchAgent"
+    fi
+}
+
 # Install Cellar WatchPaths LaunchAgent — triggers upgrade on Homebrew Cellar changes (XACA-0578)
 #
 # Creates a passive launchd watcher on $(brew --prefix)/Cellar/aiteamforge. When
@@ -1416,6 +1518,7 @@ install_kanban_system() {
     install_board_check_scripts
     install_lcars_health_check_script
     install_worktree_personas_script
+    install_kb_port_reconcile_script
     install_kanban_hooks
 
     # Initialize kanban boards for each team (skipped when no teams resolved —
@@ -1454,6 +1557,7 @@ install_kanban_system() {
     install_auto_upgrade_launchagent
     install_lcars_watch_launchagent
     install_cellar_watch_launchagent
+    install_lcars_runatload_launchagent
 
     success "LCARS Kanban System installed successfully"
 
@@ -1490,6 +1594,7 @@ uninstall_kanban_system() {
     uninstall_cellar_watch_launchagent
     uninstall_auto_upgrade_launchagent
     uninstall_lcars_watch_launchagent
+    uninstall_lcars_runatload_launchagent
 
     # Remove installed files
     info "Removing kanban system files"

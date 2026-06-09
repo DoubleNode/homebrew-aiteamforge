@@ -531,10 +531,19 @@ _render_kanban_template() {
   # original install and migrate will re-pin the plist interpreter. See XACA-0510.
   python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
 
+  # XACA-0626: resolve aiteamforge binary for the runatload plist (and any future
+  # kanban-family plist that invokes aiteamforge directly).
+  # Following the upgrade-side principle: harmless extras prevent sibling-drift bugs.
+  local aiteamforge_bin
+  aiteamforge_bin="$(command -v aiteamforge 2>/dev/null || echo "/opt/homebrew/bin/aiteamforge")"
+
   sed -e "s|{{USER_HOME}}|$HOME|g" \
+      -e "s|{{HOME_DIR}}|$HOME|g" \
       -e "s|{{AITEAMFORGE_DIR}}|${NEW_DATA_DIR}|g" \
       -e "s|{{BACKUP_INTERVAL}}|${kanban_backup_interval}|g" \
       -e "s|{{PYTHON3_PATH}}|${python3_path}|g" \
+      -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
+      -e "s|{{LOG_DIR}}|${NEW_DATA_DIR}/logs|g" \
       "$template" > "$dest"
 }
 
@@ -592,6 +601,10 @@ update_launchagents() {
     "com.aiteamforge.kanban-backup.plist|_render_kanban_template|share/templates/kanban/backup-plist.template"
     "com.aiteamforge.lcars-health.plist|_render_kanban_template|share/templates/kanban/lcars-health-plist.template"
     "com.aiteamforge.fleet-monitor.plist|_render_fleet_template|share/templates/fleet-monitor/fleet-launchagent.template.plist"
+    # XACA-0626: RunAtLoad agent — starts all configured LCARS servers at login/reboot.
+    # XACA-0578 SIBLING-DRIFT NOTE: paired with install-kanban.sh (install+uninstall),
+    # aiteamforge-upgrade.sh::update_launchagents, and the template in share/templates/auto-upgrade/.
+    "com.aiteamforge.lcars-runatload.plist|_render_kanban_template|share/templates/auto-upgrade/lcars-runatload.template.plist"
   )
 
   local agents_updated=0

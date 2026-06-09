@@ -449,6 +449,12 @@ echo "  Starting LCARS server on port $LCARS_PORT..."
 # from $HOME/.aiteamforge/venv / $AITEAMFORGE_DIR/.venv) so the server launches
 # under the venv that has the LCARS deps — the helper's own probe chain does not
 # cover those paths and would otherwise fall back to bare python3 (XACA-0563).
+#
+# XACA-0660: Startup-time port drift guard lives in start_lcars_server() inside
+# lcars-launch-helpers.sh (_lcars_port_drift_guard). Do NOT add a separate guard
+# here — the chokepoint covers all teams via the single shared helper. The guard
+# self-heals the .port file to match $LCARS_PORT before the server binds, and
+# warns loudly if team-paths.json diverges from the DEFAULT_TEAMS canonical.
 export LCARS_PYTHON="$VENV_PYTHON"
 source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
 start_lcars_server "$TEAM_ID" "$LCARS_PORT" "${TEAM_ID}-lcars" || true

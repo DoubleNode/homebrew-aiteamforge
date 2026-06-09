@@ -175,6 +175,9 @@ remove_launchagents() {
     "com.aiteamforge.auto-upgrade.plist"
     "com.aiteamforge.lcars-watch.plist"
     "com.aiteamforge.cellar-watch.plist"
+    # XACA-0626: RunAtLoad agent — starts all configured LCARS servers at login/reboot.
+    # XACA-0578 SIBLING-DRIFT NOTE: paired with install-kanban.sh, upgrade, and migrate.
+    "com.aiteamforge.lcars-runatload.plist"
   )
 
   for agent in "${agents[@]}"; do
