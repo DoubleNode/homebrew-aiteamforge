@@ -243,10 +243,20 @@ get_remote_host_for_port() {
 }
 
 # ============================================================================
-# Start LCARS server for a team
+# Start LCARS server for a team (health-check restart path)
 # ============================================================================
-# Health-check-local variant with a distinct (port, team, session) signature,
-# separate from scripts/lcars-launch-helpers.sh::start_lcars_server.
+# XACA-0614: This function now uses resolve_lcars_python() from
+# lcars-launch-helpers.sh (the single canonical python resolver) and adopts
+# the same nohup+disown durable-detach form as start_lcars_server so a
+# health-restarted server is HUP-immune too (XACA-0652 invariant).
+#
+# SIBLING: keep in sync with lcars-launch-helpers.sh::start_lcars_server —
+# the launch form (nohup env ... sh -c 'exec ... python3 server.py ...') must
+# remain identical to preserve HUP-immunity and PID-trackability.
+#
+# LaunchAgent compatibility: sources lcars-launch-helpers.sh once via the
+# same _SCRIPT_DIR already used above to locate lcars_ports.py. Sourcing only
+# defines functions (no side-effects); safe under launchd's minimal env.
 _hc_start_lcars_server() {
     local local_port=$1
     local team=$2
@@ -254,21 +264,51 @@ _hc_start_lcars_server() {
 
     log "  Starting LCARS server: team=$team port=$local_port session=$session_name"
 
+    # Source the shared helpers to get resolve_lcars_python (XACA-0614).
+    # _SCRIPT_DIR is already set at the top of this file.
+    local _helpers="${_SCRIPT_DIR}/scripts/lcars-launch-helpers.sh"
+    if [[ -f "$_helpers" ]]; then
+        # shellcheck disable=SC1090
+        source "$_helpers" 2>/dev/null || true
+    fi
+
+    # Resolve the python that has the LCARS runtime deps (venv on tap hosts,
+    # bare python3 as last-resort on the dev source machine). Falls back to
+    # plain python3 if resolve_lcars_python is not yet defined (e.g., helpers
+    # failed to source in an extremely constrained env).
+    local lcars_python
+    if typeset -f resolve_lcars_python >/dev/null 2>&1; then
+        lcars_python="$(resolve_lcars_python)"
+    else
+        lcars_python="python3"
+    fi
+
     # Kill any zombie process on this port
     pkill -f "server.py.*$local_port" 2>/dev/null
     sleep 1
 
-    # Start the server
-    cd "$LCARS_UI_DIR" && \
-        LCARS_TEAM="$team" \
-        LCARS_SESSION_NAME="$session_name" \
-        nohup python3 server.py "$local_port" > /tmp/lcars-$team-$local_port.log 2>&1 &
+    # XACA-0614 / XACA-0652: Durable server launch — mirrors start_lcars_server.
+    # nohup + disown ensures the restarted server survives SSH logout and the
+    # health-check LaunchAgent's own process-group cleanup.
+    local _hc_log="/tmp/lcars-${team}-${local_port}.log"
+    nohup env \
+        _ATF_LCARS_DIR="${LCARS_UI_DIR}" \
+        _ATF_TEAM="${team}" \
+        _ATF_SESSION="${session_name}" \
+        _ATF_PYTHON="${lcars_python}" \
+        _ATF_PORT="${local_port}" \
+        sh -c 'cd "$_ATF_LCARS_DIR" && exec env \
+            LCARS_TEAM="$_ATF_TEAM" LCARS_SESSION_NAME="$_ATF_SESSION" \
+            "$_ATF_PYTHON" server.py "$_ATF_PORT"' \
+        >/dev/null 2>>"${_hc_log}" &
+    local _hc_pid=$!
+    disown "${_hc_pid}" 2>/dev/null || true
 
-    # Wait for it to come up
+    # Wait for it to come up (10s, same budget as before)
     local attempts=0
     while [[ $attempts -lt 10 ]]; do
         if check_server_health "$local_port"; then
-            log "  Server started successfully on port $local_port"
+            log "  Server started successfully on port $local_port (pid ${_hc_pid})"
             return 0
         fi
         sleep 1

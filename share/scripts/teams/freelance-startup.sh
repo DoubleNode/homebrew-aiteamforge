@@ -75,7 +75,7 @@ ITERM_WINDOW_NAME="${PROJECTID} / ${GROUPID} : Freelance"
 # CAPTURE: Lock the current window IMMEDIATELY to prevent race conditions
 # ============================================================================
 ITERM_STARTUP_LOG="/tmp/freelance-startup-iterm2-$(date +%Y%m%d-%H%M%S).log"
-if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+if has_iterm_gui; then
     echo "🔒 Capturing current window..."
     python3 ~/dev-team/iterm2_window_manager.py \
         --action init-team-window \
@@ -193,15 +193,18 @@ sleep 1
 echo ""
 echo "🚀 Creating terminal tabs..."
 
-# Detect if iTerm2 or Terminal.app
-if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
-    # iTerm2 automation using Python API for window management
+# ── LCARS server: ALWAYS start it (GUI and headless) ──
+# Headless hosts (SSH/cockpit-host) have no GUI tab to open but MUST serve LCARS
+# so <team>-connect.sh can reach http://<host>:<port>/api/status. (XACA-0614)
+# start_lcars_server writes the team line to lcars-target.js; append the session line after.
+echo "  Starting Freelance LCARS server on port $LCARS_PORT..."
+start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" \
+    || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see above)."
+echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
 
-    # ── LCARS: start server and open in browser ──
-    echo "  Starting Freelance LCARS server on port $LCARS_PORT..."
-    # start_lcars_server writes the team line to lcars-target.js; append the session line after.
-    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see details above)."
-    echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
+# ── Tabs: only when a GUI is present ──
+if has_iterm_gui; then
+    # iTerm2 automation using Python API for window management.
 
     # ── All tabs ──
     for terminal in "${terminal_order[@]}"; do
@@ -239,7 +242,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
 
         sleep 0.3
     done
-else
+elif ! is_headless; then
     # Terminal.app automation
     for terminal in "${terminal_order[@]}"; do
         label="${terminals[$terminal]}"
@@ -259,6 +262,9 @@ end tell
 EOF
         sleep 0.5
     done
+else
+    echo "  Headless host: tmux sessions + LCARS server are up; no GUI tabs created."
+    echo "  Connect from a cockpit machine: freelance-connect.sh <this-host> ${GROUPID} ${PROJECTID}"
 fi
 
 echo ""
@@ -292,7 +298,7 @@ done
 echo ""
 
 # Add Agent Panel WebView pane to each terminal tab
-if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+if has_iterm_gui; then
     echo "🎨 Adding agent panels to terminal tabs..."
 
     # Wait for iTerm2 Python API to become ready (may lag after launch)
@@ -344,7 +350,7 @@ fi
 echo ""
 
 # Switch to the LCARS tab after all tabs are created
-if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; then
+if has_iterm_gui; then
     echo "🎯 Switching to LCARS tab..."
     python3 ~/dev-team/iterm2_window_manager.py \
         --action select-tab \

@@ -48,6 +48,96 @@
 # suppression and logs errors loudly so they are actionable.
 
 # ---------------------------------------------------------------------------
+# is_headless — returns 0 (true) when no macOS GUI session is available for
+# iTerm2/Terminal.app automation; returns 1 (false) when a GUI is present.
+#
+# Rationale for each signal (most-decisive first):
+#   * $SSH_CONNECTION / $SSH_TTY set  -> we are inside an SSH session => headless.
+#   * No Aqua login session            -> `launchctl print gui/$(id -u)` fails or
+#                                         the user is not bootstrapped into Aqua.
+#                                         This is the authoritative "is there a
+#                                         window server for me" check on macOS.
+#   * No iTerm.app AND no Terminal.app -> nothing to automate.
+# Any ONE of these => headless. We deliberately do NOT rely on $TERM_PROGRAM
+# alone: a tmux pane unsets/rewrites it, producing false "headless" on a real GUI.
+#
+# Override hooks (testability + ops):
+#   ATF_FORCE_HEADLESS=1  -> always returns 0 (headless), even on a GUI box.
+#   ATF_FORCE_GUI=1       -> always returns 1 (GUI present). ATF_FORCE_HEADLESS wins.
+# (XACA-0614)
+is_headless() {
+    # Override: force headless wins over force GUI.
+    if [[ "${ATF_FORCE_HEADLESS:-}" == "1" ]]; then return 0; fi
+    if [[ "${ATF_FORCE_GUI:-}" == "1" ]]; then return 1; fi
+
+    # Strongest signal: an SSH session has no local window server.
+    if [[ -n "${SSH_CONNECTION:-}" || -n "${SSH_TTY:-}" ]]; then
+        return 0
+    fi
+    # Authoritative macOS GUI-session probe. In an Aqua (logged-in) session this
+    # succeeds; over SSH / in a LaunchDaemon / on a headless boot it fails.
+    if ! launchctl print "gui/$(id -u)" >/dev/null 2>&1; then
+        return 0
+    fi
+    # Belt-and-suspenders: neither GUI terminal app is running => nothing to drive.
+    if ! pgrep -x iTerm2 >/dev/null 2>&1 \
+       && ! pgrep -f "iTerm.app" >/dev/null 2>&1 \
+       && ! pgrep -f "Terminal.app" >/dev/null 2>&1; then
+        return 0
+    fi
+    return 1   # a GUI session is available
+}
+
+# ---------------------------------------------------------------------------
+# has_iterm_gui — returns 0 (true) when iTerm2 is running and automatable.
+# Replaces the repeated literal `[[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep`
+# across all startup scripts (XACA-0614 sibling-drift fix R1).
+# (XACA-0614)
+has_iterm_gui() {
+    [[ "${TERM_PROGRAM:-}" == "iTerm.app" ]] || pgrep -f "iTerm.app" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# resolve_lcars_python — echo the python interpreter that has the LCARS runtime
+# deps (pyzipper, requests, …). Single source of truth for both
+# start_lcars_server and lcars-health-check.sh::_hc_start_lcars_server.
+#
+# Probe order (mirrors start_lcars_server's previous inline chain, XACA-0486/0562/0563):
+#   0. $LCARS_PYTHON (env override)
+#   1. brew --prefix aiteamforge / libexec/venv
+#   2. env.sh → $AITEAMFORGE_PYTHON
+#   3. $(brew --prefix)/var/aiteamforge/venv
+#   4. $AITEAMFORGE_DIR/share/venv
+#   5. python3  (last-resort; dev source machine has deps globally)
+# (XACA-0614)
+resolve_lcars_python() {
+    if [[ -n "${LCARS_PYTHON:-}" && -x "${LCARS_PYTHON}" ]]; then
+        echo "${LCARS_PYTHON}"; return 0
+    fi
+    local _p
+    local _brew_aitf_prefix
+    if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" \
+       && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
+        echo "${_brew_aitf_prefix}/libexec/venv/bin/python3"; return 0
+    fi
+    local _brew_prefix _atf_env_sh
+    _brew_prefix="$(brew --prefix 2>/dev/null)"
+    _atf_env_sh="${_brew_prefix}/var/aiteamforge/env.sh"
+    if [[ -f "$_atf_env_sh" ]]; then
+        # shellcheck disable=SC1090
+        source "$_atf_env_sh"
+    fi
+    if [[ -n "${AITEAMFORGE_PYTHON:-}" && -x "$AITEAMFORGE_PYTHON" ]]; then
+        echo "$AITEAMFORGE_PYTHON"; return 0
+    fi
+    _p="${_brew_prefix}/var/aiteamforge/venv/bin/python3"
+    if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
+    _p="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
+    if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
+    echo "python3"   # last-resort (dev source machine has deps globally)
+}
+
+# ---------------------------------------------------------------------------
 # start_lcars_server <team> <port> [session_name]
 #
 # Writes the router redirect file, kills any stale server on <port>, starts a
@@ -91,58 +181,14 @@ start_lcars_server() {
     # expected when nothing is running; suppress them.
     pkill -f "server.py.*${port}" 2>/dev/null
 
-    # XACA-0486 / XACA-0562 / XACA-0563: Resolve the python that has the LCARS
-    # runtime imports (pyzipper, requests, etc. from share/requirements.txt). Bare
-    # `python3` is the system interpreter and does NOT have these deps — it is only
-    # the last-resort fallback (the dev-team source machine has the deps globally;
-    # tap machines do not, so the venv MUST win there).
-    #
-    # Probe order:
-    #   0. $LCARS_PYTHON (env override)              — XACA-0563: an explicit, caller-
-    #                                                  resolved interpreter wins. The rendered
-    #                                                  tap startup templates export their own
-    #                                                  $VENV_PYTHON (resolved from
-    #                                                  $HOME/.aiteamforge/venv or
-    #                                                  $AITEAMFORGE_DIR/.venv — paths the chain
-    #                                                  below does NOT cover). Unset on the dev
-    #                                                  machine + per-team scripts → chain runs
-    #                                                  unchanged there.
-    #   1. `brew --prefix aiteamforge`/libexec/venv  — current formula convention
-    #                                                  (XACA-0486; installed by the Formula)
-    #   2. env.sh → $AITEAMFORGE_PYTHON               — older convention; env.sh exports
-    #                                                  the canonical interpreter path
-    #   3. $(brew --prefix)/var/aiteamforge/venv      — older var-located venv
-    #   4. $AITEAMFORGE_DIR/share/venv                — bundled-share venv layout
-    #   5. python3                                    — last resort (dev source machine)
-    # On the dev machine the override is unset and probes 1-4 all miss (no brew
-    # aiteamforge / no env.sh), so we fall straight through to bare python3 —
-    # identical to prior behavior.
+    # XACA-0486 / XACA-0562 / XACA-0563 / XACA-0614: Resolve the python that has
+    # the LCARS runtime imports (pyzipper, requests, etc. from share/requirements.txt).
+    # Delegated to resolve_lcars_python() — the single canonical resolver shared with
+    # lcars-health-check.sh::_hc_start_lcars_server (XACA-0614 §4).
+    # Probe order, override hooks, and last-resort fallback are documented in
+    # resolve_lcars_python() above.
     local lcars_python
-    if [[ -n "${LCARS_PYTHON:-}" ]] && [[ -x "${LCARS_PYTHON}" ]]; then
-        lcars_python="${LCARS_PYTHON}"
-    else
-        lcars_python="python3"  # last-resort fallback (dev-team source machine)
-        local _brew_aitf_prefix
-        if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
-            lcars_python="${_brew_aitf_prefix}/libexec/venv/bin/python3"
-        else
-            # Older convention: env.sh exports AITEAMFORGE_PYTHON (canonical interpreter).
-            local _brew_prefix _atf_env_sh
-            _brew_prefix="$(brew --prefix 2>/dev/null)"
-            _atf_env_sh="${_brew_prefix}/var/aiteamforge/env.sh"
-            if [[ -f "$_atf_env_sh" ]]; then
-                # shellcheck disable=SC1090
-                source "$_atf_env_sh"
-            fi
-            if [[ -n "${AITEAMFORGE_PYTHON:-}" ]] && [[ -x "$AITEAMFORGE_PYTHON" ]]; then
-                lcars_python="$AITEAMFORGE_PYTHON"
-            elif [[ -x "$(brew --prefix 2>/dev/null)/var/aiteamforge/venv/bin/python3" ]]; then
-                lcars_python="$(brew --prefix)/var/aiteamforge/venv/bin/python3"
-            elif [[ -x "${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3" ]]; then
-                lcars_python="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
-            fi
-        fi
-    fi
+    lcars_python="$(resolve_lcars_python)"
 
     # Resolve a log dir consistent with the rendered-template convention
     # (team-startup.sh.template logs to $AITEAMFORGE_DIR/logs/lcars-server-<team>.log).

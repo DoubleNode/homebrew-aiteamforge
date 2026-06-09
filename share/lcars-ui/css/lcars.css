@@ -9164,41 +9164,6 @@ body {
 .platform-env.env-gamma { background: rgba(255, 153, 0, 0.2); color: var(--lcars-orange, #ff9900); }
 .platform-env.env-prod { background: rgba(153, 255, 153, 0.2); color: var(--lcars-green, #99ff99); }
 
-/* XACA-0658-004: Version-gate badge on the platform card */
-.platform-gate-badge {
-    display: inline-block;
-    font-size: 9px;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    padding: 2px 5px;
-    border-radius: 3px;
-    margin-left: 6px;
-    vertical-align: middle;
-    cursor: default;
-    white-space: nowrap;
-}
-.platform-gate-badge.gate-pass {
-    background: rgba(153, 255, 153, 0.18);
-    color: var(--lcars-green, #99ff99);
-    border: 1px solid rgba(153, 255, 153, 0.4);
-}
-.platform-gate-badge.gate-fail {
-    background: rgba(255, 102, 102, 0.18);
-    color: var(--lcars-red, #ff6666);
-    border: 1px solid rgba(255, 102, 102, 0.4);
-}
-.platform-gate-badge.gate-skip {
-    background: rgba(136, 136, 136, 0.15);
-    color: var(--lcars-grey, #888888);
-    border: 1px solid rgba(136, 136, 136, 0.3);
-}
-.gate-stale {
-    font-size: 8px;
-    opacity: 0.7;
-    margin-left: 3px;
-    font-style: italic;
-}
-
 /* XACA-0657-005: Linked Change Requests section inside release card body */
 .release-linked-crs {
     display: flex;
