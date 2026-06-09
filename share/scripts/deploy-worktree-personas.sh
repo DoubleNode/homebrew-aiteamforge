@@ -584,7 +584,15 @@ _deploy_all() {
   for git_root in "${git_roots[@]}"; do
     _info "[${team}] Processing git root: ${git_root}"
 
-    # Enumerate all linked worktrees for this root
+    # Enumerate all linked worktrees for this root.
+    # NOTE (XACA-0660 k501-sibling-drift): kb-sync-personas sync-worktrees gained
+    # a parallel loop that ALSO deploys to the nested main git root itself
+    # (e.g. <container>/develop/) when git_root != container. That gap is NOT
+    # replicated here because this script deploys from the tap installation
+    # (~aiteamforge/.../personas/agents/) — a path only available on tap consumer
+    # machines — whereas the nested-main-root deploy in kb-sync-personas reads
+    # from the dev-team master. On tap machines, `kb-sync-personas sync-worktrees`
+    # is the authoritative command for nested-main-root persona deployment.
     wt_paths=()
     first=true
     while IFS= read -r wt_line; do
@@ -592,7 +600,7 @@ _deploy_all() {
         wt_candidate="${wt_line#worktree }"
         if [ "$first" = true ]; then
           first=false
-          continue   # skip main worktree entry
+          continue   # skip main worktree entry (see NOTE above for nested-main-root context)
         fi
         canon_candidate=$(_canon_path "$wt_candidate") || continue
         wt_paths+=("$canon_candidate")
