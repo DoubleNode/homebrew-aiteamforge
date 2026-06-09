@@ -334,10 +334,18 @@ _kb_detect_and_quarantine_stub() {
     fi
 
     # ── Minimal safe-move fallback (no kanban-helpers.sh in scope) ───────────
-    # Count items in the stub (python3 always available on macOS/Homebrew).
+    # Count items in the stub. python3 is required to parse the JSON safely.
+    # XACA-0649 / Finding 3: if python3 is unavailable we MUST NOT silently
+    # treat item_count as 0 — that would risk moving a non-empty stub.
+    # Instead, refuse and ask the operator to use kb-quarantine-stub directly.
+    if ! command -v python3 &>/dev/null; then
+        _kbitg_red "[kb-guard] python3 not found — cannot safely count stub items."
+        _kbitg_yellow "  Resolve manually: kb-quarantine-stub ${instance_id} --yes"
+        return 1
+    fi
+
     local item_count=0
-    if command -v python3 &>/dev/null; then
-        item_count=$(python3 - "$stub_path" 2>/dev/null <<'PYEOF'
+    item_count=$(python3 - "$stub_path" 2>/dev/null <<'PYEOF'
 import json, sys
 try:
     b = json.load(open(sys.argv[1]))
@@ -346,9 +354,12 @@ except Exception:
     print(0)
 PYEOF
 )
+    # If python3 ran but produced non-numeric output, treat as non-empty (safe).
+    if ! [[ "$item_count" =~ ^[0-9]+$ ]]; then
+        item_count=1
     fi
 
-    if [[ "${item_count:-0}" -gt 0 ]]; then
+    if [[ "$item_count" -gt 0 ]]; then
         _kbitg_red "[kb-guard] Stub contains ${item_count} item(s) — cannot auto-quarantine."
         _kbitg_yellow "  Review the stub manually, then run:"
         _kbitg_yellow "  kb-quarantine-stub ${instance_id} --yes --force"

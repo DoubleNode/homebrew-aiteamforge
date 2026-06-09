@@ -48,44 +48,64 @@ if [ -z "${_AITEAMFORGE_PATHS_LOADED:-}" ]; then
 fi
 
 # Get the kanban directory for a specific team
-# Each team has their own kanban/ directory in their repository
-# Delegates to aiteamforge_team_kanban_dir() when the loader is available;
-# falls back to a built-in case statement for environments without the loader.
+# Each team has their own kanban/ directory in their repository.
+#
+# XACA-0649: Three-tier lookup — same logic as kanban-aliases.sh and the
+# Python server — so shell and Python resolvers always agree.
+#
+# Strategy 1: team-paths.json registry (written by install-team.sh / kb-port-reconcile).
+#   Read kanban_dir directly; only trust an entry that points to an existing dir
+#   (mirrors the [ -d ] guard in kanban-helpers.sh).  Wrong-but-existing default
+#   paths mean the install itself was broken — surface it, not hide it.
+# Strategy 2: Well-known case arms for every built-in team template.
+#   Parameterized teams (legal-*, medical-*, finance-*, freelance-*) derive the
+#   path from the slug suffix, NOT from $AITEAMFORGE_DIR — so the early-exit
+#   [[ -d "${_atf_dir}/kanban" ]] guard that existed here before XACA-0649 is
+#   intentionally removed: that guard fired for ALL teams once the academy kanban
+#   dir existed on disk (it always does on any consumer), silently routing
+#   legal-coparenting et al. to the wrong directory.
+# Strategy 3: $AITEAMFORGE_DIR/kanban — catch-all for genuinely unknown teams only.
+#
+# SIBLING-DRIFT NOTE (XACA-0649): This function has three copies:
+#   1. kanban-helpers.template.sh (this file — deployed on upgrade by aiteamforge-upgrade.sh)
+#   2. kanban-aliases.sh           (deployed on fresh install by install-kanban.sh)
+#   3. kanban-helpers.sh           (dev source of truth — dev-tree only, not deployed)
+# When changing this function UPDATE ALL THREE and run
+#   homebrew-tap/tests/test-xaca-0649-kanban-dir-resolver.sh
+# to verify parity.
 _kb_get_kanban_dir() {
     local team="$1"
     local _atf_dir="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
-    local _config_file="${_atf_dir}/.aiteamforge-config"
 
-    # Strategy 0: Prefer the canonical loader (XACA-0168 migration)
-    if command -v aiteamforge_team_kanban_dir &>/dev/null 2>&1; then
-        local _result
-        _result=$(aiteamforge_team_kanban_dir "$team" 2>/dev/null)
-        if [[ -n "$_result" ]]; then
-            echo "$_result"
+    # ── Strategy 1: team-paths.json registry (XACA-0649) ─────────────────────
+    # Read kanban_dir directly from the registry — the same source the Python
+    # server uses — so the shell and Python resolvers always agree.
+    # Only trust an entry that is both non-empty AND points to an existing directory.
+    local _cfg_file="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    if [[ -f "$_cfg_file" ]] && command -v python3 &>/dev/null; then
+        local _reg_dir
+        _reg_dir=$(python3 - "$_cfg_file" "$team" 2>/dev/null <<'PYEOF'
+import json, sys
+from pathlib import Path
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    entry = json.loads(Path(cfg).read_text(encoding="utf-8")).get("teams", {}).get(team, {})
+    v = entry.get("kanban_dir", "")
+    if v:
+        print(v)
+except Exception:
+    pass
+PYEOF
+)
+        if [[ -n "$_reg_dir" ]] && [[ -d "$_reg_dir" ]]; then
+            echo "$_reg_dir"
             return 0
         fi
+        # Registry has an entry but directory does not exist yet (first-launch) —
+        # fall through to case arms which carry the same paths via well-known patterns.
     fi
 
-    # Strategy 1: Read working_dir from .aiteamforge-config (authoritative)
-    # Config format: { "team_paths": { "<team>": { "working_dir": "<path>" } } }
-    if [[ -f "$_config_file" ]] && command -v jq &>/dev/null; then
-        local _working_dir
-        _working_dir=$(jq -r --arg t "$team" ".team_paths[$t].working_dir // empty" "$_config_file" 2>/dev/null)
-        if [[ -n "$_working_dir" ]]; then
-            echo "${_working_dir}/kanban"
-            return 0
-        fi
-    fi
-
-    # Strategy 2: Check if a board file exists under the aiteamforge kanban dir
-    # (boards installed without team_paths config, e.g., simple installs)
-    if [[ -d "${_atf_dir}/kanban" ]]; then
-        echo "${_atf_dir}/kanban"
-        return 0
-    fi
-
-    # Strategy 3: Fallback patterns for teams that live outside aiteamforge dir
-    # These match the well-known patterns from the original dev-team install
+    # ── Strategy 2: well-known case arms ─────────────────────────────────────
     case "$team" in
         academy)
             echo "${_atf_dir}/kanban"
@@ -130,8 +150,8 @@ _kb_get_kanban_dir() {
                 echo "${_atf_dir}/kanban"
             fi
             ;;
+        # ── Strategy 3: unknown team — central fallback ───────────────────────
         *)
-            # Last resort: use aiteamforge kanban dir
             echo "${_atf_dir}/kanban"
             ;;
     esac

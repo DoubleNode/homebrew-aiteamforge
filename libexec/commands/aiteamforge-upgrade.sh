@@ -641,18 +641,34 @@ update_shell_helpers() {
   local tap_share
   tap_share="${FRAMEWORK_DIR}/share"
 
-  # Update kanban-helpers.sh from the kanban template (root of WORKING_DIR)
+  # Update kanban-helpers.sh (root of WORKING_DIR).
+  # XACA-0649 / Finding 2: mirror install_kanban_helpers' source preference —
+  #   prefer kanban-aliases.sh (the standalone, tap-tested copy that fresh installs
+  #   use); fall back to kanban-helpers.template.sh if the aliases file is absent.
+  # Both files carry the same three-tier _kb_get_kanban_dir fix after XACA-0649.
+  # Keeping upgrade in sync with install prevents a future edit to kanban-aliases.sh
+  # from silently diverging from what upgrade ships.
+  local kanban_aliases_template="${tap_share}/templates/aliases/kanban-aliases.sh"
   local kanban_template="${tap_share}/templates/kanban/kanban-helpers.template.sh"
+  local _kanban_src=""
+  if [ -f "$kanban_aliases_template" ]; then
+    _kanban_src="$kanban_aliases_template"
+  elif [ -f "$kanban_template" ]; then
+    _kanban_src="$kanban_template"
+  fi
   local kanban_target="${WORKING_DIR}/kanban-helpers.sh"
-  if [ -f "$kanban_template" ] && [ -f "$kanban_target" ]; then
-    if [ "$kanban_template" -nt "$kanban_target" ] || [ "$FORCE" = true ]; then
-      print_info "Updating kanban-helpers.sh..."
+  if [ -n "$_kanban_src" ] && [ -f "$kanban_target" ]; then
+    if [ "$_kanban_src" -nt "$kanban_target" ] || [ "$FORCE" = true ]; then
+      print_info "Updating kanban-helpers.sh (from $(basename "$_kanban_src"))..."
       if [ "$DRY_RUN" = false ]; then
-        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" "$kanban_template" > "$kanban_target"
+        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
+            -e "s|{{SHARED_DEV_ROOT}}|${SHARED_DEV_ROOT:-/Users/Shared/Development}|g" \
+            -e "s|{{ORG_NAME}}|${ORG_NAME:-}|g" \
+            "$_kanban_src" > "$kanban_target"
         print_success "Updated kanban-helpers.sh"
         updated=$((updated + 1))
       else
-        echo "Would update: kanban-helpers.sh"
+        echo "Would update: kanban-helpers.sh (from $(basename "$_kanban_src"))"
         updated=$((updated + 1))
       fi
     fi
