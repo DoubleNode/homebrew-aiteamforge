@@ -23,30 +23,30 @@ import os
 import subprocess
 import sys
 
-# If iterm2 is not available, try re-executing via the tap-owned venv.
-# The venv is provisioned at $HOMEBREW_PREFIX/var/aiteamforge/venv by the
-# Formula post_install.  If missing, run: brew postinstall aiteamforge
+# XACA-0652: Use shared venv bootstrap instead of an inline probe (k501 drift fix).
+# Path resolution must cover two layouts:
+#   Dev source: iterm2_window_manager.py at dev-team root; bootstrap at dev-team/scripts/
+#   Tap-installed: iterm2_window_manager.py at $AITEAMFORGE_DIR/scripts/;
+#                  bootstrap also at $AITEAMFORGE_DIR/scripts/ (sibling, same dir)
+# We probe both: script-sibling dir first (tap layout), then scripts/ subdir (dev layout).
+_wm_dir = os.path.dirname(os.path.abspath(__file__))
+_bootstrap_candidates = [
+    _wm_dir,                                                   # tap: bootstrap is a sibling
+    os.path.join(_wm_dir, "scripts"),                          # dev-source: bootstrap is in scripts/
+]
+for _d in _bootstrap_candidates:
+    if _d not in sys.path:
+        sys.path.insert(0, _d)
+try:
+    import iterm2_venv_bootstrap  # noqa: F401 — side-effect: re-exec under venv if needed
+except ImportError:
+    pass  # dev machine: iterm2 installed globally, bootstrap not required
+
+# After the bootstrap above we should be running under the venv python.
+# If iterm2 is STILL missing, emit a clear diagnostic and exit.
 try:
     import iterm2
 except ImportError:
-    _brew_prefix = ""
-    try:
-        _brew_prefix = subprocess.check_output(
-            ["brew", "--prefix"], text=True, timeout=5
-        ).strip()
-    except Exception:
-        pass
-    _tap_venv_candidates = [
-        os.path.join(_brew_prefix, "var/aiteamforge/venv") if _brew_prefix else "",
-        "/opt/homebrew/var/aiteamforge/venv",
-        "/usr/local/var/aiteamforge/venv",
-    ]
-    for _venv_dir in _tap_venv_candidates:
-        if not _venv_dir:
-            continue
-        venv_python = os.path.join(_venv_dir, "bin/python3")
-        if os.path.isfile(venv_python) and sys.executable != venv_python:
-            os.execv(venv_python, [venv_python] + sys.argv)
     print("Error: iterm2 module not installed.", file=sys.stderr)
     print(
         "The iterm2 package is provisioned in the tap-owned venv by the Formula.\n"

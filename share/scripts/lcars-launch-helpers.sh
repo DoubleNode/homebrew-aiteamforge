@@ -158,14 +158,51 @@ start_lcars_server() {
         mv -f "${_server_log}" "${_server_log}.old" 2>/dev/null || true
     fi
 
-    # Start the server in the background. We `exec` into python inside the
-    # subshell so that $! is the python process itself (testable with kill -0).
-    # stdout is discarded (server.py is chatty); stderr is appended to the
-    # per-team log so a FATAL boot error is recoverable.
-    ( cd "${lcars_ui_dir}" && exec env \
-        LCARS_TEAM="${team}" LCARS_SESSION_NAME="${session_name}" \
-        "${lcars_python}" server.py "${port}" ) >/dev/null 2>>"${_server_log}" &
+    # XACA-0652: Durable server launch.
+    #
+    # WHY THE OLD FORM WORKED ON DEV BUT NOT ON A TAP-INSTALLED CONSUMER:
+    #   Dev machine: startup scripts are SOURCED inside a persistent tmux pane.
+    #   The shell hosting the pane does not exit, so SIGHUP is never sent to the
+    #   background server child.  The server lives indefinitely.
+    #
+    #   Consumer (tap-installed, e.g. M4Mini): each team's startup script is
+    #   invoked as the "Initial Command" of an iTerm2 profile tab OR called from
+    #   a transient shell.  When the startup script finishes and the shell exits,
+    #   the OS sends SIGHUP to the entire process group — including the server.py
+    #   child.  The server received the first /api/status 200 (a momentary truth),
+    #   reported "ready", then was killed milliseconds later when the parent exited.
+    #
+    # FIX: two layers of protection:
+    #   1. `nohup` makes server.py IGNORE SIGHUP even if it receives one.
+    #   2. `disown` removes the PID from the shell's job table, preventing the
+    #      shell from SIGHUP'ing the child on exit in interactive/hup-sending
+    #      contexts.  `|| true` absorbs the expected "job not found" error that
+    #      zsh emits when disown is called from a non-interactive subshell.
+    #   Together these ensure the server outlives the startup script on all paths.
+    #
+    # PID TRACKABILITY: `nohup sh -c "... exec env ... python3 server.py ..."` works
+    # because `exec` inside sh -c replaces the `sh` subprocess with the python
+    # process.  `$!` therefore resolves to the python PID — NOT a shell wrapper —
+    # so kill -0 liveness checks remain accurate.  (Verified: ps -p $! shows
+    # "python3" on macOS after the exec.)
+    #
+    # STDERR: nohup normally redirects stderr to nohup.out; we override that with
+    # an explicit `2>>log` redirect, which takes precedence.  stdout is discarded.
+    #
+    # Note: we use env vars rather than shell variable expansion inside the
+    # sh -c string to avoid quoting hazards with paths that may contain spaces.
+    nohup env \
+        _ATF_LCARS_DIR="${lcars_ui_dir}" \
+        _ATF_TEAM="${team}" \
+        _ATF_SESSION="${session_name}" \
+        _ATF_PYTHON="${lcars_python}" \
+        _ATF_PORT="${port}" \
+        sh -c 'cd "$_ATF_LCARS_DIR" && exec env \
+            LCARS_TEAM="$_ATF_TEAM" LCARS_SESSION_NAME="$_ATF_SESSION" \
+            "$_ATF_PYTHON" server.py "$_ATF_PORT"' \
+        >/dev/null 2>>"${_server_log}" &
     local _server_pid=$!
+    disown "${_server_pid}" 2>/dev/null || true
 
     # Poll /api/status for up to 15s (30 × 0.5s). A ready response means the
     # server is serving routes. If the process dies before answering, a crashed
@@ -174,7 +211,20 @@ start_lcars_server() {
     local _poll_i
     for _poll_i in {1..30}; do
         if curl -s "http://localhost:${port}/api/status" >/dev/null 2>&1; then
-            echo "    ✅ LCARS server ready on port ${port}"
+            # XACA-0652: Hardened readiness check — confirm the process is still
+            # alive after the first 200.  The old code returned immediately on the
+            # first successful curl, which passed even when the server was about to
+            # be killed by SIGHUP (it answered the request, THEN died).  A 0.3s
+            # pause + re-check catches this "momentary truth" failure mode.
+            sleep 0.3
+            if ! kill -0 "${_server_pid}" 2>/dev/null; then
+                wait "${_server_pid}" 2>/dev/null; local _rc=$?
+                echo "    ❌ LCARS server for team '${team}' on port ${port} responded once then exited (status ${_rc}) — startup-script SIGHUP suspected." >&2
+                echo "       Last lines of ${_server_log}:" >&2
+                tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
+                return 1
+            fi
+            echo "    ✅ LCARS server ready on port ${port} (pid ${_server_pid})"
             return 0
         fi
         if ! kill -0 "${_server_pid}" 2>/dev/null; then

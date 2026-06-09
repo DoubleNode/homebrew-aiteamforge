@@ -862,6 +862,17 @@ if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
         "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
     echo "  ✓ scripts/lcars-launch-helpers.sh"
 
+    # XACA-0652: install shared iterm2 venv bootstrap alongside lcars-launch-helpers.sh.
+    # Cockpit scripts that `import iterm2` (iterm-browser.py, iterm2_window_manager.py,
+    # iterm2_tab_title_prefix.py) import this module to re-exec under the tap-owned venv
+    # when iterm2 is not available under system python3.  Must live in $AITEAMFORGE_DIR/scripts/
+    # so the relative path "../scripts/iterm2_venv_bootstrap" resolves from any cockpit script.
+    # No path rewrite needed (pure Python, no shell path references).
+    cp "$HOMEBREW_TAP_ROOT/share/scripts/iterm2_venv_bootstrap.py" \
+        "$AITEAMFORGE_DIR/scripts/iterm2_venv_bootstrap.py"
+    chmod +x "$AITEAMFORGE_DIR/scripts/iterm2_venv_bootstrap.py"
+    echo "  ✓ scripts/iterm2_venv_bootstrap.py"
+
     # XACA-0545: install the kanban init guard and provisioner alongside lcars-launch-helpers.sh.
     # The tap startup-script snapshots now source kb-init-team-guard.sh at launch (same relative
     # position as lcars-launch-helpers.sh), so both must be deployed together. $AITEAMFORGE_DIR/scripts
@@ -942,6 +953,12 @@ PYEOF
     _xaca0483_install_script "$HOMEBREW_TAP_ROOT/share/scripts/lcars-launch-helpers.sh" \
         "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
     echo "  ✓ scripts/lcars-launch-helpers.sh"
+    # XACA-0652: install shared iterm2 venv bootstrap (sibling of lcars-launch-helpers.sh).
+    # Same reasoning as the parametric-branch install above.
+    cp "$HOMEBREW_TAP_ROOT/share/scripts/iterm2_venv_bootstrap.py" \
+        "$AITEAMFORGE_DIR/scripts/iterm2_venv_bootstrap.py"
+    chmod +x "$AITEAMFORGE_DIR/scripts/iterm2_venv_bootstrap.py"
+    echo "  ✓ scripts/iterm2_venv_bootstrap.py"
 else
     echo "  ⚠️  Template not found: $TEAM_STARTUP_SCRIPT.template (will create basic version)"
     cat > "$STARTUP_SCRIPT" <<EOF

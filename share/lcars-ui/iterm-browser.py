@@ -16,8 +16,19 @@ Usage:
     python3 iterm-browser.py [port]
 """
 
-import iterm2
+# XACA-0652: Bootstrap — re-exec under the tap-owned venv that has iterm2
+# if running under system python3. Must come before `import iterm2`.
 import sys
+import os
+_bootstrap_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts")
+if _bootstrap_dir not in sys.path:
+    sys.path.insert(0, _bootstrap_dir)
+try:
+    import iterm2_venv_bootstrap  # noqa: F401 — side-effect: re-exec if needed
+except ImportError:
+    pass  # dev machine: iterm2 installed globally, bootstrap not required
+
+import iterm2
 import subprocess
 import time
 import urllib.request
