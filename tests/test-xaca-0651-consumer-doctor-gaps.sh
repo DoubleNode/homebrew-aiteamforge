@@ -386,6 +386,30 @@ assert_contains "$_BACKUP_LAUNCHAGENT_FUNC" \
     "install_backup_launchagent must verify registration via launchctl list (not trust exit code)"
 test_pass
 
+# 3d. Sibling-drift (XACA-0651-009): the other launchagent installers that share the
+# load+verify responsibility must use the same launchctl-list verification, so none
+# inherits the false-success bug if it ever gains a non-/tmp log path or RunAtLoad.
+_HEALTH_LAUNCHAGENT_FUNC="$(awk '/^install_lcars_health_launchagent\(\)/,/^}$/' "$INSTALLER")"
+_WATCH_LAUNCHAGENT_FUNC="$(awk '/^install_lcars_watch_launchagent\(\)/,/^}$/' "$INSTALLER")"
+
+test_start "Fix 3d (sibling): install_lcars_health_launchagent verifies via launchctl list"
+assert_contains "$_HEALTH_LAUNCHAGENT_FUNC" \
+    'launchctl list' \
+    "install_lcars_health_launchagent must verify registration via launchctl list"
+assert_not_contains "$_HEALTH_LAUNCHAGENT_FUNC" \
+    'if launchctl load' \
+    "install_lcars_health_launchagent must not use the old if-launchctl-load success-trust pattern"
+test_pass
+
+test_start "Fix 3d (sibling): install_lcars_watch_launchagent verifies via launchctl list"
+assert_contains "$_WATCH_LAUNCHAGENT_FUNC" \
+    'launchctl list' \
+    "install_lcars_watch_launchagent must verify registration via launchctl list"
+assert_not_contains "$_WATCH_LAUNCHAGENT_FUNC" \
+    'if launchctl load' \
+    "install_lcars_watch_launchagent must not use the old if-launchctl-load success-trust pattern"
+test_pass
+
 # 3b (functional): rendered plist with empty KANBAN_BACKUP_INTERVAL → <integer>900</integer>
 test_start "Fix 3b (functional): empty KANBAN_BACKUP_INTERVAL renders <integer>900</integer> not <integer></integer>"
 _PLIST_TEMPLATE="$TAP_ROOT/share/templates/kanban/backup-plist.template"

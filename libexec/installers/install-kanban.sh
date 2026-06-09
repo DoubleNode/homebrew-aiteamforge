@@ -934,11 +934,16 @@ install_lcars_health_launchagent() {
 
     launchctl unload "$plist_dest" 2>/dev/null || true
 
-    if launchctl load "$plist_dest"; then
+    # XACA-0651: verify registration via `launchctl list` rather than trust the legacy
+    # `launchctl load` exit code (which returns 0 even when the job is rejected). Kept
+    # consistent with install_backup_launchagent so neither inherits the false-success
+    # bug if either ever gains a non-/tmp log path or RunAtLoad behavior (XACA-0651-009).
+    launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-health"; then
         success "Installed and loaded LCARS health LaunchAgent"
         info "Health checks will run every 5 minutes"
     else
-        warning "Failed to load LCARS health LaunchAgent (may need manual activation)"
+        warning "LCARS health LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
     fi
 }
 
@@ -1009,11 +1014,14 @@ install_lcars_watch_launchagent() {
 
     launchctl unload "$plist_dest" 2>/dev/null || true
 
-    if launchctl load "$plist_dest"; then
+    # XACA-0651: verify registration via `launchctl list` rather than trust the legacy
+    # `launchctl load` exit code (returns 0 even on reject). Consistent with
+    # install_backup_launchagent / install_lcars_health_launchagent (XACA-0651-009).
+    launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-watch"; then
         success "LCARS watch LaunchAgent installed — will auto-restart LCARS on upgrade"
     else
-        warning "Failed to load LCARS watch LaunchAgent (may need manual activation)"
-        info "Load manually: launchctl load $plist_dest"
+        warning "LCARS watch LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
     fi
 }
 
