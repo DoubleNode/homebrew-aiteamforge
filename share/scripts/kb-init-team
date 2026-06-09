@@ -138,8 +138,11 @@ _resolve_board_template() {
 
     # Embedded fallback: write the minimal board template to a tmpfile so that
     # board creation NEVER fails due to a missing template file.
+    # BSD mktemp (macOS) requires X's at the END of the template — a trailing
+    # suffix defeats randomization and causes "File exists" on the second call.
+    # Honor TMPDIR so the file lands in the correct per-user temp directory.
     local _tmp
-    _tmp="$(mktemp /tmp/kb-init-team-board-template.XXXXXX.json)"
+    _tmp="$(mktemp "${TMPDIR:-/tmp}/kb-init-team-board-template.XXXXXX")"
     cat > "$_tmp" <<'BOARD_TEMPLATE_HEREDOC'
 {
   "team": "{{TEAM_ID}}",
@@ -877,10 +880,19 @@ PYEOF
     # an embedded heredoc tempfile if no template file is found on disk.
     local _board_tmpl
     _board_tmpl="$(_resolve_board_template)"
-    # Clean up tmpfile after use (only matters for the embedded-fallback path)
+    # Clean up tmpfile on ALL exit paths (success, python3 failure, set -e abort).
+    # Use a RETURN trap so cleanup is scoped to this function only.  The trap
+    # fires on all paths including python3 failures that would otherwise leave a
+    # /tmp landmine under set -euo pipefail.  Checking the basename prefix (not
+    # a hardcoded /tmp prefix) ensures the trap fires correctly regardless of
+    # which directory TMPDIR resolves to (e.g. /var/folders/... on macOS).
     local _board_tmpl_is_tmp=0
-    if [[ "$_board_tmpl" == /tmp/kb-init-team-board-template.* ]]; then
-        _board_tmpl_is_tmp=1
+    case "$(basename "${_board_tmpl}")" in
+        kb-init-team-board-template.*) _board_tmpl_is_tmp=1 ;;
+    esac
+    if [[ "$_board_tmpl_is_tmp" -eq 1 ]]; then
+        # shellcheck disable=SC2064  # intentional: expand _board_tmpl now
+        trap "rm -f '${_board_tmpl}' 2>/dev/null; trap - RETURN" RETURN
     fi
 
     python3 - "${_board_tmpl}" "$board_file" \
@@ -911,10 +923,8 @@ board['terminals'] = json.loads(terminals_json)
 
 Path(board_file).write_text(json.dumps(board, indent=2) + '\n', encoding='utf-8')
 PYEOF
-    # Clean up the embedded-fallback tmpfile if we created one
-    if [[ "$_board_tmpl_is_tmp" -eq 1 ]]; then
-        rm -f "$_board_tmpl" 2>/dev/null || true
-    fi
+    # Note: the RETURN trap above handles tmpfile cleanup for both success and
+    # python3-failure paths — no explicit rm needed here.
 }
 
 # ── Create directory tree + knowledge INDEX files ─────────────────────────────
