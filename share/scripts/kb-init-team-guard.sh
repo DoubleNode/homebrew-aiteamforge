@@ -237,6 +237,162 @@ _kb_is_noninteractive() {
     return 1
 }
 
+# ── _kb_stub_paths_for_instance <instance-id> ─────────────────────────────────
+# Prints zero or more legacy stub paths (one per line) that could coexist with
+# the canonical board for <instance-id>.  Used by
+# _kb_detect_and_quarantine_stub to locate the stub without the full
+# kanban-helpers.sh loaded.  Mirrors the stub map in kanban-helpers.sh
+# _kb_check_dual_boards and kanban-aliases.sh kb-quarantine-stub.
+#
+# XACA-0649: k501 sibling-drift note — this table must stay in sync with:
+#   kanban-helpers.sh   _kb_check_dual_boards  _checks array
+#   kanban-aliases.sh   kb-quarantine-stub     case "$team" stub_path assignments
+# All three must be updated together when new parameterized teams are added.
+_kb_stub_paths_for_instance() {
+    local instance_id="$1"
+    case "$instance_id" in
+        legal-coparenting)
+            printf '%s\n' "${HOME}/legal/kanban/legal-board.json"
+            printf '%s\n' "${HOME}/legal/default/kanban/legal-default-board.json"
+            ;;
+        medical-general)
+            printf '%s\n' "${HOME}/medical/kanban/medical-board.json"
+            ;;
+        finance-personal)
+            printf '%s\n' "${HOME}/finance/kanban/finance-board.json"
+            ;;
+        command)
+            printf '%s\n' "${HOME}/dev-team/kanban/command-board.json"
+            ;;
+        # No other built-in templates have known stub paths.
+    esac
+}
+
+# ── _kb_detect_and_quarantine_stub <instance-id> <canonical-board-file> ───────
+# XACA-0649: Detect a legacy-default stub that coexists with the canonical board
+# and auto-quarantine it so LCARS server start-up never hits the dual-board FATAL.
+#
+# Design rationale:
+#   • The LCARS Python server calls check_all_dual_boards_or_die() at start; a
+#     coexisting stub causes a hard FATAL that blocks the entire team terminal.
+#   • The auto-quarantine operation is REVERSIBLE: the stub is stashed, not
+#     deleted (same contract as kb-quarantine-stub --yes).
+#   • On a normal install the stub is always empty (install-kanban.sh writes a
+#     blank board), so no data is at risk.
+#   • When kanban-helpers.sh is available we delegate to kb-quarantine-stub for
+#     the full safety contract (item-count check, sidecar .meta.json, etc.).
+#     When it is not available we do a minimal safe move and print a warning.
+#
+# Returns 0 if no stub was found or stub was quarantined successfully.
+# Returns 1 if a stub was found but could NOT be quarantined (caller decides).
+_kb_detect_and_quarantine_stub() {
+    local instance_id="$1"
+    local canonical_board="$2"
+
+    # If the canonical board does not exist yet, we cannot verify the dual-board
+    # invariant — skip silently.
+    [[ -f "$canonical_board" ]] || return 0
+
+    local stub_path="" found_stub=0
+    while IFS= read -r _candidate; do
+        if [[ -f "$_candidate" ]]; then
+            stub_path="$_candidate"
+            found_stub=1
+            break
+        fi
+    done < <(_kb_stub_paths_for_instance "$instance_id")
+
+    # No stub: nothing to do.
+    [[ "$found_stub" -eq 1 ]] || return 0
+
+    _kbitg_yellow ""
+    _kbitg_yellow "┌─────────────────────────────────────────────────────────────────┐"
+    _kbitg_yellow "│  DUAL-BOARD STUB DETECTED — AUTO-QUARANTINE (XACA-0649)         │"
+    _kbitg_yellow "├─────────────────────────────────────────────────────────────────┤"
+    _kbitg_yellow "│  Instance   : ${instance_id}"
+    _kbitg_yellow "│  Stub       : ${stub_path}"
+    _kbitg_yellow "│  Canonical  : ${canonical_board}"
+    _kbitg_yellow "│"
+    _kbitg_yellow "│  Both files coexist.  LCARS would FATAL on startup."
+    _kbitg_yellow "│  Quarantining stub now (reversible — stashed, not deleted)."
+    _kbitg_yellow "└─────────────────────────────────────────────────────────────────┘"
+    printf '\n' >&2
+
+    # ── Try to delegate to kb-quarantine-stub ────────────────────────────────
+    # kb-quarantine-stub is defined in kanban-helpers.sh (dev) or kanban-aliases.sh
+    # (consumer install); it is available after either file is sourced.
+    if command -v kb-quarantine-stub &>/dev/null 2>&1; then
+        _kbitg_cyan "[kb-guard] Running: kb-quarantine-stub ${instance_id} --yes"
+        if kb-quarantine-stub "$instance_id" --yes 2>&1 | sed 's/^/  [quarantine] /' >&2; then
+            _kbitg_green "[kb-guard] Stub quarantined successfully.  LCARS will start cleanly."
+            return 0
+        else
+            _kbitg_red "[kb-guard] kb-quarantine-stub failed.  You must resolve this manually:"
+            _kbitg_yellow "           kb-quarantine-stub ${instance_id} --yes"
+            return 1
+        fi
+    fi
+
+    # ── Minimal safe-move fallback (no kanban-helpers.sh in scope) ───────────
+    # Count items in the stub (python3 always available on macOS/Homebrew).
+    local item_count=0
+    if command -v python3 &>/dev/null; then
+        item_count=$(python3 - "$stub_path" 2>/dev/null <<'PYEOF'
+import json, sys
+try:
+    b = json.load(open(sys.argv[1]))
+    print(len(b.get('backlog', [])))
+except Exception:
+    print(0)
+PYEOF
+)
+    fi
+
+    if [[ "${item_count:-0}" -gt 0 ]]; then
+        _kbitg_red "[kb-guard] Stub contains ${item_count} item(s) — cannot auto-quarantine."
+        _kbitg_yellow "  Review the stub manually, then run:"
+        _kbitg_yellow "  kb-quarantine-stub ${instance_id} --yes --force"
+        return 1
+    fi
+
+    # Empty stub: move it to a quarantine directory.
+    local _atf_dir="${AITEAMFORGE_DIR:-${HOME}/.aiteamforge}"
+    local _ts
+    _ts=$(date -u +%Y%m%d-%H%M%S)
+    local _q_dir="${_atf_dir}/quarantine/runtime-stub-stash/${_ts}-${instance_id}"
+    mkdir -p "$_q_dir" 2>/dev/null || {
+        _kbitg_red "[kb-guard] Could not create quarantine dir: ${_q_dir}"
+        _kbitg_yellow "  Resolve manually: kb-quarantine-stub ${instance_id} --yes"
+        return 1
+    }
+    local _dest="${_q_dir}/$(basename "$stub_path")"
+    if mv "$stub_path" "$_dest" 2>/dev/null; then
+        _kbitg_green "[kb-guard] Stub moved to: ${_dest}"
+        # Write minimal sidecar so the stash is traceable.
+        python3 - "$_q_dir" "$stub_path" "$canonical_board" "$instance_id" 2>/dev/null <<'PYEOF'
+import json, sys
+from datetime import datetime, timezone
+from pathlib import Path
+d, stub, canonical, team = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+meta = {
+    "quarantined_at": datetime.now(timezone.utc).isoformat(),
+    "quarantined_by": "kb-init-team-guard.sh _kb_detect_and_quarantine_stub (XACA-0649)",
+    "stub_path": stub,
+    "canonical_board": canonical,
+    "team": team,
+    "reason": "Stub board file coexisted with canonical board. Auto-quarantined at startup.",
+}
+(Path(d) / ".meta.json").write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+PYEOF
+        _kbitg_green "[kb-guard] LCARS will start cleanly."
+        return 0
+    else
+        _kbitg_red "[kb-guard] mv failed — could not move stub."
+        _kbitg_yellow "  Resolve manually: kb-quarantine-stub ${instance_id} --yes"
+        return 1
+    fi
+}
+
 # ── kb_ensure_team_initialized <team-id> <kanban-dir> ────────────────────────
 #
 # Main entry point. Call this early in a *-startup.sh before any kanban work.
@@ -259,17 +415,26 @@ kb_ensure_team_initialized() {
     local team_id="${1:?kb_ensure_team_initialized: team-id argument is required}"
     local kanban_dir="${2:?kb_ensure_team_initialized: kanban-dir argument is required}"
 
-    # ── Fast path: board is present and usable ────────────────────────────────
-    if _kb_board_is_present "$team_id" "$kanban_dir"; then
-        return 0
-    fi
-
     # Resolve the concrete INSTANCE id (e.g. legal → legal-coparenting) so any
     # provisioning targets the right board instead of the bare TEMPLATE id —
     # passing the template id makes kb-init-team try to re-allocate the team
     # code and collide with the already-registered instance. (XACA-0643)
     local instance_id
     instance_id="$(_kb_resolve_instance_id "$team_id" "$kanban_dir")"
+
+    # ── Dual-board stub check (XACA-0649) ─────────────────────────────────────
+    # Detect and auto-quarantine a legacy-default stub before LCARS tries to
+    # start.  A coexisting stub causes the LCARS Python server to FATAL on
+    # startup.  The auto-quarantine is reversible (stash, not delete) and runs
+    # even when the canonical board is already present (fast-path below would
+    # otherwise return 0 while the stub is still around to FATAL LCARS later).
+    _kb_detect_and_quarantine_stub "$instance_id" \
+        "${kanban_dir}/${instance_id}-board.json" || true
+
+    # ── Fast path: board is present and usable ────────────────────────────────
+    if _kb_board_is_present "$team_id" "$kanban_dir"; then
+        return 0
+    fi
 
     # ── Locate kb-init-team ───────────────────────────────────────────────────
     local kbit_bin

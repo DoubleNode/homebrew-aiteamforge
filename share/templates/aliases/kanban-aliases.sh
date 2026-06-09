@@ -30,28 +30,65 @@ _kb_check_jq() {
 }
 
 # Get the kanban directory for a team.
-# Strategy 1: Read working_dir from .aiteamforge-config (authoritative)
-# Strategy 2: Use $AITEAMFORGE_DIR/kanban (simple install fallback)
-# Strategy 3: Well-known paths for standard teams
+# XACA-0649: Three-tier lookup — registry first, then well-known case arms, then
+# $AITEAMFORGE_DIR/kanban as the last-resort for truly unknown teams.
+#
+# Previous strategy 2 (return $AITEAMFORGE_DIR/kanban when that dir exists) was
+# removed because it fired for ALL teams, including parameterized ones like
+# legal-coparenting whose kanban_dir is ~/legal/coparenting/kanban.  When the
+# academy board already lived at ~/aiteamforge/kanban (always true on a normal
+# install) the guard short-circuited before the correct case arm was reached,
+# causing kb-quarantine-stub to look for the canonical board at the wrong path.
+#
+# Strategy 1: team-paths.json — the canonical registry written by install-team.sh
+#             and updated by kb-port-reconcile.  Read directly via python3 so this
+#             file needs no external aiteamforge-paths.sh source.  Mirrored from
+#             kanban-helpers.sh _kb_get_kanban_dir (XACA-0649 single-source fix).
+# Strategy 2: Well-known case arms — correct for every built-in team template.
+#             Parameterized teams (legal-*, medical-*, finance-*, freelance-*)
+#             derive the path from the team slug suffix, not from AITEAMFORGE_DIR.
+# Strategy 3: $AITEAMFORGE_DIR/kanban — catch-all for genuinely unknown teams.
 _kb_get_kanban_dir() {
     local team="$1"
     local _atf_dir="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
-    local _config_file="${_atf_dir}/.aiteamforge-config"
 
-    if [[ -f "$_config_file" ]] && command -v jq &>/dev/null; then
-        local _working_dir
-        _working_dir=$(jq -r --arg t "$team" '.team_paths[$t].working_dir // empty' "$_config_file" 2>/dev/null)
-        if [[ -n "$_working_dir" ]]; then
-            echo "${_working_dir}/kanban"
+    # ── Strategy 1: team-paths.json registry (XACA-0649) ─────────────────────
+    # Read kanban_dir directly from the registry — the same source the Python
+    # server uses — so the shell and Python resolvers always agree.
+    # Only trust an entry that is both non-empty AND points to an existing directory
+    # (mirrors the [ -d ] guard in kanban-helpers.sh _kb_get_kanban_dir).
+    local _cfg_file="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    if [[ -f "$_cfg_file" ]] && command -v python3 &>/dev/null; then
+        local _reg_dir
+        _reg_dir=$(python3 - "$_cfg_file" "$team" 2>/dev/null <<'PYEOF'
+import json, sys
+from pathlib import Path
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    entry = json.loads(Path(cfg).read_text(encoding="utf-8")).get("teams", {}).get(team, {})
+    v = entry.get("kanban_dir", "")
+    if v:
+        print(v)
+except Exception:
+    pass
+PYEOF
+)
+        # Accept registry entry only when it points to an existing directory.
+        # A wrong-but-existing default ($AITEAMFORGE_DIR/kanban) would still pass
+        # this guard, but since the registry is written by install-team.sh with
+        # the real KANBAN_DIR, a wrong entry there means the install itself was
+        # broken — surface it via the board-not-found error rather than silently
+        # shadowing it with a hardcoded fallback.
+        if [[ -n "$_reg_dir" ]] && [[ -d "$_reg_dir" ]]; then
+            echo "$_reg_dir"
             return 0
         fi
+        # Registry has an entry but directory does not exist yet (first-launch,
+        # kanban dir not created yet) — fall through to case arms which carry the
+        # same paths via the well-known patterns; they will be created on demand.
     fi
 
-    if [[ -d "${_atf_dir}/kanban" ]]; then
-        echo "${_atf_dir}/kanban"
-        return 0
-    fi
-
+    # ── Strategy 2: well-known case arms ─────────────────────────────────────
     case "$team" in
         academy)      echo "${_atf_dir}/kanban" ;;
         # TODO(installer): {{SHARED_DEV_ROOT}} and {{ORG_NAME}} resolved at install time
@@ -82,6 +119,7 @@ _kb_get_kanban_dir() {
                 echo "${_atf_dir}/kanban"
             fi
             ;;
+        # ── Strategy 3: unknown team — central fallback ───────────────────
         *)
             echo "${_atf_dir}/kanban"
             ;;
