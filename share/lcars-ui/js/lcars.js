@@ -10689,11 +10689,41 @@ function renderReleaseCard(release, flowConfig = null, projectEnvironments = {})
 
         const progressComplete = envProgress >= 100 ? 'complete' : '';
 
+        // XACA-0658-004: Render gateStatus badge (pass/fail/skip) + stale hint.
+        const gs = platform.gateStatus;
+        let gateHtml = '';
+        if (gs && gs.result) {
+            const gsResult    = gs.result;   // 'pass' | 'fail' | 'skip'
+            const gsCheckedAt = gs.checkedAt || '';
+            const gsCode      = gs.codeVersion   || '';
+            const gsTarget    = gs.targetVersion || '';
+
+            // Staleness: warn when last checked > 24 h ago
+            let staleMarker = '';
+            if (gsCheckedAt) {
+                const ageMs = Date.now() - new Date(gsCheckedAt).getTime();
+                if (ageMs > 24 * 60 * 60 * 1000) {
+                    staleMarker = ' <span class="gate-stale" title="Gate result is over 24 hours old — re-run kb-release-version-gate to refresh">STALE</span>';
+                }
+            }
+
+            // Build human-readable tooltip
+            let tooltip = `Gate: ${gsResult.toUpperCase()}`;
+            if (gsCode)    tooltip += `\nCode:   ${gsCode}`;
+            if (gsTarget)  tooltip += `\nTarget: ${gsTarget}`;
+            if (gsCheckedAt) tooltip += `\nChecked: ${gsCheckedAt}`;
+            const tooltipAttr = tooltip.replace(/"/g, '&quot;');
+
+            const gsClass = `gate-${gsResult}`;  // gate-pass | gate-fail | gate-skip
+            gateHtml = `<span class="platform-gate-badge ${gsClass}" title="${tooltipAttr}">${gsResult.toUpperCase()}${staleMarker}</span>`;
+        }
+
         return `
             <div class="release-platform">
                 <div class="platform-info">
                     <span class="platform-name">${getPlatformName(key)}</span>
                     <span class="platform-version">${platform.version || '1.0.0'}</span>
+                    ${gateHtml}
                 </div>
                 <div class="platform-progress">
                     <div class="platform-progress-bar ${progressComplete}" style="width: ${envProgress}%"></div>

@@ -1,0 +1,417 @@
+#!/usr/bin/env bash
+# kb-release-version-gate — XACA-0658-004
+# Version-confirmation gate: compare code version vs release target version.
+#
+# Usage:
+#   kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]
+#
+# Exit codes:
+#   0 — PASS (versions match) or SKIP (no target version set for non-PROD env, or no version_sources)
+#   1 — FAIL (version mismatch) or PROD-no-target (PROD requires a target version)
+#
+# The gate writes gateStatus to the release via the LCARS API (POST /api/releases/<id>/platform-gate-status).
+# If LCARS is down the status write is non-fatal; the exit code is still correct.
+#
+# Canonical source: ~/dev-team/scripts/kb-release-version-gate
+# Tap mirror:       homebrew-tap/share/scripts/kb-release-version-gate
+# Canonical-source rule: XACA-0340 — edit here, run ./sync-tap.sh to mirror.
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Self-location: resolve AITEAMFORGE_DIR / kanban-helpers.sh regardless of
+# whether we're running from the dev-tree or from the tap install.
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-${(%):-%x}}")" && pwd)"
+# AITEAMFORGE_DIR may already be set (tap context); if not, infer from script location.
+if [[ -z "${AITEAMFORGE_DIR:-}" ]]; then
+    export AITEAMFORGE_DIR="$(dirname "$_SCRIPT_DIR")"
+fi
+_HELPERS="$AITEAMFORGE_DIR/kanban-helpers.sh"
+if [[ -f "$_HELPERS" ]]; then
+    # shellcheck source=/dev/null
+    source "$_HELPERS" 2>/dev/null || true
+fi
+_PATHS_PY="$AITEAMFORGE_DIR/kanban-hooks/aiteamforge_paths.py"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+_release_id=""
+_platform=""
+_env=""
+_team_override=""
+_quiet=0
+
+while [[ $# -gt 0 ]]; do
+    case "${1-}" in
+        --platform|-p)
+            _platform="${2-}"; shift 2 ;;
+        --env|-e)
+            _env="${2-}"; shift 2 ;;
+        --team|-t)
+            _team_override="${2-}"; shift 2 ;;
+        --quiet|-q)
+            _quiet=1; shift ;;
+        --help|-h)
+            grep '^#' "$0" | head -20 | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        -*)
+            echo "Error: Unknown option: ${1-}" >&2
+            echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]" >&2
+            exit 1 ;;
+        *)
+            if [[ -z "$_release_id" ]]; then
+                _release_id="${1-}"
+            else
+                echo "Error: Unexpected argument: ${1-}" >&2
+                exit 1
+            fi
+            shift ;;
+    esac
+done
+
+if [[ -z "$_release_id" ]]; then
+    echo "Error: release-id is required." >&2
+    echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]" >&2
+    exit 1
+fi
+
+if [[ -z "$_platform" ]]; then
+    echo "Error: --platform is required." >&2
+    echo "Usage: kb-release-version-gate <release-id> --platform <plat> [--env <ENV>] [--team <team>] [--quiet]" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Team and port resolution
+# ---------------------------------------------------------------------------
+if [[ -n "$_team_override" ]]; then
+    _team="$_team_override"
+elif [[ -n "${KB_TEAM:-}" ]]; then
+    _team="$KB_TEAM"
+else
+    # Try _kb_detect_context (from kanban-helpers.sh if sourced)
+    if declare -f _kb_detect_context >/dev/null 2>&1; then
+        _ctx=$(_kb_detect_context 2>/dev/null || true)
+        _team="${_ctx%%:*}"
+    else
+        echo "Error: Cannot determine team. Set KB_TEAM or pass --team <team>." >&2
+        exit 1
+    fi
+fi
+
+if [[ -z "$_team" || "$_team" == ERROR:* ]]; then
+    echo "Error: Could not determine team. Set KB_TEAM or pass --team <team>." >&2
+    exit 1
+fi
+
+# Resolve LCARS port
+# Priority: (1) _kb_team_lcars_port helper (from kanban-helpers.sh)
+#           (2) direct Python read from team-paths.json
+#           (3) fallback 8080
+_port=""
+if declare -f _kb_team_lcars_port >/dev/null 2>&1; then
+    _port=$(_kb_team_lcars_port "$_team" 2>/dev/null || true)
+fi
+if [[ -z "$_port" ]] || ! [[ "$_port" =~ ^[0-9]+$ ]]; then
+    _port=$(python3 - "$_team" 2>/dev/null <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+team = sys.argv[1]
+cfg = os.environ.get("AITEAMFORGE_CONFIG") or os.path.expanduser("~/.aiteamforge/team-paths.json")
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(team, {})
+port = entry.get("lcars_port")
+if port and str(port).isdigit():
+    print(int(port))
+else:
+    sys.exit(1)
+PYEOF
+) || _port=""
+fi
+if [[ -z "$_port" ]] || ! [[ "$_port" =~ ^[0-9]+$ ]]; then
+    _port="8080"
+fi
+
+_lcars_base="http://localhost:${_port}"
+
+# ---------------------------------------------------------------------------
+# Helper: write gateStatus back to LCARS (best-effort, non-fatal)
+# ---------------------------------------------------------------------------
+_write_gate_status() {
+    local result="$1"
+    local code_ver="${2:-}"
+    local target_ver="${3:-}"
+    local checked_at
+    checked_at=$(date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || python3 -c "import datetime; print(datetime.datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ'))")
+
+    local payload
+    payload=$(python3 -c "
+import json, sys
+print(json.dumps({
+    'platform':      sys.argv[1],
+    'result':        sys.argv[2],
+    'checkedAt':     sys.argv[3],
+    'codeVersion':   sys.argv[4],
+    'targetVersion': sys.argv[5],
+}))" "$_platform" "$result" "$checked_at" "$code_ver" "$target_ver" 2>/dev/null) || {
+        [[ $_quiet -eq 0 ]] && echo "Warning: could not build gateStatus payload" >&2
+        return 0
+    }
+
+    # POST to the new endpoint (XACA-0658-004)
+    local http_code
+    http_code=$(curl -s -o /dev/null -w "%{http_code}" \
+        -X POST \
+        -H "Content-Type: application/json" \
+        -d "$payload" \
+        --connect-timeout 3 \
+        --max-time 5 \
+        "${_lcars_base}/api/releases/${_release_id}/platform-gate-status" 2>/dev/null) || http_code="000"
+
+    if [[ "$http_code" != "200" ]]; then
+        [[ $_quiet -eq 0 ]] && echo "Warning: LCARS gateStatus write returned HTTP ${http_code} (non-fatal — gate result stands)" >&2
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Step 1: Load release.platforms.<platform>.version from LCARS API
+# ---------------------------------------------------------------------------
+_release_json=""
+_release_json=$(curl -s \
+    --connect-timeout 5 \
+    --max-time 10 \
+    "${_lcars_base}/api/releases/${_release_id}" 2>/dev/null) || _release_json=""
+
+if [[ -z "$_release_json" ]]; then
+    echo "Warning: LCARS unavailable — cannot reach ${_lcars_base}/api/releases/${_release_id}" >&2
+    echo "  Gate skipped (LCARS not running)." >&2
+    # Best-effort status write will also fail; skip it
+    exit 0
+fi
+
+# Validate response is a JSON object with an "id" field.
+# Uses a sentinel string rather than exit codes to avoid set -e gotchas.
+_lcars_valid=$(echo "$_release_json" | python3 -c "
+import json, sys
+try:
+    d = json.load(sys.stdin)
+    print('ok' if 'id' in d else 'err')
+except Exception:
+    print('err')
+" 2>/dev/null) || _lcars_valid="err"
+
+if [[ "$_lcars_valid" != "ok" ]]; then
+    echo "Error: Release '${_release_id}' not found or LCARS returned an error." >&2
+    echo "  Response: $(echo "$_release_json" | head -c 200)" >&2
+    exit 1
+fi
+
+# Extract target version: platforms.<plat>.version
+# Uses sentinel prefix strings to avoid exit-code ambiguity under set -e.
+_target_version=$(echo "$_release_json" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+plat = sys.argv[1]
+platforms = data.get('platforms', {})
+if plat not in platforms:
+    print('__NO_PLATFORM__')
+    sys.exit(0)
+ver = (platforms[plat].get('version') or '').strip()
+if not ver:
+    print('__NO_VERSION__')
+    sys.exit(0)
+print(ver)
+" "$_platform" 2>/dev/null) || _target_version=""
+
+if [[ "$_target_version" == "__NO_PLATFORM__" ]]; then
+    # Platform not in release at all
+    if [[ "${_env:-}" == "PROD" ]]; then
+        echo "VERSION GATE FAILED: platform '${_platform}' not found in release '${_release_id}' (required at PROD)." >&2
+        _write_gate_status "fail" "" ""
+        exit 1
+    fi
+    [[ $_quiet -eq 0 ]] && echo "Warning: platform '${_platform}' not found in release '${_release_id}' — gate skipped." >&2
+    _write_gate_status "skip" "" ""
+    exit 0
+fi
+
+if [[ "$_target_version" == "__NO_VERSION__" || -z "$_target_version" ]]; then
+    # No target version set
+    if [[ "${_env:-}" == "PROD" ]]; then
+        echo "VERSION GATE FAILED: no target version set for '${_platform}' in release '${_release_id}'." >&2
+        echo "  At PROD a version is required. Fix: kb-release edit ${_release_id} --platform-version ${_platform}=<ver>" >&2
+        _write_gate_status "fail" "" ""
+        exit 1
+    fi
+    # Non-PROD: hard warning, proceed (OQ-5 = HARD WARNING not block)
+    echo "Warning: no target version set for '${_platform}' in release '${_release_id}' — gate skipped." >&2
+    echo "  Set it with: kb-release edit ${_release_id} --platform-version ${_platform}=<ver>" >&2
+    _write_gate_status "skip" "" ""
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 2: Load version_sources config for team/platform
+# Use the shell accessor (from kanban-helpers.sh) as primary source.
+# Fallback: inline Python against team-paths.json when shell accessor unavailable.
+# ---------------------------------------------------------------------------
+_version_sources_json=""
+if declare -f _kb_get_team_version_sources >/dev/null 2>&1; then
+    _version_sources_json=$(_kb_get_team_version_sources "$_team" "$_platform" 2>/dev/null) || _version_sources_json="[]"
+fi
+
+# Inline fallback (when kanban-helpers.sh was not sourced)
+if [[ -z "$_version_sources_json" || "$_version_sources_json" == "[]" ]]; then
+    _version_sources_json=$(python3 - "$_team" "$_platform" 2>/dev/null <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+team, platform = sys.argv[1], sys.argv[2]
+cfg = os.environ.get("AITEAMFORGE_CONFIG") or os.path.expanduser("~/.aiteamforge/team-paths.json")
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    print("[]")
+    sys.exit(0)
+sources = data.get("teams", {}).get(team, {}).get("version_sources", [])
+if not isinstance(sources, list):
+    sources = []
+if platform:
+    sources = [s for s in sources if isinstance(s, dict) and s.get("platform") == platform]
+print(json.dumps([s for s in sources if isinstance(s, dict)]))
+PYEOF
+) || _version_sources_json="[]"
+fi
+
+if [[ -z "$_version_sources_json" || "$_version_sources_json" == "[]" ]]; then
+    [[ $_quiet -eq 0 ]] && echo "Warning: no version_source configured for '${_platform}' in team '${_team}' — gate skipped." >&2
+    [[ $_quiet -eq 0 ]] && echo "  Configure version_sources in ~/.aiteamforge/team-paths.json for team '${_team}'." >&2
+    _write_gate_status "skip" "" "$_target_version"
+    exit 0
+fi
+
+# Extract first matching source entry
+_source_file=$(echo "$_version_sources_json" | python3 -c "
+import json, sys
+sources = json.load(sys.stdin)
+if sources:
+    print(sources[0].get('file', ''))
+" 2>/dev/null) || _source_file=""
+
+_match_pattern=$(echo "$_version_sources_json" | python3 -c "
+import json, sys
+sources = json.load(sys.stdin)
+if sources:
+    print(sources[0].get('match_pattern', ''))
+" 2>/dev/null) || _match_pattern=""
+
+if [[ -z "$_source_file" || -z "$_match_pattern" ]]; then
+    [[ $_quiet -eq 0 ]] && echo "Warning: version_source for '${_platform}' is missing 'file' or 'match_pattern' — gate skipped." >&2
+    _write_gate_status "skip" "" "$_target_version"
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3: Resolve absolute path and read current version from file
+# ---------------------------------------------------------------------------
+# working_dir is needed to resolve relative paths
+_working_dir=$(python3 - "$_team" 2>/dev/null <<'PYEOF'
+import json, os, sys
+from pathlib import Path
+team = sys.argv[1]
+cfg_path = os.environ.get("AITEAMFORGE_CONFIG") or os.path.expanduser("~/.aiteamforge/team-paths.json")
+try:
+    with open(cfg_path) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(team, {})
+wd = entry.get("working_dir", "")
+if not wd:
+    sys.exit(1)
+print(str(Path(wd).expanduser()))
+PYEOF
+) || _working_dir=""
+
+if [[ -z "$_working_dir" ]]; then
+    [[ $_quiet -eq 0 ]] && echo "Warning: could not resolve working_dir for team '${_team}' — gate skipped." >&2
+    _write_gate_status "skip" "" "$_target_version"
+    exit 0
+fi
+
+# Build absolute path
+if [[ "$_source_file" = /* ]]; then
+    _abs_file="$_source_file"
+else
+    _abs_file="${_working_dir}/${_source_file}"
+fi
+
+if [[ ! -f "$_abs_file" ]]; then
+    [[ $_quiet -eq 0 ]] && echo "Warning: version file not found: ${_abs_file} — gate skipped." >&2
+    _write_gate_status "skip" "" "$_target_version"
+    exit 0
+fi
+
+# Read current version using match_pattern (same regex logic as bump engine).
+# Uses sentinel prefixes to avoid exit-code ambiguity under set -e.
+_current_version=$(python3 - "$_abs_file" "$_match_pattern" 2>/dev/null <<'PYEOF'
+import re, sys
+filepath    = sys.argv[1]
+pattern_tpl = sys.argv[2]
+
+# Convert {version} placeholder to a regex capture group (same logic as bump engine)
+VERSION_RE = r'([0-9]+\.[0-9]+(?:\.[0-9]+)?(?:-[A-Za-z0-9.+]+)?)'
+regex_str = re.escape(pattern_tpl).replace(r'\{version\}', VERSION_RE)
+
+try:
+    with open(filepath, encoding='utf-8', errors='replace') as fh:
+        content = fh.read()
+except Exception as e:
+    print(f"__READ_ERROR__: {e}")
+    sys.exit(0)
+
+m = re.search(regex_str, content)
+if not m:
+    print("__NO_MATCH__")
+    sys.exit(0)
+print(m.group(1))
+PYEOF
+) || _current_version=""
+
+if [[ "$_current_version" == __READ_ERROR__* ]]; then
+    echo "VERSION GATE FAILED: error reading version from ${_abs_file}" >&2
+    _write_gate_status "fail" "" "$_target_version"
+    exit 1
+fi
+
+if [[ "$_current_version" == "__NO_MATCH__" || -z "$_current_version" ]]; then
+    echo "VERSION GATE FAILED: could not find version matching pattern in ${_abs_file}" >&2
+    echo "  Pattern: ${_match_pattern}" >&2
+    _write_gate_status "fail" "" "$_target_version"
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4: Compare current version == target version
+# ---------------------------------------------------------------------------
+if [[ "$_current_version" == "$_target_version" ]]; then
+    # PASS
+    [[ $_quiet -eq 0 ]] && echo "VERSION GATE PASS: ${_platform} code version ${_current_version} matches release target ${_target_version}"
+    _write_gate_status "pass" "$_current_version" "$_target_version"
+    exit 0
+else
+    # FAIL
+    echo "VERSION GATE FAILED: ${_platform} code version ${_current_version} != release target ${_target_version}" >&2
+    echo "  File:   ${_abs_file}" >&2
+    echo "  Fix A:  kb-release-version-bump ${_release_id} --platform ${_platform}" >&2
+    echo "  Fix B:  kb-release edit ${_release_id} --platform-version ${_platform}=${_current_version}" >&2
+    _write_gate_status "fail" "$_current_version" "$_target_version"
+    exit 1
+fi

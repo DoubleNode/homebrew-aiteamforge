@@ -1,0 +1,479 @@
+#!/usr/bin/env bash
+# kb-release-version-bump — XACA-0658 auto-bump engine
+#
+# Usage:
+#   kb-release-version-bump <release-id> [--platform <plat>] [--dry-run] [--team <team>]
+#
+# Loads the given release from the LCARS API, reads version_sources config for
+# the team, and writes the release's target platformVersion into each
+# configured version file.
+#
+# Exit codes:
+#   0  — success (all files already at target, or bumped successfully)
+#   1  — write/verify failure, bad arguments, or config error
+#
+# Design notes:
+#   - No ~/dev-team/ hardcodes; siblings resolved via $AITEAMFORGE_DIR /
+#     $(dirname "$0").
+#   - File edits use perl (not sed -i) for consistent in-place behaviour on
+#     macOS (BSD sed -i requires an extension argument; GNU sed does not).
+#   - mv-from-tmp mode is NOT used here; perl edits in-place, preserving mode
+#     bits automatically.
+#   - Runs under both bash 3.2 (macOS system) and zsh.
+
+# Note: set -euo pipefail is applied AFTER sourcing kanban-helpers.sh, because
+# kanban-helpers.sh may return non-zero from internal checks and uses unset vars.
+# We source it in a permissive environment and tighten up immediately after.
+
+# ---------------------------------------------------------------------------
+# Resolve script directory (BASH_SOURCE is empty under zsh — use ${(%):-%x})
+# ---------------------------------------------------------------------------
+if [ -n "${BASH_SOURCE:-}" ]; then
+    _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    _SCRIPT_DIR="$(cd "$(dirname "${(%):-%x}")" && pwd)"
+else
+    _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+
+# ---------------------------------------------------------------------------
+# Locate kanban-helpers.sh relative to this script's location
+# ---------------------------------------------------------------------------
+_KH_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/kanban-helpers.sh"
+    "${_SCRIPT_DIR}/../kanban-helpers.sh"
+    "${HOME}/dev-team/kanban-helpers.sh"
+)
+_KH=""
+for _c in "${_KH_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _KH="$_c_expanded"
+        break
+    fi
+done
+if [ -z "$_KH" ]; then
+    echo "ERROR: cannot locate kanban-helpers.sh" >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+# Source without set -e so internal non-zero returns don't abort us.
+source "$_KH" 2>/dev/null || true
+
+# Tighten shell options now that sourcing is complete.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Locate aiteamforge_paths.py relative to this script
+# ---------------------------------------------------------------------------
+_PATHS_PY_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/kanban-hooks/aiteamforge_paths.py"
+    "${_SCRIPT_DIR}/../kanban-hooks/aiteamforge_paths.py"
+)
+_PATHS_PY=""
+for _c in "${_PATHS_PY_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _PATHS_PY="$_c_expanded"
+        break
+    fi
+done
+if [ -z "$_PATHS_PY" ]; then
+    echo "ERROR: cannot locate aiteamforge_paths.py" >&2
+    exit 1
+fi
+_PATHS_PY_DIR="$(dirname "$_PATHS_PY")"
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+RELEASE_ID=""
+OPT_PLATFORM=""
+OPT_DRY_RUN=0
+OPT_TEAM=""
+
+while [ $# -gt 0 ]; do
+    case "${1-}" in
+        --platform)
+            OPT_PLATFORM="${2-}"
+            shift 2
+            ;;
+        --dry-run)
+            OPT_DRY_RUN=1
+            shift
+            ;;
+        --team)
+            OPT_TEAM="${2-}"
+            shift 2
+            ;;
+        --help|-h)
+            cat <<'EOF'
+Usage: kb-release-version-bump <release-id> [--platform <plat>] [--dry-run] [--team <team>]
+
+  <release-id>       Required. Release ID (e.g. REL-2026-Q1-001).
+  --platform <plat>  Only bump the version for this platform.
+                     If omitted, bumps all platforms with configured version_sources.
+  --dry-run          Print what would be written without writing anything.
+  --team <team>      Override team detection (useful when KB_TEAM is not set).
+
+Exit 0 on success/no-op; exit 1 on error.
+
+Examples:
+  kb-release-version-bump REL-2026-Q1-001
+  kb-release-version-bump REL-2026-Q1-001 --platform ios
+  kb-release-version-bump REL-2026-Q1-001 --platform firebase --dry-run
+  kb-release-version-bump REL-2026-Q1-001 --team mainevent
+EOF
+            exit 0
+            ;;
+        -*)
+            echo "ERROR: unknown flag: ${1-}" >&2
+            echo "Run: kb-release-version-bump --help" >&2
+            exit 1
+            ;;
+        *)
+            if [ -z "$RELEASE_ID" ]; then
+                RELEASE_ID="${1-}"
+            else
+                echo "ERROR: unexpected positional argument: ${1-}" >&2
+                exit 1
+            fi
+            shift
+            ;;
+    esac
+done
+
+if [ -z "$RELEASE_ID" ]; then
+    echo "ERROR: release-id is required" >&2
+    echo "Usage: kb-release-version-bump <release-id> [--platform <plat>] [--dry-run] [--team <team>]" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve team
+# ---------------------------------------------------------------------------
+if [ -n "$OPT_TEAM" ]; then
+    _TEAM="$OPT_TEAM"
+elif [ -n "${KB_TEAM:-}" ]; then
+    _TEAM="$KB_TEAM"
+else
+    echo "ERROR: cannot determine team. Set KB_TEAM or pass --team <team>." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve LCARS port for the team
+# ---------------------------------------------------------------------------
+_LCARS_PORT=""
+if command -v _kb_team_lcars_port >/dev/null 2>&1; then
+    _LCARS_PORT=$(_kb_team_lcars_port "$_TEAM" 2>/dev/null) || true
+fi
+if [ -z "$_LCARS_PORT" ]; then
+    # Fallback: read directly from team-paths.json
+    _cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    if [ -f "$_cfg" ]; then
+        _LCARS_PORT=$(python3 - "$_cfg" "$_TEAM" <<'PYEOF'
+import json, sys
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(team, {})
+port = entry.get("lcars_port")
+if port:
+    print(port)
+PYEOF
+        ) || true
+    fi
+fi
+if [ -z "$_LCARS_PORT" ]; then
+    echo "ERROR: cannot determine LCARS port for team '$_TEAM'." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Fetch release object from LCARS API
+# ---------------------------------------------------------------------------
+_LCARS_URL="http://localhost:${_LCARS_PORT}/api/releases/${RELEASE_ID}"
+_RELEASE_JSON=""
+
+if command -v curl >/dev/null 2>&1; then
+    _RELEASE_JSON=$(curl -sf --max-time 10 "$_LCARS_URL" 2>/dev/null) || true
+fi
+
+if [ -z "$_RELEASE_JSON" ]; then
+    echo "ERROR: cannot reach LCARS server at ${_LCARS_URL}" >&2
+    echo "       Is LCARS running? Check: ps aux | grep server.py" >&2
+    echo "       You can start it with: kb-lcars start" >&2
+    exit 1
+fi
+
+# Validate it looks like a release object
+_RELEASE_ID_CHECK=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('id',''))" "$_RELEASE_JSON" 2>/dev/null) || true
+if [ -z "$_RELEASE_ID_CHECK" ]; then
+    echo "ERROR: LCARS returned unexpected response for release '$RELEASE_ID'." >&2
+    echo "       Response: $(echo "$_RELEASE_JSON" | head -c 200)" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Load working_dir for the team
+# ---------------------------------------------------------------------------
+_WORKING_DIR=$(python3 - "$_PATHS_PY_DIR" "$_TEAM" <<'PYEOF'
+import sys, json
+from pathlib import Path
+py_dir = sys.argv[1]
+team   = sys.argv[2]
+sys.path.insert(0, py_dir)
+import aiteamforge_paths
+try:
+    wd = aiteamforge_paths.get_team_working_dir(team)
+    print(str(wd))
+except Exception as exc:
+    print(f"ERROR:{exc}", end="")
+    sys.exit(1)
+PYEOF
+) || { echo "ERROR: cannot resolve working_dir for team '$_TEAM'." >&2; exit 1; }
+
+if [ -z "$_WORKING_DIR" ]; then
+    echo "ERROR: working_dir is empty for team '$_TEAM'." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Load version_sources config
+# ---------------------------------------------------------------------------
+_SOURCES_JSON=$(python3 - "$_PATHS_PY_DIR" "$_TEAM" "${OPT_PLATFORM}" <<'PYEOF'
+import sys, json
+from pathlib import Path
+py_dir    = sys.argv[1]
+team      = sys.argv[2]
+platform  = sys.argv[3]  # may be empty
+sys.path.insert(0, py_dir)
+import aiteamforge_paths
+sources = aiteamforge_paths.get_team_version_sources(team, platform=platform if platform else None)
+print(json.dumps(sources))
+PYEOF
+) || { echo "ERROR: failed to load version_sources config." >&2; exit 1; }
+
+_SOURCES_COUNT=$(python3 -c "import json,sys; print(len(json.loads(sys.argv[1])))" "$_SOURCES_JSON" 2>/dev/null) || _SOURCES_COUNT=0
+
+if [ "$_SOURCES_COUNT" -eq 0 ]; then
+    if [ -n "$OPT_PLATFORM" ]; then
+        echo "WARNING: no version_source configured for platform '$OPT_PLATFORM' in team '$_TEAM' — skipping." >&2
+    else
+        echo "WARNING: no version_sources configured for team '$_TEAM' — version gate skipped." >&2
+    fi
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Process each version source
+# ---------------------------------------------------------------------------
+_EXIT_CODE=0
+
+# Iterate sources by index using python3 to avoid JSON-in-bash parsing issues
+python3 - "$_PATHS_PY_DIR" "$_WORKING_DIR" "$_RELEASE_JSON" "$_SOURCES_JSON" "$OPT_DRY_RUN" <<'PYEOF'
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+py_dir       = sys.argv[1]
+working_dir  = Path(sys.argv[2])
+release_json = sys.argv[3]
+sources_json = sys.argv[4]
+dry_run      = sys.argv[5] == "1"
+
+release  = json.loads(release_json)
+sources  = json.loads(sources_json)
+
+# platformVersions is the dict holding declared target versions
+platform_versions = release.get("platformVersions") or {}
+
+all_ok = True
+
+for src in sources:
+    platform     = src.get("platform", "")
+    rel_file     = src.get("file", "")
+    match_pat    = src.get("match_pattern", "")
+    write_pat    = src.get("write_pattern", match_pat)
+    encoding     = src.get("encoding", "utf-8")
+    replace_all  = bool(src.get("replace_all", False))
+
+    # ------------------------------------------------------------------
+    # Resolve target version from release
+    # ------------------------------------------------------------------
+    target_version = platform_versions.get(platform, "")
+    if not target_version:
+        # Check nested structure: release.platforms[platform].version or similar
+        platforms_map = release.get("platforms") or {}
+        plat_obj = platforms_map.get(platform) or {}
+        target_version = plat_obj.get("version", "")
+
+    if not target_version:
+        print(
+            f"WARNING: no target version set for platform '{platform}' in release "
+            f"'{release.get('id', '?')}' — skipping.",
+            file=sys.stderr,
+        )
+        continue
+
+    # ------------------------------------------------------------------
+    # Resolve absolute file path
+    # ------------------------------------------------------------------
+    abs_file = working_dir / rel_file
+
+    # ------------------------------------------------------------------
+    # Handle VERSION convention — create if absent
+    # ------------------------------------------------------------------
+    if rel_file == "VERSION" and not abs_file.exists():
+        if dry_run:
+            print(
+                f"[dry-run] would create VERSION file at {abs_file} "
+                f"with content '{target_version}'"
+            )
+            continue
+        # Create it
+        abs_file.parent.mkdir(parents=True, exist_ok=True)
+        abs_file.write_text(target_version + "\n", encoding=encoding)
+        print(f"created  [{platform}] {abs_file} → '{target_version}'")
+        # Verify
+        written = abs_file.read_text(encoding=encoding).strip()
+        if written != target_version:
+            print(
+                f"ERROR: verification FAILED after creating {abs_file}: "
+                f"got '{written}', expected '{target_version}'",
+                file=sys.stderr,
+            )
+            all_ok = False
+        continue
+
+    if not abs_file.exists():
+        print(
+            f"ERROR: version file not found: {abs_file}",
+            file=sys.stderr,
+        )
+        all_ok = False
+        continue
+
+    # ------------------------------------------------------------------
+    # Build match regex: {version} → capture group
+    # ------------------------------------------------------------------
+    version_re_str = r"([0-9]+\.[0-9]+(?:\.[0-9]+)?)"
+    # Escape everything in the match_pattern except the {version} placeholder
+    escaped_prefix = re.escape(match_pat[:match_pat.find("{version}")])
+    escaped_suffix = re.escape(match_pat[match_pat.find("{version}") + len("{version}"):])
+    full_regex = escaped_prefix + version_re_str + escaped_suffix
+
+    # ------------------------------------------------------------------
+    # Read current version
+    # ------------------------------------------------------------------
+    content = abs_file.read_text(encoding=encoding)
+    match = re.search(full_regex, content)
+    if not match:
+        # For the plain VERSION file convention, the whole file is the version
+        if match_pat == "{version}":
+            current_version = content.strip()
+        else:
+            print(
+                f"WARNING: match_pattern '{match_pat}' not found in {abs_file} — skipping.",
+                file=sys.stderr,
+            )
+            continue
+    else:
+        current_version = match.group(1)
+
+    # ------------------------------------------------------------------
+    # Compare current vs target (string equality)
+    # ------------------------------------------------------------------
+    if current_version == target_version:
+        print(f"no-op    [{platform}] {rel_file}: already at '{target_version}'")
+        continue
+
+    # ------------------------------------------------------------------
+    # Dry-run: report, skip write
+    # ------------------------------------------------------------------
+    if dry_run:
+        print(
+            f"[dry-run] [{platform}] {rel_file}: "
+            f"would write '{target_version}' (currently '{current_version}')"
+        )
+        if replace_all:
+            all_matches = re.findall(full_regex, content)
+            print(f"           replace_all=true — {len(all_matches)} occurrence(s) found")
+        continue
+
+    # ------------------------------------------------------------------
+    # Build replacement string
+    # ------------------------------------------------------------------
+    write_line = write_pat.replace("{version}", target_version)
+    # The write_pattern may contain the full line; we need to replace the
+    # version substring within the matched region only.
+    # Strategy: substitute the capture group in each match with target_version.
+
+    if match_pat == "{version}":
+        # Whole-file (VERSION convention): overwrite entirely
+        new_content = target_version + "\n"
+    else:
+        def make_replacer(write_pattern, target):
+            """Return a re.sub replacement function that preserves surrounding text."""
+            def _replacer(m):
+                # Rebuild the full match with the target version
+                return write_pattern.replace("{version}", target)
+            return _replacer
+
+        replacer = make_replacer(write_pat, target_version)
+        if replace_all:
+            new_content = re.sub(full_regex, replacer, content)
+        else:
+            new_content = re.sub(full_regex, replacer, content, count=1)
+
+    # ------------------------------------------------------------------
+    # Write file in-place (truncate-and-rewrite, preserves mode bits)
+    # ------------------------------------------------------------------
+    try:
+        with open(abs_file, "w", encoding=encoding) as fh:
+            fh.write(new_content)
+    except OSError as exc:
+        print(f"ERROR: write failed for {abs_file}: {exc}", file=sys.stderr)
+        all_ok = False
+        continue
+
+    # ------------------------------------------------------------------
+    # Verify
+    # ------------------------------------------------------------------
+    verify_content = abs_file.read_text(encoding=encoding)
+    if match_pat == "{version}":
+        found_ok = verify_content.strip() == target_version
+    else:
+        found_ok = bool(re.search(full_regex.replace(version_re_str, re.escape(target_version)), verify_content))
+
+    if not found_ok:
+        print(
+            f"ERROR: verification FAILED for [{platform}] {abs_file} — "
+            f"target '{target_version}' not found after write.",
+            file=sys.stderr,
+        )
+        all_ok = False
+        continue
+
+    count_written = len(re.findall(full_regex.replace(version_re_str, re.escape(target_version)), verify_content))
+    print(
+        f"bumped   [{platform}] {rel_file}: "
+        f"'{current_version}' → '{target_version}'"
+        + (f" ({count_written} occurrence(s))" if replace_all else "")
+    )
+
+sys.exit(0 if all_ok else 1)
+PYEOF
+_PY_EXIT=$?
+
+if [ $_PY_EXIT -ne 0 ]; then
+    _EXIT_CODE=1
+fi
+
+exit $_EXIT_CODE

@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0658: Added — Release version-gate status persistence + LCARS rendering -->
+
+### Added
+- **XACA-0658: Version-confirmation gate status on release platform cards.** New endpoint `POST /api/releases/<id>/platform-gate-status` (`handle_platform_gate_status`) persists the version-gate result reported by `kb-release-version-gate` into `release.platforms.<plat>.gateStatus = {result, checkedAt, codeVersion, targetVersion}`. The server NEVER reads version files itself — it only stores what the gate script reports. Routed before the generic release PUT/POST handlers (the PUT router explicitly excludes `/platform-gate-status`); validates `platform` (required) and `result` (`pass`/`fail`/`skip`), falls back to a server timestamp when `checkedAt` is omitted. The gate-status write mirrors through `_sync_release_metadata_to_manifest` (XACA-0659 invariant) so the per-release `manifest.json` stays faithful; sync failure is logged and never aborts the board write. LCARS Releases tab renders a PASS (green) / FAIL (red) / SKIP (neutral) `.platform-gate-badge` on each platform card with a tooltip showing code vs target version + `checkedAt`, and a muted `gate-stale` marker once `checkedAt` is older than 24h. Cache-busters bumped: `lcars.js?v=3.52`→`3.53`, `lcars.css?v=32.22`→`32.23`. `lcars-ui/` is tap-mirrored via `sync-tap.sh`.
+
 <!-- XACA-0659: Fixed — Release manifest stale metadata after update/promote -->
 
 ### Fixed

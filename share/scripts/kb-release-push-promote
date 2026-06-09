@@ -1,0 +1,787 @@
+#!/usr/bin/env bash
+# kb-release-push-promote — XACA-0658-006 Branch-push auto-promotion orchestrator
+#
+# Usage:
+#   kb-release-push-promote --branch <branch-name> [--team <team>]
+#                           [--platform <plat>] [--auto-bump] [--dry-run]
+#
+# Called by kb-git-push after a successful push. Resolves the pushed branch to
+# an environment via branch_env_map, finds the active release for the team,
+# runs the version gate, calls the LCARS promote API, and promotes RELNOTES.
+#
+# Exit codes:
+#   0  — success (including branch-not-mapped no-op, no-active-release no-op)
+#   1  — hard block (version gate fail at PROD, promote API error, bad args)
+#
+# Design notes:
+#   - No ~/dev-team/ hardcodes — siblings resolved via $AITEAMFORGE_DIR /
+#     $(dirname "$0"). Reads all team config from ~/.aiteamforge/team-paths.json.
+#   - Defer set -euo pipefail until AFTER sourcing kanban-helpers.sh.
+#   - $? after cmd | tail is tail's exit — avoid pipelines for exit-code capture.
+#   - Empty-array guard: avoid "${arr[@]}" without set +u or a length check.
+#   - Runs under both bash 3.2 (macOS system) and zsh.
+#
+# PROD path (OQ-2 resolution):
+#   PROD is IN branch_env_map. On PROD push: version gate is a HARD BLOCK (must
+#   pass). On pass: promote API is called, RELNOTES-GAMMA → RELNOTES-PROD with
+#   --prod-stub, then a LOUD manual-steps prompt is printed (store copy + /cr).
+#
+# LCARS-down (non-fatal):
+#   If the promote API call cannot connect (HTTP 000 / curl error), the script
+#   prints a recovery hint and exits 0. The gate exit semantics still stand.
+#
+# Canonical source: ~/dev-team/scripts/kb-release-push-promote
+# Tap mirror:       homebrew-tap/share/scripts/kb-release-push-promote
+# Canonical-source rule: XACA-0340 — edit here, run ./sync-tap.sh to mirror.
+
+# ---------------------------------------------------------------------------
+# Resolve script directory (BASH_SOURCE is empty under zsh — use ${(%):-%x})
+# ---------------------------------------------------------------------------
+if [ -n "${BASH_SOURCE:-}" ]; then
+    _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+elif [ -n "${ZSH_VERSION:-}" ]; then
+    _SCRIPT_DIR="$(cd "$(dirname "${(%):-%x}")" && pwd)"
+else
+    _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+fi
+
+# ---------------------------------------------------------------------------
+# Locate kanban-helpers.sh relative to this script's location
+# ---------------------------------------------------------------------------
+_KH_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/kanban-helpers.sh"
+    "${_SCRIPT_DIR}/../kanban-helpers.sh"
+    "${HOME}/dev-team/kanban-helpers.sh"
+)
+_KH=""
+for _c in "${_KH_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _KH="$_c_expanded"
+        break
+    fi
+done
+if [ -z "$_KH" ]; then
+    echo "ERROR: cannot locate kanban-helpers.sh" >&2
+    exit 1
+fi
+# Source without set -e so internal non-zero returns don't abort us.
+# shellcheck source=/dev/null
+source "$_KH" 2>/dev/null || true
+
+# Tighten shell options now that sourcing is complete.
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Locate aiteamforge_paths.py relative to this script
+# ---------------------------------------------------------------------------
+_PATHS_PY_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/kanban-hooks/aiteamforge_paths.py"
+    "${_SCRIPT_DIR}/../kanban-hooks/aiteamforge_paths.py"
+)
+_PATHS_PY=""
+for _c in "${_PATHS_PY_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _PATHS_PY="$_c_expanded"
+        break
+    fi
+done
+if [ -z "$_PATHS_PY" ]; then
+    echo "ERROR: cannot locate aiteamforge_paths.py" >&2
+    exit 1
+fi
+_PATHS_PY_DIR="$(dirname "$_PATHS_PY")"
+
+# ---------------------------------------------------------------------------
+# Locate the RELNOTES library (005 deliverable)
+# ---------------------------------------------------------------------------
+_RELNOTES_LIB_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/scripts/lib/kb-relnotes-promote.sh"
+    "${_SCRIPT_DIR}/lib/kb-relnotes-promote.sh"
+)
+_RELNOTES_LIB=""
+for _c in "${_RELNOTES_LIB_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _RELNOTES_LIB="$_c_expanded"
+        break
+    fi
+done
+# Not hard-failing here: RELNOTES promotion is non-fatal; we'll check at call site.
+
+# ---------------------------------------------------------------------------
+# Locate the gate and bump scripts
+# ---------------------------------------------------------------------------
+_GATE_SCRIPT_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/scripts/kb-release-version-gate"
+    "${_SCRIPT_DIR}/kb-release-version-gate"
+)
+_GATE_SCRIPT=""
+for _c in "${_GATE_SCRIPT_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _GATE_SCRIPT="$_c_expanded"
+        break
+    fi
+done
+
+_BUMP_SCRIPT_CANDIDATES=(
+    "${AITEAMFORGE_DIR:-}/scripts/kb-release-version-bump"
+    "${_SCRIPT_DIR}/kb-release-version-bump"
+)
+_BUMP_SCRIPT=""
+for _c in "${_BUMP_SCRIPT_CANDIDATES[@]}"; do
+    _c_expanded="${_c//\~/$HOME}"
+    if [ -f "$_c_expanded" ]; then
+        _BUMP_SCRIPT="$_c_expanded"
+        break
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+OPT_BRANCH=""
+OPT_TEAM=""
+OPT_PLATFORM=""
+OPT_AUTO_BUMP=0
+OPT_DRY_RUN=0
+
+while [ $# -gt 0 ]; do
+    case "${1-}" in
+        --branch)
+            OPT_BRANCH="${2-}"
+            shift 2
+            ;;
+        --team)
+            OPT_TEAM="${2-}"
+            shift 2
+            ;;
+        --platform)
+            OPT_PLATFORM="${2-}"
+            shift 2
+            ;;
+        --auto-bump)
+            OPT_AUTO_BUMP=1
+            shift
+            ;;
+        --dry-run)
+            OPT_DRY_RUN=1
+            shift
+            ;;
+        --help|-h)
+            cat <<'EOF'
+Usage: kb-release-push-promote --branch <branch-name> [options]
+
+  --branch <name>    Required. The git branch that was pushed.
+  --team <team>      Override team detection (KB_TEAM / .kb-team chain).
+  --platform <plat>  Limit promotion to a single platform.
+  --auto-bump        If the version gate fails, auto-bump the code version
+                     to match the release target, then retry the gate.
+  --dry-run          Print intended actions without calling promote API or
+                     running RELNOTES promotion.
+
+Called automatically by kb-git-push after a successful push.
+Direct invocation is also supported for testing / manual recovery.
+
+Exit 0 on success or non-mapped branch; exit 1 on hard block.
+EOF
+            exit 0
+            ;;
+        -*)
+            echo "ERROR: unknown flag: ${1-}" >&2
+            echo "Run: kb-release-push-promote --help" >&2
+            exit 1
+            ;;
+        *)
+            echo "ERROR: unexpected positional argument: ${1-}" >&2
+            exit 1
+            ;;
+    esac
+done
+
+if [ -z "$OPT_BRANCH" ]; then
+    echo "ERROR: --branch is required" >&2
+    echo "Usage: kb-release-push-promote --branch <branch-name> [--team <team>] [--dry-run]" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Step 1 — Resolve team
+# ---------------------------------------------------------------------------
+if [ -n "$OPT_TEAM" ]; then
+    _TEAM="$OPT_TEAM"
+elif [ -n "${KB_TEAM:-}" ]; then
+    _TEAM="$KB_TEAM"
+else
+    echo "ERROR: cannot determine team. Set KB_TEAM, pass --team <team>, or add a .kb-team sentinel." >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve LCARS port for the team
+# ---------------------------------------------------------------------------
+_LCARS_PORT=""
+if command -v _kb_team_lcars_port >/dev/null 2>&1; then
+    _LCARS_PORT=$(_kb_team_lcars_port "$_TEAM" 2>/dev/null) || true
+fi
+if [ -z "$_LCARS_PORT" ]; then
+    _cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    if [ -f "$_cfg" ]; then
+        _LCARS_PORT=$(python3 - "$_cfg" "$_TEAM" <<'PYEOF'
+import json, sys
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(team, {})
+port = entry.get("lcars_port")
+if port:
+    print(port)
+PYEOF
+        ) || true
+    fi
+fi
+if [ -z "$_LCARS_PORT" ]; then
+    echo "ERROR: cannot determine LCARS port for team '$_TEAM'." >&2
+    exit 1
+fi
+_LCARS_BASE="http://localhost:${_LCARS_PORT}"
+
+# ---------------------------------------------------------------------------
+# Step 2 — Look up branch in branch_env_map
+# ---------------------------------------------------------------------------
+_BRANCH_MAP_JSON=""
+if command -v _kb_get_team_branch_env_map >/dev/null 2>&1; then
+    _BRANCH_MAP_JSON=$(_kb_get_team_branch_env_map "$_TEAM" 2>/dev/null) || true
+fi
+
+if [ -z "$_BRANCH_MAP_JSON" ] || [ "$_BRANCH_MAP_JSON" = "{}" ]; then
+    # Fallback: read directly from team-paths.json
+    _cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    if [ -f "$_cfg" ]; then
+        _BRANCH_MAP_JSON=$(python3 - "$_cfg" "$_TEAM" <<'PYEOF'
+import json, sys
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    print("{}")
+    sys.exit(0)
+raw = data.get("teams", {}).get(team, {}).get("branch_env_map", {})
+if not isinstance(raw, dict):
+    raw = {}
+print(json.dumps(raw))
+PYEOF
+        ) || _BRANCH_MAP_JSON="{}"
+    fi
+fi
+
+if [ -z "$_BRANCH_MAP_JSON" ] || [ "$_BRANCH_MAP_JSON" = "{}" ]; then
+    echo "[kb-release-push-promote] branch_env_map not configured for team '$_TEAM' — auto-promotion disabled."
+    exit 0
+fi
+
+# Check if this branch is in the map
+_BRANCH_MAP_VALUE=$(python3 - "$_BRANCH_MAP_JSON" "$OPT_BRANCH" <<'PYEOF'
+import json, sys
+branch_map_json, branch = sys.argv[1], sys.argv[2]
+try:
+    bmap = json.loads(branch_map_json)
+except Exception:
+    print("__NOT_FOUND__")
+    sys.exit(0)
+val = bmap.get(branch)
+if val is None:
+    print("__NOT_FOUND__")
+else:
+    print(json.dumps(val))
+PYEOF
+) || _BRANCH_MAP_VALUE="__NOT_FOUND__"
+
+if [ "$_BRANCH_MAP_VALUE" = "__NOT_FOUND__" ]; then
+    echo "[kb-release-push-promote] branch '${OPT_BRANCH}' not in branch_env_map — no auto-promotion."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 3 — Load active releases from LCARS API
+# ---------------------------------------------------------------------------
+_RELEASES_JSON=""
+_RELEASES_JSON=$(curl -sf --max-time 10 \
+    "${_LCARS_BASE}/api/releases?team=${_TEAM}&status=active" 2>/dev/null) || true
+
+if [ -z "$_RELEASES_JSON" ]; then
+    echo "[kb-release-push-promote] WARNING: LCARS not running at ${_LCARS_BASE}." >&2
+    echo "  Release not promoted. Run: kb-release promote <id> <plat> when LCARS is running." >&2
+    exit 0
+fi
+
+# Parse releases array out of {"releases": [...]}
+_RELEASES_ARRAY=$(python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+    releases = d.get('releases', d if isinstance(d, list) else [])
+    print(json.dumps(releases))
+except Exception as e:
+    print('[]')
+" "$_RELEASES_JSON" 2>/dev/null) || _RELEASES_ARRAY="[]"
+
+_RELEASES_COUNT=$(python3 -c "
+import json, sys
+try:
+    print(len(json.loads(sys.argv[1])))
+except Exception:
+    print(0)
+" "$_RELEASES_ARRAY" 2>/dev/null) || _RELEASES_COUNT=0
+
+if [ "$_RELEASES_COUNT" -eq 0 ]; then
+    echo "[kb-release-push-promote] no active releases found for team '$_TEAM' — skipping auto-promotion."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Step 4 — For each (platform, target_env) resolved from normalize_branch_env:
+# ---------------------------------------------------------------------------
+
+# We run all platform-env pairs through a Python orchestration loop that:
+#   a) Resolves the release to use (disambiguation rule from SPEC §6)
+#   b) Passes back structured instructions for the shell to execute
+#
+# The Python step only resolves — the shell step calls the gate, bump, and
+# promote scripts. RELNOTES promotion is handled by the sourced lib function.
+
+_PROMOTE_PLAN=$(python3 - "$_PATHS_PY_DIR" "$_RELEASES_ARRAY" "$_BRANCH_MAP_VALUE" \
+    "$OPT_PLATFORM" <<'PYEOF'
+"""
+Resolve promotion plan: for each (platform, target_env) pair, pick the right
+active release using the disambiguation rule from SPEC §6.
+
+Output format (one JSON object per line, to stdout):
+  {"action": "promote",  "release_id": "...", "platform": "...",
+   "target_env": "...", "env_from": "..."}
+  {"action": "warn",     "message": "..."}
+  {"action": "noop",     "message": "..."}
+
+Disambiguation rule:
+  1. Among all active releases, filter to those where the platform's
+     currentEnvironment is immediately before target_env.
+  2. If still multiple: pick the most recent createdAt.
+  3. If same timestamp: warn + skip.
+  4. If zero after filter: warn + skip.
+"""
+import json
+import sys
+from pathlib import Path
+
+py_dir         = sys.argv[1]
+releases_json  = sys.argv[2]
+branch_val_raw = sys.argv[3]  # raw JSON value from branch_env_map
+opt_platform   = sys.argv[4]  # may be empty
+
+sys.path.insert(0, py_dir)
+try:
+    import aiteamforge_paths
+except Exception as e:
+    print(json.dumps({"action": "warn", "message": f"cannot import aiteamforge_paths: {e}"}))
+    sys.exit(0)
+
+# Pipeline order used for "immediately before" check
+PIPELINE_ORDER = ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"]
+
+def env_before(env: str) -> str | None:
+    """Return the environment immediately before env in the pipeline, or None."""
+    try:
+        idx = PIPELINE_ORDER.index(env)
+    except ValueError:
+        return None
+    return PIPELINE_ORDER[idx - 1] if idx > 0 else None
+
+try:
+    releases = json.loads(releases_json)
+except Exception as e:
+    print(json.dumps({"action": "warn", "message": f"cannot parse releases JSON: {e}"}))
+    sys.exit(0)
+
+try:
+    branch_map_value = json.loads(branch_val_raw)
+except Exception:
+    branch_map_value = branch_val_raw  # may already be a string
+
+# Collect all platform keys across active releases to expand string map form
+all_release_platforms: list[str] = []
+for r in releases:
+    if isinstance(r, dict) and isinstance(r.get("platforms"), dict):
+        for p in r["platforms"]:
+            if p not in all_release_platforms:
+                all_release_platforms.append(p)
+
+# Normalize branch map value → {platform: target_env}
+platform_env_map: dict[str, str] = aiteamforge_paths.normalize_branch_env(
+    branch_map_value, all_release_platforms
+)
+
+if not platform_env_map:
+    print(json.dumps({"action": "noop",
+                      "message": "branch map value resolved to empty platform map"}))
+    sys.exit(0)
+
+# Filter by --platform if given
+if opt_platform:
+    platform_env_map = {p: e for p, e in platform_env_map.items() if p == opt_platform}
+    if not platform_env_map:
+        print(json.dumps({"action": "noop",
+                          "message": f"--platform {opt_platform!r} not in resolved map"}))
+        sys.exit(0)
+
+for platform, target_env in platform_env_map.items():
+    # Build set of candidate releases for this platform + target_env
+    # Filter 1: release must have this platform
+    candidates = [
+        r for r in releases
+        if isinstance(r, dict)
+        and isinstance(r.get("platforms"), dict)
+        and platform in r["platforms"]
+    ]
+
+    if not candidates:
+        print(json.dumps({
+            "action": "noop",
+            "message": f"no active release contains platform '{platform}' — skipping"
+        }))
+        continue
+
+    # Filter 2: platform's currentEnvironment must be immediately before target_env
+    expected_from = env_before(target_env)
+    if expected_from is not None:
+        best = [
+            r for r in candidates
+            if r["platforms"][platform].get("environment") == expected_from
+        ]
+    else:
+        best = candidates  # PLANNED has no "before" — take all
+
+    if not best:
+        # No release at the right stage; warn and skip
+        current_envs = [
+            f"{r['id']}:{r['platforms'][platform].get('environment','?')}"
+            for r in candidates
+        ]
+        print(json.dumps({
+            "action": "warn",
+            "message": (
+                f"no active release for platform '{platform}' has environment "
+                f"'{expected_from}' (needed to promote to '{target_env}'). "
+                f"Current: {', '.join(current_envs)}"
+            )
+        }))
+        continue
+
+    # Filter 3: pick the most recent createdAt
+    def _created_at(r):
+        return r.get("createdAt", "")
+
+    best.sort(key=_created_at, reverse=True)
+    if len(best) >= 2 and _created_at(best[0]) == _created_at(best[1]):
+        print(json.dumps({
+            "action": "warn",
+            "message": (
+                f"Multiple active releases eligible for auto-promotion of "
+                f"'{platform}' to '{target_env}' with same createdAt. "
+                f"Run: kb-release promote <id> {platform} manually. "
+                f"Candidates: {[r['id'] for r in best]}"
+            )
+        }))
+        continue
+
+    chosen = best[0]
+    print(json.dumps({
+        "action": "promote",
+        "release_id": chosen["id"],
+        "platform": platform,
+        "target_env": target_env,
+        "env_from": expected_from or "",
+    }))
+
+sys.exit(0)
+PYEOF
+) || {
+    echo "[kb-release-push-promote] ERROR: promotion plan resolution failed." >&2
+    exit 1
+}
+
+if [ -z "$_PROMOTE_PLAN" ]; then
+    echo "[kb-release-push-promote] no promotions to perform for branch '${OPT_BRANCH}'."
+    exit 0
+fi
+
+# ---------------------------------------------------------------------------
+# Source RELNOTES library (non-fatal if absent — we'll warn at call site)
+# ---------------------------------------------------------------------------
+if [ -n "$_RELNOTES_LIB" ] && [ -f "$_RELNOTES_LIB" ]; then
+    # shellcheck source=/dev/null
+    source "$_RELNOTES_LIB" 2>/dev/null || true
+fi
+
+# ---------------------------------------------------------------------------
+# Process each line of the plan
+# ---------------------------------------------------------------------------
+_OVERALL_EXIT=0
+_PROMOTED_SUMMARY=""
+
+# We need to iterate over the plan lines. Use a while-read loop on a process
+# substitution (avoids the $? after `cmd | tail` gotcha by not using a pipe
+# for the iteration itself).
+while IFS= read -r _plan_line; do
+    [ -z "$_plan_line" ] && continue
+
+    _action=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('action',''))" \
+        "$_plan_line" 2>/dev/null) || _action=""
+    _message=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('message',''))" \
+        "$_plan_line" 2>/dev/null) || _message=""
+
+    case "$_action" in
+        warn)
+            echo "[kb-release-push-promote] WARNING: ${_message}" >&2
+            continue
+            ;;
+        noop)
+            echo "[kb-release-push-promote] ${_message}"
+            continue
+            ;;
+        promote)
+            _release_id=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('release_id',''))" \
+                "$_plan_line" 2>/dev/null) || _release_id=""
+            _platform=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('platform',''))" \
+                "$_plan_line" 2>/dev/null) || _platform=""
+            _target_env=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('target_env',''))" \
+                "$_plan_line" 2>/dev/null) || _target_env=""
+            _env_from=$(python3 -c "import json,sys; d=json.loads(sys.argv[1]); print(d.get('env_from',''))" \
+                "$_plan_line" 2>/dev/null) || _env_from=""
+
+            if [ -z "$_release_id" ] || [ -z "$_platform" ] || [ -z "$_target_env" ]; then
+                echo "[kb-release-push-promote] ERROR: malformed plan entry: ${_plan_line}" >&2
+                _OVERALL_EXIT=1
+                continue
+            fi
+
+            echo "[kb-release-push-promote] processing: ${_release_id} ${_platform} → ${_target_env}"
+
+            # ── Step 4a: Version gate ────────────────────────────────────────
+            if [ -z "$_GATE_SCRIPT" ]; then
+                echo "[kb-release-push-promote] WARNING: kb-release-version-gate not found — gate skipped." >&2
+            else
+                _gate_args=("$_release_id" "--platform" "$_platform" "--env" "$_target_env" "--team" "$_TEAM")
+                if [ "$OPT_DRY_RUN" -eq 1 ]; then
+                    echo "[kb-release-push-promote] [dry-run] would run: kb-release-version-gate ${_gate_args[*]}"
+                    _gate_rc=0
+                else
+                    set +e
+                    bash "$_GATE_SCRIPT" "${_gate_args[@]}"
+                    _gate_rc=$?
+                    set -e
+                fi
+
+                if [ "$_gate_rc" -ne 0 ]; then
+                    # Gate failed — try auto-bump if requested
+                    if [ "$OPT_AUTO_BUMP" -eq 1 ] && [ -n "$_BUMP_SCRIPT" ]; then
+                        echo "[kb-release-push-promote] gate failed — attempting auto-bump for ${_platform}..." >&2
+                        set +e
+                        bash "$_BUMP_SCRIPT" "$_release_id" "--platform" "$_platform" "--team" "$_TEAM"
+                        _bump_rc=$?
+                        set -e
+                        if [ "$_bump_rc" -eq 0 ]; then
+                            # Re-run gate
+                            set +e
+                            bash "$_GATE_SCRIPT" "${_gate_args[@]}"
+                            _gate_rc=$?
+                            set -e
+                        else
+                            echo "[kb-release-push-promote] ERROR: auto-bump failed for ${_platform}." >&2
+                        fi
+                    fi
+                fi
+
+                if [ "$_gate_rc" -ne 0 ]; then
+                    echo "[kb-release-push-promote] ERROR: version gate FAILED for ${_platform} → ${_target_env}." >&2
+                    echo "  Hard block: promotion cancelled for this platform." >&2
+                    _OVERALL_EXIT=1
+                    continue
+                fi
+            fi
+
+            # ── Step 4b: Promote via LCARS API ───────────────────────────────
+            _promote_payload=$(python3 -c "
+import json, sys
+print(json.dumps({'platform': sys.argv[1], 'targetEnvironment': sys.argv[2]}))
+" "$_platform" "$_target_env" 2>/dev/null)
+
+            if [ "$OPT_DRY_RUN" -eq 1 ]; then
+                echo "[kb-release-push-promote] [dry-run] would POST ${_LCARS_BASE}/api/releases/${_release_id}/promote"
+                echo "[kb-release-push-promote] [dry-run]   payload: ${_promote_payload}"
+                _promote_http="200"
+            else
+                # Capture both body and HTTP code
+                _promote_response_file=$(mktemp /tmp/kb-promote-resp.XXXXXX)
+                _promote_http=$(curl -s \
+                    -o "$_promote_response_file" \
+                    -w "%{http_code}" \
+                    -X POST \
+                    -H "Content-Type: application/json" \
+                    -d "$_promote_payload" \
+                    --connect-timeout 5 \
+                    --max-time 15 \
+                    "${_LCARS_BASE}/api/releases/${_release_id}/promote" 2>/dev/null) || _promote_http="000"
+            fi
+
+            if [ "$_promote_http" = "000" ]; then
+                # Connection failure — LCARS not running (non-fatal)
+                echo "[kb-release-push-promote] WARNING: LCARS not running at ${_LCARS_BASE} — promote API unreachable." >&2
+                echo "  Recovery: when LCARS is running, run:" >&2
+                echo "    kb-release promote ${_release_id} ${_platform}" >&2
+                if [ "$OPT_DRY_RUN" -ne 1 ]; then
+                    rm -f "$_promote_response_file"
+                fi
+                # Non-fatal — continue to next platform
+                continue
+            fi
+
+            if [ "$_promote_http" = "400" ]; then
+                # Check if "already at" — treat as no-op
+                if [ "$OPT_DRY_RUN" -ne 1 ]; then
+                    _resp_body=""
+                    _resp_body=$(cat "$_promote_response_file" 2>/dev/null) || true
+                    rm -f "$_promote_response_file"
+                    _already=$(echo "$_resp_body" | python3 -c "
+import json,sys
+try:
+    d = json.loads(sys.stdin.read())
+    msg = d.get('error','') or d.get('message','')
+    print('yes' if 'already' in msg.lower() else 'no')
+except Exception:
+    print('no')
+" 2>/dev/null) || _already="no"
+                else
+                    _already="no"
+                fi
+                if [ "$_already" = "yes" ]; then
+                    echo "[kb-release-push-promote] ${_release_id} ${_platform}: already at ${_target_env} — no-op."
+                    continue
+                fi
+                echo "[kb-release-push-promote] ERROR: promote API returned HTTP 400 for ${_release_id} ${_platform}." >&2
+                _OVERALL_EXIT=1
+                continue
+            fi
+
+            if [ "$OPT_DRY_RUN" -ne 1 ]; then
+                rm -f "$_promote_response_file" 2>/dev/null || true
+            fi
+
+            if [ "$_promote_http" != "200" ]; then
+                echo "[kb-release-push-promote] ERROR: promote API returned HTTP ${_promote_http} for ${_release_id} ${_platform}." >&2
+                _OVERALL_EXIT=1
+                continue
+            fi
+
+            echo "[kb-release-push-promote] promoted ${_release_id} ${_platform} → ${_target_env}"
+
+            # ── Step 4c: RELNOTES promotion ──────────────────────────────────
+            _relnotes_dir=""
+            if command -v _kb_get_team_relnotes_dir >/dev/null 2>&1; then
+                _relnotes_dir=$(_kb_get_team_relnotes_dir "$_TEAM" "$_platform" 2>/dev/null) || true
+            fi
+
+            if [ -n "$_relnotes_dir" ] && command -v kb_relnotes_promote >/dev/null 2>&1; then
+                # Determine env_from for RELNOTES
+                _relnotes_from="$_env_from"
+                # For PROD, SPEC §6 says source is GAMMA
+                if [ "$_target_env" = "PROD" ]; then
+                    _relnotes_from="GAMMA"
+                fi
+
+                if [ -z "$_relnotes_from" ]; then
+                    echo "[kb-release-push-promote] WARNING: cannot determine env_from for RELNOTES — skipping RELNOTES promotion." >&2
+                else
+                    _relnotes_args=("$_relnotes_dir" "$_relnotes_from" "$_target_env")
+                    if [ "$_target_env" = "PROD" ]; then
+                        _relnotes_args=("${_relnotes_args[@]}" "--prod-stub")
+                    fi
+                    if [ "$OPT_DRY_RUN" -eq 1 ]; then
+                        _relnotes_args=("${_relnotes_args[@]}" "--dry-run")
+                    fi
+
+                    set +e
+                    kb_relnotes_promote "${_relnotes_args[@]}"
+                    _relnotes_rc=$?
+                    set -e
+
+                    if [ "$_relnotes_rc" -ne 0 ]; then
+                        echo "[kb-release-push-promote] WARNING: RELNOTES promotion returned non-zero (${_relnotes_rc}) — continuing." >&2
+                    fi
+                fi
+            else
+                if [ -z "$_relnotes_dir" ]; then
+                    echo "[kb-release-push-promote] WARNING: relnotes_dir not configured for team '$_TEAM' platform '$_platform' — RELNOTES not promoted." >&2
+                else
+                    echo "[kb-release-push-promote] WARNING: kb_relnotes_promote function not loaded — RELNOTES not promoted." >&2
+                fi
+            fi
+
+            # ── Step 4d: PROD loud prompt ────────────────────────────────────
+            if [ "$_target_env" = "PROD" ]; then
+                echo ""
+                echo "============================================================"
+                echo " PROD PROMOTION COMPLETE — MANUAL STEPS REQUIRED"
+                echo "============================================================"
+                echo ""
+                echo " Release : ${_release_id}"
+                echo " Platform: ${_platform}"
+                echo " Stage   : PROD"
+                echo ""
+                echo " Store copy and Change Request are NOT automated."
+                echo " You must complete the following steps manually:"
+                echo ""
+                echo " 1. Generate store assets (App Store promo copy, What's New):"
+                echo "      /relnotes"
+                echo "    Then review and finalize RELNOTES-PROD.md."
+                echo ""
+                echo " 2. Create or update the Change Request:"
+                echo "      /cr"
+                echo "    (Skipped if linkedCRs is already non-empty on this release"
+                echo "     — XACA-0657 guard is active.)"
+                echo ""
+                echo " 3. Submit to the App Store / Play Store only after the CR"
+                echo "    is approved and store assets are finalized."
+                echo ""
+                echo "============================================================"
+                echo ""
+            fi
+
+            # Add to summary
+            _PROMOTED_SUMMARY="${_PROMOTED_SUMMARY}  ${_release_id} ${_platform} → ${_target_env}
+"
+            ;;
+        *)
+            echo "[kb-release-push-promote] WARNING: unknown plan action '${_action}' — skipping." >&2
+            ;;
+    esac
+
+done < <(printf '%s\n' "$_PROMOTE_PLAN")
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+if [ -n "$_PROMOTED_SUMMARY" ]; then
+    echo ""
+    echo "[kb-release-push-promote] Auto-promotion summary for branch '${OPT_BRANCH}':"
+    printf '%s' "$_PROMOTED_SUMMARY"
+elif [ "$_OVERALL_EXIT" -eq 0 ]; then
+    echo "[kb-release-push-promote] No promotions performed for branch '${OPT_BRANCH}'."
+fi
+
+exit $_OVERALL_EXIT
