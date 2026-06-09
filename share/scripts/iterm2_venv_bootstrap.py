@@ -44,33 +44,38 @@ import os
 import subprocess
 import sys
 
-# Venv probe order (mirrors iterm2_window_manager.py XACA-0650 logic):
-#   1. brew --prefix aiteamforge / libexec/venv   — current Formula convention
-#   2. brew --prefix / var/aiteamforge/venv        — legacy location
-#   3. /opt/homebrew/var/aiteamforge/venv          — Apple-Silicon homebrew hardcode
-#   4. /usr/local/var/aiteamforge/venv             — Intel homebrew hardcode
-_BREW_PREFIX: str = ""
-try:
-    _BREW_PREFIX = subprocess.check_output(
-        ["brew", "--prefix"], text=True, timeout=5
-    ).strip()
-except Exception:
-    pass
 
-_BREW_ATF_PREFIX: str = ""
-try:
-    _BREW_ATF_PREFIX = subprocess.check_output(
-        ["brew", "--prefix", "aiteamforge"], text=True, timeout=5
-    ).strip()
-except Exception:
-    pass
+def _get_tap_venv_candidates() -> list[str]:
+    """Return venv candidate paths, probing brew only when necessary.
 
-_TAP_VENV_CANDIDATES: list[str] = [
-    os.path.join(_BREW_ATF_PREFIX, "libexec/venv") if _BREW_ATF_PREFIX else "",
-    os.path.join(_BREW_PREFIX, "var/aiteamforge/venv") if _BREW_PREFIX else "",
-    "/opt/homebrew/var/aiteamforge/venv",
-    "/usr/local/var/aiteamforge/venv",
-]
+    Probe order (mirrors iterm2_window_manager.py XACA-0650 logic):
+      1. brew --prefix aiteamforge / libexec/venv   — current Formula convention
+      2. brew --prefix / var/aiteamforge/venv        — legacy location
+      3. /opt/homebrew/var/aiteamforge/venv          — Apple-Silicon homebrew hardcode
+      4. /usr/local/var/aiteamforge/venv             — Intel homebrew hardcode
+    """
+    brew_prefix = ""
+    try:
+        brew_prefix = subprocess.check_output(
+            ["brew", "--prefix"], text=True, timeout=5
+        ).strip()
+    except Exception:
+        pass
+
+    brew_atf_prefix = ""
+    try:
+        brew_atf_prefix = subprocess.check_output(
+            ["brew", "--prefix", "aiteamforge"], text=True, timeout=5
+        ).strip()
+    except Exception:
+        pass
+
+    return [
+        os.path.join(brew_atf_prefix, "libexec/venv") if brew_atf_prefix else "",
+        os.path.join(brew_prefix, "var/aiteamforge/venv") if brew_prefix else "",
+        "/opt/homebrew/var/aiteamforge/venv",
+        "/usr/local/var/aiteamforge/venv",
+    ]
 
 
 def ensure_iterm2_venv() -> None:
@@ -82,7 +87,11 @@ def ensure_iterm2_venv() -> None:
     the current process.  If no usable venv is found, returns normally so the
     caller's own import produces an informative error.
     """
-    # Fast path: iterm2 is already available — nothing to do.
+    # Fast path: iterm2 is already available — zero subprocess calls, return immediately.
+    # This is the common case: running under the tap venv after a successful re-exec,
+    # or on the dev-source machine where iterm2 is installed globally.
+    # The execv infinite-loop guard is implicit: after re-exec the new python3 has
+    # iterm2, so find_spec succeeds and we return before touching the venv candidates.
     try:
         import importlib.util  # noqa: PLC0415 — lazy, intentional
         if importlib.util.find_spec("iterm2") is not None:
@@ -90,8 +99,8 @@ def ensure_iterm2_venv() -> None:
     except Exception:
         pass
 
-    # Probe venv candidates and re-exec under the first usable one.
-    for _venv_dir in _TAP_VENV_CANDIDATES:
+    # iterm2 is not importable — probe venv candidates (incurs brew subprocess calls).
+    for _venv_dir in _get_tap_venv_candidates():
         if not _venv_dir:
             continue
         venv_python = os.path.join(_venv_dir, "bin/python3")
