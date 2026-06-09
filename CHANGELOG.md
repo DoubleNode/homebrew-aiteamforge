@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.13.4] - 2026-06-09
+
 - XACA-0652: Durable LCARS server launch + shared iterm2 venv bootstrap for cockpit scripts. **Durable server launch (`share/scripts/lcars-launch-helpers.sh`):** `start_lcars_server` now launches `server.py` via `nohup env ... sh -c '... exec python3 ...'` with `disown`, ensuring the server survives the startup script's exit on tap-installed machines (e.g. M4Mini) where the parent shell exits and would previously SIGHUP the server process group. `exec` inside `sh -c` replaces `sh` so `$!` remains the python PID. Readiness check hardened: after the first `/api/status 200`, a 0.3s pause + re-check confirms persistence. **Shared iterm2 bootstrap (`share/scripts/iterm2_venv_bootstrap.py`, NEW):** the tap-venv probe/re-exec logic from XACA-0650's `iterm2_window_manager.py` is extracted into a standalone module added to the `sync-tap.sh` mirror map and deployed by both the parametric and rendered-template install paths in `libexec/installers/install-team.sh`. **Sibling cockpit scripts fixed (`share/lcars-ui/iterm-browser.py`, `share/scripts/iterm2_window_manager.py`):** both now import the shared bootstrap module instead of inline probes. `set-lcars-profile-browser.py` and `create-agent-panel-profile.py` are unchanged (they do not import iterm2). `iterm2_window_manager.py` uses a two-candidate path search (same-dir for tap layout, scripts/ subdir for dev-source layout). `iterm-browser.py` uses `../scripts` which resolves correctly in both layouts. Upgrade auto-coverage: `update_runtime_helpers` already sweeps `share/scripts/*.py` so the bootstrap will be refreshed on `brew upgrade` once it is installed. **PR #551 review fix — lazy brew probe:** `ensure_iterm2_venv()` previously ran two `brew --prefix` subprocess calls at module-import time unconditionally. Inverted to fast-path first: `importlib.util.find_spec("iterm2")` is checked at the top of `ensure_iterm2_venv()` — if iterm2 is already importable (the common case when running under the tap venv or after re-exec), the function returns immediately with zero subprocess calls. The `brew --prefix` candidate probe is now inside a lazy `_get_tap_venv_candidates()` helper, only called when `find_spec` returns None. The execv infinite-loop guard is implicit: after re-exec the new python3 has iterm2, so fast-path returns before reaching the candidates. Tap mirror synced (`share/scripts/iterm2_venv_bootstrap.py`).
 
 ## [0.13.3] - 2026-06-08
@@ -747,7 +749,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.4...HEAD
+[0.13.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.0...v0.13.1
