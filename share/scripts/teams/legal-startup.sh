@@ -25,15 +25,20 @@ export PROJECTID
 # Calculate derived variables that child scripts expect
 PROJECT_DIR="$HOME/legal/$PROJECTID"
 
+# Create project-specific session names
+PROJECT_LOWER=$(echo "$PROJECTID" | tr '[:upper:]' '[:lower:]')
+SESSION_PREFIX="legal-${PROJECT_LOWER}"
+
 # Resolve LCARS port from the canonical registry (XACA-0590).
 # resolve_lcars_port reads team-paths.json via kanban-hooks/lcars_ports.py —
 # the same single source of truth used by kb-port-reconcile and lcars-health-check.sh.
-# Fall back to the legacy deterministic cksum derivation (constant "legal" input) ONLY
-# for prefixes not yet registered, preserving backward-compat for new projects.
-# Note: the old code hashed the constant string "legal", not the PROJECTID — the
-# resolver now uses the full session prefix "legal-<projectid>" for precision.
-LCARS_PORT_TEMP="$(resolve_lcars_port "legal-${PROJECTID}")" || \
-    LCARS_PORT_TEMP=$((8220 + $(echo "legal" | cksum | cut -d' ' -f1) % 20))
+# Fall back to the legacy deterministic cksum derivation ONLY for prefixes not yet
+# registered, preserving backward-compat for new projects. XACA-0609: hash the
+# per-project ${PROJECT_LOWER} (not the constant "legal") so distinct projects get
+# distinct fallback ports — parity with finance/medical. Legal keeps its own port
+# band (8220 + cksum % 20); only the hash INPUT is unified.
+LCARS_PORT_TEMP="$(resolve_lcars_port "${SESSION_PREFIX}")" || \
+    LCARS_PORT_TEMP=$((8220 + $(echo "${PROJECT_LOWER}" | cksum | cut -d' ' -f1) % 20))
 
 # Export variables that child scripts check for
 export LEGAL_PROJECTID="$PROJECTID"
@@ -94,7 +99,7 @@ echo ""
 # Guard: verify kanban board is initialized before any kanban-dependent work.
 # XACA-0576: pass the TEMPLATE id ("legal"), not the project-scoped form.
 # board-check resolves template→instance via get_board_id() and the config
-# lookup tolerates either form. The previous "legal-${PROJECTID}" handoff
+# lookup tolerates either form. The previous raw-PROJECTID session handoff
 # worked by accident when PROJECTID="coparenting" matched the canonical
 # instance id; it would fail for any other PROJECTID.
 kb_ensure_team_initialized "legal" "$PROJECT_DIR/kanban" || true
@@ -114,25 +119,25 @@ base_terminals=(
 # Terminal definitions with labels
 # Session names now include project ID: legal-{projectid}-{terminal}
 declare -A terminals=(
-    ["legal-${PROJECTID}-lcars"]="LCARS"
-    ["legal-${PROJECTID}-chambers"]="chambers"
-    ["legal-${PROJECTID}-discovery"]="discovery"
-    ["legal-${PROJECTID}-research"]="research"
-    ["legal-${PROJECTID}-filings"]="filings"
-    ["legal-${PROJECTID}-mediation"]="mediation"
-    ["legal-${PROJECTID}-timeline"]="timeline"
+    ["${SESSION_PREFIX}-lcars"]="LCARS"
+    ["${SESSION_PREFIX}-chambers"]="chambers"
+    ["${SESSION_PREFIX}-discovery"]="discovery"
+    ["${SESSION_PREFIX}-research"]="research"
+    ["${SESSION_PREFIX}-filings"]="filings"
+    ["${SESSION_PREFIX}-mediation"]="mediation"
+    ["${SESSION_PREFIX}-timeline"]="timeline"
 )
 
 # Order of terminals
 # LCARS is first tab - Kanban overview
 terminal_order=(
-    "legal-${PROJECTID}-lcars"
-    "legal-${PROJECTID}-chambers"
-    "legal-${PROJECTID}-discovery"
-    "legal-${PROJECTID}-research"
-    "legal-${PROJECTID}-filings"
-    "legal-${PROJECTID}-mediation"
-    "legal-${PROJECTID}-timeline"
+    "${SESSION_PREFIX}-lcars"
+    "${SESSION_PREFIX}-chambers"
+    "${SESSION_PREFIX}-discovery"
+    "${SESSION_PREFIX}-research"
+    "${SESSION_PREFIX}-filings"
+    "${SESSION_PREFIX}-mediation"
+    "${SESSION_PREFIX}-timeline"
 )
 
 # Create tmux sessions ASYNCHRONOUSLY for faster startup
@@ -145,7 +150,7 @@ echo "  (Session log: $STARTUP_LOG)"
 pids=()
 for base_name in "${base_terminals[@]}"; do
     script="$HOME/dev-team/legal/scripts/legal-${base_name}-startup.sh"
-    session_name="legal-${PROJECTID}-${base_name}"
+    session_name="${SESSION_PREFIX}-${base_name}"
     if [ -f "$script" ]; then
         echo "  Initializing $session_name..."
         # Run in background with bash, passing PROJECTID via environment
@@ -177,8 +182,8 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     # ── LCARS: start server BEFORE tab creation loop ──
     # start_lcars_server writes the team line to lcars-target.js; append the session line after.
     echo "  Starting Legal LCARS server on port $LCARS_PORT..."
-    start_lcars_server "legal-${PROJECTID}" "$LCARS_PORT" "legal-${PROJECTID}-lcars" || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see details above)."
-    echo "window.LCARS_TARGET_SESSION = 'legal-${PROJECTID}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
+    start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see details above)."
+    echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
 
     # iTerm2 automation using Python API for window management
     # Window was already initialized at script start, all tabs are created fresh
@@ -189,7 +194,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
 
         # Create iTerm2 tab and attach to tmux session
         if [[ "$label" == "LCARS" ]]; then
-            open_lcars_tab "$LCARS_PORT" "$ITERM_WINDOW_NAME" "LCARS" "$TMUX_SOCKET" "legal-${PROJECTID}-lcars" "$ITERM_STARTUP_LOG" \
+            open_lcars_tab "$LCARS_PORT" "$ITERM_WINDOW_NAME" "LCARS" "$TMUX_SOCKET" "${SESSION_PREFIX}-lcars" "$ITERM_STARTUP_LOG" \
                 || echo "    ❌ Failed to open LCARS tab (see $ITERM_STARTUP_LOG)"
             sleep 0.3
             continue
