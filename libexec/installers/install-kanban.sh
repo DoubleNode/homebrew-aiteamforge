@@ -860,26 +860,46 @@ install_backup_launchagent() {
     # Create LaunchAgents directory if needed
     mkdir -p "$HOME/Library/LaunchAgents"
 
+    # XACA-0651: the backup agent runs with RunAtLoad=true and redirects stdout/stderr
+    # into ~/aiteamforge-backups/kanban/. That directory is normally created by
+    # install_kanban_backup, but that helper early-returns when the backup script
+    # source is missing — leaving the log dir absent, so launchd cannot open the
+    # job's StandardOutPath and the agent never registers. (The lcars-health agent
+    # logs to /tmp and so always loads — that asymmetry is exactly the consumer
+    # symptom this fixes.) Create the log dir here so the load is self-sufficient.
+    mkdir -p "$HOME/aiteamforge-backups/kanban"
+
     # Find python3 path
     local python3_path
     python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
 
+    # XACA-0651: guard the StartInterval substitution. An empty KANBAN_BACKUP_INTERVAL
+    # renders <integer></integer> — an invalid plist that launchctl rejects. Fall back
+    # to the documented 900s default rather than emit a malformed plist.
+    local backup_interval="${KANBAN_BACKUP_INTERVAL:-900}"
+    case "$backup_interval" in
+        ''|*[!0-9]*) backup_interval=900 ;;
+    esac
+
     # Substitute variables in template
     sed -e "s|{{USER_HOME}}|$HOME|g" \
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        -e "s|{{BACKUP_INTERVAL}}|$KANBAN_BACKUP_INTERVAL|g" \
+        -e "s|{{BACKUP_INTERVAL}}|$backup_interval|g" \
         -e "s|{{PYTHON3_PATH}}|$python3_path|g" \
         "$plist_template" > "$plist_dest"
 
     # Unload if already loaded (ignore errors)
     launchctl unload "$plist_dest" 2>/dev/null || true
 
-    # Load the LaunchAgent
-    if launchctl load "$plist_dest"; then
+    # Load the LaunchAgent. XACA-0651: legacy `launchctl load` returns 0 even when the
+    # job is rejected, so verify registration with `launchctl list` rather than trust
+    # the exit code — the old code reported a false "loaded" success.
+    launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "${KANBAN_BACKUP_LABEL}"; then
         success "Installed and loaded backup LaunchAgent"
-        info "Backups will run every 15 minutes"
+        info "Backups will run every ${backup_interval}s"
     else
-        warning "Failed to load LaunchAgent (may need manual activation)"
+        warning "Backup LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
     fi
 }
 

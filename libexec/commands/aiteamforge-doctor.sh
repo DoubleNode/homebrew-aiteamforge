@@ -555,6 +555,9 @@ check_services() {
 check_launchagents() {
   print_section "Checking LaunchAgents"
 
+  local working_dir
+  working_dir=$(get_working_dir)
+
   # Kanban backup agent
   if launchctl list 2>/dev/null | grep -q "com.aiteamforge.kanban-backup"; then
     check_result pass "Kanban backup LaunchAgent loaded"
@@ -575,10 +578,13 @@ check_launchagents() {
     fi
   fi
   # XACA-0585: script the LaunchAgent invokes must exist; missing = exit 127 on every tick
-  if [ -f "${AITEAMFORGE_DIR}/lcars-health-check.sh" ]; then
+  # XACA-0651: resolve via get_working_dir — bare ${AITEAMFORGE_DIR} is unset in the
+  # doctor context on consumers, which collapsed the path to /lcars-health-check.sh
+  # (root) and produced a false FAILURE even when the script was installed correctly.
+  if [ -f "${working_dir}/lcars-health-check.sh" ]; then
     check_result pass "LCARS health check script present"
   else
-    check_result fail "LCARS health check script missing: ${AITEAMFORGE_DIR}/lcars-health-check.sh"
+    check_result fail "LCARS health check script missing: ${working_dir}/lcars-health-check.sh"
     if [ "$VERBOSE" = true ]; then
       echo "    Fix: aiteamforge setup  (re-runs the installer lay-down)"
       echo "    Note: 'aiteamforge upgrade' will NOT create a missing script — update_aux_scripts skips absent targets."
@@ -614,6 +620,11 @@ check_git() {
   working_dir=$(get_working_dir)
 
   # Main aiteamforge repo
+  # XACA-0651: the git-repo checks are dev-source-of-truth-centric. A consumer tap
+  # install lays down ${working_dir} (e.g. ~/aiteamforge) as a plain product dir with
+  # NO .git — that is expected and healthy, not a fault. Only the dev checkout
+  # (~/dev-team) is a git repo, so gate the clean/dirty checks on .git presence and
+  # emit an informational note on consumers instead of a spurious warning.
   if [ -d "${working_dir}/.git" ]; then
     check_result pass "Dev-team git repository"
 
@@ -625,7 +636,7 @@ check_git() {
       check_result pass "Dev-team repo clean"
     fi
   else
-    check_result warn "Dev-team not a git repository"
+    print_info "Consumer install (${working_dir} is not a git checkout) — dev-repo checks skipped"
   fi
 
   # Check for worktrees
