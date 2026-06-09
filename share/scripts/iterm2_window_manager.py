@@ -29,10 +29,9 @@ import sys
 try:
     import iterm2
 except ImportError:
-    import subprocess as _sp
     _brew_prefix = ""
     try:
-        _brew_prefix = _sp.check_output(
+        _brew_prefix = subprocess.check_output(
             ["brew", "--prefix"], text=True, timeout=5
         ).strip()
     except Exception:

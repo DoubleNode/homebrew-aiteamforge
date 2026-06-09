@@ -269,11 +269,29 @@ check_python_venv() {
     return
   fi
 
-  # Required Python packages (must match share/requirements.txt)
-  local required_packages=("iterm2" "pyzipper")
+  # Parse required Python packages from share/requirements.txt.
+  # Strip comments, blank lines, and version pins (pkg==x.y → pkg).
+  # Fall back to the known set if the file is unreadable.
+  local requirements_file="${LIBEXEC_DIR}/../share/requirements.txt"
+  local required_packages=()
+  if [ -r "$requirements_file" ]; then
+    while IFS= read -r line; do
+      # Skip blank lines and comment lines
+      [[ -z "$line" || "$line" == \#* ]] && continue
+      # Strip version pin (everything from == onward) and leading/trailing whitespace
+      local pkg_name
+      pkg_name="${line%%==*}"
+      pkg_name="${pkg_name%%[[:space:]]*}"
+      [[ -n "$pkg_name" ]] && required_packages+=("$pkg_name")
+    done < "$requirements_file"
+  fi
+  if [ "${#required_packages[@]}" -eq 0 ]; then
+    # Fallback: requirements.txt unreadable or empty — use known set
+    required_packages=("iterm2" "pyzipper")
+  fi
 
   for pkg in "${required_packages[@]}"; do
-    if "$venv_pip" show "$pkg" &>/dev/null 2>&1; then
+    if "$venv_pip" show "$pkg" &>/dev/null; then
       local pkg_ver
       pkg_ver="$("$venv_pip" show "$pkg" 2>/dev/null | grep '^Version:' | awk '{print $2}')"
       check_result pass "${pkg} package installed (${pkg_ver:-unknown version})"
