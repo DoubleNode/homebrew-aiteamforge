@@ -238,6 +238,54 @@ assert_contains "$_LAST_OUTPUT" "iterm2 package installed"
 assert_contains "$_LAST_OUTPUT" "pyzipper package installed"
 test_pass
 
+# ── PEP 508 operator variants (XACA-0650-014 hardening) ──────────────────────
+
+test_start ">= pin stripped — bare name used for pip show"
+# pyzipper>=0.3 must resolve to 'pyzipper'; pip stub only matches bare names
+_build_driver $'pyzipper>=0.3\n' "pyzipper"
+_run_driver
+assert_contains "$_LAST_OUTPUT" "pyzipper package installed" \
+  ">= pin was not stripped — pip show received 'pyzipper>=0.3' instead of 'pyzipper'"
+test_pass
+
+test_start "~= compatible-release pin stripped — bare name used for pip show"
+_build_driver $'iterm2~=2.15\n' "iterm2"
+_run_driver
+assert_contains "$_LAST_OUTPUT" "iterm2 package installed" \
+  "~= pin was not stripped — pip show received full specifier"
+test_pass
+
+test_start "<= upper-bound pin stripped — bare name used for pip show"
+_build_driver $'iterm2<=3.0\n' "iterm2"
+_run_driver
+assert_contains "$_LAST_OUTPUT" "iterm2 package installed" \
+  "<= pin was not stripped"
+test_pass
+
+test_start "Indented package line is parsed correctly"
+# A line like '  iterm2==2.15' must yield 'iterm2', not '' or '  iterm2'
+_build_driver $'  iterm2==2.15\n' "iterm2"
+_run_driver
+assert_contains "$_LAST_OUTPUT" "iterm2 package installed" \
+  "Leading whitespace caused package to be dropped or passed with spaces to pip"
+test_pass
+
+test_start "Extras spec stripped — bare name used for pip show"
+# pkg[foo]==1.0 must yield 'pkg', not 'pkg[foo]'
+_build_driver $'pkg[foo]==1.0\n' "pkg"
+_run_driver
+assert_contains "$_LAST_OUTPUT" "pkg package installed" \
+  "Extras spec not stripped — pip show received 'pkg[foo]' instead of 'pkg'"
+test_pass
+
+test_start "Environment marker stripped — bare name used for pip show"
+# 'pkg ; python_version<3' must yield 'pkg'
+_build_driver $'iterm2 ; python_version>="3.8"\n' "iterm2"
+_run_driver
+assert_contains "$_LAST_OUTPUT" "iterm2 package installed" \
+  "Environment marker not stripped — pip show received marker text"
+test_pass
+
 # ── Fallback behaviour ────────────────────────────────────────────────────────
 
 test_start "Fallback to known set when requirements.txt is missing"

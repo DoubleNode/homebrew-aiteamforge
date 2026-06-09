@@ -270,18 +270,24 @@ check_python_venv() {
   fi
 
   # Parse required Python packages from share/requirements.txt.
-  # Strip comments, blank lines, and version pins (pkg==x.y → pkg).
-  # Fall back to the known set if the file is unreadable.
+  # Strip comments, blank lines, PEP 508 version specifiers, extras, and
+  # environment markers.  Fall back to the known set if the file is unreadable.
   local requirements_file="${LIBEXEC_DIR}/../share/requirements.txt"
   local required_packages=()
   if [ -r "$requirements_file" ]; then
     while IFS= read -r line; do
       # Skip blank lines and comment lines
       [[ -z "$line" || "$line" == \#* ]] && continue
-      # Strip version pin (everything from == onward) and leading/trailing whitespace
+      # Strip from first PEP 508 operator/marker/extras char onward:
+      #   <>=~!  version comparisons  (==, >=, <=, ~=, !=, >, <)
+      #   ;      environment markers  (pkg ; python_version < '3')
+      #   [      extras spec          (pkg[extra]==1.0)
       local pkg_name
-      pkg_name="${line%%==*}"
-      pkg_name="${pkg_name%%[[:space:]]*}"
+      pkg_name="${line%%[<>=~!;[]*}"
+      # Trim leading whitespace
+      pkg_name="${pkg_name#"${pkg_name%%[![:space:]]*}"}"
+      # Trim trailing whitespace
+      pkg_name="${pkg_name%"${pkg_name##*[![:space:]]}"}"
       [[ -n "$pkg_name" ]] && required_packages+=("$pkg_name")
     done < "$requirements_file"
   fi
