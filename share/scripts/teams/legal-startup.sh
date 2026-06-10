@@ -107,7 +107,7 @@ kb_ensure_team_initialized "legal" "$PROJECT_DIR/kanban" || true
 # XACA-0666: deploy this project's personas into $PROJECT_DIR/.claude/agents.
 # Shared helper in lcars-launch-helpers.sh (sourced above) — see
 # deploy_team_personas for the rationale (nested-git-root project dirs).
-deploy_team_personas legal "Legal"
+deploy_team_personas legal "Legal" "$PROJECT_DIR"
 
 # Base terminal names (actual script filenames)
 # LCARS is first - provides the kanban overview

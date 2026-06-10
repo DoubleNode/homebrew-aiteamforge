@@ -89,7 +89,7 @@ kb_ensure_team_initialized "finance" "$PROJECT_DIR/kanban" || true
 # XACA-0666: deploy this project's personas into $PROJECT_DIR/.claude/agents.
 # Shared helper in lcars-launch-helpers.sh (sourced above) — see
 # deploy_team_personas for the rationale (nested-git-root project dirs).
-deploy_team_personas finance "Finance"
+deploy_team_personas finance "Finance" "$PROJECT_DIR"
 
 # Resolve LCARS port from the canonical registry (XACA-0590).
 # resolve_lcars_port reads team-paths.json via kanban-hooks/lcars_ports.py —
