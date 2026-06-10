@@ -564,16 +564,25 @@ resolve_lcars_port() {
 }
 
 # ---------------------------------------------------------------------------
-# deploy_team_personas <team-slug> <Display-Label>
+# deploy_team_personas <team-slug> <Display-Label> [<project-dir>]
 #
-# Deploy a multi-project personal team's personas into the ACTIVE project dir's
-# .claude/agents at startup. These teams (legal/finance/medical) cd into
+# Deploy a multi-project personal team's personas into the project dir's
+# .claude/agents at startup. These teams (legal/finance/medical) work inside
 # ~/<team>/<PROJECTID> — a nested git repo the static persona manifest cannot
 # enumerate — so plain `kb-sync-personas sync` (umbrella target) never reaches
 # it and a session there loads zero personas. kb-sync-personas's XACA-0660
 # nested-root deploy (`sync-worktrees`) resolves each inner git root and
 # populates it (kept untracked via the repo's .git/info/exclude). Idempotent:
 # re-runs hash-compare and refresh on master persona changes.
+#
+# Arguments:
+#   1  team-slug   — e.g. "legal", "finance", "medical"
+#   2  label       — display name for output (defaults to team-slug)
+#   3  project-dir — REQUIRED on tap-consumer machines: absolute path to the
+#                    project's git repo root (e.g. $PROJECT_DIR). Falls back
+#                    to $PWD when omitted, but callers SHOULD pass it explicitly
+#                    because startup scripts are typically invoked from a
+#                    different directory than the project root. (XACA-0667 fix)
 #
 # Single shared implementation (XACA-0666-001, anti k501 sibling-drift): the
 # legal/finance/medical startup scripts call THIS rather than each carrying a
@@ -586,11 +595,27 @@ resolve_lcars_port() {
 deploy_team_personas() {
     local team="${1:?deploy_team_personas: team slug required}"
     local label="${2:-$team}"
+    local project_dir="${3:-$PWD}"
     local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
     local _sync_tool="${_atf_base}/scripts/kb-sync-personas"
     if [ -x "$_sync_tool" ]; then
+        # Dev machine path (kb-sync-personas present): unchanged behaviour.
         echo "   Syncing ${label} personas into project dir..."
         "$_sync_tool" sync-worktrees "$team" >/dev/null 2>&1 \
             || echo "   ⚠️  Persona sync skipped (non-fatal; run kb-sync-personas sync-worktrees ${team})"
+    else
+        # Tap-consumer path (XACA-0667): kb-sync-personas is NOT installed on
+        # tap machines. Fall back to deploy-worktree-personas.sh's
+        # --nested-main-root mode, which deploys from the tap persona source
+        # (${AITEAMFORGE_DIR}/<team>/personas/agents/) into
+        # <project_dir>/.claude/agents/ and writes .git/info/exclude so they
+        # stay untracked. Non-fatal: a failure emits a warning but never aborts
+        # startup.
+        local _tap_deploy="${_atf_base}/scripts/deploy-worktree-personas.sh"
+        if [ -x "$_tap_deploy" ]; then
+            echo "   Deploying ${label} tap personas into project dir..."
+            "$_tap_deploy" --nested-main-root "$project_dir" "$team" >/dev/null 2>&1 \
+                || echo "   ⚠️  Tap persona deploy skipped (non-fatal; run deploy-worktree-personas.sh --nested-main-root \$project_dir ${team})"
+        fi
     fi
 }

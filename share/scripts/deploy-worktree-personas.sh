@@ -327,6 +327,49 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
+# Write .claude/agents/ into <project>/.git/info/exclude (idempotent).
+# Mirrors the pattern in kb-sync-personas _kbsp_sync_worktrees (XACA-0660).
+# Resolves exclude path via git-common-dir so it is shared across all
+# worktrees of the same repo.
+# Arguments: git_root  dry_run("true"|"false")
+# ---------------------------------------------------------------------------
+
+_write_exclude() {
+  local git_root="$1"
+  local dry_run="${2:-false}"
+
+  local exclude_line=".claude/agents/"
+  local common_dir_rel
+  common_dir_rel=$(git -C "$git_root" rev-parse --git-common-dir 2>/dev/null) || common_dir_rel=""
+
+  if [ -z "$common_dir_rel" ]; then
+    _warn "[exclude] could not resolve git-common-dir for ${git_root} — skipping exclude update"
+    return 0
+  fi
+
+  local exclude_file="${git_root}/${common_dir_rel}/info/exclude"
+
+  if [ "$dry_run" = "true" ]; then
+    if grep -qxF "$exclude_line" "$exclude_file" 2>/dev/null; then
+      _info "[exclude] '${exclude_line}' already present in $(basename "$git_root")/.git/info/exclude"
+    else
+      _info "[exclude] (DRY RUN) would add '${exclude_line}' to $(basename "$git_root")/.git/info/exclude"
+    fi
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$exclude_file")"
+  if ! grep -qxF "$exclude_line" "$exclude_file" 2>/dev/null; then
+    printf '# Academy persona deployment (untracked, ephemeral) — XACA infra\n%s\n' \
+      "$exclude_line" >> "$exclude_file"
+    _info "[exclude] added '${exclude_line}' to $(basename "$git_root")/.git/info/exclude"
+  else
+    _verbose "[exclude] '${exclude_line}' already present in $(basename "$git_root")/.git/info/exclude"
+  fi
+  return 0
+}
+
+# ---------------------------------------------------------------------------
 # Write the .synced-from-tap marker file
 # ---------------------------------------------------------------------------
 
@@ -505,6 +548,100 @@ _deploy() {
 }
 
 # ---------------------------------------------------------------------------
+# Nested-main-root deployment (XACA-0667): deploy tap personas into a nested
+# git repo (i.e. the inner git root itself, not a linked worktree of it).
+#
+# Use case: legal/finance/medical teams on a tap-consumer box where each
+# session starts inside ~/<team>/<PROJECTID> — the inner git repo — and
+# kb-sync-personas is not available. This function closes the gap that the
+# original _deploy_all NOTE (XACA-0660 k501-sibling-drift) deferred to
+# kb-sync-personas, by deploying directly from the tap persona source.
+#
+# Guard semantics: target must be a real git repo root (not a linked
+# worktree). We verify via `git rev-parse --show-toplevel` and confirm
+# the canonical result equals the provided project_dir. Path traversal
+# is defeated by _canon_path + git's own toplevel resolution.
+#
+# Also writes .claude/agents/ to the repo's .git/info/exclude so deployed
+# personas stay untracked (invisible to git status), mirroring the pattern
+# in kb-sync-personas _kbsp_sync_worktrees.
+#
+# Arguments: project_dir team
+# Returns: 0 success/no-op, 1 guard failure, 2 write failure
+# ---------------------------------------------------------------------------
+
+_deploy_nested_main_root() {
+  local project_dir="$1"
+  local team="$2"
+
+  # --- Resolve source directory (same logic as _deploy) ---
+  local aiteamforge_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+  local primary_src="${aiteamforge_dir}/${team}/personas/agents"
+  local devmachine_fallback="${HOME}/dev-team/.claude/agents-master/${team}"
+
+  if [ ! -d "$primary_src" ]; then
+    if [ -d "$devmachine_fallback" ]; then
+      _info "[${team}] Dev-machine detected: use kb-sync-personas sync-worktrees ${team} instead."
+      return 0
+    fi
+    _warn "[${team}] No personas found at ${primary_src} — skipping."
+    return 0
+  fi
+
+  # --- Validate project_dir is a real git repo root ---
+  # Canonicalize the provided path first.
+  local canon_project
+  canon_project=$(_canon_path "$project_dir") || {
+    _err "[${team}] Cannot canonicalize project dir: ${project_dir}"
+    return 1
+  }
+
+  if [ ! -d "$canon_project" ]; then
+    _err "[${team}] Project dir does not exist: ${canon_project}"
+    return 1
+  fi
+
+  # Confirm it is a git repo and resolve its toplevel.
+  local git_toplevel
+  git_toplevel=$(git -C "$canon_project" rev-parse --show-toplevel 2>/dev/null) || {
+    _err "[${team}] Not a git repo: ${canon_project}"
+    return 1
+  }
+
+  local canon_toplevel
+  canon_toplevel=$(_canon_path "$git_toplevel") || {
+    _err "[${team}] Cannot canonicalize git toplevel: ${git_toplevel}"
+    return 1
+  }
+
+  # The project_dir must resolve to exactly the git repo's toplevel.
+  # This prevents a path that is merely INSIDE a repo (traversal safety).
+  if [ "$canon_project" != "$canon_toplevel" ]; then
+    _err "[${team}] project_dir (${canon_project}) is inside a git repo but is not its root (${canon_toplevel}). Pass the repo root."
+    return 1
+  fi
+
+  # Confirm it is not a linked worktree (those go through _deploy, not this function).
+  # A linked worktree has a .git FILE (not dir); the main/main-root has a .git DIR.
+  # Also reject paths whose git-common-dir resolves into a different main repo
+  # (i.e. this IS a linked worktree of some other repo).
+  local git_dir_entry="${canon_project}/.git"
+  if [ ! -d "$git_dir_entry" ] && [ -f "$git_dir_entry" ]; then
+    _err "[${team}] ${canon_project} appears to be a linked worktree (has .git FILE not dir). Use single-worktree mode instead."
+    return 1
+  fi
+
+  # --- Build the canonical target path ---
+  local canon_target="${canon_project}/.claude/agents"
+
+  # --- Write .git/info/exclude entry (idempotent) ---
+  _write_exclude "$canon_project" "${OPT_DRY_RUN:-false}" || true
+
+  # --- Deploy personas via shared core ---
+  _deploy_core "$canon_target" "$team" "$primary_src" "$aiteamforge_dir"
+}
+
+# ---------------------------------------------------------------------------
 # Batch backfill: enumerate ALL registered linked worktrees of the repo and
 # deploy personas into each. Layout-agnostic: works with both dev layout
 # (<repo>/worktrees/X) and tap/container layout (dirname(repo)/worktrees/X).
@@ -585,14 +722,14 @@ _deploy_all() {
     _info "[${team}] Processing git root: ${git_root}"
 
     # Enumerate all linked worktrees for this root.
-    # NOTE (XACA-0660 k501-sibling-drift): kb-sync-personas sync-worktrees gained
-    # a parallel loop that ALSO deploys to the nested main git root itself
-    # (e.g. <container>/develop/) when git_root != container. That gap is NOT
-    # replicated here because this script deploys from the tap installation
-    # (~aiteamforge/.../personas/agents/) — a path only available on tap consumer
-    # machines — whereas the nested-main-root deploy in kb-sync-personas reads
-    # from the dev-team master. On tap machines, `kb-sync-personas sync-worktrees`
-    # is the authoritative command for nested-main-root persona deployment.
+    # NOTE (XACA-0660 / XACA-0667 k501-sibling-drift): kb-sync-personas
+    # sync-worktrees also deploys to the nested main git root itself when
+    # git_root != container. That gap IS now replicated here via
+    # _deploy_nested_main_root (XACA-0667), which reads from the tap persona
+    # source (~aiteamforge/.../personas/agents/). The --all backfill mode
+    # enumerates linked worktrees only; startup-time nested-root deploy for
+    # legal/finance/medical runs via deploy_team_personas in
+    # lcars-launch-helpers.sh (which calls --nested-main-root on tap machines).
     wt_paths=()
     first=true
     while IFS= read -r wt_line; do
@@ -1098,6 +1235,7 @@ main() {
   if [ $# -eq 0 ]; then
     printf 'Usage: %s <worktree_path> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s --all <team> [<main_repo_path>] [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+    printf '       %s --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
     printf '       %s selftest\n' "$PROG" >&2
     exit 1
   fi
@@ -1110,6 +1248,35 @@ main() {
   OPT_DRY_RUN=false
   OPT_FORCE=false
   OPT_VERBOSE=false
+
+  # --nested-main-root mode: deploy personas into a nested git repo root
+  # (used by deploy_team_personas fallback in lcars-launch-helpers.sh on
+  # tap-consumer machines where kb-sync-personas is not available).
+  if [ "$1" = "--nested-main-root" ]; then
+    shift
+    if [ $# -lt 2 ]; then
+      printf 'Usage: %s --nested-main-root <project_dir> <team> [--dry-run] [--force] [--verbose]\n' "$PROG" >&2
+      exit 1
+    fi
+    local nmr_project="$1"
+    local nmr_team="$2"
+    shift 2
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --dry-run)  OPT_DRY_RUN=true  ;;
+        --force)    OPT_FORCE=true    ;;
+        --verbose)  OPT_VERBOSE=true  ;;
+        *)
+          _err "Unknown option: $1"
+          exit 1
+          ;;
+      esac
+      shift
+    done
+    export OPT_DRY_RUN OPT_FORCE OPT_VERBOSE
+    _deploy_nested_main_root "$nmr_project" "$nmr_team"
+    return
+  fi
 
   # --all backfill mode: deploy to all existing worktrees
   if [ "$1" = "--all" ]; then
