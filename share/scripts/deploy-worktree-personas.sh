@@ -1197,6 +1197,95 @@ PERSONA
   fi
 
   # -----------------------------------------------------------------------
+  # Test 20: --nested-main-root happy path
+  # Passing the real git repo root deploys personas into <root>/.claude/agents/,
+  # writes .claude/agents/ into .git/info/exclude, and leaves git status clean
+  # (deployed files are untracked, not staged).
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 20: --nested-main-root happy path: files deployed + exclude written + status clean...\n'
+  local nmr_main="${tmp}/nmr-main"
+  mkdir -p "$nmr_main"
+  git -C "$nmr_main" init -q
+  git -C "$nmr_main" commit -q --allow-empty -m "init"
+
+  local t20_out t20_rc=0
+  t20_out=$(AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_nested_main_root "$nmr_main" "testteam" 2>&1) || t20_rc=$?
+
+  local t20_alpha="${nmr_main}/.claude/agents/testteam_alpha_engineer_persona.md"
+  local t20_exclude="${nmr_main}/.git/info/exclude"
+  local t20_status
+  t20_status=$(git -C "$nmr_main" status --porcelain 2>/dev/null) || t20_status=""
+
+  if [ "$t20_rc" -eq 0 ] \
+     && [ -f "$t20_alpha" ] \
+     && grep -qxF ".claude/agents/" "$t20_exclude" 2>/dev/null \
+     && [ -z "$t20_status" ]; then
+    _pass "Test 20 (--nested-main-root happy path: files present + exclude written + status clean)"
+  else
+    _fail "Test 20 — rc=${t20_rc} alpha=$([ -f "$t20_alpha" ] && echo present || echo MISSING) exclude=$(grep -qxF '.claude/agents/' "$t20_exclude" 2>/dev/null && echo present || echo MISSING) status='${t20_status}' out: ${t20_out}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 21: --nested-main-root inside-repo reject
+  # Passing a path that is INSIDE a git repo but NOT the repo root must be
+  # rejected with non-zero exit (traversal / subdirectory safety).
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 21: --nested-main-root rejects path inside repo (not root)...\n'
+  local nmr_subdir="${nmr_main}/subdir"
+  mkdir -p "$nmr_subdir"
+
+  local t21_rc=0
+  AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_nested_main_root "$nmr_subdir" "testteam" 2>/dev/null || t21_rc=$?
+
+  if [ "$t21_rc" -ne 0 ]; then
+    _pass "Test 21 (--nested-main-root rejects subdir-inside-repo, non-zero exit)"
+  else
+    _fail "Test 21 — expected non-zero exit for subdir inside repo, got rc=${t21_rc}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 22: --nested-main-root linked-worktree reject
+  # A linked worktree has a .git FILE not a dir; passing it must be rejected.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 22: --nested-main-root rejects linked worktree (.git FILE)...\n'
+  local nmr_wt="${nmr_main}/worktrees/feature-nmr"
+  mkdir -p "$nmr_wt"
+  git -C "$nmr_main" worktree add -q "$nmr_wt" -b selftest-nmr-wt 2>/dev/null
+
+  local t22_rc=0
+  AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=false OPT_VERBOSE=false \
+    _deploy_nested_main_root "$nmr_wt" "testteam" 2>/dev/null || t22_rc=$?
+
+  if [ "$t22_rc" -ne 0 ]; then
+    _pass "Test 22 (--nested-main-root rejects linked worktree, non-zero exit)"
+  else
+    _fail "Test 22 — expected non-zero exit for linked worktree, got rc=${t22_rc}"
+  fi
+
+  # -----------------------------------------------------------------------
+  # Test 23: --nested-main-root idempotent exclude
+  # Running the deploy twice must NOT duplicate the .claude/agents/ line in
+  # .git/info/exclude — exactly one occurrence after the second run.
+  # -----------------------------------------------------------------------
+  printf '[selftest] Test 23: --nested-main-root idempotent exclude (no duplicate lines)...\n'
+  # nmr_main already has a deployment from Test 20; run again with --force to
+  # exercise the exclude write path a second time.
+  local t23_rc=0
+  AITEAMFORGE_DIR="$fake_aitf" OPT_DRY_RUN=false OPT_FORCE=true OPT_VERBOSE=false \
+    _deploy_nested_main_root "$nmr_main" "testteam" 2>/dev/null || t23_rc=$?
+
+  local t23_count
+  t23_count=$(grep -cxF ".claude/agents/" "${nmr_main}/.git/info/exclude" 2>/dev/null || true)
+
+  if [ "$t23_rc" -eq 0 ] && [ "$t23_count" -eq 1 ]; then
+    _pass "Test 23 (--nested-main-root idempotent exclude: exactly 1 occurrence after 2nd run)"
+  else
+    _fail "Test 23 — rc=${t23_rc} expected 1 occurrence in exclude, got ${t23_count}"
+  fi
+
+  # -----------------------------------------------------------------------
   # Summary
   # -----------------------------------------------------------------------
   printf '\n[selftest] Results: %d/%d passed\n' "$pass" "$total"
