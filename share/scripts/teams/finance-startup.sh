@@ -86,19 +86,10 @@ SESSION_PREFIX="finance-${PROJECT_LOWER}"
 # real config issues with a misleading "unknown team" warning.
 kb_ensure_team_initialized "finance" "$PROJECT_DIR/kanban" || true
 
-# XACA-0666: Ensure this project's personas are deployed into
-# $PROJECT_DIR/.claude/agents. Multi-project personal teams cd into
-# ~/finance/<PROJECTID> — a nested git repo the static persona manifest cannot
-# enumerate — so plain `kb-sync-personas sync` (umbrella target) never reaches
-# it and a session here loads zero personas. The XACA-0660 nested-root deploy in
-# `sync-worktrees` resolves and populates each inner git root. Idempotent:
-# re-runs refresh on master persona changes. Guarded + non-fatal so a missing
-# tool or non-dev host never blocks team startup.
-if [ -x "$HOME/dev-team/scripts/kb-sync-personas" ]; then
-    echo "   Syncing Finance personas into project dir..."
-    "$HOME/dev-team/scripts/kb-sync-personas" sync-worktrees finance >/dev/null 2>&1 \
-        || echo "   ⚠️  Persona sync skipped (non-fatal; run kb-sync-personas sync-worktrees finance)"
-fi
+# XACA-0666: deploy this project's personas into $PROJECT_DIR/.claude/agents.
+# Shared helper in lcars-launch-helpers.sh (sourced above) — see
+# deploy_team_personas for the rationale (nested-git-root project dirs).
+deploy_team_personas finance "Finance"
 
 # Resolve LCARS port from the canonical registry (XACA-0590).
 # resolve_lcars_port reads team-paths.json via kanban-hooks/lcars_ports.py —

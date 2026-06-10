@@ -104,19 +104,10 @@ echo ""
 # instance id; it would fail for any other PROJECTID.
 kb_ensure_team_initialized "legal" "$PROJECT_DIR/kanban" || true
 
-# XACA-0666: Ensure this project's personas are deployed into
-# $PROJECT_DIR/.claude/agents. Multi-project personal teams cd into
-# ~/legal/<PROJECTID> — a nested git repo the static persona manifest cannot
-# enumerate — so plain `kb-sync-personas sync` (umbrella target) never reaches
-# it and a session here loads zero personas. The XACA-0660 nested-root deploy in
-# `sync-worktrees` resolves and populates each inner git root. Idempotent:
-# re-runs refresh on master persona changes. Guarded + non-fatal so a missing
-# tool or non-dev host never blocks team startup.
-if [ -x "$HOME/dev-team/scripts/kb-sync-personas" ]; then
-    echo "   Syncing Legal personas into project dir..."
-    "$HOME/dev-team/scripts/kb-sync-personas" sync-worktrees legal >/dev/null 2>&1 \
-        || echo "   ⚠️  Persona sync skipped (non-fatal; run kb-sync-personas sync-worktrees legal)"
-fi
+# XACA-0666: deploy this project's personas into $PROJECT_DIR/.claude/agents.
+# Shared helper in lcars-launch-helpers.sh (sourced above) — see
+# deploy_team_personas for the rationale (nested-git-root project dirs).
+deploy_team_personas legal "Legal"
 
 # Base terminal names (actual script filenames)
 # LCARS is first - provides the kanban overview

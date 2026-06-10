@@ -562,3 +562,35 @@ resolve_lcars_port() {
     echo "${_result#*:}"
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# deploy_team_personas <team-slug> <Display-Label>
+#
+# Deploy a multi-project personal team's personas into the ACTIVE project dir's
+# .claude/agents at startup. These teams (legal/finance/medical) cd into
+# ~/<team>/<PROJECTID> — a nested git repo the static persona manifest cannot
+# enumerate — so plain `kb-sync-personas sync` (umbrella target) never reaches
+# it and a session there loads zero personas. kb-sync-personas's XACA-0660
+# nested-root deploy (`sync-worktrees`) resolves each inner git root and
+# populates it (kept untracked via the repo's .git/info/exclude). Idempotent:
+# re-runs hash-compare and refresh on master persona changes.
+#
+# Single shared implementation (XACA-0666-001, anti k501 sibling-drift): the
+# legal/finance/medical startup scripts call THIS rather than each carrying a
+# copy of the guard + invocation. kb-sync-personas is dev-team-only (not
+# tap-mirrored); the `[ -x ]` guard makes this a safe no-op on a tap-installed /
+# non-dev host, and the `|| echo` keeps a tool failure from ever aborting team
+# startup (parity with the surrounding `kb_ensure_team_initialized ... || true`).
+# Path resolves via the portable base, same as the rest of this helper.
+# ---------------------------------------------------------------------------
+deploy_team_personas() {
+    local team="${1:?deploy_team_personas: team slug required}"
+    local label="${2:-$team}"
+    local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+    local _sync_tool="${_atf_base}/scripts/kb-sync-personas"
+    if [ -x "$_sync_tool" ]; then
+        echo "   Syncing ${label} personas into project dir..."
+        "$_sync_tool" sync-worktrees "$team" >/dev/null 2>&1 \
+            || echo "   ⚠️  Persona sync skipped (non-fatal; run kb-sync-personas sync-worktrees ${team})"
+    fi
+}
