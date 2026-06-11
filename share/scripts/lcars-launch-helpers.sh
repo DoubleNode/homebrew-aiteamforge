@@ -390,7 +390,12 @@ start_lcars_server() {
             # Test 3: age guard — lockdir mtime > 30s → holder is stuck/zombie.
             # 30s is conservative: the poll window is 15s; a healthy holder completes
             # (success or failure) well within that window.
-            _mtime="$(stat -f %m "${_lock_dir}" 2>/dev/null || echo "0")"
+            # Portable mtime: GNU `stat -c %Y` first (Linux), then BSD `stat -f %m`
+            # (macOS).  GNU-first matters because BSD `stat -f %m` does NOT error on
+            # Linux — `-f` means "filesystem" there and exits 0 with junk, so the
+            # `|| echo 0` fallback would never fire (XACA-0661-008).  macOS stat
+            # rejects `-c` (exit 1) and falls through to the BSD form correctly.
+            _mtime="$(stat -c %Y "${_lock_dir}" 2>/dev/null || stat -f %m "${_lock_dir}" 2>/dev/null || echo "0")"
             _now="$(date +%s)"
             _lock_age=$(( _now - _mtime ))
             if [[ "${_lock_age}" -gt 30 ]]; then
