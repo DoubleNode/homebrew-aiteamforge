@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-06-11
+
 - XACA-0664: Aligned the 3 remaining LaunchAgent installers (`install_cellar_watch_launchagent`, `install_cr_confluence_poller_launchagent`, `install_auto_upgrade_launchagent`) in `libexec/installers/install-kanban.sh` to the XACA-0651-009 load-verify pattern — verify registration via `launchctl list` instead of trusting the `launchctl load` exit code (which returns 0 even when launchd rejects the job). Closes a pre-existing k501 sibling-drift gap: XACA-0651-009 previously aligned install_backup, install_lcars_health, install_lcars_watch, and install_lcars_runatload, but missed these three. Tap-native file — no canonical dev-team mirror; sync-tap.sh not involved. Regression test (`tests/test-xaca-0651-consumer-doctor-gaps.sh`) extended with 3 new static-source assertions (Fix 3e, one per function).
 
 - XACA-0671: Reconcile share/personas/<team>/agents to canonical .claude/agents-master/ (full-file mirror, all 11 teams) + NEW dns/mainevent persona dirs. Realigns stale name: frontmatter that mis-bound @claude_agent on tap machines (EMH medical→emh, Nahla chancellor→nahla, Reno engineering→reno, etc.), stale medical descriptions, and body drift. Going forward sync-tap.sh enforces this mirror (drift gate). avatars/ + prompts/ for dns/mainevent remain absent (separate asset pipeline — follow-up).
@@ -776,7 +778,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.4...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.1...v0.13.2
