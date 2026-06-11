@@ -757,6 +757,43 @@ resolve_lcars_port() {
 }
 
 # ---------------------------------------------------------------------------
+# resolve_lcars_port_fallback <cksum_input> <base> <range>
+#
+# Deterministic legacy port derivation for the case where resolve_lcars_port
+# fails (prefix absent from the canonical registry). Echoes
+# `base + (cksum(input) % range)` on stdout.
+#
+# Extracted (XACA-0672) from THREE hand-duplicated copies in dns-startup.sh /
+# dns-connect.sh / dns-disconnect.sh, each of which inlined
+#   8180 + $(echo "dns-framework" | cksum | cut -d' ' -f1) % 20
+# with a comment begging callers to keep them byte-identical — a textbook
+# k501 sibling-drift hazard (one edit and the bands silently diverge). One
+# source of truth now guarantees the three callers always agree.
+#
+# IMPORTANT — newline sensitivity: cksum is the POSIX CRC checksum of its
+# INPUT BYTES. The legacy form piped `echo "$input"` (which appends a trailing
+# newline) into cksum; dropping that newline (e.g. printf '%s') changes the CRC
+# and shifts the port (dns-framework: 8180 → 8192). We deliberately keep the
+# `echo "$input"` form so the value is byte-for-byte identical to the historical
+# behaviour and existing deployments are unchanged. The resolver test asserts
+# resolve_lcars_port_fallback "dns-framework" 8180 20 == 8180.
+#
+# Usage (DNS callers):
+#   LCARS_PORT="$(resolve_lcars_port "dns")" || \
+#     LCARS_PORT="$(resolve_lcars_port_fallback "dns-framework" 8180 20)"
+# ---------------------------------------------------------------------------
+resolve_lcars_port_fallback() {
+    local input="${1:?resolve_lcars_port_fallback: cksum input is required}"
+    local base="${2:?resolve_lcars_port_fallback: base port is required}"
+    local range="${3:?resolve_lcars_port_fallback: range is required}"
+    local _hash
+    # Preserve the legacy `echo` (trailing-newline) semantics — see header note.
+    _hash="$(echo "$input" | cksum | cut -d' ' -f1)"
+    echo "$(( base + _hash % range ))"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # deploy_team_personas <team-slug> <Display-Label> [<project-dir>]
 #
 # Deploy a multi-project personal team's personas into the project dir's
