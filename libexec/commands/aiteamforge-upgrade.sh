@@ -575,6 +575,28 @@ update_team_scripts() {
 #     cellar-watch-trigger.sh, deploy-worktree-personas.sh) — update_aux_scripts
 #     owns those. One owner per file (no double-refresh). The exclusion set is
 #     DERIVED from _xaca0608_aux_script_map so it can never drift from the map.
+# XACA-0673: Mandatory shared modules that other ALREADY-INSTALLED cockpit
+# scripts import/source. update_runtime_helpers MUST materialise these on upgrade
+# even when the working-dir target is ABSENT — otherwise a machine that upgrades
+# ACROSS the release introducing the dependency gets the importer but never the
+# module, breaking the cockpit. Originating incident: iterm2_venv_bootstrap.py
+# (added by XACA-0652, imported by iterm-browser.py / iterm2_window_manager.py /
+# iterm2_tab_title_prefix.py). The absent-target skip below left upgraded M4Mini
+# machines with the refreshed `import iterm2_venv_bootstrap` line in
+# iterm-browser.py but no module on disk, so `import iterm2` failed and the LCARS
+# web tab never created.
+#
+# Keep this set MINIMAL: only genuine always-required shared deps that (a) ship in
+# share/scripts/ and (b) are imported/sourced by another shipped script. The
+# XACA-0673 parity test auto-detects sibling Python imports and FAILS if a newly
+# shipped imported module is missing from this set — so it cannot silently drift.
+# Newline-delimited basenames; exact-line membership test.
+_xaca0673_mandatory_materialize_basenames() {
+  cat <<'EOF'
+iterm2_venv_bootstrap.py
+EOF
+}
+
 update_runtime_helpers() {
   print_section "Updating Runtime Helper Scripts"
 
@@ -609,8 +631,15 @@ update_runtime_helpers() {
       *$'\n'"${name}"$'\n'*) continue ;;
     esac
 
-    # Refresh only what this machine already installed under scripts/.
-    [ -f "$target" ] || continue
+    # Refresh only what this machine already installed under scripts/ — EXCEPT
+    # mandatory shared modules, which must be materialised even when absent
+    # (XACA-0673; see _xaca0673_mandatory_materialize_basenames above).
+    if [ ! -f "$target" ]; then
+      case $'\n'"$(_xaca0673_mandatory_materialize_basenames)"$'\n' in
+        *$'\n'"${name}"$'\n'*) : ;;   # mandatory shared module — materialise it
+        *) continue ;;                 # optional/layout-specific — skip if absent
+      esac
+    fi
 
     print_info "Updating scripts/${name}..."
     if [ "$DRY_RUN" = false ]; then
