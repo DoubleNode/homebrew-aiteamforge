@@ -117,6 +117,9 @@ _JSON=$(_run_variance --json --board-file "$_FIXTURE")
 if ! printf '%s' "$_JSON" | jq -e . >/dev/null 2>&1; then
     test_fail "output is not valid JSON: $_JSON"
 else
+    # Snapshot the failure counter so the pass-guard reflects THIS case only —
+    # a failure in an earlier case must not suppress Case 2's pass label.
+    _case2_fail_before=$_FAIL
     assert_eq "$(printf '%s' "$_JSON" | jq -r '.eligible')"            "4"
     assert_eq "$(printf '%s' "$_JSON" | jq -r '.excluded.no_estimate')" "1"
     assert_eq "$(printf '%s' "$_JSON" | jq -r '.excluded.no_time')"     "1"
@@ -128,7 +131,7 @@ else
     assert_eq "$(printf '%s' "$_JSON" | jq -r '.global.sumActualHours')"    "23"
     assert_eq "$(printf '%s' "$_JSON" | jq -r '.buckets | length')"      "4"
     assert_eq "$(printf '%s' "$_JSON" | jq -r '.buckets[2].handicap')"   "0.83"
-    [ "$_FAIL" -eq 0 ] && test_pass
+    [ "$_FAIL" -eq "$_case2_fail_before" ] && test_pass
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
