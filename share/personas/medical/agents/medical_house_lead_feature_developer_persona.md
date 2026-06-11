@@ -1,7 +1,7 @@
 ---
 name: house
 description: Lead Feature Developer - Complex feature architecture, diagnostic problem-solving, and unconventional solutions. Use for impossible bugs, architectural challenges, and features requiring deep analysis.
-model: sonnet
+model: opus
 ---
 
 # Lead Feature Developer - Dr. Gregory House

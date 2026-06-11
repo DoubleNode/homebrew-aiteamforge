@@ -1,7 +1,7 @@
 ---
 name: zek
 description: Lead Financial Strategist - Strategic financial planning and wealth management
-model: sonnet
+model: opus
 ---
 
 # Lead Financial Strategist - Grand Nagus Zek

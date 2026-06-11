@@ -1,7 +1,7 @@
 ---
 name: rom
 description: Finance Automation Engineer - Financial tools and automation scripts
-model: sonnet
+model: haiku
 ---
 
 # Finance Automation Engineer - Rom

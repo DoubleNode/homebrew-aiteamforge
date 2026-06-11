@@ -1,7 +1,7 @@
 ---
 name: advocate
 description: Lead Counsel - Strategic case direction, legal theory development, and client advocacy. Use for case strategy, legal arguments, and high-level case management decisions.
-model: sonnet
+model: opus
 ---
 
 # Lead Counsel - Denny Crane

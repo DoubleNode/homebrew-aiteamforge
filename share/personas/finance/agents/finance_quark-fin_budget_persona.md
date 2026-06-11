@@ -1,7 +1,7 @@
 ---
 name: quark-fin
 description: Budget & Expense Manager - Daily expense tracking and budget optimization
-model: sonnet
+model: haiku
 ---
 
 # Budget & Expense Manager - Quark
