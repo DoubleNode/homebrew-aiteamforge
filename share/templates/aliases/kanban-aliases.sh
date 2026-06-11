@@ -1398,6 +1398,346 @@ with open(sys.argv[10], "w") as f:
     echo "  To restore (if needed): mv '$dest_file' '$stub_path'"
 }
 
+# kb-variance — XACA-0630 estimate-vs-actual handicap analytics reporter
+# (ported to the tap aliases template in XACA-0632 so installed-tap users have
+#  the CLI alongside the LCARS variance panel).
+#
+# Usage: kb-variance [--json] [--board-file <path>] [-h|--help]
+#
+# Default output: human-readable table with global weighted handicap, global
+# median, excluded tallies, and per-bucket rows.
+#
+# --json: emit only the canonical §7 payload to stdout (pipe to jq . to
+#         pretty-print or diff against the server).
+#
+# --board-file <path>: override the default board file (useful for testing
+#                      against a synthetic fixture; default resolves via the
+#                      current team context exactly like other kb-* reporters).
+#
+# PARITY NOTE (XACA-0632): the jq payload + table below are kept byte-identical
+# to the canonical kb-variance in dev `kanban-helpers.sh`. The ONLY tap-side
+# adaptations are the two helper calls — _kb_check_jq (vs _kb_ensure_jq) and
+# the _kb_get_team/_kb_get_board_file board resolution (vs _kb_detect_context).
+# Keep both copies in lock-step; test_xaca0630_parity.py guards the --json shape.
+kb-variance() {
+    _kb_check_jq || return 1
+
+    # Parse arguments — declare all locals before any loop (zsh local-in-loop
+    # stdout-leak rule: never declare a reassigned `local` inside a loop).
+    local emit_json=0
+    local board_file_override=""
+    local show_help=0
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --json)            emit_json=1; shift ;;
+            --board-file)
+                if [[ -z "${2-}" ]]; then
+                    echo "Error: --board-file requires a path argument" >&2
+                    return 2
+                fi
+                board_file_override="${2}"; shift 2
+                ;;
+            -h|--help)         show_help=1; shift ;;
+            *)
+                echo "Unknown argument: ${1-}" >&2
+                echo "Usage: kb-variance [--json] [--board-file <path>] [-h|--help]" >&2
+                return 2
+                ;;
+        esac
+    done
+
+    if [[ "$show_help" -eq 1 ]]; then
+        cat <<'USAGE'
+kb-variance — Estimate-vs-actual handicap analytics (XACA-0630)
+
+Usage: kb-variance [--json] [--board-file <path>] [-h|--help]
+
+Options:
+  --json              Emit the canonical §7 JSON payload to stdout only.
+                      Suitable for piping to jq or diffing against the server.
+  --board-file <path> Override the board file (default: team board via context).
+  -h, --help          Show this help.
+
+Output (default human mode):
+  Global weighted handicap + median, excluded item tallies, and a row per
+  size bucket (<=1h, 1-4h, 4-8h, >8h) with count, handicap, median, and
+  estimated/actual hour sums.
+
+  "handicap > 1.0" means work consistently takes longer than estimated.
+  "handicap < 1.0" means we tend to overestimate effort.
+
+Empty state: when no eligible (completed + both fields set) items exist,
+  human mode prints "Not enough tracked data yet"; --json emits the §7.3
+  null-filled payload.
+USAGE
+        return 0
+    fi
+
+    # ── Resolve board file ──────────────────────────────────────────────────
+    local board_file
+    if [[ -n "$board_file_override" ]]; then
+        board_file="$board_file_override"
+    else
+        local team
+        team=$(_kb_get_team)
+        board_file=$(_kb_get_board_file "$team")
+    fi
+
+    if [[ ! -f "$board_file" ]]; then
+        echo "Error: board file not found: $board_file" >&2
+        return 1
+    fi
+
+    # ── Derive team slug for the payload ───────────────────────────────────
+    # Extract from filename: <dir>/<team>-board.json → <team>
+    local team_slug
+    team_slug=$(basename "$board_file" "-board.json")
+
+    # ── Compute payload via jq ─────────────────────────────────────────────
+    # All math at full float precision; rounding to 2dp only at the final
+    # output stage.  Uses round() which is "round half away from zero" for
+    # positive values — matches spec §6 exactly.
+    #
+    # jq != filter avoidance: never use != in jq expressions called from the
+    #   aliases template; use == with swapped if/else branches.
+    #
+    # Eligibility (spec §2):
+    #   status == "completed"
+    #   AND points != null AND (points|type)=="number" AND points > 0
+    #   AND timeWorkedMs != null AND (timeWorkedMs|type)=="number" AND timeWorkedMs > 0
+    #
+    # Exclusion buckets (only for status=="completed" items):
+    #   no_estimate:  timeWorkedMs > 0 AND (points is null/missing/<= 0)
+    #   no_time:      points > 0       AND (timeWorkedMs is null/missing/<= 0)
+    #   both_missing: both absent/null/<= 0
+    #
+    # Non-completed items are silently ignored (not counted in any exclusion bucket).
+    #
+    # Median (spec §4.2): sort ratios asc; odd n → middle; even n → mean of two middles.
+
+    local now_utc
+    now_utc=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
+
+    # ── Single-pass jq: full §7 payload ────────────────────────────────────
+    local payload
+    payload=$(jq \
+        --arg team "$team_slug" \
+        --arg generated_at "$now_utc" \
+        '
+        # ── helpers ─────────────────────────────────────────────────────────
+        # round2: "round half to even" (banker'"'"'s rounding) matching Python
+        # round(x, 2) semantics — the spec §6 example 1.125 → 1.12 proves this.
+        # Algorithm: scale by 100, compute floor; if fractional part is exactly
+        # 0.5 round to even (floor if floor is even, floor+1 if floor is odd);
+        # otherwise standard round-half-away-from-zero.
+        def round2:
+            . * 100 as $s |
+            ($s | floor) as $f |
+            ($s - $f) as $frac |
+            if $frac < 0.5 then $f / 100
+            elif $frac > 0.5 then ($f + 1) / 100
+            else
+                if (($f % 2) == 0) then $f / 100
+                else ($f + 1) / 100
+                end
+            end;
+
+        def sort_and_median:
+            sort as $s |
+            length as $n |
+            if $n == 0 then null
+            elif (($n % 2) == 1) then $s[($n / 2 | floor)]
+            else ($s[($n / 2) - 1] + $s[$n / 2]) / 2
+            end;
+
+        def is_pos_num: (. != null) and ((. | type) == "number") and (. > 0);
+
+        # ── collect completed top-level items ────────────────────────────────
+        [ .backlog[] ] as $all_items |
+        [ $all_items[] | select(.status == "completed") ] as $completed |
+
+        # ── eligible: completed + points>0 + timeWorkedMs>0 ─────────────────
+        [ $completed[] | select((.points | is_pos_num) and (.timeWorkedMs | is_pos_num)) ] as $eligible |
+
+        # ── exclusion counts ─────────────────────────────────────────────────
+        ($completed | map(
+            select(
+                ((.points | is_pos_num) | not) and
+                (.timeWorkedMs | is_pos_num)
+            )
+        ) | length) as $excl_no_estimate |
+
+        ($completed | map(
+            select(
+                (.points | is_pos_num) and
+                ((.timeWorkedMs | is_pos_num) | not)
+            )
+        ) | length) as $excl_no_time |
+
+        ($completed | map(
+            select(
+                ((.points | is_pos_num) | not) and
+                ((.timeWorkedMs | is_pos_num) | not)
+            )
+        ) | length) as $excl_both_missing |
+
+        # ── global aggregates ────────────────────────────────────────────────
+        ($eligible | length) as $n_eligible |
+        ($eligible | map(.points) | add // 0) as $sum_est |
+        ($eligible | map(.timeWorkedMs / 3600000) | add // 0) as $sum_act |
+        ([ $eligible[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median) as $global_median_raw |
+
+        # ── build payload ────────────────────────────────────────────────────
+        {
+            generatedAt: $generated_at,
+            team: $team,
+            eligible: $n_eligible,
+            excluded: {
+                no_estimate:  $excl_no_estimate,
+                no_time:      $excl_no_time,
+                both_missing: $excl_both_missing,
+                total:        ($excl_no_estimate + $excl_no_time + $excl_both_missing)
+            },
+            global: {
+                handicap:          (if $n_eligible == 0 then null else ($sum_act / $sum_est) | round2 end),
+                median:            (if $n_eligible == 0 then null else $global_median_raw | round2 end),
+                sumEstimatedHours: ($sum_est | round2),
+                sumActualHours:    ($sum_act | round2)
+            },
+            buckets: [
+                # Bucket 0: <=1h  (points > 0 and points <= 1)
+                (
+                    [ $eligible[] | select(.points > 0 and .points <= 1) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: "<=1h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                ),
+                # Bucket 1: 1-4h  (points > 1 and points <= 4)
+                (
+                    [ $eligible[] | select(.points > 1 and .points <= 4) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: "1-4h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                ),
+                # Bucket 2: 4-8h  (points > 4 and points <= 8)
+                (
+                    [ $eligible[] | select(.points > 4 and .points <= 8) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: "4-8h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                ),
+                # Bucket 3: >8h   (points > 8)
+                (
+                    [ $eligible[] | select(.points > 8) ] as $b |
+                    ($b | length) as $bn |
+                    ($b | map(.points) | add // 0) as $be |
+                    ($b | map(.timeWorkedMs / 3600000) | add // 0) as $ba |
+                    {
+                        label: ">8h", n: $bn,
+                        handicap:          (if $bn == 0 then null else ($ba / $be) | round2 end),
+                        median:            (if $bn == 0 then null else [ $b[] | (.timeWorkedMs / 3600000) / .points ] | sort_and_median | round2 end),
+                        sumEstimatedHours: ($be | round2),
+                        sumActualHours:    ($ba | round2)
+                    }
+                )
+            ]
+        }
+        ' "$board_file" 2>&1)
+
+    local jq_exit=$?
+    if [[ $jq_exit -ne 0 ]]; then
+        echo "Error: jq failed to parse board file: $board_file" >&2
+        echo "$payload" >&2
+        return 1
+    fi
+
+    # ── Emit ────────────────────────────────────────────────────────────────
+    if [[ "$emit_json" -eq 1 ]]; then
+        # --json mode: emit ONLY the payload, nothing else
+        printf '%s\n' "$payload"
+        return 0
+    fi
+
+    # ── Human-readable table ─────────────────────────────────────────────────
+    local n_eligible
+    n_eligible=$(printf '%s\n' "$payload" | jq -r '.eligible')
+
+    if [[ "$n_eligible" -eq 0 ]]; then
+        local team_display excl_total
+        team_display=$(printf '%s\n' "$payload" | jq -r '.team')
+        excl_total=$(printf '%s\n' "$payload" | jq -r '.excluded.total')
+        echo "kb-variance: Not enough tracked data yet (team: ${team_display})"
+        echo "─────────────────────────────────────────────────────────────"
+        echo "  No eligible items found — an item is eligible when it is"
+        echo "  completed AND has both an estimate (points) and tracked time."
+        if [[ "$excl_total" -gt 0 ]]; then
+            local ne nt bm
+            ne=$(printf '%s\n' "$payload" | jq -r '.excluded.no_estimate')
+            nt=$(printf '%s\n' "$payload" | jq -r '.excluded.no_time')
+            bm=$(printf '%s\n' "$payload" | jq -r '.excluded.both_missing')
+            echo ""
+            echo "  Completed items excluded ($excl_total total):"
+            echo "    no estimate (points missing):  $ne"
+            echo "    no time tracked:               $nt"
+            echo "    both missing:                  $bm"
+        fi
+        echo ""
+        echo "  Items become eligible as they are completed with both"
+        echo "  kb-backlog points <id> <hours> AND active time tracking."
+        return 0
+    fi
+
+    # Populated state — print the table
+    printf '%s\n' "$payload" | jq -r '
+        "kb-variance: Estimate-vs-Actual Handicap  (team: \(.team))",
+        "═══════════════════════════════════════════════════════",
+        "  Eligible items: \(.eligible)",
+        "  Excluded: no_estimate=\(.excluded.no_estimate)  no_time=\(.excluded.no_time)  both_missing=\(.excluded.both_missing)  total=\(.excluded.total)",
+        "",
+        "  Global weighted handicap : \(.global.handicap)    (>1.0 = under-estimated)",
+        "  Global median ratio      : \(.global.median)",
+        "  Sum estimated hours      : \(.global.sumEstimatedHours)h",
+        "  Sum actual hours         : \(.global.sumActualHours)h",
+        "",
+        "  ─── Per-bucket breakdown ────────────────────────────────",
+        ([ "Bucket", "n", "Handicap", "Median", "Est hrs", "Act hrs" ] | @tsv),
+        "  ─────────────────────────────────────────────────────────",
+        (.buckets[] |
+            [
+                .label,
+                (.n | tostring),
+                (if .handicap == null then "—" else (.handicap | tostring) end),
+                (if .median == null   then "—" else (.median   | tostring) end),
+                (.sumEstimatedHours | tostring) + "h",
+                (.sumActualHours    | tostring) + "h"
+            ] | @tsv
+        ),
+        "  ─────────────────────────────────────────────────────────"
+    '
+}
+
 # Show detailed help for all kanban commands
 kb-help() {
     echo ""
@@ -1427,6 +1767,9 @@ kb-help() {
     echo "  kb-set-worktree                 Set current item from branch name"
     echo "  kb-current                      Show current item details"
     echo "  kb-clear                        Clear current item"
+    echo ""
+    echo "Reporting / Analytics:"
+    echo "  kb-variance [--json]            Estimate-vs-actual handicap report"
     echo ""
     echo "Utility:"
     echo "  kb-team [name]                  Show or switch team"
