@@ -299,6 +299,143 @@ start_lcars_server() {
     local _atf_base="${AITEAMFORGE_DIR:-$HOME/dev-team}"
     local lcars_ui_dir="${LCARS_UI_DIR:-${_atf_base}/lcars-ui}"
 
+    # -------------------------------------------------------------------------
+    # XACA-0661 (007): Per-port startup lock — serialize concurrent invocations.
+    #
+    # ROOT CAUSE: pkill -f "server.py.*<PORT>" runs UNCONDITIONALLY near the top
+    # of every start_lcars_server call.  If two invocations race (two terminals,
+    # tmux re-attach, upgrade re-running startup), the SECOND call's pkill sends
+    # SIGTERM (status 143) to the FIRST call's freshly-launched, still-warming-up
+    # server — killing it before or just after /api/status 200.
+    #
+    # FIX: a per-port advisory lock using `mkdir` (POSIX-atomic on macOS and
+    # Linux under both bash 3.2 and zsh).  The lock is scoped to the PORT (not
+    # the team name) because pkill targets a port; two different teams on
+    # different ports must not block each other.
+    #
+    # LOCK PRIMITIVE — WHY mkdir, NOT noclobber redirect:
+    #   `(set -C; echo $$ > file)` is also atomic, but `set -C` is a shell option
+    #   that interacts with `set -u` and zsh's noclobber differently across
+    #   versions; the interaction has caused silent failures before
+    #   (feedback_removing_guard_unmasks_empty_array_set_u).  `mkdir` is a single
+    #   syscall with no shell-option dependency and is universally supported.
+    #
+    # LOCK DIRECTORY: /tmp/lcars-start-lock-<PORT>
+    #   Holds one file: "pid" containing the holder's PID.
+    #
+    # STALE-LOCK POLICY (the hard part):
+    #   A crashed or killed prior holder must not deadlock all future starts.
+    #   After mkdir fails, we read the PID from $lockdir/pid and apply two tests:
+    #     1. Liveness:  kill -0 $holder_pid fails → holder is dead → reclaim now.
+    #     2. Age:       lockdir mtime > 30s old → holder is stuck/zombie → reclaim.
+    #        30s is generous: the poll window is 15s; a legitimate holder should
+    #        always complete (success or failure) within that window.
+    #   If the holder is alive AND recent, we wait up to 20s (40 × 0.5s), re-
+    #   checking each half-second.  After 20s we reclaim anyway and proceed.
+    #
+    # SHORT-CIRCUIT — healthy server already up:
+    #   After acquiring the lock (immediately or after waiting), we check whether
+    #   a server is ALREADY answering /api/status on this port.  If so, a prior
+    #   invocation completed successfully while we were waiting; we skip the
+    #   pkill+relaunch entirely and return 0.  This is the most common outcome
+    #   when two sessions start the same team concurrently — the second one
+    #   arrives after the first has fully started.
+    #
+    # RELEASE PATHS — guaranteed via RETURN trap:
+    #   A `trap ... RETURN` inside a shell function fires on every exit path
+    #   (return 0, return 1, and implicit fall-through).  We set this trap
+    #   immediately after acquiring the lock and clear it when we deliberately
+    #   release (to avoid a double-remove on normal exit if the trap fires after
+    #   our explicit rm already ran).  All five named return points below (①②③④⑤)
+    #   are covered.
+    # -------------------------------------------------------------------------
+    local _lock_dir="/tmp/lcars-start-lock-${port}"
+
+    # Lock-release helper: called before every return in this function.
+    # Defined as a named function (not an inner function) because zsh does not
+    # support `trap ... RETURN` inside a function — that pseudo-signal is a bash
+    # extension (feedback confirmed by: zsh -c 'f(){trap ":" RETURN};f' emitting
+    # "undefined signal: RETURN").  Explicit call on each of the five exit paths
+    # below is the portable alternative.  rm -rf on a non-existent dir is a
+    # silent no-op, so double-release is harmless.
+    _lcars_start_lock_release() { rm -rf "${_lock_dir}" 2>/dev/null || true; }
+
+    # Attempt atomic acquire (mkdir is a single atomic syscall on macOS and
+    # Linux under both bash 3.2 and zsh — no shell option dependencies).
+    if ! mkdir "${_lock_dir}" 2>/dev/null; then
+        # Lock is held by another invocation.  Apply stale-lock tests, then wait.
+        local _holder_pid=""
+        _holder_pid="$(cat "${_lock_dir}/pid" 2>/dev/null || true)"
+
+        local _waited=0
+        local _reclaimed=0
+        # Declare age-check variables before the loop (zsh emits "VAR=value" to
+        # stdout on the 2nd+ iteration of `local VAR=...` inside a loop —
+        # feedback_zsh-local-in-loop-gotcha).
+        local _mtime _now _lock_age
+        while true; do
+            # Test 1: lock directory gone — holder released while we were polling.
+            if [[ ! -d "${_lock_dir}" ]]; then
+                break
+            fi
+
+            # Test 2: holder liveness — kill -0 fails → process is dead → stale lock.
+            if [[ -n "${_holder_pid}" ]] && ! kill -0 "${_holder_pid}" 2>/dev/null; then
+                echo "    ⚠️  start_lcars_server: stale lock on port ${port} (pid ${_holder_pid} dead) — reclaiming." >&2
+                rm -rf "${_lock_dir}" 2>/dev/null || true
+                _reclaimed=1
+                break
+            fi
+
+            # Test 3: age guard — lockdir mtime > 30s → holder is stuck/zombie.
+            # 30s is conservative: the poll window is 15s; a healthy holder completes
+            # (success or failure) well within that window.
+            _mtime="$(stat -f %m "${_lock_dir}" 2>/dev/null || echo "0")"
+            _now="$(date +%s)"
+            _lock_age=$(( _now - _mtime ))
+            if [[ "${_lock_age}" -gt 30 ]]; then
+                echo "    ⚠️  start_lcars_server: lock on port ${port} is ${_lock_age}s old (pid ${_holder_pid:-?} may be stuck) — reclaiming." >&2
+                rm -rf "${_lock_dir}" 2>/dev/null || true
+                _reclaimed=1
+                break
+            fi
+
+            # Live, recent holder — wait 0.5s and try again (up to 20s total).
+            if [[ "${_waited}" -eq 0 ]]; then
+                echo "    ⏳ start_lcars_server: port ${port} is being started by pid ${_holder_pid:-?} — waiting up to 20s..." >&2
+            fi
+            sleep 0.5
+            _waited=$(( _waited + 1 ))
+            if [[ "${_waited}" -ge 40 ]]; then
+                echo "    ⚠️  start_lcars_server: waited 20s for lock on port ${port} — reclaiming to prevent deadlock." >&2
+                rm -rf "${_lock_dir}" 2>/dev/null || true
+                _reclaimed=1
+                break
+            fi
+        done
+
+        # After waiting/reclaiming, try to acquire the lock.
+        if ! mkdir "${_lock_dir}" 2>/dev/null; then
+            # Extremely rare: another process raced us after our reclaim.
+            # Proceed without a lock — better to attempt a start than deadlock.
+            echo "    ⚠️  start_lcars_server: could not re-acquire lock on port ${port} after reclaim — proceeding unlocked." >&2
+        else
+            echo "${$}" > "${_lock_dir}/pid" 2>/dev/null || true
+
+            # SHORT-CIRCUIT: if another starter finished while we waited, a healthy
+            # server may already be up.  Skip pkill+relaunch if so.
+            if [[ "${_waited}" -gt 0 || "${_reclaimed}" -eq 1 ]]; then
+                if curl -s --max-time 1 "http://localhost:${port}/api/status" >/dev/null 2>&1; then
+                    echo "    ✅ LCARS server already up on port ${port} (started while we waited)" >&2
+                    _lcars_start_lock_release
+                    return 0  # ① short-circuit: concurrent starter finished cleanly
+                fi
+            fi
+        fi
+    else
+        echo "${$}" > "${_lock_dir}/pid" 2>/dev/null || true
+    fi
+
     # XACA-0626: startup-time port drift guard.
     # Must run BEFORE the server binds so the .port file is correct before any
     # connect script reads it. Soft-fail: guard never aborts startup.
@@ -311,7 +448,20 @@ start_lcars_server() {
     # Kill any stale server process on this port. Stale processes are normal
     # (previous session crash, leftover from a prior startup). Errors here are
     # expected when nothing is running; suppress them.
-    pkill -f "server.py.*${port}" 2>/dev/null
+    #
+    # XACA-0661 (005): anchor the port at a word boundary (space before, end-of-
+    # cmdline or non-digit after) to prevent a broader-than-intended match.
+    # The server is always launched as:  python3 server.py <PORT>
+    # so the port is the last argument.  Using "[[:space:]]${port}([[:space:]]|$)"
+    # avoids matching e.g. "server.py 83200" when port=8320.  No registered team
+    # port is a numeric prefix of another, so this is defence-in-depth rather than
+    # a fix to a live cross-team kill, but it closes the window should ports change.
+    #
+    # XACA-0661 (007): This pkill now runs UNDER the per-port lock above, so two
+    # concurrent starts for the same port cannot interleave their pkill+launch
+    # cycles and SIGTERM each other's freshly-started server.
+    pkill -f "server\.py[[:space:]].*[[:space:]]${port}([[:space:]]|$)" 2>/dev/null || \
+        pkill -f "server\.py[[:space:]]${port}([[:space:]]|$)" 2>/dev/null || true
 
     # XACA-0486 / XACA-0562 / XACA-0563 / XACA-0614: Resolve the python that has
     # the LCARS runtime imports (pyzipper, requests, etc. from share/requirements.txt).
@@ -331,8 +481,24 @@ start_lcars_server() {
     mkdir -p "${_log_dir}" 2>/dev/null
     local _server_log="${_log_dir}/lcars-server-${team}.log"
 
-    # Cap unbounded log growth: roll to a single .old backup past ~256KB.
-    if [[ -f "${_server_log}" ]] && (( $(wc -c < "${_server_log}" 2>/dev/null || echo 0) > 262144 )); then
+    # XACA-0661: Roll the per-team log at the START of every server-start invocation.
+    #
+    # WHY: server.py stderr is APPENDED (2>>) to the same log file across restarts.
+    # A size-only cap (the prior behavior) left any small log — even one carrying an
+    # old FATAL from a prior incident — intact across restarts.  The three failure-
+    # path tail calls at the bottom of this function then resurfaced those stale
+    # lines, making an unrelated historical FATAL masquerade as the current failure.
+    #
+    # FIX: unconditionally rotate the log before each launch.
+    #   - If a log exists (even tiny), back it up to .old before truncating so a
+    #     genuine just-crashed log from the immediately-preceding run is not lost.
+    #   - After rotation, the log file starts fresh; every tail only shows current-
+    #     start stderr.
+    #   - The old size-based cap is preserved inside the rotation: if the outgoing
+    #     log is already over 256 KB it is still moved to .old (same as before); a
+    #     smaller log is also moved to .old so it is not silently discarded.
+    #   - Only one .old backup is kept (mv -f overwrites any prior .old).
+    if [[ -f "${_server_log}" ]]; then
         mv -f "${_server_log}" "${_server_log}.old" 2>/dev/null || true
     fi
 
@@ -397,20 +563,41 @@ start_lcars_server() {
             sleep 0.3
             if ! kill -0 "${_server_pid}" 2>/dev/null; then
                 wait "${_server_pid}" 2>/dev/null; local _rc=$?
-                echo "    ❌ LCARS server for team '${team}' on port ${port} responded once then exited (status ${_rc}) — startup-script SIGHUP suspected." >&2
+                # XACA-0661 (005): status 143 = 128+15 = SIGTERM (not SIGHUP=129).
+                # The most likely cause of SIGTERM here is a concurrent or re-entrant
+                # startup invocation whose pkill targeted the same port, killing this
+                # freshly-launched server before or just after it answered /api/status.
+                # SIGHUP (129) would indicate the nohup/disown protection failed.
+                local _reason="startup-script SIGHUP suspected"
+                if [[ "${_rc}" -eq 143 ]]; then
+                    _reason="SIGTERM received (likely: concurrent startup re-entrancy — another legal/team startup script ran pkill on this port while this server was starting)"
+                elif [[ "${_rc}" -eq 129 ]]; then
+                    _reason="SIGHUP received — nohup/disown protection may have failed (XACA-0652 regression)"
+                fi
+                echo "    ❌ LCARS server for team '${team}' on port ${port} responded once then exited (status ${_rc}) — ${_reason}." >&2
                 echo "       Last lines of ${_server_log}:" >&2
                 tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
-                return 1
+                _lcars_start_lock_release
+                return 1  # ② momentary-truth / post-200 death
             fi
             echo "    ✅ LCARS server ready on port ${port} (pid ${_server_pid})"
-            return 0
+            _lcars_start_lock_release
+            return 0  # ③ success — server is up and healthy
         fi
         if ! kill -0 "${_server_pid}" 2>/dev/null; then
             wait "${_server_pid}" 2>/dev/null; local _rc=$?
-            echo "    ❌ LCARS server for team '${team}' on port ${port} exited (status ${_rc}) before becoming ready." >&2
+            # XACA-0661 (005): decode the exit status for actionable diagnostics.
+            local _reason2="server crashed or was killed"
+            if [[ "${_rc}" -eq 143 ]]; then
+                _reason2="SIGTERM received (likely: concurrent startup re-entrancy — another startup script ran pkill on port ${port})"
+            elif [[ "${_rc}" -eq 129 ]]; then
+                _reason2="SIGHUP received — nohup/disown protection may have failed (XACA-0652 regression)"
+            fi
+            echo "    ❌ LCARS server for team '${team}' on port ${port} exited (status ${_rc}) before becoming ready — ${_reason2}." >&2
             echo "       Last lines of ${_server_log}:" >&2
             tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
-            return 1
+            _lcars_start_lock_release
+            return 1  # ④ crashed before answering /api/status
         fi
         sleep 0.5
     done
@@ -421,7 +608,8 @@ start_lcars_server() {
     echo "    ⚠️  LCARS server for team '${team}' on port ${port} did not become ready within 15s (process still running, pid ${_server_pid})." >&2
     echo "       Recent ${_server_log}:" >&2
     tail -n 15 "${_server_log}" 2>/dev/null | sed 's/^/         /' >&2
-    return 1
+    _lcars_start_lock_release
+    return 1  # ⑤ timeout — process alive but not answering
 }
 
 # ---------------------------------------------------------------------------
