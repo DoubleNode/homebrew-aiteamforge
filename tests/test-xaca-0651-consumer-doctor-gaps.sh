@@ -543,6 +543,44 @@ fi
 test_pass
 
 # ════════════════════════════════════════════════════════════════════════════
+# Fix 3e (XACA-0664): Remaining 3 LaunchAgent installers aligned to XACA-0651-009
+# load-verify pattern (cellar-watch, cr-confluence-poller, auto-upgrade).
+# Previously these used `if launchctl load "$plist_dest"; then ...` which
+# returns 0 even when launchd rejects the job. Each must now use || true and
+# verify via launchctl list.
+# ════════════════════════════════════════════════════════════════════════════
+_CELLAR_WATCH_FUNC="$(awk '/^install_cellar_watch_launchagent\(\)/,/^}$/' "$INSTALLER")"
+_CR_POLLER_FUNC="$(awk '/^install_cr_confluence_poller_launchagent\(\)/,/^}$/' "$INSTALLER")"
+_AUTO_UPGRADE_FUNC="$(awk '/^install_auto_upgrade_launchagent\(\)/,/^}$/' "$INSTALLER")"
+
+test_start "Fix 3e (XACA-0664 sibling): install_cellar_watch_launchagent verifies via launchctl list"
+assert_contains "$_CELLAR_WATCH_FUNC" \
+    'launchctl list' \
+    "install_cellar_watch_launchagent must verify registration via launchctl list (not trust exit code)"
+assert_not_contains "$_CELLAR_WATCH_FUNC" \
+    'if launchctl load' \
+    "install_cellar_watch_launchagent must not use the old if-launchctl-load success-trust pattern"
+test_pass
+
+test_start "Fix 3e (XACA-0664 sibling): install_cr_confluence_poller_launchagent verifies via launchctl list"
+assert_contains "$_CR_POLLER_FUNC" \
+    'launchctl list' \
+    "install_cr_confluence_poller_launchagent must verify registration via launchctl list (not trust exit code)"
+assert_not_contains "$_CR_POLLER_FUNC" \
+    'if launchctl load' \
+    "install_cr_confluence_poller_launchagent must not use the old if-launchctl-load success-trust pattern"
+test_pass
+
+test_start "Fix 3e (XACA-0664 sibling): install_auto_upgrade_launchagent verifies via launchctl list"
+assert_contains "$_AUTO_UPGRADE_FUNC" \
+    'launchctl list' \
+    "install_auto_upgrade_launchagent must verify registration via launchctl list (not trust exit code)"
+assert_not_contains "$_AUTO_UPGRADE_FUNC" \
+    'if launchctl load' \
+    "install_auto_upgrade_launchagent must not use the old if-launchctl-load success-trust pattern"
+test_pass
+
+# ════════════════════════════════════════════════════════════════════════════
 # Summary (standalone mode only)
 # ════════════════════════════════════════════════════════════════════════════
 if [ "$_STANDALONE" = true ]; then

@@ -1207,13 +1207,17 @@ install_cellar_watch_launchagent() {
 
     launchctl unload "$plist_dest" 2>/dev/null || true
 
-    if launchctl load "$plist_dest"; then
+    # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
+    # installers): verify registration via `launchctl list` rather than trust the
+    # legacy `launchctl load` exit code, which returns 0 even when the job is
+    # rejected.
+    launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.cellar-watch"; then
         success "Cellar watch LaunchAgent installed — will auto-upgrade on brew upgrade (XACA-0578)"
         info "Trigger: $script_dest"
         info "Watches: ${brew_prefix}/Cellar/aiteamforge"
     else
-        warning "Failed to load cellar-watch LaunchAgent (may need manual activation)"
-        info "Load manually: launchctl load $plist_dest"
+        warning "Cellar watch LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
     fi
 }
 
@@ -1330,10 +1334,15 @@ install_cr_confluence_poller_launchagent() {
 
         launchctl unload "$plist_dest" 2>/dev/null || true
 
-        if launchctl load "$plist_dest"; then
+        # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
+        # installers): verify registration via `launchctl list` rather than trust the
+        # legacy `launchctl load` exit code, which returns 0 even when the job is
+        # rejected.
+        launchctl load "$plist_dest" 2>/dev/null || true
+        if launchctl list 2>/dev/null | grep -q "com.aiteamforge.cr-confluence-poller.${team}"; then
             success "Loaded CR Confluence Poller LaunchAgent: $team"
         else
-            warning "Failed to load CR Confluence Poller LaunchAgent for team '$team' (may need manual activation)"
+            warning "CR Confluence Poller LaunchAgent installed but not loaded for team '$team' — activate with: launchctl load ${plist_dest}"
         fi
     done <<< "$teams_json"
 
@@ -1457,13 +1466,18 @@ install_auto_upgrade_launchagent() {
 
     launchctl unload "$plist_dest" 2>/dev/null || true
 
-    if launchctl load "$plist_dest"; then
+    # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
+    # installers): verify registration via `launchctl list` rather than trust the
+    # legacy `launchctl load` exit code, which returns 0 even when the job is
+    # rejected.
+    launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.auto-upgrade"; then
         success "Auto-upgrade LaunchAgent installed (daily at 03:15)"
         info "Script:  $script_dest"
         info "Log:     $AITEAMFORGE_DIR/logs/auto-upgrade.log"
         info "Pin:     echo \"v0.12.3\" > $AITEAMFORGE_DIR/version-pin"
     else
-        warning "Failed to load auto-upgrade LaunchAgent (may need manual activation)"
+        warning "Auto-upgrade LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
     fi
 }
 
