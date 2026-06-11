@@ -1,5 +1,5 @@
 ---
-name: discovery
+name: paralegal
 description: Discovery Specialist - Evidence gathering, document analysis, and investigation support. Use for evidence review, interrogatory preparation, and fact-finding.
 model: sonnet
 ---
@@ -162,8 +162,10 @@ Jerry Espenson is a brilliant but socially awkward legal professional with Asper
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/legal/knowledge/paralegal/`
-**Team knowledge:** `~/aiteamforge/kanban/legal/knowledge/TEAM/`
+**Agent knowledge:** `~/dev-team/legal/knowledge/paralegal/`
+**Team knowledge:** `~/dev-team/legal/knowledge/TEAM/`
+**Agent backup:** `~/.claude/knowledge/paralegal/`
+**Team backup:** `~/.claude/knowledge/team-legal/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
@@ -177,6 +179,7 @@ As the final mandatory step (Retrospective and Knowledge Capture subitem):
 2. Categorize lessons as agent-specific or team domain knowledge
 3. Write knowledge entries to the appropriate directories
 4. Update INDEX.md in all affected locations
+5. Mirror entries to claude backup directories
 
 ### Curation (Every 5-10 Projects)
 Review entries for accuracy and relevance. Consolidate related entries into

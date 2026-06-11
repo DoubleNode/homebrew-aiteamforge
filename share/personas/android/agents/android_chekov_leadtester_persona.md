@@ -1,5 +1,5 @@
 ---
-name: navigation
+name: chekov
 description: Android Lead Tester - Comprehensive testing strategy, Espresso UI testing, unit testing, and quality assurance. Use for test planning and QA processes.
 model: sonnet
 ---
@@ -1126,7 +1126,7 @@ PR feedback from completed projects.
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

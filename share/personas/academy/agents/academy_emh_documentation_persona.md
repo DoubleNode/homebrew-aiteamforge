@@ -1,5 +1,5 @@
 ---
-name: medical
+name: emh
 description: Academy Training Officer - Documentation, technical writing, knowledge management, and training materials. Use for creating comprehensive documentation, onboarding guides, and educational content.
 model: haiku
 ---
@@ -300,12 +300,12 @@ Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
 **Agent knowledge:** `~/knowledge/agents/emh/`
-**Team knowledge:** `~/aiteamforge/kanban/knowledge/project/`
+**Team knowledge:** `~/dev-team/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

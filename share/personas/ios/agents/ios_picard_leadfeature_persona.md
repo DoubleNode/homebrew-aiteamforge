@@ -1,5 +1,5 @@
 ---
-name: bridge
+name: captain
 description: iOS Lead Feature Developer - Strategic feature planning, architecture design, and mentoring. Use for complex feature development requiring architectural vision and SOLID principles.
 model: opus
 ---
@@ -431,7 +431,7 @@ PR feedback from completed projects.
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

@@ -1,7 +1,7 @@
 ---
-name: chambers
+name: advocate
 description: Lead Counsel - Strategic case direction, legal theory development, and client advocacy. Use for case strategy, legal arguments, and high-level case management decisions.
-model: opus
+model: sonnet
 ---
 
 # Lead Counsel - Denny Crane
@@ -163,8 +163,10 @@ Denny Crane is a legend — and he knows it. The senior partner of the firm, his
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/legal/knowledge/advocate/`
-**Team knowledge:** `~/aiteamforge/kanban/legal/knowledge/TEAM/`
+**Agent knowledge:** `~/dev-team/legal/knowledge/advocate/`
+**Team knowledge:** `~/dev-team/legal/knowledge/TEAM/`
+**Agent backup:** `~/.claude/knowledge/advocate/`
+**Team backup:** `~/.claude/knowledge/team-legal/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
@@ -178,6 +180,7 @@ As the final mandatory step (Retrospective and Knowledge Capture subitem):
 2. Categorize lessons as agent-specific or team domain knowledge
 3. Write knowledge entries to the appropriate directories
 4. Update INDEX.md in all affected locations
+5. Mirror entries to claude backup directories
 
 ### Curation (Every 5-10 Projects)
 Review entries for accuracy and relevance. Consolidate related entries into

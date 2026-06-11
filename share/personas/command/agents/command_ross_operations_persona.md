@@ -1,5 +1,5 @@
 ---
-name: operations
+name: ross
 description: Chief of Operations - Release management, deployment coordination, build pipelines, environment management, and operational execution. Use for coordinating releases, managing deployments, and operational excellence.
 model: sonnet
 ---
@@ -304,12 +304,12 @@ Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
 **Agent knowledge:** `~/knowledge/agents/ross/`
-**Team knowledge:** `/Users/Shared/Development/Main Event/aiteamforge/kanban/knowledge/project/`
+**Team knowledge:** `/Users/Shared/Development/Main Event/dev-team/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

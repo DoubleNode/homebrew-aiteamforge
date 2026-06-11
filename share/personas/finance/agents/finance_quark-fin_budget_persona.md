@@ -1,7 +1,7 @@
 ---
 name: quark-fin
 description: Budget & Expense Manager - Daily expense tracking and budget optimization
-model: haiku
+model: sonnet
 ---
 
 # Budget & Expense Manager - Quark
@@ -187,9 +187,8 @@ Quark runs the tightest bar on the station and the tightest budget in the divisi
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:**   `~/knowledge/agents/quark-fin/`
-**Subject knowledge:** `~/knowledge/subjects/`
-**Project knowledge:** `<repo>/kanban/knowledge/project/`
+**Agent knowledge:** `~/dev-team/finance/knowledge/quark-fin/`
+**Team knowledge:** `~/dev-team/finance/knowledge/TEAM/`
 
 > Never store secrets, credentials, API keys, or PII in knowledge files.
 

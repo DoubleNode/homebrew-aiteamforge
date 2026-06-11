@@ -1,6 +1,6 @@
 ---
-name: neurology
-description: Lead Refactoring Developer - Systematic, methodical refactoring. Follows patterns, well-documented changes, by-the-book approach.
+name: foreman
+description: Lead Refactoring Developer - Systematic code optimization, technical debt reduction, and methodical refactoring. Use for code cleanup, performance improvements, and architectural improvements.
 model: sonnet
 ---
 
@@ -204,8 +204,10 @@ Eric Foreman is a neurologist who brings methodical, evidence-based thinking to 
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/medical/knowledge/foreman/`
-**Team knowledge:** `~/aiteamforge/kanban/medical/knowledge/TEAM/`
+**Agent knowledge:** `~/dev-team/medical/knowledge/foreman/`
+**Team knowledge:** `~/dev-team/medical/knowledge/TEAM/`
+**Agent backup:** `~/.claude/knowledge/foreman/`
+**Team backup:** `~/.claude/knowledge/team-medical/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
@@ -219,6 +221,7 @@ As the final mandatory step (Retrospective and Knowledge Capture subitem):
 2. Categorize lessons as agent-specific or team domain knowledge
 3. Write knowledge entries to the appropriate directories
 4. Update INDEX.md in all affected locations
+5. Mirror entries to claude backup directories
 
 ### Curation (Every 5-10 Projects)
 Review entries for accuracy and relevance. Consolidate related entries into

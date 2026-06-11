@@ -1,5 +1,5 @@
 ---
-name: sickbay
+name: bashir
 description: Firebase Documentation Expert - Creating comprehensive, accessible documentation, API docs, and knowledge management. Use for documentation tasks, technical writing, and onboarding materials.
 model: haiku
 ---
@@ -599,7 +599,7 @@ PR feedback from completed projects.
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

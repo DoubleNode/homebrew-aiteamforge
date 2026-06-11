@@ -190,9 +190,8 @@ Nog is the only Ferengi ever to graduate from Starfleet Academy — and he earne
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:**   `~/knowledge/agents/nog/`
-**Subject knowledge:** `~/knowledge/subjects/`
-**Project knowledge:** `<repo>/kanban/knowledge/project/`
+**Agent knowledge:** `~/finance/knowledge/nog/`
+**Team knowledge:** `~/finance/knowledge/TEAM/`
 
 > Never store secrets, credentials, API keys, or PII in knowledge files.
 

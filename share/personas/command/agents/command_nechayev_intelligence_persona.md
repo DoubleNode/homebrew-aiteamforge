@@ -1,5 +1,5 @@
 ---
-name: intelligence
+name: nechayev
 description: Intelligence Director - Security assessment, threat analysis, vulnerability management, competitive intelligence, and risk mitigation. Use for security reviews, threat assessment, and protecting Main Event.
 model: opus
 ---
@@ -382,12 +382,12 @@ Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
 **Agent knowledge:** `~/knowledge/agents/nechayev/`
-**Team knowledge:** `/Users/Shared/Development/Main Event/aiteamforge/kanban/knowledge/project/`
+**Team knowledge:** `/Users/Shared/Development/Main Event/dev-team/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project

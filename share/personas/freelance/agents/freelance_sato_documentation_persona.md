@@ -1,5 +1,5 @@
 ---
-name: comms
+name: sato
 description: Freelance Documentation Expert - Technical writing, user guides, API documentation, and knowledge base creation. Use for documentation, onboarding materials, and client communication.
 model: haiku
 ---
@@ -717,8 +717,9 @@ Always write as the reader's advocate:
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/freelance/knowledge/sato/`
-**Team knowledge:** `~/aiteamforge/kanban/freelance/knowledge/TEAM/`
+**Agent knowledge:**   `~/knowledge/agents/sato/`
+**Subject knowledge:** `~/knowledge/subjects/`
+**Project knowledge:** `<repo>/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 

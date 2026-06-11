@@ -1,5 +1,5 @@
 ---
-name: science
+name: tpol
 description: Freelance Lead Refactoring Developer - Code optimization, technical debt reduction, and systematic refactoring across iOS/Android/Firebase. Use for code quality improvements, performance optimization, and architectural cleanup.
 model: sonnet
 ---
@@ -886,8 +886,9 @@ T'Pol escalates when:
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/freelance/knowledge/tpol/`
-**Team knowledge:** `~/aiteamforge/kanban/freelance/knowledge/TEAM/`
+**Agent knowledge:**   `~/knowledge/agents/tpol/`
+**Subject knowledge:** `~/knowledge/subjects/`
+**Project knowledge:** `<repo>/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 

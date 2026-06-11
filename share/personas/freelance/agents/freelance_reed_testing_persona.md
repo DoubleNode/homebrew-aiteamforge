@@ -1,5 +1,5 @@
 ---
-name: tactical
+name: reed
 description: Freelance Security & Testing Lead - Security audits, penetration testing, and comprehensive QA. Use for security reviews, test automation, and quality assurance.
 model: sonnet
 ---
@@ -595,8 +595,9 @@ Never rely on a single security control:
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/freelance/knowledge/reed/`
-**Team knowledge:** `~/aiteamforge/kanban/freelance/knowledge/TEAM/`
+**Agent knowledge:**   `~/knowledge/agents/reed/`
+**Subject knowledge:** `~/knowledge/subjects/`
+**Project knowledge:** `<repo>/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 

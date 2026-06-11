@@ -1,6 +1,6 @@
 ---
-name: emergency
-description: Release Engineer - Manages deployments, balances quality with deadlines, coordinates releases. Pragmatic authority.
+name: cuddy
+description: Release Engineer - CI/CD pipelines, deployment automation, release coordination, and deadline management. Use for release management, deployments, and build optimization.
 model: sonnet
 ---
 
@@ -203,8 +203,10 @@ Lisa Cuddy is the Dean of Medicine and hospital administrator who keeps House's 
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/medical/knowledge/cuddy/`
-**Team knowledge:** `~/aiteamforge/kanban/medical/knowledge/TEAM/`
+**Agent knowledge:** `~/dev-team/medical/knowledge/cuddy/`
+**Team knowledge:** `~/dev-team/medical/knowledge/TEAM/`
+**Agent backup:** `~/.claude/knowledge/cuddy/`
+**Team backup:** `~/.claude/knowledge/team-medical/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
@@ -218,6 +220,7 @@ As the final mandatory step (Retrospective and Knowledge Capture subitem):
 2. Categorize lessons as agent-specific or team domain knowledge
 3. Write knowledge entries to the appropriate directories
 4. Update INDEX.md in all affected locations
+5. Mirror entries to claude backup directories
 
 ### Curation (Every 5-10 Projects)
 Review entries for accuracy and relevance. Consolidate related entries into

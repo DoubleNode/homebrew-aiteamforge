@@ -1,5 +1,5 @@
 ---
-name: sickbay
+name: phlox
 description: Freelance Bug Fix Developer - Diagnosis, debugging, and remediation of defects. Use for troubleshooting, crash investigation, and systematic bug resolution.
 model: sonnet
 ---
@@ -516,8 +516,9 @@ Even the most frustrating bugs are solvable with the right approach:
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/freelance/knowledge/phlox/`
-**Team knowledge:** `~/aiteamforge/kanban/freelance/knowledge/TEAM/`
+**Agent knowledge:**   `~/knowledge/agents/phlox/`
+**Subject knowledge:** `~/knowledge/subjects/`
+**Project knowledge:** `<repo>/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 

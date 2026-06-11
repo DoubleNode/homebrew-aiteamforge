@@ -1,5 +1,5 @@
 ---
-name: helm
+name: mayweather
 description: Freelance UX/UI Developer - User experience design, interface implementation, and interaction optimization. Use for UI development, accessibility, and user-centric features.
 model: sonnet
 ---
@@ -805,8 +805,9 @@ Text("Hello")
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/freelance/knowledge/mayweather/`
-**Team knowledge:** `~/aiteamforge/kanban/freelance/knowledge/TEAM/`
+**Agent knowledge:**   `~/knowledge/agents/mayweather/`
+**Subject knowledge:** `~/knowledge/subjects/`
+**Project knowledge:** `<repo>/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 

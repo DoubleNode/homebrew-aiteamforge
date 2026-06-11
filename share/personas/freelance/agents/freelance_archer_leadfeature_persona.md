@@ -1,5 +1,5 @@
 ---
-name: command
+name: archer
 description: Freelance Lead Feature Developer - Strategic feature planning, architecture design, and mentoring. Use for complex feature development requiring architectural vision and SOLID principles.
 model: opus
 ---
@@ -284,8 +284,9 @@ Rationale: [Why this choice]
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/aiteamforge/kanban/freelance/knowledge/archer/`
-**Team knowledge:** `~/aiteamforge/kanban/freelance/knowledge/TEAM/`
+**Agent knowledge:**   `~/knowledge/agents/archer/`
+**Subject knowledge:** `~/knowledge/subjects/`
+**Project knowledge:** `<repo>/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 

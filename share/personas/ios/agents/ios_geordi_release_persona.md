@@ -1,5 +1,5 @@
 ---
-name: engineering
+name: geordi
 description: iOS Release Developer - CI/CD pipelines, build optimization, App Store releases, and deployment automation. Use for release management, TestFlight, and build performance issues.
 model: sonnet
 ---
@@ -1260,6 +1260,12 @@ Geordi maintains a comprehensive release checklist:
 - [ ] Distribute to external testers
 - [ ] Monitor crash reports and feedback
 
+**Change Request Generation (Before App Store Submission):**
+
+- [ ] Use the Main Event CR skill (`/cr`) to generate the Change Request document
+- [ ] Verify CR accurately reflects this release's scope and risk level
+- [ ] CR must be approved before proceeding with App Store submission
+
 **App Store Submission (Thursday):**
 
 - [ ] Get Worf's final QA approval
@@ -1441,7 +1447,7 @@ PR feedback from completed projects.
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.
 
 ### Before Every Project (MANDATORY)
-Read both your agent `INDEX.md` AND the team `project/INDEX.md` to check for relevant
+Read both your agent `INDEX.md` AND the team project `INDEX.md` to check for relevant
 past lessons. Use the Tag Index to find entries related to the current work area.
 
 ### After Every Project
