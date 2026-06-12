@@ -472,11 +472,19 @@ check_python_venv() {
   done
 
   # XACA-0655: real importability test.
-  # `pip show iterm2` passing is NOT proof the module imports — a broken/partial
+  # `pip show <pkg>` passing is NOT proof the module imports — a broken/partial
   # install or wrong interpreter can leave metadata present but the import failing
-  # at runtime (which is exactly what bricks LCARS automation). Actually run the
-  # import and gate on its exit status. iterm2 is the one that matters here; it is
-  # the module the LCARS/iTerm2 automation depends on at launch.
+  # at runtime. So we additionally run an actual `import` and gate on exit status.
+  #
+  # Why iterm2 ALONE gets a real-import probe (XACA-0655-008 review): iterm2 is a
+  # native/C-extension-style package whose import genuinely fails when the venv is
+  # half-provisioned, and it is the one module the iTerm2 window-manager automation
+  # imports at launch — a silent import failure here directly bricks first use, the
+  # exact failure mode this doctor exists to catch. The other requirements (e.g.
+  # pyzipper) are pure-Python and import-trivial once pip reports them installed, so
+  # the pip-show loop above is sufficient for them; adding redundant import probes
+  # would only slow the check without catching a distinct real-world failure. If a
+  # future launch-critical native dep is added, give it its own probe here.
   local import_probe="iterm2"
   if "$atf_python" -c "import ${import_probe}" >/dev/null 2>&1; then
     check_result pass "${import_probe} module imports cleanly (real import test)"
