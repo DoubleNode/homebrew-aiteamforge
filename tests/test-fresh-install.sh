@@ -6,8 +6,16 @@
 # everything installed correctly. Safe to run multiple times.
 #
 # Usage:
-#   bash test-fresh-install.sh              # Test default ~/aiteamforge
-#   bash test-fresh-install.sh /path/to/dir # Test custom install location
+#   bash test-fresh-install.sh                       # Test default ~/aiteamforge (static only)
+#   bash test-fresh-install.sh /path/to/dir          # Test custom install location
+#   bash test-fresh-install.sh --runtime             # ALSO start a real LCARS server and
+#                                                     # verify team-start / reachability / durability
+#   bash test-fresh-install.sh /path/to/dir --runtime
+#
+# By default this script is read-only (no services started). The opt-in
+# --runtime flag (XACA-0654) actually launches a real LCARS server, confirms it
+# is reachable on /api/status, checks it is detached (survives shell logout),
+# then stops it again if it started from a clean slate.
 #
 # Exit codes:
 #   0 = All checks passed
@@ -18,7 +26,18 @@ set -o pipefail
 # ─────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────
-INSTALL_DIR="${1:-$HOME/aiteamforge}"
+# Parse args: --runtime is a flag; the first positional is the install dir.
+# (No `set -u` here, so the empty-array default expansion below is safe on
+# macOS bash 3.2.)
+RUNTIME=0
+POSITIONAL=()
+for _arg in "$@"; do
+    case "$_arg" in
+        --runtime) RUNTIME=1 ;;
+        *)         POSITIONAL+=("$_arg") ;;
+    esac
+done
+INSTALL_DIR="${POSITIONAL[0]:-$HOME/aiteamforge}"
 PASS=0
 FAIL=0
 WARN=0
@@ -276,21 +295,57 @@ else
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
-# 8. Python Virtual Environment
+# 8. Python Virtual Environment (tap-owned)
 # ─────────────────────────────────────────────────────────────────────────
 section "Python Virtual Environment"
 
-if [ -f "$INSTALL_DIR/.venv/bin/python3" ]; then
-    pass ".venv exists"
-    venv_python="$INSTALL_DIR/.venv/bin/python3"
-    if "$venv_python" -c "import iterm2" 2>/dev/null; then
-        iterm2_ver=$("$venv_python" -c "import iterm2; print(iterm2.__version__)" 2>/dev/null)
-        pass "iterm2 package installed (v$iterm2_ver)"
+# XACA-0654: the venv is TAP-OWNED. It is no longer the deprecated per-install
+# $INSTALL_DIR/.venv — it lives under the Homebrew prefix and is resolved via
+# $HOMEBREW_PREFIX/var/aiteamforge/env.sh (which exports AITEAMFORGE_PYTHON,
+# pointing at $HOMEBREW_PREFIX/var/aiteamforge/venv/bin/python3). The old check
+# read $INSTALL_DIR/.venv, which on a current install does not exist, so the
+# test was BLIND to a missing iterm2 package in the venv that actually runs the
+# iTerm2 window manager. Resolve the real venv the same way the runtime does.
+ATF_VENV_PYTHON=""
+for _atf_prefix in "${HOMEBREW_PREFIX:-}" "$(brew --prefix 2>/dev/null)" "/opt/homebrew" "/usr/local"; do
+    [ -z "$_atf_prefix" ] && continue
+    if [ -f "$_atf_prefix/var/aiteamforge/env.sh" ]; then
+        # shellcheck source=/dev/null
+        . "$_atf_prefix/var/aiteamforge/env.sh" 2>/dev/null
+        break
+    fi
+done
+# env.sh exports AITEAMFORGE_PYTHON; if it fell back to bare "python3" (or was
+# absent), probe the canonical venv path directly so we never silently grade a
+# system python3 as the tap venv.
+if [ -z "${AITEAMFORGE_PYTHON:-}" ] || [ "${AITEAMFORGE_PYTHON}" = "python3" ]; then
+    for _atf_prefix in "${HOMEBREW_PREFIX:-}" "$(brew --prefix 2>/dev/null)" "/opt/homebrew" "/usr/local"; do
+        [ -z "$_atf_prefix" ] && continue
+        if [ -x "$_atf_prefix/var/aiteamforge/venv/bin/python3" ]; then
+            ATF_VENV_PYTHON="$_atf_prefix/var/aiteamforge/venv/bin/python3"
+            break
+        fi
+    done
+else
+    ATF_VENV_PYTHON="$AITEAMFORGE_PYTHON"
+fi
+unset _atf_prefix
+
+if [ -n "$ATF_VENV_PYTHON" ] && [ "$ATF_VENV_PYTHON" != "python3" ] && [ -x "$ATF_VENV_PYTHON" ]; then
+    pass "tap-owned venv present ($ATF_VENV_PYTHON)"
+    if "$ATF_VENV_PYTHON" -c "import iterm2" 2>/dev/null; then
+        iterm2_ver=$("$ATF_VENV_PYTHON" -c "import iterm2; print(iterm2.__version__)" 2>/dev/null)
+        pass "iterm2 package importable in tap venv (v$iterm2_ver)"
     else
-        fail "iterm2 package not importable in venv"
+        fail "iterm2 package NOT importable in tap-owned venv (iTerm2 window manager will fail — run: brew reinstall aiteamforge)"
     fi
 else
-    fail ".venv missing (iTerm2 tab management won't work)"
+    fail "tap-owned venv missing (expected \$HOMEBREW_PREFIX/var/aiteamforge/venv — run: brew reinstall aiteamforge)"
+fi
+
+# Surface — but do not depend on — a lingering deprecated venv.
+if [ -e "$INSTALL_DIR/.venv" ]; then
+    warn "deprecated $INSTALL_DIR/.venv still present (no longer used; safe to remove)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -429,6 +484,89 @@ if command -v aiteamforge &>/dev/null; then
     pass "aiteamforge doctor: ${doctor_pass:-0} pass, ${doctor_warn:-0} warn, ${doctor_fail:-0} fail"
 else
     warn "aiteamforge command not available for doctor check"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────
+# 15. Runtime Smoke Test (opt-in: --runtime)  — XACA-0654
+# ─────────────────────────────────────────────────────────────────────────
+# The static checks above can all pass while the runtime is dead (e.g. a venv
+# missing iterm2, or a server that starts but immediately dies / is not durable).
+# When --runtime is passed, actually start a real LCARS server and assert:
+#   (1) team-start        — `aiteamforge start lcars` exits 0
+#   (2) reachability      — /api/status answers with a configured team
+#   (3) durability        — the server.py process is detached (PPID 1) so it
+#                           survives shell logout (nohup+disown launch contract)
+# We only stop the server afterward if NOTHING was running before we started
+# (least surprise: never kill a server the user already had up).
+section "Runtime Smoke Test (--runtime)"
+
+if [ "$RUNTIME" != "1" ]; then
+    warn "Runtime checks skipped — pass --runtime to start a real server and verify start/reachability/durability"
+elif ! command -v aiteamforge &>/dev/null; then
+    fail "Runtime checks requested (--runtime) but 'aiteamforge' is not in PATH"
+elif [ -z "$TEAMS" ]; then
+    fail "Runtime checks requested (--runtime) but no teams are configured"
+else
+    rt_team=$(echo "$TEAMS" | head -1 | tr -d '[:space:]')
+
+    # Snapshot LCARS ports already serving a team, so we (a) don't take credit for
+    # a pre-existing server and (b) don't stop one the user already had running.
+    rt_before_ports=""
+    for p in $(seq 8080 8400); do
+        if curl -s --max-time 1 "http://localhost:$p/api/status" 2>/dev/null | jq -e '.team' &>/dev/null; then
+            rt_before_ports="$rt_before_ports $p"
+        fi
+    done
+
+    # (1) Team-start
+    if aiteamforge start lcars >/tmp/atf-runtime-start.log 2>&1; then
+        pass "aiteamforge start lcars exited 0 (team: $rt_team)"
+    else
+        fail "aiteamforge start lcars failed (see /tmp/atf-runtime-start.log)"
+    fi
+
+    # (2) Reachability — poll up to ~20s for any LCARS server answering /api/status
+    rt_port=""
+    rt_seen_team=""
+    for _try in $(seq 1 20); do
+        for p in $(seq 8080 8400); do
+            t=$(curl -s --max-time 1 "http://localhost:$p/api/status" 2>/dev/null | jq -r '.team // empty' 2>/dev/null)
+            if [ -n "$t" ]; then rt_port="$p"; rt_seen_team="$t"; break; fi
+        done
+        [ -n "$rt_port" ] && break
+        sleep 1
+    done
+    if [ -n "$rt_port" ]; then
+        pass "LCARS server reachable on port $rt_port (/api/status team=$rt_seen_team)"
+    else
+        fail "No LCARS server reachable on /api/status within 20s of start"
+    fi
+
+    # (3) Durability — the launch contract (lcars-launch-helpers.sh) is nohup+disown,
+    # so once the `aiteamforge start` child exits, server.py is reparented to init
+    # (PPID 1) and survives shell logout. PPID != 1 means it would die on logout.
+    if [ -n "$rt_port" ]; then
+        rt_pid=$(pgrep -f "server.py $rt_port" | head -1)
+        if [ -n "$rt_pid" ]; then
+            rt_ppid=$(ps -o ppid= -p "$rt_pid" 2>/dev/null | tr -d ' ')
+            if [ "$rt_ppid" = "1" ]; then
+                pass "LCARS server (pid $rt_pid) detached from shell (PPID 1 — survives logout)"
+            else
+                fail "LCARS server (pid $rt_pid) NOT detached (PPID $rt_ppid — would die on shell logout / not durable)"
+            fi
+        else
+            warn "Could not locate server.py PID for port $rt_port — skipping durability check"
+        fi
+    fi
+
+    # Cleanup — only if we started from a clean slate (nothing was serving before).
+    if [ -z "${rt_before_ports// /}" ] && [ -n "$rt_port" ]; then
+        if aiteamforge stop lcars >/dev/null 2>&1; then
+            warn "Stopped the LCARS server this test started (clean-slate cleanup)"
+        fi
+    elif [ -n "$rt_port" ]; then
+        warn "Left LCARS running — a server was already up before this test (no cleanup)"
+    fi
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
