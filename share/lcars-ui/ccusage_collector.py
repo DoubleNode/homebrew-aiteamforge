@@ -169,7 +169,6 @@ try:
     from ccusage_paths import (  # noqa: PLC0415
         CACHE_PATH, CACHE_TMP_PATH, PID_PATH, ensure_runtime_dir,
     )
-    _CCUSAGE_PATHS_AVAILABLE = True
 except ImportError as e:
     # Fallback: should not happen in a normal install, but log and abort rather
     # than silently reverting to /tmp paths.

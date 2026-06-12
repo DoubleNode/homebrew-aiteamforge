@@ -146,9 +146,7 @@ try:
         COLLECTOR_LOG as _CCUSAGE_COLLECTOR_LOG_OBJ,
         ensure_runtime_dir as _ccusage_ensure_runtime_dir,
     )
-    _CCUSAGE_PATHS_AVAILABLE = True
 except ImportError as e:
-    _CCUSAGE_PATHS_AVAILABLE = False
     _ccusage_ensure_runtime_dir = None  # type: ignore[assignment]
     print(f"[LCARS] Warning: ccusage_paths not available, ccusage features may not work: {e}")
 
@@ -574,7 +572,9 @@ FLEET_MONITOR_URL = os.environ.get('FLEET_MONITOR_URL', 'http://localhost:8080')
 
 # ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
 # Paths resolved from ccusage_paths (XACA-0385: moved from world-writable /tmp).
-if _CCUSAGE_PATHS_AVAILABLE:
+# The callable-None sentinel on _ccusage_ensure_runtime_dir carries import-success
+# state — no separate availability flag needed (XACA-0385-001).
+if _ccusage_ensure_runtime_dir is not None:
     CCUSAGE_CACHE_PATH: str = str(_CCUSAGE_CACHE_PATH_OBJ)
     CCUSAGE_PID_PATH: str = str(_CCUSAGE_PID_PATH_OBJ)
     CCUSAGE_COLLECTOR_LOG: str = str(_CCUSAGE_COLLECTOR_LOG_OBJ)
