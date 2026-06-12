@@ -76,8 +76,9 @@ aiteamforge start ios
 Get up and running in under 5 minutes:
 
 ```bash
-# 1. Add tap and install
+# 1. Add tap, trust it, and install
 brew tap DoubleNode/aiteamforge
+brew trust --tap DoubleNode/aiteamforge   # required when HOMEBREW_REQUIRE_TAP_TRUST is set
 brew install aiteamforge
 
 # 2. Run interactive setup wizard
@@ -105,6 +106,18 @@ aiteamforge start ios
 ```bash
 brew tap DoubleNode/aiteamforge
 ```
+
+**Step 1b: Trust the tap**
+```bash
+brew trust --tap DoubleNode/aiteamforge
+```
+> Recent Homebrew versions refuse to load formulae from third-party taps when
+> `HOMEBREW_REQUIRE_TAP_TRUST` is set (`Error: Refusing to load formula … from
+> untrusted tap`). Trusting the tap is idempotent and required for both the
+> initial install and all future `brew upgrade` / auto-upgrade runs. `aiteamforge
+> setup` and the auto-upgrade LaunchAgent also run this automatically, but a fresh
+> `brew install` on a gated box needs it first. If upgrades ever appear to "do
+> nothing", run `aiteamforge doctor` — the **tap-trust** check surfaces this.
 
 **Step 2: Install AITeamForge**
 ```bash

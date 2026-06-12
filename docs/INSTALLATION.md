@@ -114,6 +114,20 @@ brew tap your-org/aiteamforge
 
 This adds the AITeamForge formula repository to Homebrew.
 
+### Step 1b: Trust the Tap
+
+```bash
+brew trust --tap your-org/aiteamforge
+```
+
+Recent Homebrew versions refuse to load formulae from third-party taps when
+`HOMEBREW_REQUIRE_TAP_TRUST` is set (`Error: Refusing to load formula … from
+untrusted tap`). Trusting the tap is idempotent and required for both the initial
+install and every future `brew upgrade` / auto-upgrade. `aiteamforge setup` and
+the auto-upgrade LaunchAgent also run this automatically, but a fresh
+`brew install` on a gated box needs it first. If upgrades ever appear to do
+nothing, run `aiteamforge doctor` — the **tap-trust** check surfaces this loudly.
+
 ### Step 2: Install AITeamForge
 
 ```bash

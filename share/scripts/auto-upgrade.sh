@@ -182,6 +182,28 @@ if ! brew tap 2>/dev/null | grep -qi "doublenode/aiteamforge"; then
     exit 0
 fi
 
+# Step 2.5 (XACA-0676): trust the tap BEFORE any brew load. Recent Homebrew gates
+# formula loading behind tap-trust when $HOMEBREW_REQUIRE_TAP_TRUST is set; on a
+# gated box an UNTRUSTED tap makes `brew outdated`/`brew upgrade` silently no-op,
+# so this LaunchAgent would "succeed" forever while the box rots on an old version
+# (observed on M4Mini stuck at 0.13.4). `brew trust --tap` is idempotent.
+log "Running: brew trust --tap doublenode/aiteamforge (idempotent)"
+if ! log_cmd_output "$BREW" trust --tap doublenode/aiteamforge; then
+    log "WARNING: 'brew trust --tap doublenode/aiteamforge' failed (older Homebrew without trust gate?) — continuing"
+fi
+
+# Detect: is the formula STILL refused after trusting? If so, warn LOUDLY and bail
+# with a non-zero exit + operator notification — never report a clean no-op while
+# upgrades are actually blocked.
+if "$BREW" info aiteamforge 2>&1 | grep -qiE "untrusted tap|refus(e|ing) to load"; then
+    log "ERROR: doublenode/aiteamforge tap is UNTRUSTED — Homebrew is REFUSING to load the formula."
+    log "       Upgrades are BLOCKED; this box will stay on the OLD version."
+    log "       Remediation: brew trust --tap doublenode/aiteamforge"
+    notify "Auto-upgrade BLOCKED: tap untrusted — run 'brew trust --tap doublenode/aiteamforge'"
+    log "===== auto-upgrade complete (BLOCKED: untrusted tap) ====="
+    exit 1
+fi
+
 # Step 3: brew update
 log "Running: brew update"
 if ! log_cmd_output "$BREW" update; then

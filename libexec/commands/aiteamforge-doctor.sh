@@ -49,6 +49,7 @@ Options:
 
 Components:
   dependencies    External dependencies (brew, node, python, etc.)
+  tap-trust       Homebrew tap-trust gate (untrusted tap blocks upgrades) (XACA-0676)
   python-venv     Tap-owned Python venv and required packages (XACA-0650)
   framework       Framework installation integrity
   version-drift   Cellar vs working-dir version drift (XACA-0578)
@@ -225,6 +226,39 @@ check_dependencies() {
     check_result pass "ImageMagick (optional)"
   else
     check_result warn "ImageMagick not installed (optional)" "Install: brew install imagemagick"
+  fi
+}
+
+# Check: Homebrew tap-trust gate (XACA-0676)
+# Recent Homebrew refuses to load formulae from an untrusted tap when
+# $HOMEBREW_REQUIRE_TAP_TRUST is set. On a gated box this makes `brew outdated`/
+# `brew upgrade` silently no-op — the machine rots on an old version while every
+# upgrade reports success. This diagnostic surfaces that condition LOUDLY.
+# Detection only (warn-loud): the fix is a one-liner the operator runs explicitly.
+check_tap_trust() {
+  print_section "Checking Homebrew Tap Trust"
+
+  local tap
+  tap="$(_aitf_tap_name)"
+
+  if ! command -v brew &>/dev/null; then
+    check_result warn "Homebrew not found — cannot verify tap trust" \
+      "Install Homebrew, then: brew trust --tap ${tap}"
+    return
+  fi
+
+  # Only meaningful when aiteamforge is actually installed/tapped via Homebrew.
+  if ! brew list aiteamforge &>/dev/null \
+     && ! brew tap 2>/dev/null | grep -qi "${tap}"; then
+    print_info "  aiteamforge not installed via Homebrew tap — tap-trust check not applicable"
+    return
+  fi
+
+  if tap_load_refused; then
+    check_result fail "Homebrew is REFUSING to load the aiteamforge formula (UNTRUSTED TAP) — upgrades are silently BLOCKED and this box will stay on the OLD version" \
+      "Run: brew trust --tap ${tap}"
+  else
+    check_result pass "aiteamforge tap is trusted (formula loads)"
   fi
 }
 
@@ -722,6 +756,9 @@ case "$CHECK_COMPONENT" in
   dependencies)
     check_dependencies
     ;;
+  tap-trust)
+    check_tap_trust
+    ;;
   python-venv)
     check_python_venv
     ;;
@@ -751,6 +788,7 @@ case "$CHECK_COMPONENT" in
     ;;
   all)
     check_dependencies
+    check_tap_trust
     check_python_venv
     check_framework
     check_version_drift

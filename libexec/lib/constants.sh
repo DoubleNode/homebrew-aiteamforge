@@ -46,3 +46,20 @@ readonly FLEET_MONITOR_PORT_DEFAULT
 # (intentional word-splitting — add `# shellcheck disable=SC2086` at the loop).
 : "${FLEET_MONITOR_PORT_SCAN_RANGE:=3000 3001 3002}"
 readonly FLEET_MONITOR_PORT_SCAN_RANGE
+
+# Homebrew tap name. Single source of truth for the "<org>/<tap>" identifier used
+# in `brew tap`, `brew trust --tap`, and untrusted-tap detection. Override via
+# AITF_TAP_NAME before sourcing (e.g. a fork that re-taps under a different org).
+#
+# XACA-0676: recent Homebrew gates formula loading behind tap-trust when
+# $HOMEBREW_REQUIRE_TAP_TRUST is set; an untrusted tap makes `brew outdated`/
+# `brew upgrade` silently no-op, leaving a box stuck on an old version. The trust
+# helpers in libexec/lib/common.sh (ensure_tap_trusted / tap_load_refused) resolve
+# the tap with ${AITF_TAP_NAME:-$AITF_TAP_NAME_DEFAULT}.
+# Consumers:
+#   - libexec/lib/common.sh                    (ensure_tap_trusted / tap_load_refused)
+#   - libexec/commands/aiteamforge-upgrade.sh  (check_brew_updates)
+#   - libexec/commands/aiteamforge-doctor.sh   (check_tap_trust)
+#   - bin/aiteamforge-setup.sh                 (post-dependency trust)
+: "${AITF_TAP_NAME_DEFAULT:=doublenode/aiteamforge}"
+readonly AITF_TAP_NAME_DEFAULT

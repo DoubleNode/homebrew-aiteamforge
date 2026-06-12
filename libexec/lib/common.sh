@@ -135,3 +135,40 @@ section() { print_section "$@"; }
 
 # Alias for scripts that use warn instead of warning
 warn() { warning "$@"; }
+
+#──────────────────────────────────────────────────────────────────────────────
+# Homebrew tap-trust helpers (XACA-0676)
+#──────────────────────────────────────────────────────────────────────────────
+# Recent Homebrew gates formula loading behind tap-trust when
+# $HOMEBREW_REQUIRE_TAP_TRUST is set. On a gated box an UNTRUSTED tap makes brew
+# silently refuse to load the formula, so `brew outdated`/`brew upgrade` no-op and
+# the machine rots on an old version while reporting success. These helpers let the
+# installer/upgrade trust the tap (idempotent) and let any command DETECT the
+# refused-load condition so it can warn loudly instead of faking "up to date".
+#
+# Tap name resolves via ${AITF_TAP_NAME:-$AITF_TAP_NAME_DEFAULT:-doublenode/aiteamforge}
+# so these work whether or not libexec/lib/constants.sh was sourced first.
+
+_aitf_tap_name() {
+    echo "${AITF_TAP_NAME:-${AITF_TAP_NAME_DEFAULT:-doublenode/aiteamforge}}"
+}
+
+# tap_load_refused — return 0 (true) when Homebrew is refusing to load the
+# aiteamforge formula because the tap is untrusted; 1 otherwise (incl. no brew).
+# Probes the formula load directly so it reflects the live trust gate rather than
+# guessing from config.
+tap_load_refused() {
+    command -v brew >/dev/null 2>&1 || return 1
+    brew info aiteamforge 2>&1 \
+        | grep -qiE "untrusted tap|refus(e|ing) to load"
+}
+
+# ensure_tap_trusted — idempotently trust the aiteamforge tap so Homebrew can
+# load the formula. Safe to call unconditionally: no-op success when already
+# trusted, and a quiet non-zero (logged by caller) on older Homebrew that lacks
+# the `brew trust` subcommand. Never aborts the caller.
+# Returns 0 on success (or trust not needed), 1 if the trust attempt failed.
+ensure_tap_trusted() {
+    command -v brew >/dev/null 2>&1 || return 0
+    brew trust --tap "$(_aitf_tap_name)" >/dev/null 2>&1
+}

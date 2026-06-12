@@ -142,6 +142,25 @@ check_brew_updates() {
     return
   fi
 
+  # XACA-0676: trust the tap BEFORE any brew load. On a Homebrew with the
+  # tap-trust gate active ($HOMEBREW_REQUIRE_TAP_TRUST), an untrusted tap makes
+  # `brew outdated` return empty and the formula refuse to load — which would
+  # otherwise fall through to a false "Homebrew formula is up to date". Idempotent.
+  if ! ensure_tap_trusted; then
+    print_warning "Could not run 'brew trust --tap $(_aitf_tap_name)' (older Homebrew without trust gate?) — continuing"
+  fi
+
+  # If the formula is STILL refused after trusting, warn LOUDLY and bail —
+  # never report success while stuck on the old version.
+  if tap_load_refused; then
+    print_warning "═══════════════════════════════════════════════════════════════"
+    print_warning "Homebrew is REFUSING to load the aiteamforge formula (UNTRUSTED TAP)."
+    print_warning "Upgrades are BLOCKED — your box will stay on the OLD version."
+    print_warning "Remediation:  brew trust --tap $(_aitf_tap_name)"
+    print_warning "═══════════════════════════════════════════════════════════════"
+    return
+  fi
+
   # Check for updates
   if brew outdated aiteamforge &>/dev/null; then
     local available_version

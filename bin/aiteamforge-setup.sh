@@ -561,6 +561,19 @@ TEAMS_DIR="${AITEAMFORGE_HOME}/share/teams"
 # Source common utilities (used by installer modules)
 source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
 
+# XACA-0676: trust the Homebrew tap so the formula keeps loading after a Homebrew
+# upgrade flips on the tap-trust gate ($HOMEBREW_REQUIRE_TAP_TRUST). Without this,
+# `brew upgrade` / `brew postinstall aiteamforge` silently no-op and the box rots
+# on an old version. Idempotent; only run when brew + the tap are actually present
+# so non-brew installs aren't confused. Guarded — set -eo pipefail is active.
+if command -v brew &>/dev/null && brew tap 2>/dev/null | grep -qi "$(_aitf_tap_name)"; then
+  if ensure_tap_trusted; then
+    echo -e "${GREEN}✓${NC} Homebrew tap trusted ($(_aitf_tap_name))"
+  else
+    echo -e "${YELLOW}⚠${NC} Could not trust the Homebrew tap (older Homebrew without trust gate?) — continuing"
+  fi
+fi
+
 # Sanitize an id before it is interpolated into an `eval`'d variable NAME.
 # Allow only alphanumerics, dot, hyphen, underscore. Defined here (before the
 # upgrade-hydration block) so BOTH the hydration path and the later
