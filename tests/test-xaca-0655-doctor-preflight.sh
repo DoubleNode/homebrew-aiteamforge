@@ -500,7 +500,13 @@ cat > "$SANDBOX/rfp-driver.sh" <<RFPDRIVER
 #!/bin/bash
 set -eo pipefail
 
-HOME="${_RFP_HOME}"
+# XACA-0655-009 (review fix): respect a caller-provided HOME at driver RUNTIME,
+# falling back to the D1 sandbox home only when HOME is unset. The \$HOME is
+# escaped so it is evaluated when the driver RUNS (honoring 'HOME=... bash driver'
+# from D3/D4), not baked at generation time. Previously this hardcoded the D1
+# home (which already has a sentinel), making L2-D4 vacuous — preflight
+# short-circuited on the sentinel before reaching the recursion path.
+HOME="\${HOME:-${_RFP_HOME}}"
 VERSION="${_ATF_VER}"
 LIBEXEC_DIR="${TAP_ROOT}/libexec"
 DOCTOR="${TAP_ROOT}/libexec/commands/aiteamforge-doctor.sh"
