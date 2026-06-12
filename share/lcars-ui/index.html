@@ -2845,12 +2845,6 @@
             return;
         }
 
-        // Check if all-zero (common early on) — still render, just dim
-        var allZero = _MODEL_TIERS.every(function (k) {
-            var t = tiers[k];
-            return !t || ((!t.today_tokens || t.today_tokens === 0) && (!t.today_cost_usd || t.today_cost_usd === 0));
-        });
-
         // Build rows: standard tiers + Other if non-zero
         var rows = _MODEL_TIERS.slice(); // ['Opus','Sonnet','Haiku','Fable']
         var other = tiers['Other'];
@@ -2880,7 +2874,12 @@
 
             var row = document.createElement('div');
             row.className = 'uw-model-row' + (isFable ? ' uw-model-row-fable' : '');
-            if (allZero && !isFable) row.classList.add('uw-model-row-dim');
+            // Dim per-row: only when this tier has no tokens and no cost (and it is not Fable).
+            // Using per-row zero-check (rather than a global allZero flag over only the 4 main
+            // tiers) naturally handles the case where Other is the only tier with spend — that
+            // row has data, so it is never dimmed — while still dimming genuinely-idle rows.
+            var tierIsZero = !t.today_tokens && !t.today_cost_usd;
+            if (!isFable && tierIsZero) row.classList.add('uw-model-row-dim');
 
             // Tier label cell
             var tierCell = document.createElement('span');
