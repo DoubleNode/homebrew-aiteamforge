@@ -37,6 +37,7 @@ import re
 import json
 import time
 import ssl
+import subprocess
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -79,7 +80,6 @@ def resolve_repo_root():
     if root:
         return root
     try:
-        import subprocess
         out = subprocess.run(
             ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=5,
