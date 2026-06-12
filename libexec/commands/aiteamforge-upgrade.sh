@@ -678,6 +678,27 @@ update_runtime_helpers() {
   else
     print_success "Updated ${updated} runtime helper script(s)"
   fi
+
+  # XACA-0677: Refresh the root-level iterm2_window_manager.py copy.
+  # open_lcars_tab (lcars-launch-helpers.sh) invokes ${WORKING_DIR}/iterm2_window_manager.py
+  # directly — NOT the scripts/ copy. install_iterm2_window_manager() lays this down via plain
+  # cp (no path rewrite; the file self-locates at runtime via os.path.dirname(__file__)).
+  # update_runtime_helpers' scripts/ sweep above never touches the root copy, leaving upgraded
+  # boxes running a stale iterm2_window_manager.py (e.g. missing the XACA-0652 bootstrap).
+  # Convention (XACA-0673 pattern): refresh ONLY if the root copy already exists on disk.
+  # Boxes that never installed it keep it absent; a fresh install lays it down correctly.
+  local root_wm_src="${FRAMEWORK_DIR}/share/scripts/iterm2_window_manager.py"
+  local root_wm_dest="${WORKING_DIR}/iterm2_window_manager.py"
+  if [ -f "$root_wm_dest" ] && [ -f "$root_wm_src" ]; then
+    print_info "Updating iterm2_window_manager.py (root copy)..."
+    if [ "$DRY_RUN" = false ]; then
+      cp "$root_wm_src" "$root_wm_dest"
+      chmod +x "$root_wm_dest"
+      print_success "Updated iterm2_window_manager.py (root copy)"
+    else
+      echo "Would update: iterm2_window_manager.py (root copy)"
+    fi
+  fi
 }
 
 # Update shell helpers
