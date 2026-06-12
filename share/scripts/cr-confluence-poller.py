@@ -608,8 +608,9 @@ def fetch_cr_proper_page_data(
     Fetch labels and storage-format HTML body of the CR-Proper page.
 
     cr_record must have a 'cr_proper_url' field pointing to the Confluence
-    CR-Proper page.  If cr_proper_url is absent, empty, or non-Confluence,
-    returns None (silently — the Auto 2 scan skips unlinked CRs).
+    CR-Proper page.  If cr_proper_url is absent, empty, non-Confluence, or an
+    IT Connect ticket URL (one-stage CRs — itconnect.daveandbusters.com),
+    returns None (silently — the Auto 2 scan skips unlinked or non-Confluence CRs).
 
     Returns a dict:
         {
@@ -629,6 +630,13 @@ def fetch_cr_proper_page_data(
     if not cr_proper_url.startswith("https://"):
         vlog(
             f"[{team}][{cr_id}] cr_proper_url does not start with https:// — skipping."
+        )
+        return None
+
+    if ITCONNECT_URL_PATTERN.match(cr_proper_url):
+        vlog(
+            f"[{team}][{cr_id}] cr_proper_url is an IT Connect ticket — "
+            f"not a Confluence page; skipping approval-signal fetch (XACA-0469)."
         )
         return None
 
@@ -1278,6 +1286,11 @@ def scan_team_approval(
     Idempotency: skips CRs that already have cr_approval_candidate_at set
     (first-detection only; field persists until the CR leaves cr-submitted).
 
+    IT Connect cr_proper_url values (one-stage CRs — itconnect.daveandbusters.com)
+    are silently skipped — approval-signal scanning over IT Connect is not
+    implemented (Phase 2, gated on IT Connect API access). Manual approval required
+    for those CRs.
+
     Returns the number of CRs for which a candidate event was recorded.
     """
     vlog(f"[{team}] Scanning cr-submitted CRs for approval signals...")
@@ -1308,6 +1321,18 @@ def scan_team_approval(
             vlog(
                 f"[{team}][{cr_id}] No cr_proper_url — CR-Proper page not linked yet. "
                 "Skipping approval scan."
+            )
+            continue
+
+        if ITCONNECT_URL_PATTERN.match(cr_proper_url):
+            # XACA-0469 Phase 1: cr_proper_url is an IT Connect ticket
+            # (one-stage CR, separate platform from Confluence). Approval-signal
+            # scanning over IT Connect is not implemented (Phase 2, gated on
+            # IT Connect API access). Silent-skip — manual approval required.
+            log(
+                f"[{team}][{cr_id}] cr_proper_url is an IT Connect ticket "
+                f"({cr_proper_url}) — itconnect approval-signal scan not "
+                f"implemented; manual approval required (XACA-0469 Phase 1)."
             )
             continue
 
