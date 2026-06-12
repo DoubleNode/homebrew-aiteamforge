@@ -1089,12 +1089,40 @@ def _handle_sigterm(signum: int, frame: Any) -> None:
     log_info("SIGTERM received — shutting down gracefully.")
     _shutdown_requested = True
 
+
+def _source_changed(baseline: Optional[float]) -> bool:
+    """Return True if __file__'s current mtime is newer than *baseline*.
+
+    Used by run_loop() to detect that the source has been refreshed on disk
+    (dev sync-develop or aiteamforge upgrade) while the daemon is running.
+    Returns False when baseline is None (stat failed at startup) so the daemon
+    never crashes over a missing baseline.  Testable seam: pass any float as
+    baseline; the function does its own stat of __file__.  (XACA-0680)
+    """
+    if baseline is None:
+        return False
+    try:
+        return os.path.getmtime(__file__) > baseline
+    except OSError:
+        return False
+
+
 def run_loop(binary: str) -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     acquire_pid_or_exit()
     log_info(f"Collector started (PID {os.getpid()}), polling every {POLL_INTERVAL_S}s")
     try:
+        source_mtime_baseline: Optional[float] = os.path.getmtime(__file__)
+    except OSError:
+        source_mtime_baseline = None
+    try:
         while not _shutdown_requested:
+            if _source_changed(source_mtime_baseline):
+                log_info(
+                    "Source file changed on disk (mtime advanced) — exiting cleanly"
+                    " so supervisor respawns updated code (XACA-0680)."
+                )
+                break
             try:
                 collect(binary)
             except Exception as e:
