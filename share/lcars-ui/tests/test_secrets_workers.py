@@ -55,11 +55,23 @@ for _mod_name, _stub in _stub_modules.items():
         sys.modules[_mod_name] = _stub
 
 import server  # noqa: E402
+import threading
+import time
+
 from server import (  # noqa: E402
     SECRETS_EXPORT_JOBS,
     SECRETS_IMPORT_JOBS,
+    IMPORT_JOBS,
     generate_secrets_export,
     apply_secrets_import,
+    _prune_old_secrets_jobs,
+    _import_job_create,
+    _import_job_get,
+    _import_job_update,
+    _import_job_snapshot,
+    _secrets_job_create,
+    _secrets_job_update,
+    _secrets_job_snapshot,
 )
 import pyzipper  # noqa: E402  (required dependency — must be present)
 
@@ -551,6 +563,134 @@ class TestExportImportNoDoublePrefix(unittest.TestCase):
             self.assertFalse(double_prefix_dir.exists(),
                              f"Double-prefix bug: {double_prefix_dir} should NOT exist "
                              f"(files extracted to secrets/secrets/ instead of secrets/)")
+
+
+# ---------------------------------------------------------------------------
+# Tests: XACA-0381 — thread-lock regression tests (F-04-003)
+# ---------------------------------------------------------------------------
+
+class TestPruneRaceCondition(unittest.TestCase):
+    """Concurrency regression for _prune_old_secrets_jobs + concurrent writers.
+
+    Without _SECRETS_JOBS_LOCK this test reliably produces:
+        RuntimeError: dictionary changed size during iteration
+
+    With the lock it must complete silently with no exception.
+    """
+
+    def setUp(self):
+        # Clear dicts so jobs from other tests don't leak in
+        SECRETS_IMPORT_JOBS.clear()
+        SECRETS_EXPORT_JOBS.clear()
+
+    def tearDown(self):
+        SECRETS_IMPORT_JOBS.clear()
+        SECRETS_EXPORT_JOBS.clear()
+
+    def test_prune_concurrent_create_no_race(self):
+        """Prune + concurrent creates must not raise RuntimeError."""
+        errors = []
+        stop_event = threading.Event()
+
+        # Two-hour-old ISO string so entries are eligible for pruning
+        from datetime import datetime, timezone, timedelta
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+        N_THREADS = 8
+        N_ITERS = 200
+
+        def writer():
+            for _ in range(N_ITERS):
+                if stop_event.is_set():
+                    break
+                jid = str(uuid.uuid4())
+                try:
+                    _secrets_job_create(SECRETS_IMPORT_JOBS, jid, {
+                        'status': 'completed',
+                        'createdAt': old_ts,
+                        'message': '',
+                        'progress': 100,
+                    })
+                    _secrets_job_update(SECRETS_IMPORT_JOBS, jid, {'message': 'updated'})
+                except Exception as exc:
+                    errors.append(exc)
+                    stop_event.set()
+
+        def pruner():
+            for _ in range(N_ITERS):
+                if stop_event.is_set():
+                    break
+                try:
+                    _prune_old_secrets_jobs()
+                except Exception as exc:
+                    errors.append(exc)
+                    stop_event.set()
+
+        threads = [threading.Thread(target=writer) for _ in range(N_THREADS)]
+        threads.append(threading.Thread(target=pruner))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        stop_event.set()
+        self.assertEqual(
+            errors, [],
+            f"Concurrency errors: {errors[:3]!r} (showing first 3)"
+        )
+
+
+class TestImportJobHelpers(unittest.TestCase):
+    """Unit tests for _import_job_* helpers (XACA-0381)."""
+
+    def setUp(self):
+        IMPORT_JOBS.clear()
+
+    def tearDown(self):
+        IMPORT_JOBS.clear()
+
+    def test_update_missing_job_is_noop(self):
+        """_import_job_update on a nonexistent job must not raise and must not create the key."""
+        _import_job_update('nonexistent-id', {'status': 'failed'})
+        self.assertNotIn('nonexistent-id', IMPORT_JOBS)
+
+    def test_snapshot_returns_independent_copy(self):
+        """Mutating the snapshot dict must not affect the registry."""
+        jid = _new_job_id()
+        _import_job_create(jid, {'status': 'staged', 'progress': 0, 'message': 'ok'})
+        snap = _import_job_snapshot(jid)
+        self.assertIsNotNone(snap)
+        # Mutate the snapshot
+        snap['status'] = 'MUTATED'
+        snap['extra_key'] = 'injected'
+        # Registry must be unchanged
+        live = _import_job_get(jid)
+        self.assertEqual(live['status'], 'staged', "Snapshot mutation leaked into registry")
+        self.assertNotIn('extra_key', live, "Extra key from snapshot leak found in registry")
+
+    def test_snapshot_returns_none_for_missing(self):
+        """_import_job_snapshot must return None for an unknown job_id."""
+        result = _import_job_snapshot('no-such-job')
+        self.assertIsNone(result)
+
+    def test_secrets_snapshot_returns_independent_copy(self):
+        """Mutating the secrets snapshot must not affect the registry."""
+        SECRETS_IMPORT_JOBS.clear()
+        try:
+            jid = _new_job_id()
+            _secrets_job_create(SECRETS_IMPORT_JOBS, jid, {
+                'status': 'ready',
+                'progress': 15,
+                'message': 'verified',
+            })
+            snap = _secrets_job_snapshot(SECRETS_IMPORT_JOBS, jid)
+            self.assertIsNotNone(snap)
+            snap['status'] = 'MUTATED'
+            live = SECRETS_IMPORT_JOBS.get(jid)
+            self.assertEqual(live['status'], 'ready',
+                             "Snapshot mutation leaked into SECRETS_IMPORT_JOBS registry")
+        finally:
+            SECRETS_IMPORT_JOBS.clear()
 
 
 # ---------------------------------------------------------------------------

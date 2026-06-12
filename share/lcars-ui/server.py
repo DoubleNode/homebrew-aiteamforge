@@ -332,6 +332,15 @@ EXPORT_JOBS = {}         # {job_id: {status, progress, message, filename, fileSi
 SECRETS_EXPORT_JOBS = {} # {job_id: {status, progress, message, filename, fileSize, error, pairedExportId, manifestUsed, ...}}
 IMPORT_JOBS = {}         # {job_id: {status, progress, message, manifest, stagedPath, ...}}
 SECRETS_IMPORT_JOBS = {} # {job_id: {status, progress, message, manifest, stagedPath, targetTeam, fileCount, createdAt, error, wrongPasswordAttempts, ...}}
+
+# XACA-0381 (audit F-04-003): job-registry dicts are mutated by the HTTP handler
+# thread AND daemon worker threads (apply_import / secrets workers) and iterated by
+# _prune_old_secrets_jobs. Guard all structural access (create/get/update/delete/iterate)
+# through the helpers below. Locks are held only around dict ops, NEVER across the
+# long-running extract/wipe work, so the status-poll endpoints stay responsive.
+_IMPORT_JOBS_LOCK = threading.Lock()    # guards IMPORT_JOBS
+_SECRETS_JOBS_LOCK = threading.Lock()   # guards SECRETS_EXPORT_JOBS + SECRETS_IMPORT_JOBS (shared prune loop)
+
 EXPORT_DIR = Path("/tmp/lcars-exports")
 IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
 
@@ -356,28 +365,87 @@ _SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS = 5
 MAIN_ZIP_SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
 
 
+# ---------------------------------------------------------------------------
+# XACA-0381: Thread-safe job-registry accessors
+# Each helper acquires exactly one lock and releases before returning — no
+# nested acquisition, no deadlock. Workers must use these for ALL structural
+# access; never access IMPORT_JOBS / SECRETS_*_JOBS directly.
+# ---------------------------------------------------------------------------
+
+def _import_job_create(job_id, data):
+    with _IMPORT_JOBS_LOCK:
+        IMPORT_JOBS[job_id] = data
+
+
+def _import_job_get(job_id):
+    """Live reference (reading scalar fields off it is atomic under the GIL)."""
+    with _IMPORT_JOBS_LOCK:
+        return IMPORT_JOBS.get(job_id)
+
+
+def _import_job_update(job_id, fields):
+    """Apply a dict of field updates atomically; no-op if the job is gone."""
+    with _IMPORT_JOBS_LOCK:
+        job = IMPORT_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _import_job_snapshot(job_id):
+    """Shallow copy safe to iterate/serialize without holding the lock; None if absent."""
+    with _IMPORT_JOBS_LOCK:
+        job = IMPORT_JOBS.get(job_id)
+        return dict(job) if job is not None else None
+
+
+def _secrets_job_create(jobs_dict, job_id, data):
+    with _SECRETS_JOBS_LOCK:
+        jobs_dict[job_id] = data
+
+
+def _secrets_job_get(jobs_dict, job_id):
+    with _SECRETS_JOBS_LOCK:
+        return jobs_dict.get(job_id)
+
+
+def _secrets_job_update(jobs_dict, job_id, fields):
+    with _SECRETS_JOBS_LOCK:
+        job = jobs_dict.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _secrets_job_snapshot(jobs_dict, job_id):
+    with _SECRETS_JOBS_LOCK:
+        job = jobs_dict.get(job_id)
+        return dict(job) if job is not None else None
+
+
 def _prune_old_secrets_jobs():
     """Prune completed/failed/skipped secrets jobs older than 1 hour from both dicts.
 
     Called at the start of each create-handler so the dicts don't grow unbounded
     across long-running server sessions.  Mirrors the TTL pattern in handle_create_export().
+
+    XACA-0381: hold _SECRETS_JOBS_LOCK across the full scan+delete so concurrent
+    worker threads cannot create/mutate entries while we iterate and del — the
+    root cause of `RuntimeError: dictionary changed size during iteration`.
+    Lock is held only across in-memory timestamp math; no I/O is done inside.
     """
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc)
     terminal_states = ('completed', 'failed', 'skipped')
-
-    for jobs_dict in (SECRETS_EXPORT_JOBS, SECRETS_IMPORT_JOBS):
-        stale = [
-            jid for jid, jdata in jobs_dict.items()
-            if jdata.get('status') in terminal_states
-            and (
-                now - datetime.fromisoformat(
+    with _SECRETS_JOBS_LOCK:
+        for jobs_dict in (SECRETS_EXPORT_JOBS, SECRETS_IMPORT_JOBS):
+            stale = [
+                jid for jid, jdata in jobs_dict.items()
+                if jdata.get('status') in terminal_states
+                and (now - datetime.fromisoformat(
                     jdata.get('createdAt', now.isoformat()).replace('Z', '+00:00')
-                )
-            ).total_seconds() > 3600
-        ]
-        for jid in stale:
-            del jobs_dict[jid]
+                )).total_seconds() > 3600
+            ]
+            for jid in stale:
+                del jobs_dict[jid]
 
 # XACA-0281 Phase A.3: Fleet Monitor sidecar URL (proxy + cache for engines registry)
 FLEET_MONITOR_URL = os.environ.get('FLEET_MONITOR_URL', 'http://localhost:8080')
@@ -605,7 +673,7 @@ def _compute_secrets_summary(team_id: str, paired_export_id) -> dict:
     if paired_export_id is None:
         paired_status = "none"
     else:
-        sec_job = SECRETS_EXPORT_JOBS.get(paired_export_id)
+        sec_job = _secrets_job_get(SECRETS_EXPORT_JOBS, paired_export_id)
         if sec_job is None:
             paired_status = "none"
         else:
@@ -908,7 +976,7 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         # 1. Dependency check                                                  #
         # ------------------------------------------------------------------ #
         if not pyzipper_available():
-            SECRETS_EXPORT_JOBS[job_id].update({
+            _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
                 'status': 'failed',
                 'progress': 0,
                 'message': 'pyzipper dependency missing',
@@ -924,8 +992,10 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         # ------------------------------------------------------------------ #
         # 2. Discover secrets sources                                          #
         # ------------------------------------------------------------------ #
-        SECRETS_EXPORT_JOBS[job_id]['message'] = 'Discovering secrets sources...'
-        SECRETS_EXPORT_JOBS[job_id]['progress'] = 5
+        _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
+            'message': 'Discovering secrets sources...',
+            'progress': 5,
+        })
 
         discovery = discover_secrets_sources(team_id)
         sources = discovery.get("sources", [])
@@ -933,10 +1003,10 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         manifest_used = discovery.get("manifest_used", "auto")
 
         # Store manifest_used in job immediately (status endpoint returns it)
-        SECRETS_EXPORT_JOBS[job_id]['manifestUsed'] = manifest_used
+        _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {'manifestUsed': manifest_used})
 
         if not sources:
-            SECRETS_EXPORT_JOBS[job_id].update({
+            _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
                 'status': 'skipped',
                 'progress': 100,
                 'message': 'No secrets directory found for this team — nothing to export.',
@@ -946,8 +1016,10 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         # ------------------------------------------------------------------ #
         # 3. Build file list                                                   #
         # ------------------------------------------------------------------ #
-        SECRETS_EXPORT_JOBS[job_id]['message'] = 'Scanning secrets files...'
-        SECRETS_EXPORT_JOBS[job_id]['progress'] = 10
+        _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
+            'message': 'Scanning secrets files...',
+            'progress': 10,
+        })
 
         # Each entry: (abs_path, arc_name_in_zip, source_target_rel)
         file_entries = []    # list of (Path, str arc_path)
@@ -986,7 +1058,7 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
 
         total_files = len(file_entries)
         if total_files == 0:
-            SECRETS_EXPORT_JOBS[job_id].update({
+            _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
                 'status': 'skipped',
                 'progress': 100,
                 'message': 'Secrets sources exist but contain no files — nothing to export.',
@@ -1003,8 +1075,10 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         filename = f"{team_id}-secrets-{timestamp}.zip"
         staged_path = EXPORT_DIR / filename
 
-        SECRETS_EXPORT_JOBS[job_id]['message'] = f'Encrypting {total_files} file(s)...'
-        SECRETS_EXPORT_JOBS[job_id]['progress'] = 15
+        _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
+            'message': f'Encrypting {total_files} file(s)...',
+            'progress': 15,
+        })
 
         # Note: file metadata (names, sizes) are visible in the zip's central directory;
         # only file contents are encrypted (WZ_AES).  Arc-path names must not contain
@@ -1025,14 +1099,16 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
                     print(f"[LCARS SecretsExport] Skipped: {arc_name} ({exc.__class__.__name__})")
                 processed += 1
                 if processed % 20 == 0:
-                    SECRETS_EXPORT_JOBS[job_id]['progress'] = 15 + int((processed / total_files) * 75)
-                    SECRETS_EXPORT_JOBS[job_id]['message'] = (
-                        f'Encrypting... ({processed}/{total_files} files)'
-                    )
+                    _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
+                        'progress': 15 + int((processed / total_files) * 75),
+                        'message': f'Encrypting... ({processed}/{total_files} files)',
+                    })
 
             # Manifest is the LAST entry in the zip (also encrypted)
-            SECRETS_EXPORT_JOBS[job_id]['message'] = 'Writing encrypted manifest...'
-            SECRETS_EXPORT_JOBS[job_id]['progress'] = 92
+            _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
+                'message': 'Writing encrypted manifest...',
+                'progress': 92,
+            })
 
             manifest_doc = {
                 "version": SECRETS_EXPORT_MANIFEST_VERSION,
@@ -1054,7 +1130,7 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         password = None  # noqa: F841  # explicit drop
 
         file_size = staged_path.stat().st_size
-        SECRETS_EXPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
             'status': 'completed',
             'progress': 100,
             'message': 'Secrets export ready for download',
@@ -1072,7 +1148,7 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
                 staged_path.unlink()
             except Exception:
                 pass
-        SECRETS_EXPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_EXPORT_JOBS, job_id, {
             'status': 'failed',
             'progress': 0,
             'message': f'Secrets export failed: {str(exc)}',
@@ -1125,7 +1201,7 @@ def apply_import(job_id):
     # XACA-0520-014: canonical filter is MAIN_ZIP_SKIP_CHANNELS at module level.
     SKIP_CHANNELS = MAIN_ZIP_SKIP_CHANNELS
 
-    job = IMPORT_JOBS.get(job_id)
+    job = _import_job_get(job_id)
     if not job:
         return
 
@@ -1142,8 +1218,7 @@ def apply_import(job_id):
             # ------------------------------------------------------------------ #
             # NEW FORMAT: manifest-driven, flat zip layout (XACA-0520-003+004)   #
             # ------------------------------------------------------------------ #
-            IMPORT_JOBS[job_id]['message'] = 'Reading manifest from archive...'
-            IMPORT_JOBS[job_id]['progress'] = 10
+            _import_job_update(job_id, {'message': 'Reading manifest from archive...', 'progress': 10})
 
             timestamp = datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')
             restore_staging = Path.home() / "team-transfers" / f"{target_team}-{timestamp}-restore"
@@ -1176,8 +1251,7 @@ def apply_import(job_id):
                         packable.append(fe)
 
             total = len(packable)
-            IMPORT_JOBS[job_id]['message'] = f'Extracting {total} files...'
-            IMPORT_JOBS[job_id]['progress'] = 20
+            _import_job_update(job_id, {'message': f'Extracting {total} files...', 'progress': 20})
 
             dest_home = Path.home()
             extracted = 0
@@ -1207,14 +1281,15 @@ def apply_import(job_id):
                         skipped += 1
 
                     if i % 50 == 0:
-                        IMPORT_JOBS[job_id]['progress'] = 20 + int((i / total) * 55)
-                        IMPORT_JOBS[job_id]['message'] = f'Extracting... ({i}/{total} files)'
+                        _import_job_update(job_id, {
+                            'progress': 20 + int((i / total) * 55),
+                            'message': f'Extracting... ({i}/{total} files)',
+                        })
 
             print(f'[LCARS Import] Extraction complete: {extracted} written, {skipped} skipped.')
 
             # Step 4: Post-restore verifier run against destination filesystem.
-            IMPORT_JOBS[job_id]['message'] = 'Running post-restore verifier...'
-            IMPORT_JOBS[job_id]['progress'] = 80
+            _import_job_update(job_id, {'message': 'Running post-restore verifier...', 'progress': 80})
 
             post_verifier_summary: dict = {'present': True, 'phase': 'post-restore'}
             try:
@@ -1317,7 +1392,7 @@ def apply_import(job_id):
                     'phase': 'post-restore',
                 }
 
-            IMPORT_JOBS[job_id].update({
+            _import_job_update(job_id, {
                 'status': 'completed',
                 'progress': 100,
                 'message': 'Import complete',
@@ -1372,15 +1447,13 @@ def apply_import(job_id):
                 shutil.rmtree(scratch_dir)
             scratch_dir.mkdir(parents=True)
 
-            IMPORT_JOBS[job_id]['message'] = 'Extracting archive...'
-            IMPORT_JOBS[job_id]['progress'] = 10
+            _import_job_update(job_id, {'message': 'Extracting archive...', 'progress': 10})
 
             with zipfile.ZipFile(staged_path, 'r') as zipf:
                 zipf.extractall(scratch_dir)
 
             # Step 1: Overwrite project kanban tree.
-            IMPORT_JOBS[job_id]['message'] = 'Overwriting project kanban tree...'
-            IMPORT_JOBS[job_id]['progress'] = 30
+            _import_job_update(job_id, {'message': 'Overwriting project kanban tree...', 'progress': 30})
 
             extracted_kanban = scratch_dir / "kanban"
             if not extracted_kanban.exists():
@@ -1402,8 +1475,10 @@ def apply_import(job_id):
             # Step 2: Team ID rewrite if source ≠ target.
             renames = 0
             if source_team and source_team != target_team:
-                IMPORT_JOBS[job_id]['message'] = f'Rewriting team IDs ({source_team} -> {target_team})...'
-                IMPORT_JOBS[job_id]['progress'] = 55
+                _import_job_update(job_id, {
+                    'message': f'Rewriting team IDs ({source_team} -> {target_team})...',
+                    'progress': 55,
+                })
 
                 old_board = target_kanban_dir / f"{source_team}-board.json"
                 new_board = target_kanban_dir / f"{target_team}-board.json"
@@ -1421,8 +1496,7 @@ def apply_import(job_id):
             renamed_conflicts = 0
             extracted_oot = scratch_dir / "__out_of_tree__" / "knowledge"
             if extracted_oot.exists():
-                IMPORT_JOBS[job_id]['message'] = 'Merging out-of-tree knowledge...'
-                IMPORT_JOBS[job_id]['progress'] = 75
+                _import_job_update(job_id, {'message': 'Merging out-of-tree knowledge...', 'progress': 75})
 
                 target_oot = _base_team_knowledge_dir(target_base)
                 if target_oot is None:
@@ -1465,7 +1539,7 @@ def apply_import(job_id):
                             shutil.copy2(src, rename_target)
                             renamed_conflicts += 1
 
-            IMPORT_JOBS[job_id].update({
+            _import_job_update(job_id, {
                 'status': 'completed',
                 'progress': 100,
                 'message': 'Import complete',
@@ -1482,7 +1556,7 @@ def apply_import(job_id):
                 pass
 
     except Exception as e:
-        IMPORT_JOBS[job_id].update({
+        _import_job_update(job_id, {
             'status': 'failed',
             'progress': 0,
             'message': f'Import failed: {str(e)}',
@@ -1506,12 +1580,12 @@ def apply_secrets_import(job_id, password):
     import tempfile
     from datetime import datetime, timezone
 
-    job = SECRETS_IMPORT_JOBS.get(job_id)
+    job = _secrets_job_get(SECRETS_IMPORT_JOBS, job_id)
     if not job:
         return
 
     def _fail(msg):
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'failed',
             'progress': 0,
             'message': msg,
@@ -1536,7 +1610,7 @@ def apply_secrets_import(job_id, password):
             _fail(f'Staged zip missing: {staged_path}')
             return
 
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'verifying',
             'progress': 5,
             'message': 'Verifying password...',
@@ -1607,9 +1681,9 @@ def apply_secrets_import(job_id, password):
                 f"Team mismatch: archive was exported from '{manifest_team}', "
                 f"importing into '{target_team}'. Proceeding (cross-team transfer)."
             )
-            SECRETS_IMPORT_JOBS[job_id]['message'] = team_warning
+            _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'message': team_warning})
 
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'manifest': manifest,
             'status': 'ready',
             'progress': 15,
@@ -1629,7 +1703,7 @@ def apply_secrets_import(job_id, password):
             _fail(f"Cannot determine project root for team '{target_team}'.")
             return
 
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'applying',
             'progress': 20,
             'message': 'Checking for collisions...',
@@ -1695,7 +1769,7 @@ def apply_secrets_import(job_id, password):
         # ------------------------------------------------------------------ #
         # 7. Atomic extraction: stage → move                                  #
         # ------------------------------------------------------------------ #
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'progress': 30,
             'message': f'Extracting {len(all_names)} file(s)...',
             'fileCount': len(all_names),
@@ -1717,7 +1791,7 @@ def apply_secrets_import(job_id, password):
                     dest_in_stage.parent.mkdir(parents=True, exist_ok=True)
                     dest_in_stage.write_bytes(zf.read(arc_name))
 
-            SECRETS_IMPORT_JOBS[job_id].update({
+            _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
                 'progress': 70,
                 'message': 'Moving files to target paths...',
             })
@@ -1743,7 +1817,7 @@ def apply_secrets_import(job_id, password):
                     )
                 moved += 1
                 progress = 70 + int((moved / len(all_names)) * 25)
-                SECRETS_IMPORT_JOBS[job_id]['progress'] = progress
+                _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'progress': progress})
 
         except Exception:
             # Blow away temp stage; leave target tree untouched
@@ -1760,7 +1834,7 @@ def apply_secrets_import(job_id, password):
         except Exception:
             pass
 
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'completed',
             'progress': 100,
             'message': f"Extracted {len(all_names)} file(s) to {target_root}",
@@ -14365,7 +14439,7 @@ end tell
             verifier_state = 'FAIL'   # surface as a hard block in the UI/wire
             print(f"[LCARS Import] WRONG-TEAM block: source base '{source_base}' != target base '{target_base_val}'")
 
-        IMPORT_JOBS[job_id] = {
+        _import_job_create(job_id, {
             'status': 'staged',
             'progress': 0,
             'message': 'Archive staged. Review pre-flight and apply.',
@@ -14382,7 +14456,7 @@ end tell
             'idRenameRequired': False,
             'createdAt': datetime.now(timezone.utc).isoformat(),
             'verifierSummary': verifier_summary,
-        }
+        })
 
         self._send_json_response({
             'jobId': job_id,
@@ -14426,7 +14500,7 @@ end tell
         """
         import threading
 
-        job = IMPORT_JOBS.get(job_id)
+        job = _import_job_get(job_id)
         if not job:
             self._send_json_response({'error': 'Import job not found'}, status=404)
             return
@@ -14551,7 +14625,7 @@ end tell
         # case, and must never fall through to the 409 or the acknowledge-override path.
         paired_secrets_job_id = body_json.get('pairedSecretsJobId') or None
         if paired_secrets_job_id is not None:
-            sec_job = SECRETS_IMPORT_JOBS.get(paired_secrets_job_id)
+            sec_job = _secrets_job_get(SECRETS_IMPORT_JOBS, paired_secrets_job_id)
             if sec_job is None:
                 self._send_json_response(
                     {'error': 'invalid_paired_secrets',
@@ -14578,13 +14652,15 @@ end tell
                 )
                 return
             # All validations passed — record the link so paired_secrets_provided is True.
-            IMPORT_JOBS[job_id]['pairedSecretsJobId'] = paired_secrets_job_id
+            _import_job_update(job_id, {'pairedSecretsJobId': paired_secrets_job_id})
 
         manifest = job.get('manifest', {})
         secrets_summary = manifest.get('secrets_summary', {})
         discovered = int(secrets_summary.get('discovered', 0))
         # Evaluate AFTER the block above may have set pairedSecretsJobId on the job.
-        paired_secrets_provided = IMPORT_JOBS[job_id].get('pairedSecretsJobId') is not None
+        # Re-fetch a fresh snapshot to pick up any update made just above.
+        job_fresh = _import_job_get(job_id)
+        paired_secrets_provided = (job_fresh or {}).get('pairedSecretsJobId') is not None
 
         if discovered > 0 and not paired_secrets_provided and not acknowledge_missing:
             expected = int(secrets_summary.get('expected', discovered))
@@ -14623,9 +14699,11 @@ end tell
                 f'acknowledgeMissingSecrets=true was set by the operator.'
             )
 
-        IMPORT_JOBS[job_id]['status'] = 'applying'
-        IMPORT_JOBS[job_id]['progress'] = 5
-        IMPORT_JOBS[job_id]['message'] = 'Starting import...'
+        _import_job_update(job_id, {
+            'status': 'applying',
+            'progress': 5,
+            'message': 'Starting import...',
+        })
 
         thread = threading.Thread(target=apply_import, args=(job_id,), daemon=True)
         thread.start()
@@ -14634,7 +14712,8 @@ end tell
 
     def serve_import_status(self, job_id):
         """GET /api/import/status/<job_id>"""
-        job = IMPORT_JOBS.get(job_id)
+        # Use snapshot so the comprehension below never races with worker writes.
+        job = _import_job_snapshot(job_id)
         if not job:
             self._send_json_response({'error': 'Job not found'}, status=404)
             return
@@ -14703,7 +14782,7 @@ end tell
                     pass
 
         job_id = str(uuid.uuid4())
-        SECRETS_EXPORT_JOBS[job_id] = {
+        _secrets_job_create(SECRETS_EXPORT_JOBS, job_id, {
             'status': 'generating',
             'progress': 0,
             'message': 'Initializing secrets export...',
@@ -14716,7 +14795,7 @@ end tell
             'pairedExportId': paired_export_id,
             'manifestUsed': None,
             'createdAt': datetime.now(timezone.utc).isoformat(),
-        }
+        })
 
         # Password is passed only as a thread arg — never stored in the job dict.
         thread = threading.Thread(
@@ -14734,7 +14813,7 @@ end tell
 
     def serve_secrets_export_status(self, job_id):
         """GET /api/export/secrets/status/<job_id>"""
-        job = SECRETS_EXPORT_JOBS.get(job_id)
+        job = _secrets_job_snapshot(SECRETS_EXPORT_JOBS, job_id)
         if not job:
             self._send_json_response({'error': 'Secrets export job not found'}, status=404)
             return
@@ -14742,7 +14821,7 @@ end tell
 
     def serve_secrets_export_download(self, job_id):
         """GET /api/export/secrets/download/<job_id> — stream the AES-256 encrypted zip."""
-        job = SECRETS_EXPORT_JOBS.get(job_id)
+        job = _secrets_job_snapshot(SECRETS_EXPORT_JOBS, job_id)
         if not job or job.get('status') != 'completed' or not job.get('filename'):
             self._send_json_response({'error': 'Secrets export not ready'}, status=404)
             return
@@ -14854,7 +14933,7 @@ end tell
         staged_path = job_dir / original_filename
         staged_path.write_bytes(file_bytes)
 
-        SECRETS_IMPORT_JOBS[job_id] = {
+        _secrets_job_create(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'awaiting-password',
             'progress': 0,
             'message': 'Upload complete. Provide password to verify and extract.',
@@ -14864,7 +14943,7 @@ end tell
             'fileCount': 0,
             'createdAt': datetime.now(timezone.utc).isoformat(),
             'error': None,
-        }
+        })
 
         self._send_json_response({
             'jobId': job_id,
@@ -14882,7 +14961,7 @@ end tell
 
         On wrong password: returns 400 with error; job status back to 'awaiting-password' (retryable).
         """
-        job = SECRETS_IMPORT_JOBS.get(job_id)
+        job = _secrets_job_get(SECRETS_IMPORT_JOBS, job_id)
         if not job:
             self._send_json_response({'error': 'Secrets import job not found'}, status=404)
             return
@@ -14949,14 +15028,14 @@ end tell
                             "Too many failed password attempts. "
                             "Re-upload the secrets zip to try again."
                         )
-                        SECRETS_IMPORT_JOBS[job_id].update({
+                        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
                             'status': 'failed',
                             'error': exhaust_msg,
                             'wrongPasswordAttempts': attempts,
                         })
                         self._send_json_response({'error': exhaust_msg}, status=400)
                     else:
-                        SECRETS_IMPORT_JOBS[job_id].update({
+                        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
                             'status': 'awaiting-password',
                             'error': 'Wrong password — please try again.',
                             'wrongPasswordAttempts': attempts,
@@ -14974,7 +15053,7 @@ end tell
                         "Archive does not contain secrets-manifest.json — "
                         "not a recognized LCARS secrets export."
                     )
-                    SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+                    _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'status': 'failed', 'error': msg})
                     self._send_json_response({'error': msg}, status=400)
                     return
                 all_members = [
@@ -14993,7 +15072,7 @@ end tell
                     staged_path.parent.rmdir()
                 except Exception:
                     pass
-                SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+                _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'status': 'failed', 'error': msg})
                 self._send_json_response({'error': msg}, status=400)
                 return
             raise
@@ -15002,7 +15081,7 @@ end tell
             manifest = json.loads(manifest_bytes.decode('utf-8'))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             msg = f'secrets-manifest.json is not valid JSON: {e}'
-            SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+            _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'status': 'failed', 'error': msg})
             self._send_json_response({'error': msg}, status=400)
             return
 
@@ -15011,7 +15090,7 @@ end tell
                 f"Not a recognized LCARS secrets export "
                 f"(kind={manifest.get('kind')!r})."
             )
-            SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+            _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'status': 'failed', 'error': msg})
             self._send_json_response({'error': msg}, status=400)
             return
 
@@ -15020,7 +15099,7 @@ end tell
                 f"Unsupported secrets export version: {manifest.get('version')!r} "
                 f"(expected {SECRETS_EXPORT_MANIFEST_VERSION!r})."
             )
-            SECRETS_IMPORT_JOBS[job_id].update({'status': 'failed', 'error': msg})
+            _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {'status': 'failed', 'error': msg})
             self._send_json_response({'error': msg}, status=400)
             return
 
@@ -15035,7 +15114,7 @@ end tell
                 f"importing into '{target_team}'. Proceeding (cross-team transfer)."
             )
 
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'ready',
             'manifest': manifest,
             'fileCount': len(all_members),
@@ -15065,7 +15144,7 @@ end tell
         """
         import threading
 
-        job = SECRETS_IMPORT_JOBS.get(job_id)
+        job = _secrets_job_get(SECRETS_IMPORT_JOBS, job_id)
         if not job:
             self._send_json_response({'error': 'Secrets import job not found'}, status=404)
             return
@@ -15092,7 +15171,7 @@ end tell
             self._send_json_response({'error': 'password is required'}, status=400)
             return
 
-        SECRETS_IMPORT_JOBS[job_id].update({
+        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
             'status': 'applying',
             'progress': 0,
             'message': 'Starting secrets import...',
@@ -15111,7 +15190,8 @@ end tell
 
     def serve_secrets_import_status(self, job_id):
         """GET /api/import/secrets/status/<job_id>"""
-        job = SECRETS_IMPORT_JOBS.get(job_id)
+        # Use snapshot so the comprehension below never races with worker writes.
+        job = _secrets_job_snapshot(SECRETS_IMPORT_JOBS, job_id)
         if not job:
             self._send_json_response({'error': 'Job not found'}, status=404)
             return
