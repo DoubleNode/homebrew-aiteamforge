@@ -571,5 +571,59 @@ class ConstantsTests(unittest.TestCase):
         self.assertLessEqual(cc.WEEKLY_HISTORY_MAX, 52)
 
 
+# ---------------------------------------------------------------------------
+# _source_changed() regression tests — XACA-0680 (ccusage collector self-recycle)
+# ---------------------------------------------------------------------------
+
+class SourceChangedRecycleTests(unittest.TestCase):
+    """_source_changed returns True when the source file mtime has advanced.
+
+    This is the core regression guard for XACA-0680: verify that the
+    self-recycle signal fires when a new version of ccusage_collector.py
+    is synced to disk while the daemon is running.
+    """
+
+    def test_source_changed_detects_mtime_advance(self):
+        """Recycle triggers: baseline older than current mtime → True."""
+        old_baseline = 1_000_000.0
+        # Patch getmtime to return a value newer than the baseline.
+        with mock.patch("os.path.getmtime", return_value=old_baseline + 100.0):
+            result = cc._source_changed(old_baseline)
+        self.assertTrue(result, "_source_changed must return True when mtime advanced past baseline")
+
+    def test_source_changed_no_recycle_when_unchanged(self):
+        """No recycle when stable: baseline == current mtime → False."""
+        stable_mtime = 1_700_000_000.0
+        with mock.patch("os.path.getmtime", return_value=stable_mtime):
+            result = cc._source_changed(stable_mtime)
+        self.assertFalse(result, "_source_changed must return False when mtime unchanged")
+
+    def test_source_changed_no_recycle_when_baseline_newer(self):
+        """No recycle when baseline is ahead of current mtime (clock skew / rollback) → False."""
+        current_mtime = 1_700_000_000.0
+        newer_baseline = current_mtime + 50.0
+        with mock.patch("os.path.getmtime", return_value=current_mtime):
+            result = cc._source_changed(newer_baseline)
+        self.assertFalse(result, "_source_changed must return False when baseline >= current mtime")
+
+    def test_source_changed_none_baseline_is_safe(self):
+        """Startup stat-failure path: baseline=None → False (never recycles, never crashes)."""
+        # No patch needed; function exits before calling getmtime when baseline is None.
+        result = cc._source_changed(None)
+        self.assertFalse(result, "_source_changed(None) must return False unconditionally")
+
+    def test_source_changed_none_baseline_does_not_call_getmtime(self):
+        """Confirm getmtime is never invoked when baseline is None (short-circuit guard)."""
+        with mock.patch("os.path.getmtime") as mock_getmtime:
+            cc._source_changed(None)
+        mock_getmtime.assert_not_called()
+
+    def test_source_changed_oserror_is_swallowed(self):
+        """Transient stat error → False (daemon must not crash on a missing file)."""
+        with mock.patch("os.path.getmtime", side_effect=OSError("stat failed")):
+            result = cc._source_changed(1_700_000_000.0)
+        self.assertFalse(result, "_source_changed must return False (not raise) on OSError")
+
+
 if __name__ == "__main__":
     unittest.main()
