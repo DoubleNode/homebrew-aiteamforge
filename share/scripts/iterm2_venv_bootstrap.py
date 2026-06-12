@@ -24,8 +24,25 @@ startup script via `python3 set-lcars-profile-browser.py`) the system python3
 does NOT have the `iterm2` package.  This module detects that condition and
 re-executes the current script under the venv python3 that DOES have it.
 
-If no venv is found (e.g. on the dev source machine where the package is
-installed globally, or a fresh install that hasn't run postinstall yet), the
+Venv candidate probe order:
+  1. brew --prefix aiteamforge / libexec/venv   — current Formula convention
+  2. brew --prefix / var/aiteamforge/venv        — legacy location
+  3. /opt/homebrew/var/aiteamforge/venv          — Apple-Silicon homebrew hardcode
+  4. /usr/local/var/aiteamforge/venv             — Intel homebrew hardcode
+  5. <repo_root>/.venv                           — repo-local dev venv (XACA-0690)
+
+Candidate 5 exists for the dev-source machine (M3Pro) where the tap is NEVER
+installed (CLAUDE.md hard rule) and iterm2 lives only in the repo-local dev venv.
+After a homebrew python relink (e.g. Jun 2026) bare python3 loses the iterm2
+package entirely — the repo-local .venv is the correct fallback.  On consumer
+machines no repo .venv exists so the candidate is harmlessly skipped.
+
+The repo root is resolved from `__file__`; if called from a git worktree (where
+`<root>/.git` is a file, not a directory) we parse the gitdir pointer and walk up
+to the main-checkout root so the correct `.venv` is found regardless of which
+worktree the script lives in.
+
+If no venv is found (e.g. a fresh install that hasn't run postinstall yet), the
 function returns normally and lets the caller's own `import iterm2` produce an
 informative ImportError.
 
@@ -53,6 +70,11 @@ def _get_tap_venv_candidates() -> list[str]:
       2. brew --prefix / var/aiteamforge/venv        — legacy location
       3. /opt/homebrew/var/aiteamforge/venv          — Apple-Silicon homebrew hardcode
       4. /usr/local/var/aiteamforge/venv             — Intel homebrew hardcode
+      5. <repo_root>/.venv                           — repo-local dev venv (XACA-0690)
+
+    Tap candidates come first so consumer machines always prefer the managed venv.
+    The repo-local .venv is appended last as a dev-box fallback; on consumer
+    machines it doesn't exist and is silently skipped.
     """
     brew_prefix = ""
     try:
@@ -70,11 +92,34 @@ def _get_tap_venv_candidates() -> list[str]:
     except Exception:
         pass
 
+    # Derive repo root from this file's location: <repo_root>/scripts/iterm2_venv_bootstrap.py
+    # In a git worktree, <repo_root>/.git is a FILE pointing to the common git dir;
+    # the actual dev venv lives in the main-checkout root, not the worktree root.
+    # We resolve the common-dir parent so worktree invocations find ~/dev-team/.venv.
+    _bootstrap_dir = os.path.dirname(os.path.abspath(__file__))  # .../scripts
+    _nominal_root = os.path.dirname(_bootstrap_dir)              # worktree root OR main repo root
+    _git_path = os.path.join(_nominal_root, ".git")
+    _repo_root = _nominal_root  # default: assume main checkout
+    if os.path.isfile(_git_path):
+        # Worktree: .git is a file with "gitdir: <common-dir>/worktrees/<name>"
+        # Walk up from that path to find the main repo root (the dir containing ".git/").
+        try:
+            with open(_git_path) as _f:
+                _gitdir_line = _f.read().strip()  # e.g. "gitdir: /path/.git/worktrees/name"
+            if _gitdir_line.startswith("gitdir:"):
+                _gitdir = _gitdir_line[len("gitdir:"):].strip()
+                # Navigate: .git/worktrees/<name> -> .git -> main-repo-root
+                _repo_root = os.path.dirname(os.path.dirname(os.path.dirname(_gitdir)))
+        except Exception:
+            pass
+    repo_venv = os.path.join(_repo_root, ".venv")                # repo-local dev venv (main checkout)
+
     return [
         os.path.join(brew_atf_prefix, "libexec/venv") if brew_atf_prefix else "",
         os.path.join(brew_prefix, "var/aiteamforge/venv") if brew_prefix else "",
         "/opt/homebrew/var/aiteamforge/venv",
         "/usr/local/var/aiteamforge/venv",
+        repo_venv,  # dev-box fallback: tap is never installed on M3Pro (XACA-0690)
     ]
 
 
