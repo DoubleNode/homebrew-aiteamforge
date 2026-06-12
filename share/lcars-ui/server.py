@@ -366,6 +366,23 @@ _SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS = 5
 MAIN_ZIP_SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
 
 
+def _ensure_private_dir(path: Path) -> None:
+    """Create *path* (and any parents) restricted to the owner, and tighten its
+    permissions even when it already existed.
+
+    XACA-0386 (audit F-04-007): export/import artifacts are staged under shared
+    /tmp directories and can contain sensitive team data — including encrypted
+    *and* transiently-decrypted secrets bundles. ``mkdir(mode=0o700)`` only
+    applies the mode when the directory is newly created, so a pre-existing
+    world-readable dir (left by an older build, or a wide umask) would silently
+    stay loose. The explicit ``chmod`` closes that gap. Note ``parents=True``
+    only sets the mode on the final component, so a caller creating a nested
+    staging dir must ensure the parent through this helper first.
+    """
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path.chmod(0o700)
+
+
 # ---------------------------------------------------------------------------
 # XACA-0381: Thread-safe job-registry accessors
 # Each helper acquires exactly one lock and releases before returning — no
@@ -829,7 +846,7 @@ def generate_export(job_id, team_id):
     SKIP_CHANNELS = MAIN_ZIP_SKIP_CHANNELS
 
     try:
-        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(EXPORT_DIR)
 
         base_team, project_params = _split_team_id(team_id)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1157,7 +1174,7 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         # ------------------------------------------------------------------ #
         # 4. Write encrypted zip                                               #
         # ------------------------------------------------------------------ #
-        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(EXPORT_DIR)
 
         base_team, _ = _split_team_id(team_id)
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -1583,7 +1600,8 @@ def apply_import(job_id):
             scratch_dir = IMPORT_STAGING_DIR / f"extract-{job_id}"
             if scratch_dir.exists():
                 shutil.rmtree(scratch_dir)
-            scratch_dir.mkdir(parents=True)
+            _ensure_private_dir(IMPORT_STAGING_DIR)  # parent may pre-exist loose
+            _ensure_private_dir(scratch_dir)
 
             _import_job_update(job_id, {'message': 'Extracting archive...', 'progress': 10})
 
@@ -1928,7 +1946,7 @@ def apply_secrets_import(job_id, password):
 
         try:
             # Extract everything to temp staging area
-            SECRETS_IMPORT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+            _ensure_private_dir(SECRETS_IMPORT_STAGING_DIR)
             with pyzipper.AESZipFile(staged_path, 'r') as zf:
                 zf.setpassword(password.encode('utf-8'))
                 for arc_name in all_names:
@@ -14241,7 +14259,7 @@ end tell
             self._send_json_response({'error': 'No file found in upload'}, status=400)
             return
 
-        IMPORT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(IMPORT_STAGING_DIR)
         job_id = str(uuid.uuid4())
         staged_path = IMPORT_STAGING_DIR / f"{job_id}.zip"
         staged_path.write_bytes(file_bytes)
@@ -15077,10 +15095,10 @@ end tell
             self._send_json_response({'error': 'No file found in upload'}, status=400)
             return
 
-        SECRETS_IMPORT_STAGING_DIR.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(SECRETS_IMPORT_STAGING_DIR)
         job_id = str(uuid.uuid4())
         job_dir = SECRETS_IMPORT_STAGING_DIR / job_id
-        job_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_private_dir(job_dir)
         staged_path = job_dir / original_filename
         staged_path.write_bytes(file_bytes)
 
