@@ -1,4 +1,7 @@
 #!/bin/bash
+# shellcheck disable=SC1071,SC1054,SC1073,SC1056,SC1072
+# This is a TEMPLATE file: {{PLACEHOLDER}} tokens are substituted at render time
+# and are not valid shell until rendered. ShellCheck is disabled here intentionally.
 #
 # Tailscale Funnel Restore Script
 # Restores all Funnel routes for LCARS dashboard system

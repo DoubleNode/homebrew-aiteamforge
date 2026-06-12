@@ -203,7 +203,7 @@ if [ "$MODE" = "uninstall" ]; then
   echo -e "${RED}Warning: This will NOT remove the Homebrew formula${NC}"
   echo "To fully remove aiteamforge, also run: brew uninstall aiteamforge"
   echo ""
-  read -p "Continue with uninstall? (yes/no): " confirm
+  read -rp "Continue with uninstall? (yes/no): " confirm
 
   if [ "$confirm" != "yes" ]; then
     echo "Uninstall cancelled"
@@ -234,7 +234,7 @@ if [ "$MODE" = "uninstall" ]; then
 
   # Ask about removing working directory
   echo ""
-  read -p "Remove working directory ${INSTALL_DIR}? (yes/no): " remove_dir
+  read -rp "Remove working directory ${INSTALL_DIR}? (yes/no): " remove_dir
 
   if [ "$remove_dir" = "yes" ]; then
     # Safety bounds: refuse to rm -rf dangerous paths
@@ -297,7 +297,7 @@ wizard_prompt() {
   fi
 
   local answer
-  read -p "$prompt_text" answer
+  read -rp "$prompt_text" answer
   echo "${answer:-$default_val}"
 }
 
@@ -416,7 +416,7 @@ if [ -d "/Applications/iTerm.app" ]; then
       echo ""
       echo -e "  The iTerm2 Python API is required for automatic tab creation."
       echo -e "  Enable it now, or manually via: iTerm2 → Settings → General → Magic → Enable Python API"
-      read -p "  Enable iTerm2 Python API? (yes/no) [yes]: " enable_api
+      read -rp "  Enable iTerm2 Python API? (yes/no) [yes]: " enable_api
       enable_api="${enable_api:-yes}"
       if [ "$enable_api" = "yes" ]; then
         defaults write com.googlecode.iterm2 EnableAPIServer -bool true
@@ -447,7 +447,7 @@ if [ ${#MISSING_DEPS[@]} -gt 0 ]; then
   if [ "$MODE" = "non-interactive" ]; then
     echo -e "${YELLOW}⚠ Skipping missing dependencies in non-interactive mode${NC}"
   else
-    read -p "Install missing dependencies now? (yes/no): " install_deps
+    read -rp "Install missing dependencies now? (yes/no): " install_deps
 
     if [ "$install_deps" = "yes" ]; then
       echo ""
@@ -480,10 +480,10 @@ echo "Default installation directory: ${INSTALL_DIR}"
 
 if [ "$MODE" != "non-interactive" ]; then
   echo ""
-  read -p "Use default location? (yes/no): " use_default
+  read -rp "Use default location? (yes/no): " use_default
 
   if [ "$use_default" != "yes" ]; then
-    read -p "Enter installation directory: " custom_dir
+    read -rp "Enter installation directory: " custom_dir
     INSTALL_DIR="${custom_dir/#\~/$HOME}" # Expand ~
   fi
 fi
@@ -519,7 +519,7 @@ if is_configured; then
     echo ""
     # Loop until we get a recognized choice. Empty input defaults to Upgrade.
     while true; do
-      read -p "Choice [U]: " _setup_choice
+      read -rp "Choice [U]: " _setup_choice
       case "$(printf '%s' "${_setup_choice:-U}" | tr '[:upper:]' '[:lower:]')" in
         u|upgrade)
           IS_UPGRADE="true"
@@ -676,7 +676,7 @@ if [ "$UPGRADE_HYDRATED" = "true" ]; then
 elif [ "$MODE" = "non-interactive" ]; then
   MACHINE_NAME="$DEFAULT_MACHINE_NAME"
 else
-  read -p "Machine name [${DEFAULT_MACHINE_NAME}]: " MACHINE_NAME
+  read -rp "Machine name [${DEFAULT_MACHINE_NAME}]: " MACHINE_NAME
   MACHINE_NAME="${MACHINE_NAME:-$DEFAULT_MACHINE_NAME}"
 fi
 
@@ -742,7 +742,7 @@ if [ "$MODE" = "non-interactive" ]; then
   team_choices="${AITEAMFORGE_TEAMS:-all}"
   echo "Teams to install: $team_choices (non-interactive)"
 else
-  read -p "Teams to install: " team_choices
+  read -rp "Teams to install: " team_choices
 fi
 
 if [ "$team_choices" = "all" ]; then
@@ -799,7 +799,7 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
     if [ "$MODE" = "non-interactive" ]; then
       client_id="default-client"
     else
-      read -p "  Client ID: " client_id
+      read -rp "  Client ID: " client_id
       client_id="$(_sanitize_id "$client_id")"
     fi
     if [ -z "$client_id" ]; then
@@ -811,7 +811,7 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
     if [ "$MODE" = "non-interactive" ]; then
       project_id="${default_project}"
     else
-      read -p "  Project ID [${default_project}]: " project_id
+      read -rp "  Project ID [${default_project}]: " project_id
       project_id="$(_sanitize_id "${project_id:-$default_project}")"
     fi
     project_id="${project_id:-$default_project}"
@@ -829,7 +829,7 @@ for team_id in "${SELECTED_TEAMS[@]}"; do
     if [ "$MODE" = "non-interactive" ]; then
       project_id="${default_project}"
     else
-      read -p "  Project ID [${default_project}]: " project_id
+      read -rp "  Project ID [${default_project}]: " project_id
       project_id="$(_sanitize_id "${project_id:-$default_project}")"
     fi
     project_id="${project_id:-$default_project}"
@@ -892,19 +892,19 @@ else
 
   # Shell Environment
   echo -e "${CYAN}Shell Environment${NC} — Terminal aliases, prompts, and helpers"
-  read -p "  Install shell environment? (yes/no) [yes]: " ans
+  read -rp "  Install shell environment? (yes/no) [yes]: " ans
   INSTALL_SHELL="${ans:-yes}"
   echo ""
 
   # Claude Code Configuration
   echo -e "${CYAN}Claude Code Config${NC} — AI agent settings, hooks, and personas"
-  read -p "  Install Claude Code config? (yes/no) [yes]: " ans
+  read -rp "  Install Claude Code config? (yes/no) [yes]: " ans
   INSTALL_CLAUDE="${ans:-yes}"
   echo ""
 
   # LCARS Kanban System
   echo -e "${CYAN}LCARS Kanban System${NC} — Visual task management with web UI"
-  read -p "  Install LCARS Kanban? (yes/no) [yes]: " ans
+  read -rp "  Install LCARS Kanban? (yes/no) [yes]: " ans
   INSTALL_KANBAN="${ans:-yes}"
   echo ""
 
@@ -918,7 +918,7 @@ else
   echo "    2) New Server — Set up a NEW Fleet Monitor server on this machine"
   echo "    3) Connect    — Connect this machine to an EXISTING Fleet Monitor"
   echo ""
-  read -p "  Choose (1/2/3) [1]: " fleet_choice
+  read -rp "  Choose (1/2/3) [1]: " fleet_choice
   fleet_choice="${fleet_choice:-1}"
 
   FLEET_MODE="standalone"
@@ -936,7 +936,7 @@ else
       echo ""
       echo "  Enter the URL of the existing Fleet Monitor server."
       echo "  (e.g., http://192.168.1.100:3000 or https://my-mac.tail12345.ts.net)"
-      read -p "  Server URL: " FLEET_SERVER_URL
+      read -rp "  Server URL: " FLEET_SERVER_URL
       if [ -z "$FLEET_SERVER_URL" ]; then
         echo -e "  ${RED}✗ No URL provided — skipping Fleet Monitor${NC}"
         INSTALL_FLEET="no"
@@ -991,11 +991,11 @@ if [ "$MODE" != "non-interactive" ] && [ "$UPGRADE_HYDRATED" != "true" ] \
     echo ""
     echo -e "${CYAN}Atlassian API credentials${NC} (shared across CR-enabled teams)"
     echo -e "  Create an API token: ${BLUE}https://id.atlassian.com/manage-profile/security/api-tokens${NC}"
-    read -p "  Atlassian account email: " CR_ATLASSIAN_EMAIL
+    read -rp "  Atlassian account email: " CR_ATLASSIAN_EMAIL
     read -rsp "  Atlassian API token (hidden): " CR_ATLASSIAN_TOKEN; echo ""
-    read -p "  Confluence site [mainevent.atlassian.net]: " CR_CONFLUENCE_SITE
+    read -rp "  Confluence site [mainevent.atlassian.net]: " CR_CONFLUENCE_SITE
     CR_CONFLUENCE_SITE="${CR_CONFLUENCE_SITE:-mainevent.atlassian.net}"
-    read -p "  Confluence space key [DPD2]: " CR_SPACE_KEY
+    read -rp "  Confluence space key [DPD2]: " CR_SPACE_KEY
     CR_SPACE_KEY="${CR_SPACE_KEY:-DPD2}"
     if [ -z "$CR_ATLASSIAN_EMAIL" ] || [ -z "$CR_ATLASSIAN_TOKEN" ]; then
       echo -e "  ${YELLOW}⚠ Email and token are both required — CR credentials will be skipped.${NC}"
@@ -1047,7 +1047,7 @@ elif [ "$UPGRADE_HYDRATED" = "true" ]; then
 elif [ "$INSTALL_PROFILE" = "cockpit" ]; then
   echo "Proceeding with cockpit installation..."
 else
-  read -p "Proceed with installation? (yes/no): " confirm
+  read -rp "Proceed with installation? (yes/no): " confirm
 
   if [ "$confirm" != "yes" ]; then
     echo "Setup cancelled."
@@ -1720,7 +1720,7 @@ if [ -n "$TAILSCALE_CLI" ]; then
     if [ "$MODE" != "non-interactive" ]; then
       echo ""
       echo -e "    Tailscale enables remote access to your Fleet Monitor and LCARS dashboards."
-      read -p "    Start Tailscale now? (yes/no) [yes]: " start_ts
+      read -rp "    Start Tailscale now? (yes/no) [yes]: " start_ts
       start_ts="${start_ts:-yes}"
       if [ "$start_ts" = "yes" ]; then
         echo -e "    Starting Tailscale..."
@@ -1743,7 +1743,7 @@ if [ -n "$TAILSCALE_CLI" ]; then
         if echo "$ts_status2" | grep -q "NeedsLogin\|not logged in\|failed to connect"; then
           echo ""
           echo -e "    ${CYAN}Sign in to Tailscale via the menu bar icon, then press Enter.${NC}"
-          read -p "    Press Enter when signed in... "
+          read -rp "    Press Enter when signed in... "
         fi
         # Verify
         ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
@@ -1789,7 +1789,7 @@ if [ -n "$TAILSCALE_CLI" ]; then
 else
   echo -e "  ${YELLOW}○${NC} Tailscale not installed (optional — needed for remote access)"
   if [ "$MODE" != "non-interactive" ]; then
-    read -p "    Install Tailscale now? (yes/no) [no]: " install_ts
+    read -rp "    Install Tailscale now? (yes/no) [no]: " install_ts
     install_ts="${install_ts:-no}"
     if [ "$install_ts" = "yes" ]; then
       echo -e "    Installing Tailscale (GUI app)..."
@@ -1798,7 +1798,7 @@ else
       open /Applications/Tailscale.app 2>/dev/null
       sleep 5
       echo -e "    ${CYAN}Sign in to Tailscale via the menu bar icon, then press Enter.${NC}"
-      read -p "    Press Enter when signed in... "
+      read -rp "    Press Enter when signed in... "
       ts_ip=$($TAILSCALE_CLI ip -4 2>/dev/null | head -n1 || true)
       if [ -n "$ts_ip" ]; then
         echo -e "  ${GREEN}✓${NC} Tailscale installed and connected"
