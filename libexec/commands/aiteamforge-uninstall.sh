@@ -187,7 +187,7 @@ remove_launchagents() {
       print_info "Removing ${agent}..."
 
       # Unload agent
-      launchctl unload "$plist" 2>/dev/null || true
+      _aitf_launchctl unload "$plist" 2>/dev/null || true
 
       # Remove file
       rm "$plist"

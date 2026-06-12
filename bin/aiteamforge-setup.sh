@@ -36,6 +36,13 @@ fi
 # shellcheck source=/dev/null
 [ -f "$AITEAMFORGE_HOME/libexec/lib/python-env.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/python-env.sh"
 
+# XACA-0683: source common.sh early so _aitf_launchctl (and the shared output
+# helpers) are defined for ALL code paths — notably the inline `uninstall` block
+# below, which runs and `exit 0`s before the later common.sh source. common.sh
+# has its own double-source guard, so the later sources become cheap no-ops.
+# shellcheck source=/dev/null
+[ -f "$AITEAMFORGE_HOME/libexec/lib/common.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/common.sh"
+
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "$AITEAMFORGE_HOME/../VERSION" "$AITEAMFORGE_HOME/VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
 VERSION="$(_find_version)"
@@ -212,13 +219,13 @@ if [ "$MODE" = "uninstall" ]; then
 
   # Remove LaunchAgents
   if [ -f "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist" ]; then
-    launchctl unload "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist" 2>/dev/null || true
+    _aitf_launchctl unload "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist" 2>/dev/null || true
     rm "$HOME/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist"
     echo -e "${GREEN}✓${NC} Removed kanban-backup LaunchAgent"
   fi
 
   if [ -f "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist" ]; then
-    launchctl unload "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist" 2>/dev/null || true
+    _aitf_launchctl unload "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist" 2>/dev/null || true
     rm "$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
     echo -e "${GREEN}✓${NC} Removed lcars-health LaunchAgent"
   fi
@@ -1577,8 +1584,8 @@ for _plist in \
     "$HOME/Library/LaunchAgents/com.aiteamforge.fleet-monitor.plist"; do
     if [ -f "$_plist" ]; then
         _name=$(basename "$_plist" .plist)
-        launchctl unload "$_plist" 2>/dev/null || true
-        if launchctl load "$_plist" 2>/dev/null; then
+        _aitf_launchctl unload "$_plist" 2>/dev/null || true
+        if _aitf_launchctl load "$_plist" 2>/dev/null; then
             echo -e "  ${GREEN}✓${NC} ${_name}"
             _loaded_agents=$((_loaded_agents + 1))
         else

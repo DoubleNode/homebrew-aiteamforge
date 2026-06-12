@@ -207,7 +207,7 @@ stop_agents() {
 
     # Unload agent
     print_info "Unloading ${agent}..."
-    if launchctl unload "$plist" 2>/dev/null; then
+    if _aitf_launchctl unload "$plist" 2>/dev/null; then
       print_success "Unloaded ${agent}"
       unloaded=$((unloaded + 1))
     else

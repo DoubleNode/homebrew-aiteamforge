@@ -19,18 +19,9 @@ _VALIDATE_INSTALL_SH_LOADED=1
 _atf_validate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 # shellcheck source=./python-env.sh
 [ -f "$_atf_validate_script_dir/python-env.sh" ] && . "$_atf_validate_script_dir/python-env.sh" 2>/dev/null || true
+# shellcheck source=./common.sh
+[ -f "$_atf_validate_script_dir/common.sh" ] && . "$_atf_validate_script_dir/common.sh" 2>/dev/null || true
 unset _atf_validate_script_dir
-
-# ─── launchctl guard — skips real GUI-domain side effects under test/sandbox ─
-# Set AITEAMFORGE_SKIP_LAUNCHCTL=1 to suppress load/unload/bootstrap/bootout.
-# Read-only ops (launchctl list | grep …) are NOT routed here — they are
-# harmless and, under test, the PATH mock already intercepts them.  (XACA-0682)
-_aitf_launchctl() {
-    if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" = "1" ]; then
-        return 0
-    fi
-    launchctl "$@"
-}
 
 # ─── Colors (safe to redefine if not already set) ───────────────────────────
 

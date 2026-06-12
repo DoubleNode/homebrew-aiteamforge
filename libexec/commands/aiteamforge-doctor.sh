@@ -213,7 +213,7 @@ attempt_remediation() {
       if [ "$apply" = true ]; then
         if [ -f "$plist" ]; then
           _remediation_note "[fix] keepalive: launchctl load ${plist}"
-          launchctl load "$plist" >/dev/null 2>&1 || \
+          _aitf_launchctl load "$plist" >/dev/null 2>&1 || \
             _remediation_note "[fix] keepalive: launchctl load returned non-zero (may already be loaded)"
         else
           _remediation_note "[fix] keepalive: plist missing (${plist}) — run: aiteamforge setup"

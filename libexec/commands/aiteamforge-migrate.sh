@@ -646,13 +646,13 @@ update_launchagents() {
       fi
 
       # Unload current agent (ignore failure — may not be loaded)
-      launchctl unload "${target}" 2>/dev/null || true
+      _aitf_launchctl unload "${target}" 2>/dev/null || true
 
       # Atomically replace with rendered version
       mv "$tmpfile" "${target}"
 
       # Reload agent (ignore failure — may need user session context)
-      launchctl load "${target}" 2>/dev/null || true
+      _aitf_launchctl load "${target}" 2>/dev/null || true
 
       success "Updated ${agent}"
       agents_updated=$((agents_updated + 1))

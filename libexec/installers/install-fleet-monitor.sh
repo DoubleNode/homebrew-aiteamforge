@@ -18,20 +18,6 @@ FLEET_MODE="${FLEET_MODE:-standalone}"  # standalone | client | server
 TAILSCALE_FUNNEL_PORT="${TAILSCALE_FUNNEL_PORT:-443}"
 
 #──────────────────────────────────────────────────────────────────────────────
-# launchctl guard — skips real GUI-domain side effects under test/sandbox
-# Set AITEAMFORGE_SKIP_LAUNCHCTL=1 to suppress load/unload/bootstrap/bootout.
-# Read-only operations (launchctl list | grep …) are NOT routed here — they
-# are harmless and the test mock already handles them via PATH interception.
-# (XACA-0682)
-#──────────────────────────────────────────────────────────────────────────────
-_aitf_launchctl() {
-    if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" = "1" ]; then
-        return 0
-    fi
-    launchctl "$@"
-}
-
-#──────────────────────────────────────────────────────────────────────────────
 # Detection Functions
 #──────────────────────────────────────────────────────────────────────────────
 

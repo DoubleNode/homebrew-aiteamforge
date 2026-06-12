@@ -410,7 +410,7 @@ start_fleet() {
       print_info "Fleet reporter already active"
     elif [ -f "$reporter_plist" ]; then
       print_info "Loading Fleet reporter LaunchAgent..."
-      if launchctl load "$reporter_plist" 2>/dev/null; then
+      if _aitf_launchctl load "$reporter_plist" 2>/dev/null; then
         print_success "Fleet reporter started"
       else
         print_error "Failed to load Fleet reporter LaunchAgent"
@@ -451,7 +451,7 @@ start_agents() {
 
     # Load agent
     print_info "Loading ${agent}..."
-    if launchctl load "$plist" 2>/dev/null; then
+    if _aitf_launchctl load "$plist" 2>/dev/null; then
       print_success "Loaded ${agent}"
       loaded=$((loaded + 1))
     else

@@ -9,6 +9,21 @@ if [[ -n "${_COMMON_SH_LOADED:-}" ]]; then
 fi
 _COMMON_SH_LOADED=1
 
+#──────────────────────────────────────────────────────────────────────────────
+# launchctl guard — skips real GUI-domain side effects under test/sandbox.
+# Set AITEAMFORGE_SKIP_LAUNCHCTL=1 to suppress mutating load/unload/bootstrap/
+# bootout/enable/disable/kickstart. Read-only operations (launchctl list | grep …)
+# are NOT routed here — they are harmless and the test PATH mock handles them.
+# Canonical home for the wrapper (XACA-0683); originally introduced inline in
+# install-fleet-monitor.sh + validate-install.sh by XACA-0682.
+#──────────────────────────────────────────────────────────────────────────────
+_aitf_launchctl() {
+    if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" = "1" ]; then
+        return 0
+    fi
+    launchctl "$@"
+}
+
 # ANSI color codes
 COLOR_RESET='\033[0m'
 COLOR_BOLD='\033[1m'

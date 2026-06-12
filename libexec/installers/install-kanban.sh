@@ -913,12 +913,12 @@ install_backup_launchagent() {
         "$plist_template" > "$plist_dest"
 
     # Unload if already loaded (ignore errors)
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # Load the LaunchAgent. XACA-0651: legacy `launchctl load` returns 0 even when the
     # job is rejected, so verify registration with `launchctl list` rather than trust
     # the exit code — the old code reported a false "loaded" success.
-    launchctl load "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
     if launchctl list 2>/dev/null | grep -q "${KANBAN_BACKUP_LABEL}"; then
         success "Installed and loaded backup LaunchAgent"
         info "Backups will run every ${backup_interval}s"
@@ -933,7 +933,7 @@ uninstall_backup_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading backup LaunchAgent"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed backup LaunchAgent"
     fi
@@ -956,13 +956,13 @@ install_lcars_health_launchagent() {
         -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
         "$plist_template" > "$plist_dest"
 
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # XACA-0651: verify registration via `launchctl list` rather than trust the legacy
     # `launchctl load` exit code (which returns 0 even when the job is rejected). Kept
     # consistent with install_backup_launchagent so neither inherits the false-success
     # bug if either ever gains a non-/tmp log path or RunAtLoad behavior (XACA-0651-009).
-    launchctl load "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
     if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-health"; then
         success "Installed and loaded LCARS health LaunchAgent"
         info "Health checks will run every 5 minutes"
@@ -977,7 +977,7 @@ uninstall_lcars_health_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS health LaunchAgent"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed LCARS health LaunchAgent"
     fi
@@ -1036,12 +1036,12 @@ install_lcars_watch_launchagent() {
         -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
         "$plist_template" > "$plist_dest"
 
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # XACA-0651: verify registration via `launchctl list` rather than trust the legacy
     # `launchctl load` exit code (returns 0 even on reject). Consistent with
     # install_backup_launchagent / install_lcars_health_launchagent (XACA-0651-009).
-    launchctl load "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
     if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-watch"; then
         success "LCARS watch LaunchAgent installed — will auto-restart LCARS on upgrade"
     else
@@ -1055,7 +1055,7 @@ uninstall_lcars_watch_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS watch LaunchAgent"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed LCARS watch LaunchAgent"
     fi
@@ -1111,7 +1111,7 @@ install_lcars_runatload_launchagent() {
         -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
         "$plist_template" > "$plist_dest"
 
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
     # installers): verify registration via `launchctl list` rather than trust the
@@ -1119,7 +1119,7 @@ install_lcars_runatload_launchagent() {
     # rejected. A one-shot RunAtLoad agent stays REGISTERED in the domain after
     # its run completes (KeepAlive=false governs restart, not registration), so
     # `launchctl list` still reports it here.
-    launchctl load "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
     if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-runatload"; then
         success "LCARS runatload LaunchAgent installed — LCARS will start automatically on login/reboot"
     else
@@ -1133,7 +1133,7 @@ uninstall_lcars_runatload_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS runatload LaunchAgent"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed LCARS runatload LaunchAgent"
     fi
@@ -1205,13 +1205,13 @@ install_cellar_watch_launchagent() {
         -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
         "$plist_template" > "$plist_dest"
 
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
     # installers): verify registration via `launchctl list` rather than trust the
     # legacy `launchctl load` exit code, which returns 0 even when the job is
     # rejected.
-    launchctl load "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
     if launchctl list 2>/dev/null | grep -q "com.aiteamforge.cellar-watch"; then
         success "Cellar watch LaunchAgent installed — will auto-upgrade on brew upgrade (XACA-0578)"
         info "Trigger: $script_dest"
@@ -1227,7 +1227,7 @@ uninstall_cellar_watch_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading cellar watch LaunchAgent"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed cellar watch LaunchAgent"
     fi
@@ -1446,7 +1446,7 @@ _cr_reconcile_disabled_plists() {
         fi
         if [ "$enabled" != "true" ]; then
             info "Removing CR poller LaunchAgent for non-enabled team '$team'"
-            launchctl unload "$f" 2>/dev/null || true
+            _aitf_launchctl unload "$f" 2>/dev/null || true
             rm -f "$f"
         fi
     done
@@ -1498,7 +1498,7 @@ install_cr_confluence_poller_launchagent() {
     local legacy_plist="$launch_agents_dir/com.aiteamforge.cr-confluence-poller.plist"
     if [ -f "$legacy_plist" ]; then
         info "Migrating: unloading legacy global CR Confluence Poller LaunchAgent"
-        launchctl unload "$legacy_plist" 2>/dev/null || true
+        _aitf_launchctl unload "$legacy_plist" 2>/dev/null || true
         rm -f "$legacy_plist"
         info "Removed legacy plist: com.aiteamforge.cr-confluence-poller.plist"
     fi
@@ -1569,13 +1569,13 @@ install_cr_confluence_poller_launchagent() {
             -e "s|{{TEAM_NAME}}|$team|g" \
             "$plist_template" > "$plist_dest"
 
-        launchctl unload "$plist_dest" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
         # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
         # installers): verify registration via `launchctl list` rather than trust the
         # legacy `launchctl load` exit code, which returns 0 even when the job is
         # rejected.
-        launchctl load "$plist_dest" 2>/dev/null || true
+        _aitf_launchctl load "$plist_dest" 2>/dev/null || true
         if launchctl list 2>/dev/null | grep -q "com.aiteamforge.cr-confluence-poller.${team}"; then
             success "Loaded CR Confluence Poller LaunchAgent: $team"
         else
@@ -1606,7 +1606,7 @@ uninstall_cr_confluence_poller_launchagent() {
     for plist_file in "${plist_files[@]}"; do
         [ -e "$plist_file" ] || continue
         info "Unloading: $(basename "$plist_file")"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         found_any=1
     done
@@ -1701,13 +1701,13 @@ install_auto_upgrade_launchagent() {
         -e "s|{{HOME_DIR}}|$HOME|g" \
         "$plist_template" > "$plist_dest"
 
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
     # installers): verify registration via `launchctl list` rather than trust the
     # legacy `launchctl load` exit code, which returns 0 even when the job is
     # rejected.
-    launchctl load "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
     if launchctl list 2>/dev/null | grep -q "com.aiteamforge.auto-upgrade"; then
         success "Auto-upgrade LaunchAgent installed (daily at 03:15)"
         info "Script:  $script_dest"
@@ -1724,7 +1724,7 @@ uninstall_auto_upgrade_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading auto-upgrade LaunchAgent..."
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed auto-upgrade LaunchAgent"
     fi
