@@ -32,7 +32,7 @@
     <!-- Activity Timeline Panel -->
     <link rel="stylesheet" href="css/lcars-activity.css">
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
-    <link rel="stylesheet" href="css/usage-indicator.css">
+    <link rel="stylesheet" href="css/usage-indicator.css?v=1.1">
     <!-- XACA-0292-007: CHANGE REQ list view styles -->
     <link rel="stylesheet" href="css/lcars-cr-tab.css?v=1.1">
     <!-- XACA-0334-005: Daily Overview grid + card styles -->
@@ -1650,6 +1650,14 @@
                             </div>
                         </section>
 
+                        <!-- SECTION: BY MODEL (XACA-0679-003) -->
+                        <section class="usage-section usage-by-model" aria-label="Per-model token and cost breakdown" id="uw-by-model-section">
+                            <div class="usage-section-title">BY MODEL</div>
+                            <div class="uw-model-table" id="uw-model-table" aria-label="Per-model spend table">
+                                <!-- Populated by JS: one .uw-model-row per tier -->
+                            </div>
+                        </section>
+
                         <!-- FOOTER: CALIBRATION -->
                         <footer class="usage-calibration" id="uw-calibration">
                             <span id="uw-cal-text">Calibration: loading...</span>
@@ -2817,6 +2825,112 @@
         if (accountFootnote) accountFootnote.style.display = '';
     }
 
+    // ── Per-model breakdown render (XACA-0679-003) ───────────────────────────
+    // Tier order: Opus first (most expensive), Other only when non-zero.
+    var _MODEL_TIERS = ['Opus', 'Sonnet', 'Haiku', 'Fable'];
+    var _MODEL_LABELS = { Opus: 'OPUS', Sonnet: 'SONNET', Haiku: 'HAIKU', Fable: 'FABLE', Other: 'OTHER' };
+
+    function renderByModel(byModel) {
+        var section  = document.getElementById('uw-by-model-section');
+        var tableEl  = document.getElementById('uw-model-table');
+        if (!section || !tableEl) return;
+
+        // Guard: absent or malformed data
+        var tiers = (byModel && byModel.tiers && typeof byModel.tiers === 'object')
+            ? byModel.tiers : null;
+
+        if (!tiers) {
+            // No data from this cache cycle — show placeholder, don't throw
+            tableEl.innerHTML = '<div class="uw-model-empty">No per-model data available</div>';
+            return;
+        }
+
+        // Check if all-zero (common early on) — still render, just dim
+        var allZero = _MODEL_TIERS.every(function (k) {
+            var t = tiers[k];
+            return !t || ((!t.today_tokens || t.today_tokens === 0) && (!t.today_cost_usd || t.today_cost_usd === 0));
+        });
+
+        // Build rows: standard tiers + Other if non-zero
+        var rows = _MODEL_TIERS.slice(); // ['Opus','Sonnet','Haiku','Fable']
+        var other = tiers['Other'];
+        var otherHasData = other && ((other.today_tokens && other.today_tokens > 0) || (other.today_cost_usd && other.today_cost_usd > 0));
+        if (otherHasData) rows.push('Other');
+
+        tableEl.innerHTML = '';
+
+        // Header row
+        var header = document.createElement('div');
+        header.className = 'uw-model-header';
+        header.innerHTML =
+            '<span class="uw-model-col-tier">MODEL</span>' +
+            '<span class="uw-model-col-val">TODAY</span>' +
+            '<span class="uw-model-col-sep"></span>' +
+            '<span class="uw-model-col-val">7-DAY</span>';
+        tableEl.appendChild(header);
+
+        rows.forEach(function (tierKey) {
+            var t = tiers[tierKey] || {};
+            var isFable = tierKey === 'Fable';
+
+            var todayTok  = (t.today_tokens  != null) ? t.today_tokens  : null;
+            var todayCostV = (t.today_cost_usd != null) ? t.today_cost_usd : null;
+            var d7Tok     = (t.last_7d_tokens   != null) ? t.last_7d_tokens   : null;
+            var d7CostV   = (t.last_7d_cost_usd != null) ? t.last_7d_cost_usd : null;
+
+            var row = document.createElement('div');
+            row.className = 'uw-model-row' + (isFable ? ' uw-model-row-fable' : '');
+            if (allZero && !isFable) row.classList.add('uw-model-row-dim');
+
+            // Tier label cell
+            var tierCell = document.createElement('span');
+            tierCell.className = 'uw-model-col-tier';
+            tierCell.textContent = _MODEL_LABELS[tierKey] || tierKey.toUpperCase();
+            if (isFable) {
+                var badge = document.createElement('span');
+                badge.className = 'uw-model-fable-badge';
+                badge.textContent = '2×';
+                badge.title = 'Escalation tier — 2× cost multiplier';
+                tierCell.appendChild(badge);
+            }
+            row.appendChild(tierCell);
+
+            // Today cell: tokens · cost
+            var todayCell = document.createElement('span');
+            todayCell.className = 'uw-model-col-val';
+            if (todayTok != null || todayCostV != null) {
+                var todayParts = [];
+                if (todayTok  != null) todayParts.push(formatTokens(todayTok) + ' tok');
+                if (todayCostV != null) todayParts.push(formatCost(todayCostV));
+                todayCell.textContent = todayParts.join(' · ');
+            } else {
+                todayCell.textContent = '--';
+            }
+            row.appendChild(todayCell);
+
+            // Separator dot
+            var sep = document.createElement('span');
+            sep.className = 'uw-model-col-sep';
+            sep.setAttribute('aria-hidden', 'true');
+            row.appendChild(sep);
+
+            // 7-day cell: tokens · cost
+            var d7Cell = document.createElement('span');
+            d7Cell.className = 'uw-model-col-val';
+            if (d7Tok != null || d7CostV != null) {
+                var d7Parts = [];
+                if (d7Tok   != null) d7Parts.push(formatTokens(d7Tok) + ' tok');
+                if (d7CostV != null) d7Parts.push(formatCost(d7CostV));
+                d7Cell.textContent = d7Parts.join(' · ');
+            } else {
+                d7Cell.textContent = '--';
+            }
+            row.appendChild(d7Cell);
+
+            tableEl.appendChild(row);
+        });
+    }
+
     // ── Main render function ─────────────────────────────────────────────────
     function applyUsage(d) {
         const ok      = d.ok !== false;
@@ -2999,6 +3113,9 @@
         } else if (burnRateRow) {
             burnRateRow.style.display = 'none';
         }
+
+        // ── By-model breakdown (XACA-0679-003) ──────────────────────────────
+        renderByModel(d.by_model || null);
 
         // ── Calibration footer ───────────────────────────────────────────────
         if (cal) {

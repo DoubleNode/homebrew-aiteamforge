@@ -961,3 +961,116 @@ body.theme-communications .usage-indicator.compact { background: linear-gradient
     margin-left: 4px;
     vertical-align: middle;
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   XACA-0679-003 — Per-model breakdown section (BY MODEL)
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Model table: compact grid — tier label | today | sep | 7-day */
+.uw-model-table {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+/* Header row */
+.uw-model-header {
+    display: grid;
+    grid-template-columns: 90px 1fr 10px 1fr;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.6px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.35);
+    padding-bottom: 3px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    margin-bottom: 2px;
+}
+
+/* Data row */
+.uw-model-row {
+    display: grid;
+    grid-template-columns: 90px 1fr 10px 1fr;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+/* Dimmed when all tiers are zero (common early state) */
+.uw-model-row.uw-model-row-dim {
+    opacity: 0.45;
+}
+
+/* Tier name column */
+.uw-model-col-tier {
+    font-size: 10px;
+    font-weight: 700;
+    color: var(--lcars-blue, #9999ff);
+    letter-spacing: 0.4px;
+    display: flex;
+    align-items: center;
+    gap: 5px;
+}
+
+/* Value columns (today + 7d) */
+.uw-model-col-val {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+/* Separator dot between today and 7-day columns */
+.uw-model-col-sep::after {
+    content: '\B7';
+    color: rgba(255, 255, 255, 0.25);
+}
+
+/* Empty-state placeholder */
+.uw-model-empty {
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    font-style: italic;
+    padding: 4px 0;
+}
+
+/* ── Fable row: LCARS orange accent (escalation tier — 2x cost) ─────────── */
+.uw-model-row-fable .uw-model-col-tier {
+    color: var(--lcars-orange, #ff9900);
+}
+
+.uw-model-row-fable .uw-model-col-val {
+    color: rgba(255, 153, 0, 0.85); /* warm orange-tinted values */
+}
+
+/* "2×" badge appended to the Fable tier label */
+.uw-model-fable-badge {
+    display: inline-block;
+    background: var(--lcars-orange, #ff9900);
+    color: #000;
+    font-size: 8px;
+    font-weight: 900;
+    letter-spacing: 0.3px;
+    padding: 1px 5px;
+    border-radius: 4px;
+    line-height: 1.4;
+    vertical-align: middle;
+    flex-shrink: 0;
+}
+
+/* When the Fable row has non-zero cost, add a left accent border to make it pop */
+.uw-model-row-fable:not(.uw-model-row-dim) {
+    padding-left: 6px;
+    border-left: 2px solid var(--lcars-orange, #ff9900);
+    margin-left: -6px; /* compensate so tier label stays aligned */
+}
+
+/* Reduce-motion: suppress all BY-MODEL animations/transitions */
+@media (prefers-reduced-motion: reduce) {
+    .uw-model-fable-badge {
+        animation: none !important;
+    }
+}

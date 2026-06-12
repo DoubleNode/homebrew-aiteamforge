@@ -15,9 +15,9 @@ cache to /tmp/lcars-ccusage-cache.json atomically. Multiple UI clients
 (LCARS dashboard, agent panels) read the cache without repeatedly re-scanning
 the underlying JSONL files.
 
-Cache schema (v3):
+Cache schema (v4):
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "collected_at": "<ISO-8601 UTC>",
   "collected_at_unix": <int>,
   "ccusage_ok": <bool>,
@@ -78,10 +78,20 @@ Cache schema (v3):
     "all_time_tokens": int,
     "all_time_cost_usd": float,
     "cwds": [str, ...]         // decoded cwd paths, for diagnostics
+  },
+  "by_model": {
+    "tiers": {
+      "Opus":   {"today_tokens":int,"today_cost_usd":float,"last_7d_tokens":int,"last_7d_cost_usd":float},
+      "Sonnet": {"today_tokens":int,"today_cost_usd":float,"last_7d_tokens":int,"last_7d_cost_usd":float},
+      "Haiku":  {"today_tokens":int,"today_cost_usd":float,"last_7d_tokens":int,"last_7d_cost_usd":float},
+      "Fable":  {"today_tokens":int,"today_cost_usd":float,"last_7d_tokens":int,"last_7d_cost_usd":float},
+      "Other":  {"today_tokens":int,"today_cost_usd":float,"last_7d_tokens":int,"last_7d_cost_usd":float}
+    },
+    "last_collected_at": "<ISO-8601 UTC>"
   }
 }
 
-NOTE on v3 rollup semantics:
+NOTE on v4 rollup semantics:
 - All v2 fields (active_window, history, calibration, totals, weekly) are
   PRESERVED UNCHANGED as the all-accounts rollup. Existing consumers are
   unaffected.
@@ -110,6 +120,21 @@ v2 -> v3 change notes:
 - schema_version bumped from 2 to 3.
 - v2->v3 migration (run once): legacy totals mirrored into untagged_bucket
   so historical numbers don't vanish from the new UI.
+
+v3 -> v4 change notes (XACA-0679):
+- All v3 fields are preserved unchanged for backward compatibility.
+- New top-level "by_model" key contains per-model-tier token + cost breakdown.
+- Model IDs are collapsed to 5 tiers: Opus, Sonnet, Haiku, Fable, Other.
+  Any unrecognized model ID lands in Other (tokens/cost never dropped).
+- Data source: ccusage daily --json --breakdown, aggregated for today and
+  last 7 days using the same local-midnight windowing as build_totals().
+- All five tiers are always present (zero-filled when no data for a tier),
+  consistent with how build_accounts() always initialises its accumulator
+  buckets before iterating.
+- schema_version bumped from 3 to 4.
+- v3->v4 migration (run once): adds by_model with zero-filled tiers so
+  consumers that load a stale cache before the first v4 collect() don't
+  encounter a missing key.
 
 Notes for subitem 003 (API endpoint consumer):
 - active_window is null between usage sessions.
@@ -152,7 +177,7 @@ PID_PATH = pathlib.Path("/tmp/lcars-ccusage-collector.pid")
 POLL_INTERVAL_S = 180
 CCUSAGE_TIMEOUT_S = 240  # ccusage scans JSONL transcripts; ~65s typical, 200s+ under load
 HISTORY_MAX = 50
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 ROLLING_DAYS = 7       # rolling history window for display
 CALIBRATION_DAYS = 30  # wider window keeps calibration stable as rolling rotates
 WEEKLY_DAYS = 90       # ~13 calendar weeks for weekly history
@@ -268,6 +293,36 @@ def run_ccusage_session(binary: str, days_back: int) -> tuple[bool, Any, str]:
         return False, None, f"session JSON parse error: {e} — output: {result.stdout[:100]}"
 
 
+def run_ccusage_daily_breakdown(binary: str, days_back: int) -> tuple[bool, Any, str]:
+    """Run ccusage daily --json --breakdown --since YYYYMMDD. Returns (ok, data, error_msg).
+
+    The daily command with --breakdown returns per-model token + cost splits in
+    each day's ``modelBreakdowns`` list.  This is the only ccusage command that
+    gives a reliable per-model token/cost split (blocks carries only a ``models``
+    list with no per-model token counts; session carries no model info at all).
+
+    Uses the same timeout as the other calls since it scans the same JSONL
+    transcripts.
+    """
+    cmd = [binary, "daily", "--json", "--breakdown", "--since", _since_flag(days_back)]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT_S)
+    except FileNotFoundError as e:
+        return False, None, f"ccusage binary not found: {e}"
+    except subprocess.TimeoutExpired:
+        return False, None, f"ccusage daily timed out after {CCUSAGE_TIMEOUT_S}s"
+    except Exception as e:
+        return False, None, f"ccusage daily subprocess error: {e}"
+
+    if result.returncode != 0:
+        err = (result.stderr or result.stdout or "unknown error").strip()
+        return False, None, f"ccusage daily exited {result.returncode}: {err[:200]}"
+    try:
+        return True, json.loads(result.stdout), ""
+    except json.JSONDecodeError as e:
+        return False, None, f"daily JSON parse error: {e} — output: {result.stdout[:100]}"
+
+
 # --- data helpers ---
 def _utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -376,6 +431,122 @@ def build_totals(blocks: list[dict]) -> dict:
     return {
         "today_tokens": today_tok, "today_cost_usd": round(today_cost, 6),
         "last_7d_tokens": last7_tok, "last_7d_cost_usd": round(last7_cost, 6),
+    }
+
+
+_MODEL_TIERS = ("Opus", "Sonnet", "Haiku", "Fable", "Other")
+
+
+def _model_tier(model_id: str) -> str:
+    """Collapse a raw model ID to one of five canonical tiers.
+
+    Matching is case-insensitive substring search on the tier name so future
+    point-version model IDs (e.g. claude-opus-5-0) keep working automatically.
+    The check order (Opus → Sonnet → Haiku → Fable → Other) is intentional:
+    if Anthropic ever releases a model whose ID embeds two tier names the
+    first match wins (currently hypothetical; order is stable and documented).
+
+    Examples:
+      "claude-opus-4-8"            → "Opus"
+      "claude-sonnet-4-6"          → "Sonnet"
+      "claude-haiku-4-5-20251001"  → "Haiku"
+      "claude-fable-1-0"           → "Fable"
+      "claude-unknown-model"       → "Other"
+    """
+    lower = model_id.lower()
+    for tier in ("opus", "sonnet", "haiku", "fable"):
+        if tier in lower:
+            return tier.capitalize()
+    return "Other"
+
+
+def _empty_by_model_tiers() -> dict:
+    """Return a zero-filled tiers dict covering all five model tiers.
+
+    All five tiers are always present so consumers can read any tier key
+    without a missing-key guard (mirrors how build_accounts initialises
+    accumulator buckets before iterating session rows).
+    """
+    return {
+        tier: {
+            "today_tokens": 0,
+            "today_cost_usd": 0.0,
+            "last_7d_tokens": 0,
+            "last_7d_cost_usd": 0.0,
+        }
+        for tier in _MODEL_TIERS
+    }
+
+
+def build_models_breakdown(daily_rows: list[dict]) -> dict:
+    """Aggregate per-model-tier token + cost totals for today and last 7 days.
+
+    Input is the ``daily`` list from ``ccusage daily --json --breakdown``.
+    Each row carries a ``modelBreakdowns`` list where each entry has:
+      modelName, inputTokens, outputTokens, cacheCreationTokens,
+      cacheReadTokens, cost.
+
+    Windowing uses system local midnight (same convention as build_totals):
+      today   = rows whose ``date`` string >= today's local date
+      last_7d = rows whose ``date`` string >= local date 7 days ago
+
+    Returns a dict ready to write as the top-level ``by_model`` cache key:
+      {
+        "tiers": {
+          "Opus":   {"today_tokens":N,"today_cost_usd":N,
+                     "last_7d_tokens":N,"last_7d_cost_usd":N},
+          "Sonnet": {...}, "Haiku": {...}, "Fable": {...}, "Other": {...}
+        },
+        "last_collected_at": "<ISO-8601 UTC>"
+      }
+
+    All five tiers are always present (zero-filled when no data), so
+    downstream consumers need no missing-key guards.
+    """
+    local_now = datetime.datetime.now()
+    today_date = local_now.date()
+    seven_days_ago_date = (local_now - datetime.timedelta(days=7)).date()
+
+    tiers = _empty_by_model_tiers()
+
+    for row in daily_rows:
+        row_date_str = row.get("date", "")
+        try:
+            row_date = datetime.date.fromisoformat(row_date_str)
+        except (ValueError, AttributeError):
+            continue
+
+        is_today = row_date >= today_date
+        is_7d = row_date >= seven_days_ago_date
+
+        if not is_7d:
+            continue  # outside both windows; skip to avoid wasted work
+
+        for mb in row.get("modelBreakdowns", []):
+            model_id = mb.get("modelName", "")
+            tier = _model_tier(model_id)
+            tokens = (
+                mb.get("inputTokens", 0)
+                + mb.get("outputTokens", 0)
+                + mb.get("cacheCreationTokens", 0)
+                + mb.get("cacheReadTokens", 0)
+            )
+            cost = mb.get("cost", 0.0)
+
+            tiers[tier]["last_7d_tokens"] += tokens
+            tiers[tier]["last_7d_cost_usd"] += cost
+            if is_today:
+                tiers[tier]["today_tokens"] += tokens
+                tiers[tier]["today_cost_usd"] += cost
+
+    # Round costs to 6 decimal places (matches build_totals/build_accounts convention).
+    for entry in tiers.values():
+        entry["today_cost_usd"] = round(entry["today_cost_usd"], 6)
+        entry["last_7d_cost_usd"] = round(entry["last_7d_cost_usd"], 6)
+
+    return {
+        "tiers": tiers,
+        "last_collected_at": _utc_now_iso(),
     }
 
 
@@ -693,32 +864,44 @@ def _empty_untagged_bucket() -> dict:
 
 
 def _migrate_cache_if_needed(cache: dict) -> dict:
-    """Upgrade cache in-memory from v1/v2 to v3 shape.
+    """Upgrade cache in-memory from v1/v2/v3 to v4 shape.
 
-    Migration runs once: the next write_cache() will persist the v3 schema
+    Migration runs once: the next write_cache() will persist the v4 schema
     so subsequent loads skip this path.
 
     v2->v3: synthesise empty accounts={} and untagged_bucket that mirrors
     the legacy totals so historical numbers don't vanish from the new UI.
+
+    v3->v4: synthesise zero-filled by_model so consumers that load a stale
+    cache before the first v4 collect() don't encounter a missing key.
     """
     if not isinstance(cache, dict):
         return {}
     version = cache.get("schema_version", 1)
-    if version >= 3:
+    if version >= 4:
         return cache
     prev_totals = cache.get("totals", {})
-    cache.setdefault("accounts", {})
-    cache.setdefault("untagged_bucket", {
-        "nickname": "Untagged (pre-isolation)",
-        "today_tokens": prev_totals.get("today_tokens", 0),
-        "today_cost_usd": prev_totals.get("today_cost_usd", 0.0),
-        "last_7d_tokens": prev_totals.get("last_7d_tokens", 0),
-        "last_7d_cost_usd": prev_totals.get("last_7d_cost_usd", 0.0),
-        "all_time_tokens": 0,
-        "all_time_cost_usd": 0.0,
-        "cwds": [],
+    # v2->v3: add accounts + untagged_bucket (only needed when upgrading from v1/v2)
+    if version < 3:
+        cache.setdefault("accounts", {})
+        cache.setdefault("untagged_bucket", {
+            "nickname": "Untagged (pre-isolation)",
+            "today_tokens": prev_totals.get("today_tokens", 0),
+            "today_cost_usd": prev_totals.get("today_cost_usd", 0.0),
+            "last_7d_tokens": prev_totals.get("last_7d_tokens", 0),
+            "last_7d_cost_usd": prev_totals.get("last_7d_cost_usd", 0.0),
+            "all_time_tokens": 0,
+            "all_time_cost_usd": 0.0,
+            "cwds": [],
+        })
+
+    # v3->v4: add by_model with zero-filled tiers
+    cache.setdefault("by_model", {
+        "tiers": _empty_by_model_tiers(),
+        "last_collected_at": "",
     })
-    cache["schema_version"] = 3
+
+    cache["schema_version"] = 4
     return cache
 
 
@@ -749,7 +932,8 @@ def collect(binary: str) -> None:
     if not ok:
         log_error(f"ccusage rolling fetch failed: {err}")
         # Preserve last known good values so UI can show stale-data warning.
-        # Weekly and per-account data are preserved from previous cache (independent flows).
+        # Weekly, per-account, and per-model data are preserved from previous
+        # cache (independent flows) so the UI never blanks out on a transient failure.
         write_cache({
             "schema_version": SCHEMA_VERSION,
             "collected_at": now_iso, "collected_at_unix": now_unix,
@@ -765,6 +949,10 @@ def collect(binary: str) -> None:
             "weekly_error": prev.get("weekly_error"),
             "accounts": prev.get("accounts", {}),
             "untagged_bucket": prev.get("untagged_bucket", _empty_untagged_bucket()),
+            "by_model": prev.get("by_model", {
+                "tiers": _empty_by_model_tiers(),
+                "last_collected_at": "",
+            }),
         })
         return
 
@@ -819,6 +1007,23 @@ def collect(binary: str) -> None:
         accounts = prev.get("accounts", {})
         untagged_bucket = prev.get("untagged_bucket", _empty_untagged_bucket())
 
+    # Per-model breakdown — independent of blocks/session flows; failures are tolerated.
+    # On failure: preserve previous by_model so the UI panel doesn't blank out.
+    models_ok, models_data, models_err = run_ccusage_daily_breakdown(binary, ROLLING_DAYS)
+    if models_ok:
+        by_model = build_models_breakdown(models_data.get("daily", []))
+        log_info(
+            f"Models: tiers={list(by_model['tiers'].keys())}, "
+            f"today_total_tokens="
+            f"{sum(t['today_tokens'] for t in by_model['tiers'].values())}"
+        )
+    else:
+        log_warn(f"ccusage daily breakdown fetch failed ({models_err}); preserving prev by_model")
+        by_model = prev.get("by_model", {
+            "tiers": _empty_by_model_tiers(),
+            "last_collected_at": "",
+        })
+
     payload = {
         "schema_version": SCHEMA_VERSION,
         "collected_at": now_iso,
@@ -833,6 +1038,7 @@ def collect(binary: str) -> None:
         "weekly_error": weekly_error,
         "accounts": accounts,
         "untagged_bucket": untagged_bucket,
+        "by_model": by_model,
     }
     write_cache(payload)
 
@@ -843,7 +1049,8 @@ def collect(binary: str) -> None:
         f"cal_samples={calibration.get('samples', 0)}, "
         f"max_window_tokens={calibration.get('max_window_tokens', 0):,}, "
         f"weekly={'ok' if weekly_ok else 'failed'}, "
-        f"accounts={'ok' if session_ok else 'failed'}"
+        f"accounts={'ok' if session_ok else 'failed'}, "
+        f"models={'ok' if models_ok else 'failed'}"
     )
 
 

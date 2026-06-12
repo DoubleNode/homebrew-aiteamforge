@@ -1956,6 +1956,25 @@ def _build_usage_response(
     def _unavailable_weekly(reason: str) -> dict:
         return {"available": False, "reason": reason}
 
+    # XACA-0679: empty by_model sentinel for error/pre-cache paths.
+    # Mirrors _unavailable_weekly: always include the key so the frontend
+    # can unconditionally read data.by_model.tiers without guarding undefined.
+    # Five tiers are zero-filled; last_collected_at is empty string.
+    _EMPTY_TIER = {
+        "today_tokens": 0, "today_cost_usd": 0.0,
+        "last_7d_tokens": 0, "last_7d_cost_usd": 0.0,
+    }
+    _EMPTY_BY_MODEL = {
+        "tiers": {
+            "Opus": dict(_EMPTY_TIER),
+            "Sonnet": dict(_EMPTY_TIER),
+            "Haiku": dict(_EMPTY_TIER),
+            "Fable": dict(_EMPTY_TIER),
+            "Other": dict(_EMPTY_TIER),
+        },
+        "last_collected_at": "",
+    }
+
     # Case 1: heuristics module not importable (should not happen in prod).
     if not CCUSAGE_HEURISTICS_AVAILABLE:
         return 200, {
@@ -1967,6 +1986,7 @@ def _build_usage_response(
             "history": [],
             "totals": None,
             "weekly": _unavailable_weekly("ccusage_heuristics module not available"),
+            "by_model": _EMPTY_BY_MODEL,
             "error": "ccusage_heuristics module not available",
         }
 
@@ -1984,6 +2004,7 @@ def _build_usage_response(
             "history": [],
             "totals": None,
             "weekly": _unavailable_weekly("collector not running"),
+            "by_model": _EMPTY_BY_MODEL,
             "error": "collector not running",
         }
 
@@ -2006,6 +2027,7 @@ def _build_usage_response(
             "history": [],
             "totals": None,
             "weekly": _unavailable_weekly(f"cache parse error: {exc}"),
+            "by_model": _EMPTY_BY_MODEL,
             "error": str(exc),
         }
 
@@ -2022,6 +2044,13 @@ def _build_usage_response(
     # or an unavailability sentinel (available=False).  Existing 5h consumers
     # are unaffected because we only ADD a key, never modify existing ones.
     result["weekly"] = _ccusage_heuristics.evaluate_weekly(cache)
+
+    # XACA-0679: pass through by_model from the cache as a top-level key.
+    # Schema v4 caches always have this field (all five tiers zero-filled on
+    # ccusage failure).  A v3 cache (collector not yet restarted after upgrade)
+    # lacks the field — fall back to _EMPTY_BY_MODEL so the frontend always
+    # has a consistent shape to read without guarding undefined.
+    result["by_model"] = cache.get("by_model", _EMPTY_BY_MODEL)
 
     # XACA-0280 Phase A.2: optional per-account totals filter.
     # When account_filter is None (default), result is returned unchanged so
@@ -2040,6 +2069,7 @@ def _build_usage_response(
                     "history": result.get("history", []),
                     "totals": None,
                     "weekly": result.get("weekly"),
+                    "by_model": result.get("by_model", _EMPTY_BY_MODEL),
                 }
             account_totals = {
                 "today_tokens": bucket.get("today_tokens", 0),
@@ -2067,6 +2097,7 @@ def _build_usage_response(
                     "history": result.get("history", []),
                     "totals": None,
                     "weekly": result.get("weekly"),
+                    "by_model": result.get("by_model", _EMPTY_BY_MODEL),
                 }
             if not isinstance(acct_data, dict):
                 return 200, {
@@ -2079,6 +2110,7 @@ def _build_usage_response(
                     "history": result.get("history", []),
                     "totals": None,
                     "weekly": result.get("weekly"),
+                    "by_model": result.get("by_model", _EMPTY_BY_MODEL),
                 }
             account_totals = {
                 "today_tokens": acct_data.get("today_tokens", 0),
