@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0385: Security — move ccusage runtime files out of world-writable /tmp -->
+
+### Security
+- **XACA-0385: Secure per-user runtime directory for ccusage collector files (audit F-04-005).** Moved the four ccusage runtime files — cache, atomic-write staging file, PID lock, and collector log — out of the world-writable `/tmp/` directory into `~/.aiteamforge/run/` (mode 0700, owner-only). New shared module `lcars-ui/ccusage_paths.py` is the single source of truth for all four paths; both `ccusage_collector.py` (producer) and `server.py` (consumer) import from it — path literals are no longer duplicated. `ensure_runtime_dir()` creates the directory on first use and enforces: (1) mode 0700, (2) not a symlink, (3) owned by the current uid — raising a loud `RuntimeError` on any violation rather than silently writing to an attacker-controlled path. Eliminates symlink-attack and cache-poisoning vectors possible via pre-created or symlinked `/tmp` paths.
+
 <!-- XACA-0658: Added — Release version-gate status persistence + LCARS rendering -->
 
 ### Added

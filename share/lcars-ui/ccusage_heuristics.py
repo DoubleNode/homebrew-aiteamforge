@@ -8,8 +8,8 @@
 """ccusage heuristics — policy layer for the Claude Usage Monitor (XACA-0243).
 
 This module is pure policy: it consumes the daemon-produced cache (see XACA-0243-001
-which writes ``/tmp/lcars-ccusage-cache.json``) and emits a UI-ready status dict
-consumed by the LCARS API endpoint (XACA-0243-003).
+which writes ``~/.aiteamforge/run/lcars-ccusage-cache.json``) and emits a UI-ready
+status dict consumed by the LCARS API endpoint (XACA-0243-003).
 
 It performs no I/O, no subprocess calls, and never reaches out to ccusage itself.
 The daemon owns freshness; this module owns interpretation.

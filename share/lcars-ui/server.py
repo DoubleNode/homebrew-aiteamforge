@@ -138,6 +138,20 @@ except ImportError as e:
     CCUSAGE_HEURISTICS_AVAILABLE = False
     print(f"[LCARS] Warning: ccusage_heuristics not available: {e}")
 
+# Import shared runtime paths (XACA-0385: moved out of world-writable /tmp)
+try:
+    from ccusage_paths import (  # noqa: PLC0415
+        CACHE_PATH as _CCUSAGE_CACHE_PATH_OBJ,
+        PID_PATH as _CCUSAGE_PID_PATH_OBJ,
+        COLLECTOR_LOG as _CCUSAGE_COLLECTOR_LOG_OBJ,
+        ensure_runtime_dir as _ccusage_ensure_runtime_dir,
+    )
+    _CCUSAGE_PATHS_AVAILABLE = True
+except ImportError as e:
+    _CCUSAGE_PATHS_AVAILABLE = False
+    _ccusage_ensure_runtime_dir = None  # type: ignore[assignment]
+    print(f"[LCARS] Warning: ccusage_paths not available, ccusage features may not work: {e}")
+
 # Import secrets export contract layer (XACA-0172) — same directory as server.py
 try:
     from secrets_export_lib import (
@@ -559,9 +573,16 @@ def _secrets_job_compare_and_set_status(jobs_dict, job_id, expected_statuses, fi
 FLEET_MONITOR_URL = os.environ.get('FLEET_MONITOR_URL', 'http://localhost:8080')
 
 # ccusage collector cache (XACA-0243-001 daemon writes this file atomically).
-CCUSAGE_CACHE_PATH = "/tmp/lcars-ccusage-cache.json"
-CCUSAGE_PID_PATH = "/tmp/lcars-ccusage-collector.pid"
-CCUSAGE_COLLECTOR_LOG = "/tmp/lcars-ccusage-collector.log"
+# Paths resolved from ccusage_paths (XACA-0385: moved from world-writable /tmp).
+if _CCUSAGE_PATHS_AVAILABLE:
+    CCUSAGE_CACHE_PATH: str = str(_CCUSAGE_CACHE_PATH_OBJ)
+    CCUSAGE_PID_PATH: str = str(_CCUSAGE_PID_PATH_OBJ)
+    CCUSAGE_COLLECTOR_LOG: str = str(_CCUSAGE_COLLECTOR_LOG_OBJ)
+else:
+    # Degraded fallback — paths unavailable; ccusage features will not function.
+    CCUSAGE_CACHE_PATH = ""
+    CCUSAGE_PID_PATH = ""
+    CCUSAGE_COLLECTOR_LOG = ""
 
 # Per-process flag: emit the "collector not running" warning only once.
 _ccusage_missing_warned = False
@@ -624,6 +645,11 @@ def _ensure_collector_running() -> bool:
     server_dir = str(Path(__file__).parent)
     collector = str(Path(__file__).parent / "ccusage_collector.py")
     try:
+        # Ensure the runtime dir exists before opening the log file (XACA-0385).
+        # The collector creates it on its own startup, but the server may respawn
+        # the collector before it has had a chance to run ensure_runtime_dir().
+        if _ccusage_ensure_runtime_dir is not None:
+            _ccusage_ensure_runtime_dir()
         log_fh = open(CCUSAGE_COLLECTOR_LOG, "a", encoding="utf-8")
         subprocess.Popen(  # noqa: S603 — fixed argv, not user input
             [sys.executable, collector, "--foreground"],

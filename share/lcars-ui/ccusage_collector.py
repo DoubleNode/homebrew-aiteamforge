@@ -11,9 +11,9 @@
 ccusage_collector.py — Claude Usage Cache Collector Daemon
 
 Polls `ccusage blocks --json` every 30 seconds and writes a normalised JSON
-cache to /tmp/lcars-ccusage-cache.json atomically. Multiple UI clients
-(LCARS dashboard, agent panels) read the cache without repeatedly re-scanning
-the underlying JSONL files.
+cache to ~/.aiteamforge/run/lcars-ccusage-cache.json atomically. Multiple UI
+clients (LCARS dashboard, agent panels) read the cache without repeatedly
+re-scanning the underlying JSONL files.
 
 Cache schema (v4):
 {
@@ -164,10 +164,20 @@ from typing import Any, Optional
 TEAM_PATHS_JSON = pathlib.Path("~/.aiteamforge/team-paths.json").expanduser()
 SESSION_ACCOUNT_MAP_JSONL = pathlib.Path("~/.claude/.session-account-map.jsonl").expanduser()
 
+# Import shared runtime paths (XACA-0385: moved out of world-writable /tmp)
+try:
+    from ccusage_paths import (  # noqa: PLC0415
+        CACHE_PATH, CACHE_TMP_PATH, PID_PATH, ensure_runtime_dir,
+    )
+    _CCUSAGE_PATHS_AVAILABLE = True
+except ImportError as e:
+    # Fallback: should not happen in a normal install, but log and abort rather
+    # than silently reverting to /tmp paths.
+    import sys as _sys
+    print(f"[ccusage_collector] FATAL: ccusage_paths not available: {e}", file=_sys.stderr)
+    _sys.exit(1)
+
 # --- constants ---
-CACHE_PATH = pathlib.Path("/tmp/lcars-ccusage-cache.json")
-CACHE_TMP_PATH = pathlib.Path("/tmp/lcars-ccusage-cache.tmp.json")
-PID_PATH = pathlib.Path("/tmp/lcars-ccusage-collector.pid")
 # POLL_INTERVAL_S is the SLEEP between completed scans, not the wall-clock
 # period of the loop. The main loop is sequential: do_collection() blocks for
 # the scan (up to CCUSAGE_TIMEOUT_S), THEN we sleep POLL_INTERVAL_S. So polls
@@ -1152,6 +1162,9 @@ def main() -> None:
         log_error("ccusage binary not found. Install via npm/npx or ensure it is in PATH or a known fnm location.")
         sys.exit(1)
     log_info(f"Using ccusage at: {binary}")
+
+    # Ensure secure runtime dir exists before any I/O (covers both --once and loop modes).
+    ensure_runtime_dir()
 
     if args.once:
         collect(binary)
