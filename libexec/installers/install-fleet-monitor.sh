@@ -18,6 +18,20 @@ FLEET_MODE="${FLEET_MODE:-standalone}"  # standalone | client | server
 TAILSCALE_FUNNEL_PORT="${TAILSCALE_FUNNEL_PORT:-443}"
 
 #──────────────────────────────────────────────────────────────────────────────
+# launchctl guard — skips real GUI-domain side effects under test/sandbox
+# Set AITEAMFORGE_SKIP_LAUNCHCTL=1 to suppress load/unload/bootstrap/bootout.
+# Read-only operations (launchctl list | grep …) are NOT routed here — they
+# are harmless and the test mock already handles them via PATH interception.
+# (XACA-0682)
+#──────────────────────────────────────────────────────────────────────────────
+_aitf_launchctl() {
+    if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" = "1" ]; then
+        return 0
+    fi
+    launchctl "$@"
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Detection Functions
 #──────────────────────────────────────────────────────────────────────────────
 
@@ -333,10 +347,10 @@ _write_funnel_restore_script() {
 
     if launchctl list | grep -q "com.aiteamforge.tailscale-funnel"; then
         info "Unloading existing Tailscale Funnel LaunchAgent..."
-        launchctl unload "$launchagent_file" 2>/dev/null || true
+        _aitf_launchctl unload "$launchagent_file" 2>/dev/null || true
     fi
 
-    launchctl load "$launchagent_file"
+    _aitf_launchctl load "$launchagent_file"
     success "Tailscale Funnel LaunchAgent installed (will restore routes on restart)"
 }
 
@@ -584,11 +598,11 @@ install_fleet_launchagent() {
     # Load LaunchAgent
     if launchctl list | grep -q "com.aiteamforge.fleet-monitor"; then
         info "Unloading existing Fleet Monitor LaunchAgent..."
-        launchctl unload "$launchagent_file" 2>/dev/null || true
+        _aitf_launchctl unload "$launchagent_file" 2>/dev/null || true
     fi
 
     info "Loading Fleet Monitor LaunchAgent..."
-    launchctl load "$launchagent_file"
+    _aitf_launchctl load "$launchagent_file"
 
     # Wait a moment for service to start
     sleep 2
@@ -796,10 +810,10 @@ install_fleet_reporter_launchagent() {
         "$plist_template" > "$plist_dest"
 
     # Unload if already loaded (ignore errors)
-    launchctl unload "$plist_dest" 2>/dev/null || true
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # Load the LaunchAgent
-    if launchctl load "$plist_dest"; then
+    if _aitf_launchctl load "$plist_dest"; then
         success "Fleet reporter LaunchAgent installed and loaded"
         info "Status reports will be sent every 60 seconds"
     else
@@ -813,7 +827,7 @@ uninstall_fleet_reporter_launchagent() {
 
     if [ -f "$plist_file" ]; then
         info "Unloading fleet reporter LaunchAgent"
-        launchctl unload "$plist_file" 2>/dev/null || true
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
         rm -f "$plist_file"
         success "Removed fleet reporter LaunchAgent"
     fi
@@ -994,7 +1008,7 @@ uninstall_fleet_monitor() {
     local launchagent_file="$HOME/Library/LaunchAgents/com.aiteamforge.fleet-monitor.plist"
     if [ -f "$launchagent_file" ]; then
         info "Unloading Fleet Monitor LaunchAgent..."
-        launchctl unload "$launchagent_file" 2>/dev/null || true
+        _aitf_launchctl unload "$launchagent_file" 2>/dev/null || true
         rm "$launchagent_file"
     fi
 
@@ -1002,7 +1016,7 @@ uninstall_fleet_monitor() {
     local funnel_launchagent="$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist"
     if [ -f "$funnel_launchagent" ]; then
         info "Unloading Tailscale Funnel LaunchAgent..."
-        launchctl unload "$funnel_launchagent" 2>/dev/null || true
+        _aitf_launchctl unload "$funnel_launchagent" 2>/dev/null || true
         rm "$funnel_launchagent"
     fi
 

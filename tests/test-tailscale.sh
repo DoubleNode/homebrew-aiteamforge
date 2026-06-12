@@ -26,10 +26,27 @@ if ! type test_start &>/dev/null 2>&1; then
     fi
 fi
 
+# In standalone mode test-runner.sh is sourced but setup_test_env() is never
+# called (that only happens inside run_test_file).  Call it here so TEST_TMP_DIR
+# is populated before our $HOME sandbox code runs.
+if [ -z "${TEST_TMP_DIR:-}" ]; then
+    setup_test_env
+fi
+
 # Isolated test environment
 export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
 export AITEAMFORGE_HOME="$TAP_ROOT"
 export NON_INTERACTIVE="true"
+
+# ── XACA-0682: $HOME sandbox ──────────────────────────────────────────────────
+# Save the real HOME before sandboxing so the isolation assertion (005) can
+# verify nothing leaked into the developer's actual ~/Library/LaunchAgents.
+export REAL_HOME="$HOME"
+# Redirect $HOME into the test sandbox so any plist written by the installer
+# lands in TEST_TMP_DIR/home/Library/LaunchAgents, not the real user dir.
+export HOME="$TEST_TMP_DIR/home"
+mkdir -p "$HOME/Library/LaunchAgents"
+# ─────────────────────────────────────────────────────────────────────────────
 
 mkdir -p "$AITEAMFORGE_DIR/config"
 mkdir -p "$AITEAMFORGE_DIR/logs"
@@ -38,6 +55,49 @@ mkdir -p "$AITEAMFORGE_DIR/lcars-ports"
 # Directory where per-test mock binaries live
 MOCK_BIN_DIR="$TEST_TMP_DIR/mock-bin"
 mkdir -p "$MOCK_BIN_DIR"
+
+# ── XACA-0682: record-only launchctl mock ────────────────────────────────────
+# Intercepts every launchctl call made by the installer and records them to
+# MOCK_LAUNCHCTL_LOG without touching the real GUI domain.  PATH is prepended
+# so the installer's bare "launchctl ..." calls hit the mock, while cleanup
+# code that uses "/bin/launchctl" (absolute) bypasses it intentionally.
+export MOCK_LAUNCHCTL_LOG="$TEST_TMP_DIR/launchctl-invocations.log"
+: > "$MOCK_LAUNCHCTL_LOG"
+cat > "$MOCK_BIN_DIR/launchctl" <<'EOF'
+#!/bin/bash
+# record-only launchctl mock — never touches the real GUI domain (XACA-0682)
+echo "launchctl $*" >> "$MOCK_LAUNCHCTL_LOG"
+# 'list' must succeed-but-empty so installer's `launchctl list | grep` finds nothing
+exit 0
+EOF
+chmod +x "$MOCK_BIN_DIR/launchctl"
+export PATH="$MOCK_BIN_DIR:$PATH"
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── XACA-0682: EXIT cleanup — defensive bootout + sandbox removal ─────────────
+# This runs in the test-tailscale.sh subprocess (invoked via `bash "$test_file"`
+# by test-runner.sh, or directly in standalone mode).  test-runner.sh's own
+# cleanup_test_env trap fires separately in the RUNNER process and removes
+# TEST_TMP_DIR — so we don't need to duplicate that here.  We add defensive
+# bootout using absolute /bin/launchctl (bypasses PATH mock) in case the guard
+# was ever bypassed and a real job loaded.  Wrapping in 2>/dev/null || true
+# makes this a no-op when nothing was loaded.
+_tailscale_test_cleanup() {
+    /bin/launchctl bootout "gui/$(id -u)/com.aiteamforge.tailscale-funnel" 2>/dev/null || true
+    /bin/launchctl bootout "gui/$(id -u)/com.devteam.tailscale-funnel"     2>/dev/null || true
+    # Also remove any sandbox plist in case cleanup is running standalone
+    rm -f "$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist" 2>/dev/null || true
+    rm -f "$HOME/Library/LaunchAgents/com.devteam.tailscale-funnel.plist"     2>/dev/null || true
+}
+# Chain onto any existing EXIT trap rather than replacing it
+_existing_exit_trap=$(trap -p EXIT 2>/dev/null || true)
+if [ -n "$_existing_exit_trap" ]; then
+    trap "$_existing_exit_trap; _tailscale_test_cleanup" EXIT INT TERM
+else
+    trap '_tailscale_test_cleanup' EXIT INT TERM
+fi
+unset _existing_exit_trap
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: write a mock tailscale binary to $MOCK_BIN_DIR/tailscale
@@ -544,6 +604,67 @@ else
 fi
 
 # ═════════════════════════════════════════════════════════════════════════════
+# Section 3b: LaunchAgent isolation assertions (XACA-0682)
+# ═════════════════════════════════════════════════════════════════════════════
+
+# --- plist written to SANDBOX path, not real HOME ---
+test_start "Isolation: _write_funnel_restore_script writes plist to sandbox HOME"
+make_tailscale_mock "exit 0"
+MOCK="$MOCK_BIN_DIR/tailscale"
+: > "$MOCK_LAUNCHCTL_LOG"
+(
+    source_installer
+    apply_mock_ts_present "$MOCK"
+    _write_funnel_restore_script "$MOCK" 2>/dev/null || true
+    sandbox_plist="$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist"
+    if [ -f "$sandbox_plist" ]; then
+        echo "PASS" >> "$TEST_RESULTS_FILE"
+    else
+        echo "FAIL:plist not found in sandbox HOME at $sandbox_plist" >> "$TEST_RESULTS_FILE"
+    fi
+)
+if tail -1 "$TEST_RESULTS_FILE" 2>/dev/null | grep -q "^PASS"; then
+    test_pass
+else
+    test_fail "$(tail -1 "$TEST_RESULTS_FILE" 2>/dev/null | sed 's/^FAIL://')"
+fi
+
+# --- launchctl mock records load against the SANDBOX plist path ---
+test_start "Isolation: launchctl mock records load call against sandbox plist path"
+make_tailscale_mock "exit 0"
+MOCK="$MOCK_BIN_DIR/tailscale"
+: > "$MOCK_LAUNCHCTL_LOG"
+(
+    source_installer
+    apply_mock_ts_present "$MOCK"
+    _write_funnel_restore_script "$MOCK" 2>/dev/null || true
+)
+sandbox_plist="$HOME/Library/LaunchAgents/com.aiteamforge.tailscale-funnel.plist"
+if grep -q "launchctl load" "$MOCK_LAUNCHCTL_LOG" 2>/dev/null && \
+   grep -q "$sandbox_plist" "$MOCK_LAUNCHCTL_LOG" 2>/dev/null; then
+    test_pass
+else
+    test_fail "launchctl load not recorded against sandbox plist. Log: $(cat "$MOCK_LAUNCHCTL_LOG" 2>/dev/null || echo '(empty)')"
+fi
+
+# --- AITEAMFORGE_SKIP_LAUNCHCTL=1 suppresses all launchctl load calls ---
+test_start "Isolation: AITEAMFORGE_SKIP_LAUNCHCTL=1 prevents any launchctl load recording"
+make_tailscale_mock "exit 0"
+MOCK="$MOCK_BIN_DIR/tailscale"
+: > "$MOCK_LAUNCHCTL_LOG"
+(
+    export AITEAMFORGE_SKIP_LAUNCHCTL=1
+    source_installer
+    apply_mock_ts_present "$MOCK"
+    _write_funnel_restore_script "$MOCK" 2>/dev/null || true
+)
+if grep -q "launchctl load" "$MOCK_LAUNCHCTL_LOG" 2>/dev/null; then
+    test_fail "launchctl load was recorded despite AITEAMFORGE_SKIP_LAUNCHCTL=1. Log: $(cat "$MOCK_LAUNCHCTL_LOG" 2>/dev/null)"
+else
+    test_pass
+fi
+
+# ═════════════════════════════════════════════════════════════════════════════
 # Section 4: Skip Flow (User Opts Out)
 # ═════════════════════════════════════════════════════════════════════════════
 
@@ -874,3 +995,39 @@ if [ -f "$FUNNEL_TEMPLATE" ]; then
 else
     test_fail "tailscale-funnel.template.sh not found at $FUNNEL_TEMPLATE"
 fi
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Section 7: Self-policing isolation assertion (XACA-0682)
+# Verifies nothing leaked into the REAL developer environment.
+# Uses REAL_HOME (captured before HOME was sandboxed) and absolute /bin/launchctl
+# (bypasses the PATH mock) so a genuine leak can't hide behind the mock.
+# ═════════════════════════════════════════════════════════════════════════════
+
+test_start "Isolation: no com.aiteamforge.tailscale-funnel plist leaked into real ~/Library/LaunchAgents"
+_leaked_plist=""
+for _label in "com.aiteamforge.tailscale-funnel" "com.devteam.tailscale-funnel"; do
+    _candidate="$REAL_HOME/Library/LaunchAgents/${_label}.plist"
+    if [ -f "$_candidate" ]; then
+        _leaked_plist="$_candidate"
+        break
+    fi
+done
+# Also catch any wildcard com.aiteamforge.*.plist that shouldn't be there
+if [ -z "$_leaked_plist" ] && ls "$REAL_HOME/Library/LaunchAgents/com.aiteamforge."*.plist 2>/dev/null | grep -q "tailscale"; then
+    _leaked_plist="com.aiteamforge.*tailscale* (wildcard match)"
+fi
+if [ -n "$_leaked_plist" ]; then
+    test_fail "LEAK DETECTED: plist found in real HOME: $_leaked_plist"
+else
+    test_pass
+fi
+unset _leaked_plist _label _candidate
+
+test_start "Isolation: no tailscale-funnel job loaded in real launchd domain"
+_loaded_jobs=$(/bin/launchctl list 2>/dev/null | grep -E 'com\.aiteamforge\.tailscale-funnel|com\.devteam\.tailscale-funnel' || true)
+if [ -n "$_loaded_jobs" ]; then
+    test_fail "LEAK DETECTED: launchd job loaded in real GUI domain: $_loaded_jobs"
+else
+    test_pass
+fi
+unset _loaded_jobs

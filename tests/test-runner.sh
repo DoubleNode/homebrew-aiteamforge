@@ -67,6 +67,10 @@ print_verbose() {
 
 # Create isolated temp directory for test
 setup_test_env() {
+  # On macOS, `mktemp -t PREFIX` treats the entire argument as a filename prefix
+  # and appends its own random suffix — the literal ".XXXXXX" is NOT expanded as
+  # a template here (unlike `mktemp -d /tmp/foo.XXXXXX`).  The resulting dir is
+  # named "aiteamforge-test.XXXXXX.<random>".  This is intentional and harmless.
   TEST_TMP_DIR=$(mktemp -d -t aiteamforge-test.XXXXXX)
   TEST_RESULTS_FILE="$TEST_TMP_DIR/.test-results"
   touch "$TEST_RESULTS_FILE"

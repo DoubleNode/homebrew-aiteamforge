@@ -21,6 +21,17 @@ _atf_validate_script_dir="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null 
 [ -f "$_atf_validate_script_dir/python-env.sh" ] && . "$_atf_validate_script_dir/python-env.sh" 2>/dev/null || true
 unset _atf_validate_script_dir
 
+# ─── launchctl guard — skips real GUI-domain side effects under test/sandbox ─
+# Set AITEAMFORGE_SKIP_LAUNCHCTL=1 to suppress load/unload/bootstrap/bootout.
+# Read-only ops (launchctl list | grep …) are NOT routed here — they are
+# harmless and, under test, the PATH mock already intercepts them.  (XACA-0682)
+_aitf_launchctl() {
+    if [ "${AITEAMFORGE_SKIP_LAUNCHCTL:-}" = "1" ]; then
+        return 0
+    fi
+    launchctl "$@"
+}
+
 # ─── Colors (safe to redefine if not already set) ───────────────────────────
 
 _VAL_RED='\033[0;31m'
@@ -509,7 +520,7 @@ _val_check_launchagents() {
             _val_pass "${agent} loaded"
         else
             # Auto-fix: load the plist instead of just warning
-            if launchctl load "$plist" 2>/dev/null; then
+            if _aitf_launchctl load "$plist" 2>/dev/null; then
                 _val_pass "${agent} loaded (was unloaded — auto-fixed)"
             else
                 _val_warn "${agent} plist exists but could not load" \
