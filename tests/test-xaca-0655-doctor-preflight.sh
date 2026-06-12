@@ -237,6 +237,43 @@ assert_contains "$_RFP_FUNC" \
     "run_first_launch_preflight sentinel must incorporate the VERSION variable"
 test_pass
 
+# ── L1-B (anti-recursion guards, XACA-0655 review fix) ───────────────────────
+# A SAFE remediation run during preflight may shell out to `aiteamforge start`
+# (server self-heal), which re-enters run_first_launch_preflight. On first launch
+# with the server down the sentinel is not yet stamped → infinite recursion /
+# fork-bomb. Three guards must be present and lock the fix in place.
+
+test_start "L1-B9 (static): run_first_launch_preflight has exported re-entry guard (AITEAMFORGE_PREFLIGHT_ACTIVE)"
+# Guard 1: an early return on AITEAMFORGE_PREFLIGHT_ACTIVE so nested aiteamforge
+# invocations skip preflight, AND the var is exported into the doctor call.
+assert_contains "$_RFP_FUNC" \
+    'AITEAMFORGE_PREFLIGHT_ACTIVE' \
+    "run_first_launch_preflight must reference AITEAMFORGE_PREFLIGHT_ACTIVE (process-tree re-entry guard)"
+test_pass
+
+test_start "L1-B10 (static): sentinel is stamped BEFORE the doctor is invoked (re-entry no-ops)"
+# Guard 2: the sentinel write (': > \"\$sentinel\"') must appear BEFORE the
+# 'bash \"\$doctor\" --preflight' invocation in the function body, so any
+# re-entry (even cross-process) sees the sentinel and no-ops. Compare line offsets.
+_RFP_SENTINEL_LINE="$(printf '%s\n' "$_RFP_FUNC" | grep -n '> *"\?\$sentinel' | head -1 | cut -d: -f1)"
+_RFP_DOCTOR_LINE="$(printf '%s\n' "$_RFP_FUNC" | grep -n 'bash "\$doctor" --preflight' | head -1 | cut -d: -f1)"
+if [ -n "$_RFP_SENTINEL_LINE" ] && [ -n "$_RFP_DOCTOR_LINE" ] && [ "$_RFP_SENTINEL_LINE" -lt "$_RFP_DOCTOR_LINE" ]; then
+    test_pass
+else
+    test_fail "sentinel stamp (line ${_RFP_SENTINEL_LINE:-?}) must precede doctor --preflight call (line ${_RFP_DOCTOR_LINE:-?}) to break first-launch recursion"
+fi
+
+test_start "L1-B11 (static): doctor 'server' remediation does not auto-start under --preflight"
+# Guard 3: the server remediation arm must be gated on PREFLIGHT so it never
+# shells out to 'aiteamforge start kanban' during preflight (recursion trigger +
+# premature start). Extract the server) arm of attempt_remediation and assert it
+# references PREFLIGHT before the aiteamforge-start shell-out.
+_SERVER_ARM="$(printf '%s\n' "$_DOCTOR_SRC" | awk '/^    server\)/,/^      ;;/')"
+assert_contains "$_SERVER_ARM" \
+    'PREFLIGHT' \
+    "attempt_remediation 'server' arm must check PREFLIGHT so it does not auto-start the server during preflight"
+test_pass
+
 # ── L1-C: attempt_remediation replaces the old stub (XACA-0655-003) ──────────
 
 test_start "L1-C1 (static): attempt_remediation function exists"
@@ -513,6 +550,77 @@ if [ "$_LINES_AFTER" -eq "$_LINES_BEFORE" ]; then
     test_pass
 else
     test_fail "run_first_launch_preflight re-ran despite sentinel (log grew from $_LINES_BEFORE to $_LINES_AFTER lines)"
+fi
+
+test_start "L2-D3 (behavioral): re-entry guard makes a nested invocation a no-op (AITEAMFORGE_PREFLIGHT_ACTIVE set)"
+# Simulates the nested 'aiteamforge start' that a remediation might trigger: the
+# child inherits AITEAMFORGE_PREFLIGHT_ACTIVE=1, so run_first_launch_preflight must
+# return immediately WITHOUT invoking the doctor — even with NO sentinel present.
+_RFP_HOME3="$SANDBOX/home-rfp3"
+_RFP_ATF3="$_RFP_HOME3/.aiteamforge"
+mkdir -p "$_RFP_HOME3"
+# Fresh home → no sentinel. If the guard works, no sentinel is created either,
+# because the function returns before stamping/running.
+_RFP_OUT3="$(HOME="$_RFP_HOME3" AITEAMFORGE_PREFLIGHT_ACTIVE=1 bash "$SANDBOX/rfp-driver.sh" 2>&1)" || true
+_RFP3_SENTINEL_FOUND=false
+for _f in "$_RFP_ATF3"/.doctor-preflight-*; do
+    [ -f "$_f" ] && _RFP3_SENTINEL_FOUND=true && break
+done
+if [ "$_RFP3_SENTINEL_FOUND" = false ]; then
+    test_pass
+else
+    test_fail "re-entry guard failed: preflight ran despite AITEAMFORGE_PREFLIGHT_ACTIVE=1 (sentinel was created). Output: $(echo "$_RFP_OUT3" | tail -3)"
+fi
+
+test_start "L2-D4 (behavioral): first-launch preflight does NOT fork-bomb when server-start shells back into start"
+# The real regression: a fake 'aiteamforge' on PATH whose 'start kanban' re-invokes
+# run_first_launch_preflight (mimicking the server self-heal shelling back into
+# 'aiteamforge start'). With the fix (env guard + sentinel-first + PREFLIGHT-gated
+# server remediation) this must TERMINATE and invoke the driver a bounded number of
+# times. Without the fix it recurses unbounded. Bounded by `timeout` as a backstop.
+_TIMEOUT_BIN=""
+if command -v timeout >/dev/null 2>&1; then _TIMEOUT_BIN="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then _TIMEOUT_BIN="gtimeout"; fi
+
+if [ -z "$_TIMEOUT_BIN" ]; then
+    test_skip "no timeout/gtimeout available — skipping fork-bomb backstop test (guards covered by L1-B9/B10/B11 + L2-D3)"
+else
+    _RFP_HOME4="$SANDBOX/home-rfp4"
+    _FAKE_BIN="$SANDBOX/fakebin4"
+    _COUNTER="$SANDBOX/rfp4-count"
+    mkdir -p "$_RFP_HOME4" "$_FAKE_BIN"
+    echo 0 > "$_COUNTER"
+
+    # Fake 'aiteamforge': on 'start kanban', bump the counter and re-run the driver
+    # (the recursion path). The fix's exported env guard must make this nested run
+    # a no-op. Hard cap at 25 to avoid an actual fork-bomb if the fix regresses.
+    cat > "$_FAKE_BIN/aiteamforge" <<FAKEATF
+#!/bin/bash
+if [ "\$1" = "start" ]; then
+    _n=\$(( \$(cat "$_COUNTER" 2>/dev/null || echo 0) + 1 ))
+    echo "\$_n" > "$_COUNTER"
+    [ "\$_n" -ge 25 ] && exit 0   # hard cap: regression backstop
+    HOME="$_RFP_HOME4" bash "$SANDBOX/rfp-driver.sh" >/dev/null 2>&1 || true
+fi
+exit 0
+FAKEATF
+    chmod +x "$_FAKE_BIN/aiteamforge"
+
+    # Run the top-level preflight with the fake aiteamforge first on PATH and a
+    # fresh (sentinel-absent) home — the exact first-launch + server-down scenario.
+    set +e
+    PATH="$_FAKE_BIN:$PATH" HOME="$_RFP_HOME4" "$_TIMEOUT_BIN" 20 bash "$SANDBOX/rfp-driver.sh" >/dev/null 2>&1
+    _RFP4_RC=$?
+    set -e
+    _RFP4_COUNT="$(cat "$_COUNTER" 2>/dev/null || echo 0)"
+
+    if [ "$_RFP4_RC" -eq 124 ]; then
+        test_fail "preflight HUNG (timeout) — first-launch recursion not broken (server self-heal fork-bomb). nested-start count=$_RFP4_COUNT"
+    elif [ "$_RFP4_COUNT" -ge 25 ]; then
+        test_fail "preflight recursed unbounded (hit hard cap 25) — re-entry guard ineffective"
+    else
+        test_pass
+    fi
 fi
 
 # ── L2-E: --check board against stub vs real board ────────────────────────────

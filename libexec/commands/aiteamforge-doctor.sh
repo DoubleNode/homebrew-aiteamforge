@@ -225,7 +225,15 @@ attempt_remediation() {
     server)
       # SAFE: idempotent — `aiteamforge start kanban` leaves a healthy server
       # running and only (re)launches a missing one.
-      if [ "$apply" = true ]; then
+      #
+      # PREFLIGHT EXCEPTION (XACA-0655 review fix): in --preflight mode we are
+      # running at the very top of `aiteamforge start`, which is itself about to
+      # bring the server up. Shelling out to `aiteamforge start kanban` here is
+      # both premature (the parent start does it moments later) AND the trigger
+      # for first-launch recursion. So under preflight we never auto-start the
+      # server — we only record a suggestion. (The start.sh re-entry guard is the
+      # hard backstop; this keeps the behavior correct, not just non-fatal.)
+      if [ "$apply" = true ] && [ "${PREFLIGHT:-false}" != true ]; then
         _remediation_note "[fix] server: aiteamforge start kanban"
         if command -v aiteamforge >/dev/null 2>&1; then
           aiteamforge start kanban >/dev/null 2>&1 || \

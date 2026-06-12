@@ -104,8 +104,25 @@ WORKING_DIR=$(get_working_dir)
 # auto-applies SAFE remediations silently, logs to ~/.aiteamforge/logs, prints
 # at most one concise line, and NEVER blocks (always exits 0). We wrap it in
 # `|| true` and background-safe guards so it cannot abort `aiteamforge start`.
+#
+# RE-ENTRY SAFETY (XACA-0655 review fix): a SAFE remediation run during preflight
+# may itself shell out to `aiteamforge start` (the `server` self-heal historically
+# ran `aiteamforge start kanban`). That nested start would re-enter this function;
+# on a first launch with the server down the sentinel is not yet stamped, so every
+# level re-runs preflight before ever starting the server → infinite recursion /
+# fork-bomb. Two independent guards prevent this:
+#   1. An EXPORTED process-tree guard (AITEAMFORGE_PREFLIGHT_ACTIVE) — any nested
+#      `aiteamforge` invocation inherits it and skips preflight entirely.
+#   2. The sentinel is stamped BEFORE invoking the doctor (not after), so even a
+#      cross-process re-entry that does not inherit the env var no-ops. Stamping
+#      first is safe: preflight is best-effort self-heal, already a one-shot that
+#      never retries within a version regardless of outcome.
+# (The doctor also refuses to auto-start the server while in --preflight mode.)
 # ─────────────────────────────────────────────────────────────────────────────
 run_first_launch_preflight() {
+  # Guard 1: process-tree re-entry guard — exported so nested aiteamforge calls skip.
+  [ -n "${AITEAMFORGE_PREFLIGHT_ACTIVE:-}" ] && return 0
+
   local sentinel_dir="${HOME}/.aiteamforge"
   local sentinel="${sentinel_dir}/.doctor-preflight-${VERSION}"
 
@@ -117,13 +134,15 @@ run_first_launch_preflight() {
     return 0
   fi
 
-  # Run the non-blocking self-heal. The doctor exits 0 even on findings, but
-  # guard with `|| true` so a doctor crash can never block launch.
-  bash "$doctor" --preflight || true
-
-  # Stamp the sentinel so we don't re-run until the next version bump.
+  # Guard 2: stamp the sentinel BEFORE running the doctor, so any re-entry (this
+  # process tree or a fresh one) sees it and no-ops. Best-effort, never blocks.
   mkdir -p "$sentinel_dir" 2>/dev/null || true
   : > "$sentinel" 2>/dev/null || true
+
+  # Run the non-blocking self-heal under the exported re-entry guard. The doctor
+  # exits 0 even on findings, but guard with `|| true` so a crash can't block launch.
+  AITEAMFORGE_PREFLIGHT_ACTIVE=1 bash "$doctor" --preflight || true
+
   return 0
 }
 
