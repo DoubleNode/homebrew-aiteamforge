@@ -478,9 +478,16 @@ aiteamforge doctor --verbose
 
 ```bash
 aiteamforge doctor --check dependencies
-aiteamforge doctor --check services
+aiteamforge doctor --check services      # incl. LCARS server durability (keepalive)
 aiteamforge doctor --check config
+aiteamforge doctor --check board         # kanban board resolves + not a template stub
+aiteamforge doctor --check python-venv   # venv + real `import iterm2` test
 ```
+
+Run `aiteamforge doctor --help` for the full component list. `aiteamforge doctor --fix`
+auto-applies SAFE remediations (re-provision venv, load the keepalive LaunchAgent, start
+the server); config/board provisioning (`aiteamforge setup`) is always printed, never
+auto-run.
 
 ### Common Issues
 

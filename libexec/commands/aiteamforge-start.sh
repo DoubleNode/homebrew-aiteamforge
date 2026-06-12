@@ -95,6 +95,40 @@ fi
 # Get directories
 WORKING_DIR=$(get_working_dir)
 
+# ─────────────────────────────────────────────────────────────────────────────
+# First-launch preflight self-heal (XACA-0655-004)
+#
+# Runs ONCE per install/upgrade, gated by a version-stamped sentinel so a fresh
+# install or `brew upgrade` re-runs it exactly once. Delegates to
+# `aiteamforge-doctor.sh --preflight`, which runs the fast/critical subset,
+# auto-applies SAFE remediations silently, logs to ~/.aiteamforge/logs, prints
+# at most one concise line, and NEVER blocks (always exits 0). We wrap it in
+# `|| true` and background-safe guards so it cannot abort `aiteamforge start`.
+# ─────────────────────────────────────────────────────────────────────────────
+run_first_launch_preflight() {
+  local sentinel_dir="${HOME}/.aiteamforge"
+  local sentinel="${sentinel_dir}/.doctor-preflight-${VERSION}"
+
+  # Already ran for this version → no-op.
+  [ -f "$sentinel" ] && return 0
+
+  local doctor="${LIBEXEC_DIR}/commands/aiteamforge-doctor.sh"
+  if [ ! -x "$doctor" ] && [ ! -f "$doctor" ]; then
+    return 0
+  fi
+
+  # Run the non-blocking self-heal. The doctor exits 0 even on findings, but
+  # guard with `|| true` so a doctor crash can never block launch.
+  bash "$doctor" --preflight || true
+
+  # Stamp the sentinel so we don't re-run until the next version bump.
+  mkdir -p "$sentinel_dir" 2>/dev/null || true
+  : > "$sentinel" 2>/dev/null || true
+  return 0
+}
+
+run_first_launch_preflight
+
 # Banner
 [[ -t 1 ]] && clear
 print_header "AITEAMFORGE START"

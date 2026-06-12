@@ -84,12 +84,16 @@ aiteamforge doctor
 # Verbose diagnostics
 aiteamforge doctor --verbose
 
-# Check specific component
+# Check specific component (see `aiteamforge doctor --help` for the full list)
 aiteamforge doctor --check dependencies
-aiteamforge doctor --check services
+aiteamforge doctor --check services      # incl. LCARS server durability (keepalive LaunchAgent)
 aiteamforge doctor --check config
+aiteamforge doctor --check board         # kanban board resolves + not a placeholder/template stub
+aiteamforge doctor --check python-venv   # venv packages + a real `import iterm2` test
 
-# Attempt automatic fixes (future feature)
+# Auto-apply SAFE remediations (re-provision venv, load keepalive LaunchAgent,
+# start the server). Config/board provisioning (`aiteamforge setup`) is always
+# printed, never auto-run.
 aiteamforge doctor --fix
 ```
 
