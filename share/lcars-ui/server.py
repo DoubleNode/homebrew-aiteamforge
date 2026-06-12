@@ -1245,6 +1245,42 @@ def generate_secrets_export(job_id, team_id, password, paired_export_id=None):
         })
 
 
+def _assert_zip_entries_contained(names, dest_root):
+    """Raise ValueError if any zip entry name escapes dest_root.
+
+    Mirrors the secrets-import path-traversal containment guard (6a,
+    ~line 1646).  Two rejection cases:
+      - Absolute paths (e.g. "/etc/passwd")
+      - Relative-to-root escapes (e.g. "../../.ssh/authorized_keys")
+
+    Must be called BEFORE any extraction so no files are written when a
+    bad entry is present (validate-all-first).
+
+    Args:
+        names:     iterable of arc entry names (str) from zipf.namelist()
+        dest_root: pathlib.Path — the intended extraction root
+
+    Raises:
+        ValueError: with a message naming the offending entry
+    """
+    dest_root_resolved = Path(dest_root).resolve()
+    for name in names:
+        arc_path = Path(name)
+        if arc_path.is_absolute():
+            raise ValueError(
+                f"Archive contains an absolute path entry: {name} — "
+                "refusing to extract."
+            )
+        candidate = (dest_root_resolved / name).resolve()
+        try:
+            candidate.relative_to(dest_root_resolved)
+        except ValueError:
+            raise ValueError(
+                f"Archive contains an entry that escapes the target "
+                f"directory: {name} — refusing to extract."
+            )
+
+
 def _rewrite_team_ids_in_file(filepath, old_team_id, new_team_id):
     """Rewrite occurrences of old_team_id → new_team_id inside a text file.
 
@@ -1345,6 +1381,19 @@ def apply_import(job_id):
             dest_home = Path.home()
             extracted = 0
             skipped = 0
+
+            # ------------------------------------------------------------------ #
+            # Path-traversal containment (mirrors secrets-import guard 6a):      #
+            # validate ALL manifest relpaths against dest_home BEFORE any write. #
+            # A crafted manifest could direct relpath to "../../.ssh/authorized  #
+            # _keys" or "/etc/passwd"; we refuse the whole import if any entry   #
+            # is absolute or escapes $HOME.                                       #
+            # ------------------------------------------------------------------ #
+            _packable_relpaths = [
+                fe.get('relpath', '') for fe in packable
+                if fe.get('relpath', '')
+            ]
+            _assert_zip_entries_contained(_packable_relpaths, dest_home)
 
             with zipfile.ZipFile(staged_path, 'r') as zipf:
                 zip_names = set(zipf.namelist())
@@ -1539,6 +1588,13 @@ def apply_import(job_id):
             _import_job_update(job_id, {'message': 'Extracting archive...', 'progress': 10})
 
             with zipfile.ZipFile(staged_path, 'r') as zipf:
+                # ---------------------------------------------------------------- #
+                # Path-traversal containment (mirrors secrets-import guard 6a):    #
+                # enumerate all names and validate against scratch_dir BEFORE      #
+                # extractall — a crafted zip with "../../.ssh/authorized_keys"     #
+                # or an absolute path is refused before any file is written.        #
+                # ---------------------------------------------------------------- #
+                _assert_zip_entries_contained(zipf.namelist(), scratch_dir)
                 zipf.extractall(scratch_dir)
 
             # Step 1: Overwrite project kanban tree.
