@@ -546,7 +546,10 @@ else
     # so once the `aiteamforge start` child exits, server.py is reparented to init
     # (PPID 1) and survives shell logout. PPID != 1 means it would die on logout.
     if [ -n "$rt_port" ]; then
-        rt_pid=$(pgrep -f "server.py $rt_port" | head -1)
+        # Anchor the port match the same way lcars-launch-helpers.sh does (XACA-0661):
+        # escape the dot and bound the port token so we never match e.g.
+        # "server.py 83200" when rt_port=8320. Launch form is `python3 server.py <PORT>`.
+        rt_pid=$(pgrep -f "server\.py[[:space:]]${rt_port}([[:space:]]|\$)" | head -1)
         if [ -n "$rt_pid" ]; then
             rt_ppid=$(ps -o ppid= -p "$rt_pid" 2>/dev/null | tr -d ' ')
             if [ "$rt_ppid" = "1" ]; then
