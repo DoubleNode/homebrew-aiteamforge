@@ -239,6 +239,23 @@ if [ -f "$creds_file" ]; then
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
+# CASE C (harden): a PRE-EXISTING looser-mode credentials file must be tightened
+# to 600 before the secret is written (XACA-0470 review follow-up #1). Seed a
+# 644 file first, then write — the result must be 600, not the inherited 644.
+# ─────────────────────────────────────────────────────────────────────────────
+test_start "Case C (harden): pre-existing 0644 credentials file is tightened to 0600"
+rm -f "$creds_file" 2>/dev/null || true
+printf '{"teams":{},"default":""}' > "$creds_file"
+chmod 644 "$creds_file"
+seed_mode="$(stat -f "%A" "$creds_file" 2>/dev/null || stat -c "%a" "$creds_file" 2>/dev/null)"
+write_confluence_credentials "mainevent" "user@example.com" "sekret" "example.atlassian.net" "DPD"
+hardened_mode="$(stat -f "%A" "$creds_file" 2>/dev/null || stat -c "%a" "$creds_file" 2>/dev/null)"
+_ok=true
+assert_equal "$seed_mode"     "644" "seed file must start at 0644 (precondition)" || _ok=false
+assert_equal "$hardened_mode" "600" "looser-mode file must be tightened to 0600"  || _ok=false
+[ "$_ok" = true ] && test_pass
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CASE D: cr_already_prompted — false when no cr-config; true after write_cr_config
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "Case D: cr_already_prompted returns false when no cr-config.json exists"

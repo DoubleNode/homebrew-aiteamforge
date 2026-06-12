@@ -1297,7 +1297,9 @@ write_cr_config() {
         teams_obj="$(jq -c --arg k "$t" --argjson v "$val" '. + {($k): $v}' <<<"$teams_obj")"
     done
 
-    jq -n --argjson teams "$teams_obj" '{version:1, prompted:true, teams:$teams}' > "$cfg"
+    # Non-secret, but write under a fixed umask for mode-symmetry with the
+    # credentials writer (XACA-0470 review follow-up #2).
+    ( umask 022; jq -n --argjson teams "$teams_obj" '{version:1, prompted:true, teams:$teams}' > "$cfg" )
     chmod 644 "$cfg"
     info "Recorded per-team CR opt-in → $cfg"
 }
@@ -1330,11 +1332,16 @@ write_confluence_credentials() {
         [ -z "$default_team" ] && default_team="$t"
     done
 
-    # Restrictive umask so the secret never lands group/other-readable, even for
-    # the brief window before chmod runs.
-    ( umask 077
-      jq -n --argjson teams "$teams_obj" --arg def "$default_team" \
-          '{teams:$teams, default:$def}' > "$creds" )
+    # Lock the destination to 600 BEFORE the secret lands. `umask 077` only
+    # protects a NEWLY-created file; a redirect into a pre-existing looser-mode
+    # file would otherwise leave the secret group/other-readable until the
+    # trailing chmod. So: create-if-absent under umask 077, tighten any existing
+    # file to 600, THEN write (the `>` redirect preserves the file's 600 mode).
+    # XACA-0470 review follow-up (#1).
+    ( umask 077; : >> "$creds" ) 2>/dev/null || true
+    chmod 600 "$creds" 2>/dev/null || true
+    jq -n --argjson teams "$teams_obj" --arg def "$default_team" \
+        '{teams:$teams, default:$def}' > "$creds"
     chmod 600 "$creds"
     success "Wrote Confluence credentials (mode 600) for: $enabled_csv"
 }
@@ -1806,9 +1813,11 @@ install_kanban_system() {
     # "wizard asked, user declined all" → record it (prompted=true) so migration
     # won't nag again.
     if [ "${CR_WIZARD_RAN:-}" = "1" ]; then
-        write_cr_config "${CR_ENABLED_TEAMS_STR}" "${CR_ALL_SELECTED_TEAMS_STR:-${SELECTED_TEAMS_STR:-}}"
-        if [ -n "${CR_ENABLED_TEAMS_STR}" ] && [ -n "${CR_ATLASSIAN_TOKEN:-}" ]; then
-            write_confluence_credentials "${CR_ENABLED_TEAMS_STR}" \
+        # All CR_* are `:-`-defaulted so a manual `CR_WIZARD_RAN=1` (without the
+        # sibling exports) can't abort the installer under `set -u` (review #012).
+        write_cr_config "${CR_ENABLED_TEAMS_STR:-}" "${CR_ALL_SELECTED_TEAMS_STR:-${SELECTED_TEAMS_STR:-}}"
+        if [ -n "${CR_ENABLED_TEAMS_STR:-}" ] && [ -n "${CR_ATLASSIAN_TOKEN:-}" ]; then
+            write_confluence_credentials "${CR_ENABLED_TEAMS_STR:-}" \
                 "${CR_ATLASSIAN_EMAIL:-}" "${CR_ATLASSIAN_TOKEN:-}" \
                 "${CR_CONFLUENCE_SITE:-mainevent.atlassian.net}" "${CR_SPACE_KEY:-DPD2}"
         fi
