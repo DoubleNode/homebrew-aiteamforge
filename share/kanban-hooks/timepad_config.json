@@ -1,0 +1,103 @@
+{
+  "_schemaVersion": 1,
+  "_comment": [
+    "Per-team TimePad configuration.",
+    "XACA-0619 — TimePad per-team config foundation (child of EPIC-0039).",
+    "",
+    "REBRAND NOTE: This file supersedes the retired legacy time-tracking config (hard cutover).",
+    "The canonical API host is https://timepad.io/api. The retired legacy host is not valid here.",
+    "",
+    "TOKEN SECURITY: The 'tokenRef' field holds ONLY a reference name (env-var or vault key).",
+    "A raw token value MUST NEVER appear in this file. The loader (XACA-0619-002) resolves",
+    "the actual token at runtime via the XACA-0279 vault-primary + env-failover chain.",
+    "",
+    "ENABLE/DISABLE: The enable gate is NOT stored here. It lives in the board JSON at",
+    "teamConfig.timepadSupport.enabled (served by /api/team-config, mirrors crSupport).",
+    "This is the single source of truth — see docs/TIMEPAD_CONFIG.md.",
+    "",
+    "PLACEHOLDER VALUES: All UUID fields (clientId, projectId, tagId) below contain",
+    "placeholder strings. The UUIDs from any prior host database are INVALID — they were",
+    "issued by a retired service and will not resolve against timepad.io. You MUST",
+    "fetch real IDs from https://timepad.io/api before these blocks are usable.",
+    "See docs/TIMEPAD_CONFIG.md for fetch instructions."
+  ],
+  "teams": {
+    "academy": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "ios": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "android": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "firebase": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "command": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "dns": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "freelance": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "mainevent": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "legal": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "medical": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    },
+    "finance": {
+      "apiBaseUrl": "https://timepad.io/api",
+      "tokenRef": "TIMEPAD_API_KEY",
+      "clientId": "<fetch-from-timepad.io>",
+      "projectId": "<fetch-from-timepad.io>",
+      "tagId": "<fetch-from-timepad.io>"
+    }
+  }
+}

@@ -1475,6 +1475,369 @@ def normalize_branch_env(branch_map_value: str | dict, release_platforms: list[s
     return {}
 
 
+# ---------------------------------------------------------------------------
+# TimePad config loader — XACA-0619-002
+# ---------------------------------------------------------------------------
+# Loads, validates, and caches kanban-hooks/timepad_config.json.
+#
+# Config file location (in priority order):
+#   1. $AITEAMFORGE_TIMEPAD_CONFIG env var (override for tests)
+#   2. ~/.aiteamforge/timepad_config.json  (runtime user copy)
+#   3. <dev-team-root>/kanban-hooks/timepad_config.json  (source/fallback)
+#
+# The schema ships with all UUID fields set to the placeholder
+# "<fetch-from-timepad.io>" — a valid-but-unconfigured marker.  The loader
+# does NOT crash on placeholders; callers use timepad_team_has_placeholders()
+# to distinguish configured from unconfigured teams.
+#
+# Security rules (never relax):
+#   - tokenRef must be an env-var reference NAME only — never a raw token value.
+#   - Any value that looks like a raw token (starts with "tp_", "sk-", or is
+#     longer than 80 chars) is rejected.
+#   - liquidstyle references in apiBaseUrl or tokenRef are hard-rejected
+#     (hard cutover; these UUIDs are from a retired database).
+# ---------------------------------------------------------------------------
+
+_TIMEPAD_CONFIG_CACHE: dict | None = None
+_TIMEPAD_CONFIG_PATH_AT_LOAD: str | None = None  # detect env-var changes
+
+#: Placeholder string used in the shipped schema for unconfigured UUID fields.
+TIMEPAD_PLACEHOLDER = "<fetch-from-timepad.io>"
+
+#: UUID fields in each team block that may carry TIMEPAD_PLACEHOLDER.
+_TIMEPAD_UUID_FIELDS = ("clientId", "projectId", "tagId")
+
+#: Pattern fragments that look like raw token values — reject if found in tokenRef.
+_TIMEPAD_RAW_TOKEN_PREFIXES = ("tp_", "sk-", "Bearer ", "token ", "apikey ")
+
+
+def get_timepad_config_path() -> Path:
+    """Return the path to timepad_config.json, honouring $AITEAMFORGE_TIMEPAD_CONFIG.
+
+    Search order:
+      1. $AITEAMFORGE_TIMEPAD_CONFIG env var (explicit override — tests use this)
+      2. ~/.aiteamforge/timepad_config.json  (runtime user copy)
+      3. <this-file's-dir>/timepad_config.json  (dev-team source fallback)
+    """
+    override = os.environ.get("AITEAMFORGE_TIMEPAD_CONFIG", "")
+    if override:
+        return Path(override).expanduser()
+    user_copy = Path.home() / ".aiteamforge" / "timepad_config.json"
+    if user_copy.exists():
+        return user_copy
+    # Fallback: sibling in kanban-hooks/ (dev-team source tree)
+    return Path(__file__).parent / "timepad_config.json"
+
+
+def _validate_timepad_team_block(team_slug: str, block: Any) -> list[str]:
+    """Validate a single per-team block from timepad_config.json.
+
+    Returns a list of error strings (empty = valid).  Does NOT raise.
+
+    Validation rules:
+      - block must be a dict
+      - apiBaseUrl must be a non-empty string starting with "https://"
+      - apiBaseUrl must NOT contain "liquidstyle" (hard cutover)
+      - tokenRef must be a non-empty string
+      - tokenRef must NOT start with a raw-token-looking prefix
+      - tokenRef must NOT be longer than 80 chars (env-var names don't get that long)
+      - tokenRef must NOT contain "liquidstyle"
+      - UUID fields (clientId, projectId, tagId) must be strings
+      - UUID fields may be the TIMEPAD_PLACEHOLDER sentinel (valid-but-unconfigured)
+
+    Note: the `enabled` field is intentionally NOT validated here (XACA-0619-005).
+    The enable gate lives in the board JSON at teamConfig.timepadSupport.enabled
+    (single source of truth, mirrors crSupport pattern).  A stale `enabled` field
+    in a config block is silently ignored — callers use is_timepad_enabled().
+    """
+    errors: list[str] = []
+    if not isinstance(block, dict):
+        errors.append(f"teams.{team_slug}: block must be a dict, got {type(block).__name__}")
+        return errors  # can't check sub-fields if block isn't a dict
+
+    # apiBaseUrl — must be non-empty https:// URL, no liquidstyle
+    api_base = block.get("apiBaseUrl", "")
+    if not isinstance(api_base, str) or not api_base:
+        errors.append(f"teams.{team_slug}.apiBaseUrl: must be a non-empty string")
+    elif not api_base.startswith("https://"):
+        errors.append(
+            f"teams.{team_slug}.apiBaseUrl: must start with 'https://', got {api_base!r}"
+        )
+    elif "liquidstyle" in api_base.lower():
+        errors.append(
+            f"teams.{team_slug}.apiBaseUrl: contains 'liquidstyle' — hard cutover; "
+            "this is a retired host.  Update to 'https://timepad.io/api'."
+        )
+
+    # tokenRef — name reference only, never a raw token
+    token_ref = block.get("tokenRef", "")
+    if not isinstance(token_ref, str) or not token_ref:
+        errors.append(f"teams.{team_slug}.tokenRef: must be a non-empty string")
+    else:
+        if "liquidstyle" in token_ref.lower():
+            errors.append(
+                f"teams.{team_slug}.tokenRef: contains 'liquidstyle' — "
+                "stale credential reference.  Use TIMEPAD_API_KEY or "
+                "TEAM_<CODE>_TIMEPAD_API_KEY."
+            )
+        for prefix in _TIMEPAD_RAW_TOKEN_PREFIXES:
+            if token_ref.lower().startswith(prefix.lower()):
+                errors.append(
+                    f"teams.{team_slug}.tokenRef: looks like a raw token value "
+                    f"(starts with {prefix!r}) — store only the env-var/vault key NAME"
+                )
+                break
+        if len(token_ref) > 80:
+            errors.append(
+                f"teams.{team_slug}.tokenRef: suspiciously long ({len(token_ref)} chars) "
+                "— env-var names don't exceed 80 chars; check if a raw token was stored"
+            )
+
+    # UUID fields — must be strings (placeholder or real)
+    for field in _TIMEPAD_UUID_FIELDS:
+        val = block.get(field)
+        if not isinstance(val, str):
+            errors.append(
+                f"teams.{team_slug}.{field}: must be a string, "
+                f"got {type(val).__name__!r} ({val!r})"
+            )
+
+    return errors
+
+
+def load_timepad_config() -> dict:
+    """Load, validate, and cache the TimePad per-team config.
+
+    Returns the parsed dict from timepad_config.json.  On missing file, JSON
+    parse errors, or hard validation failures the error is printed to stderr and
+    an empty-teams dict ``{"_schemaVersion": 1, "teams": {}}`` is returned so
+    callers degrade gracefully.
+
+    Soft validation failures (individual team block errors) are printed to
+    stderr but do NOT prevent the config from loading — the offending team
+    block is left in the result so callers can inspect it.  Callers that need
+    a clean team block should check the validation errors via
+    ``validate_timepad_config(config)``.
+
+    Caching: result is cached until ``bust_timepad_config_cache()`` is called
+    or ``$AITEAMFORGE_TIMEPAD_CONFIG`` changes between calls (test-isolation).
+
+    Never raises.
+    """
+    global _TIMEPAD_CONFIG_CACHE, _TIMEPAD_CONFIG_PATH_AT_LOAD
+
+    config_path = get_timepad_config_path()
+    config_path_str = str(config_path)
+
+    # Re-load if env var changed (important for tests)
+    if _TIMEPAD_CONFIG_CACHE is not None and _TIMEPAD_CONFIG_PATH_AT_LOAD == config_path_str:
+        return _TIMEPAD_CONFIG_CACHE
+
+    _empty: dict = {"_schemaVersion": 1, "teams": {}}
+
+    if not config_path.exists():
+        print(
+            f"[aiteamforge-paths] WARNING: timepad_config.json not found at {config_path} "
+            "— TimePad integration unavailable",
+            file=sys.stderr,
+        )
+        _TIMEPAD_CONFIG_CACHE = _empty
+        _TIMEPAD_CONFIG_PATH_AT_LOAD = config_path_str
+        return _TIMEPAD_CONFIG_CACHE
+
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+        config = json.loads(raw)
+    except (json.JSONDecodeError, OSError) as exc:
+        print(
+            f"[aiteamforge-paths] WARNING: could not parse timepad_config.json "
+            f"at {config_path}: {exc} — TimePad integration unavailable",
+            file=sys.stderr,
+        )
+        _TIMEPAD_CONFIG_CACHE = _empty
+        _TIMEPAD_CONFIG_PATH_AT_LOAD = config_path_str
+        return _TIMEPAD_CONFIG_CACHE
+
+    if not isinstance(config, dict):
+        print(
+            f"[aiteamforge-paths] WARNING: timepad_config.json root must be a dict — "
+            "TimePad integration unavailable",
+            file=sys.stderr,
+        )
+        _TIMEPAD_CONFIG_CACHE = _empty
+        _TIMEPAD_CONFIG_PATH_AT_LOAD = config_path_str
+        return _TIMEPAD_CONFIG_CACHE
+
+    # Run per-team validation — emit warnings but don't discard the config.
+    errors = validate_timepad_config(config)
+    for err in errors:
+        print(f"[aiteamforge-paths] TIMEPAD CONFIG WARNING: {err}", file=sys.stderr)
+
+    _TIMEPAD_CONFIG_CACHE = config
+    _TIMEPAD_CONFIG_PATH_AT_LOAD = config_path_str
+    return _TIMEPAD_CONFIG_CACHE
+
+
+def validate_timepad_config(config: dict) -> list[str]:
+    """Validate all team blocks in a parsed timepad_config.json dict.
+
+    Returns a list of error strings (empty = all clean).  Suitable for use in
+    tests and for callers that want to surface validation errors explicitly.
+
+    Does NOT check whether UUID fields are still placeholders — that's a
+    "not yet configured" state, not an error.  Use timepad_team_has_placeholders()
+    for that check.
+
+    Args:
+        config: Parsed dict from timepad_config.json (not a file path).
+
+    Returns:
+        List of human-readable error strings.  Empty list = config is valid.
+    """
+    errors: list[str] = []
+    teams = config.get("teams", {})
+    if not isinstance(teams, dict):
+        errors.append("'teams' must be a dict")
+        return errors
+    for slug, block in teams.items():
+        errors.extend(_validate_timepad_team_block(slug, block))
+    return errors
+
+
+def get_timepad_team_config_raw(team_slug: str) -> dict:
+    """Return the raw config block for a team from timepad_config.json.
+
+    Returns an empty dict if the team is not present or the config failed to load.
+    Does not raise.
+
+    This is the low-level accessor.  Sibling 005 (accessor API) wraps this with
+    board-JSON enable-flag merging.
+
+    Args:
+        team_slug: Canonical team slug (e.g. "academy", "mainevent").
+
+    Returns:
+        Per-team config dict, or {} if absent.
+    """
+    config = load_timepad_config()
+    return config.get("teams", {}).get(team_slug, {})
+
+
+def timepad_team_has_placeholders(team_slug: str) -> bool:
+    """Return True iff any UUID field for the team still holds the placeholder sentinel.
+
+    A placeholder indicates the team is valid-but-unconfigured — the UUIDs must
+    be fetched from timepad.io before TimePad operations will work.
+
+    Returns True also when the team block is absent (treat as unconfigured).
+
+    Args:
+        team_slug: Canonical team slug (e.g. "academy", "mainevent").
+
+    Returns:
+        True if any of clientId / projectId / tagId equals TIMEPAD_PLACEHOLDER,
+        or if the team block is missing; False if all three are set to non-placeholder
+        strings.
+    """
+    block = get_timepad_team_config_raw(team_slug)
+    if not block:
+        return True  # absent = unconfigured
+    return any(
+        block.get(field) == TIMEPAD_PLACEHOLDER
+        for field in _TIMEPAD_UUID_FIELDS
+    )
+
+
+def bust_timepad_config_cache() -> None:
+    """Invalidate the TimePad config cache.
+
+    The next call to load_timepad_config() will re-read from disk.
+    Intended for use in tests and for callers that write a new config to disk
+    and need the cache to reflect the new content immediately.
+    """
+    global _TIMEPAD_CONFIG_CACHE, _TIMEPAD_CONFIG_PATH_AT_LOAD
+    _TIMEPAD_CONFIG_CACHE = None
+    _TIMEPAD_CONFIG_PATH_AT_LOAD = None
+
+
+# ---------------------------------------------------------------------------
+# Public accessor API (XACA-0619-005) — consumed by hooks + LCARS
+# ---------------------------------------------------------------------------
+# Design decision (locked by Opus lead, XACA-0619-005):
+#   - get_timepad_team_config() returns only the *connection* config block from
+#     timepad_config.json (apiBaseUrl, tokenRef, clientId, projectId, tagId).
+#     It does NOT merge the enabled flag — config (connection) and enabled (gate)
+#     are intentionally separate.
+#   - is_timepad_enabled() reads the *gate* from the board JSON at
+#     teamConfig.timepadSupport.enabled (single source of truth, mirrors crSupport).
+#   - Consumers call both when they need to check if integration is active.
+#
+# This separation prevents drift: the board JSON toggle is the only place to
+# flip the feature on or off; the config JSON is connection-only config.
+
+
+def get_timepad_team_config(team_slug: str) -> dict:
+    """Return the connection config block for a team from timepad_config.json.
+
+    Public accessor for hook + LCARS consumers (XACA-0619-005).  Wraps
+    ``get_timepad_team_config_raw()`` with an explicit public contract.
+
+    Returns the dict with fields: apiBaseUrl, tokenRef, clientId, projectId,
+    tagId.  Returns an empty dict when the team is absent or config failed to
+    load.
+
+    NOTE: This dict does NOT contain an ``enabled`` flag.  The enable gate lives
+    in the board JSON at ``teamConfig.timepadSupport.enabled`` and is read by
+    ``is_timepad_enabled()``.  Keep config (connection) and enabled (gate)
+    separate — callers that need both call each function independently.
+
+    Args:
+        team_slug: Canonical team slug (e.g. "academy", "mainevent").
+
+    Returns:
+        Per-team connection config dict, or {} if absent / load failure.
+    """
+    return get_timepad_team_config_raw(team_slug)
+
+
+def is_timepad_enabled(team_slug: str) -> bool:
+    """Return True iff TimePad is enabled for the given team.
+
+    Reads ``teamConfig.timepadSupport.enabled`` from the team's board JSON
+    (``<kanban_dir>/<team>-board.json``).  This is the single source of truth
+    for the enable/disable gate, mirroring the ``teamConfig.crSupport.enabled``
+    pattern already used by the CR workflow.
+
+    Key path: board_data["teamConfig"]["timepadSupport"]["enabled"]
+    Default:  False (disabled) at every level of the chain.
+
+    The ``enabled`` field that previously existed in ``timepad_config.json`` has
+    been removed (XACA-0619-005) to eliminate the duplicate source.  This
+    function is the only place that reads the gate.
+
+    Args:
+        team_slug: Canonical team slug (e.g. "academy", "mainevent").
+
+    Returns:
+        True if the board JSON declares timepadSupport.enabled = true,
+        False in all other cases (key absent, board missing, parse error, etc.).
+    """
+    try:
+        kanban_dir = get_team_kanban_dir(team_slug)
+        board_file = kanban_dir / f"{team_slug}-board.json"
+        if not board_file.exists():
+            return False
+        board_data = json.loads(board_file.read_text(encoding="utf-8"))
+        # Mirror the server.py pattern (XACA-0333-006):
+        #   board_data.get('teamConfig') or {}  — guards against explicit null
+        team_config = board_data.get("teamConfig") or {}
+        return bool(
+            team_config.get("timepadSupport", {}).get("enabled", False)
+        )
+    except Exception:
+        return False  # safe default — disabled
+
+
 def wizard_hook_create_config(teams_dict: dict, force: bool = False) -> bool:
     """Create or overwrite the config file with the provided teams_dict.
 

@@ -10386,8 +10386,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def serve_team_config(self, query_string: str):
         """GET /api/team-config?team=<team> — return teamConfig block from board JSON.
 
-        Falls back to { crSupport: { enabled: false } } if the key is absent or the
-        board file doesn't exist yet, so callers can treat the response as authoritative.
+        Falls back to { crSupport: { enabled: false }, timepadSupport: { enabled: false } }
+        if keys are absent or the board file doesn't exist yet, so callers can treat the
+        response as authoritative.
 
         XACA-0332: also merges copyright config from ~/.aiteamforge/team-paths.json (schema v2).
         """
@@ -10414,6 +10415,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             team_config = board_data.get('teamConfig') or {}
             # Ensure crSupport key always present with default
             team_config.setdefault('crSupport', {}).setdefault('enabled', False)
+            # XACA-0619: Ensure timepadSupport key always present with default (disabled)
+            team_config.setdefault('timepadSupport', {}).setdefault('enabled', False)
 
             # XACA-0332: surface copyright config from ~/.aiteamforge/team-paths.json (schema v2)
             copyright_block = self._read_copyright_config(team)
@@ -10481,9 +10484,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             return None
 
     # Allowed top-level keys in the POST /api/team-config payload
-    _TEAM_CONFIG_ALLOWED_KEYS = {'crSupport', 'copyright'}
+    _TEAM_CONFIG_ALLOWED_KEYS = {'crSupport', 'copyright', 'timepadSupport'}
     # Allowed nested keys under crSupport
     _CR_SUPPORT_ALLOWED_KEYS = {'enabled', 'description'}
+    # Allowed nested keys under timepadSupport (XACA-0619)
+    _TIMEPAD_SUPPORT_ALLOWED_KEYS = {'enabled', 'description'}
+    # XACA-0619-011: cap support-block description length to prevent unbounded
+    # board JSON growth (applies to both crSupport and timepadSupport).
+    _SUPPORT_DESCRIPTION_MAX = 500
     # Allowed nested keys under copyright (XACA-0332)
     _COPYRIGHT_ALLOWED_KEYS = {'copyright_owner', 'license_type', 'component_label', 'year_start', 'notice_template'}
     # Valid enum values for copyright fields (XACA-0332)
@@ -10497,6 +10505,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             team: str,
             teamConfig: {
                 crSupport: { enabled: bool, description?: str },
+                timepadSupport: { enabled: bool, description?: str },
                 copyright?: {
                     copyright_owner: str, license_type: str, component_label: str,
                     year_start: int, notice_template: str
@@ -10553,6 +10562,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if 'description' in cr and not isinstance(cr['description'], str):
                     self._send_json_response({'success': False, 'error': 'crSupport.description must be a string'}, status=400)
                     return
+                if 'description' in cr and len(cr['description']) > self._SUPPORT_DESCRIPTION_MAX:
+                    self._send_json_response({'success': False, 'error': f'crSupport.description must be at most {self._SUPPORT_DESCRIPTION_MAX} characters'}, status=400)
+                    return
                 # Build a clean crSupport dict from only the validated fields
                 clean_cr = {}
                 if 'enabled' in cr:
@@ -10560,6 +10572,34 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if 'description' in cr:
                     clean_cr['description'] = cr['description']
                 clean_team_config['crSupport'] = clean_cr
+
+            # XACA-0619: validate timepadSupport block if present
+            if 'timepadSupport' in new_team_config:
+                tp = new_team_config['timepadSupport']
+                if not isinstance(tp, dict):
+                    self._send_json_response({'success': False, 'error': 'timepadSupport must be an object'}, status=400)
+                    return
+                unknown_tp = set(tp.keys()) - self._TIMEPAD_SUPPORT_ALLOWED_KEYS
+                if unknown_tp:
+                    bad = ', '.join(sorted(unknown_tp))
+                    self._send_json_response({'success': False, 'error': f'Unknown timepadSupport key(s): {bad}'}, status=400)
+                    return
+                if 'enabled' in tp and not isinstance(tp['enabled'], bool):
+                    self._send_json_response({'success': False, 'error': 'timepadSupport.enabled must be a boolean'}, status=400)
+                    return
+                if 'description' in tp and not isinstance(tp['description'], str):
+                    self._send_json_response({'success': False, 'error': 'timepadSupport.description must be a string'}, status=400)
+                    return
+                if 'description' in tp and len(tp['description']) > self._SUPPORT_DESCRIPTION_MAX:
+                    self._send_json_response({'success': False, 'error': f'timepadSupport.description must be at most {self._SUPPORT_DESCRIPTION_MAX} characters'}, status=400)
+                    return
+                # Build a clean timepadSupport dict from only the validated fields
+                clean_tp = {}
+                if 'enabled' in tp:
+                    clean_tp['enabled'] = tp['enabled']
+                if 'description' in tp:
+                    clean_tp['description'] = tp['description']
+                clean_team_config['timepadSupport'] = clean_tp
 
             # XACA-0332: validate copyright block if present
             clean_copyright = None
@@ -10656,6 +10696,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 with open(board_file, 'r') as f:
                     response_team_config = dict(json.load(f).get('teamConfig') or {})
             response_team_config.setdefault('crSupport', {}).setdefault('enabled', False)
+            # XACA-0619: ensure timepadSupport always present in POST response
+            response_team_config.setdefault('timepadSupport', {}).setdefault('enabled', False)
 
             saved_copyright = self._read_copyright_config(team)
             if saved_copyright is not None:

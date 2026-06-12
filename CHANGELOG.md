@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- XACA-0619: TimePad per-team config foundation — mirror canonical into the tap. New `share/kanban-hooks/timepad_config.json` (per-team schema, 11 teams; `apiBaseUrl` default `https://timepad.io/api`; `tokenRef` name-only reference; UUIDs ship as `<fetch-from-timepad.io>` placeholders) and `share/kanban-hooks/timepad_config.py` (token resolution on the vault-primary + env-failover chain, masked-fingerprint accessor, `_skip_vault` kwarg for hermetic tests). `share/kanban-hooks/aiteamforge_paths.py` gains the loader/validate/cache + accessor API (`load_timepad_config`, `is_timepad_enabled`, `get_timepad_team_config`, etc.). `share/lcars-ui/server.py` gains the `teamConfig.timepadSupport` enable toggle via `/api/team-config` (mirrors `crSupport`; support-block `description` capped at 500 chars). Test mirrors `share/kanban-hooks/test_timepad_0619.py` + `test_accessor_005.py`. Schema/secret/gate only — no hook/UI behavior. Hard rebrand: no legacy-host reference.
+
 - XACA-0394: Shell hygiene — Batch A. Add `-r` flag to all interactive `read` invocations in `bin/aiteamforge-setup.sh` (prevents backslash interpretation in user input); add ShellCheck disable directive + template comment to `share/templates/fleet-monitor/tailscale-funnel.template.sh` (SC1054/1073/1056/1072 false-positives from {{PLACEHOLDER}} tokens). Findings F-03-011 and F-03-014 from XACA-0338 audit.
 
 - XACA-0387 (audit F-04-008): cap POST Content-Length (50 MiB → HTTP 413) and add 30s socket timeout on the LCARS server, hardening do_POST against memory-exhaustion and slow-loris DoS.
