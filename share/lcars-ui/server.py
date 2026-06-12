@@ -340,6 +340,7 @@ SECRETS_IMPORT_JOBS = {} # {job_id: {status, progress, message, manifest, staged
 # long-running extract/wipe work, so the status-poll endpoints stay responsive.
 _IMPORT_JOBS_LOCK = threading.Lock()    # guards IMPORT_JOBS
 _SECRETS_JOBS_LOCK = threading.Lock()   # guards SECRETS_EXPORT_JOBS + SECRETS_IMPORT_JOBS (shared prune loop)
+_EXPORT_JOBS_LOCK = threading.Lock()    # guards EXPORT_JOBS (XACA-0381-002)
 
 EXPORT_DIR = Path("/tmp/lcars-exports")
 IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
@@ -446,6 +447,96 @@ def _prune_old_secrets_jobs():
             ]
             for jid in stale:
                 del jobs_dict[jid]
+
+
+# ---------------------------------------------------------------------------
+# XACA-0381-002: Thread-safe EXPORT_JOBS accessors
+# Same contract as the _import_job_* helpers above — one lock, no nesting.
+# ---------------------------------------------------------------------------
+
+def _export_job_create(job_id, data):
+    with _EXPORT_JOBS_LOCK:
+        EXPORT_JOBS[job_id] = data
+
+
+def _export_job_get(job_id):
+    """Live reference (reading scalar fields off it is atomic under the GIL)."""
+    with _EXPORT_JOBS_LOCK:
+        return EXPORT_JOBS.get(job_id)
+
+
+def _export_job_update(job_id, fields):
+    """Apply a dict of field updates atomically; no-op if the job is gone."""
+    with _EXPORT_JOBS_LOCK:
+        job = EXPORT_JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _export_job_snapshot(job_id):
+    """Shallow copy safe to iterate/serialize without holding the lock; None if absent."""
+    with _EXPORT_JOBS_LOCK:
+        job = EXPORT_JOBS.get(job_id)
+        return dict(job) if job is not None else None
+
+
+def _prune_old_export_jobs():
+    """Prune completed/failed EXPORT_JOBS entries older than 1 hour.
+
+    XACA-0381-002: dict scan+delete runs under _EXPORT_JOBS_LOCK so concurrent
+    generate_export worker threads cannot mutate EXPORT_JOBS while we iterate.
+    Lock is held only across in-memory timestamp math; no I/O is done inside.
+    File cleanup (glob + unlink) must be called by the caller AFTER this returns.
+
+    Returns the list of pruned job_ids so the caller can clean up files if needed.
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    terminal_states = ('completed', 'failed')
+    with _EXPORT_JOBS_LOCK:
+        stale = [
+            jid for jid, jdata in EXPORT_JOBS.items()
+            if jdata.get('status') in terminal_states
+            and (now - datetime.fromisoformat(
+                jdata.get('createdAt', now.isoformat()).replace('Z', '+00:00')
+            )).total_seconds() > 3600
+        ]
+        for jid in stale:
+            del EXPORT_JOBS[jid]
+    return stale
+
+
+# ---------------------------------------------------------------------------
+# XACA-0381-001: Atomic compare-and-set helpers — close staged→applying TOCTOU
+# Two concurrent POST /api/import/apply requests can both pass the "status ==
+# staged" read-check and both spawn a worker thread.  These CAS helpers make
+# the check-then-set atomic under the same lock, so only the first caller
+# transitions the job; the second sees the job no longer in the expected_statuses
+# set and returns False.  Callers MUST NOT call other locked helpers inside the
+# `with` block they inherit — these are leaf operations (no nested lock).
+# ---------------------------------------------------------------------------
+
+def _import_job_compare_and_set_status(job_id, expected_statuses, fields):
+    """Atomic check-then-set: if the job exists and its status is in
+    expected_statuses, apply fields and return True; else return False.
+    Closes the staged->applying TOCTOU where two requests both pass the gate."""
+    with _IMPORT_JOBS_LOCK:
+        job = IMPORT_JOBS.get(job_id)
+        if job is None or job.get('status') not in expected_statuses:
+            return False
+        job.update(fields)
+        return True
+
+
+def _secrets_job_compare_and_set_status(jobs_dict, job_id, expected_statuses, fields):
+    """Atomic check-then-set for secrets job dicts under _SECRETS_JOBS_LOCK."""
+    with _SECRETS_JOBS_LOCK:
+        job = jobs_dict.get(job_id)
+        if job is None or job.get('status') not in expected_statuses:
+            return False
+        job.update(fields)
+        return True
+
 
 # XACA-0281 Phase A.3: Fleet Monitor sidecar URL (proxy + cache for engines registry)
 FLEET_MONITOR_URL = os.environ.get('FLEET_MONITOR_URL', 'http://localhost:8080')
@@ -754,7 +845,7 @@ def generate_export(job_id, team_id):
         )
 
         if tt_team is None:
-            EXPORT_JOBS[job_id].update({
+            _export_job_update(job_id, {
                 'status': 'failed',
                 'progress': 0,
                 'message': f'No team_transfer config for team {team_id}',
@@ -769,8 +860,7 @@ def generate_export(job_id, team_id):
         tt_manifest_path = staging_dir / "manifest.json"
         checklist_path = staging_dir / "PRE_EXPORT_CHECKLIST.md"
 
-        EXPORT_JOBS[job_id]['message'] = 'Generating manifest...'
-        EXPORT_JOBS[job_id]['progress'] = 5
+        _export_job_update(job_id, {'message': 'Generating manifest...', 'progress': 5})
 
         gen_result = subprocess.run(
             [sys.executable, "-m", "team_transfer.generator",
@@ -785,7 +875,7 @@ def generate_export(job_id, team_id):
 
         # exit 0 = clean, exit 1 = untagged gaps (warn only), exit 2 = config error
         if gen_result.returncode == 2 or not tt_manifest_path.exists():
-            EXPORT_JOBS[job_id].update({
+            _export_job_update(job_id, {
                 'status': 'failed',
                 'progress': 0,
                 'message': 'Manifest generation failed',
@@ -796,8 +886,7 @@ def generate_export(job_id, team_id):
         print(f"[LCARS Export] Generator exit={gen_result.returncode} for team={tt_team}")
 
         # Step 2: Run pre-flight verifier, capture summary.
-        EXPORT_JOBS[job_id]['message'] = 'Running pre-flight verifier...'
-        EXPORT_JOBS[job_id]['progress'] = 20
+        _export_job_update(job_id, {'message': 'Running pre-flight verifier...', 'progress': 20})
 
         ver_result = subprocess.run(
             [sys.executable, "-m", "team_transfer.verifier",
@@ -831,8 +920,7 @@ def generate_export(job_id, team_id):
         )
 
         # Step 3: Walk manifest, collect packable file entries.
-        EXPORT_JOBS[job_id]['message'] = 'Scanning manifest...'
-        EXPORT_JOBS[job_id]['progress'] = 30
+        _export_job_update(job_id, {'message': 'Scanning manifest...', 'progress': 30})
 
         manifest_data = json.loads(tt_manifest_path.read_text(encoding="utf-8"))
         domains = manifest_data.get("domains", {})
@@ -847,7 +935,7 @@ def generate_export(job_id, team_id):
 
         total_files = len(packable)
         if total_files == 0:
-            EXPORT_JOBS[job_id].update({
+            _export_job_update(job_id, {
                 'status': 'failed',
                 'progress': 0,
                 'message': 'No packable files found in manifest',
@@ -861,7 +949,7 @@ def generate_export(job_id, team_id):
         # paired_export_id is not passed to generate_export(), so we use None here;
         # EXPORT_JOBS[job_id] may be populated with 'pairedSecretsJobId' by the HTTP
         # handler if the operator started both jobs simultaneously.
-        paired_secrets_id = EXPORT_JOBS[job_id].get('pairedSecretsJobId')
+        paired_secrets_id = (_export_job_get(job_id) or {}).get('pairedSecretsJobId')
         secrets_summary = _compute_secrets_summary(team_id, paired_secrets_id)
         # XACA-0566 (BUG B / F1): if secrets_export_lib failed to import, discovery
         # returned an empty stub — expected=0, discovered=0 — which silently hides the
@@ -881,8 +969,7 @@ def generate_export(job_id, team_id):
         )
 
         # Step 4: Pack files flat (arcname = relpath), add root artifacts.
-        EXPORT_JOBS[job_id]['message'] = f'Compressing {total_files} files...'
-        EXPORT_JOBS[job_id]['progress'] = 35
+        _export_job_update(job_id, {'message': f'Compressing {total_files} files...', 'progress': 35})
 
         skipped = 0
         with zipfile.ZipFile(output_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
@@ -912,19 +999,21 @@ def generate_export(job_id, team_id):
                         skipped += 1
 
                 if i % 50 == 0:
-                    EXPORT_JOBS[job_id]['progress'] = 35 + int((i / total_files) * 55)
-                    EXPORT_JOBS[job_id]['message'] = f'Compressing... ({i}/{total_files} files)'
+                    _export_job_update(job_id, {
+                        'progress': 35 + int((i / total_files) * 55),
+                        'message': f'Compressing... ({i}/{total_files} files)',
+                    })
 
         # Step 5: Finalize job status with verifier summary + secrets summary.
         # XACA-0520-005: Re-poll secrets job status in case it completed during packing.
-        paired_secrets_id_final = EXPORT_JOBS[job_id].get('pairedSecretsJobId')
+        paired_secrets_id_final = (_export_job_get(job_id) or {}).get('pairedSecretsJobId')
         if paired_secrets_id_final and paired_secrets_id_final == paired_secrets_id:
             # Re-compute to capture any status change since Step 3.5.
             secrets_summary = _compute_secrets_summary(team_id, paired_secrets_id_final)
             _stamp_detection_failed_if_unavailable(secrets_summary)
 
         file_size = output_path.stat().st_size
-        EXPORT_JOBS[job_id].update({
+        _export_job_update(job_id, {
             'status': 'completed',
             'progress': 100,
             'message': 'Export ready for download',
@@ -946,7 +1035,7 @@ def generate_export(job_id, team_id):
         })
 
     except Exception as e:
-        EXPORT_JOBS[job_id].update({
+        _export_job_update(job_id, {
             'status': 'failed',
             'progress': 0,
             'message': f'Export failed: {str(e)}',
@@ -13888,15 +13977,13 @@ end tell
             )
             return
 
-        # Prune old jobs (>1 hr) and old files
+        # Prune old jobs (>1 hr) — dict scan+delete under lock; file cleanup outside.
+        # XACA-0381-002: _prune_old_export_jobs() holds _EXPORT_JOBS_LOCK across the
+        # full dict scan+delete so the generate_export worker cannot mutate EXPORT_JOBS
+        # while we iterate → eliminates RuntimeError: dictionary changed size during iteration.
+        # File glob/unlink stays outside the lock (no I/O under lock).
         now = datetime.now(timezone.utc)
-        stale_ids = [
-            jid for jid, jdata in EXPORT_JOBS.items()
-            if jdata.get('status') in ('completed', 'failed')
-            and (now - datetime.fromisoformat(jdata.get('createdAt', now.isoformat()).replace('Z', '+00:00'))).total_seconds() > 3600
-        ]
-        for jid in stale_ids:
-            del EXPORT_JOBS[jid]
+        _prune_old_export_jobs()  # dict-only, locked internally
 
         if EXPORT_DIR.exists():
             for old in EXPORT_DIR.glob('lcars-export-*.zip'):
@@ -13908,7 +13995,7 @@ end tell
                     pass
 
         job_id = str(uuid.uuid4())
-        EXPORT_JOBS[job_id] = {
+        _export_job_create(job_id, {
             'status': 'generating',
             'progress': 0,
             'message': 'Initializing export...',
@@ -13917,7 +14004,7 @@ end tell
             'error': None,
             'team': LCARS_TEAM,
             'createdAt': datetime.now(timezone.utc).isoformat(),
-        }
+        })
 
         thread = threading.Thread(
             target=generate_export,
@@ -13930,7 +14017,9 @@ end tell
 
     def serve_export_status(self, job_id):
         """GET /api/export/status/<job_id>"""
-        job = EXPORT_JOBS.get(job_id)
+        # XACA-0381-002: use snapshot so {**job, 'jobId': job_id} never races with
+        # the generate_export worker mutating the live dict during iteration.
+        job = _export_job_snapshot(job_id)
         if not job:
             self._send_json_response({'error': 'Job not found'}, status=404)
             return
@@ -14009,7 +14098,9 @@ end tell
         self.wfile.write(data)
 
     def _serve_export_download_impl(self, job_id):
-        job = EXPORT_JOBS.get(job_id)
+        # XACA-0381-002: snapshot so we read a consistent view of status+filename
+        # without racing against the worker updating the live dict mid-read.
+        job = _export_job_snapshot(job_id)
         if not job or job['status'] != 'completed' or not job.get('filename'):
             self._send_json_response({'error': 'Export not ready'}, status=404)
             return
@@ -14699,11 +14790,15 @@ end tell
                 f'acknowledgeMissingSecrets=true was set by the operator.'
             )
 
-        _import_job_update(job_id, {
-            'status': 'applying',
-            'progress': 5,
-            'message': 'Starting import...',
-        })
+        # XACA-0381-001: atomic compare-and-set — closes the staged→applying TOCTOU.
+        # Two concurrent POSTs can both pass the status check above then both spawn a
+        # worker. CAS makes check-then-set atomic: only the first caller transitions;
+        # the second finds the job no longer in ('staged',) and gets a 409.
+        if not _import_job_compare_and_set_status(job_id, ('staged',), {
+                'status': 'applying', 'progress': 5, 'message': 'Starting import...'}):
+            self._send_json_response(
+                {'error': 'Job is no longer in staged state (already applying?)'}, status=409)
+            return
 
         thread = threading.Thread(target=apply_import, args=(job_id,), daemon=True)
         thread.start()
@@ -15171,12 +15266,17 @@ end tell
             self._send_json_response({'error': 'password is required'}, status=400)
             return
 
-        _secrets_job_update(SECRETS_IMPORT_JOBS, job_id, {
-            'status': 'applying',
-            'progress': 0,
-            'message': 'Starting secrets import...',
-            'error': None,
-        })
+        # XACA-0381-001: atomic compare-and-set — closes the staged→applying TOCTOU.
+        # Two concurrent POSTs can both pass the status check above then both spawn a
+        # worker. CAS makes check-then-set atomic: only the first caller transitions;
+        # the second finds the job no longer in the expected set and gets a 409.
+        if not _secrets_job_compare_and_set_status(SECRETS_IMPORT_JOBS, job_id,
+                ('awaiting-password', 'ready'), {
+                'status': 'applying', 'progress': 0,
+                'message': 'Starting secrets import...', 'error': None}):
+            self._send_json_response(
+                {'error': 'Job is no longer applyable (already applying?)'}, status=409)
+            return
 
         # Password held only in thread-local scope — not stored in job dict
         thread = threading.Thread(

@@ -62,16 +62,23 @@ from server import (  # noqa: E402
     SECRETS_EXPORT_JOBS,
     SECRETS_IMPORT_JOBS,
     IMPORT_JOBS,
+    EXPORT_JOBS,
     generate_secrets_export,
     apply_secrets_import,
     _prune_old_secrets_jobs,
+    _prune_old_export_jobs,
     _import_job_create,
     _import_job_get,
     _import_job_update,
     _import_job_snapshot,
+    _import_job_compare_and_set_status,
     _secrets_job_create,
     _secrets_job_update,
     _secrets_job_snapshot,
+    _secrets_job_compare_and_set_status,
+    _export_job_create,
+    _export_job_update,
+    _export_job_snapshot,
 )
 import pyzipper  # noqa: E402  (required dependency — must be present)
 
@@ -691,6 +698,219 @@ class TestImportJobHelpers(unittest.TestCase):
                              "Snapshot mutation leaked into SECRETS_IMPORT_JOBS registry")
         finally:
             SECRETS_IMPORT_JOBS.clear()
+
+
+# ---------------------------------------------------------------------------
+# Tests: XACA-0381-002 — EXPORT_JOBS concurrency + snapshot
+# ---------------------------------------------------------------------------
+
+class TestExportPruneRaceCondition(unittest.TestCase):
+    """Concurrency regression for _prune_old_export_jobs + concurrent writers.
+
+    Without _EXPORT_JOBS_LOCK the prune loop (dict scan+delete while a worker
+    thread calls _export_job_create / _export_job_update) reliably produces:
+        RuntimeError: dictionary changed size during iteration
+
+    With the lock it must complete silently with no exception.
+    """
+
+    def setUp(self):
+        EXPORT_JOBS.clear()
+
+    def tearDown(self):
+        EXPORT_JOBS.clear()
+
+    def test_export_prune_concurrent_create_no_race(self):
+        """_prune_old_export_jobs + concurrent _export_job_create/update must not raise."""
+        errors = []
+        stop_event = threading.Event()
+
+        from datetime import datetime, timezone, timedelta
+        old_ts = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+
+        N_THREADS = 8
+        N_ITERS = 200
+
+        def writer():
+            for _ in range(N_ITERS):
+                if stop_event.is_set():
+                    break
+                jid = str(uuid.uuid4())
+                try:
+                    _export_job_create(jid, {
+                        'status': 'completed',
+                        'createdAt': old_ts,
+                        'message': '',
+                        'progress': 100,
+                    })
+                    _export_job_update(jid, {'message': 'updated'})
+                except Exception as exc:
+                    errors.append(exc)
+                    stop_event.set()
+
+        def pruner():
+            for _ in range(N_ITERS):
+                if stop_event.is_set():
+                    break
+                try:
+                    _prune_old_export_jobs()
+                except Exception as exc:
+                    errors.append(exc)
+                    stop_event.set()
+
+        threads = [threading.Thread(target=writer) for _ in range(N_THREADS)]
+        threads.append(threading.Thread(target=pruner))
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=10)
+
+        stop_event.set()
+        self.assertEqual(
+            errors, [],
+            f"Concurrency errors: {errors[:3]!r} (showing first 3)"
+        )
+
+
+class TestExportSnapshotIndependentCopy(unittest.TestCase):
+    """_export_job_snapshot must return a copy that is independent from the registry."""
+
+    def setUp(self):
+        EXPORT_JOBS.clear()
+
+    def tearDown(self):
+        EXPORT_JOBS.clear()
+
+    def test_export_snapshot_independent_copy(self):
+        jid = str(uuid.uuid4())
+        _export_job_create(jid, {'status': 'generating', 'progress': 0, 'message': 'init'})
+        snap = _export_job_snapshot(jid)
+        self.assertIsNotNone(snap)
+        # Mutating the snapshot must not affect the live registry
+        snap['status'] = 'MUTATED'
+        snap['injected'] = 'bad'
+        live = EXPORT_JOBS.get(jid)
+        self.assertEqual(live['status'], 'generating',
+                         "Snapshot mutation leaked into EXPORT_JOBS registry")
+        self.assertNotIn('injected', live,
+                         "Extra key from snapshot mutation found in registry")
+
+    def test_export_snapshot_returns_none_for_missing(self):
+        result = _export_job_snapshot('no-such-job')
+        self.assertIsNone(result)
+
+
+# ---------------------------------------------------------------------------
+# Tests: XACA-0381-001 — CAS helpers (staged→applying TOCTOU)
+# ---------------------------------------------------------------------------
+
+class TestImportCasSingleWinner(unittest.TestCase):
+    """Only one of N concurrent apply-callers may transition the job to 'applying'."""
+
+    def setUp(self):
+        IMPORT_JOBS.clear()
+
+    def tearDown(self):
+        IMPORT_JOBS.clear()
+
+    def test_import_cas_single_winner(self):
+        jid = str(uuid.uuid4())
+        _import_job_create(jid, {'status': 'staged', 'progress': 0, 'message': 'ready'})
+
+        results = []
+
+        def try_apply():
+            won = _import_job_compare_and_set_status(
+                jid, ('staged',), {'status': 'applying', 'progress': 5})
+            results.append(won)
+
+        N = 10
+        threads = [threading.Thread(target=try_apply) for _ in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        winners = [r for r in results if r is True]
+        self.assertEqual(len(winners), 1,
+                         f"Expected exactly 1 CAS winner, got {len(winners)}: {results}")
+        # Final state must be 'applying'
+        live = IMPORT_JOBS.get(jid)
+        self.assertEqual(live['status'], 'applying')
+
+    def test_import_cas_returns_false_for_wrong_status(self):
+        jid = str(uuid.uuid4())
+        _import_job_create(jid, {'status': 'completed', 'progress': 100, 'message': 'done'})
+        won = _import_job_compare_and_set_status(jid, ('staged',), {'status': 'applying'})
+        self.assertFalse(won)
+        # Status must be unchanged
+        self.assertEqual(IMPORT_JOBS[jid]['status'], 'completed')
+
+    def test_import_cas_returns_false_for_missing_job(self):
+        won = _import_job_compare_and_set_status('no-such-id', ('staged',), {'status': 'applying'})
+        self.assertFalse(won)
+
+
+class TestSecretsCasSingleWinner(unittest.TestCase):
+    """Only one of N concurrent apply-callers may win the secrets CAS."""
+
+    def setUp(self):
+        SECRETS_IMPORT_JOBS.clear()
+
+    def tearDown(self):
+        SECRETS_IMPORT_JOBS.clear()
+
+    def test_secrets_cas_single_winner(self):
+        jid = str(uuid.uuid4())
+        _secrets_job_create(SECRETS_IMPORT_JOBS, jid, {
+            'status': 'awaiting-password', 'progress': 0, 'message': 'waiting',
+        })
+
+        results = []
+
+        def try_apply():
+            won = _secrets_job_compare_and_set_status(
+                SECRETS_IMPORT_JOBS, jid,
+                ('awaiting-password', 'ready'),
+                {'status': 'applying', 'progress': 0, 'message': 'Starting...', 'error': None})
+            results.append(won)
+
+        N = 10
+        threads = [threading.Thread(target=try_apply) for _ in range(N)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=5)
+
+        winners = [r for r in results if r is True]
+        self.assertEqual(len(winners), 1,
+                         f"Expected exactly 1 CAS winner, got {len(winners)}: {results}")
+        live = SECRETS_IMPORT_JOBS.get(jid)
+        self.assertEqual(live['status'], 'applying')
+
+    def test_secrets_cas_accepts_ready_status(self):
+        """CAS must also accept 'ready' as the starting state (not just 'awaiting-password')."""
+        jid = str(uuid.uuid4())
+        _secrets_job_create(SECRETS_IMPORT_JOBS, jid, {
+            'status': 'ready', 'progress': 0, 'message': 'verified',
+        })
+        won = _secrets_job_compare_and_set_status(
+            SECRETS_IMPORT_JOBS, jid,
+            ('awaiting-password', 'ready'),
+            {'status': 'applying', 'progress': 0, 'message': 'Starting...', 'error': None})
+        self.assertTrue(won)
+        self.assertEqual(SECRETS_IMPORT_JOBS[jid]['status'], 'applying')
+
+    def test_secrets_cas_returns_false_for_wrong_status(self):
+        jid = str(uuid.uuid4())
+        _secrets_job_create(SECRETS_IMPORT_JOBS, jid, {
+            'status': 'applying', 'progress': 10, 'message': 'in progress',
+        })
+        won = _secrets_job_compare_and_set_status(
+            SECRETS_IMPORT_JOBS, jid,
+            ('awaiting-password', 'ready'),
+            {'status': 'applying', 'progress': 0})
+        self.assertFalse(won)
 
 
 # ---------------------------------------------------------------------------
