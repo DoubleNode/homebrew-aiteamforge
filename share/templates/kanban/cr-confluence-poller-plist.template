@@ -21,9 +21,19 @@
     The legacy global plist (com.aiteamforge.cr-confluence-poller.plist, no team suffix)
     is unloaded and removed automatically on the next install run.
 
-  CREDENTIALS (not auto-created — set up manually):
+  PER-TEAM OPT-IN (XACA-0470):
+    The setup wizard now asks, per team, whether to enable the CR workflow, and
+    captures shared Atlassian credentials when at least one team opts in. The
+    opt-in is recorded in (non-secret, mode 644):
+    ~/.config/aiteamforge/cr-config.json
+      { "version": 1, "prompted": true, "teams": { "ios": true, "android": false } }
+    cr-config.json is the AUTHORITY for which teams get a plist: a plist is
+    installed only for teams whose value is true AND which have credentials;
+    plists for non-enabled teams are unloaded+removed on every install/upgrade.
+
+  CREDENTIALS (auto-created by the wizard; also editable by hand) — mode 600:
     ~/.config/aiteamforge/confluence-credentials.json
-    Schema:
+    Schema (one entry per CR-enabled team):
       {
         "teams": {
           "ios":      { "site": "...", "email": "...", "api_token": "...", "space_key": "DPD2" },
@@ -32,9 +42,9 @@
         },
         "default": "ios"
       }
-    If credentials are absent or the file has no teams, the installer skips plist
-    installation and logs an info message. The daemon itself exits cleanly with a
-    warning if the file is absent at runtime.
+    If no team is CR-enabled, or an enabled team has no credentials entry, the
+    installer skips that plist and logs an info message. The daemon itself exits
+    cleanly with a warning if the file is absent at runtime.
 
   LOGS (per-team):
     stdout: {{USER_HOME}}/Library/Logs/aiteamforge/cr-poller/{{TEAM_NAME}}.out.log
