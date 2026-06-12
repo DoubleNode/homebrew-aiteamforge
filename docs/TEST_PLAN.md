@@ -5732,7 +5732,7 @@ ls ~/aiteamforge/fleet-monitor/server/server.js
 ```
 ls ~/aiteamforge/fleet-monitor/server/node_modules | head -5
 ```
-**Expected Result:** At least five directory names are printed (e.g., `express`, `cors`, etc.). The `node_modules` directory is populated, confirming `npm install --production` ran during setup.
+**Expected Result:** At least five directory names are printed (e.g., `express`, `cors`, etc.). The `node_modules` directory is populated, confirming `npm ci --omit=dev` ran during setup.
 **Pass/Fail:** [ ]
 
 ---

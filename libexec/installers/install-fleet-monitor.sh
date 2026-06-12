@@ -273,7 +273,7 @@ install_fleet_server() {
     info "Installing Node.js dependencies (this may take a minute)..."
     (
         cd "$fleet_dir/server"
-        npm install --production --silent
+        npm ci --omit=dev --silent
     ) || {
         error "Failed to install Fleet Monitor dependencies"
         return 1
