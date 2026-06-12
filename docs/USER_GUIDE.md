@@ -315,6 +315,8 @@ cp ~/aiteamforge/kanban-backups/ios-board-20260217-1400.json \
 
 AITeamForge ships an optional CR (Change Request) lifecycle layer for teams operating under a Change Advisory Board (CAB) framework. The schema is shipped with the tap but **not deployed automatically** — each team opts in.
 
+**Enabling CR during setup:** The setup wizard (STEP 3.5) asks per team whether to enable the CR workflow and, if any team opts in, captures shared Atlassian credentials once. See [SETUP_WIZARD.md — CR Workflow Setup](SETUP_WIZARD.md#change-request-cr-workflow-setup) for the full prompt flow, config file schemas, LaunchAgent behavior, and the migration path for existing installs.
+
 **Files shipped with the tap (run them in place from the Cellar):**
 
 ```bash
@@ -648,6 +650,7 @@ launchctl kickstart -k gui/$(id -u)/com.devteam.kanban-backup
 **Installed LaunchAgents:**
 - `com.devteam.kanban-backup` - Hourly kanban backups
 - `com.devteam.lcars-health` - LCARS health monitoring
+- `com.aiteamforge.cr-confluence-poller.<team>` - CR poller daemon (one per CR-enabled team; installed only when the team opted in during setup and credentials are present; non-enabled teams' plists are removed automatically on every install/upgrade)
 
 ---
 

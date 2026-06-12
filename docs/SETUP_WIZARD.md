@@ -45,6 +45,11 @@ The wizard guides users through seven stages:
    - Claude Code Configuration (default: yes)
    - iTerm2 Integration (default: no - optional)
 
+4.5. **Change Request (CR) Workflow** *(new in XACA-0470)*
+   - Prompted per selected team: "Enable Change Request workflow for team '<X>'?" (default No)
+   - If any team opts in, captures shared Atlassian credentials once (see [CR Workflow Setup](#change-request-cr-workflow-setup) below)
+   - Skipped in non-interactive, auto-upgrade, and cockpit modes (migration handles those cases)
+
 5. **Configuration Generation**
    - Creates `~/.aiteamforge/config.json` with all selections
    - Records machine identity, teams, features, paths, timestamp
@@ -89,6 +94,115 @@ aiteamforge-setup --dry-run
 - Won't overwrite existing configurations without confirmation
 - Each installer module is idempotent
 - Can be re-run to add new teams or features
+
+---
+
+## Change Request (CR) Workflow Setup
+
+The CR workflow connects AITeamForge to your Atlassian Confluence instance so that
+change requests can be created and polled automatically per team. It is entirely
+optional and opt-in per team.
+
+### Wizard Prompts (STEP 3.5)
+
+After team selection the wizard asks once per selected team:
+
+```
+Enable Change Request workflow for team 'ios'? [y/N]
+```
+
+The default is **No**. Teams you decline are recorded as disabled and will not get a
+CR poller LaunchAgent.
+
+If at least one team answers Yes, the wizard prompts once for **shared Atlassian credentials**:
+
+```
+Atlassian API credentials (shared across CR-enabled teams)
+  Create an API token: https://id.atlassian.com/manage-profile/security/api-tokens
+  Atlassian account email: you@example.com
+  Atlassian API token (hidden): ••••••••••••••••
+  Confluence site [mainevent.atlassian.net]: <Enter to accept default>
+  Confluence space key [DPD2]: <Enter to accept default>
+```
+
+Defaults for site (`mainevent.atlassian.net`) and space key (`DPD2`) can be accepted
+with Enter or overridden by typing the desired value. If email or token are left
+blank the credential write is skipped and the wizard prints a reminder to re-run
+`aiteamforge upgrade` interactively to finish CR setup.
+
+### Configuration Files
+
+Two files in `~/.config/aiteamforge/` drive the per-team CR workflow:
+
+#### `cr-config.json` — per-team opt-in record (mode 644, non-secret)
+
+Records which teams have CR enabled. Lives in `~/.config/` so `aiteamforge upgrade`
+never touches it.
+
+```json
+{
+  "version": 1,
+  "prompted": true,
+  "teams": {
+    "ios":     true,
+    "android": false
+  }
+}
+```
+
+The `prompted` flag is set to `true` after the first time the wizard runs the CR
+prompts. It suppresses re-nagging on subsequent `aiteamforge setup` runs. This file
+is the **authority** for which teams get a CR poller LaunchAgent.
+
+#### `confluence-credentials.json` — shared Atlassian credentials (mode 600, secret)
+
+Written under `umask 077` so the file is never group- or world-readable, even
+briefly. Contains one entry per opted-in team. Teams that are not CR-enabled are
+never written here.
+
+```json
+{
+  "teams": {
+    "ios": {
+      "site":      "mainevent.atlassian.net",
+      "email":     "you@example.com",
+      "api_token": "your-atlassian-api-token",
+      "space_key": "DPD2"
+    }
+  },
+  "default": "ios"
+}
+```
+
+Both files are **merge-safe**: a partial re-run (e.g. adding a new team) never
+drops flags or credentials for teams that were set up previously.
+
+### LaunchAgent Behavior
+
+After the wizard runs the installer reconciles LaunchAgents:
+
+- **Opted-in teams with credentials** receive a per-team plist at
+  `~/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.<team>.plist`.
+- **Non-enabled teams** have their plists unloaded and removed automatically on
+  every install or upgrade.
+
+Each plist runs independently; a broken credential for one team does not affect
+others.
+
+### MIGRATION: Existing Installs
+
+For installations predating this feature the installer performs a one-time migration
+(`maybe_migrate_cr_config`) the next time `aiteamforge upgrade` runs:
+
+| Situation | What happens |
+|---|---|
+| `confluence-credentials.json` already has teams | Those teams are inferred as CR-enabled; `cr-config.json` is written silently — no prompts |
+| No credentials file, interactive TTY | Prompted per team; credentials captured if any team opts in |
+| No credentials file, `--non-interactive` / CI / auto-upgrade | No-op — `cr-config.json` is left absent so a future interactive run can prompt. Never blocks an unattended upgrade |
+
+To enable or change the CR workflow after initial setup, run `aiteamforge upgrade`
+interactively. (Dedicated `aiteamforge cr-enable` / `cr-disable` CLI subcommands are
+planned as future work.)
 
 ---
 

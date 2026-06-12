@@ -1233,6 +1233,226 @@ uninstall_cellar_watch_launchagent() {
     fi
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Change Request (CR) config + credentials helpers (XACA-0470)
+#
+# Two files in ~/.config/aiteamforge/ drive the per-team CR workflow:
+#
+#   cr-config.json              (mode 644, NON-secret) — persisted per-team opt-in
+#       record. Lives in ~/.config so `aiteamforge upgrade` never touches it; the
+#       "prompted" flag suppresses re-nagging once the user has answered.
+#         { "version":1, "prompted":true, "teams": {"academy":false,"mainevent":true} }
+#
+#   confluence-credentials.json (mode 600, SECRET) — shared Atlassian creds with
+#       one entry per CR-enabled team. The poller daemon reads this; a team's
+#       presence here is what actually arms its LaunchAgent.
+#         { "teams": {"mainevent": {"site":..,"email":..,"api_token":..,"space_key":..}},
+#           "default": "mainevent" }
+#
+# cr-config.json is the authority for which teams are ENABLED (drives plist
+# reconcile + migration); confluence-credentials.json supplies the secrets a
+# plist needs before it can be armed.
+# ─────────────────────────────────────────────────────────────────────────────
+
+cr_config_file()      { echo "$HOME/.config/aiteamforge/cr-config.json"; }
+cr_credentials_file() { echo "$HOME/.config/aiteamforge/confluence-credentials.json"; }
+
+# Is this a context where we may prompt? FALSE under --non-interactive / CI /
+# auto-upgrade so migration never blocks an unattended `aiteamforge upgrade`.
+_cr_interactive() {
+    [ -t 0 ] || return 1
+    [ "${AITEAMFORGE_NONINTERACTIVE:-}" = "1" ] && return 1
+    [ "${CI:-}" = "true" ] && return 1
+    [ "${KB_CI:-}" = "1" ] && return 1
+    return 0
+}
+
+# Has the CR opt-in prompt already been shown on this install?
+cr_already_prompted() {
+    local cfg; cfg="$(cr_config_file)"
+    [ -f "$cfg" ] || return 1
+    command -v jq &>/dev/null || return 1
+    [ "$(jq -r '.prompted // false' "$cfg" 2>/dev/null)" = "true" ]
+}
+
+# Write/refresh cr-config.json. Args: <enabled_csv> <all_selected_csv>
+# Records every selected team true/false (merging with any prior record so a
+# subset install never wipes other teams' flags) and marks prompted=true.
+write_cr_config() {
+    local enabled_csv="$1" all_csv="$2"
+    local cfg; cfg="$(cr_config_file)"
+    if ! command -v jq &>/dev/null; then
+        warning "jq required to persist CR config (skipping)"; return 0
+    fi
+    mkdir -p "$(dirname "$cfg")"
+
+    local teams_obj="{}"
+    [ -f "$cfg" ] && teams_obj="$(jq -c '.teams // {}' "$cfg" 2>/dev/null || echo '{}')"
+
+    local t val
+    for t in $all_csv; do
+        [ -z "$t" ] && continue
+        val="false"
+        case " $enabled_csv " in *" $t "*) val="true";; esac
+        teams_obj="$(jq -c --arg k "$t" --argjson v "$val" '. + {($k): $v}' <<<"$teams_obj")"
+    done
+
+    # Non-secret, but write under a fixed umask for mode-symmetry with the
+    # credentials writer (XACA-0470 review follow-up #2).
+    ( umask 022; jq -n --argjson teams "$teams_obj" '{version:1, prompted:true, teams:$teams}' > "$cfg" )
+    chmod 644 "$cfg"
+    info "Recorded per-team CR opt-in → $cfg"
+}
+
+# Write/refresh confluence-credentials.json (mode 600, merge-safe).
+# Args: <enabled_csv> <email> <token> <site> <space>
+# Only the opted-in teams are written; existing entries for other teams are
+# preserved so a partial re-run never drops working credentials.
+write_confluence_credentials() {
+    local enabled_csv="$1" email="$2" token="$3" site="$4" space="$5"
+    local creds; creds="$(cr_credentials_file)"
+    if ! command -v jq &>/dev/null; then
+        warning "jq required to write Confluence credentials (skipping)"; return 1
+    fi
+    [ -n "$enabled_csv" ] || return 0
+    mkdir -p "$(dirname "$creds")"
+
+    local teams_obj="{}" default_team=""
+    if [ -f "$creds" ]; then
+        teams_obj="$(jq -c '.teams // {}' "$creds" 2>/dev/null || echo '{}')"
+        default_team="$(jq -r '.default // empty' "$creds" 2>/dev/null || true)"
+    fi
+
+    local t
+    for t in $enabled_csv; do
+        [ -z "$t" ] && continue
+        teams_obj="$(jq -c --arg k "$t" --arg site "$site" --arg email "$email" \
+            --arg token "$token" --arg space "$space" \
+            '. + {($k): {site:$site, email:$email, api_token:$token, space_key:$space}}' <<<"$teams_obj")"
+        [ -z "$default_team" ] && default_team="$t"
+    done
+
+    # Lock the destination to 600 BEFORE the secret lands. `umask 077` only
+    # protects a NEWLY-created file; a redirect into a pre-existing looser-mode
+    # file would otherwise leave the secret group/other-readable until the
+    # trailing chmod. So: create-if-absent under umask 077, tighten any existing
+    # file to 600, THEN write (the `>` redirect preserves the file's 600 mode).
+    # XACA-0470 review follow-up (#1).
+    ( umask 077; : >> "$creds" ) 2>/dev/null || true
+    chmod 600 "$creds" 2>/dev/null || true
+    jq -n --argjson teams "$teams_obj" --arg def "$default_team" \
+        '{teams:$teams, default:$def}' > "$creds"
+    chmod 600 "$creds"
+    success "Wrote Confluence credentials (mode 600) for: $enabled_csv"
+}
+
+# Interactively capture shared Atlassian credentials and write them for the
+# given CR-enabled teams. Args: <enabled_csv>
+_cr_prompt_credentials_and_write() {
+    local enabled="$1"
+    local email token site space
+    echo ""
+    info "Atlassian API credentials (shared across CR-enabled teams)"
+    info "Create an API token: https://id.atlassian.com/manage-profile/security/api-tokens"
+    printf "  Atlassian account email: "; read -r email
+    printf "  Atlassian API token (hidden): "; read -rs token; echo ""
+    printf "  Confluence site [mainevent.atlassian.net]: "; read -r site
+    site="${site:-mainevent.atlassian.net}"
+    printf "  Confluence space key [DPD2]: "; read -r space
+    space="${space:-DPD2}"
+    if [ -z "$email" ] || [ -z "$token" ]; then
+        warning "Email and API token are both required — skipping credential write."
+        warning "Re-run 'aiteamforge upgrade' interactively to finish CR setup."
+        return 1
+    fi
+    write_confluence_credentials "$enabled" "$email" "$token" "$site" "$space"
+}
+
+# Migration (XACA-0470, decision (c) prompt-at-upgrade): installs that predate
+# cr-config.json get one populated without surprising the user:
+#   • creds file already has teams → infer those as enabled (the user opted in by
+#     authoring credentials); write cr-config silently. Preserves prior behavior.
+#   • no creds, interactive TTY    → prompt per configured team; capture shared
+#     credentials if any team opts in.
+#   • no creds, non-interactive    → do nothing (preserve the historical skip);
+#     leave cr-config absent so a later interactive run can prompt. Never blocks
+#     an unattended auto-upgrade.
+maybe_migrate_cr_config() {
+    cr_already_prompted && return 0
+    command -v jq &>/dev/null || return 0
+
+    local creds; creds="$(cr_credentials_file)"
+
+    # Case 1: infer from existing credentials.
+    if [ -f "$creds" ]; then
+        local existing_teams
+        existing_teams="$(jq -r '.teams | keys[]' "$creds" 2>/dev/null | tr '\n' ' ' || true)"
+        existing_teams="$(echo "$existing_teams" | xargs 2>/dev/null || true)"
+        if [ -n "$existing_teams" ]; then
+            info "Migrating CR config from existing credentials (teams: $existing_teams)"
+            write_cr_config "$existing_teams" "$existing_teams"
+            return 0
+        fi
+    fi
+
+    # Determine configured teams from the installer config.
+    local configured_teams=""
+    if [ -f "$AITEAMFORGE_DIR/.aiteamforge-config" ]; then
+        configured_teams="$(jq -r '.teams[]' "$AITEAMFORGE_DIR/.aiteamforge-config" 2>/dev/null | tr '\n' ' ' || true)"
+        configured_teams="$(echo "$configured_teams" | xargs 2>/dev/null || true)"
+    fi
+    [ -n "$configured_teams" ] || return 0
+
+    # Case 3: non-interactive — never prompt, never block.
+    if ! _cr_interactive; then
+        info "Change Request workflow not configured (non-interactive). Run 'aiteamforge upgrade' interactively to enable per-team CR tracking."
+        return 0
+    fi
+
+    # Case 2: interactive prompt-at-upgrade.
+    header "Change Request Workflow Setup"
+    info "New: enable Confluence + IT Connect CR tracking per team. Default is disabled."
+    local enabled="" t
+    for t in $configured_teams; do
+        [ -z "$t" ] && continue
+        if prompt_yes_no "Enable Change Request workflow for team '$t'?" "n"; then
+            enabled="$enabled $t"
+        fi
+    done
+    enabled="$(echo "$enabled" | xargs 2>/dev/null || true)"
+    write_cr_config "$enabled" "$configured_teams"
+    if [ -n "$enabled" ]; then
+        _cr_prompt_credentials_and_write "$enabled"
+    fi
+}
+
+# Reconcile: unload+remove CR poller plists for teams that are NOT CR-enabled in
+# cr-config.json (disabled, or never opted in). Stops idle daemons from polluting
+# launchd — the core complaint behind XACA-0470.
+_cr_reconcile_disabled_plists() {
+    local launch_agents_dir="$HOME/Library/LaunchAgents"
+    local cfg_file; cfg_file="$(cr_config_file)"
+    shopt -s nullglob
+    local f base team enabled
+    for f in "$launch_agents_dir"/com.aiteamforge.cr-confluence-poller.*.plist; do
+        [ -e "$f" ] || continue
+        base="$(basename "$f")"
+        team="${base#com.aiteamforge.cr-confluence-poller.}"
+        team="${team%.plist}"
+        [ -z "$team" ] && continue
+        enabled="false"
+        if [ -f "$cfg_file" ]; then
+            enabled="$(jq -r --arg t "$team" '.teams[$t] // false' "$cfg_file" 2>/dev/null || echo false)"
+        fi
+        if [ "$enabled" != "true" ]; then
+            info "Removing CR poller LaunchAgent for non-enabled team '$team'"
+            launchctl unload "$f" 2>/dev/null || true
+            rm -f "$f"
+        fi
+    done
+    shopt -u nullglob
+}
+
 # Install CR Confluence Poller LaunchAgents — one per team (XACA-0350)
 #
 # Scans cr-drafted CRs every 10 min per team; detects appended CR-Proper links
@@ -1283,26 +1503,37 @@ install_cr_confluence_poller_launchagent() {
         info "Removed legacy plist: com.aiteamforge.cr-confluence-poller.plist"
     fi
 
-    # ── Read teams from credentials (XACA-0350-002) ───────────────────────────
-    if [ ! -f "$creds_file" ]; then
-        info "Confluence credentials not found — skipping per-team LaunchAgent installation."
-        info "Configure credentials at $creds_file then re-run installer."
-        return 0
-    fi
-
-    # jq is required to parse the credentials teams dict; surface a clear error
-    # rather than silently degrading to an empty teams_json (XACA-0350-016).
+    # jq is required to parse cr-config / credentials; surface a clear error
+    # rather than silently degrading (XACA-0350-016).
     if ! command -v jq &>/dev/null; then
         warning "jq is required for per-team CR Confluence Poller install — install jq and re-run."
         return 0
     fi
 
-    # Extract team names from .teams dict; jq returns one team name per line.
-    local teams_json
-    teams_json="$(jq -r '.teams | keys[]' "$creds_file" 2>/dev/null || true)"
-    if [ -z "$teams_json" ]; then
-        info "No teams defined in $creds_file — skipping per-team LaunchAgent installation."
-        info "Add teams to .teams in $creds_file then re-run installer."
+    # ── XACA-0470: per-team opt-in is the authority ───────────────────────────
+    # Ensure a cr-config.json exists (migrates pre-flag installs; prompt-at-upgrade
+    # when interactive). cr-config records which teams are CR-ENABLED; the
+    # credentials file supplies the secrets a plist needs before it is armed.
+    maybe_migrate_cr_config
+
+    # Tear down any plists for teams that are NOT CR-enabled — the central fix
+    # for "idle daemons polluting launchd" (XACA-0470).
+    _cr_reconcile_disabled_plists
+
+    local cfg_file; cfg_file="$(cr_config_file)"
+    local enabled_teams=""
+    if [ -f "$cfg_file" ]; then
+        enabled_teams="$(jq -r '.teams | to_entries[] | select(.value==true) | .key' "$cfg_file" 2>/dev/null | tr '\n' ' ' || true)"
+        enabled_teams="$(echo "$enabled_teams" | xargs 2>/dev/null || true)"
+    fi
+    if [ -z "$enabled_teams" ]; then
+        info "No teams have Change Request workflow enabled — skipping CR poller LaunchAgents."
+        return 0
+    fi
+
+    if [ ! -f "$creds_file" ]; then
+        info "CR workflow enabled but no credentials at $creds_file — skipping LaunchAgent."
+        info "Run 'aiteamforge upgrade' interactively to supply Atlassian credentials."
         return 0
     fi
 
@@ -1312,9 +1543,9 @@ install_cr_confluence_poller_launchagent() {
 
     info "Installing per-team CR Confluence Poller LaunchAgents"
 
-    # ── Render and load one plist per team (XACA-0350-002, 003) ──────────────
+    # ── Render and load one plist per ENABLED team that has credentials ───────
     local team plist_dest
-    while IFS= read -r team; do
+    for team in $enabled_teams; do
         [ -z "$team" ] && continue
         # Allow only [a-zA-Z0-9_-] in team names — the value flows into a sed
         # replacement and a launchctl Label, so a JSON key with pipes/slashes
@@ -1322,6 +1553,12 @@ install_cr_confluence_poller_launchagent() {
         # (XACA-0350-014).
         if [[ ! "$team" =~ ^[a-zA-Z0-9_-]+$ ]]; then
             warning "Skipping team '$team': name must match [a-zA-Z0-9_-]+ for LaunchAgent label."
+            continue
+        fi
+        # An enabled team without a credentials entry cannot run — skip rather
+        # than arm a daemon that will only warn-and-exit (XACA-0470).
+        if ! jq -e --arg t "$team" '.teams[$t]' "$creds_file" >/dev/null 2>&1; then
+            warning "Team '$team' is CR-enabled but has no credentials entry — skipping its LaunchAgent."
             continue
         fi
         plist_dest="$launch_agents_dir/com.aiteamforge.cr-confluence-poller.${team}.plist"
@@ -1344,7 +1581,7 @@ install_cr_confluence_poller_launchagent() {
         else
             warning "CR Confluence Poller LaunchAgent installed but not loaded for team '$team' — activate with: launchctl load ${plist_dest}"
         fi
-    done <<< "$teams_json"
+    done
 
     info "Per-team pollers scan cr-drafted CRs every 10 minutes"
     info "Logs: $log_dir/<team>.{out,err}.log"
@@ -1563,6 +1800,28 @@ install_kanban_system() {
 
     # Install backup system (non-fatal if script missing)
     install_kanban_backup
+
+    # XACA-0470: persist the per-team CR opt-in + write Confluence credentials from
+    # the setup wizard's selections (if it passed them). Must run BEFORE the poller
+    # LaunchAgent install so it sees fresh config. The env vars are exported by
+    # bin/aiteamforge-setup.sh; they are absent on a plain `aiteamforge upgrade`,
+    # where install_cr_confluence_poller_launchagent's migration path takes over.
+    # Gate on CR_WIZARD_RAN (set only when the wizard actually showed the CR
+    # prompt) — NOT on CR_ENABLED_TEAMS_STR being set. A hydrated upgrade exports
+    # an empty CR_ENABLED_TEAMS_STR without prompting; acting on that would wipe a
+    # team's existing CR opt-in. An empty list WITH CR_WIZARD_RAN=1 correctly means
+    # "wizard asked, user declined all" → record it (prompted=true) so migration
+    # won't nag again.
+    if [ "${CR_WIZARD_RAN:-}" = "1" ]; then
+        # All CR_* are `:-`-defaulted so a manual `CR_WIZARD_RAN=1` (without the
+        # sibling exports) can't abort the installer under `set -u` (review #012).
+        write_cr_config "${CR_ENABLED_TEAMS_STR:-}" "${CR_ALL_SELECTED_TEAMS_STR:-${SELECTED_TEAMS_STR:-}}"
+        if [ -n "${CR_ENABLED_TEAMS_STR:-}" ] && [ -n "${CR_ATLASSIAN_TOKEN:-}" ]; then
+            write_confluence_credentials "${CR_ENABLED_TEAMS_STR:-}" \
+                "${CR_ATLASSIAN_EMAIL:-}" "${CR_ATLASSIAN_TOKEN:-}" \
+                "${CR_CONFLUENCE_SITE:-mainevent.atlassian.net}" "${CR_SPACE_KEY:-DPD2}"
+        fi
+    fi
 
     # Install LaunchAgents if templates exist
     install_backup_launchagent

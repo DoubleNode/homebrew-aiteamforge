@@ -956,6 +956,59 @@ fi  # end: if UPGRADE_HYDRATED (Step 3 feature selection wrapper, XACA-0559)
 echo -e "${GREEN}✓${NC} Features selected"
 
 # ═══════════════════════════════════════════════════════════════════════════
+# STEP 3.5: CHANGE REQUEST (CR) WORKFLOW — per-team opt-in (XACA-0470)
+# Ask, per selected team, whether to enable the Confluence + IT Connect CR
+# workflow. If any team opts in, capture shared Atlassian credentials once.
+# Skipped in cockpit / non-interactive / hydrated-upgrade contexts — the
+# installer's migration path (install-kanban.sh::maybe_migrate_cr_config) covers
+# upgrades and pre-existing installs.
+# ═══════════════════════════════════════════════════════════════════════════
+CR_ENABLED_TEAMS=()
+CR_ATLASSIAN_EMAIL=""
+CR_ATLASSIAN_TOKEN=""
+CR_CONFLUENCE_SITE=""
+CR_SPACE_KEY=""
+# Sentinel: "1" only when the prompt below actually ran. Without it the installer
+# cannot tell "wizard asked, user declined all" (record it) from "wizard skipped
+# this on a hydrated upgrade/cockpit" (leave existing CR config untouched —
+# otherwise an upgrade would silently disable CR for teams that had it on).
+CR_WIZARD_RAN=""
+
+if [ "$MODE" != "non-interactive" ] && [ "$UPGRADE_HYDRATED" != "true" ] \
+   && [ "$INSTALL_PROFILE" != "cockpit" ] && [ "$INSTALL_KANBAN" = "yes" ] \
+   && [ ${#SELECTED_TEAMS[@]} -gt 0 ]; then
+  CR_WIZARD_RAN="1"
+  echo ""
+  echo -e "${CYAN}Change Request Workflow${NC} — optional Confluence + IT Connect CR tracking, per team"
+  for _cr_team in "${SELECTED_TEAMS[@]}"; do
+    [ -z "$_cr_team" ] && continue
+    if prompt_yes_no "  Enable Change Request workflow for team '${_cr_team}'?" "n"; then
+      CR_ENABLED_TEAMS+=("$_cr_team")
+    fi
+  done
+
+  if [ ${#CR_ENABLED_TEAMS[@]} -gt 0 ]; then
+    echo ""
+    echo -e "${CYAN}Atlassian API credentials${NC} (shared across CR-enabled teams)"
+    echo -e "  Create an API token: ${BLUE}https://id.atlassian.com/manage-profile/security/api-tokens${NC}"
+    read -p "  Atlassian account email: " CR_ATLASSIAN_EMAIL
+    read -rsp "  Atlassian API token (hidden): " CR_ATLASSIAN_TOKEN; echo ""
+    read -p "  Confluence site [mainevent.atlassian.net]: " CR_CONFLUENCE_SITE
+    CR_CONFLUENCE_SITE="${CR_CONFLUENCE_SITE:-mainevent.atlassian.net}"
+    read -p "  Confluence space key [DPD2]: " CR_SPACE_KEY
+    CR_SPACE_KEY="${CR_SPACE_KEY:-DPD2}"
+    if [ -z "$CR_ATLASSIAN_EMAIL" ] || [ -z "$CR_ATLASSIAN_TOKEN" ]; then
+      echo -e "  ${YELLOW}⚠ Email and token are both required — CR credentials will be skipped.${NC}"
+      echo -e "  ${YELLOW}  Re-run 'aiteamforge upgrade' interactively to finish CR setup.${NC}"
+      CR_ATLASSIAN_TOKEN=""
+    fi
+    echo -e "  ${GREEN}✓${NC} CR enabled for: ${CR_ENABLED_TEAMS[*]}"
+  else
+    echo -e "  ${GREEN}✓${NC} Change Request workflow left disabled for all teams"
+  fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 # STEP 4: CONFIRM & INSTALL
 # ═══════════════════════════════════════════════════════════════════════════
 
@@ -1458,6 +1511,13 @@ if [ "$INSTALL_KANBAN" = "yes" ]; then
       export INSTALL_ROOT="${AITEAMFORGE_HOME}"
       export SELECTED_TEAMS_STR="${SELECTED_TEAMS[*]}"
       export TEAM_WORKING_DIRS_STR="${_team_dirs}"
+      # XACA-0470: hand the per-team CR opt-in + shared Atlassian credentials to
+      # install-kanban.sh. CR_ENABLED_TEAMS_STR is exported even when empty so the
+      # installer records "asked, declined" (prompted=true) and migration won't nag.
+      export CR_WIZARD_RAN="${CR_WIZARD_RAN}"
+      export CR_ENABLED_TEAMS_STR="${CR_ENABLED_TEAMS[*]}"
+      export CR_ALL_SELECTED_TEAMS_STR="${SELECTED_TEAMS[*]}"
+      export CR_ATLASSIAN_EMAIL CR_ATLASSIAN_TOKEN CR_CONFLUENCE_SITE CR_SPACE_KEY
       [ "$REFRESH_PROFILES" = "true" ] && export AITEAMFORGE_REFRESH_PROFILES=1
       source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
       source "${INSTALLERS_DIR}/install-kanban.sh"

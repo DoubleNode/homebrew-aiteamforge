@@ -136,8 +136,9 @@ The interactive wizard guides you through:
 2. ✓ Installing missing tools (if needed)
 3. ✓ Selecting teams (iOS, Android, Firebase, etc.)
 4. ✓ Configuring features (LCARS Kanban, Fleet Monitor, etc.)
-5. ✓ Setting up shell environment
-6. ✓ Installing system services
+5. ✓ Change Request (CR) workflow opt-in — per team, with Atlassian credential capture (optional; default No)
+6. ✓ Setting up shell environment
+7. ✓ Installing system services
 
 **Typical setup time: 5-10 minutes** (depending on how many dependencies need installation).
 
@@ -522,6 +523,7 @@ Comprehensive documentation is available in the `docs/` directory:
 - **[Multi-Machine Setup](docs/MULTI_MACHINE.md)** - Fleet Monitor and multi-machine coordination
 - **[Architecture](docs/ARCHITECTURE.md)** - Technical architecture and design
 - **[Team Reference](docs/TEAM_REFERENCE.md)** - Complete team and agent reference
+- **[Setup Wizard](docs/SETUP_WIZARD.md)** - Wizard stages, CR workflow setup, and config file reference
 
 ### Support
 - **[Troubleshooting](docs/TROUBLESHOOTING.md)** - Problem solving guide
