@@ -178,6 +178,11 @@ class SyncService:
         """
         Sync a single ticket link.
 
+        LIMITATION: Only external→kanban sync is implemented. Kanban→external
+        bidirectional sync is not yet implemented (tracked in XACA-0688); passing
+        SyncDirection.KANBAN_TO_EXTERNAL or SyncDirection.BIDIRECTIONAL will silently
+        skip the kanban→external half. See the commented-out stub near line 246.
+
         Args:
             item: Kanban item dictionary
             link_data: Raw ticketLink dictionary from the item
@@ -243,7 +248,7 @@ class SyncService:
                 item, link_data, verify_result, provider
             ))
 
-        # TODO: Sync from kanban -> external (requires provider.update_ticket method)
+        # TODO(XACA-0688): Sync from kanban -> external (requires provider.update_ticket method)
         # if direction in (SyncDirection.KANBAN_TO_EXTERNAL, SyncDirection.BIDIRECTIONAL):
         #     changes.update(self._sync_kanban_to_external(item, link_data, provider))
 
