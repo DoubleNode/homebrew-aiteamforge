@@ -3,7 +3,6 @@ class Aiteamforge < Formula
   homepage "https://github.com/DoubleNode/homebrew-aiteamforge"
   url "https://github.com/DoubleNode/homebrew-aiteamforge.git",
       tag: "v0.14.0"
-  version "0.14.0"
   license "MIT"
 
   head "https://github.com/DoubleNode/homebrew-aiteamforge.git", branch: "main"
