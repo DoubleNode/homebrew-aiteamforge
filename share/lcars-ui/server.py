@@ -377,6 +377,13 @@ _SECRETS_IMPORT_MAX_PASSWORD_ATTEMPTS = 5
 # source of truth — do NOT inline a separate frozenset elsewhere.
 MAIN_ZIP_SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
 
+# XACA-0387 (audit F-04-008): hard cap on POST body size. do_POST rejects any
+# request whose declared Content-Length exceeds this (HTTP 413) BEFORE dispatching
+# to a handler, preventing unbounded self.rfile.read() allocations (memory-exhaustion
+# DoS). 50 MiB covers the largest legitimate POST (base64 roadmap-PDF stash + team/
+# board export bundles). Override via env for special cases.
+MAX_POST_BODY_BYTES = int(os.environ.get('LCARS_MAX_POST_BODY_BYTES', str(50 * 1024 * 1024)))
+
 
 def _ensure_private_dir(path: Path) -> None:
     """Create *path* (and any parents) restricted to the owner, and tighten its
@@ -2527,6 +2534,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _TEAM_PATHS_CACHE: dict = {'mtime_ns': None, 'data': None}
     _TEAM_PATHS_CACHE_LOCK: threading.Lock = threading.Lock()
 
+    # XACA-0387 (audit F-04-008): socket timeout protects the single-threaded
+    # TCPServer from slow-loris connections that would otherwise pin the lone
+    # server thread indefinitely. StreamRequestHandler.setup() applies this via
+    # self.connection.settimeout(self.timeout).
+    timeout = int(os.environ.get('LCARS_SOCKET_TIMEOUT', '30'))
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
@@ -2540,6 +2553,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests"""
+        # XACA-0387 (audit F-04-008): cap the declared body size before dispatch so a
+        # forged/oversized Content-Length cannot drive an unbounded rfile.read().
+        cl_header = self.headers.get('Content-Length')
+        if cl_header is not None:
+            try:
+                declared_len = int(cl_header)
+            except (TypeError, ValueError):
+                self._send_json_response({"error": "Invalid Content-Length header"}, 400)
+                return
+            if declared_len < 0:
+                self._send_json_response({"error": "Invalid Content-Length header"}, 400)
+                return
+            if declared_len > MAX_POST_BODY_BYTES:
+                self._send_json_response(
+                    {"error": f"Request body too large (max {MAX_POST_BODY_BYTES} bytes)"}, 413)
+                return
+
         parsed = urlparse(self.path)
         path = parsed.path
 
