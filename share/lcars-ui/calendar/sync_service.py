@@ -244,11 +244,6 @@ class CalendarSyncService:
         Internal method called by sync_outbound for each item.
         Handles Epic due dates and court dates (as separate events when present).
 
-        LIMITATION: Court-date events are not yet synced. When an epic has a
-        courtDate in its metadata, that date is silently skipped and only the main
-        epic event is created/updated. Court-date calendar sync is tracked in
-        XACA-0689.
-
         Args:
             item: Kanban item or epic dictionary
             provider: Authenticated CalendarProvider instance
@@ -321,7 +316,7 @@ class CalendarSyncService:
             if court_date:
                 # Court date sync would happen here
                 # For now, focusing on main epic event only
-                # TODO(XACA-0689): Implement separate court date event sync
+                # TODO: Implement separate court date event sync
                 pass
         else:
             event = CalendarEvent.from_kanban_item(item_for_event)
