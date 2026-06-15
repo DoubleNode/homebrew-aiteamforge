@@ -844,9 +844,33 @@
         if (!ra || !ra.releaseId) {
             return '<span class="cr-dim">—</span>';
         }
-        const releaseId   = escapeHtml(ra.releaseId);
-        const releaseName = escapeHtml(ra.releaseName || ra.releaseId);
-        return `<button class="cr-release-link" data-release-id="${releaseId}" title="Navigate to release: ${releaseName}">${releaseName}</button>`;
+        const releaseId = ra.releaseId;
+
+        // XACA-0697: render the RELEASE column as "shortTitle - name" (Label + Title),
+        // mirroring the Backlog REL: dropdown (lcars-filter-bar.js _addRelease). The CR's
+        // releaseAssignment snapshot carries only releaseName (no shortTitle), so resolve
+        // shortTitle live from boardData (active first, then archived) — same lookup as
+        // lcars.js. No schema change, no backfill, no drift on rename.
+        let shortTitle = null;
+        let name = ra.releaseName || '';
+        if (typeof boardData !== 'undefined' && boardData) {
+            let release = (boardData.releases || []).find(r => r.id === releaseId);
+            if (!release && boardData.archivedReleases) {
+                release = boardData.archivedReleases.find(r => r.id === releaseId);
+            }
+            if (release) {
+                shortTitle = release.shortTitle || null;
+                if (!name) name = release.name || '';
+            }
+        }
+        const display = (shortTitle && name)
+            ? `${shortTitle} - ${name}`
+            : (name || releaseId);
+
+        const idAttr  = escapeHtml(releaseId);
+        const label   = escapeHtml(display);
+        const tooltip = escapeHtml(`Navigate to release: ${display} (${releaseId})`);
+        return `<button class="cr-release-link" data-release-id="${idAttr}" title="${tooltip}">${label}</button>`;
     }
 
     // ─── Row renderer ─────────────────────────────────────────────────────────
