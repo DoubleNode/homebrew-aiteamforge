@@ -208,10 +208,19 @@ check_brew_updates() {
     return
   fi
 
-  # Check for updates. `brew outdated` is captured into a variable (not used as the
-  # `if` condition directly) so we can re-probe it AFTER the brew step under set -e.
+  # Check for updates. XACA-0702 fix: `brew outdated <formula>` exits 0 when the
+  # formula is UP-TO-DATE and 1 when it is OUTDATED (verified on Homebrew 6.x),
+  # and prints the formula name to stdout ONLY when outdated. The exit code is the
+  # OPPOSITE of "is outdated" — gating on it directly (the prior
+  # `if brew outdated ...; then outdated_before=true`) was INVERTED: a genuinely
+  # outdated box was classified up-to-date (false success) and a current box was
+  # classified outdated. Detect via STDOUT PRESENCE instead, which is direction-
+  # unambiguous. `|| true` keeps the captured non-zero (outdated) exit from
+  # tripping set -e on the assignment.
   local outdated_before=false
-  if brew outdated aiteamforge &>/dev/null; then
+  local _outdated_probe=""
+  _outdated_probe="$(brew outdated aiteamforge 2>/dev/null || true)"
+  if [ -n "$_outdated_probe" ]; then
     outdated_before=true
   fi
 
@@ -228,9 +237,12 @@ check_brew_updates() {
         print_info "Skipping brew upgrade prompt (--non-interactive); caller already handled brew"
         # XACA-0702: the LaunchAgent ran `brew upgrade` BEFORE us, so the pre-snapshot
         # already reflects whatever brew did. We cannot bracket our own brew step here
-        # — instead detect a stuck box by re-probing `brew outdated`. If the formula is
-        # STILL outdated, brew never advanced (e.g. silently refused) → fail loudly.
-        if brew outdated aiteamforge &>/dev/null; then
+        # — instead detect a stuck box by re-probing `brew outdated`. XACA-0702: a
+        # non-empty stdout means STILL outdated (exit code is inverted; see the
+        # detection note above). If outdated, brew never advanced → fail loudly.
+        local _still_outdated=""
+        _still_outdated="$(brew outdated aiteamforge 2>/dev/null || true)"
+        if [ -n "$_still_outdated" ]; then
           print_warning "Formula is STILL outdated after the caller's brew upgrade — brew did not advance."
           UPGRADE_BREW_FAILED=true
         fi
