@@ -79,24 +79,32 @@ if [ -f "$VERSION_FILE" ]; then
 fi
 
 if [ -f "$FORMULA_FILE" ]; then
-  formula_version_val="$(grep -E '^\s+version "' "$FORMULA_FILE" | head -1 | sed 's/.*version "\([^"]*\)".*/\1/')"
-  formula_tag_val="$(grep -E 'tag:' "$FORMULA_FILE" | head -1 | sed 's/.*tag: "v\([^"]*\)".*/\1/')"
+  # || true guards: grep returns nonzero on no-match; set -eo pipefail would abort without it.
+  # The standalone version line was removed in XACA-0394 (version now derived from tag:).
+  formula_version_val="$(grep -E '^\s+version "' "$FORMULA_FILE" | head -1 | sed 's/.*version "\([^"]*\)".*/\1/' || true)"
+  formula_tag_val="$(grep -E 'tag:' "$FORMULA_FILE" | head -1 | sed 's/.*tag: "v\([^"]*\)".*/\1/' || true)"
 fi
 
 if [ -z "$version_file_val" ]; then
   fail "VERSION file missing or empty: ${VERSION_FILE}"
-elif [ -z "$formula_version_val" ]; then
-  fail "Cannot parse version from Formula/aiteamforge.rb (expected: version \"X.Y.Z\")"
 elif [ -z "$formula_tag_val" ]; then
   fail "Cannot parse tag from Formula/aiteamforge.rb (expected: tag: \"vX.Y.Z\")"
-elif [ "$version_file_val" != "$formula_version_val" ] || \
-     [ "$version_file_val" != "$formula_tag_val" ] || \
-     [ "$formula_version_val" != "$formula_tag_val" ]; then
-  fail "Version mismatch — all three must agree:
-    VERSION:                ${version_file_val}
-    Formula/aiteamforge.rb version:  ${formula_version_val}
-    Formula/aiteamforge.rb tag:      ${formula_tag_val}
+elif [ "$version_file_val" != "$formula_tag_val" ]; then
+  # Tag must strictly match VERSION; formula version line is OPTIONAL (XACA-0394).
+  fail "Version mismatch:
+    VERSION:                        ${version_file_val}
+    Formula/aiteamforge.rb tag:     ${formula_tag_val}${formula_version_val:+
+    Formula/aiteamforge.rb version: ${formula_version_val}}
+  Fix: align VERSION and tag: \"v...\" to the same value."
+elif [ -n "$formula_version_val" ] && [ "$version_file_val" != "$formula_version_val" ]; then
+  # Only compare formula version when it's present (not all Formulas have the standalone line).
+  fail "Version mismatch:
+    VERSION:                        ${version_file_val}
+    Formula/aiteamforge.rb version: ${formula_version_val}
+    Formula/aiteamforge.rb tag:     ${formula_tag_val}
   Fix: align VERSION, version \"...\", and tag: \"v...\" to the same value."
+elif [ -z "$formula_version_val" ]; then
+  ok "Version consistent — VERSION and Formula tag agree (${version_file_val}); no standalone version line (derived from tag, per XACA-0394)."
 else
   ok "Version consistent across VERSION, Formula version, and Formula tag (${version_file_val})"
 fi

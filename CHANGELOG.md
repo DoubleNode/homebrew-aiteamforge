@@ -8,6 +8,7 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 ## [Unreleased]
 
 ### Fixed
+- XACA-0701 — `scripts/check-tap-hygiene.sh`: version-line grep no longer aborts under `set -eo pipefail` when Formula has no version line (XACA-0394 regression); Formula version line now optional, tag must match VERSION strictly.
 - XACA-0700: `share/scripts/kb-tap-release` — guard grep calls against no-match abort under `set -euo pipefail`. XACA-0394 removed the standalone `version` line from `Formula/aiteamforge.rb`; two sites in kb-tap-release still grep for it, causing silent set-e death and blocking all releases. Fix: `|| true` on both grep command substitutions; Check 11 treats absent version line as valid; Phase 1 post-edit verify skips version check when line is absent. Tag verification remains strict.
 
 ### Added
