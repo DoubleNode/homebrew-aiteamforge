@@ -9,6 +9,23 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ### Fixed
 - XACA-0702 — `aiteamforge upgrade` no longer reports a false "Dev-team has been upgraded successfully!" + exit 0 when Homebrew never advanced. Four folded fixes: (1) **upgrade.sh** — `check_brew_updates()` now snapshots the installed brew version (`brew list --versions aiteamforge`) before the brew step and detects a no-op: it sets a module-level `UPGRADE_BREW_FAILED` flag when the tap is still refused after `ensure_tap_trusted` (untrusted/trust-gated Homebrew), when an interactive `brew upgrade` left the installed version unchanged, or when `--non-interactive` finds the formula STILL `brew outdated` after the caller's brew run. The final summary prints a LOUD boxed FAILURE with the `brew trust --tap <tap>` remediation and `exit 1` instead of faking success. The `.installed-version` stamp now records the REAL `brew list --versions` value when brew is the install method (not blindly the framework VERSION), so `doctor`/`status` drift detection is not fooled into thinking the box advanced. (2) **config.sh** — `get_installed_version()` now prefers the freshest accurate source (live brew version → `.installed-version` stamp → legacy config `version`) so `aiteamforge status` stops showing a stale install-time version after a `brew upgrade`. (3) **share/lcars-ui/ccusage_collector.py** — `find_ccusage()` adds an `npx -y ccusage` fallback (XACA-0243 class) when neither PATH nor fnm globs resolve; now returns a command-prefix LIST splatted into argv at every call site so the multi-token npx prefix is preserved. Mirror of canonical `lcars-ui/ccusage_collector.py` via sync-tap.sh. (4) **start.sh** — `check_port_health()` (covers `start` and `restart`) now AUTO-APPLIES the documented port reconcile (`aiteamforge-port-fix --apply`) and re-verifies instead of aborting with a "fix it yourself" message; only fails if the port collision persists after the reconcile. Graceful-degrade (tool absent → warn + continue) preserved.
+- XACA-0653 — E2E fresh-install gate driver (`tests/test-xaca-0653-e2e-fresh-install.sh`)
+  now passes on a real tap-installed consumer (verified ×3 on a v0.15.0 box). The
+  shipped v0.15.0 driver failed every downstream step on a real install, so the
+  durability crux (the XACA-0652 regression this gate exists to catch) had never
+  actually executed. Fixes: (1) probe the real installed layout — `kb-init-team`,
+  `server.py`, and `lcars-launch-helpers.sh` ship under `libexec/share/…`, not
+  `libexec/…`; (2) render the consumer resolver into the sandbox the way
+  `install_kanban_helpers` does (the install tree ships only templates) and refuse
+  to source an unrendered template; (3) register the throwaway team in
+  `team-paths.json` ourselves — tap-install `kb-init-team` runs in local-only mode
+  and deliberately skips all "product-managed" registration sites; (4) export
+  `LCARS_UI_DIR` so the product launch helper `cd`s into the installed UI; (5)
+  re-assert the team in `team-paths.json` before the resolver check, because LCARS
+  server startup regenerates the per-machine overlay from `DEFAULT_TEAMS` and
+  discards non-default entries; (6) scope the `doctor` assertion to tolerate
+  sandbox-only artifacts (absent academy board, unrendered health-check script)
+  while still failing on any real dependency regression.
 
 ## [0.15.0] - 2026-06-15
 
