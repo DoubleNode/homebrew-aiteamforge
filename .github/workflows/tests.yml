@@ -263,6 +263,21 @@ jobs:
         run: |
           bash tests/test-runner.sh tests/test-tailscale.sh
 
+      - name: Run XACA-0704 positive upgrade-gate tests
+        # Regression gate for XACA-0702: positive path — box one version behind upgrades
+        # successfully and the installed version ACTUALLY ADVANCES (three independent
+        # assertions: brew list --versions, .installed-version stamp, get_installed_version()).
+        # All tests use a mocked `brew` — real tap is never installed in CI or on M3Pro.
+        run: |
+          bash tests/test-runner.sh tests/test-xaca-0704-positive.sh
+
+      - name: Run XACA-0704 negative upgrade-gate tests
+        # Regression gate for XACA-0702: negative path — stuck/untrusted-tap upgrade exits 1
+        # and prints FAILURE banner (Case A: no-op brew; Case B: refused tap; Case C:
+        # current box under --non-interactive must NOT false-fail). All tests mocked.
+        run: |
+          bash tests/test-runner.sh tests/test-xaca-0704-negative.sh
+
   # ─────────────────────────────────────────────────────────────────────────────
   # E2E Fresh-Install Gate (XACA-0653)
   #
