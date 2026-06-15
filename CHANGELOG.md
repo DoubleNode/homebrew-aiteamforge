@@ -27,6 +27,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
   sandbox-only artifacts (absent academy board, unrendered health-check script)
   while still failing on any real dependency regression.
 
+### Added
+- XACA-0703: add Academy UX evaluator persona (lal) to `share/personas/academy/agents/academy_lal_ux_persona.md`.
+
 ## [0.15.0] - 2026-06-15
 
 ### Fixed
