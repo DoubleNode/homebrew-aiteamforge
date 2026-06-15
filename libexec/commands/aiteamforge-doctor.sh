@@ -64,6 +64,7 @@ Components:
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   services        Running services + LCARS server durability (XACA-0655)
+  lcars-port-drift  LCARS server bound to a non-canonical port (XACA-0706/0613)
   launchagents    LaunchAgent status
   git             Git repository health
   network         Network connectivity (Tailscale if configured)
@@ -945,6 +946,96 @@ check_services() {
   fi
 }
 
+# Check: LCARS servers bound to a NON-CANONICAL port (XACA-0706)
+# ─────────────────────────────────────────────────────────────────────────────
+# Root cause of XACA-0613: after a port-resolver refresh (e.g. v0.15.0 moved a
+# team's cksum-derived lcars_port), a long-lived <instance>-lcars session keeps
+# serving on the OLD port. The launcher's has-session idempotency guard then
+# blocks recreation, so script/config fixes never rebind the running session —
+# it quietly serves the wrong port until it dies, unnoticed. lcars-health-check
+# now self-heals this; the doctor SURFACES it so an operator sees the drift even
+# if the keepalive LaunchAgent isn't loaded.
+#
+# Detection (mirrors lcars-health-check.sh::detect_lcars_bound_ports): every
+# LCARS server is launched as `env LCARS_TEAM=<team> ... <python> server.py
+# <PORT>`. We read each live server.py's argv+env via `ps eww`, pull the team
+# from `LCARS_TEAM=` and the bound port from the token after `server.py`, then
+# compare against the team's CANONICAL port resolved by the shipped
+# share/kanban-hooks/lcars_ports.py helper. A mismatch is a WARN (the server may
+# be up right now — the risk is a stale port that health checks/launchers probe
+# wrong, and that won't survive the next crash on the canonical port).
+check_lcars_port_drift() {
+  print_section "Checking LCARS Port Drift"
+
+  # Locate the shipped canonical-port resolver. share/ is a sibling of libexec/.
+  local ports_helper="${LIBEXEC_DIR}/../share/kanban-hooks/lcars_ports.py"
+  if [ ! -f "$ports_helper" ]; then
+    check_result warn "LCARS port-drift check skipped — port resolver not found (${ports_helper})"
+    return 0
+  fi
+
+  local py="${AITEAMFORGE_PYTHON:-python3}"
+
+  # Sweep live LCARS servers. pgrep returns 1 (and empty) when none match; the
+  # `|| true` keeps set -e from aborting here (no servers running is normal).
+  local pids
+  pids="$(pgrep -f 'server\.py' 2>/dev/null || true)"
+  if [ -z "$pids" ]; then
+    check_result pass "No LCARS servers running (no port drift possible)"
+    return 0
+  fi
+
+  local drift_found=false
+  local checked=0
+  local _pid _args _team _bound_port _canonical
+  for _pid in $pids; do
+    [ -z "$_pid" ] && continue
+    _args="$(ps eww -o args= -p "$_pid" 2>/dev/null || true)"
+    [ -z "$_args" ] && continue
+
+    # Only LCARS servers carry LCARS_TEAM in their env. Parse team (no spaces).
+    case "$_args" in
+      *" LCARS_TEAM="*) ;;
+      *) continue ;;
+    esac
+    _team="${_args##* LCARS_TEAM=}"
+    _team="${_team%%[[:space:]]*}"
+    [ -z "$_team" ] && continue
+
+    # Bound port = first integer token immediately after "server.py ".
+    _bound_port="${_args#*server.py }"
+    _bound_port="${_bound_port%%[![:digit:]]*}"
+    [ -z "$_bound_port" ] && continue
+
+    # Resolve the team's canonical port. lcars_ports.py prints "team:port" on
+    # stdout (warnings to stderr). `|| true` guards set -e on a skip/exit-1.
+    _canonical="$("$py" "$ports_helper" "$_team" 2>/dev/null | head -1 || true)"
+    _canonical="${_canonical#*:}"
+    if [ -z "$_canonical" ]; then
+      check_result warn "LCARS server for team '${_team}' is on port ${_bound_port} but its canonical port could not be resolved" \
+        "Verify '${_team}' is registered in aiteamforge_paths.py / team-paths.json"
+      drift_found=true
+      checked=$((checked + 1))
+      continue
+    fi
+
+    checked=$((checked + 1))
+    if [ "$_bound_port" != "$_canonical" ]; then
+      check_result fail "LCARS server for team '${_team}' is bound to NON-CANONICAL port ${_bound_port} (canonical is ${_canonical})" \
+        "Reconcile: run lcars-health-check.sh (it now self-heals this), or 'aiteamforge restart kanban'"
+      drift_found=true
+    elif [ "$VERBOSE" = true ]; then
+      echo "    ${_team}: bound port ${_bound_port} matches canonical"
+    fi
+  done
+
+  if [ "$drift_found" = false ] && [ "$checked" -gt 0 ]; then
+    check_result pass "All running LCARS servers are on their canonical port (${checked} checked)"
+  elif [ "$checked" -eq 0 ]; then
+    check_result pass "No identifiable LCARS team servers running (no port drift)"
+  fi
+}
+
 # Check: LaunchAgents
 check_launchagents() {
   print_section "Checking LaunchAgents"
@@ -1194,6 +1285,9 @@ case "$CHECK_COMPONENT" in
   services)
     check_services
     ;;
+  lcars-port-drift)
+    check_lcars_port_drift
+    ;;
   launchagents)
     check_launchagents
     ;;
@@ -1215,6 +1309,7 @@ case "$CHECK_COMPONENT" in
     check_config
     check_board_resolution
     check_services
+    check_lcars_port_drift
     check_launchagents
     check_git
     check_network
