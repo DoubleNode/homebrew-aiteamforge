@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-06-15
+
 ### Fixed
 - XACA-0701 — `scripts/check-tap-hygiene.sh`: version-line grep no longer aborts under `set -eo pipefail` when Formula has no version line (XACA-0394 regression); Formula version line now optional, tag must match VERSION strictly.
 - XACA-0700: `share/scripts/kb-tap-release` — guard grep calls against no-match abort under `set -euo pipefail`. XACA-0394 removed the standalone `version` line from `Formula/aiteamforge.rb`; two sites in kb-tap-release still grep for it, causing silent set-e death and blocking all releases. Fix: `|| true` on both grep command substitutions; Check 11 treats absent version line as valid; Phase 1 post-edit verify skips version check when line is absent. Tag verification remains strict.
@@ -831,7 +833,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.15.0...HEAD
+[0.15.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.4...v0.14.0
 [0.13.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.3...v0.13.4
 [0.13.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.2...v0.13.3
