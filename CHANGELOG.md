@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- test: XACA-0653 — Tap-native CI test infrastructure. Adds an E2E fresh-install gate (`tests/test-xaca-0653-e2e-fresh-install.sh`) that installs the formula from the local tap and drives the runner end-to-end, plus a runner exit-propagation regression (`tests/test-xaca-0653-runner-exit-propagation.sh`) covering the case where a suite exits non-zero with no `FAIL:` lines. Hardens `tests/test-runner.sh` to count an exit-code failure when `fails==0` (previously such a hard failure was reported as "All tests passed!", silently green-lighting a broken gate) and wires both as CI jobs in `.github/workflows/tests.yml`.
+
 - XACA-0690: `share/scripts/iterm2_venv_bootstrap.py` now probes the repo-local `.venv` as a dev-box fallback (candidate 5) when no tap-owned venv is found. Resolves `ModuleNotFoundError: No module named 'iterm2'` on the M3Pro dev source machine after a homebrew python relink — the tap is never installed on that machine so only the repo dev venv has iterm2. Worktree-aware: if `<repo_root>/.git` is a file (git worktree pointer) the gitdir path is parsed to resolve the main-checkout root. Consumer machines are unaffected — no repo `.venv` exists in the tap layout, so the new candidate is harmlessly skipped. Mirror of canonical `dev-team/scripts/iterm2_venv_bootstrap.py` via sync-tap.sh. (XACA-0690-002)
 
 - XACA-0394: Audit Batch E tech debt (F-09-016) — add LIMITATION docstrings to two sync stubs: `share/lcars-ui/integrations/sync_service.py` (`sync_ticket_link`) documents that kanban→external bidirectional sync is not implemented (tracked XACA-0688); `share/lcars-ui/calendar/sync_service.py` (`_sync_outbound_single`) documents that court-date calendar sync is silently skipped (tracked XACA-0689). Both TODO comments annotated with tracking ticket IDs.

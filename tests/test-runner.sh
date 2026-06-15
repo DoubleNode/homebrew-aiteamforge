@@ -462,6 +462,17 @@ run_test_file() {
       print_success "Completed: $CURRENT_TEST_FILE"
     else
       print_error "Failed: $CURRENT_TEST_FILE"
+      # XACA-0653: suites that keep their OWN pass/fail counters (not the
+      # runner's test_pass/test_fail) write no "FAIL:" lines, so a hard failure
+      # leaves fails=0. Previously this branch only PRINTED "Failed:" and never
+      # incremented FAILED_TESTS, so a non-zero suite exit was reported as
+      # "All tests passed!" (runner exit 0) — silently green-lighting a broken
+      # gate (the e2e fresh-install driver is exactly such a suite). Count the
+      # exit-code failure here, but only when no "FAIL:" lines were recorded
+      # (otherwise it is already counted in the aggregation above — no double).
+      if [ "$fails" -eq 0 ] && [ "$test_exit_code" -ne 0 ]; then
+        FAILED_TESTS=$((FAILED_TESTS + 1))
+      fi
     fi
   else
     if [ "$test_exit_code" -ne 0 ]; then

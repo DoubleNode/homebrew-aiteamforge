@@ -211,6 +211,15 @@ jobs:
           chmod +x tests/test-runner.sh
           chmod +x tests/test-*.sh
 
+      - name: Run test-runner exit-propagation regression (XACA-0653)
+        # Runs FIRST: validates test-runner.sh propagates a suite's non-zero
+        # exit even when the suite keeps its own pass/fail counters (no FAIL:
+        # lines). If the runner itself is broken, every downstream suite result
+        # is untrustworthy — so gate the runner's integrity before trusting it.
+        # Self-contained (trivial stubs); needs no clean install.
+        run: |
+          bash tests/test-xaca-0653-runner-exit-propagation.sh
+
       - name: Run validate-install tests
         run: |
           bash tests/test-runner.sh tests/test-validate-install.sh
@@ -253,6 +262,69 @@ jobs:
         # Tailscale is not installed in CI — tests use internal mocks so no real binary needed
         run: |
           bash tests/test-runner.sh tests/test-tailscale.sh
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # E2E Fresh-Install Gate (XACA-0653)
+  #
+  # Real, non-mocked, full consumer-install journey on a clean runner: install
+  # the formula from the local tap, then drive tests/test-xaca-0653-e2e-fresh-
+  # install.sh, which provisions a throwaway team, starts the LCARS server, proves
+  # durability (server survives launcher death), checks the resolver + doctor +
+  # iterm2 import — all against the REAL installed binaries. Any failed step makes
+  # the driver exit non-zero, which fails this job. This job is the release gate
+  # consumed by kb-tap-release's E2E precondition.
+  #
+  # macos-14 only — matches test-formula (macos-13/Intel dropped in XACA-0499).
+  # ─────────────────────────────────────────────────────────────────────────────
+  e2e-fresh-install:
+    # SIBLING-DRIFT COUPLING (XACA-0653): the `name:` below IS the check-run
+    # name that scripts/kb-tap-release matches (E2E_GATE_CHECK_NAME). If you
+    # rename this job, update kb-tap-release in lockstep or the release gate
+    # silently blocks every release. See docs/homebrew-tap/TEST_PLAN.md Phase 8.
+    name: E2E Fresh-Install Gate (macOS)
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Homebrew
+        id: set-up-homebrew
+        uses: Homebrew/actions/setup-homebrew@master
+
+      - name: Cache Homebrew packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/Homebrew
+            ~/Library/Caches/pip
+          key: ${{ runner.os }}-homebrew-${{ hashFiles('Formula/aiteamforge.rb') }}
+          restore-keys: |
+            ${{ runner.os }}-homebrew-
+
+      - name: Install formula dependencies
+        run: |
+          brew install python@3.13 node jq gh git
+
+      - name: Tap local repository
+        run: |
+          mkdir -p $(brew --repository)/Library/Taps/doublenode
+          ln -s $PWD $(brew --repository)/Library/Taps/doublenode/homebrew-aiteamforge
+
+      - name: Install formula
+        run: |
+          brew install --build-from-source aiteamforge
+
+      - name: Run E2E fresh-install gate
+        # The driver self-isolates (sandboxed HOME + AITEAMFORGE_DIR) and contains
+        # a dev-source guard that only refuses on a real dev-team checkout. On this
+        # clean runner the install tree is the tap prefix, so the guard passes and
+        # step 3 (kb-init-team) provisions a throwaway team. We invoke it through
+        # the suite runner (consistent with the other shell suites); the runner
+        # propagates the driver's exit code, so any failed step fails this job.
+        run: |
+          chmod +x tests/test-runner.sh tests/test-xaca-0653-e2e-fresh-install.sh
+          bash tests/test-runner.sh tests/test-xaca-0653-e2e-fresh-install.sh
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Node.js Test Suites — fleet-monitor/server/tests/
