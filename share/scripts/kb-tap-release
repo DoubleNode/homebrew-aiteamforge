@@ -50,7 +50,7 @@ Preconditions (all checked before any mutation, including --dry-run):
   8.  Tap inner is up-to-date with origin/main.
   9.  sync-tap drift check passes (./sync-tap.sh --check).
   10. CHANGELOG [Unreleased] section is non-empty.
-  11. VERSION, Formula tag, and Formula version all agree.
+  11. VERSION and Formula tag agree; standalone Formula version line is optional (per XACA-0394).
   12. Computed new version tag does not already exist.
 
 Partial-failure recovery:
@@ -471,13 +471,20 @@ FORMULA_VERSION=""
 
 if [ -f "$TAP_VERSION_FILE" ] && [ -f "$TAP_FORMULA" ]; then
   CUR_VERSION="$(tr -d '[:space:]' < "$TAP_VERSION_FILE")"
-  FORMULA_TAG="$(grep -oE 'tag: "v[0-9]+\.[0-9]+\.[0-9]+"' "$TAP_FORMULA" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-  FORMULA_VERSION="$(grep -oE '^[[:space:]]*version "[0-9]+\.[0-9]+\.[0-9]+"' "$TAP_FORMULA" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+  # || true guards: grep returns nonzero on no-match; set -e would abort without it.
+  # The standalone version line was removed in XACA-0394 (version now derived from tag:).
+  FORMULA_TAG="$(grep -oE 'tag: "v[0-9]+\.[0-9]+\.[0-9]+"' "$TAP_FORMULA" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+  FORMULA_VERSION="$(grep -oE '^[[:space:]]*version "[0-9]+\.[0-9]+\.[0-9]+"' "$TAP_FORMULA" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 
-  if [ "$CUR_VERSION" = "$FORMULA_TAG" ] && [ "$CUR_VERSION" = "$FORMULA_VERSION" ]; then
-    check_pass "VERSION ($CUR_VERSION) matches Formula tag and version."
+  # Tag must always match VERSION; the standalone version line is OPTIONAL (XACA-0394).
+  if [ "$CUR_VERSION" = "$FORMULA_TAG" ] && { [ -z "$FORMULA_VERSION" ] || [ "$FORMULA_VERSION" = "$CUR_VERSION" ]; }; then
+    if [ -z "$FORMULA_VERSION" ]; then
+      check_pass "VERSION ($CUR_VERSION) matches Formula tag (no standalone version line — derived from tag, per XACA-0394)."
+    else
+      check_pass "VERSION ($CUR_VERSION) matches Formula tag and version."
+    fi
   else
-    check_fail "Version drift detected: VERSION=${CUR_VERSION}, Formula tag=${FORMULA_TAG}, Formula version=${FORMULA_VERSION}. Reconcile before releasing."
+    check_fail "Version drift: VERSION=${CUR_VERSION}, Formula tag=${FORMULA_TAG}, Formula version=${FORMULA_VERSION:-<none>}. Reconcile before releasing."
   fi
 else
   check_fail "homebrew-tap/VERSION or Formula/aiteamforge.rb not found."
@@ -595,15 +602,18 @@ sed -i.bak -E "s/tag: \"v[0-9]+\.[0-9]+\.[0-9]+\"/tag: \"v${NEW_VERSION}\"/" For
 sed -i.bak2 -E "s/^([[:space:]]*)version \"[0-9]+\.[0-9]+\.[0-9]+\"/\1version \"${NEW_VERSION}\"/" Formula/aiteamforge.rb
 rm -f Formula/aiteamforge.rb.bak Formula/aiteamforge.rb.bak2
 
-# Verify both lines updated
-FORMULA_TAG_AFTER="$(grep -oE 'tag: "v[0-9]+\.[0-9]+\.[0-9]+"' Formula/aiteamforge.rb | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
-FORMULA_VER_AFTER="$(grep -oE '^[[:space:]]*version "[0-9]+\.[0-9]+\.[0-9]+"' Formula/aiteamforge.rb | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)"
+# Verify updated lines.
+# || true guards: grep returns nonzero on no-match; set -e would abort without it.
+# The standalone version line is optional (removed in XACA-0394); tag is required.
+FORMULA_TAG_AFTER="$(grep -oE 'tag: "v[0-9]+\.[0-9]+\.[0-9]+"' Formula/aiteamforge.rb | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
+FORMULA_VER_AFTER="$(grep -oE '^[[:space:]]*version "[0-9]+\.[0-9]+\.[0-9]+"' Formula/aiteamforge.rb | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1 || true)"
 
 if [ "$FORMULA_TAG_AFTER" != "$NEW_VERSION" ]; then
   echo "Error: Formula tag not updated correctly — got '${FORMULA_TAG_AFTER}', expected '${NEW_VERSION}'." >&2
   exit 1
 fi
-if [ "$FORMULA_VER_AFTER" != "$NEW_VERSION" ]; then
+# Only enforce version line when it exists (it was removed in XACA-0394).
+if [ -n "$FORMULA_VER_AFTER" ] && [ "$FORMULA_VER_AFTER" != "$NEW_VERSION" ]; then
   echo "Error: Formula version not updated correctly — got '${FORMULA_VER_AFTER}', expected '${NEW_VERSION}'." >&2
   exit 1
 fi

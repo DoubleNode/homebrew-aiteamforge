@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- XACA-0700: `share/scripts/kb-tap-release` — guard grep calls against no-match abort under `set -euo pipefail`. XACA-0394 removed the standalone `version` line from `Formula/aiteamforge.rb`; two sites in kb-tap-release still grep for it, causing silent set-e death and blocking all releases. Fix: `|| true` on both grep command substitutions; Check 11 treats absent version line as valid; Phase 1 post-edit verify skips version check when line is absent. Tag verification remains strict.
+
 ### Added
 - XACA-0697: Mirror canonical `lcars-ui/js/lcars-cr-tab.js` + `lcars-ui/index.html` — the RELEASE column in the CHANGE REQUESTS pipeline list now renders the assigned release as `shortTitle - name` (Label + Title), matching the Backlog REL: filter dropdown. `shortTitle` is resolved live from `boardData.releases`/`archivedReleases` by `releaseId` (no board-schema change, no backfill). Cache-buster `lcars-cr-tab.js?v=1.1` → `?v=1.2`. Mirror via sync-tap.sh of canonical dev-team changes.
 
