@@ -467,6 +467,12 @@ run_health_check() {
     local skipped=0
     local restarted=0
     local drifted=0
+    # XACA-0706: hoist loop-scoped scratch var. A bare `local _bp` INSIDE the
+    # outer loop re-declares an already-set local on the 2nd+ iteration, which
+    # zsh prints as `_bp=<value>` to stdout — corrupting the health-check log
+    # (k501-zsh-local-in-loop-gotcha). Declare once here, assign without `local`
+    # inside the loop.
+    local _bp
 
     log "═══════════════════════════════════════════════════════"
     log "LCARS Health Check"
@@ -497,7 +503,6 @@ run_health_check() {
         local _bound="${LCARS_BOUND_PORTS[$team]:-}"
         local _noncanonical=""
         if [[ -n "$_bound" ]]; then
-            local _bp
             for _bp in ${=_bound}; do
                 [[ "$_bp" != "$local_port" ]] && _noncanonical="${_noncanonical:+$_noncanonical }$_bp"
             done
