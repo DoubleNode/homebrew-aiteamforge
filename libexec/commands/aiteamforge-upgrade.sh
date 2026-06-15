@@ -25,6 +25,22 @@ DRY_RUN=false
 FORCE=false
 NON_INTERACTIVE=false  # XACA-0571: auto-answer 'yes' to all prompts; for cron / auto-upgrade
 
+# XACA-0702: upgrade-outcome state. check_brew_updates() sets this true when the
+# brew step is the install method but the installed version did NOT advance —
+# either because the tap is refused (untrusted) or because `brew upgrade` ran but
+# the post-upgrade version equals the pre-upgrade version. The final summary block
+# reads it: on true we print a LOUD boxed failure + remediation and exit 1, instead
+# of the old unconditional "upgraded successfully!" + exit 0. Default false so a
+# box with no brew install (or already-current) still reports success normally.
+UPGRADE_BREW_FAILED=false
+# Whether aiteamforge is installed via Homebrew (decides version-stamp source and
+# whether the no-advance check applies at all). Resolved in check_brew_updates().
+UPGRADE_VIA_BREW=false
+# Real installed brew version AFTER the brew step (parsed from `brew list --versions`).
+# Used to stamp .installed-version accurately so doctor/status drift detection is
+# not fooled into thinking the box advanced when brew never did.
+UPGRADE_BREW_VERSION=""
+
 # Usage
 usage() {
   cat <<EOF
@@ -125,6 +141,21 @@ if [ "$DRY_RUN" = true ]; then
   echo ""
 fi
 
+# XACA-0702: parse the installed version token out of `brew list --versions`.
+# Output shape is "aiteamforge 0.15.0" (formula name + one-or-more version tokens);
+# we want the LAST whitespace-delimited field (the version). Returns empty string
+# when the formula is not installed via brew or brew is absent — callers treat an
+# empty pre/post pair as "comparison not possible" and skip the no-advance gate.
+# set -eo pipefail safe: the whole pipeline is captured by the caller with `|| true`.
+_brew_installed_version() {
+  command -v brew >/dev/null 2>&1 || { echo ""; return 0; }
+  local line
+  line="$(brew list --versions aiteamforge 2>/dev/null || true)"
+  [ -n "$line" ] || { echo ""; return 0; }
+  # Last field = newest installed version token.
+  echo "${line##* }"
+}
+
 # Check for Homebrew formula updates
 check_brew_updates() {
   print_section "Checking for Updates"
@@ -142,6 +173,17 @@ check_brew_updates() {
     return
   fi
 
+  # From here on we KNOW brew is the install method — record it so the final
+  # summary stamps the real brew version and applies the no-advance gate.
+  UPGRADE_VIA_BREW=true
+
+  # XACA-0702: snapshot the installed version BEFORE any brew mutation so we can
+  # detect a stuck box afterwards. Captured into a var first (never inline in a
+  # comparison) to stay safe under set -eo pipefail.
+  local pre_version=""
+  pre_version="$(_brew_installed_version || true)"
+  UPGRADE_BREW_VERSION="$pre_version"   # provisional; refreshed post-upgrade below
+
   # XACA-0676: trust the tap BEFORE any brew load. On a Homebrew with the
   # tap-trust gate active ($HOMEBREW_REQUIRE_TAP_TRUST), an untrusted tap makes
   # `brew outdated` return empty and the formula refuse to load — which would
@@ -152,20 +194,31 @@ check_brew_updates() {
 
   # If the formula is STILL refused after trusting, warn LOUDLY and bail —
   # never report success while stuck on the old version.
+  # XACA-0702: also record the failure so the FINAL summary fails loudly + exit 1,
+  # instead of falling through to "upgraded successfully!". The early return here
+  # short-circuits the rest of check_brew_updates (no point probing `brew outdated`
+  # on a formula brew refuses to load).
   if tap_load_refused; then
     print_warning "═══════════════════════════════════════════════════════════════"
     print_warning "Homebrew is REFUSING to load the aiteamforge formula (UNTRUSTED TAP)."
     print_warning "Upgrades are BLOCKED — your box will stay on the OLD version."
     print_warning "Remediation:  brew trust --tap $(_aitf_tap_name)"
     print_warning "═══════════════════════════════════════════════════════════════"
+    UPGRADE_BREW_FAILED=true
     return
   fi
 
-  # Check for updates
+  # Check for updates. `brew outdated` is captured into a variable (not used as the
+  # `if` condition directly) so we can re-probe it AFTER the brew step under set -e.
+  local outdated_before=false
   if brew outdated aiteamforge &>/dev/null; then
+    outdated_before=true
+  fi
+
+  if [ "$outdated_before" = true ]; then
     local available_version
-    available_version=$(brew info aiteamforge --json | jq -r '.[0].versions.stable')
-    print_warning "Update available: ${available_version}"
+    available_version=$(brew info aiteamforge --json 2>/dev/null | jq -r '.[0].versions.stable' 2>/dev/null || true)
+    print_warning "Update available: ${available_version:-unknown}"
 
     if [ "$DRY_RUN" = false ]; then
       # XACA-0571: skip the brew step entirely under --non-interactive — the
@@ -173,10 +226,33 @@ check_brew_updates() {
       # before invoking this command; re-running it here would be redundant.
       if [ "$NON_INTERACTIVE" = true ]; then
         print_info "Skipping brew upgrade prompt (--non-interactive); caller already handled brew"
+        # XACA-0702: the LaunchAgent ran `brew upgrade` BEFORE us, so the pre-snapshot
+        # already reflects whatever brew did. We cannot bracket our own brew step here
+        # — instead detect a stuck box by re-probing `brew outdated`. If the formula is
+        # STILL outdated, brew never advanced (e.g. silently refused) → fail loudly.
+        if brew outdated aiteamforge &>/dev/null; then
+          print_warning "Formula is STILL outdated after the caller's brew upgrade — brew did not advance."
+          UPGRADE_BREW_FAILED=true
+        fi
       elif prompt_yes_no "Upgrade Homebrew formula?" "y"; then
         print_info "Upgrading via Homebrew..."
-        brew upgrade aiteamforge
-        print_success "Formula upgraded"
+        # XACA-0702: never let a non-zero brew exit kill the script before we can
+        # report it. Capture the outcome, then compare pre/post installed versions.
+        if brew upgrade aiteamforge; then
+          print_success "Formula upgraded"
+        else
+          print_warning "brew upgrade aiteamforge exited non-zero"
+        fi
+        local post_version=""
+        post_version="$(_brew_installed_version || true)"
+        UPGRADE_BREW_VERSION="${post_version:-$UPGRADE_BREW_VERSION}"
+        # No-advance detection: a brew upgrade that left the installed version
+        # unchanged means the box is stuck (refused tap, pinned, etc.). Only flag
+        # when we have BOTH a pre and post token to compare (empty = can't tell).
+        if [ -n "$pre_version" ] && [ -n "$post_version" ] && [ "$pre_version" = "$post_version" ]; then
+          print_warning "Installed brew version did not advance (still ${post_version})."
+          UPGRADE_BREW_FAILED=true
+        fi
       fi
     else
       echo "Would upgrade: brew upgrade aiteamforge"
@@ -1076,20 +1152,37 @@ update_launchagents
 # chaining `aiteamforge upgrade --non-interactive`. The cellar-watch LaunchAgent
 # normally handles this automatically, but the stamp is the diagnostic backstop.
 # Skipped under --dry-run (stamp is a side-effect, not a preview).
+#
+# XACA-0702: the stamp must reflect the ACTUAL installed state, not blindly the
+# framework VERSION. When brew is the install method, stamp the real
+# `brew list --versions` token (UPGRADE_BREW_VERSION captured in check_brew_updates)
+# — otherwise a no-op/refused brew upgrade would still stamp the NEW framework
+# version, fooling `aiteamforge doctor`/`status` drift detection into thinking the
+# box advanced when it is still on the old version. Only when brew is NOT the
+# install method do we fall back to copying the framework VERSION file.
 if [ "$DRY_RUN" = false ]; then
-  _stamp_version_file=""
-  for _stamp_candidate in "${FRAMEWORK_DIR}/../VERSION" "${FRAMEWORK_DIR}/VERSION" "${LIBEXEC_DIR}/../VERSION"; do
-    if [ -f "$_stamp_candidate" ]; then
-      _stamp_version_file="$_stamp_candidate"
-      break
+  if [ "$UPGRADE_VIA_BREW" = true ] && [ -n "$UPGRADE_BREW_VERSION" ] && [ -d "$WORKING_DIR" ]; then
+    # Brew install method: stamp the real installed brew version.
+    if printf '%s\n' "$UPGRADE_BREW_VERSION" > "$WORKING_DIR/.installed-version" 2>/dev/null; then
+      print_info "Stamped working-dir version (brew): ${UPGRADE_BREW_VERSION}"
     fi
-  done
-  if [ -n "$_stamp_version_file" ] && [ -d "$WORKING_DIR" ]; then
-    if cp "$_stamp_version_file" "$WORKING_DIR/.installed-version" 2>/dev/null; then
-      print_info "Stamped working-dir version: $(cat "$WORKING_DIR/.installed-version" | tr -d '[:space:]')"
+  else
+    # Non-brew install method (or brew version unknown): fall back to the framework
+    # VERSION file, preserving the original XACA-0578 behaviour.
+    _stamp_version_file=""
+    for _stamp_candidate in "${FRAMEWORK_DIR}/../VERSION" "${FRAMEWORK_DIR}/VERSION" "${LIBEXEC_DIR}/../VERSION"; do
+      if [ -f "$_stamp_candidate" ]; then
+        _stamp_version_file="$_stamp_candidate"
+        break
+      fi
+    done
+    if [ -n "$_stamp_version_file" ] && [ -d "$WORKING_DIR" ]; then
+      if cp "$_stamp_version_file" "$WORKING_DIR/.installed-version" 2>/dev/null; then
+        print_info "Stamped working-dir version: $(cat "$WORKING_DIR/.installed-version" | tr -d '[:space:]')"
+      fi
     fi
+    unset _stamp_version_file _stamp_candidate
   fi
-  unset _stamp_version_file _stamp_candidate
 fi
 
 # Show changelog (only if not dry run)
@@ -1104,6 +1197,28 @@ if [ "$DRY_RUN" = true ]; then
   print_info "Dry run complete - no changes made"
   echo ""
   print_info "Run without --dry-run to apply changes"
+elif [ "$UPGRADE_BREW_FAILED" = true ]; then
+  # XACA-0702: the brew step never advanced (untrusted/refused tap, or a no-op
+  # upgrade). The component sweeps above only refreshed files FROM the Cellar — if
+  # the Cellar itself is on the old version, nothing actually changed. Report a
+  # LOUD, boxed failure with the exact remediation and exit non-zero so callers
+  # (auto-upgrade LaunchAgent, CI, a human) are not fooled by a false success.
+  print_error "╔═══════════════════════════════════════════════════════════════╗"
+  print_error "║                  UPGRADE FAILED — NOT UPGRADED                 ║"
+  print_error "╚═══════════════════════════════════════════════════════════════╝"
+  print_error "Homebrew did NOT advance the aiteamforge formula."
+  print_error "This box is STILL on the OLD version: ${CURRENT_VERSION:-unknown}"
+  echo ""
+  print_error "Most common cause: the tap is UNTRUSTED on a trust-gated Homebrew,"
+  print_error "so 'brew upgrade' silently no-ops while reporting success."
+  echo ""
+  print_error "Remediation:"
+  echo "  brew trust --tap $(_aitf_tap_name)"
+  echo "  brew upgrade aiteamforge"
+  echo "  aiteamforge upgrade"
+  echo ""
+  print_error "Then re-run the health check: aiteamforge doctor"
+  exit 1
 else
   print_success "Dev-team has been upgraded successfully!"
   echo ""

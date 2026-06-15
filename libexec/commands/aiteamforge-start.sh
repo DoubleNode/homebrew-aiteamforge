@@ -174,16 +174,41 @@ check_port_health() {
     return 0
   fi
 
-  if ! "${port_fix_cmd[@]}" --check 2>/dev/null; then
-    print_error "LCARS port collision or null-port detected in team-paths.json."
-    print_error "LCARS servers may fail to bind to the correct ports."
-    print_error "Fix with: aiteamforge-port-fix --apply"
+  # Happy path: ports already healthy.
+  if "${port_fix_cmd[@]}" --check 2>/dev/null; then
+    print_success "LCARS port health check passed"
+    return 0
+  fi
+
+  # XACA-0702: a failed --check used to ABORT start/restart and tell the user to
+  # run the remediation by hand. That is busywork for a documented, self-applying
+  # fix — so auto-apply it. Announce LOUDLY what we are doing (this MUTATES
+  # team-paths.json port assignments), run `--apply`, then re-verify with `--check`.
+  # Only if it STILL fails after the reconcile do we abort.
+  print_warning "═══════════════════════════════════════════════════════════════"
+  print_warning "LCARS port collision or null-port detected in team-paths.json."
+  print_warning "Auto-applying a port reconcile (aiteamforge-port-fix --apply):"
+  print_warning "  this reassigns colliding/unset LCARS ports to free, unique values"
+  print_warning "  so each team's LCARS server can bind correctly."
+  print_warning "═══════════════════════════════════════════════════════════════"
+
+  if ! "${port_fix_cmd[@]}" --apply; then
+    print_error "Port reconcile (--apply) failed."
+    print_error "Resolve manually with: aiteamforge-port-fix --apply"
     print_error "Then re-run: aiteamforge start"
     return 1
   fi
 
-  print_success "LCARS port health check passed"
-  return 0
+  # Re-verify after the auto-apply.
+  if "${port_fix_cmd[@]}" --check 2>/dev/null; then
+    print_success "Port reconcile applied — LCARS port health check now passes"
+    return 0
+  fi
+
+  print_error "Port health STILL failing after auto-applied reconcile."
+  print_error "This needs manual attention — inspect team-paths.json port assignments."
+  print_error "Re-run after fixing: aiteamforge start"
+  return 1
 }
 
 # Validate kanban boards for all configured teams

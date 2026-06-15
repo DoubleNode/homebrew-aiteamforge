@@ -36,8 +36,55 @@ get_config_value() {
 }
 
 # Get installed version
+#
+# XACA-0702: the config "version" value is stamped ONCE at install time and is
+# never updated by `brew upgrade`, so `aiteamforge status` showed a stale version
+# (e.g. 0.11.6) long after the box advanced. Prefer the freshest accurate source:
+#   1. The live brew version when installed via brew (`brew list --versions`).
+#   2. The working-dir .installed-version stamp written by the upgrade flow
+#      (XACA-0578/0702) — accurate on non-brew installs and a fast brew fallback.
+#   3. The legacy config "version" value.
+# Each source is guarded (brew may be absent; files may not exist). Returns a
+# single trimmed token; "unknown" only if every source fails.
+#
+# Shared lib consumed by aiteamforge-status.sh / aiteamforge-doctor.sh /
+# aiteamforge-upgrade.sh — all callers expect a single version token on stdout,
+# which this still returns; the change is purely which source wins.
 get_installed_version() {
-  get_config_value "version"
+  local v=""
+
+  # Source 1: live brew version (only meaningful if installed via brew).
+  if command -v brew >/dev/null 2>&1; then
+    if brew list aiteamforge >/dev/null 2>&1; then
+      local brew_line
+      brew_line="$(brew list --versions aiteamforge 2>/dev/null || true)"
+      if [ -n "$brew_line" ]; then
+        # Last whitespace-delimited field = installed version token.
+        v="${brew_line##* }"
+      fi
+    fi
+  fi
+
+  # Source 2: working-dir .installed-version stamp.
+  if [ -z "$v" ]; then
+    local stamp_dir stamp_file
+    stamp_dir="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
+    stamp_file="${stamp_dir}/.installed-version"
+    if [ -f "$stamp_file" ]; then
+      v="$(tr -d '[:space:]' < "$stamp_file" 2>/dev/null || true)"
+    fi
+  fi
+
+  # Source 3: legacy config value.
+  if [ -z "$v" ]; then
+    v="$(get_config_value "version" 2>/dev/null || true)"
+  fi
+
+  if [ -n "$v" ]; then
+    echo "$v"
+  else
+    echo "unknown"
+  fi
 }
 
 # Get installation date

@@ -159,7 +159,7 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Any, Optional
+from typing import Any, List, Optional
 
 TEAM_PATHS_JSON = pathlib.Path("~/.aiteamforge/team-paths.json").expanduser()
 SESSION_ACCOUNT_MAP_JSONL = pathlib.Path("~/.claude/.session-account-map.jsonl").expanduser()
@@ -210,16 +210,32 @@ def log_error(msg: str) -> None: _log("ERROR", msg)
 
 
 # --- binary discovery ---
-def find_ccusage() -> Optional[str]:
-    """Return path to ccusage binary or None if not found."""
+def find_ccusage() -> Optional[List[str]]:
+    """Return the ccusage invocation as a command-prefix list, or None if not found.
+
+    Resolution order:
+      1. ``ccusage`` on PATH               -> ["/abs/path/ccusage"]
+      2. fnm-managed install glob          -> ["/abs/path/ccusage"]
+      3. npx fallback (XACA-0702/0243)     -> ["npx", "-y", "ccusage"]
+
+    Returning a LIST (not a bare string) lets the npx case carry its own argv
+    prefix; every call site builds ``find_ccusage() + ["blocks", ...]`` rather than
+    ``[binary, "blocks", ...]`` so a multi-token prefix never collapses into a
+    single mangled argv element. ``npx -y ccusage`` auto-confirms the first-run
+    install prompt so the collector self-heals on a box that only has Node/npx.
+    """
     found = shutil.which("ccusage")
     if found:
-        return found
+        return [found]
     import glob
     for pattern in FNM_FALLBACK_GLOBS:
         matches = sorted(glob.glob(os.path.expanduser(pattern)))
         if matches:
-            return matches[-1]
+            return [matches[-1]]
+    # XACA-0702 (XACA-0243 class): no direct binary — fall back to npx if present.
+    npx = shutil.which("npx")
+    if npx:
+        return [npx, "-y", "ccusage"]
     return None
 
 
@@ -229,10 +245,15 @@ def _since_flag(days_back: int) -> str:
     return d.strftime("%Y%m%d")
 
 
-def run_ccusage(binary: str, days_back: int) -> tuple[bool, Any, str]:
-    """Run ccusage blocks --json --since YYYYMMDD. Returns (ok, data, error_msg)."""
+def run_ccusage(binary: List[str], days_back: int) -> tuple[bool, Any, str]:
+    """Run ccusage blocks --json --since YYYYMMDD. Returns (ok, data, error_msg).
+
+    ``binary`` is a command-prefix list from find_ccusage() (e.g. ["/path/ccusage"]
+    or ["npx", "-y", "ccusage"]); it is splatted into the argv so a multi-token npx
+    prefix is preserved (XACA-0702).
+    """
     # ccusage scans JSONL files; can take 50-200s on large histories
-    cmd = [binary, "blocks", "--json", "--since", _since_flag(days_back)]
+    cmd = [*binary, "blocks", "--json", "--since", _since_flag(days_back)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT_S)
     except FileNotFoundError as e:
@@ -251,13 +272,14 @@ def run_ccusage(binary: str, days_back: int) -> tuple[bool, Any, str]:
         return False, None, f"JSON parse error: {e} — output: {result.stdout[:100]}"
 
 
-def run_ccusage_weekly(binary: str) -> tuple[bool, Any, str]:
+def run_ccusage_weekly(binary: List[str]) -> tuple[bool, Any, str]:
     """Run ccusage weekly --json --since YYYYMMDD. Returns (ok, data, error_msg).
 
     Uses the same timeout as the blocks call — weekly scans the same JSONL
-    transcripts and has comparable runtime characteristics.
+    transcripts and has comparable runtime characteristics. ``binary`` is the
+    command-prefix list from find_ccusage() (XACA-0702).
     """
-    cmd = [binary, "weekly", "--json", "--since", _since_flag(WEEKLY_DAYS)]
+    cmd = [*binary, "weekly", "--json", "--since", _since_flag(WEEKLY_DAYS)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT_S)
     except FileNotFoundError as e:
@@ -276,14 +298,15 @@ def run_ccusage_weekly(binary: str) -> tuple[bool, Any, str]:
         return False, None, f"weekly JSON parse error: {e} — output: {result.stdout[:100]}"
 
 
-def run_ccusage_session(binary: str, days_back: int) -> tuple[bool, Any, str]:
+def run_ccusage_session(binary: List[str], days_back: int) -> tuple[bool, Any, str]:
     """Run ccusage session --json --since YYYYMMDD. Returns (ok, data, error_msg).
 
     Used for per-account attribution: each session row carries a sessionId that
     encodes the project working directory.  Uses the same timeout as blocks/weekly
-    since it scans the same JSONL transcripts.
+    since it scans the same JSONL transcripts. ``binary`` is the command-prefix
+    list from find_ccusage() (XACA-0702).
     """
-    cmd = [binary, "session", "--json", "--since", _since_flag(days_back)]
+    cmd = [*binary, "session", "--json", "--since", _since_flag(days_back)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT_S)
     except FileNotFoundError as e:
@@ -302,7 +325,7 @@ def run_ccusage_session(binary: str, days_back: int) -> tuple[bool, Any, str]:
         return False, None, f"session JSON parse error: {e} — output: {result.stdout[:100]}"
 
 
-def run_ccusage_daily_breakdown(binary: str, days_back: int) -> tuple[bool, Any, str]:
+def run_ccusage_daily_breakdown(binary: List[str], days_back: int) -> tuple[bool, Any, str]:
     """Run ccusage daily --json --breakdown --since YYYYMMDD. Returns (ok, data, error_msg).
 
     The daily command with --breakdown returns per-model token + cost splits in
@@ -311,9 +334,10 @@ def run_ccusage_daily_breakdown(binary: str, days_back: int) -> tuple[bool, Any,
     list with no per-model token counts; session carries no model info at all).
 
     Uses the same timeout as the other calls since it scans the same JSONL
-    transcripts.
+    transcripts. ``binary`` is the command-prefix list from find_ccusage()
+    (XACA-0702).
     """
-    cmd = [binary, "daily", "--json", "--breakdown", "--since", _since_flag(days_back)]
+    cmd = [*binary, "daily", "--json", "--breakdown", "--since", _since_flag(days_back)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=CCUSAGE_TIMEOUT_S)
     except FileNotFoundError as e:
@@ -929,8 +953,11 @@ def write_cache(payload: dict) -> None:
 
 # --- collection logic ---
 
-def collect(binary: str) -> None:
-    """Run one full collection cycle and update the cache file."""
+def collect(binary: List[str]) -> None:
+    """Run one full collection cycle and update the cache file.
+
+    ``binary`` is the command-prefix list from find_ccusage() (XACA-0702).
+    """
     prev = read_prev_cache()
     now_iso = _utc_now_iso()
     now_unix = _utc_now_unix()
@@ -1116,7 +1143,7 @@ def _source_changed(baseline: Optional[float]) -> bool:
         return False
 
 
-def run_loop(binary: str) -> None:
+def run_loop(binary: List[str]) -> None:
     signal.signal(signal.SIGTERM, _handle_sigterm)
     acquire_pid_or_exit()
     log_info(f"Collector started (PID {os.getpid()}), polling every {POLL_INTERVAL_S}s")
@@ -1158,9 +1185,10 @@ def main() -> None:
 
     binary = find_ccusage()
     if not binary:
-        log_error("ccusage binary not found. Install via npm/npx or ensure it is in PATH or a known fnm location.")
+        log_error("ccusage not found. Tried PATH (ccusage), known fnm install locations, "
+                  "and the npx fallback (npx). Install ccusage via npm, or ensure node/npx is on PATH.")
         sys.exit(1)
-    log_info(f"Using ccusage at: {binary}")
+    log_info(f"Using ccusage invocation: {' '.join(binary)}")
 
     # Ensure secure runtime dir exists before any I/O (covers both --once and loop modes).
     ensure_runtime_dir()
