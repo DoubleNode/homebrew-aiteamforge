@@ -343,119 +343,6 @@ check_server_process_exists() {
 }
 
 # ============================================================================
-# Detect the actual bound port of every running LCARS server, keyed by team.
-# ============================================================================
-# XACA-0706 (root cause of XACA-0613): the health loop below only asked
-# "is something answering on the team's CANONICAL port?". It was blind to a
-# live <instance>-lcars server.py bound to a NON-canonical port — the exact
-# state M1Pro's finance-personal got stuck in after the v0.15.0 resolver
-# refresh moved its canonical port (8360) while a long-lived session kept
-# serving on the pre-refresh cksum port (8427). The launcher's has-session
-# idempotency guard then BLOCKED recreation, so script+config fixes never
-# rebound the running session; the phantom later died unnoticed for 13 days.
-#
-# This function does one cheap `ps eww` sweep and maps team -> bound port(s)
-# so the loop can compare bound-vs-canonical and self-heal surgically.
-#
-# HOW WE READ THE BOUND PORT (verified against real `ps eww` on macOS):
-#   Every LCARS server is launched (start_lcars_server / _hc_start_lcars_server)
-#   as:  env LCARS_TEAM=<team> ... <python> server.py <PORT>
-#   `ps eww -o args=` prints the argv ("<python> server.py <PORT>") immediately
-#   followed by the inherited environment ("... LCARS_TEAM=<team> ..."), with NO
-#   delimiter between them. We therefore parse two anchored tokens out of that
-#   single string:
-#     - PORT: the first integer that follows the literal "server.py " (argv tail)
-#     - TEAM: the value after a whitespace-prefixed "LCARS_TEAM=" up to the next
-#             space (team ids never contain whitespace)
-#   Both anchors are immune to the noisy env blob (paths with spaces, the giant
-#   CLAUDE_SYSTEM_PROMPT, CC_SESSION_NAME text that merely mentions "port", and
-#   the sibling _ATF_TEAM= / LCARS_SESSION_NAME= vars) because neither the bare
-#   word "port" nor those vars carry the exact `server.py <N>` / ` LCARS_TEAM=`
-#   prefixes we anchor on.
-#
-# Populates the global associative array LCARS_BOUND_PORTS (team -> "p1 p2 ...").
-# A team may legitimately appear with multiple ports if a stale + fresh server
-# coexist; the caller handles that.
-typeset -gA LCARS_BOUND_PORTS
-detect_lcars_bound_ports() {
-    LCARS_BOUND_PORTS=()
-    local _pid _args _team _port
-    for _pid in ${(f)"$(pgrep -f 'server\.py' 2>/dev/null)"}; do
-        [[ -z "$_pid" ]] && continue
-        _args="$(ps eww -o args= -p "$_pid" 2>/dev/null)"
-        [[ -z "$_args" ]] && continue
-        # Only LCARS servers carry an LCARS_TEAM env var; skip anything else
-        # (e.g. an unrelated server.py) that lacks it.
-        _team="${_args##*[[:space:]]LCARS_TEAM=}"
-        # No match → ${...##...} returns the string unchanged; guard on that.
-        [[ "$_team" == "$_args" ]] && continue
-        _team="${_team%%[[:space:]]*}"
-        [[ -z "$_team" ]] && continue
-        # Port = first integer immediately after "server.py ".
-        _port="${_args#*server.py[[:space:]]}"
-        _port="${_port%%[^0-9]*}"
-        [[ -z "$_port" ]] && continue
-        if [[ -n "${LCARS_BOUND_PORTS[$_team]:-}" ]]; then
-            LCARS_BOUND_PORTS[$_team]="${LCARS_BOUND_PORTS[$_team]} $_port"
-        else
-            LCARS_BOUND_PORTS[$_team]="$_port"
-        fi
-    done
-}
-
-# ============================================================================
-# Surgically heal a team whose live LCARS server is bound to a non-canonical
-# port: kill ONLY that team's <instance>-lcars tmux session and the stale
-# server.py on the wrong port(s), then recreate on the canonical port.
-# ============================================================================
-# XACA-0706: This NEVER re-runs <team>-startup.sh — live agent tmux panes and
-# sessions in that team must be untouched. We only kill the one <instance>-lcars
-# session and the wrong-port server.py, then call _hc_start_lcars_server (which
-# already mirrors start_lcars_server's HUP-immune nohup+disown launch form).
-_hc_heal_noncanonical_port() {
-    local canonical_port=$1
-    local team=$2
-    local session_name=$3
-    local tmux_socket=$4
-    local wrong_ports=$5  # space-separated list of bound ports != canonical
-
-    log "  Healing $team: live server bound to non-canonical port(s) [$wrong_ports], canonical=$canonical_port"
-
-    # 1. Kill the team's <instance>-lcars tmux session ONLY (not other panes).
-    #    The session name is the team's session_pattern with the leading ".*"
-    #    glob stripped, matching how run_health_check derives it for restart.
-    local kill_session="${session_name}"
-    local socket_path="$TMUX_SOCKET_DIR/$tmux_socket"
-    if [[ -S "$socket_path" ]]; then
-        if tmux -S "$socket_path" has-session -t "$kill_session" 2>/dev/null; then
-            log "    Killing stale tmux session: $kill_session (socket $tmux_socket)"
-            tmux -S "$socket_path" kill-session -t "$kill_session" 2>/dev/null || true
-        fi
-    else
-        # Fallback to -L syntax.
-        if tmux -L "$tmux_socket" has-session -t "$kill_session" 2>/dev/null; then
-            log "    Killing stale tmux session: $kill_session (socket $tmux_socket)"
-            tmux -L "$tmux_socket" kill-session -t "$kill_session" 2>/dev/null || true
-        fi
-    fi
-
-    # 2. Kill the stale server.py process(es) on each wrong port. Anchor the
-    #    port at a word boundary so "8427" cannot match "84270" (XACA-0661 idiom).
-    local _wp
-    for _wp in ${=wrong_ports}; do
-        [[ "$_wp" == "$canonical_port" ]] && continue
-        log "    Killing stale server.py on wrong port $_wp"
-        pkill -f "server\.py[[:space:]].*[[:space:]]${_wp}([[:space:]]|\$)" 2>/dev/null || \
-            pkill -f "server\.py[[:space:]]${_wp}([[:space:]]|\$)" 2>/dev/null || true
-    done
-    sleep 1
-
-    # 3. Recreate on the CANONICAL port via the shared restart path.
-    _hc_start_lcars_server "$canonical_port" "$team" "$session_name"
-    return $?
-}
-
-# ============================================================================
 # Main health check routine
 # ============================================================================
 run_health_check() {
@@ -466,63 +353,14 @@ run_health_check() {
     local unhealthy=0
     local skipped=0
     local restarted=0
-    local drifted=0
-    # XACA-0706: hoist loop-scoped scratch var. A bare `local _bp` INSIDE the
-    # outer loop re-declares an already-set local on the 2nd+ iteration, which
-    # zsh prints as `_bp=<value>` to stdout — corrupting the health-check log
-    # (k501-zsh-local-in-loop-gotcha). Declare once here, assign without `local`
-    # inside the loop.
-    local _bp
 
     log "═══════════════════════════════════════════════════════"
     log "LCARS Health Check"
     log "═══════════════════════════════════════════════════════"
 
-    # XACA-0706: one ps sweep up front — map every live LCARS server's actual
-    # bound port by team, so the loop can catch a server bound to a
-    # non-canonical port (the XACA-0613 refresh-gap) before the canonical-port
-    # health check masks it.
-    detect_lcars_bound_ports
-
     for server_config in "${LCARS_SERVERS[@]}"; do
         # Parse config
         IFS=':' read -r funnel_port local_port team tmux_socket session_pattern <<< "$server_config"
-
-        # The canonical <instance>-lcars session name = pattern minus the ".*"
-        # glob (freelance uses ".*-lcars"). Used for both surgical heal and the
-        # normal restart path below.
-        local canonical_session="${session_pattern/\.\*/}"
-
-        # XACA-0706: NON-CANONICAL-PORT DRIFT DETECTION.
-        # Compare the team's actual bound port(s) against its canonical port.
-        # A live server.py for this team bound to a port != $local_port is the
-        # XACA-0613 stuck-on-stale-port case. We detect it BEFORE the canonical
-        # health check because the canonical port is usually dead in that state
-        # (the server is serving the wrong port) — and even if both are up, a
-        # server on the wrong port is still wrong and must be reconciled.
-        local _bound="${LCARS_BOUND_PORTS[$team]:-}"
-        local _noncanonical=""
-        if [[ -n "$_bound" ]]; then
-            for _bp in ${=_bound}; do
-                [[ "$_bp" != "$local_port" ]] && _noncanonical="${_noncanonical:+$_noncanonical }$_bp"
-            done
-        fi
-        if [[ -n "$_noncanonical" ]]; then
-            log "  [diag] $team: bound=[$_bound] canonical=$local_port — NON-CANONICAL DRIFT on [$_noncanonical]"
-            ((drifted++))
-            if [[ "$STATUS_ONLY" == "false" ]]; then
-                log "🔧 $team - self-healing non-canonical-port drift"
-                if _hc_heal_noncanonical_port "$local_port" "$team" "$canonical_session" "$tmux_socket" "$_noncanonical"; then
-                    ((restarted++))
-                fi
-                continue
-            else
-                log "⚠️  $team:$local_port - bound to non-canonical port(s) [$_noncanonical] (status-only: not healed)"
-                # Fall through to normal status reporting below.
-            fi
-        else
-            log "  [diag] $team: bound=[${_bound:-none}] canonical=$local_port — port OK"
-        fi
 
         # Check if this port has a remote tunnel
         local remote_host=$(get_remote_host_for_port "$local_port")
@@ -567,7 +405,7 @@ run_health_check() {
         ((unhealthy++))
 
         if [[ "$STATUS_ONLY" == "false" ]]; then
-            _hc_start_lcars_server "$local_port" "$team" "$canonical_session"
+            _hc_start_lcars_server "$local_port" "$team" "${session_pattern/\.\*/}"
             if [[ $? -eq 0 ]]; then
                 ((restarted++))
             fi
@@ -575,7 +413,7 @@ run_health_check() {
     done
 
     log "───────────────────────────────────────────────────────"
-    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $drifted non-canonical-port drift, $skipped skipped (port-unresolved)"
+    log "Summary: $healthy healthy, $unhealthy unhealthy (configured teams that were restarted/retried), $skipped skipped (port-unresolved)"
 
     if [[ "$STATUS_ONLY" == "false" && $restarted -gt 0 ]]; then
         log "Restarted: $restarted servers"
@@ -583,9 +421,8 @@ run_health_check() {
 
     log "═══════════════════════════════════════════════════════"
 
-    # Return non-zero in status-only mode if any server is unhealthy or bound to
-    # a non-canonical port (XACA-0706 — surfaces the drift to callers/monitors).
-    if [[ "$STATUS_ONLY" == "true" && ( $unhealthy -gt 0 || $drifted -gt 0 ) ]]; then
+    # Return non-zero if any servers are unhealthy and weren't restarted
+    if [[ $unhealthy -gt 0 && "$STATUS_ONLY" == "true" ]]; then
         return 1
     fi
     return 0

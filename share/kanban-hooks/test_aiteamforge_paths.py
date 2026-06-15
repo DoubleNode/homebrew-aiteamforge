@@ -63,6 +63,7 @@ import aiteamforge_paths  # noqa: E402
 from aiteamforge_paths import (  # noqa: E402
     build_team_code_map,
     compute_instance_port,
+    config_is_structurally_valid,
     get_team_code,
     get_team_from_code,
 )
@@ -639,20 +640,87 @@ class TestLoadConfigCanonicalGuardXACA0647(unittest.TestCase):
         )
         self.assertGreater(len(teams), 1)
 
-    def test_corrupt_missing_academy_is_reseeded(self):
-        """A config with finance-personal but NO academy is corrupt (academy is required)."""
+    def test_custom_team_only_no_academy_is_preserved(self):
+        """XACA-0705 regression: a config with a custom non-academy team but NO
+        academy must be treated as VALID and preserved as-is, NOT overwritten with
+        DEFAULT_TEAMS.
+
+        This is the consumer-install bug: a fresh consumer box whose team-paths.json
+        contains only a custom entry (e.g. freelance-myproject) had its config
+        clobbered by DEFAULT_TEAMS because the prior guard required academy to be
+        present. The fix: drop the academy-required constraint from the validity
+        test; academy-alone / empty is still the corruption signal.
+
+        Pre-fix behaviour (BUG): load_config() treated missing_required={academy}
+        as corrupt → bootstrapped DEFAULT_TEAMS → custom entry discarded.
+        Post-fix behaviour (EXPECTED): config is valid → preserved exactly as-is.
+        """
+        self._write_config({"freelance-myproject-portal": _minimal_team_entry("freelance-myproject-portal")})
+
+        result = aiteamforge_paths.load_config()
+        teams = result["teams"]
+
+        # The custom team must survive — the file was NOT overwritten.
+        self.assertIn(
+            "freelance-myproject-portal", teams,
+            "XACA-0705: custom-only config (no academy) must be preserved — not re-seeded",
+        )
+        # DEFAULT_TEAMS must NOT have been merged in — ios is a reliable canary.
+        self.assertNotIn(
+            "ios", teams,
+            "XACA-0705: DEFAULT_TEAMS (ios) must NOT be injected into a custom-only config",
+        )
+        # Exactly the team we wrote — no silent expansion.
+        self.assertEqual(
+            set(teams.keys()), {"freelance-myproject-portal"},
+            "XACA-0705: load_config() must preserve the exact team set from a custom-only config",
+        )
+
+        # Verify the file on disk was also NOT overwritten.
+        import json as _json
+        with open(self._config_path, encoding="utf-8") as fh:
+            on_disk = _json.load(fh)
+        self.assertIn(
+            "freelance-myproject-portal", on_disk.get("teams", {}),
+            "XACA-0705: team-paths.json must not have been overwritten on disk",
+        )
+        self.assertNotIn(
+            "ios", on_disk.get("teams", {}),
+            "XACA-0705: DEFAULT_TEAMS must not appear in the on-disk file",
+        )
+
+    def test_corrupt_missing_academy_FORMERLY_reseeded_now_valid(self):
+        """XACA-0705: a config with finance-personal but NO academy is now VALID.
+
+        PRIOR BEHAVIOUR (pre-XACA-0705 — this encoded the BUG):
+            load_config() treated "missing academy" as corrupt and bootstrapped
+            DEFAULT_TEAMS, discarding the custom entry. The old test was:
+                test_corrupt_missing_academy_is_reseeded
+            It expected ios to appear and was intentionally testing the bug.
+
+        NEW BEHAVIOUR (XACA-0705 fix):
+            A config with ANY non-academy team is valid. Academy absence is a
+            diagnostic hint only; it is NOT a corruption signal. load_config()
+            must preserve the config exactly as written.
+        """
         self._write_config({"finance-personal": _minimal_team_entry("finance-personal")})
 
         result = aiteamforge_paths.load_config()
         teams = result["teams"]
 
+        # finance-personal must be preserved — NOT replaced by DEFAULT_TEAMS.
         self.assertIn(
-            "ios", teams,
-            "Config missing academy must be re-seeded with DEFAULT_TEAMS (ios expected)",
+            "finance-personal", teams,
+            "XACA-0705: finance-personal-only config must be preserved (no academy required)",
         )
-        self.assertIn(
-            "academy", teams,
-            "Re-seeded config must include academy from DEFAULT_TEAMS",
+        # DEFAULT_TEAMS must NOT have been injected.
+        self.assertNotIn(
+            "ios", teams,
+            "XACA-0705: ios must NOT appear — this config is now valid, not corrupt",
+        )
+        self.assertEqual(
+            set(teams.keys()), {"finance-personal"},
+            "XACA-0705: load_config() must not add or remove teams from a finance-personal-only config",
         )
 
     def test_corrupt_missing_schema_version_is_reseeded(self):
@@ -768,10 +836,81 @@ class TestTeamsSatisfyCanonicalGuard(unittest.TestCase):
         self.assertFalse(has_other, "Empty set yields has_non_required=False")
 
     def test_finance_personal_only_missing_academy(self):
-        """finance-personal only: academy is missing but has_non_required is True."""
+        """finance-personal only: academy is missing but has_non_required is True.
+
+        Note (XACA-0705): teams_satisfy_canonical_guard() still returns
+        missing_required={academy} for this case — the raw guard hasn't changed.
+        What changed is that config_is_structurally_valid() no longer treats
+        missing_required as a corruption signal. The guard's return values remain
+        available for diagnostic logging.
+        """
         missing, has_other = self._guard({"finance-personal"})
         self.assertEqual(missing, frozenset({"academy"}), "academy must be flagged as missing")
         self.assertTrue(has_other, "finance-personal counts as a non-required team")
+
+
+# ---------------------------------------------------------------------------
+# XACA-0705: config_is_structurally_valid() unit tests
+#
+# Locks the truth table for the shared predicate that encodes the validity rule
+# used by BOTH load_config() and server.py _build_team_kanban_dirs().
+#
+# Truth table (per XACA-0705 spec):
+#   {custom-instance-team}          has_schema=True  → VALID
+#   {academy}                       has_schema=True  → corrupt
+#   {}                              has_schema=True  → corrupt
+#   {academy, ios, ...}             has_schema=True  → VALID
+#   missing schema_version          has_schema=False → corrupt
+# ---------------------------------------------------------------------------
+
+class TestConfigIsStructurallyValid(unittest.TestCase):
+    """XACA-0705: Unit tests for config_is_structurally_valid() truth table."""
+
+    def test_custom_only_no_academy_with_schema_is_valid(self):
+        """A custom-only config (no academy) with schema_version is VALID.
+
+        This is the core consumer-install fix: a config with only a custom
+        non-default team must NOT be treated as corrupt.
+        """
+        self.assertTrue(
+            config_is_structurally_valid({"freelance-myproject-portal"}, has_schema=True),
+            "Custom-only config (no academy) must be VALID",
+        )
+
+    def test_academy_alone_is_corrupt(self):
+        """academy as the only team → corrupt (academy-alone corruption signature)."""
+        self.assertFalse(
+            config_is_structurally_valid({"academy"}, has_schema=True),
+            "academy-alone must be corrupt",
+        )
+
+    def test_empty_teams_is_corrupt(self):
+        """Empty teams → corrupt."""
+        self.assertFalse(
+            config_is_structurally_valid(set(), has_schema=True),
+            "Empty teams must be corrupt",
+        )
+
+    def test_academy_plus_other_is_valid(self):
+        """Normal dev box (academy + ios + ...) is VALID — unchanged from pre-XACA-0705."""
+        self.assertTrue(
+            config_is_structurally_valid({"academy", "ios", "firebase"}, has_schema=True),
+            "Normal dev config (academy + ios + firebase) must be VALID",
+        )
+
+    def test_missing_schema_version_is_corrupt(self):
+        """Missing schema_version (has_schema=False) → corrupt even with teams present."""
+        self.assertFalse(
+            config_is_structurally_valid({"academy", "ios"}, has_schema=False),
+            "Missing schema_version must be corrupt",
+        )
+
+    def test_finance_personal_only_is_valid(self):
+        """finance-personal only (no academy) with schema_version is VALID (XACA-0705)."""
+        self.assertTrue(
+            config_is_structurally_valid({"finance-personal"}, has_schema=True),
+            "finance-personal-only config must be VALID after XACA-0705",
+        )
 
 
 # ---------------------------------------------------------------------------

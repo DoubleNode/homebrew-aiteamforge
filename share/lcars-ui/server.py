@@ -64,6 +64,7 @@ try:
         build_team_code_map as _aiteamforge_build_team_code_map,
         build_import_path_maps as _aiteamforge_build_import_path_maps,
         teams_satisfy_canonical_guard,
+        config_is_structurally_valid,
     )
     _AITEAMFORGE_PATHS_AVAILABLE = True
 except ImportError as e:
@@ -243,21 +244,35 @@ def _build_team_kanban_dirs() -> dict:
     # for its lifetime and every team lookup 404s until manual restart. (Bug found
     # 2026-04-22: Android LCARS served empty board after config briefly had no teams.)
     # Partial corruption (e.g. only academy survives a write-race) is also caught:
-    # the canonical-team check below requires academy AND at least one OTHER team
-    # of ANY kind (platform OR personal) before the dynamic list is trusted.
-    # (XACA-0457 / XACA-0647: personal-only machines are valid; academy-alone is not.)
+    # the canonical-team check below requires schema_version present AND at least
+    # one non-academy team before the dynamic list is trusted.
+    # (XACA-0457 / XACA-0647 / XACA-0705: consumer-only installs without academy
+    # are valid — academy-alone / empty is the corruption signature, not academy-absent.)
     if _AITEAMFORGE_PATHS_AVAILABLE:
         try:
             teams = list_teams()
             if teams:
                 teams_set = set(teams)
-                # XACA-0647: shared single-source rule (see aiteamforge_paths.
-                # teams_satisfy_canonical_guard) — ends the k501 two-site drift.
+                # XACA-0705: shared single-source rule via config_is_structurally_valid()
+                # (see aiteamforge_paths) — ends the k501 two-site drift. Academy
+                # absence alone is NOT a corruption signal; only academy-alone / empty
+                # (has_non_required=False) triggers the hardcoded fallback.
                 missing_required, has_non_required = teams_satisfy_canonical_guard(teams_set)
-                if missing_required or not has_non_required:
-                    # Build a precise diagnostic: distinguish missing-required
-                    # from academy-alone so the warning tells the operator exactly
-                    # which constraint failed. (XACA-0457-011 / XACA-0647)
+                # XACA-0705-003: derive has_schema from the live config rather than
+                # hardcoding True. The prior comment was correct (list_teams() goes
+                # through load_config() which enforces schema_version), but that
+                # coupling was invisible — if load_config() ever changed to allow
+                # schema-less configs, this guard would silently pass anything.
+                # Reading schema_version directly makes the invariant explicit and
+                # observable. load_config() failure here is handled by the outer
+                # except block; default to True to avoid false-tripping the guard.
+                try:
+                    _has_schema = "schema_version" in (_aiteamforge_load_config() or {})
+                except Exception:
+                    _has_schema = True
+                if not config_is_structurally_valid(teams_set, has_schema=_has_schema):
+                    # Build a precise diagnostic so the operator knows which constraint
+                    # failed. (XACA-0457-011 / XACA-0647 / XACA-0705)
                     parts = []
                     if missing_required:
                         parts.append(f"missing required: {sorted(missing_required)}")
