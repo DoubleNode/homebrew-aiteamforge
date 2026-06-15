@@ -343,18 +343,57 @@ def teams_satisfy_canonical_guard(teams_keys) -> tuple[frozenset, bool]:
       - missing_required: CANONICAL_REQUIRED_TEAMS absent from the set (academy).
       - has_non_required: True iff at least one team beyond the required set exists.
 
-    A team map is structurally valid iff `not missing_required and has_non_required`
-    — academy present AND at least one OTHER team of ANY kind (platform OR personal).
-    Academy-alone / empty teams is the partial-write corruption signature.
+    NOTE (XACA-0705): The validity rule is NOT "not missing_required and has_non_required"
+    anymore — see config_is_structurally_valid() for the authoritative predicate.
+    The old academy-required rule wrongly clobbered consumer configs that have zero
+    academy team (custom-only installs). The canonical corruption signatures remain:
+    no schema_version, OR empty teams, OR academy-alone (has_non_required=False).
 
     Both load_config() (this module) and lcars-ui/server.py's
-    _build_team_kanban_dirs() call this so the validity rule cannot drift across
-    the two sites (ends the k501 two-site sibling drift). (XACA-0457 / XACA-0647)
+    _build_team_kanban_dirs() call config_is_structurally_valid() so the validity
+    rule cannot drift across the two sites (ends the k501 two-site sibling drift).
+    (XACA-0457 / XACA-0647 / XACA-0705)
     """
     teams_keys = set(teams_keys)
     missing_required = CANONICAL_REQUIRED_TEAMS - teams_keys
     has_non_required = bool(teams_keys - CANONICAL_REQUIRED_TEAMS)
     return frozenset(missing_required), has_non_required
+
+
+def config_is_structurally_valid(teams_keys, has_schema: bool) -> bool:
+    """Return True iff a parsed config is structurally sound — SINGLE SOURCE OF
+    TRUTH for the load_config() and server.py _build_team_kanban_dirs() guard.
+
+    Valid iff ALL of:
+      1. schema_version key is present (has_schema=True)
+      2. at least one NON-academy team exists (has_non_required=True)
+
+    Corruption signatures (→ bootstrap / fallback):
+      - missing schema_version
+      - empty teams dict  (has_non_required=False)
+      - academy-alone     (has_non_required=False — same check as empty)
+
+    XACA-0705: The prior rule required academy to be present (missing_required
+    must be empty). That wrongly clobbered consumer installs whose team-paths.json
+    has only a custom non-academy team (e.g. a freelance-only box). The fix:
+    drop the academy-required constraint from the validity test. Academy absence
+    is now only a diagnostic hint, not a corruption signal.
+
+    Truth table:
+      {custom-instance-team}         → VALID  (consumer fix)
+      {academy}                      → corrupt (academy-alone, no non-required)
+      {}                             → corrupt (empty)
+      {academy, ios, ...}            → VALID  (normal dev box)
+      missing schema_version         → corrupt
+
+    SIBLING-DRIFT NOTE: this function is called in EXACTLY TWO places:
+      1. kanban-hooks/aiteamforge_paths.py — load_config()
+      2. lcars-ui/server.py — _build_team_kanban_dirs()
+    Both sites import this function. If you add a third call site, update this
+    comment. Never inline the validity logic at a call site. (XACA-0705 / k501)
+    """
+    _, has_non_required = teams_satisfy_canonical_guard(teams_keys)
+    return has_schema and has_non_required
 
 
 # Templates that REQUIRE one or more parameters (project, or client+project) per
@@ -496,11 +535,13 @@ def load_config() -> dict:
     if config is not None:
         has_schema = "schema_version" in config
         teams_keys = set(config.get("teams", {}).keys())
-        # XACA-0647: validity rule lives in teams_satisfy_canonical_guard() — the
+        # XACA-0705: validity rule lives in config_is_structurally_valid() — the
         # single source of truth shared with lcars-ui/server.py (ends k501 drift).
-        # Valid iff academy present AND at least one OTHER team of any kind.
+        # Valid iff schema_version present AND at least one non-academy team exists.
+        # Academy absence is a diagnostic hint only, NOT a corruption signal (fixes
+        # consumer installs that have no academy team in their overlay).
         missing_required, has_non_required = teams_satisfy_canonical_guard(teams_keys)
-        if not has_schema or missing_required or not has_non_required:
+        if not config_is_structurally_valid(teams_keys, has_schema):
             print(
                 f"[aiteamforge-paths] WARNING: {config_path} appears corrupt "
                 f"(has_schema_version={has_schema}, missing_required={sorted(missing_required)}, "
