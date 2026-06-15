@@ -772,17 +772,26 @@ DOCTOR_PASS="$(printf '%s\n' "$DOCTOR_PLAIN" | grep -oE 'Passed:[[:space:]]+[0-9
 note "doctor summary: Passed=${DOCTOR_PASS:-?} Failed=${DOCTOR_FAIL:-?}"
 
 # XACA-0653 follow-up: a flat 'Failed: 0' is the WRONG gate for a throwaway
-# sandbox. Two doctor checks fail for sandbox-ENVIRONMENTAL reasons that are NOT
-# fresh-install regressions: (a) the academy team is declared in the bootstrap
-# config but has no board in the sandbox; (b) lcars-health-check.sh is rendered
-# into $AITEAMFORGE_DIR at setup time, which the headless wizard didn't complete.
-# We tolerate ONLY those two known artifacts and FAIL on ANY other doctor failure
-# (e.g. a genuine venv-dep regression) so the gate stays meaningful.
+# sandbox on a headless runner. Several doctor checks fail for ENVIRONMENTAL
+# reasons that are NOT fresh-install regressions:
+#   (a) the academy team is declared in the bootstrap config but has no board in
+#       the sandbox;
+#   (b) lcars-health-check.sh is rendered into $AITEAMFORGE_DIR at setup time,
+#       which the headless wizard didn't complete;
+#   (c) the iTerm2 GUI app is absent on a headless CI runner (≠ the venv iterm2
+#       PYTHON package, which we assert is green separately below + in step 8);
+#   (d) the Claude Code CLI is not installed on a clean CI runner.
+# (c)/(d) are present on a real consumer (which is why M1Pro passed) but absent on
+# a GH Actions macos runner. We tolerate ONLY these known artifacts and FAIL on
+# ANY other doctor failure (e.g. a genuine venv-dep regression) so the gate stays
+# meaningful.
 UNEXPECTED_FAILS="$(printf '%s\n' "$DOCTOR_PLAIN" \
   | grep -E '^[[:space:]]*✗' \
   | grep -vE "Kanban directory does not resolve for team '?academy'?" \
   | grep -vE "No \*-board\.json found at resolved kanban dir for '?academy'?" \
   | grep -vE "LCARS health check script missing" \
+  | grep -vE "iTerm2 not found" \
+  | grep -vE "Claude Code not found" \
   | grep -vE 'Some checks failed' \
   | sed '/^[[:space:]]*$/d')"
 if [ -z "$UNEXPECTED_FAILS" ]; then
