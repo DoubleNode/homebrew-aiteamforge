@@ -961,9 +961,11 @@ check_services() {
 # <PORT>`. We read each live server.py's argv+env via `ps eww`, pull the team
 # from `LCARS_TEAM=` and the bound port from the token after `server.py`, then
 # compare against the team's CANONICAL port resolved by the shipped
-# share/kanban-hooks/lcars_ports.py helper. A mismatch is a WARN (the server may
-# be up right now — the risk is a stale port that health checks/launchers probe
-# wrong, and that won't survive the next crash on the canonical port).
+# share/kanban-hooks/lcars_ports.py helper. A mismatch is a FAIL (XACA-0706): the
+# server may answer right now, but it is bound to the wrong port — the launcher's
+# has-session guard blocks rebinding it, health checks probe the canonical port,
+# and when this stale-port server crashes nothing restarts it on canonical (the
+# exact XACA-0613 refresh-gap incident this check exists to surface).
 check_lcars_port_drift() {
   print_section "Checking LCARS Port Drift"
 
