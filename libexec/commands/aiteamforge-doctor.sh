@@ -65,6 +65,7 @@ Components:
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
   services        Running services + LCARS server durability (XACA-0655)
   lcars-port-drift  LCARS server bound to a non-canonical port (XACA-0706/0613)
+  lcars-python-runtime  LCARS python >=3.10 floor + launchd-context resolver + server.py 3.9-safety (XACA-0713)
   launchagents    LaunchAgent status
   git             Git repository health
   network         Network connectivity (Tailscale if configured)
@@ -1038,6 +1039,82 @@ check_lcars_port_drift() {
   fi
 }
 
+# Check: LCARS Python Runtime (XACA-0713)
+#
+# Distinct from check_python_venv (which validates the venv's PACKAGES via the
+# login-shell AITEAMFORGE_PYTHON). This check guards the two XACA-0713 crash
+# surfaces that check_python_venv does NOT cover:
+#
+#   1. server.py 3.9 import-safety — the canonical server.py uses PEP-604
+#      `int | None` annotations. Without `from __future__ import annotations`
+#      these eval at import time and raise TypeError on macOS system python 3.9.6.
+#      We py_compile it under /usr/bin/python3 (the 3.9 that crashed it).
+#
+#   2. Runtime resolver under a LAUNCHD / non-login PATH — the root cause. The
+#      com.aiteamforge.lcars-health daemon runs with no /opt/homebrew/bin on
+#      PATH, so `brew --prefix` returns empty and a brew-dependent resolver falls
+#      back to system python3 (3.9) → the server crashes on auto-restart and the
+#      daemon's retries SIGTERM-race any good server. We resolve the interpreter
+#      exactly as the daemon would (scrubbed PATH, HOME preserved) and assert it
+#      is the venv (>=3.10), never system 3.9.
+check_lcars_python_runtime() {
+  print_section "Checking LCARS Python Runtime (XACA-0713)"
+
+  # share/ is a sibling of libexec/.
+  local server_py="${LIBEXEC_DIR}/../share/lcars-ui/server.py"
+  local helpers="${LIBEXEC_DIR}/../share/scripts/lcars-launch-helpers.sh"
+
+  # ── 1. server.py 3.9 import-safety ──────────────────────────────────────
+  if [ -f "$server_py" ]; then
+    if [ -x /usr/bin/python3 ]; then
+      local sysver
+      sysver="$(/usr/bin/python3 --version 2>&1 | awk '{print $2}')"
+      if /usr/bin/python3 -c "import py_compile; py_compile.compile('${server_py}', doraise=True)" >/dev/null 2>&1; then
+        check_result pass "server.py compiles under system python3 (${sysver:-?}) — 3.9-safe"
+      else
+        check_result fail "server.py FAILS to compile under system python3 (${sysver:-?}) — PEP-604 annotations not deferred (XACA-0713)" \
+          "server.py must begin with 'from __future__ import annotations'. Reinstall: brew upgrade aiteamforge"
+      fi
+    fi
+  else
+    check_result warn "LCARS python-runtime: server.py not found (${server_py})"
+  fi
+
+  # ── 2. resolve_lcars_python under a launchd-style PATH ───────────────────
+  if [ ! -f "$helpers" ]; then
+    check_result warn "LCARS python-runtime: launch helpers not found (${helpers}) — resolver check skipped"
+    return 0
+  fi
+
+  # Reproduce the daemon's environment: scrub PATH (no brew), keep HOME (launchd
+  # sets HOME for user agents). No LCARS_PYTHON/AITEAMFORGE_PYTHON override, so
+  # this exercises the real absolute-path probe chain (XACA-0713 fix #2).
+  local resolved
+  resolved="$(env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin bash -c "source '${helpers}' >/dev/null 2>&1; resolve_lcars_python" 2>/dev/null || true)"
+
+  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
+    check_result warn "Daemon-context resolver returned no executable python (got: '${resolved:-empty}')" \
+      "Provision the venv: brew postinstall aiteamforge"
+    return 0
+  fi
+
+  if [ "$resolved" = "/usr/bin/python3" ]; then
+    check_result fail "Daemon-context resolver returns SYSTEM python3 — LCARS will crash on auto-restart (XACA-0713)" \
+      "The launchd health daemon has no brew on PATH; the venv must resolve by absolute path. Run: brew postinstall aiteamforge"
+    return 0
+  fi
+
+  local pv maj min
+  pv="$("$resolved" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || true)"
+  maj="${pv%%.*}"; min="${pv#*.}"; maj="${maj:-0}"; min="${min:-0}"
+  if [ "$maj" -gt 3 ] 2>/dev/null || { [ "$maj" -eq 3 ] && [ "$min" -ge 10 ]; } 2>/dev/null; then
+    check_result pass "Daemon-context LCARS python is ${pv} (>=3.10) — ${resolved}"
+  else
+    check_result fail "Daemon-context LCARS python is ${pv:-unknown} (<3.10) — server.py will crash (XACA-0713)" \
+      "Provision the 3.10+ venv: brew postinstall aiteamforge"
+  fi
+}
+
 # Check: LaunchAgents
 check_launchagents() {
   print_section "Checking LaunchAgents"
@@ -1226,6 +1303,7 @@ if [ "$PREFLIGHT" = true ]; then
   # remediation engine still appends to REMEDIATION_LOG, which we persist below.
   {
     check_python_venv
+    check_lcars_python_runtime
     check_board_resolution
     check_services
   } >/dev/null 2>&1 || true
@@ -1290,6 +1368,9 @@ case "$CHECK_COMPONENT" in
   lcars-port-drift)
     check_lcars_port_drift
     ;;
+  lcars-python-runtime)
+    check_lcars_python_runtime
+    ;;
   launchagents)
     check_launchagents
     ;;
@@ -1312,6 +1393,7 @@ case "$CHECK_COMPONENT" in
     check_board_resolution
     check_services
     check_lcars_port_drift
+    check_lcars_python_runtime
     check_launchagents
     check_git
     check_network

@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- XACA-0728 — `aiteamforge doctor` gains a `lcars-python-runtime` check (exposed as `--check lcars-python-runtime`, wired into the `all` pass and the silent first-launch preflight subset) that stands guard against the XACA-0713 class of crash. Two surfaces neither `check_python_venv` (validates venv packages via the login-shell `AITEAMFORGE_PYTHON`) nor any other check covered: (1) **server.py 3.9 import-safety** — `py_compile`s the shipped `share/lcars-ui/server.py` under macOS system `/usr/bin/python3`, FAILing if the PEP-604 annotations are not deferred (the original `int | None` TypeError); (2) **launchd-context resolver** — resolves the interpreter exactly as the `com.aiteamforge.lcars-health` daemon would (scrubbed `PATH` with no brew, `HOME` preserved, no `LCARS_PYTHON` override) via `resolve_lcars_python`, FAILing if it returns system `python3` or an interpreter `<3.10`. Remediations point at `brew postinstall aiteamforge` / `brew upgrade aiteamforge`. Tap-native change (`libexec/commands/aiteamforge-doctor.sh`); no canonical-source mirror.
+
 ## [0.15.1] - 2026-06-16
 
 ### Added
