@@ -21,6 +21,14 @@ Usage:
     Open http://localhost:8080 in your browser
 """
 
+# XACA-0713: PEP-604 union annotations (`int | None`, etc.) are evaluated at
+# def-/import-time on Python < 3.10 and raise TypeError under the macOS system
+# python3 (3.9.6) that launchd/health-daemon can fall back to. `from __future__
+# import annotations` defers ALL annotation evaluation to strings (PEP 563), so
+# these unions become harmless on 3.9. MUST be the first statement after the
+# module docstring, before any other import.
+from __future__ import annotations
+
 import http.server
 import socketserver
 import copy

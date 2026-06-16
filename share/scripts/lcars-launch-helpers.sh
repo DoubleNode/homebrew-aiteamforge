@@ -229,36 +229,72 @@ has_iterm_gui() {
 # deps (pyzipper, requests, …). Single source of truth for both
 # start_lcars_server and lcars-health-check.sh::_hc_start_lcars_server.
 #
-# Probe order (mirrors start_lcars_server's previous inline chain, XACA-0486/0562/0563):
+# Probe order (XACA-0486/0562/0563/0614, hardened XACA-0713):
 #   0. $LCARS_PYTHON (env override)
-#   1. brew --prefix aiteamforge / libexec/venv
-#   2. env.sh → $AITEAMFORGE_PYTHON
-#   3. $(brew --prefix)/var/aiteamforge/venv
-#   4. $AITEAMFORGE_DIR/share/venv
-#   5. python3  (last-resort; dev source machine has deps globally)
-# (XACA-0614)
+#   1. KNOWN ABSOLUTE venv paths — probed DIRECTLY, no brew-on-PATH needed
+#   2. brew --prefix aiteamforge / libexec/venv (brew located by absolute path
+#      if not on PATH)
+#   3. env.sh → $AITEAMFORGE_PYTHON
+#   4. $(brew --prefix)/var/aiteamforge/venv
+#   5. $AITEAMFORGE_DIR/share/venv
+#   6. python3  (last-resort; dev source machine has deps globally)
+#
+# XACA-0713 ROOT CAUSE / FIX:
+#   In launchd / non-login (health-daemon) contexts the inherited PATH lacks
+#   /opt/homebrew/bin, so `brew --prefix` returned empty → the venv path built
+#   from it ("/var/aiteamforge/venv/bin/python3", missing the brew prefix) was
+#   not executable → the resolver fell all the way to bare `python3` (the macOS
+#   system 3.9.6), which crashes server.py. Probing the FULL ABSOLUTE venv paths
+#   FIRST (step 1) makes resolution independent of brew being on PATH, and step 2
+#   now also locates the `brew` binary by absolute path so the brew-based probes
+#   still work under launchd.
 resolve_lcars_python() {
     if [[ -n "${LCARS_PYTHON:-}" && -x "${LCARS_PYTHON}" ]]; then
         echo "${LCARS_PYTHON}"; return 0
     fi
-    local _p
-    local _brew_aitf_prefix
-    if _brew_aitf_prefix="$(brew --prefix aiteamforge 2>/dev/null)" \
-       && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
-        echo "${_brew_aitf_prefix}/libexec/venv/bin/python3"; return 0
+
+    # 1. Known ABSOLUTE venv interpreters — these do NOT require brew on PATH.
+    #    Declared once, before the loop (zsh emits `local VAR` to stdout if it is
+    #    re-declared inside a loop — see memory k501-zsh-local-in-loop-gotcha).
+    local _cand
+    for _cand in \
+        /opt/homebrew/var/aiteamforge/venv/bin/python3 \
+        /usr/local/var/aiteamforge/venv/bin/python3 \
+        /opt/homebrew/opt/aiteamforge/libexec/venv/bin/python3 \
+        /usr/local/opt/aiteamforge/libexec/venv/bin/python3 ; do
+        if [[ -x "$_cand" ]]; then echo "$_cand"; return 0; fi
+    done
+
+    # 2. brew-based probes. Locate `brew` itself by absolute path when it is not
+    #    on PATH (the launchd case), so `brew --prefix` works regardless.
+    local _brew _p _brew_aitf_prefix
+    _brew="$(command -v brew 2>/dev/null)"
+    if [[ -z "$_brew" ]]; then
+        if [[ -x /opt/homebrew/bin/brew ]]; then _brew=/opt/homebrew/bin/brew
+        elif [[ -x /usr/local/bin/brew ]]; then _brew=/usr/local/bin/brew; fi
     fi
+    if [[ -n "$_brew" ]]; then
+        if _brew_aitf_prefix="$("$_brew" --prefix aiteamforge 2>/dev/null)" \
+           && [[ -x "${_brew_aitf_prefix}/libexec/venv/bin/python3" ]]; then
+            echo "${_brew_aitf_prefix}/libexec/venv/bin/python3"; return 0
+        fi
+    fi
+
     local _brew_prefix _atf_env_sh
-    _brew_prefix="$(brew --prefix 2>/dev/null)"
+    _brew_prefix=""
+    if [[ -n "$_brew" ]]; then _brew_prefix="$("$_brew" --prefix 2>/dev/null)"; fi
     _atf_env_sh="${_brew_prefix}/var/aiteamforge/env.sh"
-    if [[ -f "$_atf_env_sh" ]]; then
+    if [[ -n "$_brew_prefix" && -f "$_atf_env_sh" ]]; then
         # shellcheck disable=SC1090
         source "$_atf_env_sh"
     fi
     if [[ -n "${AITEAMFORGE_PYTHON:-}" && -x "$AITEAMFORGE_PYTHON" ]]; then
         echo "$AITEAMFORGE_PYTHON"; return 0
     fi
-    _p="${_brew_prefix}/var/aiteamforge/venv/bin/python3"
-    if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
+    if [[ -n "$_brew_prefix" ]]; then
+        _p="${_brew_prefix}/var/aiteamforge/venv/bin/python3"
+        if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
+    fi
     _p="${AITEAMFORGE_DIR:-$HOME/aiteamforge}/share/venv/bin/python3"
     if [[ -x "$_p" ]]; then echo "$_p"; return 0; fi
     echo "python3"   # last-resort (dev source machine has deps globally)

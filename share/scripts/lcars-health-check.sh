@@ -297,6 +297,31 @@ _hc_start_lcars_server() {
         lcars_python="python3"
     fi
 
+    # XACA-0713: server.py requires Python >= 3.10 at RUNTIME (PEP-604 unions are
+    # deferred by `from __future__ import annotations`, but other runtime paths
+    # may still assume 3.10+). If the resolver had to fall back to the macOS
+    # system python3 (3.9.6) — e.g. no venv installed, brew unreachable under
+    # launchd — the server will crash on boot. Emit a LOUD, unmistakable warning
+    # to the log so the failure is diagnosable. This is a WARNING, not a hard
+    # abort: the dev source machine intentionally runs a globally-installed 3.x.
+    local _lcars_pyver
+    _lcars_pyver="$("$lcars_python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
+    if [[ -n "$_lcars_pyver" ]]; then
+        local _lcars_pymaj="${_lcars_pyver%%.*}"
+        local _lcars_pymin="${_lcars_pyver#*.}"
+        if [[ "$_lcars_pymaj" -lt 3 ]] \
+           || { [[ "$_lcars_pymaj" -eq 3 ]] && [[ "$_lcars_pymin" -lt 10 ]]; }; then
+            log "  ############################################################"
+            log "  ## XACA-0713 WARNING: resolved python is ${_lcars_pyver} (< 3.10)"
+            log "  ## interpreter: ${lcars_python}"
+            log "  ## server.py REQUIRES >= 3.10 and will likely CRASH on boot."
+            log "  ## Cause: LCARS venv not found / brew unreachable under this"
+            log "  ## environment (launchd PATH?) — falling back to system python3."
+            log "  ## Fix: ensure the aiteamforge venv exists, or set \$LCARS_PYTHON."
+            log "  ############################################################"
+        fi
+    fi
+
     # Kill any zombie process on this port
     pkill -f "server.py.*$local_port" 2>/dev/null
     sleep 1
