@@ -167,6 +167,62 @@ chmod +x bin/*.sh
 
 ## Testing
 
+### Adding a tap test — the CI manifest
+
+Every new test script (`homebrew-tap/tests/test-*.sh`) **must be added to `tests/ci-manifest`** or CI's `manifest-completeness-guard` job will fail. The manifest classifies every test into one of four categories, enabling the right runner to execute it:
+
+**Decision rules:**
+
+1. **`plain-shell`** — Runs under stock `bash` with no special dependencies on a standard macOS runner (jq and bash pre-installed). All I/O sandboxed under `TEST_TMP_DIR`; no real `$HOME` mutation, no network, no launchctl, no brew formula install. Use this for unit tests, logic validation, and configuration tests.
+
+2. **`brew-bash`** — Requires Homebrew bash 4+ (uses `declare -A` associative arrays or other bash-4-specific syntax). The runner auto-installs `bash` via Homebrew and invokes the test via `"$(brew --prefix)/bin/bash" tests/test-runner.sh tests/<filename>`. Use this when your test requires bash 4+ features that stock macOS `/bin/bash 3.2` doesn't support.
+
+3. **`real-install`** — Requires a real `brew install aiteamforge` formula installed on the system before the test is meaningful (e.g., post-installation verification, durability checks, integration with actual brew-installed binaries). These belong in the dedicated E2E fresh-install job (`e2e-fresh-install`), not the plain-shell job. Use this for tests that cannot be sandboxed.
+
+4. **`excluded:<reason>`** — Must NOT be auto-run by the plain-shell runner. Reason is mandatory — a concrete explanation of why (e.g., `excluded:harness-not-a-suite` for the test-runner itself, `excluded:requires-real-brew-install` for manual post-install verification). Excluded tests may be run manually or in specialized CI jobs, but they are not part of the automatic manifest-driven enrollment.
+
+**Adding your test:**
+
+```bash
+# 1. Write the test at homebrew-tap/tests/test-myfeature.sh
+# 2. Classify it in tests/ci-manifest
+echo "test-myfeature.sh                              plain-shell" >> tests/ci-manifest
+# (or brew-bash / real-install / excluded:<reason>)
+
+# 3. Verify the manifest passes locally
+bash tests/ci-manifest-check.sh
+# Output: OK: ci-manifest complete — N entries (plain-shell=X, brew-bash=Y, real-install=Z, excluded=W)
+```
+
+**How plain-shell tests auto-enroll in CI:**
+
+The `.github/workflows/tests.yml` job `test-shell-homebrew-tap` uses the manifest to discover and run all `plain-shell` tests automatically — no YAML edits needed:
+
+```bash
+# CI loop (lines 251–259)
+awk '!/^#/ && NF>=2 && $2=="plain-shell" {print $1}' tests/ci-manifest | \
+while read testfile; do
+  bash tests/test-runner.sh "tests/${testfile}"
+done
+```
+
+Adding a `plain-shell` test to the manifest instantly enrolls it in this loop. Brew-bash and real-install tests are run in separate special-case steps; excluded tests are skipped entirely.
+
+**Verify completeness before pushing:**
+
+The manifest-completeness gate (`tests/ci-manifest-check.sh`, run on every push in CI) fails if:
+- Any `tests/test-*.sh` file on disk is missing from the manifest (drift risk)
+- The manifest lists a file that no longer exists on disk (stale entry)
+- A manifest line has an invalid category (missing category, typo, excluded with no reason)
+
+Run the check locally to catch issues before push:
+
+```bash
+bash tests/ci-manifest-check.sh
+```
+
+Exit 0 = complete and consistent; exit 1 = manifest and disk disagree. Fix any reported drift before pushing.
+
 ### Manual Testing Workflow
 
 1. **Install from source**
@@ -213,6 +269,7 @@ Tests include:
 - Installation on Intel and ARM macOS
 - Script syntax validation
 - ShellCheck linting
+- Test manifest completeness (XACA-0707)
 
 ## Pull Request Process
 

@@ -1,0 +1,78 @@
+# tests/ci-manifest — CI classification for every tests/test-*.sh (XACA-0707)
+#
+# Format: <filename>  <category>
+# Delimiter: first whitespace token (awk '{print $1}' / awk '{print $2}')
+#
+# Categories:
+#   plain-shell    Runs via `bash tests/test-runner.sh tests/<file>` on a stock
+#                  ubuntu/macos runner with no special env (beyond jq and bash
+#                  installed by the test-shell-homebrew-tap job). All I/O is
+#                  sandboxed under TEST_TMP_DIR; no real $HOME mutation, no
+#                  network, no launchctl, no brew formula install.
+#
+#   brew-bash      Requires Homebrew bash 4+ (uses `declare -A` associative arrays
+#                  or other bash-4-only syntax). Must be invoked as:
+#                    "$(brew --prefix)/bin/bash" tests/test-runner.sh tests/<file>
+#                  after `brew install bash` in the job (see XACA-0504 pattern).
+#
+#   real-install   Needs a real `brew install aiteamforge` formula on PATH before
+#                  the test is meaningful. Belongs in the e2e-fresh-install job (or
+#                  a manual post-install verification step), NOT the plain-shell job.
+#
+#   excluded:<reason>
+#                  Must NOT be auto-run by the plain-shell runner.
+#                  Reasons in use:
+#                    harness-not-a-suite  — this file IS the test runner, not a suite
+#                    requires-real-brew-install — manual post-install verification script
+#
+# Completeness gate: the CI script (tests/ci-completeness-gate.sh, XACA-0707) fails
+# if any tests/test-*.sh is missing from this manifest OR if this manifest lists a
+# file that no longer exists.  Add a new test-*.sh?  Add a line here first.
+
+test-board-template.sh                          plain-shell
+test-cli.sh                                     plain-shell
+test-command-nested-workingdir.sh               plain-shell
+test-config.sh                                  plain-shell
+test-doctor-fix.sh                              plain-shell
+test-e2e-setup-launch.sh                        plain-shell
+test-fresh-install.sh                           excluded:requires-real-brew-install
+test-installers.sh                              plain-shell
+test-integration.sh                             plain-shell
+test-kb-quarantine-stub.sh                      plain-shell
+test-lifecycle.sh                               plain-shell
+test-migration.sh                               plain-shell
+test-multi-team.sh                              brew-bash
+test-org-config.sh                              plain-shell
+test-python-venv.sh                             plain-shell
+test-runner.sh                                  excluded:harness-not-a-suite
+test-tailscale.sh                               plain-shell
+test-team-banner.sh                             plain-shell
+test-teams.sh                                   brew-bash
+test-validate-install.sh                        plain-shell
+test-wizard-ui.sh                               plain-shell
+test-xaca-0299-cr-schema.sh                     plain-shell
+test-xaca-0463-allocator.sh                     plain-shell
+test-xaca-0463-port-allocation.sh               plain-shell
+test-xaca-0470-cr-enable.sh                     plain-shell
+test-xaca-0483-parametric.sh                    brew-bash
+test-xaca-0498-twd-guard.sh                     plain-shell
+test-xaca-0510-launchagent-render.sh            plain-shell
+test-xaca-0512-migrate-launchagent-render.sh    plain-shell
+test-xaca-0564-kanban-helpers-overwrite-guard.sh plain-shell
+test-xaca-0585-lcars-health-script-laydown.sh   plain-shell
+test-xaca-0588-deploy-worktree-personas-laydown.sh plain-shell
+test-xaca-0608-team-script-refresh.sh           plain-shell
+test-xaca-0611-imgcat-provision.sh              plain-shell
+test-xaca-0632-kb-variance.sh                   plain-shell
+test-xaca-0649-kanban-dir-resolver.sh           plain-shell
+test-xaca-0650-doctor-venv.sh                   plain-shell
+test-xaca-0651-consumer-doctor-gaps.sh          plain-shell
+test-xaca-0653-e2e-fresh-install.sh             real-install
+test-xaca-0653-runner-exit-propagation.sh       plain-shell
+test-xaca-0655-doctor-preflight.sh              plain-shell
+test-xaca-0673-mandatory-materialize.sh         plain-shell
+test-xaca-0676-tap-trust.sh                     plain-shell
+test-xaca-0677-root-wm-refresh.sh               plain-shell
+test-xaca-0683-skip-launchctl.sh                plain-shell
+test-xaca-0704-negative.sh                      plain-shell
+test-xaca-0704-positive.sh                      plain-shell
