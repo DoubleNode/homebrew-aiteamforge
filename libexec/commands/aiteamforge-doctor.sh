@@ -1092,8 +1092,29 @@ check_lcars_python_runtime() {
   local resolved
   resolved="$(env -i HOME="${HOME:-/tmp}" PATH=/usr/bin:/bin bash -c "source '${helpers}' >/dev/null 2>&1; resolve_lcars_python" 2>/dev/null || true)"
 
-  if [ -z "$resolved" ] || [ ! -x "$resolved" ]; then
-    check_result warn "Daemon-context resolver returned no executable python (got: '${resolved:-empty}')" \
+  if [ -z "$resolved" ]; then
+    check_result warn "Daemon-context resolver returned nothing — cannot assess LCARS python" \
+      "Provision the venv: brew postinstall aiteamforge"
+    return 0
+  fi
+
+  # XACA-0728 review (PR #634): a SLASH-LESS result (e.g. bare "python3") is
+  # resolve_lcars_python's last-resort fallback — it means NO venv was located,
+  # so on a consumer under launchd this resolves via PATH to the system python3
+  # (3.9) and crashes server.py. That is the XACA-0713 failure, not a soft WARN.
+  # The explicit "/usr/bin/python3" branch below catches the case where PATH
+  # happens to give an absolute system path; this catches the bare-name fallback.
+  case "$resolved" in
+    */*) : ;;  # has a slash — real (absolute) path, fall through to the checks below
+    *)
+      check_result fail "Daemon-context resolver fell through to bare '${resolved}' (PATH-dependent — system python on a consumer); venv not found (XACA-0713)" \
+        "The venv must resolve by absolute path under launchd. Run: brew postinstall aiteamforge"
+      return 0
+      ;;
+  esac
+
+  if [ ! -x "$resolved" ]; then
+    check_result warn "Daemon-context resolver returned a non-executable path: ${resolved}" \
       "Provision the venv: brew postinstall aiteamforge"
     return 0
   fi
