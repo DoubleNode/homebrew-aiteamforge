@@ -199,12 +199,31 @@ bash tests/ci-manifest-check.sh
 The `.github/workflows/tests.yml` job `test-shell-homebrew-tap` uses the manifest to discover and run all `plain-shell` tests automatically — no YAML edits needed:
 
 ```bash
-# CI loop (lines 251–259)
-awk '!/^#/ && NF>=2 && $2=="plain-shell" {print $1}' tests/ci-manifest | \
-while read testfile; do
-  bash tests/test-runner.sh "tests/${testfile}"
-done
+# CI loop (abridged; see .github/workflows/tests.yml for full source)
+set -euo pipefail
+FAILED=0
+while IFS= read -r testfile; do
+  # test-xaca-0653-runner-exit-propagation.sh skipped here (runs first
+  # in the dedicated pre-loop step; stays enrolled in manifest).
+  if [ "$testfile" = "test-xaca-0653-runner-exit-propagation.sh" ]; then
+    echo "SKIP (already run as dedicated pre-loop meta-test): ${testfile}"
+    continue
+  fi
+  echo "─── Running: tests/${testfile} ───"
+  if bash tests/test-runner.sh "tests/${testfile}"; then
+    echo "PASS: ${testfile}"
+  else
+    echo "FAIL: ${testfile}"
+    FAILED=$((FAILED + 1))
+  fi
+done < <(awk '!/^#/ && NF>=2 && $2=="plain-shell" {print $1}' tests/ci-manifest)
+if [ "$FAILED" -gt 0 ]; then
+  echo "ERROR: ${FAILED} plain-shell test(s) failed."
+  exit 1
+fi
 ```
+
+The production loop runs under `set -euo pipefail`, accumulates a `FAILED` counter so all tests run even if one fails, and exits non-zero at the end if any test failed. Failures are **not** swallowed — every test gets a PASS/FAIL line and the step fails with a summary count.
 
 Adding a `plain-shell` test to the manifest instantly enrolls it in this loop. Brew-bash and real-install tests are run in separate special-case steps; excluded tests are skipped entirely.
 

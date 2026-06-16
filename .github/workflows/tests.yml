@@ -249,6 +249,14 @@ jobs:
           set -euo pipefail
           FAILED=0
           while IFS= read -r testfile; do
+            # Skip the runner-exit-propagation meta-test here — it runs first in
+            # the dedicated step above so its runner-integrity gate fires before
+            # the bulk suite is trusted. It stays enrolled in ci-manifest as
+            # plain-shell for completeness; this guard prevents a double-run.
+            if [ "$testfile" = "test-xaca-0653-runner-exit-propagation.sh" ]; then
+              echo "SKIP (already run as dedicated pre-loop meta-test): ${testfile}"
+              continue
+            fi
             echo "─── Running: tests/${testfile} ───"
             if bash tests/test-runner.sh "tests/${testfile}"; then
               echo "PASS: ${testfile}"
