@@ -241,16 +241,29 @@ class CalendarSyncService:
         """
         Sync a single item to calendar.
 
-        Internal method called by sync_outbound for each item.
-        Handles Epic due dates and court dates (as separate events when present).
+        Internal method called by sync_outbound for each item. Returns the
+        SyncResult for the item's primary event (the epic/item due-date event).
+
+        An epic's court date is synced as a SEPARATE calendar event with its own
+        state under metadata.courtDateSync; that lifecycle is delegated to
+        _sync_court_date_event, invoked at the top of this method so it runs even
+        when the item has no dueDate (court orphan-cleanup must still happen).
 
         Args:
             item: Kanban item or epic dictionary
             provider: Authenticated CalendarProvider instance
 
         Returns:
-            SyncResult with success status
+            SyncResult with success status for the primary (due-date) event
         """
+        # Court dates are tracked as a SEPARATE calendar event from the epic's
+        # own due-date event, with independent state under metadata.courtDateSync.
+        # Run the court-date lifecycle first so it stays in sync even on the
+        # no-dueDate path below (an epic can lose its dueDate but keep — or lose —
+        # a courtDate, and vice versa). _sync_court_date_event is a no-op for
+        # non-epic items and epics without a court date / prior court sync.
+        self._sync_court_date_event(item, provider)
+
         # Check if item has due date
         if not item.get('dueDate'):
             # If item previously had a synced event, delete the orphaned event
@@ -308,16 +321,12 @@ class CalendarSyncService:
         if item_for_event.get('type') == 'epic':
             event = CalendarEvent.from_epic(item_for_event)
 
-            # Also handle court date if epic has one
-            # NOTE: Court dates are tracked separately in metadata.courtDateSync
-            # This is handled in a separate sync operation
-            metadata = item.get('metadata', {})
-            court_date = metadata.get('courtDate')
-            if court_date:
-                # Court date sync would happen here
-                # For now, focusing on main epic event only
-                # TODO: Implement separate court date event sync
-                pass
+            # An epic's court date (metadata.courtDate) is synced as its OWN
+            # calendar event, distinct from this epic due-date event. The
+            # court-event lifecycle (create / update / orphan-delete) and its
+            # external-event state (metadata.courtDateSync) are handled by
+            # _sync_court_date_event, already invoked at the top of this method
+            # so it runs regardless of whether the epic also has a dueDate.
         else:
             event = CalendarEvent.from_kanban_item(item_for_event)
 
@@ -378,6 +387,134 @@ class CalendarSyncService:
                     'lastErrorAt': now.isoformat()
                 }
 
+            return result
+
+    def _sync_court_date_event(
+        self,
+        item: Dict[str, Any],
+        provider: CalendarProvider
+    ) -> Optional[SyncResult]:
+        """
+        Sync an epic's court date as a separate calendar event.
+
+        Court dates live at item['metadata']['courtDate'] and are pushed to the
+        calendar as their OWN event ("⚖️ COURT: ..."), independent of the epic's
+        due-date event. External-event state is persisted under
+        item['metadata']['courtDateSync'] — a dict mirroring the shape of
+        item['calendarSync'] (externalEventId, provider, lastSyncedAt,
+        syncStatus, lastModifiedLocal, retryCount, syncError) — so the epic
+        event and the court event can never collide.
+
+        Lifecycle (mirrors the main-event handling in _sync_outbound_single):
+          - Create:  no courtDateSync.externalEventId yet → provider.create_event.
+          - Update:  externalEventId present → provider.update_event; retryCount
+                     resets to 0 on success, increments on error.
+          - Orphan delete: the epic no longer carries a courtDate but a prior
+                     courtDateSync.externalEventId exists → delete the orphaned
+                     court event and mark syncStatus='deleted'. This runs even
+                     when the epic keeps its dueDate (so it is invoked at the top
+                     of _sync_outbound_single, before the no-dueDate early return).
+
+        No-op (returns None) for non-epic items, and for epics that have neither a
+        court date nor a previously-synced court event.
+
+        Args:
+            item: Kanban item or epic dictionary (mutated in place)
+            provider: Authenticated CalendarProvider instance
+
+        Returns:
+            SyncResult for the court-event operation, or None if nothing to do.
+        """
+        # Only epics carry court dates.
+        if item.get('type') != 'epic':
+            return None
+
+        metadata = item.get('metadata', {})
+        court_date = metadata.get('courtDate')
+        court_sync = metadata.get('courtDateSync', {})
+        external_event_id = court_sync.get('externalEventId')
+
+        # Nothing to do: no court date and no prior court event to clean up.
+        if not court_date and not external_event_id:
+            return None
+
+        now = datetime.now(timezone.utc)
+
+        # Orphan delete: court date was removed but a synced court event remains.
+        if not court_date:
+            result = provider.delete_event(external_event_id)
+            if result.success:
+                item.setdefault('metadata', {})['courtDateSync'] = {
+                    **court_sync,
+                    'syncStatus': 'deleted',
+                    'lastSyncedAt': now.isoformat(),
+                    'deletedAt': now.isoformat(),
+                    'syncError': None
+                }
+                return SyncResult(
+                    success=True,
+                    message=f"Deleted orphaned court date event for {item.get('id', 'unknown')}"
+                )
+            else:
+                retry_count = court_sync.get('retryCount', 0) + 1
+                item.setdefault('metadata', {})['courtDateSync'] = {
+                    **court_sync,
+                    'externalEventId': external_event_id,
+                    'syncStatus': 'delete_error',
+                    'syncError': result.error,
+                    'retryCount': retry_count,
+                    'lastErrorAt': now.isoformat()
+                }
+                return SyncResult(
+                    success=False,
+                    error=f"Failed to delete orphaned court date event: {result.error}"
+                )
+
+        # Build the court-date event from the epic via the existing factory.
+        court_event = CalendarEvent.from_epic(item, is_court_date=True)
+
+        if external_event_id:
+            # Update existing court event.
+            result = provider.update_event(external_event_id, court_event)
+            if result.success:
+                item.setdefault('metadata', {})['courtDateSync'] = {
+                    **court_sync,
+                    'lastSyncedAt': now.isoformat(),
+                    'syncStatus': 'synced',
+                    'lastModifiedLocal': now.isoformat(),
+                    'retryCount': 0,
+                    'syncError': None
+                }
+            else:
+                retry_count = court_sync.get('retryCount', 0) + 1
+                item.setdefault('metadata', {})['courtDateSync'] = {
+                    **court_sync,
+                    'syncStatus': 'error',
+                    'syncError': result.error,
+                    'retryCount': retry_count,
+                    'lastErrorAt': now.isoformat()
+                }
+            return result
+        else:
+            # Create a new court event.
+            result = provider.create_event(court_event)
+            if result.success:
+                item.setdefault('metadata', {})['courtDateSync'] = {
+                    'externalEventId': result.event_id,
+                    'provider': provider.name,
+                    'lastSyncedAt': now.isoformat(),
+                    'syncStatus': 'synced',
+                    'lastModifiedLocal': now.isoformat(),
+                    'retryCount': 0,
+                    'syncError': None
+                }
+            else:
+                item.setdefault('metadata', {})['courtDateSync'] = {
+                    'syncStatus': 'error',
+                    'syncError': result.error,
+                    'retryCount': 1,
+                    'lastErrorAt': now.isoformat()
+                }
             return result
 
     def sync_inbound(self, board_data: Dict[str, Any], cal_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -446,7 +583,7 @@ class CalendarSyncService:
         }
 
         now = datetime.now(timezone.utc)
-        team_id = team.get('team', 'unknown')
+        team_id = board_data.get('team', 'unknown')
         external_events = []
 
         for event in fetch_result.events:
@@ -454,7 +591,7 @@ class CalendarSyncService:
 
             if kanban_id:
                 # This is a Fleet Monitor event - update existing item
-                item = self._find_item_by_id(team, kanban_id)
+                item = self._find_item_by_id(board_data, kanban_id)
 
                 if item:
                     result = self._update_item_from_event(item, event, team_config)
@@ -487,7 +624,7 @@ class CalendarSyncService:
             team_config['stats'] = {}
 
         team_config['stats']['pendingChanges'] = sum(
-            1 for item in self._get_all_items(team)
+            1 for item in self._get_all_items(board_data)
             if item.get('calendarSync', {}).get('syncStatus') == 'pending'
         )
 
