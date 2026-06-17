@@ -16,5 +16,32 @@
   "activeWindows": [],
   "backlog": [],
   "epics": [],
-  "releases": []
+  "releases": [],
+  "releaseConfig": {
+    "defaultEnvironments": ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"],
+    "platforms": {
+      "ios": {"name": "iOS", "store": "App Store", "icon": "apple"},
+      "android": {"name": "Android", "store": "Play Store", "icon": "android"},
+      "firebase": {"name": "Firebase", "store": null, "icon": "database"},
+      "web": {"name": "Web", "store": null, "icon": "globe"},
+      "other": {"name": "Other", "store": null, "icon": "ellipsis-h"}
+    },
+    "releaseTypes": {
+      "feature": {"name": "Feature Release", "description": "New features", "color": "#4a90d9"},
+      "bugfix": {"name": "Bug Fix Release", "description": "Bug fixes", "color": "#f5a623"},
+      "hotfix": {"name": "Hotfix", "description": "Critical fixes", "color": "#d0021b"},
+      "maintenance": {"name": "Maintenance", "description": "Technical updates", "color": "#7ed321"}
+    },
+    "flowConfig": {
+      "stages": {
+        "PLANNED": {"enabled": true, "required": true},
+        "DEV": {"enabled": true, "required": true},
+        "QA": {"enabled": true, "required": false},
+        "ALPHA": {"enabled": true, "required": false},
+        "BETA": {"enabled": true, "required": false},
+        "GAMMA": {"enabled": true, "required": false},
+        "PROD": {"enabled": true, "required": true}
+      }
+    }
+  }
 }
