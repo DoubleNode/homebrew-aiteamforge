@@ -132,6 +132,28 @@ class CreateItemResult:
 
 
 @dataclass
+class UpdateTicketResult:
+    """Result from updating an external ticket's fields (kanban -> external sync).
+
+    Recognized field keys for the ``fields`` dict passed to
+    :meth:`IntegrationProvider.update_ticket`:
+
+    - ``status`` (str): Human-readable status label (e.g. "In Progress", "Done").
+      Provider maps this to its own status model; unsupported mappings return an
+      error rather than silently dropping the value.
+    - ``summary`` (str): The ticket title / summary line.
+
+    Providers that support additional fields may document them in their own
+    ``update_ticket`` docstrings.  Unknown keys are ignored by providers that
+    do not recognise them.
+    """
+    success: bool
+    error: Optional[str] = None
+    updated_fields: Dict[str, Any] = field(default_factory=dict)
+    url: Optional[str] = None
+
+
+@dataclass
 class IntegrationConfig:
     """Configuration for an integration provider."""
     id: str
@@ -406,6 +428,29 @@ class IntegrationProvider(ABC):
         return CreateItemResult(
             success=False,
             error=f"{self.name} does not support item creation"
+        )
+
+    def update_ticket(self, ticket_id: str, fields: Dict[str, Any]) -> 'UpdateTicketResult':
+        """Update an external ticket's fields (kanban -> external sync).
+
+        This method is optional — providers that don't support writes use this
+        default implementation which returns an unsupported error.
+
+        Args:
+            ticket_id: The external ticket ID to update (provider-native format).
+            fields: Dict of normalised fields to push.  Recognised keys:
+                - ``status`` (str): Human-readable status (e.g. "In Progress").
+                - ``summary`` (str): Ticket title / summary line.
+                Providers map what they support and ignore the rest.
+
+        Returns:
+            UpdateTicketResult with ``success=True`` and ``updated_fields``
+            reflecting what was actually pushed, or ``success=False`` with an
+            ``error`` string describing why the update failed.
+        """
+        return UpdateTicketResult(
+            success=False,
+            error=f"{self.name} does not support ticket updates"
         )
 
     def to_dict(self) -> Dict[str, Any]:

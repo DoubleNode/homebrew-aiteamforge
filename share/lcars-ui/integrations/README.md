@@ -13,7 +13,7 @@ A flexible integration system for connecting kanban items to external ticket tra
 
 - **JIRA** - Atlassian JIRA Cloud/Server
 - **Monday.com** - Monday.com boards and items
-- **GitHub** - GitHub Issues (planned)
+- **GitHub** - GitHub Issues
 - **Linear** - Linear App (planned)
 - **Custom** - Custom integrations via provider interface
 
@@ -297,6 +297,88 @@ cd lcars-ui
 python3 -m pytest integrations/test_integrations.py -v
 # OR
 python3 integrations/test_integrations.py
+```
+
+## Sync Directions
+
+`SyncService` supports three sync directions controlled by the `SyncDirection` enum passed to
+`sync_ticket_link()`, `sync_item()`, and `sync_board()`.
+
+### EXTERNAL_TO_KANBAN (default)
+
+Pulls the current state of the external ticket into the kanban link cache.  Calls
+`provider.verify(ticket_id)` and updates the stored `summary`, `status`, `ticketType`, and
+`ticketUrl` fields in `link_data`.  If `configure_status_mapping()` has been called for the
+integration, the external status is also mapped to a kanban status and included in the
+`changes` dict as `mapped_kanban_status`.
+
+### KANBAN_TO_EXTERNAL (outbound)
+
+Pushes the kanban item's current state to the external ticket via `provider.update_ticket()`.
+
+**Fields pushed:**
+
+| Field | Source in kanban item | External field |
+|---|---|---|
+| `summary` | `item["title"]` or `item["summary"]` | External ticket summary/title |
+| `status` | `item["status"]` (reverse-mapped via `configure_status_mapping`) | External ticket status |
+
+**Status mapping requirement:** a reverse mapping must exist for the kanban status before the
+`status` field is included in the push.  Configure the forward mapping (external → kanban) via
+`configure_status_mapping()`; the service automatically inverts it.  If no reverse mapping exists
+for the current kanban status, `status` is silently omitted from the push (not an error).
+
+**No-op avoidance:** each field is compared against the cached value in `link_data` before
+inclusion; unchanged fields are excluded so unnecessary API calls are avoided.
+
+**Per-provider support:**
+
+| Provider | `summary` | `status` |
+|---|---|---|
+| JIRA | PUT to `/rest/api/3/issue/{id}` | Transition via `/rest/api/3/issue/{id}/transitions` |
+| Monday.com | GraphQL mutation (`change_column_value`) | GraphQL mutation (`change_column_value`) |
+| GitHub Issues | PATCH to `/repos/{owner}/{repo}/issues/{id}` (`title`) | PATCH `state` — `open` or `closed` only |
+| Default (unsupported) | Returns `success=False`, `error="not supported"` | — |
+
+**Partial-failure handling:** GitHub only supports `open`/`closed` for status, so a `status`
+push may be unsupported while `summary` succeeds.  `provider.update_ticket()` returns both
+outcomes in `updated_fields` and `error`; the service caches every accepted field and records
+the error in `link_data["syncError"]` for observability without discarding the accepted fields.
+
+### BIDIRECTIONAL
+
+Runs EXTERNAL_TO_KANBAN followed by KANBAN_TO_EXTERNAL in a single call.  Change-dict keys are
+prefixed to prevent collisions: inbound keys are `summary`, `external_status`,
+`mapped_kanban_status`, `ticketType`, `ticketUrl`; outbound keys are `pushed_summary`,
+`pushed_status`, and (on partial failure) `push_error`.
+
+### Usage Example
+
+```python
+from integrations.sync_service import SyncService, SyncDirection
+
+sync = SyncService()
+
+# Required: configure the status mapping for the integration
+sync.configure_status_mapping('jira-mainevent', {
+    'To Do': 'backlog',
+    'In Progress': 'in_progress',
+    'Done': 'completed',
+})
+
+# Sync a single link bidirectionally
+result = sync.sync_ticket_link(
+    item=kanban_item,
+    link_data=kanban_item['ticketLinks'][0],
+    direction=SyncDirection.BIDIRECTIONAL,
+)
+
+# Sync all links on an item (outbound only)
+item_result = sync.sync_item(item=kanban_item, direction=SyncDirection.KANBAN_TO_EXTERNAL)
+print(item_result.success_count, item_result.error_count)
+
+# Sync an entire board
+board_results = sync.sync_board(board_data, direction=SyncDirection.BIDIRECTIONAL)
 ```
 
 ## Backward Compatibility

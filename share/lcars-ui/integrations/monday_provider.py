@@ -26,7 +26,8 @@ from .provider import (
     ConnectionTestResult,
     TicketInfo,
     FetchResult,
-    ImportedIssue
+    ImportedIssue,
+    UpdateTicketResult
 )
 from .manager import IntegrationManager
 
@@ -1169,6 +1170,123 @@ class MondayProvider(IntegrationProvider):
             'itemId': item_id,
             'body': text
         })
+
+    # =========================================================================
+    # Write / Sync Methods
+    # =========================================================================
+
+    def update_ticket(self, ticket_id: str, fields: Dict[str, Any]) -> UpdateTicketResult:
+        """Update a Monday.com item's fields (kanban -> external sync).
+
+        Supported fields:
+        - ``status`` (str): Delegates to :meth:`sync_status`, which auto-detects
+          the status column and maps the label case-insensitively.  Returns an
+          error if the label is not found among the board's valid status labels.
+        - ``summary`` (str): Updates the item name via the
+          ``change_multiple_column_values`` GraphQL mutation with a
+          ``{"name": "..."}`` JSON column-values payload.  Note: Monday.com
+          treats the item name as a pseudo-column; this mutation form is the
+          documented approach for renaming items via the v2 API.
+
+        Args:
+            ticket_id: Monday.com item ID (e.g. "MON-1234567890" or "1234567890").
+            fields: Dict with ``status`` and/or ``summary`` keys.
+
+        Returns:
+            UpdateTicketResult with updated_fields reflecting what was pushed.
+        """
+        item_id = self._parse_item_id(ticket_id)
+        if not item_id:
+            return UpdateTicketResult(
+                success=False,
+                error=f"Invalid Monday.com item ID format: '{ticket_id}'"
+            )
+
+        if not self.has_credentials():
+            return UpdateTicketResult(
+                success=False,
+                error="Monday.com API token not configured"
+            )
+
+        if not fields:
+            return UpdateTicketResult(success=False, error="No fields provided to update")
+
+        updated = {}
+        errors = []
+
+        # --- summary / item name field ---
+        if 'summary' in fields:
+            new_name = str(fields['summary']).strip()
+            if new_name:
+                # Monday.com v2: change_multiple_column_values with {"name": "..."} renames the item
+                gql_mutation = """
+                mutation renameItem($itemId: ID!, $boardId: ID!, $columnValues: JSON!) {
+                    change_multiple_column_values(
+                        item_id: $itemId,
+                        board_id: $boardId,
+                        column_values: $columnValues
+                    ) {
+                        id
+                        name
+                    }
+                }
+                """
+                try:
+                    # We need the board_id to call change_multiple_column_values
+                    item_data = self.get_item(item_id)
+                    if not item_data:
+                        errors.append(f"summary update failed: item {item_id} not found")
+                    else:
+                        board_id = item_data.get('board', {}).get('id')
+                        if not board_id:
+                            errors.append("summary update failed: could not determine board ID")
+                        else:
+                            result_data = self._make_request(gql_mutation, {
+                                'itemId': item_id,
+                                'boardId': board_id,
+                                'columnValues': json.dumps({'name': new_name})
+                            })
+                            updated_item = result_data.get('change_multiple_column_values', {})
+                            if updated_item.get('id'):
+                                updated['summary'] = new_name
+                            else:
+                                errors.append("summary update failed: no confirmation from API")
+                except MondayProviderError as e:
+                    errors.append(f"summary update failed: {e}")
+                except Exception as e:
+                    errors.append(f"summary update failed: {str(e)}")
+
+        # --- status field ---
+        if 'status' in fields:
+            new_status = str(fields['status']).strip()
+            if new_status:
+                try:
+                    sync_result = self.sync_status(item_id, new_status)
+                    if sync_result.get('success'):
+                        updated['status'] = sync_result.get('new_status', new_status)
+                    else:
+                        errors.append(
+                            f"status update failed: {sync_result.get('message', 'unknown error')}"
+                        )
+                except Exception as e:
+                    errors.append(f"status update failed: {str(e)}")
+
+        if errors and not updated:
+            return UpdateTicketResult(
+                success=False,
+                error='; '.join(errors)
+            )
+
+        result = UpdateTicketResult(
+            success=True,
+            updated_fields=updated,
+            url=self.get_ticket_url(str(item_id))
+        )
+        if errors:
+            # Partial success: some fields updated, some failed
+            result.error = '; '.join(errors)
+
+        return result
 
 
 # Register the provider

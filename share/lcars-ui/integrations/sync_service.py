@@ -9,7 +9,7 @@
 Bidirectional Sync Service - Synchronizes kanban items with external tickets.
 
 This service provides automatic synchronization between kanban items and
-their linked external tickets (JIRA, Monday.com, etc.) using the
+their linked external tickets (JIRA, Monday.com, GitHub, etc.) using the
 IntegrationProvider interface.
 
 Features:
@@ -17,6 +17,17 @@ Features:
 - Per-link syncEnabled toggle
 - Integration ID in all sync logging
 - Multi-provider support via IntegrationProvider interface
+- External-to-kanban sync: pulls ticket summary, status, type, and URL into
+  the kanban link cache; maps external status to kanban status via
+  configure_status_mapping()
+- Kanban-to-external sync (outbound): pushes kanban title and status to the
+  external ticket via provider.update_ticket(); status is only pushed when a
+  reverse mapping exists (configure_status_mapping() required)
+- Bidirectional sync: both directions in a single sync_ticket_link() call,
+  with change-dict keys prefixed to avoid collisions (pushed_* vs inbound)
+- Per-provider update support: JIRA (summary via PUT + status via
+  transitions), Monday.com (summary + status via GraphQL mutations), GitHub
+  Issues (summary -> title, status -> open/closed only)
 """
 
 import logging
@@ -25,7 +36,7 @@ from datetime import datetime, timezone
 from typing import Optional, List, Dict, Any, Callable
 from enum import Enum
 
-from .provider import IntegrationProvider, VerifyResult
+from .provider import IntegrationProvider, UpdateTicketResult, VerifyResult
 from .manager import IntegrationManager, get_manager
 from .ticket_links import TicketLink, get_ticket_links, add_ticket_link
 
@@ -158,6 +169,27 @@ class SyncService:
         mapping = self._status_mapping.get(integration_id, {})
         return mapping.get(external_status)
 
+    def _get_external_status(
+        self,
+        integration_id: str,
+        kanban_status: str
+    ) -> Optional[str]:
+        """Map kanban status to external ticket status (inverse of _get_kanban_status).
+
+        Inverts the forward mapping {ext_status: kanban_status} to produce
+        {kanban_status: ext_status}.  The forward map may be non-injective
+        (multiple external statuses map to the same kanban status); in that
+        case we use the *first* key encountered in iteration order, which is
+        insertion order under Python 3.7+.  Returns None when no mapping
+        exists so callers can omit the field entirely rather than pushing a
+        bad value.
+        """
+        forward = self._status_mapping.get(integration_id, {})
+        for ext_status, kbn_status in forward.items():
+            if kbn_status == kanban_status:
+                return ext_status
+        return None
+
     def _log_sync(
         self,
         integration_id: str,
@@ -178,10 +210,22 @@ class SyncService:
         """
         Sync a single ticket link.
 
+        Executes the requested sync direction(s):
+        - EXTERNAL_TO_KANBAN: fetches the external ticket via provider.verify()
+          and updates the cached link fields (summary, status, ticketType, url)
+          plus a mapped kanban status when configure_status_mapping() has been
+          called for this integration.
+        - KANBAN_TO_EXTERNAL: pushes the kanban item's title and status to the
+          external ticket via provider.update_ticket().  Status is only pushed
+          when a reverse mapping exists via configure_status_mapping(); fields
+          are compared against the cached link values to avoid no-op writes.
+        - BIDIRECTIONAL: both directions; change keys are prefixed to avoid
+          collisions (``pushed_summary``/``pushed_status`` vs inbound keys).
+
         Args:
             item: Kanban item dictionary
             link_data: Raw ticketLink dictionary from the item
-            direction: Sync direction
+            direction: Sync direction (default: EXTERNAL_TO_KANBAN)
 
         Returns:
             SyncResult with operation outcome
@@ -243,9 +287,9 @@ class SyncService:
                 item, link_data, verify_result, provider
             ))
 
-        # TODO: Sync from kanban -> external (requires provider.update_ticket method)
-        # if direction in (SyncDirection.KANBAN_TO_EXTERNAL, SyncDirection.BIDIRECTIONAL):
-        #     changes.update(self._sync_kanban_to_external(item, link_data, provider))
+        # Sync from kanban -> external
+        if direction in (SyncDirection.KANBAN_TO_EXTERNAL, SyncDirection.BIDIRECTIONAL):
+            changes.update(self._sync_kanban_to_external(item, link_data, provider))
 
         if changes:
             self._log_sync(integration_id, ticket_id, f"Synced: {changes}")
@@ -305,6 +349,107 @@ class SyncService:
         # Update sync metadata
         link_data['lastSynced'] = datetime.now(timezone.utc).isoformat()
         link_data.pop('syncError', None)  # Clear any previous error
+
+        return changes
+
+    def _sync_kanban_to_external(
+        self,
+        item: Dict[str, Any],
+        link_data: Dict[str, Any],
+        provider: IntegrationProvider
+    ) -> Dict[str, Any]:
+        """
+        Sync data from kanban item to the external ticket (outbound direction).
+
+        Builds a minimal ``fields`` dict of values that differ from what is
+        already cached in ``link_data`` so we avoid no-op writes.  Calls
+        ``provider.update_ticket``, which never raises — failures are logged
+        and surfaced via ``link_data['syncError']``.
+
+        Change-dict keys are prefixed with ``pushed_`` to distinguish outbound
+        changes from the inbound keys used by ``_sync_external_to_kanban``
+        (``summary``, ``external_status``, ``mapped_kanban_status``, etc.).
+        This makes it safe to call both directions and ``changes.update()``
+        their results in ``sync_ticket_link`` without key collisions.
+
+        Partial-failure handling: GitHub only supports open/closed, so a
+        ``status`` push may be unsupported while the ``summary`` push succeeds.
+        ``provider.update_ticket`` returns both outcomes in ``updated_fields``
+        and/or ``error``; we update cache and change-keys for every field that
+        *was* accepted, and record the error string in ``link_data['syncError']``
+        for observability — but we do NOT treat a partial failure as a hard
+        error that wipes the outbound changes dict.
+        """
+        integration_id = link_data.get('integrationId', '')
+        ticket_id = link_data.get('ticketId', '')
+
+        # --- Build fields dict: only include values that actually differ ---
+        fields: Dict[str, Any] = {}
+
+        # summary: kanban title -> external summary
+        kanban_summary = item.get('title', item.get('summary', ''))
+        if kanban_summary and kanban_summary != link_data.get('summary'):
+            fields['summary'] = kanban_summary
+
+        # status: reverse-map kanban status -> external status
+        kanban_status = item.get('status', '')
+        if kanban_status:
+            external_status = self._get_external_status(integration_id, kanban_status)
+            # Only push if we have a valid mapping AND it differs from cached external status
+            if external_status and external_status != link_data.get('status'):
+                fields['status'] = external_status
+
+        if not fields:
+            # Nothing to push; return empty to avoid an unnecessary API call
+            return {}
+
+        self._log_sync(integration_id, ticket_id, f"Pushing to external: {list(fields.keys())}")
+        result: UpdateTicketResult = provider.update_ticket(ticket_id, fields)
+
+        changes: Dict[str, Any] = {}
+
+        if result.success:
+            # Update the link cache to reflect what we pushed
+            if 'summary' in fields:
+                link_data['summary'] = fields['summary']
+                changes['pushed_summary'] = fields['summary']
+
+            if 'status' in fields:
+                link_data['status'] = fields['status']
+                changes['pushed_status'] = fields['status']
+
+            link_data['lastSynced'] = datetime.now(timezone.utc).isoformat()
+            link_data.pop('syncError', None)
+
+        else:
+            # Partial or full failure — log and cache the error, but still
+            # capture any fields that were accepted (updated_fields may be
+            # non-empty even when success=False, e.g. summary OK, status
+            # unsupported on GitHub).
+            accepted = result.updated_fields or {}
+
+            if 'summary' in accepted:
+                link_data['summary'] = accepted['summary']
+                changes['pushed_summary'] = accepted['summary']
+
+            if 'status' in accepted:
+                link_data['status'] = accepted['status']
+                changes['pushed_status'] = accepted['status']
+
+            if accepted:
+                link_data['lastSynced'] = datetime.now(timezone.utc).isoformat()
+
+            # Record error for observability; does not prevent the accepted
+            # fields from being returned as changes.
+            error_msg = result.error or "update_ticket returned success=False"
+            self._log_sync(
+                integration_id, ticket_id,
+                f"Push partial/failed: {error_msg}", 'warning'
+            )
+            link_data['syncError'] = error_msg
+
+            if changes:
+                changes['push_error'] = error_msg
 
         return changes
 

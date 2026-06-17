@@ -719,6 +719,416 @@ class TestMultiProviderScenarios(unittest.TestCase):
         self.assertIsNone(provider)
 
 
+class TestKanbanToExternalSync(unittest.TestCase):
+    """Tests for the kanban -> external (outbound) sync direction.
+
+    Strategy: register a single fake provider via IntegrationManager so the
+    sync_ticket_link plumbing (credential check, verify call, direction dispatch)
+    runs exactly as in production.  The fake provider controls what
+    update_ticket returns so we can drive every outbound scenario without
+    making real network calls.
+    """
+
+    # ---------- helpers --------------------------------------------------
+
+    def _make_fake_provider_class(self, update_result, verify_result=None):
+        """
+        Return a fresh IntegrationProvider subclass that:
+        - always has credentials
+        - always verifies the ticket as found (summary='External Summary',
+          status='In Progress') unless verify_result is overridden
+        - returns update_result from update_ticket
+        - records each update_ticket call in self.provider.update_calls
+        """
+        from integrations.provider import (
+            IntegrationProvider, IntegrationConfig,
+            SearchResult, VerifyResult, ConnectionTestResult,
+            UpdateTicketResult,
+        )
+
+        _update_result = update_result
+        _verify_result = verify_result or VerifyResult(
+            valid=True,
+            ticket_id='EXT-001',
+            exists=True,
+            summary='External Summary',
+            status='In Progress',
+            url='https://fake.example.com/EXT-001',
+        )
+
+        class FakeProvider(IntegrationProvider):
+            def __init__(self, config):
+                super().__init__(config)
+                self.update_calls = []
+
+            def has_credentials(self):
+                return True
+
+            def search(self, query, max_results=10):
+                return SearchResult()
+
+            def verify(self, ticket_id):
+                return _verify_result
+
+            def test_connection(self):
+                return ConnectionTestResult(success=True, message='ok')
+
+            def update_ticket(self, ticket_id, fields):
+                self.update_calls.append({'ticket_id': ticket_id, 'fields': dict(fields)})
+                return _update_result
+
+        return FakeProvider
+
+    def _make_manager_with_fake_provider(self, FakeProvider):
+        """Create an IntegrationManager that returns FakeProvider for 'fake-int'."""
+        config = IntegrationConfig(
+            id='fake-int',
+            type='fake',
+            name='Fake Integration',
+            base_url='https://fake.example.com',
+            browse_url='https://fake.example.com/{ticketId}',
+        )
+        manager = IntegrationManager.__new__(IntegrationManager)
+        manager._providers = {'fake-int': FakeProvider(config)}
+        manager._loaded = True
+        manager._config_path = None
+        # Patch get_provider to read from our dict
+        manager.get_provider = lambda pid: manager._providers.get(pid)
+        return manager
+
+    def _make_sync_service(self, update_result, verify_result=None):
+        """End-to-end helper: build SyncService backed by a fake provider."""
+        FakeProvider = self._make_fake_provider_class(update_result, verify_result)
+        manager = self._make_manager_with_fake_provider(FakeProvider)
+        svc = SyncService(manager)
+        # Expose the fake provider instance for call inspection
+        svc._fake_provider = manager._providers['fake-int']
+        return svc
+
+    def _make_link_data(self, **overrides):
+        """Build a minimal link_data dict for 'fake-int' / 'EXT-001'."""
+        base = {
+            'integrationId': 'fake-int',
+            'ticketId': 'EXT-001',
+            'syncEnabled': True,
+            'syncDirection': 'kanban_to_external',
+        }
+        base.update(overrides)
+        return base
+
+    # ---------- test 1: happy-path summary push --------------------------
+
+    def test_kanban_to_external_summary_pushed_on_title_change(self):
+        """Title differs from cached link summary → update_ticket called with
+        summary field → pushed_summary in changes, link_data updated,
+        lastSynced set, no syncError."""
+        from integrations.provider import UpdateTicketResult
+
+        update_result = UpdateTicketResult(
+            success=True,
+            updated_fields={'summary': 'New Kanban Title'},
+            url='https://fake.example.com/EXT-001',
+        )
+        svc = self._make_sync_service(update_result)
+
+        item = {'id': 'XACA-001', 'title': 'New Kanban Title', 'status': 'backlog'}
+        link_data = self._make_link_data(summary='Old External Summary')
+
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # Provider was called
+        self.assertEqual(len(svc._fake_provider.update_calls), 1)
+        call = svc._fake_provider.update_calls[0]
+        self.assertEqual(call['ticket_id'], 'EXT-001')
+        self.assertIn('summary', call['fields'])
+        self.assertEqual(call['fields']['summary'], 'New Kanban Title')
+
+        # Changes dict has pushed_summary
+        self.assertIn('pushed_summary', result.changes)
+        self.assertEqual(result.changes['pushed_summary'], 'New Kanban Title')
+
+        # link_data cache updated
+        self.assertEqual(link_data['summary'], 'New Kanban Title')
+        self.assertIn('lastSynced', link_data)
+        self.assertNotIn('syncError', link_data)
+
+        self.assertEqual(result.status, SyncStatus.SUCCESS)
+
+    # ---------- test 2: status push with reverse mapping -----------------
+
+    def test_kanban_to_external_status_pushed_with_reverse_mapping(self):
+        """Kanban status reverse-maps to external status → pushed as
+        pushed_status in changes."""
+        from integrations.provider import UpdateTicketResult
+
+        update_result = UpdateTicketResult(
+            success=True,
+            updated_fields={'status': 'Done'},
+        )
+        svc = self._make_sync_service(update_result)
+        svc.configure_status_mapping('fake-int', {
+            'To Do': 'backlog',
+            'In Progress': 'in_progress',
+            'Done': 'completed',
+        })
+
+        # _get_external_status should invert the map
+        ext_status = svc._get_external_status('fake-int', 'completed')
+        self.assertEqual(ext_status, 'Done')
+
+        item = {'id': 'XACA-002', 'title': 'Same Title', 'status': 'completed'}
+        # Cached link summary matches item title → only status is different
+        # Cached external status is 'To Do' → differs from mapped 'Done'
+        link_data = self._make_link_data(summary='Same Title', status='To Do')
+
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # Provider received status field
+        self.assertEqual(len(svc._fake_provider.update_calls), 1)
+        self.assertIn('status', svc._fake_provider.update_calls[0]['fields'])
+        self.assertEqual(svc._fake_provider.update_calls[0]['fields']['status'], 'Done')
+
+        # pushed_status in changes
+        self.assertIn('pushed_status', result.changes)
+        self.assertEqual(result.changes['pushed_status'], 'Done')
+
+        self.assertEqual(result.status, SyncStatus.SUCCESS)
+
+    # ---------- test 3: no reverse mapping → status not pushed -----------
+
+    def test_kanban_to_external_no_reverse_mapping_status_not_pushed(self):
+        """When _get_external_status returns None, status is NOT included
+        in the fields dict sent to update_ticket."""
+        from integrations.provider import UpdateTicketResult
+
+        # Return success for summary only
+        update_result = UpdateTicketResult(
+            success=True,
+            updated_fields={'summary': 'Changed Title'},
+        )
+        svc = self._make_sync_service(update_result)
+        # No status mapping configured → _get_external_status returns None
+
+        # Verify the helper returns None
+        self.assertIsNone(svc._get_external_status('fake-int', 'in_progress'))
+
+        item = {'id': 'XACA-003', 'title': 'Changed Title', 'status': 'in_progress'}
+        link_data = self._make_link_data(summary='Old Title')  # title differs
+
+        svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # update_ticket was called (because summary differs) but without 'status'
+        self.assertEqual(len(svc._fake_provider.update_calls), 1)
+        self.assertNotIn('status', svc._fake_provider.update_calls[0]['fields'])
+
+    # ---------- test 4: no-op (nothing differs) --------------------------
+
+    def test_kanban_to_external_noop_when_nothing_differs(self):
+        """When title and status both match cached link values, update_ticket
+        is NOT called and changes is empty."""
+        from integrations.provider import UpdateTicketResult
+
+        # Should never be reached, but define for completeness
+        update_result = UpdateTicketResult(success=True, updated_fields={})
+        svc = self._make_sync_service(update_result)
+        svc.configure_status_mapping('fake-int', {
+            'In Progress': 'in_progress',
+        })
+
+        item = {'id': 'XACA-004', 'title': 'Same Title', 'status': 'in_progress'}
+        # Cached values match exactly
+        link_data = self._make_link_data(summary='Same Title', status='In Progress')
+
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # Provider was NOT called
+        self.assertEqual(len(svc._fake_provider.update_calls), 0)
+        # No outbound changes in result
+        self.assertNotIn('pushed_summary', result.changes)
+        self.assertNotIn('pushed_status', result.changes)
+
+    # ---------- test 5: full failure ------------------------------------
+
+    def test_kanban_to_external_full_failure_sets_sync_error(self):
+        """Provider returns success=False with empty updated_fields →
+        changes empty, link_data['syncError'] set, no raise."""
+        from integrations.provider import UpdateTicketResult
+
+        update_result = UpdateTicketResult(
+            success=False,
+            error='Connection refused',
+            updated_fields={},
+        )
+        svc = self._make_sync_service(update_result)
+
+        item = {'id': 'XACA-005', 'title': 'New Title', 'status': 'backlog'}
+        link_data = self._make_link_data(summary='Old Title')
+
+        # Must not raise
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # Outbound changes are empty (nothing was accepted)
+        self.assertNotIn('pushed_summary', result.changes)
+        self.assertNotIn('pushed_status', result.changes)
+
+        # syncError recorded on link_data
+        self.assertIn('syncError', link_data)
+        self.assertIn('Connection refused', link_data['syncError'])
+
+        # link_data summary NOT updated (push failed)
+        self.assertEqual(link_data.get('summary'), 'Old Title')
+
+    # ---------- test 6: partial failure (GitHub-style) ------------------
+
+    def test_kanban_to_external_partial_failure_accepted_fields_cached(self):
+        """Provider returns success=False but updated_fields has 'summary'
+        (e.g. GitHub: summary accepted, status unsupported) →
+        pushed_summary + push_error in changes, summary cached,
+        syncError set."""
+        from integrations.provider import UpdateTicketResult
+
+        update_result = UpdateTicketResult(
+            success=False,
+            error='Status update not supported',
+            updated_fields={'summary': 'Accepted Title'},
+        )
+        svc = self._make_sync_service(update_result)
+        svc.configure_status_mapping('fake-int', {
+            'In Progress': 'in_progress',
+        })
+
+        item = {'id': 'XACA-006', 'title': 'Accepted Title', 'status': 'in_progress'}
+        link_data = self._make_link_data(summary='Old Title', status='To Do')
+
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # pushed_summary present (accepted)
+        self.assertIn('pushed_summary', result.changes)
+        self.assertEqual(result.changes['pushed_summary'], 'Accepted Title')
+
+        # push_error present
+        self.assertIn('push_error', result.changes)
+        self.assertIn('Status update not supported', result.changes['push_error'])
+
+        # summary cached in link_data
+        self.assertEqual(link_data['summary'], 'Accepted Title')
+
+        # syncError set
+        self.assertIn('syncError', link_data)
+        self.assertIn('Status update not supported', link_data['syncError'])
+
+        # pushed_status NOT present (status was not accepted)
+        self.assertNotIn('pushed_status', result.changes)
+
+    # ---------- test 7: syncEnabled=False skips outbound ----------------
+
+    def test_kanban_to_external_sync_enabled_false_skips(self):
+        """syncEnabled=False at the link level → provider not called,
+        status SKIPPED.  Holds for KANBAN_TO_EXTERNAL direction."""
+        from integrations.provider import UpdateTicketResult
+
+        update_result = UpdateTicketResult(success=True, updated_fields={})
+        svc = self._make_sync_service(update_result)
+
+        item = {'id': 'XACA-007', 'title': 'Some Title', 'status': 'in_progress'}
+        link_data = self._make_link_data(syncEnabled=False)
+
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.KANBAN_TO_EXTERNAL)
+
+        # Provider never called
+        self.assertEqual(len(svc._fake_provider.update_calls), 0)
+        self.assertEqual(result.status, SyncStatus.SKIPPED)
+
+    # ---------- test 8: BIDIRECTIONAL runs both directions ---------------
+
+    def test_bidirectional_runs_inbound_then_outbound(self):
+        """BIDIRECTIONAL direction runs _sync_external_to_kanban FIRST
+        (refreshing link_data cache) and then _sync_kanban_to_external.
+        Both inbound keys (summary, external_status) and outbound keys
+        (pushed_summary, pushed_status) can appear in changes.
+        Ordering: inbound runs before outbound so fresh cache is used for
+        the diff comparison."""
+        from integrations.provider import UpdateTicketResult, VerifyResult
+
+        # External ticket has different summary than kanban item
+        verify_result = VerifyResult(
+            valid=True,
+            ticket_id='EXT-001',
+            exists=True,
+            summary='External Title',    # different from kanban 'Kanban Title'
+            status='In Progress',
+            url='https://fake.example.com/EXT-001',
+        )
+        # After inbound sync, link_data['summary'] becomes 'External Title'.
+        # Kanban title is 'Kanban Title' → differs → outbound push triggered.
+        update_result = UpdateTicketResult(
+            success=True,
+            updated_fields={'summary': 'Kanban Title'},
+        )
+        svc = self._make_sync_service(update_result, verify_result=verify_result)
+        svc.configure_status_mapping('fake-int', {
+            'In Progress': 'in_progress',
+            'Done': 'completed',
+        })
+
+        item = {'id': 'XACA-008', 'title': 'Kanban Title', 'status': 'completed'}
+        link_data = self._make_link_data(summary='Stale Title', status='To Do')
+
+        result = svc.sync_ticket_link(item, link_data, SyncDirection.BIDIRECTIONAL)
+
+        # Inbound key: external summary fetched
+        self.assertIn('summary', result.changes)
+        # Inbound key: external status fetched
+        self.assertIn('external_status', result.changes)
+        self.assertEqual(result.changes['external_status'], 'In Progress')
+
+        # Outbound key: kanban title pushed
+        self.assertIn('pushed_summary', result.changes)
+        self.assertEqual(result.changes['pushed_summary'], 'Kanban Title')
+
+        # update_ticket was called exactly once (outbound)
+        self.assertEqual(len(svc._fake_provider.update_calls), 1)
+
+        self.assertEqual(result.status, SyncStatus.SUCCESS)
+
+    # ---------- test 9: default provider update_ticket returns unsupported
+
+    def test_default_provider_update_ticket_returns_unsupported(self):
+        """The base IntegrationProvider.update_ticket returns
+        success=False with an error message containing 'does not support'."""
+        from integrations.provider import (
+            IntegrationProvider, IntegrationConfig,
+            SearchResult, VerifyResult, ConnectionTestResult,
+        )
+
+        config = IntegrationConfig(
+            id='base-test',
+            type='fake',
+            name='Base Provider',
+            base_url='https://example.com',
+        )
+
+        class MinimalProvider(IntegrationProvider):
+            """Minimal concrete subclass (only implements abstract methods)."""
+            def search(self, query, max_results=10):
+                return SearchResult()
+
+            def verify(self, ticket_id):
+                return VerifyResult(valid=True, ticket_id=ticket_id, exists=True)
+
+            def test_connection(self):
+                return ConnectionTestResult(success=True, message='ok')
+
+        provider = MinimalProvider(config)
+        result = provider.update_ticket('TICKET-1', {'summary': 'Test'})
+
+        self.assertFalse(result.success)
+        self.assertIsNotNone(result.error)
+        self.assertIn('does not support', result.error)
+        # updated_fields should be empty (nothing was pushed)
+        self.assertEqual(result.updated_fields, {})
+
+
 class TestIntegrationManager(unittest.TestCase):
     """Test IntegrationManager functionality."""
 
@@ -791,6 +1201,7 @@ def run_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestMondayProviderStatusMethods))
     suite.addTests(loader.loadTestsFromTestCase(TestSyncService))
     suite.addTests(loader.loadTestsFromTestCase(TestMultiProviderScenarios))
+    suite.addTests(loader.loadTestsFromTestCase(TestKanbanToExternalSync))
     suite.addTests(loader.loadTestsFromTestCase(TestIntegrationManager))
 
     # Run tests

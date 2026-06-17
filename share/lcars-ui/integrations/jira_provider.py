@@ -28,7 +28,8 @@ from .provider import (
     ConnectionTestResult,
     TicketInfo,
     FetchResult,
-    ImportedIssue
+    ImportedIssue,
+    UpdateTicketResult
 )
 from .manager import IntegrationManager
 
@@ -90,7 +91,14 @@ class JiraProvider(IntegrationProvider):
             req.add_header('Content-Type', 'application/json')
 
         with urllib.request.urlopen(req, timeout=timeout) as response:
-            return json.loads(response.read().decode())
+            # JIRA returns 204 No Content for successful writes (issue PUT,
+            # transition POST) — no body to decode. Treat as empty success.
+            if response.status == 204:
+                return {}
+            raw = response.read().decode()
+            if not raw:
+                return {}
+            return json.loads(raw)
 
     def search(self, query: str, max_results: int = 10) -> SearchResult:
         """
@@ -681,6 +689,121 @@ class JiraProvider(IntegrationProvider):
                 success=False,
                 error=f"Unexpected error: {str(e)}"
             )
+
+    # =========================================================================
+    # Write / Sync Methods
+    # =========================================================================
+
+    def update_ticket(self, ticket_id: str, fields: Dict[str, Any]) -> UpdateTicketResult:
+        """Update a JIRA issue's fields (kanban -> external sync).
+
+        Supported fields:
+        - ``summary`` (str): Updates the issue summary via
+          PUT {baseUrl}/rest/api/{ver}/issue/{key} with {"fields": {"summary": ...}}.
+        - ``status`` (str): Transitions the issue to a matching status via
+          POST {baseUrl}/rest/api/{ver}/issue/{key}/transitions.
+          The transition is matched case-insensitively against available transitions.
+          Returns an error string for any status label that has no matching transition.
+
+        Unknown fields are silently ignored (they are passed through by the sync
+        service and each provider handles what it knows about).
+
+        Args:
+            ticket_id: JIRA issue key (e.g. "ME-123").
+            fields: Dict with ``status`` and/or ``summary`` keys.
+
+        Returns:
+            UpdateTicketResult with updated_fields reflecting what was pushed.
+        """
+        ticket_id = ticket_id.strip().upper()
+
+        if not ticket_id:
+            return UpdateTicketResult(success=False, error="No ticket ID provided")
+
+        if not self.has_credentials():
+            return UpdateTicketResult(
+                success=False,
+                error="JIRA credentials not configured"
+            )
+
+        if not fields:
+            return UpdateTicketResult(success=False, error="No fields provided to update")
+
+        updated = {}
+        errors = []
+
+        # --- summary field ---
+        if 'summary' in fields:
+            new_summary = str(fields['summary']).strip()
+            if new_summary:
+                url = f"{self._api_base}/issue/{ticket_id}"
+                try:
+                    self._make_request(
+                        url,
+                        method='PUT',
+                        data={'fields': {'summary': new_summary}}
+                    )
+                    updated['summary'] = new_summary
+                except urllib.error.HTTPError as e:
+                    errors.append(f"summary update failed (HTTP {e.code})")
+                except urllib.error.URLError as e:
+                    errors.append(f"summary update failed (network: {e.reason})")
+                except Exception as e:
+                    errors.append(f"summary update failed: {str(e)}")
+
+        # --- status field (via transitions) ---
+        if 'status' in fields:
+            new_status = str(fields['status']).strip()
+            if new_status:
+                transitions_url = f"{self._api_base}/issue/{ticket_id}/transitions"
+                try:
+                    transitions_data = self._make_request(transitions_url)
+                    transitions = transitions_data.get('transitions', [])
+
+                    # Case-insensitive match on transition name
+                    matched_id = None
+                    for t in transitions:
+                        if t.get('name', '').lower() == new_status.lower():
+                            matched_id = t['id']
+                            break
+
+                    if matched_id is None:
+                        available = [t.get('name', '') for t in transitions]
+                        errors.append(
+                            f"status '{new_status}' has no matching JIRA transition "
+                            f"(available: {', '.join(available) or 'none'})"
+                        )
+                    else:
+                        self._make_request(
+                            transitions_url,
+                            method='POST',
+                            data={'transition': {'id': matched_id}}
+                        )
+                        updated['status'] = new_status
+
+                except urllib.error.HTTPError as e:
+                    errors.append(f"status update failed (HTTP {e.code})")
+                except urllib.error.URLError as e:
+                    errors.append(f"status update failed (network: {e.reason})")
+                except Exception as e:
+                    errors.append(f"status update failed: {str(e)}")
+
+        if errors and not updated:
+            return UpdateTicketResult(
+                success=False,
+                error='; '.join(errors)
+            )
+
+        result = UpdateTicketResult(
+            success=True,
+            updated_fields=updated,
+            url=self.get_ticket_url(ticket_id)
+        )
+        if errors:
+            # Partial success: some fields updated, some failed
+            result.error = '; '.join(errors)
+
+        return result
 
 
 # Register the provider

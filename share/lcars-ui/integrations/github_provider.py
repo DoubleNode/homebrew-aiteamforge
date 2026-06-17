@@ -26,7 +26,8 @@ from .provider import (
     ConnectionTestResult,
     TicketInfo,
     FetchResult,
-    ImportedIssue
+    ImportedIssue,
+    UpdateTicketResult
 )
 from .manager import IntegrationManager
 
@@ -58,7 +59,8 @@ class GitHubProvider(IntegrationProvider):
         self,
         url: str,
         method: str = 'GET',
-        timeout: int = DEFAULT_TIMEOUT
+        timeout: int = DEFAULT_TIMEOUT,
+        data: Optional[dict] = None
     ) -> dict:
         """
         Make an authenticated request to GitHub API.
@@ -67,6 +69,7 @@ class GitHubProvider(IntegrationProvider):
             url: Full URL to request
             method: HTTP method
             timeout: Request timeout in seconds
+            data: Optional dict to send as JSON body (for PATCH/POST/PUT)
 
         Returns:
             Parsed JSON response
@@ -78,7 +81,11 @@ class GitHubProvider(IntegrationProvider):
         creds = self.get_credentials()
         token = creds.get('token', '')
 
-        req = urllib.request.Request(url, method=method)
+        body = None
+        if data is not None:
+            body = json.dumps(data).encode('utf-8')
+
+        req = urllib.request.Request(url, data=body, method=method)
 
         if token:
             req.add_header('Authorization', f'Bearer {token}')
@@ -86,6 +93,8 @@ class GitHubProvider(IntegrationProvider):
         req.add_header('Accept', 'application/vnd.github+json')
         req.add_header('X-GitHub-Api-Version', '2022-11-28')
         req.add_header('User-Agent', 'LCARS-Kanban/1.0')
+        if body is not None:
+            req.add_header('Content-Type', 'application/json')
 
         with urllib.request.urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode())
@@ -505,6 +514,118 @@ class GitHubProvider(IntegrationProvider):
                     return priority
 
         return 'medium'
+
+    # =========================================================================
+    # Write / Sync Methods
+    # =========================================================================
+
+    def update_ticket(self, ticket_id: str, fields: Dict[str, Any]) -> UpdateTicketResult:
+        """Update a GitHub issue's fields (kanban -> external sync).
+
+        Supported fields:
+        - ``summary`` (str): Updates the issue title via
+          PATCH /repos/{owner}/{repo}/issues/{number} with {"title": "..."}.
+        - ``status`` (str): Maps to GitHub issue state.  Only "open" and "closed"
+          are valid GitHub states; any other value (e.g. "In Progress") returns
+          an unsupported error because GitHub Issues has no intermediate states.
+          Accepted values (case-insensitive): "open", "closed", "done" (-> closed),
+          "complete" / "completed" (-> closed).
+
+        Args:
+            ticket_id: GitHub issue identifier (e.g. "owner/repo#123").
+            fields: Dict with ``status`` and/or ``summary`` keys.
+
+        Returns:
+            UpdateTicketResult with updated_fields reflecting what was pushed.
+        """
+        owner, repo, number = self._parse_issue_id(ticket_id)
+        if not all([owner, repo, number]):
+            return UpdateTicketResult(
+                success=False,
+                error=f"Invalid GitHub issue format: '{ticket_id}'. Expected owner/repo#123"
+            )
+
+        if not self.has_credentials():
+            return UpdateTicketResult(
+                success=False,
+                error="GitHub token not configured"
+            )
+
+        if not fields:
+            return UpdateTicketResult(success=False, error="No fields provided to update")
+
+        # Build the PATCH payload
+        patch_body: Dict[str, Any] = {}
+        updated = {}
+        errors = []
+
+        # --- summary -> title ---
+        if 'summary' in fields:
+            new_title = str(fields['summary']).strip()
+            if new_title:
+                patch_body['title'] = new_title
+
+        # --- status -> state ---
+        if 'status' in fields:
+            raw_status = str(fields['status']).strip().lower()
+            # Map common kanban states to GitHub open/closed
+            state_map = {
+                'open': 'open',
+                'todo': 'open',
+                'in_progress': 'open',
+                'in progress': 'open',
+                'closed': 'closed',
+                'done': 'closed',
+                'complete': 'closed',
+                'completed': 'closed',
+                'resolved': 'closed',
+            }
+            if raw_status in state_map:
+                patch_body['state'] = state_map[raw_status]
+            else:
+                errors.append(
+                    f"status '{fields['status']}' is not mappable to a GitHub issue state "
+                    f"(only open/closed transitions are supported; "
+                    f"intermediate states like 'In Progress' are unsupported by GitHub Issues)"
+                )
+
+        if patch_body:
+            url = f"{self._api_base}/repos/{owner}/{repo}/issues/{number}"
+            try:
+                data = self._make_request(url, method='PATCH', data=patch_body)
+                # Confirm what was actually updated from the response
+                if 'title' in patch_body and data.get('title') == patch_body['title']:
+                    updated['summary'] = patch_body['title']
+                elif 'title' in patch_body:
+                    errors.append("summary update: API did not confirm the new title")
+                if 'state' in patch_body and data.get('state') == patch_body['state']:
+                    updated['status'] = patch_body['state']
+                elif 'state' in patch_body:
+                    errors.append("status update: API did not confirm the new state")
+            except urllib.error.HTTPError as e:
+                errors.append(f"GitHub PATCH failed (HTTP {e.code})")
+            except urllib.error.URLError as e:
+                errors.append(f"GitHub PATCH failed (network: {e.reason})")
+            except Exception as e:
+                errors.append(f"GitHub PATCH failed: {str(e)}")
+
+        if errors and not updated:
+            return UpdateTicketResult(
+                success=False,
+                error='; '.join(errors)
+            )
+
+        formatted_id = self._format_issue_id(owner, repo, number)
+        result = UpdateTicketResult(
+            success=True,
+            updated_fields=updated,
+            url=self.get_ticket_url(formatted_id)
+        )
+        if errors:
+            # Partial success: some fields updated, some failed/unsupported
+            result.error = '; '.join(errors)
+
+        return result
 
 
 # Register the provider
