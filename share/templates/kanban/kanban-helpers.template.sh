@@ -20,7 +20,7 @@
 # AITeamForge Installation Root
 # This variable is substituted by the installer (install-kanban.sh)
 # ─────────────────────────────────────────────────────────────────────────────
-AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
+AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-}"
 
 # Configuration
 # Legacy centralized path (kept for reference, no longer used)
@@ -75,7 +75,7 @@ fi
 # to verify parity.
 _kb_get_kanban_dir() {
     local team="$1"
-    local _atf_dir="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
+    local _atf_dir="${AITEAMFORGE_DIR}"
 
     # ── Strategy 1: team-paths.json registry (XACA-0649) ─────────────────────
     # Read kanban_dir directly from the registry — the same source the Python

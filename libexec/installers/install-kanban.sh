@@ -613,6 +613,42 @@ install_kb_port_reconcile_script() {
     success "Installed: $dest"
 }
 
+# XACA-0698: Install kb-init-team and kb-init-team-guard.sh to AITEAMFORGE_DIR/scripts/
+# so a fresh install with NO team selected still has the provisioner available.
+# Without this, install-team.sh (which is team-gated) is the only installer that
+# copies these files — leaving a no-team fresh install unable to run kb-init-team
+# and breaking the XACA-0653 E2E gate step 3 with "not found in the installed tree".
+# SIBLING-DRIFT NOTE: this install function is paired with:
+#   (a) _xaca0608_aux_script_map entries in aiteamforge-upgrade.sh (refresh on upgrade)
+# Both sites must stay in sync when kb-init-team is renamed or moved.
+install_kb_init_team_scripts() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local guard_src="${scripts_src}/kb-init-team-guard.sh"
+    local init_src="${scripts_src}/kb-init-team"
+    local guard_dest="$AITEAMFORGE_DIR/scripts/kb-init-team-guard.sh"
+    local init_dest="$AITEAMFORGE_DIR/scripts/kb-init-team"
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+
+    if [ -f "$guard_src" ]; then
+        info "Installing kb-init-team-guard.sh"
+        cp "$guard_src" "$guard_dest"
+        chmod +x "$guard_dest"
+        success "Installed: $guard_dest"
+    else
+        warning "kb-init-team-guard.sh not found at: ${guard_src} (skipping)"
+    fi
+
+    if [ -f "$init_src" ]; then
+        info "Installing kb-init-team (team provisioner)"
+        cp "$init_src" "$init_dest"
+        chmod +x "$init_dest"
+        success "Installed: $init_dest"
+    else
+        warning "kb-init-team not found at: ${init_src} (skipping)"
+    fi
+}
+
 # Install kanban hooks
 install_kanban_hooks() {
     local hooks_src="$INSTALL_ROOT/share/kanban-hooks"
@@ -1770,6 +1806,7 @@ install_kanban_system() {
     install_lcars_health_check_script
     install_worktree_personas_script
     install_kb_port_reconcile_script
+    install_kb_init_team_scripts
     install_kanban_hooks
 
     # Initialize kanban boards for each team (skipped when no teams resolved —

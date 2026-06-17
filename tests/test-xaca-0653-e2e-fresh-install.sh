@@ -781,6 +781,10 @@ note "doctor summary: Passed=${DOCTOR_PASS:-?} Failed=${DOCTOR_FAIL:-?}"
 #   (c) the iTerm2 GUI app is absent on a headless CI runner (≠ the venv iterm2
 #       PYTHON package, which we assert is green separately below + in step 8);
 #   (d) the Claude Code CLI is not installed on a clean CI runner.
+#   (e) XACA-0698: org-identity placeholder failure ('example-org') — surfaces
+#       when team-paths.json is absent (e.g. step 3 kb-init-team was skipped or
+#       failed). Fixed by XACA-0698 (kb-init-team now unconditional on fresh
+#       install), but kept in the allowlist as cascade protection.
 # (c)/(d) are present on a real consumer (which is why M1Pro passed) but absent on
 # a GH Actions macos runner. We tolerate ONLY these known artifacts and FAIL on
 # ANY other doctor failure (e.g. a genuine venv-dep regression) so the gate stays
@@ -792,6 +796,7 @@ UNEXPECTED_FAILS="$(printf '%s\n' "$DOCTOR_PLAIN" \
   | grep -vE "LCARS health check script missing" \
   | grep -vE "iTerm2 not found" \
   | grep -vE "Claude Code not found" \
+  | grep -vE "Org identity is the unconfigured placeholder" \
   | grep -vE 'Some checks failed' \
   | sed '/^[[:space:]]*$/d')"
 if [ -z "$UNEXPECTED_FAILS" ]; then

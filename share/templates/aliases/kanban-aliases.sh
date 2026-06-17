@@ -50,7 +50,7 @@ _kb_check_jq() {
 # Strategy 3: $AITEAMFORGE_DIR/kanban — catch-all for genuinely unknown teams.
 _kb_get_kanban_dir() {
     local team="$1"
-    local _atf_dir="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}"
+    local _atf_dir="${AITEAMFORGE_DIR}"
 
     # ── Strategy 1: team-paths.json registry (XACA-0649) ─────────────────────
     # Read kanban_dir directly from the registry — the same source the Python
@@ -1259,7 +1259,7 @@ HELP
     # ── Build quarantine destination ──────────────────────────────────────────
     local timestamp_dir
     timestamp_dir=$(date -u +"%Y%m%d-%H%M%S")
-    local quarantine_base="${AITEAMFORGE_DIR:-{{AITEAMFORGE_DIR}}}/quarantine/runtime-stub-stash"
+    local quarantine_base="${AITEAMFORGE_DIR}/quarantine/runtime-stub-stash"
     local quarantine_dir="${quarantine_base}/${timestamp_dir}-${team}"
 
     # Derive a flat filename from the original path: replace / with _

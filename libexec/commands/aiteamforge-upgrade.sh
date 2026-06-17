@@ -701,6 +701,8 @@ update_team_scripts() {
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
+kb-init-team-guard.sh
+kb-init-team
 EOF
 }
 
