@@ -2652,10 +2652,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         elif path.startswith('/api/releases/') and path.endswith('/promote'):
             release_id = path.replace('/api/releases/', '').replace('/promote', '')
             self.handle_promote_release(release_id)
-        elif path.startswith('/api/releases/') and path.endswith('/plan'):
-            # POST /api/releases/<id>/plan — demote all platforms to PLANNED (XACA-0729)
-            release_id = path[len('/api/releases/'):-len('/plan')]
-            self.handle_plan_release(release_id)
         elif path == '/api/releases/flow-config':
             self.handle_update_flow_config()
         elif path == '/api/releases/sync-item':
@@ -4967,25 +4963,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if isinstance(platforms_input, str):
                 platforms_input = [p.strip() for p in platforms_input.split(',')]
 
-            # XACA-0729: Derive the initial holding environment defensively.
-            # DEFAULT_RELEASE_CONFIG always leads with "PLANNED", but boards whose
-            # defaultEnvironments drifted (e.g. omitting PLANNED) previously caused
-            # environments[0] to be "DEV" — making the release born ACTIVE.
-            # Rule: if "PLANNED" appears anywhere in the resolved environments list,
-            # seed every platform in "PLANNED" regardless of its list position.
-            # Fall back to environments[0] only for boards that have intentionally
-            # opted out of the PLANNED stage entirely.
-            if "PLANNED" in environments:
-                initial_environment = "PLANNED"
-            else:
-                initial_environment = environments[0] if environments else "PLANNED"
-
             platforms = {}
             for platform in platforms_input:
                 platforms[platform] = {
                     "version": post_data.get(f'{platform}Version', default_version),
                     "buildNumber": post_data.get(f'{platform}Build', 1),
-                    "environment": initial_environment,
+                    "environment": environments[0] if environments else "PLANNED",
                     "environmentHistory": []
                 }
 
@@ -5405,69 +5388,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         except Exception as e:
             self.send_error(500, f"Error promoting release: {e}")
-
-    def handle_plan_release(self, release_id):
-        """POST /api/releases/<id>/plan — Demote all platforms back to the PLANNED holding state.
-
-        XACA-0729: Resets a release that was accidentally born ACTIVE (e.g. because
-        defaultEnvironments drifted and omitted PLANNED) or that needs to be pulled
-        back to the holding queue before re-promotion begins.
-
-        Every platform's environment is set to "PLANNED" and a history entry is
-        appended (same audit-trail convention as handle_promote_release).  The release
-        status is reset to "in_progress" — matching what a freshly-created PLANNED
-        release looks like (see handle_create_release).
-
-        Returns 404 if the release does not exist.
-        No request body is required (the endpoint ignores any body that is sent).
-        """
-        try:
-            data = self._load_releases_config()
-            release = self._find_release_by_id(data, release_id)
-            if not release:
-                self.send_error(404, f"Release not found: {release_id}")
-                return
-
-            now = self._get_timestamp()
-            platforms = release.get('platforms', {})
-
-            for plat_name, plat_data in platforms.items():
-                current_env = plat_data.get('environment')
-                history = plat_data.get('environmentHistory', [])
-                history.append({
-                    "from": current_env,
-                    "to": "PLANNED",
-                    "promotedAt": now
-                })
-                plat_data['environment'] = "PLANNED"
-                plat_data['environmentHistory'] = history
-
-            release['platforms'] = platforms
-            # Reset to the same status a freshly-created release carries.
-            release['status'] = "in_progress"
-
-            self._save_releases_config(data)
-
-            # Write-through to manifest so it stays a faithful mirror of board state
-            # (same pattern as handle_promote_release / handle_platform_gate_status).
-            try:
-                self._sync_release_metadata_to_manifest(release, release.get('team'))
-            except Exception as sync_err:
-                print(f"[LCARS] Warning: manifest sync after plan-reset failed: {sync_err}")
-
-            self.send_response(200)
-            self.send_header('Content-Type', 'application/json')
-            self.send_header('Access-Control-Allow-Origin', '*')
-            self.end_headers()
-            self.wfile.write(json.dumps({
-                "success": True,
-                "releaseId": release_id,
-                "resetEnvironment": "PLANNED",
-                "platforms": list(platforms.keys())
-            }).encode())
-
-        except Exception as e:
-            self.send_error(500, f"Error resetting release to PLANNED: {e}")
 
     def handle_platform_gate_status(self, release_id):
         """POST /api/releases/<id>/platform-gate-status — Persist version-gate result (XACA-0658-004).
