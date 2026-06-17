@@ -317,8 +317,20 @@ check_dependencies() {
   fi
 
   # iTerm2
+  # XACA-0698: iTerm2 and Claude Code are intentionally absent on headless CI
+  # runners (GH Actions macOS). We downgrade these to 'warn' in CI so the doctor
+  # exit-code stays clean for the 'aiteamforge doctor' gate in the E2E acceptance
+  # test. On a real consumer workstation (no CI env var) they remain hard failures
+  # so a misconfigured install is still surfaced correctly.
+  # CI detection: standard GITHUB_ACTIONS=true or CI=true env vars (both set by GH
+  # Actions). Not set by a normal interactive terminal session.
+  _doc_ci_mode=false
+  [ "${GITHUB_ACTIONS:-}" = "true" ] || [ "${CI:-}" = "true" ] && _doc_ci_mode=true
+
   if [ -d "/Applications/iTerm.app" ]; then
     check_result pass "iTerm2"
+  elif [ "$_doc_ci_mode" = "true" ]; then
+    check_result warn "iTerm2 not found (expected-absent in CI)" "Install locally: brew install --cask iterm2"
   else
     check_result fail "iTerm2 not found" "Install: brew install --cask iterm2"
   fi
@@ -334,6 +346,8 @@ check_dependencies() {
     else
       check_result warn "Claude Code not configured" "Run: claude auth login"
     fi
+  elif [ "$_doc_ci_mode" = "true" ]; then
+    check_result warn "Claude Code not found (expected-absent in CI)" "Install locally: npm install -g @anthropic-ai/claude-code"
   else
     check_result fail "Claude Code not found" "Install: npm install -g @anthropic-ai/claude-code"
   fi

@@ -698,6 +698,12 @@ update_team_scripts() {
 # XACA-0673 parity test auto-detects sibling Python imports and FAILS if a newly
 # shipped imported module is missing from this set — so it cannot silently drift.
 # Newline-delimited basenames; exact-line membership test.
+# XACA-0698: kb-init-team and its guard are now installed for ALL teams (not just
+# parametric ones) via install_kb_init_team_scripts() in install-kanban.sh. Add both
+# to the mandatory materialize set so boxes UPGRADED across this release also get them;
+# without this, the install-side fix creates an asymmetry where fresh installs work but
+# pre-existing upgraded boxes stay broken. The XACA-0673 parity gate only checks Python
+# sibling-imports, so adding shell scripts here does not affect that gate.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
