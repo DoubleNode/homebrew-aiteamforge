@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Legal Team Research Terminal Startup
 # Location: Law Library

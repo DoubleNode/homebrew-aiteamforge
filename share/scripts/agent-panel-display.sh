@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Agent Panel Display - Terminal-based agent info display
 # Renders avatar via imgcat + agent info with ANSI formatting
 # Runs in a narrow split pane, refreshes when data changes

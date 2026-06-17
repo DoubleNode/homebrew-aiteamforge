@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Legal Team LCARS Terminal Startup
 # Location: Court Administration Office

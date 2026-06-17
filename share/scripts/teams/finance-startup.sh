@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Finance Team All Terminals Master Startup
 # Launches all Finance terminals in separate tabs
 # Includes LCARS (Kanban Overview) as first tab

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance Communications Terminal Startup
 # ENT Location: Communications Station

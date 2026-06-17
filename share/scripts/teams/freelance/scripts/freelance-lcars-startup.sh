@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance LCARS Terminal Startup
 # ENT Location: Enterprise NX-01 Computer Core

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance Engineering Terminal Startup
 # ENT Location: Main Engineering

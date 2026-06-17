@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Update Claude Code Agent Display in tmux Status Bar
 # Usage: ./update_claude_agent.sh "agent-name"

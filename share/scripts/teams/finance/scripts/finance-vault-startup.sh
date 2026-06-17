@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Finance Team Vault Terminal Startup
 # Location: Tower of Commerce - Investment Vault

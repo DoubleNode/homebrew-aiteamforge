@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Medical Team LCARS Terminal Startup
 # Location: Princeton-Plainsboro Teaching Hospital - Central Monitoring

@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Medical Team All Terminals Master Startup
 # Launches all Medical terminals in separate tabs
 # Includes LCARS (Kanban Overview) as first tab

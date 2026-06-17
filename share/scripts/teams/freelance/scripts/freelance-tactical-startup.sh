@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance Tactical Terminal Startup
 # ENT Location: Tactical Station

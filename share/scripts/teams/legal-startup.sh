@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Legal Team All Terminals Master Startup
 # Launches all 7 Legal-themed terminals in separate tabs
 # Includes LCARS (Kanban Overview) as first tab

@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Freelance Cleanup Sessions Script
 # Kills Freelance tmux sessions (optionally filtered by group/project)
 #

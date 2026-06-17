@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Legal Team Terminal Banner Display Script
 # Usage: legal-banner.sh '$SESSION_THEME' '$SESSION_TYPE' '$SESSION_NAME' '$TERMINAL_NUMBER' '$TERMINAL_NAME' '$SESSION_DESCRIPTION' '$SESSION_LOCATION' '$SESSION_DEVELOPER' '$SESSION_ROLE' '$TERMINAL_DESCRIPTION' '$SESSION_CODE'
 

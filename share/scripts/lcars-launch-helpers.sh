@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # shellcheck shell=bash
 # lcars-launch-helpers.sh — Shared helper functions for LCARS server startup
 #

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # auto-upgrade.sh — Daily AITeamForge tap auto-upgrade with version-pin support.
 #
 # Invoked by the com.aiteamforge.auto-upgrade LaunchAgent (daily at 03:15).

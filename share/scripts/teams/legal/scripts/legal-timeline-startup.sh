@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Legal Team Timeline Terminal Startup
 # Location: Case Management Office

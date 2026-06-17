@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Legal Team Discovery Terminal Startup
 # Location: Evidence Review Room

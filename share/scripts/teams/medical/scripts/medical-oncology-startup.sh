@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Medical Team Oncology Terminal Startup
 # Location: Princeton-Plainsboro Teaching Hospital - Oncology Department

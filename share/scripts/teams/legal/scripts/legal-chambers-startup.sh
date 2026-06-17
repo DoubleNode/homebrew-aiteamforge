@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Legal Team Chambers Terminal Startup
 # Location: Judge's Chambers

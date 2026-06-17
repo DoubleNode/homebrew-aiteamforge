@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Medical Team Neurology Terminal Startup
 # Location: Princeton-Plainsboro Teaching Hospital - Neurology Department

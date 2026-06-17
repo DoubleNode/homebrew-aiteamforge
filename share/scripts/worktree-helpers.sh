@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Git Worktree Helper Functions
 # Provides easy worktree management for iOS, Firebase, and Android development
 

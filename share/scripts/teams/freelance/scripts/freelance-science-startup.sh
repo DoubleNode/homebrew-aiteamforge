@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance Science Terminal Startup
 # ENT Location: Science Lab

@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Freelance All Terminals Master Startup
 # Launches all 8 ENT-themed Freelance terminals in separate tabs
 # Includes LCARS (Kanban Overview) as first tab

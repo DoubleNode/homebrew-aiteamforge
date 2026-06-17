@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Finance Team Workshop Terminal Startup
 # Location: Tower of Commerce - Engineering Workshop

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Finance Team Nagus Terminal Startup
 # Location: Tower of Commerce - Grand Nagus Suite

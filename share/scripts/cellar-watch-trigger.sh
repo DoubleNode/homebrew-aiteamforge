@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # cellar-watch-trigger.sh — Invoked by com.aiteamforge.cellar-watch LaunchAgent when
 # the Homebrew Cellar dir for aiteamforge changes.
 #

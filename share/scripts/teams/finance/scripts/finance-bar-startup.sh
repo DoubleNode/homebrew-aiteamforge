@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Finance Team Bar Terminal Startup
 # Location: Tower of Commerce - Quark's Emporium

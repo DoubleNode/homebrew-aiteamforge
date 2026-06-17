@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Legal Team Cleanup Sessions Script
 # Kills all Legal Team tmux sessions
 # Usage: ./legal-shutdown.sh [PROJECTID]

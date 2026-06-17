@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env zsh
 # Display Agent Avatar Panel
 # Writes agent data to a temp JSON file for the LCARS agent panel to display
 #

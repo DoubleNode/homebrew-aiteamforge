@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Finance Team LCARS Terminal Startup
 # Location: Tower of Commerce - Central Monitoring

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance Helm Terminal Startup
 # ENT Location: Helm Station

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Freelance Command Terminal Startup
 # ENT Location: Captain's Ready Room / Bridge

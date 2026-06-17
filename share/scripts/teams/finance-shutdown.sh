@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Finance Team Cleanup Script
 # Kills all Finance tmux sessions for a specific project

@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 set +x
 # Medical Team Cleanup Script
 # Kills all Medical tmux sessions for a specific project
