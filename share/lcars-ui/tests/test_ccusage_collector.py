@@ -329,7 +329,7 @@ def _make_subprocess_result(returncode: int = 0, stdout: str = "") -> mock.Magic
 
 
 class CollectWeeklySuccessTests(unittest.TestCase):
-    """When weekly succeeds, cache should contain schema_version=2 + weekly block."""
+    """When weekly succeeds, cache should contain schema_version=4 + weekly block."""
 
     def setUp(self):
         self._tmp = tempfile.NamedTemporaryFile(
@@ -371,9 +371,9 @@ class CollectWeeklySuccessTests(unittest.TestCase):
 
         return json.loads(cc.CACHE_PATH.read_text())
 
-    def test_schema_version_is_2(self):
+    def test_schema_version_is_4(self):
         cache = self._run_collect_with_mocks(weekly_ok=True)
-        self.assertEqual(cache["schema_version"], 2)
+        self.assertEqual(cache["schema_version"], 4)
 
     def test_weekly_block_present_on_success(self):
         cache = self._run_collect_with_mocks(weekly_ok=True)
@@ -456,9 +456,9 @@ class CollectWeeklyFailureTests(unittest.TestCase):
 
         return json.loads(cc.CACHE_PATH.read_text())
 
-    def test_schema_version_is_2_even_on_weekly_failure(self):
+    def test_schema_version_is_4_even_on_weekly_failure(self):
         cache = self._run_collect_weekly_fails()
-        self.assertEqual(cache["schema_version"], 2)
+        self.assertEqual(cache["schema_version"], 4)
 
     def test_ccusage_ok_true_when_only_weekly_fails(self):
         """Rolling blocks succeed -> ccusage_ok must remain True."""
@@ -542,7 +542,7 @@ class CollectRollingFailureTests(unittest.TestCase):
         self.assertIsNotNone(cache.get("weekly"))
         self.assertEqual(cache["weekly"]["current_week"]["week"], "2026-04-28")
 
-    def test_schema_version_is_2_even_when_rolling_fails(self):
+    def test_schema_version_is_4_even_when_rolling_fails(self):
         def fake_subprocess_run(cmd, **kwargs):
             return _make_subprocess_result(returncode=1, stdout="blocks error")
 
@@ -550,7 +550,7 @@ class CollectRollingFailureTests(unittest.TestCase):
             cc.collect("/fake/ccusage")
 
         cache = json.loads(cc.CACHE_PATH.read_text())
-        self.assertEqual(cache["schema_version"], 2)
+        self.assertEqual(cache["schema_version"], 4)
 
 
 # ---------------------------------------------------------------------------
@@ -560,8 +560,8 @@ class CollectRollingFailureTests(unittest.TestCase):
 class ConstantsTests(unittest.TestCase):
     """Guard against accidental constant regressions."""
 
-    def test_schema_version_is_2(self):
-        self.assertEqual(cc.SCHEMA_VERSION, 2)
+    def test_schema_version_is_4(self):
+        self.assertEqual(cc.SCHEMA_VERSION, 4)
 
     def test_weekly_days_is_positive(self):
         self.assertGreater(cc.WEEKLY_DAYS, 0)
