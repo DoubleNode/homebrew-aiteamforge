@@ -222,6 +222,12 @@ class SyncService:
         - BIDIRECTIONAL: both directions; change keys are prefixed to avoid
           collisions (``pushed_summary``/``pushed_status`` vs inbound keys).
 
+        Note:
+            ``provider.verify()`` is called unconditionally for *every*
+            direction — including pure ``KANBAN_TO_EXTERNAL`` — to confirm the
+            ticket still exists before any write. Callers should be aware that
+            even an outbound-only sync incurs one read API call per link.
+
         Args:
             item: Kanban item dictionary
             link_data: Raw ticketLink dictionary from the item
@@ -379,6 +385,14 @@ class SyncService:
         *was* accepted, and record the error string in ``link_data['syncError']``
         for observability — but we do NOT treat a partial failure as a hard
         error that wipes the outbound changes dict.
+
+        Cache-update contract: on success the local ``link_data`` cache is
+        updated from the ``fields`` we *sent* (not from ``result.updated_fields``).
+        This is safe only because every provider's ``update_ticket`` returns
+        ``success=True`` exclusively after the external response confirms the
+        change — i.e. ``success=True`` implies a confirmed write. Providers
+        added in the future MUST honour this contract (confirm via the response
+        body before returning success) or the cache may drift from reality.
         """
         integration_id = link_data.get('integrationId', '')
         ticket_id = link_data.get('ticketId', '')
