@@ -619,7 +619,9 @@ install_kb_port_reconcile_script() {
 # copies these files — leaving a no-team fresh install unable to run kb-init-team
 # and breaking the XACA-0653 E2E gate step 3 with "not found in the installed tree".
 # SIBLING-DRIFT NOTE: this install function is paired with:
-#   (a) _xaca0608_aux_script_map entries in aiteamforge-upgrade.sh (refresh on upgrade)
+#   (a) _xaca0673_mandatory_materialize_basenames entries in aiteamforge-upgrade.sh
+#       (materialize-when-absent on upgrade — these files are newly mandatory, so the
+#        upgrade path adds them if missing rather than only refreshing existing copies)
 # Both sites must stay in sync when kb-init-team is renamed or moved.
 install_kb_init_team_scripts() {
     local scripts_src="$INSTALL_ROOT/share/scripts"
