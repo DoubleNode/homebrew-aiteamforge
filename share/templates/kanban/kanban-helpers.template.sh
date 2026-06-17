@@ -1521,7 +1521,7 @@ _kb_add_subitem_blocker() {
         # Calculate elapsed time in milliseconds
         local start_epoch now_epoch elapsed_ms
         # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${work_started_at%Z}" "+%s" 2>/dev/null || echo "0")
+        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
         now_epoch=$(date -u "+%s")
         if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
             elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
@@ -2403,7 +2403,7 @@ kb-done() {
             sub_old_status=$(_kb_jq_read "$board_file" \
                 '[.backlog[$pidx].subitems[] | select(.id == $subId)] | first | .status // "todo"' \
                 --argjson pidx "$parent_idx" --arg subId "$working_id" -r 2>/dev/null || echo "todo")
-            _kb_jq_update "$board_file" '
+            if ! _kb_jq_update "$board_file" '
                 .backlog[$pidx].subitems = [.backlog[$pidx].subitems[] |
                     if .id == $subId then
                         .status = "completed" |
@@ -2414,7 +2414,10 @@ kb-done() {
                 ] |
                 .backlog[$pidx].updatedAt = $ts |
                 .lastUpdated = $ts
-            ' --argjson pidx "$parent_idx" --arg subId "$working_id" --arg ts "$timestamp"
+            ' --argjson pidx "$parent_idx" --arg subId "$working_id" --arg ts "$timestamp"; then
+                echo "❌ kb-done: board write failed (jq transform produced no output). Task NOT completed." >&2
+                return 1
+            fi
             item_found=true
             # Activity log: subitem completed via kb-done
             _kb_log_activity "subitem_status_change" "$working_id" "subitem" "status" "$sub_old_status" "completed" ""
@@ -2435,7 +2438,7 @@ kb-done() {
                 fi
             fi
 
-            _kb_jq_update "$board_file" \
+            if ! _kb_jq_update "$board_file" \
                 '.backlog[$idx].status = "completed" |
                  .backlog[$idx].completedAt = $ts |
                  .backlog[$idx].updatedAt = $ts |
@@ -2445,7 +2448,10 @@ kb-done() {
                  del(.backlog[$idx].worktreeBranch) |
                  del(.backlog[$idx].worktreeWindowId) |
                  .lastUpdated = $ts' \
-                --argjson idx "$item_idx" --arg ts "$timestamp"
+                --argjson idx "$item_idx" --arg ts "$timestamp"; then
+                echo "❌ kb-done: board write failed (jq transform produced no output). Task NOT completed." >&2
+                return 1
+            fi
             item_found=true
             # Activity log: main item completed
             _kb_log_activity "status_change" "$working_id" "item" "status" "" "completed" ""
@@ -3801,7 +3807,7 @@ kb-backlog() {
                         # Calculate elapsed time in milliseconds
                         local start_epoch now_epoch elapsed_ms
                         # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${work_started_at%Z}" "+%s" 2>/dev/null || echo "0")
+                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
                         now_epoch=$(date -u "+%s")
                         if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
                             elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
@@ -4038,7 +4044,7 @@ kb-backlog() {
                         # Calculate elapsed time in milliseconds
                         local start_epoch now_epoch elapsed_ms
                         # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${work_started_at%Z}" "+%s" 2>/dev/null || echo "0")
+                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
                         now_epoch=$(date -u "+%s")
                         if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
                             elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
@@ -4292,7 +4298,7 @@ kb-backlog() {
                         # Calculate elapsed time in milliseconds
                         local start_epoch now_epoch elapsed_ms
                         # Strip Z suffix and parse as UTC (macOS date -j -f ignores timezone suffix)
-                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${work_started_at%Z}" "+%s" 2>/dev/null || echo "0")
+                        start_epoch=$(TZ=UTC date -j -f "%Y-%m-%dT%H:%M:%S" "${${work_started_at%\.[0-9]*}%Z}" "+%s" 2>/dev/null || echo "0")
                         now_epoch=$(date -u "+%s")
                         if [[ "$start_epoch" != "0" ]] && [[ "$start_epoch" -gt 0 ]]; then
                             elapsed_ms=$(( (now_epoch - start_epoch) * 1000 ))
