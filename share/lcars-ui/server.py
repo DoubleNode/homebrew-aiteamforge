@@ -4187,6 +4187,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Use the distributed kanban directories mapping
         return TEAM_KANBAN_DIRS.get(team)
 
+    # XACA-0736: per-team dedupe set for the PLANNED self-heal warning.
+    # Keyed by team name; populated on first heal-on-read; reset never (warn once per process).
+    _planned_heal_warned: set = set()
+
     # Default release configuration (used when board doesn't have releaseConfig)
     DEFAULT_RELEASE_CONFIG = {
         "defaultEnvironments": ["PLANNED", "DEV", "QA", "ALPHA", "BETA", "GAMMA", "PROD"],
@@ -4247,13 +4251,43 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 flow_config = release_config.get('flowConfig')
                 if flow_config is None:
                     flow_config = copy.deepcopy(self.DEFAULT_RELEASE_CONFIG['flowConfig'])
+
+                # XACA-0736: Self-heal — ensure PLANNED always leads defaultEnvironments.
+                # Boards that persisted releaseConfig without PLANNED (e.g. ios/android/firebase
+                # before this fix) caused new releases to be born at environments[0]="DEV"
+                # (active) instead of the PLANNED holding tab. Heal-on-read here: the corrected
+                # list is returned and will be persisted on the next natural _save_releases_config
+                # call (no disk write here). A structured one-time warning per team is emitted so
+                # operators can see which boards needed healing without being spammed on every read.
+                raw_envs = release_config.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments'])
+                if raw_envs and raw_envs[0] != "PLANNED":
+                    # Compute the healed list once, then warn at most once per team.
+                    if "PLANNED" in raw_envs:
+                        action = "reordered to front"
+                        default_environments = ["PLANNED"] + [e for e in raw_envs if e != "PLANNED"]
+                    else:
+                        action = "prepended (was absent)"
+                        default_environments = ["PLANNED"] + list(raw_envs)
+                    warn_key = team or LCARS_TEAM
+                    if warn_key not in self.__class__._planned_heal_warned:
+                        self.__class__._planned_heal_warned.add(warn_key)
+                        print(
+                            f"[LCARS] WARNING: XACA-0736: team '{warn_key}' releaseConfig.defaultEnvironments "
+                            f"did not lead with PLANNED — auto-healed on read ({action}). "
+                            f"Original: {raw_envs}. Healed: {default_environments}. "
+                            f"Will be persisted on next config save.",
+                            file=sys.stderr,
+                        )
+                else:
+                    default_environments = raw_envs
+
                 return {
                     "version": "1.0",
                     "team": data.get('team', LCARS_TEAM),
                     "releases": data.get('releases', []),
                     "nextId": data.get('nextReleaseId', 1),
                     # Flatten config for backward compatibility
-                    "defaultEnvironments": release_config.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments']),
+                    "defaultEnvironments": default_environments,
                     "platforms": release_config.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
                     "releaseTypes": release_config.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
                     "flowConfig": flow_config,
