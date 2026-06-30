@@ -66,9 +66,14 @@ def _build_team_kanban_dirs() -> dict:
             if result:
                 return result
         # Empty/failed enumeration → fall back to DEFAULT_TEAMS directly.
+        # XACA-0727: skip board-less aliases (e.g. "mainevent") — they carry no
+        # kanban_dir, so Path(entry["kanban_dir"]) would KeyError and crash the
+        # whole comprehension. The absent value is a missing key, None, "" or the
+        # "null" sentinel (shell-heredoc seed) — exclude all of them.
         return {
             team: Path(entry["kanban_dir"]).expanduser()
             for team, entry in DEFAULT_TEAMS.items()
+            if entry.get("kanban_dir") not in (None, "", "null")
         }
     except Exception as _exc:
         warnings.warn(
@@ -92,7 +97,9 @@ def _build_team_kanban_dirs() -> dict:
             "medical-general":   _h / "medical" / "general" / "kanban",
             "medical":           _h / "medical" / "general" / "kanban",
             "finance-personal":  _h / "finance" / "personal" / "kanban",
-            "mainevent": Path("/Users/Shared/Development/Main Event/dev-team/kanban"),
+            # XACA-0727: "mainevent" removed — it is a board-less alias (no kanban
+            # board of its own; "command" owns command-board.json). It must not
+            # resolve to command's kanban_dir.
             "freelance":  _h / "dev-team" / "kanban",
         }
 

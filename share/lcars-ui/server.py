@@ -292,7 +292,19 @@ def _build_team_kanban_dirs() -> dict:
                         file=sys.stderr,
                     )
                 else:
-                    raw = {team: get_team_kanban_dir(team) for team in teams}
+                    # XACA-0727: skip board-less alias teams (e.g. "mainevent")
+                    # individually — get_team_kanban_dir() raises KeyError for
+                    # them. A bare dict comprehension would let that KeyError
+                    # escape to the outer except and collapse the ENTIRE dynamic
+                    # map to the hardcoded fallback (dropping per-machine
+                    # freelance slugs). Mirrors the per-item guard already used
+                    # by kanban-backup.py / kanban_utils.py.
+                    raw = {}
+                    for team in teams:
+                        try:
+                            raw[team] = get_team_kanban_dir(team)
+                        except KeyError:
+                            continue
                     return _filter_contract_violating_teams(raw)
             else:
                 print(

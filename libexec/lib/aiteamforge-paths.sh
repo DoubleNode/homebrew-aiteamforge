@@ -209,7 +209,16 @@ _AITEAMFORGE_DEFAULT_TEAMS_DATA() {
     # new installs use the "command" team or enable the primary org plugin.
     # xaca-0139:allowed — "mainevent" is a registered legacy team slug (backward-compat alias, not user-facing org branding)
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve collision with command (band 8230–8239).
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "mainevent"     "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8400"  "8400" "10"  "MEV"
+    # XACA-0727: mainevent is BOARD-LESS — kanban_dir/working_dir are the "null"
+    # sentinel (NOT empty: empty whitespace-delimited fields collapse under the
+    # IFS=$'\t' read parser and shift the port into the kanban_dir slot). "null"
+    # is the established absent-field sentinel here (see ports on lines above) and
+    # is treated as absent by the jq path. mainevent previously duplicated
+    # command's dev-team/kanban dir, so kb-* ops resolving team 'mainevent'
+    # derived a phantom mainevent-board.json and failed. 'command' is the
+    # operative kanban identity; mainevent persists only as a crew-launcher/port
+    # alias (LCARS 8400, team_code MEV).
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "mainevent"     "null"                                                      "null"                                                      "8400"  "8400" "10"  "MEV"
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical"        "${HOME}/medical/general/kanban"                           "${HOME}/medical/general"            "null" "8340" "10"  ""
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance"      "${HOME}/dev-team/kanban"                                  "${HOME}/dev-team"                                          "8505"  "8500" "100" "FRE"
 }

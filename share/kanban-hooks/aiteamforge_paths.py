@@ -293,15 +293,24 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve the existing
     # command/mainevent collision. 8234 is in command's band [8230, 8240);
-    # mainevent's authoritative band is [8400, 8410). This is the one deliberate
-    # schema-time renumber — mainevent has no concrete team-paths.json entry to
-    # be confused about. The kb-port-fix migration tool (subitem 005) handles
-    # live team-paths.json entries; DEFAULT_TEAMS reflects the correct post-migration
-    # value here so fresh installs get the right port immediately.
+    # mainevent's authoritative band is [8400, 8410).
+    #
+    # XACA-0727: mainevent is now a BOARD-LESS alias — it carries NO kanban_dir /
+    # working_dir. 'command' is the operative kanban identity for Main Event
+    # cross-platform coordination (it owns command-board.json in
+    # /Users/Shared/Development/Main Event/dev-team/kanban); mainevent has no
+    # board of its own. Previously mainevent DUPLICATED command's kanban_dir, so
+    # any kb-* op resolving team 'mainevent' derived a phantom
+    # mainevent-board.json (which never existed) and failed. The entry persists
+    # ONLY for its port / identity — LCARS port 8400, team_code MEV — used by the
+    # mainevent-<project> crew launcher (mainevent-startup.sh). Board-less means
+    # get_team_kanban_dir("mainevent") / get_team_working_dir("mainevent") raise a
+    # clear KeyError; team-iterating consumers (server.py _build_team_kanban_dirs,
+    # kanban-backup.py, kanban_utils.py) skip it via try/except. The hardcoded
+    # server.py fallback already omits mainevent, so dynamic + fallback now agree.
     "mainevent": {
         "team_code": "MEV",
-        "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
-        "working_dir": "/Users/Shared/Development/Main Event/dev-team",
+        # board-less alias (XACA-0727): intentionally NO kanban_dir / working_dir.
         "lcars_port_base": 8400,
         "lcars_port_range": 10,
         "lcars_port": 8400,
@@ -317,7 +326,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     # produced the warning noise + invalid team-paths.json keys. The concrete
     # instances ("medical-general", "freelance-<client>-<project>") are the
     # only valid forms. "mainevent" stays above: it is NOT parameterized
-    # (single instance), so a bare key is legitimate.
+    # (single instance), so a bare key is legitimate — though board-less as of
+    # XACA-0727 (it owns no kanban_dir; 'command' is the operative board).
 }
 
 # ---------------------------------------------------------------------------
@@ -865,7 +875,10 @@ def list_teams() -> list[str]:
 def get_team_kanban_dir(team: str) -> Path:
     """Return the kanban directory Path for the given team.
 
-    Raises KeyError with a helpful message if the team is not found.
+    Raises KeyError with a helpful message if the team is not found, or if the
+    team is a board-less alias (e.g. "mainevent" — XACA-0727 — which has no
+    kanban board of its own; use "command" for Main Event coordination).
+    Team-iterating consumers catch this KeyError and skip the team.
     """
     config = load_config()
     entry = config["teams"].get(team)
@@ -875,7 +888,18 @@ def get_team_kanban_dir(team: str) -> Path:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
-    return Path(entry["kanban_dir"]).expanduser()
+    # XACA-0727: board-less aliases carry no kanban_dir. The absent value is
+    # represented as a missing key (Python DEFAULT_TEAMS) OR the literal "null"
+    # sentinel (shell heredoc _AITEAMFORGE_DEFAULT_TEAMS_DATA, which seeds a
+    # fresh overlay) OR empty string — normalize all three.
+    _kd = entry.get("kanban_dir")
+    if _kd in (None, "", "null"):
+        raise KeyError(
+            f"Team '{team}' is a board-less alias (no kanban_dir) — it owns no "
+            f"kanban board. Use 'command' for Main Event coordination. "
+            f"See XACA-0727."
+        )
+    return Path(_kd).expanduser()
 
 
 def get_team_memory_dir(team: str) -> Path | None:
@@ -925,8 +949,16 @@ def get_team_memory_dir(team: str) -> Path | None:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
+    _wd = entry.get("working_dir")
+    if _wd in (None, "", "null"):
+        # Board-less alias (e.g. "mainevent" — XACA-0727): no working_dir, so no
+        # derivable memory dir. Consistent with get_team_kanban_dir/working_dir.
+        raise KeyError(
+            f"Team '{team}' is a board-less alias (no working_dir). "
+            f"See XACA-0727."
+        )
 
-    working_dir = Path(entry["working_dir"]).expanduser()
+    working_dir = Path(_wd).expanduser()
 
     # Encode the working_dir path as Claude Code does:
     #   1. Replace spaces with hyphens (spaces in dir names map to -)
@@ -965,7 +997,9 @@ def get_team_working_dir(team: str) -> Path:
 
     The working_dir is the parent of kanban_dir (the project root).
 
-    Raises KeyError with a helpful message if the team is not found.
+    Raises KeyError with a helpful message if the team is not found, or if the
+    team is a board-less alias (e.g. "mainevent" — XACA-0727 — which has no
+    working_dir of its own). Team-iterating consumers catch this and skip.
     """
     config = load_config()
     entry = config["teams"].get(team)
@@ -975,7 +1009,15 @@ def get_team_working_dir(team: str) -> Path:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
-    return Path(entry["working_dir"]).expanduser()
+    # XACA-0727: board-less aliases carry no working_dir (missing key, "null"
+    # sentinel, or empty — see get_team_kanban_dir for the rationale).
+    _wd = entry.get("working_dir")
+    if _wd in (None, "", "null"):
+        raise KeyError(
+            f"Team '{team}' is a board-less alias (no working_dir). "
+            f"Use 'command' for Main Event coordination. See XACA-0727."
+        )
+    return Path(_wd).expanduser()
 
 
 def get_team_lcars_port(team: str) -> int | None:
