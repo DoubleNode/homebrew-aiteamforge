@@ -271,7 +271,7 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "working_dir": f"{_HOME}/medical/general",
         "lcars_port_base": 8340,
         "lcars_port_range": 10,
-        "lcars_port": None,
+        "lcars_port": 8340,
         "anthropic_account_id": "",
         "anthropic_account_nickname": "",
         "anthropic_api_key_env_var": "TEAM_MEDICAL_GENERAL_API_KEY",

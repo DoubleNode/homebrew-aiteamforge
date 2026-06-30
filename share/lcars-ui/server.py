@@ -334,6 +334,7 @@ def _build_item_prefix_to_team() -> dict:
         'XCMD': 'command',
         'XDNS': 'dns',
         'XMEV': 'mainevent',
+        'XMED': 'medical-general',
         # Freelance per-client/project prefixes (XFSW/XFAP/.../XBWA/XBWD) are NOT
         # listed here — they live only in the per-machine overlay (XACA-0628). The
         # runtime path derives them from build_team_code_map() (merged overlay), so
