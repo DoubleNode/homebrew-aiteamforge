@@ -7358,182 +7358,649 @@ kb-plan-doc-path() {
     echo "${kanban_dir}/plans/${item_id}/"
 }
 
-# Search knowledge entries across all teams
-# Usage: kb-knowledge-search <term> [--team <team>] [--tag <tag>]
-#
-# Searches file contents and INDEX.md tag lists across all knowledge
-# directories. Returns matching entries with location and team context.
-kb-knowledge-search() {
-    _kb_ensure_jq || return 1
+# ─────────────────────────────────────────────────────────────────────────────
+# Knowledge System Helpers (Phase 6 — convention-driven, four-tier schema)
+# Spec: ~/knowledge/SPEC.md  |  Design: docs/superpowers/specs/2026-04-23-knowledge-system-schema-rewrite-design.md
+# ─────────────────────────────────────────────────────────────────────────────
 
-    local search_term="" filter_team="" filter_tag=""
+# Internal: resolve the global knowledge root (honours KB_KNOWLEDGE_GLOBAL_ROOT)
+_kb_knowledge_global_root() {
+    echo "${KB_KNOWLEDGE_GLOBAL_ROOT:-${HOME}/knowledge}"
+}
+
+# Internal: validate a single name component (persona, team, subject segment).
+# Valid: starts with lowercase letter, followed by lowercase letters, digits, underscores, hyphens.
+# Rejects path-traversal characters (/, .., \, null bytes) and uppercase names.
+_kb_validate_name_component() {
+    local name="${1-}"
+    if [[ "$name" =~ ^[a-z][a-z0-9_-]*$ ]]; then
+        return 0
+    fi
+    return 1
+}
+
+# Internal: validate a subject path (slash-separated components, each must pass _kb_validate_name_component).
+_kb_validate_subject_path() {
+    local subj_path="${1-}"
+    local component
+    # Split on / and validate each component
+    local IFS_save="$IFS"
+    IFS='/'
+    local -a components
+    components=( ${=subj_path} )
+    IFS="$IFS_save"
+    if [[ ${#components[@]} -eq 0 ]]; then
+        return 1
+    fi
+    for component in "${components[@]}"; do
+        if ! _kb_validate_name_component "$component"; then
+            return 1
+        fi
+    done
+    return 0
+}
+
+# Internal: slugify a string → lowercase, hyphen-separated, no non-alnum chars
+_kb_knowledge_slugify() {
+    local s="${1-}"
+    echo "$s" | tr '[:upper:]' '[:lower:]' | tr -s ' _' '-' | tr -cd 'a-z0-9-' | sed 's/^-//;s/-$//'
+}
+
+# Internal: parse a simple YAML value from frontmatter
+# Usage: _kb_knowledge_yaml_field <file> <field>
+_kb_knowledge_yaml_field() {
+    local file="${1-}" field="${2-}"
+    grep -m1 "^${field}:" "$file" 2>/dev/null | sed "s/^${field}:[[:space:]]*//" | tr -d '"'"'"
+}
+
+# Internal: resolve project knowledge path
+# Precedence: .knowledge-config.yml → KB_KNOWLEDGE_PROJECT_PATH → default
+# Writes result to stdout; returns 1 if not inside a git repo.
+_kb_knowledge_project_path() {
+    local repo_root project_slug
+
+    # Worktree-aware root resolution: --show-toplevel returns the worktree dir, not
+    # the main repo. Use --git-common-dir to locate the shared .git, then derive the
+    # main repo root from it — project knowledge must always resolve to the main worktree.
+    local git_common_dir
+    git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    if [[ -z "$git_common_dir" ]]; then
+        # Not inside a git repo — use default under global root with "unknown" slug
+        echo "$(_kb_knowledge_global_root)/projects/unknown"
+        return 0
+    fi
+    if [[ "$git_common_dir" == ".git" ]]; then
+        # Main worktree: --git-common-dir is relative, --show-toplevel is correct
+        repo_root=$(git rev-parse --show-toplevel 2>/dev/null)
+    else
+        # Feature worktree: --git-common-dir is the absolute main .git; parent is main repo
+        repo_root=$(dirname "$git_common_dir")
+    fi
+
+    project_slug=$(basename "$repo_root")
+
+    # 1. Per-project config file
+    local config_file="${repo_root}/.knowledge-config.yml"
+    if [[ -f "$config_file" ]]; then
+        local config_path
+        config_path=$(grep -m1 '^project_knowledge_path:' "$config_file" 2>/dev/null | sed 's/^project_knowledge_path:[[:space:]]*//' | tr -d '"'"'")
+        # Trim leading/trailing whitespace without xargs (which splits on whitespace and corrupts paths with spaces)
+        config_path="${config_path## }"
+        config_path="${config_path%% }"
+        if [[ -n "$config_path" ]]; then
+            # Expand leading ./ relative to repo root
+            if [[ "$config_path" == ./* ]]; then
+                config_path="${repo_root}/${config_path#./}"
+            fi
+            echo "$config_path"
+            return 0
+        fi
+    fi
+
+    # 2. KB_KNOWLEDGE_PROJECT_PATH env var (template-expand {repo_root} and {project})
+    if [[ -n "$KB_KNOWLEDGE_PROJECT_PATH" ]]; then
+        local expanded="${KB_KNOWLEDGE_PROJECT_PATH//\{repo_root\}/$repo_root}"
+        expanded="${expanded//\{project\}/$project_slug}"
+        echo "$expanded"
+        return 0
+    fi
+
+    # 3. Default
+    echo "$(_kb_knowledge_global_root)/projects/${project_slug}"
+}
+
+# Internal: derive a human-readable project display name from the project knowledge dir path.
+# Resolution order:
+#   a. .kb-project sentinel in $dir or ancestors (up to 3 levels up) — first non-blank line
+#   b. In-repo layout: */kanban/knowledge/project → basename of the repo root
+#   c. Fallback: basename($dir)
+#
+# NOTE on .kb-project sentinel (XACA-0389 / F-08-009):
+#   .kb-project is an OPTIONAL, per-machine, user-created file (not committed to
+#   any repo). It is absent by default. Its sole purpose is overriding the
+#   display name shown in kb-knowledge-search output for projects whose directory
+#   basename is not a friendly name. When absent, resolution falls through to (b)
+#   or (c), both of which always produce a non-empty result — absence is expected,
+#   not an error condition.
+# Usage: _kb_knowledge_project_display_name <project_knowledge_dir>
+_kb_knowledge_project_display_name() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local dir="${1-}"
+
+    # (a) .kb-project sentinel search: $dir and up to 3 ancestor levels
+    local search_dir="$dir"
+    local sentinel_val=""
+    local level
+    for level in 0 1 2 3; do
+        local sentinel_file="${search_dir}/.kb-project"
+        if [[ -f "$sentinel_file" ]]; then
+            # Read first non-blank, trimmed line
+            sentinel_val=$(grep -m1 '[^[:space:]]' "$sentinel_file" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+            if [[ -n "$sentinel_val" ]]; then
+                echo "$sentinel_val"
+                return 0
+            fi
+            break  # found sentinel but it was empty — fall through
+        fi
+        search_dir=$(dirname "$search_dir")
+    done
+
+    # (b) In-repo layout: .../kanban/knowledge/project → repo dir basename
+    if [[ "$dir" == */kanban/knowledge/project ]]; then
+        echo "$(basename "$(dirname "$(dirname "$(dirname "$dir")")")")"
+        return 0
+    fi
+
+    # (c) Fallback
+    echo "$(basename "$dir")"
+}
+
+# Search knowledge entries across the four-tier schema
+# Usage: kb-knowledge-search [<term>] [--agent <name>] [--subject <path>]
+#        [--project [<slug>]] [--tag <tag>] [--tier <agent|team|subject|project>]
+#        [--all-projects]
+#
+# Searches the new four-tier ~/knowledge/ structure:
+#   agents/*/     subjects/**/     teams/*/     <project_path>/
+#
+# Backward-compatible: the old --team flag is accepted as an alias for --agent.
+# Discovery precedence when multiple tiers match: project > team > subject > agent.
+kb-knowledge-search() {
+    # NO_NOMATCH: empty globs expand to nothing instead of erroring (XACA-0255).
+    # BARE_GLOB_QUAL: force-on so the team-tier `(/DN)` qualifier at the team
+    # glob below parses even when the user's interactive shell opted out via
+    # `setopt NO_BARE_GLOB_QUAL` — without this, that glob throws 'bad pattern'
+    # in such shells and team-tier results are silently lost (XACA-0737).
+    # LOCAL_OPTIONS scopes both to this function — neither leaks to the caller.
+    setopt LOCAL_OPTIONS NO_NOMATCH BARE_GLOB_QUAL
+    local -a search_terms=()  # OR-match terms; populated by positional args (XACA-0738)
+    local filter_agent="" filter_subject="" filter_project=""
+    local filter_tag="" filter_tier="" flag_all_projects=false flag_project_limit=false
+    local show_help=false flag_porcelain=false flag_json=false
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
-        case "$1" in
-            --team) filter_team="$2"; shift 2 ;;
-            --tag)  filter_tag="$2";  shift 2 ;;
-            -*)     echo "Usage: kb-knowledge-search <term> [--team <team>] [--tag <tag>]"; return 1 ;;
-            *)
-                if [[ -z "$search_term" ]]; then
-                    search_term="$1"
+        case "${1-}" in
+            --help|-h)
+                show_help=true; shift ;;
+            --agent)
+                filter_agent="${2-}"; shift 2 ;;
+            --team)
+                # Backward-compat alias: --team maps to --agent
+                filter_agent="${2-}"; shift 2 ;;
+            --subject)
+                filter_subject="${2-}"; shift 2 ;;
+            --project)
+                flag_project_limit=true
+                # Optional argument: next token may be the slug or another flag
+                if [[ $# -gt 1 ]] && [[ "${2-}" != --* ]]; then
+                    filter_project="${2-}"; shift 2
+                else
+                    shift
                 fi
-                shift
                 ;;
+            --tag)
+                filter_tag="${2-}"; shift 2 ;;
+            --tier)
+                filter_tier="${2-}"; shift 2 ;;
+            --all-projects)
+                flag_all_projects=true; shift ;;
+            --porcelain)
+                flag_porcelain=true; shift ;;
+            --json)
+                flag_json=true; shift ;;
+            -*)
+                echo "Unknown flag: ${1-}" >&2
+                show_help=true; shift ;;
+            *)
+                search_terms+=("${1-}")
+                shift ;;
         esac
     done
 
-    if [[ -z "$search_term" ]] && [[ -z "$filter_tag" ]]; then
-        echo "Usage: kb-knowledge-search <term> [--team <team>] [--tag <tag>]"
-        echo ""
-        echo "  <term>         Text to search in file contents and titles"
-        echo "  --team <team>  Limit search to a specific team's knowledge"
-        echo "  --tag <tag>    Search by tag (looks in INDEX.md tag lists)"
+    # Reject combining --porcelain and --json: they are mutually exclusive output modes.
+    if $flag_porcelain && $flag_json; then
+        echo "kb-knowledge-search: --porcelain and --json are mutually exclusive" >&2
         return 1
     fi
 
-    # Build the map of team label → knowledge directory
-    # Each entry: "label:path"
-    local -a team_dirs
-    # NOTE: Paths below are populated at install time via the aiteamforge-paths loader.
-    # The static fallbacks here use {{SHARED_DEV_ROOT}} and {{ORG_NAME}} placeholders
-    # that the installer resolves. Canonical path resolution delegates to
-    # aiteamforge_team_kanban_dir() when available (see loader guard above).
-    team_dirs=(
-        "academy:${AITEAMFORGE_DIR}/kanban/knowledge"
-        "{{ORG_SLUG}}:{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-iOS/kanban/knowledge"
-        "android:{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Android/kanban/knowledge"
-        "firebase:{{SHARED_DEV_ROOT}}/{{ORG_NAME}}App-Functions/kanban/knowledge"
-        "command:{{SHARED_DEV_ROOT}}/dev-team/kanban/knowledge"
-        "dns:${HOME}/dns-framework/kanban/knowledge"
-        "legal-coparenting:${HOME}/legal/coparenting/kanban/knowledge"
-        "medical-general:${HOME}/medical/general/kanban/knowledge"
-        "finance-personal:${AITEAMFORGE_DIR}/kanban/finance/knowledge"
-        "freelance:${AITEAMFORGE_DIR}/kanban/freelance/knowledge"
-        "legal:${AITEAMFORGE_DIR}/kanban/legal/knowledge"
-        "{{ORG_SLUG}}-distributed:${AITEAMFORGE_DIR}/kanban/{{ORG_SLUG}}/knowledge"
-        "medical-distributed:${AITEAMFORGE_DIR}/kanban/medical/knowledge"
-    )
-
-    # Dynamic discovery: auto-detect kanban/*/knowledge dirs not already listed
-    local discovered_dir discovered_team already_listed existing
-    for discovered_dir in "${AITEAMFORGE_DIR}/kanban"/*/knowledge; do
-        [[ -d "$discovered_dir" ]] || continue
-        discovered_team=$(basename "$(dirname "$discovered_dir")")
-        # Skip if already in team_dirs (check by path suffix)
-        already_listed=false
-        for existing in "${team_dirs[@]}"; do
-            if [[ "${existing#*:}" == "$discovered_dir" ]]; then
-                already_listed=true
-                break
+    # If a scope flag was set without an explicit --tier, imply the matching tier.
+    # When multiple scope flags are set we leave filter_tier empty so each tier's
+    # own filter (filter_agent, filter_subject, filter_project) narrows its block —
+    # the per-tier `if` blocks below already handle that case.
+    if [[ -z "$filter_tier" ]]; then
+        local _scope_flags_set=0
+        [[ -n "$filter_agent"   ]] && _scope_flags_set=$((_scope_flags_set+1))
+        [[ -n "$filter_subject" ]] && _scope_flags_set=$((_scope_flags_set+1))
+        $flag_project_limit         && _scope_flags_set=$((_scope_flags_set+1))
+        if [[ "$_scope_flags_set" -eq 1 ]]; then
+            if   [[ -n "$filter_agent"   ]]; then filter_tier="agent"
+            elif [[ -n "$filter_subject" ]]; then filter_tier="subject"
+            elif $flag_project_limit;        then filter_tier="project"
             fi
-        done
-        if [[ "$already_listed" == "false" ]]; then
-            team_dirs+=("${discovered_team}-auto:${discovered_dir}")
         fi
-    done
-
-    echo ""
-    echo "═══════════════════════════════════════════════════════════════════════════"
-    if [[ -n "$search_term" ]] && [[ -n "$filter_tag" ]]; then
-        echo "  KNOWLEDGE SEARCH: \"${search_term}\" | tag: ${filter_tag}"
-    elif [[ -n "$filter_tag" ]]; then
-        echo "  KNOWLEDGE SEARCH: tag: ${filter_tag}"
-    else
-        echo "  KNOWLEDGE SEARCH: \"${search_term}\""
     fi
-    [[ -n "$filter_team" ]] && echo "  (limited to team: ${filter_team})"
-    echo "═══════════════════════════════════════════════════════════════════════════"
-    echo ""
+
+    # Capture multi-flag state for tier-block gating below.
+    # When ANY scope flag is set the unfiltered else-branches must not add
+    # their whole tier root — only the explicitly-requested tiers should fire.
+    local any_scope_flag_set=false
+    if [[ -n "$filter_agent" ]] || [[ -n "$filter_subject" ]] || $flag_project_limit; then
+        any_scope_flag_set=true
+    fi
+
+    if $show_help || { [[ ${#search_terms[@]} -eq 0 ]] && [[ -z "$filter_tag" ]] && [[ -z "$filter_tier" ]] && [[ -z "$filter_agent" ]] && [[ -z "$filter_subject" ]] && ! $flag_project_limit; }; then
+        echo "Usage: kb-knowledge-search [<term>] [flags]"
+        echo ""
+        echo "  <term>                Text to search in filenames and file contents"
+        echo ""
+        echo "Scope flags (narrow to one tier or sub-path):"
+        echo "  --agent <name>        Limit to one persona's directory  (alias: --team)"
+        echo "  --subject <path>      Limit to one subject path, e.g. ios or ios/swift"
+        echo "  --project [<slug>]    Limit to one project (current if no arg)"
+        echo "  --tier <name>         Limit to tier: agent | team | subject | project"
+        echo "  --all-projects        Also scan Relevant Subjects from project INDEX.md"
+        echo "                        (opt-in; the 'relevant' tier is only populated when"
+        echo "                        this flag is passed — worth adding on pre-task reads)"
+        echo ""
+        echo "Tier inference: when one scope flag (--agent / --subject / --project) is"
+        echo "  set without --tier, the search is auto-scoped to that tier only. Combine"
+        echo "  flags (e.g. --agent X --subject Y) to search multiple tiers at once."
+        echo "  Explicit --tier always wins."
+        echo ""
+        echo "Filter flags:"
+        echo "  --tag <tag>           Filter by tag in frontmatter tags: field"
+        echo ""
+        echo "Output flags (mutually exclusive; suppress all decorative output):"
+        echo "  --porcelain           Machine-readable TSV: tier<TAB>title<TAB>tags<TAB>path"
+        echo "                        One line per result; empty stdout on zero results. (XACA-0738)"
+        echo "  --json                JSON array of objects: [{\"tier\",\"title\",\"tags\",\"path\"}]"
+        echo "                        Emits [] on zero results. Tags field empty when unset. (XACA-0738)"
+        echo ""
+        echo "Multi-term OR search: pass multiple positional args — entry matches if ANY term hits."
+        echo "  Example: kb-knowledge-search XACA-0001 \"authentication refactor\""
+        echo ""
+        echo "Discovery precedence: project > team > subject > agent"
+        return 1
+    fi
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+
+    # Resolve project path for this session
+    local project_path
+    project_path=$(_kb_knowledge_project_path)
+
+    # ── Build the list of search roots, in discovery-precedence order ──────────
+    # Order: project, team (reserved, included when populated), subject, agent
+    local -a search_roots
+    local -a root_tier_labels  # parallel array: tier label for each root
+
+    # Tier: project
+    if [[ -z "$filter_tier" ]] || [[ "$filter_tier" == "project" ]]; then
+        if $flag_project_limit; then
+            if [[ -n "$filter_project" ]]; then
+                local named_path="${global_root}/projects/${filter_project}"
+                search_roots+=("$named_path")
+                root_tier_labels+=("project:${filter_project}")
+            else
+                search_roots+=("$project_path")
+                root_tier_labels+=("project")
+            fi
+        else
+            if [[ -d "$project_path" ]] && ! $any_scope_flag_set; then
+                search_roots+=("$project_path")
+                root_tier_labels+=("project")
+            fi
+        fi
+    fi
+
+    # Tier: team (reserved — include when dirs exist under teams/)
+    if [[ -z "$filter_tier" ]] || [[ "$filter_tier" == "team" ]]; then
+        if ! $any_scope_flag_set || [[ "$filter_tier" == "team" ]]; then
+            local team_root="${global_root}/teams"
+            if [[ -d "$team_root" ]]; then
+                local tdir
+                local -a _team_dirs
+                # (/DN) belt-and-suspenders alongside the function-scoped
+                # `setopt NO_NOMATCH` (XACA-0255): self-documents intent at the
+                # call site so future readers don't remove it as redundant.
+                # NOTE (XACA-0717): the qualifier MUST be `/` (directories), not
+                # `.` (plain files). Team-tier knowledge entries are directories
+                # under teams/<team>/; `.` matched nothing → 0 team-tier hits.
+                # NOTE (XACA-0737): this bare `(/DN)` qualifier requires the
+                # BARE_GLOB_QUAL option — force-set at the top of this function
+                # so it parses even under interactive `setopt NO_BARE_GLOB_QUAL`.
+                _team_dirs=("${team_root}"/*/(/DN))
+                for tdir in "${_team_dirs[@]}"; do
+                    [[ -d "$tdir" ]] || continue
+                    search_roots+=("$tdir")
+                    root_tier_labels+=("team:$(basename "$tdir")")
+                done
+            fi
+        fi
+    fi
+
+    # Tier: subject
+    if [[ -z "$filter_tier" ]] || [[ "$filter_tier" == "subject" ]]; then
+        local subject_root="${global_root}/subjects"
+        if [[ -n "$filter_subject" ]]; then
+            local subject_dir="${subject_root}/${filter_subject}"
+            search_roots+=("$subject_dir")
+            root_tier_labels+=("subject:${filter_subject}")
+        else
+            if [[ -d "$subject_root" ]] && ! $any_scope_flag_set; then
+                search_roots+=("$subject_root")
+                root_tier_labels+=("subject")
+            fi
+        fi
+    fi
+
+    # Tier: agent
+    if [[ -z "$filter_tier" ]] || [[ "$filter_tier" == "agent" ]]; then
+        local agent_root="${global_root}/agents"
+        if [[ -n "$filter_agent" ]]; then
+            local agent_dir="${agent_root}/${filter_agent}"
+            search_roots+=("$agent_dir")
+            root_tier_labels+=("agent:${filter_agent}")
+        else
+            if [[ -d "$agent_root" ]] && ! $any_scope_flag_set; then
+                search_roots+=("$agent_root")
+                root_tier_labels+=("agent")
+            fi
+        fi
+    fi
+
+    # ── Optionally pull in declared Relevant Subjects from project INDEX ────────
+    if $flag_all_projects && [[ -f "${project_path}/INDEX.md" ]]; then
+        # Extract subjects:* references from the Relevant Subjects section
+        local rel_subj
+        while IFS= read -r rel_subj; do
+            rel_subj="${rel_subj#- }"
+            if [[ "$rel_subj" == subjects:* ]]; then
+                local subj_path="${rel_subj#subjects:}"
+                subj_path=$(printf '%s' "$subj_path" | tr ':' '/')  # replace each : with / (nested subjects)
+                # Validate before use (matches sibling sites ~11448/11656). Skip a malformed
+                # INDEX entry (e.g. a path-traversal ref) rather than aborting the whole search.
+                if ! _kb_validate_subject_path "$subj_path"; then
+                    echo "Warning: skipping invalid relevant-subject path '${subj_path}' from ${project_path}/INDEX.md (each component must match ^[a-z][a-z0-9_-]*$; no path traversal)" >&2
+                    continue
+                fi
+                local extra_dir="${global_root}/subjects/${subj_path}"
+                if [[ -d "$extra_dir" ]]; then
+                    search_roots+=("$extra_dir")
+                    root_tier_labels+=("relevant:${subj_path}")
+                fi
+            fi
+        done < <(grep '^\- subjects:' "${project_path}/INDEX.md" 2>/dev/null)
+    fi
+
+    # ── Print header (human mode only) ──────────────────────────────────────────
+    if ! $flag_porcelain && ! $flag_json; then
+        local _term_str="${search_terms[*]:-}"
+        echo ""
+        echo "═══════════════════════════════════════════════════════════════════════════"
+        if [[ -n "$_term_str" ]] && [[ -n "$filter_tag" ]]; then
+            echo "  KNOWLEDGE SEARCH: \"${_term_str}\" | tag: ${filter_tag}"
+        elif [[ -n "$filter_tag" ]]; then
+            echo "  KNOWLEDGE SEARCH: tag: ${filter_tag}"
+        elif [[ -n "$_term_str" ]]; then
+            echo "  KNOWLEDGE SEARCH: \"${_term_str}\""
+        else
+            echo "  KNOWLEDGE SEARCH (all entries)"
+        fi
+        [[ -n "$filter_tier" ]]    && echo "  (tier: ${filter_tier})"
+        [[ -n "$filter_agent" ]]   && echo "  (agent: ${filter_agent})"
+        [[ -n "$filter_subject" ]] && echo "  (subject: ${filter_subject})"
+        $flag_project_limit        && echo "  (project: ${filter_project:-current})"
+        echo "  Root: ${global_root}"
+        echo "═══════════════════════════════════════════════════════════════════════════"
+        echo ""
+    fi
 
     local result_count=0
+    # XACA-0502: per-tier hit distribution. The single `tier` field only ever
+    # captured the --tier *filter flag*, never which tiers the results came
+    # from — so the audit could not compute per-tier read distribution. Count
+    # matches per base tier here and emit them as a nested `result_tiers`
+    # object alongside the existing total. Plain integer counters (not an
+    # associative array) for macOS bash 3.2 portability.
+    local _kb_rt_agent=0 _kb_rt_subject=0 _kb_rt_team=0 _kb_rt_project=0 _kb_rt_relevant=0
+    local tier_label md_files filepath basename_f is_index matched title tags_line rel_path tags_val
+    local _st _jt _jti _jtg _jp  # multi-term loop var + JSON field escape buffers (XACA-0738)
+    local _pc_title _pc_tags  # porcelain TSV sanitize buffers — declared OUT of the loop (zsh local-in-loop stdout leak, k501) (XACA-0738)
+    local _json_entries="" _json_first=true  # JSON array accumulator (XACA-0738)
 
-    for entry in "${team_dirs[@]}"; do
-        local team_label="${entry%%:*}"
-        local kdir="${entry#*:}"
+    # XACA-0265: array base differs by shell — zsh defaults to 1-indexed, bash
+    # (and zsh under KSH_ARRAYS) is 0-indexed. Probe at runtime so the parallel
+    # `root_tier_labels` lookup tracks `search_roots` regardless of shell.
+    local _kb_idx_base=0
+    local _kb_probe=("first")
+    [[ "${_kb_probe[1]:-}" == "first" ]] && _kb_idx_base=1
+    local root_idx=$_kb_idx_base
 
-        # Skip teams not matching the filter
-        if [[ -n "$filter_team" ]] && [[ "$team_label" != *"$filter_team"* ]]; then
-            continue
-        fi
+    for search_root in "${search_roots[@]}"; do
+        tier_label="${root_tier_labels[$root_idx]}"
+        root_idx=$((root_idx + 1))
 
-        # Skip non-existent directories silently
-        [[ -d "$kdir" ]] || continue
+        [[ -d "$search_root" ]] || continue
 
-        # Find markdown files (exclude INDEX.md itself for content search)
-        local md_files
-        md_files=$(find "$kdir" -maxdepth 3 -type f -name "*.md" 2>/dev/null)
+        # Find all .md files recursively (subjects tier can be 3-4 levels deep)
+        md_files=$(find "$search_root" -type f -name "*.md" 2>/dev/null)
         [[ -z "$md_files" ]] && continue
 
-        local filename basename_f is_index matched dir_of_file index_file title tags_hint rel_path
         while IFS= read -r filepath; do
             basename_f=$(basename "$filepath")
-
-            # Skip INDEX.md for direct content matching (it's the tag lookup target)
             is_index=false
             [[ "$basename_f" == "INDEX.md" ]] && is_index=true
 
             matched=false
 
-            # Tag filter check: search the INDEX.md in the same directory for the tag
+            # Tag filter: check frontmatter tags: field (YAML list format)
             if [[ -n "$filter_tag" ]]; then
-                dir_of_file=$(dirname "$filepath")
-                index_file="${dir_of_file}/INDEX.md"
-                if [[ -f "$index_file" ]]; then
-                    if grep -Fqi "$filter_tag" "$index_file" 2>/dev/null; then
-                        # Tag found in that INDEX.md - check if this file is listed there
-                        if grep -Fqi "$(basename "$filepath" .md)" "$index_file" 2>/dev/null; then
-                            matched=true
-                        fi
+                tags_val=$(grep -m1 '^tags:' "$filepath" 2>/dev/null | sed 's/^tags:[[:space:]]*//')
+                if echo "$tags_val" | grep -Fqi "$filter_tag" 2>/dev/null; then
+                    matched=true
+                fi
+            fi
+
+            # Content/filename search: OR-match — any term in search_terms suffices (XACA-0738).
+            # Multiple positional args each run grep -Fqi independently; entry matches if any hits.
+            # Single-term behavior is unchanged (one-element array, same grep calls).
+            # TODO(XACA-0222): consolidate to a single grep pass (grep -rln) when entry count > ~500.
+            # Current per-term-per-file approach (tag + filename + body) is acceptable at ~200 entries.
+            if [[ ${#search_terms[@]} -gt 0 ]]; then
+                for _st in "${search_terms[@]}"; do
+                    if echo "$basename_f" | grep -Fqi "$_st" 2>/dev/null; then
+                        matched=true; break
                     fi
+                done
+                if [[ "$matched" == "false" ]] && [[ "$is_index" == "false" ]]; then
+                    for _st in "${search_terms[@]}"; do
+                        if grep -Fqi "$_st" "$filepath" 2>/dev/null; then
+                            matched=true; break
+                        fi
+                    done
                 fi
             fi
 
-            # Content/title search (skip INDEX.md files for this check)
-            if [[ -n "$search_term" ]] && [[ "$is_index" == "false" ]]; then
-                if grep -Fqi "$search_term" "$filepath" 2>/dev/null; then
-                    matched=true
-                fi
-                # Also match on filename
-                if echo "$basename_f" | grep -Fqi "$search_term" 2>/dev/null; then
-                    matched=true
-                fi
+            # If no term/tag filter, include all non-INDEX entries
+            if [[ ${#search_terms[@]} -eq 0 ]] && [[ -z "$filter_tag" ]] && [[ "$is_index" == "false" ]]; then
+                matched=true
             fi
 
-            if [[ "$matched" == "true" ]]; then
-                # Extract title from first H1 or H2 in file, fallback to filename
+            if [[ "$matched" == "true" ]] && [[ "$is_index" == "false" ]]; then
                 title=$(grep -m1 "^# \|^## " "$filepath" 2>/dev/null | sed 's/^#* //' | head -1)
                 [[ -z "$title" ]] && title="${basename_f%.md}"
 
-                # Extract tags hint from file (first Tags: line if present)
-                tags_hint=""
-                tags_hint=$(grep -i "^tags:\|^\*\*tags\*\*:\|^- tags:" "$filepath" 2>/dev/null | head -1 | sed 's/^[^:]*: *//' | cut -c1-40)
+                tags_line=$(grep -m1 '^tags:' "$filepath" 2>/dev/null | sed 's/^tags:[[:space:]]*//' | cut -c1-40)
 
-                # Determine relative path for display
                 rel_path="${filepath#${HOME}/}"
 
-                printf "  %-20s %-34s %-12s\n" "[$team_label]" "$title" "${tags_hint:-—}"
-                printf "  %-20s %s\n" "" "~/$rel_path"
-                echo ""
+                if $flag_porcelain; then
+                    # TSV: tier<TAB>title<TAB>tags<TAB>path  (path is HOME-relative, no leading ~/)
+                    # Sanitize embedded TAB/newline in fields → space so a stray delimiter
+                    # in a title/tags value cannot shift columns for the TSV consumer (XACA-0738
+                    # [Review] PR #658). tier_label/rel_path are structurally TAB-free; title/tags
+                    # come from file content, so guard them.
+                    _pc_title="${title//[$'\t\n\r']/ }"
+                    _pc_tags="${tags_line//[$'\t\n\r']/ }"
+                    printf '%s\t%s\t%s\t%s\n' "$tier_label" "$_pc_title" "${_pc_tags:-}" "$rel_path"
+                elif $flag_json; then
+                    # Accumulate JSON objects; emit array after the loop.
+                    # JSON-escape each field using the same idiom as the telemetry writer below.
+                    _jt="$tier_label"
+                    _jt=${_jt//\\/\\\\}; _jt=${_jt//\"/\\\"}; _jt=${_jt//$'\n'/\\n}; _jt=${_jt//$'\r'/\\r}; _jt=${_jt//$'\t'/\\t}
+                    _jti="$title"
+                    _jti=${_jti//\\/\\\\}; _jti=${_jti//\"/\\\"}; _jti=${_jti//$'\n'/\\n}; _jti=${_jti//$'\r'/\\r}; _jti=${_jti//$'\t'/\\t}
+                    _jtg="${tags_line:-}"
+                    _jtg=${_jtg//\\/\\\\}; _jtg=${_jtg//\"/\\\"}; _jtg=${_jtg//$'\n'/\\n}; _jtg=${_jtg//$'\r'/\\r}; _jtg=${_jtg//$'\t'/\\t}
+                    _jp="$rel_path"
+                    _jp=${_jp//\\/\\\\}; _jp=${_jp//\"/\\\"}; _jp=${_jp//$'\n'/\\n}; _jp=${_jp//$'\r'/\\r}; _jp=${_jp//$'\t'/\\t}
+                    if [[ "$_json_first" == "true" ]]; then
+                        _json_entries="{\"tier\":\"$_jt\",\"title\":\"$_jti\",\"tags\":\"$_jtg\",\"path\":\"$_jp\"}"
+                        _json_first=false
+                    else
+                        _json_entries="${_json_entries},{\"tier\":\"$_jt\",\"title\":\"$_jti\",\"tags\":\"$_jtg\",\"path\":\"$_jp\"}"
+                    fi
+                else
+                    printf "  %-26s %-32s %s\n" "[${tier_label}]" "$title" "${tags_line:-—}"
+                    printf "  %-26s %s\n" "" "~/$rel_path"
+                    echo ""
+                fi
                 result_count=$((result_count + 1))
+                # Tally the match under its base tier (the segment before ':'
+                # in tier_label, e.g. "agent:emh" → agent, "relevant:..." →
+                # relevant) for the result_tiers distribution (XACA-0502).
+                case "${tier_label%%:*}" in
+                    agent)    _kb_rt_agent=$((_kb_rt_agent + 1)) ;;
+                    subject)  _kb_rt_subject=$((_kb_rt_subject + 1)) ;;
+                    team)     _kb_rt_team=$((_kb_rt_team + 1)) ;;
+                    project)  _kb_rt_project=$((_kb_rt_project + 1)) ;;
+                    relevant) _kb_rt_relevant=$((_kb_rt_relevant + 1)) ;;
+                esac
             fi
         done <<< "$md_files"
     done
 
-    if [[ "$result_count" -eq 0 ]]; then
-        echo "  No knowledge entries found."
-        echo ""
-        echo "  Suggestions:"
-        echo "    • Try broader search terms"
-        echo "    • Check INDEX.md files in knowledge directories"
-        echo "    • Use --team to search a specific team's knowledge base"
-        echo "    • Run: kb-retro-check to see what entries exist"
-    else
-        echo "  Found ${result_count} matching entry(ies)."
-    fi
+    if $flag_json; then
+        # Emit the accumulated JSON array (empty string in _json_entries → [] on zero results).
+        printf '[%s]\n' "$_json_entries"
+    elif ! $flag_porcelain; then
+        # Human footer: result summary + decorative trailer.
+        if [[ "$result_count" -eq 0 ]]; then
+            echo "  No knowledge entries found."
+            echo ""
+            echo "  Suggestions:"
+            echo "    • Try broader search terms"
+            echo "    • Check INDEX.md files in ${global_root}/agents/ or subjects/"
+            echo "    • Use --agent <name> or --subject <path> to narrow the search"
+            echo "    • Use --tier to limit to one tier"
+        else
+            echo "  Found ${result_count} matching entry(ies)."
+        fi
 
-    echo "═══════════════════════════════════════════════════════════════════════════"
-    echo ""
+        echo "═══════════════════════════════════════════════════════════════════════════"
+        echo ""
+    fi
+    # Porcelain: zero results → empty stdout; non-zero → TSV lines already emitted above.
+    # Telemetry fires unconditionally below regardless of output mode.
+
+    # XACA-0500 telemetry: log each search to kanban-logs/kb-search.jsonl.
+    # Why: prior audit (2026-05-14) found zero usage signal — can't tell which
+    #   entries are read vs. dead weight. Opt out: KB_SEARCH_TELEMETRY_DISABLED=1.
+    # How to apply: any failure here is swallowed; telemetry must never break the search.
+    if [[ "${KB_SEARCH_TELEMETRY_DISABLED:-0}" != "1" ]]; then
+        local _kb_log_dir="$HOME/dev-team/kanban-logs"
+        local _kb_log_file="$_kb_log_dir/kb-search.jsonl"
+        local _kb_ts _kb_persona _kb_q _kb_agent _kb_subject _kb_project _kb_tier _kb_tag _kb_pwd
+        _kb_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        # Persona resolution (XACA-0502): prefer an explicit LCARS_TEAM (set by
+        # live LCARS tmux sessions), else fall through to the canonical context
+        # resolver _kb_detect_context (tmux session → KB_TEAM env → .kb-team
+        # sentinel). The prior chain was LCARS_TEAM → KB_DETECTED_TEAM, but
+        # KB_DETECTED_TEAM is set by NOTHING in the codebase and KB_TEAM (the
+        # variable every other kb-* helper resolves through) was never consulted
+        # — so every subagent / worktree / non-interactive shell logged
+        # persona=unknown, blanking the audit signal this telemetry exists to
+        # provide. Reusing _kb_detect_context avoids adding a divergent fifth
+        # persona-resolution site (sibling-drift trap, see k501).
+        _kb_persona="${LCARS_TEAM:-}"
+        if [[ -z "$_kb_persona" ]]; then
+            local _kb_ctx_team
+            _kb_ctx_team=$(_kb_detect_context 2>/dev/null)
+            _kb_ctx_team="${_kb_ctx_team%%:*}"
+            if [[ -n "$_kb_ctx_team" && "$_kb_ctx_team" != "ERROR" ]]; then
+                _kb_persona="$_kb_ctx_team"
+            else
+                _kb_persona="unknown"
+            fi
+        fi
+        # JSON-escape each string field. Order MATTERS:
+        #   1. Backslash first (doubles every \ in the source)
+        #   2. Double-quote next
+        #   3. Then control chars (newline/CR/tab) — these introduce literal \n/\r/\t
+        #      that must NOT be re-doubled by step 1, so step 1 has to precede them.
+        # Persona is escaped too (XACA-0500 review fix): a LCARS_TEAM containing a
+        # quote or newline would otherwise corrupt the JSONL line.
+        _kb_persona=${_kb_persona//\\/\\\\};    _kb_persona=${_kb_persona//\"/\\\"}
+        _kb_persona=${_kb_persona//$'\n'/\\n};  _kb_persona=${_kb_persona//$'\r'/\\r}; _kb_persona=${_kb_persona//$'\t'/\\t}
+        # Join terms with a literal space, independent of the caller's IFS (zsh (j::)
+        # flag) — deterministic regardless of shell state (XACA-0738 [Review] PR #658).
+        # Single-term stays identical; empty array → "" via the :- default.
+        _kb_q="${(j: :)search_terms:-}"
+        _kb_q=${_kb_q//\\/\\\\};               _kb_q=${_kb_q//\"/\\\"}
+        _kb_q=${_kb_q//$'\n'/\\n};              _kb_q=${_kb_q//$'\r'/\\r};             _kb_q=${_kb_q//$'\t'/\\t}
+        _kb_agent=${filter_agent//\\/\\\\};     _kb_agent=${_kb_agent//\"/\\\"}
+        _kb_agent=${_kb_agent//$'\n'/\\n};      _kb_agent=${_kb_agent//$'\r'/\\r};     _kb_agent=${_kb_agent//$'\t'/\\t}
+        _kb_subject=${filter_subject//\\/\\\\}; _kb_subject=${_kb_subject//\"/\\\"}
+        _kb_subject=${_kb_subject//$'\n'/\\n};  _kb_subject=${_kb_subject//$'\r'/\\r}; _kb_subject=${_kb_subject//$'\t'/\\t}
+        _kb_project=${filter_project//\\/\\\\}; _kb_project=${_kb_project//\"/\\\"}
+        _kb_project=${_kb_project//$'\n'/\\n};  _kb_project=${_kb_project//$'\r'/\\r}; _kb_project=${_kb_project//$'\t'/\\t}
+        _kb_tier=${filter_tier//\\/\\\\};       _kb_tier=${_kb_tier//\"/\\\"}
+        _kb_tier=${_kb_tier//$'\n'/\\n};        _kb_tier=${_kb_tier//$'\r'/\\r};       _kb_tier=${_kb_tier//$'\t'/\\t}
+        _kb_tag=${filter_tag//\\/\\\\};         _kb_tag=${_kb_tag//\"/\\\"}
+        _kb_tag=${_kb_tag//$'\n'/\\n};          _kb_tag=${_kb_tag//$'\r'/\\r};         _kb_tag=${_kb_tag//$'\t'/\\t}
+        _kb_pwd=${PWD//\\/\\\\};                _kb_pwd=${_kb_pwd//\"/\\\"}
+        _kb_pwd=${_kb_pwd//$'\n'/\\n};          _kb_pwd=${_kb_pwd//$'\r'/\\r};         _kb_pwd=${_kb_pwd//$'\t'/\\t}
+        # result_tiers (XACA-0502): nested object of per-base-tier hit counts.
+        # Emitted raw (%s, not a quoted string) so consumers can read e.g.
+        # `.result_tiers.agent`. `tier` remains the --tier filter-flag capture.
+        local _kb_result_tiers
+        _kb_result_tiers=$(printf '{"agent":%d,"subject":%d,"team":%d,"project":%d,"relevant":%d}' \
+            "$_kb_rt_agent" "$_kb_rt_subject" "$_kb_rt_team" "$_kb_rt_project" "$_kb_rt_relevant")
+        # flag_all_projects (XACA-0715): raw JSON boolean — true when --all-projects was
+        # passed, false otherwise. Without this, a relevant-tier miss (result_tiers.relevant=0)
+        # is indistinguishable from "the flag was never invoked", which blinded the
+        # XACA-0589/0712 audits. Emitted raw (%s) so consumers read it as a boolean, not
+        # a string. Normalized defensively even though flag_all_projects is set to the
+        # literals "true"/"false" by the arg-parser above.
+        local _kb_flag_ap="false"; [[ "$flag_all_projects" == "true" ]] && _kb_flag_ap="true"
+        { mkdir -p "$_kb_log_dir" 2>/dev/null && \
+          printf '{"ts":"%s","persona":"%s","query":"%s","tier":"%s","agent":"%s","subject":"%s","project":"%s","tag":"%s","results":%d,"result_tiers":%s,"flag_all_projects":%s,"cwd":"%s"}\n' \
+            "$_kb_ts" "$_kb_persona" "$_kb_q" "$_kb_tier" "$_kb_agent" "$_kb_subject" "$_kb_project" "$_kb_tag" "$result_count" "$_kb_result_tiers" "$_kb_flag_ap" "$_kb_pwd" \
+            >> "$_kb_log_file" 2>/dev/null; } || true
+    fi
 }
 
 # Show current window's status
@@ -9723,9 +10190,13 @@ kb-help() {
     echo ""
     echo "Knowledge Base:"
     echo "  kb-retro-check [--team t]              Audit completed items missing retrospectives"
-    echo "  kb-knowledge-search <term> [opts]      Search across all team knowledge directories"
-    echo "    --team <team>                         Limit search to a specific team"
-    echo "    --tag <tag>                           Search by tag (from INDEX.md)"
+    echo "  kb-knowledge-search [term] [opts]      Four-tier convention-driven knowledge search"
+    echo "    --agent <name>                        Search agent tier (alias: --team)"
+    echo "    --subject <path>                      Search subject tier (e.g. ios/swift)"
+    echo "    --project [slug]                      Search project tier"
+    echo "    --tag <tag>                           Filter by tag"
+    echo "    --tier <agent|team|subject|project>   Restrict to one tier"
+    echo "    --all-projects                        Search all project roots"
     echo ""
     echo "Display:"
     echo "  kb-my-status           Show this window's status"

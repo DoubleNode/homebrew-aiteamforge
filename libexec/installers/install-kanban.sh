@@ -1769,6 +1769,274 @@ uninstall_auto_upgrade_launchagent() {
 }
 
 #──────────────────────────────────────────────────────────────────────────────
+# Four-tier ~/knowledge/ provisioning + migration (XACA-0743 / schema XACA-0222)
+#──────────────────────────────────────────────────────────────────────────────
+# Provisions the canonical four-tier knowledge tree (agents/subjects/teams/
+# projects + templates) under $KB_KNOWLEDGE_GLOBAL_ROOT, then non-destructively
+# migrates any pre-XACA-0222 per-repo `<repo>/kanban/knowledge/` content into the
+# project tier. Fully idempotent, copy-not-move, no-overwrite, dry-run-aware,
+# and sandbox-safe (honors HOME / KB_KNOWLEDGE_GLOBAL_ROOT overrides).
+
+# Resolve the global knowledge root. Mirrors the template helper
+# _kb_knowledge_global_root: ${KB_KNOWLEDGE_GLOBAL_ROOT:-${HOME}/knowledge}.
+_knowledge_global_root() {
+    echo "${KB_KNOWLEDGE_GLOBAL_ROOT:-${HOME}/knowledge}"
+}
+
+# True when running in preview mode. Mirrors aiteamforge-migrate.sh's DRY_RUN
+# convention so a `DRY_RUN=true` outer run skips all writes here too.
+_knowledge_dry_run() {
+    [ "${DRY_RUN:-false}" = "true" ]
+}
+
+# Write $2 (content) to file $1 ONLY if absent. Never overwrites existing files.
+# Honors dry-run. Returns 0 and prints when a file is (or would be) created;
+# returns 1 (no-op) when the file already exists.
+_knowledge_seed_file() {
+    local target="$1"
+    local content="$2"
+    if [ -f "$target" ]; then
+        return 1
+    fi
+    if _knowledge_dry_run; then
+        info "[dry-run] would seed $target"
+        return 0
+    fi
+    mkdir -p "$(dirname "$target")"
+    printf '%s\n' "$content" > "$target"
+    success "Seeded: $target"
+    return 0
+}
+
+# Provision the four-tier knowledge tree + starter INDEX/templates, then migrate
+# legacy per-repo knowledge into the project tier. Idempotent.
+install_knowledge_tree() {
+    local root
+    root="$(_knowledge_global_root)"
+
+    info "Provisioning four-tier knowledge tree at $root"
+
+    local created=0
+    local tier
+    # Tier roots. `agents`, `subjects`, `teams`, `projects` mirror SPEC.md §1.
+    for tier in agents subjects teams projects templates; do
+        local dir="$root/$tier"
+        if [ ! -d "$dir" ]; then
+            if _knowledge_dry_run; then
+                info "[dry-run] would create $dir/"
+            else
+                mkdir -p "$dir"
+            fi
+            created=1
+        fi
+        # Keep empty tier roots tracked (matches the live ~/knowledge layout,
+        # which marks each tier root with a .gitkeep).
+        if [ "$tier" != "templates" ]; then
+            _knowledge_seed_file "$dir/.gitkeep" "" >/dev/null && created=1
+        fi
+    done
+
+    # Starter INDEX.md per content tier (never overwrites an existing index).
+    # The agent/team/subject tiers share a generic catalog header; the project
+    # tier gets a project-flavored header. Seeds at the tier root so a fresh
+    # install has a discoverable entry point; per-entity INDEX.md files are
+    # created later by kb-knowledge-add as real entries land.
+    local _today
+    _today="$(date +%Y-%m-%d 2>/dev/null || echo 'YYYY-MM-DD')"
+
+    _knowledge_seed_file "$root/agents/INDEX.md" \
+"# Agent Knowledge — Tier Index
+
+**Tier:** agent (\`agents/<persona>/\`)
+**Last Updated:** ${_today}
+
+Per-persona learnings live in \`agents/<persona>/\` with entry prefix \`k###\`.
+Each persona directory carries its own \`INDEX.md\`. Add entries with:
+\`kb-knowledge-add agent <persona> \"<title>\"\`. See SPEC.md §4.1." && created=1
+
+    _knowledge_seed_file "$root/subjects/INDEX.md" \
+"# Subject Knowledge — Tier Index
+
+**Tier:** subject (\`subjects/<path>/\`)
+**Last Updated:** ${_today}
+
+Cross-cutting domain/technology knowledge lives under \`subjects/<path>/\`
+(kebab-case, platform-qualified) with entry prefix \`s###\`. Add entries with:
+\`kb-knowledge-add subject <path> \"<title>\"\`. See SPEC.md §4.3." && created=1
+
+    _knowledge_seed_file "$root/teams/INDEX.md" \
+"# Team Knowledge — Tier Index
+
+**Tier:** team (\`teams/<team>/\`)
+**Last Updated:** ${_today}
+
+Themed agent-bundle shared patterns live under \`teams/<team>/\` with entry
+prefix \`t###\`. Add entries with: \`kb-knowledge-add team <team> \"<title>\"\`.
+See SPEC.md §4.2." && created=1
+
+    _knowledge_seed_file "$root/projects/INDEX.md" \
+"# Project Knowledge — Tier Index
+
+**Tier:** project (\`projects/<repo-slug>/\`)
+**Last Updated:** ${_today}
+
+Per-codebase conventions live under \`projects/<repo-slug>/\` with entry prefix
+\`p###\`. Each project directory carries its own \`INDEX.md\`. Add entries with:
+\`kb-knowledge-add project <repo-slug> \"<title>\"\`. See SPEC.md §4.4." && created=1
+
+    # Minimal starter templates (only if the schema's templates/ is empty).
+    _knowledge_seed_file "$root/templates/knowledge_entry_template.md" \
+"---
+id: <prefix>NNN-kebab-case-title
+tier: agent|team|subject|project
+date: ${_today}
+tags: [tag-one, tag-two, tag-three]
+---
+
+# <TITLE>
+
+## Problem
+
+## Solution
+
+## Why this matters" && created=1
+
+    _knowledge_seed_file "$root/templates/index_template.md" \
+"# [Agent/Team/Subject] Knowledge Index
+
+**Last Updated:** ${_today}
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+
+## Entries
+" && created=1
+
+    _knowledge_seed_file "$root/templates/project_index_template.md" \
+"# Project Knowledge — <repo-slug>
+
+**Project:** <repo-slug>
+**Last Updated:** ${_today}
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+
+## Entries
+" && created=1
+
+    if [ "$created" -eq 0 ]; then
+        info "Knowledge tree already provisioned (no changes)"
+    fi
+
+    # Non-destructive migration of legacy per-repo knowledge into project tier.
+    migrate_legacy_repo_knowledge "$root"
+
+    return 0
+}
+
+# Discover pre-XACA-0222 `<repo>/kanban/knowledge/` directories and COPY their
+# contents into the project tier ($root/projects/<repo-slug>/). Never moves or
+# deletes source content; skips files that already exist at the destination.
+# Idempotent and dry-run-aware. Disable entirely with KB_KNOWLEDGE_MIGRATE=0.
+migrate_legacy_repo_knowledge() {
+    local root="$1"
+
+    if [ "${KB_KNOWLEDGE_MIGRATE:-1}" = "0" ]; then
+        info "Legacy knowledge migration disabled (KB_KNOWLEDGE_MIGRATE=0)"
+        return 0
+    fi
+
+    # Bounded search roots — avoid scanning all of $HOME. Override/extend via
+    # KB_KNOWLEDGE_MIGRATE_SEARCH_ROOTS (space-separated absolute paths).
+    local search_roots=()
+    if [ -n "${KB_KNOWLEDGE_MIGRATE_SEARCH_ROOTS:-}" ]; then
+        local _r
+        for _r in $KB_KNOWLEDGE_MIGRATE_SEARCH_ROOTS; do
+            search_roots+=("$_r")
+        done
+    else
+        search_roots=(
+            "$HOME/dev-team"
+            "$HOME/Development"
+            "$HOME/Projects"
+            "/Users/Shared/Development"
+        )
+    fi
+
+    # Normalize the global root for the self-containment guard below.
+    local _root_real
+    _root_real="$(cd "$root" 2>/dev/null && pwd || echo "$root")"
+
+    local found=0
+    local migrated_any=0
+    local sroot
+    for sroot in "${search_roots[@]}"; do
+        [ -d "$sroot" ] || continue
+        # Pre-0222 layout: <repo>/kanban/knowledge/. Cap depth + prune .git to
+        # keep the scan cheap and zero-blast-radius.
+        local kdir
+        while IFS= read -r kdir; do
+            [ -d "$kdir" ] || continue
+            found=1
+
+            # Skip anything already inside the global root (prevents recursion
+            # when a search root overlaps $KB_KNOWLEDGE_GLOBAL_ROOT).
+            local _kdir_real
+            _kdir_real="$(cd "$kdir" 2>/dev/null && pwd || echo "$kdir")"
+            case "$_kdir_real/" in
+                "$_root_real"/*) continue ;;
+            esac
+
+            # repo = dirname(dirname(knowledge)); slug = basename(repo).
+            local repo_dir slug dest
+            repo_dir="$(dirname "$(dirname "$kdir")")"
+            slug="$(basename "$repo_dir")"
+            dest="$root/projects/$slug"
+
+            info "Found legacy knowledge: $kdir → projects/$slug/"
+
+            # Copy every file, preserving relative structure, skip-if-exists.
+            local src rel target copied=0 skipped=0
+            while IFS= read -r -d '' src; do
+                rel="${src#"$kdir"/}"
+                target="$dest/$rel"
+                if [ -f "$target" ]; then
+                    skipped=$((skipped + 1))
+                    continue
+                fi
+                if _knowledge_dry_run; then
+                    info "[dry-run] would copy $rel → projects/$slug/$rel"
+                    copied=$((copied + 1))
+                    continue
+                fi
+                mkdir -p "$(dirname "$target")"
+                cp -p "$src" "$target"
+                copied=$((copied + 1))
+            done < <(find "$kdir" -type f -print0 2>/dev/null)
+
+            if [ "$copied" -gt 0 ]; then
+                migrated_any=1
+                success "Migrated $copied file(s) into projects/$slug/ (skipped $skipped existing)"
+            else
+                info "projects/$slug/ already up to date (skipped $skipped existing)"
+            fi
+        done < <(find "$sroot" -maxdepth 6 -type d -name knowledge -path '*/kanban/knowledge' -not -path '*/.git/*' 2>/dev/null)
+    done
+
+    if [ "$found" -eq 0 ]; then
+        info "No legacy per-repo knowledge found to migrate"
+    elif [ "$migrated_any" -eq 0 ]; then
+        info "Legacy knowledge migration up to date (nothing new to copy)"
+    fi
+
+    return 0
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Main Installation Function
 #──────────────────────────────────────────────────────────────────────────────
 
@@ -1810,6 +2078,11 @@ install_kanban_system() {
     install_kb_port_reconcile_script
     install_kb_init_team_scripts
     install_kanban_hooks
+
+    # Provision the four-tier ~/knowledge/ tree + migrate legacy per-repo
+    # knowledge into the project tier. Decoupled from team presence (XACA-0743);
+    # refreshes on every run, fully idempotent.
+    install_knowledge_tree
 
     # Initialize kanban boards for each team (skipped when no teams resolved —
     # shared components above still refresh). Guarded for bash 3.2: iterating an
@@ -1940,3 +2213,5 @@ uninstall_kanban_system() {
 export -f install_kanban_system
 export -f uninstall_kanban_system
 export -f populate_board_terminals
+export -f install_knowledge_tree
+export -f migrate_legacy_repo_knowledge
