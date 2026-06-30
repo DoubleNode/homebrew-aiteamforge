@@ -251,8 +251,40 @@ _kb_jq_read() {
     ' "$lock_file" jq "${jq_args[@]}" "$jq_filter" "$board_file"
 }
 
-# Detect which team, terminal, and window we're in
+# Resolve context purely from explicit env signals (XACA-0725).
+# Precedence: KB_TEAM (canonical) → LCARS_TEAM (LCARS runtime) → AITEAMFORGE_TEAM
+# (legacy alias). These are DELIBERATE, per-invocation assertions of team
+# identity, so they outrank the ambient tmux session (see _kb_detect_context).
+# Returns "team:terminal:window_index:window_name" on success, exit 1 otherwise.
+_kb_resolve_explicit_env_context() {
+    local team
+    if [[ -n "${KB_TEAM:-}" ]]; then
+        team="${KB_TEAM}"
+    elif [[ -n "${LCARS_TEAM:-}" ]]; then
+        team="${LCARS_TEAM}"
+    elif [[ -n "${AITEAMFORGE_TEAM:-}" ]]; then
+        team="${AITEAMFORGE_TEAM}"
+    fi
+
+    if [[ -n "${team:-}" ]]; then
+        echo "${team}:${KB_TERMINAL:-agent}:${KB_WINDOW_INDEX:-0}:${KB_WINDOW_NAME:-main}"
+        return 0
+    fi
+
+    return 1
+}
+
+# Detect which team, terminal, and window we're in.
+# Priority (XACA-0725): an explicit env signal (KB_TEAM / LCARS_TEAM /
+# AITEAMFORGE_TEAM) outranks the ambient tmux session — a cross-team agent that
+# exported KB_TEAM=<other-team> inside another team's tmux pane was previously
+# mis-attributed to the session team. Normal panes set no such var → tmux wins.
 _kb_detect_context() {
+    # Priority 1: explicit env signals outrank the ambient tmux session.
+    if _kb_resolve_explicit_env_context; then
+        return 0
+    fi
+
     local session_name window_index window_name
     local pane_target="${TMUX_PANE:-}"
     if [[ -n "$pane_target" ]]; then
