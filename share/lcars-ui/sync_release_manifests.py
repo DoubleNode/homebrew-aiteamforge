@@ -40,7 +40,17 @@ KANBAN_DIR = Path.home() / "dev-team" / "kanban"
 def _build_team_kanban_dirs() -> dict:
     if _AITEAMFORGE_PATHS_AVAILABLE:
         try:
-            return {team: get_team_kanban_dir(team) for team in list_teams()}
+            # XACA-0727: skip board-less alias teams (e.g. "mainevent") per-item.
+            # A bare comprehension would let one KeyError escape to the except
+            # below and collapse the WHOLE map to the hardcoded subset (dropping
+            # per-machine freelance slugs). Mirrors server.py / kanban_utils.py.
+            _dirs = {}
+            for team in list_teams():
+                try:
+                    _dirs[team] = get_team_kanban_dir(team)
+                except KeyError:
+                    continue
+            return _dirs
         except Exception:
             pass
     # Fallback: hardcoded subset (main teams used by this script)
