@@ -4279,7 +4279,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             file=sys.stderr,
                         )
                 else:
-                    default_environments = raw_envs
+                    # XACA-0736 [Review]: defensive copy — raw_envs may alias the class-level
+                    # DEFAULT_RELEASE_CONFIG['defaultEnvironments'] list when the board has no
+                    # defaultEnvironments key. Mirrors the XACA-0163 flowConfig deepcopy rationale.
+                    default_environments = list(raw_envs)
 
                 return {
                     "version": "1.0",
