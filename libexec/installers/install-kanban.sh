@@ -1967,6 +1967,15 @@ migrate_legacy_repo_knowledge() {
         )
     fi
 
+    # XACA-0743 (review #5): guard the bash 3.2 empty-array-under-`set -u` hazard.
+    # If KB_KNOWLEDGE_MIGRATE_SEARCH_ROOTS was set but whitespace-only, the split
+    # loop above adds nothing and `"${search_roots[@]}"` throws unbound on macOS
+    # bash 3.2. Nothing to scan → return cleanly.
+    if [ ${#search_roots[@]} -eq 0 ]; then
+        info "No knowledge migration search roots resolved — skipping migration"
+        return 0
+    fi
+
     # Normalize the global root for the self-containment guard below.
     local _root_real
     _root_real="$(cd "$root" 2>/dev/null && pwd || echo "$root")"
@@ -1974,6 +1983,8 @@ migrate_legacy_repo_knowledge() {
     local found=0
     local migrated_any=0
     local sroot
+    # XACA-0743 (review #6): newline list of "slug<TAB>repo_dir" for collision detection.
+    local _seen_slugs=""
     for sroot in "${search_roots[@]}"; do
         [ -d "$sroot" ] || continue
         # Pre-0222 layout: <repo>/kanban/knowledge/. Cap depth + prune .git to
@@ -1996,6 +2007,18 @@ migrate_legacy_repo_knowledge() {
             repo_dir="$(dirname "$(dirname "$kdir")")"
             slug="$(basename "$repo_dir")"
             dest="$root/projects/$slug"
+
+            # XACA-0743 (review #6): warn on slug collision — two repos sharing a
+            # basename map to the same projects/<slug>/, and skip-if-exists would
+            # silently omit the second repo's same-named files. Copy-not-move means
+            # the source is never lost, but the operator should know the merge
+            # happened. Exact field match via awk (no substring false-positives).
+            local _prev_repo
+            _prev_repo="$(printf '%s' "$_seen_slugs" | awk -F'\t' -v s="$slug" '$1==s {print $2; exit}')"
+            if [ -n "$_prev_repo" ] && [ "$_prev_repo" != "$repo_dir" ]; then
+                warning "Knowledge migration slug collision: '$slug' already migrated from '$_prev_repo'; projects/$slug/ will merge and same-named files from '$repo_dir' are skipped (sources preserved)"
+            fi
+            _seen_slugs="${_seen_slugs}${slug}"$'\t'"${repo_dir}"$'\n'
 
             info "Found legacy knowledge: $kdir → projects/$slug/"
 

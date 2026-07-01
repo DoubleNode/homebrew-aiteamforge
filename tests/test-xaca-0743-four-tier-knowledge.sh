@@ -465,6 +465,44 @@ else
     test_fail "rc=$B6_RC dest_exists=$([ -e "$B6_ROOT/projects/otherrepo" ] && echo yes || echo no); stdout_tail=$(echo "$B6_OUT" | tail -5)"
 fi
 
+# ── B7: whitespace-only search roots is guarded (bash 3.2 empty-array, #5) ───
+test_start "PartB: whitespace-only search roots skips migration cleanly (empty-array guard, XACA-0743 #5)"
+B7_HOME=$(_next_b_home)
+B7_ROOT="$B7_HOME/knowledge"
+B7_RC=$(_run_knowledge_tree "$B7_HOME" "$B7_ROOT" "   " false 1)
+B7_OUT="$(_b_stdout)"
+B7_ERR="$(cat "$B_STDERR_FILE" 2>/dev/null)"
+# Guard must fire (no unbound-variable crash under set -u), tiers still provisioned, migration skipped.
+if [ "$B7_RC" = "0" ] && [ -d "$B7_ROOT/agents" ] \
+   && echo "$B7_OUT$B7_ERR" | grep -qi "search roots resolved" \
+   && ! echo "$B7_ERR" | grep -qi "unbound variable"; then
+    test_pass
+else
+    test_fail "rc=$B7_RC agents_dir=$([ -d "$B7_ROOT/agents" ] && echo yes || echo no); stdout_tail=$(echo "$B7_OUT" | tail -3); stderr=$B7_ERR"
+fi
+
+# ── B8: same-basename repo slug collision warns + preserves both sources (#6) ─
+test_start "PartB: same-basename repos collision warns and preserves both sources (XACA-0743 #6)"
+B8_HOME=$(_next_b_home)
+B8_ROOT="$B8_HOME/knowledge"
+B8_REPOS="$B8_HOME/repos"
+mkdir -p "$B8_REPOS/a/app/kanban/knowledge" "$B8_REPOS/b/app/kanban/knowledge"
+echo "from a" > "$B8_REPOS/a/app/kanban/knowledge/dup.md"
+echo "from b" > "$B8_REPOS/b/app/kanban/knowledge/dup.md"
+B8_RC=$(_run_knowledge_tree "$B8_HOME" "$B8_ROOT" "$B8_REPOS" false 1)
+B8_OUT="$(_b_stdout)"
+B8_ERR="$(cat "$B_STDERR_FILE" 2>/dev/null)"
+B8_SRC_A=false; B8_SRC_B=false
+[ -f "$B8_REPOS/a/app/kanban/knowledge/dup.md" ] && B8_SRC_A=true
+[ -f "$B8_REPOS/b/app/kanban/knowledge/dup.md" ] && B8_SRC_B=true
+# Copy-not-move: BOTH sources intact; collision warning emitted; single 'app' slug dir.
+if [ "$B8_RC" = "0" ] && [ "$B8_SRC_A" = true ] && [ "$B8_SRC_B" = true ] \
+   && echo "$B8_OUT$B8_ERR" | grep -qi "slug collision"; then
+    test_pass
+else
+    test_fail "rc=$B8_RC srcA=$B8_SRC_A srcB=$B8_SRC_B; collision_msg=$(echo "$B8_OUT$B8_ERR" | grep -i collision | head -1)"
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone mode only — test-runner.sh tallies pass/fail from output).
 # ─────────────────────────────────────────────────────────────────────────────
