@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-06-30
+
 ### Changed
 - XACA-0743 — `share/templates/kanban/kanban-helpers.template.sh` `kb-knowledge-search` migrated from the pre-XACA-0222 two-tier model (per-team `<repo>/kanban/knowledge` directories, `--team`/`--tag` filtering only) to the four-tier `~/knowledge/{agents,subjects,teams}` + project-tier schema (XACA-0222). Adds `--agent`, `--subject`, `--project`, `--tier`, and `--all-projects` flags (`--team` preserved as a backward-compat alias for `--agent`), multi-term OR matching on id/title (XACA-0738), and porcelain/JSON machine-readable output. `libexec/installers/install-kanban.sh` now provisions and migrates the four-tier `~/knowledge/` tree for tap consumers (previously only the dev-team installer did this). The function body is ported faithfully from the canonical dev-team `kb-knowledge-search` (XACA-0222/XACA-0738) to keep behavior identical; this template is the tap-side source of truth for the function (the canonical `kanban-helpers.sh` is dev-only / not tap-mirrored per XACA-0632). Review fold-in (PR #661): `migrate_legacy_repo_knowledge` gains an empty-search-roots guard (avoids a macOS bash 3.2 empty-array-under-`set -u` crash when `KB_KNOWLEDGE_MIGRATE_SEARCH_ROOTS` is whitespace-only) and a slug-collision warning (same-basename repos merging into one `projects/<slug>/` now emit a warning; copy-not-move already preserves all sources); test suite extended to 19 cases.
 - XACA-0684 (XACA-0338 F-03-018) — Standardized shebangs to the portable `#!/usr/bin/env <interpreter>` form across the mirrored shell scripts in `share/` (55 files: per-team `share/scripts/teams/**` startup/shutdown/banner scripts plus the shared tooling mirrored via sync-tap.sh). Every `#!/bin/{bash,zsh,sh}` became the matching `#!/usr/bin/env` form; interpreter family is never changed (line-1-only swap, verified per-file). Mirror of the canonical dev-team change via sync-tap.sh (canonical-source rule XACA-0340). Rationale: env-form is the only shebang that works for every script — some use bash 4+ features impossible under macOS `/bin/bash` 3.2, and env-bash resolves to Homebrew bash 5.3.
@@ -887,7 +889,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.15.1...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.15.1...v0.16.0
 [0.15.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.15.0...v0.15.1
 [0.15.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.14.0...v0.15.0
 [0.14.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.13.4...v0.14.0
