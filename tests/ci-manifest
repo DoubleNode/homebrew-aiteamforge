@@ -76,3 +76,4 @@ test-xaca-0677-root-wm-refresh.sh               plain-shell
 test-xaca-0683-skip-launchctl.sh                plain-shell
 test-xaca-0704-negative.sh                      plain-shell
 test-xaca-0704-positive.sh                      plain-shell
+test-xaca-0752-mktemp-template.sh               plain-shell

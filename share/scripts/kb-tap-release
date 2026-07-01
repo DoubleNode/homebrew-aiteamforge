@@ -203,7 +203,14 @@ EOF
 # Called as: python3 <(cat <<'PYEOF' ...) <changelog_path> <old_version> <new_version>
 # Or via a temp file — we use a temp file to be safe on all bash versions.
 
-FOOTER_SCRIPT=$(mktemp /tmp/kb-tap-release-footer.XXXXXX.py)
+# XACA-0752: self-heal a poisoned /tmp from the pre-fix template below — BSD/macOS
+# mktemp only randomizes TRAILING X's, so the old ".XXXXXX.py" suffix created a
+# LITERAL, non-random file. A SIGKILL'd run (trap below never fires on SIGKILL)
+# could leave that literal file behind, and the next run's mktemp would then fail
+# with "mkstemp failed ... File exists". Remove any such leftover before minting a
+# fresh, properly-randomized temp file.
+rm -f /tmp/kb-tap-release-footer.XXXXXX.py
+FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")
 trap 'rm -f "$FOOTER_SCRIPT"' EXIT INT TERM
 
 cat > "$FOOTER_SCRIPT" <<'PYEOF'

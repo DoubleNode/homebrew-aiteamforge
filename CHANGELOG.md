@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- XACA-0752 — `share/scripts/kb-tap-release` line ~206 `mktemp` template fixed to a portable trailing-X form. On macOS/BSD, `mktemp` only randomizes TRAILING X's — the previous `mktemp /tmp/kb-tap-release-footer.XXXXXX.py` template put a `.py` suffix AFTER the X's, so mktemp created a LITERAL, non-random file (`python3` runs the script fine regardless of extension, so the suffix was cosmetic-only). A SIGKILL'd run (the `trap '...' EXIT INT TERM` cleanup never fires on SIGKILL) could leave that literal file behind, and the next release-cut's `mktemp` then failed at Phase 1 with `mkstemp failed ... File exists` — hit live during the v0.16.0 cut, requiring manual `/tmp` cleanup. Fix: `FOOTER_SCRIPT=$(mktemp "${TMPDIR:-/tmp}/kb-tap-release-footer.XXXXXX")` (trailing-X only, `TMPDIR` fallback) plus an idempotent `rm -f /tmp/kb-tap-release-footer.XXXXXX.py` immediately before the `mktemp` call so an already-poisoned machine self-heals on the next run. The `trap 'rm -f "$FOOTER_SCRIPT"' EXIT INT TERM` cleanup is unchanged. Mirror of the canonical dev-team change (canonical-source rule XACA-0340).
+
 ## [0.16.0] - 2026-06-30
 
 ### Changed
