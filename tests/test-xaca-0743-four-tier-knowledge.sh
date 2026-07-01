@@ -495,12 +495,21 @@ B8_ERR="$(cat "$B_STDERR_FILE" 2>/dev/null)"
 B8_SRC_A=false; B8_SRC_B=false
 [ -f "$B8_REPOS/a/app/kanban/knowledge/dup.md" ] && B8_SRC_A=true
 [ -f "$B8_REPOS/b/app/kanban/knowledge/dup.md" ] && B8_SRC_B=true
-# Copy-not-move: BOTH sources intact; collision warning emitted; single 'app' slug dir.
+# Merge-target invariant: the two same-basename repos collapse into exactly ONE
+# projects/app/ dir, and dup.md holds exactly ONE repo's content (first-writer
+# wins via skip-if-exists). Which repo wins depends on `find` traversal order, so
+# assert order-independently (content is one of the two sources, not both/empty).
+B8_SLUG_DIRS=$(find "$B8_ROOT/projects" -mindepth 1 -maxdepth 1 -type d -name app 2>/dev/null | wc -l | tr -d ' ')
+B8_DUP="$(cat "$B8_ROOT/projects/app/dup.md" 2>/dev/null)"
+B8_DUP_OK=false
+{ [ "$B8_DUP" = "from a" ] || [ "$B8_DUP" = "from b" ]; } && B8_DUP_OK=true
+# Copy-not-move: BOTH sources intact; collision warning emitted; single merged slug dir.
 if [ "$B8_RC" = "0" ] && [ "$B8_SRC_A" = true ] && [ "$B8_SRC_B" = true ] \
-   && echo "$B8_OUT$B8_ERR" | grep -qi "slug collision"; then
+   && echo "$B8_OUT$B8_ERR" | grep -qi "slug collision" \
+   && [ "$B8_SLUG_DIRS" = "1" ] && [ "$B8_DUP_OK" = true ]; then
     test_pass
 else
-    test_fail "rc=$B8_RC srcA=$B8_SRC_A srcB=$B8_SRC_B; collision_msg=$(echo "$B8_OUT$B8_ERR" | grep -i collision | head -1)"
+    test_fail "rc=$B8_RC srcA=$B8_SRC_A srcB=$B8_SRC_B slug_dirs=$B8_SLUG_DIRS dup='$B8_DUP'; collision_msg=$(echo "$B8_OUT$B8_ERR" | grep -i collision | head -1)"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
