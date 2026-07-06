@@ -45,8 +45,12 @@
 #
 #   BOARD + DIRECTORY TREE (provisioning, not registration):
 #     12. <kanban-dir>/<team-id>-board.json
-#     13. <kanban-dir>/config/ activity/ plans/ knowledge/
-#     14. Knowledge INDEX.md files per crew member
+#     13. <kanban-dir>/config/ activity/ plans/ knowledge/project/ (project tier)
+#     14. Four-tier knowledge scaffolding (see ~/knowledge/SPEC.md):
+#           - project: <kanban-dir>/knowledge/project/INDEX.md (+ retrospectives/)
+#           - team:    $KB_KNOWLEDGE_GLOBAL_ROOT/teams/<team-id>/INDEX.md (reserved)
+#           - agent:   $KB_KNOWLEDGE_GLOBAL_ROOT/agents/<persona>/INDEX.md (if missing)
+#         Global tiers skipped-with-warning when $KB_KNOWLEDGE_GLOBAL_ROOT absent.
 #
 #   DERIVES AUTOMATICALLY (no explicit insert needed after #1):
 #     - kanban_utils._TEAM_CODE_MAP — built from build_team_code_map() at import
@@ -1003,10 +1007,26 @@ PYEOF
     # python3-failure paths — no explicit rm needed here.
 }
 
-# ── Create directory tree + knowledge INDEX files ─────────────────────────────
-
+# ── Create directory tree + four-tier knowledge scaffolding ───────────────────
+#
+# Scaffolds a newly-provisioned team's slots in the four-tier knowledge schema
+# (authoritative contract: ~/knowledge/SPEC.md). This REPLACES the pre-XACA-0222
+# per-avatar + TEAM/ repo-local layout, which no current tool reads.
+#
+#   Project tier (in-repo):  <kanban-dir>/knowledge/project/INDEX.md (+ retrospectives/)
+#     discovery anchor:      <working-dir>/.knowledge-config.yml (makes the in-repo
+#                            tier resolve for current-project searches — any team,
+#                            container-layout included)
+#   Team tier   (global):    $KB_KNOWLEDGE_GLOBAL_ROOT/teams/<team-id>/INDEX.md  (reserved, §4.2)
+#   Agent tier  (global):    $KB_KNOWLEDGE_GLOBAL_ROOT/agents/<persona>/INDEX.md (create-if-missing)
+#
+# Global tiers are BEST-EFFORT: if $KB_KNOWLEDGE_GLOBAL_ROOT (default ~/knowledge)
+# is absent — a fresh machine that has not yet received the EPIC-0047 tap rollout —
+# they are skipped with a warning, never a hard error. Every write is idempotent.
+# Agent directories are global and merge across teams (SPEC §4.1/§8.1), so an
+# existing persona INDEX is NEVER clobbered.
 _create_dir_tree() {
-    local kanban_dir="$1" team_id="$2" team_name="$3" series="$4"
+    local kanban_dir="$1" team_id="$2" team_name="$3" series="$4" working_dir="${5:-}"
 
     local today
     today=$(date +%Y-%m-%d)
@@ -1015,29 +1035,136 @@ _create_dir_tree() {
     mkdir -p "${kanban_dir}/config"
     mkdir -p "${kanban_dir}/activity"
     mkdir -p "${kanban_dir}/plans"
-    local knowledge_dir="${kanban_dir}/knowledge"
-    mkdir -p "${knowledge_dir}"
 
-    # Knowledge INDEX files per crew member + TEAM
-    while IFS=':' read -r terminal avatar; do
-        [[ -z "$terminal" ]] && continue
-        local agent_dir="${knowledge_dir}/${avatar}"
-        mkdir -p "$agent_dir"
-        local index_file="${agent_dir}/INDEX.md"
-        if [[ ! -f "$index_file" ]]; then
-            cat > "$index_file" <<EOF
-# ${team_name} - ${avatar} Knowledge Index
+    # ── Project tier: <kanban-dir>/knowledge/project/ (SPEC §4.4) ──────────────
+    # Resolve the config anchor + project slug. kb-init-team always knows the
+    # team's working dir (parent of the kanban dir by convention:
+    # kanban == <working-dir>/kanban — see team-paths.json for every team).
+    # Anchoring on it — rather than a git-rev-parse from the kanban dir — lets us
+    # write the discovery config even before the repo is git-init'd AND for
+    # container-layout teams, closing the gap where the in-repo project tier
+    # existed but --project resolution defaulted elsewhere and never found it.
+    # Fall back to git detection, then team_id, when no working dir was passed.
+    local anchor_dir="" slug="$team_id"
+    if [[ -n "$working_dir" ]]; then
+        anchor_dir="$working_dir"
+    elif anchor_dir=$(git -C "$kanban_dir" rev-parse --show-toplevel 2>/dev/null) && [[ -n "$anchor_dir" ]]; then
+        : # git-detected repo root
+    else
+        anchor_dir=""
+    fi
+    [[ -n "$anchor_dir" ]] && slug="$(basename "$anchor_dir")"
+
+    local project_dir="${kanban_dir}/knowledge/project"
+    mkdir -p "${project_dir}/retrospectives"
+    # Keep the (otherwise empty) retrospectives dir in git.
+    [[ -f "${project_dir}/retrospectives/.gitkeep" ]] || : > "${project_dir}/retrospectives/.gitkeep"
+
+    local project_index="${project_dir}/INDEX.md"
+    if [[ ! -f "$project_index" ]]; then
+        cat > "$project_index" <<EOF
+# Project Knowledge — ${slug} (${team_name})
+
+**Project:** ${slug}
+**Last Updated:** ${today}
+
+---
+
+## Relevant Subjects
+
+This project's knowledge should be read in conjunction with:
+- subjects:shell-scripting
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Retrospectives
+
+_No retrospectives yet._
+EOF
+    fi
+
+    # ── .knowledge-config.yml at the team's working dir ───────────────────────
+    # Makes the in-repo project tier discoverable via config-file resolution
+    # (kanban-helpers _kb_knowledge_project_path case 1 — verified to resolve
+    # current-project searches to the in-repo tier). Written only when kanban is
+    # the conventional <working-dir>/kanban child; skipped otherwise.
+    if [[ -n "$anchor_dir" && -d "$anchor_dir" \
+          && "$(cd "$anchor_dir" && pwd -P)/kanban" == "$(cd "$kanban_dir" && pwd -P)" ]]; then
+        local kcfg="${anchor_dir}/.knowledge-config.yml"
+        if [[ ! -f "$kcfg" ]]; then
+            cat > "$kcfg" <<EOF
+project: ${slug}
+project_knowledge_path: ./kanban/knowledge/project
+relevant_subjects:
+  - subjects:shell-scripting
+EOF
+        fi
+    fi
+
+    # ── Global tiers: team (reserved) + agent (create-if-missing) ─────────────
+    local kb_root="${KB_KNOWLEDGE_GLOBAL_ROOT:-$HOME/knowledge}"
+    if [[ ! -d "$kb_root" ]]; then
+        _warn "Global knowledge root not found (${kb_root}) — skipping team + agent tiers."
+        _warn "  (~/knowledge ships fleet-wide via EPIC-0047; re-run kb-init-team once it lands.)"
+        return 0
+    fi
+
+    # Team tier — reserved/empty per SPEC §4.2.
+    local team_tier_dir="${kb_root}/teams/${team_id}"
+    mkdir -p "$team_tier_dir"
+    local team_tier_index="${team_tier_dir}/INDEX.md"
+    if [[ ! -f "$team_tier_index" ]]; then
+        cat > "$team_tier_index" <<EOF
+# ${team_name} — Team Knowledge Index
 
 **Team:** ${team_id}
-**Agent:** ${avatar}
-**Terminal:** ${terminal}
+**Tier:** team (reserved — activates with the team-as-agent-bundle feature)
 **Last Updated:** ${today}
 
 ---
 
 ## Tag Index
 
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
 _No entries yet._
+EOF
+    fi
+
+    # Agent tier — one dir per persona, create-if-missing, NEVER clobber an
+    # existing INDEX (agent dirs are global + merged across teams).
+    while IFS=':' read -r _ avatar; do
+        [[ -z "$avatar" ]] && continue
+        local agent_index="${kb_root}/agents/${avatar}/INDEX.md"
+        if [[ ! -f "$agent_index" ]]; then
+            mkdir -p "${kb_root}/agents/${avatar}"
+            cat > "$agent_index" <<EOF
+# ${avatar} Knowledge Index
+
+**Agent:** ${avatar}
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
 
 ---
 
@@ -1047,31 +1174,6 @@ _No entries yet._
 EOF
         fi
     done < <(_series_terminals "$series")
-
-    # Team-level knowledge index
-    local team_dir="${knowledge_dir}/TEAM"
-    mkdir -p "$team_dir"
-    local team_index="${team_dir}/INDEX.md"
-    if [[ ! -f "$team_index" ]]; then
-        cat > "$team_index" <<EOF
-# ${team_name} - Team Knowledge Index
-
-**Team:** ${team_id}
-**Last Updated:** ${today}
-
----
-
-## Tag Index
-
-_No entries yet._
-
----
-
-## Entries
-
-_No entries yet._
-EOF
-    fi
 }
 
 # ── Check-only mode ───────────────────────────────────────────────────────────
@@ -1234,6 +1336,20 @@ _run_check_only() {
     # 12. board.json
     _check_site "board.json exists" \
         _chk_file_exists "${KANBAN_DIR}/${TEAM_ID}-board.json" || all_ok=1
+
+    # 13. project-tier knowledge (four-tier schema, SPEC §4.4)
+    _check_site "knowledge project tier (knowledge/project/INDEX.md)" \
+        _chk_file_exists "${KANBAN_DIR}/knowledge/project/INDEX.md" || all_ok=1
+
+    # 14. global team tier — only asserted when the global root is present
+    #     (absent on machines pre-EPIC-0047 rollout; not a provisioning failure).
+    local _kb_root="${KB_KNOWLEDGE_GLOBAL_ROOT:-$HOME/knowledge}"
+    if [[ -d "$_kb_root" ]]; then
+        _check_site "knowledge team tier (${_kb_root}/teams/${TEAM_ID}/INDEX.md)" \
+            _chk_file_exists "${_kb_root}/teams/${TEAM_ID}/INDEX.md" || all_ok=1
+    else
+        echo -e "${CYAN}[SKIP]${NC} knowledge team/agent tiers — global root absent (${_kb_root})"
+    fi
 
     echo ""
     if [[ "$all_ok" -eq 0 ]]; then
@@ -1629,13 +1745,14 @@ sys.exit(0 if any(k.startswith('${TEAM_ID}-') for k in d) else 1)
         fi
     fi
 
-    # ── Site 13+14: directory tree + knowledge INDEX files ───────────────
+    # ── Site 13+14: directory tree + four-tier knowledge scaffolding ─────
 
     if [[ "$DRY_RUN" -eq 1 ]]; then
-        _dry "Would create kanban/ directory tree and knowledge INDEX.md files"
+        _dry "Would create kanban/ directory tree + project-tier knowledge (knowledge/project/)"
+        _dry "Would scaffold team + agent tiers under ${KB_KNOWLEDGE_GLOBAL_ROOT:-$HOME/knowledge} (if present)"
     else
-        _create_dir_tree "$KANBAN_DIR" "$TEAM_ID" "$TEAM_NAME" "$SERIES"
-        _ok "Directory tree (config/ activity/ plans/ knowledge/)"
+        _create_dir_tree "$KANBAN_DIR" "$TEAM_ID" "$TEAM_NAME" "$SERIES" "$WORKING_DIR"
+        _ok "Directory tree (config/ activity/ plans/) + four-tier knowledge scaffolding"
     fi
 
     # ── Validation (FULL mode only — validates dev-source Python/shell files) ──
