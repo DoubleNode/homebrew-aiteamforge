@@ -1072,8 +1072,11 @@ _create_dir_tree() {
 
 ## Relevant Subjects
 
-This project's knowledge should be read in conjunction with:
-- subjects:shell-scripting
+Declare the cross-cutting subject tiers this project's knowledge should be read
+alongside — this list drives \`kb-knowledge-search --project\`. Add entries for
+this team's stack, e.g. \`subjects:ios\`, \`subjects:firebase\`, \`subjects:git\`.
+
+_None declared yet._
 
 ---
 
@@ -1103,8 +1106,9 @@ EOF
             cat > "$kcfg" <<EOF
 project: ${slug}
 project_knowledge_path: ./kanban/knowledge/project
-relevant_subjects:
-  - subjects:shell-scripting
+# Declare the subject tiers this project's knowledge should be read alongside,
+# e.g. subjects:ios, subjects:firebase, subjects:git. Empty by default.
+relevant_subjects: []
 EOF
         fi
     fi
