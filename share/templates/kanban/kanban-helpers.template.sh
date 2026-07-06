@@ -7931,7 +7931,7 @@ kb-knowledge-search() {
     #   entries are read vs. dead weight. Opt out: KB_SEARCH_TELEMETRY_DISABLED=1.
     # How to apply: any failure here is swallowed; telemetry must never break the search.
     if [[ "${KB_SEARCH_TELEMETRY_DISABLED:-0}" != "1" ]]; then
-        local _kb_log_dir="$HOME/dev-team/kanban-logs"
+        local _kb_log_dir="${AITEAMFORGE_DIR}/kanban-logs"  # XACA-0746: context-safe (was $HOME/dev-team)
         local _kb_log_file="$_kb_log_dir/kb-search.jsonl"
         local _kb_ts _kb_persona _kb_q _kb_agent _kb_subject _kb_project _kb_tier _kb_tag _kb_pwd
         _kb_ts=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -8001,6 +8001,1201 @@ kb-knowledge-search() {
             "$_kb_ts" "$_kb_persona" "$_kb_q" "$_kb_tier" "$_kb_agent" "$_kb_subject" "$_kb_project" "$_kb_tag" "$result_count" "$_kb_result_tiers" "$_kb_flag_ap" "$_kb_pwd" \
             >> "$_kb_log_file" 2>/dev/null; } || true
     fi
+}
+
+#──────────────────────────────────────────────────────────────────────────────
+# Knowledge System Helpers, part 2 (XACA-0746) — ported from
+# dev-team/kanban-helpers.sh to complete the subsystem this template already
+# partially carries (global_root/slugify/yaml_field/project_path/
+# project_display_name/both validators/_kb_detect_context/kb-knowledge-search
+# already exist above). No _kb_detect_context adaptation needed here — this
+# file already defines it (unlike the aliases-file port, XACA-0746-002).
+#──────────────────────────────────────────────────────────────────────────────
+
+# Internal: return numeric rank for a tier name (low = narrow, high = broad).
+# Used by kb-knowledge-promote to enforce SPEC §7 (upward-only movement).
+# Empty output (and no echo) means the tier is unknown.
+_kb_knowledge_tier_rank() {
+    case "${1-}" in
+        agents)   echo 1 ;;
+        project)  echo 2 ;;
+        teams)    echo 3 ;;
+        subjects) echo 4 ;;
+        *)        return 1 ;;
+    esac
+}
+
+# Internal: resolve a cross-reference string to an absolute file path
+# Returns 0+path on success, 1 on error
+_kb_knowledge_resolve_ref() {
+    local ref="${1-}" global_root="${2-}"
+    local tier="${ref%%:*}"
+    local remainder="${ref#*:}"
+
+    # Helper: given a target_dir and entry_id, resolve to actual file path.
+    # Short 3-digit IDs (e.g. k001) glob-expand to k001-actual-slug.md.
+    _kb_resolve_entry_path() {
+        local target_dir="${1-}" entry_id="${2-}"
+        # If it looks like a bare short ID (prefix + exactly 3 digits, no dash), glob-expand
+        if [[ "$entry_id" =~ ^[ktspmv][0-9][0-9][0-9]$ ]]; then
+            local -a glob_matches
+            glob_matches=( "${target_dir}/${entry_id}-"*.md )
+            if [[ ${#glob_matches[@]} -gt 0 ]] && [[ -e "${glob_matches[1]}" ]]; then
+                echo "${glob_matches[1]}"
+                return 0
+            fi
+        fi
+        echo "${target_dir}/${entry_id}.md"
+    }
+
+    case "$tier" in
+        agents)
+            local persona="${remainder%%:*}"
+            local entry_id="${remainder#*:}"
+            if ! _kb_validate_name_component "$persona"; then
+                echo "Error: invalid persona name '${persona}' in ref '${ref}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
+                return 1
+            fi
+            _kb_resolve_entry_path "${global_root}/agents/${persona}" "$entry_id"
+            ;;
+        teams)
+            local team="${remainder%%:*}"
+            local entry_id="${remainder#*:}"
+            if ! _kb_validate_name_component "$team"; then
+                echo "Error: invalid team name '${team}' in ref '${ref}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
+                return 1
+            fi
+            _kb_resolve_entry_path "${global_root}/teams/${team}" "$entry_id"
+            ;;
+        subjects)
+            # All tokens except the last form the path; last token is the entry ID
+            local last_token="${remainder##*:}"
+            local path_part="${remainder%:*}"
+            # If remainder has no colon, there's only an entry ID (no path)
+            if [[ "$path_part" == "$remainder" ]]; then
+                echo "Error: subjects ref needs at least subjects:<path>:<entry-id>" >&2
+                return 1
+            fi
+            local subj_path
+            subj_path=$(printf '%s' "$path_part" | tr ':' '/')
+            if ! _kb_validate_subject_path "$subj_path"; then
+                echo "Error: invalid subject path '${subj_path}' in ref '${ref}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
+                return 1
+            fi
+            _kb_resolve_entry_path "${global_root}/subjects/${subj_path}" "$last_token"
+            ;;
+        project)
+            local tokens=( ${(s.:.)remainder} )
+            if [[ ${#tokens[@]} -ge 2 ]]; then
+                # project:<slug>:<entry-id>
+                local proj_slug="${tokens[1]}"
+                if ! _kb_validate_name_component "$proj_slug"; then
+                    echo "Error: invalid project slug '${proj_slug}' in ref '${ref}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
+                    return 1
+                fi
+                _kb_resolve_entry_path "${global_root}/projects/${proj_slug}" "${tokens[2]}"
+            else
+                # project:<entry-id>
+                local proj_path
+                proj_path=$(_kb_knowledge_project_path)
+                _kb_resolve_entry_path "$proj_path" "$remainder"
+            fi
+            ;;
+        *)
+            echo "Error: unknown tier '${tier}' in ref '${ref}'" >&2
+            return 1
+            ;;
+    esac
+}
+
+# Internal: regenerate INDEX.md for a single tier directory
+_kb_knowledge_reindex_one() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local dir="${1-}"
+    local today=$(date +%Y-%m-%d)
+    local index_file="${dir}/INDEX.md"
+
+    # Determine tier from directory location
+    local global_root=$(_kb_knowledge_global_root)
+    local dir_tier
+    if [[ "$dir" == "${global_root}/agents/"* ]]; then
+        dir_tier="agent"
+    elif [[ "$dir" == "${global_root}/teams/"* ]]; then
+        dir_tier="team"
+    elif [[ "$dir" == "${global_root}/subjects/"* ]]; then
+        dir_tier="subject"
+    else
+        dir_tier="project"
+    fi
+
+    # Determine display name from directory path
+    local dir_name=$(basename "$dir")
+    # Capitalize first letter for agent tier headers (e.g. thok → Thok)
+    local dir_name_cap="${(C)dir_name[1]}${dir_name:1}"
+    local display_name
+    case "$dir_tier" in
+        agent)   display_name="${dir_name_cap} Knowledge Index" ;;
+        team)    display_name="${dir_name} Team Knowledge Index" ;;
+        subject) display_name="${dir_name} — ${dir_name} Knowledge" ;;
+        project) display_name="Project Knowledge — $(_kb_knowledge_project_display_name "$dir")" ;;
+        *)       display_name="${dir_name} Knowledge Index" ;;
+    esac
+
+    # Determine file prefix for this tier
+    local exp_prefix
+    case "$dir_tier" in
+        agent)   exp_prefix="k" ;;
+        team)    exp_prefix="t" ;;
+        subject) exp_prefix="s" ;;
+        project) exp_prefix="p" ;;
+        *)       exp_prefix="" ;;
+    esac
+
+    # Collect all entry files, sorted by ID
+    local -a entries
+    local -a load_first_entries
+    local ef
+    for ef in "${dir}/${exp_prefix}"[0-9][0-9][0-9]-*.md; do
+        [[ -f "$ef" ]] || continue
+        entries+=("$ef")
+    done
+
+    if [[ ${#entries[@]} -eq 0 ]]; then
+        echo "  [skip] No entries in ${dir}"
+        return 0
+    fi
+
+    # Build tag map: tag → space-separated list of short IDs (e.g. K001, not k001-full-slug)
+    local -A tag_map
+    local eid tags_raw tag short_id display_id lf_raw
+
+    for ef in "${entries[@]}"; do
+        eid=$(basename "$ef" .md)
+        # Extract short ID: strip everything after first dash (k001-some-slug → k001)
+        short_id="${eid%%-*}"
+        # Capitalize first letter for display (k001 → K001)
+        display_id="${(C)short_id[1]}${short_id:1}"
+        tags_raw=$(_kb_knowledge_yaml_field "$ef" "tags")
+        # Parse YAML list or comma-list: [tag1, tag2] or tag1, tag2
+        tags_raw="${tags_raw#\[}"; tags_raw="${tags_raw%\]}"
+        # Split on commas — use zsh parameter expansion (IFS splitting doesn't work in zsh without SH_WORD_SPLIT)
+        for tag in "${(@s:,:)tags_raw}"; do
+            tag="${tag## }"; tag="${tag%% }"   # trim leading/trailing spaces
+            tag="${tag//\"/}"                  # strip double quotes
+            tag="${tag//\'/}"                  # strip single quotes
+            [[ -z "$tag" ]] && continue
+            if [[ -n "${tag_map[$tag]:-}" ]]; then
+                tag_map[$tag]="${tag_map[$tag]}, ${display_id}"
+            else
+                tag_map[$tag]="${display_id}"
+            fi
+        done
+        # Collect load_first entries for the "Before Every Project" quick-reference section
+        lf_raw=$(_kb_knowledge_yaml_field "$ef" "load_first")
+        lf_raw="${lf_raw## }"; lf_raw="${lf_raw%% }"; lf_raw="${lf_raw//\"/}"; lf_raw="${lf_raw//\'/}"
+        case "${lf_raw:l}" in
+            true|yes|1) load_first_entries+=("$ef") ;;
+        esac
+    done
+
+    # Find the last/highest ID
+    local last_entry_id=$(basename "${entries[-1]}" .md)
+
+    # Preserve "Relevant Subjects" section from existing project INDEX (if present)
+    local relevant_subjects_block=""
+    if [[ "$dir_tier" == "project" ]] && [[ -f "$index_file" ]]; then
+        relevant_subjects_block=$(awk '/^## Relevant Subjects/,/^## [^R]/{if(/^## [^R]/){exit}; print}' "$index_file" 2>/dev/null)
+    fi
+
+    # Roundtrip-preserve the curated H1 title and Project line for project tier.
+    # This prevents reindex from clobbering hand-edited titles like
+    # "Project Knowledge — dev-team (Academy)" with "Project Knowledge — project".
+    local curated_h1="" curated_proj_val=""
+    if [[ "$dir_tier" == "project" ]] && [[ -f "$index_file" ]]; then
+        curated_h1=$(grep -m1 '^# ' "$index_file" 2>/dev/null | sed 's/^# //')
+        curated_proj_val=$(grep -m1 '^\*\*Project:\*\*' "$index_file" 2>/dev/null | sed 's/^\*\*Project:\*\*[[:space:]]*//')
+    fi
+    # If a curated H1 was found, honour it verbatim; otherwise the helper-derived display_name stands.
+    [[ -n "$curated_h1" ]] && display_name="$curated_h1"
+
+    # Pre-declare loop variables used inside the {} block to avoid local -A trace leaks on re-declaration
+    local etitle edate esource estatus esummary display_eid sdir sname retro_file retro_name
+    local agent_name team_name proj_name lf_ef lf_title lf_summary lf_eid lf_display_eid lf_short_id
+
+    # Write the new INDEX.md
+    {
+        echo "# ${display_name}"
+        echo ""
+
+        if [[ "$dir_tier" == "agent" ]]; then
+            agent_name=$(basename "$dir")
+            echo "**Agent:** ${agent_name}"
+        elif [[ "$dir_tier" == "team" ]]; then
+            team_name=$(basename "$dir")
+            echo "**Team:** ${team_name}"
+        elif [[ "$dir_tier" == "project" ]]; then
+            if [[ -n "$curated_proj_val" ]]; then
+                proj_name="$curated_proj_val"
+            else
+                proj_name=$(_kb_knowledge_project_display_name "$dir")
+            fi
+            echo "**Project:** ${proj_name}"
+        fi
+        echo "**Last Updated:** ${today} (${last_entry_id} added)"
+        echo ""
+        echo "---"
+        echo ""
+
+        # Before Every Project section (any tier — only if load_first entries exist)
+        if [[ ${#load_first_entries[@]} -gt 0 ]]; then
+            echo "## Before Every Project"
+            echo ""
+            echo "> Read these entries at the start of every session for this ${dir_tier}."
+            echo ""
+            for lf_ef in "${load_first_entries[@]}"; do
+                lf_eid=$(basename "$lf_ef" .md)
+                lf_short_id="${lf_eid%%-*}"
+                lf_display_eid="${(C)lf_short_id[1]}${lf_short_id:1}"
+                lf_title=$(grep -m1 '^# ' "$lf_ef" 2>/dev/null | sed 's/^# //' | head -1)
+                [[ -z "$lf_title" ]] && lf_title="${lf_eid}"
+                lf_summary=$(_kb_knowledge_yaml_field "$lf_ef" "summary")
+                if [[ -z "$lf_summary" ]]; then
+                    lf_summary=$(awk '/^---$/{count++; next} count>=2 && /^[^#[:space:]]/{print; exit}' "$lf_ef" 2>/dev/null | head -1)
+                fi
+                [[ -z "$lf_summary" ]] && lf_summary="*(add one-sentence summary)*"
+                echo "- **${lf_display_eid}:** [${lf_title}](./${lf_eid}.md) — ${lf_summary}"
+            done
+            echo ""
+            echo "---"
+            echo ""
+        fi
+
+        # Relevant Subjects section (project only)
+        if [[ "$dir_tier" == "project" ]]; then
+            if [[ -n "$relevant_subjects_block" ]]; then
+                echo "$relevant_subjects_block"
+                echo ""
+            else
+                echo "## Relevant Subjects"
+                echo ""
+                echo "This project's knowledge should be read in conjunction with:"
+                echo "- *(add subjects:* references here)*"
+                echo ""
+            fi
+        fi
+
+        # Sub-subjects section (subject parent only)
+        if [[ "$dir_tier" == "subject" ]]; then
+            local has_subdirs=false
+            for sdir in "${dir}"/*/; do
+                [[ -d "$sdir" ]] || continue
+                has_subdirs=true
+                break
+            done
+            if $has_subdirs; then
+                echo "## Sub-subjects"
+                echo ""
+                for sdir in "${dir}"/*/; do
+                    [[ -d "$sdir" ]] || continue
+                    sname=$(basename "$sdir")
+                    echo "- [${sname}](./${sname}/INDEX.md)"
+                done
+                echo ""
+            fi
+        fi
+
+        # Tag Index
+        echo "## Tag Index"
+        echo ""
+        echo "| Tag | Entries |"
+        echo "|-----|---------|"
+        for tag in "${(@k)tag_map}"; do
+            echo "| ${tag} | ${tag_map[$tag]} |"
+        done
+        echo ""
+        echo "---"
+        echo ""
+
+        # Entries section
+        echo "## Entries"
+        echo ""
+        for ef in "${entries[@]}"; do
+            eid=$(basename "$ef" .md)
+            etitle=$(grep -m1 '^# ' "$ef" 2>/dev/null | sed 's/^# //' | head -1)
+            [[ -z "$etitle" ]] && etitle="${eid}"
+            edate=$(_kb_knowledge_yaml_field "$ef" "date")
+            esource=$(_kb_knowledge_yaml_field "$ef" "source")
+            estatus=$(_kb_knowledge_yaml_field "$ef" "status")
+            # Pull summary from frontmatter, or fall back to first non-blank body line
+            esummary=$(_kb_knowledge_yaml_field "$ef" "summary")
+            if [[ -z "$esummary" ]]; then
+                esummary=$(awk '/^---$/{count++; next} count>=2 && /^[^#[:space:]]/{print; exit}' "$ef" 2>/dev/null | head -1)
+            fi
+            [[ -z "$esummary" ]] && esummary="*(add one-sentence summary)*"
+
+            display_eid="${eid[1]:u}${eid:1}"
+            echo "### ${display_eid}: ${etitle}"
+            echo "**File:** \`${eid}.md\`"
+            [[ -n "$edate" ]]   && echo "**Date:** ${edate}"
+            [[ -n "$esource" ]] && echo "**Source:** ${esource}"
+            [[ -n "$estatus" ]] && [[ "$estatus" != "active" ]] && echo "**Status:** ${estatus}"
+            echo "**Summary:** ${esummary}"
+            echo ""
+        done
+
+        # Retrospectives section (project only)
+        if [[ "$dir_tier" == "project" ]]; then
+            echo "---"
+            echo ""
+            echo "## Retrospectives"
+            echo ""
+            local retro_dir="${dir}/retrospectives"
+            if [[ -d "$retro_dir" ]]; then
+                for retro_file in "${retro_dir}"/*.md; do
+                    [[ -f "$retro_file" ]] || continue
+                    retro_name=$(basename "$retro_file")
+                    echo "- [${retro_name}](./retrospectives/${retro_name})"
+                done
+            else
+                echo "- *(none yet)*"
+            fi
+            echo ""
+        fi
+    } > "$index_file"
+
+    echo "  [rebuilt] ${index_file}"
+    return 0
+}
+
+# Scaffold a new knowledge entry at the correct tier location
+# Usage: kb-knowledge-add <tier> [<target>] "<title>"
+#
+# Examples:
+#   kb-knowledge-add agent emh "kapt error patterns"
+#   kb-knowledge-add subject ios/swift "actor isolation"
+#   kb-knowledge-add project "viper wizard wiring"
+#   kb-knowledge-add team mobile-platform "release coordination"
+kb-knowledge-add() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local tier="${1:-}"
+    local show_help=false
+
+    if [[ -z "$tier" ]] || [[ "$tier" == "--help" ]] || [[ "$tier" == "-h" ]]; then
+        show_help=true
+    fi
+
+    if $show_help; then
+        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\""
+        echo ""
+        echo "  tier       agent | subject | project | team"
+        echo "  target     Agent name, subject path, team name, or (project) optional slug"
+        echo "  title      Human-readable title for the entry"
+        echo ""
+        echo "Examples:"
+        echo "  kb-knowledge-add agent emh \"kapt error patterns\""
+        echo "  kb-knowledge-add subject ios/swift \"actor isolation\""
+        echo "  kb-knowledge-add project \"viper wizard wiring\""
+        echo "  kb-knowledge-add team mobile-platform \"release coordination\""
+        echo ""
+        echo "Set KB_KNOWLEDGE_OPEN_AFTER_ADD=1 to open in \$EDITOR after creation."
+        return 1
+    fi
+
+    shift  # consumed $1 (tier)
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+
+    local target_dir prefix title_raw tier_field=""
+
+    case "$tier" in
+        agent)
+            local persona="${1:-}"
+            if [[ -z "$persona" ]] || [[ $# -lt 2 ]]; then
+                echo "Error: agent tier requires <persona> and <title>" >&2
+                echo "  Example: kb-knowledge-add agent emh \"title here\"" >&2
+                return 1
+            fi
+            if ! _kb_validate_name_component "$persona"; then
+                echo "Error: invalid persona name '${persona}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+                return 1
+            fi
+            title_raw="${*:2}"
+            target_dir="${global_root}/agents/${persona}"
+            prefix="k"
+            tier_field="agent: ${persona}"
+            ;;
+        subject)
+            local subj_path="${1:-}"
+            if [[ -z "$subj_path" ]] || [[ $# -lt 2 ]]; then
+                echo "Error: subject tier requires <subject-path> and <title>" >&2
+                echo "  Example: kb-knowledge-add subject ios/swift \"title here\"" >&2
+                return 1
+            fi
+            if ! _kb_validate_subject_path "$subj_path"; then
+                echo "Error: invalid subject path '${subj_path}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+                return 1
+            fi
+            title_raw="${*:2}"
+            target_dir="${global_root}/subjects/${subj_path}"
+            prefix="s"
+            ;;
+        project)
+            # Optional slug arg — if next arg looks like a path slug (no spaces), use it; otherwise title only
+            if [[ $# -ge 2 ]] && echo "${1-}" | grep -qE '^[a-z0-9_/-]+$'; then
+                local proj_slug="${1-}"
+                if ! _kb_validate_subject_path "$proj_slug"; then
+                    echo "Error: invalid project slug '${proj_slug}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
+                    return 1
+                fi
+                title_raw="${*:2}"
+                target_dir="${global_root}/projects/${proj_slug}"
+            else
+                title_raw="$*"
+                target_dir=$(_kb_knowledge_project_path)
+            fi
+            prefix="p"
+            ;;
+        team)
+            local team_name="${1:-}"
+            if [[ -z "$team_name" ]] || [[ $# -lt 2 ]]; then
+                echo "Error: team tier requires <team-name> and <title>" >&2
+                echo "  Example: kb-knowledge-add team mobile-platform \"title here\"" >&2
+                return 1
+            fi
+            if ! _kb_validate_name_component "$team_name"; then
+                echo "Error: invalid team name '${team_name}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+                return 1
+            fi
+            title_raw="${*:2}"
+            target_dir="${global_root}/teams/${team_name}"
+            prefix="t"
+            tier_field="team: ${team_name}"
+            ;;
+        *)
+            echo "Error: unknown tier '${tier}'. Expected: agent | subject | project | team" >&2
+            return 1
+            ;;
+    esac
+
+    # Ensure target directory exists
+    if [[ ! -d "$target_dir" ]]; then
+        echo "Creating directory: $target_dir"
+        mkdir -p "$target_dir"
+    fi
+
+    # Find next available NNN by scanning existing files matching <prefix>NNN-*.md
+    local highest_id=0
+    local existing_file existing_num
+    for existing_file in "${target_dir}/${prefix}"[0-9][0-9][0-9]-*.md; do
+        [[ -f "$existing_file" ]] || continue
+        existing_num=$(basename "$existing_file" | grep -oE "^${prefix}[0-9]+" | tr -d "$prefix")
+        existing_num="${existing_num#0}"  # strip leading zeros
+        existing_num="${existing_num:-0}"
+        if [[ "$existing_num" -gt "$highest_id" ]]; then
+            highest_id="$existing_num"
+        fi
+    done
+    local next_id=$((highest_id + 1))
+    local padded_id
+    printf -v padded_id "%03d" "$next_id"
+
+    local title_slug
+    title_slug=$(_kb_knowledge_slugify "$title_raw")
+    local entry_id="${prefix}${padded_id}-${title_slug}"
+    local new_file="${target_dir}/${entry_id}.md"
+
+    # Determine the template to use
+    local template_file="${global_root}/templates/knowledge_entry_template.md"
+
+    # Write the frontmatter scaffold
+    local today
+    today=$(date +%Y-%m-%d)
+
+    # Compose frontmatter — inject tier-specific field (agent: <persona>, team: <name>)
+    # only when applicable. Per SPEC §3, agent and team tiers REQUIRE this field.
+    local frontmatter
+    if [[ -n "$tier_field" ]]; then
+        frontmatter=$(printf -- '---\nid: %s\ntier: %s\n%s\ndate: %s\ntags: []\n---' \
+            "$entry_id" "$tier" "$tier_field" "$today")
+    else
+        frontmatter=$(printf -- '---\nid: %s\ntier: %s\ndate: %s\ntags: []\n---' \
+            "$entry_id" "$tier" "$today")
+    fi
+
+    if [[ -f "$template_file" ]]; then
+        # Use template but replace the header placeholder
+        # Swap in actual id/tier/date and a real title heading
+        local display_prefix
+        display_prefix=$(echo "${prefix}" | tr '[:lower:]' '[:upper:]')
+        local display_num="${display_prefix}${padded_id}"
+
+        cat > "$new_file" <<FRONTMATTER
+${frontmatter}
+
+# ${display_num}: ${title_raw}
+
+## Problem
+
+<!-- Describe the symptom and root cause. -->
+
+## Solution
+
+<!-- The fix, workaround, or correct approach. -->
+
+## Why this matters
+
+<!-- What could go wrong next time if forgotten. -->
+
+---
+FRONTMATTER
+    else
+        cat > "$new_file" <<FRONTMATTER
+${frontmatter}
+
+# $(echo "${prefix}" | tr '[:lower:]' '[:upper:]')${padded_id}: ${title_raw}
+
+## Problem
+
+
+
+## Solution
+
+
+
+## Why this matters
+
+
+FRONTMATTER
+    fi
+
+    echo "Created: ${new_file}"
+
+    # XACA-0263: scaffold INDEX.md immediately so a fresh tier dir is queryable
+    # without a follow-up `kb-knowledge-reindex` call. Silent on success;
+    # failure here doesn't block entry creation (file is already on disk).
+    _kb_knowledge_reindex_one "$target_dir" >/dev/null 2>&1 || true
+
+    if [[ "${KB_KNOWLEDGE_OPEN_AFTER_ADD:-0}" == "1" ]] && [[ -n "${EDITOR:-}" ]]; then
+        "${EDITOR}" "$new_file"
+    fi
+}
+
+# Promote a knowledge entry from one tier to another
+# Usage: kb-knowledge-promote <source-ref> <target-ref>
+#
+# Source ref format:  agents:emh:k042  OR  agents:emh:k042-state-reset
+# Target ref format:  subjects:ios/swift  OR  subjects:ios/swift:s003-state-reset-pattern
+#
+# If target includes an entry ID it is used verbatim; otherwise the next
+# available ID in the target directory is assigned.
+# Pass --confirm to actually execute (cross-repo moves print plan and require --confirm).
+kb-knowledge-promote() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local source_ref="${1:-}" target_ref="${2:-}" flag_confirm=false
+
+    shift 2 2>/dev/null
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --confirm) flag_confirm=true; shift ;;
+            *) echo "Unknown flag: ${1-}" >&2; shift ;;
+        esac
+    done
+
+    if [[ -z "$source_ref" ]] || [[ -z "$target_ref" ]]; then
+        echo "Usage: kb-knowledge-promote <source-ref> <target-ref> [--confirm]"
+        echo ""
+        echo "  source-ref   agents:<persona>:<entry-id>"
+        echo "  target-ref   subjects:<path>  OR  subjects:<path>:<entry-id>"
+        echo ""
+        echo "Examples:"
+        echo "  kb-knowledge-promote agents:emh:k042 subjects:ios/swift"
+        echo "  kb-knowledge-promote agents:emh:k042-state-reset subjects:ios/swift:s003-state-reset-pattern"
+        return 1
+    fi
+
+    # ── SPEC §7 tier-ordering guard (cheap early exit, no filesystem reads) ────
+    # Promotions only flow upward (applicability broadens). Same-tier and
+    # downward moves are refused. To move content downward, copy manually and
+    # mark the source obsolete (per SPEC §7 prose).
+    local source_tier target_tier
+    source_tier="${source_ref%%:*}"
+    target_tier="${target_ref%%:*}"
+    local source_rank target_rank
+    source_rank=$(_kb_knowledge_tier_rank "$source_tier")
+    target_rank=$(_kb_knowledge_tier_rank "$target_tier")
+    if [[ -z "$source_rank" ]]; then
+        echo "Error: unknown source tier '${source_tier}'. Expected: agents | teams | subjects | project" >&2
+        return 1
+    fi
+    if [[ -z "$target_rank" ]]; then
+        echo "Error: unknown target tier '${target_tier}'. Expected: agents | teams | subjects | project" >&2
+        return 1
+    fi
+    if (( target_rank <= source_rank )); then
+        echo "Error: refusing downward/same-tier promotion (SPEC §7)." >&2
+        echo "  Source tier: ${source_tier} (rank ${source_rank})" >&2
+        echo "  Target tier: ${target_tier} (rank ${target_rank})" >&2
+        echo "  Promotions must flow strictly upward as applicability broadens:" >&2
+        echo "    agents (1) → project (2) → teams (3) → subjects (4)" >&2
+        if (( target_rank == source_rank )); then
+            echo "  Same-tier moves are not promotions. Rename the file directly if relocating within a tier." >&2
+        else
+            echo "  To move content downward, copy it manually to the narrower tier" >&2
+            echo "  and mark the original entry obsolete (per SPEC §7 prose)." >&2
+        fi
+        return 1
+    fi
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+
+    # ── Resolve source file ─────────────────────────────────────────────────────
+    local source_file
+    source_file=$(_kb_knowledge_resolve_ref "$source_ref" "$global_root")
+    if [[ $? -ne 0 ]] || [[ -z "$source_file" ]]; then
+        echo "Error: cannot resolve source ref '${source_ref}'" >&2
+        return 1
+    fi
+    if [[ ! -f "$source_file" ]]; then
+        echo "Error: source file not found: ${source_file}" >&2
+        return 1
+    fi
+
+    # ── Parse source info ───────────────────────────────────────────────────────
+    local source_id
+    source_id=$(_kb_knowledge_yaml_field "$source_file" "id")
+    [[ -z "$source_id" ]] && source_id="$(basename "$source_file" .md)"
+
+    # ── Guard: refuse to re-promote an existing promotion stub (XACA-0257) ──────
+    # A stub has status:promoted and a promoted_to pointer. Re-promoting would
+    # overwrite that pointer and lose the original target reference.
+    local source_status
+    source_status=$(_kb_knowledge_yaml_field "$source_file" "status")
+    if [[ "$source_status" == "promoted" ]]; then
+        local existing_target
+        existing_target=$(_kb_knowledge_yaml_field "$source_file" "promoted_to")
+        echo "Error: source '${source_ref}' is already a promotion stub." >&2
+        echo "       Already promoted to: ${existing_target:-<unknown>}" >&2
+        echo "       Refusing to re-promote — that would overwrite the existing pointer." >&2
+        echo "       Edit the target entry directly, or delete the stub manually to start over." >&2
+        return 1
+    fi
+
+    # ── Resolve target directory and optional target ID ─────────────────────────
+    # target_tier already resolved above by the SPEC §7 guard.
+    local target_dir="" target_entry_id="" target_prefix target_tier_field=""
+    local target_path_part target_entry_part
+    local target_remainder="${target_ref#*:}"
+
+    case "$target_tier" in
+        subjects)
+            # Last token is an entry ID if it matches sNNN-*
+            if echo "$target_remainder" | grep -qE ':[sp][0-9]+-'; then
+                target_path_part="${target_remainder%:*}"
+                target_entry_part="${target_remainder##*:}"
+            else
+                target_path_part="$target_remainder"
+                target_entry_part=""
+            fi
+            local target_subj_path
+            target_subj_path=$(printf '%s' "$target_path_part" | tr ':' '/')
+            if ! _kb_validate_subject_path "$target_subj_path"; then
+                echo "Error: invalid subject path '${target_subj_path}' in ref '${target_ref}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
+                return 1
+            fi
+            target_dir="${global_root}/subjects/${target_subj_path}"
+            target_prefix="s"
+            ;;
+        agents)
+            target_path_part="${target_remainder%%:*}"
+            target_entry_part="${target_remainder#*:}"
+            [[ "$target_entry_part" == "$target_path_part" ]] && target_entry_part=""
+            if ! _kb_validate_name_component "$target_path_part"; then
+                echo "Error: invalid persona name '${target_path_part}' in ref '${target_ref}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+                return 1
+            fi
+            target_dir="${global_root}/agents/${target_path_part}"
+            target_prefix="k"
+            target_tier_field="agent: ${target_path_part}"
+            ;;
+        teams)
+            target_path_part="${target_remainder%%:*}"
+            target_entry_part="${target_remainder#*:}"
+            [[ "$target_entry_part" == "$target_path_part" ]] && target_entry_part=""
+            if ! _kb_validate_name_component "$target_path_part"; then
+                echo "Error: invalid team name '${target_path_part}' in ref '${target_ref}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+                return 1
+            fi
+            target_dir="${global_root}/teams/${target_path_part}"
+            target_prefix="t"
+            target_tier_field="team: ${target_path_part}"
+            ;;
+        project)
+            target_path_part=""
+            target_entry_part="$target_remainder"
+            target_dir=$(_kb_knowledge_project_path)
+            target_prefix="p"
+            ;;
+        # No default branch: unknown tiers are caught upstream by the SPEC §7
+        # guard. Reaching this case statement implies target_tier is one of the
+        # four enumerated values.
+    esac
+
+    # Determine target entry ID
+    if [[ -n "$target_entry_part" ]]; then
+        target_entry_id="$target_entry_part"
+    else
+        # Find next available NNN in target dir.
+        # Use `find` instead of a literal glob: zsh aborts the function with
+        # "no matches found" when the glob expands to nothing (and target_dir
+        # may not exist yet on the first promotion into a new subjects path).
+        local highest_id=0
+        local ef en
+        if [[ -d "$target_dir" ]]; then
+            while IFS= read -r ef; do
+                [[ -f "$ef" ]] || continue
+                en=$(basename "$ef" | grep -oE "^${target_prefix}[0-9]+" | tr -d "$target_prefix")
+                en="${en#0}"; en="${en:-0}"
+                [[ "$en" -gt "$highest_id" ]] && highest_id="$en"
+            done < <(find "$target_dir" -maxdepth 1 -type f -name "${target_prefix}[0-9][0-9][0-9]-*.md" 2>/dev/null)
+        fi
+        local next_num=$(( highest_id + 1 ))
+        local padded_num; printf -v padded_num "%03d" "$next_num"
+        # Derive slug from source file basename
+        local source_slug; source_slug=$(basename "$source_file" .md | sed 's/^[ktspmv][0-9]*-//')
+        target_entry_id="${target_prefix}${padded_num}-${source_slug}"
+    fi
+
+    local target_file="${target_dir}/${target_entry_id}.md"
+
+    # ── Print the plan ──────────────────────────────────────────────────────────
+    echo ""
+    echo "PROMOTION PLAN"
+    echo "──────────────────────────────────────────────────────────────"
+    echo "  Source:   ${source_file}"
+    echo "  Target:   ${target_file}"
+    echo "  Stub at:  ${source_file}  (2-line promotion stub)"
+    echo ""
+    echo "  Steps:"
+    echo "  1. Create target directory if needed: ${target_dir}"
+    echo "  2. Copy source content to target with updated frontmatter"
+    echo "  3. Replace source with promotion stub"
+    echo "  4. Update source INDEX.md"
+    echo "  5. Update or create target INDEX.md entry"
+    echo "──────────────────────────────────────────────────────────────"
+
+    if ! $flag_confirm; then
+        echo ""
+        echo "  Dry-run only. Pass --confirm to execute."
+        echo ""
+        return 0
+    fi
+
+    # ── Execute ─────────────────────────────────────────────────────────────────
+    local today; today=$(date +%Y-%m-%d)
+
+    # 1. Ensure target dir
+    mkdir -p "$target_dir"
+
+    # Capture source frontmatter BEFORE any write — the stub-write block below
+    # truncates source_file via `> "$source_file"` redirection, which would
+    # otherwise leave tier/date blank when read inside the block.
+    local source_date source_tags source_source
+    source_tier=$(_kb_knowledge_yaml_field "$source_file" "tier")
+    source_date=$(_kb_knowledge_yaml_field "$source_file" "date")
+    source_tags=$(_kb_knowledge_yaml_field "$source_file" "tags")
+    source_source=$(_kb_knowledge_yaml_field "$source_file" "source")
+
+    # 2. Copy content with updated frontmatter
+    # Write target file: update id, tier fields in frontmatter.
+    # Per SPEC §3, tier:agent REQUIRES `agent:` and tier:team REQUIRES `team:`.
+    # target_tier_field is set by the case block above for those tiers (XACA-0272).
+    {
+        echo "---"
+        echo "id: ${target_entry_id}"
+        echo "tier: ${target_tier%s}"
+        [[ -n "$target_tier_field" ]] && echo "$target_tier_field"
+        echo "date: ${source_date}"
+        [[ -n "$source_tags" ]] && echo "tags: ${source_tags}"
+        [[ -n "$source_source" ]] && echo "source: ${source_source}"
+        echo "promoted_from: ${source_ref}"
+        echo "---"
+        echo ""
+        # Copy body (everything after the closing ---)
+        awk '/^---/{count++; if(count==2){found=1; next}} found{print}' "$source_file"
+    } > "$target_file"
+
+    # 3. Replace source with stub
+    local display_id
+    display_id=$(basename "$source_file" .md | sed 's/-.*$//' | tr '[:lower:]' '[:upper:]')
+    {
+        echo "---"
+        echo "id: ${source_id}"
+        echo "tier: ${source_tier}"
+        echo "date: ${source_date}"
+        echo "status: promoted"
+        echo "promoted_to: ${target_tier}:${target_path_part:+${target_path_part}:}${target_entry_id}"
+        echo "---"
+        echo ""
+        echo "# ${display_id} (promoted)"
+        echo "This entry was promoted to \`${target_tier}:${target_path_part:+${target_path_part}:}${target_entry_id}\` on ${today}."
+    } > "$source_file"
+
+    echo "  Wrote target:  ${target_file}"
+    echo "  Wrote stub:    ${source_file}"
+
+    # 4. Reindex both affected directories
+    kb-knowledge-reindex --dir "$(dirname "$source_file")" 2>/dev/null && echo "  Reindexed: $(dirname "$source_file")"
+    kb-knowledge-reindex --dir "$target_dir" 2>/dev/null && echo "  Reindexed: ${target_dir}"
+
+    echo ""
+    echo "Promotion complete."
+    echo "Suggested commit message:"
+    echo "  promote: ${source_ref} → ${target_tier}:${target_path_part:+${target_path_part}:}${target_entry_id}"
+}
+
+# Validate cross-reference integrity, INDEX correctness, orphan detection
+# Usage: kb-knowledge-validate [--quiet] [--fix]
+#
+# Checks:
+#   - YAML frontmatter parses (required fields: id, tier, date, tags)
+#   - id field matches filename
+#   - tier matches directory location
+#   - Cross-references in frontmatter (related:, promoted_to:, promoted_from:) resolve
+#   - Files on disk match entries in INDEX.md (orphan detection)
+#   - Subject depth <= 4 levels
+#   - Filename prefix is lowercase
+kb-knowledge-validate() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local flag_quiet=false flag_fix=false
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --quiet|-q) flag_quiet=true; shift ;;
+            --fix)      flag_fix=true;   shift ;;
+            --help|-h)
+                echo "Usage: kb-knowledge-validate [--quiet] [--fix]"
+                echo ""
+                echo "  --quiet    Show only failures"
+                echo "  --fix      Auto-fix safe issues (INDEX regeneration, casing warnings)"
+                return 0
+                ;;
+            *) echo "Unknown flag: ${1-}" >&2; shift ;;
+        esac
+    done
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+
+    local project_path
+    project_path=$(_kb_knowledge_project_path)
+
+    local error_count=0
+    local warning_count=0
+    local pass_count=0
+    # Pre-declare loop variables at function top to avoid zsh local-A trace leaks on re-declaration
+    local val_dir expected_tier dir_label exp_prefix index_file ef fname lc_fname
+    local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
+    local xref_frontmatter
+    local -a entry_files index_ids
+
+    _kb_val_error()   { echo "  [FAIL] $*" >&2; error_count=$((error_count + 1)); }
+    _kb_val_warn()    { echo "  [WARN] $*" >&2; warning_count=$((warning_count + 1)); }
+    _kb_val_pass()    { $flag_quiet || echo "  [OK]   $*"; pass_count=$((pass_count + 1)); }
+
+    # ── Collect search directories ──────────────────────────────────────────────
+    local -a val_dirs val_tiers
+
+    # Agent dirs
+    local adir
+    for adir in "${global_root}/agents"/*/; do
+        [[ -d "$adir" ]] || continue
+        val_dirs+=("$adir"); val_tiers+=("agent")
+    done
+
+    # Team dirs (reserved, but validate if present)
+    local tdir
+    for tdir in "${global_root}/teams"/*/; do
+        [[ -d "$tdir" ]] || continue
+        val_dirs+=("$tdir"); val_tiers+=("team")
+    done
+
+    # Subject dirs — walk recursively, tracking depth
+    _kb_val_walk_subjects() {
+        # Strip trailing slash from base; glob expansion of */ already appends one,
+        # so "${base}/*/" with a slash-suffixed base yields "ios//swift/" on recursion.
+        local base="${1%/}" depth="${2:-1}"
+        local sdir
+        for sdir in "${base}"/*/; do
+            [[ -d "$sdir" ]] || continue
+            val_dirs+=("$sdir"); val_tiers+=("subject")
+            if [[ $depth -ge 4 ]]; then
+                _kb_val_warn "Subject depth >= 4: ${sdir} — consider consolidating with tags"
+            fi
+            _kb_val_walk_subjects "$sdir" $((depth + 1))
+        done
+    }
+    _kb_val_walk_subjects "${global_root}/subjects"
+
+    # Project dirs — XACA-0532: scan ALL projects/*/ under global root (mirrors agents/teams/subjects)
+    local pdir
+    for pdir in "${global_root}/projects"/*/; do
+        [[ -d "$pdir" ]] || continue
+        val_dirs+=("$pdir"); val_tiers+=("project")
+    done
+    # Also include the resolved project_path ONLY if it lives outside the global root
+    # (in-repo layout: .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH pointing elsewhere).
+    # Skip if already covered by the glob above to avoid double-validating.
+    if [[ -d "$project_path" && "$project_path" != "${global_root}/projects/"* ]]; then
+        val_dirs+=("$project_path"); val_tiers+=("project")
+    fi
+
+    echo ""
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo "  KNOWLEDGE VALIDATE"
+    echo "  Global root: ${global_root}"
+    echo "  Projects:    ${global_root}/projects/*  (resolved context: ${project_path})"
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo ""
+
+    # XACA-0265: array base differs by shell — zsh defaults to 1-indexed, bash
+    # (and zsh under KSH_ARRAYS) is 0-indexed. Probe at runtime so the parallel
+    # `val_tiers` lookup tracks `val_dirs` regardless of shell.
+    local _kb_idx_base=0
+    local _kb_probe=("first")
+    [[ "${_kb_probe[1]:-}" == "first" ]] && _kb_idx_base=1
+    local dir_idx=$_kb_idx_base
+
+    for val_dir in "${val_dirs[@]}"; do
+        expected_tier="${val_tiers[$dir_idx]}"
+        dir_idx=$((dir_idx + 1))
+
+        [[ -d "$val_dir" ]] || continue
+
+        dir_label="${val_dir#${HOME}/}"
+        $flag_quiet || echo "  Directory: ~/${dir_label}"
+
+        # Determine expected prefix for this tier
+        case "$expected_tier" in
+            agent)   exp_prefix="k" ;;
+            team)    exp_prefix="t" ;;
+            subject) exp_prefix="s" ;;
+            project) exp_prefix="p" ;;
+            *)       exp_prefix="" ;;
+        esac
+
+        # Collect entry files (not INDEX.md, not retrospectives/)
+        entry_files=()
+        index_ids=()
+        for ef in "${val_dir}"/*.md; do
+            [[ -f "$ef" ]] || continue
+            [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
+            entry_files+=("$ef")
+        done
+
+        # Check INDEX.md
+        index_file="${val_dir}/INDEX.md"
+        if [[ ! -f "$index_file" ]]; then
+            _kb_val_warn "No INDEX.md in ${val_dir}"
+            if $flag_fix; then
+                kb-knowledge-reindex --dir "$val_dir" 2>/dev/null
+                echo "    Auto-fixed: regenerated INDEX.md"
+            fi
+        else
+            # Collect IDs mentioned in INDEX.md
+            while IFS= read -r line; do
+                if echo "$line" | grep -qE '`([ktspmv][0-9]+-[^`]+)`'; then
+                    idx_id=$(echo "$line" | grep -oE '`[ktspmv][0-9]+-[^`]+`' | tr -d '`' | head -1)
+                    [[ -n "$idx_id" ]] && index_ids+=("$idx_id")
+                fi
+            done < "$index_file"
+        fi
+
+        # Validate each entry file
+        for ef in "${entry_files[@]}"; do
+            fname=$(basename "$ef" .md)
+
+            # Casing check
+            if echo "$fname" | grep -qE '^[KTSPMV]'; then
+                _kb_val_warn "Uppercase prefix in ${ef}"
+                if $flag_fix; then
+                    lc_fname=$(echo "$fname" | tr '[:upper:]' '[:lower:]')
+                    mv "$ef" "${val_dir}/${lc_fname}.md" 2>/dev/null && \
+                        echo "    Auto-fixed: renamed to ${lc_fname}.md"
+                fi
+            fi
+
+            # Prefix check
+            if [[ -n "$exp_prefix" ]]; then
+                if ! echo "$fname" | grep -qE "^${exp_prefix}[0-9]+"; then
+                    _kb_val_warn "File ${fname}.md does not start with expected prefix '${exp_prefix}' for tier '${expected_tier}'"
+                fi
+            fi
+
+            # Required frontmatter fields
+            has_id=$(grep -c '^id:' "$ef" 2>/dev/null || true)
+            has_tier=$(grep -c '^tier:' "$ef" 2>/dev/null || true)
+            has_date=$(grep -c '^date:' "$ef" 2>/dev/null || true)
+            has_tags=$(grep -c '^tags:' "$ef" 2>/dev/null || true)
+
+            [[ "$has_id" -eq 0 ]]   && _kb_val_error "Missing 'id:' in ${ef}"
+            [[ "$has_tier" -eq 0 ]] && _kb_val_error "Missing 'tier:' in ${ef}"
+            [[ "$has_date" -eq 0 ]] && _kb_val_error "Missing 'date:' in ${ef}"
+            [[ "$has_tags" -eq 0 ]] && _kb_val_error "Missing 'tags:' in ${ef}"
+
+            # Tier-specific required fields (per SPEC.md §3)
+            if [[ "$expected_tier" == "agent" ]]; then
+                has_agent=$(grep -c '^agent:' "$ef" 2>/dev/null || true)
+                [[ "$has_agent" -eq 0 ]] && _kb_val_error "Missing 'agent:' in ${ef} (required for tier 'agent')"
+            fi
+            if [[ "$expected_tier" == "team" ]]; then
+                has_team=$(grep -c '^team:' "$ef" 2>/dev/null || true)
+                [[ "$has_team" -eq 0 ]] && _kb_val_error "Missing 'team:' in ${ef} (required for tier 'team')"
+            fi
+
+            # id field matches filename
+            if [[ "$has_id" -gt 0 ]]; then
+                file_id=$(_kb_knowledge_yaml_field "$ef" "id")
+                # id may be "kNNN-slug" and fname is same — strip .md
+                if [[ "$file_id" != "$fname" ]]; then
+                    _kb_val_error "id mismatch: file='${fname}', id field='${file_id}' in ${ef}"
+                fi
+            fi
+
+            # tier matches directory
+            if [[ "$has_tier" -gt 0 ]]; then
+                file_tier=$(_kb_knowledge_yaml_field "$ef" "tier")
+                if [[ "$file_tier" != "$expected_tier" ]]; then
+                    _kb_val_error "Tier mismatch: file in '${expected_tier}' dir but tier='${file_tier}' in ${ef}"
+                fi
+            fi
+
+            # Validate cross-references — scan YAML frontmatter only (between the two ^---$ lines).
+            # Scanning the full file body causes false positives when cross-ref tokens appear in
+            # code samples, prose discussions, or quoted text (see XACA-0222 review subitem 014).
+            xref_frontmatter=$(awk '/^---$/{if(found){exit}; found=1; next} found{print}' "$ef" 2>/dev/null | head -50)
+            while IFS= read -r xref_line; do
+                # Extract bare cross-refs (tokens like agents:*, subjects:*, project:*, teams:*)
+                while read -r xref; do
+                    resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$global_root" 2>/dev/null)
+                    resolver_rc=$?
+                    if [[ $resolver_rc -ne 0 ]]; then
+                        _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
+                    elif [[ -n "$resolved_xref" ]] && [[ ! -f "$resolved_xref" ]]; then
+                        _kb_val_error "Broken cross-ref '${xref}' in ${ef}"
+                    fi
+                done < <(echo "$xref_line" | grep -oE '(agents|teams|subjects|project):[a-z0-9/:_-]+')
+            done <<< "$xref_frontmatter"
+
+            _kb_val_pass "$(basename "$ef")"
+        done
+
+        # Orphan check: files in INDEX but not on disk (D3: idx_id already contains .md suffix)
+        for idx_id in "${index_ids[@]}"; do
+            idx_file="${val_dir}/${idx_id%.md}.md"
+            if [[ ! -f "$idx_file" ]]; then
+                _kb_val_warn "INDEX.md lists '${idx_id}' but file not found: ${idx_file}"
+            fi
+        done
+
+        echo ""
+    done
+
+    # ── Summary ─────────────────────────────────────────────────────────────────
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo "  RESULTS: ${pass_count} passed  |  ${warning_count} warnings  |  ${error_count} errors"
+    echo "═══════════════════════════════════════════════════════════════════════════"
+    echo ""
+
+    [[ "$error_count" -eq 0 ]]
+}
+
+# Regenerate INDEX.md for one or all knowledge tier directories
+# Usage: kb-knowledge-reindex [--dir <path>]
+#
+# If --dir is given: regenerate that one INDEX.md.
+# If no flag: regenerate ALL INDEXes under ~/knowledge/ (agents, teams, subjects, project).
+kb-knowledge-reindex() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local target_dir=""
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --dir)
+                target_dir="${2-}"; shift 2 ;;
+            --help|-h)
+                echo "Usage: kb-knowledge-reindex [--dir <path>]"
+                echo ""
+                echo "  --dir <path>   Regenerate only this directory's INDEX.md"
+                echo "  (no flags)     Regenerate ALL INDEXes under KB_KNOWLEDGE_GLOBAL_ROOT"
+                return 0
+                ;;
+            *)
+                echo "Unknown flag: ${1-}" >&2; shift ;;
+        esac
+    done
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+
+    local project_path
+    project_path=$(_kb_knowledge_project_path)
+
+    if [[ -n "$target_dir" ]]; then
+        target_dir="${target_dir/#\~/$HOME}"
+        if [[ ! -d "$target_dir" ]]; then
+            echo "Error: directory not found: ${target_dir}" >&2
+            return 1
+        fi
+        _kb_knowledge_reindex_one "$target_dir"
+        return $?
+    fi
+
+    # Rebuild all: collect all tier directories
+    local rebuilt=0 skipped=0
+    local rdir
+
+    # Agent dirs
+    for rdir in "${global_root}/agents"/*/; do
+        [[ -d "$rdir" ]] || continue
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    done
+
+    # Team dirs
+    for rdir in "${global_root}/teams"/*/; do
+        [[ -d "$rdir" ]] || continue
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    done
+
+    # Subject dirs (recursive)
+    _kb_reindex_subjects() {
+        local base="${1-}"
+        local sdir
+        for sdir in "${base}"/*/; do
+            [[ -d "$sdir" ]] || continue
+            _kb_knowledge_reindex_one "$sdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+            _kb_reindex_subjects "$sdir"
+        done
+    }
+    _kb_reindex_subjects "${global_root}/subjects"
+
+    # Project dirs — XACA-0532: scan ALL projects/*/ under global root (mirrors agents/teams/subjects)
+    local pdir
+    for pdir in "${global_root}/projects"/*/; do
+        [[ -d "$pdir" ]] || continue
+        _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    done
+    # Also reindex the resolved project_path ONLY if it lives outside the global root
+    # (in-repo layout: .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH pointing elsewhere).
+    # Skip if already covered by the glob above to avoid double-reindexing.
+    if [[ -d "$project_path" && "$project_path" != "${global_root}/projects/"* ]]; then
+        _kb_knowledge_reindex_one "$project_path" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    fi
+
+    echo ""
+    echo "  INDEX.md regeneration complete: ${rebuilt} rebuilt, ${skipped} skipped."
+    echo ""
 }
 
 # Show current window's status
