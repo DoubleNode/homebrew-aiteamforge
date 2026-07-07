@@ -2060,6 +2060,166 @@ migrate_legacy_repo_knowledge() {
 }
 
 #──────────────────────────────────────────────────────────────────────────────
+# ~/knowledge git-repo provisioning (XACA-0747 / EPIC-0047)
+#──────────────────────────────────────────────────────────────────────────────
+# install_knowledge_tree() (above) scaffolds an EMPTY four-tier tree. This step
+# turns that into a REAL clone of the canonical private knowledge repo, so a
+# fresh machine gets actual entries + the frontmatter pre-commit gate — not a
+# hollow directory. Runs BEFORE install_knowledge_tree() (see install_kanban_
+# system) so the scaffold seeds only the gaps a clone leaves, and the "directory
+# exists but has no .git" husk case is the M1Pro pre-XACA-0222 husk, never a
+# scaffold we just created.
+#
+# Four states, decided in this order:
+#   1. Already a real clone ($root/.git present) → fetch + ff-only update, keep
+#      local work; never re-clone. (Conflict resolution is the sync daemon's job,
+#      XACA-0749 — a diverged/dirty tree is left as-is with a warning.)
+#   2. Auth not yet granted (remote unreachable) → soft-skip: log and return 0,
+#      leaving whatever is on disk untouched. This is what lets XACA-0747 ship
+#      and deploy BEFORE the fleet-auth gate (XACA-0750) is unblocked; a later
+#      upgrade (post-auth) completes the clone.
+#   3. M1Pro husk ($root exists, no .git) → move aside to $root.husk-bak-<ts>
+#      (never deleted), then clone onto the clean path.
+#   4. Fresh machine ($root absent) → clone.
+# Fully idempotent, dry-run-aware, sandbox-safe (honors HOME / KB_KNOWLEDGE_*).
+
+# Canonical private knowledge repo. Overridable so sandbox tests can point at a
+# local fixture and operators can retarget without editing the installer.
+_knowledge_repo_url() {
+    echo "${KB_KNOWLEDGE_REPO_URL:-git@github.com:DoubleNode/knowledge.git}"
+}
+
+# True when $1 is reachable for clone WITHOUT prompting for credentials. Batch/
+# non-interactive so an unauthorized machine fails fast instead of hanging on an
+# SSH password or HTTPS credential prompt (the XACA-0750 fleet-auth gate).
+_knowledge_repo_reachable() {
+    local url="$1"
+    GIT_TERMINAL_PROMPT=0 \
+    GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new" \
+        git ls-remote --exit-code "$url" HEAD >/dev/null 2>&1
+}
+
+# Wire the repo's frontmatter pre-commit gate after a clone. Delegates to the
+# repo's own tracked setup script (canonical authority on how its hooks wire)
+# rather than reimplementing dispatcher logic here. Two layers:
+#   * setup-global-hooks.sh installs the init.templateDir dispatcher → every
+#     FUTURE clone/init on this machine is zero-touch.
+#   * `git init` inside the fresh clone retrofits THIS clone now (re-copies the
+#     template hooks; harmless to history). If the setup script is absent (older
+#     repo revision), fall back to per-clone `core.hooksPath .githooks`.
+# Non-fatal throughout — a knowledge clone is still useful without the gate.
+# Skip entirely with KB_KNOWLEDGE_SKIP_HOOK_SETUP=1.
+_knowledge_wire_hooks() {
+    local root="$1"
+    if [ "${KB_KNOWLEDGE_SKIP_HOOK_SETUP:-0}" = "1" ]; then
+        info "Knowledge hook wiring skipped (KB_KNOWLEDGE_SKIP_HOOK_SETUP=1)"
+        return 0
+    fi
+
+    local setup="$root/.githooks/setup-global-hooks.sh"
+    if _knowledge_dry_run; then
+        if [ -x "$setup" ]; then
+            info "[dry-run] would run $setup + 'git init $root' to wire zero-touch frontmatter hook"
+        else
+            info "[dry-run] would set core.hooksPath=.githooks in $root (no setup script)"
+        fi
+        return 0
+    fi
+
+    if [ -x "$setup" ]; then
+        # Installs the init.templateDir dispatcher for all future clones.
+        if "$setup" >/dev/null 2>&1; then
+            success "Installed zero-touch git-hook dispatcher (init.templateDir)"
+        else
+            warn "setup-global-hooks.sh failed; the frontmatter gate may need manual wiring"
+        fi
+        # Retrofit the current clone so the gate is live immediately.
+        git -C "$root" init >/dev/null 2>&1 || true
+    else
+        git -C "$root" config core.hooksPath .githooks >/dev/null 2>&1 || true
+    fi
+
+    # Verify + log: gate is live if .git/hooks/pre-commit resolved (templateDir
+    # path) OR core.hooksPath points at the tracked .githooks/pre-commit.
+    local hooks_dir
+    hooks_dir="$(git -C "$root" rev-parse --git-path hooks 2>/dev/null)"
+    if { [ -n "$hooks_dir" ] && [ -x "$root/$hooks_dir/pre-commit" ]; } \
+        || [ -x "$root/.git/hooks/pre-commit" ] \
+        || { [ "$(git -C "$root" config --get core.hooksPath 2>/dev/null)" = ".githooks" ] \
+             && [ -x "$root/.githooks/pre-commit" ]; }; then
+        success "Frontmatter pre-commit gate active in $root"
+    else
+        warn "Frontmatter pre-commit gate not detected after clone (non-fatal)"
+    fi
+    return 0
+}
+
+install_knowledge_repo() {
+    local root url
+    root="$(_knowledge_global_root)"
+    url="$(_knowledge_repo_url)"
+
+    # State 1 — already a real clone: update in place, never re-clone.
+    if [ -d "$root/.git" ]; then
+        info "Knowledge repo already present at $root — updating"
+        if _knowledge_dry_run; then
+            info "[dry-run] would fetch + fast-forward $root"
+            return 0
+        fi
+        if git -C "$root" fetch --quiet --all 2>/dev/null \
+            && git -C "$root" merge --ff-only --quiet '@{u}' 2>/dev/null; then
+            success "Knowledge repo updated (fast-forward)"
+        else
+            # Diverged, dirty, or no upstream — leave for the sync daemon
+            # (XACA-0749) rather than risk clobbering local work.
+            info "Knowledge repo left as-is (local changes or non-ff; sync daemon owns reconciliation)"
+        fi
+        _knowledge_wire_hooks "$root"
+        return 0
+    fi
+
+    # State 2 — auth gate: can we reach the remote without prompting?
+    if ! _knowledge_repo_reachable "$url"; then
+        info "Knowledge repo not yet authorized ($url unreachable) — skipping clone; scaffold retained"
+        info "  (grant fleet auth per XACA-0750, then re-run the installer/upgrade to complete the clone)"
+        return 0
+    fi
+
+    # State 3 — M1Pro husk: a non-git directory is in the way. Move it aside
+    # (never delete) so the clone lands on a clean path.
+    if [ -e "$root" ]; then
+        local backup
+        backup="${root}.husk-bak-$(date -u +%Y%m%d%H%M%S 2>/dev/null || echo backup)"
+        if _knowledge_dry_run; then
+            info "[dry-run] would move husk $root → $backup, then clone $url"
+        else
+            if mv "$root" "$backup"; then
+                success "Moved pre-existing non-git ~/knowledge husk aside → $backup"
+            else
+                warn "Could not move husk $root aside — skipping clone to avoid data loss"
+                return 0
+            fi
+        fi
+    fi
+
+    # State 3/4 — clone.
+    if _knowledge_dry_run; then
+        info "[dry-run] would clone $url → $root"
+        return 0
+    fi
+    info "Cloning knowledge repo $url → $root"
+    if GIT_TERMINAL_PROMPT=0 \
+        GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new" \
+        git clone --quiet "$url" "$root" 2>/dev/null; then
+        success "Cloned knowledge repo → $root"
+        _knowledge_wire_hooks "$root"
+    else
+        warn "Knowledge repo clone failed after reachability check — leaving scaffold in place"
+    fi
+    return 0
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Main Installation Function
 #──────────────────────────────────────────────────────────────────────────────
 
@@ -2102,9 +2262,13 @@ install_kanban_system() {
     install_kb_init_team_scripts
     install_kanban_hooks
 
-    # Provision the four-tier ~/knowledge/ tree + migrate legacy per-repo
-    # knowledge into the project tier. Decoupled from team presence (XACA-0743);
-    # refreshes on every run, fully idempotent.
+    # Provision ~/knowledge. Repo clone FIRST (XACA-0747): turn an empty/absent/
+    # husk ~/knowledge into a real clone of the canonical repo (auth-gated soft
+    # skip when the fleet-auth gate XACA-0750 is not yet granted). Then the tree
+    # step seeds only the gaps a clone leaves (or the full fallback scaffold when
+    # the clone was skipped). Decoupled from team presence (XACA-0743); both
+    # refresh on every run, fully idempotent.
+    install_knowledge_repo
     install_knowledge_tree
 
     # Initialize kanban boards for each team (skipped when no teams resolved —
@@ -2238,3 +2402,7 @@ export -f uninstall_kanban_system
 export -f populate_board_terminals
 export -f install_knowledge_tree
 export -f migrate_legacy_repo_knowledge
+export -f install_knowledge_repo
+export -f _knowledge_repo_url
+export -f _knowledge_repo_reachable
+export -f _knowledge_wire_hooks
