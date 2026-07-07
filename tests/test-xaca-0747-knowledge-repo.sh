@@ -259,6 +259,38 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# T8 — two husk-moves resolve to DISTINCT backups (no mv-into-existing nesting)
+# Review/test fold-in: a second-granularity timestamp collides when two moves
+# land in the same UTC second; the -N suffix must keep each backup separate and
+# never nest one husk inside another.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T8: repeated husk moves never nest (distinct .husk-bak-* backups)"
+T8_HOME=$(_next_home); T8_ROOT="$T8_HOME/knowledge"
+# First husk → clone.
+mkdir -p "$T8_ROOT/agents/quark"; echo "husk one" > "$T8_ROOT/agents/quark/INDEX.md"
+T8_RC1=$(_run_repo "$T8_HOME" "$T8_ROOT" "$FIXTURE_URL" false)
+# Remove the clone's .git so a SECOND run treats the path as a husk again, and
+# re-plant husk content — the second backup must not land inside the first.
+rm -rf "$T8_ROOT"
+mkdir -p "$T8_ROOT/agents/quark"; echo "husk two" > "$T8_ROOT/agents/quark/INDEX.md"
+T8_RC2=$(_run_repo "$T8_HOME" "$T8_ROOT" "$FIXTURE_URL" false)
+# Assert: >=2 distinct backups, each holding the husk content at its TOP level
+# (nesting would push it one dir deeper), and no husk nested inside another
+# (signature: a subdir named "knowledge" — the root basename — inside a backup).
+T8_BACKUPS=$(ls -d "$T8_ROOT".husk-bak-* 2>/dev/null | wc -l | tr -d ' ')
+T8_NESTED=$(find "$T8_ROOT".husk-bak-* -mindepth 1 -maxdepth 1 -type d -name knowledge 2>/dev/null | head -1)
+T8_CONTENT_OK=true
+for _b in "$T8_ROOT".husk-bak-*; do
+    [ -f "$_b/agents/quark/INDEX.md" ] || T8_CONTENT_OK=false
+done
+if [ "$T8_RC1" = "0" ] && [ "$T8_RC2" = "0" ] && [ -d "$T8_ROOT/.git" ] \
+    && [ "$T8_BACKUPS" -ge 2 ] && [ -z "$T8_NESTED" ] && [ "$T8_CONTENT_OK" = true ]; then
+    test_pass
+else
+    test_fail "rc1=$T8_RC1 rc2=$T8_RC2 backups=$T8_BACKUPS nested='${T8_NESTED:-none}' content_ok=$T8_CONTENT_OK has_git=$([ -d "$T8_ROOT/.git" ] && echo y || echo n)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Standalone summary + exit code (no-op under test-runner.sh, which owns totals)
 # ═══════════════════════════════════════════════════════════════════════════
 if [ -n "${_PASS_COUNT+x}" ]; then

@@ -2092,6 +2092,17 @@ _knowledge_repo_url() {
 # True when $1 is reachable for clone WITHOUT prompting for credentials. Batch/
 # non-interactive so an unauthorized machine fails fast instead of hanging on an
 # SSH password or HTTPS credential prompt (the XACA-0750 fleet-auth gate).
+#
+# Host-key policy (XACA-0747 review fold-in): StrictHostKeyChecking=accept-new is
+# a deliberate choice, not the weaker `no`/`accept-all`. `accept-new` trusts a
+# host on FIRST contact but still REFUSES a subsequently CHANGED key (MITM
+# protection after TOFU), and BatchMode makes an unknown/changed host fail
+# closed (the reachability check returns non-zero → clone is skipped, never an
+# interactive prompt). We intentionally do NOT pin github.com host keys inline:
+# GitHub rotates them (e.g. the 2023 RSA-key rotation), and a hardcoded pin would
+# silently break every fleet clone the day a key rotates — a worse failure than
+# the narrow first-contact TOFU window this closes. Operators wanting zero TOFU
+# can pre-seed ~/.ssh/known_hosts out of band; accept-new then no-ops.
 _knowledge_repo_reachable() {
     local url="$1"
     GIT_TERMINAL_PROMPT=0 \
@@ -2188,8 +2199,21 @@ install_knowledge_repo() {
     # State 3 — M1Pro husk: a non-git directory is in the way. Move it aside
     # (never delete) so the clone lands on a clean path.
     if [ -e "$root" ]; then
-        local backup
-        backup="${root}.husk-bak-$(date -u +%Y%m%d%H%M%S 2>/dev/null || echo backup)"
+        # Collision-proof backup path: POSIX `mv <dir> <existing-dir>` NESTS the
+        # source inside the target instead of failing, so the destination MUST
+        # not already exist. A second-granularity timestamp alone can collide
+        # (two husk moves within the same UTC second — reproducible with fast
+        # local fixtures) and the `date` fallback is a fixed literal; disambiguate
+        # both with a monotonic -N suffix until we find a free name (XACA-0747
+        # review/test fold-in). Read-only stat, safe under dry-run.
+        local backup ts n
+        ts="$(date -u +%Y%m%d%H%M%S 2>/dev/null || echo backup)"
+        backup="${root}.husk-bak-${ts}"
+        n=1
+        while [ -e "$backup" ]; do
+            backup="${root}.husk-bak-${ts}-${n}"
+            n=$((n + 1))
+        done
         if _knowledge_dry_run; then
             info "[dry-run] would move husk $root → $backup, then clone $url"
         else
