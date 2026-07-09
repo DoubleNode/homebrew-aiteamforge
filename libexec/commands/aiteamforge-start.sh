@@ -187,14 +187,23 @@ check_port_health() {
   # Only if it STILL fails after the reconcile do we abort.
   print_warning "═══════════════════════════════════════════════════════════════"
   print_warning "LCARS port collision or null-port detected in team-paths.json."
-  print_warning "Auto-applying a port reconcile (aiteamforge-port-fix --apply):"
+  print_warning "Auto-applying a port reconcile (aiteamforge-port-fix --apply --yes):"
   print_warning "  this reassigns colliding/unset LCARS ports to free, unique values"
   print_warning "  so each team's LCARS server can bind correctly."
   print_warning "═══════════════════════════════════════════════════════════════"
 
-  if ! "${port_fix_cmd[@]}" --apply; then
-    print_error "Port reconcile (--apply) failed."
-    print_error "Resolve manually with: aiteamforge-port-fix --apply"
+  # XACA-0762: --yes is mandatory here, not cosmetic. This gate runs under
+  # lcars-watch, whose stdin is non-interactive (not a tty). kb-port-fix.py's
+  # cmd_apply() requires --yes when stdin is non-interactive — without it,
+  # it detects the non-tty stdin and refuses with exit 1 EVERY time, so this
+  # "auto-apply" self-heal was guaranteed to fail under the exact supervisor
+  # that invokes it. Net effect: one team with a null lcars_port blocked
+  # EVERY team's LCARS server from starting. Consent is already implied by
+  # the loud warning above (and cmd_apply backs up team-paths.json before
+  # mutating it), so skip the interactive confirmation explicitly.
+  if ! "${port_fix_cmd[@]}" --apply --yes; then
+    print_error "Port reconcile (--apply --yes) failed."
+    print_error "Resolve manually with: aiteamforge-port-fix --apply --yes"
     print_error "Then re-run: aiteamforge start"
     return 1
   fi
