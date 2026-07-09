@@ -2083,10 +2083,64 @@ migrate_legacy_repo_knowledge() {
 #   4. Fresh machine ($root absent) → clone.
 # Fully idempotent, dry-run-aware, sandbox-safe (honors HOME / KB_KNOWLEDGE_*).
 
-# Canonical private knowledge repo. Overridable so sandbox tests can point at a
-# local fixture and operators can retarget without editing the installer.
+# Canonical private knowledge repo candidates, in resolution priority order.
+#
+# XACA-0751-014 fix: XACA-0750 provisions a per-machine, REPO-SCOPED ed25519
+# deploy key for DoubleNode/knowledge that is reachable ONLY through a dedicated
+# SSH host alias — `Host github-knowledge` (HostName github.com, IdentitiesOnly
+# yes, its own IdentityFile). Plain `git@github.com` carries no key on a fleet
+# box, so the original hard default (github.com) made even a FULLY-authorized
+# machine soft-skip (and blame XACA-0750, which had already succeeded).
+# Resolution now PROBES the deploy-key alias first, then plain github.com.
+#
+# An explicit KB_KNOWLEDGE_REPO_URL is the top-priority escape hatch and is used
+# verbatim — the two defaults are never probed when it is set (operator retarget
+# / sandbox fixtures). Each default is also individually overridable
+# (KB_KNOWLEDGE_REPO_URL_ALIAS / _DIRECT) so sandbox tests can point a candidate
+# at a local file:// fixture without real SSH.
+_knowledge_repo_url_alias() {
+    echo "${KB_KNOWLEDGE_REPO_URL_ALIAS:-git@github-knowledge:DoubleNode/knowledge.git}"
+}
+_knowledge_repo_url_direct() {
+    echo "${KB_KNOWLEDGE_REPO_URL_DIRECT:-git@github.com:DoubleNode/knowledge.git}"
+}
+
+# Ordered candidate URL list, one per line. An explicit KB_KNOWLEDGE_REPO_URL is
+# the SOLE candidate (never overridden, never probed away). Otherwise: the
+# github-knowledge deploy-key alias first, then plain github.com.
+_knowledge_repo_candidates() {
+    if [ -n "${KB_KNOWLEDGE_REPO_URL:-}" ]; then
+        echo "$KB_KNOWLEDGE_REPO_URL"
+    else
+        _knowledge_repo_url_alias
+        _knowledge_repo_url_direct
+    fi
+}
+
+# Back-compat shim: the FIRST candidate URL, UNPROBED. Retained because the
+# symbol is exported for the setup wizard; resolution logic uses
+# _knowledge_resolve_repo_url instead. Never used to rewrite an existing clone.
 _knowledge_repo_url() {
-    echo "${KB_KNOWLEDGE_REPO_URL:-git@github.com:DoubleNode/knowledge.git}"
+    _knowledge_repo_candidates | head -n 1
+}
+
+# Echo the first candidate URL that authenticates non-interactively (return 0),
+# or return 1 echoing nothing when none does. Probing reuses the single
+# _knowledge_repo_reachable probe below, so each candidate is bounded by that
+# probe's ConnectTimeout; at most two short probes (alias + direct) on an
+# unauthorized fleet box — safe for the nightly auto-upgrade LaunchAgent. Stops
+# at the first success, so a machine holding the deploy key pays exactly ONE
+# probe. Returns non-zero (never echoes a URL) when nothing authenticates, which
+# is what drives install_knowledge_repo's fail-soft skip.
+_knowledge_resolve_repo_url() {
+    local cand
+    for cand in $(_knowledge_repo_candidates); do
+        if _knowledge_repo_reachable "$cand"; then
+            echo "$cand"
+            return 0
+        fi
+    done
+    return 1
 }
 
 # True when $1 is reachable for clone WITHOUT prompting for credentials. Batch/
@@ -2168,9 +2222,14 @@ _knowledge_wire_hooks() {
 install_knowledge_repo() {
     local root url
     root="$(_knowledge_global_root)"
-    url="$(_knowledge_repo_url)"
 
     # State 1 — already a real clone: update in place, never re-clone.
+    #
+    # Deliberately resolves NO candidate URL and runs NO reachability probe: an
+    # existing clone keeps whatever remote it was cloned with (e.g. M3Pro's
+    # canonical HTTPS origin) and we NEVER rewrite it. The update rides the
+    # clone's own upstream (`@{u}`), so this path is both URL-agnostic and
+    # probe-free (fast — no SSH round trips before the fetch).
     if [ -d "$root/.git" ]; then
         info "Knowledge repo already present at $root — updating"
         if _knowledge_dry_run; then
@@ -2189,10 +2248,20 @@ install_knowledge_repo() {
         return 0
     fi
 
-    # State 2 — auth gate: can we reach the remote without prompting?
-    if ! _knowledge_repo_reachable "$url"; then
-        info "Knowledge repo not yet authorized ($url unreachable) — skipping clone; scaffold retained"
-        info "  (grant fleet auth per XACA-0750, then re-run the installer/upgrade to complete the clone)"
+    # State 2 — auth gate: resolve the first candidate that authenticates without
+    # prompting (github-knowledge deploy-key alias first, then plain github.com;
+    # an explicit KB_KNOWLEDGE_REPO_URL short-circuits to itself). No candidate
+    # reachable → soft-skip: name the URL(s) we tried (never assert a ticket
+    # state the installer can't know) and return 0, leaving disk untouched.
+    if ! url="$(_knowledge_resolve_repo_url)"; then
+        if [ -n "${KB_KNOWLEDGE_REPO_URL:-}" ]; then
+            info "Knowledge repo unreachable — KB_KNOWLEDGE_REPO_URL ($KB_KNOWLEDGE_REPO_URL) did not authenticate non-interactively (default candidates not tried) — skipping clone; scaffold retained"
+        else
+            info "Knowledge repo unreachable — tried the github-knowledge deploy-key alias ($(_knowledge_repo_url_alias)) then $(_knowledge_repo_url_direct); neither authenticated non-interactively — skipping clone; scaffold retained"
+        fi
+        info "  (authorize this machine's deploy key on the knowledge repo and configure the"
+        info "   github-knowledge SSH alias, or set KB_KNOWLEDGE_REPO_URL to a reachable remote;"
+        info "   then re-run the installer/upgrade to complete the clone)"
         return 0
     fi
 
@@ -2428,5 +2497,9 @@ export -f install_knowledge_tree
 export -f migrate_legacy_repo_knowledge
 export -f install_knowledge_repo
 export -f _knowledge_repo_url
+export -f _knowledge_repo_url_alias
+export -f _knowledge_repo_url_direct
+export -f _knowledge_repo_candidates
+export -f _knowledge_resolve_repo_url
 export -f _knowledge_repo_reachable
 export -f _knowledge_wire_hooks

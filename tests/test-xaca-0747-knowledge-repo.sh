@@ -202,8 +202,12 @@ test_start "T4: unreachable remote soft-skips (no root created, exit 0)"
 T4_HOME=$(_next_home); T4_ROOT="$T4_HOME/knowledge"
 T4_RC=$(_run_repo "$T4_HOME" "$T4_ROOT" "$BOGUS_URL" false)
 T4_OUT="$(_r_out)"
+# XACA-0751-014: soft-skip message now NAMES the attempted URL instead of
+# asserting "not yet authorized" (a ticket state the installer can't know). With
+# an explicit KB_KNOWLEDGE_REPO_URL set, the message reports that var unreachable.
 if [ "$T4_RC" = "0" ] && [ ! -e "$T4_ROOT" ] \
-    && echo "$T4_OUT" | grep -qi "not yet authorized"; then
+    && echo "$T4_OUT" | grep -qi "unreachable" \
+    && echo "$T4_OUT" | grep -q "$BOGUS_URL"; then
     test_pass
 else
     test_fail "rc=$T4_RC root_exists=$([ -e "$T4_ROOT" ] && echo y || echo n); out_tail=$(echo "$T4_OUT" | tail -3)"

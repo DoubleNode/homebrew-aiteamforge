@@ -289,8 +289,11 @@ test_start "U4: unreachable remote soft-skips, upgrade exits 0, no ~/knowledge (
 U4_HOME=$(_next_home); U4_ROOT="$U4_HOME/knowledge"
 U4_RC=$(_run_upgrade "$U4_HOME" "$U4_ROOT" "$BOGUS_URL" false)
 U4_OUT="$(_r_out)"
+# XACA-0751-014: soft-skip message now NAMES the attempted URL (was "not yet
+# authorized"). With an explicit KB_KNOWLEDGE_REPO_URL, it reports that var unreachable.
 if [ "$U4_RC" = "0" ] && [ ! -e "$U4_ROOT" ] \
-    && echo "$U4_OUT" | grep -qi "not yet authorized"; then
+    && echo "$U4_OUT" | grep -qi "unreachable" \
+    && echo "$U4_OUT" | grep -q "$BOGUS_URL"; then
     test_pass
 else
     test_fail "rc=$U4_RC root_exists=$([ -e "$U4_ROOT" ] && echo y || echo n); out_tail=$(echo "$U4_OUT" | tail -3)"
