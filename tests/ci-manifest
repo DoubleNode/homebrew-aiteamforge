@@ -78,4 +78,6 @@ test-xaca-0704-negative.sh                      plain-shell
 test-xaca-0704-positive.sh                      plain-shell
 test-xaca-0743-four-tier-knowledge.sh           plain-shell
 test-xaca-0746-kb-knowledge-in-tap.sh           plain-shell
+test-xaca-0747-knowledge-repo.sh                plain-shell
+test-xaca-0751-upgrade-knowledge-repo.sh        plain-shell
 test-xaca-0752-mktemp-template.sh               plain-shell

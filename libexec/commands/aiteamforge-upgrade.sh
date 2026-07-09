@@ -424,6 +424,68 @@ update_kanban_hooks() {
   fi
 }
 
+# XACA-0751: Knowledge-repo provisioning on the UPGRADE path.
+#
+# install_knowledge_repo() (XACA-0747) makes ~/knowledge a real git clone of the
+# canonical knowledge repo. Its ONLY call site was install_kanban_system(), which
+# runs on a fresh `aiteamforge setup` — NOT on `aiteamforge upgrade`. So every
+# already-installed box (the whole fleet) upgraded to a kb-knowledge-carrying
+# release yet never received the ~/knowledge directory those 15 helpers operate
+# on (confirmed empirically: M4Mini on 0.17.0 with no ~/knowledge). Same bug
+# class as XACA-0558 / XACA-0608 (update_kanban_hooks / update_runtime_helpers):
+# install-time provisioning the upgrade path never learned about.
+#
+# We REUSE install_knowledge_repo verbatim — it already handles all four states
+# (existing clone -> fetch + ff-only; auth-gate soft-skip; M1Pro husk -> move
+# aside, never delete; fresh machine -> clone), is DRY_RUN-aware, honors
+# HOME / KB_KNOWLEDGE_GLOBAL_ROOT / KB_KNOWLEDGE_REPO_URL / KB_KNOWLEDGE_SKIP_
+# HOOK_SETUP, and is fail-soft by design (always returns 0). We do NOT reimplement
+# it (contrast update_kanban_hooks, which re-derives a plain rsync).
+#
+# Everything runs in a SUBSHELL, for two hard reasons:
+#   1. install-kanban.sh opens with `set -euo pipefail`; sourcing it in-process
+#      would leak `set -u` into the remainder of the upgrade (which runs `set -eo`
+#      WITHOUT -u by design) and abort on the first unset variable. The subshell
+#      contains the option change.
+#   2. Fail-soft: the nightly auto-upgrade LaunchAgent runs unattended. A knowledge
+#      remote that is unreachable / unauthorized (M1Pro's current state — its
+#      deploy key is not yet authorized) must NOT fail the upgrade. install_
+#      knowledge_repo already soft-skips, but the trailing `|| ...` on the subshell
+#      guarantees that even a sourcing error or an unforeseen non-zero exit cannot
+#      abort the parent under `set -e`.
+# DRY_RUN and all KB_KNOWLEDGE_* overrides are inherited by the subshell (child
+# shells inherit non-exported vars too), so `--dry-run` and every override hold.
+update_knowledge_repo() {
+  print_section "Updating Knowledge Repository"
+
+  local installer="${LIBEXEC_DIR}/installers/install-kanban.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-kanban.sh not found ($installer) — skipping knowledge-repo provisioning"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would ensure ~/knowledge is provisioned (clone / fast-forward; auth-gated soft-skip; dirty clone left for the sync daemon)"
+  else
+    print_info "Ensuring ~/knowledge is provisioned (idempotent; fail-soft)..."
+  fi
+
+  # Subshell isolates install-kanban.sh's `set -u`; the `||` branch keeps the
+  # upgrade fail-soft even if sourcing or provisioning errors. Redirect applies
+  # ONLY to the `source` line — install_knowledge_repo's own info/warn/success
+  # output still flows to the console.
+  if (
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      install_knowledge_repo
+    ); then
+    print_success "Knowledge repository check complete"
+  else
+    print_warning "Knowledge-repo provisioning skipped (non-fatal; upgrade continues)"
+  fi
+  return 0
+}
+
 # Canonical aux-script map (XACA-0558, extended XACA-0608). SINGLE source of
 # truth: update_aux_scripts consumes it to know what to refresh, and
 # update_runtime_helpers reads the scripts/-destined basenames out of it to
@@ -1159,6 +1221,7 @@ check_brew_updates
 update_templates
 update_lcars
 update_kanban_hooks
+update_knowledge_repo
 update_aux_scripts
 update_team_scripts
 update_runtime_helpers
