@@ -7,6 +7,11 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-07-09
+
+### Security
+- XACA-0751 (EPIC-0047) — knowledge-repo provisioning now passes `-c protocol.ext.allow=never` on both the reachability probe (`_knowledge_repo_reachable`) and the `git clone`. git's `ext::` transport treats a URL as a shell command to spawn; `KB_KNOWLEDGE_REPO_URL` is owner-controlled today, but this code runs unattended, nightly, as the user via the auto-upgrade LaunchAgent, so a URL is not a place to trust. The per-command flag refuses `ext::` even when a machine's **global** `protocol.ext.allow` is permissive (attacker-set or careless) — scoped to `ext` so `file://` fixtures and `ssh`/`https` remotes keep working. New test `C9` in `tests/test-xaca-0751-014-knowledge-url-resolution.sh` proves it with a positive control (raw `git ls-remote "ext::touch <canary>"` under a hostile global `protocol.ext.allow=always` MUST fire the canary, so the test cannot pass vacuously) and asserts the shipped `_knowledge_repo_reachable` does NOT — verified to fail 8/9 when the guard is stripped. Review fold-in, PR #670 (both gates APPROVED). Also aligns the 014 suite's temp-dir cleanup to the `find -depth -delete` damage-control idiom used by the sibling upgrade suite.
+
 ## [0.17.2] - 2026-07-09
 
 ### Fixed
@@ -913,7 +918,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.2...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.3...HEAD
+[0.17.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.1...v0.17.2
 [0.17.1]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.0...v0.17.1
 [0.17.0]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.16.1...v0.17.0

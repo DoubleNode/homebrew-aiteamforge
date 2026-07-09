@@ -2157,11 +2157,16 @@ _knowledge_resolve_repo_url() {
 # silently break every fleet clone the day a key rotates — a worse failure than
 # the narrow first-contact TOFU window this closes. Operators wanting zero TOFU
 # can pre-seed ~/.ssh/known_hosts out of band; accept-new then no-ops.
+# XACA-0751 review hardening: `-c protocol.ext.allow=never` refuses git's `ext::`
+# transport, which treats the URL as a shell command to spawn. KB_KNOWLEDGE_REPO_URL
+# is owner-controlled today, but this code runs unattended, nightly, as the user via
+# the auto-upgrade LaunchAgent — a URL is not a safe place to trust. Scoped to `ext`
+# rather than an allow-list so `file://` test fixtures and `ssh`/`https` keep working.
 _knowledge_repo_reachable() {
     local url="$1"
     GIT_TERMINAL_PROMPT=0 \
     GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new" \
-        git ls-remote --exit-code "$url" HEAD >/dev/null 2>&1
+        git -c protocol.ext.allow=never ls-remote --exit-code "$url" HEAD >/dev/null 2>&1
 }
 
 # Wire the repo's frontmatter pre-commit gate after a clone. Delegates to the
@@ -2303,7 +2308,7 @@ install_knowledge_repo() {
     info "Cloning knowledge repo $url → $root"
     if GIT_TERMINAL_PROMPT=0 \
         GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=20 -o StrictHostKeyChecking=accept-new" \
-        git clone --quiet "$url" "$root" 2>/dev/null; then
+        git -c protocol.ext.allow=never clone --quiet "$url" "$root" 2>/dev/null; then
         success "Cloned knowledge repo → $root"
         _knowledge_wire_hooks "$root"
     else

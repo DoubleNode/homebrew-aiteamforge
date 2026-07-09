@@ -65,9 +65,11 @@ TEST_TMP_DIR="$(cd "$TEST_TMP_DIR" && pwd -P)"
 WORK_DIR="$TEST_TMP_DIR/xaca0751-014"
 mkdir -p "$WORK_DIR"
 
+# Only clean a temp dir WE created; the runner owns its own. Use find -depth -delete
+# per the damage-control convention (matches test-xaca-0751-upgrade-knowledge-repo.sh).
 cleanup() {
     if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ]; then
-        rm -rf "$TEST_TMP_DIR"
+        find "$TEST_TMP_DIR" -depth -delete 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
@@ -137,6 +139,9 @@ R_STDERR="$WORK_DIR/r-stderr.txt"
 _run() {
     local home_dir="$1" global_root="$2" explicit_url="$3"
     local alias_url="$4" direct_url="$5" dry_run="${6:-false}"
+    # $7 (optional): value for a hostile global protocol.ext.allow, to prove our
+    # per-command -c protocol.ext.allow=never overrides a permissive user config.
+    local hostile_ext_allow="${7:-}"
     (
         set -euo pipefail
         export INSTALL_ROOT="$TAP_ROOT"
@@ -155,6 +160,8 @@ _run() {
         export GIT_CONFIG_GLOBAL="$home_dir/.gitconfig"
         git config --file "$GIT_CONFIG_GLOBAL" user.email test@example.com
         git config --file "$GIT_CONFIG_GLOBAL" user.name "Sandbox"
+        [ -n "$hostile_ext_allow" ] && \
+            git config --file "$GIT_CONFIG_GLOBAL" protocol.ext.allow "$hostile_ext_allow"
         source "$INSTALLER" >"$R_STDOUT" 2>"$R_STDERR"
         install_knowledge_repo >>"$R_STDOUT" 2>>"$R_STDERR"
     )
@@ -298,6 +305,34 @@ if [ "$C8_RC" = "0" ] && [ ! -e "$C8_ROOT" ] \
     test_pass
 else
     test_fail "rc=$C8_RC root_exists=$([ -e "$C8_ROOT" ] && echo y || echo n); out_tail=$(echo "$C8_OUT" | tail -4)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "C9: _knowledge_repo_reachable refuses ext:: even with global protocol.ext.allow=always"
+# Threat model: a machine whose GLOBAL gitconfig permits git's ext:: transport
+# (attacker-set or careless). ext:: runs the URL as a command; `ext::touch <FILE>`
+# — a LITERAL space splits program from arg; %20 would wrongly fuse them into one
+# token — drops a canary iff the command actually executes. The shipped probe passes
+# `-c protocol.ext.allow=never`, which must WIN over the permissive global. We call
+# the REAL shipped function (sourced below) so this tests production code, not a twin.
+C9_HOME=$(_next_home); mkdir -p "$C9_HOME"
+C9_GC="$C9_HOME/.gitconfig"
+git config --file "$C9_GC" protocol.ext.allow always   # hostile permissive global
+C9_GUARDED_CANARY="$C9_HOME/guarded_pwned"
+C9_PC_CANARY="$C9_HOME/control_pwned"
+(
+    export GIT_CONFIG_GLOBAL="$C9_GC" HOME="$C9_HOME" GIT_TERMINAL_PROMPT=0
+    source "$INSTALLER" >/dev/null 2>&1
+    # Positive control: raw git under the SAME hostile global MUST fire the payload,
+    # or this test proves nothing (guards against a silently-inert payload/env).
+    git ls-remote --exit-code "ext::touch $C9_PC_CANARY" HEAD >/dev/null 2>&1 || true
+    # The real assertion: the shipped function must NOT let ext:: execute.
+    _knowledge_repo_reachable "ext::touch $C9_GUARDED_CANARY" || true
+)
+if [ -e "$C9_PC_CANARY" ] && [ ! -e "$C9_GUARDED_CANARY" ]; then
+    test_pass
+else
+    test_fail "positive_control_fired=$([ -e "$C9_PC_CANARY" ] && echo y || echo 'NO — TEST IS VACUOUS') guarded_canary=$([ -e "$C9_GUARDED_CANARY" ] && echo 'FIRED — GUARD FAILED' || echo blocked)"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
