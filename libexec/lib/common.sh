@@ -152,6 +152,65 @@ section() { print_section "$@"; }
 warn() { warning "$@"; }
 
 #──────────────────────────────────────────────────────────────────────────────
+# Legacy LaunchAgent teardown — com.aiteamforge.lcars-runatload (XACA-0763-005)
+#──────────────────────────────────────────────────────────────────────────────
+# lcars-runatload was retired: XACA-0626 Defect C already relaxed lcars-health's
+# tmux gate, so com.aiteamforge.lcars-health (RunAtLoad=true) now covers the
+# post-reboot cold-start case runatload existed for, making it a redundant
+# fourth writer to LCARS lifecycle state.
+#
+# Deleting the template and the install-side wiring (XACA-0763-005) only stops
+# NEW installs from getting the agent. Every machine that already installed it
+# has com.aiteamforge.lcars-runatload.plist LOADED in the GUI domain right now
+# and will keep firing `aiteamforge start lcars` at every login forever unless
+# something tears it down. This function is that something: it is wired into
+# BOTH `aiteamforge upgrade` and `aiteamforge migrate` (not just `aiteamforge
+# uninstall`, which most machines never run) so the whole fleet self-heals on
+# the next routine upgrade/migrate instead of carrying the orphaned agent
+# indefinitely.
+#
+# Idempotent + silent when the agent was never installed. Honors a dry-run
+# flag so callers under --dry-run only report intent.
+# Usage: remove_legacy_lcars_runatload_agent [launchagents_dir] [dry_run(true|false)]
+remove_legacy_lcars_runatload_agent() {
+    local launchagents_dir="${1:-$HOME/Library/LaunchAgents}"
+    local dry_run="${2:-false}"
+    local label="com.aiteamforge.lcars-runatload"
+    local plist="${launchagents_dir}/${label}.plist"
+
+    # Probe the LOADED job, not just the plist file. Removing the plist without a
+    # bootout leaves the job registered and firing in the live launchd session;
+    # guarding on `[ -f "$plist" ]` alone would then skip that machine on every
+    # future upgrade and the orphan would never be reaped. Check both, act on
+    # either. `launchctl print` is read-only, so it is not routed through
+    # _aitf_launchctl (see that wrapper's header).
+    local loaded=false
+    if launchctl print "gui/$(id -u)/${label}" >/dev/null 2>&1; then
+        loaded=true
+    fi
+
+    if [ "$loaded" != "true" ] && [ ! -f "$plist" ]; then
+        return 0
+    fi
+
+    if [ "$dry_run" = "true" ]; then
+        echo "[DRY RUN] Would remove legacy LaunchAgent: ${label}"
+        return 0
+    fi
+
+    # Prefer bootout (modern, synchronous unregister from the GUI domain);
+    # fall back to unload for older launchd/macOS where bootout semantics
+    # differ. Both are no-ops (idempotent) if the job isn't currently loaded.
+    if [ "$loaded" = "true" ]; then
+        _aitf_launchctl bootout "gui/$(id -u)/${label}" 2>/dev/null \
+            || _aitf_launchctl unload "$plist" 2>/dev/null || true
+    fi
+
+    rm -f "$plist"
+    success "Removed legacy LaunchAgent: ${label} (retired, XACA-0763-005)"
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Homebrew tap-trust helpers (XACA-0676)
 #──────────────────────────────────────────────────────────────────────────────
 # Recent Homebrew gates formula loading behind tap-trust when

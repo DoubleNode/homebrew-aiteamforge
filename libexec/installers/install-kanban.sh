@@ -1099,73 +1099,23 @@ uninstall_lcars_watch_launchagent() {
     fi
 }
 
-# Install RunAtLoad LCARS LaunchAgent — starts all configured LCARS servers at login/reboot (XACA-0626)
+# Uninstall RunAtLoad LCARS LaunchAgent (XACA-0763-005: RETIRED, uninstall-only)
 #
-# Creates a one-shot launchd agent that fires `aiteamforge start lcars` at every
-# login/reboot. This ensures LCARS servers come up automatically without the user
-# having to manually run a startup script. Already-running servers are left untouched
-# by the idempotent guard in aiteamforge-start.sh.
+# com.aiteamforge.lcars-runatload was retired by XACA-0763-005: XACA-0626
+# Defect C already relaxed lcars-health's tmux gate, so com.aiteamforge.lcars-health
+# (RunAtLoad=true, 300s interval) now covers the post-reboot cold-start case this
+# agent existed for, making it a redundant fourth writer to LCARS lifecycle state.
 #
-# Why: lcars-watch only fires on file changes; lcars-health skips teams with no tmux
-# session after reboot (Defect C, partially fixed in XACA-0626). This agent provides
-# defence-in-depth: fires immediately at login to cover the reboot case.
-#
-# XACA-0578 SIBLING-DRIFT NOTE: this installer is one of five coupled sites for
-# com.aiteamforge.lcars-runatload. All five must move together:
-#   (a) this function  — install side
-#   (b) uninstall_lcars_runatload_launchagent below  — uninstall side
-#   (c) share/templates/auto-upgrade/lcars-runatload.template.plist  — template
-#   (d) aiteamforge-upgrade.sh::update_launchagents agents array  — upgrade re-render
-#   (e) aiteamforge-migrate.sh::update_launchagents agents array  — migrate re-render
-# Adding a new {{PLACEHOLDER}} to the template also requires updating
-# _render_launchagent_template in aiteamforge-upgrade.sh (XACA-0571-014 note).
-install_lcars_runatload_launchagent() {
-    local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/lcars-runatload.template.plist"
-    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-runatload.plist"
-
-    if [ ! -f "$plist_template" ]; then
-        warning "LCARS runatload LaunchAgent template not found (skipping)"
-        return 0
-    fi
-
-    # Resolve the aiteamforge binary path from Homebrew prefix
-    local brew_prefix
-    if command -v brew &>/dev/null; then
-        brew_prefix="$(brew --prefix)"
-    else
-        brew_prefix="/opt/homebrew"
-    fi
-    local aiteamforge_bin="${brew_prefix}/bin/aiteamforge"
-
-    info "Installing LCARS runatload LaunchAgent (starts LCARS on login/reboot)..."
-
-    mkdir -p "$HOME/Library/LaunchAgents"
-    mkdir -p "$AITEAMFORGE_DIR/logs"
-
-    sed \
-        -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
-        -e "s|{{LOG_DIR}}|${AITEAMFORGE_DIR}/logs|g" \
-        -e "s|{{HOME_DIR}}|${HOME}|g" \
-        -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
-        "$plist_template" > "$plist_dest"
-
-    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
-
-    # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
-    # installers): verify registration via `launchctl list` rather than trust the
-    # legacy `launchctl load` exit code, which returns 0 even when the job is
-    # rejected. A one-shot RunAtLoad agent stays REGISTERED in the domain after
-    # its run completes (KeepAlive=false governs restart, not registration), so
-    # `launchctl list` still reports it here.
-    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
-    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-runatload"; then
-        success "LCARS runatload LaunchAgent installed — LCARS will start automatically on login/reboot"
-    else
-        warning "LCARS runatload LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
-    fi
-}
-
-# Uninstall RunAtLoad LCARS LaunchAgent
+# The install-side function, its template (share/templates/auto-upgrade/
+# lcars-runatload.template.plist), and its entries in aiteamforge-upgrade.sh /
+# aiteamforge-migrate.sh's update_launchagents agents arrays were all removed —
+# NEW installs never get this agent. This uninstall function is intentionally
+# KEPT: any machine that installed it before XACA-0763-005 still has the plist
+# LOADED in the GUI domain and needs a teardown path. `aiteamforge uninstall`
+# still calls this. Machines that only ever run `aiteamforge upgrade` /
+# `aiteamforge migrate` (never a full uninstall) are covered separately by
+# remove_legacy_lcars_runatload_agent() in libexec/lib/common.sh, wired into
+# both of those commands' run sequences — see that function's header comment.
 uninstall_lcars_runatload_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-runatload.plist"
 
@@ -2427,7 +2377,9 @@ install_kanban_system() {
     install_auto_upgrade_launchagent
     install_lcars_watch_launchagent
     install_cellar_watch_launchagent
-    install_lcars_runatload_launchagent
+    # com.aiteamforge.lcars-runatload retired (XACA-0763-005) — no install-side
+    # call. uninstall_lcars_runatload_launchagent below is kept so existing
+    # installs can still be torn down.
 
     success "LCARS Kanban System installed successfully"
 

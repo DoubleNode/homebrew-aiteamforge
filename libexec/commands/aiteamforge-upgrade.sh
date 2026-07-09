@@ -1096,10 +1096,10 @@ update_launchagents() {
     "com.aiteamforge.auto-upgrade.plist:auto-upgrade/auto-upgrade-launchagent.template.plist"
     "com.aiteamforge.lcars-watch.plist:auto-upgrade/lcars-watch-launchagent.template.plist"
     "com.aiteamforge.cellar-watch.plist:auto-upgrade/cellar-watch-launchagent.template.plist"
-    # XACA-0626: RunAtLoad agent — starts all configured LCARS servers at login/reboot.
-    # XACA-0578 SIBLING-DRIFT NOTE: paired with install-kanban.sh (install+uninstall),
-    # aiteamforge-migrate.sh::update_launchagents, and the template in share/templates/auto-upgrade/.
-    "com.aiteamforge.lcars-runatload.plist:auto-upgrade/lcars-runatload.template.plist"
+    # com.aiteamforge.lcars-runatload retired (XACA-0763-005) — no longer
+    # re-rendered here. Legacy installs are torn down by
+    # remove_legacy_lcars_runatload_agent (libexec/lib/common.sh), called
+    # from the run sequence right after update_launchagents below.
   )
 
   # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
@@ -1229,6 +1229,10 @@ update_imgcat
 update_shell_helpers
 update_skills
 update_launchagents
+# XACA-0763-005: tear down the retired com.aiteamforge.lcars-runatload agent
+# on any machine that still has it loaded from before the retirement. See
+# remove_legacy_lcars_runatload_agent's header comment in libexec/lib/common.sh.
+remove_legacy_lcars_runatload_agent "${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}" "$DRY_RUN"
 
 # XACA-0578: Stamp the installed version so `aiteamforge doctor` can detect
 # Cellar-vs-working-dir drift if a user runs `brew upgrade aiteamforge` without

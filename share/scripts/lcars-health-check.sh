@@ -259,18 +259,78 @@ get_remote_host_for_port() {
 # ============================================================================
 # Start LCARS server for a team (health-check restart path)
 # ============================================================================
-# XACA-0614: This function now uses resolve_lcars_python() from
-# lcars-launch-helpers.sh (the single canonical python resolver) and adopts
-# the same nohup+disown durable-detach form as start_lcars_server so a
-# health-restarted server is HUP-immune too (XACA-0652 invariant).
+# XACA-0763 (004): this is now a THIN WRAPPER delegating to
+# scripts/lcars-launch-helpers.sh::start_lcars_server instead of a hand-copied
+# duplicate of its launch form. The two had drifted (this function's own
+# header used to say "keep in sync with lcars-launch-helpers.sh::start_lcars_server",
+# which is itself a k501 sibling-drift smell — see memory
+# k501-sibling-heuristic-drift-pattern.md), and the drift was load-bearing:
 #
-# SIBLING: keep in sync with lcars-launch-helpers.sh::start_lcars_server —
-# the launch form (nohup env ... sh -c 'exec ... python3 server.py ...') must
-# remain identical to preserve HUP-immunity and PID-trackability.
+#   - start_lcars_server runs its pkill UNDER a per-port `mkdir` advisory lock
+#     (XACA-0661) with an ANCHORED port-boundary pattern, and short-circuits
+#     when a healthy server is already answering on the port.
+#   - This function's old pkill was a bare, UNLOCKED, UNANCHORED
+#     `pkill -f "server.py.*$local_port"` with no short-circuit.
+#
+#   So the health-check loop could SIGTERM a server that a concurrent
+#   `aiteamforge restart lcars` had launched moments earlier, and vice versa
+#   (the "supervisor race" half of XACA-0763). Delegating inherits the lock,
+#   the anchored pkill, the short-circuit, the XACA-0763-003 setsid(2) detach,
+#   the XACA-0626 port-drift guard, and the XACA-0713 python-version warning —
+#   all defined in exactly one place.
+#
+# Signature note: argument ORDER differs from start_lcars_server's
+# (team, port, session_name) — this function keeps its historical
+# (local_port, team, session_name) order for its own callers
+# (_hc_heal_noncanonical_port, run_health_check), so the delegating call below
+# transposes the first two arguments deliberately.
+#
+# lcars-target.js write suppression (trap avoided): start_lcars_server writes
+# lcars-target.js (the router-redirect file) unconditionally when called
+# directly, because its direct callers are the user opening/refreshing exactly
+# that team's LCARS tab. This function's caller (run_health_check) instead
+# restarts EVERY configured team in one sweep — naive delegation would rewrite
+# lcars-target.js up to 9 times per cycle, last-team-wins, silently
+# retargeting the user's LCARS cockpit to whichever team happened to be
+# restarted last. We suppress that write here via LCARS_SKIP_TARGET_WRITE=1,
+# a `local` (dynamically-scoped, so start_lcars_server sees it during this
+# call only) — see the flag's definition in lcars-launch-helpers.sh for the
+# full rationale.
+#
+# Log location (trap avoided, decided deliberately): start_lcars_server logs
+# to the canonical ${AITEAMFORGE_DIR:-~/dev-team}/logs/lcars-server-<team>.log
+# (log-rotation included) instead of this function's old ad hoc
+# /tmp/lcars-<team>-<port>.log. Converging on ONE log location is desirable —
+# it's the same file whichever launch site (dev startup script or health
+# check) started the server, so there is exactly one place to look. BUT:
+# /tmp/lcars-<team>-<port>.log is not merely a log — it is a load-bearing
+# DETECTION SENTINEL. scripts/lcars-restart-helpers.sh::detect_active_lcars_team
+# (used by the post-merge auto-restart hook) globs /tmp/lcars-*-*.log as its
+# tier-2 "which team is currently running" signal (existence + mtime + a live
+# process on that port — content is never read). Silently dropping that write
+# would have broken that hook's detection for any server that was last
+# (re)started via the health-check path. We therefore still touch a pointer
+# stub at the legacy /tmp path after delegating, preserving the sentinel
+# without duplicating real log content.
+#
+# Poll window (trap avoided, decided deliberately): start_lcars_server polls
+# for up to 15s (30 x 0.5s); this function's own poll used to be 10s (10 x
+# 1s). Converging on 15s (by simply propagating start_lcars_server's return
+# code instead of re-polling here) is a strict improvement — a healthy but
+# slightly slow boot now has 5 more seconds to answer before the health check
+# gives up and logs a false failure.
 #
 # LaunchAgent compatibility: sources lcars-launch-helpers.sh once via the
 # same _SCRIPT_DIR already used above to locate lcars_ports.py. Sourcing only
-# defines functions (no side-effects); safe under launchd's minimal env.
+# defines functions (no side-effects); safe under launchd's minimal env. If
+# sourcing fails or start_lcars_server is unavailable for any reason, this
+# degrades to a loud failure rather than silently doing nothing (graceful
+# degradation, not silent breakage).
+#
+# Called by: run_health_check (normal unhealthy-team restart) AND
+# _hc_heal_noncanonical_port (XACA-0706 non-canonical-port self-heal) — both
+# keep working unmodified since this function's own signature/behavior
+# contract (args, return 0/1, log() messages) is preserved.
 _hc_start_lcars_server() {
     local local_port=$1
     local team=$2
@@ -278,7 +338,8 @@ _hc_start_lcars_server() {
 
     log "  Starting LCARS server: team=$team port=$local_port session=$session_name"
 
-    # Source the shared helpers to get resolve_lcars_python (XACA-0614).
+    # Source the shared helpers to get start_lcars_server (XACA-0763-004;
+    # previously only resolve_lcars_python was needed here — XACA-0614).
     # _SCRIPT_DIR is already set at the top of this file.
     local _helpers="${_SCRIPT_DIR}/scripts/lcars-launch-helpers.sh"
     if [[ -f "$_helpers" ]]; then
@@ -286,76 +347,40 @@ _hc_start_lcars_server() {
         source "$_helpers" 2>/dev/null || true
     fi
 
-    # Resolve the python that has the LCARS runtime deps (venv on tap hosts,
-    # bare python3 as last-resort on the dev source machine). Falls back to
-    # plain python3 if resolve_lcars_python is not yet defined (e.g., helpers
-    # failed to source in an extremely constrained env).
-    local lcars_python
-    if typeset -f resolve_lcars_python >/dev/null 2>&1; then
-        lcars_python="$(resolve_lcars_python)"
+    if ! typeset -f start_lcars_server >/dev/null 2>&1; then
+        log "  ❌ start_lcars_server is not available (failed to source ${_helpers}) — cannot start server on port $local_port"
+        return 1
+    fi
+
+    # XACA-0763 (004): suppress the lcars-target.js router-redirect write for
+    # this health-check-triggered restart — see header comment above for why.
+    local LCARS_SKIP_TARGET_WRITE=1
+
+    # NOTE argument order: start_lcars_server takes (team, port, session_name),
+    # this function's own params are (local_port, team, session_name) — do not
+    # transpose.
+    start_lcars_server "$team" "$local_port" "$session_name"
+    local _rc=$?
+
+    # XACA-0763 (004): preserve the /tmp/lcars-<team>-<port>.log DETECTION
+    # SENTINEL that scripts/lcars-restart-helpers.sh::detect_active_lcars_team
+    # depends on (tier 2: existence + mtime + a live process on that port —
+    # content is never read by that detector). start_lcars_server itself logs
+    # to the canonical ${AITEAMFORGE_DIR}/logs/lcars-server-<team>.log now, so
+    # write a one-line pointer stub here instead of duplicating real content.
+    # Written unconditionally (best-effort) to match the old behavior, where
+    # the /tmp file was created immediately on launch regardless of whether
+    # the server subsequently passed its health poll.
+    local _hc_sentinel="/tmp/lcars-${team}-${local_port}.log"
+    echo "# XACA-0763: full log at ${AITEAMFORGE_DIR:-$HOME/dev-team}/logs/lcars-server-${team}.log" \
+        > "${_hc_sentinel}" 2>/dev/null || true
+
+    if [[ $_rc -eq 0 ]]; then
+        log "  Server started successfully on port $local_port"
     else
-        lcars_python="python3"
+        log "  FAILED to start server on port $local_port"
     fi
-
-    # XACA-0713: server.py requires Python >= 3.10 at RUNTIME (PEP-604 unions are
-    # deferred by `from __future__ import annotations`, but other runtime paths
-    # may still assume 3.10+). If the resolver had to fall back to the macOS
-    # system python3 (3.9.6) — e.g. no venv installed, brew unreachable under
-    # launchd — the server will crash on boot. Emit a LOUD, unmistakable warning
-    # to the log so the failure is diagnosable. This is a WARNING, not a hard
-    # abort: the dev source machine intentionally runs a globally-installed 3.x.
-    local _lcars_pyver
-    _lcars_pyver="$("$lcars_python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
-    if [[ -n "$_lcars_pyver" ]]; then
-        local _lcars_pymaj="${_lcars_pyver%%.*}"
-        local _lcars_pymin="${_lcars_pyver#*.}"
-        if [[ "$_lcars_pymaj" -lt 3 ]] \
-           || { [[ "$_lcars_pymaj" -eq 3 ]] && [[ "$_lcars_pymin" -lt 10 ]]; }; then
-            log "  ############################################################"
-            log "  ## XACA-0713 WARNING: resolved python is ${_lcars_pyver} (< 3.10)"
-            log "  ## interpreter: ${lcars_python}"
-            log "  ## server.py REQUIRES >= 3.10 and will likely CRASH on boot."
-            log "  ## Cause: LCARS venv not found / brew unreachable under this"
-            log "  ## environment (launchd PATH?) — falling back to system python3."
-            log "  ## Fix: ensure the aiteamforge venv exists, or set \$LCARS_PYTHON."
-            log "  ############################################################"
-        fi
-    fi
-
-    # Kill any zombie process on this port
-    pkill -f "server.py.*$local_port" 2>/dev/null
-    sleep 1
-
-    # XACA-0614 / XACA-0652: Durable server launch — mirrors start_lcars_server.
-    # nohup + disown ensures the restarted server survives SSH logout and the
-    # health-check LaunchAgent's own process-group cleanup.
-    local _hc_log="/tmp/lcars-${team}-${local_port}.log"
-    nohup env \
-        _ATF_LCARS_DIR="${LCARS_UI_DIR}" \
-        _ATF_TEAM="${team}" \
-        _ATF_SESSION="${session_name}" \
-        _ATF_PYTHON="${lcars_python}" \
-        _ATF_PORT="${local_port}" \
-        sh -c 'cd "$_ATF_LCARS_DIR" && exec env \
-            LCARS_TEAM="$_ATF_TEAM" LCARS_SESSION_NAME="$_ATF_SESSION" \
-            "$_ATF_PYTHON" server.py "$_ATF_PORT"' \
-        >/dev/null 2>>"${_hc_log}" &
-    local _hc_pid=$!
-    disown "${_hc_pid}" 2>/dev/null || true
-
-    # Wait for it to come up (10s, same budget as before)
-    local attempts=0
-    while [[ $attempts -lt 10 ]]; do
-        if check_server_health "$local_port"; then
-            log "  Server started successfully on port $local_port (pid ${_hc_pid})"
-            return 0
-        fi
-        sleep 1
-        ((attempts++))
-    done
-
-    log "  FAILED to start server on port $local_port"
-    return 1
+    return $_rc
 }
 
 # ============================================================================

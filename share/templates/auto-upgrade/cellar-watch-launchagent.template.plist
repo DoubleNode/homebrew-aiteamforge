@@ -102,6 +102,17 @@
     <key>ThrottleInterval</key>
     <integer>60</integer>
 
+    <!--
+      AbandonProcessGroup (XACA-0763-002): launchd SIGKILLs every process
+      still in this job's process group the instant the job itself exits.
+      cellar-watch chains `aiteamforge upgrade --non-interactive`, which
+      touches lcars-ui/ and fires lcars-watch → `aiteamforge restart lcars`,
+      spawning a long-lived server.py — same lifecycle chain as lcars-watch
+      and lcars-health, so it needs the same protection from job-exit reaping.
+    -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
     <key>StandardOutPath</key>
     <string>{{LOG_DIR}}/cellar-watch.log</string>
 

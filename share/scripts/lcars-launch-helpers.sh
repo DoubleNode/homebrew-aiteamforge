@@ -301,6 +301,173 @@ resolve_lcars_python() {
 }
 
 # ---------------------------------------------------------------------------
+# _lcars_spawn_detached <lcars_ui_dir> <team> <session_name> <lcars_python> <port> <log_file> <atf_base>
+#
+# XACA-0763 (003): genuine session/process-group detach for the LCARS server
+# launch, shared by start_lcars_server AND (via delegation, XACA-0763-004)
+# lcars-health-check.sh::_hc_start_lcars_server — so BOTH launch sites get the
+# same durability guarantee from one implementation instead of two hand-copied
+# ones drifting apart.
+#
+# ROOT CAUSE this closes: launchd SIGKILLs every process remaining in a job's
+# process group the instant that job exits, unless the job's plist sets
+# AbandonProcessGroup=true (the sibling half of this fix, in the plists under
+# homebrew-tap/). `nohup ... & ; disown` (XACA-0652) is necessary but NOT
+# sufficient against that: nohup only makes the child ignore SIGHUP, and
+# disown only removes the PID from the launching shell's job table — NEITHER
+# changes the process group, and nothing can ignore SIGKILL. A server spawned
+# from any launchd job (a LaunchAgent-triggered `aiteamforge restart lcars`,
+# the health-check LaunchAgent's own restart) would answer one real
+# /api/status 200, get logged as "started successfully", then be SIGKILLed
+# milliseconds later when the launching job exited.
+#
+# FIX: route the launch through _LCARS_SETSID_SRC (below) — a four-line python
+# shim, executed via `python -c`, that calls os.setsid() (the only syscall that
+# atomically creates a NEW session AND a NEW process group) and then
+# os.execvp()'s the real interpreter in place. A double-fork is explicitly NOT
+# sufficient here: it reparents the child to init but leaves its process group
+# unchanged, so launchd's SIGKILL-to-pgid still lands. Only setsid(2) breaks
+# that link. macOS ships no setsid(1) binary, hence the python shim.
+#
+# WHY INLINE (`python -c`) AND NOT A SHIPPED scripts/lcars-setsid-exec.py FILE:
+# a standalone file would be a brand-new MANDATORY runtime dependency, and the
+# tap's `update_runtime_helpers` only "refreshes what this machine already
+# installed under scripts/" — it never lays down a file that was not previously
+# present. A new file therefore reaches FRESH installs but is silently SKIPPED
+# on every UPGRADE — i.e. on exactly the already-deployed machines (M4Mini,
+# M1Pro) whose reaped servers are the reason XACA-0763 exists. The launch would
+# degrade to the unprotected form on the whole existing fleet while looking
+# fixed in the repo. (Same class of bug as XACA-0751; see memory
+# feedback_upgrade_skips_new_mandatory_shared_module.md.) This file,
+# lcars-launch-helpers.sh, is ALREADY installed and refreshed on every machine,
+# so carrying the shim source inside it adds ZERO new shipping surface: no
+# sync-tap.sh entry, no install lay-down, no upgrade wiring, nothing to drift.
+#
+# PID TRACKABILITY: os.execvp() REPLACES the process image rather than
+# forking, so the PID captured via `$!` right after backgrounding this call is
+# the SAME pid that ultimately runs server.py — existing `kill -0 "$pid"`
+# liveness checks keep working unmodified. Verified empirically (XACA-0763):
+# spawned pid == final `ps -o pid,pgid,sess` pid, with a freshly-created pgid
+# that differs from the caller's, and getsid(0) inside the final process
+# equal to its own pid (proof a new session was created).
+#
+# EPERM: os.setsid() raises OSError (EPERM) when the CALLING process is
+# ALREADY a process-group leader (can happen depending on how the launching
+# shell backgrounds a pipeline). That is a benign, already-correct state — the
+# process is already in its own group — so the shim catches it and proceeds
+# to exec rather than aborting the launch. Verified empirically: a process
+# that setsid()'d itself, then exec'd into the shim, reached the shim's final
+# exec successfully instead of crashing on the second (redundant) setsid().
+#
+# ps eww PARSE INVARIANT: lcars-health-check.sh::detect_lcars_bound_ports
+# (XACA-0706) parses each live server's team/port straight out of
+# `ps eww -o args=`, anchored on the literal `server.py <PORT>` argv prefix
+# and a whitespace-prefixed ` LCARS_TEAM=` env token. Because execvp replaces
+# argv wholesale, the shim's own path never appears in the final process's
+# argv — verified empirically with a real `ps eww -o args=` on a spawned
+# process: the output began with `<python> server.py <PORT>` exactly as
+# before, immediately followed by the env blob, with no shim-path leakage.
+#
+# GRACEFUL DEGRADATION: if the resolved python cannot run the shim at all, the
+# `sh -c` exec fails and the server never starts — the same outcome as a broken
+# interpreter, surfaced by the existing poll-loop diagnostics below. There is no
+# "shim missing" state to degrade around any more, which is the point of
+# inlining it.
+#
+# RETURN CHANNEL — a GLOBAL, deliberately NOT command substitution:
+#   Callers MUST invoke this as a plain command and then read the global
+#   `_LCARS_SPAWNED_PID`:
+#       _lcars_spawn_detached ... ; local _server_pid="${_LCARS_SPAWNED_PID}"
+#   NOT as `_server_pid="$(_lcars_spawn_detached ...)"`.
+#
+#   Why (XACA-0763, caught in review): `$(...)` runs the function in a SUBSHELL.
+#   The server would then be backgrounded as a child of that transient subshell,
+#   not of the caller. `kill -0 "$pid"` still works (it only needs the pid to
+#   exist), so the poll loop LOOKS fine — but `wait "$pid"` in the caller fails
+#   with 127 ("not a child of this shell") instead of returning the server's
+#   real exit status. start_lcars_server's two crash-diagnostic branches below
+#   do exactly `wait "${_server_pid}"; local _rc=$?` and then decode _rc: 143 =>
+#   SIGTERM (concurrent-startup pkill re-entrancy, XACA-0661), 129 => SIGHUP
+#   (nohup/disown protection regressed, XACA-0652). Under command substitution
+#   _rc is ALWAYS 127, so both of those signals would be silently misreported as
+#   a generic crash forever — blinding precisely the diagnostics that tell us
+#   whether THIS fix regressed. Verified empirically: caller-shell spawn => wait
+#   rc=143; `$(...)` spawn => wait rc=127.
+#
+#   All diagnostics go to stderr; nothing is written to stdout, so a caller that
+#   ignores the contract at least does not capture garbage.
+# ---------------------------------------------------------------------------
+# The shim, as python source. Passed to the interpreter via `python -c "$src"`.
+#
+# ARGV CONTRACT: for `python -c <src> A B C`, CPython sets sys.argv to
+# ['-c', 'A', 'B', 'C'] — so sys.argv[1] is the executable to exec and
+# sys.argv[1:] is its full argv (argv[0] included). We invoke it as
+#   "$PY" -c "$_LCARS_SETSID_SRC" "$PY" server.py "$PORT"
+# which execvp's `"$PY" server.py "$PORT"`. Because execvp REPLACES the process
+# image (no fork), the pid is preserved end-to-end: the `$!` captured by the
+# caller is the same pid that ultimately runs server.py, so `kill -0 "$pid"` and
+# `wait "$pid"` keep working. And because argv is replaced wholesale, neither
+# `-c` nor the shim source appears in the final process's `ps eww -o args=` —
+# which matters because lcars-health-check.sh::detect_lcars_bound_ports
+# (XACA-0706) parses each live server's port from the literal `server.py <PORT>`
+# argv prefix and its team from a whitespace-prefixed ` LCARS_TEAM=` env token.
+# Any shim leakage into argv would blind that parser.
+#
+# os.setsid() raises OSError (EPERM) when the calling process is ALREADY a
+# process-group leader — a benign, already-correct state (it is already in its
+# own group). Swallow it and proceed to exec rather than aborting the launch.
+_LCARS_SETSID_SRC='import os, sys
+try:
+    os.setsid()
+except OSError:
+    pass
+os.execvp(sys.argv[1], sys.argv[1:])'
+
+_lcars_spawn_detached() {
+    local _sd_lcars_dir="${1:?_lcars_spawn_detached: lcars_ui_dir required}"
+    local _sd_team="${2:?_lcars_spawn_detached: team required}"
+    local _sd_session="${3:?_lcars_spawn_detached: session_name required}"
+    local _sd_python="${4:?_lcars_spawn_detached: lcars_python required}"
+    local _sd_port="${5:?_lcars_spawn_detached: port required}"
+    local _sd_log="${6:?_lcars_spawn_detached: log_file required}"
+    # $7 (atf_base) accepted for call-site compatibility; no longer needed now
+    # that the shim is inline rather than a file resolved under $atf_base/scripts.
+
+    # Values reach `sh` as POSITIONAL PARAMETERS, not as exported _ATF_* env
+    # vars (which is what this used to do). Positionals are equally immune to
+    # the space-in-path quoting hazard the old comment worried about, and they
+    # have two advantages that matter here:
+    #   1. The multi-line shim source never enters anyone's ENVIRONMENT. Passed
+    #      via `env`, it would be inherited by server.py and would then appear,
+    #      newlines and all, in every `ps eww` dump of the running server —
+    #      directly in the blob that detect_lcars_bound_ports (XACA-0706) has to
+    #      parse, and in every future debugging session's output.
+    #   2. `sh`'s positional parameters vanish at `exec`, so nothing survives
+    #      into the final process image except the env we explicitly set.
+    # Only LCARS_TEAM / LCARS_SESSION_NAME are exported — LCARS_TEAM because
+    # server.py needs it AND because detect_lcars_bound_ports keys on it.
+    #   $0=sh  $1=ui_dir  $2=team  $3=session  $4=python  $5=shim_src  $6=port
+    nohup sh -c 'cd "$1" && exec env \
+        LCARS_TEAM="$2" LCARS_SESSION_NAME="$3" \
+        "$4" -c "$5" "$4" server.py "$6"' \
+        sh \
+        "${_sd_lcars_dir}" \
+        "${_sd_team}" \
+        "${_sd_session}" \
+        "${_sd_python}" \
+        "${_LCARS_SETSID_SRC}" \
+        "${_sd_port}" \
+        >/dev/null 2>>"${_sd_log}" &
+
+    # Assign WITHOUT `local` so the caller sees it (global in both bash and zsh).
+    # See the RETURN CHANNEL note in this function's header: the pid must be
+    # published via a global, never echoed through command substitution, or the
+    # background job becomes a child of a subshell and `wait` breaks.
+    _LCARS_SPAWNED_PID=$!
+    disown "${_LCARS_SPAWNED_PID}" 2>/dev/null || true
+}
+
+# ---------------------------------------------------------------------------
 # start_lcars_server <team> <port> [session_name]
 #
 # Writes the router redirect file, kills any stale server on <port>, starts a
@@ -484,7 +651,21 @@ start_lcars_server() {
 
     # Write the router redirect so the UI knows which team dashboard to show.
     # This must happen BEFORE the server starts; the file is read on first load.
-    echo "window.LCARS_TARGET_TEAM = '${team}';" > "${lcars_ui_dir}/lcars-target.js"
+    #
+    # XACA-0763 (004): suppressible via LCARS_SKIP_TARGET_WRITE=1. The direct
+    # callers of start_lcars_server (team-startup.sh, restart_team_lcars) are
+    # the user opening/refreshing exactly THAT team's LCARS tab, so the write
+    # is correct and intentional there — default behavior (unset) still writes.
+    # lcars-health-check.sh::_hc_start_lcars_server, however, now delegates
+    # here for EVERY configured team in one health-check sweep; if each
+    # delegated call also rewrote lcars-target.js, the LAST team restarted in
+    # that sweep would silently retarget the user's LCARS cockpit router
+    # regardless of which tab the user was actually viewing. The health-check
+    # wrapper sets this (via a `local` — dynamically scoped, visible here for
+    # the duration of its call only) to suppress that side effect.
+    if [[ "${LCARS_SKIP_TARGET_WRITE:-0}" != "1" ]]; then
+        echo "window.LCARS_TARGET_TEAM = '${team}';" > "${lcars_ui_dir}/lcars-target.js"
+    fi
 
     # Kill any stale server process on this port. Stale processes are normal
     # (previous session crash, leftover from a prior startup). Errors here are
@@ -512,6 +693,35 @@ start_lcars_server() {
     # resolve_lcars_python() above.
     local lcars_python
     lcars_python="$(resolve_lcars_python)"
+
+    # XACA-0713 (moved here from lcars-health-check.sh::_hc_start_lcars_server
+    # as part of XACA-0763-004's delegation): server.py requires Python >= 3.10
+    # at RUNTIME (PEP-604 unions are deferred by `from __future__ import
+    # annotations`, but other runtime paths may still assume 3.10+). If
+    # resolve_lcars_python had to fall back to the macOS system python3 (3.9.6)
+    # — e.g. no venv installed, brew unreachable under launchd — the server
+    # will crash on boot. Emit a LOUD, unmistakable warning so the failure is
+    # diagnosable. This is a WARNING, not a hard abort: the dev source machine
+    # intentionally runs a globally-installed 3.x. Now runs for every launch
+    # site (team-startup.sh direct calls AND the health-check delegation),
+    # instead of only the health-check path as before.
+    local _lcars_pyver
+    _lcars_pyver="$("$lcars_python" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
+    if [[ -n "$_lcars_pyver" ]]; then
+        local _lcars_pymaj="${_lcars_pyver%%.*}"
+        local _lcars_pymin="${_lcars_pyver#*.}"
+        if [[ "$_lcars_pymaj" -lt 3 ]] \
+           || { [[ "$_lcars_pymaj" -eq 3 ]] && [[ "$_lcars_pymin" -lt 10 ]]; }; then
+            echo "    ############################################################" >&2
+            echo "    ## XACA-0713 WARNING: resolved python is ${_lcars_pyver} (< 3.10)" >&2
+            echo "    ## interpreter: ${lcars_python}" >&2
+            echo "    ## server.py REQUIRES >= 3.10 and will likely CRASH on boot." >&2
+            echo "    ## Cause: LCARS venv not found / brew unreachable under this" >&2
+            echo "    ## environment (launchd PATH?) — falling back to system python3." >&2
+            echo "    ## Fix: ensure the aiteamforge venv exists, or set \$LCARS_PYTHON." >&2
+            echo "    ############################################################" >&2
+        fi
+    fi
 
     # Resolve a log dir consistent with the rendered-template convention
     # (team-startup.sh.template logs to $AITEAMFORGE_DIR/logs/lcars-server-<team>.log).
@@ -543,7 +753,7 @@ start_lcars_server() {
         mv -f "${_server_log}" "${_server_log}.old" 2>/dev/null || true
     fi
 
-    # XACA-0652: Durable server launch.
+    # XACA-0652 / XACA-0763: Durable server launch.
     #
     # WHY THE OLD FORM WORKED ON DEV BUT NOT ON A TAP-INSTALLED CONSUMER:
     #   Dev machine: startup scripts are SOURCED inside a persistent tmux pane.
@@ -557,37 +767,40 @@ start_lcars_server() {
     #   child.  The server received the first /api/status 200 (a momentary truth),
     #   reported "ready", then was killed milliseconds later when the parent exited.
     #
-    # FIX: two layers of protection:
+    # XACA-0763: a THIRD durability gap exists beyond SIGHUP: when the launching
+    # process is itself part of a launchd job's process group (e.g. an
+    # `aiteamforge restart lcars` triggered by a LaunchAgent, or the health-check
+    # LaunchAgent's own restart), launchd SIGKILLs every process left in that
+    # group the instant the job exits — unrelated to SIGHUP, and unignorable.
+    # nohup/disown alone do not protect against this because neither changes the
+    # process group. _lcars_spawn_detached (above) closes this gap via a real
+    # setsid(2), on top of (not instead of) the nohup+disown protection below.
+    #
+    # FIX: three layers of protection, all still in force:
     #   1. `nohup` makes server.py IGNORE SIGHUP even if it receives one.
     #   2. `disown` removes the PID from the shell's job table, preventing the
     #      shell from SIGHUP'ing the child on exit in interactive/hup-sending
     #      contexts.  `|| true` absorbs the expected "job not found" error that
     #      zsh emits when disown is called from a non-interactive subshell.
-    #   Together these ensure the server outlives the startup script on all paths.
+    #   3. (XACA-0763) setsid(2) via the shim gives the process its own session
+    #      AND process group, so a launchd SIGKILL-to-pgid on the LAUNCHING
+    #      job's group no longer reaches it at all.
+    #   Together these ensure the server outlives the startup script/job on all
+    #   paths: SIGHUP-on-shell-exit, AND SIGKILL-on-launchd-job-exit.
     #
-    # PID TRACKABILITY: `nohup sh -c "... exec env ... python3 server.py ..."` works
-    # because `exec` inside sh -c replaces the `sh` subprocess with the python
-    # process.  `$!` therefore resolves to the python PID — NOT a shell wrapper —
-    # so kill -0 liveness checks remain accurate.  (Verified: ps -p $! shows
-    # "python3" on macOS after the exec.)
+    # PID TRACKABILITY: preserved through the whole chain — see
+    # _lcars_spawn_detached's header comment for the empirical verification
+    # (spawned PID via `$!` == final `ps -o pid` of the running server.py).
     #
     # STDERR: nohup normally redirects stderr to nohup.out; we override that with
     # an explicit `2>>log` redirect, which takes precedence.  stdout is discarded.
-    #
-    # Note: we use env vars rather than shell variable expansion inside the
-    # sh -c string to avoid quoting hazards with paths that may contain spaces.
-    nohup env \
-        _ATF_LCARS_DIR="${lcars_ui_dir}" \
-        _ATF_TEAM="${team}" \
-        _ATF_SESSION="${session_name}" \
-        _ATF_PYTHON="${lcars_python}" \
-        _ATF_PORT="${port}" \
-        sh -c 'cd "$_ATF_LCARS_DIR" && exec env \
-            LCARS_TEAM="$_ATF_TEAM" LCARS_SESSION_NAME="$_ATF_SESSION" \
-            "$_ATF_PYTHON" server.py "$_ATF_PORT"' \
-        >/dev/null 2>>"${_server_log}" &
-    local _server_pid=$!
-    disown "${_server_pid}" 2>/dev/null || true
+    # Plain call + read the global. NOT `$(...)` — see _lcars_spawn_detached's
+    # RETURN CHANNEL header note: a subshell spawn breaks `wait` below (rc 127),
+    # silently disabling the 143/129 signal decoding in the two branches after
+    # this point.
+    local _server_pid
+    _lcars_spawn_detached "${lcars_ui_dir}" "${team}" "${session_name}" "${lcars_python}" "${port}" "${_server_log}" "${_atf_base}"
+    _server_pid="${_LCARS_SPAWNED_PID}"
 
     # Poll /api/status for up to 15s (30 × 0.5s). A ready response means the
     # server is serving routes. If the process dies before answering, a crashed

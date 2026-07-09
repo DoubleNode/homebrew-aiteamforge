@@ -64,6 +64,17 @@
     <key>ThrottleInterval</key>
     <integer>30</integer>
 
+    <!--
+      AbandonProcessGroup (XACA-0763-002): launchd SIGKILLs every process
+      still in this job's process group the instant the job itself exits.
+      This job's ProgramArguments run `aiteamforge restart lcars`, which
+      spawns a long-lived server.py that must outlive the restart command's
+      own exit — without this key launchd was reaping the freshly-restarted
+      server within seconds of every WatchPaths fire.
+    -->
+    <key>AbandonProcessGroup</key>
+    <true/>
+
     <key>StandardOutPath</key>
     <string>{{LOG_DIR}}/lcars-watch.log</string>
 

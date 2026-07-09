@@ -19,5 +19,12 @@
     <true/>
     <key>KeepAlive</key>
     <false/>
+    <!-- AbandonProcessGroup (XACA-0763-002): launchd SIGKILLs every process
+         still in this job's process group the instant the job itself exits.
+         lcars-health-check.sh spawns a long-lived server.py that must
+         survive past the health-check script's own exit — without this key
+         launchd was reaping it within seconds of every 300s run. -->
+    <key>AbandonProcessGroup</key>
+    <true/>
 </dict>
 </plist>

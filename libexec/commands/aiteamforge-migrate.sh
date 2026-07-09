@@ -531,9 +531,11 @@ _render_kanban_template() {
   # original install and migrate will re-pin the plist interpreter. See XACA-0510.
   python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
 
-  # XACA-0626: resolve aiteamforge binary for the runatload plist (and any future
-  # kanban-family plist that invokes aiteamforge directly).
-  # Following the upgrade-side principle: harmless extras prevent sibling-drift bugs.
+  # XACA-0626: resolve aiteamforge binary for {{AITEAMFORGE_BIN}} substitution.
+  # No currently-registered kanban-family template uses this placeholder as of
+  # XACA-0763-005 (the runatload plist that originally needed it was retired),
+  # but it's kept for any future kanban-family plist that invokes aiteamforge
+  # directly — harmless extras prevent sibling-drift bugs.
   local aiteamforge_bin
   aiteamforge_bin="$(command -v aiteamforge 2>/dev/null || echo "/opt/homebrew/bin/aiteamforge")"
 
@@ -601,10 +603,10 @@ update_launchagents() {
     "com.aiteamforge.kanban-backup.plist|_render_kanban_template|share/templates/kanban/backup-plist.template"
     "com.aiteamforge.lcars-health.plist|_render_kanban_template|share/templates/kanban/lcars-health-plist.template"
     "com.aiteamforge.fleet-monitor.plist|_render_fleet_template|share/templates/fleet-monitor/fleet-launchagent.template.plist"
-    # XACA-0626: RunAtLoad agent — starts all configured LCARS servers at login/reboot.
-    # XACA-0578 SIBLING-DRIFT NOTE: paired with install-kanban.sh (install+uninstall),
-    # aiteamforge-upgrade.sh::update_launchagents, and the template in share/templates/auto-upgrade/.
-    "com.aiteamforge.lcars-runatload.plist|_render_kanban_template|share/templates/auto-upgrade/lcars-runatload.template.plist"
+    # com.aiteamforge.lcars-runatload retired (XACA-0763-005) — no longer
+    # re-rendered here. Legacy installs are torn down by
+    # remove_legacy_lcars_runatload_agent (libexec/lib/common.sh), called
+    # from the run sequence right after update_launchagents below.
   )
 
   local agents_updated=0
@@ -853,6 +855,10 @@ main() {
   create_backup
   migrate_user_data
   update_launchagents
+  # XACA-0763-005: tear down the retired com.aiteamforge.lcars-runatload agent
+  # on any machine that still has it loaded from before the retirement. See
+  # remove_legacy_lcars_runatload_agent's header comment in libexec/lib/common.sh.
+  remove_legacy_lcars_runatload_agent "${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}" "$DRY_RUN"
   update_shell_integration
   create_migration_marker
   validate_migration
