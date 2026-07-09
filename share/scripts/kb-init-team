@@ -1032,6 +1032,13 @@ PYEOF
 # _kb_is_local_only_team (kanban-helpers.sh:10940); scripts/tests/test-kb-init-team.sh
 # asserts the routing behavior this floor produces.
 _kbit_local_only_teams_hardcoded() {
+    # KEEP IN SYNC with kanban-helpers.sh's _kb_local_only_teams_hardcoded
+    # (kanban-helpers.sh:10897-10899) — adding/removing/renaming a team on
+    # EITHER side without the other is a silent PII-leak regression (a new
+    # personal team backfilled via --backfill-tiers would route to the
+    # SYNCED global root instead of ~/knowledge-local). Enforced by the
+    # cross-floor drift-guard in scripts/tests/test-kb-init-team.sh
+    # (SECTION H) — that test fails the moment these two lists diverge.
     printf '%s\n' finance-personal legal-coparenting medical-general
 }
 
