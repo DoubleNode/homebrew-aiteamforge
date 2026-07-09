@@ -23,6 +23,12 @@
 #   --dry-run              Print all changes without applying any (exit 0)
 #   --check-only           Verify team is fully registered; exit 0 if complete, 1 if not
 #   --non-interactive      Fail instead of prompting; exit 1 if required inputs missing
+#   --backfill-tiers       Idempotently backfill team+agent knowledge-tier INDEX.md
+#                          scaffold for an ALREADY-REGISTERED team (only --team-id is
+#                          required; skips full provisioning). Routes finance-personal/
+#                          legal-coparenting/medical-general to ~/knowledge-local (PII),
+#                          all other teams to ~/knowledge. Combine with --dry-run or
+#                          --check-only. XACA-0754-002.
 #   --help                 Show this help
 #
 # REGISTRATION SITES (what this tool writes)
@@ -85,7 +91,11 @@ STATUSLINE_SH="${DEV_TEAM_ROOT}/claude/statusline-command.sh"
 SERVER_PY="${DEV_TEAM_ROOT}/lcars-ui/server.py"
 AMB_SESSION_MAP="${DEV_TEAM_ROOT}/amb-session-map.json"
 LCARS_PORTS_DIR="${DEV_TEAM_ROOT}/lcars-ports"
-TEAM_PATHS_JSON="${HOME}/.aiteamforge/team-paths.json"
+# Honors AITEAMFORGE_CONFIG (same override kanban-helpers.sh's
+# _kb_overlay_config_path resolves, kanban-helpers.sh:74-76) — keeps
+# _kbit_is_local_only_team's overlay-flag lookup sandboxable in tests without
+# drifting from the canonical resolution kanban-helpers.sh uses.
+TEAM_PATHS_JSON="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
 
 # ── XACA-0648: Auto-detect dev-source-of-truth vs tap-consumer mode ──────────
 #
@@ -227,6 +237,7 @@ PORT_BAND_RANGE="100"
 DRY_RUN=0
 CHECK_ONLY=0
 NON_INTERACTIVE=0
+BACKFILL_TIERS=0
 
 usage() {
     head -60 "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
@@ -250,6 +261,7 @@ while [[ $# -gt 0 ]]; do
         --dry-run)          DRY_RUN=1;          shift ;;
         --check-only)       CHECK_ONLY=1;       shift ;;
         --non-interactive)  NON_INTERACTIVE=1;  shift ;;
+        --backfill-tiers)   BACKFILL_TIERS=1;   shift ;;
         --help|-h)          usage ;;
         *) _fail "Unknown option: ${1}"; exit 1 ;;
     esac
@@ -1007,6 +1019,222 @@ PYEOF
     # python3-failure paths — no explicit rm needed here.
 }
 
+# ── XACA-0754-002: local-only (PII) team floor + tier-index writers ──────────
+#
+# kb-init-team is bash; kanban-helpers.sh (which owns the canonical
+# _kb_is_local_only_team / _kb_knowledge_local_root predicates, XACA-0754 C1/C2)
+# is zsh and cannot be sourced here — verified: `bash -c 'source kanban-helpers.sh'`
+# aborts with a parse-time syntax error from unrelated zsh-only syntax elsewhere
+# in that file, even though the three predicates below are themselves portable.
+# So this is a deliberate, git-tracked REPLICA of the hardcoded floor — not a
+# derivation. It MUST be kept in lockstep with kanban-helpers.sh's
+# _kb_local_only_teams_hardcoded (kanban-helpers.sh:10897) and
+# _kb_is_local_only_team (kanban-helpers.sh:10940); scripts/tests/test-kb-init-team.sh
+# asserts the routing behavior this floor produces.
+_kbit_local_only_teams_hardcoded() {
+    printf '%s\n' finance-personal legal-coparenting medical-general
+}
+
+# _kbit_is_local_only_team <team-id> — mirrors kanban-helpers.sh's two-source
+# check: the hardcoded floor above (checked first, unconditionally — a missing
+# or regenerated team-paths.json can never misclassify one of these three
+# teams as shareable), then an optional "local_only": true flag in
+# team-paths.json for extensibility to future personal teams.
+_kbit_is_local_only_team() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+
+    local t
+    for t in $(_kbit_local_only_teams_hardcoded); do
+        [[ "$t" == "$team" ]] && return 0
+    done
+
+    local config_path="${TEAM_PATHS_JSON}"
+    [[ -f "$config_path" ]] || return 1
+    local flag_value
+    flag_value=$(python3 - "$config_path" "$team" <<'PYEOF'
+import sys, json
+from pathlib import Path
+config_path, team = sys.argv[1], sys.argv[2]
+try:
+    config = json.loads(Path(config_path).read_text(encoding='utf-8'))
+    v = config.get('teams', {}).get(team, {}).get('local_only', False)
+    print('true' if v is True else 'false')
+except Exception:
+    print('false')
+PYEOF
+)
+    [[ "$flag_value" == "true" ]]
+}
+
+# Mirrors kanban-helpers.sh's _kb_knowledge_local_root (kanban-helpers.sh:10886).
+_kbit_knowledge_local_root() {
+    echo "${KB_KNOWLEDGE_LOCAL_ROOT:-${HOME}/knowledge-local}"
+}
+
+# Maps a team-id to its persona-roster directory under
+# ~/dev-team/.claude/agents-master/ (per-team CLAUDE.md layout: academy/,
+# ios/, android/, firebase/, command/, dns/, finance/, legal/, medical/,
+# mainevent/, freelance/ — 11 group directories). The three local-only teams'
+# full team-ids differ from their group directory name (mirrors
+# kanban-helpers.sh's _kb_local_team_persona_group, kanban-helpers.sh:11049);
+# every freelance-<client>-<project> instance shares the single "freelance"
+# group; everything else (academy/ios/android/firebase/command/dns/mainevent)
+# already matches its group name 1:1.
+_kbit_agents_master_group_for_team() {
+    case "${1-}" in
+        finance-personal)  echo finance ;;
+        legal-coparenting) echo legal ;;
+        medical-general)   echo medical ;;
+        freelance-*)       echo freelance ;;
+        *)                 echo "${1-}" ;;
+    esac
+}
+
+# Resolves the kb agent-tier slug roster for ANY team-id by reading each
+# agents-master persona file's `name:` frontmatter field (that field IS the kb
+# slug — mirrors kanban-helpers.sh's _kb_local_personas_for_team fallback scan,
+# kanban-helpers.sh:11104-11109). One slug per line. Returns 1 (silently) if
+# the group directory doesn't exist on this machine (e.g. LOCAL-ONLY/tap-consumer
+# mode, where agents-master is Academy/dev-source-only) — callers treat that as
+# "agent-tier roster unknown, team-tier only" rather than a hard failure.
+_kbit_agent_roster_for_team() {
+    local team_id="${1-}"
+    local group
+    group=$(_kbit_agents_master_group_for_team "$team_id")
+    local master_dir="${HOME}/dev-team/.claude/agents-master/${group}"
+    [[ -d "$master_dir" ]] || return 1
+
+    local f name
+    for f in "${master_dir}"/*.md; do
+        [[ -f "$f" ]] || continue
+        name=$(grep -m1 '^name:' "$f" 2>/dev/null | sed 's/^name:[[:space:]]*//' | tr -d "\"'")
+        [[ -n "$name" ]] && echo "$name"
+    done
+}
+
+# ── Shared tier-index writers (used by BOTH _create_dir_tree's global-tier
+# ── block AND --backfill-tiers — single template source, XACA-0754-002) ──────
+#
+# is_local: "1" writes the LOCAL-ONLY (PII) template variant — matches
+# kanban-helpers.sh's kb-knowledge-local-scaffold templates (kanban-helpers.sh:
+# 13215) byte-for-byte in shape; "0" writes the standard global template that
+# _create_dir_tree has always written. Idempotent: never touches an existing
+# INDEX.md. Returns 0 if created, 1 if it already existed (so callers can
+# report create-vs-skip counts without a second stat call).
+_write_team_tier_index() {
+    local root="$1" team_id="$2" team_name="$3" is_local="${4:-0}"
+    local today
+    today=$(date +%Y-%m-%d)
+    local team_tier_dir="${root}/teams/${team_id}"
+    mkdir -p "$team_tier_dir"
+    local team_tier_index="${team_tier_dir}/INDEX.md"
+    [[ -f "$team_tier_index" ]] && return 1
+
+    if [[ "$is_local" -eq 1 ]]; then
+        cat > "$team_tier_index" <<EOF
+# ${team_id} — Team Knowledge Index (local-only)
+
+**Team:** ${team_id}
+**Tier:** team
+**Storage:** LOCAL ONLY — this tree is never synced off this machine (XACA-0754)
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+    else
+        cat > "$team_tier_index" <<EOF
+# ${team_name} — Team Knowledge Index
+
+**Team:** ${team_id}
+**Tier:** team (reserved — activates with the team-as-agent-bundle feature)
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+    fi
+    return 0
+}
+
+_write_agent_tier_index() {
+    local root="$1" persona="$2" is_local="${3:-0}"
+    local today
+    today=$(date +%Y-%m-%d)
+    local agent_index="${root}/agents/${persona}/INDEX.md"
+    [[ -f "$agent_index" ]] && return 1
+    mkdir -p "${root}/agents/${persona}"
+
+    if [[ "$is_local" -eq 1 ]]; then
+        cat > "$agent_index" <<EOF
+# ${persona} Knowledge Index (local-only)
+
+**Agent:** ${persona}
+**Storage:** LOCAL ONLY — this tree is never synced off this machine (XACA-0754)
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+    else
+        cat > "$agent_index" <<EOF
+# ${persona} Knowledge Index
+
+**Agent:** ${persona}
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+    fi
+    return 0
+}
+
 # ── Create directory tree + four-tier knowledge scaffolding ───────────────────
 #
 # Scaffolds a newly-provisioned team's slots in the four-tier knowledge schema
@@ -1121,62 +1349,19 @@ EOF
         return 0
     fi
 
-    # Team tier — reserved/empty per SPEC §4.2.
-    local team_tier_dir="${kb_root}/teams/${team_id}"
-    mkdir -p "$team_tier_dir"
-    local team_tier_index="${team_tier_dir}/INDEX.md"
-    if [[ ! -f "$team_tier_index" ]]; then
-        cat > "$team_tier_index" <<EOF
-# ${team_name} — Team Knowledge Index
-
-**Team:** ${team_id}
-**Tier:** team (reserved — activates with the team-as-agent-bundle feature)
-**Last Updated:** ${today}
-
----
-
-## Tag Index
-
-| Tag | Entries |
-|-----|---------|
-| _none yet_ | |
-
----
-
-## Entries
-
-_No entries yet._
-EOF
-    fi
+    # Team tier — reserved/empty per SPEC §4.2. (XACA-0754-002: writer shared
+    # with --backfill-tiers via _write_team_tier_index; see its definition
+    # above for the templates. is_local=0 — new teams provisioned via the
+    # normal kb-init-team flow are never one of the local-only PII teams,
+    # which already exist and are handled by --backfill-tiers/
+    # kb-knowledge-local-scaffold instead.)
+    _write_team_tier_index "$kb_root" "$team_id" "$team_name" 0 || true
 
     # Agent tier — one dir per persona, create-if-missing, NEVER clobber an
     # existing INDEX (agent dirs are global + merged across teams).
     while IFS=':' read -r _ avatar; do
         [[ -z "$avatar" ]] && continue
-        local agent_index="${kb_root}/agents/${avatar}/INDEX.md"
-        if [[ ! -f "$agent_index" ]]; then
-            mkdir -p "${kb_root}/agents/${avatar}"
-            cat > "$agent_index" <<EOF
-# ${avatar} Knowledge Index
-
-**Agent:** ${avatar}
-**Last Updated:** ${today}
-
----
-
-## Tag Index
-
-| Tag | Entries |
-|-----|---------|
-| _none yet_ | |
-
----
-
-## Entries
-
-_No entries yet._
-EOF
-        fi
+        _write_agent_tier_index "$kb_root" "$avatar" 0 || true
     done < <(_series_terminals "$series")
 }
 
@@ -1373,6 +1558,136 @@ _run_check_only() {
     return "$all_ok"
 }
 
+# ── --backfill-tiers: idempotent knowledge-tier-only backfill (XACA-0754-002) ─
+#
+# XACA-0748 made kb-init-team scaffold team+agent knowledge tiers for NEW
+# teams. Teams registered BEFORE that (mainevent, command, etc.) never got
+# that scaffold. This runs ONLY the tier-writing subset of _create_dir_tree —
+# no board creation, no sites 1–11 registration, no port allocation — for a
+# team-id that is already fully registered elsewhere.
+#
+# PII ROUTING IS MANDATORY: finance-personal / legal-coparenting /
+# medical-general (and any future team flagged "local_only": true in
+# team-paths.json) route to $KB_KNOWLEDGE_LOCAL_ROOT (default
+# ~/knowledge-local), never the synced $KB_KNOWLEDGE_GLOBAL_ROOT. See
+# _kbit_is_local_only_team above — same two-source floor kanban-helpers.sh
+# uses for kb-knowledge-add's write routing (XACA-0754 C2/C4).
+_run_backfill_tiers() {
+    local team_id="$TEAM_ID"
+    local team_name
+    team_name=$(echo "$team_id" | tr '[:lower:]-' '[:upper:] ' | tr -s ' ')
+
+    echo ""
+    echo "=== kb-init-team --backfill-tiers: '${team_id}' ==="
+
+    local write_root is_local=0
+    if _kbit_is_local_only_team "$team_id"; then
+        write_root=$(_kbit_knowledge_local_root)
+        is_local=1
+        _info "Routing    : LOCAL root (PII team, XACA-0754) → ${write_root}"
+    else
+        write_root="${KB_KNOWLEDGE_GLOBAL_ROOT:-$HOME/knowledge}"
+        _info "Routing    : GLOBAL/synced root → ${write_root}"
+    fi
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        echo -e "${CYAN}  DRY-RUN mode — no files will be written${NC}"
+    fi
+    echo ""
+
+    # Local root is a plain, never-git, never-synced directory tree (design
+    # §2) — safe to create on demand, unlike the global root (a git clone that
+    # must arrive via the EPIC-0047 tap rollout; fabricating it here would be
+    # wrong). Global root absence is best-effort-skip, mirroring
+    # _create_dir_tree's existing behavior exactly.
+    if [[ "$is_local" -eq 0 && ! -d "$write_root" ]]; then
+        _fail "Global knowledge root not found (${write_root})."
+        _fail "  (~/knowledge ships fleet-wide via EPIC-0047; re-run once it lands.)"
+        return 1
+    fi
+    if [[ "$is_local" -eq 1 && "$DRY_RUN" -eq 0 && "$CHECK_ONLY" -eq 0 ]]; then
+        mkdir -p "${write_root}/agents" "${write_root}/teams"
+    fi
+
+    local -a roster=()
+    local persona
+    while IFS= read -r persona; do
+        [[ -n "$persona" ]] && roster+=("$persona")
+    done < <(_kbit_agent_roster_for_team "$team_id" 2>/dev/null)
+    if [[ "${#roster[@]}" -eq 0 ]]; then
+        _warn "No agent-tier persona roster resolved for '${team_id}' (no matching directory under ~/dev-team/.claude/agents-master/) — team-tier only."
+    fi
+
+    local team_tier_index="${write_root}/teams/${team_id}/INDEX.md"
+
+    # ── --check-only: report present/missing, write nothing ──────────────────
+    if [[ "$CHECK_ONLY" -eq 1 ]]; then
+        local all_ok=0
+        if [[ -f "$team_tier_index" ]]; then
+            _ok "team-tier INDEX present: ${team_tier_index}"
+        else
+            _fail "Missing team-tier INDEX: ${team_tier_index}"
+            all_ok=1
+        fi
+        for persona in "${roster[@]}"; do
+            local agent_index="${write_root}/agents/${persona}/INDEX.md"
+            if [[ -f "$agent_index" ]]; then
+                _ok "agent-tier INDEX present: ${agent_index}"
+            else
+                _fail "Missing agent-tier INDEX: ${agent_index}"
+                all_ok=1
+            fi
+        done
+        echo ""
+        if [[ "$all_ok" -eq 0 ]]; then
+            echo -e "${GREEN}All knowledge-tier scaffold present for '${team_id}'.${NC}"
+        else
+            echo -e "${RED}Backfill incomplete for '${team_id}'. Run: kb-init-team --team-id ${team_id} --backfill-tiers${NC}"
+        fi
+        return "$all_ok"
+    fi
+
+    # ── --dry-run: preview only ────────────────────────────────────────────────
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+        if [[ -f "$team_tier_index" ]]; then
+            _skip "teams/${team_id}/INDEX.md"
+        else
+            _dry "Would create ${team_tier_index}"
+        fi
+        for persona in "${roster[@]}"; do
+            local agent_index="${write_root}/agents/${persona}/INDEX.md"
+            if [[ -f "$agent_index" ]]; then
+                _skip "agents/${persona}/INDEX.md"
+            else
+                _dry "Would create ${agent_index}"
+            fi
+        done
+        return 0
+    fi
+
+    # ── Apply ──────────────────────────────────────────────────────────────────
+    local team_created=0 agent_created=0 agent_present=0
+    if _write_team_tier_index "$write_root" "$team_id" "$team_name" "$is_local"; then
+        team_created=1
+        _ok "created teams/${team_id}/INDEX.md"
+    else
+        _skip "teams/${team_id}/INDEX.md"
+    fi
+    for persona in "${roster[@]}"; do
+        if _write_agent_tier_index "$write_root" "$persona" "$is_local"; then
+            agent_created=$((agent_created + 1))
+            _ok "created agents/${persona}/INDEX.md"
+        else
+            agent_present=$((agent_present + 1))
+        fi
+    done
+
+    echo ""
+    echo "  Backfill complete for '${team_id}' → ${write_root}"
+    echo "  team_tier_created=${team_created} agent_tier_created=${agent_created} agent_tier_already_present=${agent_present}"
+    echo ""
+    return 0
+}
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 main() {
@@ -1386,6 +1701,15 @@ main() {
     if [[ ! "$TEAM_ID" =~ ^[a-z0-9][a-z0-9-]*$ ]]; then
         _fail "team_id must be lowercase alphanumeric with dashes (got: '${TEAM_ID}')"
         exit 1
+    fi
+
+    # ── --backfill-tiers: standalone knowledge-tier-only mode (XACA-0754-002) ──
+    # Only needs TEAM_ID (validated above) — deliberately bypasses TEAM_CODE /
+    # KANBAN_DIR prompts and the full sites 1–14 registration flow below; an
+    # already-registered team has no business re-running those.
+    if [[ "$BACKFILL_TIERS" -eq 1 ]]; then
+        _run_backfill_tiers
+        exit $?
     fi
 
     # XACA-0648: In LOCAL-ONLY mode (tap-consumer), TEAM_CODE is not required for
