@@ -36,6 +36,28 @@
 #            null-port fixture with closed stdin — exercising the exact
 #            code path aiteamforge start/restart runs, without launching
 #            any real LCARS/Fleet servers.
+#   Case 5 — Colliding ports: two instances sharing one lcars_port. --apply
+#            --yes resolves them to unique ports, the deterministic winner
+#            (earlier addedAt) keeps the original port, and a subsequent
+#            --check passes. Also driven end-to-end through
+#            check_port_health(). Coverage of pre-existing collision logic,
+#            not itself a fold-in fix — added per PR #671 review request.
+#   Case 6 — Malformed `teams` (XACA-0762-004 / Fix B): a JSON array where
+#            `teams` should be an object. --check exits 0 (tolerate, don't
+#            crash — XACA-0463-013 is unchanged) but now prints a WARNING
+#            naming the problem, instead of silently treating it as "no
+#            teams configured".
+#   Case 7 — Absent config (XACA-0762-005 / Fix C): kb-port-fix.py --check
+#            exits 3 (not 1) when team-paths.json doesn't exist, and
+#            check_port_health() degrades gracefully (returns 0, prints a
+#            warning) instead of aborting `aiteamforge start` — this is the
+#            case that proves the "one unconfigured team blocks every team's
+#            LCARS server" bug is fixed.
+#   Case 8 — Read-only config parent dir (XACA-0762-003 / Fix A): --apply
+#            --yes against a config whose parent directory is not writable
+#            exits 1 with a single actionable ERROR line and no raw Python
+#            traceback on stderr. Skipped cleanly when running as root
+#            (EUID 0 bypasses permission checks, which would false-pass).
 #
 # Sandboxing: all writes go to $TEST_TMP_DIR (a mktemp dir, auto-cleaned).
 #             AITEAMFORGE_DIR is exported into $TEST_TMP_DIR before anything
@@ -106,6 +128,26 @@ new_fixture() {
     local label="$1"
     local path="$TEST_TMP_DIR/team-paths-${label}.json"
     printf '{"schema_version":1,"teams":{"academy":{"team_code":"ACA","lcars_port":null}}}\n' > "$path"
+    printf '%s' "$path"
+}
+
+# Two instances under the "academy" template (band [8200,8210), same as
+# new_fixture above) sharing lcars_port 8200. academy-x has the earlier
+# addedAt so it is the deterministic winner (_sort_key_winner: earlier
+# addedAt wins); academy-y is the renumber target.
+new_fixture_collision() {
+    local label="$1"
+    local path="$TEST_TMP_DIR/team-paths-collision-${label}.json"
+    printf '%s\n' '{"schema_version":1,"teams":{"academy-x":{"team_code":"ACAX","lcars_port":8200,"addedAt":"2026-01-01T00:00:00Z"},"academy-y":{"team_code":"ACAY","lcars_port":8200,"addedAt":"2026-02-01T00:00:00Z"}}}' > "$path"
+    printf '%s' "$path"
+}
+
+# "teams" is a JSON array instead of an object — XACA-0463-013 says tolerate
+# (don't crash), XACA-0762-004 says do it loudly (WARNING on stderr).
+new_fixture_malformed_teams() {
+    local label="$1"
+    local path="$TEST_TMP_DIR/team-paths-malformed-${label}.json"
+    printf '{"schema_version":1,"teams":[]}\n' > "$path"
     printf '%s' "$path"
 }
 
@@ -276,6 +318,220 @@ else
     test_fail "skipped — case-4 preflight failed (aiteamforge-port-fix shadowed on PATH)"
     test_start "XACA-0762 case-4b: check_port_health() end-to-end port reassignment (skipped)"
     test_fail "skipped — case-4 preflight failed (aiteamforge-port-fix shadowed on PATH)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 5 — Colliding ports: --apply --yes resolves two instances sharing one
+# lcars_port to unique ports; the deterministic winner keeps the original;
+# a subsequent --check passes. Also driven end-to-end through
+# check_port_health(). Coverage of pre-existing collision-resolution logic
+# (unchanged by the PR #671 fold-in fixes), added per review request.
+# ─────────────────────────────────────────────────────────────────────────────
+_c5_fixture="$(new_fixture_collision "c5")"
+
+test_start "XACA-0762 case-5a: kb-port-fix.py --apply --yes exits 0 on a colliding-port fixture with closed stdin"
+_c5_rc=0
+AITEAMFORGE_CONFIG="$_c5_fixture" python3 "$PORT_FIX_PY" --apply --yes \
+    >"$TEST_TMP_DIR/c5-apply.out" 2>"$TEST_TMP_DIR/c5-apply.err" < /dev/null || _c5_rc=$?
+if [[ "$_c5_rc" -eq 0 ]]; then
+    test_pass
+else
+    test_fail "expected exit 0, got $_c5_rc (see $TEST_TMP_DIR/c5-apply.err)"
+fi
+
+test_start "XACA-0762 case-5b: deterministic winner (academy-x, earlier addedAt) kept its original port 8200"
+_c5_winner_port="$(jq -r '.teams["academy-x"].lcars_port // empty' "$_c5_fixture" 2>/dev/null)"
+if [[ "$_c5_winner_port" = "8200" ]]; then
+    test_pass
+else
+    test_fail "expected academy-x.lcars_port to remain 8200, got '${_c5_winner_port:-<empty>}'"
+fi
+
+test_start "XACA-0762 case-5c: the loser (academy-y) was renumbered to a different in-band port"
+_c5_loser_port="$(jq -r '.teams["academy-y"].lcars_port // empty' "$_c5_fixture" 2>/dev/null)"
+if [[ -n "$_c5_loser_port" ]] && [[ "$_c5_loser_port" =~ ^[0-9]+$ ]] \
+    && [[ "$_c5_loser_port" -ge 8200 ]] && [[ "$_c5_loser_port" -lt 8210 ]] \
+    && [[ "$_c5_loser_port" -ne 8200 ]]; then
+    test_pass
+else
+    test_fail "expected academy-y.lcars_port in [8201,8210), got '${_c5_loser_port:-<empty>}'"
+fi
+
+test_start "XACA-0762 case-5d: a subsequent --check now passes"
+_c5_check_rc=0
+AITEAMFORGE_CONFIG="$_c5_fixture" python3 "$PORT_FIX_PY" --check >/dev/null 2>&1 < /dev/null || _c5_check_rc=$?
+if [[ "$_c5_check_rc" -eq 0 ]]; then
+    test_pass
+else
+    test_fail "expected --check exit 0 after reconcile, got $_c5_check_rc"
+fi
+
+_c5e_skip=false
+if command -v aiteamforge-port-fix >/dev/null 2>&1; then
+    _c5e_skip=true
+fi
+if [[ "$_c5e_skip" != true ]]; then
+    _c5e_fixture="$(new_fixture_collision "c5e")"
+    test_start "XACA-0762 case-5e: check_port_health() end-to-end resolves a colliding-port fixture"
+    _c5e_rc=0
+    AITEAMFORGE_CONFIG="$_c5e_fixture" bash "$_c4_harness" \
+        >"$TEST_TMP_DIR/c5e.out" 2>"$TEST_TMP_DIR/c5e.err" < /dev/null || _c5e_rc=$?
+    if [[ "$_c5e_rc" -eq 0 ]]; then
+        test_pass
+    else
+        test_fail "check_port_health() exited $_c5e_rc against a colliding-port fixture (see $TEST_TMP_DIR/c5e.err)"
+    fi
+else
+    test_start "XACA-0762 case-5e: check_port_health() end-to-end (skipped)"
+    test_fail "skipped — aiteamforge-port-fix shadowed on PATH (see case-4 preflight)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 6 — Malformed `teams` (XACA-0762-004): a JSON array where an object is
+# expected. Must not crash, must exit 0 (XACA-0463-013 tolerate-don't-crash
+# is unchanged), and must now print a WARNING naming the problem instead of
+# silently treating it as "no teams configured".
+# ─────────────────────────────────────────────────────────────────────────────
+_c6_fixture="$(new_fixture_malformed_teams "c6")"
+
+test_start "XACA-0762 case-6a: --check on malformed (array) teams exits 0, does not crash"
+_c6_rc=0
+AITEAMFORGE_CONFIG="$_c6_fixture" python3 "$PORT_FIX_PY" --check \
+    >"$TEST_TMP_DIR/c6.out" 2>"$TEST_TMP_DIR/c6.err" < /dev/null || _c6_rc=$?
+if [[ "$_c6_rc" -eq 0 ]]; then
+    test_pass
+else
+    test_fail "expected exit 0 (tolerate malformed teams per XACA-0463-013), got $_c6_rc (see $TEST_TMP_DIR/c6.err)"
+fi
+
+test_start "XACA-0762 case-6b: stderr carries a WARNING naming the malformed teams value"
+if grep -q "^WARNING:" "$TEST_TMP_DIR/c6.err" 2>/dev/null && grep -qi "teams" "$TEST_TMP_DIR/c6.err" 2>/dev/null; then
+    test_pass
+else
+    test_fail "expected a WARNING mentioning 'teams' on stderr; got: $(head -c 200 "$TEST_TMP_DIR/c6.err" 2>/dev/null)"
+fi
+
+test_start "XACA-0762 case-6c: no Python traceback on stderr for malformed teams"
+if grep -q "^Traceback (most recent call last):" "$TEST_TMP_DIR/c6.err" 2>/dev/null; then
+    test_fail "found a raw Python traceback on stderr: $(head -c 200 "$TEST_TMP_DIR/c6.err" 2>/dev/null)"
+else
+    test_pass
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 7 — Absent config (XACA-0762-005): kb-port-fix.py --check must exit 3
+# (not 1) when team-paths.json doesn't exist, and check_port_health() must
+# degrade gracefully (return 0, print a warning) instead of aborting
+# `aiteamforge start`. This is the case that proves the "one unconfigured
+# team blocks every team's LCARS server" bug is fixed.
+# ─────────────────────────────────────────────────────────────────────────────
+_c7_fixture="$TEST_TMP_DIR/team-paths-absent-c7.json"  # deliberately never created
+
+test_start "XACA-0762 case-7a: kb-port-fix.py --check exits 3 (not 1) when the config file does not exist"
+_c7_rc=0
+AITEAMFORGE_CONFIG="$_c7_fixture" python3 "$PORT_FIX_PY" --check \
+    >"$TEST_TMP_DIR/c7-check.out" 2>"$TEST_TMP_DIR/c7-check.err" < /dev/null || _c7_rc=$?
+if [[ "$_c7_rc" -eq 3 ]]; then
+    test_pass
+else
+    test_fail "expected exit 3 for a missing config file, got $_c7_rc (see $TEST_TMP_DIR/c7-check.err)"
+fi
+
+_c7e_skip=false
+if command -v aiteamforge-port-fix >/dev/null 2>&1; then
+    _c7e_skip=true
+fi
+if [[ "$_c7e_skip" != true ]]; then
+    test_start "XACA-0762 case-7b: check_port_health() end-to-end degrades gracefully (exit 0) against a missing config file"
+    _c7b_rc=0
+    AITEAMFORGE_CONFIG="$_c7_fixture" bash "$_c4_harness" \
+        >"$TEST_TMP_DIR/c7b.out" 2>"$TEST_TMP_DIR/c7b.err" < /dev/null || _c7b_rc=$?
+    if [[ "$_c7b_rc" -eq 0 ]]; then
+        test_pass
+    else
+        test_fail "check_port_health() exited $_c7b_rc against a missing config file — should degrade gracefully (see $TEST_TMP_DIR/c7b.err); this is the exact XACA-0762-005 regression (an unconfigured install could never start)"
+    fi
+
+    test_start "XACA-0762 case-7c: check_port_health() end-to-end prints a warning (not an error) for the missing config"
+    if grep -qi "team-paths.json not found" "$TEST_TMP_DIR/c7b.out" 2>/dev/null; then
+        test_pass
+    else
+        test_fail "expected a 'team-paths.json not found' warning on stdout; got: $(head -c 200 "$TEST_TMP_DIR/c7b.out" 2>/dev/null)"
+    fi
+else
+    test_start "XACA-0762 case-7b: check_port_health() end-to-end (skipped)"
+    test_fail "skipped — aiteamforge-port-fix shadowed on PATH (see case-4 preflight)"
+    test_start "XACA-0762 case-7c: check_port_health() end-to-end warning text (skipped)"
+    test_fail "skipped — aiteamforge-port-fix shadowed on PATH (see case-4 preflight)"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Case 8 — Read-only config parent dir (XACA-0762-003): --apply --yes against
+# a config whose parent directory is not writable must exit 1 with a single
+# actionable ERROR line, never a raw Python traceback. Skipped cleanly when
+# running as root (root bypasses the permission check, which would
+# false-pass rather than exercise the guard).
+# ─────────────────────────────────────────────────────────────────────────────
+_c8_skip=false
+test_start "XACA-0762 case-8 preflight: not running as root (EUID 0 bypasses the permission check under test)"
+if [[ "$(id -u)" -eq 0 ]]; then
+    test_fail "running as root — skipping case 8 (root writes succeed regardless of directory permissions, which would false-pass this guard)"
+    _c8_skip=true
+else
+    test_pass
+fi
+
+if [[ "$_c8_skip" != true ]]; then
+    _c8_dir="$TEST_TMP_DIR/readonly-c8"
+    mkdir -p "$_c8_dir"
+    _c8_fixture="$_c8_dir/team-paths.json"
+    printf '{"schema_version":1,"teams":{"academy":{"team_code":"ACA","lcars_port":null}}}\n' > "$_c8_fixture"
+    chmod 555 "$_c8_dir"
+
+    test_start "XACA-0762 case-8a: --apply --yes against a read-only parent dir exits 1"
+    _c8_rc=0
+    AITEAMFORGE_CONFIG="$_c8_fixture" python3 "$PORT_FIX_PY" --apply --yes \
+        >"$TEST_TMP_DIR/c8-apply.out" 2>"$TEST_TMP_DIR/c8-apply.err" < /dev/null || _c8_rc=$?
+    # Restore write permission immediately so cleanup (rm -rf TEST_TMP_DIR) can
+    # remove the directory regardless of assertion outcome below.
+    chmod 755 "$_c8_dir"
+    if [[ "$_c8_rc" -eq 1 ]]; then
+        test_pass
+    else
+        test_fail "expected exit 1 against a read-only parent dir, got $_c8_rc (see $TEST_TMP_DIR/c8-apply.err)"
+    fi
+
+    test_start "XACA-0762 case-8b: stderr carries exactly one actionable ERROR line"
+    _c8_error_lines="$(grep -c "^ERROR:" "$TEST_TMP_DIR/c8-apply.err" 2>/dev/null || true)"
+    if [[ "${_c8_error_lines:-0}" -eq 1 ]]; then
+        test_pass
+    else
+        test_fail "expected exactly one 'ERROR:' line, got ${_c8_error_lines:-0}: $(cat "$TEST_TMP_DIR/c8-apply.err" 2>/dev/null)"
+    fi
+
+    test_start "XACA-0762 case-8c: no raw Python traceback leaked to stderr"
+    if grep -q "^Traceback (most recent call last):" "$TEST_TMP_DIR/c8-apply.err" 2>/dev/null; then
+        test_fail "found a raw Python traceback on stderr: $(cat "$TEST_TMP_DIR/c8-apply.err" 2>/dev/null)"
+    else
+        test_pass
+    fi
+
+    test_start "XACA-0762 case-8d: the refused apply did not silently succeed (fixture lcars_port still null)"
+    _c8_port_after="$(jq -r '.teams.academy.lcars_port // "null"' "$_c8_fixture" 2>/dev/null)"
+    if [[ "$_c8_port_after" = "null" ]]; then
+        test_pass
+    else
+        test_fail "expected fixture lcars_port to remain null after a failed apply, got '$_c8_port_after'"
+    fi
+else
+    test_start "XACA-0762 case-8a: --apply --yes against a read-only parent dir (skipped)"
+    test_fail "skipped — running as root"
+    test_start "XACA-0762 case-8b: single actionable ERROR line (skipped)"
+    test_fail "skipped — running as root"
+    test_start "XACA-0762 case-8c: no raw Python traceback (skipped)"
+    test_fail "skipped — running as root"
+    test_start "XACA-0762 case-8d: fixture left unmodified (skipped)"
+    test_fail "skipped — running as root"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -112,15 +112,41 @@ def _load_team_paths(config_path: Path) -> dict:
 
     A root value that isn't a JSON object (null, [], scalar) is normalized
     to {"teams": {}} — the caller treats that as "nothing to migrate".
-    See XACA-0463-013 (subitem 008 QA finding).
+    Likewise a present-but-non-object "teams" value is tolerated. Both are
+    deliberate (XACA-0463-013, subitem 008 QA finding): tolerate externally
+    authored malformed JSON rather than crash. XACA-0762-004 hardens this by
+    making the tolerance LOUD (a WARNING on stderr) instead of silent, so a
+    malformed config doesn't quietly present as "no teams configured" — this
+    is the single load site, so the warning fires exactly once per invocation
+    regardless of how many times downstream helpers re-derive the teams dict.
+
+    Exit codes:
+      3 — config file not found (XACA-0762-005: distinct from "1 == issues
+          found" so callers like aiteamforge-start.sh's check_port_health()
+          can tell "nothing to check" from "found something wrong" and
+          degrade gracefully instead of aborting startup).
     """
     if not config_path.exists():
         print(f"ERROR: Config file not found: {config_path}", file=sys.stderr)
-        sys.exit(1)
+        sys.exit(3)
     with config_path.open() as f:
         data = json.load(f)
     if not isinstance(data, dict):
+        print(
+            f"WARNING: {config_path} does not contain a JSON object at its "
+            f"root (found {type(data).__name__}) — treating as empty "
+            f"(no teams configured).",
+            file=sys.stderr,
+        )
         return {"teams": {}}
+    teams = data.get("teams")
+    if teams is not None and not isinstance(teams, dict):
+        print(
+            f"WARNING: {config_path} has a non-object \"teams\" value "
+            f"(found {type(teams).__name__}) — treating as empty "
+            f"(no teams configured).",
+            file=sys.stderr,
+        )
     return data
 
 
@@ -338,7 +364,7 @@ def _print_report(config_path: Path, plan: dict, include_new_ports: bool = False
           f"{sum(1 for _ in plan['collisions'])} collision group(s) resolved.")
     if not include_new_ports:
         print("Run `aiteamforge-port-fix --apply` to make these changes.")
-        print("Run `aiteamforge-port-fix --check` to use as a script gate (exit 0=clean, 1=issues).")
+        print("Run `aiteamforge-port-fix --check` to use as a script gate (exit 0=clean, 1=issues, 3=config not found).")
     print()
 
 
@@ -385,7 +411,7 @@ def _atomic_write(data: dict, target: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Check mode (script-usable gate — exits 1 on issues, 0 when clean)
+# Check mode (script-usable gate — exits 0=clean, 1=issues, 3=config not found)
 # ---------------------------------------------------------------------------
 
 
@@ -395,6 +421,14 @@ def cmd_check(args: argparse.Namespace) -> int:
     Designed for use as a startup gate or CI check — outputs a concise summary
     and returns a standard exit code (0 = OK, 1 = issues found) rather than
     the detect-mode 2 (which signals "work available" rather than "error").
+
+    Exit 3 (config file not found) is raised from _load_team_paths() before
+    this function's own body runs — see that docstring. XACA-0762-005:
+    kept distinct from 1 so a genuinely unconfigured install (no
+    team-paths.json yet) is distinguishable from "found real issues" by
+    callers such as aiteamforge-start.sh's check_port_health(), which must
+    degrade gracefully (warn + continue) rather than abort startup when
+    there is nothing to check yet.
     """
     config_path = Path(
         os.environ.get("AITEAMFORGE_CONFIG", str(DEFAULT_CONFIG_PATH))
@@ -480,11 +514,21 @@ def cmd_apply(args: argparse.Namespace) -> int:
             print("Aborted. No changes made.")
             return 0
 
-    # Backup
+    # Backup — XACA-0762-003: a read-only config parent dir (or any other
+    # OSError, e.g. disk full, permission denied) must produce a single
+    # actionable ERROR line, not a raw Python traceback. A failed backup
+    # must NOT be followed by a write attempt.
     ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup_path = config_path.parent / (config_path.name + BACKUP_SUFFIX_PREFIX + ts)
     import shutil
-    shutil.copy2(str(config_path), str(backup_path))
+    try:
+        shutil.copy2(str(config_path), str(backup_path))
+    except OSError as exc:
+        print(
+            f"ERROR: Failed to write backup to {backup_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
     print(f"Backup written: {backup_path}")
 
     # Apply changes to data in memory
@@ -501,8 +545,18 @@ def cmd_apply(args: argparse.Namespace) -> int:
         new_port = entry["new_port"]
         teams[iid]["lcars_port"] = new_port
 
-    # Atomic write
-    _atomic_write(data, config_path)
+    # Atomic write — same OSError-to-single-line-ERROR treatment as the backup
+    # above. _atomic_write() already cleans up its own tmp file on failure
+    # (see its internal try/except); we only need to convert the re-raised
+    # exception into an actionable message here.
+    try:
+        _atomic_write(data, config_path)
+    except OSError as exc:
+        print(
+            f"ERROR: Failed to write {config_path}: {exc}",
+            file=sys.stderr,
+        )
+        return 1
 
     total = sum(len(g["renumber"]) for g in plan["collisions"]) + len(plan["null_ports"])
     print(f"Done. {total} entry/entries updated in {config_path}")
@@ -523,8 +577,12 @@ def _build_parser() -> argparse.ArgumentParser:
             "Default (no args): print a report. Exit 0 if nothing to fix,\n"
             "exit 2 if changes are needed.\n\n"
             "--check: script-usable gate. Exit 0 if clean, exit 1 if issues\n"
-            "  found. Suitable for use in startup scripts and CI.\n\n"
-            "--apply: show plan, ask for confirmation, backup, write.\n"
+            "  found, exit 3 if the config file does not exist. Suitable for\n"
+            "  use in startup scripts and CI.\n\n"
+            "--apply: show plan, ask for confirmation, backup, write. Exit 0\n"
+            "  on success or nothing-to-do, exit 1 on a failed backup/write\n"
+            "  or a refused non-interactive confirmation, exit 3 if the\n"
+            "  config file does not exist.\n\n"
             "--json: machine-readable JSON report (detect mode only)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -535,8 +593,8 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help=(
             "Script-usable gate: exit 0 if all ports are unique and non-null, "
-            "exit 1 if any collision or null port is found. "
-            "Suitable for startup scripts and CI."
+            "exit 1 if any collision or null port is found, exit 3 if the "
+            "config file does not exist. Suitable for startup scripts and CI."
         ),
     )
     parser.add_argument(

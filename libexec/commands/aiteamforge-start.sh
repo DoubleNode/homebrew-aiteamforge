@@ -174,9 +174,36 @@ check_port_health() {
     return 0
   fi
 
-  # Happy path: ports already healthy.
+  # XACA-0762-005: capture the --check exit code directly rather than piping
+  # it (`$?` after a pipe is the LAST command's status, not kb-port-fix's —
+  # see MEMORY feedback_pipefail_hides_exit_code.md). This script runs under
+  # `set -eo pipefail` (line 6), so the capture MUST happen inside an if/else
+  # — a bare `cmd; rc=$?` statement is itself subject to set -e and aborts the
+  # WHOLE start script the instant cmd returns non-zero, before rc=$? even
+  # runs (verified empirically: the bare form never reaches the following
+  # line under set -e). if/else conditions are exempt from set -e.
+  local port_check_rc=0
   if "${port_fix_cmd[@]}" --check 2>/dev/null; then
+    port_check_rc=0
+  else
+    port_check_rc=$?
+  fi
+
+  # Happy path: ports already healthy.
+  if [ "$port_check_rc" -eq 0 ]; then
     print_success "LCARS port health check passed"
+    return 0
+  fi
+
+  # XACA-0762-005: exit 3 means "config file not found" — a genuinely
+  # unconfigured install, not a discovered problem. Degrade gracefully (warn
+  # + continue) exactly like the "tool not found" branch above, instead of
+  # falling into the auto-apply path below (which would itself fail the same
+  # way against a missing file, and previously hard-aborted `aiteamforge
+  # start` entirely — see kb-port-fix.py's --check exit-code contract at
+  # ~line 341/579 for the 0/1/3 contract).
+  if [ "$port_check_rc" -eq 3 ]; then
+    print_warning "team-paths.json not found — skipping port health check (degrade gracefully)"
     return 0
   fi
 
@@ -208,9 +235,25 @@ check_port_health() {
     return 1
   fi
 
-  # Re-verify after the auto-apply.
+  # Re-verify after the auto-apply. Same guarded-capture pattern as above —
+  # rc==3 ("config not found") shouldn't be reachable here in practice (the
+  # --apply --yes above already proved the config file exists, or we'd have
+  # returned 1 at line ~235), but handle it the same way for robustness
+  # rather than falling through to the generic "STILL failing" error.
+  local port_recheck_rc=0
   if "${port_fix_cmd[@]}" --check 2>/dev/null; then
+    port_recheck_rc=0
+  else
+    port_recheck_rc=$?
+  fi
+
+  if [ "$port_recheck_rc" -eq 0 ]; then
     print_success "Port reconcile applied — LCARS port health check now passes"
+    return 0
+  fi
+
+  if [ "$port_recheck_rc" -eq 3 ]; then
+    print_warning "team-paths.json not found on re-verify — skipping port health check (degrade gracefully)"
     return 0
   fi
 
