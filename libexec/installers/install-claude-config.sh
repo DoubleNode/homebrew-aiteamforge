@@ -77,39 +77,25 @@ backup_file() {
     fi
 }
 
-# Merge JSON files (newer settings override older)
-merge_json() {
-    local base_file="$1"
-    local overlay_file="$2"
-    local output_file="$3"
-
-    if ! command -v jq &>/dev/null; then
-        log_error "jq is required for JSON merging"
-        return 1
-    fi
-
-    # If base doesn't exist, just copy overlay
-    if [[ ! -f "$base_file" ]]; then
-        cp "$overlay_file" "$output_file"
-        return 0
-    fi
-
-    # Merge: overlay values take precedence
-    jq -s '.[0] * .[1]' "$base_file" "$overlay_file" > "$output_file"
-}
-
-# Merge settings.json specifically (XACA-0773). The generic merge_json() above
-# does a whole-array REPLACE of every key via `jq -s '.[0] * .[1]'`, which is
-# fine for most settings.json fields but silently drops any box-local,
-# hand-added hooks.<event> matcher (e.g. a custom PreToolUse entry) on every
-# upgrade, because jq's `*` replaces arrays wholesale rather than merging them.
-# This variant deep-merges everything EXCEPT hooks.<event> arrays, which are
-# unioned instead: the shipped template's matchers always win on a `.matcher`
-# collision (so fixes/updates to shipped matchers still propagate), and any
-# base (existing/user) matcher whose `.matcher` is absent from the template is
-# preserved. Confined to settings.json — merge_json() itself is untouched and
-# still used as-is elsewhere (MCP config, etc.) where whole-array replace is
-# the correct/expected behavior.
+# Merge settings.json specifically (XACA-0773). A naive whole-array REPLACE
+# merge (`jq -s '.[0] * .[1]'`) is fine for most settings.json fields but
+# silently drops any box-local, hand-added hooks.<event> entry (e.g. a custom
+# PreToolUse matcher) on every upgrade, because jq's `*` replaces arrays
+# wholesale rather than merging them. This deep-merges everything EXCEPT
+# hooks.<event> arrays, which are unioned instead via two keying modes:
+#   - Entries that carry a non-null `.matcher` (PreToolUse/PostToolUse) are
+#     keyed by that matcher string: the shipped template's matcher always
+#     wins on a collision (so fixes/updates to shipped matchers still
+#     propagate), and any base (existing/user) matcher absent from the
+#     template is preserved.
+#   - Matcher-less entries (SessionStart/Stop/SessionEnd/UserPromptSubmit,
+#     which have no `.matcher` field at all) are keyed by exact object
+#     identity instead: a base entry survives unless that EXACT object
+#     already exists in the template. Keying these purely by `.matcher` would
+#     collapse every matcher-less entry onto the same null key, silently
+#     dropping a second custom base entry for the same event — the opposite
+#     of what this function exists to prevent. Exact-duplicate matcher-less
+#     entries still dedupe (no double-install of the same hook).
 merge_settings_json() {
     local base_file="$1"
     local overlay_file="$2"
@@ -130,7 +116,12 @@ merge_settings_json() {
       .[0] as $base | .[1] as $ovl |
       def union_hooks($a; $b):
         ($b // [])
-        + (($a // []) | map(select(.matcher as $m | (($b // []) | map(.matcher) | index($m)) == null)));
+        + (($a // []) | map(select(
+            . as $e
+            | if ($e | has("matcher")) and ($e.matcher != null)
+              then (($b // []) | map(.matcher) | index($e.matcher)) == null
+              else (($b // []) | index($e)) == null
+              end)));
       ($base * $ovl)
       | if (($base.hooks // $ovl.hooks) != null) then
           .hooks = ( reduce ((($base.hooks // {}) + ($ovl.hooks // {})) | keys_unsorted[]) as $e (.hooks // {};
