@@ -83,3 +83,4 @@ test-xaca-0751-upgrade-knowledge-repo.sh        plain-shell
 test-xaca-0751-014-knowledge-url-resolution.sh  plain-shell
 test-xaca-0752-mktemp-template.sh               plain-shell
 test-xaca-0762-start-port-reconcile-yes.sh      plain-shell
+test-xaca-0770-local-only-knowledge-in-tap.sh    plain-shell

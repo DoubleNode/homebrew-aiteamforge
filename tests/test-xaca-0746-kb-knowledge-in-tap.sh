@@ -286,11 +286,18 @@ fi
 _assert_all_defined "PartB(template)" "$B_RENDERED"
 
 # ── B2: same add -> search -> validate round trip against the fallback file ──
+# XACA-0770: this file's subject/project kb-knowledge-add tiers now run
+# through _kb_ambiguous_tier_write_guard (ported from dev-team's
+# XACA-0754-014), which fail-closes when _kb_detect_context can't resolve a
+# team (no tmux, no KB_TEAM/LCARS_TEAM/AITEAMFORGE_TEAM env signal — exactly
+# this sandbox's default state). Export KB_TEAM so the guard resolves
+# "testteam" (a non-local team) and the write proceeds to the shared root,
+# same as before XACA-0770.
 test_start "PartB(template): kb-knowledge-add + kb-knowledge-search round trip"
 B2_HOME=$(_next_home)
 B2_ROOT="$B2_HOME/knowledge"
 _run_zsh "$B_RENDERED" "$B2_HOME" "$B2_ROOT" \
-    "kb-knowledge-add subject testsubject 'template fallback round trip'; kb-knowledge-search 'fallback round trip' --subject testsubject --porcelain"
+    "export KB_TEAM=testteam; kb-knowledge-add subject testsubject 'template fallback round trip'; kb-knowledge-search 'fallback round trip' --subject testsubject --porcelain"
 B2_OUT="$(_stdout)"
 if echo "$B2_OUT" | grep -q '^subject:testsubject'; then
     test_pass

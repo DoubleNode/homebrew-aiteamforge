@@ -7368,6 +7368,287 @@ _kb_knowledge_global_root() {
     echo "${KB_KNOWLEDGE_GLOBAL_ROOT:-${HOME}/knowledge}"
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0770 — Local-only team knowledge (PII containment), ported from
+# dev-team/kanban-helpers.sh (XACA-0754/XACA-0754-013/XACA-0754-014).
+# finance-personal / legal-coparenting / medical-general carry PII and must
+# NEVER leave this host. _kb_knowledge_local_root() resolves a SECOND root,
+# parallel to the global one, that the knowledge sync daemon (XACA-0749 — not
+# yet in the tap, see XACA-0761) physically cannot see: it only ever operates
+# on the global root. Search reads both roots; kb-knowledge-add routes writes
+# to whichever root the target team/persona belongs to.
+#
+# Context-adaptation note: unlike the aliases-file counterpart
+# (share/templates/aliases/kanban-aliases.sh), THIS file keeps
+# _kb_detect_context (the tmux-pane/env/.kb-team-sentinel resolver defined
+# above) for _kb_current_session_is_local_only_team and _kb_context_resolved
+# below — it runs in the full-helpers context where that resolver is
+# meaningful, so no substitution is needed here.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Internal: locate the team-paths.json overlay config (honours AITEAMFORGE_CONFIG).
+# Ported from dev-team/kanban-helpers.sh — HOME-based, no dev-team coupling.
+_kb_overlay_config_path() {
+    printf '%s\n' "${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+}
+
+# Internal: resolve the local (unsynced) knowledge root (honours KB_KNOWLEDGE_LOCAL_ROOT)
+_kb_knowledge_local_root() {
+    echo "${KB_KNOWLEDGE_LOCAL_ROOT:-${HOME}/knowledge-local}"
+}
+
+# Internal: the git-tracked, hardcoded floor of local-only (PII) teams.
+# THIS is the authoritative safety control, not team-paths.json (see
+# _kb_is_local_only_team below) — a regenerated or missing team-paths.json
+# must never be able to flip one of these three teams to shareable. Extend
+# this list (and re-run sync-tap.sh) when a new personal team is created;
+# do not rely solely on the team-paths.json flag for a team that already
+# carries PII.
+_kb_local_only_teams_hardcoded() {
+    printf '%s\n' finance-personal legal-coparenting medical-general
+}
+
+# Internal: the git-tracked, hardcoded floor of local-only (PII) agent-tier
+# personas — the resolved D1 roster (17 slugs), mirroring
+# _kb_local_only_teams_hardcoded's role for the team tier.
+#
+# Why this exists: _kb_is_local_persona's OTHER path resolves its roster via
+# _kb_local_personas_for_team, which reads either a persisted
+# "local_personas" array in team-paths.json OR a scan of
+# ~/dev-team/.claude/agents-master/. On the machine this design actually
+# protects (a bare tap host such as M4Mini) NEITHER exists — agents-master is
+# an Academy/dev-team-only checkout and the local-scaffold step that persists
+# the array has not necessarily run yet — so the roster could resolve empty,
+# _kb_is_local_persona would return false, and kb-knowledge-add's write_root
+# would stay $global_root: a finance/legal/medical persona's agent-tier entry
+# would leak into the SYNCED repo. This hardcoded list requires zero external
+# state, so it can never silently fall through to global on a bare machine.
+_kb_local_personas_hardcoded() {
+    # finance-personal
+    printf '%s\n' brunt nog quark-fin rom zek
+    # legal-coparenting
+    printf '%s\n' advocate casemanager courtclerk lawclerk mediator paralegal
+    # medical-general
+    printf '%s\n' cameron chase cuddy foreman house wilson
+}
+
+# _kb_is_local_only_team <team-id>
+# True (0) if the team's knowledge MUST be routed to the local, unsynced root
+# instead of the shared ~/knowledge repo.
+#
+# Fail-safe toward local: checks TWO independent sources and returns true if
+# EITHER says so —
+#   1. The hardcoded allowlist above (git-tracked, ships with the tool,
+#      cannot be silently regenerated away).
+#   2. An optional "local_only": true flag in team-paths.json (extensibility
+#      for future personal teams, without a code change).
+# Source 1 is checked first and unconditionally — a missing/corrupt/
+# regenerated team-paths.json can therefore never misclassify a known PII
+# team as shareable; at worst it fails to extend protection to a NEW team
+# that hasn't been added to the hardcoded list yet.
+_kb_is_local_only_team() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+
+    local t
+    for t in $(_kb_local_only_teams_hardcoded); do
+        [[ "$t" == "$team" ]] && return 0
+    done
+
+    local config_path
+    config_path=$(_kb_overlay_config_path)
+    [[ -f "$config_path" ]] || return 1
+
+    local flag_value
+    if command -v jq &>/dev/null; then
+        flag_value=$(jq -r --arg t "$team" '.teams[$t].local_only // false' "$config_path" 2>/dev/null)
+    elif command -v python3 &>/dev/null; then
+        flag_value=$(python3 - "$config_path" "$team" <<'PYEOF'
+import sys, json
+from pathlib import Path
+config_path, team = sys.argv[1], sys.argv[2]
+try:
+    config = json.loads(Path(config_path).read_text(encoding='utf-8'))
+    v = config.get('teams', {}).get(team, {}).get('local_only', False)
+    print('true' if v is True else 'false')
+except Exception:
+    print('false')
+PYEOF
+)
+    else
+        flag_value="false"
+    fi
+    [[ "$flag_value" == "true" ]]
+}
+
+# _kb_current_session_is_local_only_team
+# True (0) if the CURRENT SESSION's team (resolved via the canonical
+# _kb_detect_context, same resolver every other kb-* helper in this file
+# uses) is local-only. Used by kb-knowledge-add for tiers that aren't keyed
+# by an explicit team/persona argument — subject and (bare) project — where
+# the only signal available is "which team is this session running as."
+#
+# Returns false for BOTH "context resolved to a real, known non-local team"
+# AND "context could not be resolved at all" — this function alone cannot
+# distinguish those two cases. That's fine for ROUTING an already-permitted
+# write (global is correct either way), but it means this function must NOT
+# be used, by itself, to decide whether an ambiguous write should be allowed
+# at all — see _kb_context_resolved + _kb_ambiguous_tier_write_guard below,
+# which make that distinction explicitly for the fail-closed check in
+# kb-knowledge-add.
+_kb_current_session_is_local_only_team() {
+    local context team
+    context=$(_kb_detect_context 2>/dev/null) || return 1
+    team="${context%%:*}"
+    _kb_is_local_only_team "$team"
+}
+
+# _kb_context_resolved
+# True (0) if _kb_detect_context can actually resolve the current session's
+# team via any of its layers (explicit env / tmux / hard error). False (1)
+# if it hard-fails through to its "ERROR:ERROR:0:unknown" fallback. Thin
+# wrapper — does not duplicate _kb_detect_context's own resolution logic, it
+# just reports the pass/fail of the exact same call every kb-* helper
+# already makes.
+_kb_context_resolved() {
+    _kb_detect_context >/dev/null 2>&1
+}
+
+# _kb_ambiguous_tier_write_guard <allow_global:true|false>
+# Fail-closed guard for kb-knowledge-add's subject/project tiers ONLY.
+# agent/team tiers key off an explicit persona/team argument and are
+# unaffected — this guard is not, and should not be, called for them.
+#
+# The gap this closes: _kb_current_session_is_local_only_team returns false
+# both when context resolves to a real non-local team (correct → global,
+# must stay frictionless) AND when context is entirely unresolvable
+# (ambiguous — could be a PII session with no tmux/env signal). Routing on
+# that function alone would let an ambiguous write through to the synced
+# root silently. This guard distinguishes the two:
+#   - context resolved (local OR non-local) → silent no-op, return 0.
+#   - context unresolved AND allow_global=true → warn to stderr, return 0
+#     (the caller proceeds to global — there is no "local" to fall back to
+#     since the team is genuinely unknown).
+#   - context unresolved AND allow_global=false (default) → error to stderr,
+#     return 1 (caller must refuse the write).
+_kb_ambiguous_tier_write_guard() {
+    local allow_global="${1:-false}"
+
+    _kb_context_resolved && return 0
+    _kb_current_session_is_local_only_team && return 0  # defensive; shouldn't be reachable if unresolved
+
+    if [[ "$allow_global" == "true" ]]; then
+        echo "Warning: kb-knowledge-add could not resolve the current session's team (no tmux or env signal) — it can't verify this isn't a finance/legal/medical (PII) session. Proceeding to the SHARED/synced knowledge root anyway because --force was passed." >&2
+        return 0
+    fi
+
+    echo "Error: kb-knowledge-add could not resolve the current session's team, so it can't verify this write isn't from a finance/legal/medical (PII) session. Refusing to write to the shared/synced knowledge root." >&2
+    echo "  Fix: set KB_TEAM=<team> to disambiguate (e.g. KB_TEAM=academy kb-knowledge-add subject ...), or pass --force to intentionally write to the shared root anyway." >&2
+    return 1
+}
+
+# Internal: map a local-only team's team-paths.json id to its agents-master
+# persona-group directory name (used only by _kb_local_personas_for_team's
+# fallback scan below). The two naming schemes differ (team-paths.json uses
+# the full kanban team id, agents-master groups by short family name).
+_kb_local_team_persona_group() {
+    case "${1-}" in
+        finance-personal)  echo "finance" ;;
+        legal-coparenting) echo "legal" ;;
+        medical-general)   echo "medical" ;;
+        *) return 1 ;;
+    esac
+}
+
+# _kb_local_personas_for_team <team-id>
+# Resolves the kb agent-tier slug roster for a local-only team, one slug per
+# line.
+#
+# Fast path: a persisted "local_personas" array in team-paths.json (written
+# once by kb-knowledge-local-scaffold) — a lookup, not a filesystem scan.
+# Fallback: scan ~/dev-team/.claude/agents-master/<group>/*.md and read each
+# file's frontmatter `name:` field. That checkout does NOT exist on this
+# file's target machines (bare tap hosts have no ~/dev-team) — the
+# [[ -d "$master_dir" ]] guard below makes that a clean, silent no-op
+# (return 1, no output, no error), never a leak or a crash. The hardcoded
+# persona floor (_kb_local_personas_hardcoded, checked FIRST in
+# _kb_is_local_persona) is what actually protects a bare machine; this
+# function is only the extension path for a FUTURE local-only team not yet
+# added to that floor.
+_kb_local_personas_for_team() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+
+    local config_path
+    config_path=$(_kb_overlay_config_path)
+    if [[ -f "$config_path" ]]; then
+        local persisted=""
+        if command -v jq &>/dev/null; then
+            persisted=$(jq -r --arg t "$team" '.teams[$t].local_personas // [] | .[]' "$config_path" 2>/dev/null)
+        elif command -v python3 &>/dev/null; then
+            persisted=$(python3 - "$config_path" "$team" <<'PYEOF'
+import sys, json
+from pathlib import Path
+config_path, team = sys.argv[1], sys.argv[2]
+try:
+    config = json.loads(Path(config_path).read_text(encoding='utf-8'))
+    for p in config.get('teams', {}).get(team, {}).get('local_personas', []) or []:
+        print(p)
+except Exception:
+    pass
+PYEOF
+)
+        fi
+        if [[ -n "$persisted" ]]; then
+            printf '%s\n' "$persisted"
+            return 0
+        fi
+    fi
+
+    local group
+    group=$(_kb_local_team_persona_group "$team") || return 1
+    local master_dir="${HOME}/dev-team/.claude/agents-master/${group}"
+    [[ -d "$master_dir" ]] || return 1
+
+    local f name
+    for f in "${master_dir}"/*.md; do
+        [[ -f "$f" ]] || continue
+        name=$(_kb_knowledge_yaml_field "$f" "name")
+        [[ -n "$name" ]] && echo "$name"
+    done
+}
+
+# _kb_is_local_persona <persona-slug>
+# True (0) if the given kb agent-tier slug belongs to one of the three known
+# local-only teams' persona rosters (no intra-machine isolation — one shared
+# local_root, all local personas are peers on this host). Used by
+# kb-knowledge-add to route agent-tier writes to the local root.
+#
+# Fail-safe toward local (mirrors _kb_is_local_only_team's two-source shape):
+# checks the hardcoded 17-persona floor (_kb_local_personas_hardcoded) FIRST
+# and unconditionally — it requires no agents-master checkout and no
+# persisted team-paths.json array, so it holds even on a bare tap machine
+# that has neither. Only if the slug isn't in that floor does it fall
+# through to the roster-resolution loop (_kb_local_personas_for_team), the
+# extension path for a FUTURE local-only team not yet in the hardcoded floor.
+_kb_is_local_persona() {
+    local persona="${1-}"
+    [[ -z "$persona" ]] && return 1
+
+    local hp
+    for hp in $(_kb_local_personas_hardcoded); do
+        [[ "$hp" == "$persona" ]] && return 0
+    done
+
+    local team p
+    for team in $(_kb_local_only_teams_hardcoded); do
+        for p in $(_kb_local_personas_for_team "$team" 2>/dev/null); do
+            [[ "$p" == "$persona" ]] && return 0
+        done
+    done
+    return 1
+}
+
 # Internal: validate a single name component (persona, team, subject segment).
 # Valid: starts with lowercase letter, followed by lowercase letters, digits, underscores, hyphens.
 # Rejects path-traversal characters (/, .., \, null bytes) and uppercase names.
@@ -7467,6 +7748,37 @@ _kb_knowledge_project_path() {
 
     # 3. Default
     echo "$(_kb_knowledge_global_root)/projects/${project_slug}"
+}
+
+# _kb_knowledge_project_path_effective
+# Same as _kb_knowledge_project_path, EXCEPT: when that resolution falls all
+# the way through to case 3 (the bare "${global_root}/projects/<slug>"
+# default) AND the current session's team is local-only, redirect to the
+# equivalent path under local_root instead (XACA-0754-013, ported XACA-0770).
+#
+# Why only case 3: cases 1 (.knowledge-config.yml) and 2
+# (KB_KNOWLEDGE_PROJECT_PATH) already point project knowledge OUTSIDE
+# $KB_KNOWLEDGE_GLOBAL_ROOT entirely (typically in-repo) — they are never at
+# risk of syncing PII fleet-wide, so redirecting them would be pointless
+# indirection.
+#
+# Used by BOTH the writer (kb-knowledge-add's bare-project branch) and the
+# reader (kb-knowledge-search's unfiltered "current project" resolution, and
+# kb-knowledge-reindex's project_path reindex) so a local-redirected write is
+# never orphaned from search/reindex.
+_kb_knowledge_project_path_effective() {
+    local base
+    base=$(_kb_knowledge_project_path) || return $?
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+    if [[ "$base" == "${global_root}/projects/"* ]] && _kb_current_session_is_local_only_team; then
+        local local_root
+        local_root=$(_kb_knowledge_local_root)
+        echo "${local_root}/projects/${base#${global_root}/projects/}"
+        return 0
+    fi
+    echo "$base"
 }
 
 # Internal: derive a human-readable project display name from the project knowledge dir path.
@@ -7646,10 +7958,16 @@ kb-knowledge-search() {
 
     local global_root
     global_root=$(_kb_knowledge_global_root)
+    local local_root
+    local_root=$(_kb_knowledge_local_root)
 
-    # Resolve project path for this session
+    # Resolve project path for this session. Uses the "effective" resolver
+    # (XACA-0754-013, ported XACA-0770) so a local-only session's current-
+    # project path — if kb-knowledge-add redirected it to local_root — is
+    # read from the SAME place it was written, not silently orphaned under
+    # global_root.
     local project_path
-    project_path=$(_kb_knowledge_project_path)
+    project_path=$(_kb_knowledge_project_path_effective)
 
     # ── Build the list of search roots, in discovery-precedence order ──────────
     # Order: project, team (reserved, included when populated), subject, agent
@@ -7663,6 +7981,16 @@ kb-knowledge-search() {
                 local named_path="${global_root}/projects/${filter_project}"
                 search_roots+=("$named_path")
                 root_tier_labels+=("project:${filter_project}")
+
+                # XACA-0754-013 (ported XACA-0770): also check local_root for
+                # a same-named local project (mirrors the local team/agent
+                # merge blocks below) — a local-only session's named project
+                # entry lives here instead of global_root.
+                local local_named_path="${local_root}/projects/${filter_project}"
+                if [[ -d "$local_named_path" ]]; then
+                    search_roots+=("$local_named_path")
+                    root_tier_labels+=("project:${filter_project}")
+                fi
             else
                 search_roots+=("$project_path")
                 root_tier_labels+=("project")
@@ -7698,6 +8026,23 @@ kb-knowledge-search() {
                     root_tier_labels+=("team:$(basename "$tdir")")
                 done
             fi
+
+            # XACA-0754 (ported XACA-0770): local-only teams (finance-personal/
+            # legal-coparenting/medical-general) keep their team-tier entries
+            # under local_root instead of global_root — merge them in here so
+            # they're discoverable from any local-team session on this host.
+            # Same (/DN) qualifier + tier label convention as the global
+            # block above.
+            local local_team_root="${local_root}/teams"
+            if [[ -d "$local_team_root" ]]; then
+                local -a _local_team_dirs
+                _local_team_dirs=("${local_team_root}"/*/(/DN))
+                for tdir in "${_local_team_dirs[@]}"; do
+                    [[ -d "$tdir" ]] || continue
+                    search_roots+=("$tdir")
+                    root_tier_labels+=("team:$(basename "$tdir")")
+                done
+            fi
         fi
     fi
 
@@ -7714,6 +8059,26 @@ kb-knowledge-search() {
                 root_tier_labels+=("subject")
             fi
         fi
+
+        # XACA-0754-013 (ported XACA-0770): merge local_root/subjects the
+        # same way (no intra-host isolation — once written, visible from any
+        # session on this host, same as the local team/agent merge blocks).
+        # No per-leaf (/DN) glob needed here — subject entries can nest
+        # arbitrarily deep and the per-root matching below already recurses,
+        # exactly like the unfiltered global subject_root case above.
+        local local_subject_root="${local_root}/subjects"
+        if [[ -n "$filter_subject" ]]; then
+            local local_subject_dir="${local_subject_root}/${filter_subject}"
+            if [[ -d "$local_subject_dir" ]]; then
+                search_roots+=("$local_subject_dir")
+                root_tier_labels+=("subject:${filter_subject}")
+            fi
+        else
+            if [[ -d "$local_subject_root" ]] && ! $any_scope_flag_set; then
+                search_roots+=("$local_subject_root")
+                root_tier_labels+=("subject")
+            fi
+        fi
     fi
 
     # Tier: agent
@@ -7726,6 +8091,26 @@ kb-knowledge-search() {
         else
             if [[ -d "$agent_root" ]] && ! $any_scope_flag_set; then
                 search_roots+=("$agent_root")
+                root_tier_labels+=("agent")
+            fi
+        fi
+
+        # XACA-0754 (ported XACA-0770): local-only personas (finance/legal/
+        # medical personal-team agents) live under local_root/agents instead
+        # of global_root/agents. Merge in whichever slice applies — a
+        # specific --agent dir if it exists there, or the whole local
+        # agent_root in the unfiltered case — mirroring the global block's
+        # shape exactly.
+        local local_agent_root="${local_root}/agents"
+        if [[ -n "$filter_agent" ]]; then
+            local local_agent_dir="${local_agent_root}/${filter_agent}"
+            if [[ -d "$local_agent_dir" ]]; then
+                search_roots+=("$local_agent_dir")
+                root_tier_labels+=("agent:${filter_agent}")
+            fi
+        else
+            if [[ -d "$local_agent_root" ]] && ! $any_scope_flag_set; then
+                search_roots+=("$local_agent_root")
                 root_tier_labels+=("agent")
             fi
         fi
@@ -8117,12 +8502,13 @@ _kb_knowledge_reindex_one() {
 
     # Determine tier from directory location
     local global_root=$(_kb_knowledge_global_root)
+    local local_root=$(_kb_knowledge_local_root)
     local dir_tier
-    if [[ "$dir" == "${global_root}/agents/"* ]]; then
+    if [[ "$dir" == "${global_root}/agents/"* ]] || [[ "$dir" == "${local_root}/agents/"* ]]; then
         dir_tier="agent"
-    elif [[ "$dir" == "${global_root}/teams/"* ]]; then
+    elif [[ "$dir" == "${global_root}/teams/"* ]] || [[ "$dir" == "${local_root}/teams/"* ]]; then
         dir_tier="team"
-    elif [[ "$dir" == "${global_root}/subjects/"* ]]; then
+    elif [[ "$dir" == "${global_root}/subjects/"* ]] || [[ "$dir" == "${local_root}/subjects/"* ]]; then
         dir_tier="subject"
     else
         dir_tier="project"
@@ -8367,6 +8753,105 @@ _kb_knowledge_reindex_one() {
     return 0
 }
 
+# kb-knowledge-local-scaffold — ported from dev-team/kanban-helpers.sh (XACA-0754 C7, XACA-0770)
+#
+# Creates the local (unsynced, PII) knowledge tree for the three known
+# local-only teams: ${local_root}/teams/<team>/INDEX.md +
+# ${local_root}/agents/<persona>/INDEX.md for each team's persona roster
+# (resolved via the hardcoded floor when no agents-master checkout exists,
+# which is the normal case on a bare tap machine). Mirrors the team/agent
+# INDEX.md template kb-init-team writes for the global tiers. Idempotent —
+# never clobbers an existing INDEX.md, safe to re-run.
+#
+# Honours KB_KNOWLEDGE_LOCAL_ROOT so it can be pointed at a sandbox in tests;
+# this function does NOT run automatically anywhere — it is an explicit,
+# one-time provisioning step for a machine that will host these teams.
+kb-knowledge-local-scaffold() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local local_root
+    local_root=$(_kb_knowledge_local_root)
+    local today
+    today=$(date +%Y-%m-%d)
+
+    mkdir -p "${local_root}/agents" "${local_root}/teams"
+
+    local team
+    for team in $(_kb_local_only_teams_hardcoded); do
+        local team_dir="${local_root}/teams/${team}"
+        mkdir -p "$team_dir"
+        local team_index="${team_dir}/INDEX.md"
+        if [[ ! -f "$team_index" ]]; then
+            cat > "$team_index" <<EOF
+# ${team} — Team Knowledge Index (local-only)
+
+**Team:** ${team}
+**Tier:** team
+**Storage:** LOCAL ONLY — this tree is never synced off this machine (XACA-0754)
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+            echo "  [created] ${team_index}"
+        fi
+
+        local persona
+        # Prefer the hardcoded persona floor for this team (works with zero
+        # external state — the correct default on a bare tap machine).
+        # _kb_local_personas_for_team is still consulted so a persisted
+        # team-paths.json "local_personas" array or a future agents-master
+        # checkout can extend the roster without a code change; the two
+        # sources are simply unioned here (dedup via the existing INDEX.md
+        # idempotency guard, not an explicit set operation).
+        for persona in $(_kb_local_personas_hardcoded) $(_kb_local_personas_for_team "$team" 2>/dev/null); do
+            [[ -z "$persona" ]] && continue
+            _kb_is_local_persona "$persona" || continue
+            local agent_dir="${local_root}/agents/${persona}"
+            mkdir -p "$agent_dir"
+            local agent_index="${agent_dir}/INDEX.md"
+            if [[ ! -f "$agent_index" ]]; then
+                cat > "$agent_index" <<EOF
+# ${persona} Knowledge Index (local-only)
+
+**Agent:** ${persona}
+**Storage:** LOCAL ONLY — this tree is never synced off this machine (XACA-0754)
+**Last Updated:** ${today}
+
+---
+
+## Tag Index
+
+| Tag | Entries |
+|-----|---------|
+| _none yet_ | |
+
+---
+
+## Entries
+
+_No entries yet._
+EOF
+                echo "  [created] ${agent_index}"
+            fi
+        done
+    done
+
+    echo ""
+    echo "  Local knowledge scaffold complete under: ${local_root}"
+    echo ""
+}
+
 # Scaffold a new knowledge entry at the correct tier location
 # Usage: kb-knowledge-add <tier> [<target>] "<title>"
 #
@@ -8385,11 +8870,16 @@ kb-knowledge-add() {
     fi
 
     if $show_help; then
-        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\""
+        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force]"
         echo ""
         echo "  tier       agent | subject | project | team"
         echo "  target     Agent name, subject path, team name, or (project) optional slug"
         echo "  title      Human-readable title for the entry"
+        echo "  --force    subject/project tiers only (XACA-0754-014, ported XACA-0770):"
+        echo "             proceed with a shared/synced write even when the session's team"
+        echo "             could not be resolved at all — normally refused, since an"
+        echo "             unresolvable session might be a finance/legal/medical (PII) one."
+        echo "             Ignored for agent/team tiers."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-add agent emh \"kapt error patterns\""
@@ -8403,8 +8893,39 @@ kb-knowledge-add() {
 
     shift  # consumed $1 (tier)
 
+    # XACA-0754-014 (ported XACA-0770): --force is recognized anywhere in the
+    # remaining args and stripped out BEFORE tier-specific positional parsing
+    # runs — otherwise it would get swept into title_raw (which greedily
+    # joins "${*:2}"/"$*"). Only subject/project tiers consult it; agent/team
+    # tiers ignore it silently (harmless no-op, not an error).
+    local flag_allow_global=false
+    local -a _kb_add_filtered_args=()
+    local _kb_add_arg
+    for _kb_add_arg in "$@"; do
+        if [[ "$_kb_add_arg" == "--force" ]]; then
+            flag_allow_global=true
+        else
+            _kb_add_filtered_args+=("$_kb_add_arg")
+        fi
+    done
+    set -- "${_kb_add_filtered_args[@]}"
+
     local global_root
     global_root=$(_kb_knowledge_global_root)
+    local local_root
+    local_root=$(_kb_knowledge_local_root)
+
+    # XACA-0754/XACA-0754-013 (ported XACA-0770): which root a write actually
+    # lands under. Defaults to global; flipped to local_root below whenever
+    # the write targets a local-only (PII) team. agent/team tiers key off the
+    # explicit persona/team-name argument (_kb_is_local_persona /
+    # _kb_is_local_only_team). subject and bare-project tiers have no such
+    # argument — they key off the CURRENT SESSION's team instead
+    # (_kb_current_session_is_local_only_team), and named-project keys off
+    # the session too (a project slug carries no team information of its
+    # own). Over-containment is the safe direction: a local session's
+    # subject/project entry going local is correct even for a generic topic.
+    local write_root="$global_root"
 
     local target_dir prefix title_raw tier_field=""
 
@@ -8420,8 +8941,11 @@ kb-knowledge-add() {
                 echo "Error: invalid persona name '${persona}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
                 return 1
             fi
+            if _kb_is_local_persona "$persona"; then
+                write_root="$local_root"
+            fi
             title_raw="${*:2}"
-            target_dir="${global_root}/agents/${persona}"
+            target_dir="${write_root}/agents/${persona}"
             prefix="k"
             tier_field="agent: ${persona}"
             ;;
@@ -8436,8 +8960,15 @@ kb-knowledge-add() {
                 echo "Error: invalid subject path '${subj_path}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
                 return 1
             fi
+            # XACA-0754-014 (ported XACA-0770): fail closed if the
+            # session's team is genuinely unresolvable (ambiguous — could be
+            # PII). No-op when it resolved, whether local or not.
+            _kb_ambiguous_tier_write_guard "$flag_allow_global" || return 1
+            if _kb_current_session_is_local_only_team; then
+                write_root="$local_root"
+            fi
             title_raw="${*:2}"
-            target_dir="${global_root}/subjects/${subj_path}"
+            target_dir="${write_root}/subjects/${subj_path}"
             prefix="s"
             ;;
         project)
@@ -8448,11 +8979,31 @@ kb-knowledge-add() {
                     echo "Error: invalid project slug '${proj_slug}' — each component must match ^[a-z][a-z0-9_-]*$ (no path traversal)" >&2
                     return 1
                 fi
+                # XACA-0754-014 (ported XACA-0770): same fail-closed
+                # guard as subject — a named project slug carries no team
+                # information of its own either.
+                _kb_ambiguous_tier_write_guard "$flag_allow_global" || return 1
+                if _kb_current_session_is_local_only_team; then
+                    write_root="$local_root"
+                fi
                 title_raw="${*:2}"
-                target_dir="${global_root}/projects/${proj_slug}"
+                target_dir="${write_root}/projects/${proj_slug}"
             else
                 title_raw="$*"
-                target_dir=$(_kb_knowledge_project_path)
+                # XACA-0754-013 (ported XACA-0770): use the "effective"
+                # resolver, which redirects only the bare
+                # ${global_root}/projects/<slug> fallback case to local_root
+                # for a local-only session — an in-repo .knowledge-config.yml
+                # / KB_KNOWLEDGE_PROJECT_PATH override already points outside
+                # the synced repo and passes through unchanged.
+                target_dir=$(_kb_knowledge_project_path_effective)
+                # XACA-0754-014: only the global-root FALLBACK case is
+                # ambiguity-sensitive — an in-repo/env-var override already
+                # points somewhere outside the synced repo regardless of
+                # whether the session's team can be resolved.
+                if [[ "$target_dir" == "${global_root}/projects/"* ]]; then
+                    _kb_ambiguous_tier_write_guard "$flag_allow_global" || return 1
+                fi
             fi
             prefix="p"
             ;;
@@ -8467,8 +9018,11 @@ kb-knowledge-add() {
                 echo "Error: invalid team name '${team_name}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
                 return 1
             fi
+            if _kb_is_local_only_team "$team_name"; then
+                write_root="$local_root"
+            fi
             title_raw="${*:2}"
-            target_dir="${global_root}/teams/${team_name}"
+            target_dir="${write_root}/teams/${team_name}"
             prefix="t"
             tier_field="team: ${team_name}"
             ;;
@@ -9138,9 +9692,15 @@ kb-knowledge-reindex() {
 
     local global_root
     global_root=$(_kb_knowledge_global_root)
+    local local_root
+    local_root=$(_kb_knowledge_local_root)
 
+    # XACA-0754-013 (ported XACA-0770): effective resolver so the "reindex
+    # the current project if it lives outside the glob-walked roots" check
+    # below also honours a local-redirected bare-project path, not just the
+    # raw in-repo/env-var cases.
     local project_path
-    project_path=$(_kb_knowledge_project_path)
+    project_path=$(_kb_knowledge_project_path_effective)
 
     if [[ -n "$target_dir" ]]; then
         target_dir="${target_dir/#\~/$HOME}"
@@ -9168,6 +9728,18 @@ kb-knowledge-reindex() {
         _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
     done
 
+    # XACA-0754/XACA-0754-013 (ported XACA-0770): local root's agent/team
+    # dirs (PII, unsynced — same shape as global root, just a different base
+    # path).
+    for rdir in "${local_root}/agents"/*/; do
+        [[ -d "$rdir" ]] || continue
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    done
+    for rdir in "${local_root}/teams"/*/; do
+        [[ -d "$rdir" ]] || continue
+        _kb_knowledge_reindex_one "$rdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    done
+
     # Subject dirs (recursive)
     _kb_reindex_subjects() {
         local base="${1-}"
@@ -9179,6 +9751,7 @@ kb-knowledge-reindex() {
         done
     }
     _kb_reindex_subjects "${global_root}/subjects"
+    _kb_reindex_subjects "${local_root}/subjects"
 
     # Project dirs — XACA-0532: scan ALL projects/*/ under global root (mirrors agents/teams/subjects)
     local pdir
@@ -9186,10 +9759,19 @@ kb-knowledge-reindex() {
         [[ -d "$pdir" ]] || continue
         _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
     done
-    # Also reindex the resolved project_path ONLY if it lives outside the global root
-    # (in-repo layout: .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH pointing elsewhere).
-    # Skip if already covered by the glob above to avoid double-reindexing.
-    if [[ -d "$project_path" && "$project_path" != "${global_root}/projects/"* ]]; then
+    # XACA-0754-013 (ported XACA-0770): same glob-walk under local_root/projects
+    # (a local-only session's named-project or local-redirected bare-project entries).
+    for pdir in "${local_root}/projects"/*/; do
+        [[ -d "$pdir" ]] || continue
+        _kb_knowledge_reindex_one "$pdir" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
+    done
+    # Also reindex the resolved project_path ONLY if it lives outside BOTH
+    # glob-walked roots above (in-repo layout: .knowledge-config.yml /
+    # KB_KNOWLEDGE_PROJECT_PATH pointing elsewhere). Skip if already covered
+    # by either glob to avoid double-reindexing.
+    if [[ -d "$project_path" ]] \
+        && [[ "$project_path" != "${global_root}/projects/"* ]] \
+        && [[ "$project_path" != "${local_root}/projects/"* ]]; then
         _kb_knowledge_reindex_one "$project_path" && rebuilt=$((rebuilt + 1)) || skipped=$((skipped + 1))
     fi
 
