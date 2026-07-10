@@ -149,13 +149,13 @@ _validate_ident "$TMUX_SOCKET" "TMUX_SOCKET"
 _validate_ident "$SESSION" "SESSION"
 
 # HOST is passed to ssh as its own argv element (not string-interpolated into
-# a shell command), so injection risk is lower — but still reject a leading
-# '-' (classic argv-injection-as-ssh-flag trick) and shell metacharacters.
+# a shell command), so injection risk is lower — but still reject shell
+# metacharacters as defense-in-depth. A leading '-' (the classic
+# argv-injection-as-ssh-flag trick) is already rejected upstream: the arg
+# parser above routes any leading-dash token into its '-*) unknown flag'
+# branch before positionals are assigned, so HOST can never begin with '-'
+# here (XACA-0774-014 removed a now-unreachable dedicated check for it).
 case "$HOST" in
-    -*)
-        echo "${SCRIPT_NAME}: invalid HOST '${HOST}' (must not start with '-')." >&2
-        exit 2
-        ;;
     *\'*|*\`*|*';'*|*'&'*|*'|'*|*$'\n'*)
         echo "${SCRIPT_NAME}: HOST contains unsafe characters." >&2
         exit 2
@@ -270,17 +270,21 @@ while true; do
     wait_s=$(( BACKOFF_BASE ** backoff_exp ))
     (( wait_s <= 0 || wait_s > BACKOFF_MAX )) && wait_s=$BACKOFF_MAX
 
+    # Reconnect/backoff progress is diagnostic status, not program output —
+    # send it to stderr (XACA-0774-013) so it never mixes with anything a
+    # caller might capture on stdout. In the normal interactive-tab case both
+    # streams land on the same terminal, so this is behaviour-neutral there.
     reset_terminal
-    echo ""
+    echo "" >&2
     if [[ $_session_status -eq 2 ]]; then
-        echo "  (${HOST} unreachable — cannot verify session yet; will keep retrying)"
+        echo "  (${HOST} unreachable — cannot verify session yet; will keep retrying)" >&2
     fi
     if [[ "$MAX_RETRIES" -gt 0 ]]; then
-        echo "  ⚠ connection to ${HOST} dropped (ssh exit ${exit_code}) — reconnecting… (attempt ${attempt}/${MAX_RETRIES})"
+        echo "  ⚠ connection to ${HOST} dropped (ssh exit ${exit_code}) — reconnecting… (attempt ${attempt}/${MAX_RETRIES})" >&2
     else
-        echo "  ⚠ connection to ${HOST} dropped (ssh exit ${exit_code}) — reconnecting… (attempt ${attempt})"
+        echo "  ⚠ connection to ${HOST} dropped (ssh exit ${exit_code}) — reconnecting… (attempt ${attempt})" >&2
     fi
-    echo "  Retrying in ${wait_s}s (Ctrl-C to abort)..."
+    echo "  Retrying in ${wait_s}s (Ctrl-C to abort)..." >&2
 
     if ! sleep "$wait_s"; then
         # Ctrl-C (or another signal) during the wait — abort instead of
