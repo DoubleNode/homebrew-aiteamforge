@@ -766,11 +766,21 @@ update_team_scripts() {
 # without this, the install-side fix creates an asymmetry where fresh installs work but
 # pre-existing upgraded boxes stay broken. The XACA-0673 parity gate only checks Python
 # sibling-imports, so adding shell scripts here does not affect that gate.
+# XACA-0774: remote-tmux-attach.sh is a BRAND-NEW file referenced (as a LOCAL
+# client-side path) by the rendered *-connect.sh scripts. It already carries the
+# .sh extension, so update_runtime_helpers' self-maintaining *.sh glob sweep
+# refreshes it automatically once present — no _xaca0608_aux_script_map entry
+# needed (that map is only for basenames the glob does NOT already cover, e.g.
+# the extensionless kb-port-reconcile). But since this is a NEW file, existing
+# installs have no target on disk yet, and the sweep's default rule is "only
+# refresh what's already there" — so it needs the same materialize-when-absent
+# treatment as kb-init-team-guard.sh above, or upgraded machines never get it.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
 kb-init-team-guard.sh
 kb-init-team
+remote-tmux-attach.sh
 EOF
 }
 

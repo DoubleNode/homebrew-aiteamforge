@@ -613,6 +613,42 @@ install_kb_port_reconcile_script() {
     success "Installed: $dest"
 }
 
+# XACA-0774: Install remote-tmux-attach.sh to AITEAMFORGE_DIR/scripts/ so freshly
+# rendered *-connect.sh scripts (which reference it as
+# ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh, a LOCAL client-side path) find
+# it on disk. Without this seed a fresh install's connect scripts point at a
+# missing file.
+# SIBLING-DRIFT NOTE: this install function is paired with:
+#   (a) _xaca0673_mandatory_materialize_basenames entry in aiteamforge-upgrade.sh
+#       (materialize-when-absent on upgrade — this is a BRAND-NEW file, so the
+#       self-maintaining *.sh sweep's default "only refresh if already present"
+#       rule would otherwise never lay it down on existing installs). NOT added
+#       to _xaca0608_aux_script_map — that map is for files the *.sh/*.py glob
+#       does NOT already cover (extensionless, like kb-port-reconcile); this file
+#       already has the .sh extension so the self-maintaining sweep in
+#       update_runtime_helpers picks it up for refresh once present.
+#   (b) no per-file removal entry in aiteamforge-uninstall.sh — that script
+#       removes the entire scripts/ directory wholesale (remove_files()'s
+#       dirs_to_remove), so kb-port-reconcile and this file are both covered
+#       without an individual entry.
+# All sites must stay in sync when remote-tmux-attach.sh is renamed or moved.
+install_remote_tmux_attach_script() {
+    local scripts_src="$INSTALL_ROOT/share/scripts"
+    local src="${scripts_src}/remote-tmux-attach.sh"
+    local dest="$AITEAMFORGE_DIR/scripts/remote-tmux-attach.sh"
+
+    if [ ! -f "$src" ]; then
+        warning "remote-tmux-attach.sh not found at: ${src} (skipping)"
+        return 0
+    fi
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    info "Installing remote-tmux-attach.sh (remote tmux session attach helper)"
+    cp "$src" "$dest"
+    chmod +x "$dest"
+    success "Installed: $dest"
+}
+
 # XACA-0698: Install kb-init-team and kb-init-team-guard.sh to AITEAMFORGE_DIR/scripts/
 # so a fresh install with NO team selected still has the provisioner available.
 # Without this, install-team.sh (which is team-gated) is the only installer that
@@ -2307,6 +2343,7 @@ install_kanban_system() {
     install_lcars_health_check_script
     install_worktree_personas_script
     install_kb_port_reconcile_script
+    install_remote_tmux_attach_script
     install_kb_init_team_scripts
     install_kanban_hooks
 

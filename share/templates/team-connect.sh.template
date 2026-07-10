@@ -208,7 +208,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             --window-title "$ITERM_WINDOW_NAME" \
             --profile "LCARS Web" \
             --tab-name "LCARS" \
-            --command "export ITERM_TAB_TITLE='LCARS' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars'\"" \
+            --command "export ITERM_TAB_TITLE='LCARS' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${TEAM_ID}-lcars" \
             2>&1 )
         _lcars_tab_exit=$?
         if [[ $_lcars_tab_exit -eq 0 ]]; then
@@ -233,7 +233,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
             --tab-name "LCARS" \
-            --command "export ITERM_TAB_TITLE='LCARS' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars'\"" \
+            --command "export ITERM_TAB_TITLE='LCARS' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${TEAM_ID}-lcars" \
             2>>"$ITERM_CONNECT_LOG" || true
     fi
     sleep 0.3
@@ -249,7 +249,7 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
             --action create-tab \
             --window-title "$ITERM_WINDOW_NAME" \
             --tab-name "$agent" \
-            --command "export ITERM_TAB_TITLE='${agent}' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}'\"" \
+            --command "export ITERM_TAB_TITLE='${agent}' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${TEAM_ID}-${agent}" \
             2>>"$ITERM_CONNECT_LOG"
         # shellcheck disable=SC2181
         if [[ $? -ne 0 ]]; then
@@ -288,6 +288,10 @@ if [[ "$TERM_PROGRAM" == "iTerm.app" ]] || pgrep -f "iTerm.app" > /dev/null; the
     # via ssh -t so it can read kanban/tmp JSON, board data, and query remote tmux.
     # imgcat works end-to-end because remote tmux has allow-passthrough on.
     # Remote AITEAMFORGE_DIR is assumed to match the local install path (spec §4.3).
+    # NOTE (XACA-0774-002): intentionally NOT wrapped with remote-tmux-attach.sh —
+    # this is a remote display-refresh loop (agent-panel-display.sh polls kanban/tmp
+    # + board JSON on the REMOTE host), not a tmux attach. Auto-reconnect is out of
+    # scope for this surface.
     echo ""
     echo "  Adding agent panels..."
     for agent in "${AGENTS[@]}"; do
@@ -338,7 +342,7 @@ tell application "Terminal"
         end tell
     end tell
     delay 0.5
-    do script "printf '\\\\033]0;LCARS\\\\007' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-lcars'\"" in front window
+    do script "printf '\\\\033]0;LCARS\\\\007' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${TEAM_ID}-lcars" in front window
 end tell
 APPLESCRIPT
     sleep 0.5
@@ -353,7 +357,7 @@ tell application "Terminal"
         end tell
     end tell
     delay 0.5
-    do script "printf '\\\\033]0;${agent}\\\\007' && ssh -t ${HOST} \"/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} attach -t ${TEAM_ID}-${agent}'\"" in front window
+    do script "printf '\\\\033]0;${agent}\\\\007' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${TEAM_ID}-${agent}" in front window
 end tell
 APPLESCRIPT
         sleep 0.5
