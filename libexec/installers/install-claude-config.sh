@@ -13,13 +13,22 @@ INSTALLER_NAME="Claude Code Configuration"
 INSTALLER_VERSION="1.4.2"
 
 # Default paths (will be overridden by setup wizard config)
-# CLAUDE_CONFIG_DIR: Where Claude Code config lives.
-# When CLAUDE_SANDBOX=1 (set by setup wizard for non-production installs),
-# configs are staged under AITEAMFORGE_DIR instead of modifying real ~/.claude.
+# CLAUDE_CONFIG_DIR: Where Claude Code config lives. Precedence (XACA-0773):
+#   1. A caller-provided CLAUDE_CONFIG_DIR is honored as-is (sandbox/agent
+#      testing seam — lets a test harness point this installer at a scratch
+#      dir without touching real ~/.claude, even when CLAUDE_SANDBOX isn't set).
+#   2. Else, when CLAUDE_SANDBOX=1 (set by setup wizard for non-production
+#      installs), configs are staged under AITEAMFORGE_DIR instead of
+#      modifying real ~/.claude.
+#   3. Else, real ~/.claude (production default).
+# Production (aiteamforge-setup.sh) never pre-sets CLAUDE_CONFIG_DIR, so this
+# new precedence is a no-op there — behavior is unchanged.
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-${HOME}/aiteamforge}"
 TEMPLATE_DIR="${TEMPLATE_DIR:-}"
 
-if [[ "${CLAUDE_SANDBOX:-0}" == "1" ]]; then
+if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+    :  # honor caller-provided path (sandbox/agent testing) — XACA-0773
+elif [[ "${CLAUDE_SANDBOX:-0}" == "1" ]]; then
     CLAUDE_CONFIG_DIR="${AITEAMFORGE_DIR}/.claude-staging"
 else
     CLAUDE_CONFIG_DIR="${HOME}/.claude"
@@ -87,6 +96,47 @@ merge_json() {
 
     # Merge: overlay values take precedence
     jq -s '.[0] * .[1]' "$base_file" "$overlay_file" > "$output_file"
+}
+
+# Merge settings.json specifically (XACA-0773). The generic merge_json() above
+# does a whole-array REPLACE of every key via `jq -s '.[0] * .[1]'`, which is
+# fine for most settings.json fields but silently drops any box-local,
+# hand-added hooks.<event> matcher (e.g. a custom PreToolUse entry) on every
+# upgrade, because jq's `*` replaces arrays wholesale rather than merging them.
+# This variant deep-merges everything EXCEPT hooks.<event> arrays, which are
+# unioned instead: the shipped template's matchers always win on a `.matcher`
+# collision (so fixes/updates to shipped matchers still propagate), and any
+# base (existing/user) matcher whose `.matcher` is absent from the template is
+# preserved. Confined to settings.json — merge_json() itself is untouched and
+# still used as-is elsewhere (MCP config, etc.) where whole-array replace is
+# the correct/expected behavior.
+merge_settings_json() {
+    local base_file="$1"
+    local overlay_file="$2"
+    local output_file="$3"
+
+    if ! command -v jq &>/dev/null; then
+        log_error "jq is required for JSON merging"
+        return 1
+    fi
+
+    # If base doesn't exist, just copy overlay
+    if [[ ! -f "$base_file" ]]; then
+        cp "$overlay_file" "$output_file"
+        return 0
+    fi
+
+    jq -s '
+      .[0] as $base | .[1] as $ovl |
+      def union_hooks($a; $b):
+        ($b // [])
+        + (($a // []) | map(select(.matcher as $m | (($b // []) | map(.matcher) | index($m)) == null)));
+      ($base * $ovl)
+      | if (($base.hooks // $ovl.hooks) != null) then
+          .hooks = ( reduce ((($base.hooks // {}) + ($ovl.hooks // {})) | keys_unsorted[]) as $e (.hooks // {};
+                       .[$e] = union_hooks($base.hooks[$e]; $ovl.hooks[$e]) ) )
+        else . end
+    ' "$base_file" "$overlay_file" > "$output_file"
 }
 
 # Template substitution for configuration files
@@ -405,7 +455,7 @@ install_settings_json() {
         if [[ -f "$target" ]]; then
             log_info "Merging with existing settings..."
             local merged_file="/tmp/claude-settings-merged-$$.json"
-            merge_json "$target" "$temp_file" "$merged_file"
+            merge_settings_json "$target" "$temp_file" "$merged_file"
             mv "$merged_file" "$target"
         else
             mv "$temp_file" "$target"
