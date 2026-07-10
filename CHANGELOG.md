@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- XACA-0773 — Ships an iCloud File Provider path guard as a new `PreToolUse` hook (`share/templates/claude/hooks/block-icloud-paths.py`), fleet-wide via the tap installer. Native file tools (`Read`/`Write`/`Edit`/`MultiEdit`/`NotebookEdit`/`Glob`/`Grep`) opening a path under `~/Library/Mobile Documents/com~apple~CloudDocs/` wedge Claude Code's event loop in an uninterruptible `openat$NOCANCEL` on both reads and writes. The hook denies the fatal open before it happens (exit 2 + stderr guidance pointing at the local `~/aiteamforge-transfers/<team>/` staging dir and the `~/.aiteamforge/stage-transfer.sh` helpers) and fails OPEN (exit 0) on any parse error so it can never break normal tool use. `Bash` is intentionally NOT guarded — subprocess opens don't hang, and that is how the stage-transfer/publish-transfer helpers move files across the iCloud boundary. `libexec/installers/install-claude-config.sh::install_hooks()` now copies the top-level hook into `${CLAUDE_CONFIG_DIR}/hooks/` (guarding existing read-only files the same way the damage-control loop does) alongside the existing `damage-control/*` copy; `share/templates/claude/settings.json.template` registers it as a new `PreToolUse` matcher. `settings.json` is per-machine and never synced, so this installer path (fresh install AND `brew upgrade` hydration) is the only way the hook reaches already-deployed fleet machines.
+
 ## [0.17.4] - 2026-07-10
 
 ### Added

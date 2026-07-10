@@ -211,6 +211,19 @@ install_hooks() {
         fi
     fi
 
+    # Install top-level hooks (skip files that already exist and are read-only)
+    if [[ -f "${TEMPLATE_DIR}/claude/hooks/block-icloud-paths.py" ]]; then
+        local icloud_guard_target="$hooks_dir/block-icloud-paths.py"
+        if [[ -f "$icloud_guard_target" && ! -w "$icloud_guard_target" ]]; then
+            log_warning "Skipping read-only hook: block-icloud-paths.py"
+        elif cp "${TEMPLATE_DIR}/claude/hooks/block-icloud-paths.py" "$icloud_guard_target" 2>/dev/null; then
+            chmod +x "$icloud_guard_target" 2>/dev/null || true
+            log_success "iCloud path guard hook installed"
+        else
+            log_warning "Could not install: block-icloud-paths.py"
+        fi
+    fi
+
     # Apply template substitution to any hook scripts
     find "$hooks_dir" -type f -name "*.sh" -o -name "*.py" | while read -r hook_file; do
         # If file contains template markers, apply substitution
