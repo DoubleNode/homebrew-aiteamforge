@@ -176,7 +176,10 @@ get_hostname() {
 
     if [ -n "$tailscale_json" ]; then
         # Extract the first DNSName (which is Self) and remove trailing dot
-        tailscale_name=$(echo "$tailscale_json" | grep '"DNSName"' | head -1 | sed 's/.*"DNSName": *"\([^"]*\)".*/\1/' | sed 's/\.$//')
+        # XACA-0782: `|| true` guards the same set -e/pipefail abort class as the
+        # session-count line — grep exits 1 if the JSON has no DNSName; empty name
+        # is fine, the caller falls back to hostname below.
+        tailscale_name=$(echo "$tailscale_json" | grep '"DNSName"' | head -1 | sed 's/.*"DNSName": *"\([^"]*\)".*/\1/' | sed 's/\.$//') || true
     fi
 
     if [ -n "$tailscale_name" ]; then
@@ -188,7 +191,11 @@ get_hostname() {
 }
 
 HOSTNAME=$(get_hostname)
-IP_ADDRESS=$(/sbin/ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1)
+# XACA-0782: `|| true` prevents a whole-script abort here (top-level, under set
+# -euo pipefail). On a loopback-only host, `grep -v '127.0.0.1'` filters every
+# line and exits 1; pipefail + set -e would kill the reporter before it POSTs.
+# Empty IP is acceptable in the payload; aborting is not.
+IP_ADDRESS=$(/sbin/ifconfig | grep 'inet ' | grep -v '127.0.0.1' | awk '{print $2}' | head -1) || true
 OS_TYPE=$(uname -s)
 TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -440,7 +447,9 @@ get_tmux_sessions() {
             # Format: session_name: X windows (created DATE) [attached]
 
             session_name=$(echo "$line" | awk -F: '{print $1}')
-            windows=$(echo "$line" | grep -o '[0-9]* windows' | awk '{print $1}')
+            # XACA-0782: `|| echo 0` keeps windows numeric AND guards the set -e/
+            # pipefail abort class (grep -o exits 1 if the line has no "N windows").
+            windows=$(echo "$line" | grep -o '[0-9]* windows' | awk '{print $1}' || echo 0)
             attached=$(echo "$line" | grep -q 'attached' && echo "true" || echo "false")
 
             # Extract creation date
