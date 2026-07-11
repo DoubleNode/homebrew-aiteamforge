@@ -63,6 +63,7 @@ test-xaca-0564-kanban-helpers-overwrite-guard.sh plain-shell
 test-xaca-0585-lcars-health-script-laydown.sh   plain-shell
 test-xaca-0588-deploy-worktree-personas-laydown.sh plain-shell
 test-xaca-0608-team-script-refresh.sh           plain-shell
+test-xaca-0610-fleet-reporter-refresh.sh        plain-shell
 test-xaca-0611-imgcat-provision.sh              plain-shell
 test-xaca-0632-kb-variance.sh                   plain-shell
 test-xaca-0649-kanban-dir-resolver.sh           plain-shell

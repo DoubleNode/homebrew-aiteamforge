@@ -938,6 +938,32 @@ update_runtime_helpers() {
       echo "Would update: iterm2_window_manager.py (root copy)"
     fi
   fi
+
+  # XACA-0610: Refresh the OPERATIVE fleet-monitor/client/fleet-reporter.sh copy.
+  # fleet-reporter.sh ships to TWO destinations at install time: a decorative
+  # helper copy at ${WORKING_DIR}/scripts/fleet-reporter.sh (via install-shell.sh,
+  # covered by the scripts/ sweep above) and the OPERATIVE copy at
+  # ${WORKING_DIR}/fleet-monitor/client/fleet-reporter.sh (via
+  # install-fleet-monitor.sh) — it is this second, separate-destination copy that
+  # the com.aiteamforge.fleet-reporter launchd job actually executes. Because the
+  # scripts/ sweep above only walks ${WORKING_DIR}/scripts/, it never reaches
+  # fleet-monitor/client/, leaving upgraded boxes running a permanently frozen
+  # reporter. Same defect class as XACA-0677's root-level iterm2_window_manager.py.
+  # Convention (XACA-0673 pattern): refresh ONLY if the operative copy already
+  # exists on disk — machines that opted out of fleet monitoring (XACA-0673)
+  # never had it laid down and must not have it materialised here.
+  local fr_src="${FRAMEWORK_DIR}/share/scripts/fleet-reporter.sh"
+  local fr_dest="${WORKING_DIR}/fleet-monitor/client/fleet-reporter.sh"
+  if [ -f "$fr_dest" ] && [ -f "$fr_src" ]; then
+    print_info "Updating fleet-monitor/client/fleet-reporter.sh (operative copy)..."
+    if [ "$DRY_RUN" = false ]; then
+      cp "$fr_src" "$fr_dest"
+      chmod +x "$fr_dest"
+      print_success "Updated fleet-monitor/client/fleet-reporter.sh (operative copy)"
+    else
+      echo "Would update: fleet-monitor/client/fleet-reporter.sh (operative copy)"
+    fi
+  fi
 }
 
 # Update shell helpers
