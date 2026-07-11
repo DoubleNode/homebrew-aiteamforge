@@ -966,6 +966,21 @@ update_runtime_helpers() {
   fi
 }
 
+# XACA-0771: Mandatory shared alias files. install_aliases() (install-shell.sh)
+# lays down all three of these unconditionally on every fresh install — there
+# is no "optional alias file" today. Kept as its own function (mirrors the
+# XACA-0673 _xaca0673_mandatory_materialize_basenames pattern) so a FUTURE
+# optional/layout-specific alias file can opt out without touching the
+# create-vs-skip branching in update_shell_helpers' alias loop below.
+# Newline-delimited basenames; exact-line membership test.
+_xaca0771_mandatory_alias_basenames() {
+  cat <<'EOF'
+agent-aliases.sh
+cc-aliases.sh
+worktree-aliases.sh
+EOF
+}
+
 # Update shell helpers
 update_shell_helpers() {
   print_section "Updating Shell Helpers"
@@ -1027,6 +1042,33 @@ update_shell_helpers() {
     fi
 
     if [ ! -f "$target" ]; then
+      # XACA-0771: the target is missing. Prior behavior was an unconditional
+      # `continue` here — upgrade NEVER created a missing alias file, only
+      # refreshed one that already existed. That stranded any box whose
+      # share/aliases/cc-aliases.sh was never laid down (pre-XACA-0494 install)
+      # or got deleted: cc-aliases.sh defines the `cc` alias that redirects the
+      # bare `cc` command away from /usr/bin/cc (clang) — without it, `cc`
+      # silently falls through to clang and the box never notices until a
+      # script assuming the alias breaks. Only the MANDATORY set (see
+      # _xaca0771_mandatory_alias_basenames above) is created from absent; a
+      # future non-mandatory/layout-specific alias file still opts out via
+      # `continue`, matching the update_runtime_helpers XACA-0673 convention.
+      case $'\n'"$(_xaca0771_mandatory_alias_basenames)"$'\n' in
+        *$'\n'"${alias_file}"$'\n'*) : ;;   # mandatory — materialize it
+        *) continue ;;                       # optional — skip if absent
+      esac
+
+      print_info "Creating share/aliases/${alias_file} (was missing)..."
+      if [ "$DRY_RUN" = false ]; then
+        mkdir -p "$aliases_dir"
+        sed -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" "$source" > "$target"
+        chmod +x "$target" 2>/dev/null || true
+        print_success "Created share/aliases/${alias_file}"
+        updated=$((updated + 1))
+      else
+        echo "Would create: share/aliases/${alias_file} (was missing)"
+        updated=$((updated + 1))
+      fi
       continue
     fi
 
@@ -1043,6 +1085,22 @@ update_shell_helpers() {
       fi
     fi
   done
+
+  # XACA-0771: assert-present — verify every mandatory alias file actually
+  # exists on disk after the create/refresh loop above. This is a loud warning,
+  # not a hard failure (mirrors the fail-soft stance of update_knowledge_repo /
+  # update_knowledge_sync): a still-missing file here means the shipped
+  # template itself was absent from this Cellar payload (the `[ ! -f "$source"
+  # ] && continue` guard above would otherwise let that pass silently).
+  # Skipped under --dry-run, since nothing was actually materialized to check.
+  if [ "$DRY_RUN" = false ]; then
+    local _mandatory_alias
+    for _mandatory_alias in $(_xaca0771_mandatory_alias_basenames); do
+      if [ ! -f "${aliases_dir}/${_mandatory_alias}" ]; then
+        print_warning "Mandatory alias file still missing after upgrade: ${aliases_dir}/${_mandatory_alias}"
+      fi
+    done
+  fi
 
   # Update update_claude_agent.sh
   local agent_src="${tap_share}/scripts/update_claude_agent.sh"
@@ -1070,6 +1128,137 @@ update_shell_helpers() {
       print_info "Reload shell or run: source ~/.zshrc"
     fi
   fi
+}
+
+# XACA-0771: Mandatory ~/.claude/hooks files, relative to ${CLAUDE_CONFIG_DIR}/hooks/.
+# Kept as its own function (mirrors _xaca0673_mandatory_materialize_basenames /
+# _xaca0771_mandatory_alias_basenames) so update_claude_hooks' assert-present
+# check has a single source of truth for "which hook files must exist". This
+# set intentionally EXCLUDES damage-control/README.md and the
+# damage-control/test-*.py files: install_hooks() (install-claude-config.sh)
+# copies every file under templates/claude/hooks/damage-control/ verbatim
+# (docs and tests included — that behavior is unchanged by this ticket), but
+# only the three *-damage-control.py scripts and block-icloud-paths.py /
+# inject-time-context.sh are actually WIRED as hooks in settings.json.template
+# — those are the files whose absence breaks a live hook, so those are the
+# ones worth a loud warning if still missing after materialize.
+_xaca0771_mandatory_hook_basenames() {
+  cat <<'EOF'
+inject-time-context.sh
+block-icloud-paths.py
+damage-control/bash-tool-damage-control.py
+damage-control/edit-tool-damage-control.py
+damage-control/write-tool-damage-control.py
+EOF
+}
+
+# XACA-0771: ~/.claude/hooks materialization on the UPGRADE path.
+#
+# install_hooks() (libexec/installers/install-claude-config.sh) lays down the
+# mandatory hook files (damage-control/*, block-icloud-paths.py, and — after
+# this same ticket's install-side fix — inject-time-context.sh) into
+# ${CLAUDE_CONFIG_DIR}/hooks/. Its ONLY call site was install_claude_config(),
+# reached from aiteamforge-setup.sh on a FRESH INSTALL. `aiteamforge upgrade`
+# had NO function that ever touched ~/.claude/hooks — same bug class as
+# XACA-0751 (update_knowledge_repo) / XACA-0761 (update_knowledge_sync):
+# install-time-only provisioning the upgrade path never learned about.
+# Confirmed root cause: settings.json.template wires
+# {{CLAUDE_CONFIG_DIR}}/hooks/inject-time-context.sh as a UserPromptSubmit
+# hook, so a box whose hooks/ directory predates that file (or lost it) runs
+# with time-context injection silently broken, and `aiteamforge upgrade` never
+# re-materialized it.
+#
+# We REUSE install_hooks() verbatim (same idiom as update_knowledge_repo /
+# update_knowledge_sync reusing their installer counterparts) instead of
+# re-implementing the copy+chmod+template-substitution logic here. install_hooks
+# already: creates ${hooks_dir} and damage-control/ if absent, copies every
+# damage-control/* file (this ticket does not change what damage-control/
+# ships), skips a target only when it exists AND is read-only (never silently
+# clobbers a locked-down file), and applies {{...}} template substitution to
+# any *.sh/*.py under hooks_dir afterward. Because install_hooks unconditionally
+# cp's rather than "only if missing", calling it here BOTH creates missing
+# mandatory files (the defect this ticket fixes) AND refreshes already-present
+# ones with the latest shipped content — the same "materialize-if-missing,
+# refresh-if-present" contract XACA-0673 established for update_runtime_helpers.
+#
+# Runs in a SUBSHELL for the identical two reasons update_knowledge_repo /
+# update_knowledge_sync document: (1) install-claude-config.sh opens with
+# `set -euo pipefail`; sourcing it in-process would leak `set -u` into this
+# `set -eo` (no -u) upgrade script and abort on the next unset variable, and
+# (2) fail-soft — the nightly auto-upgrade LaunchAgent runs unattended, so a
+# sourcing error or unexpected non-zero exit must never abort the parent
+# upgrade.
+#
+# AITEAMFORGE_DIR / TEMPLATE_DIR are neither read from nor exported by the
+# rest of this script, so — like update_knowledge_sync's AITEAMFORGE_DIR /
+# INSTALL_ROOT — they are set explicitly inside the subshell from this
+# script's own WORKING_DIR / FRAMEWORK_DIR before sourcing. CLAUDE_CONFIG_DIR
+# is deliberately NOT set here: install-claude-config.sh's own top-of-file
+# precedence (XACA-0773) honors a caller/test-exported CLAUDE_CONFIG_DIR
+# override verbatim (the sandbox/test seam), and otherwise falls back to the
+# real $HOME/.claude — exactly what production `aiteamforge upgrade` needs.
+# Do NOT call install_claude_config() (the full installer entrypoint) — that
+# would also touch settings.json, skills, personas, tmux.conf, etc. This
+# function's job is ONLY the hook files.
+update_claude_hooks() {
+  print_section "Updating Claude Code Hooks"
+
+  local installer="${LIBEXEC_DIR}/installers/install-claude-config.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-claude-config.sh not found ($installer) — skipping Claude Code hooks refresh"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "Would ensure ~/.claude/hooks/{inject-time-context.sh,block-icloud-paths.py,damage-control/*} are present and current"
+    return 0
+  fi
+
+  print_info "Ensuring Claude Code hooks are present and current (idempotent; fail-soft)..."
+
+  # Subshell isolates install-claude-config.sh's `set -u` (see rationale
+  # above); AITEAMFORGE_DIR / TEMPLATE_DIR are set here — not exported — so
+  # they apply only inside this subshell and never leak into the rest of the
+  # upgrade run. Any caller/test-exported CLAUDE_CONFIG_DIR is inherited
+  # unchanged (subshells inherit the parent's exported environment).
+  if (
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      TEMPLATE_DIR="${FRAMEWORK_DIR}/share/templates"
+      export AITEAMFORGE_DIR TEMPLATE_DIR
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      install_hooks
+    ); then
+    print_success "Claude Code hooks check complete"
+  else
+    print_warning "Claude Code hooks refresh skipped (non-fatal; upgrade continues)"
+  fi
+
+  # XACA-0771: assert-present — verify every mandatory hook file actually
+  # exists on disk after the materialize attempt above. Loud warning, not a
+  # hard failure (same fail-soft stance as the rest of this function): a
+  # still-missing file here means the subshell above errored partway through,
+  # or the shipped template itself was absent from this Cellar payload. This
+  # mirrors install-claude-config.sh's own CLAUDE_CONFIG_DIR precedence
+  # (XACA-0773) exactly, so the path checked here is the SAME path install_hooks
+  # actually wrote to. Skipped under --dry-run (nothing was materialized).
+  local _assert_config_dir
+  if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
+    _assert_config_dir="$CLAUDE_CONFIG_DIR"
+  elif [ "${CLAUDE_SANDBOX:-0}" = "1" ]; then
+    _assert_config_dir="${WORKING_DIR}/.claude-staging"
+  else
+    _assert_config_dir="$HOME/.claude"
+  fi
+  local _hooks_check_dir="${_assert_config_dir}/hooks"
+  local _mandatory_hook
+  for _mandatory_hook in $(_xaca0771_mandatory_hook_basenames); do
+    if [ ! -f "${_hooks_check_dir}/${_mandatory_hook}" ]; then
+      print_warning "Mandatory Claude Code hook still missing after refresh: ${_hooks_check_dir}/${_mandatory_hook}"
+    fi
+  done
+
+  return 0
 }
 
 # Update skills
@@ -1335,6 +1524,7 @@ update_team_scripts
 update_runtime_helpers
 update_imgcat
 update_shell_helpers
+update_claude_hooks
 update_skills
 update_launchagents
 # XACA-0763-005: tear down the retired com.aiteamforge.lcars-runatload agent

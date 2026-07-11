@@ -265,6 +265,26 @@ install_hooks() {
         fi
     fi
 
+    # XACA-0771: install inject-time-context.sh (skip files that already exist
+    # and are read-only). This hook was shipped in templates/claude/hooks/ and
+    # wired as the UserPromptSubmit hook in settings.json.template, but this
+    # function never actually copied it — a fresh install laid down a
+    # settings.json referencing a hook script that did not exist on disk, so
+    # the UserPromptSubmit hook silently failed on every invocation. Same
+    # install-vs-template gap class as block-icloud-paths.py above; mirrors its
+    # exact read-only-guard + chmod pattern.
+    if [[ -f "${TEMPLATE_DIR}/claude/hooks/inject-time-context.sh" ]]; then
+        local time_context_target="$hooks_dir/inject-time-context.sh"
+        if [[ -f "$time_context_target" && ! -w "$time_context_target" ]]; then
+            log_warning "Skipping read-only hook: inject-time-context.sh"
+        elif cp "${TEMPLATE_DIR}/claude/hooks/inject-time-context.sh" "$time_context_target" 2>/dev/null; then
+            chmod +x "$time_context_target" 2>/dev/null || true
+            log_success "Time-context hook installed"
+        else
+            log_warning "Could not install: inject-time-context.sh"
+        fi
+    fi
+
     # Apply template substitution to any hook scripts
     find "$hooks_dir" -type f -name "*.sh" -o -name "*.py" | while read -r hook_file; do
         # If file contains template markers, apply substitution
