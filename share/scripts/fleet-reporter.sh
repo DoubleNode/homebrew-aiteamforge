@@ -668,8 +668,14 @@ main() {
     echo "Collecting tmux session data..."
     payload=$(build_payload)
 
-    # Count sessions
-    session_count=$(echo "$payload" | grep -o '"name":' | wc -l | tr -d ' ')
+    # Count sessions.
+    # XACA-0782: the trailing `|| true` is REQUIRED, not redundant. Under
+    # `set -euo pipefail` (top of file), an idle machine with ZERO tmux sessions
+    # yields a payload with no `"name":` occurrences, so `grep -o` exits 1;
+    # pipefail propagates that and `set -e` aborts the whole script HERE — before
+    # send_status ever runs — so idle machines could never report. `|| true`
+    # keeps the (correct, 0) count without letting grep's no-match abort the run.
+    session_count=$(echo "$payload" | grep -o '"name":' | wc -l | tr -d ' ') || true
     echo "Found $session_count tmux sessions"
     echo ""
 
