@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-07-10
+
 ### Fixed
 - XACA-0782 — `fleet-reporter.sh` (mirrored from canonical `fleet-monitor/client/fleet-reporter.sh`, XACA-0340) no longer aborts on machines with ZERO tmux sessions. The script runs `set -euo pipefail`; the session-count line `session_count=$(echo "$payload" | grep -o '"name":' | wc -l ...)` returns a non-zero exit from `grep` when the payload has no `"name":` occurrences (an idle machine running no team sessions), which pipefail propagated and `set -e` turned into a full-script abort — BEFORE `send_status` ever POSTed — so idle fleet machines could never report and showed permanently offline. Fix: append `|| true` to the count line (plus an explanatory comment so it isn't "cleaned up" as redundant) so grep's no-match exit can't abort the run; the count is correctly 0. Review follow-up (PR #683): the same set -e/pipefail abort class was guarded at three sibling `grep`-in-command-substitution sites in the same script — `tailscale_name` (grep '"DNSName"'), the **top-level** `IP_ADDRESS` (`grep -v '127.0.0.1'`, which could abort the whole reporter on a loopback-only host), and `windows` (`grep -o '[0-9]* windows'`, guarded with `|| echo 0` to stay numeric). Byte-identical canonical + tap mirror per the plain-`cp` `sync_file` contract.
 - XACA-0610 — `update_runtime_helpers` in `libexec/commands/aiteamforge-upgrade.sh` now also refreshes the OPERATIVE `fleet-monitor/client/fleet-reporter.sh` copy, not just the decorative `${WORKING_DIR}/scripts/fleet-reporter.sh` copy the existing scripts/ sweep already covered. `fleet-reporter.sh` ships to two destinations at install time (`install-shell.sh` lays down the decorative copy, `install-fleet-monitor.sh` lays down the operative copy that the `com.aiteamforge.fleet-reporter` launchd job actually executes); the scripts/ sweep only walks `WORKING_DIR/scripts/`, so it never reached `fleet-monitor/client/`, leaving upgraded machines running a permanently frozen reporter. Fix: a tightly-scoped block at the end of `update_runtime_helpers` (same shape as the XACA-0677 root-`iterm2_window_manager.py` fix) copies `share/scripts/fleet-reporter.sh` → `${WORKING_DIR}/fleet-monitor/client/fleet-reporter.sh` with plain `cp` + `chmod +x`, refreshing ONLY when the operative copy already exists on disk (XACA-0673 convention — machines that opted out of fleet monitoring stay opted out). Dry-run aware. New `tests/test-xaca-0610-fleet-reporter-refresh.sh` (stale-refresh, content-match, absent-not-materialised, dry-run cases), registered in `tests/ci-manifest` as `plain-shell`.
@@ -947,7 +949,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.4...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.5...HEAD
+[0.17.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.4...v0.17.5
 [0.17.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.3...v0.17.4
 [0.17.3]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.2...v0.17.3
 [0.17.2]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.1...v0.17.2
