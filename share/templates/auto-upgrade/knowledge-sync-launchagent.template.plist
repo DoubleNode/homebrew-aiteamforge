@@ -1,0 +1,101 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Knowledge-Sync LaunchAgent — XACA-0761 (mirrors XACA-0749's
+  com.devteam.knowledge-sync onto the tap as a fleet-portable template)
+  =========================================================================
+  Periodic best-effort job that runs {{KNOWLEDGE_SYNC_SCRIPT}} (kb-knowledge-sync.sh)
+  every 30 minutes to keep a machine's ~/knowledge git clone in sync with the
+  fleet (git pull --rebase, then git push if there are local commits ahead).
+
+  WHY THIS IS A PLAIN StartInterval JOB, NOT A WatchPaths TRIGGER:
+  Unlike lcars-watch / cellar-watch (which react to filesystem mutations),
+  knowledge sync has no natural "something changed" signal to watch — commits
+  can land on ANY fleet machine's ~/knowledge clone at any time, including
+  machines this LaunchAgent knows nothing about. A fixed-interval poll is the
+  correct shape here, matching the source com.devteam.knowledge-sync.plist
+  design (XACA-0749) and the auto-upgrade LaunchAgent's periodic pattern.
+
+  NO AbandonProcessGroup (XACA-0763 evaluation):
+  AbandonProcessGroup is required only when the job's ProgramArguments spawn
+  or chain into a long-lived child process that must outlive the job's own
+  exit (see lcars-watch / cellar-watch, which chain into a persistent
+  server.py). kb-knowledge-sync.sh does the opposite: it runs `git pull
+  --rebase` and `git push` synchronously to completion and always exits 0
+  (see the script's own "Exit-code policy" doc comment) — no `&`
+  backgrounding, no detached children, no persistent process. There is
+  nothing for launchd to reap prematurely, so AbandonProcessGroup is not
+  needed here. This mirrors auto-upgrade-launchagent.template.plist, which
+  is the other periodic (non-WatchPaths) template in this directory and also
+  omits the key.
+
+  RunAtLoad — catch up once at login/reboot/reload rather than waiting up to
+  30 minutes for the first sync.
+
+  KeepAlive=false / Nice=15 / ProcessType=Background / LowPriorityIO=true —
+  preserved unchanged from the source plist (XACA-0749): this is a strictly
+  best-effort background job that must never compete for foreground CPU/IO
+  and must never be treated as a service to keep alive.
+
+  ThrottleInterval=60 — floor on restart cadence; StartInterval (1800s) is
+  the real schedule. Preserved unchanged from the source plist.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.aiteamforge.knowledge-sync</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <!-- Use absolute paths: launchd PATH is minimal and does not include
+             Homebrew bin by default. {{KNOWLEDGE_SYNC_SCRIPT}} is substituted
+             by the installer to the full path of the installed
+             kb-knowledge-sync.sh, mirroring the AUTO_UPGRADE_SCRIPT install
+             convention used by auto-upgrade-launchagent.template.plist:
+             $AITEAMFORGE_DIR/scripts/<script-name>. -->
+        <string>/bin/bash</string>
+        <string>{{KNOWLEDGE_SYNC_SCRIPT}}</string>
+    </array>
+
+    <!-- Every 30 minutes — knowledge sync is not latency-sensitive. Preserved
+         from the source com.devteam.knowledge-sync.plist. -->
+    <key>StartInterval</key>
+    <integer>1800</integer>
+
+    <!-- Catch up at load (login / reboot / reload) -->
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>{{LOG_DIR}}/knowledge-sync.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>{{LOG_DIR}}/knowledge-sync.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Include both Apple Silicon and Intel Homebrew prefixes so git
+             (and any brew-installed dependency) is reachable regardless of
+             architecture. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>{{HOME_DIR}}</string>
+        <key>AITEAMFORGE_DIR</key>
+        <string>{{AITEAMFORGE_DIR}}</string>
+    </dict>
+
+    <!-- Best-effort background job — never keep-alive, never compete for
+         I/O. Preserved unchanged from the source plist (XACA-0749). -->
+    <key>KeepAlive</key>
+    <false/>
+    <key>Nice</key>
+    <integer>15</integer>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>LowPriorityIO</key>
+    <true/>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+</dict>
+</plist>

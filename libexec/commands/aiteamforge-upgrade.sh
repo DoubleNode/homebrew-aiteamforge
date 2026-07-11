@@ -486,6 +486,77 @@ update_knowledge_repo() {
   return 0
 }
 
+# Materialize the knowledge-sync LaunchAgent onto EXISTING fleet machines
+# (XACA-0761). install_knowledge_sync_launchagent's ONLY call site was
+# install_kanban_system() (fresh `aiteamforge setup` only) — same defect
+# class as update_knowledge_repo's own header comment describes for
+# XACA-0747/0751: install-time-only provisioning never reaches boxes that
+# were already installed before this feature shipped. This function is the
+# fix — it runs install_knowledge_sync_launchagent from the nightly
+# auto-upgrade LaunchAgent so every fleet machine eventually gets the daemon,
+# not just fresh installs.
+#
+# We REUSE install_knowledge_sync_launchagent verbatim (same idiom as
+# update_knowledge_repo reusing install_knowledge_repo above) rather than
+# re-implementing the render+load logic here — it already handles the
+# fail-soft ~/knowledge-is-a-real-clone gate, missing-script/template
+# soft-skips, and the XACA-0651-009 launchctl-list load-verify pattern.
+# install_knowledge_sync_launchagent is UNCONDITIONAL-INSTALL (it (re)renders
+# and (re)loads the plist every time it's called, it does not skip when the
+# plist is already present) — that "materialize" behavior is exactly what
+# gets existing machines that never received the plist caught up, and is
+# also idempotent/safe to re-run on machines that already have it.
+#
+# Unlike update_knowledge_repo, install_knowledge_sync_launchagent DOES read
+# $AITEAMFORGE_DIR and $INSTALL_ROOT (to resolve the plist template, the
+# script source, and both install destinations) — but neither is guaranteed
+# to be exported into this process the way aiteamforge-setup.sh explicitly
+# `export`s them before invoking installers. So, unlike update_knowledge_repo,
+# we explicitly set both inside the subshell from this script's own
+# WORKING_DIR / FRAMEWORK_DIR (the upgrade path's equivalents, see
+# get_working_dir / get_framework_dir in libexec/lib/config.sh) before
+# sourcing — install-kanban.sh itself never defines either var, it only
+# consumes them.
+#
+# Same subshell rationale as update_knowledge_repo: (1) install-kanban.sh's
+# `set -euo pipefail` must not leak into the rest of this `set -eo` (no -u)
+# upgrade script, and (2) the nightly auto-upgrade LaunchAgent runs
+# unattended, so a sourcing error or unexpected non-zero exit must never
+# abort the parent upgrade — the trailing `|| ...` branch guarantees that.
+update_knowledge_sync() {
+  print_section "Updating knowledge-sync LaunchAgent"
+
+  local installer="${LIBEXEC_DIR}/installers/install-kanban.sh"
+  if [ ! -f "$installer" ]; then
+    print_warning "install-kanban.sh not found ($installer) — skipping knowledge-sync LaunchAgent"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would materialize the knowledge-sync LaunchAgent if ~/knowledge is a real git clone (fail-soft skip otherwise)"
+  else
+    print_info "Ensuring knowledge-sync LaunchAgent is installed (idempotent; fail-soft)..."
+  fi
+
+  # Subshell isolates install-kanban.sh's `set -u` (see rationale above);
+  # AITEAMFORGE_DIR / INSTALL_ROOT are set here — not exported — so they
+  # apply only inside this subshell and never leak into the rest of the
+  # upgrade run.
+  if (
+      AITEAMFORGE_DIR="${WORKING_DIR}"
+      INSTALL_ROOT="${FRAMEWORK_DIR}"
+      export AITEAMFORGE_DIR INSTALL_ROOT
+      # shellcheck source=/dev/null
+      source "$installer" >/dev/null 2>&1
+      install_knowledge_sync_launchagent
+    ); then
+    print_success "Knowledge-sync LaunchAgent check complete"
+  else
+    print_warning "Knowledge-sync LaunchAgent provisioning skipped (non-fatal; upgrade continues)"
+  fi
+  return 0
+}
+
 # Canonical aux-script map (XACA-0558, extended XACA-0608). SINGLE source of
 # truth: update_aux_scripts consumes it to know what to refresh, and
 # update_runtime_helpers reads the scripts/-destined basenames out of it to
@@ -1232,6 +1303,7 @@ update_templates
 update_lcars
 update_kanban_hooks
 update_knowledge_repo
+update_knowledge_sync
 update_aux_scripts
 update_team_scripts
 update_runtime_helpers

@@ -39,6 +39,7 @@ test-fresh-install.sh                           excluded:requires-real-brew-inst
 test-installers.sh                              plain-shell
 test-integration.sh                             plain-shell
 test-kb-quarantine-stub.sh                      plain-shell
+test-knowledge-sync-upgrade-registration.sh     plain-shell
 test-lifecycle.sh                               plain-shell
 test-migration.sh                               plain-shell
 test-multi-team.sh                              brew-bash
@@ -82,5 +83,6 @@ test-xaca-0747-knowledge-repo.sh                plain-shell
 test-xaca-0751-upgrade-knowledge-repo.sh        plain-shell
 test-xaca-0751-014-knowledge-url-resolution.sh  plain-shell
 test-xaca-0752-mktemp-template.sh               plain-shell
+test-xaca-0761-knowledge-sync-launchagent.sh    plain-shell
 test-xaca-0762-start-port-reconcile-yes.sh      plain-shell
 test-xaca-0770-local-only-knowledge-in-tap.sh    plain-shell

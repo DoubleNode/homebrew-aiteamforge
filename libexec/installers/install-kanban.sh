@@ -2303,6 +2303,104 @@ install_knowledge_repo() {
     return 0
 }
 
+# Install knowledge-sync LaunchAgent (XACA-0761)
+#
+# Installs a 30-minute LaunchAgent that keeps a machine's ~/knowledge git
+# clone in sync with the fleet (git pull --rebase, then git push if there are
+# local commits ahead) via kb-knowledge-sync.sh. Modeled 1:1 on
+# install_auto_upgrade_launchagent above.
+#
+# Script installed to: $AITEAMFORGE_DIR/scripts/kb-knowledge-sync.sh
+# Plist:               ~/Library/LaunchAgents/com.aiteamforge.knowledge-sync.plist
+# Log:                 $AITEAMFORGE_DIR/logs/knowledge-sync.log
+#
+# FAIL-SOFT GATE: kb-knowledge-sync.sh itself never exits non-zero (see its
+# own "Exit-code policy" doc comment), but this installer ADDITIONALLY gates
+# on ~/knowledge actually being a real git clone before installing/loading the
+# daemon at all — reusing the EXACT detection idiom install_knowledge_repo
+# uses for its "already a real clone" branch: [ -d "$root/.git" ]. A
+# scaffold-only or absent ~/knowledge means the fleet-auth gate (XACA-0750)
+# has not been granted on this box yet; installing a periodic daemon with
+# nothing to sync would just be a pointless 30-minute no-op poll loop. This
+# gate is belt-and-suspenders on top of the script's own self-fail-soft
+# behavior, not a replacement for it.
+#
+# XACA-0761 SIBLING-DRIFT NOTE (mirrors XACA-0571-014, but simpler): unlike
+# auto-upgrade's install/upgrade split (two independent sed renderers that
+# must agree on a placeholder vocabulary), update_knowledge_sync in
+# libexec/commands/aiteamforge-upgrade.sh REUSES this exact function (sourced
+# in a subshell) instead of re-rendering the template a second way — so there
+# is only ONE place that understands {{KNOWLEDGE_SYNC_SCRIPT}} / {{LOG_DIR}} /
+# {{AITEAMFORGE_DIR}} / {{HOME_DIR}}.
+install_knowledge_sync_launchagent() {
+    local root
+    root="$(_knowledge_global_root)"
+
+    if [ ! -d "$root/.git" ]; then
+        info "Skipping knowledge-sync LaunchAgent — ~/knowledge is not a git clone ($root)"
+        return 0
+    fi
+
+    local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/knowledge-sync-launchagent.template.plist"
+    local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.knowledge-sync.plist"
+    local script_src="$INSTALL_ROOT/share/scripts/kb-knowledge-sync.sh"
+    local script_dest="$AITEAMFORGE_DIR/scripts/kb-knowledge-sync.sh"
+
+    if [ ! -f "$script_src" ]; then
+        warning "kb-knowledge-sync.sh not found at $script_src (skipping knowledge-sync LaunchAgent)"
+        return 0
+    fi
+
+    if [ ! -f "$plist_template" ]; then
+        warning "knowledge-sync LaunchAgent template not found (skipping)"
+        return 0
+    fi
+
+    info "Installing knowledge-sync LaunchAgent..."
+
+    mkdir -p "$AITEAMFORGE_DIR/scripts"
+    mkdir -p "$AITEAMFORGE_DIR/logs"
+    mkdir -p "$HOME/Library/LaunchAgents"
+
+    cp "$script_src" "$script_dest"
+    chmod +x "$script_dest"
+
+    sed \
+        -e "s|{{KNOWLEDGE_SYNC_SCRIPT}}|$script_dest|g" \
+        -e "s|{{LOG_DIR}}|$AITEAMFORGE_DIR/logs|g" \
+        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+        -e "s|{{HOME_DIR}}|$HOME|g" \
+        "$plist_template" > "$plist_dest"
+
+    _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
+
+    # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
+    # installers): verify registration via `launchctl list` rather than trust
+    # the legacy `launchctl load` exit code, which returns 0 even when the
+    # job is rejected.
+    _aitf_launchctl load "$plist_dest" 2>/dev/null || true
+    if launchctl list 2>/dev/null | grep -q "com.aiteamforge.knowledge-sync"; then
+        success "Knowledge-sync LaunchAgent installed (every 30 minutes)"
+        info "Script:  $script_dest"
+        info "Log:     $AITEAMFORGE_DIR/logs/knowledge-sync.log"
+    else
+        warning "Knowledge-sync LaunchAgent installed but not loaded — activate with: launchctl load ${plist_dest}"
+    fi
+    return 0
+}
+
+# Uninstall knowledge-sync LaunchAgent
+uninstall_knowledge_sync_launchagent() {
+    local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.knowledge-sync.plist"
+
+    if [ -f "$plist_file" ]; then
+        info "Unloading knowledge-sync LaunchAgent..."
+        _aitf_launchctl unload "$plist_file" 2>/dev/null || true
+        rm -f "$plist_file"
+        success "Removed knowledge-sync LaunchAgent"
+    fi
+}
+
 #──────────────────────────────────────────────────────────────────────────────
 # Main Installation Function
 #──────────────────────────────────────────────────────────────────────────────
@@ -2414,6 +2512,7 @@ install_kanban_system() {
     install_auto_upgrade_launchagent
     install_lcars_watch_launchagent
     install_cellar_watch_launchagent
+    install_knowledge_sync_launchagent
     # com.aiteamforge.lcars-runatload retired (XACA-0763-005) — no install-side
     # call. uninstall_lcars_runatload_launchagent below is kept so existing
     # installs can still be torn down.
@@ -2454,6 +2553,7 @@ uninstall_kanban_system() {
     uninstall_auto_upgrade_launchagent
     uninstall_lcars_watch_launchagent
     uninstall_lcars_runatload_launchagent
+    uninstall_knowledge_sync_launchagent
 
     # Remove installed files
     info "Removing kanban system files"
