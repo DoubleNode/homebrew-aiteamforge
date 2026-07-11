@@ -88,18 +88,19 @@ LaunchAgents (`com.aiteamforge.kanban-backup`, `com.aiteamforge.lcars-health`,
 ## Operating
 
 - **Interval:** every 1800s (30 min), plus once at load (login/reboot).
-- **Logs:** `/tmp/knowledge-sync.log` (each line tagged `[kb-knowledge-sync]`
-  with a UTC timestamp and the run outcome).
+- **Logs:** `$AITEAMFORGE_DIR/logs/knowledge-sync.log` (each line tagged
+  `[kb-knowledge-sync]` with a UTC timestamp and the run outcome). The plist's
+  `StandardOutPath`/`StandardErrorPath` render from `{{LOG_DIR}}` →
+  `$AITEAMFORGE_DIR/logs`.
 
-  Log location & rotation: `/tmp` is deliberate — it always exists (no
-  dir-creation fragility for launchd, which does not create parent dirs for
-  `StandardOutPath`), it self-clears on reboot (natural rotation), and it
-  matches the sibling `com.aiteamforge.lcars-health` agent. Per-run output is
-  a handful of lines, so there is no size concern between reboots. If you
-  want durable, cross-reboot history instead, point
-  `StandardOutPath`/`StandardErrorPath` at `~/aiteamforge-backups/knowledge/`
-  (as the `com.aiteamforge.kanban-backup` agent does) and ensure that
-  directory exists.
+  Log location & rotation: the installer (`install-kanban.sh`) runs
+  `mkdir -p "$AITEAMFORGE_DIR/logs"` immediately before loading the agent, so
+  the `StandardOutPath` parent always exists (launchd does not create parent
+  dirs itself). This is the same `$AITEAMFORGE_DIR/logs/` directory the sibling
+  `com.aiteamforge.auto-upgrade` and `com.aiteamforge.cellar-watch` agents log
+  to. Per-run output is a handful of lines, so there is no size concern; the
+  file is not auto-rotated — if you want it trimmed periodically, add a
+  `newsyslog`/`logrotate` entry or clear it by hand.
 - **Check status:** `launchctl list com.aiteamforge.knowledge-sync`
 - **Run once by hand:** `bash $AITEAMFORGE_DIR/scripts/kb-knowledge-sync.sh`
 - **Disable:**
