@@ -1744,17 +1744,27 @@ echo ""
 # GENERATE PER-AGENT STARTUP SCRIPTS
 # ============================================================================
 # Creates individual startup scripts for each agent persona found in the team's
-# personas directory.  Scripts are named <team>-<terminal_id>-startup.sh and
+# personas directory.  Scripts are named <team>-<slug>-startup.sh and
 # follow the android-bridge-startup.sh pattern: hardcoded persona variables,
 # a setup_window() function, 4 named tmux windows, status-line theming, and a
 # SKIP_ATTACH guard.
 #
-# The generator is driven by persona .md files (not TEAM_AGENTS) so the script
-# name uses the frontmatter 'name:' field (e.g. "reno") rather than the TEAM_AGENTS
-# role label (e.g. "engineering").  AGENT_WINDOWS_* variables are read directly
-# from the raw conf text because the _read_conf() loader only serialises windows
-# for agents whose names appear in TEAM_AGENTS, and character names (reno, emh,
-# thok) often differ from role labels (engineering, medical, training).
+# The generator is driven by persona .md files (not TEAM_AGENTS). The
+# frontmatter 'name:' field (e.g. "reno") is the Claude agent's CHARACTER
+# identity, NOT the terminal slug (e.g. "engineering") — those are two
+# different namespaces that happen to collide on some teams (Academy) and
+# diverge sharply on others (Finance: zek -> nagus). The slug is resolved
+# via the AGENT_TERMINAL_<character> map in the team .conf (XACA-0785) and
+# drives every filesystem/tmux identifier: the startup script filename,
+# SESSION_NAME/SESSION_CODE, and therefore <team>-<slug>-prompt.txt
+# resolution. Personas with no AGENT_TERMINAL_ entry are subagent-only
+# (never launched as a persistent terminal) and are skipped entirely.
+# AGENT_WINDOWS_* / AGENT_TERMINAL_* variables are both read directly from
+# the raw conf text because the _read_conf() loader only serialises
+# arrays/vars for agents whose names appear in TEAM_AGENTS, and character
+# names (reno, emh, thok, zek) often differ from the TEAM_AGENTS role
+# labels (engineering, medical, training, nagus) that AGENT_WINDOWS_*/
+# AGENT_TERMINAL_* target values are keyed by.
 # ============================================================================
 
 generate_per_agent_startup_scripts() {
@@ -1772,16 +1782,21 @@ generate_per_agent_startup_scripts() {
     mkdir -p "$scripts_dir"
 
     # Read all AGENT_WINDOWS_* values directly from the raw conf text so that
-    # character-named keys (e.g. AGENT_WINDOWS_reno) are found even when the
+    # slug-named keys (e.g. AGENT_WINDOWS_engineering) are found even when the
     # TEAM_AGENTS array uses role labels (e.g. "engineering").
     local raw_conf_text
     raw_conf_text=$(grep '^AGENT_WINDOWS_' "$TEAM_CONF" 2>/dev/null || true)
+
+    # Read all AGENT_TERMINAL_* values (character -> terminal slug map, XACA-0785)
+    # the same way, for the same reason.
+    local raw_terminal_text
+    raw_terminal_text=$(grep '^AGENT_TERMINAL_' "$TEAM_CONF" 2>/dev/null || true)
 
     local tap_version
     tap_version="$(cat "$HOMEBREW_TAP_ROOT/VERSION" 2>/dev/null || echo "unknown")"
 
     python3 - "$personas_dir" "$scripts_dir" "$TEAM_ID" \
-              "$AITEAMFORGE_DIR" "$TEAM_COLOR" "$raw_conf_text" "$tap_version" <<'PYEOF'
+              "$AITEAMFORGE_DIR" "$TEAM_COLOR" "$raw_conf_text" "$tap_version" "$raw_terminal_text" <<'PYEOF'
 import re
 import sys
 import os
@@ -1795,14 +1810,27 @@ atf_dir       = sys.argv[4]
 team_color    = sys.argv[5]          # hex e.g. "#0099CC"
 raw_conf_text = sys.argv[6]          # raw AGENT_WINDOWS_* lines from conf
 tap_version   = sys.argv[7] if len(sys.argv) > 7 else "unknown"
+raw_terminal_text = sys.argv[8] if len(sys.argv) > 8 else ""   # raw AGENT_TERMINAL_* lines
 
 # ---- Parse AGENT_WINDOWS from raw conf text ----
-# Each line looks like:  AGENT_WINDOWS_reno="win0 win1 win2 win3"
+# Each line looks like:  AGENT_WINDOWS_engineering="win0 win1 win2 win3"
+# NOTE: keyed by terminal SLUG (not character) — same namespace as AGENT_TERMINAL_*
+# target values below.
 agent_windows = {}
 for line in raw_conf_text.splitlines():
     m = re.match(r'^AGENT_WINDOWS_(\w+)="([^"]*)"', line.strip())
     if m:
         agent_windows[m.group(1).lower()] = m.group(2).split()
+
+# ---- Parse AGENT_TERMINAL_<character> -> <slug> map from raw conf text (XACA-0785) ----
+# Each line looks like:  AGENT_TERMINAL_zek="nagus"
+# The variable-name segment normalizes '-' to '_' (e.g. persona "quark-fin" ->
+# AGENT_TERMINAL_quark_fin), matching the AGENT_WINDOWS_* convention.
+agent_terminal = {}
+for line in raw_terminal_text.splitlines():
+    m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+    if m:
+        agent_terminal[m.group(1).lower()] = m.group(2).strip()
 
 # ---- Frontmatter parser ----
 def parse_frontmatter(text):
@@ -1905,7 +1933,11 @@ def window_desc(win_name, terminal_id, win_index):
     return win_name.replace("-", " ").title()
 
 # ---- Script generator ----
-def generate_script(terminal_id, identity, windows, frontmatter, session_desc, location, aiteamforge_dir):
+# terminal_id: the resolved SLUG (AGENT_TERMINAL_<character>) — drives file naming,
+#              SESSION_NAME/SESSION_CODE, and prompt-file resolution.
+# character:   the raw persona frontmatter 'name:' — the Claude agent identity — drives
+#              @claude_agent (and, via `identity["developer"]`, SESSION_DEVELOPER/@developer).
+def generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, aiteamforge_dir):
     developer = identity["developer"]
     role      = identity["role"]
     theme     = identity["theme"] or "OPERATIONS"
@@ -2063,7 +2095,7 @@ if [ $? != 0 ]; then
     $TMUX_CMD set -t $SESSION_CODE status-left "  $SESSION_NAME "
     # Set session-specific variables for dynamic status-right
     $TMUX_CMD set -t $SESSION_CODE @developer "$SESSION_DEVELOPER"
-    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{terminal_id}"
+    $TMUX_CMD set -t $SESSION_CODE @claude_agent "{character}"
     $TMUX_CMD set -t $SESSION_CODE status-right "🤖 #{{@claude_agent}} | 🖥  $DISPLAY_HOST  "
     $TMUX_CMD set -t $SESSION_CODE status-style "bg=colour{bg_code},fg=colour255"
     $TMUX_CMD set -t $SESSION_CODE status-left-style "bg=colour{accent_code},fg=colour255,bold"
@@ -2110,9 +2142,18 @@ for pfile in persona_files:
         continue
 
     frontmatter = parse_frontmatter(content)
-    terminal_id = frontmatter.get("name", "").strip()
-    if not terminal_id:
+    character = frontmatter.get("name", "").strip()
+    if not character:
         print(f"  Warning: no 'name' field in {pfile.name} — skipping", file=sys.stderr)
+        continue
+
+    # Resolve the terminal slug via the AGENT_TERMINAL_<character> map (XACA-0785).
+    # Personas with no mapping are subagent-only (e.g. Academy's 'lal', the UX
+    # evaluator) — never launched as a persistent terminal, so generate nothing.
+    char_key = character.lower().replace("-", "_")
+    terminal_id = agent_terminal.get(char_key)
+    if not terminal_id:
+        print(f"  ℹ️  {team_id}/{character}: subagent-only persona (no terminal slug) — skipping")
         continue
 
     identity = parse_core_identity(content)
@@ -2120,12 +2161,11 @@ for pfile in persona_files:
     session_desc     = make_session_desc(team_id, terminal_id, frontmatter_desc)
     location         = make_location(team_id, identity["location"])
 
-    # Resolve window names: try persona frontmatter name first, then filename character
-    filename_parts = pfile.stem.replace("_persona", "").split("_")
-    char_name = filename_parts[1] if len(filename_parts) >= 2 else terminal_id
-    windows = agent_windows.get(terminal_id) or agent_windows.get(char_name) or []
+    # Window names are keyed by terminal SLUG (AGENT_WINDOWS_* is slug-keyed
+    # fleet-wide as of XACA-0785).
+    windows = agent_windows.get(terminal_id) or []
 
-    script_text = generate_script(terminal_id, identity, windows, frontmatter, session_desc, location, atf_dir)
+    script_text = generate_script(terminal_id, character, identity, windows, frontmatter, session_desc, location, atf_dir)
 
     out_path = scripts_dir / f"{team_id}-{terminal_id}-startup.sh"
     try:
@@ -2148,18 +2188,25 @@ echo ""
 # GENERATE PER-AGENT ZSHRC FILES
 # ============================================================================
 #
-# Generates ~/.zshrc_<team>_<terminal_id> files for each agent persona found
+# Generates ~/.zshrc_<team>_<slug> files for each agent persona found
 # in the team's personas directory.  Each file sets up the LCARS-themed zsh
 # prompt for one tmux window.
 #
 # Pattern based on dev-team home-scripts/.zshrc_<team>_<terminal> files.
 # Gold standard reference: dev-team/home-scripts/.zshrc_android_bridge
 #
+# The terminal slug (AGENT_TERMINAL_<character> map, XACA-0785) — not the
+# persona frontmatter 'name:' character — drives the output filename,
+# SESSION_NAME/SESSION_CODE, and therefore the _PROMPT_FILE lookup
+# (<team>-<slug>-prompt.txt). Personas with no AGENT_TERMINAL_ entry are
+# subagent-only and are skipped. The character identity is preserved for
+# SESSION_DEVELOPER/@developer/@claude_agent and the visible SESSION_TITLE.
+#
 # Each generated file contains:
 #   1. Header comment (character name, division)
 #   2. SESSION_* variables (TITLE, THEME, TYPE, NAME, CODE)
 #   3. Unset block — clears all OTHER team theme vars
-#   4. Theme export — sets CLAUDE_<SERIES>_THEME="<TERMINAL_ID_UPPER>"
+#   4. Theme export — sets CLAUDE_<SERIES>_THEME="<SLUG_UPPER>"
 #   5. Common color definitions (team-specific palette)
 #   6. Theme selection if-blocks (division → THEME_COLOR / THEME_COLOR_HIGHLIGHT)
 #   7. Prompt setup (parse_git_branch, show_worktree, PROMPT)
@@ -2178,7 +2225,13 @@ generate_per_agent_zshrc_files() {
         return 0
     fi
 
-    python3 - "$personas_dir" "$TEAM_ID" "$HOME" "$AITEAMFORGE_DIR" <<'ZSHRC_PYEOF'
+    # Read all AGENT_TERMINAL_* values (character -> terminal slug map, XACA-0785)
+    # directly from the raw conf text — same reasoning as the startup-script
+    # generator above (character names don't always match TEAM_AGENTS labels).
+    local raw_terminal_text
+    raw_terminal_text=$(grep '^AGENT_TERMINAL_' "$TEAM_CONF" 2>/dev/null || true)
+
+    python3 - "$personas_dir" "$TEAM_ID" "$HOME" "$AITEAMFORGE_DIR" "$raw_terminal_text" <<'ZSHRC_PYEOF'
 import re
 import sys
 import os
@@ -2189,6 +2242,15 @@ personas_dir  = Path(sys.argv[1])
 team_id       = sys.argv[2]
 home_dir      = sys.argv[3]
 atf_dir       = sys.argv[4]
+raw_terminal_text = sys.argv[5] if len(sys.argv) > 5 else ""   # raw AGENT_TERMINAL_* lines
+
+# ---- Parse AGENT_TERMINAL_<character> -> <slug> map from raw conf text (XACA-0785) ----
+# Each line looks like:  AGENT_TERMINAL_zek="nagus"
+agent_terminal = {}
+for line in raw_terminal_text.splitlines():
+    m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+    if m:
+        agent_terminal[m.group(1).lower()] = m.group(2).strip()
 
 # -------------------------------------------------------------------------
 # Team ID → Claude theme variable name
@@ -2609,27 +2671,41 @@ for pfile in persona_files:
         continue
 
     frontmatter = parse_frontmatter(content)
-    terminal_id = frontmatter.get("name", "").strip()
-    if not terminal_id:
+    character = frontmatter.get("name", "").strip()
+    if not character:
         print(f"  Warning: no 'name' field in {pfile.name} — skipping", file=sys.stderr)
         continue
 
+    # Resolve the terminal slug via the AGENT_TERMINAL_<character> map (XACA-0785).
+    # Personas with no mapping are subagent-only (e.g. Academy's 'lal', the UX
+    # evaluator) — never launched as a persistent terminal, so generate nothing.
+    char_key = character.lower().replace("-", "_")
+    terminal_id = agent_terminal.get(char_key)
+    if not terminal_id:
+        print(f"  ℹ️  {team_id}/{character}: subagent-only persona (no terminal slug) — skipping")
+        continue
+
     identity = parse_core_identity(content)
-    char_name  = identity["developer"] or terminal_id.replace("-", " ").title()
+    char_name  = identity["developer"] or character.replace("-", " ").title()
     division   = identity["division"] or "COMMAND"
     session_theme = division_to_session_theme(division)
 
-    # Theme export value = uppercase terminal_id
+    # Theme export value = uppercase terminal SLUG — this is a routing key that
+    # must match SESSION_CODE / lcars-ports file naming (also slug-keyed as of
+    # XACA-0785), NOT a display value.
     theme_value = terminal_id.upper().replace("-", "_")
 
-    # SESSION_TITLE = uppercase terminal_id
-    session_title = terminal_id.upper().replace("-", " ")
+    # SESSION_TITLE is the visible shell-prompt banner (rendered on every prompt
+    # line) — keep it CHARACTER-driven so the user sees "who" they're talking to
+    # (e.g. RENO), not the room/location slug (e.g. ENGINEERING).
+    session_title = character.upper().replace("-", " ")
 
-    # Output path: $HOME/.zshrc_<team>_<terminal_id>
+    # Output path: $HOME/.zshrc_<team>_<slug>
     out_path = Path(home_dir) / f".zshrc_{team_id}_{terminal_id}"
 
-    # Escape single quotes in char_name for shell safety
+    # Escape single quotes in char_name / character for shell safety
     char_name_safe = char_name.replace("'", "'\\''")
+    character_safe = character.replace("'", "'\\''")
 
     zshrc = f'''\
 #!/bin/zsh
@@ -2701,7 +2777,7 @@ ${{THEME_COLOR_HIGHLIGHT}}└─➤${{RESET}} '
 # Set session-specific developer for tmux status bar
 if [ -n "$TMUX" ]; then
     tmux set-option @developer "{char_name_safe}"
-    tmux set-option @claude_agent "{team_id}-{terminal_id}"
+    tmux set-option @claude_agent "{team_id}-{character_safe}"
 fi
 
 # Source shared helpers (prefer AITEAMFORGE_DIR, fall back gracefully)
@@ -2736,6 +2812,116 @@ ZSHRC_PYEOF
 echo "🖥️  Generating per-agent zshrc files..."
 echo "  Note: Reinstalling will overwrite existing zshrc files — back up any manual customizations first."
 generate_per_agent_zshrc_files
+echo ""
+
+# ============================================================================
+# VERIFY AGENT SYSTEM-PROMPT FILE RESOLUTION
+# ============================================================================
+# For every persona that resolves to a terminal slug (AGENT_TERMINAL_<character>
+# map, XACA-0785 — i.e. every persona the two generators above actually turned
+# into a launchable terminal), assert that the prompt file its generated zshrc
+# will look up at runtime (<team>/scripts/prompts/<team>-<slug>-prompt.txt) was
+# actually installed by the "COPY TEAM PERSONA TEMPLATES" step earlier in this
+# script. A miss here means the zshrc's
+#   [[ -f "$_PROMPT_FILE" ]] && CLAUDE_SYSTEM_PROMPT=... && export CLAUDE_SYSTEM_PROMPT
+# guard silently no-ops: CLAUDE_SYSTEM_PROMPT stays unset and Claude launches
+# with NO PERSONA, with no error anywhere in the chain. This was the core
+# XACA-0785 bug. We warn loudly here instead of letting it fail silent.
+#
+# Deliberately does NOT abort the install on a miss (no `exit 1`): a missing
+# prompt file for one agent is a content gap, not an installer failure, and
+# aborting here would strand the team half-installed (personas/scripts/zshrc
+# already written) over what's usually a fixable follow-up (ship the missing
+# .txt and reinstall/regenerate). The loud banner + OK/MISS summary is the bar.
+# ============================================================================
+
+verify_agent_prompt_files() {
+    local personas_dir="$AITEAMFORGE_DIR/$TEAM_ID/personas/agents"
+    if [[ ! -d "$personas_dir" ]]; then
+        personas_dir="$HOMEBREW_TAP_ROOT/share/personas/$TEAM_ID/agents"
+    fi
+    if [[ ! -d "$personas_dir" ]]; then
+        return 0
+    fi
+
+    local prompts_dir="$TEAM_DIR/scripts/prompts"
+    local raw_terminal_text
+    raw_terminal_text=$(grep '^AGENT_TERMINAL_' "$TEAM_CONF" 2>/dev/null || true)
+
+    python3 - "$personas_dir" "$prompts_dir" "$TEAM_ID" "$raw_terminal_text" <<'PROMPTCHECK_PYEOF'
+import re
+import sys
+from pathlib import Path
+
+personas_dir      = Path(sys.argv[1])
+prompts_dir       = Path(sys.argv[2])
+team_id           = sys.argv[3]
+raw_terminal_text = sys.argv[4] if len(sys.argv) > 4 else ""
+
+agent_terminal = {}
+for line in raw_terminal_text.splitlines():
+    m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+    if m:
+        agent_terminal[m.group(1).lower()] = m.group(2).strip()
+
+def parse_frontmatter(text):
+    result = {}
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return result
+    for line in lines[1:]:
+        stripped = line.strip()
+        if stripped == "---":
+            break
+        if ":" in stripped:
+            key, _, val = stripped.partition(":")
+            val = val.strip().strip('"').strip("'")
+            if key.strip() not in result:
+                result[key.strip()] = val
+    return result
+
+ok = 0
+missing = []
+for pfile in sorted(personas_dir.glob("*_persona.md")):
+    try:
+        content = pfile.read_text()
+    except Exception:
+        continue
+    frontmatter = parse_frontmatter(content)
+    character = frontmatter.get("name", "").strip()
+    if not character:
+        continue
+    char_key = character.lower().replace("-", "_")
+    slug = agent_terminal.get(char_key)
+    if not slug:
+        continue  # subagent-only persona — no terminal, no prompt file expected
+
+    prompt_path = prompts_dir / f"{team_id}-{slug}-prompt.txt"
+    if prompt_path.exists():
+        ok += 1
+    else:
+        missing.append((character, slug, str(prompt_path)))
+
+if missing:
+    print("")
+    print("  🚨🚨🚨 MISSING SYSTEM PROMPT FILE(S) — CLAUDE WILL LAUNCH WITH NO PERSONA 🚨🚨🚨")
+    for character, slug, path in missing:
+        print(f"  ✗ {team_id}/{character} -> slug '{slug}': expected {path}")
+    print("    Affected terminal(s) will source their zshrc, find no prompt file, and")
+    print("    silently skip exporting CLAUDE_SYSTEM_PROMPT — Claude launches with no persona.")
+    print("  🚨🚨🚨 END MISSING SYSTEM PROMPT FILE(S) 🚨🚨🚨")
+    print("")
+
+print(f"  Prompt file check: OK={ok} MISS={len(missing)}")
+sys.exit(1 if missing else 0)
+PROMPTCHECK_PYEOF
+}
+
+echo "🔎 Verifying agent system-prompt file resolution..."
+if ! verify_agent_prompt_files; then
+    echo "  ⚠️  Install continuing despite missing prompt file(s) above — fix by shipping the"
+    echo "  ⚠️  missing <team>-<slug>-prompt.txt and re-running the installer for this team."
+fi
 echo ""
 
 # ============================================================================
