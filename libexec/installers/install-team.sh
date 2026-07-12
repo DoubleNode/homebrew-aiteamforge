@@ -764,7 +764,30 @@ if [[ -d "$PERSONAS_TEMPLATE_DIR" ]]; then
     # to load the Claude system prompt when launching agents.
     if [[ -d "$PERSONAS_TEMPLATE_DIR/prompts" ]]; then
         mkdir -p "$TEAM_DIR/scripts/prompts"
-        cp "$PERSONAS_TEMPLATE_DIR/prompts/"*.txt "$TEAM_DIR/scripts/prompts/" 2>/dev/null || true
+        # XACA-0785-009: this used to be `cp ... 2>/dev/null || true`, which swallowed
+        # partial/permission copy failures entirely. verify_agent_prompt_files() later
+        # in this script only reports the downstream SYMPTOM (a missing prompt file at
+        # runtime) — not the actual CAUSE (the copy failed right here, during install).
+        # Report the failure at the point it happens, with the real cp stderr attached,
+        # so it's attributable instead of just another "missing file" mystery. Keep the
+        # install non-fatal: a copy failure for one persona's prompt shouldn't strand an
+        # otherwise-good install of every other persona/team component.
+        shopt -s nullglob
+        _PROMPT_SRC_FILES=("$PERSONAS_TEMPLATE_DIR/prompts/"*.txt)
+        shopt -u nullglob
+        if [[ ${#_PROMPT_SRC_FILES[@]} -eq 0 ]]; then
+            echo "  ⚠️  No .txt prompt files found in $PERSONAS_TEMPLATE_DIR/prompts/ — nothing to copy" >&2
+        else
+            _PROMPT_COPY_ERR=$(mktemp)
+            if ! cp "${_PROMPT_SRC_FILES[@]}" "$TEAM_DIR/scripts/prompts/" 2>"$_PROMPT_COPY_ERR"; then
+                echo "  🚨 Failed to copy prompt file(s) from $PERSONAS_TEMPLATE_DIR/prompts/ to $TEAM_DIR/scripts/prompts/:" >&2
+                sed 's/^/      /' "$_PROMPT_COPY_ERR" >&2
+                echo "  🚨 Install continuing — affected persona(s) may launch with NO PERSONA (see prompt-file check below)." >&2
+            fi
+            rm -f "$_PROMPT_COPY_ERR"
+            unset _PROMPT_COPY_ERR
+        fi
+        unset _PROMPT_SRC_FILES
         PROMPT_COUNT=$(find "$TEAM_DIR/scripts/prompts" -maxdepth 1 -type f -name '*.txt' 2>/dev/null | wc -l | tr -d ' ')
         echo "  ✓ Installed $PROMPT_COUNT system prompt file(s) to scripts/prompts/"
     fi
@@ -1826,11 +1849,64 @@ for line in raw_conf_text.splitlines():
 # Each line looks like:  AGENT_TERMINAL_zek="nagus"
 # The variable-name segment normalizes '-' to '_' (e.g. persona "quark-fin" ->
 # AGENT_TERMINAL_quark_fin), matching the AGENT_WINDOWS_* convention.
-agent_terminal = {}
-for line in raw_terminal_text.splitlines():
-    m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
-    if m:
-        agent_terminal[m.group(1).lower()] = m.group(2).strip()
+#
+# XACA-0785-006/007: the slug VALUE flows straight into generated filenames and
+# into double-quoted shell in the generated zshrc (SESSION_NAME="{terminal_id}"),
+# so a typo'd or hostile value (e.g. containing '../' or '$(...)') would produce
+# a garbage path or command substitution. parse_agent_terminal_map() rejects
+# malformed slugs and duplicate slug targets instead of letting them flow
+# through — same "warn loudly, never silent" bar this ticket exists to enforce.
+_AGENT_TERMINAL_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
+
+
+def parse_agent_terminal_map(raw_text, team_id):
+    """Parse AGENT_TERMINAL_<character>="<slug>" lines into a char_key -> slug map.
+
+    Returns (agent_terminal, quarantined):
+      agent_terminal: char_key -> slug (slug is "" for an explicit empty value —
+        XACA-0785-008 needs "no entry" and "empty entry" distinguishable by callers).
+      quarantined: char_key set that HAD a raw entry but was rejected (malformed
+        slug format, or a slug value already claimed by another character) — a
+        loud warning was already printed here. Callers must treat these as
+        "already handled", NOT as "no entry" (which would print the misleading
+        subagent-only-persona message for what is actually a config bug).
+    """
+    agent_terminal = {}
+    slug_owner = {}
+    quarantined = set()
+    for line in raw_text.splitlines():
+        m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+        if not m:
+            continue
+        char_key = m.group(1).lower()
+        slug = m.group(2).strip()
+        if not slug:
+            # Empty value is a distinct case from "no entry at all" — retain it
+            # (not quarantined) so the per-persona loop can tell them apart.
+            agent_terminal[char_key] = ""
+            continue
+        if not _AGENT_TERMINAL_SLUG_RE.match(slug):
+            print(f"  ⚠️  {team_id}/{char_key}: AGENT_TERMINAL_{char_key}=\"{slug}\" is not a valid "
+                  f"terminal slug (must match ^[a-z0-9][a-z0-9_-]*$) — skipping this persona's terminal "
+                  f"generation rather than risk a corrupted path or shell injection (XACA-0785-006)",
+                  file=sys.stderr)
+            quarantined.add(char_key)
+            continue
+        if slug in slug_owner and slug_owner[slug] != char_key:
+            print(f"  ⚠️  {team_id}: AGENT_TERMINAL_{char_key}=\"{slug}\" collides with "
+                  f"AGENT_TERMINAL_{slug_owner[slug]}=\"{slug}\" — two characters mapped to the same "
+                  f"terminal slug would silently overwrite each other's generated startup "
+                  f"script/zshrc (last-writer-wins). Keeping AGENT_TERMINAL_{slug_owner[slug]}; "
+                  f"AGENT_TERMINAL_{char_key} is IGNORED. Fix the .conf so each persona has a unique "
+                  f"slug (XACA-0785-007)", file=sys.stderr)
+            quarantined.add(char_key)
+            continue
+        slug_owner[slug] = char_key
+        agent_terminal[char_key] = slug
+    return agent_terminal, quarantined
+
+
+agent_terminal, _quarantined_terminal_chars = parse_agent_terminal_map(raw_terminal_text, team_id)
 
 # ---- Frontmatter parser ----
 def parse_frontmatter(text):
@@ -2151,9 +2227,24 @@ for pfile in persona_files:
     # Personas with no mapping are subagent-only (e.g. Academy's 'lal', the UX
     # evaluator) — never launched as a persistent terminal, so generate nothing.
     char_key = character.lower().replace("-", "_")
-    terminal_id = agent_terminal.get(char_key)
-    if not terminal_id:
+    if char_key in _quarantined_terminal_chars:
+        # Already warned during AGENT_TERMINAL_* parsing above (malformed slug
+        # format or duplicate slug target) — skip silently here so we don't ALSO
+        # print the misleading "subagent-only persona" message (XACA-0785-006/007).
+        continue
+    if char_key not in agent_terminal:
         print(f"  ℹ️  {team_id}/{character}: subagent-only persona (no terminal slug) — skipping")
+        continue
+    terminal_id = agent_terminal[char_key]
+    if not terminal_id:
+        # AGENT_TERMINAL_<char>="" — an explicit EMPTY value is a config bug,
+        # not a legitimate subagent-only persona. Distinguishing this from "no
+        # entry at all" is the point of XACA-0785-008 — the old code folded
+        # both into the same falsy branch and printed the friendly skip
+        # message for what is actually a broken .conf entry.
+        print(f"  ⚠️  {team_id}/{character}: AGENT_TERMINAL_{char_key} is set but EMPTY in the team "
+              f".conf — this is a config bug, not a subagent-only persona. Fix the .conf entry or "
+              f"remove it entirely to mark {character} as subagent-only (XACA-0785-008)", file=sys.stderr)
         continue
 
     identity = parse_core_identity(content)
@@ -2246,11 +2337,62 @@ raw_terminal_text = sys.argv[5] if len(sys.argv) > 5 else ""   # raw AGENT_TERMI
 
 # ---- Parse AGENT_TERMINAL_<character> -> <slug> map from raw conf text (XACA-0785) ----
 # Each line looks like:  AGENT_TERMINAL_zek="nagus"
-agent_terminal = {}
-for line in raw_terminal_text.splitlines():
-    m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
-    if m:
-        agent_terminal[m.group(1).lower()] = m.group(2).strip()
+#
+# XACA-0785-006/007: the slug VALUE is interpolated directly into double-quoted
+# shell in the generated zshrc (SESSION_NAME="{terminal_id}") and into the output
+# filename (.zshrc_<team>_<slug>) — a malformed or hostile value would produce a
+# garbage path or command substitution. See parse_agent_terminal_map() docstring.
+_AGENT_TERMINAL_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
+
+
+def parse_agent_terminal_map(raw_text, team_id):
+    """Parse AGENT_TERMINAL_<character>="<slug>" lines into a char_key -> slug map.
+
+    Returns (agent_terminal, quarantined):
+      agent_terminal: char_key -> slug (slug is "" for an explicit empty value —
+        XACA-0785-008 needs "no entry" and "empty entry" distinguishable by callers).
+      quarantined: char_key set that HAD a raw entry but was rejected (malformed
+        slug format, or a slug value already claimed by another character) — a
+        loud warning was already printed here. Callers must treat these as
+        "already handled", NOT as "no entry" (which would print the misleading
+        subagent-only-persona message for what is actually a config bug).
+    """
+    agent_terminal = {}
+    slug_owner = {}
+    quarantined = set()
+    for line in raw_text.splitlines():
+        m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+        if not m:
+            continue
+        char_key = m.group(1).lower()
+        slug = m.group(2).strip()
+        if not slug:
+            # Empty value is a distinct case from "no entry at all" — retain it
+            # (not quarantined) so the per-persona loop can tell them apart.
+            agent_terminal[char_key] = ""
+            continue
+        if not _AGENT_TERMINAL_SLUG_RE.match(slug):
+            print(f"  ⚠️  {team_id}/{char_key}: AGENT_TERMINAL_{char_key}=\"{slug}\" is not a valid "
+                  f"terminal slug (must match ^[a-z0-9][a-z0-9_-]*$) — skipping this persona's terminal "
+                  f"generation rather than risk a corrupted path or shell injection (XACA-0785-006)",
+                  file=sys.stderr)
+            quarantined.add(char_key)
+            continue
+        if slug in slug_owner and slug_owner[slug] != char_key:
+            print(f"  ⚠️  {team_id}: AGENT_TERMINAL_{char_key}=\"{slug}\" collides with "
+                  f"AGENT_TERMINAL_{slug_owner[slug]}=\"{slug}\" — two characters mapped to the same "
+                  f"terminal slug would silently overwrite each other's generated startup "
+                  f"script/zshrc (last-writer-wins). Keeping AGENT_TERMINAL_{slug_owner[slug]}; "
+                  f"AGENT_TERMINAL_{char_key} is IGNORED. Fix the .conf so each persona has a unique "
+                  f"slug (XACA-0785-007)", file=sys.stderr)
+            quarantined.add(char_key)
+            continue
+        slug_owner[slug] = char_key
+        agent_terminal[char_key] = slug
+    return agent_terminal, quarantined
+
+
+agent_terminal, _quarantined_terminal_chars = parse_agent_terminal_map(raw_terminal_text, team_id)
 
 # -------------------------------------------------------------------------
 # Team ID → Claude theme variable name
@@ -2680,9 +2822,24 @@ for pfile in persona_files:
     # Personas with no mapping are subagent-only (e.g. Academy's 'lal', the UX
     # evaluator) — never launched as a persistent terminal, so generate nothing.
     char_key = character.lower().replace("-", "_")
-    terminal_id = agent_terminal.get(char_key)
-    if not terminal_id:
+    if char_key in _quarantined_terminal_chars:
+        # Already warned during AGENT_TERMINAL_* parsing above (malformed slug
+        # format or duplicate slug target) — skip silently here so we don't ALSO
+        # print the misleading "subagent-only persona" message (XACA-0785-006/007).
+        continue
+    if char_key not in agent_terminal:
         print(f"  ℹ️  {team_id}/{character}: subagent-only persona (no terminal slug) — skipping")
+        continue
+    terminal_id = agent_terminal[char_key]
+    if not terminal_id:
+        # AGENT_TERMINAL_<char>="" — an explicit EMPTY value is a config bug,
+        # not a legitimate subagent-only persona. Distinguishing this from "no
+        # entry at all" is the point of XACA-0785-008 — the old code folded
+        # both into the same falsy branch and printed the friendly skip
+        # message for what is actually a broken .conf entry.
+        print(f"  ⚠️  {team_id}/{character}: AGENT_TERMINAL_{char_key} is set but EMPTY in the team "
+              f".conf — this is a config bug, not a subagent-only persona. Fix the .conf entry or "
+              f"remove it entirely to mark {character} as subagent-only (XACA-0785-008)", file=sys.stderr)
         continue
 
     identity = parse_core_identity(content)
@@ -2872,11 +3029,45 @@ prompts_dir       = Path(sys.argv[2])
 team_id           = sys.argv[3]
 raw_terminal_text = sys.argv[4] if len(sys.argv) > 4 else ""
 
-agent_terminal = {}
-for line in raw_terminal_text.splitlines():
-    m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
-    if m:
-        agent_terminal[m.group(1).lower()] = m.group(2).strip()
+_AGENT_TERMINAL_SLUG_RE = re.compile(r'^[a-z0-9][a-z0-9_-]*$')
+
+
+def parse_agent_terminal_map_quiet(raw_text):
+    """Same char_key -> slug parsing/validation as parse_agent_terminal_map()
+    in the two generators above (generate_per_agent_startup_scripts /
+    generate_per_agent_zshrc_files, XACA-0785-006/007), but WITHOUT
+    re-printing the warnings — those generators already ran earlier in this
+    same install pass and warned loudly about any malformed or
+    duplicate-target AGENT_TERMINAL_* entries. This copy exists purely so the
+    OK/MISS count below agrees with what the generators actually produced: a
+    quarantined char_key must be excluded here too, or this check would
+    falsely report a MISS for a persona that was never supposed to get a
+    terminal (and therefore never got a prompt file) in the first place.
+    """
+    agent_terminal = {}
+    slug_owner = {}
+    quarantined = set()
+    for line in raw_text.splitlines():
+        m = re.match(r'^AGENT_TERMINAL_(\w+)="([^"]*)"', line.strip())
+        if not m:
+            continue
+        char_key = m.group(1).lower()
+        slug = m.group(2).strip()
+        if not slug:
+            agent_terminal[char_key] = ""
+            continue
+        if not _AGENT_TERMINAL_SLUG_RE.match(slug):
+            quarantined.add(char_key)
+            continue
+        if slug in slug_owner and slug_owner[slug] != char_key:
+            quarantined.add(char_key)
+            continue
+        slug_owner[slug] = char_key
+        agent_terminal[char_key] = slug
+    return agent_terminal, quarantined
+
+
+agent_terminal, _quarantined_terminal_chars = parse_agent_terminal_map_quiet(raw_terminal_text)
 
 def parse_frontmatter(text):
     result = {}
@@ -2906,9 +3097,13 @@ for pfile in sorted(personas_dir.glob("*_persona.md")):
     if not character:
         continue
     char_key = character.lower().replace("-", "_")
-    slug = agent_terminal.get(char_key)
-    if not slug:
+    if char_key in _quarantined_terminal_chars:
+        continue  # malformed slug / duplicate slug target — already warned by the generators above
+    if char_key not in agent_terminal:
         continue  # subagent-only persona — no terminal, no prompt file expected
+    slug = agent_terminal[char_key]
+    if not slug:
+        continue  # AGENT_TERMINAL_* explicitly empty — config bug already warned by the generators above
 
     prompt_path = prompts_dir / f"{team_id}-{slug}-prompt.txt"
     if prompt_path.exists():
