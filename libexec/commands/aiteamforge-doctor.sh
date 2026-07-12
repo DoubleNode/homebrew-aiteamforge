@@ -13,6 +13,11 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
+# XACA-0734: shared LaunchAgent vocabulary — mandatory set, opt-out sentinel, and
+# the render+load helper backing the `--fix` backstop in check_launchagents /
+# _apply_remediation. Must come after common.sh (print_*/_aitf_launchctl) and
+# config.sh (get_working_dir, used by the renderer to resolve {{AITEAMFORGE_DIR}}).
+source "${LIBEXEC_DIR}/lib/launchagents.sh"
 # XACA-0650: resolve tap-owned venv Python (sets AITEAMFORGE_PYTHON)
 # shellcheck source=../lib/python-env.sh
 [ -f "${LIBEXEC_DIR}/lib/python-env.sh" ] && source "${LIBEXEC_DIR}/lib/python-env.sh" 2>/dev/null || true
@@ -210,18 +215,53 @@ attempt_remediation() {
       fi
       ;;
     keepalive)
-      # SAFE: idempotent — launchctl load is a no-op if already loaded.
-      local plist="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
+      # SAFE: idempotent — launchctl load is a no-op if already loaded, and the
+      # render path below rewrites a plist from the shipped template.
+      #
+      # XACA-0734: this used to be load-only. When the plist was MISSING it just
+      # printed "run: aiteamforge setup" and gave up — so a box that never had the
+      # agent stayed broken, and `doctor --fix` (the thing you run precisely when
+      # something is broken) could not fix it. Now --fix renders the plist from the
+      # template and loads it, using the shared lib so this does not become a fourth
+      # copy of the render logic.
+      local _ka_agent="com.aiteamforge.lcars-health.plist"
+      local _ka_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+      local plist="${_ka_dir}/${_ka_agent}"
       if [ "$apply" = true ]; then
         if [ -f "$plist" ]; then
           _remediation_note "[fix] keepalive: launchctl load ${plist}"
           _aitf_launchctl load "$plist" >/dev/null 2>&1 || \
             _remediation_note "[fix] keepalive: launchctl load returned non-zero (may already be loaded)"
+        elif _xaca0734_is_opted_out "$_ka_agent"; then
+          # Recorded opt-out — the user removed this on purpose. Absence is the
+          # CORRECT state; report it as information, never as a failure to fix.
+          _remediation_note "[info] keepalive: ${_ka_agent} is opted out ($(_xaca0734_optout_file)) — leaving it absent"
         else
-          _remediation_note "[fix] keepalive: plist missing (${plist}) — run: aiteamforge setup"
+          _remediation_note "[fix] keepalive: plist missing — rendering ${plist} from template"
+          # XACA-0734: discoverability hint on the materialize path — mirrors
+          # update_launchagents' identical hint in aiteamforge-upgrade.sh.
+          _xaca0734_print_optout_hint "$_ka_agent"
+          local _ka_framework
+          _ka_framework="$(get_framework_dir)"
+          if _xaca0734_render_and_load_launchagent "$_ka_agent" "$_ka_framework" "$_ka_dir"; then
+            _remediation_note "[fix] keepalive: rendered and loaded ${_ka_agent}"
+          elif [ -f "$plist" ]; then
+            # Rendered, but launchd did not register it (load returns 0 even on
+            # reject — hence the launchctl list verify inside the lib helper).
+            _remediation_note "[fix] keepalive: rendered ${plist} but it did not register — activate with: launchctl load ${plist}"
+          else
+            _remediation_note "[fix] keepalive: could not render ${_ka_agent} (template missing?) — run: aiteamforge setup"
+          fi
         fi
       else
-        _remediation_note "[suggest] keepalive: launchctl load ${plist}"
+        if _xaca0734_is_opted_out "$_ka_agent"; then
+          _remediation_note "[info] keepalive: ${_ka_agent} is opted out — nothing to do"
+        elif [ -f "$plist" ]; then
+          _remediation_note "[suggest] keepalive: launchctl load ${plist}"
+        else
+          _remediation_note "[suggest] keepalive: render + load ${_ka_agent} (aiteamforge doctor --fix)"
+          _xaca0734_print_optout_hint "$_ka_agent"
+        fi
       fi
       ;;
     server)
@@ -1156,6 +1196,41 @@ check_launchagents() {
 
   local working_dir
   working_dir=$(get_working_dir)
+
+  local launchagents_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
+
+  # XACA-0734: MANDATORY plist presence.
+  #
+  # The per-agent checks below only ask "is it LOADED?", which quietly conflates
+  # two very different states: "the plist exists but launchd has not loaded it"
+  # (a warning — a re-login fixes it) and "the plist does not exist at all" (a
+  # real failure — nothing will ever load it, and upgrade used to skip absent
+  # plists, so it would never come back). The second case is how M1Pro ended up
+  # with no auto-upgrade agent and no way to ever get one. Surface it as a FAILURE
+  # with an actionable fix, not silence.
+  #
+  # An agent with a recorded opt-out is SUPPOSED to be absent — that is a pass,
+  # not a problem. Absence is only a defect when nobody asked for it.
+  local _agent
+  for _agent in $(_xaca0734_mandatory_launchagent_basenames); do
+    if [ -f "${launchagents_dir}/${_agent}" ]; then
+      continue
+    fi
+    if _xaca0734_is_opted_out "$_agent"; then
+      check_result pass "${_agent} absent (opted out — intentional)"
+      continue
+    fi
+    check_result fail "Mandatory LaunchAgent missing: ${launchagents_dir}/${_agent}"
+    if [ "$VERBOSE" = true ]; then
+      echo "    Fix: aiteamforge upgrade   (re-materializes mandatory LaunchAgents)"
+      echo "    Or:  aiteamforge doctor --fix"
+    fi
+    # XACA-0734: always print the opt-out escape hatch (not VERBOSE-gated) —
+    # this IS the "report a missing mandatory agent" moment the hint exists for,
+    # mirroring update_launchagents' materialize path. No new CLI subcommand;
+    # the sentinel is a plain user-editable file (see lib/launchagents.sh).
+    _xaca0734_print_optout_hint "$_agent"
+  done
 
   # Kanban backup agent
   if launchctl list 2>/dev/null | grep -q "com.aiteamforge.kanban-backup"; then

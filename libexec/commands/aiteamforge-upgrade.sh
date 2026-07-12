@@ -15,6 +15,12 @@ source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
 # XACA-0611: imgcat provisioning helper (must come after common.sh — uses info/warning/error)
 source "${LIBEXEC_DIR}/lib/imgcat-provision.sh"
+# XACA-0734: shared LaunchAgent vocabulary — the agent→template map, the mandatory
+# set, the opt-out sentinel helpers, and _render_launchagent_template (which used to
+# live in THIS file). Sourced by doctor.sh too; see lib/launchagents.sh for why the
+# renderer moved out (it was about to become a fourth copy).
+# Must come after common.sh (print_* helpers) and constants.sh (KANBAN_BACKUP_INTERVAL_DEFAULT).
+source "${LIBEXEC_DIR}/lib/launchagents.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -1326,77 +1332,41 @@ _cleanup_upgrade_tmpfiles() {
   done
 }
 
-# Render a LaunchAgent template to a tempfile.
-# Applies the full substitution map (USER_HOME, AITEAMFORGE_DIR,
-# BACKUP_INTERVAL, PYTHON3_PATH, plus XACA-0571 auto-upgrade placeholders)
-# so that every template gets every substitution — harmless extras prevent
-# sibling-drift bugs.
-# Usage: _render_launchagent_template <template_path> <dest_path>
-# Returns: 0 on success, 1 if template not found.
-#
-# XACA-0571-014 SIBLING-DRIFT NOTE: this renderer handles ALL LaunchAgent
-# templates during `aiteamforge upgrade`. First-time install renders happen
-# in libexec/installers/install-kanban.sh via inline sed (install_*_launchagent
-# functions). Both renderers must understand the same placeholder vocabulary;
-# adding a placeholder to a new template requires updating BOTH this function
-# AND the matching install-kanban.sh installer. The full placeholder list is
-# the sed -e chain below — when adding a new {{VAR}}, add it here AND in the
-# corresponding inline install sed.
-_render_launchagent_template() {
-  local template="$1"
-  local dest="$2"
-
-  if [ ! -f "$template" ]; then
-    print_warning "LaunchAgent template not found: $template"
-    return 1
-  fi
-
-  local kanban_backup_interval="${KANBAN_BACKUP_INTERVAL:-$KANBAN_BACKUP_INTERVAL_DEFAULT}"
-  local python3_path
-  # NOTE: PYTHON3_PATH is re-resolved on every upgrade — PATH changes between
-  # install and upgrade will silently re-pin the plist interpreter. See XACA-0510.
-  python3_path="$(command -v python3 2>/dev/null || echo "/usr/bin/python3")"
-
-  # XACA-0571: resolve aiteamforge binary for the LCARS watch plist.
-  local aiteamforge_bin
-  aiteamforge_bin="$(command -v aiteamforge 2>/dev/null || echo "/opt/homebrew/bin/aiteamforge")"
-
-  # XACA-0578: resolve Homebrew prefix for cellar-watch plist ({{BREW_CELLAR_DIR}}).
-  local brew_prefix
-  brew_prefix="$(command -v brew &>/dev/null && brew --prefix 2>/dev/null || echo "/opt/homebrew")"
-
-  sed -e "s|{{USER_HOME}}|$HOME|g" \
-      -e "s|{{HOME_DIR}}|$HOME|g" \
-      -e "s|{{AITEAMFORGE_DIR}}|${WORKING_DIR}|g" \
-      -e "s|{{BACKUP_INTERVAL}}|${kanban_backup_interval}|g" \
-      -e "s|{{PYTHON3_PATH}}|${python3_path}|g" \
-      -e "s|{{AUTO_UPGRADE_SCRIPT}}|${WORKING_DIR}/scripts/auto-upgrade.sh|g" \
-      -e "s|{{LOG_DIR}}|${WORKING_DIR}/logs|g" \
-      -e "s|{{LCARS_UI_DIR}}|${WORKING_DIR}/lcars-ui|g" \
-      -e "s|{{AITEAMFORGE_BIN}}|${aiteamforge_bin}|g" \
-      -e "s|{{CELLAR_WATCH_TRIGGER}}|${WORKING_DIR}/scripts/cellar-watch-trigger.sh|g" \
-      -e "s|{{BREW_CELLAR_DIR}}|${brew_prefix}/Cellar/aiteamforge|g" \
-      "$template" > "$dest"
-}
+# NOTE (XACA-0734): _render_launchagent_template used to live here. It now lives in
+# libexec/lib/launchagents.sh (sourced at the top of this file) because `aiteamforge
+# doctor --fix` needed the same renderer and would have become a FOURTH copy of this
+# logic. The agent→template map and the mandatory/opt-out vocabulary moved with it.
+# Add a new {{PLACEHOLDER}} in ONE place: the sed chain in lib/launchagents.sh.
 
 # Update LaunchAgents
+#
+# XACA-0734 DECISION TABLE — what happens to each agent in the map:
+#
+#   plist on disk | in mandatory set | in optout sentinel | action
+#   --------------|------------------|--------------------|--------------------------
+#   present       | —                | —                  | refresh   (unchanged)
+#   absent        | yes              | no                 | RENDER + LOAD  ← the fix
+#   absent        | yes              | yes                | skip (respect recorded intent)
+#   absent        | no               | —                  | skip (unchanged)
+#
+# The old code had a single `[ ! -f "$target" ] && continue` guard, which collapsed
+# rows 2 and 3 into "skip" and thereby made every NET-NEW mandatory LaunchAgent
+# permanently unreachable on every already-installed box. See lib/launchagents.sh
+# for the full incident write-up (M1Pro could never auto-upgrade because it was
+# missing the very agent that performs upgrades).
+#
+# Under --dry-run nothing is materialized; a would-be install prints "Would install".
+#
+# Row 2 (the materialize path — both --dry-run and real) always prints the
+# opt-out escape hatch right after "Would install"/"Installing", via
+# _xaca0734_print_optout_hint. That is the discoverability mechanism for row 3
+# — there is deliberately NO new CLI subcommand for opting out; the sentinel is
+# a plain user-editable file (see lib/launchagents.sh) and this is where a user
+# learns it exists, at the exact moment it becomes relevant. Row 1 (routine
+# refresh of an agent already installed) does NOT print the hint — that would
+# be noise on every upgrade for agents nobody is trying to remove.
 update_launchagents() {
   print_section "Updating LaunchAgents"
-
-  # Pairs of "plist-filename:template-subpath" — order matters for logging.
-  # Templates resolve to ${FRAMEWORK_DIR}/share/templates/<subpath>.
-  # (XACA-0571 widened this to allow subdirs other than kanban/.)
-  local agents=(
-    "com.aiteamforge.kanban-backup.plist:kanban/backup-plist.template"
-    "com.aiteamforge.lcars-health.plist:kanban/lcars-health-plist.template"
-    "com.aiteamforge.auto-upgrade.plist:auto-upgrade/auto-upgrade-launchagent.template.plist"
-    "com.aiteamforge.lcars-watch.plist:auto-upgrade/lcars-watch-launchagent.template.plist"
-    "com.aiteamforge.cellar-watch.plist:auto-upgrade/cellar-watch-launchagent.template.plist"
-    # com.aiteamforge.lcars-runatload retired (XACA-0763-005) — no longer
-    # re-rendered here. Legacy installs are torn down by
-    # remove_legacy_lcars_runatload_agent (libexec/lib/common.sh), called
-    # from the run sequence right after update_launchagents below.
-  )
 
   # Allow tests to inject a sandbox path instead of the real LaunchAgents dir.
   local launchagents_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
@@ -1406,7 +1376,12 @@ update_launchagents() {
   _upgrade_tmpfiles=()
   trap '_cleanup_upgrade_tmpfiles' RETURN
 
-  for entry in "${agents[@]}"; do
+  # Agent→template pairs come from the shared map (lib/launchagents.sh) so
+  # upgrade and doctor cannot drift apart. Order is the map's order.
+  local entry
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+
     local agent="${entry%%:*}"
     local tmpl_subpath="${entry##*:}"
     local template="${FRAMEWORK_DIR}/share/templates/${tmpl_subpath}"
@@ -1414,10 +1389,38 @@ update_launchagents() {
     local tmpfile="${target}.new"
     _upgrade_tmpfiles+=("$tmpfile")
 
-    # Skip agents the user has not installed — upgrade must not silently
-    # materialise agents the user opted out of at install time.
+    # is_new drives the messaging (Installing vs Updating) and the post-load
+    # registration verification below. The render/diff/replace machinery is
+    # shared between both paths.
+    local is_new=false
+
     if [ ! -f "$target" ]; then
-      continue
+      # Absent plist. Absence is NOT intent — consult the recorded opt-out
+      # sentinel instead of inferring from disk state (this is the whole point
+      # of XACA-0734).
+      if ! _xaca0734_is_mandatory "$agent"; then
+        # Row 4: optional agent, never installed here → leave it alone.
+        continue
+      fi
+      if _xaca0734_is_opted_out "$agent"; then
+        # Row 3: the user's own uninstall recorded this. Respect it.
+        print_info "Skipping ${agent} — opted out ($(_xaca0734_optout_file))"
+        continue
+      fi
+      # Row 2: mandatory, absent, no recorded opt-out → materialize it.
+      is_new=true
+
+      # Under --dry-run, short-circuit BEFORE any filesystem effect. There is
+      # nothing to diff (the target does not exist — it would simply be created),
+      # so skipping here means dry-run creates no tempfile and no LaunchAgents dir.
+      if [ "$DRY_RUN" = true ]; then
+        echo "Would install: ${agent}"
+        _xaca0734_print_optout_hint "$agent"
+        updated=$((updated + 1))
+        continue
+      fi
+
+      mkdir -p "$launchagents_dir"
     fi
 
     # Template missing: report without aborting the whole upgrade run.
@@ -1426,9 +1429,15 @@ update_launchagents() {
     fi
 
     # Diff rendered output against live target (not the raw template, which
-    # always looks different due to {{VAR}} placeholders).
+    # always looks different due to {{VAR}} placeholders). A missing target
+    # makes diff fail, which correctly routes a new agent into the write path.
     if ! diff -q "$tmpfile" "$target" &>/dev/null || [ "$FORCE" = true ]; then
-      print_info "Updating ${agent}..."
+      if [ "$is_new" = true ]; then
+        print_info "Installing ${agent} (mandatory, was missing)..."
+        _xaca0734_print_optout_hint "$agent"
+      else
+        print_info "Updating ${agent}..."
+      fi
 
       if [ "$DRY_RUN" = false ]; then
         # Unload current agent (ignore failure — may not be loaded)
@@ -1440,9 +1449,24 @@ update_launchagents() {
         # Reload agent (ignore failure — may need user session context)
         _aitf_launchctl load "$target" 2>/dev/null || true
 
-        print_success "Updated ${agent}"
+        if [ "$is_new" = true ]; then
+          # XACA-0651-009 load-verify: `launchctl load` returns 0 even when the
+          # job is REJECTED, so confirm registration rather than trust the exit
+          # code. Only warn — a plist on disk that did not register is still an
+          # improvement over no plist at all, and the next login will load it.
+          local label="${agent%.plist}"
+          if launchctl list 2>/dev/null | grep -q "$label"; then
+            print_success "Installed and loaded ${agent}"
+          else
+            print_warning "Installed ${agent} but it did not register — activate with: launchctl load ${target}"
+          fi
+        else
+          print_success "Updated ${agent}"
+        fi
         updated=$((updated + 1))
       else
+        # Only reachable for an EXISTING target whose content changed — a
+        # would-be install already short-circuited above with "Would install".
         echo "Would update: ${agent}"
         rm -f "$tmpfile"
         updated=$((updated + 1))
@@ -1451,7 +1475,28 @@ update_launchagents() {
       # No change — clean up tempfile, count as no-op
       rm -f "$tmpfile"
     fi
-  done
+  done <<EOF
+$(_xaca0734_launchagent_map)
+EOF
+
+  # XACA-0734 assert-present: verify every mandatory agent actually exists on
+  # disk after the loop. Mirrors the XACA-0771 alias-file assert — a LOUD warning,
+  # never fatal, because a still-missing plist here means the shipped TEMPLATE was
+  # absent from this Cellar payload (the `_render_launchagent_template` failure
+  # above only prints a warning and continues, which would otherwise pass silently).
+  # Opted-out agents are expected to be missing and are not flagged.
+  # Skipped under --dry-run, since nothing was actually materialized to check.
+  if [ "$DRY_RUN" = false ]; then
+    local _mandatory_agent
+    for _mandatory_agent in $(_xaca0734_mandatory_launchagent_basenames); do
+      if _xaca0734_is_opted_out "$_mandatory_agent"; then
+        continue
+      fi
+      if [ ! -f "${launchagents_dir}/${_mandatory_agent}" ]; then
+        print_warning "Mandatory LaunchAgent still missing after upgrade: ${launchagents_dir}/${_mandatory_agent}"
+      fi
+    done
+  fi
 
   if [ $updated -eq 0 ]; then
     print_success "All LaunchAgents up to date"

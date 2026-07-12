@@ -626,6 +626,33 @@ update_launchagents() {
 
     # Opt-in guard: only re-render agents the user already has installed.
     # Migrate must not silently materialise agents that weren't there.
+    #
+    # ═══ XACA-0734 DECISION: THIS GUARD IS CORRECT **HERE**. DO NOT "FIX" IT. ═══
+    #
+    # The identical `[ ! -f "$target" ] && continue` guard in aiteamforge-upgrade.sh's
+    # update_launchagents() was a BUG and was removed — it made every net-new mandatory
+    # LaunchAgent permanently unreachable on already-installed boxes. A sibling-drift
+    # audit will therefore flag this line as "the same bug, unfixed". It is not. The
+    # two functions have different jobs:
+    #
+    #   upgrade  = PROVISIONING. Its contract is "bring this box up to what the current
+    #              release ships", which necessarily includes agents that did not exist
+    #              when the box was installed. Skipping absent plists breaks that
+    #              contract, so upgrade now consults the recorded opt-out sentinel
+    #              (lib/launchagents.sh) instead of inferring intent from disk state.
+    #
+    #   migrate  = REPOINTING. Its contract is "the data dir MOVED; rewrite the agents
+    #              that reference the old path so they point at ${NEW_DATA_DIR}". An
+    #              agent that is not installed has no stale path to repoint — there is
+    #              literally nothing to migrate. Creating it here would mean a
+    #              data-directory move silently PROVISIONS new launchd jobs, which is a
+    #              surprising side effect well outside what the user asked for, and it
+    #              would duplicate (and race) upgrade's provisioning logic.
+    #
+    # Provisioning of missing mandatory agents belongs to exactly two places: the
+    # upgrade path (primary) and `aiteamforge doctor --fix` (backstop). Migrate stays
+    # out of it on purpose. If a box is missing a mandatory agent AND moves its data
+    # dir, the next upgrade/doctor run installs it — correctly pointed at the new dir.
     if [[ ! -f "${target}" ]]; then
       continue
     fi

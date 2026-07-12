@@ -8,6 +8,14 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/../lib/common.sh"
 source "$SCRIPT_DIR/../lib/constants.sh"
+# XACA-0734: opt-out sentinel helpers. Each install_<x>_launchagent() below
+# CHECKS the sentinel and refuses to install when the user has opted out;
+# uninstall_<x>_launchagent() RECORDS an opt-out (though its only current
+# caller, uninstall_kanban_system, immediately wipes the whole sentinel again —
+# see that function's header comment). This lets `aiteamforge upgrade` tell
+# "deliberately removed" from "never existed on this box" instead of inferring
+# it from disk state. Full contract + lifecycle: see lib/launchagents.sh.
+source "$SCRIPT_DIR/../lib/launchagents.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -948,6 +956,16 @@ install_backup_launchagent() {
     local plist_template="$INSTALL_ROOT/share/templates/kanban/backup-plist.template"
     local plist_dest="$HOME/Library/LaunchAgents/${KANBAN_BACKUP_LABEL}.plist"
 
+    # XACA-0734: this function is called unconditionally by install_kanban_system
+    # on EVERY `aiteamforge setup` (including reconfigure), not just a fresh
+    # install. Checking the opt-out sentinel here — rather than auto-clearing it —
+    # is what makes a hand-recorded opt-out actually stick across unrelated setup
+    # re-runs. See the LIFECYCLE note in lib/launchagents.sh for the full story.
+    if _xaca0734_is_opted_out "${KANBAN_BACKUP_LABEL}.plist"; then
+        info "Skipping backup LaunchAgent — opted out. To reinstall, remove this line from $(_xaca0734_optout_file): ${KANBAN_BACKUP_LABEL}.plist"
+        return 0
+    fi
+
     if [ ! -f "$plist_template" ]; then
         warning "LaunchAgent template not found: $plist_template (skipping)"
         return 0
@@ -1002,8 +1020,17 @@ install_backup_launchagent() {
 }
 
 # Uninstall backup LaunchAgent
+#
+# XACA-0734: records the opt-out so a later `aiteamforge upgrade` does NOT
+# re-materialize this mandatory agent. NOTE the sentinel is recorded
+# unconditionally — even when the plist is already gone — because the intent
+# ("I do not want this agent") is what we are persisting, not the disk state.
+# The batch caller uninstall_kanban_system() wipes the whole sentinel afterward;
+# see its comment for why that is required and not a contradiction.
 uninstall_backup_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/${KANBAN_BACKUP_LABEL}.plist"
+
+    _xaca0734_record_optout "${KANBAN_BACKUP_LABEL}.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading backup LaunchAgent"
@@ -1017,6 +1044,12 @@ uninstall_backup_launchagent() {
 install_lcars_health_launchagent() {
     local plist_template="$INSTALL_ROOT/share/templates/kanban/lcars-health-plist.template"
     local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
+
+    # XACA-0734: see the identical guard in install_backup_launchagent.
+    if _xaca0734_is_opted_out "com.aiteamforge.lcars-health.plist"; then
+        info "Skipping LCARS health LaunchAgent — opted out. To reinstall, remove this line from $(_xaca0734_optout_file): com.aiteamforge.lcars-health.plist"
+        return 0
+    fi
 
     if [ ! -f "$plist_template" ]; then
         warning "LCARS health LaunchAgent template not found (skipping)"
@@ -1046,8 +1079,11 @@ install_lcars_health_launchagent() {
 }
 
 # Uninstall LCARS health LaunchAgent
+# XACA-0734: records the opt-out — see uninstall_backup_launchagent.
 uninstall_lcars_health_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
+
+    _xaca0734_record_optout "com.aiteamforge.lcars-health.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS health LaunchAgent"
@@ -1077,6 +1113,14 @@ install_lcars_watch_launchagent() {
     local plist_template="$INSTALL_ROOT/share/templates/auto-upgrade/lcars-watch-launchagent.template.plist"
     local plist_dest="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-watch.plist"
     local lcars_ui_dir="$AITEAMFORGE_DIR/lcars-ui"
+
+    # XACA-0734: see the identical guard in install_backup_launchagent. lcars-watch
+    # is in the shared agent map but not mandatory, so this guard is not load-bearing
+    # for upgrade's behavior today — kept for correctness-by-construction.
+    if _xaca0734_is_opted_out "com.aiteamforge.lcars-watch.plist"; then
+        info "Skipping LCARS watch LaunchAgent — opted out. To reinstall, remove this line from $(_xaca0734_optout_file): com.aiteamforge.lcars-watch.plist"
+        return 0
+    fi
 
     if [ ! -f "$plist_template" ]; then
         warning "LCARS watch LaunchAgent template not found (skipping)"
@@ -1124,8 +1168,11 @@ install_lcars_watch_launchagent() {
 }
 
 # Uninstall LCARS WatchPaths LaunchAgent
+# XACA-0734: records the opt-out — see uninstall_backup_launchagent.
 uninstall_lcars_watch_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-watch.plist"
+
+    _xaca0734_record_optout "com.aiteamforge.lcars-watch.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS watch LaunchAgent"
@@ -1193,6 +1240,13 @@ install_cellar_watch_launchagent() {
     local script_src="$INSTALL_ROOT/share/scripts/cellar-watch-trigger.sh"
     local script_dest="$AITEAMFORGE_DIR/scripts/cellar-watch-trigger.sh"
 
+    # XACA-0734: see the identical guard in install_backup_launchagent. Like
+    # lcars-watch, cellar-watch is in the shared agent map but not mandatory.
+    if _xaca0734_is_opted_out "com.aiteamforge.cellar-watch.plist"; then
+        info "Skipping cellar watch LaunchAgent — opted out. To reinstall, remove this line from $(_xaca0734_optout_file): com.aiteamforge.cellar-watch.plist"
+        return 0
+    fi
+
     # Copy the trigger script into place
     if [ ! -f "$script_src" ]; then
         warning "cellar-watch-trigger.sh not found at $script_src (skipping cellar-watch LaunchAgent)"
@@ -1229,6 +1283,7 @@ install_cellar_watch_launchagent() {
         -e "s|{{AITEAMFORGE_DIR}}|${AITEAMFORGE_DIR}|g" \
         "$plist_template" > "$plist_dest"
 
+
     _aitf_launchctl unload "$plist_dest" 2>/dev/null || true
 
     # XACA-0651-009 load-verify pattern (aligned with the sibling LaunchAgent
@@ -1246,8 +1301,11 @@ install_cellar_watch_launchagent() {
 }
 
 # Uninstall Cellar WatchPaths LaunchAgent
+# XACA-0734: records the opt-out — see uninstall_backup_launchagent.
 uninstall_cellar_watch_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.cellar-watch.plist"
+
+    _xaca0734_record_optout "com.aiteamforge.cellar-watch.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading cellar watch LaunchAgent"
@@ -1698,6 +1756,14 @@ install_auto_upgrade_launchagent() {
     local script_src="$INSTALL_ROOT/share/scripts/auto-upgrade.sh"
     local script_dest="$AITEAMFORGE_DIR/scripts/auto-upgrade.sh"
 
+    # XACA-0734: see the identical guard in install_backup_launchagent. This is
+    # the HIGHEST-PRIORITY agent in the mandatory set — it is the one that
+    # performs upgrades — so respecting a recorded opt-out here matters most.
+    if _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+        info "Skipping auto-upgrade LaunchAgent — opted out. To reinstall, remove this line from $(_xaca0734_optout_file): com.aiteamforge.auto-upgrade.plist"
+        return 0
+    fi
+
     # Copy the upgrade script into place
     if [ ! -f "$script_src" ]; then
         warning "auto-upgrade.sh not found at $script_src (skipping auto-upgrade LaunchAgent)"
@@ -1743,8 +1809,14 @@ install_auto_upgrade_launchagent() {
 }
 
 # Uninstall auto-upgrade LaunchAgent
+# XACA-0734: records the opt-out — see uninstall_backup_launchagent. Removing THIS
+# agent is the one with teeth: it is the agent that performs upgrades, so a box
+# without it can never self-heal. The sentinel is what makes that a deliberate,
+# recorded choice rather than an accident that upgrade would silently perpetuate.
 uninstall_auto_upgrade_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist"
+
+    _xaca0734_record_optout "com.aiteamforge.auto-upgrade.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading auto-upgrade LaunchAgent..."
@@ -2554,6 +2626,40 @@ uninstall_kanban_system() {
     uninstall_lcars_watch_launchagent
     uninstall_lcars_runatload_launchagent
     uninstall_knowledge_sync_launchagent
+
+    # ═══ XACA-0734: WIPE THE OPT-OUT SENTINEL. THIS IS NOT OPTIONAL. ═══
+    #
+    # Read this before "simplifying" it away.
+    #
+    # Each uninstall_<x>_launchagent() above APPENDS its agent to the opt-out
+    # sentinel, because a TARGETED removal means "I do not want this agent" and
+    # `aiteamforge upgrade` must respect that instead of re-materializing it.
+    #
+    # But this function is a FULL uninstall, not a targeted one — it batch-calls
+    # every per-agent helper. So by the time we get here the sentinel lists
+    # EVERY agent, including the mandatory ones. If we left it in that state:
+    #
+    #     uninstall  →  sentinel = {auto-upgrade, lcars-health, kanban-backup, …}
+    #     reinstall  →  upgrade reads the sentinel, sees every mandatory agent
+    #                   marked "opted out", and suppresses all of them FOREVER
+    #
+    # ...which is precisely the self-sealing failure XACA-0734 exists to kill,
+    # just relocated to the uninstall→reinstall path. A full uninstall erases the
+    # installation, and that must include erasing its recorded preferences.
+    #
+    # Order matters: this MUST run AFTER the per-agent calls above, since they are
+    # the ones doing the appending.
+    #
+    # THIS WIPE IS THE ONLY THING THAT EVER CLEARS THESE ENTRIES. A later
+    # `aiteamforge setup` does NOT do it for you: install_<x>_launchagent() no
+    # longer auto-clears an opt-out on install (see the LIFECYCLE note in
+    # lib/launchagents.sh — that used to be the plan, and it was wrong, because
+    # install_kanban_system runs unconditionally on every setup/reconfigure, not
+    # just a fresh install, and would have silently reversed a deliberate
+    # hand-recorded opt-out). So without this call, a full uninstall followed by
+    # a fresh reinstall would leave every mandatory agent PERMANENTLY opted out
+    # — nothing downstream would ever clear those entries either. Wipe it here.
+    _xaca0734_clear_all_optouts
 
     # Remove installed files
     info "Removing kanban system files"

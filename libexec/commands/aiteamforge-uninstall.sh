@@ -12,6 +12,9 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source shared libraries
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
+# XACA-0734: opt-out sentinel helpers (_xaca0734_clear_all_optouts). See
+# remove_launchagents below for why a full uninstall MUST delete the sentinel.
+source "${LIBEXEC_DIR}/lib/launchagents.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -195,6 +198,34 @@ remove_launchagents() {
       print_success "Removed ${agent}"
     fi
   done
+
+  # ═══ XACA-0734: WIPE THE OPT-OUT SENTINEL. THIS IS NOT OPTIONAL. ═══
+  #
+  # The sentinel (~/.aiteamforge/launchagents.optout) records which LaunchAgents
+  # the user has deliberately removed, so `aiteamforge upgrade` can tell that
+  # apart from "this agent never existed on this box" and stop suppressing every
+  # net-new mandatory agent. See lib/launchagents.sh for the full write-up.
+  #
+  # Two things make deleting it here load-bearing rather than tidy-up:
+  #
+  #  1. A populated sentinel that OUTLIVES an uninstall poisons the next fresh
+  #     install: upgrade would read it, see the mandatory agents marked "opted
+  #     out", and suppress them forever — recreating the exact self-sealing bug
+  #     this ticket fixes.
+  #
+  #  2. remove_files() below CANNOT clean it up for us. It only removes paths
+  #     under WORKING_DIR (${AITEAMFORGE_DIR:-~/aiteamforge}). The sentinel lives
+  #     in ~/.aiteamforge/ — the runtime config dir, alongside team-paths.json.
+  #     Those are DIFFERENT directories (one has a dot, one does not). Nothing
+  #     else in this script touches ~/.aiteamforge/, so without this call the
+  #     sentinel survives a full purge.
+  #
+  # Note this loop deliberately does its own inline unload+rm rather than calling
+  # install-kanban.sh's uninstall_<x>_launchagent() helpers — which is fortunate,
+  # since those APPEND to the sentinel. If anyone ever refactors this to use them,
+  # this wipe is what keeps that refactor from poisoning the sentinel with every
+  # agent. Keep it last, and keep it unconditional.
+  _xaca0734_clear_all_optouts
 }
 
 # Remove zshrc integration
