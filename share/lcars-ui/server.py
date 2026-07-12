@@ -2081,6 +2081,64 @@ def get_board_file(team: str) -> Path:
     """Get the board file path for a team using distributed directories."""
     kanban_dir = TEAM_KANBAN_DIRS.get(team, KANBAN_DIR)
     return kanban_dir / f"{team}-board.json"
+
+
+def get_reconciled_inprogress(team: str, board_file: Path) -> list:
+    """XACA-0778-005: Crash-recovery reconciliation for the Workflow tab.
+
+    Shells out to `_kb_reconcile_inprogress` (kanban-helpers.sh) to classify
+    every in_progress backlog item/subitem as BOUND (a live tmux window still
+    backs it) or ORPHANED (it does not — e.g. after a Mac/tmux crash). This is
+    the persistent-truth view (backlog[].status == "in_progress") that
+    survives a dead tmux server, unlike the ephemeral activeWindows[] pointers
+    the Workflow tab has historically rendered from.
+
+    Read-only and best-effort: on ANY failure (helpers script missing, jq
+    error, timeout, malformed output) this returns [] rather than raising —
+    reconciliation is an additive enhancement to board serving, and a broken
+    classifier must never take down the primary board response the whole UI
+    depends on. Errors are logged server-side for diagnosis.
+
+    See kanban-helpers.sh `_kb_reconcile_inprogress` for the full output
+    contract (XACA-0778-001) — do not reimplement classification here.
+    """
+    try:
+        dev_team_root = Path.home() / "dev-team"
+        helpers_path = dev_team_root / "kanban-helpers.sh"
+        if not helpers_path.exists():
+            return []
+
+        shell_script = "\n".join([
+            f"source {shlex.quote(str(helpers_path))}",
+            f"_kb_reconcile_inprogress {shlex.quote(team)} {shlex.quote(str(board_file))}",
+        ])
+
+        result = subprocess.run(
+            ["zsh", "-c", shell_script],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        if result.returncode != 0:
+            stderr = result.stderr.strip()
+            print(f"[LCARS] WARNING: reconcile-inprogress non-zero exit for '{team}': {stderr}")
+            return []
+
+        raw = result.stdout.strip()
+        if not raw:
+            return []
+
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, list) else []
+    except subprocess.TimeoutExpired:
+        print(f"[LCARS] WARNING: reconcile-inprogress timed out for team '{team}'")
+        return []
+    except Exception as e:
+        print(f"[LCARS] WARNING: reconcile-inprogress failed for team '{team}': {e}")
+        return []
+
+
 BACKUP_STATUS_FILE = BACKUP_DIR / "backup-status.json"
 UI_DIR = Path(__file__).parent
 CONFIG_DIR = Path.home() / "dev-team" / "config"
@@ -12929,6 +12987,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         )
                         return
                     # If registry is absent entirely, serve the data as-is (degraded mode).
+
+                # XACA-0778-005: merge in the reconciled in_progress view so the
+                # Workflow tab can surface ORPHANED work (dead tmux pointer, or the
+                # whole tmux server down post-crash) that would otherwise be
+                # invisible when activeWindows[] has no matching entry. Additive
+                # field only — activeWindows[] is left untouched so existing
+                # consumers are unaffected. Best-effort: reconcile_inprogress
+                # never raises, so a classifier failure degrades to an empty list
+                # rather than breaking board serving.
+                data['reconciledInProgress'] = get_reconciled_inprogress(team, board_file)
 
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')

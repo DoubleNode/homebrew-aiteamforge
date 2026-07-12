@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Added
+- XACA-0778 — Mirrors the crash-recovery reconciliation surfacing into the tap: `share/lcars-ui/` (`server.py`, `index.html`, `css/lcars.css`, `js/lcars.js`) gains the LCARS Workflow-tab "NEEDS RECONNECT" lane that surfaces crash-orphaned in-progress work (server-side `get_reconciled_inprogress()` adds an additive `reconciledInProgress` field sourced from the read-only `_kb_reconcile_inprogress` classifier; client renders an amber lane distinct from PAUSED with a `kb-resume <id>` reconnect hint), and `share/kanban-hooks/kanban-stop.py` now writes a clean-shutdown sentinel on graceful exit so an unclean shutdown is detectable. Byte-identical canonical→tap mirror per the XACA-0340 `sync-tap.sh` contract (5 files). The reconciliation engine + `kb-recover`/`kb-resume <ID>` commands live in canonical `kanban-helpers.sh`, which is not `sync-tap.sh`-mapped (tap consumers get helper content via the `kanban-aliases.sh`/`kanban-helpers.template.sh` route), so no helper drift here.
+
 ## [0.17.6] - 2026-07-11
 
 ### Fixed

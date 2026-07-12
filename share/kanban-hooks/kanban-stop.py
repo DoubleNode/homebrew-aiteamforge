@@ -18,6 +18,41 @@ from kanban_utils import get_board_file, update_board_safely, parse_session_name
 KANBAN_DIR = os.path.expanduser("~/dev-team/kanban")
 LOG_FILE = os.path.expanduser("~/dev-team/kanban/stop-hook-debug.log")
 
+# XACA-0778-003: clean-shutdown sentinel. Presence means "the most recent
+# real Claude exit we know of (since this file was last consumed by a
+# SessionStart hook) went through the graceful Stop path". Written here,
+# consumed by kanban-hooks/kanban-crash-detect.sh at SessionStart. See that
+# script's header comment for the full presence/absence state machine and
+# its documented races with multiple concurrent windows.
+CLEAN_SHUTDOWN_SENTINEL = os.path.expanduser(
+    "~/.aiteamforge/run/kanban-clean-shutdown.sentinel"
+)
+
+def write_clean_shutdown_sentinel():
+    """Best-effort: mark that this Claude session exited gracefully.
+
+    Called ONLY from the confirmed-real-exit branch of delayed_check_and_remove
+    (never on a turn-end Stop). Written atomically (tmp file + os.replace) so
+    concurrent windows exiting around the same time can never produce a
+    torn/partial read on the consumer side -- worst case is last-writer-wins
+    on the timestamp, which is fine since this is a presence/absence signal,
+    not a counter.
+
+    Wrapped in try/except -- a failure here must never affect window-removal
+    cleanup or any other part of the stop hook.
+    """
+    try:
+        sentinel_dir = os.path.dirname(CLEAN_SHUTDOWN_SENTINEL)
+        os.makedirs(sentinel_dir, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        tmp_path = f"{CLEAN_SHUTDOWN_SENTINEL}.tmp.{os.getpid()}"
+        with open(tmp_path, "w") as f:
+            f.write(timestamp + "\n")
+        os.replace(tmp_path, CLEAN_SHUTDOWN_SENTINEL)
+        log_debug(f"[Background] Wrote clean-shutdown sentinel: {timestamp}")
+    except Exception as e:
+        log_debug(f"[Background] Failed to write clean-shutdown sentinel: {e}")
+
 def log_debug(message):
     """Write debug message to log file."""
     try:
@@ -411,6 +446,11 @@ def delayed_check_and_remove(session_name, window_name, team, terminal, session_
                 log_debug("[Background] Claude has exited - proceeding with window removal")
                 result = remove_window(team, terminal, window_name)
                 log_debug(f"[Background] remove_window result: {result}")
+
+                # XACA-0778-003: this IS the graceful-exit path (Claude process
+                # confirmed gone, not a turn-end Stop) -- mark the clean-shutdown
+                # sentinel so the next SessionStart doesn't mistake this for a crash.
+                write_clean_shutdown_sentinel()
 
                 # Signal to iTerm2 that Claude is no longer active in this tab.
                 # Pass session_id so the helper can read back the frozen tab_id

@@ -2032,6 +2032,11 @@ function renderShipInfo() {
 
 // Column priority: 'critical' always shows, 'important' shows if non-empty, 'optional' hides when empty
 const COLUMN_PRIORITY = {
+    // XACA-0778-005: crash-recovery lane. 'important' (not 'critical') so it
+    // collapses cleanly when there is nothing orphaned -- the whole point is
+    // to surface orphans without adding permanent visual noise for the
+    // common case (tmux is fine, nothing needs reconnecting).
+    needs_reconnect: 'important',
     paused:    'critical',   // Always show - alerts need visibility
     ready:     'critical',   // Always show - work backlog entry point
     coding:    'critical',   // Always show - active development
@@ -2041,8 +2046,10 @@ const COLUMN_PRIORITY = {
     pr_review: 'optional'    // Hide when empty
 };
 
-// All column names in display order
-const KANBAN_COLUMNS = ['paused', 'ready', 'planning', 'coding', 'testing', 'commit', 'pr_review'];
+// All column names in display order. 'needs_reconnect' leads the board --
+// crash-orphaned in_progress work (XACA-0778-005) is the thing an operator
+// is most likely to miss, so it gets first billing, ahead of even PAUSED.
+const KANBAN_COLUMNS = ['needs_reconnect', 'paused', 'ready', 'planning', 'coding', 'testing', 'commit', 'pr_review'];
 
 // Toggle state - show all columns or intelligent hiding
 let showAllKanbanColumns = localStorage.getItem('showAllKanbanColumns') === 'true';
@@ -2075,6 +2082,24 @@ function renderKanbanColumns() {
     const readyCol = document.getElementById('col-ready');
     if (activeWindows.length === 0 && readyCol) {
         readyCol.innerHTML = '<div class="empty-column">No active windows</div>';
+    }
+
+    // XACA-0778-005: NEEDS RECONNECT lane -- backlog[].status == "in_progress"
+    // work the server-side reconciler (kb-reconcile-inprogress, XACA-0778-001)
+    // classified ORPHANED: no live tmux window backs it (dead pointer, or the
+    // whole tmux server is down post-crash). This is the persistent-truth
+    // view, unlike activeWindows[] above which is entirely tmux-session-keyed
+    // and goes silent the instant tmux dies -- exactly when an operator most
+    // needs to see what was mid-flight. Additive: never touches activeWindows.
+    const reconnectCol = document.getElementById('col-needs_reconnect');
+    if (reconnectCol) {
+        const reconciled = boardData.reconciledInProgress || [];
+        const orphaned = reconciled.filter(r => r.classification === 'ORPHANED');
+        orphaned.forEach(item => {
+            const card = createReconnectCard(item);
+            reconnectCol.appendChild(card);
+            columnCardCounts.needs_reconnect = (columnCardCounts.needs_reconnect || 0) + 1;
+        });
     }
 
     // Apply responsive swimlane logic
@@ -2243,6 +2268,83 @@ function createKanbanCard(win) {
 
     card.title = `${win.developer || 'Unknown'}\nWorktree: ${win.worktree || 'N/A'}`;
     card.onclick = () => showWindowDetails(win);
+    return card;
+}
+
+/**
+ * XACA-0778-005: Build a card for the NEEDS RECONNECT lane from a single
+ * reconciled-in-progress entry (see kb-reconcile-inprogress / kanban-helpers.sh
+ * _kb_reconcile_inprogress for the output contract). Unlike createKanbanCard,
+ * `item` is NOT an activeWindows[] entry -- there is no live tmux window, no
+ * terminal, no developer/avatar to show. The card's job is purely "here's
+ * what's orphaned and how to get back to it": id, title, worktree/branch, and
+ * an explicit recovery hint.
+ */
+function createReconnectCard(item) {
+    const card = document.createElement('div');
+    card.className = 'kanban-card needs-reconnect';
+
+    // Line 1: Alert header -- distinct from the live-session card header
+    // (no avatar/terminal to show since nothing is actually connected).
+    const headerLine = document.createElement('div');
+    headerLine.className = 'card-header';
+    const alertIcon = document.createElement('span');
+    alertIcon.className = 'card-reconnect-icon';
+    alertIcon.textContent = '🔌'; // 🔌 plug -- disconnected work, self-contained unicode glyph
+    alertIcon.setAttribute('aria-hidden', 'true');
+    headerLine.appendChild(alertIcon);
+    const alertLabel = document.createElement('div');
+    alertLabel.className = 'card-terminal';
+    alertLabel.textContent = 'ORPHANED';
+    headerLine.appendChild(alertLabel);
+    card.appendChild(headerLine);
+
+    // Line 2: ID (prominent, clickable -- navigates to the backlog item,
+    // same behavior as the working-id line on live cards).
+    const idLine = document.createElement('div');
+    idLine.className = 'card-working-id clickable';
+    idLine.textContent = `⚡ ${item.id}`;
+    idLine.title = `Click to view ${item.id} in Queue`;
+    idLine.addEventListener('click', (e) => {
+        e.stopPropagation();
+        navigateToBacklogItemById(item.id);
+    });
+    card.appendChild(idLine);
+
+    // Parent relationship, when this is an orphaned subitem
+    if (item.parentId) {
+        const parentLine = document.createElement('div');
+        parentLine.className = 'card-window';
+        parentLine.textContent = `part of ${item.parentId}`;
+        card.appendChild(parentLine);
+    }
+
+    // Line 3: Title/task
+    const taskLine = document.createElement('div');
+    taskLine.className = 'card-task';
+    taskLine.textContent = item.title || 'Untitled';
+    card.appendChild(taskLine);
+
+    // Worktree / branch, when known
+    if (item.worktree || item.branch) {
+        const worktreeLine = document.createElement('div');
+        worktreeLine.className = 'card-worktree';
+        const parts = [];
+        if (item.branch) parts.push(item.branch);
+        if (item.worktree) parts.push(item.worktree);
+        worktreeLine.textContent = parts.join(' — ');
+        card.appendChild(worktreeLine);
+    }
+
+    // Recovery hint -- the actionable line, styled like the paused-reason
+    // callout so it reads as "do something about this", not just FYI.
+    const hintLine = document.createElement('div');
+    hintLine.className = 'card-reconnect-hint';
+    hintLine.textContent = `Run kb-resume ${item.id} (or kb-recover) to reconnect`;
+    card.appendChild(hintLine);
+
+    card.title = `${item.id}\nOrphaned in-progress work -- no live tmux window backs it.\nWorktree: ${item.worktree || 'N/A'}\nBranch: ${item.branch || 'N/A'}\nRun kb-resume ${item.id} or kb-recover to reconnect.`;
+    card.onclick = () => navigateToBacklogItemById(item.id);
     return card;
 }
 
