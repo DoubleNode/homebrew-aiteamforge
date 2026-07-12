@@ -2790,7 +2790,21 @@ _ATFD="${{AITEAMFORGE_DIR:-$HOME/aiteamforge}}"
 # .txt files are plain prompt text — read directly into the env var rather than
 # `source` (which would try to execute the prose as shell and choke on heredocs / quoting).
 _PROMPT_FILE="$_ATFD/${{SESSION_TYPE}}/scripts/prompts/${{SESSION_CODE}}-prompt.txt"
-[[ -f "$_PROMPT_FILE" ]] && CLAUDE_SYSTEM_PROMPT="$(<"$_PROMPT_FILE")" && export CLAUDE_SYSTEM_PROMPT
+if [[ -f "$_PROMPT_FILE" ]]; then
+    CLAUDE_SYSTEM_PROMPT="$(<"$_PROMPT_FILE")"
+    export CLAUDE_SYSTEM_PROMPT
+else
+    # XACA-0785: this used to be a silent `[[ -f ... ]] && ... || true`-shaped
+    # no-op. A missing prompt file left CLAUDE_SYSTEM_PROMPT unset and Claude
+    # launched with NO PERSONA — generic assistant, no character/team context —
+    # with zero indication anywhere (colors/tmux window name/banners all still
+    # worked). Warn loudly instead of failing silent. This is a runtime
+    # complement to the install-time verify_agent_prompt_files() check below;
+    # it fires whenever the file goes missing/renamed/deleted AFTER install.
+    echo "🚨 WARNING: Agent prompt file not found: $_PROMPT_FILE" >&2
+    echo "🚨 Claude will launch with NO PERSONA (generic assistant — no character, no team context)." >&2
+    echo "🚨 Fix: restore the missing .txt, or re-run the team installer to regenerate it." >&2
+fi
 
 # Auto-set worktree project context
 wt-project $SESSION_TYPE > /dev/null 2>&1 || true

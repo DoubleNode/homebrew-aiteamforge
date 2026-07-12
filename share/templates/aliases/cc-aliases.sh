@@ -284,6 +284,13 @@ cc() {
         if [[ -f "$prompt_file" ]]; then
             _cc_launch "$prompt_file"
             return
+        else
+            # XACA-0785: this branch used to silently drop straight through to
+            # the persona-less fallback below — no error, no persona, and
+            # nothing in colors/tmux window name/banners to reveal it. That
+            # silent no-op was the core XACA-0785 bug. Warn loudly instead.
+            echo "🚨 WARNING: Agent prompt file not found: $prompt_file" >&2
+            echo "🚨 Falling back to plain claude — NO PERSONA (generic assistant, no character/team context)." >&2
         fi
     fi
     claude --permission-mode bypassPermissions "$@"
