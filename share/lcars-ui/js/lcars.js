@@ -2344,7 +2344,17 @@ function createReconnectCard(item) {
     card.appendChild(hintLine);
 
     card.title = `${item.id}\nOrphaned in-progress work -- no live tmux window backs it.\nWorktree: ${item.worktree || 'N/A'}\nBranch: ${item.branch || 'N/A'}\nRun kb-resume ${item.id} or kb-recover to reconnect.`;
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', `Orphaned item ${item.id}: ${item.title || 'Untitled'}, activate to reconnect`);
     card.onclick = () => navigateToBacklogItemById(item.id);
+    card.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            e.stopPropagation();
+            navigateToBacklogItemById(item.id);
+        }
+    });
     return card;
 }
 
