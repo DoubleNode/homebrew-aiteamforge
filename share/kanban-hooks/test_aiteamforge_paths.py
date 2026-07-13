@@ -12,8 +12,10 @@ Run:
 
 import copy
 import importlib
+import importlib.util
 import json
 import os
+import shutil
 import sys
 import tempfile
 import unittest
@@ -488,6 +490,7 @@ def _reset_module_cache():
     aiteamforge_paths._CONFIG_PATH_AT_LOAD = None
     aiteamforge_paths._A1_BACKFILL_ATTEMPTED = False
     aiteamforge_paths._CONTRACT_SCRUB_ATTEMPTED = False
+    aiteamforge_paths._BOARD_LESS_BACKFILL_ATTEMPTED = False  # XACA-0794
 
 
 def _minimal_team_entry(slug: str) -> dict:
@@ -911,6 +914,548 @@ class TestConfigIsStructurallyValid(unittest.TestCase):
             config_is_structurally_valid({"finance-personal"}, has_schema=True),
             "finance-personal-only config must be VALID after XACA-0705",
         )
+
+
+# ---------------------------------------------------------------------------
+# XACA-0794-005: Regression tests LOCKING the board-less alias contract.
+#
+# "mainevent" is a DELIBERATE board-less alias (XACA-0727): it owns no kanban
+# board of its own — 'command' is the operative kanban identity for Main Event
+# cross-platform coordination. Its absent kanban_dir/working_dir is CORRECT BY
+# DESIGN, not corruption. This premise has already been misread THREE times
+# (the XACA-0724 gate spec, XACA-0794 itself which was filed to delete this
+# entry, and would-be "cleanup" #4 if these tests didn't exist). These tests
+# make a fourth misread structurally impossible to land silently.
+#
+# All tests here use tmp dirs / mock.patch.object(aiteamforge_paths,
+# "load_config", ...) — never the real ~/.aiteamforge/team-paths.json. Reading
+# (let alone writing) the real overlay from a unit test risks tripping the
+# board-less-marker self-heal write path inside load_config() on a live
+# developer machine.
+# ---------------------------------------------------------------------------
+
+
+def _mainevent_overlay_config(mainevent_entry: dict | None = None) -> dict:
+    """Build a minimal synthetic {schema_version, teams} config containing
+    academy + command + a mainevent entry (defaults to the real DEFAULT_TEAMS
+    shape, deep-copied so callers can't mutate the module-level constant)."""
+    return {
+        "schema_version": 3,
+        "teams": {
+            "academy": _minimal_team_entry("academy"),
+            "command": _minimal_team_entry("command"),
+            "mainevent": (
+                copy.deepcopy(mainevent_entry)
+                if mainevent_entry is not None
+                else copy.deepcopy(DEFAULT_TEAMS["mainevent"])
+            ),
+        },
+    }
+
+
+class TestMainEventBoardLessContract(unittest.TestCase):
+    """Items 1-3, 5: the DEFAULT_TEAMS shape and accessor-raise contract."""
+
+    # ── 1. Key ABSENCE (not just falsy value) ───────────────────────────────
+
+    def test_mainevent_exists_in_default_teams(self):
+        self.assertIn("mainevent", DEFAULT_TEAMS)
+
+    def test_mainevent_default_teams_no_kanban_dir_key(self):
+        """The key itself must be absent — a bare `None` value is a DIFFERENT
+        (legacy, pre-XACA-0794) shape covered separately below."""
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertNotIn(
+            "kanban_dir", entry,
+            "board-less DEFAULT_TEAMS entry must have NO kanban_dir key at all",
+        )
+
+    def test_mainevent_default_teams_no_working_dir_key(self):
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertNotIn(
+            "working_dir", entry,
+            "board-less DEFAULT_TEAMS entry must have NO working_dir key at all",
+        )
+
+    # ── 2. Explicit markers ──────────────────────────────────────────────────
+
+    def test_mainevent_board_less_marker_is_true(self):
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertIs(
+            entry.get("board_less"), True,
+            "board_less must be the Python bool True, not a truthy stand-in",
+        )
+
+    def test_mainevent_alias_of_is_command(self):
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertEqual(entry.get("alias_of"), "command")
+
+    # ── 3. Accessor raise contract ───────────────────────────────────────────
+
+    def test_get_team_kanban_dir_mainevent_raises_keyerror_mentions_alias(self):
+        cfg = _mainevent_overlay_config()
+        with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+            with self.assertRaises(KeyError) as ctx:
+                aiteamforge_paths.get_team_kanban_dir("mainevent")
+        msg = str(ctx.exception)
+        self.assertIn("mainevent", msg)
+        self.assertIn("command", msg, "error message must name the alias target")
+
+    def test_get_team_working_dir_mainevent_raises_keyerror_mentions_alias(self):
+        cfg = _mainevent_overlay_config()
+        with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+            with self.assertRaises(KeyError) as ctx:
+                aiteamforge_paths.get_team_working_dir("mainevent")
+        msg = str(ctx.exception)
+        self.assertIn("mainevent", msg)
+        self.assertIn("command", msg, "error message must name the alias target")
+
+    # ── 5. Identity preserved (team_code / lcars_port) ──────────────────────
+
+    def test_mainevent_team_code_is_mev(self):
+        self.assertEqual(DEFAULT_TEAMS["mainevent"]["team_code"], "MEV")
+
+    def test_mainevent_lcars_port_is_8400_in_authoritative_band(self):
+        """XACA-0463: mainevent's band is [8400, 8410) — moved off 8234 to end
+        the collision with command's band [8230, 8240)."""
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertEqual(entry["lcars_port"], 8400)
+        self.assertEqual(entry["lcars_port_base"], 8400)
+        self.assertEqual(entry["lcars_port_range"], 10)
+        self.assertTrue(
+            entry["lcars_port_base"] <= entry["lcars_port"] < entry["lcars_port_base"] + entry["lcars_port_range"],
+            "lcars_port must fall inside mainevent's own declared band",
+        )
+        # And it must NOT collide with command's band [8230, 8240).
+        cmd = DEFAULT_TEAMS["command"]
+        self.assertFalse(
+            cmd["lcars_port_base"] <= entry["lcars_port"] < cmd["lcars_port_base"] + cmd["lcars_port_range"],
+            "mainevent's port must not fall inside command's band (the XACA-0463 collision)",
+        )
+
+    def test_get_team_lcars_port_mainevent_returns_8400(self):
+        """get_team_lcars_port() is NOT board-less-gated — a board-less alias
+        still resolves its own port (it has an identity; it just has no board)."""
+        cfg = _mainevent_overlay_config()
+        with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+            self.assertEqual(aiteamforge_paths.get_team_lcars_port("mainevent"), 8400)
+
+
+# ---------------------------------------------------------------------------
+# Item 4: legacy (pre-XACA-0794) un-migrated overlay shapes must still raise
+# the same clear KeyError. Guards tap-seeded consumer boxes that haven't run
+# the board-less-marker backfill yet.
+#
+# All three shapes below carry NO board_less/alias_of markers — they simulate
+# an overlay written before XACA-0794 existed. load_config() is mocked
+# directly (rather than routed through a real config file + the self-heal
+# backfill) specifically so these tests isolate the SENTINEL FALLBACK branch
+# in get_team_kanban_dir()/get_team_working_dir(), independent of whether the
+# auto-migration already ran.
+# ---------------------------------------------------------------------------
+
+# Mirrors aiteamforge_paths._ABSENT_SENTINELS exactly (module constant is not
+# imported here so a future accidental edit to the sentinel tuple is visible
+# as a NEW test failure rather than silently tracking the change).
+_LEGACY_ABSENT_SHAPES = (None, "", "null")
+
+
+class TestBoardLessLegacyFallback(unittest.TestCase):
+    """Item 4: un-migrated (pre-XACA-0794) overlay shapes still raise cleanly."""
+
+    def _legacy_entry(self, shape):
+        """A pre-XACA-0794 mainevent entry: no board_less/alias_of markers,
+        kanban_dir/working_dir set to one of the three legacy 'absent' shapes."""
+        return {
+            "team_code": "MEV",
+            "kanban_dir": shape,
+            "working_dir": shape,
+            "lcars_port": 8400,
+            "anthropic_account_id": "",
+            "anthropic_account_nickname": "",
+            "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
+            # Deliberately NO board_less / alias_of keys.
+        }
+
+    def test_legacy_kanban_dir_shapes_all_raise_keyerror(self):
+        for shape in _LEGACY_ABSENT_SHAPES:
+            with self.subTest(kanban_dir=repr(shape)):
+                cfg = _mainevent_overlay_config(self._legacy_entry(shape))
+                with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+                    with self.assertRaises(KeyError) as ctx:
+                        aiteamforge_paths.get_team_kanban_dir("mainevent")
+                self.assertIn("command", str(ctx.exception))
+
+    def test_legacy_working_dir_shapes_all_raise_keyerror(self):
+        for shape in _LEGACY_ABSENT_SHAPES:
+            with self.subTest(working_dir=repr(shape)):
+                cfg = _mainevent_overlay_config(self._legacy_entry(shape))
+                with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+                    with self.assertRaises(KeyError) as ctx:
+                        aiteamforge_paths.get_team_working_dir("mainevent")
+                self.assertIn("command", str(ctx.exception))
+
+    def test_legacy_entry_is_not_board_less_by_marker(self):
+        """Sanity check on the fixture itself: the legacy entry has no marker,
+        so team_is_board_less() is False and the KeyError above MUST be coming
+        from the sentinel-normalization fallback, not the marker-first branch."""
+        entry = self._legacy_entry(None)
+        self.assertFalse(aiteamforge_paths.team_is_board_less(entry))
+
+
+# ---------------------------------------------------------------------------
+# Item 8: the board_less invariant itself — board_less=True must win even if
+# a kanban_dir value is (erroneously) re-added to the entry. This is the
+# guard against a future "cleanup" that re-populates kanban_dir on mainevent
+# without also clearing board_less: the marker must be authoritative, not the
+# value, so a stale/phantom path can never silently resolve.
+# ---------------------------------------------------------------------------
+
+class TestBoardLessInvariantWinsOverStaleValue(unittest.TestCase):
+    """Item 8: board_less=True must override a re-added kanban_dir/working_dir."""
+
+    def test_board_less_true_with_kanban_dir_value_still_raises(self):
+        entry = {
+            "team_code": "MEV",
+            "board_less": True,
+            "alias_of": "command",
+            # Erroneously re-added a real-looking path alongside the marker.
+            "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
+            "lcars_port": 8400,
+        }
+        cfg = _mainevent_overlay_config(entry)
+        with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+            with self.assertRaises(KeyError) as ctx:
+                aiteamforge_paths.get_team_kanban_dir("mainevent")
+        self.assertIn("command", str(ctx.exception))
+
+    def test_board_less_true_with_working_dir_value_still_raises(self):
+        entry = {
+            "team_code": "MEV",
+            "board_less": True,
+            "alias_of": "command",
+            "working_dir": "/Users/Shared/Development/Main Event/dev-team",
+            "lcars_port": 8400,
+        }
+        cfg = _mainevent_overlay_config(entry)
+        with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+            with self.assertRaises(KeyError) as ctx:
+                aiteamforge_paths.get_team_working_dir("mainevent")
+        self.assertIn("command", str(ctx.exception))
+
+
+# ---------------------------------------------------------------------------
+# Item 6: team-iterating consumers must skip the board-less alias cleanly
+# rather than crashing (or, worse, silently collapsing their ENTIRE dynamic
+# map to a hardcoded fallback because one KeyError escaped a bare comprehension
+# — the exact bug XACA-0727 fixed in lcars-ui/server.py).
+#
+# build_team_code_map() never touches kanban_dir so it can't crash on
+# mainevent by construction; it's exercised here only as a fast smoke check.
+# The real coverage is server.py:_build_team_kanban_dirs() and
+# kanban-backup.py:_get_team_kanban_dirs(), both loaded from their actual
+# source files (hyphenated kanban-backup.py via importlib.util, mirroring the
+# existing test_timepad_track_0620.py pattern) and exercised with their
+# imported accessor names monkeypatched directly on the loaded module — never
+# touching the real aiteamforge_paths.load_config() / real overlay file.
+# ---------------------------------------------------------------------------
+
+_REPO_ROOT = _HERE.parent
+
+
+def _fake_iteration_fixture():
+    """A minimal {list_teams, get_team_kanban_dir} pair simulating a config
+    with academy + command + mainevent (board-less), for monkeypatching onto
+    server.py / kanban-backup.py."""
+    def fake_list_teams():
+        return ["academy", "command", "mainevent"]
+
+    def fake_get_team_kanban_dir(team):
+        if team == "mainevent":
+            raise aiteamforge_paths._board_less_error(
+                "mainevent", DEFAULT_TEAMS["mainevent"], "kanban_dir"
+            )
+        return Path(f"/tmp/xaca0794-fixture/{team}/kanban")
+
+    return fake_list_teams, fake_get_team_kanban_dir
+
+
+class TestBuildTeamCodeMapSurvivesMainEvent(unittest.TestCase):
+    """Fast smoke check: build_team_code_map() never raises on mainevent and
+    still routes it (board-less teams keep their identity/code — only the
+    board-path accessors are gated)."""
+
+    def test_build_team_code_map_does_not_raise_and_includes_mainevent(self):
+        cfg = _mainevent_overlay_config()
+        with mock.patch.object(aiteamforge_paths, "load_config", return_value=cfg):
+            result = build_team_code_map()  # must not raise
+        self.assertEqual(result.get("MEV"), "mainevent")
+
+
+class TestServerBuildTeamKanbanDirsSkipsBoardLess(unittest.TestCase):
+    """Item 6: lcars-ui/server.py:_build_team_kanban_dirs() must skip
+    mainevent without raising and without collapsing the whole map."""
+
+    _server_mod = None
+    _import_error = None
+
+    @classmethod
+    def setUpClass(cls):
+        server_path = _REPO_ROOT / "lcars-ui" / "server.py"
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "xaca0794_server_under_test", str(server_path)
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cls._server_mod = mod
+        except Exception as exc:  # pragma: no cover - environment-dependent
+            cls._import_error = exc
+
+    def setUp(self):
+        if self._server_mod is None:
+            self.skipTest(f"lcars-ui/server.py could not be imported: {self._import_error!r}")
+
+    def test_build_team_kanban_dirs_skips_mainevent_no_raise(self):
+        fake_list_teams, fake_get_team_kanban_dir = _fake_iteration_fixture()
+        fake_cfg = {
+            "schema_version": 3,
+            "teams": {"academy": {}, "command": {}, "mainevent": {}},
+        }
+        mod = self._server_mod
+        with mock.patch.object(mod, "list_teams", fake_list_teams), \
+             mock.patch.object(mod, "get_team_kanban_dir", fake_get_team_kanban_dir), \
+             mock.patch.object(mod, "_aiteamforge_load_config", lambda: fake_cfg):
+            result = mod._build_team_kanban_dirs()  # must not raise
+        self.assertNotIn("mainevent", result, "board-less alias must be skipped, not crash the map")
+        self.assertIn("academy", result)
+        self.assertIn("command", result)
+
+
+class TestKanbanBackupSkipsBoardLess(unittest.TestCase):
+    """Item 6: kanban-backup.py:_get_team_kanban_dirs() must skip mainevent
+    without raising. kanban-backup.py has a hyphenated filename, so it is
+    loaded via importlib.util.spec_from_file_location (same pattern as
+    test_timepad_track_0620.py's _load_dispatcher())."""
+
+    _backup_mod = None
+    _import_error = None
+
+    @classmethod
+    def setUpClass(cls):
+        backup_path = _REPO_ROOT / "kanban-backup.py"
+        try:
+            spec = importlib.util.spec_from_file_location(
+                "xaca0794_kanban_backup_under_test", str(backup_path)
+            )
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            cls._backup_mod = mod
+        except Exception as exc:  # pragma: no cover - environment-dependent
+            cls._import_error = exc
+
+    def setUp(self):
+        if self._backup_mod is None:
+            self.skipTest(f"kanban-backup.py could not be imported: {self._import_error!r}")
+
+    def test_get_team_kanban_dirs_skips_mainevent_no_raise(self):
+        fake_list_teams, fake_get_team_kanban_dir = _fake_iteration_fixture()
+        mod = self._backup_mod
+        with mock.patch.object(mod, "list_teams", fake_list_teams), \
+             mock.patch.object(mod, "get_team_kanban_dir", fake_get_team_kanban_dir):
+            result = mod._get_team_kanban_dirs()  # must not raise
+        self.assertNotIn("mainevent", result, "board-less alias must be skipped, not crash the map")
+        self.assertIn("academy", result)
+        self.assertIn("command", result)
+
+
+# ---------------------------------------------------------------------------
+# Item 7: _backfill_board_less_markers_on_disk() / apply_board_less_markers()
+# must be STRICTLY ADDITIVE and IDEMPOTENT:
+#   - a customized board-less team's other fields survive byte-for-byte
+#   - other teams are untouched
+#   - a second run is a byte-identical no-op
+# ---------------------------------------------------------------------------
+
+def _customized_mainevent_entry() -> dict:
+    """A mainevent entry with several fields customized away from
+    DEFAULT_TEAMS, simulating a real per-machine overlay a user has hand-tuned
+    (custom port, custom Anthropic account, custom copyright-style extra
+    fields the backfill has never heard of)."""
+    return {
+        "team_code": "MEV",
+        "kanban_dir": None,
+        "working_dir": None,
+        "lcars_port": 8499,  # customized away from the 8400 default
+        "anthropic_account_id": "custom-acct-id-123",
+        "anthropic_account_nickname": "Custom MainEvent Account",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
+        "copyright_holder": "Custom Holder LLC",  # arbitrary unknown-to-backfill field
+        "copyright_year_start": 2024,
+        # Deliberately NO board_less / alias_of — pre-XACA-0794 shape.
+    }
+
+
+class TestApplyBoardLessMarkersPure(unittest.TestCase):
+    """Item 7 (pure-function half): apply_board_less_markers() in isolation,
+    no disk I/O involved."""
+
+    def test_apply_board_less_markers_is_additive(self):
+        original = {
+            "schema_version": 3,
+            "teams": {
+                "academy": _minimal_team_entry("academy"),
+                "mainevent": _customized_mainevent_entry(),
+            },
+        }
+        upgraded = aiteamforge_paths.apply_board_less_markers(original)
+        me = upgraded["teams"]["mainevent"]
+
+        self.assertIs(me["board_less"], True)
+        self.assertEqual(me["alias_of"], "command")
+
+        # Every customized field must survive byte-for-byte.
+        original_me = original["teams"]["mainevent"]
+        for key in original_me:
+            self.assertEqual(
+                me[key], original_me[key],
+                f"Field {key!r} must be preserved unchanged by the backfill",
+            )
+
+        # academy (a non-board-less team) must be completely untouched.
+        self.assertEqual(upgraded["teams"]["academy"], original["teams"]["academy"])
+
+    def test_apply_board_less_markers_does_not_mutate_input(self):
+        original = {
+            "schema_version": 3,
+            "teams": {"mainevent": _customized_mainevent_entry()},
+        }
+        snapshot = copy.deepcopy(original)
+        aiteamforge_paths.apply_board_less_markers(original)
+        self.assertEqual(original, snapshot, "Input config must not be mutated (pure function contract)")
+
+    def test_apply_board_less_markers_second_run_is_idempotent(self):
+        original = {
+            "schema_version": 3,
+            "teams": {
+                "academy": _minimal_team_entry("academy"),
+                "mainevent": _customized_mainevent_entry(),
+            },
+        }
+        once = aiteamforge_paths.apply_board_less_markers(original)
+        twice = aiteamforge_paths.apply_board_less_markers(once)
+        self.assertEqual(once, twice, "Second run over an already-migrated config must be a no-op")
+
+
+class TestBoardLessBackfillOnDiskAdditiveIdempotent(unittest.TestCase):
+    """Item 7 (disk half): _backfill_board_less_markers_on_disk(), driven
+    through the real load_config() self-heal path against a temp config file
+    — never the real ~/.aiteamforge/team-paths.json."""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="xaca0794_backfill_test_")
+        self._config_path = os.path.join(self._tmp, "team-paths.json")
+        _reset_module_cache()
+        self._orig_env = os.environ.get("AITEAMFORGE_CONFIG")
+        os.environ["AITEAMFORGE_CONFIG"] = self._config_path
+
+    def tearDown(self):
+        _reset_module_cache()
+        if self._orig_env is None:
+            os.environ.pop("AITEAMFORGE_CONFIG", None)
+        else:
+            os.environ["AITEAMFORGE_CONFIG"] = self._orig_env
+        try:
+            shutil.rmtree(self._tmp)
+        except OSError:
+            pass
+
+    def _write_legacy_config(self) -> dict:
+        cfg = {
+            "schema_version": 3,
+            "teams": {
+                "academy": _minimal_team_entry("academy"),
+                "command": _minimal_team_entry("command"),
+                "mainevent": _customized_mainevent_entry(),
+            },
+        }
+        with open(self._config_path, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2)
+        return cfg
+
+    def test_backfill_on_disk_preserves_customized_fields(self):
+        original = self._write_legacy_config()
+
+        result = aiteamforge_paths.load_config()  # triggers the on-disk backfill
+        me = result["teams"]["mainevent"]
+
+        self.assertIs(me.get("board_less"), True)
+        self.assertEqual(me.get("alias_of"), "command")
+        for key in original["teams"]["mainevent"]:
+            self.assertEqual(
+                me[key], original["teams"]["mainevent"][key],
+                f"Field {key!r} must survive the on-disk backfill unchanged",
+            )
+        # academy / command untouched.
+        self.assertEqual(result["teams"]["academy"], original["teams"]["academy"])
+        self.assertEqual(result["teams"]["command"], original["teams"]["command"])
+
+    def test_backfill_on_disk_second_run_is_byte_identical_noop(self):
+        self._write_legacy_config()
+
+        aiteamforge_paths.load_config()  # first pass: performs the on-disk backfill
+        with open(self._config_path, encoding="utf-8") as fh:
+            after_first = fh.read()
+
+        _reset_module_cache()  # force a fresh read + backfill-check cycle
+        aiteamforge_paths.load_config()  # second pass: must be a no-op
+        with open(self._config_path, encoding="utf-8") as fh:
+            after_second = fh.read()
+
+        self.assertEqual(
+            after_first, after_second,
+            "A second backfill pass over an already-migrated config must not touch the file again",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Small direct-unit coverage of the board-less predicate helpers themselves,
+# so a future edit to their matching semantics (e.g. accepting a truthy
+# non-True value, or dropping the DEFAULT_TEAMS alias_of fallback) shows up
+# as a failing test here rather than only downstream.
+# ---------------------------------------------------------------------------
+
+class TestBoardLessHelperPredicates(unittest.TestCase):
+
+    def test_team_is_board_less_true_for_explicit_marker(self):
+        self.assertTrue(aiteamforge_paths.team_is_board_less({"board_less": True}))
+
+    def test_team_is_board_less_false_when_key_absent(self):
+        self.assertFalse(aiteamforge_paths.team_is_board_less({}))
+
+    def test_team_is_board_less_false_for_truthy_non_true_value(self):
+        """Guards against a stringly-typed 'true' (e.g. JSON round-tripped
+        through a shell layer) being silently accepted as the marker."""
+        self.assertFalse(aiteamforge_paths.team_is_board_less({"board_less": "true"}))
+        self.assertFalse(aiteamforge_paths.team_is_board_less({"board_less": 1}))
+
+    def test_board_less_alias_of_uses_explicit_value_when_present(self):
+        self.assertEqual(
+            aiteamforge_paths.board_less_alias_of("mainevent", {"alias_of": "command"}),
+            "command",
+        )
+
+    def test_board_less_alias_of_falls_back_to_default_teams(self):
+        """An entry with no explicit alias_of still resolves via DEFAULT_TEAMS
+        — this is what keeps the legacy (un-migrated) fallback's error message
+        helpful even before the marker backfill has run."""
+        self.assertEqual(
+            aiteamforge_paths.board_less_alias_of("mainevent", {}),
+            "command",
+        )
+
+    def test_board_less_alias_of_none_for_non_alias_team(self):
+        self.assertIsNone(aiteamforge_paths.board_less_alias_of("academy", {}))
 
 
 # ---------------------------------------------------------------------------

@@ -311,6 +311,19 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     "mainevent": {
         "team_code": "MEV",
         # board-less alias (XACA-0727): intentionally NO kanban_dir / working_dir.
+        # XACA-0794: the ABSENCE of kanban_dir is now stated EXPLICITLY rather than
+        # left to be inferred from a bare null. JSON carries no comments, so a human
+        # reading ~/.aiteamforge/team-paths.json saw only `"kanban_dir": null` and
+        # reasonably concluded "corruption" — this misread the design twice (the
+        # XACA-0724 gate spec, and XACA-0794 itself, which was filed to DELETE this
+        # entry). These two keys make the intent self-documenting in the data:
+        #   board_less: true  → owns no kanban board; this is CORRECT, not corrupt.
+        #   alias_of: command → the operative kanban identity to use instead.
+        # DO NOT DELETE this entry: it is live infrastructure (LCARS port 8400,
+        # team_code MEV, mainevent-startup.sh crew launcher, .claude/agents-master/
+        # mainevent/ personas). Board-less means kanban_dir/working_dir stay ABSENT.
+        "board_less": True,
+        "alias_of": "command",
         "lcars_port_base": 8400,
         "lcars_port_range": 10,
         "lcars_port": 8400,
@@ -338,6 +351,7 @@ _CONFIG_CACHE: dict | None = None
 _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
 _A1_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0522)
 _CONTRACT_SCRUB_ATTEMPTED: bool = False  # once-per-process guard (XACA-0643)
+_BOARD_LESS_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0794)
 
 SUPPORTED_SCHEMA_VERSION = 3
 
@@ -425,6 +439,64 @@ _PARAMETERIZED_TEMPLATES: frozenset[str] = frozenset({"finance", "legal", "medic
 _TEMPLATE_PORT_BANDS: dict[str, tuple[int, int]] = {
     "freelance": (8500, 100),
 }
+
+
+# ---------------------------------------------------------------------------
+# Board-less alias support (XACA-0727 / XACA-0794)
+# ---------------------------------------------------------------------------
+#
+# A board-less team owns NO kanban board but retains its other identities (LCARS
+# port, team_code, crew launcher, personas). "mainevent" is the canonical case:
+# 'command' is the operative kanban identity for Main Event coordination.
+#
+# Absence of kanban_dir/working_dir is representable four ways across the two
+# canonical registry seeds (K661 — dual-canonical registry):
+#   - key absent            → Python DEFAULT_TEAMS
+#   - JSON null             → overlay seeded by the shell heredoc's "null" column
+#   - the string "null"     → shell heredoc sentinel, read verbatim
+#   - empty string          → defensive
+# _ABSENT_SENTINELS normalizes all four so the two seeds cannot drift in meaning.
+#
+# XACA-0794 adds the EXPLICIT marker (board_less/alias_of). Resolvers check the
+# marker FIRST and fall back to sentinel-normalization, so un-migrated overlays
+# (which carry a bare null and no marker) keep working unchanged.
+_ABSENT_SENTINELS: tuple = (None, "", "null")
+
+
+def team_is_board_less(entry: dict) -> bool:
+    """Return True iff a team entry declares itself board-less (XACA-0794).
+
+    Checks ONLY the explicit marker. Callers that must also honour legacy
+    un-migrated overlays combine this with an _ABSENT_SENTINELS check on the
+    specific field they need — see get_team_kanban_dir/get_team_working_dir.
+    Pure predicate — never mutates, never raises.
+    """
+    return entry.get("board_less") is True
+
+
+def board_less_alias_of(team: str, entry: dict) -> str | None:
+    """Return the team a board-less alias defers to (e.g. "command"), or None.
+
+    Prefers the entry's explicit alias_of marker; falls back to DEFAULT_TEAMS so
+    the guidance still resolves on un-migrated overlays that predate XACA-0794.
+    """
+    alias = entry.get("alias_of")
+    if alias in _ABSENT_SENTINELS:
+        alias = DEFAULT_TEAMS.get(team, {}).get("alias_of")
+    return alias if alias not in _ABSENT_SENTINELS else None
+
+
+def _board_less_error(team: str, entry: dict, field: str) -> KeyError:
+    """Build the KeyError raised when a board-less alias is asked for a path."""
+    alias = board_less_alias_of(team, entry)
+    guidance = (
+        f"Use '{alias}' instead." if alias
+        else "It owns no kanban board of its own."
+    )
+    return KeyError(
+        f"Team '{team}' is a board-less alias (no {field}) — this is intentional, "
+        f"NOT corruption. {guidance} See XACA-0727 / XACA-0794."
+    )
 
 
 def _make_default_config() -> dict:
@@ -517,6 +589,7 @@ def load_config() -> dict:
     Never raises.
     """
     global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED, _CONTRACT_SCRUB_ATTEMPTED
+    global _BOARD_LESS_BACKFILL_ATTEMPTED
 
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -625,6 +698,16 @@ def load_config() -> dict:
         maybe_upgraded = _backfill_a1_fields_on_disk(config_path, config)
         if maybe_upgraded is not None:
             config = maybe_upgraded
+
+    # Board-less marker backfill (XACA-0794) — self-heal overlays whose board-less
+    # teams carry a bare `"kanban_dir": null` with no explanation. Runs LAST so it
+    # operates on the already-scrubbed + already-backfilled team set. Same
+    # once-per-process flag discipline as the two passes above.
+    if not _BOARD_LESS_BACKFILL_ATTEMPTED:
+        _BOARD_LESS_BACKFILL_ATTEMPTED = True
+        maybe_marked = _backfill_board_less_markers_on_disk(config_path, config)
+        if maybe_marked is not None:
+            config = maybe_marked
 
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
@@ -862,6 +945,155 @@ def _scrub_contract_violating_keys_on_disk(config_path: Path, current: dict) -> 
         return _clean(current)
 
 
+def diff_missing_board_less_markers(config: dict) -> list[tuple[str, str | None]]:
+    """Return [(team_slug, alias_of), ...] for teams needing the XACA-0794 markers.
+
+    A team needs the markers when DEFAULT_TEAMS declares it board-less but the
+    live overlay entry does NOT carry the explicit `board_less` key — i.e. an
+    overlay seeded before XACA-0794 (or by the shell heredoc, whose positional
+    tab-table has no column for named markers and writes only a bare null).
+
+    DEFAULT_TEAMS is the authority for WHICH teams are board-less; the overlay is
+    never trusted to invent board-less-ness. Empty list = already migrated
+    (skip-fast). Pure predicate — never mutates, never raises.
+    """
+    board_less_defaults = {
+        slug: entry.get("alias_of")
+        for slug, entry in DEFAULT_TEAMS.items()
+        if entry.get("board_less") is True
+    }
+    result: list[tuple[str, str | None]] = []
+    for slug, entry in sorted(config.get("teams", {}).items()):
+        if slug not in board_less_defaults:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if "board_less" in entry:
+            continue  # already migrated
+        result.append((slug, board_less_defaults[slug]))
+    return result
+
+
+def apply_board_less_markers(config: dict) -> dict:
+    """Return a copy of *config* with board_less/alias_of markers backfilled.
+
+    STRICTLY ADDITIVE — the whole point of XACA-0794 is to make an existing null
+    self-explanatory, not to restructure the overlay:
+      - Adds ONLY `board_less` and `alias_of`, and ONLY to teams DEFAULT_TEAMS
+        declares board-less.
+      - Never touches any other team, and never touches any other field on the
+        board-less team (lcars_port, anthropic_account_id, team_code, and any
+        user customization are preserved byte-for-byte).
+      - Deliberately does NOT delete a legacy `"kanban_dir": null`. Deleting it
+        would converge the on-disk shape with DEFAULT_TEAMS, but it is not worth
+        the risk: a key-presence consumer would then behave differently for
+        explicit-null vs absent-key. (One such consumer exists — see
+        scripts/aiteamforge-paths-init.sh, fixed in this same change.) The null
+        is harmless once the marker sits beside it, because every resolver
+        normalizes absent == null == "null" == "" via _ABSENT_SENTINELS.
+      - Also neutralizes pre-XACA-0727 overlays that still carry a STALE DUPLICATE
+        of command's kanban_dir on mainevent: the marker is checked first, so the
+        phantom mainevent-board.json derivation stays dead.
+
+    Idempotent: re-running on an already-migrated config is a no-op.
+    The input config is never mutated; a deep copy is returned.
+    """
+    import copy
+    upgraded = copy.deepcopy(config)
+    teams = upgraded.get("teams", {})
+    for slug, alias in diff_missing_board_less_markers(config):
+        entry = teams.get(slug)
+        if not isinstance(entry, dict):
+            continue
+        entry["board_less"] = True
+        if alias:
+            entry["alias_of"] = alias
+    return upgraded
+
+
+def _backfill_board_less_markers_on_disk(config_path: Path, current: dict) -> dict | None:
+    """Snapshot, lock, add board_less/alias_of markers, atomically rewrite (XACA-0794).
+
+    Self-heals overlays written before XACA-0794 — including those seeded by the
+    shell heredoc, whose positional tab-table cannot express named markers. That
+    is what closes the K661 dual-canonical drift WITHOUT requiring the two seeds
+    to stay in lockstep forever: whichever seed wrote the overlay, the first
+    Python read converges it onto the marker shape.
+
+    Mirrors _backfill_a1_fields_on_disk's lock / TOCTOU / backup / atomic-write
+    discipline. Returns the upgraded config when a change is made, or None when
+    there is nothing to do (skip-fast — no lock, no backup, no write).
+    Never raises.
+    """
+    if not diff_missing_board_less_markers(current):
+        return None
+
+    try:
+        lock_file = config_path.with_suffix(".json.lock")
+        with open(lock_file, "w") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # TOCTOU defense — re-read under the lock in case another process raced.
+                try:
+                    reread = json.loads(config_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    reread = current
+
+                if not diff_missing_board_less_markers(reread):
+                    # Someone else won the race; still return the in-memory upgraded
+                    # form so this process sees the markers.
+                    return apply_board_less_markers(current)
+
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = config_path.with_name(
+                    f"{config_path.name}.bak-pre-board-less-markers-{timestamp}"
+                )
+                try:
+                    backup_path.write_bytes(config_path.read_bytes())
+                except OSError as exc:
+                    print(
+                        f"[aiteamforge-paths] board-less markers: snapshot failed "
+                        f"({exc}) — aborting disk write",
+                        file=sys.stderr,
+                    )
+                    return apply_board_less_markers(current)
+
+                upgraded = apply_board_less_markers(reread)
+                tmp_path = config_path.with_suffix(f".json.tmp.{os.getpid()}")
+                try:
+                    with open(tmp_path, "w", encoding="utf-8") as f:
+                        json.dump(upgraded, f, indent=2)
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(str(tmp_path), str(config_path))
+                except Exception:
+                    tmp_path.unlink(missing_ok=True)
+                    raise
+
+                for slug, alias in diff_missing_board_less_markers(current):
+                    print(
+                        f"[aiteamforge-paths] board-less markers: team={slug} "
+                        f"board_less=true alias_of={alias!r} (XACA-0794 — the null "
+                        f"kanban_dir is intentional, not corruption)",
+                        file=sys.stderr,
+                    )
+                print(
+                    f"[aiteamforge-paths] board-less markers: snapshot={backup_path}",
+                    file=sys.stderr,
+                )
+                return upgraded
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                lock_file.unlink(missing_ok=True)
+    except Exception as exc:
+        print(
+            f"[aiteamforge-paths] board-less markers: disk write failed ({exc}) — "
+            f"degrading to in-memory upgrade",
+            file=sys.stderr,
+        )
+        return apply_board_less_markers(current)
+
+
 # ---------------------------------------------------------------------------
 # Team accessor functions
 # ---------------------------------------------------------------------------
@@ -888,17 +1120,15 @@ def get_team_kanban_dir(team: str) -> Path:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
-    # XACA-0727: board-less aliases carry no kanban_dir. The absent value is
-    # represented as a missing key (Python DEFAULT_TEAMS) OR the literal "null"
-    # sentinel (shell heredoc _AITEAMFORGE_DEFAULT_TEAMS_DATA, which seeds a
-    # fresh overlay) OR empty string — normalize all three.
+    # XACA-0794: prefer the EXPLICIT board_less marker; XACA-0727: fall back to
+    # sentinel-normalization (missing key / JSON null / "null" / "") so overlays
+    # written before the marker existed keep raising the same clear KeyError.
+    # Marker-first also repairs pre-XACA-0727 overlays that still carry a stale
+    # DUPLICATE of command's kanban_dir: the marker wins, so we raise instead of
+    # deriving the phantom mainevent-board.json that XACA-0727 was filed to kill.
     _kd = entry.get("kanban_dir")
-    if _kd in (None, "", "null"):
-        raise KeyError(
-            f"Team '{team}' is a board-less alias (no kanban_dir) — it owns no "
-            f"kanban board. Use 'command' for Main Event coordination. "
-            f"See XACA-0727."
-        )
+    if team_is_board_less(entry) or _kd in _ABSENT_SENTINELS:
+        raise _board_less_error(team, entry, "kanban_dir")
     return Path(_kd).expanduser()
 
 
@@ -949,14 +1179,12 @@ def get_team_memory_dir(team: str) -> Path | None:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
+    # Board-less alias (e.g. "mainevent"): no working_dir, so no derivable memory
+    # dir. Marker-first (XACA-0794), sentinel fallback (XACA-0727). Consistent
+    # with get_team_kanban_dir / get_team_working_dir.
     _wd = entry.get("working_dir")
-    if _wd in (None, "", "null"):
-        # Board-less alias (e.g. "mainevent" — XACA-0727): no working_dir, so no
-        # derivable memory dir. Consistent with get_team_kanban_dir/working_dir.
-        raise KeyError(
-            f"Team '{team}' is a board-less alias (no working_dir). "
-            f"See XACA-0727."
-        )
+    if team_is_board_less(entry) or _wd in _ABSENT_SENTINELS:
+        raise _board_less_error(team, entry, "working_dir")
 
     working_dir = Path(_wd).expanduser()
 
@@ -1009,14 +1237,10 @@ def get_team_working_dir(team: str) -> Path:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
-    # XACA-0727: board-less aliases carry no working_dir (missing key, "null"
-    # sentinel, or empty — see get_team_kanban_dir for the rationale).
+    # XACA-0794 marker-first / XACA-0727 sentinel fallback — see get_team_kanban_dir.
     _wd = entry.get("working_dir")
-    if _wd in (None, "", "null"):
-        raise KeyError(
-            f"Team '{team}' is a board-less alias (no working_dir). "
-            f"Use 'command' for Main Event coordination. See XACA-0727."
-        )
+    if team_is_board_less(entry) or _wd in _ABSENT_SENTINELS:
+        raise _board_less_error(team, entry, "working_dir")
     return Path(_wd).expanduser()
 
 

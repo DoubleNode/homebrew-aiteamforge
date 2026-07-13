@@ -143,5 +143,16 @@ config = json.loads(sys.stdin.read())
 for team, entry in sorted(config['teams'].items()):
     port = entry.get('lcars_port')
     port_str = f'  (LCARS :{port})' if port else ''
-    print(f'  {team:<45} {entry[\"kanban_dir\"]}{port_str}')
+    # XACA-0794: board-less teams (e.g. mainevent) carry NO kanban_dir — the key
+    # is ABSENT in DEFAULT_TEAMS. The previous entry['kanban_dir'] subscript was
+    # unguarded and raised KeyError here, killing the whole team listing after the
+    # config had already been written. Use .get() and render the absence in words
+    # so nobody reads a blank/None and files another 'phantom team' ticket.
+    kanban_dir = entry.get('kanban_dir')
+    if entry.get('board_less') is True or kanban_dir in (None, '', 'null'):
+        alias = entry.get('alias_of')
+        label = f'(board-less alias — use {alias!r})' if alias else '(board-less — no kanban board)'
+    else:
+        label = kanban_dir
+    print(f'  {team:<45} {label}{port_str}')
 " <<< "$CONFIG_JSON"
