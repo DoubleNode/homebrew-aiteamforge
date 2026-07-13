@@ -1,7 +1,7 @@
 ---
 name: project-planner
 description: Strategic project planning skill that creates kanban items, subitems, and plan documents WITHOUT executing any implementation. Enforces plan-and-delegate workflow with explicit handoff checkpoint.
-version: 1.10.0
+version: 1.12.0
 author: Captain Nahla Ake (Chancellor, Starfleet Academy)
 company: Starfleet Academy - Chancellor's Office
 project: Dev Team LCARS Infrastructure
@@ -24,7 +24,7 @@ tags:
   - architecture
   - no-execution
 command_shortcut: /plan-project
-last_updated: 2026-03-18 (v1.10.0)
+last_updated: 2026-07-13 (v1.12.0)
 status: production-ready
 model: opus
 ---
@@ -34,11 +34,11 @@ model: opus
 ## Skill Metadata
 
 **Name:** Project Planner
-**Version:** 1.10.0
+**Version:** 1.12.0
 **Author:** Captain Nahla Ake (Starfleet Academy Chancellor)
 **Command:** `/plan-project`
 **Platforms:** All dev-team platforms
-**Last Updated:** March 18, 2026
+**Last Updated:** July 13, 2026
 
 ---
 
@@ -104,8 +104,8 @@ The skill enforces a deliberate handoff checkpoint, allowing work to be delegate
 
 **Examples (each in the team's own kanban directory):**
 - `~/dev-team/kanban/XACA-0031_dark_mode_support.md` (Academy)
-- `.../MainEventApp-iOS/kanban/XIOS-0042_payment_flow_refactor.md` (iOS)
-- `.../MainEventApp-Functions/kanban/XFIR-0055_account_deletion_api.md` (Firebase)
+- `<ios-repo>/kanban/XIOS-0042_payment_flow_refactor.md` (iOS)
+- `<firebase-repo>/kanban/XFIR-0055_account_deletion_api.md` (Firebase)
 - `.../Starwords/kanban/XFSW-0020_setup_wizard.md` (Starwords)
 
 ### STOP AFTER PLANNING
@@ -207,7 +207,110 @@ Subitems tagged with `[Review]` or `[Test]` are **protected subitems** with spec
 
 ---
 
+## ATTACH MODE: Planning Against Existing Items
+
+**When to use ATTACH MODE:**
+
+When kb-run, kb-work, or kb-debug invoke the Project Planner skill against an EXISTING kanban item that currently has ZERO subitems. This prevents duplicate item creation and allows planning to be attached to an item that was auto-created by the planning gate.
+
+**ATTACH MODE invocation:**
+
+```
+Invoke the Project Planner skill in ATTACH MODE against this EXISTING item:
+
+/plan-project --attach XACA-0801
+```
+
+**What ATTACH MODE does (and does NOT do):**
+
+| Phase | Action | ATTACH MODE | Reason |
+|-------|--------|-------------|--------|
+| **Phase 0** | Container Selection | **SKIP** | Container decision already made — the item exists |
+| **Phase 1** | Requirements Analysis | **RUN** | Read the existing item's title/description as requirements input |
+| **Phase 2** | Codebase Research | **RUN** | Understand scope and architectural impact |
+| **Phase 3** | Kanban Item Creation | **⛔ FORBIDDEN** | Creating another item here produces a DUPLICATE (exact prohibition, not a suggestion) |
+| **Phase 4** | Subitem Creation | **RUN** | Attach implementation subitems to the EXISTING item via `kb-backlog sub add <ITEM-ID> "..."` |
+| **Phase 5** | Plan Document Creation | **RUN** | Create the canonical plan document for the existing item |
+| **Handoff Checkpoint** | Display options | **STOP** | ATTACH MODE still stops here — plan approval is NOT execution approval |
+
+**ATTACH MODE Protected Subitem Governance:**
+
+ATTACH MODE MUST still emit the protected `[Review]`, `[Test]`, and `[UX]` subitems in the appropriate trailing positions (just as standard mode does). These subitems are precisely why the planning gate exists.
+
+**Guard: Already Has Subitems**
+
+If the item ALREADY has subitems when you invoke ATTACH MODE, STOP and report this to the user:
+
+```
+The item XACA-0801 already has subitems. ATTACH MODE is only for items with ZERO subitems.
+Existing subitems:
+  - [subitem-1]
+  - [subitem-2]
+
+ACTION: Either:
+  1. Use the existing subitems (item already has a plan)
+  2. Ask the user to approve cancellation of existing subitems before proceeding
+```
+
+Do NOT proceed in ATTACH MODE if subitems exist.
+
+---
+
 ## Planning Process
+
+### Phase 0: Container Selection (MANDATORY — DO THIS FIRST)
+
+⚠️ **ATTACH MODE NOTE:** If you are planning against an EXISTING kanban item (e.g., from the auto-planning gate), skip Phase 0 and Phase 3. See [ATTACH MODE: Planning Against Existing Items](#attach-mode-planning-against-existing-items) for full details.
+
+```
+═══════════════════════════════════════════════════════════════════════════════
+ 🛑 STOP — DO NOT CALL kb-backlog add YET
+═══════════════════════════════════════════════════════════════════════════════
+
+ Before creating ANY kanban container, decide which TYPE of container fits.
+ The most common planning failure is creating a regular backlog item titled
+ "EPIC: ...", "RELEASE: ...", or "TODO: ..." instead of using the real
+ first-class container that already exists in our system.
+
+═══════════════════════════════════════════════════════════════════════════════
+```
+
+**Decision tree — answer in order, stop at the first YES:**
+
+| # | Question | If YES → use | If NO → continue |
+|---|----------|--------------|------------------|
+| 1 | Does the work span **multiple kanban items, sprints, or teams** under one strategic theme? | **Kanban EPIC** — `kb-epic create "<title>" "<desc>" <priority> <category>` then `kb-epic add-item EPIC-xxxx <ITEM-ID>` for each child. Plan doc: `EPIC-xxxx_<description>.md`. | ↓ |
+| 2 | Is the work a **coordinated deployment** to one or more platforms moving through environments (DEV→QA→PROD)? | **Kanban RELEASE** — `/release create "<name>" --platforms <list>` then `/release assign <ITEM-ID> <REL-ID>`. Plan doc: `REL-xxxx_<description>.md`. | ↓ |
+| 3 | Is the work a **checklist of sequential steps** inside ONE piece of work that one agent will own? | **Subitems** of an existing parent — `kb-backlog sub add <PARENT-ID> "<step>"`. (Subitems ARE the kanban TODO list — do not invent a separate "TODO" item.) | ↓ |
+| 4 | Is this a **single deliverable** that fits in one work session / PR? | **Plain backlog item** — `kb-backlog add "<title>" <priority> "<desc>"`. THIS is the only correct path to `kb-backlog add`. | Re-read the request — if you can't classify it, ask the user before creating anything. |
+
+**FORBIDDEN naming patterns (immediate STOP if you're about to type these):**
+
+```
+❌  kb-backlog add "EPIC: <anything>"          →  use kb-epic create instead
+❌  kb-backlog add "Release: <anything>"       →  use /release create instead
+❌  kb-backlog add "RELEASE: <anything>"       →  use /release create instead
+❌  kb-backlog add "REL-2026-Q2 something"     →  use /release create instead
+❌  kb-backlog add "TODO: <anything>"          →  use kb-backlog sub add instead
+❌  kb-backlog add "Checklist for <anything>"  →  use kb-backlog sub add instead
+❌  kb-backlog add "<Initiative>: Phase 1"     →  use kb-epic + child items instead
+```
+
+**Attach-to-existing first:** Before creating any new container, check whether a matching epic or release already exists:
+
+```bash
+source ~/dev-team/kanban-helpers.sh
+kb-epic list                                    # see existing epics for this team
+kb-release list  # or:  /release list           # see active releases
+```
+
+If a parent exists, **attach** the new work to it (`kb-epic add-item` / `/release assign`) instead of creating a sibling container with a similar name.
+
+**Why this matters:** Epic and Release are first-class containers in the LCARS UI with their own tabs, progress aggregation, environment promotion, and child-item rollups. A backlog item titled `"EPIC: Foo"` is a string — it doesn't aggregate progress, doesn't appear in the EPICS tab, doesn't link to children, and pollutes the regular backlog. Same for releases and TODO checklists.
+
+**Only after Phase 0 is complete** — and you have selected the correct container type — proceed to Phase 1.
+
+---
 
 ### Phase 1: Requirements Analysis
 
@@ -232,8 +335,10 @@ Subitems tagged with `[Review]` or `[Test]` are **protected subitems** with spec
 Create the main backlog item using kanban-helpers:
 
 ```bash
-source ~/dev-team/kanban-helpers.sh && kb-backlog add "<title>" <priority> "<description>" "<jira-id>" "<os>"
+source ~/dev-team/kanban-helpers.sh && kb-backlog add "<title>" <priority> "<description>" "<jira-id>" "<os>" --points <hours>
 ```
+
+**`--points` is optional at creation but the item must be estimated before work begins.** Supply an estimate here when it is reasonably known (realistic normal-human developer hours, fractional OK — e.g. `--points 4` or `--points 0.5`). If the scope is unclear at planning time, omit it and set it with `kb-backlog points <id> <hours>` before the implementing agent runs `kb-pick` or `kb-run`.
 
 ### Phase 4: Subitem Creation
 
@@ -368,8 +473,8 @@ Any project that involves code changes MUST also include a dedicated **"QA Testi
 │    REQUEST_CHANGES)                                                         │
 │  • On both approvals, creating agent merges PR                             │
 │                                                                             │
-│  Position: Second-to-last (after PR Creation & Test Handoff, before        │
-│  Retrospective and Knowledge Capture)                                      │
+│  Position: Third-to-last (after PR Creation & Test Handoff, before         │
+│  UX/UI Evaluation and Retrospective)                                       │
 │                                                                             │
 │  ⛔ DO NOT skip this subitem — all code changes require QA + code review   │
 │  ⛔ DO NOT combine QA testing with PR creation or implementation subitems  │
@@ -388,6 +493,102 @@ Any project that involves code changes MUST also include a dedicated **"QA Testi
 - Performance improvements
 
 **When QA Testing & Code Review subitem may be skipped:**
+- See [Project-Level Exceptions](#project-level-exceptions) below
+
+**⚠️ MANDATORY: UX/UI Evaluation Subitem for UI-Touching Projects**
+
+Any project that modifies a user-facing interface MUST include a dedicated **"[UX] UX/UI Evaluation"** subitem. This is a protected subitem (merge gate).
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  REQUIRED: UI-touching projects MUST have a [UX] UX/UI Evaluation         │
+│  protected subitem                                                          │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  Standard UX/UI Evaluation Subitem:                                        │
+│  Title: "[UX] UX/UI Evaluation"  ← The [UX] tag is REQUIRED (protected)    │
+│                                                                             │
+│  This subitem covers UX/UI design compliance:                              │
+│  • The designated UX Expert for the team performs the evaluation           │
+│  • Evaluation covers: design consistency, accessibility (WCAG),            │
+│    interaction flows, visual polish, responsive layout, edge cases         │
+│  • UX Expert submits verdict via PR comment (pending gh-bot-ux deployment) │
+│  • On approval, PR merge proceeds; on REQUEST_CHANGES, address feedback    │
+│                                                                             │
+│  CRITICAL: UX/UI Evaluation is a MERGE GATE                                │
+│  The [UX] tag makes this a protected subitem (same as [Review]/[Test])    │
+│  It MUST be resolved before PR can merge via the kb-sweep gate.            │
+│                                                                             │
+│  UX Expert Routing (see docs/ux-eval-gate.md for full table):             │
+│  • iOS: wesley (substitute: deanna)                                        │
+│  • Android: uhura (substitute: sulu)                                       │
+│  • Firebase: quark (API/DX focus, not UI graphics)                         │
+│  • MainEvent: paris-me                                                     │
+│  • Freelance: mayweather                                                   │
+│  • Academy: lal (substitute: emh)                                          │
+│  • Command: n/a (non-UI team — auto-cancel without user approval)         │
+│  • DNS: n/a (non-UI team — auto-cancel without user approval)             │
+│  • Finance/Medical/Legal: n/a (non-UI teams — auto-cancel)                │
+│                                                                             │
+│  Position: Fourth-to-last (after QA Testing & Code Review,                 │
+│  before Retrospective)                                                     │
+│                                                                             │
+│  ⛔ DO NOT skip this subitem for UI-touching projects                      │
+│  ⛔ DO NOT combine UX evaluation with other subitems                       │
+│  ⛔ This is a protected subitem — agents CANNOT cancel it                  │
+│                                                                             │
+│  EXCEPTION: If the project does NOT touch user-facing interface:           │
+│  You MAY pre-cancel [UX] at creation with reason "no UX/UI surface in     │
+│  diff" (see auto-cancel section below). This is the ONLY sanctioned       │
+│  case where a protected subitem can be auto-cancelled. A backstop in      │
+│  the PR auto-merge loop re-opens cancelled [UX] if the diff later         │
+│  reveals UI-touching paths (XACA-0703 Layer 2 heuristic).                 │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+**When UX/UI Evaluation subitem is required:**
+- New feature with user-facing interface
+- UI/UX modifications or design changes
+- Responsive layout updates
+- Accessibility improvements
+- Theme or styling changes
+- Any project modifying files in: `lcars-ui/`, `*.html`, `*.css`, `*.scss`, `*View.swift`, `res/layout/`, `res/drawable/`, etc.
+- See docs/ux-eval-gate.md § "UI Surface Diff Paths" for complete heuristic patterns
+
+**When UX/UI Evaluation subitem may be skipped or pre-cancelled:**
+- Backend/infrastructure code with NO user-facing changes
+- Documentation updates only
+- Non-code teams (Command, DNS, Finance, Medical, Legal)
+- Configuration changes with NO UI impact
+- **PRE-CANCEL CONDITION:** Add subitem but cancel it immediately with reason "no UX/UI surface in diff" when you are certain the project does NOT modify any user-facing interface
+
+**CRITICAL: Protected Subitem Governance for [UX]**
+
+The `[UX]` tag designates UX/UI Evaluation as a **protected subitem** — it is a merge gate, equivalent to `[Review]` and `[Test]` subitems. This means:
+
+1. **Agents CANNOT cancel [UX] subitems** unless:
+   - The subitem was created with reason "no UX/UI surface in diff" at planning time (pre-cancelled)
+   - OR the user explicitly approves cancellation
+
+2. **Why the exception exists for "no UX/UI surface":**
+   - A bot cannot accurately judge UX impact at planning time without analyzing the full PR diff
+   - However, deferring the judgment to PR creation would force all projects to include the subitem
+   - Solution: pre-cancel at planning if you are confident (based on project description) that no UI surfaces will be touched
+   - The PR auto-merge loop implements a Layer 2 backstop heuristic (XACA-0703) that re-opens the cancelled [UX] subitem if the diff matches known UI-touching patterns — preventing false negatives
+
+3. **Why this is the ONLY sanctioned exception:**
+   - `[Review]` and `[Test]` subitems represent committed work that agents MUST complete (no cancellation except user approval)
+   - `[UX]` has a principled two-layer design: planner intent + heuristic backstop
+   - Allowing agents to cancel [UX] subitems outside the "no UX/UI surface" class would undermine the merge gate
+   - See docs/ux-eval-gate.md for the full two-layer design and heuristic backstop implementation
+
+4. **When assigning the subitem:**
+   - If UI-touching: assign to the team's UX Expert (from routing table above)
+   - If pre-cancelled: mark it done with reason "no UX/UI surface in diff"
+   - The backstop will re-open it if the diff later contradicts the cancellation
+
+**When UX/UI Evaluation subitem may be skipped:**
 - See [Project-Level Exceptions](#project-level-exceptions) below
 
 **⚠️ MANDATORY: Retrospective and Knowledge Capture Subitem for All Projects**
@@ -414,13 +615,19 @@ Every project MUST include a dedicated **"Retrospective and Knowledge Capture"**
 │    ⛔ Do NOT manually construct the path — always use kb-retro-path       │
 │  • Fill in the Delegation Map — EVERY Task tool invocation during the     │
 │    project MUST be logged (subagent_type, subitem, what they did)          │
-│  • Categorize each lesson: agent-specific vs. team domain knowledge        │
-│    - Agent-specific → <repo-kanban>/knowledge/<codename>/                  │
-│    - Team domain    → <repo-kanban>/knowledge/TEAM/                        │
-│    - A lesson CAN go to both if it has personal AND team-wide value        │
-│    - Subagent lessons: categorize per Section 12 of the design doc         │
-│  • Write knowledge entry (or entries) to the appropriate directory/ies     │
-│  • Update INDEX.md for each location written                               │
+│  • Categorize each lesson into knowledge tiers:                             │
+│    - Agent tier    → ~/knowledge/agents/<persona>/                          │
+│    - Subject tier  → ~/knowledge/subjects/<topic>/                          │
+│    - Project tier  → resolved per project (configurable, see below)         │
+│      • Default per SPEC.md §4.4: $KB_KNOWLEDGE_GLOBAL_ROOT/projects/<slug>/ │
+│      • Override via .knowledge-config.yml `project_knowledge_path:` or      │
+│        the KB_KNOWLEDGE_PROJECT_PATH env var                                │
+│      • dev-team uses repo-local override: <repo>/kanban/knowledge/project/  │
+│    - A lesson CAN go to multiple tiers if it spans domains                 │
+│  • Use kb-knowledge-add to scaffold new entries:                           │
+│    kb-knowledge-add agent <persona> "<title>"                             │
+│    kb-knowledge-add subject "<topic>" "<title>"                           │
+│    kb-knowledge-add project ["<optional-slug>"] "<title>"                 │
 │  • Fill in the "Knowledge Entries Created" table in the retrospective doc  │
 │  • Run cross-agent review: re-spawn each unique subagent type from the    │
 │    Delegation Map to review the retrospective and extract knowledge to    │
@@ -428,11 +635,10 @@ Every project MUST include a dedicated **"Retrospective and Knowledge Capture"**
 │  • Update the Cross-Agent Review table in the retrospective doc           │
 │  • Mark this retrospective subitem done ONLY after all agents reviewed    │
 │                                                                             │
-│  See ~/dev-team/kanban/XACA-0084_knowledge_base_design.md for full        │
-│  process details, file templates, agent-to-directory mapping,              │
-│  guidance on agent-specific vs. team domain categorization, subagent       │
-│  knowledge extraction (Section 12), and retrospective document spec        │
-│  (Section 13).                                                             │
+│  For full schema details, see:                                             │
+│    - ~/knowledge/SPEC.md — four-tier schema contract                       │
+│    - ~/knowledge/docs/USAGE.md — daily operations and tools               │
+│  Original planning context: XACA-0222 (Phase 9 completion)               │
 │                                                                             │
 │  Position: SECOND-TO-LAST subitem (after QA Testing & Code Review,         │
 │  before Sync Local Develop Branch)                                         │
@@ -490,7 +696,7 @@ These rules are absolute. Violations cause broken cross-references, polluted kno
 │                                                                             │
 │  ⛔ NEVER copy retrospective documents into knowledge directories          │
 │  ⛔ NEVER place retros in ~/dev-team/docs/kanban/                          │
-│  ⛔ NEVER place retros in <repo-kanban>/knowledge/<codename>/              │
+│  ⛔ NEVER place retros in knowledge directories                             │
 │                                                                             │
 ├─────────────────────────────────────────────────────────────────────────────┤
 │  RETROSPECTIVE vs. KNOWLEDGE ENTRIES — THEY ARE DIFFERENT THINGS           │
@@ -502,10 +708,12 @@ These rules are absolute. Violations cause broken cross-references, polluted kno
 │    → Must NOT be copied to knowledge directories                           │
 │                                                                             │
 │  Knowledge entries (extracted FROM retrospectives):                         │
-│    → Live in knowledge directories (primary + backup)                      │
-│    → Named k###-<slug>.md (e.g., k001-chart-js-registration-scoping.md)   │
-│    → ARE listed in INDEX.md                                                │
-│    → Live in <repo-kanban>/knowledge/<codename>/                           │
+│    → Live in FOUR-TIER schema directories                                  │
+│    → AGENT tier: ~/knowledge/agents/<persona>/kNNN-<slug>.md              │
+│    → SUBJECT tier: ~/knowledge/subjects/<topic>/sNNN-<slug>.md             │
+│    → PROJECT tier: <repo>/kanban/knowledge/project/pNNN-<slug>.md          │
+│    → ARE listed in INDEX.md in their tier directory                        │
+│    → Use kb-knowledge-add to scaffold new entries                          │
 │                                                                             │
 │  The retrospective PROCESS creates knowledge entries.                      │
 │  The retrospective DOCUMENT is not itself a knowledge entry.               │
@@ -516,7 +724,45 @@ These rules are absolute. Violations cause broken cross-references, polluted kno
 **Subagent Prompt Requirements for Knowledge Capture:**
 
 When any project subitem is delegated to a subagent via the Task tool, the subagent
-prompt MUST include this instruction at the end (before the LCARS cleanup instruction):
+prompt MUST include the following sections in this order:
+
+1. **Task Identity** (kanban item, subitem, goal)
+2. **Worktree Context** (if applicable — with explicit "DO NOT switch branches" warning)
+3. **Subitem Tracking Commands** (`kb-backlog sub start/done`)
+4. **⛔ FORBIDDEN ACTIONS** — The load-bearing perimeter block
+5. **Work Instructions** (clear steps and acceptance criteria)
+6. **Lessons Learned** instruction (below)
+7. **MANDATORY FINAL STEP** (crew avatar removal)
+
+### ⛔ FORBIDDEN ACTIONS Block (MANDATORY for All Subagent Prompts)
+
+Every subagent prompt MUST include a clearly-visible ⛔ FORBIDDEN ACTIONS block near the top (after task identity, before work instructions). This block has measurably reduced subagent scope drift and unsafe shortcuts (XACA-0222, XACA-0239).
+
+**Universal Forbidden Actions (Always Include):**
+```
+⛔ FORBIDDEN ACTIONS — Do not do these:
+  ⛔ Do not check out develop or master
+  ⛔ Do not switch branches (worktree lock violation)
+  ⛔ Do not run git worktree remove, git worktree prune, or delete worktree directories
+  ⛔ Do not modify files outside the named scope for this subitem
+  ⛔ Do not refactor unrelated code "while you're here" — expand scope only with explicit instruction
+  ⛔ Do not skip lint or tests when the parent task includes them
+  ⛔ Do not include secrets, credentials, API keys, or PII in any artifact (output, files, comments)
+  ⛔ Do not bypass --no-verify, --no-gpg-sign, or skip git hooks
+```
+
+**Task-Specific Additions (Add 1–2 items per delegation):**
+Examples:
+- ⛔ Do not edit anything in `<team>/` directory (team boundary violation)
+- ⛔ Do not modify `<unrelated-file>` — out of scope for this subitem
+- ⛔ Do not run xcodegen (overwrites manual config; needs user approval)
+- ⛔ Do not commit directly to develop (use feature branch, open PR)
+
+**Why This Is Mandatory:** Subagents start cold and pattern-match the prompt. Without an explicit perimeter, they drift toward refactoring, shortcut commands, and scope expansion. The block must be visible (emoji + list form) and scannable — burying it reduces compliance. See XACA-0239 and `~/knowledge/templates/subagent_prompt_template.md` for complete guidance.
+
+### Lessons Learned Instruction (MANDATORY for All Subagent Prompts)
+
+The subagent prompt MUST include this instruction at the end (before the LCARS cleanup instruction):
 
 ```
 Before returning your output, include a "Lessons Learned" section at the end with:
@@ -534,7 +780,13 @@ the Task completes.
 
 **🚨 MANDATORY: Retrospective Subitem Delegation Prompt**
 
-When delegating the "Retrospective and Knowledge Capture" subitem to a subagent via the Task tool, the delegation prompt MUST include these specific instructions (in addition to the standard "Lessons Learned" instruction above):
+When delegating the "Retrospective and Knowledge Capture" subitem to a subagent via the Task tool, the delegation prompt MUST include:
+
+1. The universal ⛔ FORBIDDEN ACTIONS block (from the section above)
+2. Task-specific forbidden actions (e.g., "Do not edit knowledge-base entries that belong to other agents")
+3. These specific retrospective-file creation instructions (in addition to the standard "Lessons Learned" instruction):
+
+The instructions must include:
 
 ````
 ## CRITICAL: Retrospective File Creation (MANDATORY)
@@ -695,14 +947,20 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 **Ordering of Mandatory Trailing Subitems:**
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│  For all code-related projects, the LAST FIVE subitems must always be:    │
+│  For all code-related projects, the LAST SIX subitems must always be:    │
 │                                                                             │
 │  ... (implementation subitems) ...                                         │
-│  N-4. Testing & Debugging                    ← Fifth-to-last (MANDATORY)  │
-│  N-3. PR Creation & Test Handoff             ← Fourth-to-last (MANDATORY) │
-│  N-2. QA Testing & Code Review               ← Third-to-last (MANDATORY)  │
+│  N-5. Testing & Debugging                    ← Sixth-to-last (MANDATORY)  │
+│  N-4. PR Creation & Test Handoff             ← Fifth-to-last (MANDATORY)  │
+│  N-3. QA Testing & Code Review               ← Fourth-to-last (MANDATORY) │
+│  N-2. [UX] UX/UI Evaluation                  ← Third-to-last (IF UI)      │
 │  N-1. Retrospective and Knowledge Capture    ← Second-to-last (MANDATORY) │
 │  N.   Sync Local Develop Branch              ← Always LAST (MANDATORY)    │
+│                                                                             │
+│  Notes:                                                                    │
+│  • [UX] is conditionally required only for UI-touching projects           │
+│  • For non-UI projects: omit [UX], shift to N-2. Retrospective            │
+│  • [UX] is a protected subitem (merge gate, like [Review]/[Test])         │
 │                                                                             │
 │  This order ensures:                                                       │
 │  • All code is tested BEFORE the PR is created                             │
@@ -710,6 +968,7 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 │  • The PR contains fully tested, lint-clean code                           │
 │  • A formal QA testing gate validates all tests pass after PR is open      │
 │  • Code reviewers receive QA-validated code ready for review               │
+│  • UX Expert evaluates UI changes for design/accessibility compliance      │
 │  • Knowledge is captured AFTER the PR is merged and project is complete    │
 │  • PR review feedback is available when writing the retrospective          │
 │  • Local develop branch is fully synced after merge completes              │
@@ -719,7 +978,7 @@ Every code-related project MUST include a dedicated **"Sync Local Develop Branch
 
 ### Project-Level Exceptions
 
-Not all teams and projects produce code. The mandatory trailing subitems (Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, Retrospective and Knowledge Capture, Sync Local Develop Branch) apply **only to projects that involve code changes in a git repository**. The Retrospective and Sync subitems follow the same exception rules as Testing & PR, but even exempt projects are encouraged to include them.
+Not all teams and projects produce code, and not all code projects touch user-facing interfaces. The mandatory trailing subitems (Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, UX/UI Evaluation, Retrospective and Knowledge Capture, Sync Local Develop Branch) apply **only to projects that involve code changes in a git repository**. UX/UI Evaluation is conditional on touching a user-facing interface. The Retrospective and Sync subitems follow the same exception rules as Testing & PR, but even exempt projects are encouraged to include them.
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
@@ -728,15 +987,19 @@ Not all teams and projects produce code. The mandatory trailing subitems (Testin
 │                                                                             │
 │  EXCEPTION 1: Non-Code Teams                                               │
 │  ─────────────────────────────────────────────────────────────────────────  │
-│  Teams that do NOT maintain a code repository are EXEMPT from all five     │
-│  mandatory trailing subitems (Testing, PR, QA, Retrospective, and Sync).  │
+│  Teams that do NOT maintain a code repository are EXEMPT from all six      │
+│  mandatory trailing subitems (Testing, PR, QA, UX, Retrospective, Sync).  │
 │                                                                             │
 │  Exempt teams:                                                              │
 │  • Command (XCMD-)  — Strategic/planning documents only, no code           │
 │  • Legal (XLCP-)    — Case management, no code repository                  │
+│  • DNS (XDNS-)      — Infrastructure automation, no user-facing UI         │
+│  • Finance (XFIN-)  — Personal finance tracking, no team UI                │
+│  • Medical (XMED-)  — Personal health tracking, no team UI                 │
 │                                                                             │
 │  These teams have no codebase to test, no branches to PR, and no           │
 │  CI/CD pipeline. Their deliverables are documents, plans, and strategy.    │
+│  [UX] is auto-cancelled for non-UI teams at creation.                      │
 │                                                                             │
 │  ⚠️ ENCOURAGED: Even exempt teams benefit from retrospectives. Non-code   │
 │  lessons about planning, communication, and coordination are valuable.     │
@@ -745,7 +1008,7 @@ Not all teams and projects produce code. The mandatory trailing subitems (Testin
 │  ─────────────────────────────────────────────────────────────────────────  │
 │  Even on teams that normally produce code, some projects are non-code:     │
 │                                                                             │
-│  All five subitems may be skipped when the project involves ONLY:          │
+│  All six subitems may be skipped when the project involves ONLY:           │
 │  • Documentation updates (README, guides, ADRs)                            │
 │  • Asset updates (images, strings, localization files)                     │
 │  • Planning/research tasks with no code output                             │
@@ -754,7 +1017,26 @@ Not all teams and projects produce code. The mandatory trailing subitems (Testin
 │  ⚠️ ENCOURAGED: Even for non-code projects, a Retrospective subitem is    │
 │  recommended. Lessons from planning and documentation work are valuable.   │
 │                                                                             │
-│  EXCEPTION 3: Direct-to-Develop Changes                                    │
+│  EXCEPTION 3: Non-UI Code Projects                                         │
+│  ─────────────────────────────────────────────────────────────────────────  │
+│  Projects that involve code changes but do NOT modify user-facing          │
+│  interfaces may skip the [UX] UX/UI Evaluation subitem.                    │
+│                                                                             │
+│  Skip [UX] when the project involves ONLY:                                 │
+│  • Backend APIs with no user-facing changes                                │
+│  • Infrastructure/DevOps code                                              │
+│  • Configuration changes with no UI impact                                 │
+│  • Data model changes without UI effects                                   │
+│                                                                             │
+│  Pre-cancel [UX] when you are CERTAIN no UI surfaces will be touched:      │
+│    Title: "[UX] UX/UI Evaluation"                                          │
+│    Reason: "no UX/UI surface in diff"                                      │
+│                                                                             │
+│  ⚠️ IMPORTANT: A backstop heuristic in the PR auto-merge loop               │
+│  (XACA-0703 Layer 2) will re-open [UX] if the diff later reveals          │
+│  UI-touching paths — preventing false negatives.                           │
+│                                                                             │
+│  EXCEPTION 4: Direct-to-Develop Changes                                    │
 │  ─────────────────────────────────────────────────────────────────────────  │
 │  The PR Creation & Test Handoff and QA Testing & Code Review subitems      │
 │  (only) may be skipped when:                                               │
@@ -762,50 +1044,59 @@ Not all teams and projects produce code. The mandatory trailing subitems (Testin
 │  • Agent is NOT in a worktree (main repo, on develop branch)              │
 │  • Changes are config files, RELNOTES, or small fixes                      │
 │  • Testing & Debugging subitem STILL APPLIES if code was changed          │
+│  • [UX] subitem STILL APPLIES if UI was modified (even direct-to-dev)     │
 │  • Retrospective subitem STILL APPLIES                                     │
 │  • Sync Local Develop Branch subitem STILL APPLIES                        │
 │                                                                             │
-│  ⚠️ NOTE: This exception does NOT exempt Testing, Retrospective, or      │
-│  Sync — tested code can be committed directly, but untested code should   │
-│  not. Local develop must still be synced after direct commits.            │
+│  ⚠️ NOTE: This exception does NOT exempt Testing, UX, Retrospective, or  │
+│  Sync — tested code can be committed directly, UX evaluation still needed  │
+│  for UI changes, and local develop must still be synced after commits.    │
 │                                                                             │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 **Quick Reference — Which Subitems Does My Project Need?**
 
-| Scenario | Testing & Debugging | PR Creation & Test Handoff | QA Testing & Code Review | Retrospective | Sync Develop |
-|----------|:-------------------:|:--------------------------:|:------------------------:|:-------------:|:------------:|
-| Code project on code team (worktree) | **REQUIRED** | **REQUIRED** | **REQUIRED** | **REQUIRED** | **REQUIRED** |
-| Code project on code team (direct to develop) | **REQUIRED** | Skip | Skip | **REQUIRED** | **REQUIRED** |
-| Non-code project on code team (docs, assets) | Skip | Skip | Skip | Encouraged | Skip |
-| Command team (XCMD) — any project | Skip | Skip | Skip | Encouraged | Skip |
-| Legal team (XLCP) — any project | Skip | Skip | Skip | Encouraged | Skip |
-| Config-only changes (non-code) | Skip | Skip | Skip | Encouraged | Skip |
-| Planning/research with no code output | Skip | Skip | Skip | Encouraged | Skip |
+| Scenario | Testing & Debugging | PR Creation & Test Handoff | QA Testing & Code Review | [UX] UX/UI Eval | Retrospective | Sync Develop |
+|----------|:-------------------:|:--------------------------:|:------------------------:|:---------------:|:-------------:|:------------:|
+| Code project on code team (UI-touching, worktree) | **REQUIRED** | **REQUIRED** | **REQUIRED** | **REQUIRED** | **REQUIRED** | **REQUIRED** |
+| Code project on code team (non-UI, worktree) | **REQUIRED** | **REQUIRED** | **REQUIRED** | Skip/Cancel | **REQUIRED** | **REQUIRED** |
+| Code project on code team (UI-touching, direct to develop) | **REQUIRED** | Skip | Skip | **REQUIRED** | **REQUIRED** | **REQUIRED** |
+| Code project on code team (non-UI, direct to develop) | **REQUIRED** | Skip | Skip | Skip | **REQUIRED** | **REQUIRED** |
+| Non-code project on code team (docs, assets) | Skip | Skip | Skip | Skip | Encouraged | Skip |
+| Command team (XCMD) — any project | Skip | Skip | Skip | Skip | Encouraged | Skip |
+| Legal team (XLCP) — any project | Skip | Skip | Skip | Skip | Encouraged | Skip |
+| Config-only changes (non-code) | Skip | Skip | Skip | Skip | Encouraged | Skip |
+| Planning/research with no code output | Skip | Skip | Skip | Skip | Encouraged | Skip |
 
 **Decision Flow:**
 
 ```
 Is this a code-related project?
-├── NO → Skip Testing, PR, QA, and Sync mandatory subitems
-│         (docs, assets, planning, strategy, Command/Legal teams)
+├── NO → Skip Testing, PR, QA, UX, and Sync mandatory subitems
+│         (docs, assets, planning, strategy, Command/Legal/DNS teams)
 │         → Retrospective is encouraged but not required
 │
 └── YES → Does the team maintain a code repository?
-    ├── NO → Skip Testing, PR, QA, and Sync mandatory subitems
-    │         (Command/XCMD, Legal/XLCP)
+    ├── NO → Skip Testing, PR, QA, UX, and Sync mandatory subitems
+    │         (Command/XCMD, Legal/XLCP, DNS/XDNS, etc.)
     │         → Retrospective is encouraged but not required
     │
     └── YES → Will changes go through a PR?
-        ├── YES → ALL FIVE subitems required
-        │          (Testing + PR Handoff + QA Review + Retrospective + Sync)
-        │          (worktree work, feature branches)
+        ├── YES → ALL SIX subitems required (UI-touching projects)
+        │          (Testing + PR Handoff + QA Review + UX + Retrospective + Sync)
+        │          (worktree work, feature branches, UI changes)
         │
-        └── NO → Testing subitem REQUIRED, PR Handoff and QA Review skipped
-                   Retrospective subitem REQUIRED
-                   Sync Local Develop Branch subitem REQUIRED
-                   (minor fixes direct to develop, not in worktree)
+        ├── SOME UI → Testing + PR Handoff + QA Review REQUIRED
+        │              UX subitem REQUIRED (if UI-touching)
+        │              Retrospective + Sync REQUIRED
+        │
+        └── NO (direct-to-develop) → Testing subitem REQUIRED
+                  PR Handoff and QA Review skipped
+                  UX subitem REQUIRED (if UI-touching, even direct-to-develop)
+                  Retrospective subitem REQUIRED
+                  Sync Local Develop Branch subitem REQUIRED
+                  (minor fixes direct to develop, not in worktree)
 ```
 
 ### Phase 5: Plan Document Creation (MANDATORY)
@@ -827,13 +1118,14 @@ Create a comprehensive plan document following the template below.
 
 **Examples by Team (each in their OWN kanban directory):**
 - Academy: `~/dev-team/kanban/XACA-0031_dark_mode_support.md`
-- iOS: `.../MainEventApp-iOS/kanban/XIOS-0042_payment_refactor.md`
-- Firebase: `.../MainEventApp-Functions/kanban/XFIR-0055_account_api.md`
+- iOS: `<ios-repo>/kanban/XIOS-0042_payment_refactor.md`
+- Firebase: `<firebase-repo>/kanban/XFIR-0055_account_api.md`
 - Freelance: `.../Starwords/kanban/XFSW-0020_setup_wizard.md`
 
 **Minimum Content Requirements:**
 
 Every plan document MUST include:
+0. ✅ **Canonical marker** (HTML comment `<!-- plan_doc: canonical -->` on line 1, above the H1)
 1. ✅ **Header metadata** (Status, Priority, Tags, Created date, Team)
 2. ✅ **Summary** (2-4 sentences describing the project)
 3. ✅ **Requirements** (numbered list of what must be accomplished)
@@ -843,9 +1135,12 @@ Every plan document MUST include:
 7. ✅ **Subitems Table** (all subitems with IDs and status)
 8. ✅ **Verification Checklist** (testable acceptance criteria)
 
+> **Marker Convention (XACA-0478):** The `<!-- plan_doc: canonical -->` marker on line 1 lets `kb-retro-path` distinguish the canonical plan doc from side-docs (audit reports, SPECs, instruction files, feasibility notes) when `kanban/plans/<ID>/` contains multiple plan-adjacent files. The marker is invisible in GitHub Markdown, Confluence, and the LCARS UI plan viewer (per CommonMark HTML-comment stripping). **Side-docs MUST NOT carry this marker** — that is what makes the resolver pick correctly. Only the one canonical plan doc per item gets the marker.
+
 **Template:**
 
 ```markdown
+<!-- plan_doc: canonical -->
 # <ITEM-ID>: <Title>
 
 **Status:** Planning Complete
@@ -911,14 +1206,16 @@ Every plan document MUST include:
 | <ITEM-ID>-001 | <Subitem 1 title> | todo |
 | <ITEM-ID>-002 | <Subitem 2 title> | todo |
 | ... | ... | ... |
-| <ITEM-ID>-00(N-4) | Testing & Debugging | todo |
-| <ITEM-ID>-00(N-3) | PR Creation & Test Handoff | todo |
-| <ITEM-ID>-00(N-2) | QA Testing & Code Review | todo |
+| <ITEM-ID>-00(N-5) | Testing & Debugging | todo |
+| <ITEM-ID>-00(N-4) | PR Creation & Test Handoff | todo |
+| <ITEM-ID>-00(N-3) | QA Testing & Code Review | todo |
+| <ITEM-ID>-00(N-2) | [UX] UX/UI Evaluation | todo |
 | <ITEM-ID>-00(N-1) | Retrospective and Knowledge Capture | todo |
 | <ITEM-ID>-00N | Sync Local Develop Branch | todo |
 
-> ⚠️ **Note:** Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, Retrospective and Knowledge Capture, and Sync Local Develop Branch subitems are MANDATORY for all code-related projects.
-> These five subitems must always be the last five, in this order.
+> ⚠️ **Note:** Testing & Debugging, PR Creation & Test Handoff, QA Testing & Code Review, [UX] UX/UI Evaluation, Retrospective and Knowledge Capture, and Sync Local Develop Branch subitems are MANDATORY for code-related projects.
+> [UX] is conditionally required: required for UI-touching projects, may be skipped or pre-cancelled for non-UI projects.
+> When present, these six subitems must always be the last six, in this order.
 
 ---
 
@@ -1068,6 +1365,8 @@ This skill uses the Kanban Manager skill commands:
 | Create item | `kb-backlog add` |
 | Add subitem | `kb-backlog sub add` |
 | Set priority | `kb-backlog priority` |
+| Set effort estimate | `kb-backlog points <id> <hours>` (required before start) |
+| List unestimated | `kb-backlog unestimated` |
 | Add tags | `kb-backlog tag` |
 | Set due date | `kb-backlog due` |
 | Link JIRA | `kb-backlog jira` |
@@ -1102,15 +1401,15 @@ Plan documents MUST be stored in the owning team's `kanban/` directory, NOT in a
 
 Each project has its own git repository. The item ID prefix determines which repo's kanban/ directory to use:
 
-#### Main Event Teams
+#### Dev Teams
 
 | Prefix | Team | Kanban Directory |
 |--------|------|------------------|
 | `XACA-` | Academy | `~/dev-team/kanban/` |
-| `XIOS-` | iOS | `/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/` |
-| `XAND-` | Android | `/Users/Shared/Development/Main Event/MainEventApp-Android/kanban/` |
-| `XFIR-` | Firebase | `/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban/` |
-| `XCMD-` | Command | `/Users/Shared/Development/Main Event/dev-team/kanban/` |
+| `XIOS-` | iOS | `<ios-repo>/kanban/` |
+| `XAND-` | Android | `<android-repo>/kanban/` |
+| `XFIR-` | Firebase | `<firebase-repo>/kanban/` |
+| `XCMD-` | Command | `<command-repo>/kanban/` |
 | `XDNS-` | DNS | `/Users/Shared/Development/DNSFramework/kanban/` |
 
 #### Freelance Projects (Each project has its own repo)
@@ -1162,12 +1461,12 @@ get_plan_doc_dir() {
     local prefix="${item_id%%-*}"  # Extract prefix before first hyphen
 
     case "$prefix" in
-        # Main Event Teams
+        # Dev Teams (set IOS_REPO, ANDROID_REPO, FIREBASE_REPO env vars for your layout)
         XACA) echo "$HOME/dev-team/kanban" ;;
-        XIOS) echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
-        XAND) echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
-        XFIR) echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        XCMD) echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
+        XIOS) echo "${IOS_REPO:-/path/to/ios-repo}/kanban" ;;
+        XAND) echo "${ANDROID_REPO:-/path/to/android-repo}/kanban" ;;
+        XFIR) echo "${FIREBASE_REPO:-/path/to/firebase-repo}/kanban" ;;
+        XCMD) echo "${COMMAND_REPO:-/path/to/command-repo}/kanban" ;;
         XDNS) echo "/Users/Shared/Development/DNSFramework/kanban" ;;
 
         # Freelance Projects (each project has its own repo)
@@ -1263,12 +1562,12 @@ get_plan_doc_dir() {
     local prefix="${item_id%%-*}"
 
     case "$prefix" in
-        # Main Event Teams
+        # Dev Teams (set IOS_REPO, ANDROID_REPO, FIREBASE_REPO env vars for your layout)
         XACA) echo "$HOME/dev-team/kanban" ;;
-        XIOS) echo "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban" ;;
-        XAND) echo "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban" ;;
-        XFIR) echo "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban" ;;
-        XCMD) echo "/Users/Shared/Development/Main Event/dev-team/kanban" ;;
+        XIOS) echo "${IOS_REPO:-/path/to/ios-repo}/kanban" ;;
+        XAND) echo "${ANDROID_REPO:-/path/to/android-repo}/kanban" ;;
+        XFIR) echo "${FIREBASE_REPO:-/path/to/firebase-repo}/kanban" ;;
+        XCMD) echo "${COMMAND_REPO:-/path/to/command-repo}/kanban" ;;
         XDNS) echo "/Users/Shared/Development/DNSFramework/kanban" ;;
 
         # Freelance Projects
@@ -1334,21 +1633,23 @@ Include enough detail that:
 │  Before showing handoff checkpoint, ALL of these MUST be complete:         │
 │                                                                             │
 │  □ Kanban item created with kb-backlog add                                 │
+│  □ Effort estimate set (--points at creation OR kb-backlog points after)  │
 │  □ All subitems created with kb-backlog sub add                            │
 │  □ Testing/Debugging subitem included (unless exempt — see Exceptions)     │
 │  □ PR Creation & Test Handoff subitem included (unless exempt)             │
 │  □ QA Testing & Code Review subitem included (unless exempt)               │
+│  □ [UX] UX/UI Evaluation subitem included (if UI-touching; may pre-cancel) │
 │  □ Retrospective and Knowledge Capture subitem included (unless exempt)    │
 │  □ Sync Local Develop Branch subitem included (unless exempt)             │
-│  □ Mandatory subitems are last five: Testing, PR Handoff, QA Review,      │
-│    Retrospective, Sync (in this order)                                     │
-│  □ Exceptions verified (non-code teams, non-code projects, direct-develop) │
+│  □ Mandatory subitems are last six (UI projects): Testing, PR Handoff,    │
+│    QA Review, [UX], Retrospective, Sync (in this order)                    │
+│  □ Exceptions verified (non-code teams, non-UI projects, direct-develop)   │
 │  □ Plan document written to CORRECT TEAM KANBAN DIRECTORY:                 │
 │      XACA-* → ~/dev-team/kanban/                                           │
-│      XIOS-* → .../MainEventApp-iOS/kanban/                                 │
-│      XAND-* → .../MainEventApp-Android/kanban/                             │
-│      XFIR-* → .../MainEventApp-Functions/kanban/                           │
-│      XCMD-* → .../Main Event/dev-team/kanban/                              │
+│      XIOS-* → <ios-repo>/kanban/                                           │
+│      XAND-* → <android-repo>/kanban/                                       │
+│      XFIR-* → <firebase-repo>/kanban/                                      │
+│      XCMD-* → <command-repo>/kanban/                                       │
 │      XDNS-* → .../DNSFramework/kanban/                                     │
 │      XFSW-* → .../Starwords/kanban/                                        │
 │      XFAP-* → .../appPlanning/kanban/                                      │
@@ -1360,6 +1661,7 @@ Include enough detail that:
 │  ⛔ Each Freelance project has its OWN repository                          │
 │                                                                             │
 │  Plan Document Required Sections:                                          │
+│  0. Canonical marker `<!-- plan_doc: canonical -->` on line 1 (XACA-0478)  │
 │  1. Header metadata (Status, Priority, Tags, Created, Team)                │
 │  2. Summary (2-4 sentences)                                                │
 │  3. Requirements (numbered list)                                           │
@@ -1377,6 +1679,41 @@ Include enough detail that:
 ---
 
 ## Version History
+
+**v1.11.0** (June 15, 2026)
+- **XACA-0703 UX/UI Evaluation quality gate (third merge gate)** - Added `[UX] UX/UI Evaluation` as a new protected subitem (merge gate, same as `[Review]`/`[Test]`)
+- Added conditional UX subitem requirement: REQUIRED for UI-touching projects, MAY be skipped or pre-cancelled for non-UI projects
+- Implemented two-layer UX gate design: Layer 1 (planner intent at creation), Layer 2 (PR auto-merge backstop heuristic to re-open prematurely cancelled [UX])
+- Added sanctioned auto-cancel exception: `[UX]` is the ONLY protected subitem agents may pre-cancel (with reason "no UX/UI surface in diff"), all others require user approval
+- Updated mandatory trailing subitem ordering from 5 to 6: Testing, PR Handoff, QA Review, **[UX] UX/UI Evaluation**, Retrospective, Sync
+- Added UX Expert routing table (wesley/uhura/quark/paris-me/mayweather/lal per team) with routing guidance
+- Updated exception rules with new EXCEPTION 3 (Non-UI Code Projects) to clarify when [UX] can be skipped or pre-cancelled
+- Updated Project-Level Exceptions section to explain auto-cancel condition and Layer 2 backstop
+- Added explicit governance section on protected subitem rules for [UX], clarifying it is NEVER cancelled except by user approval (except the no-UI-surface pre-cancel condition)
+- Updated quick reference table to show [UX] requirement per UI-touching scenarios
+- Updated decision flow to incorporate UI/non-UI branching
+- Updated plan document template subitems table to include [UX] in mandatory trailing subitems
+- Updated mandatory checklist to include [UX] verification
+- See docs/ux-eval-gate.md for complete design, routing table, UI surface heuristic patterns, and two-layer detection
+
+**v1.12.0** (July 13, 2026)
+- **ATTACH MODE: Planning against existing items** - Added explicit mode for planning against items that already exist but have zero subitems, preventing duplicate item creation
+- **ATTACH MODE skips Phase 0 and Phase 3** - Container selection and kanban item creation are skipped (item already exists); Phases 1, 2, 4, 5 run normally
+- **ATTACH MODE guard condition** - Reports and stops if the item already has subitems (plan already exists or item was modified externally)
+- **Protected subitem governance in ATTACH MODE** - Mandatory `[Review]`, `[Test]`, `[UX]` trailing subitems still emit, preserving merge gate dependencies
+- **ATTACH MODE preserves handoff checkpoint** - Still stops at the explicit handoff option display (plan approval ≠ execution approval)
+- Added [ATTACH MODE](#attach-mode-planning-against-existing-items) section with full mode documentation, phase-by-phase decisions, invocation syntax, and guard conditions
+- Added cross-reference from Phase 0 Container Selection to ATTACH MODE section
+- Invoked via: `/plan-project --attach <ITEM-ID>` or from auto-planning-gate prompts
+
+**v1.10.1** (April 26, 2026)
+- **XACA-0222 Four-Tier Knowledge Schema Integration** - Updated all knowledge path references to reflect the new portable four-tier schema (agent/team/subject/project tiers)
+- Replaced legacy `<repo-kanban>/knowledge/<codename>/` paths with agent-tier: `~/knowledge/agents/<persona>/`
+- Replaced legacy team-domain guidance with subject-tier (`~/knowledge/subjects/<topic>/`) and project-tier (`<repo>/kanban/knowledge/project/`)
+- Updated Retrospective subitem box to use `kb-knowledge-add` tool for scaffolding entries instead of manual mkdir
+- Replaced XACA-0084 design doc reference with authoritative sources: `~/knowledge/SPEC.md` (schema contract) and `~/knowledge/docs/USAGE.md` (daily operations)
+- Updated knowledge entry naming to reflect new prefixes: `k###` (agent), `s###` (subject), `p###` (project)
+- Team tier (`t###`) is reserved for future use; currently all team-domain knowledge maps to subject or project tiers per context
 
 **v1.10.0** (March 18, 2026)
 - **MANDATORY Retrospective delegation prompt template** - Added explicit delegation prompt template for the "Retrospective and Knowledge Capture" subitem that agents MUST include when delegating via the Task tool
@@ -1481,7 +1818,7 @@ Include enough detail that:
 - Updated verification commands to check correct project repository
 - Updated quick reference checklist with repository mapping
 - ⚠️ **CRITICAL**: Plan docs go in the PROJECT'S REPOSITORY, not subdirectories of another repo
-- **Main Event**: Academy, iOS, Android, Firebase (separate repos)
+- **Mobile teams**: Academy, iOS, Android, Firebase (separate repos)
 - **Freelance**: Each project (Starwords, AppPlanning, etc.) has its OWN repo
 - **Legal**: CoParenting has its own repo with XLCP-* prefix
 

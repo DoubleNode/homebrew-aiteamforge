@@ -5491,6 +5491,63 @@ _kb_get_persona_delegation_guide() {
     echo "$guide"
 }
 
+# Internal helper: Build the "no subitems yet" planning-gate section injected into the
+# kb-run/kb-work/kb-run-debug/kb-work-debug prompts (XACA-0801).
+#
+# Why this exists: the Review/Test/UX protected-subitem sweep (Gate 3 of the PR merge
+# system) keys entirely off the subitem rail — kb-sweep looks for [Review]/[Test]/[UX]
+# tagged subitems. An item with ZERO subitems has no rail at all, so a PR built against
+# it sails through with no merge governance. This section forces a stop-and-plan step
+# before the agent starts improvising a todo list on an unplanned item.
+#
+# Usage: _kb_build_planning_gate_section <item_id> <subitem_count>
+# Echoes the section text to stdout (or nothing). Pure string builder — no side effects,
+# safe to call via plain command substitution at the call site.
+#
+# Emits empty output (no section) when:
+#   - subitem_count > 0 (item is already planned — nothing to gate)
+#   - KB_PLAN_GATE_DISABLED=1|true|yes (any case) — escape hatch
+#
+# Implementation notes (zsh gotchas, k501):
+#   - No loop in this function, so the "local-in-loop leaks to stdout" trap doesn't apply,
+#     but keep it that way if this ever grows a loop — declare loop vars OUTSIDE any loop.
+#   - Do NOT end this function with `[[ cond ]] && cmd` — under `set -e` that aborts the
+#     whole script when cond is false. Use full `if` blocks (feedback_set_e_last_line_short_circuit).
+_kb_build_planning_gate_section() {
+    local _item_id="${1-}"
+    local _subitem_count_raw="${2:-0}"
+
+    # Normalize to a numeric count; anything non-numeric is treated as 0 (safe default —
+    # never suppress the gate just because the caller passed something unexpected).
+    local _subitem_count=0
+    if [[ "$_subitem_count_raw" =~ ^[0-9]+$ ]]; then
+        _subitem_count=$_subitem_count_raw
+    fi
+
+    # Already planned — nothing to gate.
+    if [[ $_subitem_count -gt 0 ]]; then
+        return 0
+    fi
+
+    # Kill switch: KB_PLAN_GATE_DISABLED=1|true|yes (any case)
+    local _disabled="${KB_PLAN_GATE_DISABLED:-0}"
+    case "$_disabled" in
+        1|true|yes|TRUE|YES|True|Yes) return 0 ;;
+    esac
+
+    local _section=""
+    _section+="## Planning Gate (No Subitems)\n"
+    _section+="**This item has ZERO subitems.** The Review/Test/UX protected-subitem merge gates key off the subitem rail (kb-sweep looks for [Review]/[Test]/[UX] tagged subitems) — an item with no subitems has no merge gate at all.\n\n"
+    _section+="**Before doing anything else:**\n"
+    _section+="1. Invoke the **Project Planner** skill in **ATTACH mode** against the EXISTING item \`$_item_id\`.\n"
+    _section+="2. ATTACH mode means: create subitems + a plan document for the item that ALREADY EXISTS. Do **NOT** create a new kanban item — that would mint a duplicate.\n"
+    _section+="3. Stop at the Project Planner handoff checkpoint and **wait for user approval**.\n"
+    _section+="4. Only after subitems exist should you proceed with the normal delegation workflow below.\n\n"
+    _section+="_Escape hatch: set \`KB_PLAN_GATE_DISABLED=1\` to skip this gate._\n"
+
+    printf '%s' "$_section"
+}
+
 # Run a task from backlog - launch Claude Code with todo plan and worktree setup
 kb-run() {
     _kb_ensure_jq || return 1
@@ -5696,6 +5753,14 @@ kb-run() {
         prompt+="\n## GitHub: $github_issue"
     fi
 
+    # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
+    # rail. Emits nothing when subitem_count > 0 or KB_PLAN_GATE_DISABLED is set.
+    local _kb_planning_gate_section
+    _kb_planning_gate_section=$(_kb_build_planning_gate_section "$item_id" "$subitem_count")
+    if [[ -n "$_kb_planning_gate_section" ]]; then
+        prompt+="\n\n${_kb_planning_gate_section}"
+    fi
+
     # Add subitems if present (subitem_count already computed above)
     if [[ "$subitem_count" -gt 0 ]]; then
         prompt+="\n\n## Subitems\n"
@@ -5752,9 +5817,18 @@ kb-run() {
         prompt+="**DO NOT close the terminal without running kb-done.** This clears the task from the workflow board.\n"
     fi
 
-    prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
-    prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
-    prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    # XACA-0801: this tail asserted "delegate each subitem" unconditionally, even when
+    # subitem_count is 0 — nonsensical when there's nothing to delegate. The subitem_count>0
+    # branch is BYTE-IDENTICAL to the pre-XACA-0801 text (regression guard: do not reflow).
+    if [[ "$subitem_count" -gt 0 ]]; then
+        prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
+        prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
+        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    else
+        prompt+="\n\nReview the task above. Follow the Planning Gate instructions above to create subitems before proceeding.\n"
+        prompt+="Once subitems exist and are approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
+        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    fi
 
     # Check for worktree conflicts before starting
     local worktree_path conflict
@@ -5969,6 +6043,14 @@ kb-work() {
         prompt+="\n## GitHub: $github_issue"
     fi
 
+    # Planning gate (XACA-0801): items with ZERO subitems have no Review/Test/UX merge
+    # rail. Emits nothing when subitem_count > 0 or KB_PLAN_GATE_DISABLED is set.
+    local _kb_planning_gate_section
+    _kb_planning_gate_section=$(_kb_build_planning_gate_section "$item_id" "$subitem_count")
+    if [[ -n "$_kb_planning_gate_section" ]]; then
+        prompt+="\n\n${_kb_planning_gate_section}"
+    fi
+
     # Add subitems if present
     if [[ "$subitem_count" -gt 0 ]]; then
         prompt+="\n\n## Subitems\n"
@@ -6024,9 +6106,18 @@ kb-work() {
         prompt+="**DO NOT close the terminal without running kb-done.** This clears the task from the workflow board.\n"
     fi
 
-    prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
-    prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
-    prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    # XACA-0801: this tail asserted "delegate each subitem" unconditionally, even when
+    # subitem_count is 0 — nonsensical when there's nothing to delegate. The subitem_count>0
+    # branch is BYTE-IDENTICAL to the pre-XACA-0801 text (regression guard: do not reflow).
+    if [[ "$subitem_count" -gt 0 ]]; then
+        prompt+="\n\nReview the task and subitems above, then wait for approval before delegating work.\n"
+        prompt+="When approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
+        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    else
+        prompt+="\n\nReview the task above. Follow the Planning Gate instructions above to create subitems before proceeding.\n"
+        prompt+="Once subitems exist and are approved, DELEGATE each subitem to a separate subagent using the Task tool.\n"
+        prompt+="When ALL subitems are complete, run \`kb-done\` to mark the task as completed before closing the terminal."
+    fi
 
     # Check for worktree conflicts before starting
     local worktree_path conflict
@@ -6925,12 +7016,34 @@ kb-work-test() {
 
 # Internal helper: Build the debug/investigation prompt text
 # Usage: _kb_build_debug_prompt <item_id> <title> <description> <item_worktree_branch>
+#                                [<subitem_count>] [<subitems_text>]
 # Echoes the complete debug prompt to stdout
+#
+# subitem_count/subitems_text (XACA-0801, both OPTIONAL — callers predating this change
+# still work, defaulting to subitem_count=0):
+#   _kb_reopen_item only adds its 7 "[Debug] ..." subitems when the item was completed/
+#   cancelled (that's the ONLY branch that calls it). Run kb-run-debug/kb-work-debug
+#   against an item that was already in_progress and _kb_reopen_item never fires — no
+#   subitems get added — yet this prompt used to unconditionally claim "New debug
+#   subitems have been automatically added" and print a hardcoded 7-item list that
+#   doesn't exist on the board. Callers MUST pass the item's CURRENT subitem count
+#   (re-read from the board AFTER any reopen attempt) so this function can tell the
+#   truth either way. subitems_text, if provided, is a pre-formatted "- **id**: [status]
+#   title" list (same format as kb-run's ## Subitems block) reflecting the item's ACTUAL
+#   subitems; when omitted but subitem_count > 0, falls back to the static 7-item list
+#   (accurate for the common reopen case, where those are exactly the subitems added).
 _kb_build_debug_prompt() {
-    local item_id="$1"
-    local title="$2"
-    local description="$3"
-    local item_worktree_branch="$4"
+    local item_id="${1-}"
+    local title="${2-}"
+    local description="${3-}"
+    local item_worktree_branch="${4-}"
+    local subitem_count="${5:-0}"
+    local subitems_text="${6-}"
+
+    # Normalize to numeric (defensive — never let a bad value silently suppress the gate).
+    if [[ ! "$subitem_count" =~ ^[0-9]+$ ]]; then
+        subitem_count=0
+    fi
 
     local prompt="You are debugging a previously completed kanban item [$item_id].\n\n"
     prompt+="## Task Being Debugged\n"
@@ -6946,8 +7059,14 @@ _kb_build_debug_prompt() {
     fi
 
     prompt+="\n## Context\n"
-    prompt+="This item was previously completed but has been reopened for debugging.\n"
-    prompt+="New debug subitems have been automatically added to track your progress.\n"
+    if [[ "$subitem_count" -gt 0 ]]; then
+        prompt+="This item was previously completed but has been reopened for debugging.\n"
+        prompt+="Debug subitems tracking your progress are listed below.\n"
+    else
+        prompt+="This item is being debugged in place. It was NOT reopened from completed/cancelled\n"
+        prompt+="status (or had no debug subitems added), so there is currently no subitem rail —\n"
+        prompt+="see the Planning Gate below before proceeding.\n"
+    fi
     prompt+="\n## Your Mission\n"
     prompt+="\n1. **Diagnose the root cause** before writing any fix:\n"
     prompt+="   - Read the original implementation to understand what was built\n"
@@ -6983,15 +7102,29 @@ _kb_build_debug_prompt() {
     prompt+="   source ${AITEAMFORGE_DIR}/kanban-helpers.sh\n"
     prompt+="   kb-backlog sub add $item_id \"[Debug] <finding or improvement> (PR #<number>)\"\n"
     prompt+="   \`\`\`\n"
-    prompt+="\n## Debug Subitems Added\n"
-    prompt+="The following subitems were auto-added when this item was reopened:\n"
-    prompt+="- Diagnose root cause\n"
-    prompt+="- Implement fix\n"
-    prompt+="- Testing & validation\n"
-    prompt+="- PR Creation & Test Handoff\n"
-    prompt+="- QA Testing & Code Review\n"
-    prompt+="- Retrospective and Knowledge Capture\n"
-    prompt+="- Sync Local Develop Branch\n"
+    # XACA-0801: only claim subitems exist when subitem_count actually says so — the
+    # unconditional version of this section lied whenever _kb_reopen_item hadn't fired.
+    if [[ "$subitem_count" -gt 0 ]]; then
+        prompt+="\n## Debug Subitems\n"
+        if [[ -n "$subitems_text" ]]; then
+            prompt+="${subitems_text}\n"
+        else
+            prompt+="The following subitems were auto-added when this item was reopened:\n"
+            prompt+="- Diagnose root cause\n"
+            prompt+="- Implement fix\n"
+            prompt+="- Testing & validation\n"
+            prompt+="- PR Creation & Test Handoff\n"
+            prompt+="- QA Testing & Code Review\n"
+            prompt+="- Retrospective and Knowledge Capture\n"
+            prompt+="- Sync Local Develop Branch\n"
+        fi
+    else
+        local _debug_planning_gate_section
+        _debug_planning_gate_section=$(_kb_build_planning_gate_section "$item_id" "$subitem_count")
+        if [[ -n "$_debug_planning_gate_section" ]]; then
+            prompt+="\n\n${_debug_planning_gate_section}"
+        fi
+    fi
     prompt+="\n## CRITICAL Rules\n"
     prompt+="- **Diagnose FIRST** — understand the problem completely before writing code\n"
     prompt+="- **Minimal fixes** — fix the bug, don't refactor the world\n"
@@ -7083,9 +7216,19 @@ kb-run-debug() {
         _kb_switch_to_item_worktree "$board_file" "$index" "$item_id"
     fi
 
+    # Re-read subitem count/list AFTER the possible reopen above (XACA-0801): reopen only
+    # fires for completed/cancelled items, so subitem_count here may be 0 (already
+    # in_progress, never reopened) or >0 (reopen added its 7 [Debug] subitems, or the item
+    # already had some). Either way this is the item's TRUE current state, not the
+    # pre-reopen snapshot _kb_display_item_box captured earlier.
+    local _debug_item_json _debug_subitem_count _debug_subitems_text
+    _debug_item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
+    _debug_subitem_count=$(echo "$_debug_item_json" | jq '.subitems // [] | length')
+    _debug_subitems_text=$(echo "$_debug_item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)"' 2>/dev/null)
+
     # Build the debug prompt using shared helper
     local prompt
-    prompt=$(_kb_build_debug_prompt "$item_id" "$title" "$description" "$item_worktree_branch")
+    prompt=$(_kb_build_debug_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$_debug_subitem_count" "$_debug_subitems_text")
 
     echo "Launching Claude Code for debugging [$item_id]: $title"
     echo "─────────────────────────────────────"
@@ -7177,9 +7320,18 @@ kb-work-debug() {
         _kb_reopen_item "$board_file" "$index" "$item_id"
     fi
 
+    # Re-read subitem count/list AFTER the possible reopen above (XACA-0801): same
+    # rationale as kb-run-debug — reopen only fires for completed/cancelled items, so
+    # this must reflect the item's TRUE current state, not the pre-reopen snapshot
+    # _kb_display_item_box captured earlier.
+    local _debug_item_json _debug_subitem_count _debug_subitems_text
+    _debug_item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
+    _debug_subitem_count=$(echo "$_debug_item_json" | jq '.subitems // [] | length')
+    _debug_subitems_text=$(echo "$_debug_item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)"' 2>/dev/null)
+
     # Build the debug prompt using shared helper
     local prompt
-    prompt=$(_kb_build_debug_prompt "$item_id" "$title" "$description" "$item_worktree_branch")
+    prompt=$(_kb_build_debug_prompt "$item_id" "$title" "$description" "$item_worktree_branch" "$_debug_subitem_count" "$_debug_subitems_text")
 
     echo "Launching Claude Code for debugging [$item_id]: $title"
     echo "─────────────────────────────────────"
