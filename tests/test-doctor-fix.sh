@@ -14,12 +14,30 @@
 #   - Dry-run distinction (doctor has no --dry-run; tests confirm absence)
 #   - --fix with unknown/invalid component
 #
-# IMPLEMENTATION NOTE:
-#   As of the current version, --fix is accepted and sets the FIX flag, but
-#   auto-remediation is a stub. When failures are detected the doctor outputs:
+# IMPLEMENTATION NOTE (REFRESHED — XACA-0734-014):
+#   This header used to say auto-remediation was a STUB, and two tests below
+#   asserted that stub's message:
 #     "(Auto-fix not yet implemented - run: aiteamforge setup --upgrade)"
-#   Tests validate the CURRENT behavior. Assertions that should tighten once
-#   fix logic is implemented are annotated with "FUTURE:".
+#   That has not been true since XACA-0655 (commit 33a73ff) made `--fix` actually
+#   remediate; the string is gone from the doctor entirely. The assertions kept
+#   passing right up until the doctor's output changed shape, then failed for a
+#   reason that had nothing to do with what they were guarding — they were stale,
+#   not broken. (They fail identically on the v0.17.7 baseline, so they are not a
+#   XACA-0734 regression; XACA-0734 is simply the ticket that noticed.)
+#
+#   THE CURRENT CONTRACT, which the refreshed tests assert:
+#     * SAFE remediations (venv, keepalive, server) are auto-applied INLINE at
+#       each failing check when --apply/--fix is set.
+#     * RISKY ones (config/board rewrites via `aiteamforge setup`) are print-only,
+#       tagged [manual], never auto-applied.
+#     * With failures + --fix, the doctor ALWAYS reports its remediation outcome —
+#       either a "Remediation Summary (--fix)" section listing the tagged actions,
+#       or an explicit "No auto-remediable issues detected" line. It never accepts
+#       --fix and then says nothing.
+#
+#   DO NOT assert on the literal word "setup" here. It appears only when a
+#   board/setup-KIND check happens to fail, which varies by machine (that is
+#   exactly how the old assertion rotted). Assert the contract, not the weather.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -84,6 +102,23 @@ _remove_config() {
   rm -f "$_FAKE_AITEAMFORGE/.aiteamforge-config"
 }
 
+# ── launchd containment (XACA-0787) ───────────────────────────────────────────
+# `doctor --fix` is no longer a stub: its keepalive remediation RENDERS a plist and
+# `launchctl load`s it. HOME is faked below, so the plist lands in the sandbox — but
+# launchctl is not a filesystem operation. Loading a sandbox plist registers a REAL
+# job in the developer's REAL launchd session, which outlives the test and the temp
+# dir it points at. That is the XACA-0787 leak class, and this suite is squarely in
+# it now that --fix actually does something.
+#
+# AITEAMFORGE_SKIP_LAUNCHCTL=1 short-circuits _aitf_launchctl (lib/common.sh), which
+# is the single chokepoint for every load/unload in the render path. The read-only
+# `launchctl list` used for load-verification is unaffected (and harmless).
+#
+# Behavior-neutral for every assertion in this file: nothing here asserts on
+# keepalive text or on whether a job registered. Verified by running the suite both
+# ways — identical results.
+export AITEAMFORGE_SKIP_LAUNCHCTL=1
+
 # Helper: run doctor with arbitrary args, capturing output and exit code
 # Usage: _run_doctor [args...]
 _run_doctor() {
@@ -91,6 +126,7 @@ _run_doctor() {
   output=$(AITEAMFORGE_DIR="$_FAKE_AITEAMFORGE" \
            AITEAMFORGE_HOME="$TAP_ROOT" \
            HOME="$_FAKE_HOME" \
+           AITEAMFORGE_SKIP_LAUNCHCTL=1 \
            bash "$DOCTOR_CMD" "$@" 2>&1) || exit_code=$?
   # Return output via stdout, exit code via a temp file to survive subshell
   echo "$output"
@@ -104,6 +140,7 @@ _run_doctor_full() {
   _LAST_OUTPUT=$(AITEAMFORGE_DIR="$_FAKE_AITEAMFORGE" \
                  AITEAMFORGE_HOME="$TAP_ROOT" \
                  HOME="$_FAKE_HOME" \
+                 AITEAMFORGE_SKIP_LAUNCHCTL=1 \
                  bash "$DOCTOR_CMD" "$@" 2>&1) || _LAST_EXIT_CODE=$?
 }
 
@@ -154,23 +191,43 @@ test_pass
 test_start "--fix shows remediation guidance when failures exist"
 _remove_config
 _run_doctor_full --fix
-# Doctor detects missing config as a failure; with --fix it shows fix guidance
-# Current stub message: "(Auto-fix not yet implemented - run: aiteamforge setup --upgrade)"
-# The doctor must show SOMETHING about fixing rather than silently ignoring --fix
+# Doctor detects missing config as a failure; with --fix it shows fix guidance.
+# The doctor must show SOMETHING about fixing rather than silently ignoring --fix.
 assert_contains "$_LAST_OUTPUT" "fix"
 test_pass
 
-test_start "--fix references setup command in remediation guidance"
+# XACA-0734-014: REFRESHED from "--fix references setup command in remediation
+# guidance" (assert_contains "setup"). That assertion only ever held in the STUB
+# era, when an empty remediation log sent the doctor down the
+# "No auto-remediable issues detected / Run: aiteamforge setup" branch. Now that
+# --fix produces real remediations it takes the OTHER branch, where the word
+# "setup" appears only if a board/setup-kind check happens to have failed — which
+# is machine-dependent. The DURABLE contract is that --fix always reports its
+# outcome; that is what we assert.
+test_start "--fix always reports a remediation outcome (never silently swallows --fix)"
 _remove_config
 _run_doctor_full --fix
-assert_contains "$_LAST_OUTPUT" "setup"
+case "$_LAST_OUTPUT" in
+  *"Remediation Summary"*|*"No auto-remediable issues detected"*) : ;;
+  *) test_fail "with failures present, --fix must either list its remediations or say there were none — accepting --fix and reporting nothing is the one thing it may not do" ;;
+esac
 test_pass
 
-test_start "--fix with failures shows auto-fix stub message"
+# XACA-0734-014: REFRESHED from "--fix with failures shows auto-fix stub message"
+# (assert_contains "Auto-fix not yet implemented"). The stub was deleted by
+# XACA-0655; asserting its presence now asserts a regression. Inverted to guard
+# the real behavior: the stub must stay gone, and --fix must show its work.
+test_start "--fix with failures actually remediates (the XACA-0655 stub is gone for good)"
 _remove_config
 _run_doctor_full --fix
-# Current implementation: stub message when failures exist
-assert_contains "$_LAST_OUTPUT" "Auto-fix not yet implemented"
+assert_not_contains "$_LAST_OUTPUT" "Auto-fix not yet implemented" \
+  "the auto-fix stub was removed by XACA-0655 — if this string is back, --fix has regressed to a no-op"
+# ...and it must TAG what it did. [fix] = auto-applied, [manual] = you must run it,
+# or the explicit "nothing to remediate" line. Any of the three is a real report.
+case "$_LAST_OUTPUT" in
+  *"[fix]"*|*"[manual]"*|*"No auto-remediable issues detected"*) : ;;
+  *) test_fail "--fix must tag its remediation actions ([fix]/[manual]) or state there were none" ;;
+esac
 test_pass
 
 test_start "--fix with failures still exits with code 2"

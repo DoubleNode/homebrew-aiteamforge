@@ -234,12 +234,65 @@ _xaca0734_launchagents_applicable() {
   fi
 
   # Marker 2: LCARS Kanban explicitly declined at setup.
-  # Matched against the exact shape setup's to_json_bool writes. A config that
-  # PREDATES the features block, or that cannot be read, matches nothing and
-  # therefore falls through to "applicable" — fail open, as above.
+  #
+  # READ THE KEY, NOT THE FILE (XACA-0734-010 / XACA-0734-012).
+  # ───────────────────────────────────────────────────────────
+  # The first cut of this gate used
+  #     grep -qE '"lcars_kanban"[[:space:]]*:[[:space:]]*false' "$config_file"
+  # which is a file-WIDE substring match that has no idea what a JSON key is. It is
+  # correct against today's schema and one schema change away from being silently
+  # catastrophic: ANY second occurrence of that byte pattern anywhere in the file —
+  # an audit-history array recording a PAST false, a per-team override block, a
+  # stale key someone forgot to delete — closes the gate on a box whose LIVE key is
+  # `true`.
+  #
+  # And it closes it in the ONE DIRECTION THIS GATE MUST NEVER FAIL IN. A
+  # false-OPEN materializes an agent someone did not want: visible, annoying,
+  # trivially undone with one line in the sentinel. A false-CLOSE suppresses every
+  # mandatory agent — including com.aiteamforge.auto-upgrade.plist, the agent that
+  # PERFORMS upgrades — while every check still reports the box healthy. That turns
+  # this entire ticket into a no-op on exactly the machines it exists to fix, and
+  # leaves no symptom to notice. Fail-closed here IS the original XACA-0734 bug
+  # wearing a different hat.
+  #
+  # Note setup also emits the BARE STRING "lcars_kanban" as an element of the
+  # "installed_features" ARRAY (bin/aiteamforge-setup.sh:1642, _build_installed_features)
+  # in the same file. A key-scoped read cannot confuse an array element with an
+  # object key; a substring match is only ever one edit away from doing exactly that.
+  #
+  # WHY jq: it is the house tool for reading THIS FILE — bin/aiteamforge-doctor.sh
+  # (:357, :368) and bin/aiteamforge-setup.sh (:613, the upgrade-hydration path)
+  # both parse .aiteamforge-config with it, and `doctor` already reports a missing
+  # jq as a hard FAIL. lib/python-env.sh is deliberately NOT sourced here: nothing
+  # else in this lib needs an interpreter, and taking on a python dependency to
+  # implement a gate whose defining property is "fail open" is backwards.
+  #
+  # FAIL OPEN ON EVERY DEGRADED INPUT. This is the property that matters, and it is
+  # why there is deliberately NO grep fallback when jq is unavailable. Missing file,
+  # unreadable file, empty file, truncated or malformed JSON, a non-object root, a
+  # missing `features` block, a missing key, or no jq on PATH at all — every one of
+  # them resolves to APPLICABLE. The one and only thing that closes this gate is jq
+  # successfully parsing the config and finding features.lcars_kanban === false.
+  # Falling back to the grep would reinstate the false-CLOSE hazard precisely on the
+  # boxes least equipped to tolerate it; a "fallback" that can fail closed is not a
+  # fallback, it is the bug with a longer code path.
   local config_file="${wd}/.aiteamforge-config"
-  if [ -f "$config_file" ] && [ -r "$config_file" ]; then
-    if grep -qE '"lcars_kanban"[[:space:]]*:[[:space:]]*false' "$config_file" 2>/dev/null; then
+  if [ -f "$config_file" ] && [ -r "$config_file" ] && command -v jq >/dev/null 2>&1; then
+    local verdict
+    # jq's `and` SHORT-CIRCUITS, so `.features` is never indexed on a non-object
+    # root (which would be a hard error). Any parse failure exits non-zero with an
+    # empty stdout, so `verdict` is "" — which is not "declined" — and we fall
+    # through to applicable. `|| true` keeps that path from tripping the caller's
+    # `set -e` (install-kanban.sh runs under `set -euo pipefail`).
+    verdict="$(jq -r '
+        if (type == "object")
+           and ((.features | type) == "object")
+           and (.features.lcars_kanban == false)
+        then "declined"
+        else "applicable"
+        end
+      ' "$config_file" 2>/dev/null || true)"
+    if [ "$verdict" = "declined" ]; then
       return 1
     fi
   fi
@@ -249,6 +302,22 @@ _xaca0734_launchagents_applicable() {
 
 # Human-readable reason the gate is closed, for user-facing messages.
 # Only meaningful when _xaca0734_launchagents_applicable returned 1.
+#
+# ALWAYS NAMES THE WAY BACK IN (XACA-0734-013). Reporting that something is
+# suppressed without saying how to un-suppress it is how a user concludes they are
+# stuck. This is the same discoverability contract as _xaca0734_print_optout_hint,
+# which prints the opt-OUT command at the moment an agent is about to be
+# materialized; this is its mirror — the opt-IN path, printed at the moment we
+# report that agents are being withheld.
+#
+# `aiteamforge setup` is a REAL recovery path, not a hopeful suggestion, and the
+# whole marker-based design rests on it: setup's upgrade-hydration block forces
+# INSTALL_KANBAN="yes" on any non-cockpit re-run and rewrites .aiteamforge-config
+# with "lcars_kanban": true (and .install-profile with the chosen profile). So the
+# markers this gate reads are exactly the markers setup rewrites — flipping either
+# one is a supported, single-command operation. It is the reason this gate never
+# has to clear anything itself. See the block comment on
+# _xaca0734_launchagents_applicable above.
 _xaca0734_launchagents_skip_reason() {
   local wd="${1:-}"
 
@@ -267,12 +336,12 @@ _xaca0734_launchagents_skip_reason() {
     local profile
     profile="$(tr -d '[:space:]' < "$profile_file" 2>/dev/null || true)"
     if [ "$profile" = "cockpit" ]; then
-      echo "cockpit profile — LCARS and kanban run on a remote host"
+      echo "cockpit profile — LCARS and kanban run on a remote host; to run them HERE, re-run: aiteamforge setup"
       return 0
     fi
   fi
 
-  echo "LCARS Kanban was declined at setup (.aiteamforge-config: lcars_kanban=false)"
+  echo "LCARS Kanban was declined at setup (.aiteamforge-config: lcars_kanban=false); to opt back in, re-run: aiteamforge setup"
 }
 
 #──────────────────────────────────────────────────────────────────────────────

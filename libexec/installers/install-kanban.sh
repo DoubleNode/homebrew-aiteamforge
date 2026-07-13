@@ -2659,7 +2659,18 @@ uninstall_kanban_system() {
     #
     # Scoped to this function: set before the calls, unset after, so a later
     # targeted uninstall in the same shell records normally.
-    _XACA0734_BATCH_UNINSTALL=1
+    #
+    # EXPORTED, and that is load-bearing (XACA-0734-011). uninstall_kanban_system
+    # is `export -f`'d (see the bottom of this file), so it is REACHABLE from a
+    # separate bash process — `bash -c uninstall_kanban_system`, a `xargs`/`find
+    # -exec` wrapper, a future installer that shells out. A plain shell variable
+    # does not cross that boundary: the child would run the whole teardown with the
+    # guard UNSET, every helper would fall through to _xaca0734_record_optout, and
+    # the sentinel would come out listing every mandatory agent — the poisoned,
+    # self-sealing box that BLOCKING 2 exists to prevent, reintroduced by nothing
+    # more than the caller's choice of invocation. Exporting the flag makes the
+    # guard travel with the function it guards.
+    export _XACA0734_BATCH_UNINSTALL=1
 
     # Unload LaunchAgents
     uninstall_backup_launchagent

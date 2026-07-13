@@ -786,6 +786,31 @@ _reason="$(_xaca0734_launchagents_skip_reason "$FAKE_WORKING")"
 assert_contains "$_reason" "cockpit" "the reason must tell the user WHY nothing was installed"
 test_pass
 
+# ── XACA-0734-013: WHY is only half a message; the user also needs the WAY BACK ──
+# "Your agents are suppressed" without "here is how to un-suppress them" is how a
+# user concludes they are stuck. `aiteamforge setup` is a real recovery path (it
+# forces INSTALL_KANBAN=yes on a non-cockpit re-run and rewrites both markers), so
+# it belongs in the message that reports the suppression — the mirror of
+# _xaca0734_print_optout_hint, which prints the opt-OUT command at the moment we
+# are about to materialize.
+
+test_start "Skip reason (XACA-0734-013): cockpit branch names the opt-back-IN path"
+reset_all
+_write_install_profile "cockpit"
+_reason="$(_xaca0734_launchagents_skip_reason "$FAKE_WORKING")"
+assert_contains "$_reason" "aiteamforge setup" \
+  "reporting agents as suppressed without naming the recovery command leaves the user believing they are stuck"
+test_pass
+
+test_start "Skip reason (XACA-0734-013): declined-kanban branch names the opt-back-IN path"
+reset_all
+_write_config_kanban "false"
+_reason="$(_xaca0734_launchagents_skip_reason "$FAKE_WORKING")"
+assert_contains "$_reason" "lcars_kanban" "the reason must still name WHICH marker closed the gate"
+assert_contains "$_reason" "aiteamforge setup" \
+  "...and how to reverse it — the whole marker design rests on setup rewriting this key"
+test_pass
+
 # ─────────────────────────────────────────────────────────────────────────
 # THE BLOCKING-1 REGRESSION TEST the reviewer asked for.
 # ─────────────────────────────────────────────────────────────────────────
@@ -848,6 +873,203 @@ reset_all
 _write_config_kanban "true"
 FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
 assert_file_exists "$AUTO_UPGRADE_PLIST" "re-running setup and installing kanban rewrites the marker; the gate must then OPEN"
+test_pass
+reset_all
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0734-010 / XACA-0734-012 — MARKER 2 READS THE KEY, NOT THE FILE
+#
+# The gate used to detect "kanban declined" with a file-WIDE substring grep:
+#     grep -qE '"lcars_kanban"[[:space:]]*:[[:space:]]*false'
+# Correct against today's schema; silently catastrophic against tomorrow's. Any
+# SECOND occurrence of that byte pattern anywhere in the config — an audit-history
+# array recording a PAST false, a per-team override, a stale key — closes the gate
+# on a box whose LIVE key is `true`.
+#
+# That fails CLOSED, which is the one direction this gate must never fail in: it
+# suppresses every mandatory agent (including auto-upgrade, the agent that PERFORMS
+# upgrades) while every check still reports the box healthy — turning this whole
+# ticket into a silent no-op on the exact machines it exists to fix.
+#
+# So: only an explicit, correctly-PARSED features.lcars_kanban === false may close
+# this gate. EVERY degraded input — no jq, bad JSON, empty file, unreadable file,
+# missing block, missing key — must fall through to APPLICABLE.
+# ═══════════════════════════════════════════════════════════════════════════
+
+# A PATH that has every tool the gate could possibly fall back to — EXCEPT jq.
+#
+# NOT an empty dir. An empty PATH removes `grep` along with `jq`, so a reinstated
+# grep fallback could not run either and the "no jq -> applicable" test below would
+# pass for entirely the wrong reason — it would be asserting "an empty PATH breaks
+# everything", not "the gate refuses to guess without a parser". (Caught by running
+# the negative control: with an empty-PATH fixture, deliberately adding a grep
+# fallback back into the gate did NOT turn the test red. A test that cannot fail is
+# not a test.) Symlinking the real tools in means jq's absence is the ONLY variable.
+_NOJQ_BIN="$SANDBOX_DIR/no-jq-bin"
+mkdir -p "$_NOJQ_BIN"
+for _t in grep tr sed cat awk; do
+  _tp="$(command -v "$_t" 2>/dev/null || true)"
+  [ -n "$_tp" ] && ln -sf "$_tp" "$_NOJQ_BIN/$_t"
+done
+unset _t _tp
+
+_write_raw_config() { printf '%s' "$1" > "$FAKE_WORKING/.aiteamforge-config"; }
+
+# Live key TRUE, but a PAST `false` recorded elsewhere in the file. This is the
+# regression test: the old grep matched the history entry and closed the gate.
+_write_config_decoy_past_false() {
+  cat > "$FAKE_WORKING/.aiteamforge-config" <<'EOF'
+{
+  "version": "0.0.0",
+  "install_profile": "full",
+  "installed_features": ["shell_environment", "lcars_kanban"],
+  "feature_history": [
+    {"date": "2026-01-01", "features": {"lcars_kanban": false}},
+    {"date": "2026-02-01", "features": {"lcars_kanban": true}}
+  ],
+  "features": {
+    "shell_environment": true,
+    "lcars_kanban": true,
+    "fleet_monitor": false
+  }
+}
+EOF
+}
+
+# The mirror: live key FALSE, with a decoy `true` in the history. Proves the new
+# read is actually reading the LIVE key and not merely always-opening.
+_write_config_decoy_past_true() {
+  cat > "$FAKE_WORKING/.aiteamforge-config" <<'EOF'
+{
+  "version": "0.0.0",
+  "install_profile": "full",
+  "feature_history": [
+    {"date": "2026-01-01", "features": {"lcars_kanban": true}}
+  ],
+  "features": {
+    "shell_environment": true,
+    "lcars_kanban": false,
+    "fleet_monitor": false
+  }
+}
+EOF
+}
+
+test_start "Marker2 (XACA-0734-010): a PAST lcars_kanban=false elsewhere in the file must NOT close the gate"
+reset_all
+_write_config_decoy_past_false
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "live features.lcars_kanban is TRUE — a stale 'false' in an audit array must not suppress every mandatory agent (this is the false-CLOSE the flat grep allowed)"
+fi
+test_pass
+
+test_start "Marker2: ...and it must not suppress row 2 end-to-end either"
+reset_all
+_write_config_decoy_past_false
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_exists "$AUTO_UPGRADE_PLIST" \
+  "the whole ticket: a box whose LIVE key says kanban=true must still get auto-upgrade.plist"
+test_pass
+
+test_start "Marker2: live lcars_kanban=false STILL closes the gate (decoy 'true' in history ignored)"
+reset_all
+_write_config_decoy_past_true
+if _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "the LIVE key is false — the gate must still close, or the key-scoped read is just always-open"
+fi
+test_pass
+
+test_start "Marker2: 'lcars_kanban' as an installed_features ARRAY element is not a declined key"
+reset_all
+_write_raw_config '{"installed_features":["lcars_kanban"],"features":{"lcars_kanban":true}}'
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "the bare string in the array is a FEATURE NAME, not a key:false — it must never be read as intent"
+fi
+test_pass
+
+# ── FAIL OPEN on every degraded input ────────────────────────────────────────
+# Each of these must return APPLICABLE. A gate that cannot parse its input has
+# learned nothing, and "I learned nothing" must never mean "suppress everything".
+
+test_start "Marker2 fail-open: MALFORMED/truncated JSON -> applicable"
+reset_all
+_write_raw_config '{ "features": { "lcars_kanban": false'
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "a config we cannot parse is not a recorded opt-out — it must fail OPEN"
+fi
+test_pass
+
+test_start "Marker2 fail-open: EMPTY config file -> applicable"
+reset_all
+: > "$FAKE_WORKING/.aiteamforge-config"
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "an empty config records no intent"
+fi
+test_pass
+
+test_start "Marker2 fail-open: config with NO features block -> applicable"
+reset_all
+_write_raw_config '{"version":"0.0.0","install_dir":"/tmp/x"}'
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "a config predating the features block (every old install) must be applicable"
+fi
+test_pass
+
+test_start "Marker2 fail-open: features block present but lcars_kanban key MISSING -> applicable"
+reset_all
+_write_raw_config '{"features":{"shell_environment":true,"fleet_monitor":false}}'
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "a missing key is not a false key — absence of a marker is never intent"
+fi
+test_pass
+
+test_start "Marker2 fail-open: NON-OBJECT JSON root -> applicable (must not error out)"
+reset_all
+_write_raw_config '[1,2,3]'
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "indexing .features on an array is a jq hard error — the gate must swallow it and fail open"
+fi
+test_pass
+
+test_start "Marker2 fail-open: UNREADABLE config (chmod 000) -> applicable"
+reset_all
+if [ "$(id -u)" = "0" ]; then
+  test_pass   # root can read anything; the chmod cannot be exercised
+else
+  _write_config_kanban "false"
+  chmod 000 "$FAKE_WORKING/.aiteamforge-config"
+  set +e
+  _xaca0734_launchagents_applicable "$FAKE_WORKING"
+  _rc=$?
+  set -e
+  chmod 644 "$FAKE_WORKING/.aiteamforge-config"
+  if [ "$_rc" -ne 0 ]; then
+    test_fail "a config we cannot READ tells us nothing — claiming it said 'no' is fabricating intent"
+  fi
+  test_pass
+fi
+
+test_start "Marker2 fail-open: jq UNAVAILABLE -> applicable EVEN WITH lcars_kanban=false"
+reset_all
+_write_config_kanban "false"
+# The interpreter is the one dependency the gate cannot verify in advance. With no
+# jq on PATH there is deliberately NO grep fallback: the flat grep is exactly the
+# false-CLOSE hazard this section exists to remove, and reinstating it on the boxes
+# that are ALREADY degraded (no jq) is the worst possible place to put it. No
+# parser => no verdict => applicable.
+#
+# FIXTURE GUARDS — this test is only meaningful if jq is genuinely gone AND a
+# fallback tool is genuinely present. Assert both, or a broken fixture makes the
+# test silently vacuous (which is precisely what an empty-PATH fixture did).
+if ( PATH="$_NOJQ_BIN"; command -v jq >/dev/null 2>&1 ); then
+  test_fail "fixture broken: jq is still reachable on the no-jq PATH — this test proves nothing"
+fi
+if ! ( PATH="$_NOJQ_BIN"; command -v grep >/dev/null 2>&1 ); then
+  test_fail "fixture broken: grep is ALSO missing, so this test cannot tell 'refused to guess' from 'no tools at all' — a reinstated grep fallback would slip straight through"
+fi
+if ! ( PATH="$_NOJQ_BIN"; _xaca0734_launchagents_applicable "$FAKE_WORKING" ); then
+  test_fail "no jq means the key could not be read — that is DOUBT, and doubt must fail OPEN, never suppress every mandatory agent"
+fi
 test_pass
 reset_all
 
@@ -1084,11 +1306,60 @@ assert_contains "$_uks" "_XACA0734_BATCH_UNINSTALL=1" \
   "the batch teardown must mark itself, or the per-agent helpers will record opt-outs"
 test_pass
 
+test_start "XACA-0734-011: the batch flag is EXPORTED, not a plain shell var"
+_uks="$(_extract_func uninstall_kanban_system)"
+assert_contains "$_uks" "export _XACA0734_BATCH_UNINSTALL=1" \
+  "uninstall_kanban_system is export -f'd, so it is reachable from a separate bash process — a plain var does not travel with it and the child would record an opt-out for every mandatory agent"
+test_pass
+
 test_start "Extraction sanity: per-agent uninstall helpers route through the batch-aware recorder"
 _uba="$(_extract_func uninstall_auto_upgrade_launchagent)"
 assert_contains "$_uba" "_xaca0734_record_optout_unless_batch" \
   "a raw _xaca0734_record_optout here is what poisoned the sentinel on abort"
 test_pass
+
+# ─────────────────────────────────────────────────────────────────────────
+# XACA-0734-011 — the guard must SURVIVE A PROCESS BOUNDARY.
+#
+# uninstall_kanban_system is `export -f`'d, so running the teardown in a separate
+# bash process (`bash -c`, a find -exec / xargs wrapper, a future installer that
+# shells out) is a legitimate, reachable shape. A plain shell variable does not
+# cross that boundary: the child runs the entire batch with the guard UNSET, every
+# helper falls through to _xaca0734_record_optout, and the sentinel comes out
+# listing every mandatory agent — the poisoned, self-sealing box that BLOCKING 2
+# exists to prevent, reintroduced by nothing but the caller's choice of invocation.
+# ─────────────────────────────────────────────────────────────────────────
+
+test_start "XACA-0734-011: an EXPORTED batch guard suppresses recording across a bash -c boundary"
+_uninstall_sandbox_reset
+(
+  export _XACA0734_BATCH_UNINSTALL=1
+  bash -c 'set -euo pipefail; source "$1"; _xaca0734_record_optout_unless_batch "com.aiteamforge.auto-upgrade.plist"' \
+    _ "$LAUNCHAGENTS_LIB"
+) >/dev/null 2>&1
+if [ -f "$AITF_LAUNCHAGENT_OPTOUT_FILE" ]; then
+  _got="$(cat "$AITF_LAUNCHAGENT_OPTOUT_FILE")"
+  test_fail "the guard must reach the child process; instead the child recorded: ${_got}"
+fi
+test_pass
+
+# The CONTROL that keeps the test above honest. If a non-exported guard ALSO
+# suppressed recording, the test above would pass for the wrong reason and prove
+# nothing about the export. This asserts the process boundary is real: with the
+# guard set as a plain var (the pre-fix code), the child genuinely DOES record.
+test_start "XACA-0734-011 control: a NON-exported guard IS lost across bash -c (boundary is real)"
+_uninstall_sandbox_reset
+(
+  unset _XACA0734_BATCH_UNINSTALL
+  _XACA0734_BATCH_UNINSTALL=1          # plain assignment — deliberately NOT exported
+  bash -c 'set -euo pipefail; source "$1"; _xaca0734_record_optout_unless_batch "com.aiteamforge.auto-upgrade.plist"' \
+    _ "$LAUNCHAGENTS_LIB"
+) >/dev/null 2>&1
+if [ ! -f "$AITF_LAUNCHAGENT_OPTOUT_FILE" ]; then
+  test_fail "control failed: the child recorded nothing even WITHOUT the guard, so the exported-guard test above is vacuous"
+fi
+test_pass
+_uninstall_sandbox_reset
 
 test_start "BLOCKING 2: a COMPLETE batch uninstall records NO opt-outs"
 _uninstall_sandbox_reset
