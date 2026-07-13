@@ -7,6 +7,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-07-13
+
 ### Added
 - XACA-0778 — Mirrors the crash-recovery reconciliation surfacing into the tap: `share/lcars-ui/` (`server.py`, `index.html`, `css/lcars.css`, `js/lcars.js`) gains the LCARS Workflow-tab "NEEDS RECONNECT" lane that surfaces crash-orphaned in-progress work (server-side `get_reconciled_inprogress()` adds an additive `reconciledInProgress` field sourced from the read-only `_kb_reconcile_inprogress` classifier; client renders an amber lane distinct from PAUSED with a `kb-resume <id>` reconnect hint), and `share/kanban-hooks/kanban-stop.py` now writes a clean-shutdown sentinel on graceful exit so an unclean shutdown is detectable. Byte-identical canonical→tap mirror per the XACA-0340 `sync-tap.sh` contract (5 files). The reconciliation engine + `kb-recover`/`kb-resume <ID>` commands live in canonical `kanban-helpers.sh`, which is not `sync-tap.sh`-mapped (tap consumers get helper content via the `kanban-aliases.sh`/`kanban-helpers.template.sh` route), so no helper drift here.
 
@@ -971,7 +973,8 @@ Follow-up to XACA-0542. The tap's manual startup-script snapshot (XACA-0483) did
 - **Predecessor:** XACA-0476 corrected the `share/` path prefix; this ticket unblocks the actual render. Sibling site `aiteamforge-migrate.sh::update_launchagents` has a different defect class (in-place sed path rewrite, no template render) tracked separately as XACA-0512.
 - **Three confirmed datapoints of sibling-heuristic drift** in this surface: XACA-0476 (missing prefix), XACA-0510 (no template render in upgrade), XACA-0512 (no template render in migrate).
 
-[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.6...HEAD
+[Unreleased]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.7...HEAD
+[0.17.7]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.6...v0.17.7
 [0.17.6]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.5...v0.17.6
 [0.17.5]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.4...v0.17.5
 [0.17.4]: https://github.com/DoubleNode/homebrew-aiteamforge/compare/v0.17.3...v0.17.4
