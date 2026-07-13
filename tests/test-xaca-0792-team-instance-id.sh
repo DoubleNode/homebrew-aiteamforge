@@ -156,9 +156,102 @@ start_lcars_body=$(awk '/^start_lcars\(\)/,/^}/' "$START_CMD")
 test_start "XACA-0792 Case 6a: start_lcars() body was extracted"
 assert_not_empty "$start_lcars_body" && test_pass
 
-test_start "XACA-0792 Case 6b: start_lcars() calls get_team_instance_id"
-assert_contains "$start_lcars_body" "get_team_instance_id" && test_pass
+test_start "XACA-0792 Case 6b: the resolver consults BOTH mappers"
+# start_lcars() delegates to aiteamforge_resolve_team_key (Case 7i). The resolver
+# is where the candidate order lives, so that is where the guard belongs: it must
+# consult the canonical map (get_board_id — the one that saves `legal`) AND the
+# project_id derivation (get_team_instance_id — the one that saves custom projects).
+# Dropping either one silently strands a class of teams.
+resolver_body=$(awk '/^aiteamforge_resolve_team_key\(\)/,/^}/' "$PATHS_LIB")
+assert_contains "$resolver_body" "get_board_id" \
+  && assert_contains "$resolver_body" "get_team_instance_id" \
+  && test_pass
 
 test_start "XACA-0792 Case 6c: the port lookup is not fed the raw base id"
 # The lookup must be driven by the resolved candidate, never bare "$team".
 assert_not_contains "$start_lcars_body" 'aiteamforge_team_lcars_port "$team"' && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 7 — aiteamforge_resolve_team_key across ALL profile-scoped teams
+#
+# This is the case the first cut of the fix got WRONG (caught in review). Deriving
+# the instance id from .team_paths[<base>].project_id alone fixes finance and
+# medical ONLY BY COINCIDENCE — their TEAM_DEFAULT_PROJECT ("personal", "general")
+# happens to spell the registry suffix. legal's TEAM_DEFAULT_PROJECT is "default",
+# which derives "legal-default" — a key that does not exist — so legal's LCARS
+# stayed permanently down. The canonical get_board_id map (legal → legal-coparenting)
+# is the authority and must be consulted FIRST.
+#
+# A fixture using project_id "coparenting" for legal would have hidden the bug, so
+# these use the REAL shipped defaults from share/teams/<team>.conf.
+# ═══════════════════════════════════════════════════════════════════════════
+# shellcheck source=../libexec/lib/kanban-paths.sh
+source "$TAP_ROOT/libexec/lib/kanban-paths.sh" 2>/dev/null || true
+
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
+{
+  "teams": ["finance", "legal", "medical", "academy"],
+  "team_paths": {
+    "finance": {"project_id": "personal"},
+    "legal":   {"project_id": "default"},
+    "medical": {"project_id": "general"},
+    "academy": {}
+  }
+}
+EOF
+
+cat > "$AITEAMFORGE_CONFIG" <<'EOF'
+{
+  "schema_version": 2,
+  "teams": {
+    "academy":           {"team_code": "ACA", "lcars_port": 8203},
+    "finance-personal":  {"team_code": "FIN", "lcars_port": 8361},
+    "legal-coparenting": {"team_code": "LCP", "lcars_port": 8320},
+    "medical-general":   {"team_code": "MED", "lcars_port": 8340}
+  }
+}
+EOF
+
+test_start "XACA-0792 Case 7a: get_board_id is reachable (legal → legal-coparenting)"
+assert_equal "legal-coparenting" "$(get_board_id legal)" && test_pass
+
+test_start "XACA-0792 Case 7b: 'legal' resolves despite project_id 'default'"
+# THE REVIEW CATCH: project_id-derivation alone yields 'legal-default' → no port.
+assert_equal "legal-coparenting" "$(aiteamforge_resolve_team_key legal)" && test_pass
+
+test_start "XACA-0792 Case 7c: 'legal' resolves to port 8320"
+assert_equal "8320" "$(aiteamforge_team_lcars_port "$(aiteamforge_resolve_team_key legal)")" && test_pass
+
+test_start "XACA-0792 Case 7d: 'finance' resolves to port 8361"
+assert_equal "8361" "$(aiteamforge_team_lcars_port "$(aiteamforge_resolve_team_key finance)")" && test_pass
+
+test_start "XACA-0792 Case 7e: 'medical' resolves to port 8340"
+assert_equal "8340" "$(aiteamforge_team_lcars_port "$(aiteamforge_resolve_team_key medical)")" && test_pass
+
+test_start "XACA-0792 Case 7f: 'academy' (single-instance) resolves to port 8203"
+assert_equal "8203" "$(aiteamforge_team_lcars_port "$(aiteamforge_resolve_team_key academy)")" && test_pass
+
+test_start "XACA-0792 Case 7g: an unknown team resolves nothing (returns 1)"
+_c7_rc=0
+aiteamforge_resolve_team_key "nosuchteam" >/dev/null 2>&1 || _c7_rc=$?
+assert_exit_failure "$_c7_rc" && test_pass
+
+test_start "XACA-0792 Case 7h: a custom project_id the static map cannot know still resolves"
+# Guards candidate #2: get_board_id has no 'freelance' case, so only the
+# project_id derivation can resolve this one.
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
+{
+  "teams": ["freelance"],
+  "team_paths": {"freelance": {"project_id": "acme"}}
+}
+EOF
+cat > "$AITEAMFORGE_CONFIG" <<'EOF'
+{
+  "schema_version": 2,
+  "teams": {"freelance-acme": {"team_code": "FRL", "lcars_port": 8420}}
+}
+EOF
+assert_equal "freelance-acme" "$(aiteamforge_resolve_team_key freelance)" && test_pass
+
+test_start "XACA-0792 Case 7i: start_lcars() uses the resolver, not a raw derivation"
+assert_contains "$start_lcars_body" "aiteamforge_resolve_team_key" && test_pass

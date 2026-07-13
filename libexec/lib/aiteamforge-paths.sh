@@ -438,6 +438,67 @@ aiteamforge_team_lcars_port() {
     echo "$result"
 }
 
+# aiteamforge_resolve_team_key <team>
+# Resolve a CONFIGURED team id to the key that actually exists in this registry.
+#
+# `.aiteamforge-config`'s `.teams[]` stores BASE ids ("finance", "legal"), but the
+# registry keys profile-scoped teams by their INSTANCE id ("finance-personal",
+# "legal-coparenting"). Callers that skip this mapping miss the registry entirely
+# and silently skip the team (XACA-0792).
+#
+# Candidates are tried in order and the FIRST that exists in the registry wins:
+#   1. get_board_id  — the canonical deterministic map (kanban-paths.sh). This is
+#      the authority. It is first because a team's configured project_id is NOT
+#      reliably the registry suffix: legal's TEAM_DEFAULT_PROJECT is "default",
+#      which would derive "legal-default" — a key that does not exist. finance
+#      ("personal") and medical ("general") only agree with the registry by
+#      coincidence, so deriving from project_id alone fixes 2 of 3 teams.
+#   2. get_team_instance_id — derived from .team_paths[<base>].project_id. Covers
+#      genuinely project-scoped installs the static map cannot know about (e.g. a
+#      freelance team on a custom project).
+#   3. the base id unchanged — single-instance teams (academy, ios), and installs
+#      whose .teams[] already holds instance ids.
+#
+# Prints the resolved key, or returns 1 with no output if none resolve.
+aiteamforge_resolve_team_key() {
+    local team="$1"
+    [ -z "$team" ] && return 1
+
+    local -a candidates=()
+    local mapped=""
+
+    # Both helpers live in sibling libs that a caller may not have sourced; guard
+    # on presence rather than assume, and always fall back to the base id.
+    #
+    # A candidate is only worth trying if it actually MAPS to something other than
+    # the base id. Both helpers echo their input unchanged when they have nothing
+    # to say, and an unmapped base id must NOT be tried early: registry lookups
+    # fall back to baked-in DEFAULT_TEAMS rows, so a bare base id can "resolve" to
+    # a default port that is not the one this install configured (e.g. `freelance`
+    # hits the default 8505 while the configured `freelance-acme` is on 8420). The
+    # base id therefore belongs LAST, after every real mapping has had its turn.
+    if type get_board_id >/dev/null 2>&1; then
+        mapped=$(get_board_id "$team" 2>/dev/null || true)
+        [ -n "$mapped" ] && [ "$mapped" != "$team" ] && candidates+=("$mapped")
+    fi
+    if type get_team_instance_id >/dev/null 2>&1; then
+        mapped=$(get_team_instance_id "$team" 2>/dev/null || true)
+        [ -n "$mapped" ] && [ "$mapped" != "$team" ] && candidates+=("$mapped")
+    fi
+    candidates+=("$team")
+
+    local cand
+    for cand in "${candidates[@]}"; do
+        [ -z "$cand" ] && continue
+        if aiteamforge_team_lcars_port "$cand" >/dev/null 2>&1; then
+            echo "$cand"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 # aiteamforge_team_code <team>
 # Prints the 3-letter team code (e.g. ACA) for the given team, or returns
 # nonzero with no output for teams that have no own code (alias entries).

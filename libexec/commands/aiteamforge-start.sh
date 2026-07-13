@@ -16,6 +16,12 @@ source "${LIBEXEC_DIR}/lib/constants.sh"
 # aiteamforge-paths.sh provides aiteamforge_team_lcars_port (used by start_lcars).
 # It carries its own include-guard, so sourcing here is idempotent.
 source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
+# kanban-paths.sh provides get_board_id — the CANONICAL base→instance map
+# (legal → legal-coparenting). aiteamforge_resolve_team_key() consults it, and
+# without it `legal` cannot resolve a port at all (XACA-0792). Sourced defensively,
+# mirroring aiteamforge-doctor.sh.
+# shellcheck source=../lib/kanban-paths.sh
+[ -f "${LIBEXEC_DIR}/lib/kanban-paths.sh" ] && source "${LIBEXEC_DIR}/lib/kanban-paths.sh" 2>/dev/null || true
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -369,29 +375,21 @@ start_lcars() {
   for team in "${teams[@]}"; do
     [ -z "$team" ] && continue
 
-    # get_configured_teams returns BASE ids ("finance"), but the registry keys
-    # project-scoped teams by INSTANCE id ("finance-personal"). Map before the
-    # lookup, else `stop` kills those servers and `start` silently skips them,
-    # leaving LCARS down with no way to recover (XACA-0792).
-    local instance=""
-    instance=$(get_team_instance_id "$team" 2>/dev/null) || instance="$team"
-    [ -z "$instance" ] && instance="$team"
-
-    # Prefer the instance id; fall back to the base id so this stays correct on
-    # installs whose .teams[] already holds instance ids.
-    local port=""
+    # get_configured_teams returns BASE ids ("finance", "legal"), but the registry
+    # keys profile-scoped teams by INSTANCE id ("finance-personal",
+    # "legal-coparenting"). Map before the lookup, else `stop` kills those servers
+    # and `start` silently skips them, leaving LCARS down with no way to recover
+    # (XACA-0792). Resolution order lives in aiteamforge_resolve_team_key().
     local team_key=""
-    local cand
-    for cand in "$instance" "$team"; do
-      [ -z "$cand" ] && continue
-      if port=$(aiteamforge_team_lcars_port "$cand" 2>/dev/null) && [ -n "$port" ]; then
-        team_key="$cand"
-        break
-      fi
-    done
+    team_key=$(aiteamforge_resolve_team_key "$team" 2>/dev/null) || team_key=""
+
+    local port=""
+    if [ -n "$team_key" ]; then
+      port=$(aiteamforge_team_lcars_port "$team_key" 2>/dev/null) || port=""
+    fi
 
     if [ -z "$team_key" ] || [ -z "$port" ]; then
-      print_warning "No LCARS port allocated for '${team}' (tried '${instance}') — skipping"
+      print_warning "No LCARS port allocated for '${team}' — skipping"
       continue
     fi
 
