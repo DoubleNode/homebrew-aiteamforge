@@ -37,6 +37,7 @@ const { ensureReady: vaultEnsureReady } = require('./lib/vault-crypto');
 // XACA-0537-012: Secret Vault API routes, extracted into a mountable module so
 // integration tests exercise the REAL handlers (not an inline re-implementation).
 const { registerVaultRoutes } = require('./lib/vault-routes');
+const { registerMsgRelayRoutes } = require('./lib/msg-relay-routes');
 
 // ============================================================================
 // CONFIGURATION
@@ -2035,6 +2036,19 @@ registerEnginesRoutes(app);
 // ============================================================================
 
 registerVaultRoutes(app);
+
+// ============================================================================
+// KB-MSG CROSS-MACHINE RELAY API (XACA-0777)
+// ============================================================================
+// Store-and-forward of OPAQUE sealed message envelopes for the kb-msg comms
+// channel. Like the vault, this relay never decrypts — no /api/msg route ever
+// calls crypto_box_seal_open; it stores ciphertext keyed by destination machine
+// and validates shape/length only. Bearer-gated (FLEET_AUTH_TOKEN) for relay
+// ACCESS; sealing gates READABILITY. Nothing here touches AMB. Handlers live in
+// lib/msg-relay-routes.js so the integration tests exercise the shipped code.
+// ============================================================================
+
+registerMsgRelayRoutes(app);
 
 // ============================================================================
 // TEAM CONFIGURATION API (Auto-Discovery)

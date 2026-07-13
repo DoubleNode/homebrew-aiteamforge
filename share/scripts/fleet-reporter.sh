@@ -664,6 +664,101 @@ send_status() {
 }
 
 # ============================================================================
+# kb-msg cross-machine pull (XACA-0777)
+# ============================================================================
+# Pull any SEALED envelopes addressed to THIS machine off the fleet-monitor
+# /api/msg relay, open them locally with this machine's private key, and ingest
+# the decrypted records into the local kb-msg inbox — the SAME inbox a Tier-1
+# (same-machine) send writes to, so kb-msg inbox/read are identical regardless
+# of origin. Best-effort: this NEVER fails the status report, and (XACA-0777-017
+# review) must be a silent, zero-cost no-op on any box that hasn't been set up
+# for kb-msg — no error, no output, no node/libsodium startup, no network call.
+
+# Bash re-implementation of vault-keygen.js's defaultMachineSlug(): lowercase
+# hostname, strip .local / domain, non-alnum -> dash, trim dashes, prefix "m-"
+# if it doesn't start with a letter. Used ONLY for the cheap pre-check below —
+# msg-client.js is the source of truth for the actual slug at send/pull time.
+_msg_default_machine_slug() {
+    local raw slug
+    raw=$(hostname 2>/dev/null | tr '[:upper:]' '[:lower:]')
+    slug=$(printf '%s' "$raw" \
+        | sed -E 's/\.local$//' \
+        | sed -E 's/\..*$//' \
+        | sed -E 's/[^a-z0-9]+/-/g' \
+        | sed -E 's/^-+//' \
+        | sed -E 's/-+$//')
+    if [ -z "$slug" ] || ! printf '%s' "$slug" | grep -qE '^[a-z]'; then
+        slug=$(printf '%s' "m-${slug}" | sed -E 's/-+$//')
+    fi
+    printf '%s' "${slug:0:64}"
+}
+
+# Does this machine have a vault private key yet (Tier 2 prerequisite)?
+# Mirrors vault-keygen.js's two storage backends: macOS Keychain
+# (service com.aiteamforge.vault) or the ~/.aiteamforge/vault/<slug>.key
+# file fallback. No key => this box never ran vault-keygen => skip Tier 2
+# entirely, silently (most boxes, most of the time).
+_msg_has_vault_key() {
+    local slug="$1"
+    [ -n "$slug" ] || return 1
+    if [ "$(uname -s)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+        security find-generic-password -s com.aiteamforge.vault -a "$slug" >/dev/null 2>&1 && return 0
+    fi
+    [ -f "$HOME/.aiteamforge/vault/${slug}.key" ] && return 0
+    return 1
+}
+
+pull_messages() {
+    local dir="${AITEAMFORGE_DIR:-$HOME/dev-team}"
+
+    # msg-client.sh ships as a SIBLING of THIS script in both layouts:
+    #   dev:      fleet-monitor/client/{fleet-reporter.sh,msg-client.sh}
+    #   consumer: ~/aiteamforge/scripts/{fleet-reporter.sh,msg-client.sh}
+    #             (tap-mirrored flattened into share/scripts/, same pattern
+    #              fleet-reporter.sh itself already uses — see sync-tap.sh)
+    # Resolving relative to this script's OWN location (not AITEAMFORGE_DIR)
+    # keeps this correct in both layouts without a separate mapping.
+    local reporter_dir
+    reporter_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    local client="$reporter_dir/msg-client.sh"
+    local store="$dir/kanban-hooks/msg-store.py"
+
+    # Guard 1: msg-client.js/.sh not shipped to this box yet (older tap install,
+    # or dev checkout predating XACA-0777) — silent no-op.
+    [ -x "$client" ] || return 0
+    [ -f "$store" ] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    command -v node >/dev/null 2>&1 || return 0
+
+    # Guard 2: no vault key configured on this machine — silent no-op, and
+    # crucially BEFORE we pay for a node/libsodium startup + network round-trip
+    # on every reporter cycle on a box that was never set up for kb-msg.
+    local machine_slug
+    machine_slug=$(_msg_default_machine_slug)
+    _msg_has_vault_key "$machine_slug" || return 0
+
+    # Derive the relay base URL from the configured central API endpoint by
+    # stripping the trailing /api/... path. Skip when there is no central server.
+    local base=""
+    if [ -n "${CENTRAL_API:-}" ]; then
+        base="${CENTRAL_API%/api/*}"
+    fi
+    [ -n "$base" ] || return 0
+
+    # msg-client.js reads FLEET_AUTH_TOKEN from env or fleet-config for the
+    # Bearer header; pass the central token through explicitly. Both stderr and
+    # exit code are swallowed — a transient relay/decrypt failure must never
+    # break the reporter loop for the status report that already succeeded.
+    local decrypted
+    decrypted=$(FLEET_MONITOR_URL="$base" FLEET_AUTH_TOKEN="${CENTRAL_AUTH_TOKEN:-}" \
+        bash "$client" pull --server "$base" 2>/dev/null || true)
+    if [ -n "$decrypted" ]; then
+        printf '%s\n' "$decrypted" | python3 "$store" ingest >/dev/null 2>&1 || true
+        echo "  ✓ Pulled + ingested cross-machine kb-msg mail"
+    fi
+}
+
+# ============================================================================
 # MAIN
 # ============================================================================
 
@@ -703,8 +798,15 @@ main() {
     else
         echo ""
         echo "Report failed. Check API_ENDPOINT configuration."
+        # Still attempt a mail pull below? No — if the server is unreachable the
+        # pull will fail too. Exit as before.
         exit 1
     fi
+
+    # Pull cross-machine kb-msg mail for this machine (best-effort; XACA-0777).
+    echo ""
+    echo "Checking kb-msg relay for cross-machine mail..."
+    pull_messages || true
 }
 
 # Run main function
