@@ -7846,45 +7846,65 @@ kb-knowledge-search() {
     # LOCAL_OPTIONS scopes both to this function — neither leaks to the caller.
     setopt LOCAL_OPTIONS NO_NOMATCH BARE_GLOB_QUAL
     local -a search_terms=()  # OR-match terms; populated by positional args (XACA-0738)
+    local -a _retry_argv=()   # XACA-0800 D4: parallel argv built DURING parsing for the zero-result
+                               # OR-fallback — flags/values copied verbatim, positional terms
+                               # word-split (${=1}). Never reconstructed from filter_* vars
+                               # afterward — that's a second, divergent source of truth
+                               # (sibling-heuristic drift trap, knowledge k501).
     local filter_agent="" filter_subject="" filter_project=""
     local filter_tag="" filter_tier="" flag_all_projects=false flag_project_limit=false
     local show_help=false flag_porcelain=false flag_json=false
+    local _kb_zero_result_hint=false  # XACA-0800: did the literal-phrase hint fire? (telemetry field)
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case "${1-}" in
             --help|-h)
+                _retry_argv+=("${1-}")
                 show_help=true; shift ;;
             --agent)
+                _retry_argv+=("${1-}" "${2-}")
                 filter_agent="${2-}"; shift 2 ;;
             --team)
+                _retry_argv+=("${1-}" "${2-}")
                 # Backward-compat alias: --team maps to --agent
                 filter_agent="${2-}"; shift 2 ;;
             --subject)
+                _retry_argv+=("${1-}" "${2-}")
                 filter_subject="${2-}"; shift 2 ;;
             --project)
                 flag_project_limit=true
                 # Optional argument: next token may be the slug or another flag
                 if [[ $# -gt 1 ]] && [[ "${2-}" != --* ]]; then
+                    _retry_argv+=("${1-}" "${2-}")
                     filter_project="${2-}"; shift 2
                 else
+                    _retry_argv+=("${1-}")
                     shift
                 fi
                 ;;
             --tag)
+                _retry_argv+=("${1-}" "${2-}")
                 filter_tag="${2-}"; shift 2 ;;
             --tier)
+                _retry_argv+=("${1-}" "${2-}")
                 filter_tier="${2-}"; shift 2 ;;
             --all-projects)
+                _retry_argv+=("${1-}")
                 flag_all_projects=true; shift ;;
             --porcelain)
+                _retry_argv+=("${1-}")
                 flag_porcelain=true; shift ;;
             --json)
+                _retry_argv+=("${1-}")
                 flag_json=true; shift ;;
             -*)
                 echo "Unknown flag: ${1-}" >&2
                 show_help=true; shift ;;
             *)
+                # XACA-0800 D4: word-split the positional so a quoted multi-word
+                # phrase becomes separate OR'd terms on the fallback retry.
+                _retry_argv+=(${=1})
                 search_terms+=("${1-}")
                 shift ;;
         esac
@@ -7951,6 +7971,11 @@ kb-knowledge-search() {
         echo ""
         echo "Multi-term OR search: pass multiple positional args — entry matches if ANY term hits."
         echo "  Example: kb-knowledge-search XACA-0001 \"authentication refactor\""
+        echo ""
+        echo "⚠ A SINGLE quoted arg is matched as a LITERAL PHRASE, not OR'd words:"
+        echo "  kb-knowledge-search \"authentication refactor\"   → substring match, often 0 results"
+        echo "  kb-knowledge-search authentication refactor     → OR match, usually what you want"
+        echo "  A zero-result multi-word query auto-suggests and retries the OR form (XACA-0800)."
         echo ""
         echo "Discovery precedence: project > team > subject > agent"
         return 1
@@ -8301,6 +8326,39 @@ kb-knowledge-search() {
             echo "    • Check INDEX.md files in ${global_root}/agents/ or subjects/"
             echo "    • Use --agent <name> or --subject <path> to narrow the search"
             echo "    • Use --tier to limit to one tier"
+
+            # XACA-0800 D2: a quoted multi-word term is matched as a literal
+            # PHRASE (grep -F), not OR'd words — the #1 cause of a false-zero on
+            # a genuinely populated corpus (XACA-0793). Trigger ONLY when a
+            # search_terms element contains whitespace, so a real single-word
+            # corpus miss never sees this (no crying wolf). The recursion guard
+            # (_KB_KS_NO_FALLBACK) also gates the hint itself, not just the
+            # fallback call below — the retry's terms are always single words so
+            # the whitespace check alone would suffice, but D3 explicitly wants
+            # non-recursion to be an invariant, not a coincidence of that fact.
+            if [[ -z "${_KB_KS_NO_FALLBACK:-}" ]]; then
+                local _kb_zrh_term _kb_zrh_multiword=false
+                for _kb_zrh_term in "${search_terms[@]}"; do
+                    if [[ "$_kb_zrh_term" == *[[:space:]]* ]]; then
+                        _kb_zrh_multiword=true
+                        break
+                    fi
+                done
+
+                if $_kb_zrh_multiword; then
+                    _kb_zero_result_hint=true
+                    echo ""
+                    echo "  ⚠ Hint: a quoted multi-word term is matched as a LITERAL PHRASE,"
+                    echo "    not OR'd words — that's almost certainly why this returned zero."
+                    echo "    Pass each word as its own argument to match ANY of them instead:"
+                    echo ""
+                    echo "      kb-knowledge-search ${(j: :)_retry_argv}"
+                    echo ""
+                    echo "  ── no literal match — showing term matches (OR-fallback) ──"
+                    echo ""
+                    KB_SEARCH_TELEMETRY_DISABLED=1 _KB_KS_NO_FALLBACK=1 kb-knowledge-search "${_retry_argv[@]}"
+                fi
+            fi
         else
             echo "  Found ${result_count} matching entry(ies)."
         fi
@@ -8381,9 +8439,14 @@ kb-knowledge-search() {
         # a string. Normalized defensively even though flag_all_projects is set to the
         # literals "true"/"false" by the arg-parser above.
         local _kb_flag_ap="false"; [[ "$flag_all_projects" == "true" ]] && _kb_flag_ap="true"
+        # zero_result_hint (XACA-0800): additive field — true only when the human-mode
+        # literal-phrase hint fired on THIS invocation. result_count above is untouched
+        # (still 0 on the primary/literal query) — this stays a truthful adoption-gate
+        # signal (XACA-0724/0780) rather than laundering a miss into a hit.
+        local _kb_zrh_json="false"; [[ "$_kb_zero_result_hint" == "true" ]] && _kb_zrh_json="true"
         { mkdir -p "$_kb_log_dir" 2>/dev/null && \
-          printf '{"ts":"%s","persona":"%s","query":"%s","tier":"%s","agent":"%s","subject":"%s","project":"%s","tag":"%s","results":%d,"result_tiers":%s,"flag_all_projects":%s,"cwd":"%s"}\n' \
-            "$_kb_ts" "$_kb_persona" "$_kb_q" "$_kb_tier" "$_kb_agent" "$_kb_subject" "$_kb_project" "$_kb_tag" "$result_count" "$_kb_result_tiers" "$_kb_flag_ap" "$_kb_pwd" \
+          printf '{"ts":"%s","persona":"%s","query":"%s","tier":"%s","agent":"%s","subject":"%s","project":"%s","tag":"%s","results":%d,"result_tiers":%s,"flag_all_projects":%s,"zero_result_hint":%s,"cwd":"%s"}\n' \
+            "$_kb_ts" "$_kb_persona" "$_kb_q" "$_kb_tier" "$_kb_agent" "$_kb_subject" "$_kb_project" "$_kb_tag" "$result_count" "$_kb_result_tiers" "$_kb_flag_ap" "$_kb_zrh_json" "$_kb_pwd" \
             >> "$_kb_log_file" 2>/dev/null; } || true
     fi
 }
