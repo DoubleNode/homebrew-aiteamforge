@@ -232,6 +232,13 @@ attempt_remediation() {
           _remediation_note "[fix] keepalive: launchctl load ${plist}"
           _aitf_launchctl load "$plist" >/dev/null 2>&1 || \
             _remediation_note "[fix] keepalive: launchctl load returned non-zero (may already be loaded)"
+        elif ! _xaca0734_launchagents_applicable; then
+          # XACA-0734 review, BLOCKING 1: this install RECORDED that it has no
+          # LaunchAgents (cockpit / kanban declined). `--fix` must not "fix" a box
+          # into a state it deliberately opted out of — on a cockpit box the
+          # lcars-health agent would poll an LCARS server that runs on a DIFFERENT
+          # machine, failing on every tick forever.
+          _remediation_note "[info] keepalive: not applicable — $(_xaca0734_launchagents_skip_reason)"
         elif _xaca0734_is_opted_out "$_ka_agent"; then
           # Recorded opt-out — the user removed this on purpose. Absence is the
           # CORRECT state; report it as information, never as a failure to fix.
@@ -254,7 +261,9 @@ attempt_remediation() {
           fi
         fi
       else
-        if _xaca0734_is_opted_out "$_ka_agent"; then
+        if ! _xaca0734_launchagents_applicable; then
+          _remediation_note "[info] keepalive: not applicable — $(_xaca0734_launchagents_skip_reason)"
+        elif _xaca0734_is_opted_out "$_ka_agent"; then
           _remediation_note "[info] keepalive: ${_ka_agent} is opted out — nothing to do"
         elif [ -f "$plist" ]; then
           _remediation_note "[suggest] keepalive: launchctl load ${plist}"
@@ -953,7 +962,7 @@ check_services() {
   # keepalive/auto-restart LaunchAgent is not loaded, the server will die on the
   # next crash and NOT come back, leaving the box silently broken. Surface that.
   # (warn, not fail: the server may be up right now — the risk is future durability.)
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-health"; then
+  if _xaca0734_launchctl_is_loaded "com.aiteamforge.lcars-health"; then
     [ "$VERBOSE" = true ] && echo "    Durability: lcars-health keepalive LaunchAgent loaded"
   else
     if [ "$lcars_up" = true ]; then
@@ -1224,44 +1233,71 @@ check_launchagents() {
   #
   # An agent with a recorded opt-out is SUPPOSED to be absent — that is a pass,
   # not a problem. Absence is only a defect when nobody asked for it.
-  local _agent
-  for _agent in $(_xaca0734_mandatory_launchagent_basenames); do
-    if [ -f "${launchagents_dir}/${_agent}" ]; then
-      continue
-    fi
-    if _xaca0734_is_opted_out "$_agent"; then
-      check_result pass "${_agent} absent (opted out — intentional)"
-      continue
-    fi
-    check_result fail "Mandatory LaunchAgent missing: ${launchagents_dir}/${_agent}"
-    if [ "$VERBOSE" = true ]; then
-      echo "    Fix: aiteamforge upgrade   (re-materializes mandatory LaunchAgents)"
-      echo "    Or:  aiteamforge doctor --fix"
-    fi
-    # XACA-0734: always print the opt-out escape hatch (not VERBOSE-gated) —
-    # this IS the "report a missing mandatory agent" moment the hint exists for,
-    # mirroring update_launchagents' materialize path. No new CLI subcommand;
-    # the sentinel is a plain user-editable file (see lib/launchagents.sh).
-    _xaca0734_print_optout_hint "$_agent"
-  done
+  #
+  # ...and neither is it a defect on an install that RECORDED, at setup time, that
+  # it has no LaunchAgents at all (XACA-0734 review, BLOCKING 1). Without this
+  # gate `aiteamforge doctor` would turn RED with three FAILs on a perfectly
+  # healthy cockpit box — while bin/aiteamforge-doctor.sh (check_services) calls
+  # that identical state a PASS. Two doctors contradicting each other on the same
+  # machine is worse than either verdict alone: it makes both untrustworthy.
+  # Keep this consistent with bin/aiteamforge-doctor.sh, which now shares this gate.
+  local _mandatory_applicable=true
+  if ! _xaca0734_launchagents_applicable "$working_dir"; then
+    _mandatory_applicable=false
+    check_result pass "Mandatory LaunchAgents not applicable ($(_xaca0734_launchagents_skip_reason "$working_dir"))"
+  fi
 
-  # Kanban backup agent
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.kanban-backup"; then
+  local _agent
+  if [ "$_mandatory_applicable" = true ]; then
+    for _agent in $(_xaca0734_mandatory_launchagent_basenames); do
+      if [ -f "${launchagents_dir}/${_agent}" ]; then
+        continue
+      fi
+      if _xaca0734_is_opted_out "$_agent"; then
+        check_result pass "${_agent} absent (opted out — intentional)"
+        continue
+      fi
+      check_result fail "Mandatory LaunchAgent missing: ${launchagents_dir}/${_agent}"
+      if [ "$VERBOSE" = true ]; then
+        echo "    Fix: aiteamforge upgrade   (re-materializes mandatory LaunchAgents)"
+        echo "    Or:  aiteamforge doctor --fix"
+      fi
+      # XACA-0734: always print the opt-out escape hatch (not VERBOSE-gated) —
+      # this IS the "report a missing mandatory agent" moment the hint exists for,
+      # mirroring update_launchagents' materialize path. No new CLI subcommand;
+      # the sentinel is a plain user-editable file (see lib/launchagents.sh).
+      _xaca0734_print_optout_hint "$_agent"
+    done
+  fi
+
+  # Per-agent LOADED checks.
+  #
+  # XACA-0734 review #2: these are strictly about "the plist exists but launchd
+  # has not loaded it" (a warning — a re-login fixes it). The "no plist at all"
+  # case is ALREADY reported, with far better remediation, by the mandatory-presence
+  # loop above. Reporting it a second time here as "not loaded" double-counted a
+  # single defect: one missing plist produced a FAIL *and* a WARN, which inflates
+  # the doctor's failure count and reads like two unrelated problems.
+  # So: only warn about not-loaded when the plist is actually THERE — matching the
+  # `elif [ -f ... ]` idiom the fleet-reporter and cr-poller checks below already use.
+  local _kb_plist="${launchagents_dir}/com.aiteamforge.kanban-backup.plist"
+  if _xaca0734_launchctl_is_loaded "com.aiteamforge.kanban-backup"; then
     check_result pass "Kanban backup LaunchAgent loaded"
-  else
+  elif [ -f "$_kb_plist" ]; then
     check_result warn "Kanban backup LaunchAgent not loaded"
     if [ "$VERBOSE" = true ]; then
-      echo "    Load: launchctl load ~/Library/LaunchAgents/com.aiteamforge.kanban-backup.plist"
+      echo "    Load: launchctl load ${_kb_plist}"
     fi
   fi
 
   # LCARS health agent
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-health"; then
+  local _lh_plist="${launchagents_dir}/com.aiteamforge.lcars-health.plist"
+  if _xaca0734_launchctl_is_loaded "com.aiteamforge.lcars-health"; then
     check_result pass "LCARS health LaunchAgent loaded"
-  else
+  elif [ -f "$_lh_plist" ]; then
     check_result warn "LCARS health LaunchAgent not loaded"
     if [ "$VERBOSE" = true ]; then
-      echo "    Load: launchctl load ~/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
+      echo "    Load: launchctl load ${_lh_plist}"
     fi
   fi
   # XACA-0585: script the LaunchAgent invokes must exist; missing = exit 127 on every tick
@@ -1279,7 +1315,7 @@ check_launchagents() {
   fi
 
   # Fleet reporter agent
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.fleet-reporter"; then
+  if _xaca0734_launchctl_is_loaded "com.aiteamforge.fleet-reporter"; then
     check_result pass "Fleet reporter LaunchAgent loaded"
   elif [ -f "$HOME/Library/LaunchAgents/com.aiteamforge.fleet-reporter.plist" ]; then
     check_result warn "Fleet reporter LaunchAgent not loaded"
@@ -1289,7 +1325,7 @@ check_launchagents() {
   fi
 
   # CR Confluence Poller agent (XACA-0328-003)
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.cr-confluence-poller"; then
+  if _xaca0734_launchctl_is_loaded "com.aiteamforge.cr-confluence-poller"; then
     check_result pass "CR Confluence Poller LaunchAgent loaded"
   elif [ -f "$HOME/Library/LaunchAgents/com.aiteamforge.cr-confluence-poller.plist" ]; then
     check_result warn "CR Confluence Poller LaunchAgent not loaded"

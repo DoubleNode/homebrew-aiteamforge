@@ -83,8 +83,37 @@ if ! declare -f print_section >/dev/null 2>&1; then
   print_section() { :; }
 fi
 
-# No-op launchctl stub. Override before loading any code that might call it.
-launchctl() { return 0; }
+# launchctl stub.
+#
+# XACA-0734 review #5: this used to be `launchctl() { return 0; }` — a stub that
+# emitted NOTHING. The load-verify in update_launchagents is
+# `launchctl list | <is-loaded?>`, so against a silent stub the answer was always
+# "not loaded" and the SUCCESS branch ("Installed and loaded ...") was never once
+# executed by this suite. A test stub that can only produce one outcome does not
+# test a branch, it hides it.
+#
+# So: `launchctl list` now emits a plausible three-column listing
+# ("PID\tStatus\tLabel"), which is what the real one prints. LAUNCHCTL_LOADED
+# controls which labels appear, so a test can exercise BOTH the registered and
+# the rejected-by-launchd paths.
+#
+# Everything else still returns 0 and does nothing — this must NEVER reach real
+# launchd (see XACA-0787: the full runner has leaked live agents into the real
+# ~/Library/LaunchAgents before).
+LAUNCHCTL_LOADED="com.aiteamforge.kanban-backup com.aiteamforge.lcars-health com.aiteamforge.auto-upgrade"
+export LAUNCHCTL_LOADED
+
+launchctl() {
+  if [ "${1:-}" = "list" ]; then
+    printf 'PID\tStatus\tLabel\n'
+    local _l
+    for _l in ${LAUNCHCTL_LOADED:-}; do
+      printf -- '-\t0\t%s\n' "$_l"
+    done
+    return 0
+  fi
+  return 0
+}
 export -f launchctl
 
 # _aitf_launchctl normally comes from lib/common.sh (not sourced here — it would
@@ -676,3 +705,458 @@ FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
 output="$(FORCE=false DRY_RUN=true run_update_launchagents 2>&1)"
 assert_contains "$output" "All LaunchAgents up to date" "No-change DRY_RUN run must report 'All LaunchAgents up to date'"
 test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0734 review, BLOCKING 1 — THE APPLICABILITY GATE
+#
+# Some installs RECORD, at setup time, that they deliberately have NO
+# LaunchAgents. The first cut of this ticket read the opt-out sentinel and
+# nothing else, so it would have "self-healed" those boxes by installing three
+# agents they never wanted — two of which point at an lcars-ui/ and a kanban
+# backup script that do not exist there, i.e. recurring FAILING launchd jobs on
+# a machine that was perfectly healthy. Same bug as the one this ticket fixes,
+# roles reversed: intent WAS recorded, the code just didn't read the file.
+# ═══════════════════════════════════════════════════════════════════════════
+
+_write_install_profile() { printf '%s\n' "$1" > "$FAKE_WORKING/.install-profile"; }
+_write_config_kanban() {
+  cat > "$FAKE_WORKING/.aiteamforge-config" <<EOF
+{
+  "version": "0.0.0",
+  "install_profile": "full",
+  "features": {
+    "shell_environment": true,
+    "claude_code_config": true,
+    "lcars_kanban": $1,
+    "fleet_monitor": false
+  }
+}
+EOF
+}
+# Clear BOTH markers — the default state of every pre-existing box.
+_clear_markers() { rm -f "$FAKE_WORKING/.install-profile" "$FAKE_WORKING/.aiteamforge-config"; }
+# Full reset: plists, sentinel, AND markers.
+reset_all() { reset_launchagents; _clear_markers; }
+
+test_start "Gate: NO markers (every pre-existing box) -> APPLICABLE (fails OPEN)"
+reset_all
+# This is the M1Pro case and the single most important property of the gate:
+# absence of a marker is NOT intent. Inferring intent from absence IS the bug.
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "an install with no recorded markers MUST be applicable — fail-open is what makes the M1Pro fix work"
+fi
+test_pass
+
+test_start "Gate: .install-profile=cockpit -> NOT applicable"
+reset_all
+_write_install_profile "cockpit"
+if _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "a cockpit install records that it has no LaunchAgents — the gate must read .install-profile"
+fi
+test_pass
+
+test_start "Gate: .install-profile=full -> applicable"
+reset_all
+_write_install_profile "full"
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "a full install must be applicable"
+fi
+test_pass
+
+test_start "Gate: config lcars_kanban=false (user declined kanban) -> NOT applicable"
+reset_all
+_write_config_kanban "false"
+if _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "answering 'no' to 'Install LCARS Kanban?' is recorded in .aiteamforge-config — the gate must read it"
+fi
+test_pass
+
+test_start "Gate: config lcars_kanban=true -> applicable"
+reset_all
+_write_config_kanban "true"
+if ! _xaca0734_launchagents_applicable "$FAKE_WORKING"; then
+  test_fail "a box that installed kanban must get its mandatory agents"
+fi
+test_pass
+
+test_start "Gate: skip reason names cockpit when the profile marker closed the gate"
+reset_all
+_write_install_profile "cockpit"
+_reason="$(_xaca0734_launchagents_skip_reason "$FAKE_WORKING")"
+assert_contains "$_reason" "cockpit" "the reason must tell the user WHY nothing was installed"
+test_pass
+
+# ─────────────────────────────────────────────────────────────────────────
+# THE BLOCKING-1 REGRESSION TEST the reviewer asked for.
+# ─────────────────────────────────────────────────────────────────────────
+test_start "BLOCKING 1: cockpit profile -> ROW 2 DOES NOT FIRE (no plist is materialized)"
+reset_all
+_write_install_profile "cockpit"
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_not_exists "$AUTO_UPGRADE_PLIST" "cockpit box must NOT get auto-upgrade.plist — deliberately never installed there"
+assert_file_not_exists "$LCARS_PLIST"        "cockpit box must NOT get lcars-health.plist — LCARS runs on a REMOTE host; this would fail every tick"
+assert_file_not_exists "$BACKUP_PLIST"       "cockpit box must NOT get kanban-backup.plist — there is no local kanban to back up"
+test_pass
+
+test_start "BLOCKING 1: cockpit upgrade EXPLAINS itself (does not silently no-op)"
+reset_all
+_write_install_profile "cockpit"
+output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
+assert_contains "$output" "No mandatory LaunchAgents on this install" "the upgrade must say why it installed nothing"
+assert_contains "$output" "cockpit" "...and name the reason"
+test_pass
+
+test_start "BLOCKING 1: cockpit -> assert-present does NOT warn about correctly-absent agents"
+reset_all
+_write_install_profile "cockpit"
+output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
+assert_not_contains "$output" "Mandatory LaunchAgent still missing" \
+  "on a cockpit box every mandatory agent is absent BY DESIGN — warning 3x per upgrade trains users to ignore warnings"
+test_pass
+
+test_start "BLOCKING 1: kanban declined -> ROW 2 DOES NOT FIRE either"
+reset_all
+_write_config_kanban "false"
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_not_exists "$AUTO_UPGRADE_PLIST" "a user who declined kanban expressed intent as explicitly as one who edits the sentinel"
+assert_file_not_exists "$LCARS_PLIST"        "declined-kanban box must not get lcars-health.plist"
+assert_file_not_exists "$BACKUP_PLIST"       "declined-kanban box must not get kanban-backup.plist"
+test_pass
+
+test_start "BLOCKING 1: FORCE=true does NOT override the applicability gate"
+reset_all
+_write_install_profile "cockpit"
+FORCE=true DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_not_exists "$AUTO_UPGRADE_PLIST" "--force must not punch through a RECORDED 'this box has no LaunchAgents'"
+test_pass
+
+test_start "BLOCKING 1: ROW 1 (refresh an EXISTING plist) stays UNCONDITIONAL on cockpit"
+reset_all
+_write_install_profile "cockpit"
+# If a cockpit box somehow DOES have a plist, keeping its content current is still
+# correct — the gate governs MATERIALIZING absent agents, not refreshing present ones.
+printf 'STALE — {{AITEAMFORGE_DIR}} never resolved\n' > "$BACKUP_PLIST"
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+_content="$(cat "$BACKUP_PLIST")"
+assert_not_contains "$_content" "STALE" "an existing plist must still be refreshed even on a gated install"
+assert_not_contains "$_content" "{{"    "the refreshed plist must be fully rendered"
+assert_file_not_exists "$AUTO_UPGRADE_PLIST" "...but a still-absent agent must NOT be materialized by the refresh pass"
+test_pass
+
+test_start "Gate: markers cleared -> mandatory agents materialize again (opt-back-in works)"
+reset_all
+_write_config_kanban "true"
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_exists "$AUTO_UPGRADE_PLIST" "re-running setup and installing kanban rewrites the marker; the gate must then OPEN"
+test_pass
+reset_all
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0734-002 — the sentinel is HAND-EDITED, so parse it like a human wrote it
+#
+# is_opted_out used a raw [ "$line" = "$agent" ] with no trimming, so a trailing
+# \r or a stray space made the entry silently NOT match — and the agent the user
+# explicitly declined got re-materialized anyway. Silent intent loss: the exact
+# failure class this ticket exists to kill.
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "Sentinel: CRLF line ending still matches (file edited on/synced from Windows)"
+reset_all
+printf 'com.aiteamforge.auto-upgrade.plist\r\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+if ! _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "a trailing CR must not silently reverse a hand-recorded opt-out"
+fi
+test_pass
+
+test_start "Sentinel: leading/trailing SPACES still match"
+reset_all
+printf '   com.aiteamforge.auto-upgrade.plist   \n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+if ! _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "padding spaces must be trimmed, not treated as part of the basename"
+fi
+test_pass
+
+test_start "Sentinel: TAB-indented entry still matches"
+reset_all
+printf '\tcom.aiteamforge.lcars-health.plist\t\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+if ! _xaca0734_is_opted_out "com.aiteamforge.lcars-health.plist"; then
+  test_fail "tabs must be trimmed too"
+fi
+test_pass
+
+test_start "Sentinel: a '#' COMMENT line is NOT an opt-out (a user WILL add comments)"
+reset_all
+printf '# com.aiteamforge.auto-upgrade.plist  <- disabled once, changed my mind\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+if _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "a commented-out entry must NOT suppress the agent — that is the opposite of what the comment says"
+fi
+test_pass
+
+test_start "Sentinel: blank lines and comments coexist with real entries"
+reset_all
+printf '# my opt-outs\n\n   \ncom.aiteamforge.auto-upgrade.plist\n\n# end\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+if ! _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "a real entry must still be found among comments and blank lines"
+fi
+if _xaca0734_is_opted_out "com.aiteamforge.lcars-health.plist"; then
+  test_fail "an agent that is NOT listed must not be reported as opted out"
+fi
+test_pass
+
+test_start "Sentinel: CRLF entry actually SUPPRESSES row 2 end-to-end"
+reset_all
+printf 'com.aiteamforge.auto-upgrade.plist\r\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_not_exists "$AUTO_UPGRADE_PLIST" \
+  "the whole point: a CRLF-terminated hand-written opt-out must actually prevent materialization"
+assert_file_exists "$LCARS_PLIST" "...while agents that were NOT opted out still materialize"
+test_pass
+
+test_start "Sentinel: clear_optout removes a whitespace/CRLF-padded entry"
+reset_all
+printf '  com.aiteamforge.auto-upgrade.plist  \r\ncom.aiteamforge.lcars-health.plist\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+_xaca0734_clear_optout "com.aiteamforge.auto-upgrade.plist"
+if _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "clear must remove any entry that is_opted_out can SEE, or the user is stuck opted out with no way back"
+fi
+if ! _xaca0734_is_opted_out "com.aiteamforge.lcars-health.plist"; then
+  test_fail "clear_optout must not remove OTHER agents' entries"
+fi
+test_pass
+
+test_start "Sentinel: clear_optout PRESERVES the user's comments and blank lines"
+reset_all
+printf '# keep me\ncom.aiteamforge.auto-upgrade.plist\n\n# and me\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+_xaca0734_clear_optout "com.aiteamforge.auto-upgrade.plist"
+_after="$(cat "$AITF_LAUNCHAGENT_OPTOUT_FILE")"
+assert_contains "$_after" "# keep me" "a hand-maintained file's comments must survive a clear"
+assert_contains "$_after" "# and me"  "...all of them"
+assert_not_contains "$_after" "com.aiteamforge.auto-upgrade.plist" "...but the cleared entry must be gone"
+test_pass
+
+test_start "Sentinel: clear_optout does NOT truncate an UNREADABLE sentinel"
+reset_all
+if [ "$(id -u)" = "0" ]; then
+  test_pass
+else
+  printf 'com.aiteamforge.auto-upgrade.plist\ncom.aiteamforge.lcars-health.plist\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+  chmod 000 "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+  set +e
+  _xaca0734_clear_optout "com.aiteamforge.auto-upgrade.plist" >/dev/null 2>&1
+  _rc=$?
+  set -e
+  chmod 644 "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+  # The old code ran `grep -v ... || true` then mv'd UNCONDITIONALLY: grep exits 2
+  # on a read error, `|| true` swallowed it, and an EMPTY tempfile was moved over
+  # the user's entire opt-out list. Silent total data loss.
+  _after="$(cat "$AITF_LAUNCHAGENT_OPTOUT_FILE")"
+  assert_contains "$_after" "com.aiteamforge.auto-upgrade.plist" "an unreadable sentinel must be left INTACT, never truncated"
+  assert_contains "$_after" "com.aiteamforge.lcars-health.plist" "...every entry preserved"
+  if [ "$_rc" -eq 0 ]; then
+    test_fail "clear_optout must REPORT failure (non-zero) when it cannot read the sentinel"
+  fi
+  test_pass
+fi
+reset_all
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0734 review #4/#5 — LOAD VERIFY
+#
+# `launchctl load` returns 0 even when launchd REJECTS the job, so registration
+# is confirmed via `launchctl list`. Both branches are exercised here; before
+# this, the stub emitted nothing, so the SUCCESS branch had never once run.
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "Load-verify: SUCCESS branch reports 'Installed and loaded' (never exercised before)"
+reset_all
+LAUNCHCTL_LOADED="com.aiteamforge.kanban-backup com.aiteamforge.lcars-health com.aiteamforge.auto-upgrade"
+output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
+assert_contains "$output" "Installed and loaded com.aiteamforge.auto-upgrade.plist" \
+  "when launchctl list SHOWS the label, the success branch must run"
+assert_not_contains "$output" "did not register" "...and the failure branch must not"
+test_pass
+
+test_start "Load-verify: REJECTED branch reports 'did not register' (launchctl load lies with exit 0)"
+reset_all
+LAUNCHCTL_LOADED=""
+output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
+assert_contains "$output" "did not register" \
+  "launchd rejecting the job must be surfaced — 'load' returning 0 proves nothing"
+test_pass
+
+test_start "Load-verify: a SUPERSTRING label must NOT count as loaded (substring bug)"
+reset_all
+LAUNCHCTL_LOADED="com.aiteamforge.auto-upgrade.disabled"
+output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
+assert_contains "$output" "did not register" \
+  "'...auto-upgrade.disabled' must NOT satisfy the check for '...auto-upgrade' — grep -q was a substring match"
+test_pass
+
+test_start "Load-verify: dots are LITERAL, not regex wildcards"
+reset_all
+LAUNCHCTL_LOADED="comXaiteamforgeXauto-upgrade"
+output="$(FORCE=false DRY_RUN=false run_update_launchagents 2>&1)"
+assert_contains "$output" "did not register" \
+  "grep -q treats the label's dots as 'any char' — an exact field match must not"
+test_pass
+
+test_start "Load-verify helper: exact-label match, positive and negative"
+LAUNCHCTL_LOADED="com.aiteamforge.auto-upgrade"
+if ! _xaca0734_launchctl_is_loaded "com.aiteamforge.auto-upgrade"; then
+  test_fail "an exactly-matching label must be reported as loaded"
+fi
+if _xaca0734_launchctl_is_loaded "com.aiteamforge.lcars-health"; then
+  test_fail "a label absent from launchctl list must not be reported as loaded"
+fi
+test_pass
+
+# Restore the default stub state.
+LAUNCHCTL_LOADED="com.aiteamforge.kanban-backup com.aiteamforge.lcars-health com.aiteamforge.auto-upgrade"
+reset_all
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0734 review, BLOCKING 2 — AN ABORTED BATCH UNINSTALL MUST NOT POISON
+# THE SENTINEL
+#
+# install-kanban.sh runs under `set -euo pipefail`. Every uninstall_<x>_launchagent
+# used to APPEND its agent to the sentinel, and only the END of the batch wiped it
+# again. A Ctrl-C — a completely normal response to an uninstall you started by
+# mistake — landing between the two left the sentinel listing every mandatory
+# agent, and NOTHING downstream ever clears it (installers refuse an opted-out
+# agent; upgrade skips it). Reinstall then produced a box where auto-upgrade could
+# never be installed by ANY code path: the original self-sealing bug, resurrected.
+#
+# These tests drive the REAL functions, extracted from install-kanban.sh.
+# ═══════════════════════════════════════════════════════════════════════════
+
+INSTALL_KANBAN_SH="$TAP_ROOT/libexec/installers/install-kanban.sh"
+
+# Pull one top-level function verbatim out of install-kanban.sh.
+_extract_func() {
+  awk -v fn="$1" '
+    index($0, fn "() {") == 1 { c = 1 }
+    c { print }
+    c && /^\}$/ { exit }
+  ' "$INSTALL_KANBAN_SH"
+}
+
+for _fn in uninstall_backup_launchagent \
+           uninstall_cellar_watch_launchagent \
+           uninstall_auto_upgrade_launchagent \
+           uninstall_lcars_watch_launchagent \
+           uninstall_kanban_system; do
+  _body="$(_extract_func "$_fn")"
+  if [ -z "$_body" ]; then
+    test_start "Extraction sanity: ${_fn} can be pulled from install-kanban.sh"
+    test_fail "awk extracted nothing for ${_fn} — the uninstall tests below would be vacuous"
+  fi
+  eval "$_body"
+done
+unset _fn _body
+
+# Helpers the extracted functions call, which live elsewhere in install-kanban.sh
+# or lib/common.sh. Stubbed inert — nothing here may touch real launchd or a real HOME.
+header()  { :; }
+info()    { :; }
+success() { :; }
+warning() { :; }
+prompt_yes_no() { return 1; }   # always answer "no" to "Remove kanban board data?"
+uninstall_cr_confluence_poller_launchagent() { :; }
+uninstall_lcars_runatload_launchagent()      { :; }
+uninstall_knowledge_sync_launchagent()       { :; }
+# Normally from lib/constants.sh. Referenced only inside the functions eval'd
+# above, which shellcheck cannot see into — hence the disable, not a real unused var.
+# shellcheck disable=SC2034
+KANBAN_BACKUP_LABEL="com.aiteamforge.kanban-backup"
+
+UNINSTALL_HOME="$SANDBOX_DIR/uninstall-home"
+UNINSTALL_ROOT="$SANDBOX_DIR/uninstall-root"
+
+_uninstall_sandbox_reset() {
+  rm -rf "$UNINSTALL_HOME" "$UNINSTALL_ROOT"
+  mkdir -p "$UNINSTALL_HOME/Library/LaunchAgents" "$UNINSTALL_ROOT"
+  rm -f "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+}
+
+test_start "Extraction sanity: uninstall_kanban_system sets the batch flag"
+_uks="$(_extract_func uninstall_kanban_system)"
+assert_contains "$_uks" "_XACA0734_BATCH_UNINSTALL=1" \
+  "the batch teardown must mark itself, or the per-agent helpers will record opt-outs"
+test_pass
+
+test_start "Extraction sanity: per-agent uninstall helpers route through the batch-aware recorder"
+_uba="$(_extract_func uninstall_auto_upgrade_launchagent)"
+assert_contains "$_uba" "_xaca0734_record_optout_unless_batch" \
+  "a raw _xaca0734_record_optout here is what poisoned the sentinel on abort"
+test_pass
+
+test_start "BLOCKING 2: a COMPLETE batch uninstall records NO opt-outs"
+_uninstall_sandbox_reset
+( HOME="$UNINSTALL_HOME"; AITEAMFORGE_DIR="$UNINSTALL_ROOT"; uninstall_kanban_system ) >/dev/null 2>&1
+if [ -f "$AITF_LAUNCHAGENT_OPTOUT_FILE" ]; then
+  _got="$(cat "$AITF_LAUNCHAGENT_OPTOUT_FILE")"
+  test_fail "batch uninstall must not write the sentinel at all; it contains: ${_got}"
+fi
+test_pass
+
+test_start "BLOCKING 2: an ABORTED batch uninstall (Ctrl-C) leaves NO poisoned sentinel"
+_uninstall_sandbox_reset
+# Abort AFTER auto-upgrade has been torn down — exactly where the old code had
+# already appended auto-upgrade to the sentinel and had not yet reached the wipe.
+set +e
+(
+  set -euo pipefail
+  HOME="$UNINSTALL_HOME"
+  AITEAMFORGE_DIR="$UNINSTALL_ROOT"
+  uninstall_lcars_watch_launchagent() { exit 130; }   # simulated SIGINT mid-teardown
+  uninstall_kanban_system
+) >/dev/null 2>&1
+_abort_rc=$?
+set -e
+if [ "$_abort_rc" -eq 0 ]; then
+  test_fail "the abort simulation did not actually abort — this test would be vacuous"
+fi
+if _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "ABORTED uninstall left auto-upgrade opted out FOREVER — the box can now never self-upgrade by ANY code path"
+fi
+if _xaca0734_is_opted_out "com.aiteamforge.kanban-backup.plist"; then
+  test_fail "aborted uninstall left kanban-backup opted out"
+fi
+test_pass
+
+test_start "BLOCKING 2: after an aborted uninstall, a reinstall's upgrade STILL materializes the agents"
+# The real-world consequence, end to end: the sentinel is clean, so the box heals.
+reset_launchagents
+FORCE=false DRY_RUN=false run_update_launchagents >/dev/null 2>&1
+assert_file_exists "$AUTO_UPGRADE_PLIST" \
+  "this is the payoff — an aborted uninstall must not permanently seal the box against auto-upgrade"
+test_pass
+
+test_start "BLOCKING 2: batch uninstall does NOT destroy a user's HAND-EDITED opt-outs"
+_uninstall_sandbox_reset
+# The old code wiped the ENTIRE sentinel at the end of the batch. Now that nothing
+# records during the batch, that wipe is gone — and it MUST be, because its only
+# remaining effect would be to silently delete opt-outs a human typed on purpose.
+printf '# I run LCARS on the NAS\ncom.aiteamforge.lcars-health.plist\n' > "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+( HOME="$UNINSTALL_HOME"; AITEAMFORGE_DIR="$UNINSTALL_ROOT"; uninstall_kanban_system ) >/dev/null 2>&1
+if ! _xaca0734_is_opted_out "com.aiteamforge.lcars-health.plist"; then
+  test_fail "a hand-recorded opt-out must survive a kanban teardown — silently deleting it is the same intent-loss bug"
+fi
+_after="$(cat "$AITF_LAUNCHAGENT_OPTOUT_FILE")"
+assert_contains "$_after" "# I run LCARS on the NAS" "the user's comment must survive too"
+test_pass
+
+test_start "BLOCKING 2: a TARGETED (non-batch) uninstall still DOES record an opt-out"
+_uninstall_sandbox_reset
+# The primitive must stay correct for a future single-agent uninstall entry point:
+# suppressing the record inside the batch must not break recording outside it.
+# (AITEAMFORGE_DIR is read by the eval'd installer functions — SC2034 can't see that.)
+# shellcheck disable=SC2034
+( HOME="$UNINSTALL_HOME"; AITEAMFORGE_DIR="$UNINSTALL_ROOT"; uninstall_auto_upgrade_launchagent ) >/dev/null 2>&1
+if ! _xaca0734_is_opted_out "com.aiteamforge.auto-upgrade.plist"; then
+  test_fail "a targeted removal IS an opt-out and must be recorded — otherwise upgrade would reinstall what the user just removed"
+fi
+test_pass
+
+rm -f "$AITF_LAUNCHAGENT_OPTOUT_FILE"
+reset_all

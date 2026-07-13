@@ -28,6 +28,23 @@ fi
 # shellcheck source=/dev/null
 [ -f "$AITEAMFORGE_HOME/libexec/lib/python-env.sh" ] && . "$AITEAMFORGE_HOME/libexec/lib/python-env.sh"
 
+# XACA-0734 (review #1): this script was the FIFTH place with its own LaunchAgent
+# opinion, and the only one still asking nothing but "is it loaded?". A plist that
+# does not EXIST is a different, worse problem than one that merely is not loaded
+# — nothing will ever load it — and this doctor reported that state as a mere
+# "not loaded" warning, which is how M1Pro's missing auto-upgrade agent hid in
+# plain sight. Source the shared vocabulary (mandatory set + opt-out sentinel +
+# applicability gate) so this doctor cannot drift from `aiteamforge doctor`,
+# `aiteamforge upgrade`, and the installer.
+#
+# Sourced DEFENSIVELY: if the lib is absent (a partially-upgraded install), fall
+# back to the legacy loaded-only checks rather than crashing the whole doctor.
+# shellcheck source=/dev/null
+_LAUNCHAGENTS_LIB_OK=false
+if [ -f "$AITEAMFORGE_HOME/libexec/lib/launchagents.sh" ]; then
+  . "$AITEAMFORGE_HOME/libexec/lib/launchagents.sh" && _LAUNCHAGENTS_LIB_OK=true
+fi
+
 # Working directory
 AITEAMFORGE_DIR="${AITEAMFORGE_DIR:-$HOME/aiteamforge}"
 
@@ -493,17 +510,49 @@ check_services() {
     check_result warn "Fleet reporter LaunchAgent not loaded"
   fi
 
-  # LaunchAgents
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.kanban-backup"; then
-    check_result pass "Kanban backup LaunchAgent"
-  else
-    check_result warn "Kanban backup LaunchAgent not loaded"
-  fi
+  # LaunchAgents — XACA-0734 (review #1): ported to the SHARED mandatory set.
+  #
+  # Note the cockpit early-return at the top of this function already handled the
+  # cockpit case, but this gate ALSO covers the kanban-declined install, which the
+  # profile marker alone does not. It is the same gate `aiteamforge doctor` and
+  # `aiteamforge upgrade` use, which is the whole point: three tools, one answer.
+  local _la_dir="${LAUNCHAGENTS_DIR:-$HOME/Library/LaunchAgents}"
 
-  if launchctl list 2>/dev/null | grep -q "com.aiteamforge.lcars-health"; then
-    check_result pass "LCARS health LaunchAgent"
+  if [ "$_LAUNCHAGENTS_LIB_OK" = true ] && ! _xaca0734_launchagents_applicable "$AITEAMFORGE_DIR"; then
+    check_result pass "LaunchAgents (not applicable — $(_xaca0734_launchagents_skip_reason "$AITEAMFORGE_DIR"))"
+  elif [ "$_LAUNCHAGENTS_LIB_OK" = true ]; then
+    local _agent _label
+    for _agent in $(_xaca0734_mandatory_launchagent_basenames); do
+      _label="${_agent%.plist}"
+      if _xaca0734_launchctl_is_loaded "$_label"; then
+        check_result pass "${_label} LaunchAgent"
+      elif [ -f "${_la_dir}/${_agent}" ]; then
+        # Present but not loaded — a re-login or an explicit load fixes it.
+        check_result warn "${_label} LaunchAgent not loaded" "Load: launchctl load ${_la_dir}/${_agent}"
+      elif _xaca0734_is_opted_out "$_agent"; then
+        # Recorded opt-out: absence is the CORRECT state here, not a defect.
+        check_result pass "${_label} LaunchAgent absent (opted out — intentional)"
+      else
+        # MISSING ENTIRELY and nobody asked for that. This is the M1Pro failure:
+        # not merely unloaded — nonexistent, with nothing on the box that would
+        # ever create it. A FAIL with a real fix, not a shrug.
+        check_result fail "${_label} LaunchAgent MISSING: ${_la_dir}/${_agent}" \
+          "Fix: aiteamforge upgrade   (re-materializes mandatory LaunchAgents)"
+      fi
+    done
   else
-    check_result warn "LCARS health LaunchAgent not loaded"
+    # Legacy fallback — lib unavailable (partially-upgraded install).
+    if launchctl list 2>/dev/null | grep -qF "com.aiteamforge.kanban-backup"; then
+      check_result pass "Kanban backup LaunchAgent"
+    else
+      check_result warn "Kanban backup LaunchAgent not loaded"
+    fi
+
+    if launchctl list 2>/dev/null | grep -qF "com.aiteamforge.lcars-health"; then
+      check_result pass "LCARS health LaunchAgent"
+    else
+      check_result warn "LCARS health LaunchAgent not loaded"
+    fi
   fi
 
   echo ""

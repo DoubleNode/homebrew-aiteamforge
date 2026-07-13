@@ -1376,6 +1376,24 @@ update_launchagents() {
   _upgrade_tmpfiles=()
   trap '_cleanup_upgrade_tmpfiles' RETURN
 
+  # XACA-0734 applicability gate. Some installs RECORD, at setup time, that they
+  # deliberately have no LaunchAgents — cockpit boxes (LCARS/kanban live on a
+  # remote host) and boxes where the user declined LCARS Kanban. Materializing
+  # the mandatory set on those is not self-healing, it is vandalism: two of the
+  # three agents point at ${WORKING_DIR}/lcars-ui and the kanban backup script,
+  # which do not exist there, so they would become recurring FAILING launchd jobs.
+  #
+  # Computed ONCE, outside the loop: a closed gate is a property of the INSTALL,
+  # not of any individual agent, so it is reported once rather than three times.
+  # See _xaca0734_launchagents_applicable in lib/launchagents.sh for why the
+  # markers are read rather than a sentinel written.
+  local la_applicable=true
+  if ! _xaca0734_launchagents_applicable; then
+    la_applicable=false
+    print_info "No mandatory LaunchAgents on this install — $(_xaca0734_launchagents_skip_reason)"
+    print_info "Existing LaunchAgents (if any) are still refreshed; absent ones are left absent."
+  fi
+
   # Agent→template pairs come from the shared map (lib/launchagents.sh) so
   # upgrade and doctor cannot drift apart. Order is the map's order.
   local entry
@@ -1400,6 +1418,12 @@ update_launchagents() {
       # of XACA-0734).
       if ! _xaca0734_is_mandatory "$agent"; then
         # Row 4: optional agent, never installed here → leave it alone.
+        continue
+      fi
+      if [ "$la_applicable" = false ]; then
+        # Row 2a (XACA-0734 review, BLOCKING 1): this install is RECORDED as
+        # having no LaunchAgents at all (cockpit / kanban declined). The agent is
+        # SUPPOSED to be absent. Reported once above the loop, so stay quiet here.
         continue
       fi
       if _xaca0734_is_opted_out "$agent"; then
@@ -1455,7 +1479,7 @@ update_launchagents() {
           # code. Only warn — a plist on disk that did not register is still an
           # improvement over no plist at all, and the next login will load it.
           local label="${agent%.plist}"
-          if launchctl list 2>/dev/null | grep -q "$label"; then
+          if _xaca0734_launchctl_is_loaded "$label"; then
             print_success "Installed and loaded ${agent}"
           else
             print_warning "Installed ${agent} but it did not register — activate with: launchctl load ${target}"
@@ -1486,7 +1510,12 @@ EOF
   # above only prints a warning and continues, which would otherwise pass silently).
   # Opted-out agents are expected to be missing and are not flagged.
   # Skipped under --dry-run, since nothing was actually materialized to check.
-  if [ "$DRY_RUN" = false ]; then
+  #
+  # Also skipped when the applicability gate is closed (XACA-0734 review): on a
+  # cockpit / kanban-declined box every mandatory agent is missing BY DESIGN, and
+  # warning three times per upgrade about the correct state is exactly the kind of
+  # false alarm that teaches people to ignore warnings.
+  if [ "$DRY_RUN" = false ] && [ "$la_applicable" = true ]; then
     local _mandatory_agent
     for _mandatory_agent in $(_xaca0734_mandatory_launchagent_basenames); do
       if _xaca0734_is_opted_out "$_mandatory_agent"; then

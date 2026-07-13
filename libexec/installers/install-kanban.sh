@@ -10,11 +10,13 @@ source "$SCRIPT_DIR/../lib/common.sh"
 source "$SCRIPT_DIR/../lib/constants.sh"
 # XACA-0734: opt-out sentinel helpers. Each install_<x>_launchagent() below
 # CHECKS the sentinel and refuses to install when the user has opted out;
-# uninstall_<x>_launchagent() RECORDS an opt-out (though its only current
-# caller, uninstall_kanban_system, immediately wipes the whole sentinel again —
-# see that function's header comment). This lets `aiteamforge upgrade` tell
-# "deliberately removed" from "never existed on this box" instead of inferring
-# it from disk state. Full contract + lifecycle: see lib/launchagents.sh.
+# uninstall_<x>_launchagent() RECORDS an opt-out — but ONLY for a targeted,
+# single-agent removal. During the BATCH teardown (uninstall_kanban_system) the
+# recording is suppressed via _xaca0734_record_optout_unless_batch, because
+# "remove the kanban system" is not a statement about which agents you want on a
+# future reinstall. This lets `aiteamforge upgrade` tell "deliberately removed"
+# from "never existed on this box" instead of inferring it from disk state.
+# Full contract + lifecycle: see lib/launchagents.sh.
 source "$SCRIPT_DIR/../lib/launchagents.sh"
 
 #──────────────────────────────────────────────────────────────────────────────
@@ -1022,15 +1024,20 @@ install_backup_launchagent() {
 # Uninstall backup LaunchAgent
 #
 # XACA-0734: records the opt-out so a later `aiteamforge upgrade` does NOT
-# re-materialize this mandatory agent. NOTE the sentinel is recorded
-# unconditionally — even when the plist is already gone — because the intent
-# ("I do not want this agent") is what we are persisting, not the disk state.
-# The batch caller uninstall_kanban_system() wipes the whole sentinel afterward;
-# see its comment for why that is required and not a contradiction.
+# re-materialize this mandatory agent. The record happens even when the plist is
+# already gone — the intent ("I do not want this agent") is what we persist, not
+# the disk state.
+#
+# ...EXCEPT during a batch teardown, where _xaca0734_record_optout_unless_batch
+# suppresses it: uninstall_kanban_system means "remove the kanban system", which
+# expresses no preference at all about individual agents on a future reinstall.
+# Recording there — and then trying to undo it — is what let a Ctrl-C'd uninstall
+# permanently seal a box against auto-upgrade. See uninstall_kanban_system's
+# header and lib/launchagents.sh.
 uninstall_backup_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/${KANBAN_BACKUP_LABEL}.plist"
 
-    _xaca0734_record_optout "${KANBAN_BACKUP_LABEL}.plist"
+    _xaca0734_record_optout_unless_batch "${KANBAN_BACKUP_LABEL}.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading backup LaunchAgent"
@@ -1083,7 +1090,7 @@ install_lcars_health_launchagent() {
 uninstall_lcars_health_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-health.plist"
 
-    _xaca0734_record_optout "com.aiteamforge.lcars-health.plist"
+    _xaca0734_record_optout_unless_batch "com.aiteamforge.lcars-health.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS health LaunchAgent"
@@ -1172,7 +1179,7 @@ install_lcars_watch_launchagent() {
 uninstall_lcars_watch_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.lcars-watch.plist"
 
-    _xaca0734_record_optout "com.aiteamforge.lcars-watch.plist"
+    _xaca0734_record_optout_unless_batch "com.aiteamforge.lcars-watch.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading LCARS watch LaunchAgent"
@@ -1305,7 +1312,7 @@ install_cellar_watch_launchagent() {
 uninstall_cellar_watch_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.cellar-watch.plist"
 
-    _xaca0734_record_optout "com.aiteamforge.cellar-watch.plist"
+    _xaca0734_record_optout_unless_batch "com.aiteamforge.cellar-watch.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading cellar watch LaunchAgent"
@@ -1816,7 +1823,7 @@ install_auto_upgrade_launchagent() {
 uninstall_auto_upgrade_launchagent() {
     local plist_file="$HOME/Library/LaunchAgents/com.aiteamforge.auto-upgrade.plist"
 
-    _xaca0734_record_optout "com.aiteamforge.auto-upgrade.plist"
+    _xaca0734_record_optout_unless_batch "com.aiteamforge.auto-upgrade.plist"
 
     if [ -f "$plist_file" ]; then
         info "Unloading auto-upgrade LaunchAgent..."
@@ -2618,6 +2625,42 @@ install_kanban_system() {
 uninstall_kanban_system() {
     header "Uninstalling LCARS Kanban System"
 
+    # ═══ XACA-0734: THIS IS A BATCH TEARDOWN, NOT A STRING OF OPT-OUTS ═══
+    #
+    # Read this before "simplifying" it away.
+    #
+    # Every uninstall_<x>_launchagent() below CAN record an opt-out, because a
+    # TARGETED removal means "I do not want this agent" and `aiteamforge upgrade`
+    # must respect that rather than re-materializing it. But this function is a
+    # BATCH teardown of the whole kanban system. "Remove the kanban system" says
+    # nothing about which agents the user wants if they ever reinstall it — so
+    # recording an opt-out for each one, here, would be inventing intent nobody
+    # expressed. That is the sin this entire ticket exists to punish.
+    #
+    # The first cut of XACA-0734 recorded anyway and wiped the sentinel at the end
+    # to undo it. This script runs under `set -euo pipefail`, so any non-zero exit
+    # — or a Ctrl-C, which is an utterly normal response to an uninstall you began
+    # by mistake — landing between the first record and the final wipe left the
+    # sentinel listing EVERY MANDATORY AGENT. Nothing downstream ever clears it
+    # (installers refuse an opted-out agent; upgrade skips it), so:
+    #
+    #     uninstall → ^C partway → reinstall
+    #       ⇒ auto-upgrade can never be installed by ANY code path, ever again
+    #
+    # ...which is the original self-sealing failure, resurrected on the
+    # uninstall→reinstall path. So we do not record at all: the flag below makes
+    # every helper skip its record for the duration of the batch. There is
+    # nothing to undo, so there is nothing an abort can leave behind. Note this
+    # replaced a trailing _xaca0734_clear_all_optouts() — DO NOT reintroduce it:
+    # with no batch recording, its only remaining effect would be to silently
+    # destroy the user's HAND-EDITED opt-outs, which are the sentinel's primary
+    # population path. (The FULL uninstall still wipes the sentinel, correctly —
+    # see aiteamforge-uninstall.sh, where the whole install is going away.)
+    #
+    # Scoped to this function: set before the calls, unset after, so a later
+    # targeted uninstall in the same shell records normally.
+    _XACA0734_BATCH_UNINSTALL=1
+
     # Unload LaunchAgents
     uninstall_backup_launchagent
     uninstall_cr_confluence_poller_launchagent
@@ -2627,39 +2670,7 @@ uninstall_kanban_system() {
     uninstall_lcars_runatload_launchagent
     uninstall_knowledge_sync_launchagent
 
-    # ═══ XACA-0734: WIPE THE OPT-OUT SENTINEL. THIS IS NOT OPTIONAL. ═══
-    #
-    # Read this before "simplifying" it away.
-    #
-    # Each uninstall_<x>_launchagent() above APPENDS its agent to the opt-out
-    # sentinel, because a TARGETED removal means "I do not want this agent" and
-    # `aiteamforge upgrade` must respect that instead of re-materializing it.
-    #
-    # But this function is a FULL uninstall, not a targeted one — it batch-calls
-    # every per-agent helper. So by the time we get here the sentinel lists
-    # EVERY agent, including the mandatory ones. If we left it in that state:
-    #
-    #     uninstall  →  sentinel = {auto-upgrade, lcars-health, kanban-backup, …}
-    #     reinstall  →  upgrade reads the sentinel, sees every mandatory agent
-    #                   marked "opted out", and suppresses all of them FOREVER
-    #
-    # ...which is precisely the self-sealing failure XACA-0734 exists to kill,
-    # just relocated to the uninstall→reinstall path. A full uninstall erases the
-    # installation, and that must include erasing its recorded preferences.
-    #
-    # Order matters: this MUST run AFTER the per-agent calls above, since they are
-    # the ones doing the appending.
-    #
-    # THIS WIPE IS THE ONLY THING THAT EVER CLEARS THESE ENTRIES. A later
-    # `aiteamforge setup` does NOT do it for you: install_<x>_launchagent() no
-    # longer auto-clears an opt-out on install (see the LIFECYCLE note in
-    # lib/launchagents.sh — that used to be the plan, and it was wrong, because
-    # install_kanban_system runs unconditionally on every setup/reconfigure, not
-    # just a fresh install, and would have silently reversed a deliberate
-    # hand-recorded opt-out). So without this call, a full uninstall followed by
-    # a fresh reinstall would leave every mandatory agent PERMANENTLY opted out
-    # — nothing downstream would ever clear those entries either. Wipe it here.
-    _xaca0734_clear_all_optouts
+    unset _XACA0734_BATCH_UNINSTALL
 
     # Remove installed files
     info "Removing kanban system files"
