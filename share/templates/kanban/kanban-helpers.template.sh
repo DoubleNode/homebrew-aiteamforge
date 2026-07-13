@@ -7223,8 +7223,8 @@ kb-run-debug() {
     # pre-reopen snapshot _kb_display_item_box captured earlier.
     local _debug_item_json _debug_subitem_count _debug_subitems_text
     _debug_item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
-    _debug_subitem_count=$(echo "$_debug_item_json" | jq '.subitems // [] | length')
-    _debug_subitems_text=$(echo "$_debug_item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)"' 2>/dev/null)
+    _debug_subitem_count=$(printf '%s\n' "$_debug_item_json" | jq '.subitems // [] | length')
+    _debug_subitems_text=$(printf '%s\n' "$_debug_item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)"' 2>/dev/null)
 
     # Build the debug prompt using shared helper
     local prompt
@@ -7326,8 +7326,8 @@ kb-work-debug() {
     # _kb_display_item_box captured earlier.
     local _debug_item_json _debug_subitem_count _debug_subitems_text
     _debug_item_json=$(_kb_jq_read "$board_file" ".backlog[$index] // empty")
-    _debug_subitem_count=$(echo "$_debug_item_json" | jq '.subitems // [] | length')
-    _debug_subitems_text=$(echo "$_debug_item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)"' 2>/dev/null)
+    _debug_subitem_count=$(printf '%s\n' "$_debug_item_json" | jq '.subitems // [] | length')
+    _debug_subitems_text=$(printf '%s\n' "$_debug_item_json" | jq -r '.subitems[] | "- **\(.id)**: [\(.status)] \(.title)"' 2>/dev/null)
 
     # Build the debug prompt using shared helper
     local prompt
