@@ -16,6 +16,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 import unittest
@@ -1456,6 +1457,297 @@ class TestBoardLessHelperPredicates(unittest.TestCase):
 
     def test_board_less_alias_of_none_for_non_alias_team(self):
         self.assertIsNone(aiteamforge_paths.board_less_alias_of("academy", {}))
+
+
+# ---------------------------------------------------------------------------
+# XACA-0794-008 / -009 / -012: the SHARED on-disk rewrite helper.
+#
+# All three self-heal passes (A.1 backfill, contract scrub, board-less markers)
+# now route through _rewrite_config_on_disk / _atomic_write_json. These tests pin
+# the three properties that were broken in all three cloned copies, and they drive
+# the real load_config() self-heal path against a temp config — never the real
+# ~/.aiteamforge/team-paths.json.
+#
+# Each property is asserted against MORE THAN ONE pass where practical, because the
+# whole point of the refactor is that the passes no longer have independent write
+# paths that could regress separately.
+# ---------------------------------------------------------------------------
+
+class TestSharedOnDiskRewriteContract(unittest.TestCase):
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="xaca0794_rewrite_test_")
+        self._config_path = os.path.join(self._tmp, "team-paths.json")
+        _reset_module_cache()
+        self._orig_env = os.environ.get("AITEAMFORGE_CONFIG")
+        os.environ["AITEAMFORGE_CONFIG"] = self._config_path
+
+    def tearDown(self):
+        _reset_module_cache()
+        if self._orig_env is None:
+            os.environ.pop("AITEAMFORGE_CONFIG", None)
+        else:
+            os.environ["AITEAMFORGE_CONFIG"] = self._orig_env
+        try:
+            shutil.rmtree(self._tmp)
+        except OSError:
+            pass
+
+    def _write_config(self, path=None, *, with_scrub_violation=False) -> dict:
+        """A config that still needs the board-less backfill (mainevent lacks markers).
+
+        with_scrub_violation additionally seeds a bare "freelance" key, which makes
+        the CONTRACT SCRUB pass fire too — letting a test prove the property holds
+        for a pre-existing pass, not just the new one.
+        """
+        teams = {
+            "academy": _minimal_team_entry("academy"),
+            "command": _minimal_team_entry("command"),
+            "mainevent": _customized_mainevent_entry(),
+        }
+        if with_scrub_violation:
+            teams["freelance"] = _minimal_team_entry("freelance")
+        cfg = {"schema_version": 3, "teams": teams}
+        with open(path or self._config_path, "w", encoding="utf-8") as fh:
+            json.dump(cfg, fh, indent=2)
+        return cfg
+
+    def _assert_rewrite_happened(self, path=None):
+        with open(path or self._config_path, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        self.assertIs(
+            on_disk["teams"]["mainevent"].get("board_less"), True,
+            "precondition: the self-heal pass must actually have rewritten the file",
+        )
+
+    # -- XACA-0794-008: file mode ------------------------------------------
+
+    def test_rewrite_preserves_0600_mode(self):
+        """A 0600 config must not silently widen to 0644 on self-heal.
+
+        The tmp file was created under the process umask and os.replace() carried
+        that mode onto the config. team-paths.json holds per-team Anthropic account
+        ids and API-key env-var names, so this was a real permission regression.
+        """
+        self._write_config()
+        os.chmod(self._config_path, 0o600)
+
+        aiteamforge_paths.load_config()  # triggers the on-disk backfill
+
+        self._assert_rewrite_happened()
+        mode = stat.S_IMODE(os.stat(self._config_path).st_mode)
+        self.assertEqual(
+            mode, 0o600,
+            f"config mode must survive the rewrite; got {oct(mode)} (expected 0o600)",
+        )
+
+    def test_rewrite_preserves_0640_mode_through_contract_scrub(self):
+        """Same property, exercised through a PRE-EXISTING pass (the contract scrub),
+        proving the fix is central rather than local to the new board-less pass."""
+        self._write_config(with_scrub_violation=True)
+        os.chmod(self._config_path, 0o640)
+
+        result = aiteamforge_paths.load_config()
+
+        self.assertNotIn(
+            "freelance", result["teams"],
+            "precondition: the contract scrub must actually have fired",
+        )
+        mode = stat.S_IMODE(os.stat(self._config_path).st_mode)
+        self.assertEqual(mode, 0o640, f"got {oct(mode)} (expected 0o640)")
+
+    # -- XACA-0794-009: symlinked config ------------------------------------
+
+    def test_rewrite_through_symlink_keeps_symlink_and_updates_target(self):
+        """os.replace(tmp, link) would replace the LINK with a regular file and
+        orphan the real target. The write must follow the link."""
+        real_path = os.path.join(self._tmp, "real-team-paths.json")
+        self._write_config(path=real_path)
+        os.symlink(real_path, self._config_path)
+
+        aiteamforge_paths.load_config()  # triggers the on-disk backfill
+
+        # The config path must STILL be a symlink...
+        self.assertTrue(
+            os.path.islink(self._config_path),
+            "the symlink was replaced by a regular file — the real target is orphaned",
+        )
+        self.assertEqual(os.path.realpath(self._config_path), os.path.realpath(real_path))
+
+        # ...and the REAL file behind it must carry the update.
+        with open(real_path, encoding="utf-8") as fh:
+            on_disk = json.load(fh)
+        self.assertIs(
+            on_disk["teams"]["mainevent"].get("board_less"), True,
+            "the symlink target did not receive the rewrite",
+        )
+
+    def test_rewrite_through_symlink_preserves_target_mode(self):
+        """008 and 009 must hold TOGETHER: the mode preserved is the real file's."""
+        real_path = os.path.join(self._tmp, "real-team-paths.json")
+        self._write_config(path=real_path)
+        os.chmod(real_path, 0o600)
+        os.symlink(real_path, self._config_path)
+
+        aiteamforge_paths.load_config()
+
+        self.assertTrue(os.path.islink(self._config_path))
+        mode = stat.S_IMODE(os.stat(real_path).st_mode)
+        self.assertEqual(mode, 0o600, f"got {oct(mode)} (expected 0o600)")
+
+    def test_no_tmp_files_left_behind(self):
+        """The atomic write must not litter .tmp.<pid> files next to the config."""
+        self._write_config()
+        aiteamforge_paths.load_config()
+
+        leftovers = [n for n in os.listdir(self._tmp) if ".tmp." in n]
+        self.assertEqual(leftovers, [], f"tmp files left behind: {leftovers}")
+
+    # -- XACA-0794-012: lock file identity ----------------------------------
+
+    def test_lock_file_is_not_unlinked_under_the_held_lock(self):
+        """The passes used to unlink the lock file while STILL holding the flock, so a
+        racing process could create a fresh lock inode and both would 'hold' the lock.
+        The lock must survive the rewrite — a lock's job is to have a stable identity.
+        """
+        self._write_config()
+        aiteamforge_paths.load_config()  # triggers the on-disk backfill
+
+        self._assert_rewrite_happened()
+        lock_path = os.path.join(self._tmp, "team-paths.json.lock")
+        self.assertTrue(
+            os.path.exists(lock_path),
+            "lock file was unlinked — mutual exclusion is not guaranteed against a racing process",
+        )
+
+    def test_lock_is_taken_on_the_resolved_path_not_the_symlink(self):
+        """Two processes reaching the same config, one via a symlink and one via the
+        real path, must contend for the SAME lock inode."""
+        real_path = os.path.join(self._tmp, "real-team-paths.json")
+        self._write_config(path=real_path)
+        os.symlink(real_path, self._config_path)
+
+        aiteamforge_paths.load_config()
+
+        self.assertTrue(
+            os.path.exists(os.path.join(self._tmp, "real-team-paths.json.lock")),
+            "lock must be taken on the resolved target, not on the symlink name",
+        )
+
+    # -- the self-heal itself still works ------------------------------------
+
+    def test_rewrite_is_still_idempotent_after_refactor(self):
+        """Guard against the refactor breaking the skip-fast no-op property."""
+        self._write_config()
+        aiteamforge_paths.load_config()
+        with open(self._config_path, encoding="utf-8") as fh:
+            after_first = fh.read()
+
+        _reset_module_cache()
+        aiteamforge_paths.load_config()
+        with open(self._config_path, encoding="utf-8") as fh:
+            after_second = fh.read()
+
+        self.assertEqual(after_first, after_second)
+
+
+# ---------------------------------------------------------------------------
+# XACA-0794-011: shell/Python parity for the board-less alias fallback.
+#
+# _kb_board_less_alias_of() returned 0 with EMPTY output when an overlay carried
+# board_less=true but no alias_of, so the caller's error message lost its "use
+# 'command' instead" guidance. Python's board_less_alias_of() falls back to
+# DEFAULT_TEAMS in exactly that case. These tests pin the two halves together by
+# actually SOURCING kanban-helpers.sh under zsh and calling the function.
+# ---------------------------------------------------------------------------
+
+class TestShellBoardLessAliasFallbackParity(unittest.TestCase):
+
+    HELPERS = Path(__file__).resolve().parent.parent / "kanban-helpers.sh"
+
+    def setUp(self):
+        if shutil.which("zsh") is None:
+            self.skipTest("zsh not available")
+        if not self.HELPERS.is_file():
+            self.skipTest(f"kanban-helpers.sh not found at {self.HELPERS}")
+        self._tmp = tempfile.mkdtemp(prefix="xaca0794_shellparity_")
+
+    def tearDown(self):
+        try:
+            shutil.rmtree(self._tmp)
+        except OSError:
+            pass
+
+    def _run_alias_of(self, overlay: dict, team: str = "mainevent"):
+        """Source kanban-helpers.sh under zsh against a temp overlay and echo
+        _kb_board_less_alias_of's stdout + exit status."""
+        import subprocess
+
+        cfg_path = os.path.join(self._tmp, "team-paths.json")
+        with open(cfg_path, "w", encoding="utf-8") as fh:
+            json.dump(overlay, fh, indent=2)
+
+        script = (
+            f'export AITEAMFORGE_CONFIG="{cfg_path}"\n'
+            'export KB_TEAM=academy KB_TERMINAL=agent\n'
+            f'source "{self.HELPERS}" >/dev/null 2>&1\n'
+            f'_out=$(_kb_board_less_alias_of "{team}"); _rc=$?\n'
+            'printf "%s|%s" "$_out" "$_rc"\n'
+        )
+        proc = subprocess.run(
+            ["zsh", "-c", script], capture_output=True, text=True, timeout=120,
+        )
+        out, _, rc = proc.stdout.rpartition("|")
+        return out.strip(), rc.strip()
+
+    def _overlay(self, mainevent_entry: dict) -> dict:
+        return {
+            "schema_version": 3,
+            "teams": {
+                "academy": _minimal_team_entry("academy"),
+                "command": _minimal_team_entry("command"),
+                "mainevent": mainevent_entry,
+            },
+        }
+
+    def test_alias_falls_back_to_builtin_when_overlay_omits_alias_of(self):
+        """THE BUG: board_less=true with NO alias_of used to yield empty output."""
+        entry = {"team_code": "MEV", "board_less": True}  # no alias_of
+        out, rc = self._run_alias_of(self._overlay(entry))
+
+        self.assertEqual(rc, "0", "board-less team must still be reported as board-less")
+        self.assertEqual(
+            out, "command",
+            "shell must fall back to the built-in DEFAULT_TEAMS alias like Python's "
+            "board_less_alias_of() does — otherwise the error message loses the alias target",
+        )
+        # Parity: Python agrees on the same overlay entry.
+        self.assertEqual(aiteamforge_paths.board_less_alias_of("mainevent", entry), "command")
+
+    def test_alias_falls_back_when_overlay_alias_of_is_null(self):
+        """A JSON null alias_of is one of the _ABSENT_SENTINELS — same fallback."""
+        entry = {"team_code": "MEV", "board_less": True, "alias_of": None}
+        out, rc = self._run_alias_of(self._overlay(entry))
+
+        self.assertEqual(rc, "0")
+        self.assertEqual(out, "command")
+        self.assertEqual(aiteamforge_paths.board_less_alias_of("mainevent", entry), "command")
+
+    def test_explicit_overlay_alias_of_still_wins(self):
+        """The marker remains authoritative when it DOES carry a target."""
+        entry = {"team_code": "MEV", "board_less": True, "alias_of": "command"}
+        out, rc = self._run_alias_of(self._overlay(entry))
+
+        self.assertEqual(rc, "0")
+        self.assertEqual(out, "command")
+
+    def test_non_board_less_team_returns_nonzero(self):
+        """A normal team must NOT be reported as a board-less alias."""
+        out, rc = self._run_alias_of(
+            self._overlay(_customized_mainevent_entry()), team="academy",
+        )
+        self.assertEqual(rc, "1")
+        self.assertEqual(out, "")
 
 
 # ---------------------------------------------------------------------------

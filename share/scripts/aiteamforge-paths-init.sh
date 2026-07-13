@@ -137,22 +137,38 @@ printf '%s\n' "$CONFIG_JSON" > "$CONFIG_PATH"
 
 echo "Created: $CONFIG_PATH"
 echo "Teams:"
-python3 -c "
+# XACA-0794-010: this listing used to re-implement the board-less check inline AND
+# re-type the _ABSENT_SENTINELS tuple as a literal (None, '', 'null') — a fourth
+# copy of a heuristic that already had a named owner in the loader this very script
+# importlib-loads a few lines above (k501 sibling-heuristic drift). It now imports
+# team_is_board_less / board_less_alias_of / _ABSENT_SENTINELS from the loader, so
+# the sentinel set has exactly ONE owner and cannot drift out from under this file.
+# Reads the config back from the file just written (rather than stdin) so the loader
+# path can travel in argv without fighting the heredoc for stdin.
+python3 - "$PYTHON_LOADER" "$CONFIG_PATH" <<'PYEOF'
 import json, sys
-config = json.loads(sys.stdin.read())
+import importlib.util
+from pathlib import Path
+
+loader_path, config_path = sys.argv[1], sys.argv[2]
+spec = importlib.util.spec_from_file_location("aiteamforge_paths", loader_path)
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+
+config = json.loads(Path(config_path).read_text(encoding="utf-8"))
 for team, entry in sorted(config['teams'].items()):
     port = entry.get('lcars_port')
     port_str = f'  (LCARS :{port})' if port else ''
-    # XACA-0794: board-less teams (e.g. mainevent) carry NO kanban_dir — the key
-    # is ABSENT in DEFAULT_TEAMS. The previous entry['kanban_dir'] subscript was
-    # unguarded and raised KeyError here, killing the whole team listing after the
-    # config had already been written. Use .get() and render the absence in words
-    # so nobody reads a blank/None and files another 'phantom team' ticket.
+    # Board-less teams (e.g. mainevent) carry NO kanban_dir — the key is ABSENT in
+    # DEFAULT_TEAMS. An unguarded entry['kanban_dir'] subscript used to raise
+    # KeyError here, killing the whole listing AFTER the config was already written.
+    # The explicit marker is checked first, then the legacy sentinel forms, exactly
+    # as get_team_kanban_dir() does.
     kanban_dir = entry.get('kanban_dir')
-    if entry.get('board_less') is True or kanban_dir in (None, '', 'null'):
-        alias = entry.get('alias_of')
+    if mod.team_is_board_less(entry) or kanban_dir in mod._ABSENT_SENTINELS:
+        alias = mod.board_less_alias_of(team, entry)
         label = f'(board-less alias — use {alias!r})' if alias else '(board-less — no kanban board)'
     else:
         label = kanban_dir
     print(f'  {team:<45} {label}{port_str}')
-" <<< "$CONFIG_JSON"
+PYEOF

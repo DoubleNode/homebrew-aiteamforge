@@ -73,9 +73,97 @@ fi
 # When changing this function UPDATE ALL THREE and run
 #   homebrew-tap/tests/test-xaca-0649-kanban-dir-resolver.sh
 # to verify parity.
+# ─────────────────────────────────────────────────────────────────────────────
+# Board-less alias marker (XACA-0794 / XACA-0794-013)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# A board-less team owns NO kanban board but keeps its other identities (LCARS
+# port, team_code, crew launcher, personas). "mainevent" is the only one today: a
+# coordination/port identity (LCARS 8400, team_code MEV) whose operative kanban
+# identity is "command".
+#
+# WHY THIS EXISTS (XACA-0794-013): this resolver never had a board-less guard --
+# not even XACA-0727's, which only ever landed on the dev-tree copy. So on a
+# CONSUMER box a kb-* call for 'mainevent' read kanban_dir=null from the registry,
+# failed Strategy 1's [[ -d ]] test, matched no case arm, and fell through to the
+# Strategy-3 catch-all -- silently resolving to ACADEMY's board and operating on
+# the wrong team's data. Erroring clearly beats corrupting a bystander.
+#
+# Contract: echo the alias target and return 0 when $1 is board-less; return 1
+# otherwise. Mirrors board_less_alias_of() in kanban-hooks/aiteamforge_paths.py --
+# EXPLICIT OVERLAY MARKER FIRST, built-in fallback second.
+_kb_board_less_builtin_alias_of() {
+    case "${1-}" in
+        mainevent) echo "command"; return 0 ;;
+    esac
+    return 1
+}
+
+_kb_board_less_alias_of() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+
+    # 1. Explicit overlay marker -- authoritative once the overlay is migrated.
+    #    The helper exits non-zero for "not board-less" AND for "config unreadable";
+    #    both correctly mean "fall through to the built-in table" below.
+    local _cfg_file="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    if [[ -f "$_cfg_file" ]] && command -v python3 &>/dev/null; then
+        local _alias
+        if _alias=$(python3 - "$_cfg_file" "$team" 2>/dev/null <<'PYEOF'
+import json, sys
+from pathlib import Path
+cfg, team = sys.argv[1], sys.argv[2]
+try:
+    entry = json.loads(Path(cfg).read_text(encoding="utf-8")).get("teams", {}).get(team, {})
+except Exception:
+    sys.exit(1)
+if not isinstance(entry, dict) or entry.get("board_less") is not True:
+    sys.exit(1)
+alias = entry.get("alias_of")
+# Absence is representable as missing / null / "null" / "" -- normalize all four
+# (_ABSENT_SENTINELS in aiteamforge_paths.py).
+if alias not in (None, "", "null"):
+    print(alias)
+sys.exit(0)
+PYEOF
+        ); then
+            if [[ -n "$_alias" ]]; then
+                echo "$_alias"
+            else
+                # Overlay marks the team board-less but omits alias_of. Python's
+                # board_less_alias_of() falls back to DEFAULT_TEAMS here; mirror it,
+                # or the error message below loses its "use 'command'" guidance.
+                _kb_board_less_builtin_alias_of "$team" || true
+            fi
+            return 0
+        fi
+    fi
+
+    # 2. Built-in fallback -- un-migrated overlay, or no overlay at all.
+    if _kb_board_less_builtin_alias_of "$team"; then
+        return 0
+    fi
+
+    return 1
+}
+
 _kb_get_kanban_dir() {
     local team="$1"
     local _atf_dir="${AITEAMFORGE_DIR}"
+
+    # ── Strategy 0: board-less guard (XACA-0727 / XACA-0794-013) ─────────────
+    # Refuse BEFORE any resolution strategy. A board-less alias has no board, so
+    # every strategy below would be answering the wrong question -- and the
+    # catch-all would answer it with someone else's board.
+    local _bl_alias
+    if _bl_alias=$(_kb_board_less_alias_of "$team"); then
+        if [[ -n "$_bl_alias" ]]; then
+            echo "kb: '$team' is a board-less alias (no kanban board) — this is intentional, not corruption. Use '$_bl_alias' instead. (XACA-0727/XACA-0794)" >&2
+        else
+            echo "kb: '$team' is a board-less alias (no kanban board) — this is intentional, not corruption. (XACA-0727/XACA-0794)" >&2
+        fi
+        return 1
+    fi
 
     # ── Strategy 1: team-paths.json registry (XACA-0649) ─────────────────────
     # Read kanban_dir directly from the registry — the same source the Python

@@ -126,6 +126,7 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import stat
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -776,77 +777,182 @@ def diff_missing_anthropic_fields(config: dict) -> list[tuple[str, list[str]]]:
     return result
 
 
+# ---------------------------------------------------------------------------
+# Shared on-disk rewrite machinery (XACA-0794-008 / -009 / -012)
+# ---------------------------------------------------------------------------
+#
+# THREE self-healing passes rewrite team-paths.json during load_config():
+# the A.1 field backfill (XACA-0522), the contract scrub (XACA-0643), and the
+# board-less marker backfill (XACA-0794). Each was originally written by cloning
+# the previous one, so each carried its own copy of the same lock / TOCTOU /
+# backup / atomic-write skeleton — and therefore its own copy of the same three
+# defects. That is the k501 sibling-heuristic drift failure mode, and patching
+# three copies would only have seeded a fourth.
+#
+# The skeleton now lives HERE, once. The passes below supply only what actually
+# differs between them: a predicate, a transform, a backup tag, and a log label.
+# A fourth pass must reuse this driver rather than clone it.
+
+
+def _atomic_write_json(target: Path, data: dict) -> None:
+    """Atomically rewrite *target* with *data*, preserving file mode and symlink identity.
+
+    XACA-0794-009 (symlink): the write follows the link and replaces the RESOLVED
+    target. ``os.replace(tmp, link_path)`` would silently swap the symlink itself
+    for a regular file and orphan the real file it pointed at — a config a user
+    deliberately symlinked (e.g. into a dotfiles repo) would stop tracking.
+
+    XACA-0794-008 (mode): the tmp file is created under the process umask, so it
+    lands at whatever the umask dictates (commonly 0644) regardless of what the
+    original was. team-paths.json carries per-team Anthropic account ids and
+    API-key env-var names, so a 0600 config silently widening to 0644 on the next
+    self-heal is a real permission regression. Copy the original's mode onto the
+    tmp file BEFORE the replace, so the mode change is atomic with the content.
+
+    The tmp file is created in the resolved target's own directory — os.replace()
+    is only atomic within a single filesystem.
+
+    Raises on failure (callers degrade to an in-memory transform).
+    """
+    resolved = target.resolve()
+
+    # Capture the mode we must restore. A missing original is not fatal — we simply
+    # have no mode to preserve and let the umask stand.
+    try:
+        orig_mode: int | None = stat.S_IMODE(os.stat(resolved).st_mode)
+    except OSError:
+        orig_mode = None
+
+    # with_name (not with_suffix): a symlink may resolve to a file whose name has a
+    # different suffix, and with_suffix would clobber it.
+    tmp_path = resolved.with_name(f"{resolved.name}.tmp.{os.getpid()}")
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        if orig_mode is not None:
+            os.chmod(tmp_path, orig_mode)
+        os.replace(str(tmp_path), str(resolved))
+    except Exception:
+        tmp_path.unlink(missing_ok=True)
+        raise
+
+
+def _rewrite_config_on_disk(
+    config_path: Path,
+    current: dict,
+    *,
+    label: str,
+    backup_tag: str,
+    needs_change: Any,
+    transform: Any,
+    describe: Any = None,
+) -> dict | None:
+    """Snapshot, lock, transform, and atomically rewrite the config. Never raises.
+
+    The single owner of the self-heal write path. Parameters:
+      label        — human name for log lines ("A.1 backfill").
+      backup_tag   — backup filename infix ("a1-backfill").
+      needs_change — (cfg) -> truthy when this pass has work to do. Called on the
+                     in-memory config for skip-fast AND on the re-read config for
+                     TOCTOU defense.
+      transform    — (cfg) -> a transformed COPY (must not mutate its input).
+      describe     — optional (cfg) -> list[str] of per-change detail log lines.
+
+    Returns the transformed config on success (disk write) or on any degraded path
+    (snapshot failure, lost race, write failure) so the calling process always sees
+    the corrected shape even when disk could not be updated.
+    Returns None only on skip-fast: nothing to do, no lock, no backup, no write.
+    """
+    if not needs_change(current):
+        return None
+
+    try:
+        # Lock the RESOLVED path so a process reaching the config through a symlink
+        # and one reaching the real file take the SAME lock inode.
+        resolved = config_path.resolve()
+        lock_file = resolved.with_name(f"{resolved.name}.lock")
+
+        # XACA-0794-012: open with "a" (never truncate) and NEVER unlink. The three
+        # passes used to `lock_file.unlink()` in the finally while STILL holding the
+        # flock. A racing process blocked on that same path would then be holding a
+        # lock on an inode that is no longer reachable by name; the next arrival
+        # creates a FRESH inode and acquires it immediately, so two processes both
+        # believe they hold the lock. Harmless today (the transforms are additive,
+        # re-read under the lock, and idempotent — worst case a redundant write),
+        # but it is not a property to leave load-bearing. The lock file is tiny and
+        # persistent by design: a lock's whole job is to have a stable identity.
+        with open(lock_file, "a") as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                # TOCTOU defense — re-read under the lock in case another process raced.
+                try:
+                    reread = json.loads(resolved.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    reread = current
+
+                if not needs_change(reread):
+                    # Someone else won the race. The in-memory `current` is stale, but
+                    # this process must still SEE the corrected shape, so return the
+                    # transformed in-memory form rather than None.
+                    return transform(current)
+
+                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+                backup_path = resolved.with_name(
+                    f"{resolved.name}.bak-pre-{backup_tag}-{timestamp}"
+                )
+                try:
+                    backup_path.write_bytes(resolved.read_bytes())
+                except OSError as exc:
+                    print(
+                        f"[aiteamforge-paths] {label}: snapshot failed ({exc}) — aborting disk write",
+                        file=sys.stderr,
+                    )
+                    return transform(current)
+
+                transformed = transform(reread)
+                _atomic_write_json(resolved, transformed)
+
+                if describe is not None:
+                    for line in describe(current):
+                        print(f"[aiteamforge-paths] {label}: {line}", file=sys.stderr)
+                print(
+                    f"[aiteamforge-paths] {label}: snapshot={backup_path}",
+                    file=sys.stderr,
+                )
+                return transformed
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+                # Intentionally NO unlink — see XACA-0794-012 note above.
+    except Exception as exc:
+        print(
+            f"[aiteamforge-paths] {label}: disk write failed ({exc}) — "
+            f"degrading to in-memory transform",
+            file=sys.stderr,
+        )
+        return transform(current)
+
+
 def _backfill_a1_fields_on_disk(config_path: Path, current: dict) -> dict | None:
     """Snapshot, lock, upgrade, and atomically write the config if any team lacks A.1 fields.
 
     Returns the upgraded config dict on success (disk write or in-memory fallback).
     Returns None only when no fields are missing (skip-fast — no lock, no backup, no write).
-    Never raises.
+    Never raises. Write mechanics live in _rewrite_config_on_disk.
     """
-    if not diff_missing_anthropic_fields(current):
-        return None
-
-    try:
-        lock_file = config_path.with_suffix(".json.lock")
-        with open(lock_file, "w") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                # TOCTOU defense — re-read under the lock in case another process raced
-                try:
-                    reread = json.loads(config_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    reread = current
-
-                if not diff_missing_anthropic_fields(reread):
-                    # Someone else won the race; the in-memory current is stale but
-                    # we should still return the in-memory upgraded form so this
-                    # process sees the correct fields.
-                    return upgrade_config_to_v3(current)
-
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                backup_path = config_path.with_name(
-                    f"{config_path.name}.bak-pre-a1-backfill-{timestamp}"
-                )
-                try:
-                    backup_path.write_bytes(config_path.read_bytes())
-                except OSError as exc:
-                    print(
-                        f"[aiteamforge-paths] A.1 backfill: snapshot failed ({exc}) — aborting disk write",
-                        file=sys.stderr,
-                    )
-                    return upgrade_config_to_v3(current)
-
-                upgraded = upgrade_config_to_v3(reread)
-                tmp_path = config_path.with_suffix(f".json.tmp.{os.getpid()}")
-                try:
-                    with open(tmp_path, "w", encoding="utf-8") as f:
-                        json.dump(upgraded, f, indent=2)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(str(tmp_path), str(config_path))
-                except Exception:
-                    tmp_path.unlink(missing_ok=True)
-                    raise
-
-                for slug, fields in diff_missing_anthropic_fields(current):
-                    print(
-                        f"[aiteamforge-paths] A.1 backfill: team={slug} fields={fields}",
-                        file=sys.stderr,
-                    )
-                print(
-                    f"[aiteamforge-paths] A.1 backfill: snapshot={backup_path}",
-                    file=sys.stderr,
-                )
-                return upgraded
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                lock_file.unlink(missing_ok=True)
-    except Exception as exc:
-        print(
-            f"[aiteamforge-paths] A.1 backfill: disk write failed ({exc}) — degrading to in-memory upgrade",
-            file=sys.stderr,
-        )
-        return upgrade_config_to_v3(current)
+    return _rewrite_config_on_disk(
+        config_path,
+        current,
+        label="A.1 backfill",
+        backup_tag="a1-backfill",
+        needs_change=diff_missing_anthropic_fields,
+        transform=upgrade_config_to_v3,
+        describe=lambda cfg: [
+            f"team={slug} fields={fields}"
+            for slug, fields in diff_missing_anthropic_fields(cfg)
+        ],
+    )
 
 
 def _find_contract_violating_keys(config: dict) -> list[str]:
@@ -869,14 +975,10 @@ def _scrub_contract_violating_keys_on_disk(config_path: Path, current: dict) -> 
     """Snapshot, lock, drop bare parameterized-template keys, atomically rewrite.
 
     Self-heals configs written before XACA-0643 (which seeded bare "medical"/
-    "freelance"). Mirrors _backfill_a1_fields_on_disk's lock/TOCTOU/backup/
-    atomic-write discipline. Returns the cleaned config dict when a change is
-    made, or None when there is nothing to scrub (skip-fast — no lock, no
-    backup, no write). Never raises.
+    "freelance"). Returns the cleaned config dict when a change is made, or None
+    when there is nothing to scrub (skip-fast — no lock, no backup, no write).
+    Never raises. Write mechanics live in _rewrite_config_on_disk.
     """
-    if not _find_contract_violating_keys(current):
-        return None
-
     def _clean(cfg: dict) -> dict:
         import copy
         out = copy.deepcopy(cfg)
@@ -885,64 +987,19 @@ def _scrub_contract_violating_keys_on_disk(config_path: Path, current: dict) -> 
             teams.pop(k, None)
         return out
 
-    try:
-        lock_file = config_path.with_suffix(".json.lock")
-        with open(lock_file, "w") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                # TOCTOU defense — re-read under the lock in case another process raced.
-                try:
-                    reread = json.loads(config_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    reread = current
-
-                violations = _find_contract_violating_keys(reread)
-                if not violations:
-                    # Someone else won the race; return the in-memory cleaned form
-                    # so this process still sees the corrected team set.
-                    return _clean(current)
-
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                backup_path = config_path.with_name(
-                    f"{config_path.name}.bak-pre-contract-scrub-{timestamp}"
-                )
-                try:
-                    backup_path.write_bytes(config_path.read_bytes())
-                except OSError as exc:
-                    print(
-                        f"[aiteamforge-paths] contract scrub: snapshot failed ({exc}) — aborting disk write",
-                        file=sys.stderr,
-                    )
-                    return _clean(current)
-
-                cleaned = _clean(reread)
-                tmp_path = config_path.with_suffix(f".json.tmp.{os.getpid()}")
-                try:
-                    with open(tmp_path, "w", encoding="utf-8") as f:
-                        json.dump(cleaned, f, indent=2)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(str(tmp_path), str(config_path))
-                except Exception:
-                    tmp_path.unlink(missing_ok=True)
-                    raise
-
-                print(
-                    f"[aiteamforge-paths] contract scrub: removed bare "
-                    f"parameterized-template keys {sorted(violations)} from "
-                    f"{config_path} (team-id contract violation); snapshot={backup_path}",
-                    file=sys.stderr,
-                )
-                return cleaned
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                lock_file.unlink(missing_ok=True)
-    except Exception as exc:
-        print(
-            f"[aiteamforge-paths] contract scrub: disk write failed ({exc}) — degrading to in-memory clean",
-            file=sys.stderr,
-        )
-        return _clean(current)
+    return _rewrite_config_on_disk(
+        config_path,
+        current,
+        label="contract scrub",
+        backup_tag="contract-scrub",
+        needs_change=_find_contract_violating_keys,
+        transform=_clean,
+        describe=lambda cfg: [
+            f"removed bare parameterized-template keys "
+            f"{sorted(_find_contract_violating_keys(cfg))} from {config_path} "
+            f"(team-id contract violation)"
+        ],
+    )
 
 
 def diff_missing_board_less_markers(config: dict) -> list[tuple[str, str | None]]:
@@ -1020,78 +1077,24 @@ def _backfill_board_less_markers_on_disk(config_path: Path, current: dict) -> di
     to stay in lockstep forever: whichever seed wrote the overlay, the first
     Python read converges it onto the marker shape.
 
-    Mirrors _backfill_a1_fields_on_disk's lock / TOCTOU / backup / atomic-write
-    discipline. Returns the upgraded config when a change is made, or None when
-    there is nothing to do (skip-fast — no lock, no backup, no write).
-    Never raises.
+    Returns the upgraded config when a change is made, or None when there is
+    nothing to do (skip-fast — no lock, no backup, no write). Never raises.
+    Write mechanics live in _rewrite_config_on_disk — this pass deliberately owns
+    NO copy of the lock / TOCTOU / backup / atomic-write skeleton.
     """
-    if not diff_missing_board_less_markers(current):
-        return None
-
-    try:
-        lock_file = config_path.with_suffix(".json.lock")
-        with open(lock_file, "w") as lock:
-            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
-            try:
-                # TOCTOU defense — re-read under the lock in case another process raced.
-                try:
-                    reread = json.loads(config_path.read_text(encoding="utf-8"))
-                except (OSError, json.JSONDecodeError):
-                    reread = current
-
-                if not diff_missing_board_less_markers(reread):
-                    # Someone else won the race; still return the in-memory upgraded
-                    # form so this process sees the markers.
-                    return apply_board_less_markers(current)
-
-                timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-                backup_path = config_path.with_name(
-                    f"{config_path.name}.bak-pre-board-less-markers-{timestamp}"
-                )
-                try:
-                    backup_path.write_bytes(config_path.read_bytes())
-                except OSError as exc:
-                    print(
-                        f"[aiteamforge-paths] board-less markers: snapshot failed "
-                        f"({exc}) — aborting disk write",
-                        file=sys.stderr,
-                    )
-                    return apply_board_less_markers(current)
-
-                upgraded = apply_board_less_markers(reread)
-                tmp_path = config_path.with_suffix(f".json.tmp.{os.getpid()}")
-                try:
-                    with open(tmp_path, "w", encoding="utf-8") as f:
-                        json.dump(upgraded, f, indent=2)
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(str(tmp_path), str(config_path))
-                except Exception:
-                    tmp_path.unlink(missing_ok=True)
-                    raise
-
-                for slug, alias in diff_missing_board_less_markers(current):
-                    print(
-                        f"[aiteamforge-paths] board-less markers: team={slug} "
-                        f"board_less=true alias_of={alias!r} (XACA-0794 — the null "
-                        f"kanban_dir is intentional, not corruption)",
-                        file=sys.stderr,
-                    )
-                print(
-                    f"[aiteamforge-paths] board-less markers: snapshot={backup_path}",
-                    file=sys.stderr,
-                )
-                return upgraded
-            finally:
-                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
-                lock_file.unlink(missing_ok=True)
-    except Exception as exc:
-        print(
-            f"[aiteamforge-paths] board-less markers: disk write failed ({exc}) — "
-            f"degrading to in-memory upgrade",
-            file=sys.stderr,
-        )
-        return apply_board_less_markers(current)
+    return _rewrite_config_on_disk(
+        config_path,
+        current,
+        label="board-less markers",
+        backup_tag="board-less-markers",
+        needs_change=diff_missing_board_less_markers,
+        transform=apply_board_less_markers,
+        describe=lambda cfg: [
+            f"team={slug} board_less=true alias_of={alias!r} (XACA-0794 — the null "
+            f"kanban_dir is intentional, not corruption)"
+            for slug, alias in diff_missing_board_less_markers(cfg)
+        ],
+    )
 
 
 # ---------------------------------------------------------------------------
