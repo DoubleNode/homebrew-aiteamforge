@@ -369,12 +369,35 @@ start_lcars() {
   for team in "${teams[@]}"; do
     [ -z "$team" ] && continue
 
-    # Resolve this team's LCARS port from the aiteamforge_paths registry.
+    # get_configured_teams returns BASE ids ("finance"), but the registry keys
+    # project-scoped teams by INSTANCE id ("finance-personal"). Map before the
+    # lookup, else `stop` kills those servers and `start` silently skips them,
+    # leaving LCARS down with no way to recover (XACA-0792).
+    local instance=""
+    instance=$(get_team_instance_id "$team" 2>/dev/null) || instance="$team"
+    [ -z "$instance" ] && instance="$team"
+
+    # Prefer the instance id; fall back to the base id so this stays correct on
+    # installs whose .teams[] already holds instance ids.
     local port=""
-    if ! port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null) || [ -z "$port" ]; then
-      print_warning "No LCARS port allocated for '${team}' — skipping"
+    local team_key=""
+    local cand
+    for cand in "$instance" "$team"; do
+      [ -z "$cand" ] && continue
+      if port=$(aiteamforge_team_lcars_port "$cand" 2>/dev/null) && [ -n "$port" ]; then
+        team_key="$cand"
+        break
+      fi
+    done
+
+    if [ -z "$team_key" ] || [ -z "$port" ]; then
+      print_warning "No LCARS port allocated for '${team}' (tried '${instance}') — skipping"
       continue
     fi
+
+    # Everything downstream (port, LCARS_TEAM, session name) keys off the id that
+    # actually resolved.
+    team="$team_key"
 
     # Already serving on this port? Treat as success and LEAVE IT RUNNING.
     # (Do NOT fall through to start_lcars_server — its pkill would kill a healthy

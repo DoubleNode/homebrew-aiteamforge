@@ -115,6 +115,40 @@ get_configured_teams() {
   fi
 }
 
+# Resolve a team's registry INSTANCE id from its configured BASE id.
+#
+# `.teams[]` stores base ids ("finance"), but the canonical port registry
+# (team-paths.json) keys project-scoped teams by instance id ("finance-personal").
+# The link is `.team_paths[<base>].project_id`. Single-instance teams (academy,
+# ios) have no project_id, so instance == base and this is a no-op for them.
+#
+# Callers that look a team up in the registry MUST map through this first, or
+# project-scoped teams (finance-personal, legal-coparenting, medical-general)
+# miss the registry entirely (XACA-0792).
+get_team_instance_id() {
+  local team="$1"
+  [ -z "$team" ] && return 1
+
+  local config_file
+  config_file=$(get_config_file)
+
+  # No config or no jq: base id is the best available answer.
+  if [ ! -f "$config_file" ] || ! command -v jq &>/dev/null; then
+    echo "$team"
+    return 0
+  fi
+
+  local project_id
+  project_id=$(jq -r --arg t "$team" '.team_paths[$t].project_id // empty' "$config_file" 2>/dev/null)
+
+  if [ -n "$project_id" ]; then
+    # Lowercased to match how the registry + team startup scripts derive the id.
+    echo "${team}-$(echo "$project_id" | tr '[:upper:]' '[:lower:]')"
+  else
+    echo "$team"
+  fi
+}
+
 # Get machine name
 # Supports both "machine_name" (bin/aiteamforge-setup.sh) and "machine.name" (wizard) formats
 get_machine_name() {
