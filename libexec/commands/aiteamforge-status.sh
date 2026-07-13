@@ -146,6 +146,18 @@ gather_status_data() {
   LCARS_UP_COUNT=0
   LCARS_TOTAL_COUNT=0
 
+  # `status` MUST stay read-only. aiteamforge_team_lcars_port() MATERIALIZES a
+  # default registry file on its first lookup when none exists — fine for `start`,
+  # unacceptable for a status probe, which would silently create ~/.aiteamforge/
+  # team-paths.json just by being run. So only consult the registry when it already
+  # exists; otherwise fall through to the legacy single-port probe below and write
+  # nothing.
+  _lcars_registry=""
+  if type aiteamforge_config_path >/dev/null 2>&1; then
+    _lcars_registry=$(aiteamforge_config_path 2>/dev/null) || _lcars_registry=""
+  fi
+
+  if [ -n "$_lcars_registry" ] && [ -f "$_lcars_registry" ]; then
   for _lcars_team in $CONFIGURED_TEAMS; do
     [ -z "$_lcars_team" ] && continue
 
@@ -170,13 +182,26 @@ gather_status_data() {
     LCARS_TEAM_STATUS="${LCARS_TEAM_STATUS}${_lcars_key}|${_lcars_port}|${_lcars_up}
 "
   done
+  fi
+
+  # Legacy single-port probe — the ONLY path when no registry exists (see the
+  # read-only note above). Preserves pre-XACA-0792 behavior for un-provisioned
+  # installs instead of reporting a bare "not running".
+  if [ -z "$LCARS_TEAM_STATUS" ]; then
+    _legacy_port=8080
+    if [ -f "${WORKING_DIR}/lcars-ui/.lcars-port" ]; then
+      _legacy_port="$(cat "${WORKING_DIR}/lcars-ui/.lcars-port" 2>/dev/null || echo 8080)"
+    fi
+    if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${_legacy_port}/" 2>/dev/null | grep -q '200'; then
+      LCARS_RUNNING=true
+      LCARS_PORT="$_legacy_port"
+    fi
+    [ -z "$LCARS_PORT" ] && LCARS_PORT="$_legacy_port"
+  fi
 
   # Scalar fallbacks so the JSON `port` field is never empty.
   if [ -z "$LCARS_PORT" ] && [ -n "$LCARS_TEAM_STATUS" ]; then
     LCARS_PORT=$(printf '%s' "$LCARS_TEAM_STATUS" | head -1 | cut -d'|' -f2)
-  fi
-  if [ -z "$LCARS_PORT" ] && [ -f "${WORKING_DIR}/lcars-ui/.lcars-port" ]; then
-    LCARS_PORT="$(cat "${WORKING_DIR}/lcars-ui/.lcars-port" 2>/dev/null || echo 8080)"
   fi
   [ -z "$LCARS_PORT" ] && LCARS_PORT=8080
 

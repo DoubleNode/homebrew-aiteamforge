@@ -317,6 +317,23 @@ test_start "XACA-0792 Case 9b: status no longer hardcodes the legacy 8080-only p
 # itself must be driven by a per-team resolved port, not a lone .lcars-port read.
 assert_contains "$status_src" "aiteamforge_team_lcars_port" && test_pass
 
+test_start "XACA-0792 Case 9c: status stays READ-ONLY (never materializes the registry)"
+# aiteamforge_team_lcars_port() writes a default registry on first lookup when none
+# exists. That is fine for `start`, but `status` must never create state just by
+# being run — so it only consults the registry when the file already exists.
+_ro_dir=$(mktemp -d)
+mkdir -p "$_ro_dir/aiteamforge/lcars-ui"
+cat > "$_ro_dir/aiteamforge/.aiteamforge-config" <<'EOF'
+{"version":"0.0.0","teams":["finance"],"team_paths":{"finance":{"project_id":"personal"}}}
+EOF
+(
+  AITEAMFORGE_DIR="$_ro_dir/aiteamforge" \
+  AITEAMFORGE_CONFIG="$_ro_dir/team-paths.json" \
+  HOME="$_ro_dir" \
+  bash "$STATUS_CMD" --json >/dev/null 2>&1
+) || true
+assert_file_not_exists "$_ro_dir/team-paths.json" && test_pass
+
 # ═══════════════════════════════════════════════════════════════════════════
 # Case 10 — doctor maps before a registry lookup (XACA-0792-002)
 # ═══════════════════════════════════════════════════════════════════════════
