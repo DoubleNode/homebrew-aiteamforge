@@ -255,3 +255,75 @@ assert_equal "freelance-acme" "$(aiteamforge_resolve_team_key freelance)" && tes
 
 test_start "XACA-0792 Case 7i: start_lcars() uses the resolver, not a raw derivation"
 assert_contains "$start_lcars_body" "aiteamforge_resolve_team_key" && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 8 — SINGLE AUTHORITY / lock-step (XACA-0792-003)
+#
+# get_board_id is THE deterministic base→instance map. get_team_instance_id must
+# DEFER to it, never compete with it — a second derivation from a mutable source is
+# exactly how `legal` broke. These guard the consolidation from silently regressing.
+# ═══════════════════════════════════════════════════════════════════════════
+write_install_config  # finance=personal, academy=(none)
+
+# Config deliberately disagrees with the canonical map: legal's project_id is the
+# shipped default "default", which would derive the non-existent "legal-default".
+cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
+{
+  "teams": ["finance", "legal", "medical"],
+  "team_paths": {
+    "finance": {"project_id": "personal"},
+    "legal":   {"project_id": "default"},
+    "medical": {"project_id": "general"}
+  }
+}
+EOF
+
+test_start "XACA-0792 Case 8a: get_team_instance_id DEFERS to the canonical map"
+# If this regresses to a project_id-only derivation it returns 'legal-default'.
+assert_equal "legal-coparenting" "$(get_team_instance_id legal)" && test_pass
+
+test_start "XACA-0792 Case 8b: instance helper agrees with get_board_id on every mapped team"
+_lockstep_ok=true
+for _t in finance legal medical; do
+  if [ "$(get_team_instance_id "$_t")" != "$(get_board_id "$_t")" ]; then
+    _lockstep_ok=false
+  fi
+done
+assert_equal "true" "$_lockstep_ok" && test_pass
+
+test_start "XACA-0792 Case 8c: get_board_id and get_template_id are exact inverses"
+_inverse_ok=true
+for _t in finance legal medical; do
+  if [ "$(get_template_id "$(get_board_id "$_t")")" != "$_t" ]; then
+    _inverse_ok=false
+  fi
+done
+assert_equal "true" "$_inverse_ok" && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 9 — aiteamforge status consults the registry (XACA-0792-001)
+#
+# Before: status probed a single legacy lcars-ui/.lcars-port (default 8080) and
+# reported finance DOWN while it was serving on 8361.
+# ═══════════════════════════════════════════════════════════════════════════
+STATUS_CMD="$TAP_ROOT/libexec/commands/aiteamforge-status.sh"
+
+test_start "XACA-0792 Case 9a: status resolves each team through the registry"
+status_src=$(cat "$STATUS_CMD")
+assert_contains "$status_src" "aiteamforge_resolve_team_key" && test_pass
+
+test_start "XACA-0792 Case 9b: status no longer hardcodes the legacy 8080-only probe"
+# The legacy default may remain as a last-resort scalar fallback, but the probe
+# itself must be driven by a per-team resolved port, not a lone .lcars-port read.
+assert_contains "$status_src" "aiteamforge_team_lcars_port" && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 10 — doctor maps before a registry lookup (XACA-0792-002)
+# ═══════════════════════════════════════════════════════════════════════════
+DOCTOR_CMD="$TAP_ROOT/libexec/commands/aiteamforge-doctor.sh"
+
+test_start "XACA-0792 Case 10: doctor does not pass a raw base id to the registry"
+doctor_src=$(cat "$DOCTOR_CMD")
+assert_not_contains "$doctor_src" 'aiteamforge_team_kanban_dir "$active_team"' \
+  && assert_contains "$doctor_src" "aiteamforge_resolve_team_key" \
+  && test_pass

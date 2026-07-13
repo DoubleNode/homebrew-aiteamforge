@@ -118,17 +118,42 @@ get_configured_teams() {
 # Resolve a team's registry INSTANCE id from its configured BASE id.
 #
 # `.teams[]` stores base ids ("finance"), but the canonical port registry
-# (team-paths.json) keys project-scoped teams by instance id ("finance-personal").
-# The link is `.team_paths[<base>].project_id`. Single-instance teams (academy,
-# ios) have no project_id, so instance == base and this is a no-op for them.
+# (team-paths.json) keys profile-scoped teams by instance id ("finance-personal").
+# Callers that look a team up in the registry MUST map through this first, or those
+# teams miss the registry entirely and get silently skipped (XACA-0792).
 #
-# Callers that look a team up in the registry MUST map through this first, or
-# project-scoped teams (finance-personal, legal-coparenting, medical-general)
-# miss the registry entirely (XACA-0792).
+# SINGLE AUTHORITY (XACA-0792-003). `get_board_id()` in kanban-paths.sh is THE
+# deterministic base→instance map and this helper DEFERS to it — it must never
+# contradict it, and deliberately does not re-implement it. An earlier cut of this
+# function derived the instance id from `.team_paths[<base>].project_id` alone,
+# which made it a THIRD, competing mapper with a DIFFERENT derivation — and a wrong
+# one: legal's TEAM_DEFAULT_PROJECT is "default", so it derived the non-existent
+# "legal-default". finance ("personal") and medical ("general") only agreed with the
+# registry by coincidence.
+#
+# What this helper adds ON TOP of the canonical map is the one thing a static map
+# cannot know: an install whose instance suffix comes from the user's own config
+# (e.g. a freelance team on a custom project → freelance-acme). That is the ONLY
+# case the project_id derivation is authoritative for.
+#
+# Returns the base id unchanged for single-instance teams (academy, ios), and
+# degrades to the base id — never to empty — when config or jq is unavailable.
 get_team_instance_id() {
   local team="$1"
   [ -z "$team" ] && return 1
 
+  # 1. Canonical deterministic map wins whenever it has an opinion.
+  if type get_board_id >/dev/null 2>&1; then
+    local mapped
+    mapped=$(get_board_id "$team" 2>/dev/null || true)
+    if [ -n "$mapped" ] && [ "$mapped" != "$team" ]; then
+      echo "$mapped"
+      return 0
+    fi
+  fi
+
+  # 2. Otherwise fall back to the install's own project_id, which is the only
+  #    source for custom project-scoped teams the static map cannot enumerate.
   local config_file
   config_file=$(get_config_file)
 

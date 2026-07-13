@@ -804,9 +804,22 @@ check_board_resolution() {
   # Prefer the org-aware aiteamforge_team_kanban_dir; fall back to get_kanban_dir
   # (the .aiteamforge-config-driven resolver) when the team-paths resolver yields
   # nothing for this team.
+  # active_team is a BASE id from .teams[] ("finance"), but aiteamforge_team_kanban_dir
+  # is a REGISTRY lookup and the registry keys profile-scoped teams by INSTANCE id
+  # ("finance-personal"). Passing the base id straight in always missed and fell
+  # through to get_kanban_dir — the fallback masked the defect rather than resolving
+  # it, so doctor reported a path it reached by accident (XACA-0792-002, same defect
+  # shape as XACA-0792 itself). Resolve first; get_kanban_dir keeps the BASE id
+  # because it is .aiteamforge-config-driven and maps template→instance internally.
+  local registry_key="$active_team"
+  if command -v aiteamforge_resolve_team_key >/dev/null 2>&1; then
+    registry_key=$(aiteamforge_resolve_team_key "$active_team" 2>/dev/null) || registry_key="$active_team"
+    [ -z "$registry_key" ] && registry_key="$active_team"
+  fi
+
   local kanban_dir=""
   if command -v aiteamforge_team_kanban_dir >/dev/null 2>&1; then
-    kanban_dir=$(aiteamforge_team_kanban_dir "$active_team" 2>/dev/null) || true
+    kanban_dir=$(aiteamforge_team_kanban_dir "$registry_key" 2>/dev/null) || true
   fi
   if [ -z "$kanban_dir" ] && command -v get_kanban_dir >/dev/null 2>&1; then
     kanban_dir=$(get_kanban_dir "$active_team" 2>/dev/null) || true

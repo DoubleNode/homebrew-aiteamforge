@@ -13,6 +13,13 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
 source "${LIBEXEC_DIR}/lib/constants.sh"
+# Registry access for per-team LCARS status (XACA-0792-001). aiteamforge-paths.sh
+# provides aiteamforge_resolve_team_key/aiteamforge_team_lcars_port; kanban-paths.sh
+# provides the canonical get_board_id map the resolver consults first (guarded
+# source, mirroring aiteamforge-doctor.sh).
+source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
+# shellcheck source=../lib/kanban-paths.sh
+[ -f "${LIBEXEC_DIR}/lib/kanban-paths.sh" ] && source "${LIBEXEC_DIR}/lib/kanban-paths.sh" 2>/dev/null || true
 
 # Version — read from VERSION file (single source of truth)
 if [ -f "${LIBEXEC_DIR}/../VERSION" ]; then
@@ -118,15 +125,60 @@ gather_status_data() {
   # Teams
   CONFIGURED_TEAMS=$(get_configured_teams)
 
-  # Services status — read LCARS port from config, default to 8080
+  # Services status — resolve EACH configured team's LCARS port from the canonical
+  # registry and probe it (XACA-0792-001).
+  #
+  # The old model probed a single legacy `lcars-ui/.lcars-port` (defaulting to
+  # 8080) and predates multi-team LCARS entirely. On any real install it reported
+  # the wrong thing: with XACA-0792's start fix in place, finance-personal comes up
+  # on 8361 and this still said DOWN, because 8361 is not 8080 and nothing here ever
+  # consulted the registry. Teams are resolved through aiteamforge_resolve_team_key
+  # so profile-scoped ids (finance -> finance-personal, legal -> legal-coparenting)
+  # land on the right port.
+  #
+  # LCARS_RUNNING / LCARS_PORT are retained as scalars for the existing JSON shape
+  # and brief output: RUNNING means "at least one configured team's server answers",
+  # and PORT is the first such port (falling back to the first configured team's
+  # port, then the legacy file, then 8080) so the field is never empty.
   LCARS_RUNNING=false
-  LCARS_PORT=8080
-  if [ -f "${WORKING_DIR}/lcars-ui/.lcars-port" ]; then
+  LCARS_PORT=""
+  LCARS_TEAM_STATUS=""   # newline-delimited "<key>|<port>|<up>"
+  LCARS_UP_COUNT=0
+  LCARS_TOTAL_COUNT=0
+
+  for _lcars_team in $CONFIGURED_TEAMS; do
+    [ -z "$_lcars_team" ] && continue
+
+    _lcars_key=""
+    _lcars_key=$(aiteamforge_resolve_team_key "$_lcars_team" 2>/dev/null) || _lcars_key=""
+    [ -z "$_lcars_key" ] && continue
+
+    _lcars_port=""
+    _lcars_port=$(aiteamforge_team_lcars_port "$_lcars_key" 2>/dev/null) || _lcars_port=""
+    [ -z "$_lcars_port" ] && continue
+
+    LCARS_TOTAL_COUNT=$((LCARS_TOTAL_COUNT + 1))
+
+    _lcars_up=false
+    if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${_lcars_port}/" 2>/dev/null | grep -q '200'; then
+      _lcars_up=true
+      LCARS_UP_COUNT=$((LCARS_UP_COUNT + 1))
+      LCARS_RUNNING=true
+      [ -z "$LCARS_PORT" ] && LCARS_PORT="$_lcars_port"
+    fi
+
+    LCARS_TEAM_STATUS="${LCARS_TEAM_STATUS}${_lcars_key}|${_lcars_port}|${_lcars_up}
+"
+  done
+
+  # Scalar fallbacks so the JSON `port` field is never empty.
+  if [ -z "$LCARS_PORT" ] && [ -n "$LCARS_TEAM_STATUS" ]; then
+    LCARS_PORT=$(printf '%s' "$LCARS_TEAM_STATUS" | head -1 | cut -d'|' -f2)
+  fi
+  if [ -z "$LCARS_PORT" ] && [ -f "${WORKING_DIR}/lcars-ui/.lcars-port" ]; then
     LCARS_PORT="$(cat "${WORKING_DIR}/lcars-ui/.lcars-port" 2>/dev/null || echo 8080)"
   fi
-  if curl -s -o /dev/null -w '%{http_code}' "http://localhost:${LCARS_PORT}/" 2>/dev/null | grep -q '200'; then
-    LCARS_RUNNING=true
-  fi
+  [ -z "$LCARS_PORT" ] && LCARS_PORT=8080
 
   # Fleet Monitor — check server AND client (reporter)
   FLEET_RUNNING=false
@@ -252,7 +304,18 @@ output_json() {
   "services": {
     "lcars": {
       "running": ${LCARS_RUNNING},
-      "port": ${LCARS_PORT}
+      "port": ${LCARS_PORT},
+      "teams_up": ${LCARS_UP_COUNT},
+      "teams_total": ${LCARS_TOTAL_COUNT},
+      "teams": [$(
+        _json_first=true
+        while IFS='|' read -r _js_key _js_port _js_up; do
+          [ -z "$_js_key" ] && continue
+          [ "$_json_first" = true ] || printf ', '
+          _json_first=false
+          printf '{"team": "%s", "port": %s, "running": %s}' "$_js_key" "$_js_port" "$_js_up"
+        done <<< "$LCARS_TEAM_STATUS"
+      )]
     },
     "fleet_monitor": {
       "server_running": ${FLEET_RUNNING},
@@ -326,7 +389,27 @@ output_full() {
   # Services
   print_section "Services"
 
-  if [ "$LCARS_RUNNING" = true ]; then
+  # Per-team LCARS status (XACA-0792-001). One line per configured team with the
+  # port actually resolved from the registry, so a team that is up on a non-default
+  # port is no longer reported as down.
+  if [ -n "$LCARS_TEAM_STATUS" ]; then
+    if [ "$LCARS_UP_COUNT" -eq "$LCARS_TOTAL_COUNT" ]; then
+      print_success "LCARS Kanban Server (${LCARS_UP_COUNT}/${LCARS_TOTAL_COUNT} teams running)"
+    elif [ "$LCARS_UP_COUNT" -gt 0 ]; then
+      print_warning "LCARS Kanban Server (${LCARS_UP_COUNT}/${LCARS_TOTAL_COUNT} teams running)"
+    else
+      print_error "LCARS Kanban Server (not running)"
+    fi
+
+    while IFS='|' read -r _st_key _st_port _st_up; do
+      [ -z "$_st_key" ] && continue
+      if [ "$_st_up" = "true" ]; then
+        print_color "${COLOR_LILAC}" "    ✓ ${_st_key} — port ${_st_port}"
+      else
+        print_color "${COLOR_LILAC}" "    ✗ ${_st_key} — port ${_st_port} (not running)"
+      fi
+    done <<< "$LCARS_TEAM_STATUS"
+  elif [ "$LCARS_RUNNING" = true ]; then
     print_success "LCARS Kanban Server (port ${LCARS_PORT})"
   else
     print_error "LCARS Kanban Server (not running)"

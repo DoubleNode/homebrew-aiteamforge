@@ -477,13 +477,25 @@ aiteamforge_resolve_team_key() {
     # a default port that is not the one this install configured (e.g. `freelance`
     # hits the default 8505 while the configured `freelance-acme` is on 8420). The
     # base id therefore belongs LAST, after every real mapping has had its turn.
+    # get_team_instance_id already DEFERS to get_board_id internally (XACA-0792-003),
+    # so for canonically-mapped teams the two agree and the duplicate is skipped.
+    # get_board_id is still consulted directly as a safety net for callers that
+    # sourced aiteamforge-paths.sh + kanban-paths.sh but NOT config.sh — without it,
+    # `legal` would silently fall through to its base id.
     if type get_board_id >/dev/null 2>&1; then
         mapped=$(get_board_id "$team" 2>/dev/null || true)
         [ -n "$mapped" ] && [ "$mapped" != "$team" ] && candidates+=("$mapped")
     fi
     if type get_team_instance_id >/dev/null 2>&1; then
         mapped=$(get_team_instance_id "$team" 2>/dev/null || true)
-        [ -n "$mapped" ] && [ "$mapped" != "$team" ] && candidates+=("$mapped")
+        if [ -n "$mapped" ] && [ "$mapped" != "$team" ]; then
+            local already=false
+            local seen
+            for seen in ${candidates[@]+"${candidates[@]}"}; do
+                [ "$seen" = "$mapped" ] && already=true && break
+            done
+            [ "$already" = false ] && candidates+=("$mapped")
+        fi
     fi
     candidates+=("$team")
 
