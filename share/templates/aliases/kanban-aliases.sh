@@ -2771,57 +2771,78 @@ kb-knowledge-search() {
     # LOCAL_OPTIONS scopes both to this function — neither leaks to the caller.
     setopt LOCAL_OPTIONS NO_NOMATCH BARE_GLOB_QUAL
     local -a search_terms=()  # OR-match terms; populated by positional args (XACA-0738)
-    local -a _retry_argv=()   # XACA-0800 D4: parallel argv built DURING parsing for the zero-result
-                               # OR-fallback — flags/values copied verbatim, positional terms
-                               # word-split (${=1}). Never reconstructed from filter_* vars
-                               # afterward — that's a second, divergent source of truth
-                               # (sibling-heuristic drift trap, knowledge k501).
+    local -a _retry_argv=()   # XACA-0800 D4/D11: FINAL argv for the zero-result OR-fallback,
+                               # assembled AFTER parsing (see below) as: recognized flags/values
+                               # (verbatim) + a `--` end-of-options terminator + word-split
+                               # positional terms. The terminator guarantees a term that begins
+                               # with '-' (e.g. a phrase like "how to use -exact matching") can
+                               # never be mis-parsed as a flag on the recursive retry call, or by
+                               # a human pasting the printed suggestion (XACA-0800-011). Never
+                               # reconstructed from filter_* vars — that's a second, divergent
+                               # source of truth (sibling-heuristic drift trap, knowledge k501).
+    local -a _retry_flags=()  # flags/values copied verbatim, in original order, DURING parsing
+    local -a _retry_terms=()  # positional terms, word-split (${=1}), DURING parsing
     local filter_agent="" filter_subject="" filter_project=""
     local filter_tag="" filter_tier="" flag_all_projects=false flag_project_limit=false
     local show_help=false flag_porcelain=false flag_json=false
     local _kb_zero_result_hint=false  # XACA-0800: did the literal-phrase hint fire? (telemetry field)
+    local _kb_ks_end_of_opts=false    # XACA-0800-011: true once a literal `--` has been consumed
 
     # Parse arguments
     while [[ $# -gt 0 ]]; do
+        # Once `--` has been seen, EVERY remaining token is a positional search
+        # term verbatim — even one that looks like a flag (leading '-') or is
+        # itself another literal `--`. This is the standard end-of-options
+        # convention and is what lets the OR-fallback below safely hand back
+        # dash-leading words without them being re-parsed as flags.
+        if $_kb_ks_end_of_opts; then
+            _retry_terms+=(${=1})
+            search_terms+=("${1-}")
+            shift
+            continue
+        fi
         case "${1-}" in
+            --)
+                _kb_ks_end_of_opts=true
+                shift ;;
             --help|-h)
-                _retry_argv+=("${1-}")
+                _retry_flags+=("${1-}")
                 show_help=true; shift ;;
             --agent)
-                _retry_argv+=("${1-}" "${2-}")
+                _retry_flags+=("${1-}" "${2-}")
                 filter_agent="${2-}"; shift 2 ;;
             --team)
-                _retry_argv+=("${1-}" "${2-}")
+                _retry_flags+=("${1-}" "${2-}")
                 # Backward-compat alias: --team maps to --agent
                 filter_agent="${2-}"; shift 2 ;;
             --subject)
-                _retry_argv+=("${1-}" "${2-}")
+                _retry_flags+=("${1-}" "${2-}")
                 filter_subject="${2-}"; shift 2 ;;
             --project)
                 flag_project_limit=true
                 # Optional argument: next token may be the slug or another flag
                 if [[ $# -gt 1 ]] && [[ "${2-}" != --* ]]; then
-                    _retry_argv+=("${1-}" "${2-}")
+                    _retry_flags+=("${1-}" "${2-}")
                     filter_project="${2-}"; shift 2
                 else
-                    _retry_argv+=("${1-}")
+                    _retry_flags+=("${1-}")
                     shift
                 fi
                 ;;
             --tag)
-                _retry_argv+=("${1-}" "${2-}")
+                _retry_flags+=("${1-}" "${2-}")
                 filter_tag="${2-}"; shift 2 ;;
             --tier)
-                _retry_argv+=("${1-}" "${2-}")
+                _retry_flags+=("${1-}" "${2-}")
                 filter_tier="${2-}"; shift 2 ;;
             --all-projects)
-                _retry_argv+=("${1-}")
+                _retry_flags+=("${1-}")
                 flag_all_projects=true; shift ;;
             --porcelain)
-                _retry_argv+=("${1-}")
+                _retry_flags+=("${1-}")
                 flag_porcelain=true; shift ;;
             --json)
-                _retry_argv+=("${1-}")
+                _retry_flags+=("${1-}")
                 flag_json=true; shift ;;
             -*)
                 echo "Unknown flag: ${1-}" >&2
@@ -2829,11 +2850,22 @@ kb-knowledge-search() {
             *)
                 # XACA-0800 D4: word-split the positional so a quoted multi-word
                 # phrase becomes separate OR'd terms on the fallback retry.
-                _retry_argv+=(${=1})
+                _retry_terms+=(${=1})
                 search_terms+=("${1-}")
                 shift ;;
         esac
     done
+
+    # XACA-0800-011: assemble the final retry argv AFTER parsing — recognized
+    # flags first (so they still parse as flags on the retry), then a `--`
+    # terminator (only when there are terms to protect), then the word-split
+    # terms verbatim. This is what both the recursive fallback call and the
+    # printed copy-paste suggestion use below, so a leading-dash term (or a
+    # term that is literally `--`) is handled identically and safely in both.
+    _retry_argv=("${_retry_flags[@]}")
+    if [[ ${#_retry_terms[@]} -gt 0 ]]; then
+        _retry_argv+=("--" "${_retry_terms[@]}")
+    fi
 
     # Reject combining --porcelain and --json: they are mutually exclusive output modes.
     if $flag_porcelain && $flag_json; then
