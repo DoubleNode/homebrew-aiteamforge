@@ -67,13 +67,34 @@ if [ ! -d "$SCRIPT_DIR/node_modules/libsodium-wrappers" ]; then
         exit 127
     fi
 
+    # A non-numeric override must not silently disable the backoff — say so and
+    # fall back to the default rather than leaving the 60s retry storm running
+    # with no indication why.
+    if ! [ "$BOOTSTRAP_COOLDOWN" -ge 0 ] 2>/dev/null; then
+        echo "Warning: MSG_CLIENT_BOOTSTRAP_COOLDOWN='$BOOTSTRAP_COOLDOWN' is not numeric;" >&2
+        echo "         falling back to 3600s." >&2
+        BOOTSTRAP_COOLDOWN=3600
+    fi
+
     # Honour an unexpired failure sentinel: stay quiet rather than retrying.
-    if [ "$BOOTSTRAP_COOLDOWN" -gt 0 ] 2>/dev/null && [ -f "$BOOTSTRAP_SENTINEL" ]; then
+    if [ "$BOOTSTRAP_COOLDOWN" -gt 0 ] && [ -f "$BOOTSTRAP_SENTINEL" ]; then
         _now=$(date +%s)
-        # Portable mtime: BSD stat -f %m, GNU stat -c %Y.
-        _stamp=$(stat -f %m "$BOOTSTRAP_SENTINEL" 2>/dev/null \
-                 || stat -c %Y "$BOOTSTRAP_SENTINEL" 2>/dev/null \
-                 || echo 0)
+        # Portable mtime. GNU form FIRST: BSD stat rejects -c outright ("illegal
+        # option"), so it falls through cleanly. The reverse order is unsafe —
+        # on GNU coreutils `stat -f` is --file-system and %m is the MOUNT POINT,
+        # so it would SUCCEED and hand back a path string, which then blows up
+        # the arithmetic below instead of failing over.
+        _stamp=$(stat -c %Y "$BOOTSTRAP_SENTINEL" 2>/dev/null \
+                 || stat -f %m "$BOOTSTRAP_SENTINEL" 2>/dev/null \
+                 || echo "")
+        # Guard the arithmetic: anything non-numeric means we could not read the
+        # mtime, so treat the cooldown as expired (fail OPEN — never wedge the
+        # relay shut on a stat quirk) but say why.
+        if ! [ "${_stamp:-x}" -ge 0 ] 2>/dev/null; then
+            echo "Warning: cannot read mtime of '$BOOTSTRAP_SENTINEL'; ignoring cooldown." >&2
+            _stamp=0
+            _now=0
+        fi
         if [ $(( _now - _stamp )) -lt "$BOOTSTRAP_COOLDOWN" ]; then
             echo "Error: libsodium-wrappers bootstrap failed recently; in cooldown." >&2
             echo "       Retry sooner: rm '$BOOTSTRAP_SENTINEL'" >&2
@@ -86,8 +107,21 @@ if [ ! -d "$SCRIPT_DIR/node_modules/libsodium-wrappers" ]; then
         rm -f "$BOOTSTRAP_SENTINEL"
     else
         # Record the failure so the next cycle backs off instead of retrying.
-        : > "$BOOTSTRAP_SENTINEL" 2>/dev/null || true
-        echo "Error: npm install failed; backing off for ${BOOTSTRAP_COOLDOWN}s." >&2
+        # If the sentinel cannot be written (read-only install dir), the backoff
+        # is silently defeated and we are back to retrying every 60s — so warn
+        # loudly rather than swallowing it. Still non-fatal: an unwritable dir
+        # must not wedge the relay for anyone who fixes npm later.
+        # Subshell so the SHELL's own redirect-failure message is suppressed too;
+        # `: > f 2>/dev/null` still leaks "Permission denied" because that error
+        # is emitted while setting up the redirect, not by the command.
+        if ( : > "$BOOTSTRAP_SENTINEL" ) 2>/dev/null; then
+            echo "Error: npm install failed; backing off for ${BOOTSTRAP_COOLDOWN}s." >&2
+        else
+            echo "Error: npm install failed." >&2
+            echo "Warning: could not write '$BOOTSTRAP_SENTINEL' — backoff is DISABLED," >&2
+            echo "         so this will retry on every invocation. Make the directory" >&2
+            echo "         writable, or set MSG_CLIENT_NO_AUTO_INSTALL=1." >&2
+        fi
         exit 1
     fi
 fi
