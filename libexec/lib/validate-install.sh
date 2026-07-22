@@ -183,6 +183,11 @@ _val_check_scripts() {
         "display-agent-avatar.sh"
         "lcars-tmp-dir.sh"
         "init-agent-panel-json.py"
+        # XACA-0796: the kb-msg relay entrypoints. fleet-reporter.sh resolves
+        # msg-client.sh as a SIBLING and Guard 1 tests `[ -x "$client" ]`, so
+        # both must be present AND executable for the relay to run at all.
+        "fleet-reporter.sh"
+        "msg-client.sh"
     )
 
     for script in "${required_scripts[@]}"; do
@@ -195,6 +200,36 @@ _val_check_scripts() {
                 "Run: chmod +x '${path}'"
         else
             _val_pass "${script} (executable)"
+        fi
+    done
+
+    # XACA-0796: non-executed relay payload — presence only, NO executable check.
+    # These have no shebang and are never exec'd directly (msg-client.js is
+    # reached via `exec node`, vault-keygen.js via require(), package.json is a
+    # manifest), so asserting +x here would demand a mode bit the installer
+    # deliberately does not set.
+    #
+    # Why doctor checks these at all: the original XACA-0796 defect was an
+    # install-time ALLOWLIST GAP — files mirrored into share/ but never copied
+    # to scripts/. That class is invisible to a check that only looks at
+    # entrypoints, because the entrypoint is present and it is the transitive
+    # sibling that is missing. Checking the payload is what makes a recurrence
+    # detectable by `aiteamforge doctor` instead of surfacing as a silently
+    # swallowed MODULE_NOT_FOUND every reporter cycle.
+    local required_relay_data=(
+        "msg-client.js"
+        "vault-keygen.js"
+        "package.json"
+        "package-lock.json"
+    )
+
+    for datafile in "${required_relay_data[@]}"; do
+        local dpath="${scripts_dir}/${datafile}"
+        if [ ! -f "$dpath" ]; then
+            _val_warn "${datafile} missing from scripts/ (kb-msg relay will fail)" \
+                "Run: aiteamforge setup --upgrade"
+        else
+            _val_pass "${datafile} (present)"
         fi
     done
 

@@ -210,9 +210,12 @@ install_helper_scripts() {
     #                     package.json of its own; without it npm walks up, finds
     #                     nothing, installs nothing, and every relay attempt pays a
     #                     futile npm+node startup.
+    #   package-lock.json — pins libsodium-wrappers to the exact build we tested
+    #                     instead of letting every consumer box independently
+    #                     re-resolve ^0.7.16.
     # msg-client.sh stays in the executable loop above — fleet-reporter.sh's
     # Guard 1 tests `[ -x "$client" ]`, so its exec bit is load-bearing.
-    for datafile in msg-client.js vault-keygen.js package.json; do
+    for datafile in msg-client.js vault-keygen.js package.json package-lock.json; do
         if [ -f "$scripts_src/$datafile" ]; then
             cp "$scripts_src/$datafile" "$scripts_dest/$datafile"
             chmod 644 "$scripts_dest/$datafile"

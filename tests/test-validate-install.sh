@@ -74,10 +74,24 @@ _write_scripts() {
         "display-agent-avatar.sh"
         "lcars-tmp-dir.sh"
         "init-agent-panel-json.py"
+        # XACA-0796: kb-msg relay entrypoints — checked for presence AND +x
+        "fleet-reporter.sh"
+        "msg-client.sh"
     )
     for s in "${names[@]}"; do
         touch "$scripts_dir/$s"
         chmod +x "$scripts_dir/$s"
+    done
+    # XACA-0796: non-executed relay payload — presence only, deliberately NOT +x.
+    local datafiles=(
+        "msg-client.js"
+        "vault-keygen.js"
+        "package.json"
+        "package-lock.json"
+    )
+    for d in "${datafiles[@]}"; do
+        touch "$scripts_dir/$d"
+        chmod 644 "$scripts_dir/$d"
     done
 }
 
@@ -418,8 +432,10 @@ cp "$install_dir/scripts/iterm2_window_manager.py" "$install_dir/iterm2_window_m
 _val_check_scripts "$install_dir" >/dev/null 2>&1
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "0" "$_VAL_WARN"
-# 5 required scripts + root copy = 6 passes
-assert_equal "6" "$_VAL_PASS"
+# 7 required executables (5 original + XACA-0796 fleet-reporter.sh, msg-client.sh)
+# + 4 relay data files (msg-client.js, vault-keygen.js, package.json,
+# package-lock.json) + root copy = 12 passes
+assert_equal "12" "$_VAL_PASS"
 test_pass
 
 test_start "_val_check_scripts: warns for missing script file"
@@ -427,11 +443,11 @@ _reload_validate_lib
 _val_reset
 install_dir="$TEST_TMP_DIR/missing_one_script"
 mkdir -p "$install_dir/scripts"
-# Create all except iterm2_window_manager.py
-for s in "agent-panel-display.sh" "display-agent-avatar.sh" "lcars-tmp-dir.sh" "init-agent-panel-json.py"; do
-    touch "$install_dir/scripts/$s"
-    chmod +x "$install_dir/scripts/$s"
-done
+# Write the full expected payload, then remove exactly one file, so this test
+# stays a single-variable probe of "one script missing" rather than silently
+# re-testing every file the payload has since grown by.
+_write_scripts "$install_dir/scripts"
+rm -f "$install_dir/scripts/iterm2_window_manager.py"
 _val_check_scripts "$install_dir" >/dev/null 2>&1
 # iterm2_window_manager.py missing from scripts/ AND root copy also missing
 assert_equal "0" "$_VAL_FAIL"
@@ -459,6 +475,38 @@ _write_scripts "$install_dir/scripts"
 _val_check_scripts "$install_dir" >/dev/null 2>&1
 assert_equal "0" "$_VAL_FAIL"
 assert_equal "1" "$_VAL_WARN"
+test_pass
+
+# XACA-0796: doctor must be able to DETECT a recurrence of the allowlist-gap
+# class that caused this ticket — files mirrored into share/ but never copied
+# into scripts/. The entrypoint being present is not evidence the relay works;
+# the original defect was a missing TRANSITIVE sibling, so the payload is what
+# has to be checked.
+test_start "_val_check_scripts: warns when kb-msg relay payload missing (XACA-0796)"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/relay_payload_missing"
+_write_scripts "$install_dir/scripts"
+cp "$install_dir/scripts/iterm2_window_manager.py" "$install_dir/iterm2_window_manager.py"
+# Simulate the exact XACA-0796 defect: entrypoints installed, siblings not.
+rm -f "$install_dir/scripts/vault-keygen.js" "$install_dir/scripts/package.json"
+_val_check_scripts "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_FAIL"
+assert_equal "2" "$_VAL_WARN"
+test_pass
+
+test_start "_val_check_scripts: relay payload not required to be executable (XACA-0796)"
+_reload_validate_lib
+_val_reset
+install_dir="$TEST_TMP_DIR/relay_payload_noexec"
+_write_scripts "$install_dir/scripts"
+cp "$install_dir/scripts/iterm2_window_manager.py" "$install_dir/iterm2_window_manager.py"
+# msg-client.js / vault-keygen.js / package.json ship 644 by design. A check
+# that demanded +x here would warn on a CORRECT install and train people to
+# ignore doctor output.
+_val_check_scripts "$install_dir" >/dev/null 2>&1
+assert_equal "0" "$_VAL_FAIL"
+assert_equal "0" "$_VAL_WARN"
 test_pass
 
 test_start "_val_check_scripts: warn message includes chmod hint for non-executable"

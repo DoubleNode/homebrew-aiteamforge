@@ -192,5 +192,21 @@ fi
 
 echo
 echo "Passed: $PASSED   Failed: $FAILED"
-[ "$FAILED" -eq 0 ] || exit 1
+
+# Gate on FAILED *and* on PASSED. Gating on FAILED alone means a run where every
+# assertion was skipped — node absent, an early `return`, a refactor that stops
+# reaching the assertions — reports 0/0 and exits 0, i.e. green for having tested
+# nothing. That is the exact vacuous-pass failure mode this file exists to
+# prevent elsewhere; it would be indefensible to leave it in the guard itself.
+# T3/T5 legitimately SKIP without node, so the floor is the assertions that do
+# not depend on it (T1 x4, T2 x4, T4 x1 = 9).
+MIN_EXPECTED=9
+if [ "$FAILED" -ne 0 ]; then
+    exit 1
+fi
+if [ "$PASSED" -lt "$MIN_EXPECTED" ]; then
+    echo "ERROR: only $PASSED assertions ran (expected >= $MIN_EXPECTED) — treating as FAILURE," >&2
+    echo "       not success. A run that asserts nothing must never report green." >&2
+    exit 1
+fi
 exit 0
