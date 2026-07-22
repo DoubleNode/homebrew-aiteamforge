@@ -1384,8 +1384,20 @@ def get_team_primary_host(team: str) -> str:
     "" means "unowned / not yet declared", which every consumer must treat as
     fail-OPEN — the registry lists all 20 teams on every machine, so absence has
     always been the normal case and must never be read as "this host is wrong".
-    Falls back to DEFAULT_TEAMS when the live overlay predates the backfill pass
-    (same migration-tolerance shape as get_team_code).
+
+    KEY PRESENCE IS THE CONTRACT (XACA-0802-004). `diff_missing_primary_host` /
+    `apply_primary_host` deliberately treat a present key — INCLUDING an empty
+    one — as "the operator has spoken", and never overwrite it. This accessor
+    must read the overlay by exactly that rule, because the shell-side guard
+    (`_kb_team_primary_host` in kanban-helpers.sh) does: it reads
+    `.teams[$t].primary_host // ""` and an empty value makes
+    `_kb_knowledge_host_affinity_guard` fail OPEN. A blanket `if not host`
+    fallback to DEFAULT_TEAMS made the two sides disagree about the identical
+    overlay entry — Python insisting a host owned the team while the shell read
+    it as undeclared. The DEFAULT_TEAMS fallback therefore fires ONLY when the
+    key is genuinely absent (an overlay predating the backfill pass, or one the
+    backfill could not rewrite), which is the migration-tolerance case
+    get_team_code has and the only case the fallback was ever meant to serve.
 
     Raises KeyError with a helpful message if the team is not found.
     """
@@ -1397,8 +1409,9 @@ def get_team_primary_host(team: str) -> str:
             f"Team '{team}' not found. Available: {hint} — "
             f"edit {get_config_path()} or run `aiteamforge-paths init`."
         )
-    host = entry.get("primary_host")
-    if not host:
+    if "primary_host" in entry:
+        host = entry.get("primary_host")
+    else:
         host = DEFAULT_TEAMS.get(team, {}).get("primary_host")
     return str(host) if host else ""
 

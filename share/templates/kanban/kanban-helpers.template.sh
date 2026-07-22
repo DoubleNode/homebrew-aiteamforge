@@ -7889,6 +7889,249 @@ _kb_is_local_persona() {
     return 1
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0802 — Knowledge host affinity (WHICH BOX may author a team's knowledge)
+#
+# XACA-0754 answered "which ROOT does this write go to" (~/knowledge vs
+# ~/knowledge-local). It never answered "is THIS HOST the one that owns this
+# team", because nothing in the system could express that. ~/.aiteamforge/
+# team-paths.json registers every team on every machine — it is a superset
+# REGISTRY, not an ownership record — and every team's kanban_dir resolves to an
+# existing directory on every box, so directory presence is not a usable proxy
+# either. Consequence (XACA-0779): `kb-knowledge-add team legal-coparenting ...`
+# run on a NON-owning host cheerfully mkdir -p'd a legal tree under
+# ~/knowledge-local and wrote an entry there. The knowledge is correct,
+# contained, and permanently invisible to the box that is supposed to have it.
+#
+# It also silently forked the entry-id counter. Ids are allocated by scanning the
+# LOCAL target dir for the highest <prefix>NNN — and ~/knowledge-local never syncs
+# between hosts by design, so two hosts each independently allocated t001 in
+# legal-coparenting AND in medical-general. Four entries, two ids, no warning.
+# Restoring a SINGLE authorized writer per team is what makes that counter
+# authoritative again; a cross-host id scheme is deliberately not attempted.
+#
+# The declared owner is the optional per-team `primary_host` field in the
+# team-paths overlay, materialized there by aiteamforge_paths.py's backfill pass.
+# ABSENT is the normal, expected state for most teams — see the fail-open ruling
+# in the guard below.
+#
+# Consumer note: this block matters MORE on a tap host than on the dev box. The
+# PII teams live on consumer machines, so the guard has to ship here to protect
+# anything at all.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Internal: normalize a host identity for comparison — lowercased, trailing
+# ".local" stripped. macOS hands out the same box under several spellings
+# (a capitalized name from scutil, a lowercased one from hostname -s, plus a
+# ".local" suffix from anything mDNS-flavoured); a guard that fires on the very
+# host it is supposed to protect is worse than no guard at all, so normalize
+# aggressively.
+_kb_host_normalize() {
+    local h
+    h=$(printf '%s' "${1-}" | tr '[:upper:]' '[:lower:]')
+    h="${h%.local}"
+    printf '%s\n' "$h"
+}
+
+# _kb_this_host_id
+# This host's canonical identity. Primary source is `scutil --get ComputerName`
+# (the user-facing name, matching how the fleet is referred to in docs); falls
+# back to `hostname -s` when scutil is unavailable (non-macOS, stripped PATH) or
+# returns empty. Never fails — worst case it echoes an empty line, which the
+# guard treats as "unknown host" and reports verbatim.
+_kb_this_host_id() {
+    local id=""
+    if command -v scutil &>/dev/null; then
+        id=$(scutil --get ComputerName 2>/dev/null)
+    fi
+    if [[ -z "$id" ]]; then
+        id=$(hostname -s 2>/dev/null)
+    fi
+    printf '%s\n' "$id"
+}
+
+# _kb_team_primary_host <team-id>
+# Echoes the team's declared `primary_host` from the team-paths overlay, or
+# nothing when the field is absent/empty/null. Same jq-then-python3-then-give-up
+# ladder as _kb_is_local_only_team — and deliberately NOT _kb_overlay_lookup,
+# whose team_code gate would reject the very entries this needs to read (a
+# local-only overlay entry may carry no team_code).
+_kb_team_primary_host() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+
+    local config_path
+    config_path=$(_kb_overlay_config_path)
+    [[ -f "$config_path" ]] || return 1
+
+    local host=""
+    if command -v jq &>/dev/null; then
+        host=$(jq -r --arg t "$team" '.teams[$t].primary_host // ""' "$config_path" 2>/dev/null)
+    elif command -v python3 &>/dev/null; then
+        host=$(python3 - "$config_path" "$team" <<'PYEOF'
+import sys, json
+from pathlib import Path
+config_path, team = sys.argv[1], sys.argv[2]
+try:
+    config = json.loads(Path(config_path).read_text(encoding='utf-8'))
+    print(config.get('teams', {}).get(team, {}).get('primary_host', '') or '')
+except Exception:
+    print('')
+PYEOF
+)
+    fi
+    [[ "$host" == "null" ]] && host=""
+    printf '%s\n' "$host"
+}
+
+# _kb_host_matches <declared> <actual>
+# True (0) when <declared> names THIS box. Comparison is case-insensitive, with
+# a trailing ".local" stripped from both sides, and <declared> is matched against
+# <actual> OR either live form (`scutil --get ComputerName`, `hostname -s`) —
+# a declared value only has to agree with ONE of the names this Mac answers to.
+# That breadth is intentional: false-negative == a legitimate author locked out
+# of their own knowledge tree, which is strictly worse than the leak-free
+# over-permission of accepting a second correct spelling of the same host.
+_kb_host_matches() {
+    local declared="${1-}" actual="${2-}"
+    [[ -z "$declared" ]] && return 1
+
+    local want
+    want=$(_kb_host_normalize "$declared")
+    [[ -z "$want" ]] && return 1
+
+    local scutil_name="" short_name=""
+    if command -v scutil &>/dev/null; then
+        scutil_name=$(scutil --get ComputerName 2>/dev/null)
+    fi
+    short_name=$(hostname -s 2>/dev/null)
+
+    local cand
+    for cand in "$actual" "$scutil_name" "$short_name"; do
+        [[ -z "$cand" ]] && continue
+        [[ "$(_kb_host_normalize "$cand")" == "$want" ]] && return 0
+    done
+    return 1
+}
+
+# _kb_team_for_local_persona <persona-slug>
+# Echoes the local-only team that owns an agent-tier persona slug, or returns 1
+# when the slug belongs to no local-only team (the common case — every ordinary
+# persona). Mirrors _kb_is_local_persona's two-source shape: the hardcoded
+# 17-slug floor FIRST and unconditionally (it needs no agents-master checkout and
+# no persisted overlay array, so it holds on a bare tap machine), then the
+# roster-resolution fallback for a FUTURE local-only team not yet in the floor.
+# Keep the case arms in lockstep with _kb_local_personas_hardcoded.
+_kb_team_for_local_persona() {
+    local persona="${1-}"
+    [[ -z "$persona" ]] && return 1
+
+    case "$persona" in
+        brunt|nog|quark-fin|rom|zek)
+            printf '%s\n' finance-personal; return 0 ;;
+        advocate|casemanager|courtclerk|lawclerk|mediator|paralegal)
+            printf '%s\n' legal-coparenting; return 0 ;;
+        cameron|chase|cuddy|foreman|house|wilson)
+            printf '%s\n' medical-general; return 0 ;;
+    esac
+
+    local team p
+    for team in $(_kb_local_only_teams_hardcoded); do
+        for p in $(_kb_local_personas_for_team "$team" 2>/dev/null); do
+            if [[ "$p" == "$persona" ]]; then
+                printf '%s\n' "$team"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# _kb_knowledge_host_affinity_guard <target> <kind:agent|team> [allow_foreign:true|false]
+# The policy function. Returns 0 to proceed, 1 to refuse the write. MUST be
+# called after the local-only classification and BEFORE mkdir -p / id allocation
+# — a refusal has to leave no directory and no file behind.
+#
+# Three outcomes, in the order they are decided:
+#
+#  1. No declared host → FAIL OPEN with one warning line. This is a deliberate
+#     ruling, not an oversight: `primary_host` is absent for most teams and was
+#     absent everywhere the instant this shipped, so failing closed would brick
+#     local-only authoring across the entire fleet before a single host was
+#     populated. Authorization may arrive progressively; ROUTING is already
+#     backstopped by the hardcoded PII floor, which is the control that actually
+#     contains the data.
+#
+#  2. Local-only target on the wrong host → REFUSE. ~/knowledge-local never
+#     syncs, so this write is unrecoverable-in-place: invisible to the owner,
+#     and it forks the id counter (XACA-0779). The message names the correct
+#     host and the override flag. Overridable via --allow-foreign-host, which
+#     downgrades it to a warning for the operator who genuinely means it.
+#
+#  3. Fleet-synced team on the wrong host → WARN ONLY, proceed. ~/knowledge IS
+#     synced: the entry shows up everywhere, the id counter still sees it, and
+#     the write is trivially fixable. Blocking here would be friction with no
+#     safety payoff — do not over-block.
+_kb_knowledge_host_affinity_guard() {
+    local target="${1-}" kind="${2-}" allow_foreign="${3:-false}"
+    [[ -z "$target" ]] && return 0
+
+    # Resolve the team whose ownership governs this write, plus whether the
+    # target is local-only (which decides refuse-vs-warn on a mismatch).
+    local team="" is_local=false
+    if [[ "$kind" == "agent" ]]; then
+        team=$(_kb_team_for_local_persona "$target" 2>/dev/null) || team=""
+        if _kb_is_local_persona "$target"; then
+            is_local=true
+        fi
+    else
+        team="$target"
+        if _kb_is_local_only_team "$target"; then
+            is_local=true
+        fi
+    fi
+
+    # An agent-tier persona owned by no local-only team has no governing team —
+    # nothing to enforce, and no team-paths entry to consult.
+    [[ -z "$team" ]] && return 0
+
+    local declared
+    declared=$(_kb_team_primary_host "$team" 2>/dev/null) || declared=""
+    if [[ -z "$declared" ]]; then
+        # Fail open. The warning is scoped to local-only targets deliberately:
+        # most teams will never declare a primary_host, so warning on every
+        # ordinary `kb-knowledge-add team <t> ...` would be pure noise on the
+        # path where a stranded write is impossible anyway (the global root
+        # syncs). An undeclared LOCAL-ONLY team is the case worth saying out
+        # loud — that is a host whose overlay has not been backfilled yet,
+        # i.e. exactly the XACA-0779 exposure, still open.
+        if [[ "$is_local" == "true" ]]; then
+            echo "Warning: no primary_host declared for '${team}' — cannot verify this host is authorized to author its local-only knowledge. Proceeding (XACA-0802 fails open on an undeclared host)." >&2
+        fi
+        return 0
+    fi
+
+    local actual
+    actual=$(_kb_this_host_id)
+    if _kb_host_matches "$declared" "$actual"; then
+        return 0
+    fi
+
+    if [[ "$is_local" == "true" ]]; then
+        if [[ "$allow_foreign" == "true" ]]; then
+            echo "Warning: '${target}' knowledge is authored on '${declared}' (this host is '${actual}') — writing here anyway because --allow-foreign-host was passed. The entry will stay on THIS host and may collide with an entry id already used on '${declared}'." >&2
+            return 0
+        fi
+        echo "Error: '${target}' knowledge is authored on '${declared}' (this host is '${actual}')." >&2
+        echo "  Fix: run this kb-knowledge-add on '${declared}'. Its knowledge root never syncs between hosts, so an entry written here is stranded and invisible there (XACA-0779)." >&2
+        echo "  Override: pass --allow-foreign-host to write here anyway, accepting a stranded entry and a possible entry-id collision." >&2
+        return 1
+    fi
+
+    echo "Warning: '${team}' knowledge is authored on '${declared}' (this host is '${actual}'). Proceeding — this tier writes to the fleet-synced knowledge root, so the entry is visible everywhere and easy to relocate." >&2
+    return 0
+}
+
 # Internal: validate a single name component (persona, team, subject segment).
 # Valid: starts with lowercase letter, followed by lowercase letters, digits, underscores, hyphens.
 # Rejects path-traversal characters (/, .., \, null bytes) and uppercase names.
@@ -9265,7 +9508,7 @@ kb-knowledge-add() {
     fi
 
     if $show_help; then
-        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force]"
+        echo "Usage: kb-knowledge-add <tier> [<target>] \"<title>\" [--force] [--allow-foreign-host]"
         echo ""
         echo "  tier       agent | subject | project | team"
         echo "  target     Agent name, subject path, team name, or (project) optional slug"
@@ -9275,6 +9518,12 @@ kb-knowledge-add() {
         echo "             could not be resolved at all — normally refused, since an"
         echo "             unresolvable session might be a finance/legal/medical (PII) one."
         echo "             Ignored for agent/team tiers."
+        echo "  --allow-foreign-host"
+        echo "             agent/team tiers only (XACA-0802): write a local-only team's"
+        echo "             entry on a host that is NOT that team's declared primary_host."
+        echo "             Normally refused, because the local knowledge root never syncs"
+        echo "             — the entry would be stranded here and invisible on the owning"
+        echo "             host, and its entry id can collide with one allocated there."
         echo ""
         echo "Examples:"
         echo "  kb-knowledge-add agent emh \"kapt error patterns\""
@@ -9293,12 +9542,20 @@ kb-knowledge-add() {
     # runs — otherwise it would get swept into title_raw (which greedily
     # joins "${*:2}"/"$*"). Only subject/project tiers consult it; agent/team
     # tiers ignore it silently (harmless no-op, not an error).
+    #
+    # XACA-0802: --allow-foreign-host is stripped the same way, for the same
+    # reason. It is the agent/team-tier counterpart of --force (host
+    # authorization rather than PII-session disambiguation); subject/project
+    # tiers ignore it silently.
     local flag_allow_global=false
+    local flag_allow_foreign_host=false
     local -a _kb_add_filtered_args=()
     local _kb_add_arg
     for _kb_add_arg in "$@"; do
         if [[ "$_kb_add_arg" == "--force" ]]; then
             flag_allow_global=true
+        elif [[ "$_kb_add_arg" == "--allow-foreign-host" ]]; then
+            flag_allow_foreign_host=true
         else
             _kb_add_filtered_args+=("$_kb_add_arg")
         fi
@@ -9339,6 +9596,10 @@ kb-knowledge-add() {
             if _kb_is_local_persona "$persona"; then
                 write_root="$local_root"
             fi
+            # XACA-0802: routing is settled; now ask whether THIS HOST is allowed
+            # to author it. Must run before mkdir -p / id allocation below so a
+            # refusal leaves no directory and no file.
+            _kb_knowledge_host_affinity_guard "$persona" agent "$flag_allow_foreign_host" || return 1
             title_raw="${*:2}"
             target_dir="${write_root}/agents/${persona}"
             prefix="k"
@@ -9416,6 +9677,9 @@ kb-knowledge-add() {
             if _kb_is_local_only_team "$team_name"; then
                 write_root="$local_root"
             fi
+            # XACA-0802: same host-authorization check as the agent tier — see
+            # the comment there. Refuses BEFORE mkdir -p / id allocation.
+            _kb_knowledge_host_affinity_guard "$team_name" team "$flag_allow_foreign_host" || return 1
             title_raw="${*:2}"
             target_dir="${write_root}/teams/${team_name}"
             prefix="t"
@@ -9836,6 +10100,10 @@ kb-knowledge-validate() {
 
     local global_root
     global_root=$(_kb_knowledge_global_root)
+    # XACA-0802: second root, parallel shape, may legitimately not exist on a
+    # host that has never held PII-team knowledge. Absent => silently skipped.
+    local local_root
+    local_root=$(_kb_knowledge_local_root)
 
     local project_path
     project_path=$(_kb_knowledge_project_path)
@@ -9844,7 +10112,8 @@ kb-knowledge-validate() {
     local warning_count=0
     local pass_count=0
     # Pre-declare loop variables at function top to avoid zsh local-A trace leaks on re-declaration
-    local val_dir expected_tier dir_label exp_prefix index_file ef fname lc_fname
+    local val_dir expected_tier cur_root dir_label exp_prefix index_file ef fname lc_fname
+    local dup_slots dup_slot dup_files root_label
     local has_id has_tier has_date has_tags has_agent has_team file_id file_tier xref_line xref resolved_xref resolver_rc idx_id idx_file
     local xref_frontmatter
     local -a entry_files index_ids
@@ -9854,23 +10123,17 @@ kb-knowledge-validate() {
     _kb_val_pass()    { $flag_quiet || echo "  [OK]   $*"; pass_count=$((pass_count + 1)); }
 
     # ── Collect search directories ──────────────────────────────────────────────
-    local -a val_dirs val_tiers
+    # val_roots tracks, per collected dir, WHICH root it came from. Two reasons:
+    # (1) cross-refs must resolve against their own root — a local-only entry's
+    #     `teams:finance-personal:t001` lives under ~/knowledge-local, and
+    #     resolving it against the global root would report a false broken ref;
+    # (2) findings stay attributable to a store in the output.
+    local -a val_dirs val_tiers val_roots
 
-    # Agent dirs
-    local adir
-    for adir in "${global_root}/agents"/*/; do
-        [[ -d "$adir" ]] || continue
-        val_dirs+=("$adir"); val_tiers+=("agent")
-    done
-
-    # Team dirs (reserved, but validate if present)
-    local tdir
-    for tdir in "${global_root}/teams"/*/; do
-        [[ -d "$tdir" ]] || continue
-        val_dirs+=("$tdir"); val_tiers+=("team")
-    done
-
-    # Subject dirs — walk recursively, tracking depth
+    # Subject dirs — walk recursively, tracking depth. Reads _kb_val_cur_root
+    # (set by the collector below) so recursion doesn't need to thread the root
+    # through every frame.
+    local _kb_val_cur_root=""
     _kb_val_walk_subjects() {
         # Strip trailing slash from base; glob expansion of */ already appends one,
         # so "${base}/*/" with a slash-suffixed base yields "ios//swift/" on recursion.
@@ -9878,32 +10141,69 @@ kb-knowledge-validate() {
         local sdir
         for sdir in "${base}"/*/; do
             [[ -d "$sdir" ]] || continue
-            val_dirs+=("$sdir"); val_tiers+=("subject")
+            val_dirs+=("$sdir"); val_tiers+=("subject"); val_roots+=("$_kb_val_cur_root")
             if [[ $depth -ge 4 ]]; then
                 _kb_val_warn "Subject depth >= 4: ${sdir} — consider consolidating with tags"
             fi
             _kb_val_walk_subjects "$sdir" $((depth + 1))
         done
     }
-    _kb_val_walk_subjects "${global_root}/subjects"
 
-    # Project dirs — XACA-0532: scan ALL projects/*/ under global root (mirrors agents/teams/subjects)
-    local pdir
-    for pdir in "${global_root}/projects"/*/; do
-        [[ -d "$pdir" ]] || continue
-        val_dirs+=("$pdir"); val_tiers+=("project")
-    done
-    # Also include the resolved project_path ONLY if it lives outside the global root
-    # (in-repo layout: .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH pointing elsewhere).
-    # Skip if already covered by the glob above to avoid double-validating.
-    if [[ -d "$project_path" && "$project_path" != "${global_root}/projects/"* ]]; then
-        val_dirs+=("$project_path"); val_tiers+=("project")
+    # XACA-0802: one collector, applied to each root. Both roots have the SAME
+    # four-tier shape (agents/ teams/ subjects/ projects/), so the global and
+    # local stores get identical treatment — no second, drift-prone code path.
+    _kb_val_collect_root() {
+        local root="${1%/}"
+        # Absent root is not an error: a host with no PII-team knowledge simply
+        # has no ~/knowledge-local. Skip silently.
+        [[ -d "$root" ]] || return 0
+        _kb_val_cur_root="$root"
+
+        local cdir
+        for cdir in "${root}/agents"/*/; do
+            [[ -d "$cdir" ]] || continue
+            val_dirs+=("$cdir"); val_tiers+=("agent"); val_roots+=("$root")
+        done
+        for cdir in "${root}/teams"/*/; do
+            [[ -d "$cdir" ]] || continue
+            val_dirs+=("$cdir"); val_tiers+=("team"); val_roots+=("$root")
+        done
+        _kb_val_walk_subjects "${root}/subjects"
+        # XACA-0532: scan ALL projects/*/ (mirrors agents/teams/subjects)
+        for cdir in "${root}/projects"/*/; do
+            [[ -d "$cdir" ]] || continue
+            val_dirs+=("$cdir"); val_tiers+=("project"); val_roots+=("$root")
+        done
+    }
+
+    _kb_val_collect_root "$global_root"
+    # Skip the local pass when the two roots resolve to the same path (possible
+    # if someone points KB_KNOWLEDGE_LOCAL_ROOT at the global root) — otherwise
+    # every entry would be validated, and counted, twice.
+    if [[ "${local_root%/}" != "${global_root%/}" ]]; then
+        _kb_val_collect_root "$local_root"
+    fi
+
+    # Also include the resolved project_path ONLY if it lives outside BOTH roots
+    # (in-repo layout: .knowledge-config.yml / KB_KNOWLEDGE_PROJECT_PATH pointing
+    # elsewhere). Skip if already covered by a glob above to avoid double-validating.
+    if [[ -d "$project_path" \
+       && "$project_path" != "${global_root}/projects/"* \
+       && "$project_path" != "${local_root}/projects/"* ]]; then
+        val_dirs+=("$project_path"); val_tiers+=("project"); val_roots+=("$global_root")
     fi
 
     echo ""
     echo "═══════════════════════════════════════════════════════════════════════════"
     echo "  KNOWLEDGE VALIDATE"
     echo "  Global root: ${global_root}"
+    if [[ "${local_root%/}" == "${global_root%/}" ]]; then
+        echo "  Local root:  ${local_root}  (same as global root — validated once)"
+    elif [[ -d "$local_root" ]]; then
+        echo "  Local root:  ${local_root}  (unsynced / PII — XACA-0754)"
+    else
+        echo "  Local root:  ${local_root}  (absent — skipped)"
+    fi
     echo "  Projects:    ${global_root}/projects/*  (resolved context: ${project_path})"
     echo "═══════════════════════════════════════════════════════════════════════════"
     echo ""
@@ -9918,12 +10218,24 @@ kb-knowledge-validate() {
 
     for val_dir in "${val_dirs[@]}"; do
         expected_tier="${val_tiers[$dir_idx]}"
+        cur_root="${val_roots[$dir_idx]}"
         dir_idx=$((dir_idx + 1))
 
         [[ -d "$val_dir" ]] || continue
 
+        # XACA-0802: tag every directory line with its store so a user can tell
+        # at a glance which root a finding came from. A bare ~/-relative label
+        # is not enough — KB_KNOWLEDGE_LOCAL_ROOT may point anywhere (tests do).
+        if [[ "${cur_root%/}" == "${local_root%/}" && "${local_root%/}" != "${global_root%/}" ]]; then
+            root_label="local"
+        else
+            root_label="global"
+        fi
+        # Only re-add the ~/ shorthand when the strip actually fired — a root
+        # pointed outside $HOME (sandboxed tests) otherwise renders as "~//tmp/…".
         dir_label="${val_dir#${HOME}/}"
-        $flag_quiet || echo "  Directory: ~/${dir_label}"
+        [[ "$dir_label" != "$val_dir" ]] && dir_label="~/${dir_label}"
+        $flag_quiet || echo "  Directory: [${root_label}] ${dir_label}"
 
         # Determine expected prefix for this tier
         case "$expected_tier" in
@@ -9942,6 +10254,32 @@ kb-knowledge-validate() {
             [[ "$(basename "$ef")" == "INDEX.md" ]] && continue
             entry_files+=("$ef")
         done
+
+        # ── Duplicate ID-slot check (XACA-0802) ────────────────────────────────
+        # kb-knowledge-add allocates the next entry ID by scanning the TARGET
+        # dir for the highest <prefix>NNN. That scan is per-host, and the local
+        # root never syncs (XACA-0754), so two machines independently handed out
+        # the same slot in the same team dir — four entries, two colliding IDs,
+        # zero warnings (XACA-0795). Two files claiming one slot means one of
+        # them will be silently clobbered by any merge or migration, so this is
+        # an ERROR, not a warning. Applies to both roots.
+        if [[ ${#entry_files[@]} -gt 0 ]]; then
+            dup_slots=$(for ef in "${entry_files[@]}"; do
+                             basename "$ef" .md | sed -n 's/^\([a-zA-Z][0-9][0-9]*\)-.*$/\1/p'
+                         done | sort | uniq -d)
+            if [[ -n "$dup_slots" ]]; then
+                while IFS= read -r dup_slot; do
+                    [[ -n "$dup_slot" ]] || continue
+                    dup_files=$(for ef in "${entry_files[@]}"; do
+                                    fname=$(basename "$ef" .md)
+                                    case "$fname" in
+                                        "${dup_slot}"-*) printf '%s.md ' "$fname" ;;
+                                    esac
+                                done)
+                    _kb_val_error "Duplicate ID slot '${dup_slot}' in ${val_dir} — files: ${dup_files% }"
+                done <<< "$dup_slots"
+            fi
+        fi
 
         # Check INDEX.md
         index_file="${val_dir}/INDEX.md"
@@ -10027,7 +10365,11 @@ kb-knowledge-validate() {
             while IFS= read -r xref_line; do
                 # Extract bare cross-refs (tokens like agents:*, subjects:*, project:*, teams:*)
                 while read -r xref; do
-                    resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$global_root" 2>/dev/null)
+                    # XACA-0802: resolve against the entry's OWN root — a
+                    # local-only entry's refs point at siblings under
+                    # ~/knowledge-local, and resolving those against the global
+                    # root would report every one of them as broken.
+                    resolved_xref=$(_kb_knowledge_resolve_ref "$xref" "$cur_root" 2>/dev/null)
                     resolver_rc=$?
                     if [[ $resolver_rc -ne 0 ]]; then
                         _kb_val_error "Broken cross-ref '${xref}' in ${ef} (resolver rejected — invalid format)"
