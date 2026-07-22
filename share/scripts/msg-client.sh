@@ -92,8 +92,14 @@ if [ ! -d "$SCRIPT_DIR/node_modules/libsodium-wrappers" ]; then
         # relay shut on a stat quirk) but say why.
         if ! [ "${_stamp:-x}" -ge 0 ] 2>/dev/null; then
             echo "Warning: cannot read mtime of '$BOOTSTRAP_SENTINEL'; ignoring cooldown." >&2
+            # _stamp=0 alone makes elapsed = the full epoch, which is >= any
+            # cooldown, so the sentinel reads as expired and we proceed.
+            # Do NOT also zero _now: elapsed would become 0, i.e. "created this
+            # instant" = maximally IN cooldown, and this branch would always
+            # exit 1 while printing "ignoring cooldown" — fail-CLOSED, and
+            # lying about it. (Caught in PR #698 review; the comment above
+            # promised fail-open while the code did the opposite.)
             _stamp=0
-            _now=0
         fi
         if [ $(( _now - _stamp )) -lt "$BOOTSTRAP_COOLDOWN" ]; then
             echo "Error: libsodium-wrappers bootstrap failed recently; in cooldown." >&2

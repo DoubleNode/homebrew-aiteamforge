@@ -190,6 +190,106 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------------------
+# T6 — npm bootstrap BACKOFF state machine.
+#
+# This block had ZERO coverage until PR #698 round four, which is exactly why a
+# fail-CLOSED defect survived that long: the unreadable-mtime branch zeroed BOTH
+# _now and _stamp, making elapsed 0 — "created this instant", i.e. maximally IN
+# cooldown — so it always exit 1'd while printing "ignoring cooldown". The
+# comment promised fail-open; the code did the opposite. Untested logic that
+# only runs on a degraded consumer box is precisely where that hides.
+#
+# Runs against the INSTALLED msg-client.sh. No npm/network needed: every state
+# asserted here short-circuits before the install attempt.
+# ---------------------------------------------------------------------------
+_backoff_dir() {
+    local d="$SANDBOX/backoff-$1"
+    mkdir -p "$d"
+    cp "$SCRIPTS_DIR/msg-client.sh" "$SCRIPTS_DIR/msg-client.js" \
+       "$SCRIPTS_DIR/vault-keygen.js" "$SCRIPTS_DIR/package.json" "$d/" 2>/dev/null
+    echo "$d"
+}
+
+if ! command -v node >/dev/null 2>&1; then
+    echo "  SKIP  T6 (node not on PATH)"
+else
+    # T6a — a fresh sentinel must short-circuit WITHOUT invoking npm. This is
+    # the whole point: fleet-reporter fires this every 60s.
+    D=$(_backoff_dir fresh); : > "$D/.msg-client-bootstrap-failed"
+    OUT=$( cd "$D" && bash msg-client.sh pull 2>&1 )
+    if grep -q "in cooldown" <<< "$OUT" && [ ! -d "$D/node_modules" ]; then
+        pass "T6a fresh sentinel short-circuits, npm never invoked"
+    else
+        fail "T6a fresh sentinel did not short-circuit cleanly"
+    fi
+
+    # T6b — an expired sentinel must NOT block (fail-open on age).
+    D=$(_backoff_dir expired); : > "$D/.msg-client-bootstrap-failed"
+    touch -t "$(date -v-2H +%Y%m%d%H%M 2>/dev/null || date -d '2 hours ago' +%Y%m%d%H%M)" \
+          "$D/.msg-client-bootstrap-failed" 2>/dev/null
+    # NOTE: do NOT set MSG_CLIENT_NO_AUTO_INSTALL=1 here. That check sits ABOVE
+    # the cooldown block and exits first, so the test would pass without ever
+    # reaching the logic it claims to cover (it did, until PR #698 round five).
+    # Assert on the marker printed immediately BEFORE npm runs — that proves the
+    # cooldown gate was passed, without depending on the install succeeding.
+    OUT=$( cd "$D" && bash msg-client.sh pull 2>&1 )
+    if grep -q "in cooldown" <<< "$OUT"; then
+        fail "T6b expired sentinel still blocked — backoff never releases"
+    elif grep -q "Installing client dependencies" <<< "$OUT"; then
+        pass "T6b expired sentinel ignored (reached install)"
+    else
+        fail "T6b did not reach the cooldown gate at all (test is vacuous)"
+    fi
+
+    # T6c — explicit disable must win over a fresh sentinel.
+    D=$(_backoff_dir override); : > "$D/.msg-client-bootstrap-failed"
+    OUT=$( cd "$D" && MSG_CLIENT_BOOTSTRAP_COOLDOWN=0 bash msg-client.sh pull 2>&1 )
+    if grep -q "in cooldown" <<< "$OUT"; then
+        fail "T6c COOLDOWN=0 did not override the sentinel"
+    elif grep -q "Installing client dependencies" <<< "$OUT"; then
+        pass "T6c COOLDOWN=0 overrides sentinel (reached install)"
+    else
+        fail "T6c did not reach the cooldown gate at all (test is vacuous)"
+    fi
+
+    # T6d — a non-numeric override must WARN and still enforce a backoff, never
+    # silently disable it (the fail-silent path this ticket closed).
+    D=$(_backoff_dir nonnum); : > "$D/.msg-client-bootstrap-failed"
+    OUT=$( cd "$D" && MSG_CLIENT_BOOTSTRAP_COOLDOWN=abc bash msg-client.sh pull 2>&1 )
+    if grep -q "not numeric" <<< "$OUT" && grep -q "in cooldown" <<< "$OUT" \
+       && [ ! -d "$D/node_modules" ]; then
+        pass "T6d non-numeric cooldown warns and still enforces backoff"
+    else
+        fail "T6d non-numeric cooldown did not warn-and-enforce"
+    fi
+
+    # T6e — THE FAIL-OPEN BRANCH ITSELF. T6a-d exercise the state machine but
+    # NEVER reach the unreadable-mtime path, because a real backdated sentinel
+    # has a perfectly readable mtime. That is precisely how the fail-CLOSED bug
+    # survived: it lived in the one branch no test could enter.
+    #
+    # Reached the same way T5 works — a controlled mutant. Neutralise the mtime
+    # probe so it yields garbage, then assert the script PROCEEDS (fail-open)
+    # instead of exiting "in cooldown". A stat quirk must never wedge the relay.
+    D=$(_backoff_dir failopen); : > "$D/.msg-client-bootstrap-failed"
+    sed 's|_stamp=$(stat -c %Y "$BOOTSTRAP_SENTINEL" 2>/dev/null \\|_stamp=$(echo "not-a-number" \\|' \
+        "$SCRIPTS_DIR/msg-client.sh" > "$D/msg-client.sh"
+    chmod +x "$D/msg-client.sh"
+    if grep -q 'not-a-number' "$D/msg-client.sh"; then
+        OUT=$( cd "$D" && bash msg-client.sh pull 2>&1 )
+        if grep -q "in cooldown" <<< "$OUT"; then
+            fail "T6e unreadable mtime FAILED CLOSED — wedges the relay on a stat quirk"
+        elif grep -q "ignoring cooldown" <<< "$OUT"; then
+            pass "T6e unreadable mtime fails OPEN and says so"
+        else
+            fail "T6e unreadable-mtime branch not reached (mutant ineffective)"
+        fi
+    else
+        fail "T6e could not construct mutant (stat probe shape changed — update this test)"
+    fi
+fi
+
 echo
 echo "Passed: $PASSED   Failed: $FAILED"
 
@@ -200,7 +300,7 @@ echo "Passed: $PASSED   Failed: $FAILED"
 # prevent elsewhere; it would be indefensible to leave it in the guard itself.
 # T3/T5 legitimately SKIP without node, so the floor is the assertions that do
 # not depend on it (T1 x4, T2 x4, T4 x1 = 9).
-MIN_EXPECTED=9
+MIN_EXPECTED=14
 if [ "$FAILED" -ne 0 ]; then
     exit 1
 fi
