@@ -294,6 +294,12 @@ printf '{"version": "1.0.0", bad json\n' > "$install_dir/.aiteamforge-config"
 if command -v jq &>/dev/null; then
     _val_check_config "$install_dir" >/dev/null 2>&1
     assert_equal "1" "$_VAL_FAIL"
+    # XACA-0796: this test_pass was missing. assert_* only records on FAILURE,
+    # so on any machine WITH jq the test started and was never counted —
+    # Total=82 but Passed=81, with Failed=0 masking it. The no-jq branch below
+    # always called test_pass, which is why the gap read as a rounding quirk
+    # rather than an uncounted assertion.
+    test_pass
 else
     test_pass  # No jq — skip
 fi
