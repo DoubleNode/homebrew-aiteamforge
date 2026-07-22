@@ -183,9 +183,12 @@ install_helper_scripts() {
     # iterm2_window_manager.py, and other runtime helpers at $AITEAMFORGE_DIR/scripts/
     local scripts_dest="$AITEAMFORGE_DIR/scripts"
     mkdir -p "$scripts_dest"
+    # msg-client.{sh,js} are fleet-reporter.sh's kb-msg Tier-2 relay helpers; it
+    # resolves them relative to its own script dir, so they must land alongside it.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
-                  kanban-backup.py fleet-reporter.sh init-agent-panel-json.py; do
+                  kanban-backup.py fleet-reporter.sh init-agent-panel-json.py \
+                  msg-client.sh msg-client.js; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
             chmod +x "$scripts_dest/$helper"

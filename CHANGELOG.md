@@ -7,6 +7,9 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fixed
+- XACA-0796 — **kb-msg Tier-2 relay was mirrored into the tap but never installed onto consumer boxes.** `msg-client.sh` and `msg-client.js` shipped correctly into `share/scripts/` (XACA-0777), but `install_helper_scripts()` in `libexec/installers/install-shell.sh` copies to `$AITEAMFORGE_DIR/scripts/` from a hard-coded **allowlist**, and neither name was on it. Mirroring a file into `share/` is necessary but *not sufficient* — anything a consumer must execute has to be named in that allowlist too. The failure is silent by construction: `fleet-reporter.sh` resolves its relay helper as a **sibling** (`local client="$reporter_dir/msg-client.sh"`), so on every consumer install the sibling simply was not there and the Tier-2 path fell through its "not shipped to this box yet" guard — no error, no warning, just a permanently dark relay. **Fix:** added `msg-client.sh msg-client.js` to the allowlist, with a comment recording the sibling-resolution contract so the coupling is visible to the next editor. Verified by running the patched `install_helper_scripts()` against a sandboxed `AITEAMFORGE_DIR` (all three of `fleet-reporter.sh`/`msg-client.sh`/`msg-client.js` land executable), plus a negative control against the unpatched function that reproduces both absences — confirming the check is not vacuously green.
+
 ## [0.17.8] - 2026-07-14
 
 ### Fixed
