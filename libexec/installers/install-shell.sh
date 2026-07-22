@@ -192,19 +192,27 @@ install_helper_scripts() {
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh init-agent-panel-json.py \
-                  msg-client.sh msg-client.js vault-keygen.js; do
+                  msg-client.sh; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
             chmod +x "$scripts_dest/$helper"
         fi
     done
 
-    # Data files — copied, never chmod +x. package.json is what lets
-    # msg-client.sh's `npm install` bootstrap of libsodium-wrappers resolve in
-    # the flattened consumer layout ($AITEAMFORGE_DIR/scripts/), which has no
-    # package.json of its own; without it npm walks up, finds nothing, installs
-    # nothing, and every relay attempt pays a futile npm+node startup.
-    for datafile in package.json; do
+    # Non-executed payload — copied, never chmod +x, because nothing execs these
+    # directly and a misleading mode bit invites the next reader to assume a
+    # contract that does not exist:
+    #   msg-client.js   — no shebang; only ever reached via `exec node "$CLIENT_JS"`
+    #   vault-keygen.js — no shebang; only ever reached via require() from msg-client.js
+    #   package.json    — a manifest, and what lets msg-client.sh's `npm install`
+    #                     bootstrap of libsodium-wrappers resolve in the flattened
+    #                     consumer layout ($AITEAMFORGE_DIR/scripts/), which has no
+    #                     package.json of its own; without it npm walks up, finds
+    #                     nothing, installs nothing, and every relay attempt pays a
+    #                     futile npm+node startup.
+    # msg-client.sh stays in the executable loop above — fleet-reporter.sh's
+    # Guard 1 tests `[ -x "$client" ]`, so its exec bit is load-bearing.
+    for datafile in msg-client.js vault-keygen.js package.json; do
         if [ -f "$scripts_src/$datafile" ]; then
             cp "$scripts_src/$datafile" "$scripts_dest/$datafile"
             chmod 644 "$scripts_dest/$datafile"

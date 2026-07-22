@@ -42,6 +42,7 @@ test-kb-quarantine-stub.sh                      plain-shell
 test-knowledge-sync-upgrade-registration.sh     plain-shell
 test-lifecycle.sh                               plain-shell
 test-migration.sh                               plain-shell
+test-msg-client-install.sh                      plain-shell
 test-multi-team.sh                              brew-bash
 test-org-config.sh                              plain-shell
 test-python-venv.sh                             plain-shell
