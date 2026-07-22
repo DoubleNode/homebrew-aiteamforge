@@ -2180,11 +2180,640 @@ kb-pause() {
     fi
 }
 
+# ============================================================================
+# Crash-Recovery Reconciliation Engine (XACA-0778-001)
+# ============================================================================
+#
+# Problem: a Mac/tmux crash kills the tmux server without running the graceful
+# kanban-stop.py reconciler. activeWindows[] pointers in the board orphan
+# silently -- nothing cross-checks them against LIVE tmux. The PERSISTENT
+# truth for "what was being worked on" is backlog[].status == "in_progress"
+# (item-level) and backlog[].subitems[].status == "in_progress" (subitem-
+# level); this engine classifies each one as BOUND (a live tmux window still
+# backs it) or ORPHANED (it does not).
+#
+# This is a pure READ-ONLY classifier. It NEVER writes to the board and NEVER
+# touches tmux beyond querying it. Status mutation / resume-manifest emission
+# / re-binding are the concern of downstream subitems (kb-recover XACA-0778-
+# 002, kb-resume-rebind XACA-0778-004) that consume this function's output --
+# do not fold that logic in here.
+#
+# ----------------------------------------------------------------------------
+# OUTPUT CONTRACT (STABLE -- XACA-0778-002/004/005 are written against this
+# exact shape; changing field names/types here is a breaking change for all
+# three):
+#
+#   _kb_reconcile_inprogress emits a JSON array on stdout, one object per
+#   in_progress item/subitem:
+#
+#     {
+#       "id":              string        -- item id ("XACA-0761") or subitem id ("XACA-0761-003")
+#       "title":           string
+#       "team":            string        -- team slug the board belongs to
+#       "parentId":        string|null   -- parent item id if this is a subitem, else null
+#       "worktree":        string|null   -- worktree path recorded on the item/subitem
+#       "branch":          string|null   -- worktreeBranch recorded on the item/subitem
+#       "planDocPath":     string|null   -- kb-plan-doc-path dir, ONLY if it exists on disk
+#       "lastKnownWindow": string|null   -- XACA-0668 stable window-id key "terminal:window_name"
+#       "classification":  "BOUND" | "ORPHANED"
+#     }
+#
+#   BOUND    = lastKnownWindow resolved to a tmux window that is alive right now.
+#   ORPHANED = in_progress but no live tmux window backs it -- dead pointer,
+#              no pointer at all (liveness cannot be confirmed), or the whole
+#              tmux server is down (the universal post-crash case: everything
+#              is ORPHANED).
+#
+#   lastKnownWindow resolution priority per item:
+#     1. the item/subitem's own .worktreeWindowId field (persistent -- lives
+#        in board.json, survives a crash because it isn't tmux-derived).
+#     2. fallback: an activeWindows[] entry whose .workingOnId == this id,
+#        using that entry's .id (covers older items started before
+#        worktreeWindowId existed).
+# ----------------------------------------------------------------------------
+
+# Internal: emit the set of LIVE tmux window keys ("terminal:window_name",
+# the XACA-0668 stable window-id) for a given team, one per line. Reverses
+# the SAME session-name convention _kb_detect_context uses to derive
+# team/terminal: session = "<team>-<terminal>" (terminal = suffix after the
+# LAST dash; team = everything before it -- correct even when team itself
+# contains dashes, e.g. "freelance-doublenode-starwords").
+#
+# Degrades to silent empty output (never an error) when: tmux isn't
+# installed, the tmux server isn't running (the universal post-crash state),
+# or no session in the running server belongs to this team. Callers must
+# treat "no lines emitted" as "nothing is live", not as failure.
+_kb_tmux_live_window_ids() {
+    local team="${1-}"
+    [[ -n "$team" ]] || return 0
+
+    command -v tmux >/dev/null 2>&1 || return 0
+    tmux list-sessions >/dev/null 2>&1 || return 0
+
+    local session sess_terminal sess_team wname
+    tmux list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r session; do
+        [[ -n "$session" ]] || continue
+        sess_terminal="${session##*-}"
+        sess_team="${session%-*}"
+        [[ "$sess_team" == "$team" ]] || continue
+
+        tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | while IFS= read -r wname; do
+            [[ -n "$wname" ]] || continue
+            printf '%s:%s\n' "$sess_terminal" "$wname"
+        done
+    done
+}
+
+# Internal: resolve a plan-doc directory for an item/subitem id IF it exists
+# on disk, else emit nothing. kb-plan-doc-path only accepts parent-item shape
+# (XABC-1234, no subitem suffix) since plan docs live at the parent
+# granularity -- callers must pass the PARENT id for subitems.
+_kb_reconcile_plan_doc_path() {
+    local parent_id="${1-}"
+    [[ -n "$parent_id" ]] || return 0
+    local p
+    p=$(kb-plan-doc-path "$parent_id" 2>/dev/null) || return 0
+    [[ -n "$p" && -d "$p" ]] && printf '%s' "$p"
+    return 0
+}
+
+# The reconciliation engine. Pure read-only classifier -- see OUTPUT CONTRACT
+# above. NEVER mutates the board and NEVER mutates tmux.
+#
+# Usage: _kb_reconcile_inprogress <team> [board_file]
+#   team        Team slug (required -- used both to resolve the default board
+#               file and to scope the live-tmux-session match).
+#   board_file  Optional override (defaults to `_kb_get_board_file <team>`).
+#
+# Emits a JSON array on stdout (see contract). Emits "[]" (not an error) for
+# a missing/unreadable board file -- a team with no board has no in_progress
+# work to reconcile.
+_kb_reconcile_inprogress() {
+    local team="${1-}"
+    local board_file="${2-}"
+
+    if [[ -z "$team" ]]; then
+        echo "Usage: _kb_reconcile_inprogress <team> [board_file]" >&2
+        return 1
+    fi
+
+    if [[ -z "$board_file" ]]; then
+        board_file=$(_kb_get_board_file "$team" 2>/dev/null)
+    fi
+
+    if [[ -z "$board_file" || ! -f "$board_file" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Single locked read: every in_progress item AND in_progress subitem,
+    # with lastKnownWindow resolved per the priority rule documented above.
+    # win_for($id) is the activeWindows[] fallback (priority 2).
+    local candidates
+    candidates=$(_kb_jq_read "$board_file" '
+        (.activeWindows // []) as $windows
+        | def win_for($id): (($windows | map(select(.workingOnId == $id)) | first) // {}).id // null;
+        (
+            [ (.backlog // [])[] | select(.status == "in_progress") | {
+                id: .id,
+                title: .title,
+                parentId: null,
+                worktree: (.worktree // null),
+                branch: (.worktreeBranch // null),
+                lastKnownWindow: (.worktreeWindowId // win_for(.id))
+              }
+            ]
+        ) + (
+            [ (.backlog // [])[] as $parent
+              | (($parent.subitems // [])[] | select(.status == "in_progress")) as $sub
+              | {
+                  id: $sub.id,
+                  title: $sub.title,
+                  parentId: $parent.id,
+                  worktree: ($sub.worktree // $parent.worktree // null),
+                  branch: ($sub.worktreeBranch // $parent.worktreeBranch // null),
+                  lastKnownWindow: ($sub.worktreeWindowId // win_for($sub.id))
+                }
+            ]
+        )
+    ' -c 2>/dev/null)
+
+    if [[ -z "$candidates" || "$candidates" == "null" ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    # Live tmux window set for this team. Empty is a valid, expected result
+    # (tmux server down post-crash) -- NOT a fatal condition; it just means
+    # every candidate below classifies ORPHANED.
+    local live_windows
+    live_windows=$(_kb_tmux_live_window_ids "$team")
+
+    # Loop-body locals declared ONCE before the loop (zsh: re-declaring
+    # `local` inside a loop body can leak the assignment expression to
+    # stdout on some zsh versions -- see kanban-helpers.sh house style).
+    local cand_json cand_id cand_title cand_worktree cand_branch cand_parent cand_lkw
+    local plan_target plan_doc_path classification result_line
+    local -a result_lines=()
+
+    while IFS= read -r cand_json; do
+        [[ -n "$cand_json" ]] || continue
+
+        cand_id=$(printf '%s' "$cand_json" | jq -r '.id // empty' 2>/dev/null)
+        [[ -n "$cand_id" ]] || continue
+        cand_title=$(printf '%s' "$cand_json" | jq -r '.title // empty' 2>/dev/null)
+        cand_worktree=$(printf '%s' "$cand_json" | jq -r '.worktree // empty' 2>/dev/null)
+        cand_branch=$(printf '%s' "$cand_json" | jq -r '.branch // empty' 2>/dev/null)
+        cand_parent=$(printf '%s' "$cand_json" | jq -r '.parentId // empty' 2>/dev/null)
+        cand_lkw=$(printf '%s' "$cand_json" | jq -r '.lastKnownWindow // empty' 2>/dev/null)
+
+        # planDocPath resolves at the PARENT granularity (kb-plan-doc-path
+        # rejects subitem-shaped ids); use the id itself when this candidate
+        # IS a top-level item (parentId is null/empty).
+        plan_target="${cand_parent:-$cand_id}"
+        plan_doc_path=$(_kb_reconcile_plan_doc_path "$plan_target")
+
+        # BOUND requires a lastKnownWindow pointer AND that exact
+        # "terminal:window_name" key present in the live set right now.
+        # No pointer, or a live set that doesn't contain it (including an
+        # entirely empty live set post-crash) => ORPHANED.
+        classification="ORPHANED"
+        if [[ -n "$cand_lkw" && -n "$live_windows" ]] && printf '%s\n' "$live_windows" | grep -qxF -- "$cand_lkw"; then
+            classification="BOUND"
+        fi
+
+        result_line=$(jq -nc \
+            --arg id "$cand_id" \
+            --arg title "$cand_title" \
+            --arg team "$team" \
+            --arg parentId "$cand_parent" \
+            --arg worktree "$cand_worktree" \
+            --arg branch "$cand_branch" \
+            --arg planDocPath "$plan_doc_path" \
+            --arg lastKnownWindow "$cand_lkw" \
+            --arg classification "$classification" \
+            '{
+                id: $id,
+                title: $title,
+                team: $team,
+                parentId: (if $parentId == "" then null else $parentId end),
+                worktree: (if $worktree == "" then null else $worktree end),
+                branch: (if $branch == "" then null else $branch end),
+                planDocPath: (if $planDocPath == "" then null else $planDocPath end),
+                lastKnownWindow: (if $lastKnownWindow == "" then null else $lastKnownWindow end),
+                classification: $classification
+            }' 2>/dev/null)
+
+        [[ -n "$result_line" ]] && result_lines+=("$result_line")
+    done < <(printf '%s' "$candidates" | jq -c '.[]' 2>/dev/null)
+
+    if [[ ${#result_lines[@]} -eq 0 ]]; then
+        echo "[]"
+        return 0
+    fi
+
+    printf '%s\n' "${result_lines[@]}" | jq -sc '.' 2>/dev/null || echo "[]"
+}
+
+# Thin manual/debug CLI over _kb_reconcile_inprogress -- NOT the user-facing
+# crash-recovery command (that's kb-recover, XACA-0778-002, built on top of
+# this). Useful for spot-checking reconciliation state without waiting on 002.
+#
+# Usage: kb-reconcile-inprogress [--team <team>] [--all-teams] [--json]
+#   (no flags)     current team (via _kb_detect_context), human-readable table
+#   --team <team>  scan one specific team's board
+#   --all-teams    scan every team registered in team-paths.json
+#   --json         emit the raw JSON array (or {team: [...]} map for --all-teams)
+kb-reconcile-inprogress() {
+    _kb_ensure_jq || return 1
+
+    local target_team="" all_teams=0 emit_json=0
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --team)
+                target_team="${2-}"
+                shift 2
+                ;;
+            --all-teams)
+                all_teams=1
+                shift
+                ;;
+            --json)
+                emit_json=1
+                shift
+                ;;
+            -h|--help)
+                cat <<'USAGE'
+Usage: kb-reconcile-inprogress [--team <team>] [--all-teams] [--json]
+
+Classifies every in_progress item/subitem as BOUND (live tmux window backs
+it) or ORPHANED (it does not) -- e.g. after a Mac/tmux crash. Read-only:
+never mutates the board or tmux. See _kb_reconcile_inprogress in
+kanban-helpers.sh for the full output contract.
+
+  --team <team>   Scan one specific team's board (default: current team)
+  --all-teams     Scan every team registered in ~/.aiteamforge/team-paths.json
+  --json          Emit raw JSON instead of the human-readable table
+USAGE
+                return 0
+                ;;
+            *)
+                echo "Unknown argument: ${1-}" >&2
+                echo "Run 'kb-reconcile-inprogress --help' for usage." >&2
+                return 2
+                ;;
+        esac
+    done
+
+    local -a teams_to_scan=()
+    if [[ "$all_teams" -eq 1 ]]; then
+        local teams_json="$HOME/.aiteamforge/team-paths.json"
+        if [[ ! -f "$teams_json" ]]; then
+            echo "Error: cannot read $teams_json" >&2
+            return 2
+        fi
+        local raw_teams t
+        raw_teams=$(jq -r '.teams | keys[]' "$teams_json" 2>/dev/null)
+        while IFS= read -r t; do
+            [[ -n "$t" ]] && teams_to_scan+=("$t")
+        done <<< "$raw_teams"
+    elif [[ -n "$target_team" ]]; then
+        teams_to_scan=("$target_team")
+    else
+        local context
+        context=$(_kb_detect_context)
+        if [[ "$context" == ERROR:* ]]; then
+            echo "Error: could not detect team context. Pass --team <team> or --all-teams." >&2
+            return 2
+        fi
+        teams_to_scan=("${context%%:*}")
+    fi
+
+    # team → results map, accumulated across the scan
+    local report="{}"
+    local scan_team team_results
+    for scan_team in "${teams_to_scan[@]}"; do
+        [[ -n "$scan_team" ]] || continue
+        team_results=$(_kb_reconcile_inprogress "$scan_team")
+        report=$(jq -c --arg t "$scan_team" --argjson r "${team_results:-[]}" '.[$t] = $r' <<< "$report" 2>/dev/null) || report="{}"
+    done
+
+    if [[ "$emit_json" -eq 1 ]]; then
+        printf '%s\n' "$report" | jq '.'
+        return 0
+    fi
+
+    local bound_count orphan_count total
+    bound_count=$(printf '%s' "$report" | jq '[.[][] | select(.classification == "BOUND")] | length' 2>/dev/null || echo 0)
+    orphan_count=$(printf '%s' "$report" | jq '[.[][] | select(.classification == "ORPHANED")] | length' 2>/dev/null || echo 0)
+    total=$(( bound_count + orphan_count ))
+
+    if [[ "$total" -eq 0 ]]; then
+        echo "No in_progress items/subitems found across ${#teams_to_scan[@]} team(s)."
+        return 0
+    fi
+
+    printf '%s' "$report" | jq -r '
+        to_entries[] | .key as $team | .value[] |
+        "[\(.classification)] \($team) \(.id) — \(.title)\n    worktree: \(.worktree // "-")  branch: \(.branch // "-")  lastKnownWindow: \(.lastKnownWindow // "-")\n    planDocPath: \(.planDocPath // "-")"
+    '
+    echo ""
+    echo "Summary: $total in_progress ($bound_count BOUND, $orphan_count ORPHANED) across ${#teams_to_scan[@]} team(s)."
+    if [[ "$orphan_count" -gt 0 ]]; then
+        echo "Run kb-recover to resume orphaned work (XACA-0778-002)."
+    fi
+}
+
+# The user-facing crash-recovery command (XACA-0778-002). Answers "what was I
+# doing?" after a Mac/tmux crash: filters _kb_reconcile_inprogress's output
+# down to ORPHANED entries only (BOUND work needs no recovery) and renders a
+# resume manifest -- id, title, worktree, branch, plan-doc path, last-known
+# window. Pure read-only, same as the engine it's built on. To re-bind an
+# orphan to the CURRENT live window, run `kb-resume <ID>` (XACA-0778-004).
+#
+# Usage: kb-recover [--team <team>] [--all-teams] [--json]
+#   (no flags)     current team (via _kb_detect_context)
+#   --team <team>  scan one specific team's board
+#   --all-teams    scan every team registered in team-paths.json -- a crash
+#                  hits every board, not just the one you happen to be in
+#   --json         emit the raw resume-manifest JSON: a flat array for the
+#                  single-team case, a {team: [...]} map for --all-teams
+kb-recover() {
+    _kb_ensure_jq || return 1
+
+    local target_team="" all_teams=0 emit_json=0
+
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --team)
+                target_team="${2-}"
+                shift 2
+                ;;
+            --all-teams)
+                all_teams=1
+                shift
+                ;;
+            --json)
+                emit_json=1
+                shift
+                ;;
+            -h|--help)
+                cat <<'USAGE'
+Usage: kb-recover [--team <team>] [--all-teams] [--json]
+
+Resume manifest: lists in_progress items/subitems ORPHANED by a crash (no
+live tmux window backs them) -- "what was I doing?" after a Mac/tmux crash.
+Read-only: never mutates the board or tmux.
+
+  --team <team>   Scan one specific team's board (default: current team)
+  --all-teams     Scan every team registered in ~/.aiteamforge/team-paths.json
+  --json          Emit the raw resume-manifest JSON instead of the report
+
+To re-bind an orphan to THIS window: kb-resume <ID>
+USAGE
+                return 0
+                ;;
+            *)
+                echo "Unknown argument: ${1-}" >&2
+                echo "Run 'kb-recover --help' for usage." >&2
+                return 2
+                ;;
+        esac
+    done
+
+    if [[ "$all_teams" -eq 1 ]]; then
+        local teams_json="$HOME/.aiteamforge/team-paths.json"
+        if [[ ! -f "$teams_json" ]]; then
+            echo "Error: cannot read $teams_json" >&2
+            return 2
+        fi
+        local -a teams_to_scan=()
+        local raw_teams t
+        raw_teams=$(jq -r '.teams | keys[]' "$teams_json" 2>/dev/null)
+        while IFS= read -r t; do
+            [[ -n "$t" ]] && teams_to_scan+=("$t")
+        done <<< "$raw_teams"
+
+        # team → ORPHANED-only results map
+        local report="{}"
+        local scan_team team_results orphaned
+        for scan_team in "${teams_to_scan[@]}"; do
+            [[ -n "$scan_team" ]] || continue
+            team_results=$(_kb_reconcile_inprogress "$scan_team")
+            orphaned=$(printf '%s' "${team_results:-[]}" | jq -c '[.[] | select(.classification == "ORPHANED")]' 2>/dev/null)
+            report=$(jq -c --arg t "$scan_team" --argjson r "${orphaned:-[]}" '.[$t] = $r' <<< "$report" 2>/dev/null) || report="{}"
+        done
+
+        if [[ "$emit_json" -eq 1 ]]; then
+            printf '%s\n' "$report" | jq '.'
+            return 0
+        fi
+
+        local orphan_count
+        orphan_count=$(printf '%s' "$report" | jq '[.[][]] | length' 2>/dev/null || echo 0)
+
+        if [[ "$orphan_count" -eq 0 ]]; then
+            echo "✓ Nothing orphaned across ${#teams_to_scan[@]} team(s) -- all in_progress work is bound to a live window."
+            return 0
+        fi
+
+        echo "Resume manifest -- $orphan_count orphaned in_progress item(s)/subitem(s) across ${#teams_to_scan[@]} team(s):"
+        echo ""
+        printf '%s' "$report" | jq -r '
+            to_entries[] | .key as $team | .value[] |
+            "[\($team)] \(.id) — \(.title)\n    worktree:          \(.worktree // "-")\n    branch:            \(.branch // "-")\n    plan doc:          \(.planDocPath // "-")\n    last known window: \(.lastKnownWindow // "-")\n"
+        '
+        echo "To pick this work back up in THIS window: kb-resume <ID>"
+        return 0
+    fi
+
+    # Single-team path (default: current team via context; or --team override)
+    local team
+    if [[ -n "$target_team" ]]; then
+        team="$target_team"
+    else
+        local context
+        context=$(_kb_detect_context)
+        if [[ "$context" == ERROR:* ]]; then
+            echo "Error: could not detect team context. Pass --team <team> or --all-teams." >&2
+            return 2
+        fi
+        team="${context%%:*}"
+    fi
+
+    local team_results orphaned
+    team_results=$(_kb_reconcile_inprogress "$team")
+    orphaned=$(printf '%s' "${team_results:-[]}" | jq -c '[.[] | select(.classification == "ORPHANED")]' 2>/dev/null)
+    [[ -n "$orphaned" ]] || orphaned="[]"
+
+    if [[ "$emit_json" -eq 1 ]]; then
+        printf '%s\n' "$orphaned" | jq '.'
+        return 0
+    fi
+
+    local orphan_count
+    orphan_count=$(printf '%s' "$orphaned" | jq 'length' 2>/dev/null || echo 0)
+
+    if [[ "$orphan_count" -eq 0 ]]; then
+        echo "✓ Nothing orphaned for team '$team' -- all in_progress work is bound to a live window."
+        return 0
+    fi
+
+    echo "Resume manifest for team '$team' -- $orphan_count orphaned in_progress item(s)/subitem(s):"
+    echo ""
+    printf '%s' "$orphaned" | jq -r '
+        .[] |
+        "\(.id) — \(.title)\n    worktree:          \(.worktree // "-")\n    branch:            \(.branch // "-")\n    plan doc:          \(.planDocPath // "-")\n    last known window: \(.lastKnownWindow // "-")\n"
+    '
+    echo "To pick this work back up in THIS window: kb-resume <ID>"
+}
+
+# Re-bind an ORPHANED in_progress item/subitem to the CURRENT live tmux
+# window (XACA-0778-004). This is the `kb-resume <ID>` overload path -- NOT
+# the no-arg pause/resume toggle below (that stays untouched).
+#
+# Pointer re-bind ONLY: does not change status (the item is already
+# in_progress) and does not touch pausedReason/previousStatus (those belong
+# to the pause/resume flow). It sets worktreeWindowId on the item/subitem to
+# THIS window and refreshes the matching activeWindows[] entry via
+# _kb_update_window, so the Workflow tab shows it BOUND again immediately.
+# Classification comes from _kb_reconcile_inprogress (XACA-0778-001) -- never
+# hand-rolled here.
+#
+# Usage: kb-resume <ID>   (item id "XACA-0761" or subitem id "XACA-0761-003")
+_kb_resume_rebind() {
+    local target_id="${1-}"
+
+    _kb_ensure_jq || return 1
+
+    local context team terminal window_index window_name board_file window_id
+    context=$(_kb_detect_context)
+    if [[ "$context" == ERROR:* ]]; then
+        echo "Error: could not detect the current window context." >&2
+        echo "kb-resume <ID> re-binds an orphaned item to the CURRENT live tmux window --" >&2
+        echo "run it from inside the tmux window you want to bind to." >&2
+        return 1
+    fi
+    team="${context%%:*}"
+    local rest="${context#*:}"
+    terminal="${rest%%:*}"
+    rest="${rest#*:}"
+    window_index="${rest%%:*}"
+    window_name="${rest#*:}"
+    board_file=$(_kb_get_board_file "$team")
+    window_id=$(_kb_get_window_id "$terminal" "$window_name")
+
+    if [[ ! -f "$board_file" ]]; then
+        echo "Error: No kanban board found for team '$team'" >&2
+        return 1
+    fi
+
+    # Classify via the reconciliation engine (read-only, single source of
+    # truth for BOUND/ORPHANED).
+    local reconciled match_json classification current_lkw title parent_id
+    reconciled=$(_kb_reconcile_inprogress "$team" "$board_file")
+    match_json=$(printf '%s' "$reconciled" | jq -c --arg id "$target_id" '[.[] | select(.id == $id)] | first // empty' 2>/dev/null)
+
+    if [[ -z "$match_json" || "$match_json" == "null" ]]; then
+        echo "Error: '$target_id' is not an in_progress item/subitem on team '$team'." >&2
+        echo "Run 'kb-recover' to see the current resume manifest." >&2
+        return 1
+    fi
+
+    classification=$(printf '%s' "$match_json" | jq -r '.classification')
+    current_lkw=$(printf '%s' "$match_json" | jq -r '.lastKnownWindow // empty')
+    title=$(printf '%s' "$match_json" | jq -r '.title // empty')
+    parent_id=$(printf '%s' "$match_json" | jq -r '.parentId // empty')
+
+    if [[ "$classification" == "BOUND" ]]; then
+        if [[ "$current_lkw" == "$window_id" ]]; then
+            echo "'$target_id' is already bound to this window ($window_id). Nothing to do."
+        else
+            echo "'$target_id' is already BOUND to a live window ($current_lkw), not this one ($window_id)."
+            echo "Refusing to steal a live binding -- stop it there first, or resume it from that window."
+        fi
+        return 0
+    fi
+
+    # ORPHANED -- warn (don't block) if the current worktree is already
+    # claimed by another actively-working item/subitem, same advisory guard
+    # kb-run/kb-pick run before binding a window to a task (XACA-0778-018).
+    local worktree conflict
+    worktree=$(_kb_get_worktree)
+    if [[ -n "$worktree" ]]; then
+        conflict=$(_kb_check_worktree_conflict "$board_file" "$target_id" "$worktree")
+        if [[ -n "$conflict" ]]; then
+            _kb_warn_worktree_conflict "$conflict"
+        fi
+    fi
+
+    # ORPHANED -- re-point the persistent worktreeWindowId to THIS window.
+    local idx sidx timestamp
+    timestamp=$(_kb_get_timestamp)
+
+    if [[ -n "$parent_id" ]]; then
+        local resolved
+        resolved=$(_kb_resolve_subitem_id "$board_file" "$target_id")
+        idx="${resolved%%:*}"
+        sidx="${resolved#*:}"
+        if [[ "$idx" == "-1" || "$sidx" == "-1" ]]; then
+            echo "Error: could not resolve subitem '$target_id' on the board." >&2
+            return 1
+        fi
+        _kb_jq_update "$board_file" \
+           '.backlog[$pidx].subitems[$sidx].worktreeWindowId = $wid |
+            .backlog[$pidx].subitems[$sidx].updatedAt = $ts |
+            .backlog[$pidx].updatedAt = $ts |
+            .lastUpdated = $ts' \
+           --argjson pidx "$idx" \
+           --argjson sidx "$sidx" \
+           --arg wid "$window_id" \
+           --arg ts "$timestamp"
+    else
+        idx=$(_kb_find_by_id "$board_file" "$target_id")
+        if [[ "$idx" == "-1" ]]; then
+            echo "Error: could not resolve item '$target_id' on the board." >&2
+            return 1
+        fi
+        _kb_jq_update "$board_file" \
+           '.backlog[$idx].worktreeWindowId = $wid |
+            .backlog[$idx].updatedAt = $ts |
+            .lastUpdated = $ts' \
+           --argjson idx "$idx" \
+           --arg wid "$window_id" \
+           --arg ts "$timestamp"
+    fi
+
+    # Refresh/create the activeWindows[] entry for THIS window so the
+    # Workflow tab reflects the re-bind immediately. _kb_update_window
+    # re-derives context internally and preserves persistent fields
+    # (startedAt, statusHistory, ...) from any prior entry with this window
+    # id. "coding" mirrors the status kb-run/kb-backlog-sub-start set when a
+    # task is (re)claimed by a window.
+    _kb_update_window "coding" "$title"
+    _kb_set_working_on "$target_id" "DEV"
+
+    echo "✓ Re-bound [$target_id] to this window ($window_id): $title"
+    echo "  (was ORPHANED -- previous pointer: ${current_lkw:-none})"
+
+    local target_type="item"
+    [[ -n "$parent_id" ]] && target_type="subitem"
+    _kb_log_activity "resume_rebind" "$target_id" "$target_type" "worktreeWindowId" "${current_lkw:-}" "$window_id" ""
+}
+
 # Resume a paused task and return to previous status
-# Usage: kb-resume
-# Returns card to its previous status before pausing
-# Also clears paused state from backlog item
+# Usage: kb-resume [<ID>]
+# No args: returns card to its previous status before pausing (and clears
+#   paused state from the backlog item) -- unchanged legacy behavior.
+# With an ID (XACA-0778-004): re-binds an ORPHANED in_progress item/subitem
+#   to THIS live window instead -- see _kb_resume_rebind above.
 kb-resume() {
+    if [[ $# -gt 0 ]]; then
+        _kb_resume_rebind "$@"
+        return $?
+    fi
+
     local context team terminal window_index window_name board_file window_id
     context=$(_kb_detect_context)
     team="${context%%:*}"
