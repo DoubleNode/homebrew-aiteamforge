@@ -166,6 +166,20 @@ def get_config_path() -> Path:
 #                    band base at install time and persisted to team-paths.json;
 #                    use lcars_port_base + lcars_port_range for band queries.
 #                    None means not yet allocated (pre-migration install).
+# primary_host     — OPTIONAL (XACA-0802): the ONE fleet host on which this
+#                    team's knowledge is authored. Compared case-insensitively
+#                    (and with a trailing ".local" stripped) against BOTH
+#                    `scutil --get ComputerName` and `hostname -s`, so a single
+#                    slug matches either form. ABSENT means "no declared host"
+#                    — deliberately not the empty string, because the shell
+#                    guard (_kb_knowledge_host_affinity_guard in
+#                    kanban-helpers.sh) fails OPEN on absence and an empty
+#                    string would be indistinguishable from a host named "".
+#                    Populated ONLY for the three PII teams today; the registry
+#                    lists every team the fleet knows about, so team membership
+#                    alone has never implied ownership — this field is what
+#                    makes ownership expressible (XACA-0779 stranded a legal
+#                    and a medical entry on M3Pro precisely because it wasn't).
 # ---------------------------------------------------------------------------
 
 _HOME = str(Path.home())
@@ -263,6 +277,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_account_id": "",
         "anthropic_account_nickname": "",
         "anthropic_api_key_env_var": "TEAM_LEGAL_COPARENTING_API_KEY",
+        # XACA-0802: PII team — authored on the M4 Mini, nowhere else.
+        "primary_host": "darren-m4-mini",
     },
 
     # ── Medical ───────────────────────────────────────────────────────────
@@ -276,6 +292,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_account_id": "",
         "anthropic_account_nickname": "",
         "anthropic_api_key_env_var": "TEAM_MEDICAL_GENERAL_API_KEY",
+        # XACA-0802: PII team — authored on the M4 Mini, nowhere else.
+        "primary_host": "darren-m4-mini",
     },
 
     # ── Finance ───────────────────────────────────────────────────────────
@@ -289,6 +307,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "anthropic_account_id": "",
         "anthropic_account_nickname": "",
         "anthropic_api_key_env_var": "TEAM_FINANCE_PERSONAL_API_KEY",
+        # XACA-0802: PII team — authored on the M4 Mini, nowhere else.
+        "primary_host": "darren-m4-mini",
     },
 
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
@@ -353,6 +373,7 @@ _CONFIG_PATH_AT_LOAD: str | None = None  # detect $AITEAMFORGE_CONFIG changes
 _A1_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0522)
 _CONTRACT_SCRUB_ATTEMPTED: bool = False  # once-per-process guard (XACA-0643)
 _BOARD_LESS_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0794)
+_PRIMARY_HOST_BACKFILL_ATTEMPTED: bool = False  # once-per-process guard (XACA-0802)
 
 SUPPORTED_SCHEMA_VERSION = 3
 
@@ -590,7 +611,7 @@ def load_config() -> dict:
     Never raises.
     """
     global _CONFIG_CACHE, _CONFIG_PATH_AT_LOAD, _A1_BACKFILL_ATTEMPTED, _CONTRACT_SCRUB_ATTEMPTED
-    global _BOARD_LESS_BACKFILL_ATTEMPTED
+    global _BOARD_LESS_BACKFILL_ATTEMPTED, _PRIMARY_HOST_BACKFILL_ATTEMPTED
 
     config_path = get_config_path()
     config_path_str = str(config_path)
@@ -709,6 +730,16 @@ def load_config() -> dict:
         maybe_marked = _backfill_board_less_markers_on_disk(config_path, config)
         if maybe_marked is not None:
             config = maybe_marked
+
+    # primary_host backfill (XACA-0802) — the overlay on every existing machine
+    # predates the field, so without this pass the shell host-affinity guard
+    # would see "no declared host" for the PII teams forever and fail open
+    # forever. Runs after the passes above so it operates on the final team set.
+    if not _PRIMARY_HOST_BACKFILL_ATTEMPTED:
+        _PRIMARY_HOST_BACKFILL_ATTEMPTED = True
+        maybe_hosted = _backfill_primary_host_on_disk(config_path, config)
+        if maybe_hosted is not None:
+            config = maybe_hosted
 
     _CONFIG_CACHE = config
     _CONFIG_PATH_AT_LOAD = config_path_str
@@ -1097,6 +1128,89 @@ def _backfill_board_less_markers_on_disk(config_path: Path, current: dict) -> di
     )
 
 
+def diff_missing_primary_host(config: dict) -> list[tuple[str, str]]:
+    """Return [(team_slug, primary_host), ...] for teams needing the XACA-0802 field.
+
+    A team needs the field when DEFAULT_TEAMS declares a non-empty `primary_host`
+    but the live overlay entry does not carry the key at all. DEFAULT_TEAMS is the
+    authority for WHICH host owns a team; the overlay is never trusted to invent
+    or contradict ownership, but a hand-set overlay value IS respected (key
+    present → skipped), so an operator who moves a team to another box is not
+    fought by the loader on every read.
+
+    Empty list = already migrated (skip-fast). Pure predicate — never mutates,
+    never raises.
+    """
+    host_defaults = {
+        slug: str(entry.get("primary_host") or "")
+        for slug, entry in DEFAULT_TEAMS.items()
+        if entry.get("primary_host")
+    }
+    result: list[tuple[str, str]] = []
+    for slug, entry in sorted(config.get("teams", {}).items()):
+        if slug not in host_defaults:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        if "primary_host" in entry:
+            continue  # already migrated, or deliberately overridden
+        result.append((slug, host_defaults[slug]))
+    return result
+
+
+def apply_primary_host(config: dict) -> dict:
+    """Return a copy of *config* with `primary_host` backfilled (XACA-0802).
+
+    STRICTLY ADDITIVE, mirroring apply_board_less_markers:
+      - Adds ONLY `primary_host`, and ONLY to teams DEFAULT_TEAMS declares a host
+        for (today: the three PII teams).
+      - Never touches any other team and never touches any other field.
+      - Never overwrites an existing `primary_host`, even an empty one — key
+        presence is the migration marker, and an operator's explicit value wins.
+
+    Idempotent: re-running on an already-migrated config is a no-op. The input
+    config is never mutated; a deep copy is returned.
+    """
+    import copy
+    upgraded = copy.deepcopy(config)
+    teams = upgraded.get("teams", {})
+    for slug, host in diff_missing_primary_host(config):
+        entry = teams.get(slug)
+        if not isinstance(entry, dict):
+            continue
+        entry["primary_host"] = host
+    return upgraded
+
+
+def _backfill_primary_host_on_disk(config_path: Path, current: dict) -> dict | None:
+    """Snapshot, lock, add `primary_host`, atomically rewrite (XACA-0802).
+
+    Self-heals overlays written before XACA-0802 — i.e. every overlay in the
+    fleet at the time this shipped. Without it the field would exist only in
+    Python's DEFAULT_TEAMS, which the SHELL guard never reads: kanban-helpers.sh
+    reads the on-disk overlay, so a team's host affinity is only enforceable once
+    the value is materialized there.
+
+    Returns the upgraded config when a change is made, or None when there is
+    nothing to do (skip-fast — no lock, no backup, no write). Never raises. Write
+    mechanics live in _rewrite_config_on_disk — this pass owns no copy of the
+    lock / TOCTOU / backup / atomic-write skeleton.
+    """
+    return _rewrite_config_on_disk(
+        config_path,
+        current,
+        label="primary-host affinity",
+        backup_tag="primary-host",
+        needs_change=diff_missing_primary_host,
+        transform=apply_primary_host,
+        describe=lambda cfg: [
+            f"team={slug} primary_host={host!r} (XACA-0802 — knowledge for this "
+            f"team is authored on that host only)"
+            for slug, host in diff_missing_primary_host(cfg)
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Team accessor functions
 # ---------------------------------------------------------------------------
@@ -1262,6 +1376,31 @@ def get_team_lcars_port(team: str) -> int | None:
         )
     port = entry.get("lcars_port")
     return int(port) if port is not None else None
+
+
+def get_team_primary_host(team: str) -> str:
+    """Return the team's declared primary host, or "" when none is declared (XACA-0802).
+
+    "" means "unowned / not yet declared", which every consumer must treat as
+    fail-OPEN — the registry lists all 20 teams on every machine, so absence has
+    always been the normal case and must never be read as "this host is wrong".
+    Falls back to DEFAULT_TEAMS when the live overlay predates the backfill pass
+    (same migration-tolerance shape as get_team_code).
+
+    Raises KeyError with a helpful message if the team is not found.
+    """
+    config = load_config()
+    entry = config["teams"].get(team)
+    if entry is None:
+        hint = _available_teams_hint(config)
+        raise KeyError(
+            f"Team '{team}' not found. Available: {hint} — "
+            f"edit {get_config_path()} or run `aiteamforge-paths init`."
+        )
+    host = entry.get("primary_host")
+    if not host:
+        host = DEFAULT_TEAMS.get(team, {}).get("primary_host")
+    return str(host) if host else ""
 
 
 # ---------------------------------------------------------------------------
