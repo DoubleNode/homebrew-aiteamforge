@@ -8472,6 +8472,11 @@ kb-knowledge-search() {
     local _st _jt _jti _jtg _jp  # multi-term loop var + JSON field escape buffers (XACA-0738)
     local _pc_title _pc_tags  # porcelain TSV sanitize buffers — declared OUT of the loop (zsh local-in-loop stdout leak, k501) (XACA-0738)
     local _json_entries="" _json_first=true  # JSON array accumulator (XACA-0738)
+    # Batched-matching scratch (XACA-0721) — ALL declared before the loop so no
+    # `local` runs inside it (zsh local-in-loop stdout-leak trap, k501).
+    local _all_md _matched_set _tag_hits _body_hits _f _bnlc _stlc _extract _bn
+    local -a _grep_e_args
+    local _sep=$'\034'  # 0x1C field separator for the title<sep>tags awk extract
 
     # XACA-0265: array base differs by shell — zsh defaults to 1-indexed, bash
     # (and zsh under KSH_ARRAYS) is 0-indexed. Probe at runtime so the parallel
@@ -8487,58 +8492,102 @@ kb-knowledge-search() {
 
         [[ -d "$search_root" ]] || continue
 
-        # Find all .md files recursively (subjects tier can be 3-4 levels deep)
-        md_files=$(find "$search_root" -type f -name "*.md" 2>/dev/null)
-        [[ -z "$md_files" ]] && continue
+        # ── Batched per-root matching (XACA-0721) ──────────────────────────────
+        # Replaces the prior per-file walk (tag + filename + body greps run on
+        # EVERY .md file) with a small fixed number of batched passes per root,
+        # then loops ONLY the matched set for the cheap title/tags extract + emit.
+        # The result SET and result_count are identical to the per-file walk —
+        # ONLY intra-root ordering changes (sort -u → lexical, vs find's traversal
+        # order). Cross-root tier precedence (project > team > subject > agent) is
+        # preserved by the enclosing per-root loop, which is untouched.
+        #
+        # Multi-term OR (XACA-0738) is preserved:
+        #   • body  → ONE recursive `grep -rliF` with one `-e <term>` per term →
+        #             OR-union of every term in a single filesystem walk.
+        #   • file  → pure-shell scan of the find list; a file matches if its
+        #             lowercased basename contains ANY term (break on first hit).
+        # INDEX.md is excluded from every candidate set (it is never an emitted
+        # entry regardless of how it matched), exactly as the old walk's emit guard.
+        _all_md=$(find "$search_root" -type f -name "*.md" 2>/dev/null)
+        [[ -z "$_all_md" ]] && continue
 
-        while IFS= read -r filepath; do
-            basename_f=$(basename "$filepath")
-            is_index=false
-            [[ "$basename_f" == "INDEX.md" ]] && is_index=true
-
-            matched=false
-
-            # Tag filter: check frontmatter tags: field (YAML list format)
+        _matched_set=""
+        if [[ ${#search_terms[@]} -eq 0 ]] && [[ -z "$filter_tag" ]]; then
+            # No term and no tag → every non-INDEX entry under this root.
+            _matched_set=$(printf '%s\n' "$_all_md" | grep -v '/INDEX\.md$' 2>/dev/null)
+        else
+            # ── Tag filter: ONE batched `grep -rH '^tags:'` pass ───────────────
+            # Mirrors the old per-file `grep -m1 '^tags:' | sed … | grep -Fqi`:
+            #   • first `^tags:` line per file — contiguity guard: grep -r emits a
+            #     file's lines contiguously, so we keep only the first per path.
+            #   • strip the leading `tags:`+spaces, then literal case-insensitive
+            #     substring test against the filter value (mirrors grep -Fqi).
             if [[ -n "$filter_tag" ]]; then
-                tags_val=$(grep -m1 '^tags:' "$filepath" 2>/dev/null | sed 's/^tags:[[:space:]]*//')
-                if echo "$tags_val" | grep -Fqi "$filter_tag" 2>/dev/null; then
-                    matched=true
-                fi
+                _tag_hits=$(grep -rH --include='*.md' '^tags:' "$search_root" 2>/dev/null \
+                    | awk -v tag="$filter_tag" '
+                        { ci=index($0,":"); if(ci==0) next;
+                          path=substr($0,1,ci-1); rest=substr($0,ci+1);
+                          if(path==lastpath) next; lastpath=path;
+                          sub(/^tags:[[:space:]]*/,"",rest);
+                          if(index(tolower(rest),tolower(tag))>0) print path }')
+                [[ -n "$_tag_hits" ]] && _matched_set+="$_tag_hits"$'\n'
             fi
 
-            # Content/filename search: OR-match — any term in search_terms suffices (XACA-0738).
-            # Multiple positional args each run grep -Fqi independently; entry matches if any hits.
-            # Single-term behavior is unchanged (one-element array, same grep calls).
-            # TODO(XACA-0222): consolidate to a single grep pass (grep -rln) when entry count > ~500.
-            # Current per-term-per-file approach (tag + filename + body) is acceptable at ~200 entries.
+            # ── Term filter: body (batched recursive grep) + filename (shell) ──
             if [[ ${#search_terms[@]} -gt 0 ]]; then
-                for _st in "${search_terms[@]}"; do
-                    if echo "$basename_f" | grep -Fqi "$_st" 2>/dev/null; then
-                        matched=true; break
-                    fi
-                done
-                if [[ "$matched" == "false" ]] && [[ "$is_index" == "false" ]]; then
+                # Body: one recursive fixed-string, case-insensitive pass. Every
+                # term becomes a `-e` arg → OR-union of all terms in one walk.
+                _grep_e_args=()
+                for _st in "${search_terms[@]}"; do _grep_e_args+=(-e "$_st"); done
+                _body_hits=$(grep -rliF --include='*.md' "${_grep_e_args[@]}" "$search_root" 2>/dev/null)
+                [[ -n "$_body_hits" ]] && _matched_set+="$_body_hits"$'\n'
+
+                # Filename: pure-shell scan over the find list. A file matches if
+                # its lowercased basename contains ANY term (break on first hit).
+                # Quote the term in the glob so grep -F literal semantics hold —
+                # metachars in a term match literally, not as shell wildcards.
+                while IFS= read -r _f; do
+                    [[ -z "$_f" ]] && continue
+                    _bnlc="${_f##*/}"; _bnlc="${(L)_bnlc}"
                     for _st in "${search_terms[@]}"; do
-                        if grep -Fqi "$_st" "$filepath" 2>/dev/null; then
-                            matched=true; break
+                        _stlc="${(L)_st}"
+                        if [[ "$_bnlc" == *"$_stlc"* ]]; then
+                            _matched_set+="$_f"$'\n'; break
                         fi
                     done
-                fi
+                done <<< "$_all_md"
             fi
+        fi
 
-            # If no term/tag filter, include all non-INDEX entries
-            if [[ ${#search_terms[@]} -eq 0 ]] && [[ -z "$filter_tag" ]] && [[ "$is_index" == "false" ]]; then
-                matched=true
-            fi
+        # Dedup + drop blank lines + drop INDEX.md (never an emitted entry,
+        # regardless of how it matched). sort -u also yields deterministic
+        # intra-root ordering — the ONLY observable change vs. the old walk.
+        _matched_set=$(printf '%s\n' "$_matched_set" | grep -v '^$' | grep -v '/INDEX\.md$' 2>/dev/null | sort -u)
+        [[ -z "$_matched_set" ]] && continue
 
-            if [[ "$matched" == "true" ]] && [[ "$is_index" == "false" ]]; then
-                title=$(grep -m1 "^# \|^## " "$filepath" 2>/dev/null | sed 's/^#* //' | head -1)
-                [[ -z "$title" ]] && title="${basename_f%.md}"
+        # ── Emit loop over the matched set ─────────────────────────────────────
+        while IFS= read -r filepath; do
+            [[ -z "$filepath" ]] && continue
+            _bn="${filepath##*/}"; _bn="${_bn%.md}"
+            # ONE awk pass per matched file: first `# `/`## ` heading → title
+            # (fallback: basename without .md), first `^tags:` line → tags (≤40
+            # chars). The two fields are joined by 0x1C (absent from text, so it
+            # can never collide with content) and split back in the shell below.
+            # This reproduces the old `grep -m1 … | sed …` title/tags extraction.
+            _extract=$(awk -v bn="$_bn" -v sep="$_sep" '
+                !ht && ($0 ~ /^# / || $0 ~ /^## /) { t=$0; sub(/^#* /,"",t); title=t; ht=1 }
+                !hg && /^tags:/ { g=$0; sub(/^tags:[[:space:]]*/,"",g); tags=g; hg=1 }
+                END { if(title=="") title=bn; printf "%s%s%s", title, sep, substr(tags,1,40) }
+            ' "$filepath" 2>/dev/null)
+            [[ -z "$_extract" ]] && _extract="${_bn}${_sep}"
+            title="${_extract%%${_sep}*}"
+            tags_line="${_extract#*${_sep}}"
 
-                tags_line=$(grep -m1 '^tags:' "$filepath" 2>/dev/null | sed 's/^tags:[[:space:]]*//' | cut -c1-40)
+            rel_path="${filepath#${HOME}/}"
 
-                rel_path="${filepath#${HOME}/}"
-
+            # Emit branches below are byte-preserved from the per-file walk
+            # (XACA-0738): porcelain TSV / JSON accumulator / human 2-line, then
+            # result_count + the per-base-tier result_tiers tally (XACA-0502).
                 if $flag_porcelain; then
                     # TSV: tier<TAB>title<TAB>tags<TAB>path  (path is HOME-relative, no leading ~/)
                     # Sanitize embedded TAB/newline in fields → space so a stray delimiter
@@ -8581,8 +8630,7 @@ kb-knowledge-search() {
                     project)  _kb_rt_project=$((_kb_rt_project + 1)) ;;
                     relevant) _kb_rt_relevant=$((_kb_rt_relevant + 1)) ;;
                 esac
-            fi
-        done <<< "$md_files"
+        done <<< "$_matched_set"
     done
 
     if $flag_json; then
@@ -8646,6 +8694,18 @@ kb-knowledge-search() {
     #   entries are read vs. dead weight. Opt out: KB_SEARCH_TELEMETRY_DISABLED=1.
     # How to apply: any failure here is swallowed; telemetry must never break the search.
     if [[ "${KB_SEARCH_TELEMETRY_DISABLED:-0}" != "1" ]]; then
+        # INTENTIONAL DIVERGENCE FROM CANONICAL (XACA-0810, do not "fix" to parity).
+        #   canonical kanban-helpers.sh uses: "${AITEAMFORGE_DIR:-$HOME/dev-team}/kanban-logs"
+        #   this tap copy deliberately uses:  "${AITEAMFORGE_DIR}/kanban-logs"  (no fallback)
+        # Why: the $HOME/dev-team fallback is a DEV-MACHINE default. On a tap consumer
+        #   box there is no ~/dev-team checkout, so that fallback would silently
+        #   manufacture a phantom ~/dev-team/kanban-logs tree — precisely the failure
+        #   XACA-0746 fixed here and that XACA-0760's own canonical-side comment cites as
+        #   the reason for the change. AITEAMFORGE_DIR is always set by the tap's shell
+        #   init before this file is sourced, so the fallback is unreachable-by-design on
+        #   consumers and only harmful if it ever did fire.
+        # Per XACA-0340 the canonical file remains authoritative for everything else in
+        #   this function; this single line is an environment adaptation, not drift.
         local _kb_log_dir="${AITEAMFORGE_DIR}/kanban-logs"  # XACA-0746: context-safe (was $HOME/dev-team)
         local _kb_log_file="$_kb_log_dir/kb-search.jsonl"
         local _kb_ts _kb_persona _kb_q _kb_agent _kb_subject _kb_project _kb_tier _kb_tag _kb_pwd

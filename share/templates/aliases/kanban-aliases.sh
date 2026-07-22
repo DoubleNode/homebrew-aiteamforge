@@ -3379,6 +3379,18 @@ kb-knowledge-search() {
     #   entries are read vs. dead weight. Opt out: KB_SEARCH_TELEMETRY_DISABLED=1.
     # How to apply: any failure here is swallowed; telemetry must never break the search.
     if [[ "${KB_SEARCH_TELEMETRY_DISABLED:-0}" != "1" ]]; then
+        # INTENTIONAL DIVERGENCE FROM CANONICAL (XACA-0810, do not "fix" to parity).
+        #   canonical kanban-helpers.sh uses: "${AITEAMFORGE_DIR:-$HOME/dev-team}/kanban-logs"
+        #   this tap copy deliberately uses:  "${AITEAMFORGE_DIR}/kanban-logs"  (no fallback)
+        # Why: the $HOME/dev-team fallback is a DEV-MACHINE default. On a tap consumer
+        #   box there is no ~/dev-team checkout, so that fallback would silently
+        #   manufacture a phantom ~/dev-team/kanban-logs tree — precisely the failure
+        #   XACA-0746 fixed here and that XACA-0760's own canonical-side comment cites as
+        #   the reason for the change. AITEAMFORGE_DIR is always set by the tap's shell
+        #   init before this file is sourced, so the fallback is unreachable-by-design on
+        #   consumers and only harmful if it ever did fire.
+        # Per XACA-0340 the canonical file remains authoritative for everything else in
+        #   this function; this single line is an environment adaptation, not drift.
         local _kb_log_dir="${AITEAMFORGE_DIR}/kanban-logs"  # XACA-0746: context-safe (no ~/dev-team dependency)
         local _kb_log_file="$_kb_log_dir/kb-search.jsonl"
         local _kb_ts _kb_persona _kb_q _kb_agent _kb_subject _kb_project _kb_tier _kb_tag _kb_pwd
