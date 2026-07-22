@@ -1,0 +1,29 @@
+{
+  "name": "aiteamforge-fleet-client",
+  "version": "1.0.0",
+  "description": "Fleet Monitor client tooling — secret vault machine keypair + secret fetch/decrypt (EPIC-0016 A.4.1-A.4.2)",
+  "private": true,
+  "main": "vault-keygen.js",
+  "bin": {
+    "vault-keygen": "vault-keygen.js",
+    "vault-fetch": "vault-fetch.js"
+  },
+  "scripts": {
+    "test": "node --test tests/vault-keygen.test.js tests/vault-fetch.test.js"
+  },
+  "keywords": [
+    "aiteamforge",
+    "fleet-monitor",
+    "secret-vault",
+    "x25519",
+    "libsodium"
+  ],
+  "author": "Commander Jett Reno",
+  "license": "MIT",
+  "dependencies": {
+    "libsodium-wrappers": "^0.7.16"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

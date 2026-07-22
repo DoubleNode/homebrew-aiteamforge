@@ -184,14 +184,30 @@ install_helper_scripts() {
     local scripts_dest="$AITEAMFORGE_DIR/scripts"
     mkdir -p "$scripts_dest"
     # msg-client.{sh,js} are fleet-reporter.sh's kb-msg Tier-2 relay helpers; it
-    # resolves them relative to its own script dir, so they must land alongside it.
+    # resolves them relative to its own script dir, so they must land alongside
+    # it. The chain does NOT stop there: msg-client.js top-level-requires
+    # ./vault-keygen.js, so that sibling has to land too, or node dies on
+    # MODULE_NOT_FOUND inside a swallowed `2>/dev/null || true` — a silent crash
+    # every reporter cycle. Ship the whole require chain, not just entrypoints.
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh init-agent-panel-json.py \
-                  msg-client.sh msg-client.js; do
+                  msg-client.sh msg-client.js vault-keygen.js; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
             chmod +x "$scripts_dest/$helper"
+        fi
+    done
+
+    # Data files — copied, never chmod +x. package.json is what lets
+    # msg-client.sh's `npm install` bootstrap of libsodium-wrappers resolve in
+    # the flattened consumer layout ($AITEAMFORGE_DIR/scripts/), which has no
+    # package.json of its own; without it npm walks up, finds nothing, installs
+    # nothing, and every relay attempt pays a futile npm+node startup.
+    for datafile in package.json; do
+        if [ -f "$scripts_src/$datafile" ]; then
+            cp "$scripts_src/$datafile" "$scripts_dest/$datafile"
+            chmod 644 "$scripts_dest/$datafile"
         fi
     done
 
