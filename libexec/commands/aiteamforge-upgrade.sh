@@ -786,6 +786,128 @@ update_team_scripts() {
   fi
 }
 
+# Refresh per-team connect/disconnect cockpit scripts on upgrade (XACA-0814).
+#
+# BUGFIX XACA-0814: install-time-only provisioning — same bug class as the
+# XACA-0608 / XACA-0673 / XACA-0751 gaps documented above this in the file
+# (K113: "install path grows a step, upgrade path never learns about it").
+# install-team.sh --connect-only renders ${INSTANCE_ID}-connect.sh and
+# ${INSTANCE_ID}-disconnect.sh into WORKING_DIR, but ONLY at `aiteamforge
+# setup` time — bin/aiteamforge-setup.sh's cockpit-mode pass (~line 1420) and
+# its full-mode "render remaining teams" pass (~line 1394) are the ONLY call
+# sites. The upgrade run-sequence never re-ran that step, so XACA-0785's fix
+# to the connect-script generator itself shipped in a release but never
+# reached a machine that had ALREADY installed under the broken generator —
+# `aiteamforge upgrade` bumped every other component and left the stale,
+# pre-XACA-0785 connect/disconnect scripts in place, untouched, forever, on
+# every consumer box that installed before the fix landed. This function
+# closes that gap the same way update_team_scripts / update_runtime_helpers
+# close their equivalents: a self-maintaining, refresh-only sweep, delegated
+# entirely to install-team.sh --connect-only so INSTANCE_ID computation
+# (including the finance/medical/legal/freelance project-augmented instance-id
+# path, XACA-0485) is never duplicated here.
+#
+# Design:
+#   • Enumerate ${FRAMEWORK_DIR}/share/teams/*.conf — the same source list
+#     install-team.sh itself derives team ids from, and the same list
+#     bin/aiteamforge-setup.sh's cockpit pass iterates (mirror the
+#     authoritative reference exactly, don't reinvent team discovery).
+#     Parametric/umbrella teams with no .conf (DNS, MainEvent) are naturally
+#     excluded here, and install-team.sh's own CONNECT_ONLY branch additionally
+#     no-ops for parametric teams regardless (see install-team.sh's parametric
+#     comments near its connect/disconnect generation) — belt and suspenders,
+#     not a reimplementation of that skip logic.
+#   • Refresh-only guard: INSTANCE_ID always BEGINS WITH the base team id (it
+#     is either the bare team id, e.g. "academy", or a project-augmented id,
+#     e.g. "finance-personal" — XACA-0485), so a glob on "${team_id}*-connect.sh"
+#     against WORKING_DIR catches both shapes without this function ever
+#     computing INSTANCE_ID itself. A team whose connect script was never
+#     rendered on this machine (never installed, or opted out) is skipped —
+#     upgrade must never materialise cockpit scripts for a team this box
+#     didn't set up. Guard each glob candidate with `[ -f "$f" ]` so the loop
+#     is safe whether or not nullglob is set.
+#   • Delegate the actual render to install-team.sh --connect-only in an
+#     isolated `bash` SUBPROCESS (not `source`) — exactly like the setup
+#     wizard's own cockpit loop (bin/aiteamforge-setup.sh's
+#     `AITEAMFORGE_DIR="${INSTALL_DIR}" bash "${INSTALLERS_DIR}/install-team.sh"
+#     "$_ct" --connect-only --install-dir "${INSTALL_DIR}"`). A full subprocess
+#     fully isolates install-team.sh's `set -euo pipefail` from this script's
+#     `set -eo` (no -u, see top of file) — `set -u` can never leak into the
+#     upgrade the way it could if this were sourced (contrast
+#     update_knowledge_repo/update_knowledge_sync above, which DO source
+#     install-kanban.sh and need the subshell-with-option-change trick because
+#     of that; install-team.sh's own CONNECT-ONLY EARLY EXIT block is written
+#     to be invoked by a fresh interpreter, not sourced into a caller).
+#   • Fail-soft: a single team's render failure never aborts the upgrade —
+#     this runs unattended under the nightly auto-upgrade LaunchAgent.
+#     `set -eo pipefail` is active at the top of this file, so the
+#     `if ( ... | sed ... ); then` construct below correctly observes
+#     install-team.sh's own exit status through the pipe.
+#   • DRY_RUN-aware: prints what would be refreshed without invoking the
+#     installer.
+update_connect_scripts() {
+  print_section "Updating Team Connect/Disconnect Scripts"
+
+  local teams_conf_dir="${FRAMEWORK_DIR}/share/teams"
+  local installer="${LIBEXEC_DIR}/installers/install-team.sh"
+
+  if [ ! -d "$teams_conf_dir" ]; then
+    print_warning "Team configs not found ($teams_conf_dir) — skipping connect-script refresh"
+    return 0
+  fi
+  if [ ! -f "$installer" ]; then
+    print_warning "install-team.sh not found ($installer) — skipping connect-script refresh"
+    return 0
+  fi
+
+  local updated=0
+  local failed=0
+  local conf team_id found f
+
+  for conf in "$teams_conf_dir"/*.conf; do
+    [ -f "$conf" ] || continue
+    team_id="$(basename "$conf" .conf)"
+
+    # Refresh only if this machine already rendered connect scripts for this
+    # team (never materialise cockpit scripts for a team this box never set
+    # up). INSTANCE_ID always begins with team_id (bare or project-augmented,
+    # XACA-0485), so this glob catches both shapes.
+    found=false
+    for f in "${WORKING_DIR}/${team_id}"*-connect.sh; do
+      [ -f "$f" ] || continue
+      found=true
+      break
+    done
+    [ "$found" = true ] || continue
+
+    if [ "$DRY_RUN" = true ]; then
+      echo "Would re-render ${team_id} connect/disconnect scripts"
+      updated=$((updated + 1))
+      continue
+    fi
+
+    print_info "Refreshing ${team_id} connect/disconnect scripts..."
+    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "$team_id" --connect-only --install-dir "${WORKING_DIR}" 2>&1 | sed 's/^/    /' ); then
+      print_success "Refreshed ${team_id} connect/disconnect scripts"
+      updated=$((updated + 1))
+    else
+      print_warning "Failed to refresh ${team_id} connect/disconnect scripts (continuing)"
+      failed=$((failed + 1))
+    fi
+  done
+
+  if [ $((updated + failed)) -eq 0 ]; then
+    print_success "No installed team connect scripts to refresh"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would refresh ${updated} team connect/disconnect script set(s)"
+  elif [ "$failed" -gt 0 ]; then
+    print_warning "Refreshed ${updated} team connect/disconnect script set(s); ${failed} failed (non-fatal)"
+  else
+    print_success "Refreshed ${updated} team connect/disconnect script set(s)"
+  fi
+  return 0
+}
+
 # Update top-level runtime helpers laid into WORKING_DIR/scripts/ (XACA-0608, extended).
 #
 # BUGFIX XACA-0608 (extended scope): the install path lays a set of top-level
@@ -1595,6 +1717,7 @@ update_knowledge_repo
 update_knowledge_sync
 update_aux_scripts
 update_team_scripts
+update_connect_scripts
 update_runtime_helpers
 update_imgcat
 update_shell_helpers
