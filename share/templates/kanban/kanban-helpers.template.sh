@@ -10119,6 +10119,78 @@ EOF
     echo ""
 }
 
+# XACA-0818: atomically reserve the next available knowledge-entry slot in
+# target_dir, closing the scan→compute→create TOCTOU race in the id
+# allocator. Concurrent kb-knowledge-add/kb-knowledge-promote callers all
+# read the SAME highest NNN before any of them writes its file, then each
+# writes a DISTINCT slug into the SAME NNN slot (e.g. k002-foo.md AND
+# k002-bar.md — both creates succeed because the filenames differ, so an
+# O_EXCL/noclobber guard on the FINAL filename cannot fix this). The atomic
+# unit is the whole "scan existing files → compute next NNN → reserve the
+# slot", NOT the final file.
+#
+# The lock is deliberately kept OUTSIDE the synced knowledge tree, under
+# TMPDIR and keyed by a hash of the target dir — NOT inside target_dir.
+# kb-knowledge-sync.sh Guard 3 treats ANY non-empty porcelain as "dirty →
+# skip sync", so the first add/promote on a host WEDGED that host's knowledge
+# sync permanently. Keying the lock by dir-hash under TMPDIR still serializes
+# writers to the SAME dir (identical hash) while letting different dirs proceed
+# in parallel, and leaves the synced tree clean.
+#
+# Reuses the Perl-flock discipline from _kb_jq_update (macOS ships no flock(1);
+# bash's `200>file` redirect syntax fails under zsh). Under the lock we scan for
+# the highest NNN and immediately create an empty placeholder at
+# <prefix>NNN-<slug>.md INSIDE target_dir — that reserved real entry is the
+# unchanged placeholder mechanism, so the NEXT locked caller's scan sees it and
+# advances to NNN+1. Real content is written into the reserved file by the
+# caller AFTER the lock releases (safe: the filename is uniquely ours).
+#
+# Args:   <target_dir> <prefix> <slug>   (target_dir must already exist)
+# Stdout: absolute path of the reserved (empty, 0-byte) placeholder file.
+# Returns non-zero (and prints nothing usable) on failure.
+_kb_alloc_slot() {
+    local target_dir="${1:?_kb_alloc_slot: target_dir required}"
+    local prefix="${2:?_kb_alloc_slot: prefix required}"
+    local slug="${3:?_kb_alloc_slot: slug required}"
+
+    # Normalize to an absolute path so the lock key is stable regardless of the
+    # caller's cwd. Callers mkdir -p target_dir before calling, so it exists;
+    # fall back to the raw value if the cd somehow fails.
+    local abs_dir
+    abs_dir=$(cd "$target_dir" 2>/dev/null && pwd) || abs_dir="$target_dir"
+
+    local dir_hash
+    dir_hash=$(printf '%s' "$abs_dir" | cksum | awk '{print $1}')
+    local alloc_lock="${TMPDIR:-/tmp}/kb-alloc-${dir_hash}.lock"
+
+    perl -e '
+        use Fcntl qw(:flock);
+        my $lock_file = $ARGV[0];  # zsh-index-ok: Perl, 0-indexed by design
+        open(my $fh, ">", $lock_file) or die "Cannot open lock file: $!";
+        flock($fh, LOCK_EX) or die "Cannot lock: $!";
+        my $rc = system(@ARGV[1..$#ARGV]);
+        close($fh);
+        exit($rc >> 8);
+    ' "$alloc_lock" sh -c '
+        dir=$1; pfx=$2; slug=$3
+        highest=0
+        for f in "$dir/$pfx"[0-9][0-9][0-9]-*.md; do
+            [ -f "$f" ] || continue
+            b=${f##*/}
+            num=${b#"$pfx"}
+            num=${num%%-*}
+            num=$(printf %s "$num" | sed "s/^0*//")
+            [ -z "$num" ] && num=0
+            if [ "$num" -gt "$highest" ] 2>/dev/null; then highest=$num; fi
+        done
+        next=$((highest + 1))
+        padded=$(printf %03d "$next")
+        file="$dir/$pfx$padded-$slug.md"
+        : > "$file" || exit 3
+        printf %s "$file"
+    ' sh "$abs_dir" "$prefix" "$slug"
+}
+
 # Scaffold a new knowledge entry at the correct tier location
 # Usage: kb-knowledge-add <tier> [<target>] "<title>"
 #
@@ -10326,26 +10398,32 @@ kb-knowledge-add() {
         mkdir -p "$target_dir"
     fi
 
-    # Find next available NNN by scanning existing files matching <prefix>NNN-*.md
-    local highest_id=0
-    local existing_file existing_num
-    for existing_file in "${target_dir}/${prefix}"[0-9][0-9][0-9]-*.md; do
-        [[ -f "$existing_file" ]] || continue
-        existing_num=$(basename "$existing_file" | grep -oE "^${prefix}[0-9]+" | tr -d "$prefix")
-        existing_num="${existing_num#0}"  # strip leading zeros
-        existing_num="${existing_num:-0}"
-        if [[ "$existing_num" -gt "$highest_id" ]]; then
-            highest_id="$existing_num"
-        fi
-    done
-    local next_id=$((highest_id + 1))
-    local padded_id
-    printf -v padded_id "%03d" "$next_id"
-
+    # Compute the title slug up front — it is title-derived and independent of
+    # any other entry, so it needs no serialization.
     local title_slug
     title_slug=$(_kb_knowledge_slugify "$title_raw")
-    local entry_id="${prefix}${padded_id}-${title_slug}"
-    local new_file="${target_dir}/${entry_id}.md"
+
+    # XACA-0818: close the scan→compute→create TOCTOU race in the id allocator.
+    # See _kb_alloc_slot's header comment for the full race description. It
+    # serializes the whole critical section under an exclusive lock (kept
+    # under TMPDIR, keyed by target-dir hash — NOT inside the synced tree, so
+    # it can't wedge kb-knowledge-sync's Guard-3 dirty check) and reserves an
+    # empty placeholder <prefix>NNN-<slug>.md inside target_dir. The real
+    # content is written into that reserved file below, after the lock
+    # releases (safe: the filename is uniquely ours).
+    local new_file
+    new_file=$(_kb_alloc_slot "$target_dir" "$prefix" "$title_slug")
+
+    if [[ -z "$new_file" || ! -f "$new_file" ]]; then
+        echo "Error: failed to atomically allocate a knowledge entry id in ${target_dir}" >&2
+        return 1
+    fi
+
+    # Derive the id fields from the atomically reserved filename.
+    local entry_id padded_id
+    entry_id=$(basename "$new_file" .md)
+    padded_id="${entry_id#${prefix}}"
+    padded_id="${padded_id%%-*}"
 
     # Determine the template to use
     local template_file="${global_root}/templates/knowledge_entry_template.md"
@@ -10585,9 +10663,16 @@ kb-knowledge-promote() {
     esac
 
     # Determine target entry ID
+    # XACA-0818: track whether the id was auto-allocated. When it was, the
+    # plan-time max+1 scan below is only a non-atomic ESTIMATE for the printed
+    # plan — the authoritative slot is re-resolved under an exclusive per-dir
+    # lock at execute time (after mkdir -p). An explicitly named target skips
+    # that re-resolution and keeps its caller-supplied id.
+    local target_entry_auto=false
     if [[ -n "$target_entry_part" ]]; then
         target_entry_id="$target_entry_part"
     else
+        target_entry_auto=true
         # Find next available NNN in target dir.
         # Use `find` instead of a literal glob: zsh aborts the function with
         # "no matches found" when the glob expands to nothing (and target_dir
@@ -10639,6 +10724,26 @@ kb-knowledge-promote() {
 
     # 1. Ensure target dir
     mkdir -p "$target_dir"
+
+    # XACA-0818: when the target id was auto-allocated, re-resolve the slot now
+    # via the shared atomic allocator so two concurrent promotions into the same
+    # tier dir cannot both land on the same NNN. _kb_alloc_slot keeps the lock
+    # under TMPDIR (NOT inside the synced tree — see its header) and reserves an
+    # empty placeholder so the next locked caller advances to NNN+1. The
+    # plan-time id printed above is a non-atomic estimate; this is the
+    # authoritative allocation. Skipped when the caller named the target entry
+    # explicitly (behavior unchanged there).
+    if $target_entry_auto; then
+        local reserve_slug reserved_file
+        reserve_slug=$(basename "$source_file" .md | sed 's/^[ktspmv][0-9]*-//')
+        reserved_file=$(_kb_alloc_slot "$target_dir" "$target_prefix" "$reserve_slug")
+        if [[ -z "$reserved_file" || ! -f "$reserved_file" ]]; then
+            echo "Error: failed to atomically allocate a promotion target id in ${target_dir}" >&2
+            return 1
+        fi
+        target_file="$reserved_file"
+        target_entry_id=$(basename "$target_file" .md)
+    fi
 
     # Capture source frontmatter BEFORE any write — the stub-write block below
     # truncates source_file via `> "$source_file"` redirection, which would
