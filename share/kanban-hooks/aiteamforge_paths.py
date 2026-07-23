@@ -314,7 +314,8 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
     # ── Aliases (backward-compat, mirrors kanban_utils.py) ────────────────
     # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve the existing
     # command/mainevent collision. 8234 is in command's band [8230, 8240);
-    # mainevent's authoritative band is [8400, 8410).
+    # mainevent's authoritative band is [8400, 8401) (XACA-0806 narrowed it from
+    # [8400, 8410): a board-less alias binds exactly its one fixed port).
     #
     # XACA-0727: mainevent is now a BOARD-LESS alias — it carries NO kanban_dir /
     # working_dir. 'command' is the operative kanban identity for Main Event
@@ -346,12 +347,121 @@ DEFAULT_TEAMS: dict[str, dict[str, Any]] = {
         "board_less": True,
         "alias_of": "command",
         "lcars_port_base": 8400,
-        "lcars_port_range": 10,
+        # range 1 (XACA-0806): a board-less alias binds exactly ONE port (its
+        # fixed lcars_port 8400) and is never dynamically allocated via
+        # compute_instance_port, so it needs no multi-port band. It was 10
+        # ([8400,8410)) from XACA-0463's move off 8234; that width nominally
+        # overlapped the per-project band _TEMPLATE_PORT_BANDS["mainevent"] =
+        # (8401,19) → [8401,8419) on 8401-8409, violating the team-id-contract
+        # "bands MUST NOT overlap" rule. Narrowing to [8400,8401) removes the
+        # overlap; inert in practice (nothing allocated in the old 8401-8409 tail).
+        "lcars_port_range": 1,
         "lcars_port": 8400,
         "anthropic_account_id": "",
         "anthropic_account_nickname": "",
         "anthropic_api_key_env_var": "TEAM_MAINEVENT_API_KEY",
     },
+
+    # ── MainEvent per-project crew instances (XACA-0806) ──────────────────
+    # mainevent-startup.sh <PROJECTID> launches an 8-terminal VOY-themed crew
+    # against an arbitrary Main Event project directory; each run's LCARS server
+    # is addressed by SESSION_PREFIX = "mainevent-<project-lower>" (see
+    # LCARS_TEAM_NAME in mainevent/scripts/mainevent-lcars-startup.sh — it is
+    # passed to lcars-ui/server.py as LCARS_TEAM for data isolation, so this
+    # registry entry's kanban_dir is what that server instance actually renders).
+    # These are DELIBERATELY separate registry keys from "ios"/"android"/
+    # "firebase"/"command" even though 4 of the 5 point at the SAME physical
+    # kanban_dir as those teams — mainevent-startup.sh is an alternate,
+    # cross-platform-themed way to open a session against that same board, not
+    # a different board. This mirrors the pre-existing bare "mainevent" →
+    # 'command' relationship, just via a plain duplicate entry instead of
+    # board_less/alias_of (these instances DO own an addressable kanban_dir,
+    # unlike the coordination-only bare alias above).
+    #
+    # Port band [8401, 8419] per _TEMPLATE_PORT_BANDS["mainevent"] above. Only
+    # the 5 project directories verified to exist under
+    # "/Users/Shared/Development/Main Event/" at registration time are seeded;
+    # mainevent-startup.sh's SHELL fallback (resolve_lcars_port_fallback, now
+    # rebased to the same [8401, 8419] band) still covers any future PROJECTID
+    # run against this launcher that isn't listed here.
+    #
+    # No component_label/copyright_owner/license_type/notice_template/year_start
+    # keys: lcars-ui/server.py's copyright endpoints read those via `.get()` and
+    # tolerate absence (renders as an unfilled placeholder); inventing values for
+    # a script-driven registration risked recording incorrect licensing metadata.
+    "mainevent-dev-team": {
+        # DEFAULT_PROJECT in mainevent-connect.sh. Same working_dir/kanban_dir as
+        # team "command" (Main Event's dev-team repo IS command's board).
+        "team_code": "MDT",
+        "kanban_dir": "/Users/Shared/Development/Main Event/dev-team/kanban",
+        "working_dir": "/Users/Shared/Development/Main Event/dev-team",
+        "lcars_port_base": 8401,
+        "lcars_port_range": 19,
+        "lcars_port": 8401,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_DEV_TEAM_API_KEY",
+    },
+    "mainevent-maineventapp-ios": {
+        # Same working_dir/kanban_dir as team "ios".
+        "team_code": "MAI",
+        "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban",
+        "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-iOS",
+        "lcars_port_base": 8401,
+        "lcars_port_range": 19,
+        "lcars_port": 8402,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTAPP_IOS_API_KEY",
+    },
+    "mainevent-maineventapp-android": {
+        # Same working_dir/kanban_dir as team "android". Project uses a
+        # /develop worktree; kanban_dir stays at the project ROOT (matches
+        # mainevent-startup.sh's dirname($PROJECT_DIR)/kanban derivation when
+        # USE_WORKTREE=true — the develop/kanban subdir holds only gitignored
+        # per-worktree knowledge, never the live board).
+        "team_code": "MAA",
+        "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android/kanban",
+        "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-Android",
+        "lcars_port_base": 8401,
+        "lcars_port_range": 19,
+        "lcars_port": 8403,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTAPP_ANDROID_API_KEY",
+    },
+    "mainevent-maineventapp-functions": {
+        # Same working_dir/kanban_dir as team "firebase". Also has a /develop
+        # worktree; see the android entry's note above re: kanban_dir staying
+        # at the project root.
+        "team_code": "MAF",
+        "kanban_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions/kanban",
+        "working_dir": "/Users/Shared/Development/Main Event/MainEventApp-Functions",
+        "lcars_port_base": 8401,
+        "lcars_port_range": 19,
+        "lcars_port": 8404,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTAPP_FUNCTIONS_API_KEY",
+    },
+    "mainevent-maineventwrapper-ios": {
+        # No existing "ios"-style team owns this dir — MainEventWrapper-iOS is a
+        # standalone legacy repo with no sibling team entry to duplicate. Its
+        # project directory exists (verified at registration) but has NEVER had
+        # a kanban board initialized (no kanban_dir on disk yet, no /develop
+        # worktree) — kb_ensure_team_initialized in mainevent-startup.sh will
+        # provision kanban_dir on first run, same as any other net-new team.
+        "team_code": "MWI",
+        "kanban_dir": "/Users/Shared/Development/Main Event/MainEventWrapper-iOS/kanban",
+        "working_dir": "/Users/Shared/Development/Main Event/MainEventWrapper-iOS",
+        "lcars_port_base": 8401,
+        "lcars_port_range": 19,
+        "lcars_port": 8405,
+        "anthropic_account_id": "",
+        "anthropic_account_nickname": "",
+        "anthropic_api_key_env_var": "TEAM_MAINEVENT_MAINEVENTWRAPPER_IOS_API_KEY",
+    },
+
     # XACA-0643: bare "medical" and "freelance" aliases REMOVED. They are
     # parameterized templates (medical needs a project; freelance needs
     # client+project) per the team-id contract, so a bare key is a contract
@@ -458,8 +568,55 @@ _PARAMETERIZED_TEMPLATES: frozenset[str] = frozenset({"finance", "legal", "medic
 # yet kb-port-fix still needs its band to renumber freelance-<client>-<project>
 # installs. finance/legal/medical resolve via their seeded *-instance entries and
 # intentionally are NOT duplicated here (avoids band drift). (XACA-0643)
+#
+# "mainevent" (XACA-0806): mainevent-startup.sh accepts an ARBITRARY PROJECTID
+# (SESSION_PREFIX = "mainevent-<project-lower>"), so per-project instances can
+# never all be pre-seeded in DEFAULT_TEAMS — this band is what lets kb-port-fix
+# reason about (and eventually renumber) any mainevent-<project> instance, seeded
+# or not. Base is 8401, NOT 8400: 8400 is the bare board-less "mainevent" alias's
+# own lcars_port (team_code MEV, alias_of "command" — see that entry above) and
+# must stay uncollidable with a per-project instance landing at the band's first
+# slot. Range 19 gives [8401, 8419], deliberately clear of freelance's band
+# [8500, 8600) — the whole point of this ticket was that mainevent per-project
+# instances were landing inside freelance's band via a stale 8510/90 shell
+# fallback (see mainevent-startup.sh's resolve_lcars_port_fallback call site).
+#
+# RESOLVED (XACA-0806 subitem 3): unlike freelance, "mainevent" DOES have a
+# bare entry in DEFAULT_TEAMS (board-less alias, lcars_port_base 8400 /
+# lcars_port_range 1 — narrowed from 10 by XACA-0806's review response so the
+# alias band [8400, 8401) no longer overlaps this per-project band).
+# _resolve_template_band() used to resolve "mainevent-<anything>" to that bare
+# entry's OWN (8400, 1) band via its strip-dash tolerant-lookup step, BEFORE
+# this dict was ever consulted — so an UNREGISTERED mainevent-<project> run
+# through compute_instance_port() would allocate from the bare alias's
+# [8400, 8401) band instead of [8401, 8419] and collide with the alias's own
+# port 8400. Fixed by reordering _resolve_template_band() so an explicit
+# _TEMPLATE_PORT_BANDS declaration is checked BEFORE the strip-dash heuristic
+# (see that function's ORDERING RATIONALE docstring).
+#
+# RESIDUAL CAVEAT (flagged for follow-up, NOT fixable from a dev-team-only
+# change): kb-port-fix.py (homebrew-tap/libexec/commands/ — tap-only, no
+# dev-team mirror) computes the template for an existing team-paths.json
+# instance id via its OWN `_split_template(iid)` helper (first dash-component
+# only) BEFORE calling compute_instance_port(), e.g.
+# `compute_instance_port(_split_template("mainevent-someproject"), ...)` ==
+# `compute_instance_port("mainevent", ...)`. That pre-strip throws away the
+# child suffix this fix relies on — _resolve_template_band("mainevent") alone
+# still (correctly, for a literal bare-alias query) returns (8400, 1) at step
+# 1's direct match. So kb-port-fix.py's RENUMBERING path (used when an
+# existing mainevent-<project> entry collides or has a null port) would still
+# misallocate into the bare alias's [8400, 8401) band. The fix belongs in
+# kb-port-fix.py itself: pass the FULL iid to compute_instance_port(iid, ...)
+# instead of the pre-split base, letting this function's own tolerant
+# resolution (steps 1-4 below) disambiguate correctly. Requires a tap-side
+# commit; out of reach from this worktree (tap submodule uninitialized here,
+# and homebrew-tap/ in the main repo is read-only reference-only per policy).
+# The mainevent-startup.sh SHELL fallback (a separate, cksum-based mechanism —
+# see resolve_lcars_port_fallback in scripts/lcars-launch-helpers.sh) does NOT
+# go through this function at all and is unaffected either way.
 _TEMPLATE_PORT_BANDS: dict[str, tuple[int, int]] = {
     "freelance": (8500, 100),
+    "mainevent": (8401, 19),
 }
 
 
@@ -1529,42 +1686,79 @@ def _resolve_template_band(template_id: str) -> tuple[int, int]:
     """Return (lcars_port_base, lcars_port_range) for *template_id*.
 
     Lookup strategy (in order):
-    1. Direct key match in DEFAULT_TEAMS.
-    2. Tolerant input: if template_id contains a dash, strip to first
+    1. Direct key match in DEFAULT_TEAMS. Covers both a bare template queried
+       by its own name (e.g. "mainevent" → its own board-less-alias entry)
+       and a fully-seeded instance queried by its own name (e.g.
+       "mainevent-dev-team", "finance-personal").
+    2. Explicit band declaration: an exact or base-template hit in
+       _TEMPLATE_PORT_BANDS. Checked BEFORE any heuristic derivation because
+       an explicit declaration is authoritative — it exists precisely to
+       state "this template's band is X", and a human/registry author who
+       wrote that entry did so to be trusted over a guess. (XACA-0806,
+       subitem 3 — see rationale below.)
+    3. Tolerant input: if template_id contains a dash, strip to first
        dash-separated component (base template) and retry direct lookup
        (handles "finance-personal" → "finance").
-    3. Prefix scan: search DEFAULT_TEAMS for any key that starts with
+    4. Prefix scan: search DEFAULT_TEAMS for any key that starts with
        "<template_id>-" and inherit its band. This handles pure template
        ids like "finance" that only appear as "finance-personal" in
        DEFAULT_TEAMS.
 
     Raises:
         ValueError: if no matching entry or the entry has no band declared.
+
+    ORDERING RATIONALE (XACA-0806 subitem 3 — fixes the shadowing bug flagged
+    where _TEMPLATE_PORT_BANDS is defined above):
+    Step 3 (strip-dash) used to run BEFORE the explicit-band lookup. That is
+    fine for freelance (no bare DEFAULT_TEAMS entry exists for it, so step 3
+    always misses and falls through) but wrong for mainevent: mainevent DOES
+    have a bare DEFAULT_TEAMS entry (board-less alias, lcars_port_base 8400 /
+    range 1 — see that entry's comment). For an UNSEEDED instance like
+    "mainevent-somefutureproject", step 1 misses (no direct key), and the old
+    step-2 strip-dash tolerant lookup would find the bare "mainevent" entry
+    and return ITS band (8400, 1) — silently donating the board-less alias's
+    own port band to an arbitrary per-project child, even though the whole
+    point of _TEMPLATE_PORT_BANDS["mainevent"] = (8401, 19) is to give
+    per-project instances a DIFFERENT, non-colliding band.
+        The general rule that fixes this without special-casing the string
+    "mainevent": an explicit band declaration in _TEMPLATE_PORT_BANDS is
+    authoritative for a given base template and must be checked before any
+    heuristic (strip-dash / prefix-scan) derivation is allowed to substitute
+    a *different* entry's band. This generalizes correctly to any future
+    template that, like mainevent, has both a bare DEFAULT_TEAMS entry AND a
+    separate _TEMPLATE_PORT_BANDS declaration for its per-instance children.
+        This reordering is safe for the templates that intentionally have NO
+    _TEMPLATE_PORT_BANDS entry (finance, legal, medical): the explicit-band
+    step below simply misses for them (returns None) and falls through
+    unchanged to steps 3/4 exactly as before. It is also safe for exact
+    lookups of "mainevent" itself and of any already-seeded
+    "mainevent-<instance>" key (mainevent-dev-team, etc.) — those are direct
+    DEFAULT_TEAMS hits at step 1, which still runs FIRST and returns before
+    step 2 is ever consulted.
     """
     # 1. Direct lookup.
     entry = DEFAULT_TEAMS.get(template_id)
 
-    # 2. Tolerant input: instance id passed; strip to base template.
+    # 2. Explicit band declaration wins over any heuristic derivation below.
+    #    Must run before step 3's strip-dash lookup — see ORDERING RATIONALE.
+    if entry is None:
+        base_template = template_id.split("-")[0] if "-" in template_id else template_id
+        band = _TEMPLATE_PORT_BANDS.get(template_id) or _TEMPLATE_PORT_BANDS.get(base_template)
+        if band is not None:
+            return int(band[0]), int(band[1])
+
+    # 3. Tolerant input: instance id passed; strip to base template.
     if entry is None and "-" in template_id:
         base_template = template_id.split("-")[0]
         entry = DEFAULT_TEAMS.get(base_template)
 
-    # 3. Prefix scan: template id exists only as part of instance keys.
+    # 4. Prefix scan: template id exists only as part of instance keys.
     if entry is None:
         prefix = template_id + "-"
         for key, candidate in DEFAULT_TEAMS.items():
             if key.startswith(prefix) and candidate.get("lcars_port_base") is not None:
                 entry = candidate
                 break
-
-    # 4. Canonical band fallback: parameterized templates with no seeded instance
-    #    in DEFAULT_TEAMS (e.g. freelance — client+project only) declare their
-    #    band in _TEMPLATE_PORT_BANDS so allocation still works. (XACA-0643)
-    if entry is None:
-        base_template = template_id.split("-")[0] if "-" in template_id else template_id
-        band = _TEMPLATE_PORT_BANDS.get(template_id) or _TEMPLATE_PORT_BANDS.get(base_template)
-        if band is not None:
-            return int(band[0]), int(band[1])
 
     if entry is None:
         raise ValueError(

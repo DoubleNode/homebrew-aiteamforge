@@ -1017,12 +1017,14 @@ class TestMainEventBoardLessContract(unittest.TestCase):
         self.assertEqual(DEFAULT_TEAMS["mainevent"]["team_code"], "MEV")
 
     def test_mainevent_lcars_port_is_8400_in_authoritative_band(self):
-        """XACA-0463: mainevent's band is [8400, 8410) — moved off 8234 to end
-        the collision with command's band [8230, 8240)."""
+        """XACA-0463 moved mainevent off 8234 to 8400 to end the collision with
+        command's band [8230, 8240). XACA-0806 narrowed the band from [8400,8410)
+        to [8400,8401) (range 10→1): a board-less alias binds exactly one port,
+        and the old width overlapped the per-project band [8401,8419)."""
         entry = DEFAULT_TEAMS["mainevent"]
         self.assertEqual(entry["lcars_port"], 8400)
         self.assertEqual(entry["lcars_port_base"], 8400)
-        self.assertEqual(entry["lcars_port_range"], 10)
+        self.assertEqual(entry["lcars_port_range"], 1)
         self.assertTrue(
             entry["lcars_port_base"] <= entry["lcars_port"] < entry["lcars_port_base"] + entry["lcars_port_range"],
             "lcars_port must fall inside mainevent's own declared band",
@@ -1748,6 +1750,189 @@ class TestShellBoardLessAliasFallbackParity(unittest.TestCase):
         )
         self.assertEqual(rc, "1")
         self.assertEqual(out, "")
+
+
+# ---------------------------------------------------------------------------
+# XACA-0806: mainevent per-project port registration + the explicit-band-
+# beats-heuristic ordering fix in _resolve_template_band().
+#
+# Ticket recap: mainevent-startup.sh's shell fallback previously allocated
+# per-project LCARS ports from [8510, 8599] — squatting inside freelance's
+# canonical band [8500, 8600). Subitem 2 registered 5 seeded mainevent-<project>
+# instances and declared _TEMPLATE_PORT_BANDS["mainevent"] = (8401, 19).
+# Subitem 3 fixed a shadowing bug: _resolve_template_band() used to run its
+# strip-dash tolerant lookup BEFORE consulting _TEMPLATE_PORT_BANDS, so an
+# UNSEEDED "mainevent-<project>" would resolve to the bare "mainevent" alias's
+# OWN band (8400, 1) instead of the per-project band (8401, 19) — silently
+# donating the board-less alias's port to an arbitrary per-project child.
+# ---------------------------------------------------------------------------
+
+class TestMainEventPortBandRegression(unittest.TestCase):
+    """Locks the XACA-0806 subitem-3 fix and its surrounding invariants.
+
+    See module docstring block above for the ticket recap.
+    """
+
+    # ── (a) THE regression test for the shadowing bug ──────────────────────
+
+    def test_resolve_template_band_unseeded_mainevent_uses_per_project_band(self):
+        """_resolve_template_band('mainevent-<unseeded>') MUST return (8401, 19),
+        the per-project band — NOT (8400, 1), the bare board-less alias's own
+        band.
+
+        THE TRAP this guards against: "mainevent" has a bare entry in
+        DEFAULT_TEAMS (the board-less alias, lcars_port_base=8400,
+        lcars_port_range=1 — see that entry above). _resolve_template_band()
+        also has an explicit _TEMPLATE_PORT_BANDS["mainevent"] = (8401, 19)
+        declaration for per-project children. Before XACA-0806 subitem 3, the
+        function's strip-dash tolerant-lookup step ran BEFORE the explicit-band
+        step, so an instance id that only matched via strip-dash (i.e. anything
+        NOT already a seeded key in DEFAULT_TEAMS) would find the bare
+        "mainevent" entry FIRST and return its (8400, 1) band instead — a
+        silent donation of the alias's own port range to an arbitrary
+        per-project instance.
+
+        DO NOT "simplify" _resolve_template_band()'s step ordering back to
+        strip-dash-before-explicit-band as a cleanup — that ordering IS the
+        bug this test exists to catch. The explicit _TEMPLATE_PORT_BANDS
+        declaration must be checked before the heuristic derivation for any
+        template (like mainevent) that has BOTH a bare DEFAULT_TEAMS entry AND
+        a separate _TEMPLATE_PORT_BANDS entry for its instances.
+
+        "<unseeded>" here means a project name deliberately absent from the 5
+        seeded mainevent-* keys in DEFAULT_TEAMS (mainevent-dev-team,
+        mainevent-maineventapp-ios/-android/-functions,
+        mainevent-maineventwrapper-ios) — the pathological case this bug
+        actually affected. A seeded key would hit step 1 (direct match) and
+        never reach the ordering this test is about.
+        """
+        self.assertNotIn(
+            "mainevent-somefutureproject", DEFAULT_TEAMS,
+            "test fixture must be an unseeded instance id, or this test "
+            "exercises step 1 (direct match) instead of the ordering fix",
+        )
+        result = aiteamforge_paths._resolve_template_band("mainevent-somefutureproject")
+        self.assertEqual(
+            result, (8401, 19),
+            "unseeded 'mainevent-<project>' must resolve via the explicit "
+            "_TEMPLATE_PORT_BANDS declaration (8401, 19), not the bare alias's "
+            "own band (8400, 1) via strip-dash shadowing",
+        )
+
+    # ── (b) explicit-band-beats-heuristic must NOT regress templates that ──
+    # ── intentionally resolve via seeded *-instance entries instead of a ───
+    # ── _TEMPLATE_PORT_BANDS declaration ────────────────────────────────────
+
+    def test_finance_legal_medical_absent_from_template_port_bands(self):
+        """finance/legal/medical are DELIBERATELY absent from
+        _TEMPLATE_PORT_BANDS (XACA-0643) — they resolve via their seeded
+        *-instance entries in DEFAULT_TEAMS instead. If a future edit adds
+        them there by mistake, this documents the intentional absence so the
+        change is caught and reviewed, not silently accepted."""
+        for base_template in ("finance", "legal", "medical"):
+            self.assertNotIn(
+                base_template, aiteamforge_paths._TEMPLATE_PORT_BANDS,
+                f"'{base_template}' must stay OUT of _TEMPLATE_PORT_BANDS — "
+                "it resolves via its seeded *-instance entry, not a declared band",
+            )
+
+    def test_finance_legal_medical_bands_unaffected_by_reordering(self):
+        """The explicit-band-before-strip-dash reordering (XACA-0806 subitem 3)
+        must be a no-op for templates with NO _TEMPLATE_PORT_BANDS entry: the
+        explicit-band step simply misses and falls through to strip-dash
+        exactly as before the reorder. Assert the resolved bands explicitly."""
+        self.assertEqual(
+            aiteamforge_paths._resolve_template_band("finance-personal"), (8360, 10),
+        )
+        self.assertEqual(
+            aiteamforge_paths._resolve_template_band("legal-coparenting"), (8320, 10),
+        )
+        self.assertEqual(
+            aiteamforge_paths._resolve_template_band("medical-general"), (8340, 10),
+        )
+
+    def test_freelance_band_unaffected_by_reordering(self):
+        """freelance IS in _TEMPLATE_PORT_BANDS (8500, 100) and has NO bare
+        DEFAULT_TEAMS entry — the reordering must not change its resolution,
+        whether queried by base template id or by an (unseeded) instance id."""
+        self.assertEqual(
+            aiteamforge_paths._resolve_template_band("freelance"), (8500, 100),
+        )
+        self.assertEqual(
+            aiteamforge_paths._resolve_template_band("freelance-someclient-someproject"),
+            (8500, 100),
+        )
+
+    # ── (c) no mainevent instance collides with the bare alias's 8400; all ─
+    # ── 5 registered instances fall inside [8401, 8419] ─────────────────────
+
+    _SEEDED_MAINEVENT_INSTANCES = (
+        "mainevent-dev-team",
+        "mainevent-maineventapp-ios",
+        "mainevent-maineventapp-android",
+        "mainevent-maineventapp-functions",
+        "mainevent-maineventwrapper-ios",
+    )
+
+    def test_five_seeded_mainevent_instances_present(self):
+        """Fixture sanity: all 5 instances subitem 2 registered are still
+        present in DEFAULT_TEAMS (guards against an instance being silently
+        dropped without this test noticing)."""
+        for instance in self._SEEDED_MAINEVENT_INSTANCES:
+            self.assertIn(instance, DEFAULT_TEAMS, f"{instance} missing from DEFAULT_TEAMS")
+
+    def test_seeded_mainevent_instance_ports_fall_inside_own_band(self):
+        """Every seeded mainevent-<project> instance's lcars_port must fall
+        inside [8401, 8419) — mainevent's per-project band — and NONE may
+        equal 8400, the bare board-less alias's own port."""
+        band_base, band_range = aiteamforge_paths._TEMPLATE_PORT_BANDS["mainevent"]
+        self.assertEqual((band_base, band_range), (8401, 19))
+        for instance in self._SEEDED_MAINEVENT_INSTANCES:
+            port = DEFAULT_TEAMS[instance]["lcars_port"]
+            self.assertNotEqual(
+                port, 8400,
+                f"{instance}'s port must not collide with the bare 'mainevent' "
+                "alias's own port 8400",
+            )
+            self.assertTrue(
+                band_base <= port < band_base + band_range,
+                f"{instance}'s port {port} must fall inside [{band_base}, "
+                f"{band_base + band_range}) — its own declared band",
+            )
+
+    def test_seeded_mainevent_instance_ports_are_unique(self):
+        """No two seeded mainevent instances may share a port (would be a
+        silent double-allocation within DEFAULT_TEAMS itself)."""
+        ports = [DEFAULT_TEAMS[i]["lcars_port"] for i in self._SEEDED_MAINEVENT_INSTANCES]
+        self.assertEqual(
+            len(ports), len(set(ports)),
+            f"duplicate lcars_port among seeded mainevent instances: {ports}",
+        )
+
+    # ── (d) the bare mainevent entry is untouched by this ticket ───────────
+
+    def test_bare_mainevent_still_resolves_to_8400(self):
+        """The bare board-less 'mainevent' alias entry itself must still
+        resolve to port 8400 — this ticket only changed how UNSEEDED
+        per-project instances resolve, not the alias's own identity. Its band
+        is now [8400,8401) (range narrowed 10→1 by XACA-0806 to stop the
+        nominal overlap with the per-project band [8401,8419))."""
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertEqual(entry["lcars_port"], 8400)
+        self.assertEqual(entry["lcars_port_base"], 8400)
+        self.assertEqual(entry["lcars_port_range"], 1)
+        # Direct-key lookup (step 1) must win for the bare key itself, same as
+        # before this ticket — it must NOT be redirected to the per-project band.
+        self.assertEqual(
+            aiteamforge_paths._resolve_template_band("mainevent"), (8400, 1),
+        )
+
+    def test_bare_mainevent_still_board_less_alias_of_command(self):
+        """The bare 'mainevent' entry's board_less/alias_of markers (XACA-0727/
+        XACA-0794) are untouched by this ticket."""
+        entry = DEFAULT_TEAMS["mainevent"]
+        self.assertTrue(entry.get("board_less"))
+        self.assertEqual(entry.get("alias_of"), "command")
 
 
 # ---------------------------------------------------------------------------
