@@ -267,6 +267,41 @@ fi
 
 log "pull-succeeded: ${REPO_DIR} is up to date with upstream"
 
+# ── Guard 4: post-merge duplicate ID-slot gate (XACA-0818 fleet backstop) ────
+# The per-directory allocation lock added to kb-knowledge-add/-promote in
+# XACA-0818 serializes writers WITHIN one host, but it cannot stop two DIFFERENT
+# hosts from each allocating the same NNN slot offline and then git-merging both
+# entries cleanly (distinct slug filenames => no git conflict, two files silently
+# sharing e.g. k004). The rebase we just ran is exactly where such a cross-host
+# collision materializes. Surface it immediately as a HARD, loud failure so the
+# colliding state is never pushed onward to the rest of the fleet.
+#
+# This mirrors the "Duplicate ID slots within one tier dir" check in
+# kb-knowledge-validate (XACA-0802) — reimplemented inline here rather than
+# invoking that zsh function, to keep this bash daemon dependency-light and to
+# gate ONLY on slot collisions (not the validator's unrelated frontmatter/xref
+# checks, which must never turn a benign sync into a failure). Like the Guard 1b
+# PII-containment abort above, this is a deliberate exception to the script's
+# otherwise exit-0-always contract: a data collision is a genuine defect, not an
+# ordinary git/network condition. We do NOT auto-remediate — renumbering entries
+# is the operator's call (see the XACA-0818 remediation).
+_dup_slots="$(
+    find "$REPO_DIR" -type f -name '*.md' ! -name 'INDEX.md' -not -path '*/.git/*' -print0 2>/dev/null \
+    | while IFS= read -r -d '' _f; do
+        _d="${_f%/*}"; _b="${_f##*/}"
+        # slot key = leading lowercase prefix + exactly 3 digits (k004, t001, …)
+        _slot="$(printf '%s\n' "$_b" | sed -n 's/^\([a-z][a-z]*[0-9][0-9][0-9]\)-.*\.md$/\1/p')"
+        [ -n "$_slot" ] && printf '%s\t%s\t%s\n' "$_d" "$_slot" "$_b"
+      done \
+    | awk -F'\t' '{ key=$1 "\t" $2; c[key]++; if (c[key]==1) { first[key]=$3 } else { print $1 "  slot=" $2 "  collides: " first[key] " + " $3 } }'
+)"
+
+if [ -n "$_dup_slots" ]; then
+    log "FATAL: duplicate knowledge ID slot(s) detected in ${REPO_DIR} after sync — a cross-host merge landed two entries in the same NNN slot (XACA-0818). NOT auto-remediating and NOT pushing. Run kb-knowledge-validate to confirm, then apply the XACA-0818 remediation (renumber the colliding entry) and re-run sync."
+    log_block "duplicate ID slots" "$_dup_slots"
+    exit 65  # EX_DATAERR — deliberate loud failure (see Guard 1b precedent)
+fi
+
 # ── Step: push (only if we actually have local commits ahead) ───────────────
 AHEAD="$(git -C "$REPO_DIR" rev-list --count '@{u}..HEAD' 2>/dev/null || true)"
 case "$AHEAD" in
