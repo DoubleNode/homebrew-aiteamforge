@@ -340,8 +340,11 @@ test_start "XACA-0799 Case 7: start consumes AITEAMFORGE_RESTORE_LCARS_PORTS"
 # rescue it: that control strips every line mentioning the needles, so it cannot
 # distinguish code from prose either.
 start_src=$(grep -vE '^[[:space:]]*#' "$START_CMD")
+# The reverse lookup itself now lives inside aiteamforge_build_restore_union()
+# (XACA-0799-015), so pinning that symbol HERE would fail on a legitimate move.
+# Assert the real contract: start.sh consumes the variable AND delegates.
 assert_contains "$start_src" "AITEAMFORGE_RESTORE_LCARS_PORTS" \
-    && assert_contains "$start_src" "aiteamforge_team_for_lcars_port" \
+    && assert_contains "$start_src" "aiteamforge_build_restore_union" \
     && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -351,11 +354,14 @@ assert_contains "$start_src" "AITEAMFORGE_RESTORE_LCARS_PORTS" \
 # box with an empty .teams[] returns before restoring anything — the outage in
 # full, with the restore code present but unreachable.
 test_start "XACA-0799 Case 8: empty-teams early return sits after the restore union"
-_union_line=$(grep -n "AITEAMFORGE_RESTORE_LCARS_PORTS" "$START_CMD" | head -1 | cut -d: -f1)
+# XACA-0799-021: match on CODE lines only. The unstripped form is the same
+# comment-defeatable class Case 6 was fixed for — both needles appear in
+# start.sh's own prose, so a comment above the bail-out would move the anchor.
+_union_line=$(grep -nE "AITEAMFORGE_RESTORE_LCARS_PORTS" "$START_CMD" | grep -vE ":[[:space:]]*#" | head -1 | cut -d: -f1)
 # Anchor on the LCARS-specific wording. validate_boards() emits a near-identical
 # "No configured teams found — skipping board validation" earlier in the file;
 # matching that one compares against the wrong bail-out entirely.
-_bail_line=$(grep -n "No configured teams found — skipping LCARS startup" "$START_CMD" | head -1 | cut -d: -f1)
+_bail_line=$(grep -nE "No configured teams found — skipping LCARS startup" "$START_CMD" | grep -vE ":[[:space:]]*#" | head -1 | cut -d: -f1)
 if [ -z "$_union_line" ] || [ -z "$_bail_line" ]; then
     test_fail "could not locate union ('$_union_line') and/or bail-out ('$_bail_line') in $START_CMD"
 elif [ "$_union_line" -lt "$_bail_line" ]; then
@@ -523,16 +529,21 @@ test_start "XACA-0799 Case 14d: start builds the port map OUTSIDE the restore lo
 # map builder instead; that was dead code, because callers invoke it through
 # $( ... ) and the cache never survived the subshell.
 _sc=$(grep -vE '^[[:space:]]*#' "$START_CMD")
+# start.sh builds the map once; the fork-free per-port lookup now lives in
+# aiteamforge_build_restore_union() in common.sh. Assert each half in its real
+# home, so a regression in either is still caught.
+_cmn_code=$(grep -vE '^[[:space:]]*#' "$COMMON_LIB")
 assert_contains "$_sc" "aiteamforge_lcars_port_team_map" \
-  && assert_contains "$_sc" "aiteamforge_team_for_lcars_port_in_map" \
+  && assert_contains "$_cmn_code" "aiteamforge_team_for_lcars_port_in_map" \
   && test_pass
-_map_line=$(grep -n "aiteamforge_lcars_port_team_map" "$START_CMD" | head -1 | cut -d: -f1)
-_loop_line=$(grep -n 'for _rport in' "$START_CMD" | head -1 | cut -d: -f1)
-test_start "XACA-0799 Case 14e: the map build precedes the per-port loop"
+# XACA-0799-021: CODE lines only, same reason as Case 8 above.
+_map_line=$(grep -n "aiteamforge_lcars_port_team_map" "$START_CMD" | grep -vE ":[[:space:]]*#" | head -1 | cut -d: -f1)
+_loop_line=$(grep -nE "aiteamforge_build_restore_union" "$START_CMD" | grep -vE ":[[:space:]]*#" | head -1 | cut -d: -f1)
+test_start "XACA-0799 Case 14e: the map build precedes the union call"
 if [ -n "$_map_line" ] && [ -n "$_loop_line" ] && [ "$_map_line" -lt "$_loop_line" ]; then
   test_pass
 else
-  test_fail "map built at line ${_map_line:-?} does not precede the loop at ${_loop_line:-?}"
+  test_fail "map built at line ${_map_line:-?} does not precede the union call at ${_loop_line:-?}"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -637,6 +648,76 @@ else
     "forward resolved ios -> ${_c17_fwd} but the reverse map does not own that port" \
     && test_pass
 fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 18 — the restore union itself (XACA-0799-015/016/017/020)
+# ═══════════════════════════════════════════════════════════════════════════
+# A review-round mutation pass found FOUR regressions in start_lcars()'s restore
+# loop passing 29/29 with the suite green: deleting the dedupe CALL (the previous
+# round extracted the predicate but left its call site unpinned — the wrong half),
+# `teams+=` becoming `teams=` so a restore REPLACED the configured list, the
+# unowned-port warn+continue replaced by a synthesized id, and the safe read -ra
+# split swapped for `($VAR)`. None was reachable without launching real servers.
+# The decision now lives in aiteamforge_build_restore_union() and is driven here.
+
+_u_map=$(aiteamforge_lcars_port_team_map)
+
+test_start "XACA-0799 Case 18a: union = configured teams THEN mapped restore teams"
+_u=$(aiteamforge_build_restore_union "academy" "8361" "$_u_map" 2>/dev/null | tr '\n' ' ')
+assert_equal "academy finance-personal " "$_u" && test_pass
+
+test_start "XACA-0799 Case 18b: a restore team already configured is not added twice"
+# Pins the dedupe CALL SITE, not just the predicate.
+_u=$(aiteamforge_build_restore_union "finance-personal" "8361" "$_u_map" 2>/dev/null | grep -c .)
+assert_equal "1" "$_u" && test_pass
+
+test_start "XACA-0799 Case 18c: ADD-never-lose — every configured team survives"
+# Pins `teams+=` vs `teams=`: a restore must never shrink or replace the list.
+_u=$(aiteamforge_build_restore_union "academy ios android" "8361" "$_u_map" 2>/dev/null)
+_n=$(printf '%s\n' "$_u" | grep -c .)
+assert_equal "4" "$_n" \
+  && assert_contains "$_u" "academy" \
+  && assert_contains "$_u" "ios" \
+  && assert_contains "$_u" "android" \
+  && assert_contains "$_u" "finance-personal" \
+  && test_pass
+
+test_start "XACA-0799 Case 18d: an unowned port warns on stderr and is NOT started"
+# Pins the warn+continue: a synthesized id here would be launched with a bogus
+# LCARS_TEAM. Assert BOTH halves — the warning, and the absence from the list.
+_uerr=$(aiteamforge_build_restore_union "academy" "9999" "$_u_map" 2>&1 >/dev/null)
+_uout=$(aiteamforge_build_restore_union "academy" "9999" "$_u_map" 2>/dev/null | tr '\n' ' ')
+assert_contains "$_uerr" "9999" \
+  && assert_equal "academy " "$_uout" \
+  && test_pass
+
+test_start "XACA-0799 Case 18e: base-configured vs instance-restored collapse to one"
+# .teams[] holds "finance"; the map returns "finance-personal". Same server.
+_u=$(aiteamforge_build_restore_union "finance" "8361" "$_u_map" 2>/dev/null | grep -c .)
+assert_equal "1" "$_u" && test_pass
+
+test_start "XACA-0799 Case 18f: whitespace-only port list adds nothing"
+# The degrade path: guard is `-n`, so "   " ENTERS the block and must be inert.
+_u=$(aiteamforge_build_restore_union "academy" "   " "$_u_map" 2>/dev/null | tr '\n' ' ')
+assert_equal "academy " "$_u" && test_pass
+
+test_start "XACA-0799 Case 18g: start_lcars delegates to the union builder"
+_sc18=$(grep -vE '^[[:space:]]*#' "$START_CMD")
+assert_contains "$_sc18" "aiteamforge_build_restore_union" \
+  && test_pass
+
+test_start "XACA-0799 Case 18h: the union splits with read -ra, not an unquoted array"
+# XACA-0799-020: this CANNOT be caught behaviorally on this machine — bash splits
+# `out=($configured)` just fine, so the suite would stay green while the form is
+# glob-expanding and, under zsh, not splitting at all. Case 16a asserted a
+# property of bash's own `read -ra` rather than anything in our code; this asserts
+# the code. Comment-stripped, since the hazard is named in the prose above it.
+_u_code=$(grep -vE '^[[:space:]]*#' "$COMMON_LIB")
+assert_contains "$_u_code" 'read -ra out <<< "$configured"' \
+  && assert_contains "$_u_code" 'read -ra plist <<< "$ports"' \
+  && assert_not_contains "$_u_code" 'out=($configured)' \
+  && assert_not_contains "$_u_code" 'plist=($ports)' \
+  && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Summary (standalone mode only — the runner prints its own)

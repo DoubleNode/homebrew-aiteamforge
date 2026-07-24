@@ -309,6 +309,58 @@ aiteamforge_restore_key_is_new() {
     return 0
 }
 
+# aiteamforge_build_restore_union <configured-ids> <restore-ports> <port-map>
+# Prints the FINAL launch list, one team id per line: the configured ids followed
+# by any team a restore port maps to that is not already represented.
+# Warnings for unmappable ports go to stderr; they are never added to the list.
+#
+# XACA-0799-015/016/017/020: this whole decision used to live inline in
+# start_lcars()'s restore loop, where the only way to reach it was to launch real
+# servers. A review-round mutation pass showed four separate regressions passing
+# 29/29 with the suite fully green: deleting the dedupe CALL (the previous round
+# extracted the predicate but left its call site unpinned — the wrong half),
+# turning `teams+=` into `teams=` so a restore REPLACED the configured list
+# instead of adding to it, replacing the unowned-port warn+continue with a
+# synthesized id, and swapping the safe `read -ra` split for `($VAR)`.
+#
+# As a pure function every one of those is directly assertable, and the caller
+# keeps only the parts that genuinely need the process: launching and printing.
+aiteamforge_build_restore_union() {
+    local configured="${1:-}"
+    local ports="${2:-}"
+    local port_map="${3:-}"
+
+    local -a out=()
+    local t
+    # Split with read -ra, never `out=($configured)`: the unquoted-array form is
+    # subject to glob expansion, and zsh does not word-split it at all.
+    read -ra out <<< "$configured"
+
+    local -a plist=()
+    read -ra plist <<< "$ports"
+
+    local pt team
+    for pt in ${plist[@]+"${plist[@]}"}; do
+        [ -z "$pt" ] && continue
+        team=$(aiteamforge_team_for_lcars_port_in_map "$pt" "$port_map" 2>/dev/null) || team=""
+        if [ -z "$team" ]; then
+            # Recorded and surfaced, never started: LCARS_TEAM is mandatory since
+            # XACA-0555, so a server on an unregistered port cannot be relaunched.
+            printf 'LCARS was serving on port %s but no team owns it in the registry — not restoring\n' \
+                "$pt" >&2
+            continue
+        fi
+        if aiteamforge_restore_key_is_new "$team" ${out[@]+"${out[@]}"}; then
+            out+=("$team")
+        fi
+    done
+
+    for t in ${out[@]+"${out[@]}"}; do
+        [ -n "$t" ] && printf '%s\n' "$t"
+    done
+    return 0
+}
+
 #──────────────────────────────────────────────────────────────────────────────
 # Homebrew tap-trust helpers (XACA-0676)
 #──────────────────────────────────────────────────────────────────────────────

@@ -389,60 +389,50 @@ start_lcars() {
   # the dispatcher sets this variable. Unset ⇒ behavior identical to before.
   # ───────────────────────────────────────────────────────────────────────────
   if [ -n "${AITEAMFORGE_RESTORE_LCARS_PORTS:-}" ]; then
-    local _rport _rteam _seen _seen_key _dup
-    # Split via read -ra (the idiom already used for teams_str above) rather than
-    # an unquoted expansion — see the portability note on
-    # aiteamforge_lcars_running_ports in lib/common.sh.
-    local -a _rports=()
-    read -ra _rports <<< "$AITEAMFORGE_RESTORE_LCARS_PORTS"
-
-    # XACA-0799-004: build the port→team map ONCE, outside the loop. The previous
-    # shape called aiteamforge_team_for_lcars_port() per port, and that scanned
-    # every registered team calling aiteamforge_team_lcars_port() on each — two jq
-    # forks per team, per port. At 15 teams x 8 ports it measured 1.35s added to
-    # the restart path, sitting directly in front of a teardown lcars-watch fires
-    # on every lcars-ui change. One jq pass here, pure-shell lookups below.
+    # XACA-0799-015/016/017/020: the union decision itself lives in
+    # aiteamforge_build_restore_union() (lib/common.sh) so the suite can drive it.
+    # Inline here it was reachable only by launching real servers, and a mutation
+    # pass found FOUR regressions passing with the suite green — including deletion
+    # of the dedupe call, which the previous round believed it had pinned.
     local _port_map=""
     _port_map=$(aiteamforge_lcars_port_team_map 2>/dev/null) || _port_map=""
-    for _rport in ${_rports[@]+"${_rports[@]}"}; do
-      if [ -z "$_rport" ]; then
-        continue
-      fi
 
-      _rteam=$(aiteamforge_team_for_lcars_port_in_map "$_rport" "$_port_map" 2>/dev/null) || _rteam=""
-      if [ -z "$_rteam" ]; then
-        print_warning "LCARS was serving on port ${_rport} but no team owns it in the registry — not restoring"
-        continue
-      fi
+    local _before_n=${#teams[@]}
+    local -a _union=()
+    local _uline
+    while IFS= read -r _uline; do
+      [ -n "$_uline" ] && _union+=("$_uline")
+    done < <(aiteamforge_build_restore_union \
+               "${teams[*]-}" "$AITEAMFORGE_RESTORE_LCARS_PORTS" "$_port_map" \
+               2> >(while IFS= read -r _w; do print_warning "$_w"; done))
 
-      # Dedupe against the configured list. Compare the resolved KEY as well as
-      # the raw id: .teams[] holds BASE ids ("finance") while the reverse lookup
-      # returns the registry INSTANCE id ("finance-personal"), so a raw-only
-      # comparison would queue the same team twice and race two servers onto one
-      # port (XACA-0792 is exactly this base-vs-instance split).
-      # XACA-0799-001: the predicate lives in aiteamforge_restore_key_is_new()
-      # (lib/common.sh) so the suite can drive it. Inline here it was reachable
-      # only by launching real servers, so a review-round mutation DELETING the
-      # dedupe entirely still passed the whole suite.
-      _dup=false
-      if ! aiteamforge_restore_key_is_new "$_rteam" ${teams[@]+"${teams[@]}"}; then
-        _dup=true
-      fi
+    # Guard the add-never-lose contract at the call site too: the union must be a
+    # SUPERSET of what we already had. If it somehow came back shorter, keep the
+    # configured list rather than silently starting fewer teams than before.
+    if [ ${#_union[@]} -ge "$_before_n" ]; then
+      teams=(${_union[@]+"${_union[@]}"})
+    else
+      print_warning "Restore union returned fewer teams than configured — keeping the configured list"
+    fi
 
-      if [ "$_dup" = false ]; then
-        teams+=("$_rteam")
-        print_info "Restoring LCARS for '${_rteam}' (was serving on port ${_rport} before restart)"
-      fi
-    done
+    local _added=$(( ${#teams[@]} - _before_n ))
+    if [ "$_added" -gt 0 ]; then
+      print_info "Restoring ${_added} LCARS instance(s) that were serving before the restart"
+    fi
 
-    # XACA-0799-011: consume ONCE, then unset. The variable is exported by the
-    # restart dispatcher, so without this it leaks down the entire process tree —
-    # and start.sh's own run_first_launch_preflight() invokes aiteamforge-doctor.sh,
-    # whose remediation path runs `aiteamforge start kanban`. That nested STANDALONE
-    # start would inherit the snapshot and perform its own restore union, resurrecting
-    # teams outside any restart. That is precisely the "a standalone start reverses a
-    # deliberate stop" failure mode for which the disk-manifest design was rejected;
-    # leaving the export live would have reintroduced it through the back door.
+    # Consume ONCE, then unset. The dispatcher EXPORTS this, so leaving it live
+    # would leak the snapshot into every child process started from here — the
+    # per-team *-startup.sh launches that follow, and anything they invoke. A
+    # nested `aiteamforge start` inheriting it would perform its own restore
+    # union outside any restart.
+    #
+    # NOTE (XACA-0799-019): an earlier version of this comment claimed the threat
+    # was run_first_launch_preflight -> aiteamforge-doctor.sh -> `aiteamforge start
+    # kanban`. That path cannot fire: the preflight runs near the top of this
+    # script, BEFORE dispatch reaches start_lcars, so the unset would be too late
+    # to affect it — and the doctor refuses to auto-start while in --preflight
+    # mode anyway. The unset is still correct and still worth keeping; only that
+    # specific justification was wrong.
     unset AITEAMFORGE_RESTORE_LCARS_PORTS
   fi
 

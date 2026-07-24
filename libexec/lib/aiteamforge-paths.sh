@@ -660,13 +660,20 @@ ${_fp}	${_t}"
         done < <( { aiteamforge_list_teams; _AITEAMFORGE_DEFAULT_TEAMS_DATA | cut -f1; } 2>/dev/null | sort -u )
     else
         # No jq — fall back to the per-team scan. Slower, but correctness first.
+        #
+        # XACA-0799-018: iterate the SAME union the jq branch fills against
+        # (config keys PLUS baked-in default ids). aiteamforge_list_teams returns
+        # config keys only when a config exists, so scanning it alone reproduced
+        # exactly the narrower coverage the jq branch had to be fixed for — a
+        # config-absent team would resolve FORWARD and be invisible here.
         local team port
         while IFS= read -r team; do
             [ -z "$team" ] && continue
             port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null) || continue
+            [ -z "$port" ] && continue
             map="${map}${port}	${team}
 "
-        done < <(aiteamforge_list_teams)
+        done < <( { aiteamforge_list_teams; _AITEAMFORGE_DEFAULT_TEAMS_DATA | cut -f1; } 2>/dev/null | sort -u )
     fi
 
     [ -n "$map" ] && map="${map}
