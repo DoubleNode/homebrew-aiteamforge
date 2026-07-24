@@ -786,7 +786,34 @@ update_team_scripts() {
   fi
 }
 
-# Refresh per-team connect/disconnect cockpit scripts on upgrade (XACA-0814).
+# Read a team conf's parameterisation flags (XACA-0834).
+#
+# Emits "<TEAM_HAS_PROJECTS>|<TEAM_REQUIRES_CLIENT_ID>" on stdout, defaulting
+# either to "false" when the conf omits it (matching compute_instance_id()'s
+# own treatment of unset flags).
+#
+# The conf is sourced inside a SUBSHELL so its assignments (TEAM_ID,
+# TEAM_WORKING_DIR, TEAM_LCARS_PORT, ...) can never leak into the upgrade
+# process — this file runs a long sequence of other update_* steps that must
+# not observe a team conf's variables. `set +eo pipefail` inside the subshell
+# keeps a malformed conf from aborting the upgrade under the file's `set -eo`;
+# a conf that fails to source yields the "false|false" default, which routes
+# the instance to the "template takes no parameters" branch and — for a
+# genuinely parameterised instance — produces a visible skip warning rather
+# than a silently wrong installer invocation.
+_connect_script_team_flags() {
+  (
+    set +eo pipefail
+    TEAM_HAS_PROJECTS=""
+    TEAM_REQUIRES_CLIENT_ID=""
+    # shellcheck disable=SC1090
+    . "$1" >/dev/null 2>&1
+    printf '%s|%s' "${TEAM_HAS_PROJECTS:-false}" "${TEAM_REQUIRES_CLIENT_ID:-false}"
+  ) || printf 'false|false'
+}
+
+# Refresh per-team connect/disconnect cockpit scripts on upgrade (XACA-0814,
+# instance-id recovery reworked in XACA-0834).
 #
 # BUGFIX XACA-0814: install-time-only provisioning — same bug class as the
 # XACA-0608 / XACA-0673 / XACA-0751 gaps documented above this in the file
@@ -817,15 +844,49 @@ update_team_scripts() {
 #     no-ops for parametric teams regardless (see install-team.sh's parametric
 #     comments near its connect/disconnect generation) — belt and suspenders,
 #     not a reimplementation of that skip logic.
-#   • Refresh-only guard: INSTANCE_ID always BEGINS WITH the base team id (it
-#     is either the bare team id, e.g. "academy", or a project-augmented id,
-#     e.g. "finance-personal" — XACA-0485), so a glob on "${team_id}*-connect.sh"
-#     against WORKING_DIR catches both shapes without this function ever
-#     computing INSTANCE_ID itself. A team whose connect script was never
-#     rendered on this machine (never installed, or opted out) is skipped —
-#     upgrade must never materialise cockpit scripts for a team this box
-#     didn't set up. Guard each glob candidate with `[ -f "$f" ]` so the loop
-#     is safe whether or not nullglob is set.
+#   • Refresh-only guard, driven by the RENDERED FILES (XACA-0834): iterate
+#     "${WORKING_DIR}"/*-connect.sh and RECOVER the instance id by stripping the
+#     "-connect.sh" suffix. install-team.sh writes exactly "${INSTANCE_ID}-connect.sh",
+#     so the filename IS this box's record of which instance it installed —
+#     recover that record rather than re-deriving it.
+#
+#     This function previously iterated team CONFIGS, detected installedness
+#     with an unanchored "${team_id}*-connect.sh" glob, and then re-rendered
+#     using the BARE team id — discarding the very instance shape the glob had
+#     just matched. Three defects followed (XACA-0834):
+#       - install-team.sh resolves a bare parameterised id through
+#         TEAM_DEFAULT_PROJECT, so an installed "finance-work" was re-rendered
+#         as "finance-personal": a cockpit script this machine never installed,
+#         while the real one stayed stale. Not a no-op — active mis-materialisation.
+#       - "freelance" sets TEAM_REQUIRES_CLIENT_ID=true with NO client default,
+#         so the bare call could not resolve an instance id at all and its
+#         connect scripts were never refreshed (the fail-soft branch below
+#         swallowed the error on the TTY-less nightly LaunchAgent run; on an
+#         interactive run install-team.sh would instead PROMPT for a client id
+#         mid-upgrade). Passing --client explicitly retires both behaviours.
+#       - the unanchored glob could false-match a longer team id sharing the
+#         prefix (a "med" template matching "medical-general-connect.sh").
+#         Iterating filenames makes this structurally impossible: we never glob
+#         on a team id at all, so there is no prefix to collide. No hardened
+#         "${team_id}*" glob remains.
+#
+#     A team whose connect script was never rendered on this machine (never
+#     installed, or opted out) is still skipped — upgrade must never materialise
+#     cockpit scripts for a team this box didn't set up. That guarantee now
+#     comes from only ever refreshing files that already exist. The recovered
+#     instance is still validated against the shipped team configs, using
+#     ANCHORED shapes only ("<team>" exactly, or "<team>-<rest>"), so a stray
+#     file cannot drive an installer invocation. Guard each glob candidate with
+#     `[ -f "$f" ]` so the loop is safe whether or not nullglob is set.
+#   • Instance decomposition is the exact inverse of install-team.sh's
+#     compute_instance_id() (XACA-0460-008 / XACA-0485). That function emits:
+#       TEAM_HAS_PROJECTS=false                     -> "<team>"
+#       TEAM_HAS_PROJECTS=true, no client required  -> "<team>-<project>"
+#       TEAM_HAS_PROJECTS=true, client required     -> "<team>-<client>-<project>"
+#     Components are validated against ^[a-z0-9_]+$ — they never contain a
+#     dash — so once the team id is known the remainder splits unambiguously.
+#     Because a bare team id may itself contain a dash, matching prefers the
+#     LONGEST matching template id (an exact match therefore always wins).
 #   • Delegate the actual render to install-team.sh --connect-only in an
 #     isolated `bash` SUBPROCESS (not `source`) — exactly like the setup
 #     wizard's own cockpit loop (bin/aiteamforge-setup.sh's
@@ -862,36 +923,105 @@ update_connect_scripts() {
 
   local updated=0
   local failed=0
-  local conf team_id found f
+  local skipped=0
+  local f base instance_id conf team_id best_team best_conf remainder
+  local flags has_projects requires_client client project
+  local -a install_args
 
-  for conf in "$teams_conf_dir"/*.conf; do
-    [ -f "$conf" ] || continue
-    team_id="$(basename "$conf" .conf)"
+  # Iterate the RENDERED FILES, not the team configs (XACA-0834).
+  for f in "${WORKING_DIR}"/*-connect.sh; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
 
-    # Refresh only if this machine already rendered connect scripts for this
-    # team (never materialise cockpit scripts for a team this box never set
-    # up). INSTANCE_ID always begins with team_id (bare or project-augmented,
-    # XACA-0485), so this glob catches both shapes.
-    found=false
-    for f in "${WORKING_DIR}/${team_id}"*-connect.sh; do
-      [ -f "$f" ] || continue
-      found=true
-      break
+    # Recover the instance id: the exact inverse of install-team.sh's
+    # "${INSTANCE_ID}-connect.sh" filename composition.
+    instance_id="${base%-connect.sh}"
+    [ -n "$instance_id" ] || continue
+
+    # Validate the recovered instance against the shipped templates using
+    # ANCHORED shapes only: "<team>" exactly, or "<team>-<rest>". Longest
+    # match wins, so a dash-bearing template id beats a shorter template that
+    # shares its first component.
+    best_team=""
+    best_conf=""
+    for conf in "$teams_conf_dir"/*.conf; do
+      [ -f "$conf" ] || continue
+      team_id="$(basename "$conf" .conf)"
+      if [ "$instance_id" = "$team_id" ] || [ "${instance_id#"${team_id}-"}" != "$instance_id" ]; then
+        if [ "${#team_id}" -gt "${#best_team}" ]; then
+          best_team="$team_id"
+          best_conf="$conf"
+        fi
+      fi
     done
-    [ "$found" = true ] || continue
+
+    if [ -z "$best_team" ]; then
+      print_warning "Skipping ${base} — no team template matches instance '${instance_id}'"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    # Split the remainder into client/project according to the template's own
+    # parameterisation, mirroring compute_instance_id(). Components never
+    # contain a dash, so these splits are unambiguous.
+    flags="$(_connect_script_team_flags "$best_conf")"
+    has_projects="${flags%%|*}"
+    requires_client="${flags##*|}"
+    remainder="${instance_id#"$best_team"}"
+    remainder="${remainder#-}"
+
+    client=""
+    project=""
+    if [ "$has_projects" = "true" ]; then
+      if [ -z "$remainder" ]; then
+        print_warning "Skipping ${base} — template '${best_team}' is parameterised but instance '${instance_id}' carries no project component"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if [ "$requires_client" = "true" ]; then
+        client="${remainder%%-*}"
+        project="${remainder#*-}"
+        if [ -z "$client" ] || [ -z "$project" ] || [ "$client" = "$remainder" ] || [ "$project" != "${project#*-}" ]; then
+          print_warning "Skipping ${base} — cannot split '${remainder}' into <client>-<project> for template '${best_team}'"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      else
+        project="$remainder"
+        if [ "$project" != "${project#*-}" ]; then
+          print_warning "Skipping ${base} — project component '${project}' for template '${best_team}' contains a dash"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      fi
+    elif [ -n "$remainder" ]; then
+      print_warning "Skipping ${base} — template '${best_team}' takes no parameters but instance '${instance_id}' carries suffix '${remainder}'"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    # Re-render EXACTLY the instance that exists on disk — never a guessed one.
+    install_args=( "$best_team" )
+    if [ -n "$client" ]; then
+      install_args+=( --client "$client" )
+    fi
+    if [ -n "$project" ]; then
+      install_args+=( --project "$project" )
+    fi
+    install_args+=( --connect-only --install-dir "${WORKING_DIR}" )
 
     if [ "$DRY_RUN" = true ]; then
-      echo "Would re-render ${team_id} connect/disconnect scripts"
+      echo "Would re-render ${instance_id} connect/disconnect scripts (template ${best_team})"
       updated=$((updated + 1))
       continue
     fi
 
-    print_info "Refreshing ${team_id} connect/disconnect scripts..."
-    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "$team_id" --connect-only --install-dir "${WORKING_DIR}" 2>&1 | sed 's/^/    /' ); then
-      print_success "Refreshed ${team_id} connect/disconnect scripts"
+    print_info "Refreshing ${instance_id} connect/disconnect scripts..."
+    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" 2>&1 | sed 's/^/    /' ); then
+      print_success "Refreshed ${instance_id} connect/disconnect scripts"
       updated=$((updated + 1))
     else
-      print_warning "Failed to refresh ${team_id} connect/disconnect scripts (continuing)"
+      print_warning "Failed to refresh ${instance_id} connect/disconnect scripts (continuing)"
       failed=$((failed + 1))
     fi
   done
@@ -904,6 +1034,9 @@ update_connect_scripts() {
     print_warning "Refreshed ${updated} team connect/disconnect script set(s); ${failed} failed (non-fatal)"
   else
     print_success "Refreshed ${updated} team connect/disconnect script set(s)"
+  fi
+  if [ "$skipped" -gt 0 ]; then
+    print_warning "Skipped ${skipped} unrecognised *-connect.sh file(s) (non-fatal)"
   fi
   return 0
 }
