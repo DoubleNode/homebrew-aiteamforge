@@ -225,32 +225,58 @@ _lcars_port_drift_guard() {
         return 0
     fi
 
+    # Force base 10 for the band arithmetic below. A zero-padded value such as
+    # "08361" satisfies the digits-only test above, but bash's $(( )) reads a
+    # leading zero as octal and errors out on the digits 8 and 9 — which then
+    # falls through to a spurious OUTSIDE-band warning for a port that is
+    # actually inside its band. That is this ticket's own bug class (a false
+    # positive on a healthy port), so it gets closed here rather than deferred.
+    # zsh already treats the value as decimal; the explicit 10# makes both
+    # shells agree. The unpadded original is kept for the operator-facing
+    # messages so the text still shows what the registry literally holds.
+    local _guard_port_n=$(( 10#$_guard_port ))
+
     local _guard_py_dir
     _guard_py_dir="$(dirname "$_guard_ports_py")"
+
+    # The Python source below is SINGLE-quoted, and the two runtime values it
+    # needs (module dir, team id) are passed as argv rather than interpolated
+    # into the program text. Interpolating them would let a team id containing
+    # a quote character execute arbitrary Python (XACA-0803 review finding —
+    # a pre-existing pattern, proven exploitable, closed here). Team ids come
+    # from operator argv and are constrained to existing directory names, so
+    # this was never a privilege boundary; it is still not a defensible thing
+    # to leave in a file that every startup sources.
+    #
+    # The trailing `|| true` matters: under `set -e`, a failing command
+    # substitution in an assignment aborts the caller. The production call
+    # site already appends `|| true`, but the guard's documented contract is
+    # that it can NEVER abort a startup, so it must hold under bare
+    # invocation too rather than depending on how it happens to be called.
     local _guard_check2_raw
-    _guard_check2_raw="$(python3 -c "
+    _guard_check2_raw="$(python3 -c '
 import sys
-sys.path.insert(0, '${_guard_py_dir}')
+sys.path.insert(0, sys.argv[1])
 try:
     from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band
 except Exception:
-    print('||')
+    print("||")
     sys.exit(0)
 
-team = '${_guard_team}'
+team = sys.argv[2]
 
-default_port = ''
+default_port = ""
 try:
     entry = DEFAULT_TEAMS.get(team)
     if entry:
-        p = entry.get('lcars_port')
+        p = entry.get("lcars_port")
         if p:
             default_port = str(int(p))
 except Exception:
     pass
 
-band_base = ''
-band_range = ''
+band_base = ""
+band_range = ""
 try:
     base, rng = _resolve_template_band(team)
     band_base = str(int(base))
@@ -258,8 +284,8 @@ try:
 except Exception:
     pass
 
-print(default_port + '|' + band_base + '|' + band_range)
-" 2>/dev/null)"
+print(default_port + "|" + band_base + "|" + band_range)
+' "$_guard_py_dir" "$_guard_team" 2>/dev/null || true)"
 
     # Parse the pipe-delimited '<default_port>|<band_base>|<band_range>'
     # triple with plain parameter expansion (no external process, works
@@ -274,7 +300,7 @@ print(default_port + '|' + band_base + '|' + band_range)
         # Band resolved. Half-open interval [base, base+range) — matches
         # compute_instance_port's own semantics in aiteamforge_paths.py.
         local _guard_band_end=$(( _guard_band_base + _guard_band_range ))
-        if (( _guard_port >= _guard_band_base && _guard_port < _guard_band_end )); then
+        if (( _guard_port_n >= _guard_band_base && _guard_port_n < _guard_band_end )); then
             # Inside the allocated band: a legal XACA-0463 allocation
             # (the allocator hands out the next free port up when the base
             # is occupied), not drift. Stay silent.
@@ -290,7 +316,7 @@ print(default_port + '|' + band_base + '|' + band_range)
     # value, same shape as historical behavior, with authority-corrected
     # remediation text.
     if [[ -n "$_guard_default_port" && "$_guard_port" != "$_guard_default_port" ]]; then
-        local _guard_drift=$(( _guard_port - _guard_default_port ))
+        local _guard_drift=$(( _guard_port_n - 10#$_guard_default_port ))
         local _guard_drift_str
         if (( _guard_drift > 0 )); then
             _guard_drift_str="+${_guard_drift}"

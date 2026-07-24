@@ -82,7 +82,7 @@ declare -a PORT_TEAM_MAP=()
 for _team in "${_SMOKE_TEAMS[@]}"; do
     _lp="${_TEAM_PORT[$_team]}"
     if [[ -z "$_lp" ]]; then
-        echo "WARNING: no canonical lcars_port for team '$_team' — skipping smoke-test entry" >&2
+        echo "WARNING: no registry lcars_port for team '$_team' — skipping smoke-test entry" >&2
         continue
     fi
     PORT_TEAM_MAP+=("${_lp}:${_team}")
