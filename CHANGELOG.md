@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Docs: XACA-0848 — rewrite `docs/LOCKSTEP-CHECK.md` for the current tap gate model
+
+Mirrors the dev-team canonical `docs/homebrew-tap/LOCKSTEP-CHECK.md` (XACA-0340 canonical-source rule).
+
+The doc described the `tap-lockstep-check` CI gate, which XACA-0848 retired: it had been
+structurally incapable of failing since the XACA-0300 submodule migration (an outer-repo diff
+only ever contains the bare gitlink path `homebrew-tap`, never `homebrew-tap/share/...`, so its
+path guard skipped every file). The rewrite documents the enforcement model that replaced it:
+
+- **drift attribution** — mirror drift is classified OWNED (this PR's fault) / INHERITED (a
+  sibling ticket mirrored ahead) / UNATTRIBUTED (fail-closed). Purely-inherited drift no longer
+  blocks an innocent PR; the report names the tap commit and ticket that actually caused it.
+- **gitlink mainline reachability** — a gitlink unreachable from tap `main` is now refused.
+- **declared-ahead ordering guard** — mirroring ahead of canonical must carry a
+  `Tap-Mirror-Ahead: XACA-NNNN (PR #N)` trailer.
+- The two bypass vocabularies (`Tap-Only-Edit:` / `Tap-Gitlink-Skip:`) are **not** interchangeable.
+
+Known gap recorded in the doc: the ordering-guard hook is per-clone and cannot ship through git.
+
 ### Fix: XACA-0838 — resolved 8 protected-gate findings against `share/scripts/kb-port-reconcile`'s `--set-port` mode
 
 Mirrors dev-team canonical changes into `homebrew-tap/share/` (XACA-0340 canonical-source rule).
