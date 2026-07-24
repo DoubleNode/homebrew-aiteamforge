@@ -616,10 +616,16 @@ assert_contains "$_sc16" 'if [ -n "${AITEAMFORGE_RESTORE_LCARS_PORTS:-}" ]; then
 
 test_start "XACA-0799 Case 16c: start UNSETS the variable after consuming it"
 # XACA-0799-011: the dispatcher EXPORTS it, so without an unset it leaks down the
-# whole process tree — and start.sh's own preflight invokes aiteamforge-doctor.sh,
-# whose remediation runs `aiteamforge start kanban`. That nested STANDALONE start
-# would inherit the snapshot and restore teams outside any restart: exactly the
-# failure mode for which the disk-manifest design was rejected.
+# whole process tree — into the per-team *-startup.sh launches that follow the
+# union and anything they invoke. A nested STANDALONE start inheriting it would
+# perform its own restore union outside any restart: exactly the failure mode for
+# which the disk-manifest design was rejected.
+#
+# (XACA-0799-019 corrected an earlier version of this comment that named
+# run_first_launch_preflight -> aiteamforge-doctor.sh -> `aiteamforge start
+# kanban` as the threat. That path cannot fire: the preflight runs BEFORE dispatch
+# reaches start_lcars, so the unset is too late to affect it, and the doctor
+# refuses to auto-start under --preflight anyway. The unset is still correct.)
 assert_contains "$_sc16" "unset AITEAMFORGE_RESTORE_LCARS_PORTS" \
   && test_pass
 
