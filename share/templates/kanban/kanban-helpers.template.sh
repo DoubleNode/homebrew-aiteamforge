@@ -11728,33 +11728,122 @@ lcars-restart() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0838: overlay-backed LCARS port resolution for kb-restart()
+#
+# Replaces the hardcoded TEAM_PORTS associative array that used to live inside
+# kb-restart(). That array rotted well past this ticket's original two-team
+# scope: two freelance entries were stale by a whole port-band renumber, three
+# more were already wrong before this ticket touched anything, and one
+# registered freelance team (bandwear-android) was absent entirely — "Unknown
+# team" on a team that genuinely exists. A hardcoded per-client table can never
+# keep up with `kb-init-team` provisioning new freelance instances at runtime.
+#
+# dev-team/kanban-helpers.sh solved exactly this class of drift for the same
+# function already (XACA-0628): resolve freelance-* slugs from the
+# team-paths.json overlay first (the overlay entry is authoritative once a
+# team is self-describing via team_code), fall back to the canonical
+# aiteamforge_team_lcars_port loader (sourced at the top of this file from
+# libexec/lib/aiteamforge-paths.sh) for every other registered team, and only
+# then fall back to a small built-in table for the handful of well-known
+# teams this file has always shipped. _kb_team_lcars_port below is a minimal
+# in-template mirror of that dev-team helper — not a second, divergent
+# lookup — because dev-team/kanban-helpers.sh itself is a dev-tree-only file
+# that is never shipped to consumers; only this template and the shared
+# aiteamforge-paths.sh loader are. See dev-team/kanban-helpers.sh's
+# _kb_team_lcars_port() (~line 15676) for the sibling this must stay
+# behaviorally aligned with.
+#
+# _kb_overlay_lookup mirrors dev-team/kanban-helpers.sh's function of the same
+# name: gated on the overlay entry carrying its own team_code, which is the
+# marker that distinguishes a generic-freelance registration (self-describing,
+# safe to trust) from a legacy stub that still expects the built-in fallback.
+_kb_overlay_lookup() {
+    local slug="${1-}" field="${2-}"
+    [[ -z "$slug" || -z "$field" ]] && return 1
+    command -v python3 &>/dev/null || return 1
+    local cfg="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+    [[ -f "$cfg" ]] || return 1
+    python3 - "$cfg" "$slug" "$field" <<'PYEOF'
+import json, sys
+cfg, slug, field = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(cfg) as fh:
+        data = json.load(fh)
+except Exception:
+    sys.exit(1)
+entry = data.get("teams", {}).get(slug)
+if not isinstance(entry, dict):
+    sys.exit(1)
+code = entry.get("team_code")
+if not code:
+    sys.exit(1)
+val = entry.get(field)
+if val is None or val == "":
+    sys.exit(1)
+print(val)
+PYEOF
+}
+
+# _kb_team_lcars_port <team>
+# Resolution order — kept in lockstep with dev-team/kanban-helpers.sh's
+# _kb_team_lcars_port():
+#   1. freelance-* — overlay-first lookup (XACA-0628 pattern). No hardcoded
+#      per-client port table; a per-client instance's port lives only in the
+#      registry it was provisioned into.
+#   2. aiteamforge_team_lcars_port — the canonical loader sourced at the top
+#      of this file. Authoritative for every other registered team.
+#   3. Built-in fallback table — only the well-known non-freelance teams this
+#      file has always shipped, for the case the loader is unavailable (e.g.
+#      a bare shell without the tap lib on PATH). Freelance client slugs are
+#      deliberately NOT in this table (XACA-0838): a stale fallback port here
+#      is worse than a clean "unknown team" error for a per-client instance.
+_kb_team_lcars_port() {
+    local team="${1-}"
+    [[ -z "$team" ]] && return 1
+
+    if [[ "$team" == freelance-* ]]; then
+        local _ovl_port
+        if _ovl_port=$(_kb_overlay_lookup "$team" lcars_port) && [[ "$_ovl_port" =~ ^[0-9]+$ ]]; then
+            echo "$_ovl_port"
+            return 0
+        fi
+    fi
+
+    if command -v aiteamforge_team_lcars_port &>/dev/null; then
+        local _atf_port
+        _atf_port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null)
+        if [[ -n "$_atf_port" ]] && [[ "$_atf_port" =~ ^[0-9]+$ ]]; then
+            echo "$_atf_port"
+            return 0
+        fi
+    fi
+
+    local _port=""
+    case "$team" in
+        ios)        _port="8260" ;;
+        android)    _port="8280" ;;
+        firebase)   _port="8240" ;;
+        academy)    _port="8203" ;;
+        dns)        _port="8180" ;;
+        # Generic base slug for an unclaimed/legacy freelance instance —
+        # per-client slugs resolve via the overlay branch above, not here.
+        freelance)  _port="8505" ;;
+        command)    _port="8234" ;;
+        # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
+        mainevent)  _port="8234" ;;
+        *)          _port="" ;;
+    esac
+
+    [[ -z "$_port" ]] && return 1
+    echo "$_port"
+    return 0
+}
+
 # Restart LCARS kanban server for the current team
 kb-restart() {
     local DEV_TEAM_DIR="${AITEAMFORGE_DIR}"
     local LCARS_UI_DIR="${DEV_TEAM_DIR}/lcars-ui"
-
-    # Port mapping: team -> local_port
-    # Format matches lcars-health-check.sh LCARS_SERVERS array
-    declare -A TEAM_PORTS=(
-        ["ios"]="8260"
-        ["android"]="8280"
-        ["firebase"]="8240"
-        ["academy"]="8203"
-        ["dns"]="8180"
-        ["freelance"]="8505"
-        # NOTE: freelance-<client>-<project> keys below are registered team IDs
-        # from a specific install. New installations add their own team IDs here.
-        ["freelance-doublenode-starwords"]="8505"  # xaca-0139:allowed — stable team slug constant
-        ["freelance-doublenode-workstats"]="8505"  # xaca-0139:allowed — stable team slug constant
-        ["freelance-doublenode-appplanning"]="8505"  # xaca-0139:allowed — stable team slug constant
-        ["freelance-liquidstyle-agentbadges-app"]="8960"
-        ["freelance-liquidstyle-agentbadges-ios"]="8970"
-        ["command"]="8234"
-        # NOTE: "mainevent" is a registered team slug from a specific install. xaca-0139:allowed (legacy slug, not org branding)
-        # At install time the org team slug ({{ORG_SLUG}}) would be added here.
-        # xaca-0139:allowed — "mainevent" is a legacy team slug constant (backward-compat alias, not user-facing org branding)
-        ["mainevent"]="8234"
-    )
 
     # Detect current team from tmux session
     local context team terminal
@@ -11770,12 +11859,18 @@ kb-restart() {
     local rest="${context#*:}"
     terminal="${rest%%:*}"
 
-    # Get port for this team
-    local local_port="${TEAM_PORTS[$team]}"
+    # Get port for this team (XACA-0838: overlay-backed resolution — see
+    # _kb_team_lcars_port above)
+    local local_port
+    local_port=$(_kb_team_lcars_port "$team") || {
+        echo "Error: Unknown team '$team' (no LCARS port configured)"
+        echo "Known teams: check ${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+        return 1
+    }
 
     if [[ -z "$local_port" ]]; then
-        echo "Error: Unknown team '$team'"
-        echo "Known teams: ${(k)TEAM_PORTS[@]}"
+        echo "Error: Unknown team '$team' (no LCARS port configured)"
+        echo "Known teams: check ${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
         return 1
     fi
 
