@@ -15,6 +15,11 @@
 #   kb-port-reconcile --apply            # actually perform the writes
 #   kb-port-reconcile --team <team-id>   # restrict to a single team (with --check/--dry-run/--apply)
 #   kb-port-reconcile --prefer <src>     # precedence: team-paths (default) | portfile | canonical
+#   kb-port-reconcile --set-port <team> <port>                      # explicit band-aware renumber
+#   kb-port-reconcile --set-port <team> auto                        # lowest free port in the team's band
+#   kb-port-reconcile --set-port <team> <port> --allow-out-of-band  # override the band-membership check
+#     (--set-port composes with --check/--dry-run/--apply exactly like the standard flow: dry-run
+#      previews, check validates read-only, apply writes. See "SET-PORT MODE" below.)
 #   kb-port-reconcile --help
 #
 # THE THREE PORT SOURCES (and who reads each at runtime)
@@ -48,6 +53,72 @@
 #        its running server, .port file and tmux session all agreed on.
 #        Order: DEFAULT_TEAMS only. Teams missing a positive-int entry
 #        are skipped. See docs/team-registry-guide.md § "LCARS Port Authority Model".
+#
+# SET-PORT MODE (XACA-0838) — explicit band-aware renumber, closing a real gap
+#   Everything above reconciles a team's write sites TOWARD EACH OTHER — it never
+#   reconciles a team TOWARD ITS DECLARED BAND. A team can be internally
+#   consistent (all sites agree) while sitting entirely outside
+#   [lcars_port_base, lcars_port_base + lcars_port_range) and `--check` will
+#   report it OK (verified: freelance-bandwear-android at port 8478 sits below
+#   its declared [8500, 8600) band; `--check --team freelance-bandwear-android`
+#   reports "1 consistent, 0 divergent"). No prior mode here, and no other tool
+#   in the tree (kb-port-fix.py only handles collisions/null ports), can move a
+#   team's port. --set-port is that missing move.
+#
+#     kb-port-reconcile --set-port <team> <port>   Set an explicit port.
+#     kb-port-reconcile --set-port <team> auto     Allocate the lowest free
+#                                                   port in the team's band.
+#
+#   MULTI-TEAM PREVIEW (--check/--dry-run only): repeat --set-port to preview
+#   several teams in ONE process:
+#     kb-port-reconcile --set-port <team1> auto --set-port <team2> auto --dry-run
+#   A single --set-port invocation resolves 'auto' against team-paths.json AS
+#   IT SITS ON DISK — correct for one team, but stateless across processes:
+#   two SEPARATE --set-port <team> auto --dry-run runs each see the same
+#   on-disk state and can preview the SAME port for two different teams, even
+#   though a sequential run of separate --apply invocations (which genuinely
+#   does update the on-disk state the next process reads) would not collide.
+#   Repeating --set-port in one invocation fixes the preview: each team's
+#   'auto'/collision check is resolved against a scratch copy of the registry
+#   that already carries the simulated ports of every team earlier in the
+#   list — the exact cumulative state a sequence of --apply runs, in that
+#   order, would produce. --apply itself still requires ONE team per
+#   invocation (state can only be reserved by actually writing
+#   team-paths.json, which --dry-run/--check must never do); passing --apply
+#   with more than one --set-port is refused, with guidance to apply one team
+#   at a time, in the previewed order.
+#
+#   Band math is NEVER reimplemented shell-side here (the k501 sibling-drift
+#   class this repo keeps getting burned by). Both forms call straight through
+#   to the CANONICAL _resolve_template_band() / compute_instance_port() in
+#   kanban-hooks/aiteamforge_paths.py, loaded dynamically from whatever file
+#   $KB_PR_PATHS_PY (alias: AITEAMFORGE_PATHS_PY below) points at — so the test
+#   suite's fixtures exercise the identical code path as production.
+#
+#   Validation BEFORE any write (--check surfaces these, read-only, exit 1 on
+#   failure; --dry-run/--apply refuse to proceed on the same failures):
+#     - Collision: the target port must not already be held by ANY OTHER team,
+#       in ANY template's band (cross-template collisions count). No override
+#       exists for this — a collision is always a hard failure.
+#     - Band membership: an explicit <port> outside the team's resolved band is
+#       rejected unless --allow-out-of-band is also passed. `auto` allocation
+#       is always in-band by construction and never needs the override.
+#
+#   Write sites: reuses the identical write engine as the standard flow above
+#   (_reconcile_team) — every site that has a pre-existing entry for the team
+#   is updated; every site with no entry (e.g. DEFAULT_TEAMS / the
+#   kanban-helpers.sh case arm, for a template-only team like freelance-* that
+#   is intentionally absent from both — XACA-0628) is reported and skipped,
+#   never silently no-op'd and never created fresh (registration remains a
+#   separate decision, same rule the standard flow already follows). Verified
+#   applicable sites for the freelance-* shape: team-paths.json lcars_port +
+#   lcars-ports/<team>-lcars.port. team-paths.json is backed up
+#   (team-paths.json.bak-<timestamp>, matching the convention already used by
+#   lcars-ui/server.py and aiteamforge_paths.py's own save_config()) before the
+#   first write of an --apply run.
+#
+#   Incompatible with --prefer canonical (that mode short-circuits before
+#   set-port would ever run) — the combination is refused up front.
 #
 # THE 5 WRITE SITES (reconcile updates all that exist for each team)
 #   1. kanban-hooks/aiteamforge_paths.py  — DEFAULT_TEAMS[<team>]["lcars_port"] (CANONICAL)
@@ -123,9 +194,16 @@ ONLY_TEAM=""
 PREFER="team-paths"     # team-paths | portfile | canonical
 STRICT=0                # --check only: also fail on presence anomalies / UNRESOLVABLE
 DASH="-"                # absent-cell sentinel emitted by _analyze (keep in sync)
+declare -a SET_PORT_TEAMS=()  # XACA-0838: one entry per --set-port occurrence
+declare -a SET_PORT_VALUES=() # literal "<port>" or the literal string "auto", index-aligned with SET_PORT_TEAMS
+# Scalar mirrors of the above, populated right before dispatch for the (overwhelmingly common)
+# single --set-port case so _set_port_mode's single-team logic doesn't need to know about arrays.
+SET_PORT_TEAM=""
+SET_PORT_VALUE=""
+ALLOW_OOB=0             # --allow-out-of-band: override the band-membership check for --set-port
 
 usage() {
-    sed -n '2,80p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+    sed -n '2,153p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
     exit 0
 }
 
@@ -137,6 +215,10 @@ while [[ $# -gt 0 ]]; do
         --team)             ONLY_TEAM="${2:?--team requires a value}"; shift 2 ;;
         --prefer)           PREFER="${2:?--prefer requires a value}";  shift 2 ;;
         --strict)           STRICT=1;         shift ;;
+        --set-port)         SET_PORT_TEAMS+=("${2:?--set-port requires <team> <port|auto>}")
+                             SET_PORT_VALUES+=("${3:?--set-port requires <team> <port|auto>}")
+                             shift 3 ;;
+        --allow-out-of-band) ALLOW_OOB=1;     shift ;;
         --help|-h)          usage ;;
         *) _fail "Unknown option: ${1}"; exit 1 ;;
     esac
@@ -146,6 +228,11 @@ case "$PREFER" in
     team-paths|portfile|canonical) ;;
     *) _fail "--prefer must be 'team-paths', 'portfile', or 'canonical' (got: ${PREFER})"; exit 1 ;;
 esac
+
+if [[ "${#SET_PORT_TEAMS[@]}" -gt 0 && "$PREFER" == "canonical" ]]; then
+    _fail "--set-port is incompatible with --prefer canonical (canonical mode short-circuits before --set-port would ever run)."
+    exit 1
+fi
 
 # XACA-0626: --prefer canonical short-circuits the rest of the flow.
 # Treat aiteamforge_paths.py DEFAULT_TEAMS as the sole authority. For each team
@@ -1091,6 +1178,334 @@ sys.exit(0)
 PYEOF
 }
 
+# ── XACA-0838: --set-port mode ─────────────────────────────────────────────────
+#
+# Backup team-paths.json before its FIRST write of a --set-port --apply run,
+# matching the convention already used by lcars-ui/server.py (backup_path =
+# team-paths.json.bak-<timestamp>) and aiteamforge_paths.py's own
+# save_config() (config_path.name + ".bak-" + timestamp). A no-op if the
+# file doesn't exist yet (isolated test fixtures / a fresh install).
+_backup_team_paths_json() {
+    [[ -f "$TEAM_PATHS_JSON" ]] || return 0
+    local ts backup_path
+    ts="$(date +%Y%m%d-%H%M%S)"
+    backup_path="${TEAM_PATHS_JSON}.bak-${ts}"
+    if cp -p "$TEAM_PATHS_JSON" "$backup_path" 2>/dev/null; then
+        _info "backup: team-paths.json snapshot saved to ${backup_path}"
+    else
+        _warn "backup: failed to snapshot team-paths.json before write"
+    fi
+}
+
+# Resolve + validate a --set-port request. NEVER reimplements band math —
+# dynamically loads whatever file $AITEAMFORGE_PATHS_PY points at (real
+# module or a test fixture) and calls its OWN _resolve_template_band() /
+# compute_instance_port(), exactly as production does (k501 sibling-drift
+# class: this repo has been burned repeatedly by shell-side re-derivations
+# of logic that already lives in one canonical place).
+#
+# Emits one pipe-delimited line on stdout:
+#   OK|<newport>|<band_base>|<band_range>|<message>
+#   ERR|||| <message>
+# (band_base/band_range are empty on ERR, and also empty on an OK reached
+# only via --allow-out-of-band with an unresolvable band.)
+_set_port_resolve() {
+    local team="$1" reqport="$2" allow_oob="$3"
+    python3 - "${AITEAMFORGE_PATHS_PY}" "${TEAM_PATHS_JSON}" "${team}" "${reqport}" "${allow_oob}" <<'PYEOF'
+import sys, json, importlib.util
+from pathlib import Path
+
+paths_py, team_paths_json, team, reqport, allow_oob = sys.argv[1:6]
+allow_oob = allow_oob == "1"
+
+
+def emit(status, newport="", base="", rng="", msg=""):
+    print(f"{status}|{newport}|{base}|{rng}|{msg}")
+    sys.exit(0)
+
+
+# Dynamically load the module at paths_py — works for the real canonical file
+# OR a test fixture regardless of its on-disk filename — so this always calls
+# the SAME band-allocation code production uses, never a reimplementation.
+spec = importlib.util.spec_from_file_location("_kb_pr_setport_mod", paths_py)
+if spec is None or spec.loader is None:
+    emit("ERR", msg=f"could not load spec for {paths_py}")
+mod = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(mod)
+except Exception as e:
+    emit("ERR", msg=f"failed to load {paths_py}: {e!r}")
+
+resolve_band = getattr(mod, "_resolve_template_band", None)
+compute_port = getattr(mod, "compute_instance_port", None)
+if resolve_band is None or compute_port is None:
+    emit("ERR", msg=f"{paths_py} does not define _resolve_template_band/compute_instance_port — cannot allocate without reimplementing band math")
+
+# Existing registry (may be absent in an isolated test fixture — treat as empty).
+existing = {"teams": {}}
+p = Path(team_paths_json)
+if p.exists():
+    try:
+        existing = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as e:
+        emit("ERR", msg=f"failed to parse {team_paths_json}: {e!r}")
+
+base = band_range = None
+band_err = None
+try:
+    base, band_range = resolve_band(team)
+except Exception as e:
+    band_err = str(e)
+
+if reqport == "auto":
+    if band_err is not None:
+        emit("ERR", msg=f"cannot auto-allocate: {band_err}")
+    try:
+        newport = compute_port(team, existing)
+    except Exception as e:
+        emit("ERR", msg=str(e))
+    emit("OK", newport, base, band_range, "auto-allocated lowest free port in band")
+
+# Explicit numeric port requested.
+try:
+    newport = int(reqport)
+except ValueError:
+    emit("ERR", msg=f"requested port '{reqport}' is not an integer or the literal 'auto'")
+if newport <= 0:
+    emit("ERR", msg=f"requested port must be a positive integer, got {newport}")
+
+# Collision check: the target port must not already be held by ANY OTHER
+# team in ANY template's band. Cross-template collisions count. No override
+# exists for this check — it is always a hard failure.
+for other_team, entry in existing.get("teams", {}).items():
+    if other_team == team:
+        continue
+    if isinstance(entry, dict) and entry.get("lcars_port") == newport:
+        emit("ERR", msg=f"port {newport} is already in use by team '{other_team}' — refusing collision")
+
+# Band-membership check — the only check --allow-out-of-band can override.
+if band_err is not None:
+    if not allow_oob:
+        emit("ERR", msg=f"{band_err} Pass --allow-out-of-band to set an explicit port without a resolvable band.")
+    emit("OK", newport, "", "", f"band unresolvable ({band_err}) — proceeding under --allow-out-of-band")
+
+in_band = base <= newport < (base + band_range)
+if not in_band and not allow_oob:
+    emit("ERR", msg=f"port {newport} is outside declared band [{base}, {base + band_range}) for '{team}'. Pass --allow-out-of-band to override.")
+
+msg = "in declared band" if in_band else f"OUT OF declared band [{base}, {base + band_range}) — proceeding under --allow-out-of-band"
+emit("OK", newport, base, band_range, msg)
+PYEOF
+}
+
+# Dispatch a validated --set-port request through the SAME write engine as the
+# standard reconcile flow (_reconcile_team) — see the SET-PORT MODE header
+# comment for the write-site rationale. Always exits (never returns).
+_set_port_mode() {
+    local team="$SET_PORT_TEAM" reqport="$SET_PORT_VALUE"
+    local raw status newport base range msg
+    raw="$(_set_port_resolve "$team" "$reqport" "$ALLOW_OOB")"
+    IFS='|' read -r status newport base range msg <<< "$raw"
+
+    if [[ "$status" != "OK" ]]; then
+        _fail "set-port ${team}: ${msg}"
+        exit 1
+    fi
+
+    local band_desc="unresolvable"
+    [[ -n "$base" && -n "$range" ]] && band_desc="[${base}, $((base + range)))"
+
+    echo -e "${BOLD}SET-PORT${NC}: ${team} requested '${reqport}' -> resolves to ${GREEN}${newport}${NC} (band ${band_desc}; ${msg})"
+    echo ""
+
+    if [[ "$MODE" == "check" ]]; then
+        echo -e "${GREEN}Valid.${NC} Run with --dry-run to preview site writes, --apply to perform them."
+        exit 0
+    fi
+
+    # Pull each site's CURRENT value for this team so _reconcile_team's
+    # existing per-site skip logic (site1/2/3/5 absent -> reported, not
+    # created) applies unchanged — the identical rules the standard flow uses.
+    ONLY_TEAM="$team"
+    _load_records
+    local d tp pf
+    if [[ "${#RECORDS[@]}" -gt 0 ]]; then
+        local _t _auth _status
+        IFS=$'\t' read -r _t d tp pf _auth _status <<< "${RECORDS[0]}"
+    else
+        d="$DASH"; tp=""; pf=""
+        _warn "set-port: ${team} not found in DEFAULT_TEAMS, team-paths.json, or lcars-ports/*.port — only sites with a pre-existing entry are ever updated, and none exist yet for this team, so nothing will be written. Registration is a separate decision."
+    fi
+
+    if [[ "$MODE" == "apply" ]]; then
+        _backup_team_paths_json
+        echo -e "${BOLD}Applying set-port...${NC}"
+    else
+        echo -e "${BOLD}Dry run — the following changes WOULD be made (use --apply to write):${NC}"
+    fi
+    echo ""
+
+    RECONCILED_COUNT=0
+    _reconcile_team "$team" "$newport" "$d" "$tp" "$pf"
+
+    if [[ "$MODE" == "apply" ]]; then
+        echo -e "${BOLD}Summary:${NC} set-port applied — ${team} -> ${newport}."
+        echo -e "${YELLOW}NEXT STEP:${NC} if site1/2/3 were touched, run ./sync-tap.sh to mirror canonical aiteamforge_paths.py into the tap, then commit."
+    else
+        echo -e "${BOLD}Summary (dry run):${NC} set-port would set ${team} -> ${newport}. Re-run with --apply to perform the writes."
+    fi
+    exit 0
+}
+
+# ── XACA-0838: --set-port multi-team preview mode ──────────────────────────────
+#
+# Triggered when --set-port appears more than once. A lone --set-port <team>
+# auto resolves against team-paths.json AS IT SITS ON DISK — correct for one
+# team, but stateless ACROSS PROCESSES: two separate --set-port <team> auto
+# --dry-run invocations each see identical on-disk state and can preview the
+# SAME port for two different teams sharing a band, even though a sequence of
+# separate --apply runs (each process's write is what the next process reads)
+# would not collide. This function fixes the PREVIEW, not the (already
+# correct) apply behavior: it resolves every team in the list, in order,
+# against a throwaway scratch copy of the registry that is updated after each
+# team resolves — so team N's 'auto'/collision check sees teams 1..N-1's
+# SIMULATED ports as taken, exactly what a real sequential --apply run would
+# produce. The scratch file is never the live TEAM_PATHS_JSON and is deleted
+# on exit; nothing here ever writes to the real registry.
+#
+# --apply is refused for a multi-team --set-port on purpose: there is no way
+# to reserve N ports for N teams atomically in one process without either
+# writing team-paths.json from a mode that must stay read-only (--dry-run) or
+# reimplementing a two-phase commit this tool has no other need for. Applying
+# a multi-team renumber remains what it already correctly is: one --apply
+# invocation per team, in the previewed order.
+_set_port_mode_multi() {
+    local n="${#SET_PORT_TEAMS[@]}"
+
+    if [[ "$MODE" == "apply" ]]; then
+        _fail "multi-team --set-port only supports --check/--dry-run in a single invocation. Run --apply once per team, in the order shown by --dry-run — each --apply's write is what the next team's allocation must see, and only running them as separate processes actually reserves that state."
+        exit 1
+    fi
+
+    echo -e "${BOLD}SET-PORT (multi-team preview)${NC}: simulating cumulative allocation across ${n} teams, in the order given"
+    echo -e "${YELLOW}NOTE:${NC} this is a preview only — nothing is written here. A real multi-team renumber still requires one --apply invocation PER TEAM, in this order."
+    echo ""
+
+    local scratch
+    scratch="$(mktemp -t kb-port-reconcile-multiset.XXXXXX)"
+    trap 'rm -f "$scratch"' EXIT
+    if [[ -f "$TEAM_PATHS_JSON" ]]; then
+        cp "$TEAM_PATHS_JSON" "$scratch"
+    else
+        printf '{"schema_version": 1, "teams": {}}' > "$scratch"
+    fi
+
+    local orig_team_paths_json="$TEAM_PATHS_JSON"
+    local i=0 team reqport raw status newport base range msg band_desc
+    local any_invalid=0
+    local -a resolved_teams=() resolved_ports=()
+
+    while [[ "$i" -lt "$n" ]]; do
+        team="${SET_PORT_TEAMS[$i]}"
+        reqport="${SET_PORT_VALUES[$i]}"
+
+        # Point the resolver at the scratch snapshot (which already carries
+        # every earlier team's simulated port) instead of the real registry.
+        TEAM_PATHS_JSON="$scratch"
+        raw="$(_set_port_resolve "$team" "$reqport" "$ALLOW_OOB")"
+        TEAM_PATHS_JSON="$orig_team_paths_json"
+        IFS='|' read -r status newport base range msg <<< "$raw"
+
+        if [[ "$status" != "OK" ]]; then
+            _fail "[$((i+1))/${n}] set-port ${team}: ${msg}"
+            any_invalid=1
+            i=$((i+1))
+            continue
+        fi
+
+        band_desc="unresolvable"
+        [[ -n "$base" && -n "$range" ]] && band_desc="[${base}, $((base + range)))"
+        echo -e "${BOLD}[$((i+1))/${n}] ${team}${NC} requested '${reqport}' -> resolves to ${GREEN}${newport}${NC} (band ${band_desc}; ${msg}) ${CYAN}[simulated: as if the ${i} team(s) before it in this batch were already applied]${NC}"
+
+        resolved_teams+=("$team")
+        resolved_ports+=("$newport")
+
+        # Fold this team's simulated port into the scratch registry so the
+        # NEXT iteration's resolve (auto allocation AND collision check) sees
+        # it as taken. Reuses the exact same production resolver — never a
+        # shell-side reimplementation of band/collision math (k501 class).
+        python3 - "$scratch" "$team" "$newport" <<'PYEOF'
+import sys, json
+scratch, team, newport = sys.argv[1], sys.argv[2], int(sys.argv[3])
+with open(scratch) as f:
+    d = json.load(f)
+d.setdefault("teams", {})
+d["teams"].setdefault(team, {})
+d["teams"][team]["lcars_port"] = newport
+with open(scratch, "w") as f:
+    json.dump(d, f)
+PYEOF
+        i=$((i+1))
+    done
+    echo ""
+
+    if [[ "$any_invalid" -eq 1 ]]; then
+        _fail "one or more teams in this batch failed to resolve — see above. This mode never writes anything."
+        exit 1
+    fi
+
+    # Non-vacuous guard: prove no two teams in this batch actually landed on
+    # the same port, rather than trusting the simulation ran correctly.
+    local dupe=0 j=0 k
+    while [[ "$j" -lt "${#resolved_ports[@]}" ]]; do
+        k=$((j+1))
+        while [[ "$k" -lt "${#resolved_ports[@]}" ]]; do
+            if [[ "${resolved_ports[$j]}" == "${resolved_ports[$k]}" ]]; then
+                _fail "INTERNAL: simulated allocation produced the same port (${resolved_ports[$j]}) for both '${resolved_teams[$j]}' and '${resolved_teams[$k]}' — this should never happen when both requested 'auto' in the same band; treat as a kb-port-reconcile bug."
+                dupe=1
+            fi
+            k=$((k+1))
+        done
+        j=$((j+1))
+    done
+
+    if [[ "$MODE" == "check" ]]; then
+        [[ "$dupe" -eq 1 ]] && exit 1
+        echo -e "${GREEN}Valid.${NC} Run with --dry-run to preview site writes for each team (still one --apply per team, in this order)."
+        exit 0
+    fi
+
+    # --dry-run: also show the per-site preview for each team, reusing the
+    # identical single-team write-preview path (_reconcile_team), driven by
+    # each team's REAL on-disk site values against its simulated resolved
+    # port. Nothing here writes to any real site — MODE is guaranteed
+    # "dry-run" at this point (apply was refused above).
+    echo -e "${BOLD}Per-team site preview (dry run — nothing written):${NC}"
+    echo ""
+    i=0
+    while [[ "$i" -lt "${#resolved_teams[@]}" ]]; do
+        team="${resolved_teams[$i]}"
+        newport="${resolved_ports[$i]}"
+        ONLY_TEAM="$team"
+        _load_records
+        local d tp pf
+        if [[ "${#RECORDS[@]}" -gt 0 ]]; then
+            local _t _auth _status
+            IFS=$'\t' read -r _t d tp pf _auth _status <<< "${RECORDS[0]}"
+        else
+            d="$DASH"; tp=""; pf=""
+        fi
+        RECONCILED_COUNT=0
+        _reconcile_team "$team" "$newport" "$d" "$tp" "$pf"
+        i=$((i+1))
+    done
+
+    [[ "$dupe" -eq 1 ]] && exit 1
+
+    echo -e "${BOLD}Summary (multi-team dry run):${NC} ${n} teams previewed with cumulative simulated allocation — no two teams in this batch resolve to the same port. Re-run '--set-port <team> <port> --apply' ONCE PER TEAM, in this order, to perform the writes."
+    exit 0
+}
+
 # ── Main flow ─────────────────────────────────────────────────────────────────
 
 # XACA-0626: --prefer canonical short-circuits the standard flow. _canonical_mode
@@ -1099,6 +1514,20 @@ PYEOF
 # call-before-definition error (the helpers live at lines 850+).
 if [[ "$PREFER" == "canonical" ]]; then
     _canonical_mode
+fi
+
+# XACA-0838: --set-port short-circuits the standard flow the same way, and for
+# the same reason (defined earlier, invoked here after every helper it calls
+# — _load_records/_reconcile_team/_backup_team_paths_json — is defined).
+# A single --set-port keeps the original scalar single-team path unchanged
+# (backward-compatible flag surface); repeating --set-port routes to the
+# multi-team preview simulator instead.
+if [[ "${#SET_PORT_TEAMS[@]}" -eq 1 ]]; then
+    SET_PORT_TEAM="${SET_PORT_TEAMS[0]}"
+    SET_PORT_VALUE="${SET_PORT_VALUES[0]}"
+    _set_port_mode
+elif [[ "${#SET_PORT_TEAMS[@]}" -gt 1 ]]; then
+    _set_port_mode_multi
 fi
 
 _load_records
