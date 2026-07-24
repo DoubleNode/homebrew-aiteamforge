@@ -395,12 +395,21 @@ start_lcars() {
     # aiteamforge_lcars_running_ports in lib/common.sh.
     local -a _rports=()
     read -ra _rports <<< "$AITEAMFORGE_RESTORE_LCARS_PORTS"
+
+    # XACA-0799-004: build the port→team map ONCE, outside the loop. The previous
+    # shape called aiteamforge_team_for_lcars_port() per port, and that scanned
+    # every registered team calling aiteamforge_team_lcars_port() on each — two jq
+    # forks per team, per port. At 15 teams x 8 ports it measured 1.35s added to
+    # the restart path, sitting directly in front of a teardown lcars-watch fires
+    # on every lcars-ui change. One jq pass here, pure-shell lookups below.
+    local _port_map=""
+    _port_map=$(aiteamforge_lcars_port_team_map 2>/dev/null) || _port_map=""
     for _rport in ${_rports[@]+"${_rports[@]}"}; do
       if [ -z "$_rport" ]; then
         continue
       fi
 
-      _rteam=$(aiteamforge_team_for_lcars_port "$_rport" 2>/dev/null) || _rteam=""
+      _rteam=$(aiteamforge_team_for_lcars_port_in_map "$_rport" "$_port_map" 2>/dev/null) || _rteam=""
       if [ -z "$_rteam" ]; then
         print_warning "LCARS was serving on port ${_rport} but no team owns it in the registry — not restoring"
         continue
@@ -411,18 +420,14 @@ start_lcars() {
       # returns the registry INSTANCE id ("finance-personal"), so a raw-only
       # comparison would queue the same team twice and race two servers onto one
       # port (XACA-0792 is exactly this base-vs-instance split).
+      # XACA-0799-001: the predicate lives in aiteamforge_restore_key_is_new()
+      # (lib/common.sh) so the suite can drive it. Inline here it was reachable
+      # only by launching real servers, so a review-round mutation DELETING the
+      # dedupe entirely still passed the whole suite.
       _dup=false
-      for _seen in ${teams[@]+"${teams[@]}"}; do
-        if [ "$_seen" = "$_rteam" ]; then
-          _dup=true
-          break
-        fi
-        _seen_key=$(aiteamforge_resolve_team_key "$_seen" 2>/dev/null) || _seen_key=""
-        if [ -n "$_seen_key" ] && [ "$_seen_key" = "$_rteam" ]; then
-          _dup=true
-          break
-        fi
-      done
+      if ! aiteamforge_restore_key_is_new "$_rteam" ${teams[@]+"${teams[@]}"}; then
+        _dup=true
+      fi
 
       if [ "$_dup" = false ]; then
         teams+=("$_rteam")

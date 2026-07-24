@@ -583,16 +583,98 @@ aiteamforge_team_for_lcars_port() {
     [ -z "$want" ] && return 1
 
     local team port
-    while IFS= read -r team; do
-        [ -z "$team" ] && continue
-        port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null) || continue
+    while IFS=$'\t' read -r port team; do
+        [ -z "$port" ] && continue
         if [ "$port" = "$want" ]; then
             echo "$team"
             return 0
         fi
-    done < <(aiteamforge_list_teams)
+    done < <(aiteamforge_lcars_port_team_map)
 
     return 1  # no team in the registry owns this port
+}
+
+# aiteamforge_lcars_port_team_map
+# Prints one "<port><TAB><team>" line per team that has an LCARS port allocated.
+#
+# XACA-0799-004: the reverse lookup used to scan aiteamforge_list_teams and call
+# aiteamforge_team_lcars_port per team — two jq forks per probe, repeated for
+# EVERY port. At 15 teams x 8 ports that measured 1.35s added to the restart
+# path, sitting directly in front of a teardown that lcars-watch fires on every
+# lcars-ui change. This builds the whole map in ONE jq pass and memoizes it, so a
+# batch of lookups costs one fork instead of O(ports x teams).
+#
+# The cache key includes the config path AND its mtime, so a test (or a live
+# port reconcile) that rewrites team-paths.json is picked up rather than served
+# stale — a plain path-keyed cache would hand back a pre-reconcile map.
+#
+# READ-ONLY by construction: it reads the config file directly and returns empty
+# when absent. The old per-team path went through aiteamforge_team_lcars_port,
+# which MATERIALIZES a default registry on first lookup when none exists — so a
+# reverse lookup could create state just by being run. Emitting nothing for a
+# missing config is the correct degrade: the caller falls back to configured
+# teams only.
+aiteamforge_lcars_port_team_map() {
+    local config_path
+    config_path=$(aiteamforge_config_path)
+
+    if [ ! -f "$config_path" ]; then
+        return 0
+    fi
+
+    local map=""
+    if command -v jq &>/dev/null; then
+        map=$(jq -r '
+            .teams | to_entries[]
+            | select(.value.lcars_port != null and .value.lcars_port != "")
+            | "\(.value.lcars_port)\t\(.key)"
+        ' "$config_path" 2>/dev/null)
+    else
+        # No jq — fall back to the per-team scan. Slower, but correctness first.
+        local team port
+        while IFS= read -r team; do
+            [ -z "$team" ] && continue
+            port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null) || continue
+            map="${map}${port}	${team}
+"
+        done < <(aiteamforge_list_teams)
+    fi
+
+    [ -n "$map" ] && map="${map}
+"
+    printf '%s' "$map"
+    return 0
+}
+
+# aiteamforge_team_for_lcars_port_in_map <port> <map>
+# Pure-shell lookup against a map already built by aiteamforge_lcars_port_team_map.
+# Prints the owning team, or returns 1.
+#
+# XACA-0799-004: this is what actually removes the per-port cost. Callers that
+# probe several ports build the map ONCE and then call this, so a batch costs a
+# single jq fork total instead of one per port.
+#
+# A memoizing cache inside aiteamforge_lcars_port_team_map was tried first and
+# deleted: every caller invokes these through `$( ... )`, which runs in a
+# SUBSHELL, so the cache variable never survives back to the parent and the
+# memoization was dead code that merely looked like an optimisation. Passing the
+# map explicitly is the only form that actually holds across calls.
+aiteamforge_team_for_lcars_port_in_map() {
+    local want="$1"
+    local map="$2"
+    [ -z "$want" ] && return 1
+
+    local port team
+    while IFS=$'\t' read -r port team; do
+        [ -z "$port" ] && continue
+        if [ "$port" = "$want" ]; then
+            echo "$team"
+            return 0
+        fi
+    done <<EOF
+$map
+EOF
+    return 1
 }
 
 # aiteamforge_compute_instance_port <template_id> [<team_paths_json_path>]

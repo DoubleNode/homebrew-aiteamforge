@@ -120,6 +120,11 @@ if ! type -t test_start >/dev/null 2>&1; then
         local msg="${2:-Expected non-empty}"
         [ -n "$value" ] || { test_fail "$msg"; return 1; }
     }
+    assert_file_not_exists() {
+        local file="$1"
+        local msg="${2:-Expected file NOT to exist: $1}"
+        [ ! -f "$file" ] || { test_fail "$msg"; return 1; }
+    }
 fi
 
 if [ -z "${TEST_TMP_DIR:-}" ]; then
@@ -139,6 +144,15 @@ mkdir -p "$AITEAMFORGE_DIR"
 source "$COMMON_LIB"
 # shellcheck source=/dev/null
 source "$PATHS_LIB"
+# config.sh + kanban-paths.sh supply get_board_id / get_team_instance_id, which
+# aiteamforge_resolve_team_key() consults to map a BASE id ("finance") to its
+# registry INSTANCE id ("finance-personal"). Without them that mapping silently
+# degrades to the base id and the base-vs-instance dedupe case below would pass
+# for the wrong reason — the comparison never being exercised at all.
+# shellcheck source=/dev/null
+source "$TAP_ROOT/libexec/lib/config.sh" 2>/dev/null || true
+# shellcheck source=/dev/null
+source "$TAP_ROOT/libexec/lib/kanban-paths.sh" 2>/dev/null || true
 
 # ═══════════════════════════════════════════════════════════════════════════
 # Fixture — an M4Mini-shaped install: many teams in the port registry, but only
@@ -405,6 +419,131 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
+# Case 12 — port extraction is a real function, driven directly (XACA-0799-006)
+# ═══════════════════════════════════════════════════════════════════════════
+# The first cut re-typed the production sed into the test body. That proves only
+# that the test's own copy works and keeps passing after production drifts away
+# from it, so the rule now lives in aiteamforge_extract_lcars_port().
+test_start "XACA-0799 Case 12a: extraction is anchored on server.py"
+assert_equal "8203" "$(aiteamforge_extract_lcars_port 'python3 server.py 8203')" \
+  && assert_equal "8361" "$(aiteamforge_extract_lcars_port '/opt/homebrew/bin/Python server.py 8361')" \
+  && test_pass
+
+test_start "XACA-0799 Case 12b: a trailing numeric arg does not become the port"
+# A right-to-left "last all-numeric token" scan returns 2 here. That form shipped
+# once carrying a comment claiming it "tolerates trailing flags"; it does the
+# opposite. Anchoring is what actually tolerates them.
+assert_equal "8203" "$(aiteamforge_extract_lcars_port 'python3 server.py 8203 --workers 2')" \
+  && test_pass
+
+test_start "XACA-0799 Case 12c: non-server.py cmdlines and empty input yield nothing"
+assert_empty "$(aiteamforge_extract_lcars_port 'python3 some-other.py 8203')" \
+  && assert_empty "$(aiteamforge_extract_lcars_port '')" \
+  && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 13 — the restore dedupe predicate (XACA-0799-001)
+# ═══════════════════════════════════════════════════════════════════════════
+# Previously inline in start_lcars()'s restore loop, reachable only by launching
+# real servers. A review-round mutation pass DELETED the dedupe outright with the
+# suite still fully green, so it is now a pure predicate the suite drives.
+test_start "XACA-0799 Case 13a: an unrelated team is new"
+aiteamforge_restore_key_is_new "academy" "ios" "android" && test_pass \
+  || test_fail "unrelated team reported as duplicate"
+
+test_start "XACA-0799 Case 13b: an exact repeat is NOT new (this is the dedupe)"
+if aiteamforge_restore_key_is_new "academy" "ios" "academy"; then
+  test_fail "an exact duplicate was reported new — dedupe is not working"
+else
+  test_pass
+fi
+
+test_start "XACA-0799 Case 13c: instance id matches a configured BASE id"
+# THE case the dedupe exists for: .teams[] holds "finance", the reverse lookup
+# returns "finance-personal". A raw-only comparison misses it and races two
+# servers onto port 8361. Needs kanban-paths.sh (sourced above) for the mapping.
+if aiteamforge_restore_key_is_new "finance-personal" "finance"; then
+  test_fail "instance id 'finance-personal' did not match configured base 'finance'"
+else
+  test_pass
+fi
+
+test_start "XACA-0799 Case 13d: empty candidate is never treated as new"
+if aiteamforge_restore_key_is_new "" "academy"; then
+  test_fail "empty candidate reported as a startable team"
+else
+  test_pass
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 14 — single-pass port map (XACA-0799-004)
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "XACA-0799 Case 14a: map emits one port<TAB>team row per allocated team"
+_map=$(aiteamforge_lcars_port_team_map)
+assert_contains "$_map" "8361	finance-personal" \
+  && assert_contains "$_map" "8240	academy" \
+  && test_pass
+
+test_start "XACA-0799 Case 14b: map is READ-ONLY (never materializes a registry)"
+# The old per-team path went through aiteamforge_team_lcars_port, which writes a
+# default registry on first lookup when none exists — so a reverse lookup could
+# create state just by running (the XACA-0792-001 precedent set by `status`).
+_ro2=$(mktemp -d)
+( AITEAMFORGE_CONFIG="$_ro2/team-paths.json" aiteamforge_lcars_port_team_map >/dev/null 2>&1 ) || true
+assert_file_not_exists "$_ro2/team-paths.json" && test_pass
+
+test_start "XACA-0799 Case 14c: map-based lookup resolves and rejects correctly"
+# The lookup callers actually use. Driven against a map built once, which is the
+# whole point of the fix — a batch of probes costs one jq fork, not one per port.
+_m=$(aiteamforge_lcars_port_team_map)
+assert_equal "academy" "$(aiteamforge_team_for_lcars_port_in_map 8240 "$_m")" \
+  && assert_equal "finance-personal" "$(aiteamforge_team_for_lcars_port_in_map 8361 "$_m")" \
+  && assert_empty "$(aiteamforge_team_for_lcars_port_in_map 9999 "$_m" 2>/dev/null || true)" \
+  && test_pass
+
+test_start "XACA-0799 Case 14d: start builds the port map OUTSIDE the restore loop"
+# The cost only disappears if the map is built once. Building it per iteration
+# would still be O(ports) jq forks while every behavioral assertion above stayed
+# green — so this is pinned structurally. An earlier attempt memoized inside the
+# map builder instead; that was dead code, because callers invoke it through
+# $( ... ) and the cache never survived the subshell.
+_sc=$(grep -vE '^[[:space:]]*#' "$START_CMD")
+assert_contains "$_sc" "aiteamforge_lcars_port_team_map" \
+  && assert_contains "$_sc" "aiteamforge_team_for_lcars_port_in_map" \
+  && test_pass
+_map_line=$(grep -n "aiteamforge_lcars_port_team_map" "$START_CMD" | head -1 | cut -d: -f1)
+_loop_line=$(grep -n 'for _rport in' "$START_CMD" | head -1 | cut -d: -f1)
+test_start "XACA-0799 Case 14e: the map build precedes the per-port loop"
+if [ -n "$_map_line" ] && [ -n "$_loop_line" ] && [ "$_map_line" -lt "$_loop_line" ]; then
+  test_pass
+else
+  test_fail "map built at line ${_map_line:-?} does not precede the loop at ${_loop_line:-?}"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 15 — matcher literal across EVERY kill/capture site (XACA-0799-005)
+# ═══════════════════════════════════════════════════════════════════════════
+# The guard previously pinned 2 of 5 sites. aiteamforge-doctor.sh is deliberately
+# EXCLUDED and named here rather than silently skipped: it greps `server\.py`
+# without the ` [0-9]` port guard because it only PROBES for reporting and wants
+# the broader match, so asserting it identical would be wrong.
+test_start "XACA-0799 Case 15: every kill/capture site uses one matcher spelling"
+_pats=$(grep -rhoE '(pgrep|pkill) -f "server\\\.py \[0-9\]"' \
+          "$TAP_ROOT/libexec/commands/aiteamforge-stop.sh" \
+          "$TAP_ROOT/libexec/commands/aiteamforge-uninstall.sh" \
+          "$TAP_ROOT/libexec/commands/aiteamforge-migrate.sh" \
+          "$COMMON_LIB" 2>/dev/null \
+        | sed -E 's/^(pgrep|pkill) -f //' | sort -u)
+_n=$(printf '%s\n' "$_pats" | grep -c . || true)
+if [ "${_n:-0}" -eq 0 ]; then
+  test_fail "extracted no matchers at all — the grep is broken, not the code"
+else
+  assert_equal "1" "$_n" \
+    "kill/capture sites disagree; found: $(printf '%s' "$_pats" | tr '\n' ' ')" \
+    && test_pass
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
 # Summary (standalone mode only — the runner prints its own)
 # ═══════════════════════════════════════════════════════════════════════════
 if [ "$_STANDALONE" = true ]; then
@@ -421,3 +560,4 @@ if [ "$_STANDALONE" = true ]; then
 fi
 
 exit 0
+

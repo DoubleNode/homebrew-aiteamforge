@@ -256,9 +256,57 @@ aiteamforge_lcars_running_ports() {
         # Extract the numeric argument immediately following server.py — that is
         # the bind port. Anchored on server.py so an unrelated numeric arg
         # elsewhere in the cmdline cannot be mistaken for the port.
-        port=$(echo "$args" | sed -n 's/.*server\.py[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p')
+        port=$(aiteamforge_extract_lcars_port "$args")
         [ -n "$port" ] && echo "$port"
     done | sort -un
+}
+
+# aiteamforge_extract_lcars_port <ps-args-string>
+# Prints the LCARS bind port carried in a `server.py` command line, or nothing.
+#
+# XACA-0799-006: split out of aiteamforge_lcars_running_ports so the extraction
+# RULE is exercised directly by the suite rather than re-implemented inside a
+# test case. A test that re-types the production sed proves only that the test's
+# own copy works, and keeps passing after production drifts away from it.
+#
+# Anchored on `server.py`, taking the token IMMEDIATELY after it. A right-to-left
+# "last all-numeric token" scan looks equivalent and is not: it returns the LAST
+# number on the line, so any trailing numeric argument (`server.py 8203 --workers
+# 2`) yields 2 and the snapshot records a port no team owns. Anchoring is what
+# actually tolerates trailing flags.
+aiteamforge_extract_lcars_port() {
+    printf '%s\n' "${1:-}" \
+        | sed -n 's/.*server\.py[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p'
+}
+
+# aiteamforge_restore_key_is_new <candidate-instance-id> <configured-id>...
+# Returns 0 if <candidate> is NOT already represented among the configured ids,
+# 1 if it is (i.e. it would be a duplicate start).
+#
+# XACA-0799-001: split out of start_lcars()'s restore loop. Inline there the
+# dedupe was only reachable by launching real servers, so the suite could assert
+# nothing about it beyond a presence-grep for an identifier — and a review-round
+# mutation pass proved that inadequate by DELETING the dedupe with the suite
+# still green.
+#
+# Comparison happens in BOTH raw and resolved space on purpose: `.teams[]` holds
+# BASE ids ("finance") while the reverse lookup returns the registry INSTANCE id
+# ("finance-personal"). A raw-only comparison queues the same team twice and
+# races two servers onto one port — XACA-0792 is exactly this base-vs-instance
+# split.
+aiteamforge_restore_key_is_new() {
+    local candidate="${1:-}"
+    shift || true
+    [ -z "$candidate" ] && return 1
+
+    local seen seen_key
+    for seen in "$@"; do
+        [ -z "$seen" ] && continue
+        [ "$seen" = "$candidate" ] && return 1
+        seen_key=$(aiteamforge_resolve_team_key "$seen" 2>/dev/null) || seen_key=""
+        [ -n "$seen_key" ] && [ "$seen_key" = "$candidate" ] && return 1
+    done
+    return 0
 }
 
 #──────────────────────────────────────────────────────────────────────────────
