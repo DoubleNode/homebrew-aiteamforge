@@ -2144,6 +2144,31 @@ UI_DIR = Path(__file__).parent
 CONFIG_DIR = Path.home() / "dev-team" / "config"
 SESSION_NAME = os.environ.get("LCARS_SESSION_NAME", "lcars")
 LCARS_TEAM = os.environ.get("LCARS_TEAM", "").strip()
+
+
+def lcars_runtime_target_path() -> Path:
+    """XACA-0798: absolute path of the RUNTIME router-redirect file.
+
+    MUST stay byte-for-byte equivalent to the shell-side definition in
+    scripts/lcars-launch-helpers.sh::lcars_runtime_target_file — that helper is
+    the writer, this is the reader. Same default, same env override.
+
+    Why not lcars-ui/lcars-target.js any more: lcars-ui/ is the WatchPaths
+    directory of the com.aiteamforge.lcars-watch LaunchAgent. A runtime write
+    there fired `aiteamforge restart lcars` on every single team startup, which
+    SIGTERM'd every server.py on the box — including the one the startup script
+    had launched seconds earlier. Runtime-mutable state must not live inside a
+    directory that is watched for content changes.
+
+    Keyed to Path.home() (not AITEAMFORGE_DIR) so it sits beside the XACA-0301
+    manual override at ~/.aiteamforge/lcars-target.local.js.
+    """
+    override = os.environ.get("LCARS_TARGET_RUNTIME_FILE", "").strip()
+    if override:
+        return Path(override)
+    return Path.home() / ".aiteamforge" / "lcars-target.js"
+
+
 def _resolve_server_hostname() -> str:
     """Prefer the Tailscale MagicDNS short name — it is stable,
     user-controlled, and matches the host argument users pass to
@@ -12660,13 +12685,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         # Estimate-vs-actual handicap analytics (XACA-0630-003)
         elif path == '/api/estimates':
             self.serve_estimates(parsed.query)
-        # NOTE: lcars-target.js is now served as a STATIC file (not dynamic)
-        # This allows the router to work from ANY port - startup scripts write
-        # the target team to the static file, and all servers serve the same file.
-        # Previously, dynamic serving broke the router because each server
-        # would serve its own team instead of the globally-written target.
+        # NOTE: lcars-target.js is NOT served dynamically per-server. Every LCARS
+        # server on the box must resolve the SAME target, otherwise the router
+        # sends you to whichever port you happened to hit instead of the team the
+        # user actually started. Previously that shared state was the static file
+        # lcars-ui/lcars-target.js, which startup scripts overwrote at runtime.
+        # XACA-0798: that runtime write is gone — lcars-ui/ is the lcars-watch
+        # WatchPaths dir and writing there restarted (and SIGTERM'd) every server
+        # on every startup. The shared state now lives at
+        # ~/.aiteamforge/lcars-target.js and this route serves it, falling back to
+        # the shipped static default when it is absent.
+        elif path == '/lcars-target.js':
+            self.serve_lcars_target()
         # XACA-0301: per-machine override served from ~/.aiteamforge/lcars-target.local.js
         # (404 when absent — HTML loader handles the no-override case gracefully).
+        # Chained AFTER lcars-target.js by the router HTML, so it still wins last.
         elif path == '/lcars-target.local.js':
             self.serve_lcars_target_local()
         elif path.endswith('.js') or path.endswith('.html') or path.endswith('.css') or path == '/':
@@ -16018,6 +16051,10 @@ end tell
         """
         from urllib.parse import urlparse
         path = urlparse(self.path).path
+        # XACA-0798: HEAD parity for the runtime router-target route.
+        if path == '/lcars-target.js':
+            self.serve_lcars_target(head_only=True)
+            return
         if path == '/lcars-target.local.js':
             self.serve_lcars_target_local(head_only=True)
             return
@@ -16025,6 +16062,49 @@ end tell
             self.serve_no_cache_static(path, head_only=True)
             return
         super().do_HEAD()
+
+    def serve_lcars_target(self, head_only=False):
+        """XACA-0798: serve the RUNTIME router-redirect file, else the shipped default.
+
+        Resolution order for /lcars-target.js:
+          1. ~/.aiteamforge/lcars-target.js  — written at startup by
+             lcars-launch-helpers.sh::start_lcars_server + the *-startup.sh
+             session-line appends. Outside lcars-ui/, so writing it does NOT
+             trip the com.aiteamforge.lcars-watch WatchPaths agent.
+          2. lcars-ui/lcars-target.js        — the shipped static default,
+             written only at install/upgrade time and never at runtime.
+
+        A read error on (1) falls through to (2) rather than 500-ing: a broken
+        runtime file must degrade to the shipped default, not black-hole the
+        router. Absence of BOTH yields the same 404 serve_no_cache_static has
+        always produced, which the HTML loader's onerror path already handles.
+
+        The XACA-0301 manual override (~/.aiteamforge/lcars-target.local.js) is
+        a SEPARATE chained script load and is deliberately untouched here — it
+        loads after this file and still wins last.
+        """
+        runtime_path = lcars_runtime_target_path()
+        data = None
+        try:
+            if runtime_path.is_file():
+                data = runtime_path.read_bytes()
+        except OSError:
+            data = None
+
+        if data is None:
+            self.serve_no_cache_static('/lcars-target.js', head_only=head_only)
+            return
+
+        # Same no-cache header set serve_no_cache_static uses for .js.
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/javascript')
+        self.send_header('Content-Length', len(data))
+        self.send_header('Cache-Control', 'no-cache, no-store, must-revalidate')
+        self.send_header('Pragma', 'no-cache')
+        self.send_header('Expires', '0')
+        self.end_headers()
+        if not head_only:
+            self.wfile.write(data)
 
     def serve_lcars_target_local(self, head_only=False):
         """XACA-0301: serve per-machine LCARS retargeting override.

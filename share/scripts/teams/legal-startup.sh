@@ -186,11 +186,15 @@ echo "  Creating terminal tabs..."
 # Headless hosts (SSH/cockpit-host) have no GUI tab to open but MUST serve LCARS
 # so <team>-connect.sh can reach http://<host>:<port>/api/status. (XACA-0614)
 # Session-name prefix uses the lowercased SESSION_PREFIX (XACA-0609).
-# start_lcars_server writes the team line to lcars-target.js; append the session line after.
+# start_lcars_server writes the team line to the RUNTIME target file; append
+# the session line to the SAME file. XACA-0798: that file is
+# ~/.aiteamforge/lcars-target.js (via lcars_runtime_target_file), NOT
+# lcars-ui/lcars-target.js — lcars-ui/ is the lcars-watch WatchPaths dir and
+# writing there made every startup restart (and SIGTERM) every LCARS server.
 echo "  Starting Legal LCARS server on port $LCARS_PORT..."
 start_lcars_server "${SESSION_PREFIX}" "$LCARS_PORT" "${SESSION_PREFIX}-lcars" \
     || echo "    ⚠️  Continuing without a confirmed-ready LCARS server (see above)."
-echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> ~/dev-team/lcars-ui/lcars-target.js
+echo "window.LCARS_TARGET_SESSION = '${SESSION_PREFIX}-lcars';" >> "$(lcars_runtime_target_file)"
 
 # ── Tabs: only when a GUI is present ──
 if has_iterm_gui; then
