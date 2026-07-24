@@ -131,6 +131,16 @@ fi
 # Extract update_connect_scripts() from aiteamforge-upgrade.sh (do NOT source
 # the whole script — its main body has side effects: is_configured,
 # get_framework_dir, brew checks, the upgrade itself).
+#
+# XACA-0834 UPDATE: update_connect_scripts() now calls a second helper,
+# _connect_script_team_flags(), to read TEAM_HAS_PROJECTS/
+# TEAM_REQUIRES_CLIENT_ID from the matched conf. That helper must be
+# extracted and sourced too — without it, every call silently resolves to
+# "command not found" inside a `$( ... )` substitution, which yields an
+# empty $flags and therefore an always-false has_projects/requires_client
+# regardless of what a fixture's conf actually says (this bit F6 below: the
+# fixture's own conf content was correct, but the helper it depends on was
+# never sourced, so it had no effect either way).
 # ─────────────────────────────────────────────────────────────────────────────
 _extract_fn() {
     awk -v fn="$1" '
@@ -140,7 +150,9 @@ _extract_fn() {
     ' "$UPGRADE_SH"
 }
 
+FLAGS_FN_SRC="$WORK_DIR/connect_script_team_flags.extracted.sh"
 UPD_FN_SRC="$WORK_DIR/update_connect_scripts.extracted.sh"
+_extract_fn _connect_script_team_flags > "$FLAGS_FN_SRC"
 _extract_fn update_connect_scripts > "$UPD_FN_SRC"
 
 if [ ! -s "$UPD_FN_SRC" ]; then
@@ -150,6 +162,12 @@ if [ ! -s "$UPD_FN_SRC" ]; then
         echo "XACA-0814 upgrade-connect-scripts tests: ${_PASS_COUNT} passed, $((_FAIL_COUNT + 1)) failed"
     fi
     exit 1
+fi
+# _connect_script_team_flags is a XACA-0834 addition; tolerate its absence on
+# an older checkout (pre-0834) so this suite still runs against history, but
+# warn loudly since every functional case below now implicitly depends on it.
+if [ ! -s "$FLAGS_FN_SRC" ]; then
+    echo "WARNING: _connect_script_team_flags not found in $UPGRADE_SH — functional tests below may behave as pre-XACA-0834" >&2
 fi
 
 # print_* stubs that ALSO record output so functional tests can grep for
@@ -163,6 +181,8 @@ _install_print_stubs() {
 }
 _install_print_stubs
 
+# shellcheck disable=SC1090
+[ -s "$FLAGS_FN_SRC" ] && source "$FLAGS_FN_SRC"
 # shellcheck disable=SC1090
 source "$UPD_FN_SRC"
 declare -f update_connect_scripts >/dev/null || { echo "FATAL: update_connect_scripts not defined after extraction"; exit 1; }
@@ -336,12 +356,34 @@ fi
 # F6 — PROJECT-AUGMENTED-INSTANCE-ID: the refresh-only guard's glob must match
 # an XACA-0485 project-augmented instance id (e.g. finance -> finance-personal),
 # not just the bare team id.
+#
+# XACA-0834 UPDATE: update_connect_scripts() was rewritten (file-iteration +
+# anchored-shape recovery, replacing the conf-iteration + unanchored-glob
+# design this test was originally written against — see
+# test-xaca-0834-connect-script-recovery.sh for the dedicated regression
+# suite covering that rewrite in depth). The rewrite reads TEAM_HAS_PROJECTS
+# from the conf to decide how to split a recovered instance id, so this
+# fixture's conf must now carry real values — an EMPTY conf (the original
+# fixture) defaults to TEAM_HAS_PROJECTS=false, which makes the new code
+# correctly SKIP a "finance-personal" instance ("template takes no
+# parameters") instead of refreshing it, breaking this assertion for a
+# reason that has nothing to do with the property F6 exists to guard. Fixed
+# by giving finance.conf the same TEAM_HAS_PROJECTS=true /
+# TEAM_REQUIRES_CLIENT_ID=false shape the real share/teams/finance.conf
+# ships (this test's stub ignores --client/--project — it renders whatever
+# STUB_INSTANCE_ID says regardless — so only the has_projects gate needed
+# fixing for this fixture to reach the installer call again).
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "F6: refresh-only guard matches a project-augmented instance id (finance -> finance-personal)"
 F6_FRAMEWORK="$(_next_sandbox)"
 F6_WORKING="$(_next_sandbox)"
 mkdir -p "$F6_FRAMEWORK/share/teams"
-: > "$F6_FRAMEWORK/share/teams/finance.conf"
+cat > "$F6_FRAMEWORK/share/teams/finance.conf" <<'CONF'
+TEAM_ID="finance"
+TEAM_HAS_PROJECTS="true"
+TEAM_REQUIRES_CLIENT_ID="false"
+TEAM_DEFAULT_PROJECT="personal"
+CONF
 echo "stale-instance-augmented-connect" > "$F6_WORKING/finance-personal-connect.sh"
 echo "stale-instance-augmented-disconnect" > "$F6_WORKING/finance-personal-disconnect.sh"
 
