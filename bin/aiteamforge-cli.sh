@@ -137,6 +137,40 @@ case "${1:-}" in
   restart)
     check_configured
     shift
+    # XACA-0799: stop's blast radius is WIDER than start's coverage. stop reaps
+    # every server.py on the box (kill-all by design); start only launches teams
+    # in .aiteamforge-config's .teams[]. Teams started by their own *-startup.sh
+    # are absent from .teams[], so a naive stop-then-start killed all of them and
+    # brought back only the configured few, leaving the rest down until the 300s
+    # lcars-health check healed them.
+    #
+    # Snapshot the ports that are SERVING right now — before the teardown — and
+    # hand them to start via the environment. start unions them into its team
+    # list so a restart restores exactly what it took down.
+    #
+    # Strictly best-effort: every step is guarded so a snapshot failure degrades
+    # to today's behavior (configured teams only) rather than blocking a restart.
+    _atf_restart_svc="all"
+    for _atf_arg in "$@"; do
+      case "$_atf_arg" in
+        all|lcars|kanban|fleet|agents) _atf_restart_svc="$_atf_arg"; break ;;
+      esac
+    done
+
+    case "$_atf_restart_svc" in
+      all|lcars|kanban)
+        if [ -r "${AITEAMFORGE_HOME}/libexec/lib/common.sh" ]; then
+          # shellcheck source=/dev/null
+          source "${AITEAMFORGE_HOME}/libexec/lib/common.sh" 2>/dev/null || true
+          if type aiteamforge_lcars_running_ports >/dev/null 2>&1; then
+            AITEAMFORGE_RESTORE_LCARS_PORTS="$(aiteamforge_lcars_running_ports 2>/dev/null | tr '\n' ' ')" \
+              || AITEAMFORGE_RESTORE_LCARS_PORTS=""
+            export AITEAMFORGE_RESTORE_LCARS_PORTS
+          fi
+        fi
+        ;;
+    esac
+
     "${AITEAMFORGE_HOME}/libexec/commands/aiteamforge-stop.sh" "$@"
     exec "${AITEAMFORGE_HOME}/libexec/commands/aiteamforge-start.sh" "$@"
     ;;
