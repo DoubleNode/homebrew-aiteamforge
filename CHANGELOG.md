@@ -7,6 +7,21 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0838 — resolved 8 protected-gate findings against `share/scripts/kb-port-reconcile`'s `--set-port` mode
+
+Mirrors dev-team canonical changes into `homebrew-tap/share/` (XACA-0340 canonical-source rule).
+
+- **008:** `auto` was non-idempotent for a team already inside its declared band — `compute_instance_port()` counted the team's OWN current port as taken, moving it to the next free slot on every re-run. `auto` now short-circuits to the team's own current port when it is already in-band.
+- **007/012:** a duplicate team id in one `--set-port` batch is now rejected up front — the existing same-port dupe guard can't catch a same-team repeat (each occurrence legitimately resolves to a different simulated port).
+- **009:** sites 2/3 (the tap mirror files) now report, rather than silently skip, a team genuinely absent from an EXISTING tap file — matching site1/site5's existing "not registered — skipped" behavior for the same condition.
+- **010:** `--apply`'s summary now reports the actual per-site write count instead of unconditional success-shaped text when zero sites actually changed.
+- **011:** the pre-write `team-paths.json` backup is now conditional on a pending write (was unconditional) and prunes to the last `KB_PR_BACKUP_RETAIN` (default 10) snapshots.
+- **013a:** the collision check now coerces a string-typed `lcars_port` before comparing, matching `compute_instance_port()`'s own coercion — a string-typed duplicate previously evaded the no-override collision gate.
+- **013b:** the shell side now takes the LAST line of `_set_port_resolve`'s output rather than the first, so noisy stdout from a dynamically-loaded module at import time can no longer shadow the real `OK|`/`ERR|` status line.
+- **014:** the regression suite's own header description was corrected (SECTION C was mislabeled, SECTION E was omitted) and the missing self-port `auto` no-op case was added.
+
+40 new assertions (84 → 124 in `scripts/tests/test-xaca-0838-set-port.sh`), each individually proven non-vacuous by reverting its fix and observing only the targeted assertions fail before restoring green.
+
 ### Fix: XACA-0798 — LCARS router-target write moved out of the `lcars-ui` WatchPaths directory
 
 Mirrors dev-team canonical changes into `homebrew-tap/share/` (XACA-0340 canonical-source rule).

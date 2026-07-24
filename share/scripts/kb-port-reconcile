@@ -185,7 +185,7 @@ _info() { echo -e "       $*"; }
 _warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
 _fail() { echo -e "${RED}[FAIL]${NC} $*" >&2; }
 _dry()  { echo -e "${CYAN} [DRY]${NC} $*"; }
-_chg()  { echo -e "${GREEN}[WRITE]${NC} $*"; }
+_chg()  { echo -e "${GREEN}[WRITE]${NC} $*"; SITE_WRITE_COUNT=$((SITE_WRITE_COUNT + 1)); }
 
 # ── Argument parsing ──────────────────────────────────────────────────────────
 
@@ -1010,6 +1010,13 @@ _render_anomalies() {
 # ── Per-team reconcile (dry-run prints, apply writes) ─────────────────────────
 # Echoes the per-site planned/applied changes. Returns 0.
 RECONCILED_COUNT=0
+# XACA-0838-010: real per-SITE write counter (RECONCILED_COUNT above is a
+# per-TEAM boolean — 0 or 1 regardless of how many of that team's sites
+# actually wrote). _chg() increments this on every genuine write, in any
+# mode/section that reaches it; --set-port's single-team apply summary uses
+# it to tell "wrote N sites" apart from "0 sites written — nothing to do"
+# instead of printing success-shaped text unconditionally.
+SITE_WRITE_COUNT=0
 _reconcile_team() {
     local team="$1" auth="$2" d="$3" tp="$4" pf="$5"
     local did_something=0 rc=0
@@ -1061,7 +1068,16 @@ for node in ast.walk(tree):
 print("")
 PYEOF
 )
-        if [[ -n "$tapval" && "$tapval" != "$auth" ]]; then
+        # XACA-0838-009: when the tap file EXISTS but has no entry for this
+        # team, tapval is "" — previously that fell through this whole
+        # `if [[ -n "$tapval" ...` block silently, printing NOTHING, unlike
+        # site1's matching "not in DEFAULT_TEAMS — skipped" info line for the
+        # exact same condition. A summary describing this as "reported" was
+        # false for this branch specifically. Report it the same way site1
+        # does.
+        if [[ -z "$tapval" ]]; then
+            _info "site2 tap aiteamforge_paths.py mirror: ${team} not in DEFAULT_TEAMS — skipped (registration decision)"
+        elif [[ "$tapval" != "$auth" ]]; then
             if [[ "$MODE" == "apply" ]]; then
                 if _update_paths_py "$TAP_PATHS_PY" "$team" "$auth"; then
                     _chg "site2 tap aiteamforge_paths.py mirror: ${tapval} -> ${auth}"; did_something=1
@@ -1090,7 +1106,12 @@ for line in open(file):
 print("")
 PYEOF
 )
-        if [[ -n "$shval" && "$shval" != "$auth" ]]; then
+        # XACA-0838-009: same fix as site2 immediately above — an EXISTING
+        # tap file with no heredoc row for this team previously reported
+        # nothing at all.
+        if [[ -z "$shval" ]]; then
+            _info "site3 tap aiteamforge-paths.sh heredoc: ${team} not in heredoc rows — skipped (registration decision)"
+        elif [[ "$shval" != "$auth" ]]; then
             if [[ "$MODE" == "apply" ]]; then
                 if _update_paths_sh "$TAP_PATHS_SH" "$team" "$auth"; then
                     _chg "site3 tap aiteamforge-paths.sh heredoc: ${shval} -> ${auth}"; did_something=1
@@ -1185,6 +1206,15 @@ PYEOF
 # team-paths.json.bak-<timestamp>) and aiteamforge_paths.py's own
 # save_config() (config_path.name + ".bak-" + timestamp). A no-op if the
 # file doesn't exist yet (isolated test fixtures / a fresh install).
+#
+# XACA-0838-011: the CALLER now only invokes this when a team-paths.json
+# write is actually pending (see _set_port_mode) — a plain --apply that
+# turns out to be a no-op (team already at the requested port) used to
+# snapshot unconditionally, so 3 --apply runs could produce 3 backups when
+# only 1 ever wrote anything. This function stays a no-op-safe primitive
+# either way; the retention prune below is the second half of the fix — even
+# a caller that DOES snapshot every time cannot grow the backup set without
+# bound.
 _backup_team_paths_json() {
     [[ -f "$TEAM_PATHS_JSON" ]] || return 0
     local ts backup_path
@@ -1194,6 +1224,37 @@ _backup_team_paths_json() {
         _info "backup: team-paths.json snapshot saved to ${backup_path}"
     else
         _warn "backup: failed to snapshot team-paths.json before write"
+        return 0
+    fi
+    _prune_team_paths_backups
+}
+
+# XACA-0838-011: retention — keep only the most recent KB_PR_BACKUP_RETAIN
+# (default 10) team-paths.json.bak-<timestamp> snapshots matching THIS
+# file's exact backup pattern, oldest first. Runs only right after this
+# tool creates a new backup (called from _backup_team_paths_json above), so
+# it only ever prunes once the count including the just-created snapshot
+# exceeds the retention window — it never runs as an unprompted sweep, and
+# it never touches anything that doesn't match "<TEAM_PATHS_JSON>.bak-*".
+_prune_team_paths_backups() {
+    local retain="${KB_PR_BACKUP_RETAIN:-10}"
+    local dir base
+    dir="$(dirname "$TEAM_PATHS_JSON")"
+    base="$(basename "$TEAM_PATHS_JSON")"
+    [[ -d "$dir" ]] || return 0
+    local -a backups=()
+    local f
+    while IFS= read -r f; do
+        [[ -n "$f" ]] && backups+=("$f")
+    done < <(ls -1t "${dir}/${base}.bak-"* 2>/dev/null || true)
+    local count="${#backups[@]}"
+    if [[ "$count" -gt "$retain" ]]; then
+        local i
+        for (( i = retain; i < count; i++ )); do
+            if rm -f "${backups[$i]}" 2>/dev/null; then
+                _info "backup: pruned old snapshot ${backups[$i]} (retention: keeping last ${retain})"
+            fi
+        done
     fi
 }
 
@@ -1260,6 +1321,33 @@ except Exception as e:
 if reqport == "auto":
     if band_err is not None:
         emit("ERR", msg=f"cannot auto-allocate: {band_err}")
+    # XACA-0838-008: compute_instance_port() counts the team's OWN existing
+    # port as "taken" (it iterates every entry in existing_team_paths,
+    # including this team's), so re-running `auto` on a team that is
+    # ALREADY correctly in-band pushed it to the NEXT free slot instead of
+    # leaving it alone — non-idempotent by construction, churning the port
+    # on every repeated --apply. Fix scoped here (not inside
+    # compute_instance_port itself, which other callers such as fresh
+    # provisioning legitimately want unchanged): if this team's current
+    # registered port already falls inside its own resolved band, `auto`
+    # short-circuits to THAT port rather than asking compute_instance_port
+    # for the lowest free slot. This is the "prefer the team's own current
+    # port when in-band" option from XACA-0838-008 — chosen over the
+    # alternative (hard-refuse with no resolution) because it makes `auto`
+    # a true no-op for the common re-run case instead of an error, and it
+    # never touches the canonical band-allocation function other callers
+    # depend on.
+    current_port = None
+    team_entry = existing.get("teams", {}).get(team)
+    if isinstance(team_entry, dict):
+        raw_current = team_entry.get("lcars_port")
+        if raw_current is not None:
+            try:
+                current_port = int(raw_current)
+            except (TypeError, ValueError):
+                current_port = None
+    if current_port is not None and base <= current_port < base + band_range:
+        emit("OK", current_port, base, band_range, f"already in band at {current_port} — nothing to do")
     try:
         newport = compute_port(team, existing)
     except Exception as e:
@@ -1277,10 +1365,26 @@ if newport <= 0:
 # Collision check: the target port must not already be held by ANY OTHER
 # team in ANY template's band. Cross-template collisions count. No override
 # exists for this check — it is always a hard failure.
+#
+# XACA-0838-013a: compute_instance_port() builds its own "used ports" set
+# via int(entry["lcars_port"]) (coercing every value), but this check used
+# to compare entry.get("lcars_port") == newport directly against an int —
+# a string-typed "lcars_port" in the registry (e.g. "8600" instead of 8600,
+# which JSON permits and nothing here prevented) would never equal the int
+# newport and silently evade the collision gate. Coerce both sides the same
+# way compute_instance_port already does, so a string-typed entry cannot
+# slip past a check whose entire job is to be a hard, no-override failure.
 for other_team, entry in existing.get("teams", {}).items():
     if other_team == team:
         continue
-    if isinstance(entry, dict) and entry.get("lcars_port") == newport:
+    if not isinstance(entry, dict):
+        continue
+    other_raw = entry.get("lcars_port")
+    try:
+        other_port = int(other_raw) if other_raw is not None else None
+    except (TypeError, ValueError):
+        other_port = None
+    if other_port == newport:
         emit("ERR", msg=f"port {newport} is already in use by team '{other_team}' — refusing collision")
 
 # Band-membership check — the only check --allow-out-of-band can override.
@@ -1304,7 +1408,15 @@ PYEOF
 _set_port_mode() {
     local team="$SET_PORT_TEAM" reqport="$SET_PORT_VALUE"
     local raw status newport base range msg
-    raw="$(_set_port_resolve "$team" "$reqport" "$ALLOW_OOB")"
+    # XACA-0838-013b: `read <<<` only ever consumes the FIRST line of a
+    # multi-line here-string. _set_port_resolve dynamically loads whatever
+    # module $AITEAMFORGE_PATHS_PY points at (importlib exec_module) — if
+    # that module prints ANYTHING to stdout at import time, that print lands
+    # as line 1 of $raw and our actual OK|/ERR| status line (always the last
+    # thing emitted) shifts to line 2+, silently discarded by `read`. Take
+    # the LAST line unconditionally so import-time stdout noise can never
+    # shadow the real result.
+    raw="$(_set_port_resolve "$team" "$reqport" "$ALLOW_OOB" | tail -n1)"
     IFS='|' read -r status newport base range msg <<< "$raw"
 
     if [[ "$status" != "OK" ]]; then
@@ -1338,7 +1450,18 @@ _set_port_mode() {
     fi
 
     if [[ "$MODE" == "apply" ]]; then
-        _backup_team_paths_json
+        # XACA-0838-011: only snapshot when a team-paths.json write is
+        # actually about to happen — mirrors the exact condition
+        # _reconcile_team itself uses further down to decide whether to
+        # write team-paths.json ([[ -n "$tp" && "$tp" != "$auth" ]], with
+        # DASH treated as "absent" here since an absent entry never writes).
+        # Backing up unconditionally meant a no-op --apply (team already at
+        # the requested port) still produced a fresh, useless snapshot.
+        if [[ -n "$tp" && "$tp" != "$DASH" && "$tp" != "$newport" ]]; then
+            _backup_team_paths_json
+        else
+            _info "backup: skipped — no team-paths.json write is pending for ${team} (already ${newport}, or no registry entry yet)"
+        fi
         echo -e "${BOLD}Applying set-port...${NC}"
     else
         echo -e "${BOLD}Dry run — the following changes WOULD be made (use --apply to write):${NC}"
@@ -1346,11 +1469,22 @@ _set_port_mode() {
     echo ""
 
     RECONCILED_COUNT=0
+    SITE_WRITE_COUNT=0
     _reconcile_team "$team" "$newport" "$d" "$tp" "$pf"
 
     if [[ "$MODE" == "apply" ]]; then
-        echo -e "${BOLD}Summary:${NC} set-port applied — ${team} -> ${newport}."
-        echo -e "${YELLOW}NEXT STEP:${NC} if site1/2/3 were touched, run ./sync-tap.sh to mirror canonical aiteamforge_paths.py into the tap, then commit."
+        # XACA-0838-010: report the ACTUAL write count rather than printing
+        # success-shaped "applied" text unconditionally — a --apply that
+        # wrote to zero sites (e.g. an unregistered team, or a team already
+        # at the requested port everywhere) used to still print "set-port
+        # applied — <team> -> <port>" and exit 0, indistinguishable from a
+        # real write.
+        if [[ "$SITE_WRITE_COUNT" -eq 0 ]]; then
+            echo -e "${BOLD}Summary:${NC} ${YELLOW}0 sites written${NC} — nothing to do (${team} -> ${newport}: no site had a pre-existing entry that differed, or the team has no entry anywhere yet)."
+        else
+            echo -e "${BOLD}Summary:${NC} applied to ${GREEN}${SITE_WRITE_COUNT} site(s)${NC} — ${team} -> ${newport}."
+            echo -e "${YELLOW}NEXT STEP:${NC} if site1/2/3 were touched, run ./sync-tap.sh to mirror canonical aiteamforge_paths.py into the tap, then commit."
+        fi
     else
         echo -e "${BOLD}Summary (dry run):${NC} set-port would set ${team} -> ${newport}. Re-run with --apply to perform the writes."
     fi
@@ -1382,6 +1516,31 @@ _set_port_mode() {
 _set_port_mode_multi() {
     local n="${#SET_PORT_TEAMS[@]}"
 
+    # XACA-0838-007/012: reject a duplicate team id in the SAME batch, up
+    # front, before any resolution runs. The dupe guard further down this
+    # function (the "no two teams in this batch resolve to the same PORT"
+    # check) compares resolved PORTS, not team IDS — a team repeated with
+    # `auto` legitimately resolves to two DIFFERENT ports (its own turn N
+    # sees a different scratch-registry state than turn M), so that guard
+    # trivially passes while the preview nonsensically shows one team id at
+    # two different ports, and only the LAST occurrence's resolution would
+    # ever mean anything if this were ever applied one-team-at-a-time.
+    # Reject it here instead of downstream where "same port" is the only
+    # thing being watched for.
+    local -A _seen_teams=()
+    local _dup_team="" _bt
+    for _bt in "${SET_PORT_TEAMS[@]}"; do
+        if [[ -n "${_seen_teams[$_bt]:-}" ]]; then
+            _dup_team="$_bt"
+            break
+        fi
+        _seen_teams[$_bt]=1
+    done
+    if [[ -n "$_dup_team" ]]; then
+        _fail "duplicate team '${_dup_team}' in this --set-port batch — each team may appear at most once per invocation. The existing same-port guard cannot catch this case (the same team repeated with 'auto' legitimately resolves to a DIFFERENT port on each occurrence, since each turn sees the prior turn's simulated state), and only the LAST occurrence would ever mean anything. Remove the duplicate and re-run."
+        exit 1
+    fi
+
     if [[ "$MODE" == "apply" ]]; then
         _fail "multi-team --set-port only supports --check/--dry-run in a single invocation. Run --apply once per team, in the order shown by --dry-run — each --apply's write is what the next team's allocation must see, and only running them as separate processes actually reserves that state."
         exit 1
@@ -1411,8 +1570,11 @@ _set_port_mode_multi() {
 
         # Point the resolver at the scratch snapshot (which already carries
         # every earlier team's simulated port) instead of the real registry.
+        # XACA-0838-013b: take the LAST line only — see the single-team path
+        # above for why (import-time stdout noise from the dynamically
+        # loaded module must never shadow the real OK|/ERR| status line).
         TEAM_PATHS_JSON="$scratch"
-        raw="$(_set_port_resolve "$team" "$reqport" "$ALLOW_OOB")"
+        raw="$(_set_port_resolve "$team" "$reqport" "$ALLOW_OOB" | tail -n1)"
         TEAM_PATHS_JSON="$orig_team_paths_json"
         IFS='|' read -r status newport base range msg <<< "$raw"
 
