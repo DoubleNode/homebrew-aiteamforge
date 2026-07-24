@@ -19,26 +19,35 @@
 #
 # THE THREE PORT SOURCES (and who reads each at runtime)
 #   1. kanban-hooks/aiteamforge_paths.py  DEFAULT_TEAMS[<team>]["lcars_port"]
-#        Baked-in registry baseline. DEPRECATED (XACA-0463) — many teams share a band
-#        default (all freelance-doublenode share 8505), so this is LEAST trustworthy.
+#        Baked-in template baseline. DEPRECATED (XACA-0463) — FALLBACK ONLY.
+#        Many teams share a band default (all freelance-doublenode share 8505),
+#        making this LEAST trustworthy. Used only when registry has no entry.
 #   2. ~/.aiteamforge/team-paths.json     teams.<team>.lcars_port
-#        Live overlay; what get_team_lcars_port() returns and what kb-* helpers curl.
-#        AUTHORITATIVE SOURCE (user decision).
+#        AUTHORITATIVE REGISTRY (XACA-0792). Per-machine, written by installer band
+#        allocator. This is what get_team_lcars_port() returns and what kb-* helpers use.
+#        The single source of truth for port assignments at runtime.
 #   3. lcars-ports/<team-id>-lcars.port   single-line port file
-#        What the LCARS startup scripts bind the server to.
+#        Derived from registry; LCARS startup scripts bind the server to this.
+#        Not a source — a read-only consequence of #2.
 #
 # AUTHORITY / PRECEDENCE (default --prefer team-paths)
 #   For each team the authoritative port = first available of:
 #     1. team-paths.json lcars_port  (if a positive integer)
-#     2. else DEFAULT_TEAMS lcars_port (if numeric)  — fallback only
+#     2. else DEFAULT_TEAMS lcars_port (if numeric)  — fallback only, DEPRECATED
 #     3. else UNRESOLVABLE → report as anomaly, do NOT guess, do NOT write.
 #   --prefer portfile flips precedence so the .port file value wins (a running server
 #   may not want to move). Order then: portfile → team-paths → DEFAULT_TEAMS.
-#   --prefer canonical treats aiteamforge_paths.py DEFAULT_TEAMS as the sole authority
-#        and writes ALL sites (team-paths.json, .port file, kanban-helpers case arm) to
-#        match it. Use this when team-paths.json is the drifted source (XACA-0626,
-#        e.g. M1Pro finance-personal 8361 vs canonical 8360).
-#        Order: DEFAULT_TEAMS only. Teams missing a positive-int entry are skipped.
+#   --prefer canonical — NARROW ESCAPE HATCH (XACA-0626, do NOT suggest blindly)
+#        Treats aiteamforge_paths.py DEFAULT_TEAMS as the sole authority and writes
+#        ALL sites (team-paths.json, .port file, kanban-helpers case arm) to match it.
+#        Use ONLY when team-paths.json is the GENUINELY DRIFTED source, verified via
+#        inspection. Suggesting this mode without proof of registry corruption has shipped
+#        a real bug: XACA-0803, where the startup port-drift guard emitted
+#        "kb-port-reconcile --prefer canonical <team>" for every legitimately
+#        band-allocated port, advice which would have moved a healthy team off the port
+#        its running server, .port file and tmux session all agreed on.
+#        Order: DEFAULT_TEAMS only. Teams missing a positive-int entry
+#        are skipped. See docs/team-registry-guide.md § "LCARS Port Authority Model".
 #
 # THE 5 WRITE SITES (reconcile updates all that exist for each team)
 #   1. kanban-hooks/aiteamforge_paths.py  — DEFAULT_TEAMS[<team>]["lcars_port"] (CANONICAL)

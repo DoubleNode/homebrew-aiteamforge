@@ -76,9 +76,12 @@ declare -a _LCARS_INFRA=(
     "0:legal-coparenting:legal-coparenting:legal-coparenting-lcars"
 )
 
-# Derive lcars_port for each team from the canonical source at runtime via the
+# Derive lcars_port for each team from the team-paths registry at runtime via the
 # shared kanban-hooks/lcars_ports.py helper (XACA-0561-008 — single source of the
 # derivation logic, shared with lcars-smoke-test.sh).
+# In this script, "canonical port" or "resolved port" means the team's registry port
+# from ~/.aiteamforge/team-paths.json, NOT the DEFAULT_TEAMS template baseline.
+# See docs/team-registry-guide.md § "LCARS Port Authority Model" (XACA-0803).
 # Both dev-tree (kanban-hooks/ sibling of this script) and shipped tap layout
 # (share/kanban-hooks/) resolve via script dir.
 _SCRIPT_DIR="${0:A:h}"
@@ -93,6 +96,7 @@ done
 
 # Emits "team:port" per line to stdout; missing/None ports → stderr warning,
 # omitted from output so we never build a LCARS_SERVERS entry with "".
+# The port returned is from the registry (team-paths.json), not DEFAULT_TEAMS fallback.
 _PORT_LOOKUP=$(python3 "${_KANBAN_HOOKS_DIR}/lcars_ports.py" "${_INFRA_TEAMS[@]}")
 
 # Build a team->port associative array from the lookup output.
@@ -108,7 +112,7 @@ for _e in "${_LCARS_INFRA[@]}"; do
     IFS=':' read -r _fp _team _sock _pat <<< "$_e"
     _lp="${_TEAM_PORT[$_team]}"
     if [[ -z "$_lp" ]]; then
-        echo "WARNING: no canonical lcars_port for team '$_team' — skipping health-check entry" >&2
+        echo "WARNING: no registry lcars_port for team '$_team' — skipping health-check entry" >&2
         continue
     fi
     LCARS_SERVERS+=("${_fp}:${_lp}:${_team}:${_sock}:${_pat}")
@@ -454,20 +458,23 @@ detect_lcars_bound_ports() {
 }
 
 # ============================================================================
-# Surgically heal a team whose live LCARS server is bound to a non-canonical
-# port: kill ONLY that team's <instance>-lcars tmux session and the stale
-# server.py on the wrong port(s), then recreate on the canonical port.
+# Surgically heal a team whose live LCARS server is bound to the wrong port:
+# kill ONLY that team's <instance>-lcars tmux session and the stale server.py
+# on the wrong port(s), then recreate on the registry (resolved) port.
 # ============================================================================
 # XACA-0706: This NEVER re-runs <team>-startup.sh — live agent tmux panes and
 # sessions in that team must be untouched. We only kill the one <instance>-lcars
 # session and the wrong-port server.py, then call _hc_start_lcars_server (which
 # already mirrors start_lcars_server's HUP-immune nohup+disown launch form).
+#
+# "canonical port" in this function means the team's RESOLVED port from the
+# registry (~/.aiteamforge/team-paths.json), NOT the template baseline.
 _hc_heal_noncanonical_port() {
-    local canonical_port=$1
+    local canonical_port=$1  # resolved port from registry
     local team=$2
     local session_name=$3
     local tmux_socket=$4
-    local wrong_ports=$5  # space-separated list of bound ports != canonical
+    local wrong_ports=$5  # space-separated list of bound ports != resolved port
 
     log "  Healing $team: live server bound to non-canonical port(s) [$wrong_ports], canonical=$canonical_port"
 
@@ -529,27 +536,27 @@ run_health_check() {
     log "═══════════════════════════════════════════════════════"
 
     # XACA-0706: one ps sweep up front — map every live LCARS server's actual
-    # bound port by team, so the loop can catch a server bound to a
-    # non-canonical port (the XACA-0613 refresh-gap) before the canonical-port
-    # health check masks it.
+    # bound port by team, so the loop can catch a server bound to the wrong port
+    # (the XACA-0613 refresh-gap) before the registry-port health check masks it.
     detect_lcars_bound_ports
 
     for server_config in "${LCARS_SERVERS[@]}"; do
         # Parse config
         IFS=':' read -r funnel_port local_port team tmux_socket session_pattern <<< "$server_config"
 
-        # The canonical <instance>-lcars session name = pattern minus the ".*"
-        # glob (freelance uses ".*-lcars"). Used for both surgical heal and the
+        # The <instance>-lcars session name = pattern minus the ".*" glob
+        # (freelance uses ".*-lcars"). Used for both surgical heal and the
         # normal restart path below.
         local canonical_session="${session_pattern/\.\*/}"
 
-        # XACA-0706: NON-CANONICAL-PORT DRIFT DETECTION.
-        # Compare the team's actual bound port(s) against its canonical port.
-        # A live server.py for this team bound to a port != $local_port is the
-        # XACA-0613 stuck-on-stale-port case. We detect it BEFORE the canonical
-        # health check because the canonical port is usually dead in that state
-        # (the server is serving the wrong port) — and even if both are up, a
-        # server on the wrong port is still wrong and must be reconciled.
+        # XACA-0706: PORT DRIFT DETECTION.
+        # Compare the team's actual bound port(s) against its resolved port
+        # (from the registry). A live server.py for this team bound to a port
+        # != $local_port is the XACA-0613 stuck-on-stale-port case. We detect
+        # it BEFORE the registry-port health check because the correct port is
+        # usually dead in that state (the server is serving the wrong port) —
+        # and even if both are up, a server on the wrong port is still wrong
+        # and must be reconciled.
         local _bound="${LCARS_BOUND_PORTS[$team]:-}"
         local _noncanonical=""
         if [[ -n "$_bound" ]]; then
@@ -634,7 +641,7 @@ run_health_check() {
     log "═══════════════════════════════════════════════════════"
 
     # Return non-zero in status-only mode if any server is unhealthy or bound to
-    # a non-canonical port (XACA-0706 — surfaces the drift to callers/monitors).
+    # the wrong port (XACA-0706 — surfaces the drift to callers/monitors).
     if [[ "$STATUS_ONLY" == "true" && ( $unhealthy -gt 0 || $drifted -gt 0 ) ]]; then
         return 1
     fi
