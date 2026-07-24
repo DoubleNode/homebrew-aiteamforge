@@ -91,3 +91,4 @@ test-xaca-0770-local-only-knowledge-in-tap.sh    plain-shell
 test-xaca-0771-upgrade-materialize-missing.sh   plain-shell
 test-xaca-0788-crash-recovery-in-tap.sh         plain-shell
 test-xaca-0792-team-instance-id.sh              plain-shell
+test-xaca-0799-restart-symmetry.sh              plain-shell

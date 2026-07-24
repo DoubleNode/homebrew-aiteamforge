@@ -1,423 +1,498 @@
 #!/usr/bin/env bash
 # test-xaca-0799-restart-symmetry.sh
-# Regression test for XACA-0799 — `aiteamforge restart lcars` must bring back
-# every LCARS server it tore down, not just the configured ones.
+# Regression test for XACA-0799 — `aiteamforge restart lcars` must START the same
+# set of LCARS servers it STOPPED.
 #
-# Bug: the two halves of a restart had mismatched scope.
-#   STOP  — stop_lcars() in libexec/commands/aiteamforge-stop.sh matches
-#           `server\.py [0-9]` with NO port, deliberately (see the kill-all note
-#           there, XACA-0560-001). It reaps EVERY LCARS server on the box.
-#   START — start_lcars() in libexec/commands/aiteamforge-start.sh iterates only
-#           get_configured_teams(), i.e. .aiteamforge-config's .teams[].
+# THE BUG
+# -------
+# `aiteamforge restart` is two processes (bin/aiteamforge-cli.sh):
+#     aiteamforge-stop.sh "$@"  ;  exec aiteamforge-start.sh "$@"
+# They shared no state, and disagreed about the team set:
+#   STOP  — stop_lcars() matches `server\.py [0-9]` with NO port. A deliberate
+#           kill-all (XACA-0560), so it reaps every LCARS server on the box.
+#   START — start_lcars() iterated ONLY `.teams[]` from .aiteamforge-config.
+# Teams launched by their own *-startup.sh are absent from `.teams[]`, so a
+# restart killed them and never brought them back. Observed on M4Mini at v0.17.7
+# (WITH the XACA-0792 fix in place): STOP killed all 8 servers, START relaunched
+# only finance-personal; the other 7 stayed down until the 300s lcars-health
+# LaunchAgent noticed. Up to 5 minutes of fleet-wide LCARS outage per restart.
 #
-# On a box where most LCARS servers are launched by their own per-team
-# *-startup.sh, those teams never appear in .teams[]. So a restart killed all of
-# them and started only the configured handful; the rest stayed down until the
-# 300s com.aiteamforge.lcars-health check healed them — a fleet-wide LCARS
-# outage of up to 5 minutes on EVERY restart. Observed on M4Mini immediately
-# after the v0.17.7 upgrade (2026-07-13): lcars-watch fired `aiteamforge restart
-# lcars`, 8 servers were killed, only finance-personal (8361) came back;
-# ios/android/firebase/academy/dns/command/legal were all DOWN.
-#
-# XACA-0792 fixed the OTHER half of this (start skipped project-scoped teams
-# because it passed a base id to a registry keyed by instance id). That made
-# `finance` come back. This ticket is the REMAINING half: the blast radius of
-# stop still does not match the coverage of start.
-#
-# Fix (snapshot & restore): the `restart` dispatcher in bin/aiteamforge-cli.sh
-# snapshots the ports actually SERVING *before* the teardown and exports them as
-# AITEAMFORGE_RESTORE_LCARS_PORTS; start_lcars() maps each back to a team via the
-# registry reverse lookup and unions them into its team list. `stop` keeps its
-# kill-all semantics and a standalone `start` keeps its configured-teams-only
-# semantics — only `restart`, the path that caused the outage, becomes symmetric.
+# THE FIX
+# -------
+# stop captures the live server set to an atomic, TTL-bounded manifest BEFORE the
+# first kill; start unions that manifest with `.teams[]`.
 #
 # Covers:
-#   Case 1 — Unit: reverse lookup resolves a port to its owning team.
-#   Case 2 — Unit: a port no team owns returns nonzero AND empty (must not
-#            resurrect a server under a bogus team id).
-#   Case 3 — Unit: reverse lookup round-trips with the FORWARD lookup for every
-#            team in the registry. This is the anti-drift property — the reverse
-#            must never claim a pairing the forward lookup would not assign.
-#   Case 4 — Behavioral: the running-port scan finds a live `server.py <port>`
-#            process and stops reporting it once that process is gone.
-#   Case 5 — Behavioral (the regression, pinned): against an M4Mini-shaped
-#            fixture, the running set resolves to teams the CONFIGURED set does
-#            not contain. That non-empty delta is exactly what a restart used to
-#            lose; it is what the restore path now recovers.
-#   Case 6 — Structural: the snapshot must happen BEFORE stop.sh is invoked.
-#            Ordering is the whole fix — snapshotting after the teardown returns
-#            an empty set and silently restores nothing.
-#   Case 7 — Structural: start_lcars() must consume AITEAMFORGE_RESTORE_LCARS_PORTS.
-#   Case 8 — Structural: the "no configured teams" early-return must sit AFTER
-#            the restore union. Before it, a box with an empty .teams[] bails out
-#            before restoring and the outage returns in full.
-#   Case 9 — Structural (anti-regression on the OTHER side): stop's kill-all
-#            matcher must stay port-less. Narrowing it would "fix" the asymmetry
-#            by breaking stop-all, which XACA-0560-001 explicitly warns against.
-#   Case 10 — Portability: the port scan must not rely on unquoted word
-#            splitting. zsh does not split unquoted expansions, so `for pid in
-#            $pids` silently yields an EMPTY port set while still exiting 0 — a
-#            vacuous success that hands restart nothing to restore. (Hit for real
-#            while developing this fix.)
-#   Case 11 — Negative control: proves Cases 6-8 are non-vacuous by re-running
-#            them against a synthesized PRE-FIX copy and requiring them to FAIL.
-
-# No `set -e`: assert_* helpers signal failure by RETURNING 1, so -e would abort
-# the run on the first failing assertion instead of reporting the full tally
-# (matching test-xaca-0792 / test-xaca-0585). No `set -u` either: the shared
-# runner's assert helpers declare `local a="$1" msg="...$a..."` on one line, and
-# bash declares both names before assigning — so the self-referencing default
-# expands an unset local and -u would abort inside the harness itself.
-set -o pipefail
+#   Case 1 — Port→team reverse map (incl. read-only + unknown-port behavior).
+#   Case 2 — Manifest round-trip: capture → serialize → read back.
+#   Case 3 — TTL freshness: a stale manifest is ignored, not replayed.
+#   Case 4 — THE SYMMETRY CONTRACT: the union covers everything stop killed.
+#   Case 5 — No-regression: absent/empty/corrupt manifest ⇒ historical behavior.
+#   Case 6 — Structural guards wiring stop.sh / start.sh to the mechanism, and
+#            pinning the stop-matcher ≡ capture-matcher equivalence the whole
+#            design rests on.
+#   Case 7 — Crash safety: capture precedes teardown; writes are atomic.
+#   Case 8 — Unmappable ports are recorded, surfaced, and not started.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
-COMMON_LIB="$TAP_ROOT/libexec/lib/common.sh"
+
+# This suite depends on the shared runner for BOTH its assert helpers and
+# TEST_TMP_DIR. Run bare, every sandboxed path collapses to "/" — the runtime-dir
+# cases then attempt `ln` and manifest writes at the filesystem ROOT (harmless as
+# an unprivileged user on a read-only /, litter or worse otherwise) while every
+# assertion silently no-ops as "command not found". Refuse that shape outright
+# rather than let it look like a run that happened.
+if [ -z "${TEST_TMP_DIR:-}" ] || ! type test_start >/dev/null 2>&1; then
+  echo "ERROR: run via the shared runner — bash tests/test-runner.sh $(basename "$0")" >&2
+  echo "       (needs TEST_TMP_DIR + the assert helpers; a bare run writes to /)" >&2
+  exit 1
+fi
+
 PATHS_LIB="$TAP_ROOT/libexec/lib/aiteamforge-paths.sh"
-START_CMD="$TAP_ROOT/libexec/commands/aiteamforge-start.sh"
+MANIFEST_LIB="$TAP_ROOT/libexec/lib/lcars-restart-manifest.sh"
 STOP_CMD="$TAP_ROOT/libexec/commands/aiteamforge-stop.sh"
-CLI_CMD="$TAP_ROOT/bin/aiteamforge-cli.sh"
-
-# ── Standalone framework (mirrors test-xaca-0651 / test-xaca-0585 pattern) ────
-_STANDALONE=false
-if ! type -t test_start >/dev/null 2>&1; then
-    _STANDALONE=true
-    _PASS_COUNT=0
-    _FAIL_COUNT=0
-    _CURRENT_TEST=""
-
-    test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
-    test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
-    test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST — $1" >&2; }
-
-    assert_equal() {
-        local expected="$1" actual="$2"
-        local msg="${3:-Expected '$expected', got '$actual'}"
-        [ "$expected" = "$actual" ] || { test_fail "$msg"; return 1; }
-    }
-    assert_contains() {
-        local haystack="$1" needle="$2"
-        local msg="${3:-Expected to find: $needle}"
-        case "$haystack" in *"$needle"*) return 0 ;; esac
-        test_fail "$msg"; return 1
-    }
-    assert_not_contains() {
-        local haystack="$1" needle="$2"
-        local msg="${3:-Expected NOT to find: $needle}"
-        case "$haystack" in *"$needle"*) test_fail "$msg"; return 1 ;; esac
-        return 0
-    }
-    assert_empty() {
-        # Two `local` statements, not one: bash declares every name in a single
-        # `local` before assigning any, so a self-referencing default in the same
-        # statement expands an unset variable.
-        local value="$1"
-        local msg="${2:-Expected empty, got '$value'}"
-        [ -z "$value" ] || { test_fail "$msg"; return 1; }
-    }
-    assert_not_empty() {
-        local value="$1"
-        local msg="${2:-Expected non-empty}"
-        [ -n "$value" ] || { test_fail "$msg"; return 1; }
-    }
-fi
-
-if [ -z "${TEST_TMP_DIR:-}" ]; then
-    TEST_TMP_DIR=$(mktemp -d -t aiteamforge-0799.XXXXXX)
-    export TEST_TMP_DIR
-fi
-
-# NOTE ON THE HARNESS: assert_* returns 0 silently on success and only records on
-# FAILURE (via test_fail). A bare `assert_equal` therefore registers a START with
-# no PASS, and the suite reports "all passed" on 0 passed / 0 failed — a vacuous
-# green. Every assertion below MUST pair with an explicit `&& test_pass`.
+START_CMD="$TAP_ROOT/libexec/commands/aiteamforge-start.sh"
 
 export AITEAMFORGE_DIR="$TEST_TMP_DIR/aiteamforge"
 mkdir -p "$AITEAMFORGE_DIR"
 
+# Runtime dir redirected into the sandbox — this suite never touches the real
+# ~/.aiteamforge/run, and never signals a real process.
+export LCARS_RESTART_RUNTIME_DIR="$TEST_TMP_DIR/run"
+
 # shellcheck source=/dev/null
-source "$COMMON_LIB"
+source "$TAP_ROOT/libexec/lib/config.sh"
 # shellcheck source=/dev/null
 source "$PATHS_LIB"
+# shellcheck source=/dev/null
+source "$TAP_ROOT/libexec/lib/kanban-paths.sh" 2>/dev/null || true
+# shellcheck source=/dev/null
+source "$MANIFEST_LIB"
+
+# NOTE ON THE HARNESS (learned the hard way, see XACA-0792 suite): assert_*
+# returns 0 silently on success and only records on FAILURE. A bare assert
+# registers a START with no PASS, so a suite of bare asserts reports
+# "0 passed / 0 failed" and the runner calls it green. Every assertion below
+# MUST pair with an explicit `&& test_pass`.
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Fixture — an M4Mini-shaped install: many teams in the port registry, but only
-# ONE of them listed in .aiteamforge-config's .teams[]. That gap IS the bug.
+# Fixtures — the M4Mini topology that produced the field report: 8 teams in the
+# registry, but only ONE of them (finance) present in .aiteamforge-config's
+# .teams[]. The other 7 were started by their own *-startup.sh.
 # ═══════════════════════════════════════════════════════════════════════════
-export AITEAMFORGE_CONFIG="$TEST_TMP_DIR/team-paths.json"
-cat > "$AITEAMFORGE_CONFIG" <<'EOF'
+
+write_install_config() {
+  cat > "$AITEAMFORGE_DIR/.aiteamforge-config" <<'EOF'
 {
-  "schema_version": 2,
-  "teams": {
-    "ios":               {"team_code": "IOS", "lcars_port": 8180},
-    "android":           {"team_code": "AND", "lcars_port": 8203},
-    "firebase":          {"team_code": "FIR", "lcars_port": 8234},
-    "academy":           {"team_code": "ACA", "lcars_port": 8240},
-    "dns":               {"team_code": "DNS", "lcars_port": 8260},
-    "command":           {"team_code": "CMD", "lcars_port": 8280},
-    "legal-coparenting": {"team_code": "LEG", "lcars_port": 8320},
-    "finance-personal":  {"team_code": "FIN", "lcars_port": 8361}
+  "version": "0.17.7",
+  "teams": ["finance"],
+  "team_paths": {
+    "finance": {"working_dir": "/Users/test/finance/personal", "project_id": "personal"}
   }
 }
 EOF
+}
+
+write_port_registry() {
+  export AITEAMFORGE_CONFIG="$TEST_TMP_DIR/team-paths.json"
+  cat > "$AITEAMFORGE_CONFIG" <<'EOF'
+{
+  "schema_version": 2,
+  "teams": {
+    "academy":          {"team_code": "ACA", "lcars_port": 8203},
+    "ios":              {"team_code": "IOS", "lcars_port": 8201},
+    "android":          {"team_code": "AND", "lcars_port": 8202},
+    "firebase":         {"team_code": "FIR", "lcars_port": 8204},
+    "dns":              {"team_code": "DNS", "lcars_port": 8205},
+    "command":          {"team_code": "CMD", "lcars_port": 8206},
+    "legal-coparenting":{"team_code": "LCP", "lcars_port": 8320},
+    "finance-personal": {"team_code": "FIN", "lcars_port": 8361}
+  }
+}
+EOF
+}
+
+write_install_config
+write_port_registry
+
+# The 8 ports that were live on M4Mini when the restart fired.
+M4MINI_PORTS="8201 8202 8203 8204 8205 8206 8320 8361"
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 1 — reverse lookup resolves a port to its owning team
+# Case 1 — port → team reverse map
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "XACA-0799 Case 1: port 8361 → 'finance-personal'"
-actual=$(aiteamforge_team_for_lcars_port 8361 2>/dev/null || true)
-assert_equal "finance-personal" "$actual" && test_pass
+
+test_start "XACA-0799 Case 1a: port 8203 reverse-maps to 'academy'"
+assert_equal "academy" "$(lcars_port_to_team 8203)" && test_pass
+
+test_start "XACA-0799 Case 1b: port 8361 reverse-maps to 'finance-personal'"
+# The instance id, NOT the base id — this is the id start must launch under.
+assert_equal "finance-personal" "$(lcars_port_to_team 8361)" && test_pass
+
+test_start "XACA-0799 Case 1c: port 8320 reverse-maps to 'legal-coparenting'"
+assert_equal "legal-coparenting" "$(lcars_port_to_team 8320)" && test_pass
+
+test_start "XACA-0799 Case 1d: an unregistered port maps to nothing (returns 1)"
+_c1_rc=0
+lcars_port_to_team 9999 >/dev/null 2>&1 || _c1_rc=$?
+assert_exit_failure "$_c1_rc" && test_pass
+
+test_start "XACA-0799 Case 1e: reverse map is READ-ONLY (never materializes a registry)"
+# aiteamforge_team_lcars_port() writes a default registry on first lookup when
+# none exists. `stop` must not create state just by running (the precedent
+# aiteamforge-status.sh set in XACA-0792-001).
+_ro_dir=$(mktemp -d)
+(
+  AITEAMFORGE_CONFIG="$_ro_dir/team-paths.json" \
+    lcars_port_to_team 8203 >/dev/null 2>&1
+) || true
+assert_file_not_exists "$_ro_dir/team-paths.json" && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 2 — an unowned port must NOT resolve
+# Case 2 — manifest round-trip
 # ═══════════════════════════════════════════════════════════════════════════
-# A bogus team id here would be worse than skipping: start would try to launch a
-# server for a team that has no registry entry, on a port it does not own.
-test_start "XACA-0799 Case 2: unowned port 9999 returns nonzero and empty"
-if unowned=$(aiteamforge_team_for_lcars_port 9999 2>/dev/null); then
-    test_fail "port 9999 unexpectedly resolved to '$unowned'"
-else
-    assert_empty "${unowned:-}" && test_pass
-fi
+
+test_start "XACA-0799 Case 2a: capture of the 8 live ports writes a manifest"
+printf '%s\n' $M4MINI_PORTS | lcars_ports_to_manifest | lcars_restart_manifest_write
+assert_file_exists "$(lcars_restart_manifest_path)" && test_pass
+
+test_start "XACA-0799 Case 2b: manifest reads back all 8 teams"
+_c2_count=$(lcars_restart_manifest_teams | grep -c .)
+assert_equal "8" "$_c2_count" && test_pass
+
+test_start "XACA-0799 Case 2c: manifest names the instance id, not the base id"
+_c2_teams=$(lcars_restart_manifest_teams | tr '\n' ' ')
+assert_contains "$_c2_teams" "finance-personal" \
+  && assert_not_contains "$_c2_teams" "finance " \
+  && test_pass
+
+test_start "XACA-0799 Case 2d: manifest carries a written_at stamp"
+assert_contains "$(cat "$(lcars_restart_manifest_path)")" "written_at=" && test_pass
+
+test_start "XACA-0799 Case 2e: manifest is owner-only (0600)"
+_c2_mode=$(stat -f '%Lp' "$(lcars_restart_manifest_path)" 2>/dev/null \
+  || stat -c '%a' "$(lcars_restart_manifest_path)" 2>/dev/null)
+assert_equal "600" "$_c2_mode" && test_pass
+
+test_start "XACA-0799 Case 2f: clear removes the manifest"
+lcars_restart_manifest_clear
+assert_file_not_exists "$(lcars_restart_manifest_path)" && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 3 — reverse round-trips with forward for EVERY registry team
+# Case 3 — TTL freshness
 # ═══════════════════════════════════════════════════════════════════════════
-# The reverse lookup is implemented as a scan over the forward lookup precisely
-# so this can never drift. Pin it: a future "optimisation" that reimplements the
-# reverse as an independent jq query would break here first.
-test_start "XACA-0799 Case 3: reverse lookup round-trips with forward lookup"
-_roundtrip_ok=true
-_roundtrip_msg=""
-for _team in ios android firebase academy dns command legal-coparenting finance-personal; do
-    _fwd=$(aiteamforge_team_lcars_port "$_team" 2>/dev/null || true)
-    if [ -z "$_fwd" ]; then
-        _roundtrip_ok=false
-        _roundtrip_msg="forward lookup produced no port for '$_team'"
-        break
-    fi
-    _rev=$(aiteamforge_team_for_lcars_port "$_fwd" 2>/dev/null || true)
-    if [ "$_rev" != "$_team" ]; then
-        _roundtrip_ok=false
-        _roundtrip_msg="port $_fwd owned by '$_team' but reverse said '$_rev'"
-        break
-    fi
-done
-if [ "$_roundtrip_ok" = true ]; then
-    test_pass
-else
-    test_fail "$_roundtrip_msg"
-fi
+
+# Rewrite the manifest with a doctored written_at, without touching the body.
+forge_manifest_age() {
+  local age_secs="$1"
+  local m
+  m=$(lcars_restart_manifest_path)
+  printf '%s\n' $M4MINI_PORTS | lcars_ports_to_manifest | lcars_restart_manifest_write
+  local now stamp
+  now=$(date +%s)
+  stamp=$(( now - age_secs ))
+  sed "s/^written_at=.*/written_at=${stamp}/" "$m" > "${m}.tmp" && mv -f "${m}.tmp" "$m"
+}
+
+test_start "XACA-0799 Case 3a: a 10-second-old manifest is fresh"
+forge_manifest_age 10
+assert_exit_success "$(lcars_restart_manifest_is_fresh; echo $?)" && test_pass
+
+test_start "XACA-0799 Case 3b: a 10-second-old manifest yields its 8 teams"
+assert_equal "8" "$(lcars_restart_manifest_teams | grep -c .)" && test_pass
+
+test_start "XACA-0799 Case 3c: a 2-hour-old manifest is STALE"
+forge_manifest_age 7200
+_c3_rc=0
+lcars_restart_manifest_is_fresh || _c3_rc=$?
+assert_exit_failure "$_c3_rc" && test_pass
+
+test_start "XACA-0799 Case 3d: a stale manifest yields NO teams (not replayed)"
+# The crash-safety guarantee: a stop whose start never happened must not
+# resurrect a long-dead topology days later.
+assert_equal "0" "$(lcars_restart_manifest_teams | grep -c . || true)" && test_pass
+
+test_start "XACA-0799 Case 3e: TTL is configurable (2h manifest fresh under a 3h TTL)"
+_c3_rc=0
+LCARS_RESTART_MANIFEST_TTL=10800 lcars_restart_manifest_is_fresh || _c3_rc=$?
+assert_exit_success "$_c3_rc" && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 4 — the running-port scan sees a real process, and stops seeing it
+# Case 4 — THE SYMMETRY CONTRACT (the actual regression)
+#
+# This is the bug, pinned. With .teams[] = ["finance"] and 8 servers running,
+# the OLD start set was 1 team and the stop set was 8 — 7 stranded.
 # ═══════════════════════════════════════════════════════════════════════════
-# Spawns a stand-in whose argv is literally `server.py <port>` so it matches the
-# same pgrep pattern stop_lcars() uses. Port 19911 is far outside every LCARS
-# band so it cannot collide with a real server on the machine running the tests.
-test_start "XACA-0799 Case 4: running-port scan detects a live server.py process"
-_FAKE_PORT=19911
-_FAKE_DIR="$TEST_TMP_DIR/fakesrv"
-mkdir -p "$_FAKE_DIR"
-cat > "$_FAKE_DIR/server.py" <<'PYEOF'
-import sys, time
-# Stand-in for an LCARS server: binds nothing, just stays alive so the process
-# table carries an argv of `server.py <port>` for the scanner to find.
-time.sleep(120)
-PYEOF
 
-_FAKE_PID=""
-if command -v python3 >/dev/null 2>&1; then
-    ( cd "$_FAKE_DIR" && exec python3 server.py "$_FAKE_PORT" ) >/dev/null 2>&1 &
-    _FAKE_PID=$!
-    # Give the process table a moment to reflect the exec.
-    sleep 1
+forge_manifest_age 5   # fresh manifest holding all 8 captured teams
 
-    _cleanup_fake() {
-        if [ -n "${_FAKE_PID:-}" ] && kill -0 "$_FAKE_PID" 2>/dev/null; then
-            kill "$_FAKE_PID" 2>/dev/null || true
-        fi
-    }
-    trap _cleanup_fake EXIT
+test_start "XACA-0799 Case 4a: the OLD behavior (.teams[] alone) covers only 1 of 8"
+# Pinning the defect itself, so the test explains WHY the union is required.
+_c4_old=$(get_configured_teams | tr ' ' '\n' | grep -c . || true)
+assert_equal "1" "$_c4_old" && test_pass
 
-    _scan=$(aiteamforge_lcars_running_ports 2>/dev/null || true)
-    assert_contains "$_scan" "$_FAKE_PORT" \
-        "scan did not report the live fake server on port $_FAKE_PORT (got: $_scan)" \
-        && test_pass
+test_start "XACA-0799 Case 4b: the union covers all 8 teams that were killed"
+_c4_union=$(lcars_restart_union_teams "$(get_configured_teams)" | grep -c .)
+assert_equal "8" "$_c4_union" && test_pass
 
-    # ...and it must disappear once the process is gone. This half is what
-    # distinguishes a real scan from a hardcoded list.
-    test_start "XACA-0799 Case 4b: scan drops the port once the process exits"
-    kill "$_FAKE_PID" 2>/dev/null || true
-    wait "$_FAKE_PID" 2>/dev/null || true
-    sleep 1
-    _scan_after=$(aiteamforge_lcars_running_ports 2>/dev/null || true)
-    assert_not_contains "$_scan_after" "$_FAKE_PORT" \
-        "scan still reports port $_FAKE_PORT after the process exited" \
-        && test_pass
-    trap - EXIT
-else
-    test_fail "python3 not available — cannot spawn the stand-in server process"
-fi
+test_start "XACA-0799 Case 4c: SYMMETRY — every stopped team is in the start set"
+# The contract in one assertion: resolve both sides to instance ids and diff.
+# Anything stop killed that start would not relaunch shows up here.
+_stopped=$(lcars_restart_manifest_teams | sort)
+_starting=$(lcars_restart_union_teams "$(get_configured_teams)" \
+  | while IFS= read -r _t; do aiteamforge_resolve_team_key "$_t" 2>/dev/null || echo "$_t"; done \
+  | sort -u)
+_stranded=$(comm -23 <(echo "$_stopped") <(echo "$_starting"))
+assert_empty "$_stranded" && test_pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Case 5 — THE REGRESSION: running set contains teams the configured set does not
-# ═══════════════════════════════════════════════════════════════════════════
-# This is the M4Mini shape in miniature. .teams[] holds only finance; the box is
-# actually serving 8 teams. Every port in that running set that maps to a team
-# OUTSIDE the configured set is a server the old restart killed and never
-# restored. Assert the delta is non-empty and names the right teams.
-test_start "XACA-0799 Case 5: running set resolves teams absent from the configured set"
-_CONFIGURED="finance-personal"
-_RUNNING_PORTS="8180 8203 8234 8240 8260 8280 8320 8361"
+test_start "XACA-0799 Case 4d: the configured team is not lost from the union"
+# Guards over-correction in the other direction: the manifest must ADD to
+# .teams[], never replace it. Asserted against the full instance id — a bare
+# "finance" would substring-match "finance-personal" and pass vacuously.
+assert_contains "$(lcars_restart_union_teams "$(get_configured_teams)" | tr '\n' ' ')" \
+  "finance-personal" && test_pass
 
-_delta=""
-for _p in $_RUNNING_PORTS; do
-    _t=$(aiteamforge_team_for_lcars_port "$_p" 2>/dev/null || true)
-    [ -z "$_t" ] && continue
-    case " $_CONFIGURED " in
-        *" $_t "*) : ;;                       # already configured — start covers it
-        *) _delta="$_delta $_t" ;;            # would have been lost by a restart
-    esac
-done
-_delta="${_delta# }"
+test_start "XACA-0799 Case 4e: base id and instance id collapse to ONE start"
+# The union legally holds BOTH "finance" (configured base) and "finance-personal"
+# (captured instance). They are the SAME server. The union must therefore dedupe
+# in resolved-key space and emit it exactly once — otherwise start processes one
+# server twice and warns "LCARS already running" during a fresh restart.
+_c4_fin=$(lcars_restart_union_teams "$(get_configured_teams)" | grep -c '^finance-personal$')
+assert_equal "1" "$_c4_fin" && test_pass
 
-assert_not_empty "$_delta" "expected teams outside the configured set, got none" \
-    && assert_contains "$_delta" "academy" \
-    && assert_contains "$_delta" "ios" \
-    && assert_contains "$_delta" "legal-coparenting" \
-    && assert_not_contains "$_delta" "finance-personal" \
-    && test_pass
+test_start "XACA-0799 Case 4f: the union speaks in resolved INSTANCE ids"
+# The raw base id must not survive into the start set — start keys LCARS_TEAM,
+# the port lookup, and the session name off whatever this emits. Counted with an
+# ANCHORED grep, not assert_not_contains: that helper is a substring test, so
+# "finance" would match inside "finance-personal" and the check would be vacuous.
+_c4_bare=$(lcars_restart_union_teams "$(get_configured_teams)" | grep -c '^finance$' || true)
+assert_equal "0" "$_c4_bare" && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 6 — the snapshot must be taken BEFORE the teardown
+# Case 5 — NO REGRESSION: degrade to historical behavior
 # ═══════════════════════════════════════════════════════════════════════════
-# Ordering IS the fix. Snapshotting after stop.sh has run returns an empty set,
-# which restores nothing while looking entirely correct in a diff.
-test_start "XACA-0799 Case 6: restart snapshots running ports before invoking stop"
-cli_src=$(cat "$CLI_CMD")
-_snap_line=$(grep -n "aiteamforge_lcars_running_ports" "$CLI_CMD" | head -1 | cut -d: -f1)
-_stop_line=$(grep -n "aiteamforge-stop.sh" "$CLI_CMD" | tail -1 | cut -d: -f1)
-if [ -z "$_snap_line" ] || [ -z "$_stop_line" ]; then
-    test_fail "could not locate snapshot ('$_snap_line') and/or stop invocation ('$_stop_line') in $CLI_CMD"
-elif [ "$_snap_line" -lt "$_stop_line" ]; then
-    test_pass
-else
-    test_fail "snapshot at line $_snap_line does not precede stop invocation at line $_stop_line"
-fi
+
+test_start "XACA-0799 Case 5a: no manifest ⇒ union is exactly .teams[]"
+# Resolved, as everywhere else: .teams[] holds "finance", the start set names
+# "finance-personal". One entry — the manifest contributed nothing.
+lcars_restart_manifest_clear
+assert_equal "finance-personal" "$(lcars_restart_union_teams "$(get_configured_teams)" | tr -d '\n')" && test_pass
+
+test_start "XACA-0799 Case 5b: no manifest ⇒ teams reader is silent and succeeds"
+_c5_rc=0
+_c5_out=$(lcars_restart_manifest_teams) || _c5_rc=$?
+assert_exit_success "$_c5_rc" && assert_empty "$_c5_out" && test_pass
+
+test_start "XACA-0799 Case 5c: empty manifest (nothing was running) ⇒ .teams[] only"
+: | lcars_restart_manifest_write
+assert_equal "finance-personal" "$(lcars_restart_union_teams "$(get_configured_teams)" | tr -d '\n')" && test_pass
+
+test_start "XACA-0799 Case 5d: manifest with no written_at stamp is ignored"
+# A truncated/corrupt file must not be trusted as fresh.
+printf 'academy\t8203\n' > "$(lcars_restart_manifest_path)"
+assert_empty "$(lcars_restart_manifest_teams)" && test_pass
+
+test_start "XACA-0799 Case 5e: non-numeric written_at is ignored"
+printf 'written_at=garbage\nacademy\t8203\n' > "$(lcars_restart_manifest_path)"
+assert_empty "$(lcars_restart_manifest_teams)" && test_pass
+
+test_start "XACA-0799 Case 5f: comment lines are not mistaken for team ids"
+lcars_restart_manifest_clear
+printf '%s\n' $M4MINI_PORTS | lcars_ports_to_manifest | lcars_restart_manifest_write
+assert_not_contains "$(lcars_restart_manifest_teams)" "#" && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 7 — start_lcars must consume the restore set
+# Case 6 — STRUCTURAL GUARDS
+#
+# Cases 1–5 exercise the library directly. They would ALL keep passing if
+# stop.sh/start.sh never adopted it — exactly the trap XACA-0792 Case 6 was
+# written to close. These pin the wiring.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "XACA-0799 Case 7: start consumes AITEAMFORGE_RESTORE_LCARS_PORTS"
-start_src=$(cat "$START_CMD")
-assert_contains "$start_src" "AITEAMFORGE_RESTORE_LCARS_PORTS" \
-    && assert_contains "$start_src" "aiteamforge_team_for_lcars_port" \
-    && test_pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Case 8 — the empty-configured-teams early return must follow the union
-# ═══════════════════════════════════════════════════════════════════════════
-# Subtle and load-bearing: if the "no configured teams" bail-out runs first, a
-# box with an empty .teams[] returns before restoring anything — the outage in
-# full, with the restore code present but unreachable.
-test_start "XACA-0799 Case 8: empty-teams early return sits after the restore union"
-_union_line=$(grep -n "AITEAMFORGE_RESTORE_LCARS_PORTS" "$START_CMD" | head -1 | cut -d: -f1)
-# Anchor on the LCARS-specific wording. validate_boards() emits a near-identical
-# "No configured teams found — skipping board validation" earlier in the file;
-# matching that one compares against the wrong bail-out entirely.
-_bail_line=$(grep -n "No configured teams found — skipping LCARS startup" "$START_CMD" | head -1 | cut -d: -f1)
-if [ -z "$_union_line" ] || [ -z "$_bail_line" ]; then
-    test_fail "could not locate union ('$_union_line') and/or bail-out ('$_bail_line') in $START_CMD"
-elif [ "$_union_line" -lt "$_bail_line" ]; then
-    test_pass
-else
-    test_fail "bail-out at line $_bail_line precedes the restore union at line $_union_line"
-fi
-
-# ═══════════════════════════════════════════════════════════════════════════
-# Case 9 — stop's kill-all matcher must stay port-less
-# ═══════════════════════════════════════════════════════════════════════════
-# The tempting "fix" for this ticket is to narrow stop to the configured teams.
-# That trades a restart outage for a broken stop-all, which XACA-0560-001
-# explicitly warns future auditors against. Pin the kill-all matcher.
-test_start "XACA-0799 Case 9: stop retains its deliberate port-less kill-all matcher"
 stop_src=$(cat "$STOP_CMD")
-assert_contains "$stop_src" 'pgrep -f "server\.py [0-9]"' \
-    && test_pass
+start_src=$(cat "$START_CMD")
+stop_lcars_body=$(awk '/^stop_lcars\(\)/,/^}/' "$STOP_CMD")
+start_lcars_body=$(awk '/^start_lcars\(\)/,/^}/' "$START_CMD")
+
+test_start "XACA-0799 Case 6a: both function bodies were extracted"
+assert_not_empty "$stop_lcars_body" && assert_not_empty "$start_lcars_body" && test_pass
+
+test_start "XACA-0799 Case 6b: stop.sh sources the manifest library"
+assert_contains "$stop_src" "lcars-restart-manifest.sh" && test_pass
+
+test_start "XACA-0799 Case 6c: start.sh sources the manifest library"
+assert_contains "$start_src" "lcars-restart-manifest.sh" && test_pass
+
+test_start "XACA-0799 Case 6d: stop_lcars() captures the running set"
+assert_contains "$stop_lcars_body" "lcars_restart_manifest_capture" && test_pass
+
+test_start "XACA-0799 Case 6e: start_lcars() drives its loop off the UNION"
+assert_contains "$start_lcars_body" "lcars_restart_union_teams" && test_pass
+
+test_start "XACA-0799 Case 6f: start_lcars() no longer iterates .teams[] alone"
+# The precise line the bug lived on. If someone reinstates it, the union is dead
+# code and every restart strands servers again.
+assert_not_contains "$start_lcars_body" 'read -ra teams <<< "$teams_str"' && test_pass
+
+manifest_src=$(cat "$MANIFEST_LIB")
+
+# Extract the pattern actually passed to `pgrep -f` — from CODE, never from the
+# surrounding prose.
+#
+# The first cut of this guard did `assert_contains "$manifest_src" 'server\.py
+# [0-9]'` against the whole file, and was VACUOUS: both files carry that literal
+# in explanatory comments, so deliberately narrowing the live pgrep call to
+# `lcars-ui/server.py` still passed. Verified by breaking it on purpose — the
+# suite stayed green, which is exactly the failure mode this repo has been bitten
+# by before. Strip comment lines first, then read the pgrep argument.
+extract_pgrep_pattern() {
+  echo "$1" | grep -v '^[[:space:]]*#' | grep -m1 -o 'pgrep -f "[^"]*"' | sed 's/pgrep -f "//; s/"$//'
+}
+
+_stop_pat=$(extract_pgrep_pattern "$stop_lcars_body")
+_capture_body=$(awk '/^lcars_running_lcars_ports\(\)/,/^}/' "$MANIFEST_LIB")
+_capture_pat=$(extract_pgrep_pattern "$_capture_body")
+
+test_start "XACA-0799 Case 6g-pre: both live pgrep patterns were extracted from code"
+assert_not_empty "$_stop_pat" && assert_not_empty "$_capture_pat" && test_pass
+
+test_start "XACA-0799 Case 6g: MATCHER EQUIVALENCE — capture sees what stop kills"
+# The single most important structural invariant. stop_lcars()'s kill-all matcher
+# and lcars_running_lcars_ports()'s capture matcher must be the SAME pattern, or
+# the capture under-reports and the stranding returns silently. Narrowing either
+# one without the other is precisely the sibling-matcher drift the XACA-0560-001
+# warning in stop_lcars() already cautions against.
+assert_equal "$_stop_pat" "$_capture_pat" && test_pass
+
+test_start "XACA-0799 Case 6h: start dedupes on the RESOLVED key"
+# Without post-resolution dedupe, "finance" + "finance-personal" double-process.
+assert_contains "$start_lcars_body" "_seen_keys" && test_pass
+
+test_start "XACA-0799 Case 6i: manifest is cleared only on a complete restore"
+assert_contains "$start_lcars_body" "_restore_complete" \
+  && assert_contains "$start_lcars_body" "lcars_restart_manifest_clear" \
+  && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Case 10 — the scan must not depend on unquoted word splitting
+# Case 7 — CRASH SAFETY
 # ═══════════════════════════════════════════════════════════════════════════
-# zsh does not word-split unquoted parameter expansions. Under `for pid in
-# $pids` the loop runs ONCE over the whole multi-line PID blob, every ps lookup
-# fails, and the function returns an empty set while still exiting 0 — restart
-# then restores nothing and reports success. Hit for real during development.
-test_start "XACA-0799 Case 10: port scan avoids the word-splitting PID loop"
-# Strip comments before asserting. The fix documents the broken form by name in
-# a warning comment, so a whole-file grep matches the PROSE and fails a correct
-# implementation. Assert against executable lines only.
-common_code=$(grep -vE '^[[:space:]]*#' "$COMMON_LIB")
-assert_not_contains "$common_code" 'for pid in $pids' \
-    && assert_contains "$common_code" 'while IFS= read -r pid' \
-    && test_pass
 
-# ═══════════════════════════════════════════════════════════════════════════
-# Case 11 — NEGATIVE CONTROL: Cases 6-8 must fail against a pre-fix copy
-# ═══════════════════════════════════════════════════════════════════════════
-# Structural greps are the easiest assertions in this file to satisfy by
-# accident. Synthesize the PRE-FIX state (strip every mention of the restore
-# variable and the snapshot call) and require the same checks to fail. If they
-# still pass here, they were never testing anything.
-test_start "XACA-0799 Case 11: structural checks fail against a synthesized pre-fix copy"
-_PREFIX_DIR="$TEST_TMP_DIR/prefix"
-mkdir -p "$_PREFIX_DIR"
-grep -v "AITEAMFORGE_RESTORE_LCARS_PORTS\|aiteamforge_team_for_lcars_port" "$START_CMD" > "$_PREFIX_DIR/start.sh"
-grep -v "aiteamforge_lcars_running_ports" "$CLI_CMD" > "$_PREFIX_DIR/cli.sh"
-
-_neg_ok=true
-_neg_msg=""
-
-# Case 7 equivalent must now FAIL to find the restore wiring.
-if grep -q "AITEAMFORGE_RESTORE_LCARS_PORTS" "$_PREFIX_DIR/start.sh" 2>/dev/null; then
-    _neg_ok=false
-    _neg_msg="pre-fix start.sh still mentions AITEAMFORGE_RESTORE_LCARS_PORTS"
-fi
-# Case 6 equivalent must now FAIL to find a snapshot call.
-if [ "$_neg_ok" = true ] && grep -q "aiteamforge_lcars_running_ports" "$_PREFIX_DIR/cli.sh" 2>/dev/null; then
-    _neg_ok=false
-    _neg_msg="pre-fix cli.sh still mentions aiteamforge_lcars_running_ports"
-fi
-# Sanity: the stripped copies must still be substantial files, not empty — an
-# empty file would make the two greps above pass for the wrong reason.
-if [ "$_neg_ok" = true ]; then
-    _pf_lines=$(wc -l < "$_PREFIX_DIR/start.sh" | tr -d ' ')
-    if [ "${_pf_lines:-0}" -lt 100 ]; then
-        _neg_ok=false
-        _neg_msg="synthesized pre-fix start.sh is implausibly short (${_pf_lines} lines) — strip removed too much"
-    fi
-fi
-
-if [ "$_neg_ok" = true ]; then
-    test_pass
+test_start "XACA-0799 Case 7a: capture happens BEFORE the first kill"
+# If the snapshot were taken after the kill loop, a crash mid-teardown would lose
+# the record entirely — and pgrep would already be returning fewer servers.
+# Compare line offsets within stop_lcars()'s own body.
+_cap_line=$(echo "$stop_lcars_body" | grep -n "lcars_restart_manifest_capture" | head -1 | cut -d: -f1)
+_kill_line=$(echo "$stop_lcars_body" | grep -n 'if kill "\$pid"' | head -1 | cut -d: -f1)
+if [ -n "$_cap_line" ] && [ -n "$_kill_line" ] && [ "$_cap_line" -lt "$_kill_line" ]; then
+  _c7_order="before"
 else
-    test_fail "$_neg_msg"
+  _c7_order="after(cap=${_cap_line},kill=${_kill_line})"
 fi
+assert_equal "before" "$_c7_order" && test_pass
+
+test_start "XACA-0799 Case 7b: the early-return on 'nothing running' is AFTER capture"
+# Guards a subtle ordering trap: returning early when pgrep is empty must not
+# skip writing the empty manifest, or a stale prior manifest survives and gets
+# replayed on the next start.
+_empty_ret=$(echo "$stop_lcars_body" | grep -n 'LCARS server not running' | head -1 | cut -d: -f1)
+if [ -n "$_cap_line" ] && [ -n "$_empty_ret" ] && [ "$_cap_line" -lt "$_empty_ret" ]; then
+  _c7_ret="before"
+else
+  _c7_ret="after(cap=${_cap_line},ret=${_empty_ret})"
+fi
+assert_equal "before" "$_c7_ret" && test_pass
+
+test_start "XACA-0799 Case 7c: manifest writes are atomic (temp + rename)"
+assert_contains "$manifest_src" "mktemp" && assert_contains "$manifest_src" "mv -f" && test_pass
+
+test_start "XACA-0799 Case 7d: a failed capture cannot abort stop"
+# stop.sh runs under `set -eo pipefail`. Losing LCARS to a bookkeeping error
+# would be strictly worse than the bug being fixed.
+assert_contains "$stop_lcars_body" "print_warning" \
+  && assert_contains "$stop_lcars_body" "if lcars_restart_manifest_capture" \
+  && test_pass
+
+test_start "XACA-0799 Case 7e: runtime dir is refused when it is a symlink"
+_sym_target=$(mktemp -d)
+_sym_dir="$TEST_TMP_DIR/symlinked-run"
+ln -sfn "$_sym_target" "$_sym_dir"
+_c7_rc=0
+( LCARS_RESTART_RUNTIME_DIR="$_sym_dir" lcars_restart_manifest_write </dev/null ) >/dev/null 2>&1 || _c7_rc=$?
+assert_exit_failure "$_c7_rc" && test_pass
 
 # ═══════════════════════════════════════════════════════════════════════════
-# Summary (standalone mode only — the runner prints its own)
+# Case 8 — unmappable ports are recorded, surfaced, not started
 # ═══════════════════════════════════════════════════════════════════════════
-if [ "$_STANDALONE" = true ]; then
-    echo ""
-    echo "──────────────────────────────────────────────"
-    echo "  XACA-0799 restart symmetry: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
-    echo "──────────────────────────────────────────────"
-    # A run that asserted nothing is a failure, not a pass (vacuous-green guard).
-    if [ "$_PASS_COUNT" -eq 0 ]; then
-        echo "  ERROR: no assertions passed — harness did not execute" >&2
-        exit 1
-    fi
-    [ "$_FAIL_COUNT" -eq 0 ] || exit 1
-fi
 
-exit 0
+test_start "XACA-0799 Case 8a: an unregistered port is recorded with the '-' sentinel"
+printf '8203\n9999\n' | lcars_ports_to_manifest | lcars_restart_manifest_write
+assert_contains "$(cat "$(lcars_restart_manifest_path)")" "-	9999" && test_pass
+
+test_start "XACA-0799 Case 8b: the sentinel is NOT offered to start as a team"
+# "-" is not a launchable team id; feeding it to start would be a hard error.
+assert_not_contains "$(lcars_restart_manifest_teams)" "-" && test_pass
+
+test_start "XACA-0799 Case 8c: unmapped ports are reported for operator visibility"
+assert_equal "9999" "$(lcars_restart_manifest_unmapped_ports | tr -d '\n')" && test_pass
+
+test_start "XACA-0799 Case 8d: the mappable port alongside it still restores"
+assert_equal "academy" "$(lcars_restart_manifest_teams | tr -d '\n')" && test_pass
+
+test_start "XACA-0799 Case 8e: start_lcars() surfaces unmapped ports"
+assert_contains "$start_lcars_body" "lcars_restart_manifest_unmapped_ports" && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 9 — non-numeric / junk input is rejected by the port layer
+# ═══════════════════════════════════════════════════════════════════════════
+
+test_start "XACA-0799 Case 9a: junk port lines are dropped, not mapped"
+_c9=$(printf '8203\nnot-a-port\n\n8361\n' | lcars_ports_to_manifest | grep -c .)
+assert_equal "2" "$_c9" && test_pass
+
+test_start "XACA-0799 Case 9b: capture of an empty process list yields an empty manifest"
+: | lcars_ports_to_manifest | lcars_restart_manifest_write
+assert_equal "0" "$(lcars_restart_manifest_teams | grep -c . || true)" && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 10 — portability + extraction guards on the capture layer
+# ═══════════════════════════════════════════════════════════════════════════
+# Both of these were live defects in the first cut of the manifest library and
+# both fail SILENTLY — they produce an empty or wrong manifest while every
+# function still exits 0, so `start` restores nothing and the run looks healthy.
+# Structural guards, because neither reproduces under bash (the shell the tap
+# actually ships) and a behavioral test would therefore pass on this machine
+# regardless. Asserted against comment-stripped source: the fixes document the
+# broken forms by name, so a whole-file grep matches the PROSE and fails a
+# correct implementation.
+_mf_code=$(grep -vE '^[[:space:]]*#' "$MANIFEST_LIB")
+
+test_start "XACA-0799 Case 10a: capture does not rely on unquoted word splitting"
+# zsh does not word-split unquoted expansions: `for pid in $pids` runs ONCE over
+# the whole multi-line PID blob, every ps lookup fails, and the capture returns
+# an EMPTY set while exiting 0 — a vacuous success that writes an empty manifest.
+assert_not_contains "$_mf_code" 'for pid in $pids' \
+  && assert_contains "$_mf_code" 'while IFS= read -r pid' \
+  && test_pass
+
+test_start "XACA-0799 Case 10b: the union does not rely on unquoted word splitting"
+# Same trap on the configured-teams string: under zsh the whole ".teams[]" value
+# resolves as ONE team id and every configured team drops out of the union.
+assert_not_contains "$_mf_code" 'for t in $configured' \
+  && test_pass
+
+test_start "XACA-0799 Case 10c: port extraction is anchored on server.py"
+# A right-to-left "last all-numeric token" scan looks equivalent to anchoring and
+# is not: it returns the LAST number on the line, so a trailing numeric argument
+# (`server.py 8203 --workers 2`) yields 2 and the manifest records a port no team
+# owns. Anchoring immediately after server.py is what actually tolerates flags.
+assert_contains "$_mf_code" 'server\.py[[:space:]]' \
+  && assert_not_contains "$_mf_code" 'for (i = NF; i >= 1; i--)' \
+  && test_pass
+
+test_start "XACA-0799 Case 10d: extraction picks the port, not a trailing numeric arg"
+# Behavioral counterpart to 10c, exercised through the same sed the capture uses.
+_extract() { printf '%s\n' "$1" | sed -n 's/.*server\.py[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p'; }
+assert_equal "8203" "$(_extract 'python3 server.py 8203')" \
+  && assert_equal "8203" "$(_extract '/usr/bin/python3 server.py 8203 --workers 2')" \
+  && test_pass

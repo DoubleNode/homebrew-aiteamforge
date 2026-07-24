@@ -562,39 +562,6 @@ aiteamforge_team_from_code() {
     return 1  # not found
 }
 
-# aiteamforge_team_for_lcars_port <port>
-# Prints the team id that owns the given LCARS port, or returns nonzero with no
-# output if no team does.
-#
-# XACA-0799: the reverse of aiteamforge_team_lcars_port. `aiteamforge restart`
-# snapshots the ports that are actually SERVING before it tears them down, then
-# maps them back to team ids here so start can bring back exactly what stop
-# reaped (stop is kill-all by design; start only covers configured teams).
-#
-# Deliberately implemented as a scan over aiteamforge_list_teams +
-# aiteamforge_team_lcars_port rather than an independent jq query: it MUST
-# round-trip exactly with the forward lookup that start_lcars() uses. A separate
-# query could disagree with the forward path on config-vs-baked-in-defaults
-# precedence or null-port handling, and would then hand start a team/port pair
-# the forward lookup never actually assigns — resurrecting a server on the wrong
-# port. Reusing the forward function makes that class of drift impossible.
-aiteamforge_team_for_lcars_port() {
-    local want="$1"
-    [ -z "$want" ] && return 1
-
-    local team port
-    while IFS= read -r team; do
-        [ -z "$team" ] && continue
-        port=$(aiteamforge_team_lcars_port "$team" 2>/dev/null) || continue
-        if [ "$port" = "$want" ]; then
-            echo "$team"
-            return 0
-        fi
-    done < <(aiteamforge_list_teams)
-
-    return 1  # no team in the registry owns this port
-}
-
 # aiteamforge_compute_instance_port <template_id> [<team_paths_json_path>]
 #
 # Allocate the lowest free port in template_id's band per XACA-0463 /
