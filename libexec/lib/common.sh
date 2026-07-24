@@ -211,6 +211,57 @@ remove_legacy_lcars_runatload_agent() {
 }
 
 #──────────────────────────────────────────────────────────────────────────────
+# Live LCARS process inspection (XACA-0799)
+#──────────────────────────────────────────────────────────────────────────────
+# aiteamforge_lcars_running_ports
+# Prints the port of every LCARS server currently running on this box, one per
+# line, deduplicated and numerically sorted. Prints nothing (exit 0) when none
+# are running.
+#
+# XACA-0799: `aiteamforge stop` reaps EVERY `server.py <port>` on the box — that
+# is deliberate and documented (see the kill-all note in aiteamforge-stop.sh) —
+# but `aiteamforge start` only launches teams listed in .aiteamforge-config's
+# .teams[]. On a machine where most LCARS servers were started by their own
+# per-team *-startup.sh, those teams are NOT in .teams[], so a restart killed
+# every server and brought back only the configured handful. The rest stayed
+# down until the 300s lcars-health check healed them — a fleet-wide LCARS
+# outage of up to 5 minutes on every restart (observed on M4Mini after the
+# v0.17.7 upgrade: 8 killed, 1 restarted).
+#
+# Snapshotting the live ports BEFORE teardown is what lets start restore exactly
+# the set stop is about to take down.
+#
+# CONTRACT: the pgrep pattern below MUST stay in lockstep with stop_lcars()'s
+# matcher in libexec/commands/aiteamforge-stop.sh. This function's entire
+# meaning is "the set stop is about to kill" — if that matcher is ever changed,
+# change this one identically or restart silently stops restoring the delta.
+aiteamforge_lcars_running_ports() {
+    local pids pid args port
+    pids=$(pgrep -f "server\.py [0-9]" 2>/dev/null || true)
+    if [ -z "$pids" ]; then
+        return 0
+    fi
+
+    # Iterate line-by-line via read rather than `for pid in $pids`. The
+    # word-splitting form is NOT portable: zsh does not split unquoted parameter
+    # expansions, so under zsh the loop would run ONCE with the entire multi-line
+    # PID blob as a single value, every ps lookup would fail, and this function
+    # would silently return nothing while still exiting 0 — a vacuous success
+    # that hands `restart` an empty restore set and quietly reinstates the very
+    # outage this fixes. read -r is unambiguous under both bash and zsh.
+    printf '%s\n' "$pids" | while IFS= read -r pid; do
+        [ -z "$pid" ] && continue
+        args=$(ps -o args= -p "$pid" 2>/dev/null) || continue
+        [ -z "$args" ] && continue
+        # Extract the numeric argument immediately following server.py — that is
+        # the bind port. Anchored on server.py so an unrelated numeric arg
+        # elsewhere in the cmdline cannot be mistaken for the port.
+        port=$(echo "$args" | sed -n 's/.*server\.py[[:space:]]\{1,\}\([0-9]\{1,\}\).*/\1/p')
+        [ -n "$port" ] && echo "$port"
+    done | sort -un
+}
+
+#──────────────────────────────────────────────────────────────────────────────
 # Homebrew tap-trust helpers (XACA-0676)
 #──────────────────────────────────────────────────────────────────────────────
 # Recent Homebrew gates formula loading behind tap-trust when

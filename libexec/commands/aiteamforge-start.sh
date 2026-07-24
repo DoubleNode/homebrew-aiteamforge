@@ -22,9 +22,6 @@ source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
 # mirroring aiteamforge-doctor.sh.
 # shellcheck source=../lib/kanban-paths.sh
 [ -f "${LIBEXEC_DIR}/lib/kanban-paths.sh" ] && source "${LIBEXEC_DIR}/lib/kanban-paths.sh" 2>/dev/null || true
-# lcars-restart-manifest.sh provides the stop→start handoff that keeps `aiteamforge
-# restart lcars` symmetric (XACA-0799). Carries its own include-guard.
-source "${LIBEXEC_DIR}/lib/lcars-restart-manifest.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -366,45 +363,84 @@ start_lcars() {
   local teams_str=""
   teams_str=$(get_configured_teams) || true
 
-  # ── XACA-0799: restore what stop tore down ────────────────────────────────
-  # stop_lcars() is a kill-all — it reaps EVERY server.py on the box, including
-  # teams launched by their own *-startup.sh that never appear in `.teams[]`.
-  # Starting only `.teams[]` therefore left those teams DOWN after every restart
-  # (M4Mini: 7 of 8 teams, until the 300s lcars-health agent caught it).
-  #
-  # Union the configured set with the set stop actually captured, so start covers
-  # exactly what stop killed. A missing/stale/empty manifest contributes nothing
-  # and start behaves exactly as it did before — this only ever ADDS teams.
   local -a teams=()
-  local _union_line
-  while IFS= read -r _union_line; do
-    [ -n "$_union_line" ] && teams+=("$_union_line")
-  done < <(lcars_restart_union_teams "$teams_str")
-
-  # Ports that were running but map to no team in the registry cannot be
-  # relaunched — LCARS_TEAM is mandatory since XACA-0555. Say so rather than
-  # dropping them silently.
-  local _unmapped
-  _unmapped=$(lcars_restart_manifest_unmapped_ports 2>/dev/null | tr '\n' ' ' || true)
-  if [ -n "${_unmapped// /}" ]; then
-    print_warning "LCARS was running on unregistered port(s): ${_unmapped}— cannot restore (no team id)"
+  if [ -n "$teams_str" ]; then
+    read -ra teams <<< "$teams_str"
   fi
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # XACA-0799: restore the teams a `restart` just tore down.
+  #
+  # `aiteamforge stop` reaps EVERY server.py on the box (kill-all by design),
+  # but the configured set above is often a strict SUBSET of what was actually
+  # running — teams launched by their own per-team *-startup.sh never appear in
+  # .aiteamforge-config's .teams[]. Restarting therefore killed N servers and
+  # brought back only the configured few; the rest stayed down until the 300s
+  # lcars-health check healed them (M4Mini after v0.17.7: 8 killed, 1 back).
+  #
+  # The `restart` dispatcher snapshots the serving ports BEFORE stop runs and
+  # exports them here. We map each back to its team via the registry reverse
+  # lookup so restored teams go through the SAME resolved-key path as configured
+  # ones — no second, divergent launch route.
+  #
+  # This deliberately does NOT change `stop` (kill-all stays, per XACA-0560-001)
+  # nor a standalone `start` (configured-teams-only stays). Only `restart`, the
+  # path that actually caused the outage, becomes symmetric — and only because
+  # the dispatcher sets this variable. Unset ⇒ behavior identical to before.
+  # ───────────────────────────────────────────────────────────────────────────
+  if [ -n "${AITEAMFORGE_RESTORE_LCARS_PORTS:-}" ]; then
+    local _rport _rteam _seen _seen_key _dup
+    # Split via read -ra (the idiom already used for teams_str above) rather than
+    # an unquoted expansion — see the portability note on
+    # aiteamforge_lcars_running_ports in lib/common.sh.
+    local -a _rports=()
+    read -ra _rports <<< "$AITEAMFORGE_RESTORE_LCARS_PORTS"
+    for _rport in ${_rports[@]+"${_rports[@]}"}; do
+      if [ -z "$_rport" ]; then
+        continue
+      fi
+
+      _rteam=$(aiteamforge_team_for_lcars_port "$_rport" 2>/dev/null) || _rteam=""
+      if [ -z "$_rteam" ]; then
+        print_warning "LCARS was serving on port ${_rport} but no team owns it in the registry — not restoring"
+        continue
+      fi
+
+      # Dedupe against the configured list. Compare the resolved KEY as well as
+      # the raw id: .teams[] holds BASE ids ("finance") while the reverse lookup
+      # returns the registry INSTANCE id ("finance-personal"), so a raw-only
+      # comparison would queue the same team twice and race two servers onto one
+      # port (XACA-0792 is exactly this base-vs-instance split).
+      _dup=false
+      for _seen in ${teams[@]+"${teams[@]}"}; do
+        if [ "$_seen" = "$_rteam" ]; then
+          _dup=true
+          break
+        fi
+        _seen_key=$(aiteamforge_resolve_team_key "$_seen" 2>/dev/null) || _seen_key=""
+        if [ -n "$_seen_key" ] && [ "$_seen_key" = "$_rteam" ]; then
+          _dup=true
+          break
+        fi
+      done
+
+      if [ "$_dup" = false ]; then
+        teams+=("$_rteam")
+        print_info "Restoring LCARS for '${_rteam}' (was serving on port ${_rport} before restart)"
+      fi
+    done
+  fi
+
+  # Empty-check runs AFTER the union: a box with no configured teams but live
+  # servers must still restore them, so bailing on an empty configured list
+  # would reintroduce the very outage this fixes.
   if [ ${#teams[@]} -eq 0 ]; then
-    # Neither `.teams[]` nor a captured manifest named anything to start.
-    print_warning "No configured or previously-running teams found — skipping LCARS startup"
+    print_warning "No configured teams found — skipping LCARS startup"
     return 0
   fi
 
-  # Teams named in the manifest, used below to decide whether the restore was
-  # complete enough to retire the manifest.
-  local _restored_expected=""
-  _restored_expected=$(lcars_restart_manifest_teams 2>/dev/null | tr '\n' ' ' || true)
-
   local ok=0
   local team
-  local _seen_keys=" "
-  local _failed_keys=" "
   for team in "${teams[@]}"; do
     [ -z "$team" ] && continue
 
@@ -430,16 +466,6 @@ start_lcars() {
     # actually resolved.
     team="$team_key"
 
-    # XACA-0799: dedupe on the RESOLVED key, not the raw id. The union can legally
-    # contain both a configured BASE id ("finance") and the manifest's INSTANCE id
-    # ("finance-personal"); both resolve to the same server. Deduping pre-resolution
-    # would miss that and emit a spurious "already running" warning on the second
-    # pass. Post-resolution is the only place the equivalence is visible.
-    case "$_seen_keys" in
-      *" ${team} "*) continue ;;
-    esac
-    _seen_keys="${_seen_keys}${team} "
-
     # Already serving on this port? Treat as success and LEAVE IT RUNNING.
     # (Do NOT fall through to start_lcars_server — its pkill would kill a healthy
     # server. Preserving this least-surprise behavior is intentional, XACA-0562.)
@@ -462,37 +488,8 @@ start_lcars() {
       [ "$OPEN_BROWSER" = true ] && open "http://localhost:${port}" 2>/dev/null || true
     else
       print_error "LCARS server for '${team}' failed to become ready on port ${port}"
-      _failed_keys="${_failed_keys}${team} "
     fi
   done
-
-  # ── XACA-0799: retire the manifest only on a COMPLETE restore ─────────────
-  # If any team the manifest named is still not up, the record SURVIVES. That way
-  # a subsequent `aiteamforge start` — and the lcars-health LaunchAgent — get
-  # another chance at it. Clearing unconditionally would discard the only evidence
-  # of what was supposed to be running, turning a partial restore into a permanent
-  # one. The TTL bounds how long a surviving manifest stays relevant.
-  local _restore_complete=true
-  local _rt
-  for _rt in $_restored_expected; do
-    local _rt_key=""
-    _rt_key=$(aiteamforge_resolve_team_key "$_rt" 2>/dev/null) || _rt_key="$_rt"
-    case "$_failed_keys" in
-      *" ${_rt_key} "*) _restore_complete=false ;;
-    esac
-    # A manifest team that never even made it into the start set (e.g. its
-    # registry entry vanished) also counts as an incomplete restore.
-    case "$_seen_keys" in
-      *" ${_rt_key} "*) ;;
-      *) _restore_complete=false ;;
-    esac
-  done
-
-  if [ "$_restore_complete" = true ]; then
-    lcars_restart_manifest_clear
-  else
-    print_warning "LCARS restore incomplete — keeping restart manifest for the next start"
-  fi
 
   if [ "$ok" -eq 0 ]; then
     print_warning "No LCARS servers were launched"

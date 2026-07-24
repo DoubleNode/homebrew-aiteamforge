@@ -12,10 +12,6 @@ LIBEXEC_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # Source shared libraries
 source "${LIBEXEC_DIR}/lib/common.sh"
 source "${LIBEXEC_DIR}/lib/config.sh"
-# XACA-0799: the port registry (for the port→team reverse map) and the restart
-# manifest that hands the running server set to the start phase.
-source "${LIBEXEC_DIR}/lib/aiteamforge-paths.sh"
-source "${LIBEXEC_DIR}/lib/lcars-restart-manifest.sh"
 
 # Version — read from VERSION file (single source of truth)
 _find_version() { for p in "${LIBEXEC_DIR}/../VERSION" "${LIBEXEC_DIR}/../../VERSION"; do [ -f "$p" ] && cat "$p" | tr -d '[:space:]' && return; done; echo "unknown"; }
@@ -114,34 +110,6 @@ stop_lcars() {
   # narrowing this to one port would silently break stop-all. (XACA-0560-001)
   local pids
   pids=$(pgrep -f "server\.py [0-9]" 2>/dev/null || true)
-
-  # ── XACA-0799: capture BEFORE teardown ────────────────────────────────────
-  # `aiteamforge restart` is stop.sh followed by start.sh — two processes with no
-  # shared memory. This kill-all reaps every LCARS server on the box, but start
-  # only relaunches `.teams[]`, so any team started by its own *-startup.sh was
-  # left DOWN until the 300s lcars-health LaunchAgent noticed (M4Mini: 7 of 8
-  # teams, ~5 minutes of fleet-wide outage per restart).
-  #
-  # Snapshotting the live set to disk here — BEFORE the first kill, so a crash
-  # mid-teardown still leaves a complete record — lets start restore exactly what
-  # was torn down. Written unconditionally, including the empty case: "nothing was
-  # running" is a real answer, and writing it also clears any earlier manifest
-  # that would otherwise be replayed.
-  #
-  # Never allowed to abort the stop: a failed snapshot degrades restart to the old
-  # `.teams[]`-only behavior, which is exactly today's baseline. Losing LCARS to a
-  # bookkeeping error would be a strictly worse trade, and this script runs under
-  # `set -eo pipefail`.
-  if lcars_restart_manifest_capture 2>/dev/null; then
-    local _captured=0
-    _captured=$(lcars_restart_manifest_teams 2>/dev/null | grep -c . || true)
-    [ -z "$_captured" ] && _captured=0
-    if [ "$_captured" -gt 0 ]; then
-      print_info "Recorded ${_captured} running LCARS instance(s) for restart"
-    fi
-  else
-    print_warning "Could not record running LCARS set — start will fall back to configured teams only"
-  fi
 
   if [ -z "$pids" ]; then
     print_info "LCARS server not running"
