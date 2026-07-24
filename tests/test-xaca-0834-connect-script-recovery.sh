@@ -64,15 +64,54 @@
 #       `finance --project work`; finance-personal-connect.sh is NEVER
 #       created as a side effect.
 #   T3  MED/MEDICAL (Requirement 3, SYNTHETIC — see note above): with only
-#       medical-general-connect.sh on disk and synthetic med.conf +
-#       medical.conf templates both present, only `medical --project general`
-#       is invoked; `med` (a template whose id is a prefix of "medical") is
-#       never invoked and no med-connect.sh is ever materialised.
+#       medical-general-connect.sh on disk and ONLY a synthetic "med" template
+#       present (no "medical" template — XACA-0834-005 fix: the earlier
+#       fixture shipped both med.conf AND medical.conf, which let longest-
+#       match rescue a correct result even with the anchor removed, since
+#       "medical" would still out-length "med" — see mutation-test note
+#       inline below), the anchor must reject "med" as a candidate for
+#       instance "medical-general" (no "med-" prefix — "medi..." != "med-...")
+#       on its own, with no second template around to make the right answer
+#       structurally inevitable. `med` is never invoked and no med-connect.sh
+#       is ever materialised.
 #   T4  UNMATCHED (Requirement 4): a connect script with no matching template
 #       is skipped with a warning, never handed to the installer.
 #   T5  LONGEST-MATCH: a dash-bearing template id (ops-west) beats a shorter
 #       template sharing its first component (ops) for an instance that
-#       anchor-matches both.
+#       anchor-matches both. XACA-0834-006 MUTATION-TEST FINDING: the explicit
+#       length comparison this test guards is `[ "${#team_id}" -gt
+#       "${#best_team}" ]` (source line ~955). Two candidate mutations were
+#       tried against this exact fixture on the real (extracted) function:
+#         (a) "first-match-wins" — replace the -gt check with `[ -z
+#             "$best_team" ]` (keep whichever candidate is matched FIRST in
+#             loop order, never overwrite). Mutation-tested: this PASSES T5
+#             unchanged — not a fixture gap, but a structural property of
+#             `for conf in "$teams_conf_dir"/*.conf`: pathname expansion is
+#             sorted, and for any two templates X / X-rest that both
+#             anchor-match the same instance (the anchor rule forces this
+#             exact relationship — X-rest is always literally X + "-" +
+#             something whenever both match one instance), their filenames
+#             "X.conf" and "X-rest.conf" diverge at the first byte after X:
+#             '-' (0x2D) vs '.' (0x2E). Since '-' < '.', "X-rest.conf" is
+#             UNCONDITIONALLY ordered before "X.conf" by the shell's glob
+#             sort, for every possible choice of X and "rest" (verified
+#             empirically against multiple fixtures, and against the real
+#             source with the mutation applied — see PR discussion / retro).
+#             So "first-match-wins" and "longest-match-wins" are provably
+#             identical for this specific glob-based iteration; no fixture
+#             can make them diverge. This is why T5 cannot be strengthened
+#             against that particular mutation, and is not a test gap.
+#         (b) "last-match-wins" — drop the -gt guard entirely (unconditional
+#             `best_team="$team_id"` on every match, keeping the LAST match
+#             seen rather than the first). Mutation-tested: this FAILS T5 as
+#             already written — since (a)'s proof shows the longer template's
+#             conf sorts first, "last wins" ends up keeping the SHORTER
+#             ("ops"), which then gets rejected downstream ("takes no
+#             parameters") instead of correctly refreshing ops-west. This is
+#             the actually-reachable regression (e.g. a future "simplify away
+#             the length check" edit) that T5's existing fixture already
+#             discriminates against, unmodified — the -gt comparison IS
+#             load-bearing against this mutation, just not against (a).
 #   T6  NULLGLOB-SAFETY: an empty WORKING_DIR (no *-connect.sh files at all)
 #       does not crash and invokes the installer zero times, whether or not
 #       nullglob is set in the caller's shell.
@@ -86,9 +125,9 @@
 #       --client acme --project acme.
 #   T9  EMPTY-INSTANCE (edge case): a file literally named "-connect.sh"
 #       (empty instance id after suffix-stripping) is never handed to the
-#       installer. Documented finding: this path is a silent `continue`, not
-#       even counted in the "skipped" tally — an observability gap, not a
-#       correctness bug (see report).
+#       installer, AND is now counted + warned about in the skip tally
+#       (XACA-0834-007 fix — the prior silent `continue` was an observability
+#       gap: correctly never installed, but invisible in the summary).
 #   NC1/NC2/NC3  NEGATIVE CONTROL: the T1/T2/T3 fixtures replayed against the
 #       PRE-FIX algorithm (embedded verbatim from tap commit f7557b2 as
 #       _pre_fix_update_connect_scripts, function name only renamed to avoid
@@ -444,10 +483,30 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # T3 — MED/MEDICAL (Requirement 3, SYNTHETIC): only medical-general-connect.sh
-# is on disk; med.conf + medical.conf both present as templates ("med" is a
-# prefix of "medical"). Only medical is invoked; med is never touched.
+# is on disk; ONLY a synthetic med.conf is present as a template — NO
+# medical.conf (XACA-0834-005 fix, see below). "med" must never be selected
+# for instance "medical-general"; the installer is never invoked and no
+# med-connect.sh is ever materialised.
+#
+# XACA-0834-005 MUTATION-TEST FINDING: the ORIGINAL fixture shipped BOTH
+# med.conf AND medical.conf. That let this assertion pass even with the `-`
+# anchor removed from the matching condition, because longest-match rescued
+# it: an unanchored substring test would ALSO match "medical" (len 7) against
+# "medical-general", and 7 > 3 beats "med"'s accidental unanchored match — so
+# "medical" would still win regardless of whether the anchor was present.
+# Removing medical.conf from this fixture eliminates that rescue: with only
+# "med" in play, an unanchored match of "med" against "medical-general" (the
+# literal substring "med" IS a prefix of "medical-general", just not followed
+# by a dash) has no competing longer candidate to lose to, so it actually
+# reaches the install call — proving the anchor, not longest-match, is what
+# rejects it in the real (fixed) code. Verified by mutation-testing a copy of
+# the matching condition with the trailing "-" dropped:
+#   correct (anchored):   `${instance_id#"${team_id}-"}` — no match, skipped
+#   mutated (unanchored): `${instance_id#"${team_id}"}`  — false match, calls
+#                           installer with team=med --client ical --project
+#                           general (a real, wrong, materialised call)
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T3 [SYNTHETIC]: med/medical templates don't cross-match; only medical-general is refreshed, med is never invoked or materialised"
+test_start "T3 [SYNTHETIC]: med-only template never cross-matches medical-general; med is never invoked or materialised"
 T3_FRAMEWORK="$(_next_sandbox)"
 T3_WORKING="$(_next_sandbox)"
 mkdir -p "$T3_FRAMEWORK/share/teams"
@@ -455,16 +514,17 @@ mkdir -p "$T3_FRAMEWORK/share/teams"
 # the implementer's own stated latent-defect condition). "med" here is a
 # constructed template that does NOT exist in share/teams/*.conf; it exists
 # only inside this test's sandboxed FRAMEWORK_DIR to exercise the collision.
+# Deliberately parameterised (client+project) so an unanchored false-match
+# would cleanly split "ical-general" into --client ical --project general
+# and actually reach the installer — a silent "skip" for a different reason
+# would NOT prove the anchor is what's doing the rejecting.
 cat > "$T3_FRAMEWORK/share/teams/med.conf" <<'CONF'
 TEAM_ID="med"
-TEAM_HAS_PROJECTS="false"
-CONF
-cat > "$T3_FRAMEWORK/share/teams/medical.conf" <<'CONF'
-TEAM_ID="medical"
 TEAM_HAS_PROJECTS="true"
-TEAM_REQUIRES_CLIENT_ID="false"
-TEAM_DEFAULT_PROJECT="general"
+TEAM_REQUIRES_CLIENT_ID="true"
+TEAM_DEFAULT_PROJECT=""
 CONF
+# Deliberately NO medical.conf — see XACA-0834-005 mutation-test finding above.
 echo "stale-medical-general-connect" > "$T3_WORKING/medical-general-connect.sh"
 echo "stale-medical-general-disconnect" > "$T3_WORKING/medical-general-disconnect.sh"
 # Deliberately no med-connect.sh — "med" was never installed on this box.
@@ -474,12 +534,15 @@ T3_CALL_LOG="$WORK_DIR/t3-calls.txt"; : > "$T3_CALL_LOG"
 STUB_CALL_LOG="$T3_CALL_LOG" STUB_TEAMS_CONF_DIR="$T3_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T3_FRAMEWORK" WORKING_DIR="$T3_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
     update_connect_scripts >/dev/null 2>&1
-if grep -qF "medical|client=|project=general" "$T3_CALL_LOG" \
+if [ ! -s "$T3_CALL_LOG" ] \
     && ! grep -qE '^med\|' "$T3_CALL_LOG" \
-    && [ ! -f "$T3_WORKING/med-connect.sh" ]; then
+    && [ ! -f "$T3_WORKING/med-connect.sh" ] \
+    && ! find "$T3_WORKING" -maxdepth 1 -name 'med-*-connect.sh' -print -quit | grep -q . \
+    && grep -qi "no team template matches" "$_STUB_LOG" \
+    && grep -qF "medical-general-connect.sh" "$_STUB_LOG"; then
     test_pass
 else
-    test_fail "expected only 'medical|client=|project=general', no 'med|' call, no med-connect.sh materialised; call_log=$(cat "$T3_CALL_LOG"); med_exists=$([ -f "$T3_WORKING/med-connect.sh" ] && echo yes || echo no)"
+    test_fail "expected NO installer call at all (med never matches medical-general even unanchored-adjacent), no med*-connect.sh materialised, 'no team template matches' warning naming medical-general-connect.sh; call_log=$(cat "$T3_CALL_LOG"); stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -513,7 +576,13 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # T5 — LONGEST-MATCH: a dash-bearing template (ops-west) must beat a shorter
 # template sharing its first component (ops) for an instance anchor-matching
-# both shapes.
+# both shapes. See the XACA-0834-006 MUTATION-TEST FINDING in the file header
+# above: this fixture is mutation-tested to genuinely discriminate against
+# dropping the -gt length guard ("last-match-wins"); it is provably UNABLE to
+# discriminate against a "first-match-wins" mutation, because glob sort order
+# always presents the longer of any two anchor-matching templates first,
+# regardless of fixture content — that is a structural property of the
+# algorithm, not a gap in this test.
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "T5: longest-match — ops-west-project1 resolves to template 'ops-west', not the shorter 'ops'"
 T5_FRAMEWORK="$(_next_sandbox)"
@@ -643,12 +712,12 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # T9 — EMPTY-INSTANCE edge case: a file literally named "-connect.sh" yields
-# an empty instance id after suffix-stripping. Documented FINDING: this is a
-# silent `continue` in the source (never reaches the warning branch), so it
-# is not even counted in the "skipped" tally — an observability gap, not a
-# correctness bug (the installer is still never invoked on it).
+# an empty instance id after suffix-stripping. XACA-0834-007 fix: this path
+# is now counted + warned about, consistent with every other skip path (no
+# team template matches / shape-reject) — closing the observability gap
+# where it was previously a silent `continue`, invisible in the summary.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T9 [FINDING]: a literal '-connect.sh' file (empty instance id) is never handed to the installer, but is also silently uncounted"
+test_start "T9: a literal '-connect.sh' file (empty instance id) is never handed to the installer, and IS counted + warned about"
 T9_FRAMEWORK="$(_next_sandbox)"
 T9_WORKING="$(_next_sandbox)"
 mkdir -p "$T9_FRAMEWORK/share/teams"
@@ -664,11 +733,11 @@ STUB_CALL_LOG="$T9_CALL_LOG" STUB_TEAMS_CONF_DIR="$T9_FRAMEWORK/share/teams" STU
 FRAMEWORK_DIR="$T9_FRAMEWORK" WORKING_DIR="$T9_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
     update_connect_scripts >/dev/null 2>&1
 if [ ! -s "$T9_CALL_LOG" ] \
-    && grep -qi "No installed team connect scripts to refresh" "$_STUB_LOG" \
-    && ! grep -qi "skipped" "$_STUB_LOG"; then
+    && grep -qi "empty instance id after suffix-stripping" "$_STUB_LOG" \
+    && grep -qi "Skipped 1 unrecognised" "$_STUB_LOG"; then
     test_pass
 else
-    test_fail "expected installer never invoked, 'No installed team connect scripts to refresh' (i.e. NOT counted as skipped either); call_log=$(cat "$T9_CALL_LOG" 2>/dev/null); stub_log=$(cat "$_STUB_LOG")"
+    test_fail "expected installer never invoked + 'empty instance id after suffix-stripping' warning + 'Skipped 1 unrecognised' tally; call_log=$(cat "$T9_CALL_LOG" 2>/dev/null); stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

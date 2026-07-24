@@ -936,7 +936,11 @@ update_connect_scripts() {
     # Recover the instance id: the exact inverse of install-team.sh's
     # "${INSTANCE_ID}-connect.sh" filename composition.
     instance_id="${base%-connect.sh}"
-    [ -n "$instance_id" ] || continue
+    if [ -z "$instance_id" ]; then
+      print_warning "Skipping ${base} — empty instance id after suffix-stripping"
+      skipped=$((skipped + 1))
+      continue
+    fi
 
     # Validate the recovered instance against the shipped templates using
     # ANCHORED shapes only: "<team>" exactly, or "<team>-<rest>". Longest
