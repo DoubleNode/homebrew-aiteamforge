@@ -1318,6 +1318,30 @@ try:
 except Exception as e:
     band_err = str(e)
 
+
+# XACA-0838-013a/B-2: shared by both the 'auto' short-circuit and the
+# explicit-port path below — the target port must not already be held by
+# ANY OTHER team in ANY template's band. Cross-template collisions count.
+# No override exists for this check — it is always a hard failure. Coerce
+# both sides the same way compute_instance_port() already does (a
+# string-typed "lcars_port" in the registry, e.g. "8600" instead of 8600,
+# is valid JSON and must not silently evade the gate).
+def _find_collision(port):
+    for other_team, entry in existing.get("teams", {}).items():
+        if other_team == team:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        other_raw = entry.get("lcars_port")
+        try:
+            other_port = int(other_raw) if other_raw is not None else None
+        except (TypeError, ValueError):
+            other_port = None
+        if other_port == port:
+            return other_team
+    return None
+
+
 if reqport == "auto":
     if band_err is not None:
         emit("ERR", msg=f"cannot auto-allocate: {band_err}")
@@ -1347,6 +1371,19 @@ if reqport == "auto":
             except (TypeError, ValueError):
                 current_port = None
     if current_port is not None and base <= current_port < base + band_range:
+        # B-2: this short-circuit used to run BEFORE the cross-team collision
+        # check further below, so a team whose current in-band port was ALSO
+        # squatted by another team got "already in band — nothing to do" and
+        # exited 0 without the collision gate ever running — the one
+        # scenario `--set-port <team> auto` (the natural remediation for
+        # XACA-0806-style duplicate-port squatting) most needs to catch.
+        # Refuse instead of silently reallocating: moving a team off a port
+        # it currently serves on without being asked is a bigger surprise
+        # than a hard error, and refusing matches this check's existing
+        # "always a hard failure, no override" contract.
+        _collider = _find_collision(current_port)
+        if _collider is not None:
+            emit("ERR", msg=f"port {current_port} is already in use by team '{_collider}' — refusing collision (this team's own current port is contested; resolve the collision first — e.g. reassign '{_collider}' or pass an explicit free port — then re-run 'auto')")
         emit("OK", current_port, base, band_range, f"already in band at {current_port} — nothing to do")
     try:
         newport = compute_port(team, existing)
@@ -1364,28 +1401,12 @@ if newport <= 0:
 
 # Collision check: the target port must not already be held by ANY OTHER
 # team in ANY template's band. Cross-template collisions count. No override
-# exists for this check — it is always a hard failure.
-#
-# XACA-0838-013a: compute_instance_port() builds its own "used ports" set
-# via int(entry["lcars_port"]) (coercing every value), but this check used
-# to compare entry.get("lcars_port") == newport directly against an int —
-# a string-typed "lcars_port" in the registry (e.g. "8600" instead of 8600,
-# which JSON permits and nothing here prevented) would never equal the int
-# newport and silently evade the collision gate. Coerce both sides the same
-# way compute_instance_port already does, so a string-typed entry cannot
-# slip past a check whose entire job is to be a hard, no-override failure.
-for other_team, entry in existing.get("teams", {}).items():
-    if other_team == team:
-        continue
-    if not isinstance(entry, dict):
-        continue
-    other_raw = entry.get("lcars_port")
-    try:
-        other_port = int(other_raw) if other_raw is not None else None
-    except (TypeError, ValueError):
-        other_port = None
-    if other_port == newport:
-        emit("ERR", msg=f"port {newport} is already in use by team '{other_team}' — refusing collision")
+# exists for this check — it is always a hard failure. See _find_collision()
+# above (shared with the 'auto' short-circuit) for the string/int coercion
+# rationale (XACA-0838-013a).
+_collider = _find_collision(newport)
+if _collider is not None:
+    emit("ERR", msg=f"port {newport} is already in use by team '{_collider}' — refusing collision")
 
 # Band-membership check — the only check --allow-out-of-band can override.
 if band_err is not None:
@@ -1527,14 +1548,23 @@ _set_port_mode_multi() {
     # ever mean anything if this were ever applied one-team-at-a-time.
     # Reject it here instead of downstream where "same port" is the only
     # thing being watched for.
-    local -A _seen_teams=()
-    local _dup_team="" _bt
-    for _bt in "${SET_PORT_TEAMS[@]}"; do
-        if [[ -n "${_seen_teams[$_bt]:-}" ]]; then
-            _dup_team="$_bt"
-            break
-        fi
-        _seen_teams[$_bt]=1
+    # NOTE: bash 3.2 (stock macOS /bin/bash, and this script's tap consumers
+    # have no `depends_on "bash"`) has no associative arrays — `local -A`
+    # aborts with "invalid option" before this function ever runs. Duplicate
+    # detection instead does a plain O(n^2) nested scan over the (small,
+    # human-typed) --set-port team list; `[[ x == y ]]` is exact string
+    # comparison in bash, so no delimiter/sentinel is needed to avoid
+    # substring false-positives.
+    local _dup_team="" _bt _bt2 _bi _bj
+    for ((_bi = 0; _bi < n; _bi++)); do
+        _bt="${SET_PORT_TEAMS[_bi]}"
+        for ((_bj = 0; _bj < _bi; _bj++)); do
+            _bt2="${SET_PORT_TEAMS[_bj]}"
+            if [[ "$_bt" == "$_bt2" ]]; then
+                _dup_team="$_bt"
+                break 2
+            fi
+        done
     done
     if [[ -n "$_dup_team" ]]; then
         _fail "duplicate team '${_dup_team}' in this --set-port batch — each team may appear at most once per invocation. The existing same-port guard cannot catch this case (the same team repeated with 'auto' legitimately resolves to a DIFFERENT port on each occurrence, since each turn sees the prior turn's simulated state), and only the LAST occurrence would ever mean anything. Remove the duplicate and re-run."
