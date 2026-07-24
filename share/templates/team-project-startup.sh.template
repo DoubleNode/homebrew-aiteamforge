@@ -443,7 +443,9 @@ echo "  Starting LCARS server on port $LCARS_PORT..."
 # start` (XACA-0562). It pkills any stale server, captures the server PID and
 # short-circuits on a crash with the log tail, polls for 15s, and logs stderr to
 # $AITEAMFORGE_DIR/logs/lcars-server-<team>.log (previously discarded here). It
-# also writes window.LCARS_TARGET_TEAM. Soft-fail preserved: startup continues.
+# also writes window.LCARS_TARGET_TEAM to the RUNTIME router-target file
+# (XACA-0798: ~/.aiteamforge/lcars-target.js, NOT lcars-ui/lcars-target.js).
+# Soft-fail preserved: startup continues.
 #
 # Hand the helper the interpreter this template already resolved ($VENV_PYTHON,
 # from $HOME/.aiteamforge/venv / $AITEAMFORGE_DIR/.venv) so the server launches
@@ -457,11 +459,46 @@ echo "  Starting LCARS server on port $LCARS_PORT..."
 # warns loudly if team-paths.json diverges from the DEFAULT_TEAMS canonical.
 export LCARS_PYTHON="$VENV_PYTHON"
 source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+
+# Fallback stub (XACA-0798): same guarded-source contract used by the dev
+# medical/legal startup scripts. If the sourced helper predates XACA-0798 and
+# does not define the resolver, resolve the path INLINE — never degrade back to
+# lcars-ui/. lcars-ui/ is the com.aiteamforge.lcars-watch WatchPaths directory:
+# any content change there fires `aiteamforge restart lcars`, which SIGTERMs
+# every server.py on the box, including the one started microseconds earlier.
+# Keep this body byte-identical to lcars_runtime_target_file() in
+# scripts/lcars-launch-helpers.sh — scripts/tests/test-xaca-0798-runtime-target-parity.sh
+# fails the build if any definition drifts on env-var name or default path.
+if ! command -v lcars_runtime_target_file >/dev/null 2>&1; then
+    lcars_runtime_target_file() {
+        local _f="${LCARS_TARGET_RUNTIME_FILE:-$HOME/.aiteamforge/lcars-target.js}"
+        local _d="${_f%/*}"
+        [[ "$_d" != "$_f" ]] && mkdir -p "$_d" 2>/dev/null
+        printf '%s\n' "$_f"
+        return 0
+    }
+fi
+
 start_lcars_server "$TEAM_ID" "$LCARS_PORT" "${TEAM_ID}-lcars" || true
 
-# start_lcars_server truncates lcars-target.js to just LCARS_TARGET_TEAM; re-append
-# LCARS_TARGET_SESSION (consumed by redirect.html).
-echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
+# XACA-0798: write BOTH router-redirect lines to the SAME runtime file that
+# start_lcars_server just wrote — ~/.aiteamforge/lcars-target.js.
+#
+# Two regressions this shape prevents, both introduced the moment
+# start_lcars_server stopped writing lcars-ui/lcars-target.js:
+#   1. SESSION going dark. The old code appended SESSION to
+#      lcars-ui/lcars-target.js while TEAM went to the runtime file. Different
+#      files; the /lcars-target.js route prefers the runtime one, so
+#      window.LCARS_TARGET_SESSION (read at redirect.html) was never delivered.
+#   2. Unbounded growth + a watcher fire per startup. Truncation used to come
+#      from start_lcars_server's `>` on that file. Nothing truncated
+#      lcars-ui/lcars-target.js any more, so a bare `>>` grew it by one line
+#      every startup forever — and EACH append re-tripped lcars-watch.
+#
+# TEAM truncates (`>`), SESSION appends (`>>`), in that order.
+_LCARS_TARGET_RT="$(lcars_runtime_target_file)"
+echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$_LCARS_TARGET_RT" 2>/dev/null
+echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$_LCARS_TARGET_RT" 2>/dev/null
 
 # ============================================================================
 # Create iTerm2 tabs — each tab attaches to its tmux session
@@ -478,11 +515,20 @@ if [[ "$ITERM2_AVAILABLE" == "true" ]]; then
     if [[ -f "$LCARS_SETTER" ]]; then
         "$VENV_PYTHON" "$LCARS_SETTER" "http://localhost:$LCARS_PORT" 2>/dev/null
 
-        # Write target team for LCARS auto-redirect
-        if [[ -d "$AITEAMFORGE_DIR/lcars-ui" ]]; then
-            echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js"
-            echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js"
-        fi
+        # Write target team + session for LCARS auto-redirect.
+        # XACA-0798: destination is the RUNTIME file (~/.aiteamforge/lcars-target.js)
+        # via lcars_runtime_target_file — NOT $AITEAMFORGE_DIR/lcars-ui/, which is
+        # the com.aiteamforge.lcars-watch WatchPaths directory (a write there fires
+        # `aiteamforge restart lcars` and SIGTERMs every server.py on the box).
+        # The old `[[ -d "$AITEAMFORGE_DIR/lcars-ui" ]]` guard is gone with the
+        # path: the runtime file no longer lives under lcars-ui/, and the resolver
+        # mkdir -p's its own parent, so gating on lcars-ui/ would only ever skip a
+        # write that is now perfectly valid.
+        # TEAM truncates (`>`), SESSION appends (`>>`), in that order — the `>`
+        # is what keeps the file from growing one line per startup.
+        _LCARS_TARGET_RT="$(lcars_runtime_target_file)"
+        echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$_LCARS_TARGET_RT" 2>/dev/null
+        echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$_LCARS_TARGET_RT" 2>/dev/null
 
         echo "  Opening LCARS kanban in iTerm2 tab..."
         _lcars_tab_err=$( "$VENV_PYTHON" "$WM" \

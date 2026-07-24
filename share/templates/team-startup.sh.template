@@ -381,8 +381,10 @@ LCARS_SERVER_LOG="${LCARS_LOG_DIR}/lcars-server-${TEAM_ID}.log"
 # source of truth also used by the dev *-startup.sh scripts and `aiteamforge
 # start` (XACA-0562). It pkills any stale server, captures the server PID and
 # short-circuits on a crash with the log tail, polls for 15s, size-rotates the
-# log, and writes window.LCARS_TARGET_TEAM to lcars-ui/lcars-target.js. Soft-fail
-# is preserved: startup continues regardless of the return so the tabs still open.
+# log, and writes window.LCARS_TARGET_TEAM to the RUNTIME router-target file
+# (XACA-0798: ~/.aiteamforge/lcars-target.js, NOT lcars-ui/lcars-target.js).
+# Soft-fail is preserved: startup continues regardless of the return so the tabs
+# still open.
 #
 # Hand the helper the interpreter this template already resolved ($VENV_PYTHON,
 # from $HOME/.aiteamforge/venv / $AITEAMFORGE_DIR/.venv) so the server launches
@@ -396,12 +398,48 @@ LCARS_SERVER_LOG="${LCARS_LOG_DIR}/lcars-server-${TEAM_ID}.log"
 # warns loudly if team-paths.json diverges from the DEFAULT_TEAMS canonical.
 export LCARS_PYTHON="$VENV_PYTHON"
 source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh"
+
+# Fallback stub (XACA-0798): same guarded-source contract used by the dev
+# medical/legal startup scripts. If the sourced helper predates XACA-0798 and
+# does not define the resolver, resolve the path INLINE — never degrade back to
+# lcars-ui/. lcars-ui/ is the com.aiteamforge.lcars-watch WatchPaths directory:
+# any content change there fires `aiteamforge restart lcars`, which SIGTERMs
+# every server.py on the box, including the one started microseconds earlier.
+# Keep this body byte-identical to lcars_runtime_target_file() in
+# scripts/lcars-launch-helpers.sh — scripts/tests/test-xaca-0798-runtime-target-parity.sh
+# fails the build if any definition drifts on env-var name or default path.
+if ! command -v lcars_runtime_target_file >/dev/null 2>&1; then
+    lcars_runtime_target_file() {
+        local _f="${LCARS_TARGET_RUNTIME_FILE:-$HOME/.aiteamforge/lcars-target.js}"
+        local _d="${_f%/*}"
+        [[ "$_d" != "$_f" ]] && mkdir -p "$_d" 2>/dev/null
+        printf '%s\n' "$_f"
+        return 0
+    }
+fi
+
 start_lcars_server "$TEAM_ID" "$LCARS_PORT" "${TEAM_ID}-lcars" || true
 
-# start_lcars_server truncates lcars-target.js to just LCARS_TARGET_TEAM; re-append
-# LCARS_TARGET_SESSION (consumed by redirect.html) so the inline browser targets
-# this team's LCARS session.
-echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$AITEAMFORGE_DIR/lcars-ui/lcars-target.js" 2>/dev/null
+# XACA-0798: write BOTH router-redirect lines to the SAME runtime file that
+# start_lcars_server just wrote — ~/.aiteamforge/lcars-target.js.
+#
+# Two regressions this shape prevents, both introduced the moment
+# start_lcars_server stopped writing lcars-ui/lcars-target.js:
+#   1. SESSION going dark. The old code appended SESSION to
+#      lcars-ui/lcars-target.js while TEAM went to the runtime file. Different
+#      files; the /lcars-target.js route prefers the runtime one, so
+#      window.LCARS_TARGET_SESSION (read at redirect.html) was never delivered.
+#   2. Unbounded growth + a watcher fire per startup. Truncation used to come
+#      from start_lcars_server's `>` on that file. Nothing truncated
+#      lcars-ui/lcars-target.js any more, so a bare `>>` grew it by one line
+#      every startup forever — and EACH append re-tripped lcars-watch.
+#
+# TEAM truncates (`>`), SESSION appends (`>>`), in that order. Writing TEAM here
+# rather than relying on start_lcars_server's write also makes the pair atomic
+# with respect to LCARS_SKIP_TARGET_WRITE and to helper version skew.
+_LCARS_TARGET_RT="$(lcars_runtime_target_file)"
+echo "window.LCARS_TARGET_TEAM = '${TEAM_ID}';" > "$_LCARS_TARGET_RT" 2>/dev/null
+echo "window.LCARS_TARGET_SESSION = '${TEAM_ID}-lcars';" >> "$_LCARS_TARGET_RT" 2>/dev/null
 
 # ============================================================================
 # Create iTerm2 tabs
