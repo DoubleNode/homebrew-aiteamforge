@@ -67,19 +67,42 @@
 #    never re-synced by any startup path. The 8427 stale cksum residue on M1Pro
 #    is the canonical example — a single startup now self-heals it permanently.
 #
-# 2. team-paths.json vs DEFAULT_TEAMS canonical (WARN-ONLY):
-#    Invokes aiteamforge_paths.py to compare the team-paths.json port (which
-#    resolve_lcars_port already used as <port>) against DEFAULT_TEAMS canonical.
-#    If they differ, a loud actionable warning is emitted pointing the operator
-#    at "kb-port-reconcile --prefer canonical <team>". We do NOT auto-correct
-#    team-paths.json here: that file is written by the installer's allocator, and
-#    rewriting it mid-startup could fight a concurrent install or mask a real
-#    collision that the operator needs to consciously resolve. The .port rewrite
-#    (check 1) is the sufficient, safe self-heal for connectivity; team-paths
-#    drift is a secondary issue that requires informed operator action.
+# 2. team-paths.json port vs its allocated port BAND (WARN-ONLY):
+#    ~/.aiteamforge/team-paths.json is the AUTHORITATIVE port registry — this
+#    is kb-port-reconcile's own default precedence (`--prefer team-paths`,
+#    see that script's "AUTHORITY / PRECEDENCE" header) and is reaffirmed by
+#    XACA-0792. DEFAULT_TEAMS in aiteamforge_paths.py is an explicitly
+#    DEPRECATED (XACA-0463) band-base fallback, NOT a canonical value to
+#    reconcile team-paths.json toward — treating it as such gets the
+#    authority backwards (see Check 1 above, which already self-heals the
+#    .port file TO the team-paths value; Check 2 must agree with it, not
+#    contradict it).
+#
+#    The XACA-0463 band allocator (compute_instance_port) hands each team a
+#    port band [lcars_port_base, lcars_port_base + lcars_port_range) and
+#    assigns the lowest FREE port in that band — so an allocated port that
+#    differs from the band's base value (e.g. finance-personal at 8361 when
+#    its band base is 8360) is a CORRECT allocation, not drift. This check
+#    invokes aiteamforge_paths.py's _resolve_template_band() to determine the
+#    team's band and warns ONLY when the resolved port falls genuinely
+#    outside it (a real misallocation), or when no band is declared and the
+#    port differs from the DEFAULT_TEAMS fallback, or when the resolved port
+#    itself is missing/non-numeric. A port inside its declared band is
+#    silent — no warning. The remediation text points at
+#    "kb-port-reconcile --check --team <team>" (read-only diagnostic showing
+#    the three-way comparison table); it deliberately does NOT suggest
+#    "--prefer canonical", which flips authority to the deprecated
+#    DEFAULT_TEAMS side and is reserved for the narrow XACA-0626 case where
+#    team-paths.json itself is the genuinely drifted source. We do NOT
+#    auto-correct team-paths.json here: that file is written by the
+#    installer's allocator, and rewriting it mid-startup could fight a
+#    concurrent install or mask a real collision that the operator needs to
+#    consciously resolve. The .port rewrite (check 1) is the sufficient,
+#    safe self-heal for connectivity; team-paths band drift is a secondary
+#    issue that requires informed operator action.
 #
 # Defensive contract: any failure in this guard (missing files, Python errors,
-# unresolvable canonical) emits a stderr warning and returns 0 — the guard
+# unresolvable band) emits a stderr warning and returns 0 — the guard
 # NEVER aborts the startup. A broken guard is worse than no guard.
 #
 # Shell compatibility: #!/bin/zsh (macOS system zsh). No bashisms beyond what
@@ -130,35 +153,89 @@ _lcars_port_drift_guard() {
     fi
 
     # ------------------------------------------------------------------
-    # Check 2: team-paths.json port vs DEFAULT_TEAMS canonical (WARN-ONLY)
-    #
-    # resolve_lcars_port (called by the template before start_lcars_server)
-    # already prefers the team-paths.json overlay, so _guard_port == the
-    # team-paths value. Here we fetch the DEFAULT_TEAMS canonical and compare.
-    # A mismatch means the installer's allocator produced a +1 drift (self-
-    # collision) — the operator must run kb-port-reconcile to correct it.
+    # Check 2: team-paths.json port vs the team's allocated port BAND
+    # (WARN-ONLY; team-paths.json is the authoritative registry — see the
+    # function header above). Silent when the resolved port falls inside
+    # its declared band; that is a correct XACA-0463 allocation, not drift.
     # ------------------------------------------------------------------
     if [[ ! -f "$_guard_ports_py" ]]; then
         # No Python module available (edge case: stripped install). Skip silently.
         return 0
     fi
 
+    # Defensive: the resolved port must be numeric before we do band
+    # arithmetic below. Missing/non-numeric means team-paths.json (or its
+    # resolver) produced something unusable — warn and bail, never abort.
+    if [[ ! "$_guard_port" =~ ^[0-9]+$ ]]; then
+        echo "  [port-drift-guard] WARNING: resolved port for '${_guard_team}' is missing or non-numeric ('${_guard_port}') — cannot verify band membership." >&2
+        echo "                     To correct: kb-port-reconcile --check --team ${_guard_team}" >&2
+        return 0
+    fi
+
     local _guard_py_dir
     _guard_py_dir="$(dirname "$_guard_ports_py")"
-    local _guard_default_port
-    _guard_default_port="$(python3 -c "
+    local _guard_check2_raw
+    _guard_check2_raw="$(python3 -c "
 import sys
 sys.path.insert(0, '${_guard_py_dir}')
 try:
-    from aiteamforge_paths import DEFAULT_TEAMS
-    entry = DEFAULT_TEAMS.get('${_guard_team}')
+    from aiteamforge_paths import DEFAULT_TEAMS, _resolve_template_band
+except Exception:
+    print('||')
+    sys.exit(0)
+
+team = '${_guard_team}'
+
+default_port = ''
+try:
+    entry = DEFAULT_TEAMS.get(team)
     if entry:
         p = entry.get('lcars_port')
-        if p: print(int(p))
+        if p:
+            default_port = str(int(p))
 except Exception:
     pass
+
+band_base = ''
+band_range = ''
+try:
+    base, rng = _resolve_template_band(team)
+    band_base = str(int(base))
+    band_range = str(int(rng))
+except Exception:
+    pass
+
+print(default_port + '|' + band_base + '|' + band_range)
 " 2>/dev/null)"
 
+    # Parse the pipe-delimited '<default_port>|<band_base>|<band_range>'
+    # triple with plain parameter expansion (no external process, works
+    # identically under bash and zsh).
+    local _guard_default_port="${_guard_check2_raw%%|*}"
+    local _guard_rest="${_guard_check2_raw#*|}"
+    local _guard_band_base="${_guard_rest%%|*}"
+    local _guard_band_range="${_guard_rest#*|}"
+
+    if [[ -n "$_guard_band_base" && -n "$_guard_band_range" \
+          && "$_guard_band_base" =~ ^[0-9]+$ && "$_guard_band_range" =~ ^[0-9]+$ ]]; then
+        # Band resolved. Half-open interval [base, base+range) — matches
+        # compute_instance_port's own semantics in aiteamforge_paths.py.
+        local _guard_band_end=$(( _guard_band_base + _guard_band_range ))
+        if (( _guard_port >= _guard_band_base && _guard_port < _guard_band_end )); then
+            # Inside the allocated band: a legal XACA-0463 allocation
+            # (the allocator hands out the next free port up when the base
+            # is occupied), not drift. Stay silent.
+            return 0
+        fi
+        echo "  [port-drift-guard] WARNING: team-paths.json port for '${_guard_team}' is ${_guard_port}, which is OUTSIDE its allocated band [${_guard_band_base}, ${_guard_band_end}) (i.e. ports ${_guard_band_base}-$(( _guard_band_end - 1 )))." >&2
+        echo "                     To correct: kb-port-reconcile --check --team ${_guard_team}" >&2
+        return 0
+    fi
+
+    # Band unresolvable (no band declared for this team/template) — fall
+    # back to a rough sanity check against the deprecated DEFAULT_TEAMS
+    # value, same shape as historical behavior, with authority-corrected
+    # remediation text.
     if [[ -n "$_guard_default_port" && "$_guard_port" != "$_guard_default_port" ]]; then
         local _guard_drift=$(( _guard_port - _guard_default_port ))
         local _guard_drift_str
@@ -167,8 +244,9 @@ except Exception:
         else
             _guard_drift_str="${_guard_drift}"
         fi
-        echo "  [port-drift-guard] WARNING: team-paths.json port for '${_guard_team}' is ${_guard_port} but DEFAULT_TEAMS canonical is ${_guard_default_port} (drift: ${_guard_drift_str})." >&2
-        echo "                     To correct: kb-port-reconcile --prefer canonical ${_guard_team}" >&2
+        echo "  [port-drift-guard] WARNING: no port band is declared for team '${_guard_team}', so its port cannot be range-checked." >&2
+        echo "                     team-paths.json port is ${_guard_port}; DEFAULT_TEAMS fallback value is ${_guard_default_port} (delta: ${_guard_drift_str})." >&2
+        echo "                     To correct: kb-port-reconcile --check --team ${_guard_team}" >&2
     fi
 
     return 0
