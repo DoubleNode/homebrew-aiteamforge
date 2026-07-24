@@ -434,6 +434,16 @@ start_lcars() {
         print_info "Restoring LCARS for '${_rteam}' (was serving on port ${_rport} before restart)"
       fi
     done
+
+    # XACA-0799-011: consume ONCE, then unset. The variable is exported by the
+    # restart dispatcher, so without this it leaks down the entire process tree —
+    # and start.sh's own run_first_launch_preflight() invokes aiteamforge-doctor.sh,
+    # whose remediation path runs `aiteamforge start kanban`. That nested STANDALONE
+    # start would inherit the snapshot and perform its own restore union, resurrecting
+    # teams outside any restart. That is precisely the "a standalone start reverses a
+    # deliberate stop" failure mode for which the disk-manifest design was rejected;
+    # leaving the export live would have reintroduced it through the back door.
+    unset AITEAMFORGE_RESTORE_LCARS_PORTS
   fi
 
   # Empty-check runs AFTER the union: a box with no configured teams but live

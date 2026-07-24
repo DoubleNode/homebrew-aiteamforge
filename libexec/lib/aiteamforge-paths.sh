@@ -571,9 +571,10 @@ aiteamforge_team_from_code() {
 # maps them back to team ids here so start can bring back exactly what stop
 # reaped (stop is kill-all by design; start only covers configured teams).
 #
-# Deliberately implemented as a scan over aiteamforge_list_teams +
-# aiteamforge_team_lcars_port rather than an independent jq query: it MUST
-# round-trip exactly with the forward lookup that start_lcars() uses. A separate
+# Delegates to aiteamforge_lcars_port_team_map(): an independent jq query over
+# the config PLUS a forward-lookup fill for whatever jq misses. That fill is what
+# preserves the round-trip invariant with the forward lookup start_lcars() uses —
+# jq alone sees a strictly narrower set (XACA-0799-010). A separate
 # query could disagree with the forward path on config-vs-baked-in-defaults
 # precedence or null-port handling, and would then hand start a team/port pair
 # the forward lookup never actually assigns — resurrecting a server on the wrong
@@ -601,12 +602,13 @@ aiteamforge_team_for_lcars_port() {
 # aiteamforge_team_lcars_port per team — two jq forks per probe, repeated for
 # EVERY port. At 15 teams x 8 ports that measured 1.35s added to the restart
 # path, sitting directly in front of a teardown that lcars-watch fires on every
-# lcars-ui change. This builds the whole map in ONE jq pass and memoizes it, so a
-# batch of lookups costs one fork instead of O(ports x teams).
+# lcars-ui change. This builds the whole map in ONE jq pass, so a batch of probes
+# costs one fork instead of O(ports x teams); callers hold the map and probe it
+# fork-free via aiteamforge_team_for_lcars_port_in_map().
 #
-# The cache key includes the config path AND its mtime, so a test (or a live
-# port reconcile) that rewrites team-paths.json is picked up rather than served
-# stale — a plain path-keyed cache would hand back a pre-reconcile map.
+# NOT memoized. An in-function cache was tried and deleted: every caller invokes
+# this through $( ... ), a SUBSHELL, so the cache never survived back to the
+# parent and was dead code that merely looked like an optimisation.
 #
 # READ-ONLY by construction: it reads the config file directly and returns empty
 # when absent. The old per-team path went through aiteamforge_team_lcars_port,
@@ -629,6 +631,33 @@ aiteamforge_lcars_port_team_map() {
             | select(.value.lcars_port != null and .value.lcars_port != "")
             | "\(.value.lcars_port)\t\(.key)"
         ' "$config_path" 2>/dev/null)
+
+        # XACA-0799-010: the jq pass sees ONLY teams carrying a non-null
+        # lcars_port in team-paths.json, but the FORWARD lookup
+        # (aiteamforge_team_lcars_port) falls back to
+        # _AITEAMFORGE_DEFAULT_TEAMS_DATA. A team with a null port, or absent from
+        # the config entirely, therefore resolves FORWARD while being invisible to
+        # this reverse map — its live port would hit "no team owns it, not
+        # restoring" and the team would be silently dropped from a restart. That
+        # breaks the round-trip invariant the reverse lookup's contract asserts.
+        # Fill the gap through the forward lookup, but ONLY for teams jq missed, so
+        # the common case (every team carries an explicit port) still costs one fork.
+        local _known _t _fp
+        _known=$(printf '%s\n' "$map" | cut -f2)
+        while IFS= read -r _t; do
+            [ -z "$_t" ] && continue
+            case "
+$_known
+" in
+                *"
+$_t
+"*) continue ;;
+            esac
+            _fp=$(aiteamforge_team_lcars_port "$_t" 2>/dev/null) || continue
+            [ -z "$_fp" ] && continue
+            map="${map}
+${_fp}	${_t}"
+        done < <( { aiteamforge_list_teams; _AITEAMFORGE_DEFAULT_TEAMS_DATA | cut -f1; } 2>/dev/null | sort -u )
     else
         # No jq — fall back to the per-team scan. Slower, but correctness first.
         local team port

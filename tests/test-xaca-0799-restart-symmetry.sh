@@ -286,14 +286,14 @@ _CONFIGURED="finance-personal"
 _RUNNING_PORTS="8180 8203 8234 8240 8260 8280 8320 8361"
 
 _delta=""
-for _p in $_RUNNING_PORTS; do
+while IFS= read -r _p; do
     _t=$(aiteamforge_team_for_lcars_port "$_p" 2>/dev/null || true)
     [ -z "$_t" ] && continue
     case " $_CONFIGURED " in
         *" $_t "*) : ;;                       # already configured — start covers it
         *) _delta="$_delta $_t" ;;            # would have been lost by a restart
     esac
-done
+done < <(printf '%s\n' "$_RUNNING_PORTS" | tr ' ' '\n')
 _delta="${_delta# }"
 
 assert_not_empty "$_delta" "expected teams outside the configured set, got none" \
@@ -309,9 +309,19 @@ assert_not_empty "$_delta" "expected teams outside the configured set, got none"
 # Ordering IS the fix. Snapshotting after stop.sh has run returns an empty set,
 # which restores nothing while looking entirely correct in a diff.
 test_start "XACA-0799 Case 6: restart snapshots running ports before invoking stop"
-cli_src=$(cat "$CLI_CMD")
-_snap_line=$(grep -n "aiteamforge_lcars_running_ports" "$CLI_CMD" | head -1 | cut -d: -f1)
-_stop_line=$(grep -n "aiteamforge-stop.sh" "$CLI_CMD" | tail -1 | cut -d: -f1)
+# XACA-0799-007: the first cut anchored on `grep -n aiteamforge-stop.sh | tail -1`
+# — the LAST match anywhere in the file. Mutation-proven defeatable: moving the
+# snapshot AFTER the teardown and appending a trailing comment that mentions the
+# path pushed the anchor past it and the guard went green with the exact
+# regression it exists to catch fully present. Anchor instead on the FIRST stop.sh
+# invocation at or after the `restart)` case label, which is the one the restart
+# path actually executes.
+_restart_line=$(grep -n '^[[:space:]]*restart)' "$CLI_CMD" | head -1 | cut -d: -f1)
+_snap_line=$(awk -v s="${_restart_line:-1}" 'NR>=s && /aiteamforge_lcars_running_ports/ {print NR; exit}' "$CLI_CMD")
+_stop_line=$(awk -v s="${_restart_line:-1}" 'NR>=s && /aiteamforge-stop\.sh/ {print NR; exit}' "$CLI_CMD")
+if [ -z "$_restart_line" ]; then
+  _snap_line=""; _stop_line=""   # no restart case found -> fail loudly below
+fi
 if [ -z "$_snap_line" ] || [ -z "$_stop_line" ]; then
     test_fail "could not locate snapshot ('$_snap_line') and/or stop invocation ('$_stop_line') in $CLI_CMD"
 elif [ "$_snap_line" -lt "$_stop_line" ]; then
@@ -324,7 +334,12 @@ fi
 # Case 7 — start_lcars must consume the restore set
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "XACA-0799 Case 7: start consumes AITEAMFORGE_RESTORE_LCARS_PORTS"
-start_src=$(cat "$START_CMD")
+# XACA-0799-013: strip comments first. Both needles appear in start.sh's own
+# explanatory comments, so a start.sh carrying ONLY the comments — with every line
+# of restore logic deleted — passed this case. Case 11's negative control does not
+# rescue it: that control strips every line mentioning the needles, so it cannot
+# distinguish code from prose either.
+start_src=$(grep -vE '^[[:space:]]*#' "$START_CMD")
 assert_contains "$start_src" "AITEAMFORGE_RESTORE_LCARS_PORTS" \
     && assert_contains "$start_src" "aiteamforge_team_for_lcars_port" \
     && test_pass
@@ -535,11 +550,91 @@ _pats=$(grep -rhoE '(pgrep|pkill) -f "server\\\.py \[0-9\]"' \
           "$COMMON_LIB" 2>/dev/null \
         | sed -E 's/^(pgrep|pkill) -f //' | sort -u)
 _n=$(printf '%s\n' "$_pats" | grep -c . || true)
+# XACA-0799-008: a set-size check alone only catches a DIVERGENT-but-still-matching
+# spelling. It cannot see a site that drops OUT of the grep entirely — widening
+# common.sh's capture matcher to a port-less `pgrep -f "server\.py"` (the exact
+# violation its own CONTRACT comment forbids) removed it from the result set and
+# left size 1, so the guard passed. Require each named file to contribute at least
+# one match, so disappearing is a failure rather than a silent pass.
+_floor_ok=true
+_floor_msg=""
+for _f in "$TAP_ROOT/libexec/commands/aiteamforge-stop.sh" \
+          "$TAP_ROOT/libexec/commands/aiteamforge-uninstall.sh" \
+          "$TAP_ROOT/libexec/commands/aiteamforge-migrate.sh" \
+          "$COMMON_LIB"; do
+  _c=$(grep -cE '(pgrep|pkill) -f "server\\.py \[0-9\]"' "$_f" 2>/dev/null || true)
+  if [ "${_c:-0}" -lt 1 ]; then
+    _floor_ok=false
+    _floor_msg="$(basename "$_f") contributes 0 matches — it dropped out of the family"
+    break
+  fi
+done
 if [ "${_n:-0}" -eq 0 ]; then
   test_fail "extracted no matchers at all — the grep is broken, not the code"
+elif [ "$_floor_ok" != true ]; then
+  test_fail "$_floor_msg"
 else
   assert_equal "1" "$_n" \
     "kill/capture sites disagree; found: $(printf '%s' "$_pats" | tr '\n' ' ')" \
+    && test_pass
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 16 — the fail-soft degrade contract (XACA-0799-012)
+# ═══════════════════════════════════════════════════════════════════════════
+# The PR's central safety claim is that with AITEAMFORGE_RESTORE_LCARS_PORTS
+# unset, start behaves byte-for-byte as before, and that the mechanism can only
+# ever ADD teams. Nothing asserted it — every other case exercises the restore
+# path. The degrade rests on two mechanisms, both pinned here.
+
+test_start "XACA-0799 Case 16a: whitespace-only restore var yields ZERO ports"
+# The guard is `[ -n "${VAR:-}" ]`, which is TRUE for "   " — so a whitespace
+# value ENTERS the restore block. The degrade then depends entirely on read -ra
+# producing an empty array. Pin that, or a future refactor to a different split
+# silently starts iterating a bogus single empty element.
+_wsA=(); read -ra _wsA <<< "   "
+_wsB=(); read -ra _wsB <<< ""
+assert_equal "0" "${#_wsA[@]}" \
+  && assert_equal "0" "${#_wsB[@]}" \
+  && test_pass
+
+test_start "XACA-0799 Case 16b: the restore block is guarded on the variable"
+_sc16=$(grep -vE '^[[:space:]]*#' "$START_CMD")
+assert_contains "$_sc16" 'if [ -n "${AITEAMFORGE_RESTORE_LCARS_PORTS:-}" ]; then' \
+  && test_pass
+
+test_start "XACA-0799 Case 16c: start UNSETS the variable after consuming it"
+# XACA-0799-011: the dispatcher EXPORTS it, so without an unset it leaks down the
+# whole process tree — and start.sh's own preflight invokes aiteamforge-doctor.sh,
+# whose remediation runs `aiteamforge start kanban`. That nested STANDALONE start
+# would inherit the snapshot and restore teams outside any restart: exactly the
+# failure mode for which the disk-manifest design was rejected.
+assert_contains "$_sc16" "unset AITEAMFORGE_RESTORE_LCARS_PORTS" \
+  && test_pass
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Case 17 — reverse map must cover the same set as the forward lookup
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0799-010. The jq fast path reads team-paths.json only, but the FORWARD
+# lookup falls back to _AITEAMFORGE_DEFAULT_TEAMS_DATA. A team absent from the
+# config therefore resolved FORWARD while being invisible to the REVERSE map, so
+# its live port hit "no team owns it" and the team was silently dropped from a
+# restart. The original fixture gave every team an explicit port, so no case could
+# see it.
+test_start "XACA-0799 Case 17: a config-absent team still round-trips"
+_c17=$(mktemp -d)
+cat > "$_c17/team-paths.json" <<'EOF'
+{"schema_version": 2, "teams": {"academy": {"team_code": "ACA", "lcars_port": 8240}}}
+EOF
+_c17_fwd=$(AITEAMFORGE_CONFIG="$_c17/team-paths.json" aiteamforge_team_lcars_port ios 2>/dev/null || true)
+_c17_map=$(AITEAMFORGE_CONFIG="$_c17/team-paths.json" aiteamforge_lcars_port_team_map 2>/dev/null || true)
+_c17_rev=$(AITEAMFORGE_CONFIG="$_c17/team-paths.json" \
+             aiteamforge_team_for_lcars_port_in_map "$_c17_fwd" "$_c17_map" 2>/dev/null || true)
+if [ -z "$_c17_fwd" ]; then
+  test_fail "fixture invalid: 'ios' does not resolve forward, so nothing is being tested"
+else
+  assert_equal "ios" "$_c17_rev" \
+    "forward resolved ios -> ${_c17_fwd} but the reverse map does not own that port" \
     && test_pass
 fi
 
