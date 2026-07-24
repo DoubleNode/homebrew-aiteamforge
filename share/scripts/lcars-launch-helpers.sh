@@ -48,6 +48,59 @@
 # suppression and logs errors loudly so they are actionable.
 
 # ---------------------------------------------------------------------------
+# lcars_runtime_target_file
+#
+# XACA-0798: THE single canonical location of the RUNTIME router-redirect file.
+#
+# Prints the absolute path every runtime writer must use, and guarantees the
+# parent directory exists so no call site has to remember its own `mkdir -p`.
+#
+# WHY THIS FILE MOVED OUT OF lcars-ui/
+#   The `com.aiteamforge.lcars-watch` LaunchAgent sets WatchPaths on
+#   $AITEAMFORGE_DIR/lcars-ui and fires `aiteamforge restart lcars` on ANY
+#   content change under that directory. `start_lcars_server` used to write
+#   lcars-target.js INTO that exact directory on every team startup — so every
+#   startup tripped the watcher, which SIGTERM'd every server.py on the box,
+#   including the one the startup script had launched ~5 seconds earlier
+#   (observed `wait` status 143). The 300s lcars-health tick healed it later,
+#   and the whole cycle repeated on the NEXT startup. A runtime-mutable file
+#   must not live inside a directory that is watched for content changes.
+#
+#   XACA-0763-004 dodged the same trap on the health-check path with
+#   LCARS_SKIP_TARGET_WRITE=1. That escape hatch is NOT the fix here: the
+#   startup path legitimately needs to write the target. Moving the file is.
+#
+# PRECEDENCE (unchanged for the browser; see server.py::serve_lcars_target):
+#   1. shipped static default   lcars-ui/lcars-target.js   (install-time only)
+#   2. runtime auto file        THIS path                  (startup writes it)
+#   3. manual per-machine       ~/.aiteamforge/lcars-target.local.js  (wins)
+#   (2) shadows (1) at the /lcars-target.js route; (3) is a SEPARATE chained
+#   script load and still wins last. Never auto-write (3) — it is a documented
+#   deliberate developer override (XACA-0301) and clobbering it destroys work.
+#
+# PATH CHOICE: ~/.aiteamforge/ — the same directory that already holds the
+# manual override, team-paths.json and run/. It is keyed to $HOME (NOT to
+# $AITEAMFORGE_DIR) deliberately, so it matches server.py's `Path.home()`
+# resolution of the sibling .local.js file exactly.
+#
+# LCARS_TARGET_RUNTIME_FILE overrides the path. It exists for TESTS (so a
+# regression suite never mutates the operator's real cockpit target) and is
+# read by BOTH this helper and server.py, so an override keeps writer and
+# reader in agreement. Nothing in production sets it.
+# ---------------------------------------------------------------------------
+lcars_runtime_target_file() {
+    local _f="${LCARS_TARGET_RUNTIME_FILE:-$HOME/.aiteamforge/lcars-target.js}"
+    # Parent dir via POSIX suffix-strip, NOT zsh's `${_f:h}` modifier — this
+    # helper is also sourced from bash contexts (feedback_zsh_colon_modifier_path).
+    # Best-effort: never abort a startup because the dir could not be made;
+    # the caller's redirect (`>`) will surface the real error if it matters.
+    local _d="${_f%/*}"
+    [[ "$_d" != "$_f" ]] && mkdir -p "$_d" 2>/dev/null
+    printf '%s\n' "$_f"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # _lcars_port_drift_guard <team> <port> <session_name> <atf_base>
 #
 # XACA-0626 startup-time port drift guard.
@@ -730,6 +783,14 @@ start_lcars_server() {
     # Write the router redirect so the UI knows which team dashboard to show.
     # This must happen BEFORE the server starts; the file is read on first load.
     #
+    # XACA-0798: the destination is lcars_runtime_target_file() —
+    # ~/.aiteamforge/lcars-target.js — NOT ${lcars_ui_dir}/lcars-target.js.
+    # lcars-ui/ is the com.aiteamforge.lcars-watch WatchPaths directory, so
+    # writing there made every team startup fire `aiteamforge restart lcars`,
+    # which SIGTERM'd the server this very function had just launched. See the
+    # helper's header for the full rationale. lcars-ui/lcars-target.js is now
+    # an install-time-only shipped default and is NEVER written at runtime.
+    #
     # XACA-0763 (004): suppressible via LCARS_SKIP_TARGET_WRITE=1. The direct
     # callers of start_lcars_server (team-startup.sh, restart_team_lcars) are
     # the user opening/refreshing exactly THAT team's LCARS tab, so the write
@@ -742,7 +803,7 @@ start_lcars_server() {
     # wrapper sets this (via a `local` — dynamically scoped, visible here for
     # the duration of its call only) to suppress that side effect.
     if [[ "${LCARS_SKIP_TARGET_WRITE:-0}" != "1" ]]; then
-        echo "window.LCARS_TARGET_TEAM = '${team}';" > "${lcars_ui_dir}/lcars-target.js"
+        echo "window.LCARS_TARGET_TEAM = '${team}';" > "$(lcars_runtime_target_file)"
     fi
 
     # Kill any stale server process on this port. Stale processes are normal
