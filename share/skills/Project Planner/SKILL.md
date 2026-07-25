@@ -325,10 +325,34 @@ If a parent exists, **attach** the new work to it (`kb-epic add-item` / `/releas
 2. Identify files that will need modification
 3. Understand current architecture patterns
 4. Note dependencies and integration points
+5. **Ground every count and inventory against the filesystem** (see below)
 
-**Tools to use:** Glob, Grep, Read, Task (with Explore agent)
+**Tools to use:** Glob, Grep, Read, Bash (read-only counting only — `find`/`ls`/`wc`), Task (with Explore agent)
 
 **Tools NOT to use:** Edit, Write (for code), Bash (for builds/tests)
+
+**⚠️ MANDATORY: Count it, don't assert it**
+
+Every quantity that reaches the plan document — how many files, personas, skills, call sites, teams, config surfaces — MUST come from a command you actually ran, not from a prior document, a ticket description, or recall.
+
+```bash
+# Right: the number comes from the filesystem
+find .claude/agents-master -name '*.md' | wc -l
+find skills -name SKILL.md | wc -l
+grep -rl "<pattern>" <dir> | wc -l
+```
+
+Then state the number **and** how you got it, so a reader can re-run it:
+
+> 69 personas (`find .claude/agents-master -name '*.md' | wc -l`)
+
+**Why this is mandatory.** An asserted count is a *grounding* failure, not a reasoning failure — it is not fixed by more thinking or a bigger model, only by looking. It is also self-concealing: a plausible number attracts no scrutiny, propagates into subitems, verification checklists, and the docs those subitems rewrite, and surfaces only when someone finally counts.
+
+Real case (XACA-0867, 2026-07-25): a plan document asserted "16 skills" in four places — **including its own verification checklist** — when the filesystem had 15. The checklist could never have caught it, because it was written from the same unverified number it was meant to check. The plan's stated purpose was to fix stale counts in a document; left unchecked it would have replaced an old wrong number with a new one.
+
+**Corollary — a checklist item must not restate the number it verifies.** Write "counts in the doc match `find ... | wc -l` output", not "counts are 16". A check that inherits the assumption it is testing cannot fail.
+
+**When a source document disagrees with the filesystem, the filesystem wins** — and say so explicitly in the plan, naming the stale source, so the error is corrected rather than silently carried forward.
 
 ### Phase 3: Kanban Item Creation
 

@@ -7,6 +7,24 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Chore: XACA-0867 — Project Planner grounding rule ported to the tap skill mirror
+
+Ports the "Count it, don't assert it" rule (dev-team XACA-0867) into the tap-mirrored
+`share/skills/Project Planner/SKILL.md`, keeping it in sync with the canonical `skills/` copy:
+
+- Phase 2 (Codebase Research) now requires every count or inventory reaching a plan document to
+  come from a command actually run (`find ... | wc -l`), stated together with the command so a
+  reader can re-run it — never asserted from a source document or from recall.
+- Adds the corollary that a verification checklist must not restate the number it verifies: a
+  check written from the same unverified number it is meant to test cannot fail.
+- Adds the rule that when a source document disagrees with the filesystem, the filesystem wins,
+  and the stale source must be named so the error is corrected rather than carried forward.
+
+Motivating case: the XACA-0867 plan document asserted "16 skills" in four places — including its
+own verification checklist — when the filesystem had 15, in a plan whose stated purpose was
+fixing stale counts. This is a grounding failure rather than a reasoning-depth failure: it is not
+fixed by a larger model, only by looking.
+
 ### Chore: XACA-0867 — Q3 model-tier reassessment: persona `model:`/`effort:` frontmatter sync
 
 Ports the Q3 tier-review frontmatter decisions (dev-team XACA-0867-002/003) into the tap-mirrored
