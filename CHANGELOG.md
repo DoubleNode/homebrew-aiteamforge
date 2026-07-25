@@ -73,6 +73,58 @@ the worst possible place to put one.
 Comment provenance lines referencing the dev-machine master directory were genericized in the tap copies;
 the code is otherwise byte-identical to canonical, which is what the parity gates require.
 
+### Fix: XACA-0846 — the duplicate-persona failure message sent consumers to files they do not have
+
+Follow-up to the port above, from PR #726 review. The ported `kb-knowledge-validate` failure message
+told the reader to add an allow-list entry "in `_kb_knowledge_persona_dup_pairs`, `kanban-helpers.sh`"
+and to justify it by naming "both `agents-master` persona files". On a tap install `agents-master` does
+not exist at all — it is a dev-machine-only checkout — so that citation is unsatisfiable.
+
+The `kanban-helpers.sh` reference was subtler and worse than a plain broken path: a file by that name
+**does** exist on a consumer, at `$AITEAMFORGE_DIR/kanban-helpers.sh`, so the instruction reads as
+perfectly actionable. Following it is futile — the installer rewrites that file from these very
+templates on the next upgrade, silently discarding the exemption. An instruction that appears to work,
+succeeds locally, and is then reverted without comment is harder to debug than one that fails outright.
+
+The guidance now states the actual contract: the allow-list ships as part of the installed helpers, a
+local edit is reverted on upgrade, and the exemption only persists if it lands in the AITeamForge
+source — with a concrete next step for each audience (change the source and re-sync, or report the pair
+upstream and leave both directories in place meanwhile). The wording is now identical in canonical and
+both tap copies, deliberately: that keeps the region under the existing **full-function** parity pin
+instead of demoting it to a weaker lines-only comparison to accommodate a per-copy divergence.
+
+Behaviour is unchanged — message text only. `_KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS` is still named
+verbatim (the bats suite greps for that constant) and
+`tests/bats/kb-knowledge-validate-duplicate-personas.bats` stays 27/27.
+
+Also restores two lines the port dropped from `kb-knowledge-validate`'s header `Checks:` block in both
+tap copies — the XACA-0802 duplicate-ID-slot check and the XACA-0842 duplicate-persona check. Both
+behaviours were ported correctly; only their documentation was left behind, so the shipped copies
+under-described what the validator actually enforces.
+
+### Fix: XACA-0846 — one stray persona directory produced two duplicate-persona FAIL lines
+
+`_kb_knowledge_persona_dup_pairs`'s heuristic pass hyphen-splits a stray directory name and tests
+every component against the allow-listed roster. A name like `thok-tuvok` splits into two components
+that BOTH sit on the roster (`thok` and `tuvok` are real, separately-defined personas — see the
+allow-list comment), so the old loop tested every component unconditionally and printed a FAIL line
+for each match: two accusations against one directory, one of them necessarily the wrong merge target.
+
+`_kb_kpd_emit` now reports whether it actually printed a finding (return 0) or suppressed one (return 1
+— same-name no-op, allow-listed exemption, or an identical pair already seen). The heuristic loop stops
+at the first component whose match is actually printed, trying components leftmost-first — the existing
+naming convention for these byline slugs already puts the primary name first, matching the disambiguating
+comment already in the allow-list ("`thok-tuvok` ... really is a byline slug of `thok`"). A suppressed
+match (e.g. the first component happens to be allow-listed) does not stop the scan, so a stray that
+collides with two genuinely distinct canonical directories still surfaces its real duplicate — only the
+same stray being reported twice against two DIFFERENT canonical targets is collapsed.
+
+Verified with a throwaway fixture tree (not committed): a `reno-dup` stray still FAILS against `reno`, a
+`thok-tuvok` stray now yields exactly one FAIL line (against `thok`, previously two), and an allow-listed
+distinct pair (`janeway` / `janeway-me`) still does not fire. Wording, allow-list contents, and detection
+scope are otherwise unchanged; the fix is confined to `_kb_kpd_emit`'s return code and the heuristic
+loop's stop condition, identical across canonical and both tap copies.
+
 ### Fix: XACA-0846 — consumers' `kb-cr` silently vanished in every nested shell
 
 Mirrors the XACA-0852 canonical fix into `share/templates/kanban/kanban-helpers.template.sh`, the

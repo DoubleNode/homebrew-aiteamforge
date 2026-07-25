@@ -5307,23 +5307,46 @@ _kb_knowledge_persona_dup_pairs() {
     #
     # The direction is the detector's best guess, not a proven fact — the
     # rendered message says so, and the operator confirms before merging.
+    # Return code carries whether a finding was actually PRINTED (0) or
+    # suppressed (1 — same-name no-op, allow-listed exemption, or an
+    # already-emitted identical pair). Callers that walk MULTIPLE candidate
+    # matches for one stray directory (see the heuristic pass below) rely on
+    # this to know when to stop looking: a suppressed match means try the
+    # next candidate; a printed match means the stray already has its one
+    # finding for this run.
     _kb_kpd_emit() {
         local from="${1}" to="${2}" why="${3}" _lo _hi _swap
-        [[ "$from" == "$to" ]] && return 0
+        [[ "$from" == "$to" ]] && return 1
         _lo="$from"; _hi="$to"
         if [[ "$_lo" > "$_hi" ]]; then _swap="$_lo"; _lo="$_hi"; _hi="$_swap"; fi
         case "$_kb_kpd_allow" in
-            *$'\n'"${_lo}|${_hi}"$'\n'*) return 0 ;;
+            *$'\n'"${_lo}|${_hi}"$'\n'*) return 1 ;;
         esac
         case "$_kb_kpd_seen" in
-            *$'\n'"${_lo}|${_hi}"$'\n'*) return 0 ;;
+            *$'\n'"${_lo}|${_hi}"$'\n'*) return 1 ;;
         esac
         _kb_kpd_seen+="${_lo}|${_hi}"$'\n'
         printf '%s|%s|%s\n' "$from" "$to" "$why"
+        return 0
     }
 
     # 1. Heuristic pass — every hyphen-separated component of every hyphenated
     #    directory name, tested against the roster.
+    #
+    # ONE finding per stray directory (XACA-0846-010): a name like
+    # `thok-tuvok` hyphen-splits into two components that BOTH happen to sit
+    # on the roster (`thok` and `tuvok`), so without a stopping rule this pass
+    # would print two FAIL lines accusing one directory of duplicating two
+    # different canonical personas — noise, since only one is the real merge
+    # target. Components are tried leftmost-first (matching the existing
+    # naming convention that the byline's primary name comes first, e.g. the
+    # `thok-tuvok` comment above), and the loop stops at the first component
+    # whose match is ACTUALLY PRINTED. A component whose match is suppressed
+    # (already allow-listed, or an identical pair already seen) is not a
+    # finding, so the scan continues to the next component — a stray that
+    # collides with two genuinely distinct canonical directories still needs
+    # its real duplicate caught, not silently swallowed by the first,
+    # exempted candidate.
     local rest comp
     for d in "${_kb_kpd_dirs[@]}"; do
         case "$d" in
@@ -5334,7 +5357,7 @@ _kb_knowledge_persona_dup_pairs() {
         while :; do
             comp="${rest%%-*}"
             if [[ -n "$comp" && "$comp" != "$d" ]] && _kb_kpd_has "$comp"; then
-                _kb_kpd_emit "$d" "$comp" "heuristic: '${d}' looks like a display-byline slug of '${comp}'"
+                _kb_kpd_emit "$d" "$comp" "heuristic: '${d}' looks like a display-byline slug of '${comp}'" && break
             fi
             case "$rest" in
                 *-*) rest="${rest#*-}" ;;
@@ -5371,6 +5394,8 @@ _kb_knowledge_persona_dup_pairs() {
 #   - Files on disk match entries in INDEX.md (orphan detection)
 #   - Subject depth <= 4 levels
 #   - Filename prefix is lowercase
+#   - Duplicate ID slots within one tier dir (XACA-0802)
+#   - Duplicate persona directories under agents/ (XACA-0842) — FAILS, not warns
 kb-knowledge-validate() {
     setopt LOCAL_OPTIONS NO_NOMATCH
     local flag_quiet=false flag_fix=false
@@ -5729,11 +5754,17 @@ kb-knowledge-validate() {
                 entry-free directory is skipped by this check.
                 (then run: kb-knowledge-reindex && kb-knowledge-validate)
              2. Exempt — if '${dup_stray}' and '${dup_canon}' are genuinely DIFFERENT
-                personas, add \"${dup_stray}|${dup_canon}\" to the allow-list constant
-                _KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS (in _kb_knowledge_persona_dup_pairs,
-                kanban-helpers.sh) WITH a comment naming both agents-master
-                persona files that prove they are distinct. An entry without a
-                justification is not acceptable."
+                personas, they need a \"${dup_stray}|${dup_canon}\" entry in the
+                allow-list constant _KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS, which is
+                defined inside _kb_knowledge_persona_dup_pairs. That allow-list
+                ships as part of the installed helpers, so an edit to your local
+                copy is reverted by the next upgrade — the exemption only sticks
+                if it lands in the AITeamForge source. If you maintain that
+                source, change it there and re-sync; otherwise report the pair
+                upstream and leave both directories in place meanwhile. Either
+                way the entry MUST carry a justification naming the two persona
+                definitions that prove the ids are distinct — an entry without
+                one is not acceptable."
         done < <(_kb_knowledge_persona_dup_pairs "${dup_root}/agents")
     done
 
