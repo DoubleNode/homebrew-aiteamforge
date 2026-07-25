@@ -12638,7 +12638,7 @@ kb-epic() {
             else
                 _kb_jq_read "$board_file" '
                     (.epics[$idx].itemIds // []) as $ids |
-                    .backlog[] | select(.id as $id | $ids | index($id)) |
+                    (.backlog // [])[] | select(.id as $id | $ids | index($id)) |
                     "║   [\(.id)] \(.status | ascii_upcase | .[0:4]) \(.title)"
                 ' --argjson idx "$index" -r
             fi
@@ -12703,7 +12703,7 @@ kb-epic() {
                 .epics[$idx].itemIds += [$itemId] |
                 .epics[$idx].itemIds |= unique |
                 .epics[$idx].updatedAt = $ts |
-                (.backlog[] | select(.id == $itemId)).epicId = $epicId |
+                ((.backlog // [])[] | select(.id == $itemId)).epicId = $epicId |
                 .lastUpdated = $ts
             ' \
             --argjson idx "$epic_index" \
@@ -12742,7 +12742,7 @@ kb-epic() {
             _kb_jq_update "$board_file" '
                 .epics[$idx].itemIds -= [$itemId] |
                 .epics[$idx].updatedAt = $ts |
-                (.backlog[] | select(.id == $itemId)) |= del(.epicId) |
+                ((.backlog // [])[] | select(.id == $itemId)) |= del(.epicId) |
                 .lastUpdated = $ts
             ' \
             --argjson idx "$epic_index" \
@@ -12823,7 +12823,7 @@ kb-epic() {
             _kb_jq_update "$board_file" '
                 (.epics[$idx].itemIds // []) as $ids |
                 del(.epics[$idx]) |
-                (.backlog[] | select(.id as $id | $ids | index($id))) |= del(.epicId) |
+                ((.backlog // [])[] | select(.id as $id | $ids | index($id))) |= del(.epicId) |
                 .lastUpdated = $ts
             ' \
             --argjson idx "$epic_index" \
