@@ -10801,6 +10801,968 @@ kb-knowledge-promote() {
     echo "Suggested commit message:"
     echo "  promote: ${source_ref} → ${target_tier}:${target_path_part:+${target_path_part}:}${target_entry_id}"
 }
+# ─────────────────────────────────────────────────────────────────────────────
+# XACA-0842 — kb-knowledge-merge: LATERAL (same-tier) agent-dir consolidation
+#
+# WHY THIS EXISTS, AND WHY IT IS NOT kb-knowledge-promote
+# ~/knowledge/agents/ accumulated duplicate directories per persona (e.g.
+# `jett-reno` alongside `reno`), stranding ~55 entries that kb-knowledge-search
+# never surfaces. Consolidating them is a SAME-TIER move (agents → agents).
+# kb-knowledge-promote deliberately refuses exactly that: SPEC §7 makes
+# promotion strictly upward (agents 1 → project 2 → teams 3 → subjects 4) and
+# its rank guard hard-fails `target_rank <= source_rank`. That guard is CORRECT
+# and is left untouched — this is a separate, purpose-built sibling verb rather
+# than a weakening of the promotion contract.
+#
+# THE HARD PART IS NOT MOVING FILES — IT IS NOT ORPHANING REFERENCES.
+# Both directories number from k001, so every source entry must be renumbered
+# into the target's next free slots. Renumbering silently invalidates every
+# existing citation, so this function rewrites references across the WHOLE
+# knowledge base (all tiers + per-repo project knowledge + retrospectives).
+#
+# Reference-repair rules — deliberately conservative, because two classes of
+# false positive would be actively destructive:
+#
+#   1. `[[...]]` is NOT a safe blanket target. The knowledge base is full of
+#      shell snippets like `[[ -d "$WORKTREE_ROOT/homebrew-tap/share" ]]` and
+#      `[[ $# -gt 0 ]]` (9+ real occurrences). The matcher therefore requires
+#      an id token IMMEDIATELY after `[[` (`[a-z]\d{3}`), so a space — which
+#      every shell test has — excludes it.
+#
+#   2. Bare ids are AMBIGUOUS ACROSS PERSONAS. Nearly every persona dir has a
+#      k012. A bare `K012` or `[[k012]]` sitting in subjects/ or a retro cannot
+#      be attributed to the source persona from the token alone. Blindly
+#      rewriting those would corrupt citations that point at OTHER personas.
+#      So bare ids are rewritten only where attribution is certain:
+#        * inside a MOVED COPY (mode=own) — within the source persona's own
+#          entry set, a bare id unambiguously meant that persona's entry; or
+#        * on a line carrying an explicit `agents/<source>` / `agents:<source>`
+#          qualifier (the documented citation form, e.g. "K012 (agents/nahla)").
+#      Everything else is reported LOUDLY as unresolved (never silently
+#      dropped, and never silently rewritten).
+#
+#   Full-slug links (`[[k012-dependency-aware-subitem-delegation]]`) carry
+#   their own disambiguator and are rewritten anywhere they appear.
+#
+#   NOTE the target's PRE-EXISTING entries are treated as FOREIGN, not own: a
+#   bare `[[k005]]` in a target-owned entry means the TARGET's k005, and
+#   rewriting it would be flatly wrong. Only the moved copies get own-mode.
+#
+# The source directory is left in place — a later subitem replaces it with a
+# README pointer. Nothing here deletes it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Internal: single-pass reference rewriter for kb-knowledge-merge.
+#
+# Usage: _kb_knowledge_merge_rewrite <mapfile> <apply:0|1> <own|foreign> <src-persona> <file>...
+#
+# mapfile is TSV: <old-full-id>\t<new-full-id>\t<old-short-id>\t<new-short-id>
+#
+# Emits on stdout (tab-separated, machine-readable):
+#   SUB\t<file>\t<substitution-count>      — per file that changed (or would)
+#   UNRES\t<file>\t<lineno>\t<token>       — reference it could NOT attribute
+#
+# Rewrites are ONE pass per rule, so a renumber chain (k001→k016 while
+# k016→k031 in the same batch) can never double-apply: Perl's s///ge does not
+# rescan its own replacement text. The two rules cannot feed each other either,
+# because rule 1 emits lowercase ids and rule 2 only matches uppercase `K`.
+_kb_knowledge_merge_rewrite() {
+    local mapfile="${1-}" apply="${2-}" mode="${3-}" src_persona="${4-}"
+    shift 4 2>/dev/null || return 0
+    [[ $# -eq 0 ]] && return 0
+
+    perl -e '
+use strict;
+use warnings;
+
+my ($mapfile, $apply, $mode, $src) = splice(@ARGV, 0, 4);
+
+my (%full, %short);
+open(my $mh, "<", $mapfile) or die "kb-knowledge-merge: cannot read id map: $!";
+while (my $l = <$mh>) {
+    chomp $l;
+    next unless length $l;
+    my ($of, $nf, $os, $ns) = split(/\t/, $l, 4);
+    next unless defined $ns;
+    $full{$of}  = $nf;
+    $short{$os} = $ns;
+}
+close $mh;
+
+# Explicit persona qualifier, e.g. "K012 (agents/nahla)" or "agents:nahla:k012".
+#
+# XACA-0842 (PR #718 review): the qualifier binds to the TOKEN it governs, never
+# to the whole line. The original implementation computed ONE line-level boolean
+# and consumed it in every callback on that line, so:
+#
+#     See K001 (agents/nahla-ake) and also K003 (agents/emh)
+#
+# authorised rewriting K003 — which belongs to emh, not the merge source — and,
+# because the qualified branch skips the else, never reported it. That breaks
+# the core contract of this tool: a reference is either repaired correctly or
+# reported loudly, never silently rewritten.
+#
+# Binding rules, deliberately conservative. A false "unresolved" costs a human
+# 30 seconds; a silent wrong rewrite is undetectable and permanent.
+#   * A qualifier governs a token only when it lies within $ADJACENT characters
+#     of it AND no OTHER id token sits between the two. Proximity is what makes
+#     "K001 (agents/nahla-ake)" resolve to the k001 of nahla-ake.
+#   * Among governing candidates, the CLOSEST wins.
+#   * If candidates naming DIFFERENT personas tie at the same distance, the
+#     token is ambiguous — reported, never rewritten.
+#   * A governing qualifier naming a persona OTHER than the merge source
+#     SUPPRESSES its token: unambiguously not ours, so neither rewritten nor
+#     reported as ambiguous. It is emitted as SUPPR so it cannot silently
+#     vanish from the report.
+#   * No governing qualifier -> prior behaviour (foreign mode reports it
+#     unresolved; own mode still rewrites, since inside a moved copy a bare id
+#     unambiguously meant the entry of that persona).
+my $ADJACENT = 40;
+my $qual_re  = qr{agents[:/]([a-z][a-z0-9_-]*)};
+
+# Which qualifier, if any, governs $tok. Returns (persona, ambiguous_flag).
+sub _governing {
+    my ($tok, $quals, $toks, $adjacent) = @_;
+    my @cand;
+    for my $q (@$quals) {
+        my ($gap, $lo, $hi);
+        if    ($q->{start} >= $tok->{end})   { $gap = $q->{start} - $tok->{end};  ($lo, $hi) = ($tok->{end}, $q->{start}); }
+        elsif ($q->{end}   <= $tok->{start}) { $gap = $tok->{start} - $q->{end};  ($lo, $hi) = ($q->{end}, $tok->{start}); }
+        else                                 { $gap = 0; ($lo, $hi) = (0, 0); }
+        next if $gap > $adjacent;
+        # An intervening id token breaks the association: in
+        # "K001 and K003 (agents/emh)" the emh qualifier cannot reach K001.
+        my $blocked = 0;
+        if ($hi > $lo) {
+            for my $o (@$toks) {
+                next if $o == $tok;
+                if ($o->{start} >= $lo && $o->{end} <= $hi) { $blocked = 1; last; }
+            }
+        }
+        next if $blocked;
+        push @cand, { persona => $q->{persona}, gap => $gap };
+    }
+    return (undef, 0) unless @cand;
+    my ($min) = sort { $a <=> $b } map { $_->{gap} } @cand;
+    my %names = map { $_->{persona} => 1 } grep { $_->{gap} == $min } @cand;
+    my @n = keys %names;
+    return (undef, 1) if @n > 1;
+    # This is PERL, not zsh. Perl arrays are 0-indexed, so $n[0] is the first
+    # element and is correct here. The XACA-0812 guard skips quoted HEREDOC
+    # bodies but not `perl -e ...` single-quoted strings, so it scans this block
+    # as if it were zsh. @n holds exactly one element at this point: the >1 case
+    # returned above, the empty case at the `unless @cand` guard. The pragma sits
+    # on the statement itself because the guard only honours it there or on the
+    # single line immediately above.
+    return ($n[0], 0);  # zsh-index-ok (Perl array, 0-indexed by definition)
+}
+
+for my $file (@ARGV) {
+    open(my $fh, "<", $file) or next;
+    my @lines = <$fh>;
+    close $fh;
+
+    my $subs   = 0;
+    my $lineno = 0;
+    my (@unres, @suppr);
+
+    # Aliasing loop: modifying $line writes back into @lines.
+    for my $line (@lines) {
+        $lineno++;
+
+        my @quals;
+        while ($line =~ /$qual_re/g) {
+            push @quals, { persona => $1, start => $-[0], end => $+[0] };
+        }
+
+        # ONE combined scan so both token kinds share a coordinate space, which
+        # the "no other id token between" test above depends on. The id token
+        # must abut "[[" so shell test syntax ("[[ -d ... ]]") can never match.
+        my @toks;
+        while ($line =~ m{\[\[([a-z]\d{3})((?:-[A-Za-z0-9._-]+)?)\]\]|\bK(\d{3})\b}g) {
+            my ($ws, $wr, $kn) = ($1, $2, $3);
+            my %t = (start => $-[0], end => $+[0], text => substr($line, $-[0], $+[0] - $-[0]));
+            if (defined $kn) { $t{kind} = "K"; $t{short} = "k$kn"; }
+            else             { $t{kind} = "W"; $t{short} = $ws; $t{full} = $ws . (defined $wr ? $wr : ""); }
+            push @toks, \%t;
+        }
+        next unless @toks;
+
+        for my $t (@toks) {
+            my $repl;
+            if ($t->{kind} eq "W" && $t->{full} ne $t->{short} && exists $full{$t->{full}}) {
+                # Full-slug link carries its own disambiguator — always safe.
+                $repl = "[[" . $full{$t->{full}} . "]]";
+                $subs++;
+            } elsif (exists $short{$t->{short}}) {
+                my $rewrite = 0;
+                if ($mode eq "own") {
+                    $rewrite = 1;
+                } else {
+                    my ($gov, $amb) = _governing($t, \@quals, \@toks, $ADJACENT);
+                    if    ($amb)             { push @unres, [$lineno, $t->{text}]; }
+                    elsif (!defined $gov)    { push @unres, [$lineno, $t->{text}]; }
+                    elsif ($gov eq $src)     { $rewrite = 1; }
+                    else                     { push @suppr, [$lineno, $t->{text}, $gov]; }
+                }
+                if ($rewrite) {
+                    if ($t->{kind} eq "K") {
+                        my $ns = $short{$t->{short}}; $ns =~ s/^k//;
+                        $repl = "K" . $ns;
+                    } else {
+                        $repl = "[[" . $short{$t->{short}} . "]]";
+                    }
+                    $subs++;
+                }
+            }
+            $t->{repl} = $repl;
+        }
+
+        # Rebuild in ONE left-to-right pass. Tokens never overlap, so a splice
+        # can never re-scan its own output: a renumber chain (k001->k016 while
+        # k016->k031 in the same batch) cannot double-apply.
+        my $outl = ""; my $prev = 0;
+        for my $t (@toks) {
+            $outl .= substr($line, $prev, $t->{start} - $prev);
+            $outl .= defined $t->{repl} ? $t->{repl} : $t->{text};
+            $prev  = $t->{end};
+        }
+        $outl .= substr($line, $prev);
+        $line  = $outl;
+    }
+
+    if ($subs > 0 && $apply eq "1") {
+        open(my $out, ">", $file) or die "kb-knowledge-merge: cannot write $file: $!";
+        print $out @lines;
+        close $out;
+    }
+
+    print "SUB\t$file\t$subs\n" if $subs > 0;
+    print "UNRES\t$file\t$_->[0]\t$_->[1]\n" for @unres;
+    print "SUPPR\t$file\t$_->[0]\t$_->[1]\t$_->[2]\n" for @suppr;
+}
+' "$mapfile" "$apply" "$mode" "$src_persona" "$@"
+}
+
+# Internal: enumerate the roots kb-knowledge-merge sweeps for referrers.
+# Global + local knowledge roots, this repo's project-tier knowledge, this
+# repo's retrospectives, plus any colon-separated KB_KNOWLEDGE_MERGE_EXTRA_ROOTS
+# (fleet sweeps across sibling repos).
+#
+# KB_KNOWLEDGE_MERGE_SCAN_ROOTS (colon-separated) REPLACES the whole default set
+# — an explicit allow-list that bounds the blast radius. This matters because the
+# repo-derived roots below resolve to the MAIN worktree's real
+# <repo>/kanban/{knowledge/project,plans} via .knowledge-config.yml, which
+# KB_KNOWLEDGE_GLOBAL_ROOT does NOT sandbox (that config file takes precedence
+# over every env var in _kb_knowledge_project_path). Without this allow-list a
+# --confirm run driven from a test/CI sandbox would happily rewrite live
+# retrospectives. The bats suite sets it; so should any dry-runnable automation.
+_kb_knowledge_merge_search_roots() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local -a roots
+    local r
+
+    if [[ -n "${KB_KNOWLEDGE_MERGE_SCAN_ROOTS:-}" ]]; then
+        for r in "${(@s/:/)KB_KNOWLEDGE_MERGE_SCAN_ROOTS}"; do
+            [[ -n "$r" && -d "$r" ]] && roots+=("$r")
+        done
+        [[ ${#roots[@]} -eq 0 ]] && return 0
+        printf '%s\n' "${roots[@]}"
+        return 0
+    fi
+
+    roots+=("$(_kb_knowledge_global_root)")
+
+    local local_root
+    local_root=$(_kb_knowledge_local_root 2>/dev/null)
+    [[ -n "$local_root" && -d "$local_root" ]] && roots+=("$local_root")
+
+    # Project-tier knowledge and retrospectives live in the MAIN repo worktree.
+    local proj
+    proj=$(_kb_knowledge_project_path 2>/dev/null)
+    if [[ -n "$proj" && -d "$proj" ]]; then
+        roots+=("$proj")
+        # Retros sit beside project knowledge under <repo>/kanban/plans.
+        local plans="${proj:h:h}/plans"
+        [[ -d "$plans" ]] && roots+=("$plans")
+    fi
+
+    if [[ -n "${KB_KNOWLEDGE_MERGE_EXTRA_ROOTS:-}" ]]; then
+        for r in "${(@s/:/)KB_KNOWLEDGE_MERGE_EXTRA_ROOTS}"; do
+            [[ -n "$r" && -d "$r" ]] && roots+=("$r")
+        done
+    fi
+
+    [[ ${#roots[@]} -eq 0 ]] && return 0
+    printf '%s\n' "${roots[@]}"
+}
+
+# Internal: report a reference-rewriter failure and say what it means.
+#
+# XACA-0842 (PR #718 review, subitem 009): the rewriter used to be invoked with
+# its stderr sent to /dev/null and its exit status never checked. When perl
+# die()d partway through a sweep, the output captured was empty or truncated,
+# every awk counter therefore read 0, and the tool cheerfully printed
+# "MERGE COMPLETE / References rewritten: 0" — reporting success it had not
+# earned, AFTER the entries were already copied. That is the exact defect class
+# this whole ticket exists to close: a reassuring result from a check that never
+# actually ran.
+#
+# Args: <phase-label> <exit-code> <stderr-file> <entries-already-copied: yes|no>
+# Always writes to stderr; callers must return non-zero afterwards.
+_kb_knowledge_merge_rewrite_failed() {
+    local phase="${1-}" rc="${2-}" errfile="${3-}" copied="${4-}"
+    echo "" >&2
+    echo "✗ kb-knowledge-merge FAILED: the reference rewriter exited ${rc} during the ${phase} phase." >&2
+    echo "  This run did NOT complete. Do not treat any part of it as successful." >&2
+    if [[ -s "$errfile" ]]; then
+        echo "" >&2
+        echo "  Rewriter error output:" >&2
+        sed 's/^/      /' "$errfile" >&2
+    else
+        echo "  The rewriter produced no error output — it was most likely killed," >&2
+        echo "  or perl is not available on PATH." >&2
+    fi
+    echo "" >&2
+    if [[ "$copied" == "yes" ]]; then
+        echo "  ⚠️  ENTRIES WERE ALREADY COPIED into the target directory before this" >&2
+        echo "      failure. Reference repair is therefore INCOMPLETE and some references" >&2
+        echo "      are now orphaned. Your next steps:" >&2
+        echo "        * Do NOT retire the source directory — it is still the intact copy." >&2
+        echo "        * Fix the cause, then re-run the merge, or restore the knowledge" >&2
+        echo "          tree from backup before retrying." >&2
+    else
+        echo "  No files were created or modified — this failed during dry-run analysis," >&2
+        echo "  before any copy or rewrite took place. Fix the cause and re-run." >&2
+    fi
+    echo "" >&2
+}
+
+# Consolidate one agent knowledge directory into another (same tier).
+# Usage: kb-knowledge-merge <source-persona> <target-persona> [--dry-run] [--confirm]
+#
+# Examples:
+#   kb-knowledge-merge jett-reno reno              # plan only, changes nothing
+#   kb-knowledge-merge jett-reno reno --dry-run    # explicit plan
+#   kb-knowledge-merge jett-reno reno --confirm    # execute
+kb-knowledge-merge() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local source_persona="${1:-}" target_persona="${2:-}"
+    local flag_confirm=false flag_dryrun=false
+
+    shift 2 2>/dev/null
+    while [[ $# -gt 0 ]]; do
+        case "${1-}" in
+            --confirm) flag_confirm=true; shift ;;
+            --dry-run) flag_dryrun=true; shift ;;
+            *) echo "Unknown flag: ${1-}" >&2; shift ;;
+        esac
+    done
+
+    if [[ -z "$source_persona" ]] || [[ -z "$target_persona" ]]; then
+        echo "Usage: kb-knowledge-merge <source-persona> <target-persona> [--dry-run] [--confirm]"
+        echo ""
+        echo "  Consolidates agents/<source-persona>/ into agents/<target-persona>/."
+        echo "  Same-tier (agents → agents) lateral move. For UPWARD tier movement"
+        echo "  use kb-knowledge-promote — it refuses same-tier moves by design (SPEC §7)."
+        echo ""
+        echo "  Source entries are renumbered into the target's next free ids (slug"
+        echo "  preserved); a target entry is never overwritten. Every reference to a"
+        echo "  renumbered entry is repaired across all knowledge tiers, per-repo"
+        echo "  project knowledge, and retrospectives. References that cannot be"
+        echo "  attributed with certainty are reported, never silently rewritten."
+        echo ""
+        echo "  --dry-run    Print the plan and change nothing (this is the default)."
+        echo "  --confirm    Actually execute. Required for any write."
+        echo ""
+        echo "  The source directory is NOT deleted."
+        echo ""
+        echo "Examples:"
+        echo "  kb-knowledge-merge jett-reno reno"
+        echo "  kb-knowledge-merge jett-reno reno --confirm"
+        return 1
+    fi
+
+    # --dry-run wins if both are passed: the safe reading of a contradictory
+    # instruction is "do not write".
+    if $flag_dryrun; then
+        flag_confirm=false
+    fi
+
+    if ! _kb_validate_name_component "$source_persona"; then
+        echo "Error: invalid source persona '${source_persona}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+        return 1
+    fi
+    if ! _kb_validate_name_component "$target_persona"; then
+        echo "Error: invalid target persona '${target_persona}' — must match ^[a-z][a-z0-9_-]*$ (no path traversal, no uppercase)" >&2
+        return 1
+    fi
+    if [[ "$source_persona" == "$target_persona" ]]; then
+        echo "Error: source and target persona are the same ('${source_persona}') — nothing to merge." >&2
+        return 1
+    fi
+
+    local global_root
+    global_root=$(_kb_knowledge_global_root)
+    local source_dir="${global_root}/agents/${source_persona}"
+    local target_dir="${global_root}/agents/${target_persona}"
+
+    if [[ ! -d "$source_dir" ]]; then
+        echo "Error: source directory not found: ${source_dir}" >&2
+        return 1
+    fi
+    if [[ ! -d "$target_dir" ]]; then
+        echo "Error: target directory not found: ${target_dir}" >&2
+        echo "       Refusing to create it — a missing target is usually a typo." >&2
+        return 1
+    fi
+
+    # ── Enumerate source entries ────────────────────────────────────────────────
+    # find, not a literal glob: zsh aborts the function on a no-match glob.
+    local -a source_files
+    local f
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        source_files+=("$f")
+    done < <(find "$source_dir" -maxdepth 1 -type f \
+                \( -name 'k[0-9][0-9][0-9]-*.md' -o -name 'k[0-9][0-9][0-9].md' \) 2>/dev/null | sort)
+
+    if [[ ${#source_files[@]} -eq 0 ]]; then
+        echo "Error: no knowledge entries found in ${source_dir}" >&2
+        return 1
+    fi
+
+    # ── Find the target's highest existing id ───────────────────────────────────
+    local highest=0 en
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        en=$(basename "$f" | sed -n 's/^k0*\([0-9][0-9]*\).*/\1/p')
+        [[ -z "$en" ]] && continue
+        if [[ "$en" -gt "$highest" ]] 2>/dev/null; then
+            highest="$en"
+        fi
+    done < <(find "$target_dir" -maxdepth 1 -type f \
+                \( -name 'k[0-9][0-9][0-9]-*.md' -o -name 'k[0-9][0-9][0-9].md' \) 2>/dev/null)
+
+    # ── Build the renumbering map ───────────────────────────────────────────────
+    local tmpdir="${TMPDIR:-/tmp}/kb-knowledge-merge-$$"
+    mkdir -p "$tmpdir" || { echo "Error: cannot create temp dir ${tmpdir}" >&2; return 1; }
+    local mapfile="${tmpdir}/idmap.tsv"
+    : > "$mapfile"
+
+    local -a plan_lines
+    local next="$highest"
+    local old_full old_short slug new_num new_short new_full
+    for f in "${source_files[@]}"; do
+        old_full=$(basename "$f" .md)
+        old_short="${old_full%%-*}"
+        slug="${old_full#*-}"
+        [[ "$slug" == "$old_full" ]] && slug=""
+
+        next=$(( next + 1 ))
+        printf -v new_num "%03d" "$next"
+        new_short="k${new_num}"
+        if [[ -n "$slug" ]]; then
+            new_full="${new_short}-${slug}"
+        else
+            new_full="$new_short"
+        fi
+
+        # Never overwrite a target entry. ids are allocated above the target's
+        # current maximum so this should be unreachable — assert anyway.
+        if [[ -e "${target_dir}/${new_full}.md" ]]; then
+            echo "Error: refusing to overwrite existing target entry ${target_dir}/${new_full}.md" >&2
+            rm -f "$mapfile"
+            rmdir "$tmpdir" 2>/dev/null
+            return 1
+        fi
+
+        printf '%s\t%s\t%s\t%s\n' "$old_full" "$new_full" "$old_short" "$new_short" >> "$mapfile"
+        plan_lines+=("    ${old_full}.md  →  ${new_full}.md")
+    done
+
+    # ── Collect referrer candidates across every search root ────────────────────
+    # Deduped: a file reached through two overlapping roots must be rewritten
+    # exactly once, or a renumber chain could double-apply.
+    # Source-dir files are excluded (the dir is being retired untouched), as are
+    # generated INDEX.md files (rebuilt from entry frontmatter, not rewritten).
+    local -a scan_files
+    local root
+    while IFS= read -r f; do
+        [[ -f "$f" ]] || continue
+        [[ "$f" == "${source_dir}/"* ]] && continue
+        [[ "$(basename "$f")" == "INDEX.md" ]] && continue
+        scan_files+=("$f")
+    done < <(
+        while IFS= read -r root; do
+            [[ -d "$root" ]] || continue
+            find "$root" -type f -name '*.md' 2>/dev/null
+        done < <(_kb_knowledge_merge_search_roots) | sort -u
+    )
+
+    # ── Print the plan ──────────────────────────────────────────────────────────
+    echo ""
+    echo "KNOWLEDGE MERGE PLAN"
+    echo "──────────────────────────────────────────────────────────────"
+    echo "  Source dir:  ${source_dir}"
+    echo "  Target dir:  ${target_dir}"
+    echo "  Entries:     ${#source_files[@]}  (renumbered from k$(printf '%03d' $(( highest + 1 ))) upward)"
+    echo "  Referrer scan candidates: ${#scan_files[@]} file(s)"
+    echo ""
+    echo "  Renumbering:"
+    local pl
+    for pl in "${plan_lines[@]}"; do
+        echo "$pl"
+    done
+    echo ""
+    echo "  Steps:"
+    echo "  1. Copy each source entry into the target dir under its new id"
+    echo "  2. Rewrite id:/agent: frontmatter in each moved copy"
+    echo "  3. Repair self-references inside the moved copies"
+    echo "  4. Repair [[links]] and K### citations across all knowledge tiers,"
+    echo "     per-repo project knowledge, and retrospectives"
+    echo "  5. Rebuild ${target_dir}/INDEX.md"
+    echo "  6. Leave the source dir in place (README pointer is a later step)"
+    echo "──────────────────────────────────────────────────────────────"
+
+    # ── Dry-run: analyse without writing, then stop ─────────────────────────────
+    if ! $flag_confirm; then
+        # Rewriter stderr is CAPTURED, not discarded, and the exit status is
+        # checked. `dry_out` is declared on its own line first: `local x=$(...)`
+        # would make $? the status of `local`, not the command substitution —
+        # the same class of trap as reading $? after a trailing pipeline.
+        local dry_out dry_rc
+        local dry_err="${tmpdir}/rewrite-dryrun.err"
+        dry_out=$(
+            {
+                _kb_knowledge_merge_rewrite "$mapfile" 0 own "$source_persona" "${source_files[@]}" || exit 1
+                if [[ ${#scan_files[@]} -gt 0 ]]; then
+                    _kb_knowledge_merge_rewrite "$mapfile" 0 foreign "$source_persona" "${scan_files[@]}" || exit 1
+                fi
+            } 2>"$dry_err"
+        )
+        dry_rc=$?
+        if [[ "$dry_rc" -ne 0 ]]; then
+            # A silently-failing dry-run is arguably worse than a failing
+            # execute: the operator reads a clean plan and then confirms it.
+            _kb_knowledge_merge_rewrite_failed "dry-run analysis" "$dry_rc" "$dry_err" "no"
+            rm -f "$mapfile" "$dry_err"
+            rmdir "$tmpdir" 2>/dev/null
+            return 1
+        fi
+        local dry_subs dry_unres
+        dry_subs=$(printf '%s\n' "$dry_out" | awk -F'\t' '$1=="SUB"{n+=$3} END{print n+0}')
+        dry_unres=$(printf '%s\n' "$dry_out" | awk -F'\t' '$1=="UNRES"{n++} END{print n+0}')
+        local dry_suppr
+        dry_suppr=$(printf '%s\n' "$dry_out" | awk -F'\t' '$1=="SUPPR"{n++} END{print n+0}')
+
+        echo ""
+        echo "  Projected: ${dry_subs} reference(s) would be rewritten."
+        if [[ "$dry_suppr" -gt 0 ]]; then
+            echo "  Suppressed: ${dry_suppr} reference(s) qualified to another persona (left alone)."
+        fi
+        if [[ "$dry_unres" -gt 0 ]]; then
+            echo ""
+            echo "  ⚠️  ${dry_unres} AMBIGUOUS reference(s) would NOT be rewritten:"
+            printf '%s\n' "$dry_out" | awk -F'\t' '$1=="UNRES"{printf "      %s:%s  %s\n", $2, $3, $4}'
+        fi
+        echo ""
+        echo "  Dry-run only. Pass --confirm to execute."
+        echo ""
+        rm -f "$mapfile"
+        rmdir "$tmpdir" 2>/dev/null
+        return 0
+    fi
+
+    # ── Execute ─────────────────────────────────────────────────────────────────
+    local moved=0
+    local -a moved_files
+    local i=0
+    local dest
+    for f in "${source_files[@]}"; do
+        i=$(( i + 1 ))
+        new_full=$(awk -F'\t' -v n="$i" 'NR==n{print $2}' "$mapfile")
+        if [[ -z "$new_full" ]]; then
+            echo "Error: internal id-map lookup failed for ${f}" >&2
+            rm -f "$mapfile"
+            rmdir "$tmpdir" 2>/dev/null
+            return 1
+        fi
+        dest="${target_dir}/${new_full}.md"
+
+        # Paranoia: re-check immediately before the write.
+        if [[ -e "$dest" ]]; then
+            echo "Error: refusing to overwrite existing target entry ${dest}" >&2
+            rm -f "$mapfile"
+            rmdir "$tmpdir" 2>/dev/null
+            return 1
+        fi
+
+        # Copy, rewriting the two tier-scoped frontmatter fields. Only the FIRST
+        # occurrence of each is touched (frontmatter), leaving any body prose
+        # that happens to start with "id:" alone.
+        awk -v newid="$new_full" -v newagent="$target_persona" '
+            BEGIN { done_id = 0; done_agent = 0 }
+            !done_id && /^id:[[:space:]]/       { print "id: " newid;       done_id = 1; next }
+            !done_agent && /^agent:[[:space:]]/ { print "agent: " newagent; done_agent = 1; next }
+            { print }
+        ' "$f" > "$dest"
+
+        if [[ ! -s "$dest" ]]; then
+            echo "Error: failed to write ${dest} (source left intact)" >&2
+            rm -f "$dest"
+            rm -f "$mapfile"
+            rmdir "$tmpdir" 2>/dev/null
+            return 1
+        fi
+
+        moved_files+=("$dest")
+        moved=$(( moved + 1 ))
+    done
+
+    # Repair references. own-mode covers ONLY the moved copies; the target's
+    # pre-existing entries are foreign (their bare ids mean the TARGET's ids).
+    # As above: stderr captured, status checked, and `exec_out` declared
+    # separately so $? belongs to the command substitution.
+    local exec_out exec_rc
+    local exec_err="${tmpdir}/rewrite-exec.err"
+    exec_out=$(
+        {
+            _kb_knowledge_merge_rewrite "$mapfile" 1 own "$source_persona" "${moved_files[@]}" || exit 1
+            if [[ ${#scan_files[@]} -gt 0 ]]; then
+                _kb_knowledge_merge_rewrite "$mapfile" 1 foreign "$source_persona" "${scan_files[@]}" || exit 1
+            fi
+        } 2>"$exec_err"
+    )
+    exec_rc=$?
+    if [[ "$exec_rc" -ne 0 ]]; then
+        # Entries are already on disk at this point — the operator's recovery
+        # path depends entirely on knowing that, so say it explicitly.
+        _kb_knowledge_merge_rewrite_failed "reference repair" "$exec_rc" "$exec_err" "yes"
+        rm -f "$mapfile" "$exec_err"
+        rmdir "$tmpdir" 2>/dev/null
+        return 1
+    fi
+
+    local refs_rewritten refs_files unresolved_count
+    refs_rewritten=$(printf '%s\n' "$exec_out" | awk -F'\t' '$1=="SUB"{n+=$3} END{print n+0}')
+    refs_files=$(printf '%s\n' "$exec_out" | awk -F'\t' '$1=="SUB"{n++} END{print n+0}')
+    unresolved_count=$(printf '%s\n' "$exec_out" | awk -F'\t' '$1=="UNRES"{n++} END{print n+0}')
+    local suppressed_count
+    suppressed_count=$(printf '%s\n' "$exec_out" | awk -F'\t' '$1=="SUPPR"{n++} END{print n+0}')
+
+    # Rebuild the target index from the merged entry set.
+    _kb_knowledge_reindex_one "$target_dir" >/dev/null 2>&1 || true
+
+    rm -f "$mapfile"
+    rmdir "$tmpdir" 2>/dev/null
+
+    # ── Report ──────────────────────────────────────────────────────────────────
+    echo ""
+    echo "MERGE COMPLETE"
+    echo "──────────────────────────────────────────────────────────────"
+    echo "  Entries moved:        ${moved}"
+    echo "  Ids renumbered:       ${moved}"
+    echo "  References rewritten: ${refs_rewritten}  (across ${refs_files} file(s))"
+    echo "  Unresolved refs:      ${unresolved_count}"
+    echo "  Suppressed refs:      ${suppressed_count}  (qualified to another persona — correctly left alone)"
+    echo "  Target INDEX.md rebuilt: ${target_dir}/INDEX.md"
+    echo "  Source dir left in place: ${source_dir}"
+
+    if [[ "$suppressed_count" -gt 0 ]]; then
+        echo ""
+        echo "  Suppressed (a qualifier names a DIFFERENT persona, so these are"
+        echo "  unambiguously not ours — neither rewritten nor flagged ambiguous):"
+        printf '%s\n' "$exec_out" | awk -F'\t' '$1=="SUPPR"{printf "      %s:%s  %s  -> belongs to %s\n", $2, $3, $4, $5}'
+    fi
+
+    if [[ "$unresolved_count" -gt 0 ]]; then
+        echo ""
+        echo "  ⚠️  UNRESOLVED REFERENCES — these were NOT rewritten and now point"
+        echo "      at the OLD ids. They are ambiguous (a bare id matches several"
+        echo "      personas), so rewriting them automatically risked corrupting a"
+        echo "      citation to a different persona. Review each by hand:"
+        printf '%s\n' "$exec_out" | awk -F'\t' '$1=="UNRES"{printf "      %s:%s  %s\n", $2, $3, $4}'
+        echo ""
+        echo "      Tip: add an explicit qualifier (e.g. \"K012 (agents/${source_persona})\")"
+        echo "      and re-run, or fix the citation to the new id directly."
+    fi
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Suggested commit message:"
+    echo "  merge: knowledge agents/${source_persona} → agents/${target_persona} (${moved} entries)"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Duplicate persona-directory detection (XACA-0842)
+# ══════════════════════════════════════════════════════════════════════════════
+#
+# Background — the defect this exists to prevent recurring:
+#   A past migration slugified persona DISPLAY BYLINES into directory names
+#   instead of using the canonical agent id. `~/knowledge/agents/thok-tuvok/`
+#   was created from the byline "**Agent:** Thok/Tuvok (Academy Cadet Master,
+#   QA Testing)" while `~/knowledge/agents/thok/` already existed. Same for
+#   jett-reno/reno, nahla-ake/nahla, captain-sisko/sisko, captain-archer/archer,
+#   travis-mayweather/mayweather. Result: ~55 entries stranded — invisible to
+#   kb-knowledge-search, which resolves the canonical agent id only.
+#
+# This is a GATE, not a report. kb-knowledge-validate raises each finding via
+# _kb_val_error (not _kb_val_warn), so a fragmented tree exits non-zero. A
+# warning was explicitly rejected: the original fragmentation accumulated for
+# months precisely because nothing failed.
+#
+# ── Detection: two mechanisms, deliberately kept separate ───────────────────
+#
+#   1. HEURISTIC (byline-slug shape). A hyphenated directory whose components
+#      include the name of another existing directory is flagged:
+#      `jett-reno` + `reno`, `captain-sisko` + `sisko`, `nahla-ake` + `nahla`.
+#      This is a guess based on NAME SHAPE ALONE — it has no knowledge of who
+#      any persona actually is. It can produce false positives; that is what
+#      the allow-list below is for.
+#
+#   2. DECLARED ALIASES. Some duplicates share no substring at all —
+#      `counselor` is the display title of `deanna`, `doctor` of `emh`. No
+#      heuristic can derive that from the strings; pretending otherwise would
+#      be dishonest. These pairs are hand-declared and must be maintained by a
+#      human when a new display-name alias appears.
+#
+# The two mechanisms are unioned, pairs are normalised (alphabetically ordered)
+# and de-duplicated, then the allow-list suppresses known-distinct pairs.
+#
+# Both mechanisms see only directories that actually CONTAIN entries. Retired
+# pointer directories (README.md only, no `kNNN-*.md`) are skipped, because the
+# gate exists to catch STRANDED ENTRIES and an entry-free directory strands
+# nothing. See the _kb_kpd_has_entries block inside the function for the full
+# rationale and for why the allow-list was NOT the right place for these.
+#
+# Output: one `<lo>|<hi>|<reason>` line per finding on stdout; no output means
+# no duplicates. Non-zero exit is NOT used to signal findings (callers read the
+# lines) — a non-zero return here means the directory was unreadable.
+_kb_knowledge_persona_dup_pairs() {
+    setopt LOCAL_OPTIONS NO_NOMATCH
+    local agents_dir="${1:-}"
+    agents_dir="${agents_dir%/}"
+    [[ -d "$agents_dir" ]] || return 0
+
+    # ── ALLOW-LIST: pairs that LOOK like duplicates but are DISTINCT personas ──
+    #
+    # Every entry MUST carry a justification. A bare list rots: six months from
+    # now nobody remembers whether an entry was a real exemption or somebody
+    # silencing a finding they did not want to fix. If you add a pair here
+    # WITHOUT a reason, you have disabled the gate for that pair, permanently.
+    #
+    # Format: "<name-a>|<name-b>" — order does not matter, the lookup normalises.
+    # Verified against the upstream persona master directory on 2026-07-24.
+    local -a _KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS
+    _KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS=(
+        # MainEvent deliberately suffixes `-me` on two personas to avoid a name
+        # collision with the Command team's Janeway/Paris. Both sides are real,
+        # separately-defined agents with their own knowledge:
+        #   command/command_janeway_strategic_persona.md      -> name: janeway
+        #   mainevent/mainevent_janeway_leadfeature_persona.md -> name: janeway-me
+        # Documented in ~/.claude/CLAUDE.md § "Per-Team Persona Layout".
+        "janeway|janeway-me"
+        #   command/command_paris_communications_persona.md   -> name: paris
+        #   mainevent/mainevent_paris_ux_persona.md           -> name: paris-me
+        "paris|paris-me"
+
+        # `doctor` is NOT a display-title alias of Academy's `emh`, despite both
+        # being EMH-flavoured. It is its own MainEvent agent:
+        #   mainevent/mainevent_doctor_bugfix_persona.md      -> name: doctor
+        #   academy/academy_emh_documentation_persona.md      -> name: emh
+        # Different teams, different roles (bugfix vs documentation). This pair
+        # IS in the declared-alias list below — the allow-list is what overrides
+        # it. Remove this line and the gate starts failing on a legitimate tree.
+        "doctor|emh"
+
+        # `tuvok` is a real MainEvent security/test lead, not a byline fragment
+        # of Academy's Vulcan QA persona `thok`:
+        #   mainevent/mainevent_tuvok_security_persona.md     -> name: tuvok
+        #   academy/academy_thok_testing_persona.md           -> name: thok
+        # (Note: `thok-tuvok` is NOT exempt — that directory really is a byline
+        # slug of `thok` and must be consolidated away.)
+        "thok|tuvok"
+    )
+
+    # ── DECLARED display-name aliases ──────────────────────────────────────────
+    # "<display-title-slug>|<canonical-agent-id>". These CANNOT be found by any
+    # string heuristic — they are asserted by a human who knows the personas.
+    # Add a line here whenever a persona's display title gets its own directory.
+    local -a _KB_KNOWLEDGE_PERSONA_DECLARED_ALIASES
+    _KB_KNOWLEDGE_PERSONA_DECLARED_ALIASES=(
+        # NOTE the orientation: STRAY first, CANONICAL second. The canonical id
+        # is the persona's frontmatter `name:` (SPEC 2.1) — NEVER the entry count
+        # and NEVER the persona FILEname. ios_deanna_documentation_persona.md
+        # declares `name: counselor`, so `counselor` is canonical and `deanna`
+        # (the filename/display-derived spelling) is the stray. Getting this
+        # backwards makes the gate print a command that folds the CANONICAL
+        # directory into the stray — the same data-destroying inversion already
+        # regression-tested on the heuristic path (travis-mayweather).
+        "deanna|counselor"   # display/filename "Deanna" -> canonical id `counselor`
+        "doctor|emh"         # "The Doctor"     -> canonical id `emh`  (see allow-list)
+        "tuvok|thok"         # byline "Thok/Tuvok"                      (see allow-list)
+    )
+
+    # ── Does this directory hold any actual knowledge? (XACA-0842) ─────────────
+    #
+    # THE GATE DETECTS STRANDED ENTRIES. AN ENTRY-FREE DIRECTORY STRANDS NOTHING.
+    #
+    # That single sentence is the whole rule. After consolidation, the seven
+    # byline-slug directories are RETIRED rather than deleted: each keeps a
+    # README.md pointing at its canonical home so old references still resolve.
+    # They therefore still exist, and still look like duplicate-persona pairs by
+    # name — so without this filter the gate would fire on them forever.
+    #
+    # Allow-listing them was the obvious alternative and it is wrong. The
+    # allow-list means, precisely, "these are DIFFERENT agents". Retired
+    # pointers are the same agent. Putting them there would corrupt the one
+    # contract that makes the allow-list trustworthy, and every future reader
+    # would have to guess which entries were real exemptions.
+    #
+    # The entry count is the property that actually matters, and it is
+    # self-maintaining: add a real entry to a retired directory and it re-enters
+    # the roster, so the gate fires again — which is the correct behaviour,
+    # because at that moment the directory really is hiding knowledge from
+    # kb-knowledge-search.
+    #
+    # Deliberately NOT used as the test: the `status: retired` /
+    # `consolidated_into:` frontmatter the READMEs carry. It is a fine secondary
+    # signal but a bad primary one — a future author can omit it, misspell it,
+    # or retire a directory without it, and the gate would then fire on a
+    # correctly-retired pointer. Presence of entries cannot be forgotten.
+    #
+    # Consequence worth stating plainly: a pair fires only when BOTH sides hold
+    # entries. The asymmetric case (stray has entries, canonical is empty) is
+    # therefore skipped. That is intentional — an empty canonical directory is
+    # indistinguishable from an absent one, and an absent one would produce no
+    # pair either. Entries sitting under a wrong-but-unpaired directory name are
+    # a naming defect, not a duplication defect, and a pair detector is the
+    # wrong tool for it.
+    #
+    # Entry shape is the agent tier's `kNNN-<slug>.md`. README.md, INDEX.md and
+    # anything else are explicitly NOT entries.
+    local _kb_kpd_ent_f _kb_kpd_ent_bn _kb_kpd_ent_stem
+    _kb_kpd_has_entries() {
+        for _kb_kpd_ent_f in "${1}"/*.md; do
+            [[ -f "$_kb_kpd_ent_f" ]] || continue
+            _kb_kpd_ent_bn="${_kb_kpd_ent_f##*/}"
+            case "$_kb_kpd_ent_bn" in
+                k*-*.md) ;;
+                *) continue ;;
+            esac
+            # Require DIGITS between the 'k' and the first hyphen, so a stray
+            # file like `kb-notes.md` is not mistaken for an entry.
+            _kb_kpd_ent_stem="${_kb_kpd_ent_bn#k}"
+            _kb_kpd_ent_stem="${_kb_kpd_ent_stem%%-*}"
+            case "$_kb_kpd_ent_stem" in
+                ''|*[!0-9]*) continue ;;
+            esac
+            return 0
+        done
+        return 1
+    }
+
+    # ── Collect the directory roster ───────────────────────────────────────────
+    local -a _kb_kpd_dirs
+    local d base
+    for d in "${agents_dir}"/*/; do
+        [[ -d "$d" ]] || continue
+        base="${d%/}"
+        base="${base##*/}"
+        [[ -n "$base" ]] || continue
+        # Retired pointer dirs (and any other entry-free dir) are invisible to
+        # the detector — see the block above.
+        _kb_kpd_has_entries "${d%/}" || continue
+        _kb_kpd_dirs+=("$base")
+    done
+    [[ ${#_kb_kpd_dirs[@]} -gt 0 ]] || return 0
+
+    # Newline-delimited membership blobs. Avoids associative arrays, whose
+    # declaration syntax and iteration order differ between bash and zsh.
+    local _kb_kpd_roster=$'\n'
+    for d in "${_kb_kpd_dirs[@]}"; do _kb_kpd_roster+="${d}"$'\n'; done
+
+    local _kb_kpd_allow=$'\n' _kb_kpd_seen=$'\n'
+    local p lo hi swap
+    for p in "${_KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS[@]}"; do
+        lo="${p%%|*}"; hi="${p##*|}"
+        if [[ "$lo" > "$hi" ]]; then swap="$lo"; lo="$hi"; hi="$swap"; fi
+        _kb_kpd_allow+="${lo}|${hi}"$'\n'
+    done
+
+    # Membership test against the roster.
+    _kb_kpd_has() {
+        case "$_kb_kpd_roster" in
+            *$'\n'"${1}"$'\n'*) return 0 ;;
+        esac
+        return 1
+    }
+
+    # _kb_kpd_emit <suspected-non-canonical> <suspected-canonical> <why>
+    #
+    # DIRECTION MATTERS. Callers pass the pair oriented: arg 1 is the directory
+    # believed to be the stray (the byline slug / display-name alias), arg 2 the
+    # believed canonical agent id. That orientation is preserved on the output
+    # line so the caller can render a correctly-ordered `kb-knowledge-merge
+    # <from> <to>` — printing an alphabetically-sorted pair instead would emit
+    # `kb-knowledge-merge mayweather travis-mayweather`, i.e. instructions to
+    # merge the canonical directory INTO the stray. Sorting is used ONLY to
+    # build the order-independent key for allow-list lookup and de-duplication.
+    #
+    # The direction is the detector's best guess, not a proven fact — the
+    # rendered message says so, and the operator confirms before merging.
+    _kb_kpd_emit() {
+        local from="${1}" to="${2}" why="${3}" _lo _hi _swap
+        [[ "$from" == "$to" ]] && return 0
+        _lo="$from"; _hi="$to"
+        if [[ "$_lo" > "$_hi" ]]; then _swap="$_lo"; _lo="$_hi"; _hi="$_swap"; fi
+        case "$_kb_kpd_allow" in
+            *$'\n'"${_lo}|${_hi}"$'\n'*) return 0 ;;
+        esac
+        case "$_kb_kpd_seen" in
+            *$'\n'"${_lo}|${_hi}"$'\n'*) return 0 ;;
+        esac
+        _kb_kpd_seen+="${_lo}|${_hi}"$'\n'
+        printf '%s|%s|%s\n' "$from" "$to" "$why"
+    }
+
+    # 1. Heuristic pass — every hyphen-separated component of every hyphenated
+    #    directory name, tested against the roster.
+    local rest comp
+    for d in "${_kb_kpd_dirs[@]}"; do
+        case "$d" in
+            *-*) ;;
+            *) continue ;;
+        esac
+        rest="$d"
+        while :; do
+            comp="${rest%%-*}"
+            if [[ -n "$comp" && "$comp" != "$d" ]] && _kb_kpd_has "$comp"; then
+                _kb_kpd_emit "$d" "$comp" "heuristic: '${d}' looks like a display-byline slug of '${comp}'"
+            fi
+            case "$rest" in
+                *-*) rest="${rest#*-}" ;;
+                *) break ;;
+            esac
+        done
+    done
+
+    # 2. Declared-alias pass — flagged only when BOTH directories actually exist.
+    #    Map order is "<display-name>|<canonical-id>", which is already the
+    #    orientation _kb_kpd_emit wants (stray first, canonical second).
+    local alias_name canon_name
+    for p in "${_KB_KNOWLEDGE_PERSONA_DECLARED_ALIASES[@]}"; do
+        alias_name="${p%%|*}"; canon_name="${p##*|}"
+        if _kb_kpd_has "$alias_name" && _kb_kpd_has "$canon_name"; then
+            _kb_kpd_emit "$alias_name" "$canon_name" \
+                "declared alias: '${alias_name}' is a known display name for '${canon_name}'"
+        fi
+    done
+
+    unset -f _kb_kpd_has _kb_kpd_emit _kb_kpd_has_entries 2>/dev/null
+    return 0
+}
+
 
 # Validate cross-reference integrity, INDEX correctness, orphan detection
 # Usage: kb-knowledge-validate [--quiet] [--fix]
@@ -11125,6 +12087,58 @@ kb-knowledge-validate() {
         done
 
         echo ""
+    done
+
+    # ── Duplicate persona-directory check (XACA-0842) ───────────────────────────
+    # Runs ONCE per root over agents/ as a whole (not per-directory) — the check
+    # is about RELATIONSHIPS BETWEEN sibling directories, so it needs the full
+    # roster, which the per-directory loop above never has.
+    #
+    # These are _kb_val_error (hard failure, non-zero exit), never _kb_val_warn.
+    # See _kb_knowledge_persona_dup_pairs for the detection rationale and the
+    # allow-list of genuinely-distinct look-alike pairs.
+    local -a dup_roots
+    dup_roots=("$global_root")
+    if [[ "${local_root%/}" != "${global_root%/}" ]]; then
+        dup_roots+=("$local_root")
+    fi
+
+    # dup_stray / dup_canon are ORIENTED by the detector: stray first, believed
+    # canonical second. Keep that order when rendering the merge command.
+    local dup_root dup_stray dup_canon dup_why dup_root_label
+    for dup_root in "${dup_roots[@]}"; do
+        [[ -d "${dup_root}/agents" ]] || continue
+        if [[ "${dup_root%/}" == "${local_root%/}" && "${local_root%/}" != "${global_root%/}" ]]; then
+            dup_root_label="local"
+        else
+            dup_root_label="global"
+        fi
+        while IFS='|' read -r dup_stray dup_canon dup_why; do
+            [[ -n "$dup_stray" && -n "$dup_canon" ]] || continue
+            _kb_val_error "Duplicate persona directories [${dup_root_label}]: '${dup_root}/agents/${dup_stray}' and '${dup_root}/agents/${dup_canon}'
+           Why flagged: ${dup_why}
+           Impact: kb-knowledge-search resolves the canonical agent id only, so
+                   every entry in the non-canonical directory is STRANDED.
+           Fix (pick one):
+             1. Consolidate — fold the stray into the canonical agent id
+                (direction below is this check's best guess — confirm it first):
+                  kb-knowledge-merge ${dup_stray} ${dup_canon}
+                That COPIES — it deliberately leaves the source entries in place,
+                so this check keeps firing until you also RETIRE the source.
+                Retire it by removing the k*.md entries and the now-stale
+                INDEX.md from '${dup_stray}' (git rm, so the content stays
+                recoverable), keeping ONLY a README.md pointer naming
+                '${dup_canon}'. Do not delete the directory itself — the pointer
+                is what lets historical references still resolve, and an
+                entry-free directory is skipped by this check.
+                (then run: kb-knowledge-reindex && kb-knowledge-validate)
+             2. Exempt — if '${dup_stray}' and '${dup_canon}' are genuinely DIFFERENT
+                personas, add \"${dup_stray}|${dup_canon}\" to the allow-list constant
+                _KB_KNOWLEDGE_PERSONA_DISTINCT_PAIRS (in _kb_knowledge_persona_dup_pairs,
+                kanban-helpers.sh) WITH a comment naming both agents-master
+                persona files that prove they are distinct. An entry without a
+                justification is not acceptable."
+        done < <(_kb_knowledge_persona_dup_pairs "${dup_root}/agents")
     done
 
     # ── Summary ─────────────────────────────────────────────────────────────────

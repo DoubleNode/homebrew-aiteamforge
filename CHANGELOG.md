@@ -7,6 +7,32 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0846 / XACA-0842 — `kb-knowledge-merge` and the duplicate-persona check never reached consumers
+
+Hand-ports the XACA-0842 knowledge-helper work into **both** shipped tap copies
+(`share/templates/kanban/kanban-helpers.template.sh` and `share/templates/aliases/kanban-aliases.sh`),
+which had it in neither. Consumers had no `kb-knowledge-merge` at all, and their `kb-knowledge-validate`
+silently skipped the duplicate-persona-directory check — so a stray persona directory stranded every
+knowledge entry inside it with no diagnostic, which is the precise failure XACA-0842 existed to surface.
+
+Ported verbatim (these functions are `${HOME}/knowledge`-based and git-root-derived, with no
+`${AITEAMFORGE_DIR}` coupling, so no path substitution applies — verified by diffing the four
+already-shared `_kb_knowledge_*` helpers, which are byte-identical across all three copies):
+
+- `kb-knowledge-merge` and its rewriter helpers `_kb_knowledge_merge_rewrite`,
+  `_kb_knowledge_merge_search_roots`, `_kb_knowledge_merge_rewrite_failed`
+- `_kb_knowledge_persona_dup_pairs` (with its nested `_kb_kpd_has_entries` / `_kb_kpd_has` / `_kb_kpd_emit`)
+- the 51-line duplicate-persona-directory block inside `kb-knowledge-validate`
+
+**`_kb_knowledge_merge_rewrite_failed` was not on the ticket's port list and had to be found by reading
+the call graph.** `kb-knowledge-merge` invokes it on both the dry-run and execute failure paths. Porting
+only the named functions would have shipped a `kb-knowledge-merge` whose *error handler* died with
+"command not found" — a break that only appears once something else has already gone wrong, which is
+the worst possible place to put one.
+
+Comment provenance lines referencing the dev-machine master directory were genericized in the tap copies;
+the code is otherwise byte-identical to canonical, which is what the parity gates require.
+
 ### Fix: XACA-0846 — consumers' `kb-cr` silently vanished in every nested shell
 
 Mirrors the XACA-0852 canonical fix into `share/templates/kanban/kanban-helpers.template.sh`, the
