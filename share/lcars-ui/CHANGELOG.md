@@ -11,6 +11,11 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+<!-- XACA-0855: Fixed — epics with all-cancelled assigned items derived PLANNED instead of ARCHIVED -->
+
+### Fixed
+- **XACA-0855: All-cancelled epics now derive `ARCHIVED` instead of getting stuck in `PLANNED`.** `_derive_epic_state` computed one `effective` set (assigned items minus cancelled) and returned `PLANNED` whenever it was empty, conflating an epic with zero assigned items (correctly `PLANNED`) with an epic whose items were ALL assigned and ALL cancelled (should be `ARCHIVED` — the work concluded, nothing shipped). Split the check into two stages: `assigned` (ID-resolved items, orphans excluded) empty → `PLANNED` unchanged; `assigned` non-empty but `effective` (assigned minus cancelled) empty → now `ARCHIVED`. `_derive_epic_roadmap_state` inherits the fix via its delegation to `_derive_epic_state`. Affected epics move from the Planned bucket to the Archived bucket on the Roadmap and Epics tabs; the derivation stays pure and reversible — reopening any one item flips `effective` non-empty again and the epic re-derives normally on the next read. See `STATE_CONTRACT.md` §1.5 (amended) and the companion jq fix in `kanban-helpers.sh::_kb_epic_derive_state`. `lcars-ui/` is tap-mirrored via `sync-tap.sh`.
+
 <!-- XACA-0385: Security — move ccusage runtime files out of world-writable /tmp -->
 
 ### Security
