@@ -37,14 +37,20 @@
 #     every freshly rendered script aside on every re-install.
 #   - libexec/commands/aiteamforge-upgrade.sh: update_connect_scripts()'s
 #     work list is now a UNION of (a) *-connect.sh files already on disk and
-#     (b) instances REGISTERED in team-paths.json / .aiteamforge-config.
-#     Source (a) alone can only ever REFRESH an existing file, never CREATE a
-#     missing one — which is exactly the state XACA-0845 found: two live
-#     registered instances with no connect script, forever un-healable by
-#     upgrade. The "never materialise for a team this box didn't set up"
-#     guarantee is preserved (strengthened, even): registry membership is
-#     affirmative proof of setup, neither source invents an instance id, and
-#     anything unrecognised is still skipped, not guessed at.
+#     (b) instances recorded in the install's own .aiteamforge-config
+#     `.teams[]`. Source (a) alone can only ever REFRESH an existing file,
+#     never CREATE a missing one — which is exactly the state XACA-0845 found:
+#     two live installed instances with no connect script, forever un-healable
+#     by upgrade. The "never materialise for a team this box didn't set up"
+#     guarantee is preserved: .aiteamforge-config is written by setup from
+#     SELECTED_TEAMS AFTER the install loop, neither source invents an instance
+#     id, and anything unrecognised is still skipped, not guessed at.
+#
+#     XACA-0845-008: source (b) originally ALSO read ~/.aiteamforge/
+#     team-paths.json, on the premise that registry membership proves setup.
+#     It does not — the wizard enables every catalogued team by default (T6A),
+#     so that read silently materialised cockpit scripts for up to 8 teams a
+#     box never installed. T6B/T6C/T6D are the regression guards.
 #
 # TEST CASES (mapped to the XACA-0845-004 subitem brief):
 #   S1  STRUCTURAL: _is_parametric_team() is defined once and referenced by
@@ -181,10 +187,18 @@ _new_install_sandbox() {
 # Drive the REAL install-team.sh in a sandbox. $1=sandbox root, rest = args.
 # AITEAMFORGE_ORG_CONFIG (non-empty, need not exist) skips the interactive
 # org-identity prompt (_ensure_org_config, install-team.sh ~line 424).
+#
+# AITEAMFORGE_CONFIG is pinned into the sandbox too (XACA-0845-011). Overriding
+# HOME alone is NOT enough: AITEAMFORGE_CONFIG is consulted directly wherever it
+# is set, so an ambient exported value would escape the sandbox and let the
+# installer read — and the port allocator WRITE — the real registry on this
+# machine. tests/test-xaca-0799-restart-symmetry.sh exports one, so under
+# test-runner.sh this is a live leak, not a hypothetical.
 _run_install() {
     local sbx="$1"; shift
     HOME="$sbx/home" \
     AITEAMFORGE_DIR="$sbx/aiteamforge" \
+    AITEAMFORGE_CONFIG="$sbx/home/.aiteamforge/team-paths.json" \
     AITEAMFORGE_ORG_CONFIG="$sbx/home/.aiteamforge/organization.yaml" \
         bash "$INSTALL_TEAM_SH" "$@" --install-dir "$sbx/aiteamforge"
 }
@@ -619,15 +633,51 @@ with open(out, "w") as f:
 PYEOF
 }
 
+# Build an INSTALL config (.aiteamforge-config) — the installer-written record
+# of what this box actually set up, and the union's only non-filesystem source
+# since XACA-0845-008. $1 = output path, remaining args = "<base>" or
+# "<base>:<project_id>", matching bin/aiteamforge-setup.sh's shape: `.teams[]`
+# holds BASE ids, `.team_paths.<base>.project_id` carries the project for
+# parameterised installs.
+_write_install_config() {
+    local out="$1"; shift
+    mkdir -p "$(dirname "$out")"
+    python3 - "$out" "$@" <<'PYEOF'
+import json, sys
+out = sys.argv[1]
+teams = []
+paths = {}
+for spec in sys.argv[2:]:
+    if ":" in spec:
+        base, pid = spec.split(":", 1)
+        paths[base] = {"working_dir": "/nonexistent/" + base, "project_id": pid}
+    else:
+        base = spec
+        paths[base] = {"working_dir": "/nonexistent/" + base}
+    teams.append(base)
+data = {"version": "test", "teams": teams, "team_paths": paths}
+with open(out, "w") as f:
+    json.dump(data, f)
+PYEOF
+}
+
 # ═══════════════════════════════════════════════════════════════════════════
-# T6 — Case 6 (union, half): a REGISTERED-but-scriptless instance gets its
+# T6 — Case 6 (union, half): an INSTALLED-but-scriptless instance gets its
 # connect/disconnect CREATED by `aiteamforge upgrade` — driven through the
 # REAL (fixed) install-team.sh, real templates, real finance.conf.
+#
+# XACA-0845-008: this case originally drove the union from a team-paths.json
+# registry entry. That premise was wrong — see T6B — so the case now supplies
+# the same instance through .aiteamforge-config, the source that genuinely
+# records an install. The behaviour under test (a live-but-scriptless instance
+# gets its connect script CREATED, with the correct team-base tmux socket) is
+# unchanged; only the proof-of-setup signal driving it is corrected.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T6 [Case 6]: upgrade's union creates finance-personal-connect.sh for a registered-but-scriptless instance"
+test_start "T6 [Case 6]: upgrade's union creates finance-personal-connect.sh for an installed-but-scriptless instance"
 T6_SBX="$(_new_install_sandbox)"
 T6_REGISTRY="$T6_SBX/home/.aiteamforge/team-paths.json"
-_write_registry "$T6_REGISTRY" "finance-personal"
+_write_registry "$T6_REGISTRY"
+_write_install_config "$T6_SBX/aiteamforge/.aiteamforge-config" "finance:personal"
 _install_print_stubs
 HOME="$T6_SBX/home" \
 AITEAMFORGE_ORG_CONFIG="$T6_SBX/home/.aiteamforge/organization.yaml" \
@@ -641,6 +691,139 @@ if [ -s "$T6_CONNECT" ] \
     test_pass
 else
     test_fail "expected finance-personal-connect.sh created with correct socket + a 'Creating missing' message; connect_exists=$([ -f "$T6_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG"); upgrade_log=$(tail -20 "$WORK_DIR/t6-upgrade.log")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6A [XACA-0845-008 precondition]: the wizard catalogue really does enable
+# every team by default — the fact that makes team-paths.json membership
+# worthless as proof of setup.
+#
+# Pinned as an executable precondition rather than asserted in prose so that
+# if the wizard ever becomes opt-IN, this test fails and whoever made that
+# change gets told that T6B/T6C's premise moved.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6A [XACA-0845-008]: team-paths wizard enables every catalogued team by default (so registry membership proves nothing)"
+T6A_WIZARD="$TAP_ROOT/share/scripts/aiteamforge-team-paths-wizard.py"
+T6A_PATHS="$TAP_ROOT/share/kanban-hooks/aiteamforge_paths.py"
+T6A_OK=true
+[ -f "$T6A_WIZARD" ] || T6A_OK=false
+[ -f "$T6A_PATHS" ] || T6A_OK=false
+# (1) the per-team prompt defaults to YES
+grep -qF 'default_yes=True' "$T6A_WIZARD" 2>/dev/null || T6A_OK=false
+grep -qE "Enable .*team_id" "$T6A_WIZARD" 2>/dev/null || T6A_OK=false
+# (2) --accept-defaults writes DEFAULT_TEAMS with no prompt at all
+grep -qF -- '--accept-defaults' "$T6A_WIZARD" 2>/dev/null || T6A_OK=false
+# (3) alias teams are re-added unconditionally after the prompt loop
+grep -qF 'Always include alias teams unchanged' "$T6A_WIZARD" 2>/dev/null || T6A_OK=false
+# (4) the catalogue really does carry teams this box need never have installed
+T6A_CATALOG_COUNT=$(grep -cE '^\s*"[a-z0-9-]+":\s*\{' "$T6A_PATHS" 2>/dev/null || echo 0)
+if [ "$T6A_OK" = true ] && [ "${T6A_CATALOG_COUNT:-0}" -ge 5 ]; then
+    test_pass
+else
+    test_fail "expected the wizard to enable every catalogued team by default and the catalogue to be non-trivial; ok=$T6A_OK catalog_entries=$T6A_CATALOG_COUNT wizard=$T6A_WIZARD"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6B [XACA-0845-008, REGRESSION GUARD]: a fully-populated team-paths.json
+# with NO .aiteamforge-config materialises NOTHING.
+#
+# This is the defect the -008 review finding named. The first cut of the union
+# treated registry membership as affirmative proof of setup. It is not: the
+# wizard (see T6A) enables every catalogued team by default, and
+# aiteamforge_team_lcars_port() materialises a default registry on first
+# lookup — so a box where setup NEVER RAN can hold a complete 16-team
+# registry. Under the old code every one of those teams with a shipped .conf
+# got a connect script it never asked for, silently inverting the guarantee
+# "never materialise cockpit scripts for a team this box did not set up".
+#
+# The catalogue ids below are the real DEFAULT_TEAMS entries; the assertion
+# targets the subset that has a shipped <team>.conf (academy, android,
+# command, firebase, ios, finance-personal, legal-coparenting, medical-general
+# all match a template, so all 8 WOULD have been materialised pre-fix).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6B [XACA-0845-008]: a wizard-populated team-paths.json alone materialises NOTHING (registry is not proof of setup)"
+T6B_SBX="$(_new_install_sandbox)"
+T6B_REGISTRY="$T6B_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T6B_REGISTRY" \
+    academy android command dns finance-personal firebase ios \
+    legal-coparenting mainevent medical-general
+# Deliberately NO .aiteamforge-config: nothing was ever installed here.
+_install_print_stubs
+HOME="$T6B_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6B_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6B_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6B_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6b-upgrade.log" 2>&1
+T6B_COUNT=$(find "$T6B_SBX/aiteamforge" -maxdepth 1 -name '*-connect.sh' 2>/dev/null | wc -l | tr -d ' ')
+T6B_DIS_COUNT=$(find "$T6B_SBX/aiteamforge" -maxdepth 1 -name '*-disconnect.sh' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T6B_COUNT" -eq 0 ] && [ "$T6B_DIS_COUNT" -eq 0 ] \
+    && grep -qi "No installed team connect scripts to refresh" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected ZERO scripts materialised from a registry-only box; connect=$T6B_COUNT disconnect=$T6B_DIS_COUNT; created=$(find "$T6B_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' -exec basename {} \; 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6C [XACA-0845-008, REGRESSION GUARD]: with the SAME full registry present,
+# only the team recorded in .aiteamforge-config is materialised.
+#
+# T6B proves the registry alone does nothing. T6C proves the registry is
+# ignored even when a legitimate install exists alongside it — i.e. the union
+# scopes to what was installed, not to what the wizard catalogued. This is the
+# case that would have shipped 7 unwanted cockpit scripts.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6C [XACA-0845-008]: full registry + .aiteamforge-config listing only academy materialises ONLY academy"
+T6C_SBX="$(_new_install_sandbox)"
+T6C_REGISTRY="$T6C_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T6C_REGISTRY" \
+    academy android command dns finance-personal firebase ios \
+    legal-coparenting mainevent medical-general
+_write_install_config "$T6C_SBX/aiteamforge/.aiteamforge-config" "academy"
+_install_print_stubs
+HOME="$T6C_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6C_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6C_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6C_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6c-upgrade.log" 2>&1
+T6C_MADE=$(find "$T6C_SBX/aiteamforge" -maxdepth 1 -name '*-connect.sh' -exec basename {} \; 2>/dev/null | sort | tr '\n' ' ')
+T6C_UNWANTED=0
+for _t6c_bad in android-connect.sh command-connect.sh firebase-connect.sh ios-connect.sh \
+                finance-personal-connect.sh legal-coparenting-connect.sh medical-general-connect.sh; do
+    [ -e "$T6C_SBX/aiteamforge/$_t6c_bad" ] && T6C_UNWANTED=$((T6C_UNWANTED + 1))
+done
+if [ -s "$T6C_SBX/aiteamforge/academy-connect.sh" ] && [ "$T6C_UNWANTED" -eq 0 ]; then
+    test_pass
+else
+    test_fail "expected ONLY academy-connect.sh; unwanted_count=$T6C_UNWANTED; materialised='$T6C_MADE'; stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6D [XACA-0845-008, STRUCTURAL]: update_connect_scripts no longer reads the
+# registry at all.
+#
+# T6B/T6C are behavioural and would still pass if someone re-added the
+# registry read behind a condition that happens to be false in the sandbox.
+# This pins the absence of the signal itself in the extracted function source.
+#
+# COMMENT LINES ARE STRIPPED FIRST, and that is load-bearing: the function
+# carries a long "WHY NOT team-paths.json" rationale that names both rejected
+# identifiers verbatim. A raw substring scan matches that prose and fails on
+# correct code — which is exactly what happened when this test was first
+# written. Assert against EXECUTABLE lines only.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6D [XACA-0845-008]: update_connect_scripts references neither team-paths.json nor AITEAMFORGE_CONFIG in code"
+T6D_SRC="$(grep -v '^[[:space:]]*#' "$UPD_FN_SRC" || true)"
+T6D_OK=true
+case "$T6D_SRC" in *team-paths.json*) T6D_OK=false ;; esac
+case "$T6D_SRC" in *AITEAMFORGE_CONFIG*) T6D_OK=false ;; esac
+case "$T6D_SRC" in *.aiteamforge-config*) : ;; *) T6D_OK=false ;; esac
+# Negative control: the stripped source must still be real code, not empty —
+# otherwise the two "must not contain" assertions above would pass vacuously.
+case "$T6D_SRC" in *update_connect_scripts*) : ;; *) T6D_OK=false ;; esac
+if [ "$T6D_OK" = true ]; then
+    test_pass
+else
+    test_fail "update_connect_scripts must read .aiteamforge-config and must NOT read team-paths.json/AITEAMFORGE_CONFIG (registry membership is not proof of setup, XACA-0845-008); extracted source: $UPD_FN_SRC"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -693,13 +876,14 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # T9 — Case 8: medical-general is DECLARED (medical.conf ships in the
-# catalog) but NOT LIVE on this box (no registry entry, no on-disk script).
+# catalog) but NOT LIVE on this box (not installed, no on-disk script).
 #
 # ASSERTED BEHAVIOR: nothing is materialised for medical-general. WHY this is
 # correct, not a gap: the union's whole purpose is "an instance this box
 # ACTUALLY set up should get a connect script even if the file is missing" —
-# proof of setup is either an on-disk artifact OR a registry entry. Being
-# merely CATALOGUED (a shipped medical.conf template exists) is neither.
+# proof of setup is either an on-disk artifact OR an .aiteamforge-config
+# `.teams[]` entry. Being merely CATALOGUED (a shipped medical.conf template,
+# or a wizard-written team-paths.json row — see T6B) is neither.
 # Materialising a script for every catalogued team regardless of whether
 # anyone asked for it would be the same class of defect this ticket fixes,
 # just inverted: instead of a live instance getting nothing, a
@@ -729,10 +913,16 @@ fi
 # ─────────────────────────────────────────────────────────────────────────────
 # NC3 [bonus negative control, Case 6]: the pre-XACA-0845
 # update_connect_scripts (embedded verbatim, tap commit d263bbb — on-disk
-# files ONLY, no registry union) never creates a connect script for a
-# registered-but-scriptless instance. Proves source (b) — registry
-# membership — is genuinely what XACA-0845 added, not a restatement of what
-# was already there.
+# files ONLY, no union) never creates a connect script for an
+# installed-but-scriptless instance. Proves source (b) is genuinely what
+# XACA-0845 added, not a restatement of what was already there.
+#
+# XACA-0845-008: the sandbox below MUST supply the instance via
+# .aiteamforge-config — the CURRENT source (b). Driving it with a
+# team-paths.json registry instead would make this control VACUOUS, because
+# the fixed code deliberately ignores that file too: both algorithms would
+# create nothing, for different reasons, and the test would no longer
+# discriminate the pre-fix behaviour from the post-fix behaviour at all.
 # ─────────────────────────────────────────────────────────────────────────────
 _pre_xaca0845_update_connect_scripts() {
   print_section "Updating Team Connect/Disconnect Scripts"
@@ -863,7 +1053,7 @@ _pre_xaca0845_update_connect_scripts() {
   return 0
 }
 
-test_start "NC3 [negative control, Case 6]: pre-XACA-0845 update_connect_scripts NEVER creates a registered-but-scriptless instance's connect script"
+test_start "NC3 [negative control, Case 6]: pre-XACA-0845 update_connect_scripts NEVER creates an installed-but-scriptless instance's connect script"
 # Verify the revert landed: the embedded fixture must iterate ONLY on-disk
 # files (no registry/AITEAMFORGE_CONFIG reference at all) — proving it is
 # genuinely the pre-XACA-0845 algorithm.
@@ -879,7 +1069,9 @@ if [ "$NC3_MARKER_OK" != true ]; then
 else
     NC3_SBX="$(_new_install_sandbox)"
     NC3_REGISTRY="$NC3_SBX/home/.aiteamforge/team-paths.json"
-    _write_registry "$NC3_REGISTRY" "finance-personal"
+    _write_registry "$NC3_REGISTRY"
+    # Source (b) as it exists TODAY — see the vacuity note above.
+    _write_install_config "$NC3_SBX/aiteamforge/.aiteamforge-config" "finance:personal"
     _install_print_stubs
     HOME="$NC3_SBX/home" \
     AITEAMFORGE_ORG_CONFIG="$NC3_SBX/home/.aiteamforge/organization.yaml" \
@@ -889,8 +1081,93 @@ else
     if [ ! -f "$NC3_SBX/aiteamforge/finance-personal-connect.sh" ]; then
         test_pass
     else
-        test_fail "expected the pre-XACA-0845 algorithm to create NOTHING for the registered-but-scriptless finance-personal — if a file now exists, the negative control no longer discriminates from T6"
+        test_fail "expected the pre-XACA-0845 algorithm to create NOTHING for the installed-but-scriptless finance-personal — if a file now exists, the negative control no longer discriminates from T6"
     fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# D1–D3 — `aiteamforge doctor --check connect` (XACA-0845 Blocker 2)
+#
+# check_connect_scripts originally landed in bin/aiteamforge-doctor.sh — which
+# `aiteamforge doctor` DOES NOT DISPATCH TO. bin/aiteamforge-cli.sh execs
+# libexec/commands/aiteamforge-doctor.sh, so the advertised diagnostic was
+# dead code: the CHANGELOG and PR body claimed a working `--check connect`
+# while the command it names would have exited 1 with "Unknown component".
+#
+# D3 drives the check through the REAL CLI entry point rather than calling the
+# function directly. That distinction is the whole point — a test that sourced
+# the file and invoked check_connect_scripts would have passed against the
+# broken build, since the function existed and worked; only the wiring was
+# missing.
+# ═══════════════════════════════════════════════════════════════════════════
+DOCTOR_CMD="$TAP_ROOT/libexec/commands/aiteamforge-doctor.sh"
+BIN_DOCTOR="$TAP_ROOT/bin/aiteamforge-doctor.sh"
+CLI_SH="$TAP_ROOT/bin/aiteamforge-cli.sh"
+
+test_start "D1 [Blocker 2]: check_connect_scripts is defined in the REAL dispatch target and wired into --check connect + all"
+D1_OK=true
+[ -f "$DOCTOR_CMD" ] || D1_OK=false
+D1_SRC="$(cat "$DOCTOR_CMD" 2>/dev/null || true)"
+case "$D1_SRC" in *"check_connect_scripts() {"*) : ;; *) D1_OK=false ;; esac
+# the `connect)` case arm and membership in the `all` fan-out
+printf '%s\n' "$D1_SRC" | grep -qE '^[[:space:]]*connect\)' || D1_OK=false
+[ "$(printf '%s\n' "$D1_SRC" | grep -c '^[[:space:]]*check_connect_scripts[[:space:]]*$')" -ge 2 ] || D1_OK=false
+# usage must advertise the component it now really supports
+printf '%s\n' "$D1_SRC" | grep -qE '^[[:space:]]*connect[[:space:]]+' || D1_OK=false
+if [ "$D1_OK" = true ]; then
+    test_pass
+else
+    test_fail "libexec/commands/aiteamforge-doctor.sh must define check_connect_scripts, expose a 'connect)' case arm, call it from BOTH 'connect)' and 'all', and list it in usage; doctor=$DOCTOR_CMD"
+fi
+
+test_start "D2 [Blocker 2, sibling-drift]: the legacy bin/aiteamforge-doctor.sh does NOT also define check_connect_scripts"
+# Mirrors test-xaca-0655-doctor-preflight.sh L3-A2: new doctor functionality
+# lives ONLY in libexec/commands. Two copies of this check would drift, and the
+# bin copy is not what `aiteamforge doctor` runs.
+if [ ! -f "$BIN_DOCTOR" ]; then
+    test_pass
+else
+    D2_SRC="$(cat "$BIN_DOCTOR")"
+    D2_OK=true
+    case "$D2_SRC" in *"check_connect_scripts"*) D2_OK=false ;; esac
+    # and the CLI must still not dispatch to it
+    case "$(cat "$CLI_SH" 2>/dev/null || true)" in
+        *"bin/aiteamforge-doctor.sh"*) D2_OK=false ;;
+    esac
+    if [ "$D2_OK" = true ]; then
+        test_pass
+    else
+        test_fail "bin/aiteamforge-doctor.sh must NOT define check_connect_scripts (it is not the CLI dispatch target — that is libexec/commands/aiteamforge-doctor.sh), and the CLI must not exec it"
+    fi
+fi
+
+test_start "D3 [Blocker 2, END-TO-END]: 'aiteamforge doctor --check connect' through bin/aiteamforge-cli.sh actually runs the check"
+D3_SBX="$(_new_install_sandbox)"
+# One installed parametric instance with NO script (must be reported missing),
+# one installed non-parametric instance WITH a script (must be reported
+# present), and one orphan script (must be reported as matching nothing).
+_write_install_config "$D3_SBX/aiteamforge/.aiteamforge-config" "finance:personal" "academy"
+printf '#!/bin/zsh\necho stub\n' > "$D3_SBX/aiteamforge/academy-connect.sh"
+printf '#!/bin/zsh\necho stub\n' > "$D3_SBX/aiteamforge/legal-default-connect.sh"
+D3_LOG="$WORK_DIR/d3-doctor.log"
+HOME="$D3_SBX/home" \
+AITEAMFORGE_HOME="$TAP_ROOT" \
+AITEAMFORGE_DIR="$D3_SBX/aiteamforge" \
+AITEAMFORGE_CONFIG="$D3_SBX/home/.aiteamforge/team-paths.json" \
+    bash "$CLI_SH" doctor --check connect >"$D3_LOG" 2>&1 || true
+D3_OK=true
+# The component must be RECOGNISED (the pre-fix failure mode was this exact
+# message from the unknown-component arm).
+grep -qi "Unknown component" "$D3_LOG" && D3_OK=false
+# The check must actually have run and produced all three verdicts.
+grep -qi "Connect Scripts" "$D3_LOG" || D3_OK=false
+grep -qF "finance-personal" "$D3_LOG" || D3_OK=false
+grep -qF "academy" "$D3_LOG" || D3_OK=false
+grep -qF "legal-default" "$D3_LOG" || D3_OK=false
+if [ "$D3_OK" = true ]; then
+    test_pass
+else
+    test_fail "'aiteamforge doctor --check connect' must reach check_connect_scripts via the real CLI dispatch and report the missing (finance-personal), present (academy) and orphaned (legal-default) instances; output: $(cat "$D3_LOG")"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

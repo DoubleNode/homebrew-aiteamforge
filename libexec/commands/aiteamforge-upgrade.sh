@@ -930,8 +930,8 @@ update_connect_scripts() {
 
   # ── Build the work list: a UNION of two sources (XACA-0845) ──────────────
   #   (a) *-connect.sh files already on disk — the XACA-0834 behaviour;
-  #   (b) instances REGISTERED in team-paths.json `.teams` (and the install's
-  #       own .aiteamforge-config) — the set this box actually set up.
+  #   (b) instances this box actually INSTALLED, read from the install's own
+  #       .aiteamforge-config `.teams[]`.
   #
   # Why (b) had to be added: (a) alone can only ever REFRESH a script that
   # already exists. It can never CREATE a missing one, so an instance that is
@@ -940,15 +940,35 @@ update_connect_scripts() {
   # is the exact state XACA-0845 found: two live parametric instances with no
   # connect script, alongside refreshed orphans for conf-default instances.
   #
-  # The guarantee stated below — "never materialise cockpit scripts for a team
-  # this box didn't set up" — is PRESERVED, and strengthened. Registry
-  # membership is affirmative PROOF of setup: install-team.sh writes
-  # teams[<instance>] only after provisioning that instance. A filename is mere
-  # inference. Neither source globs a team id or invents an instance; both
-  # yield concrete instance ids that are still validated against the shipped
-  # team confs below, and anything unrecognised is skipped, not guessed at.
+  # WHY NOT team-paths.json (XACA-0845-008). The first cut of this union ALSO
+  # read the registry at ~/.aiteamforge/team-paths.json `.teams`, on the stated
+  # premise that "registry membership is affirmative PROOF of setup". That
+  # premise is false, and it broke the very guarantee the union was meant to
+  # preserve. team-paths.json is written by aiteamforge-team-paths-wizard.py,
+  # which (1) prompts "Enable <team>?" with the default answer YES for every
+  # catalogued team, (2) under --accept-defaults writes DEFAULT_TEAMS verbatim
+  # with no prompt at all, and (3) unconditionally re-adds every ALIAS_TEAMS
+  # entry after the prompt loop. That catalogue ships 16 instances (academy,
+  # android, command, dns, finance-personal, firebase, ios, legal-coparenting,
+  # the mainevent set, medical-general). So a box that installed ios ALONE
+  # would have had connect scripts materialised for academy, android, command,
+  # firebase, finance-personal, legal-coparenting and medical-general — teams
+  # it never set up. Worse, the file need not have been authored deliberately
+  # at all: aiteamforge_team_lcars_port() MATERIALIZES a default registry on
+  # its first lookup (see the read-only note in aiteamforge-status.sh), so a
+  # full 16-team registry can exist on a box where setup never ran.
+  #
+  # .aiteamforge-config IS proof. bin/aiteamforge-setup.sh writes `.teams[]`
+  # from SELECTED_TEAMS, and writes it AFTER the loop that runs install-team.sh
+  # for each of those teams — a team reaches that array only by being chosen
+  # and surviving install-time validation (which can also remove it again).
+  # Cockpit installs deliberately record an EMPTY `.teams[]` and are covered
+  # entirely by source (a), i.e. exactly their pre-XACA-0845 behaviour.
+  #
+  # Neither remaining source globs a team id or invents an instance; both yield
+  # concrete instance ids that are still validated against the shipped team
+  # confs below, and anything unrecognised is skipped, not guessed at.
   local work_list=""
-  local _registry_json="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
   local _install_config="${WORKING_DIR}/.aiteamforge-config"
   local _reg_instances=""
 
@@ -966,32 +986,29 @@ update_connect_scripts() {
     work_list="${work_list}${instance_id}"$'\n'
   done
 
-  # Registered instances. team-paths.json `.teams` is keyed BY INSTANCE ID
-  # ("finance-personal"), so its keys are usable directly. Read with python3 —
+  # Installed instances, read from .aiteamforge-config. Read with python3 —
   # a hard dependency of the installer this function drives — and fail soft:
-  # a missing or malformed registry must degrade to the on-disk-only work list
+  # a missing or malformed config must degrade to the on-disk-only work list
   # (the pre-XACA-0845 behaviour), never abort an unattended nightly upgrade.
+  #
+  # NOTE FOR EDITORS: no apostrophes anywhere in the here-doc body below. Under
+  # bash 3.2 (every macOS consumer box) a here-doc nested inside $( ) is NOT
+  # treated as opaque, so one stray single quote opens an unterminated quote and
+  # the WHOLE file fails to parse — with the error reported hundreds of lines
+  # later, nowhere near the real cause. See XACA-0845.
   if command -v python3 >/dev/null 2>&1; then
-    _reg_instances="$(python3 - "$_registry_json" "$_install_config" <<'PYEOF' 2>/dev/null || true
+    _reg_instances="$(python3 - "$_install_config" <<'PYEOF' 2>/dev/null || true
 import json, sys
 
 out = []
 
-# (1) team-paths.json: .teams is an object keyed by instance id.
+# .aiteamforge-config: .teams[] holds BASE ids; .team_paths.<base>.project_id
+# carries the project for parameterised installs. Compose the instance id the
+# same way get_team_instance_id() in config.sh does (lowercased). This is the
+# only source that both covers custom project-scoped installs AND is written
+# exclusively by the installer, after the team was actually installed.
 try:
     with open(sys.argv[1]) as fh:
-        teams = json.load(fh).get("teams", {})
-    if isinstance(teams, dict):
-        out.extend(str(k) for k in teams)
-except Exception:
-    pass
-
-# (2) .aiteamforge-config: .teams[] holds BASE ids; .team_paths.<base>.project_id
-#     carries the project for parameterised installs. Compose the instance id
-#     the same way config.sh's get_team_instance_id() does (lowercased), which
-#     is the only source covering custom project-scoped installs.
-try:
-    with open(sys.argv[2]) as fh:
         cfg = json.load(fh)
     paths = cfg.get("team_paths", {}) or {}
     for base in cfg.get("teams", []) or []:
@@ -1015,7 +1032,17 @@ PYEOF
   # De-duplicate, preserving first-seen order, and drop blank lines.
   work_list="$(printf '%s' "$work_list" | awk 'NF && !seen[$0]++')"
 
-  for instance_id in $work_list; do
+  # Iterate line-by-line (XACA-0845-012). `for instance_id in $work_list` was an
+  # UNQUOTED expansion: subject to word splitting AND pathname expansion, so an
+  # instance id containing a glob metacharacter would have been silently
+  # replaced by matching filenames from the caller cwd (or, with no match,
+  # passed through as a literal glob). A here-string keeps the loop body in the
+  # CURRENT shell, so `updated`/`failed`/`skipped` still accumulate — a pipe
+  # into `while` would run the body in a subshell and lose every count.
+  while IFS= read -r instance_id; do
+    # `<<<` on an empty work_list still yields one empty line.
+    [ -n "$instance_id" ] || continue
+
     # Message continuity with the file-driven original; also the file this
     # iteration will create or refresh.
     base="${instance_id}-connect.sh"
@@ -1108,14 +1135,19 @@ PYEOF
     fi
 
     print_info "${_action} ${instance_id} connect/disconnect scripts..."
-    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" 2>&1 | sed 's/^/    /' ); then
+    # `</dev/null` is REQUIRED, not cosmetic (XACA-0845-012). The loop now reads
+    # the work list from a here-string on stdin, and a child that reads stdin
+    # would swallow the remaining instance ids — install-team.sh can prompt
+    # (_ensure_org_config) before its --connect-only early exit, so one
+    # unattended upgrade could silently process only the first instance.
+    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" </dev/null 2>&1 | sed 's/^/    /' ); then
       print_success "${_action_done} ${instance_id} connect/disconnect scripts"
       updated=$((updated + 1))
     else
       print_warning "Failed to render ${instance_id} connect/disconnect scripts (continuing)"
       failed=$((failed + 1))
     fi
-  done
+  done <<< "$work_list"
 
   if [ $((updated + failed)) -eq 0 ]; then
     print_success "No installed team connect scripts to refresh"

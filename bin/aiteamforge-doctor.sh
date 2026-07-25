@@ -80,7 +80,6 @@ Components:
   services        Check running services
   permissions     Check file permissions
   install         Validate post-install structure (teams, scripts, LCARS, venv)
-  connect         Cross-check cockpit connect scripts against registered instances
   all             Run all checks (default)
 
 Examples:
@@ -581,103 +580,6 @@ check_permissions() {
   echo ""
 }
 
-# XACA-0845: cockpit connect-script coverage.
-#
-# Reports BOTH directions of the mismatch between the instances this box has
-# registered and the *-connect.sh scripts on disk:
-#
-#   missing — a registered, live instance with NO connect script. This is the
-#             XACA-0845 symptom: a parametric team was scriptless precisely
-#             BECAUSE it was selected during setup, since selection routed it
-#             down the install path that refused to render one.
-#   orphan  — a connect script with no matching registered instance, typically
-#             a conf-default instance ("legal-default") written by a pass that
-#             did not know the real project, or a pre-0.11.5 bare-team name.
-#
-# This check REPORTS ONLY and never removes anything. An orphan is a dead
-# script; deleting one someone still invokes is a worse failure than leaving
-# it, and the file is the only remaining record of how it got there. Removal
-# stays a deliberate human act.
-check_connect_scripts() {
-  echo -e "${CYAN}Checking cockpit connect scripts...${NC}"
-  echo ""
-
-  local _registry_json="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
-  local _install_config="${AITEAMFORGE_DIR}/.aiteamforge-config"
-
-  if ! command -v python3 >/dev/null 2>&1; then
-    check_result warn "python3 unavailable — cannot cross-check connect scripts against the registry"
-    echo ""
-    return
-  fi
-
-  local _registered
-  _registered="$(python3 - "$_registry_json" "$_install_config" <<'PYEOF' 2>/dev/null || true
-import json, sys
-out = []
-try:
-    with open(sys.argv[1]) as fh:
-        teams = json.load(fh).get("teams", {})
-    if isinstance(teams, dict):
-        out.extend(str(k) for k in teams)
-except Exception:
-    pass
-try:
-    with open(sys.argv[2]) as fh:
-        cfg = json.load(fh)
-    paths = cfg.get("team_paths", {}) or {}
-    for base in cfg.get("teams", []) or []:
-        base = str(base)
-        pid = (paths.get(base) or {}).get("project_id")
-        out.append("%s-%s" % (base, str(pid).lower()) if pid else base)
-except Exception:
-    pass
-for i in sorted(set(x for x in out if x)):
-    print(i)
-PYEOF
-)"
-
-  if [ -z "$_registered" ]; then
-    check_result pass "No registered team instances to cross-check"
-    echo ""
-    return
-  fi
-
-  local _on_disk="" _cs _inst _missing=0 _orphans=0
-  for _cs in "${AITEAMFORGE_DIR}"/*-connect.sh; do
-    [ -f "$_cs" ] || continue
-    _inst="$(basename "$_cs")"
-    _on_disk="${_on_disk}${_inst%-connect.sh}"$'\n'
-  done
-
-  # Direction 1: registered but no script — the actionable failure.
-  for _inst in $_registered; do
-    if [ -f "${AITEAMFORGE_DIR}/${_inst}-connect.sh" ]; then
-      check_result pass "Connect script present for ${_inst}"
-    else
-      _missing=$((_missing + 1))
-      check_result warn "Registered instance '${_inst}' has no connect script" \
-        "Run: aiteamforge upgrade (recreates missing cockpit scripts)"
-    fi
-  done
-
-  # Direction 2: script with no registered instance — reported, never removed.
-  for _inst in $_on_disk; do
-    [ -n "$_inst" ] || continue
-    if ! printf '%s\n' "$_registered" | grep -qx -- "$_inst"; then
-      _orphans=$((_orphans + 1))
-      check_result warn "Connect script '${_inst}-connect.sh' matches no registered instance" \
-        "Left in place deliberately. If it is genuinely unused, remove it by hand."
-    fi
-  done
-
-  if [ "$_missing" -eq 0 ] && [ "$_orphans" -eq 0 ]; then
-    check_result pass "Connect scripts match registered instances exactly"
-  fi
-
-  echo ""
-}
-
 # Check post-install structure via validate-install library
 check_install() {
   echo -e "${CYAN}Checking post-install structure...${NC}"
@@ -736,9 +638,6 @@ case "$CHECK_COMPONENT" in
   install)
     check_install
     ;;
-  connect)
-    check_connect_scripts
-    ;;
   all)
     check_dependencies
     check_framework
@@ -746,7 +645,6 @@ case "$CHECK_COMPONENT" in
     check_services
     check_permissions
     check_install
-    check_connect_scripts
     ;;
   *)
     echo -e "${RED}ERROR: Unknown component: ${CHECK_COMPONENT}${NC}" >&2

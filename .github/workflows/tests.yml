@@ -1,6 +1,11 @@
 name: Test Homebrew Formula
 
 on:
+  # XACA-0845-010: libexec/** and bin/** MUST be in these filters. Without
+  # them a PR touching only installer/upgrade/CLI code never triggered this
+  # workflow at all — the suites below (and the syntax check) simply did not
+  # run, and the PR showed no failing checks. That is how a bash 3.2 parse
+  # error in libexec/commands/aiteamforge-upgrade.sh reached review green.
   push:
     branches: [ main, develop ]
     paths:
@@ -9,6 +14,8 @@ on:
       - 'tests/**'
       - 'scripts/**'
       - 'fleet-monitor/**'
+      - 'libexec/**'
+      - 'bin/**'
   pull_request:
     branches: [ main, develop ]
     paths:
@@ -17,6 +24,8 @@ on:
       - 'tests/**'
       - 'scripts/**'
       - 'fleet-monitor/**'
+      - 'libexec/**'
+      - 'bin/**'
   workflow_dispatch:
 
 jobs:
@@ -184,10 +193,43 @@ jobs:
 
       - name: Check script syntax
         run: |
-          # Check bash scripts
-          bash -n bin/aiteamforge-cli.sh
-          bash -n bin/aiteamforge-setup.sh
-          bash -n bin/aiteamforge-doctor.sh
+          # XACA-0845-009: parse EVERY shipped bash script under /bin/bash,
+          # which on macOS is bash 3.2 — the interpreter on every consumer box.
+          #
+          # This step used to name three bin/ scripts and used PATH `bash`
+          # (Homebrew bash 5.x on the runner). Both gaps mattered: the file
+          # that actually broke was libexec/commands/aiteamforge-upgrade.sh,
+          # which was never checked at all, and its defect was a bash 3.2-only
+          # parse failure (3.2 does not treat a here-doc nested in $( ) as
+          # opaque, so one apostrophe in a comment unterminated the whole
+          # file). bash 5.x parses that same file cleanly. So the regression
+          # shipped through a green "Check script syntax" twice over.
+          #
+          # Scope: files with a bash shebang under libexec/ and bin/. zsh
+          # scripts and templates are deliberately excluded — `bash -n` on a
+          # zsh script is not a meaningful check, and *.template files are not
+          # valid shell until rendered.
+          set -euo pipefail
+          echo "Using $(/bin/bash --version | head -1)"
+          rc=0
+          checked=0
+          while IFS= read -r f; do
+            head -1 "$f" | grep -qE '^#!.*(bin/bash|env bash)' || continue
+            checked=$((checked + 1))
+            if ! /bin/bash -n "$f"; then
+              echo "::error file=$f::bash 3.2 syntax check failed"
+              rc=1
+            fi
+          done < <(find libexec bin -type f -name '*.sh' | sort)
+          echo "Checked $checked bash script(s) under /bin/bash."
+          # A pathing/glob mistake that checks NOTHING must fail, not pass
+          # green — this whole step exists because a vacuous check shipped a
+          # parse error.
+          if [ "$checked" -lt 10 ]; then
+            echo "::error::expected to check at least 10 bash scripts, checked $checked — the file discovery is broken"
+            rc=1
+          fi
+          exit $rc
 
       - name: Run ShellCheck on scripts
         run: |

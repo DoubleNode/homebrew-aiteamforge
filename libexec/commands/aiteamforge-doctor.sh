@@ -68,6 +68,7 @@ Components:
   version-drift   Cellar vs working-dir version drift (XACA-0578)
   config          Configuration files and validity
   board           Kanban board resolution + template/stub-collision detection (XACA-0655)
+  connect         Cockpit connect scripts vs installed team instances (XACA-0845)
   services        Running services + LCARS server durability (XACA-0655)
   lcars-port-drift  LCARS server bound to a non-canonical port (XACA-0706/0613)
   lcars-python-runtime  LCARS python >=3.10 floor + launchd-context resolver + server.py 3.9-safety (XACA-0713)
@@ -933,6 +934,111 @@ PYEOF
   esac
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Check: cockpit connect scripts (XACA-0845)
+#
+# Cross-checks the instances this box INSTALLED against the *-connect.sh files
+# actually on disk, and reports BOTH directions:
+#
+#   missing — an installed instance with no connect script. The actionable
+#             failure, and the XACA-0845 symptom: a parametric team was
+#             scriptless precisely BECAUSE it was selected during setup, since
+#             selection routed it down the install path that refused to render
+#             one.
+#   orphan  — a connect script matching no installed instance, typically a
+#             conf-default instance ("legal-default") written by a pass that did
+#             not know the real project, or a pre-0.11.5 bare-team name.
+#
+# SOURCE OF TRUTH is ${WORKING_DIR}/.aiteamforge-config `.teams[]`, NOT
+# ~/.aiteamforge/team-paths.json. The registry is written by
+# aiteamforge-team-paths-wizard.py, which enables every catalogued team by
+# default (and writes all 16 verbatim under --accept-defaults), so registry
+# membership does not imply the team was ever set up — it would make this check
+# report a "missing connect script" for every catalogued team on every box. See
+# the matching rationale in aiteamforge-upgrade.sh's update_connect_scripts
+# (XACA-0845-008). Cockpit installs record an EMPTY .teams[] on purpose, so on
+# those boxes this check reports orphans only, never spurious missing entries.
+#
+# This check REPORTS ONLY and never removes anything. An orphan is a dead
+# script; deleting one someone still invokes is a worse failure than leaving
+# it, and the file is the only remaining record of how it got there. Removal
+# stays a deliberate human act.
+# ─────────────────────────────────────────────────────────────────────────────
+check_connect_scripts() {
+  print_section "Checking Cockpit Connect Scripts"
+
+  local _working_dir
+  _working_dir="$(get_working_dir)"
+  local _install_config="${_working_dir}/.aiteamforge-config"
+
+  if ! command -v python3 >/dev/null 2>&1; then
+    check_result warn "python3 unavailable — cannot cross-check connect scripts against installed teams"
+    return
+  fi
+
+  # NOTE FOR EDITORS: no apostrophes anywhere in the here-doc body below. Under
+  # bash 3.2 a here-doc nested inside $( ) is NOT opaque, so one stray single
+  # quote unterminates the whole file. See XACA-0845.
+  local _installed
+  _installed="$(python3 - "$_install_config" <<'PYEOF' 2>/dev/null || true
+import json, sys
+
+out = []
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+    paths = cfg.get("team_paths", {}) or {}
+    for base in cfg.get("teams", []) or []:
+        base = str(base)
+        pid = (paths.get(base) or {}).get("project_id")
+        out.append("%s-%s" % (base, str(pid).lower()) if pid else base)
+except Exception:
+    pass
+
+for i in sorted(set(x for x in out if x)):
+    print(i)
+PYEOF
+)"
+
+  local _on_disk="" _cs _inst _missing=0 _orphans=0
+  for _cs in "${_working_dir}"/*-connect.sh; do
+    [ -f "$_cs" ] || continue
+    _inst="$(basename "$_cs")"
+    _on_disk="${_on_disk}${_inst%-connect.sh}"$'\n'
+  done
+
+  if [ -z "$_installed" ] && [ -z "$_on_disk" ]; then
+    check_result pass "No installed team instances to cross-check"
+    return
+  fi
+
+  # Direction 1: installed but no script — the actionable failure.
+  while IFS= read -r _inst; do
+    [ -n "$_inst" ] || continue
+    if [ -f "${_working_dir}/${_inst}-connect.sh" ]; then
+      check_result pass "Connect script present for ${_inst}"
+    else
+      _missing=$((_missing + 1))
+      check_result warn "Installed instance '${_inst}' has no connect script" \
+        "Run: aiteamforge upgrade (recreates missing cockpit scripts)"
+    fi
+  done <<< "$_installed"
+
+  # Direction 2: script with no installed instance — reported, never removed.
+  while IFS= read -r _inst; do
+    [ -n "$_inst" ] || continue
+    if ! printf '%s\n' "$_installed" | grep -qx -- "$_inst"; then
+      _orphans=$((_orphans + 1))
+      check_result warn "Connect script '${_inst}-connect.sh' matches no installed instance" \
+        "Left in place deliberately. If it is genuinely unused, remove it by hand."
+    fi
+  done <<< "$_on_disk"
+
+  if [ "$_missing" -eq 0 ] && [ "$_orphans" -eq 0 ]; then
+    check_result pass "Connect scripts match installed instances exactly"
+  fi
+}
+
 # Check: Services
 check_services() {
   print_section "Checking Services"
@@ -1521,6 +1627,9 @@ case "$CHECK_COMPONENT" in
   board)
     check_board_resolution
     ;;
+  connect)
+    check_connect_scripts
+    ;;
   services)
     check_services
     ;;
@@ -1550,6 +1659,7 @@ case "$CHECK_COMPONENT" in
     check_version_drift
     check_config
     check_board_resolution
+    check_connect_scripts
     check_services
     check_lcars_port_drift
     check_lcars_python_runtime

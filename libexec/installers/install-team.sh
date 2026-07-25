@@ -1003,7 +1003,18 @@ if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
     for _stale_glob in "$AITEAMFORGE_DIR/${TEAM_ID}-"*-startup.sh \
                        "$AITEAMFORGE_DIR/${TEAM_ID}-"*-shutdown.sh; do
         [[ -f "$_stale_glob" ]] || continue
-        # Skip the template-keyed names themselves
+        # VESTIGIAL as written (XACA-0845-013): with the glob narrowed to
+        # "${TEAM_ID}-"*-startup.sh, this arm can no longer fire. The literal
+        # "finance-startup.sh" does not match "finance-*-startup.sh" — after the
+        # "finance-" prefix the remainder is "startup.sh", which does not end in
+        # the required "-startup.sh". Verified empirically under bash 3.2.
+        #
+        # KEPT DELIBERATELY, not dropped: it is the last line of defence if the
+        # glob is ever widened back toward the pre-XACA-0845 "${TEAM_ID}*"
+        # shape. Without it, such a change would move the LIVE template-keyed
+        # startup/shutdown scripts aside on every re-install — silently, since
+        # mv leaves no error. A dead one-line guard costs nothing; re-deriving
+        # this reasoning after the fact costs an outage.
         case "$(basename "$_stale_glob")" in
             "${TEAM_ID}-startup.sh"|"${TEAM_ID}-shutdown.sh") continue ;;
         esac

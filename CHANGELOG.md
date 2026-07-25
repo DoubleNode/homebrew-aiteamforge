@@ -7,6 +7,67 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0845 (PR #723 review) — two blockers and six findings against the connect-script work
+
+Remediation of the code review on PR #723. Two of these were shipping defects in the ticket's own
+fix; the rest close the CI gaps that let the first one reach a green review.
+
+- **BLOCKER — `libexec/commands/aiteamforge-upgrade.sh` failed to parse under bash 3.2, i.e. on every
+  macOS consumer box.** A lone apostrophe in a *comment* inside the `python3` here-doc nested in
+  `$( )` unterminated the whole file. Bash 3.2 does not treat a here-doc body inside command
+  substitution as opaque the way 5.x does, so the quote ran to end-of-file and the parse error was
+  reported hundreds of lines away from its cause. `bash -n` under Homebrew bash 5.x — what CI used —
+  reports this file **clean**. Fixed, and the here-doc now carries an explicit no-apostrophes note
+  for editors.
+- **BLOCKER — `aiteamforge doctor --check connect` was dead code.** `check_connect_scripts` landed in
+  `bin/aiteamforge-doctor.sh`, but `bin/aiteamforge-cli.sh` dispatches `doctor` to
+  `libexec/commands/aiteamforge-doctor.sh`, which had no reference to it — so the diagnostic the
+  CHANGELOG and PR body advertised exited 1 with `Unknown component: connect`. The check now lives in
+  the real dispatch target (wired into both the `connect)` arm and the `all` fan-out, and listed in
+  `usage`), and the duplicate was removed from the legacy `bin/` entry point per the sibling-drift
+  convention that `test-xaca-0655-doctor-preflight.sh` L3-A2 already pins. New test **D3** drives the
+  check through `bin/aiteamforge-cli.sh` end-to-end rather than calling the function directly —
+  a direct-call test would have passed against the broken build, since the function itself worked.
+- **XACA-0845-008 — "registry membership is proof of setup" was false, and it inverted the guarantee
+  the union exists to protect.** `~/.aiteamforge/team-paths.json` is written by
+  `aiteamforge-team-paths-wizard.py`, which prompts `Enable '<team>'?` with the default answer **yes**
+  for every catalogued team, writes `DEFAULT_TEAMS` verbatim under `--accept-defaults` with no prompt
+  at all, and unconditionally re-adds the alias teams after the prompt loop. Its catalogue ships 16
+  instances, 8 of which match a shipped `<team>.conf` — so a box that installed **ios alone** would
+  have had cockpit scripts materialised for academy, android, command, firebase, finance-personal,
+  legal-coparenting and medical-general. Worse, the file need not have been authored deliberately at
+  all: `aiteamforge_team_lcars_port()` materialises a default registry on first lookup, so a complete
+  registry can exist on a box where setup never ran. The union now reads **only**
+  `.aiteamforge-config` `.teams[]`, which `bin/aiteamforge-setup.sh` writes from `SELECTED_TEAMS`
+  *after* the install loop. Cockpit installs record an empty `.teams[]` by design and remain covered
+  entirely by the on-disk source. Guarded by new tests **T6A** (pins the wizard's opt-out-by-default
+  behaviour), **T6B** (a full registry with no install config materialises nothing), **T6C** (a full
+  registry alongside a one-team install materialises only that team) and **T6D** (structural: the
+  function references neither `team-paths.json` nor `AITEAMFORGE_CONFIG` in code).
+- **XACA-0845-009 — CI's "Check script syntax" step now parses every shipped bash script under
+  `/bin/bash` 3.2.** It previously named three `bin/` scripts and used PATH `bash` (5.x on the
+  runner). Both halves mattered: the file that broke lives under `libexec/` and was never checked,
+  and its defect is invisible to 5.x. The step now discovers bash-shebanged `*.sh` under `libexec/`
+  and `bin/` (27 files today) and **fails if it checks fewer than 10** — a discovery bug that checks
+  nothing must go red, not green.
+- **XACA-0845-010 — `tests.yml` `paths:` filters now include `libexec/**` and `bin/**`.** Without
+  them a PR touching only installer/upgrade/CLI code never triggered the workflow, so the suites and
+  the syntax check simply did not run and the PR showed no failing checks.
+- **XACA-0845-011 — the 0845 suite's `_run_install()` now pins `AITEAMFORGE_CONFIG` into its
+  sandbox.** Overriding `HOME` alone is insufficient: `AITEAMFORGE_CONFIG` is honoured wherever it is
+  set, and `test-xaca-0799-restart-symmetry.sh` exports one, so under `test-runner.sh` the installer
+  (and the port allocator, which **writes**) could reach the real registry.
+- **XACA-0845-012 — `for instance_id in $work_list` replaced with `while IFS= read -r`.** The
+  unquoted expansion was subject to pathname expansion as well as word splitting. The loop body stays
+  in the current shell (a pipe would lose every counter), and the installer call gained `</dev/null`
+  so a child that reads stdin cannot swallow the remaining work list.
+- **XACA-0845-013 — the XACA-0483 stale-migration case-arm is now marked vestigial.** With the glob
+  narrowed to `"${TEAM_ID}-"*-startup.sh`, `finance-startup.sh` can no longer match (verified
+  empirically under bash 3.2), so the arm skipping the template-keyed names is unreachable. Kept
+  deliberately rather than dropped: it is the last defence if the glob is ever widened back toward
+  the pre-XACA-0845 `"${TEAM_ID}"*` shape, where it would otherwise move the **live** startup and
+  shutdown scripts aside on every re-install, silently, since `mv` leaves no error.
+
 ### Fix: XACA-0857 — two stale iOS persona mirrors and one unregistered test suite, both pre-existing on `develop`
 
 Housekeeping for two drifts that predate the PR carrying them; neither was introduced by the
@@ -54,9 +115,9 @@ Being selected routed a projects-enabled team (`TEAM_HAS_PROJECTS=true`: finance
 - **`share/templates/team-{connect,disconnect}-parametric.sh.template` now ship in the tap**, mirrored from the dev-team canonical by `sync-tap.sh` (XACA-0340 canonical-source rule). Without this the retired skip would have had nothing to render from.
 - **Instance-keyed naming retained** (`<instance>-connect.sh`), with the instance's own project — and, for freelance, client — baked in as the script's defaults, so `finance-personal-connect.sh <host>` resolves to exactly that instance while an explicit argument still overrides. This keeps `aiteamforge-upgrade.sh`'s filename decomposition reversible against `compute_instance_id()`.
 - **XACA-0483 stale-migration no longer sweeps connect/disconnect aside.** Only startup/shutdown became template-keyed under XACA-0483; connect scripts are inherently instance-keyed (each live instance has its own port and session set), so `<team>-<project>-connect.sh` is now the *correct* name. Left in the glob, it would have moved each freshly rendered script aside on every re-install — re-creating the exact "live team has no connect script" state this ticket fixes.
-- **`libexec/commands/aiteamforge-upgrade.sh` — the work list is now a UNION** of on-disk `*-connect.sh` files and instances registered in `team-paths.json` / `.aiteamforge-config`. Iterating rendered files alone can only ever *refresh*; it can never **create** a missing script, so a live-but-scriptless instance stayed that way through every upgrade while orphans got refreshed forever. The stated guarantee — never materialise cockpit scripts for a team this box didn't set up — is preserved and strengthened: registry membership is affirmative proof of setup, whereas a filename is inference. (This refresh-only loop shipped in XACA-0814, which is merged but **unreleased**, so it is a latent defect rather than the cause of the observed state.)
+- **`libexec/commands/aiteamforge-upgrade.sh` — the work list is now a UNION** of on-disk `*-connect.sh` files and the instances recorded in the install's own `.aiteamforge-config` `.teams[]`. Iterating rendered files alone can only ever *refresh*; it can never **create** a missing script, so a live-but-scriptless instance stayed that way through every upgrade while orphans got refreshed forever. The guarantee — never materialise cockpit scripts for a team this box didn't set up — is preserved: `bin/aiteamforge-setup.sh` writes `.teams[]` from `SELECTED_TEAMS` *after* the loop that runs `install-team.sh` for each of them, so an entry there means the team was chosen and survived install-time validation. (This refresh-only loop shipped in XACA-0814, which is merged but **unreleased**, so it is a latent defect rather than the cause of the observed state.)
 - **`bin/aiteamforge-setup.sh` — `--project`/`--client` are now forwarded at the three call sites that omitted them** (stale-script regeneration, the post-selected-teams pass, and the cockpit pass). XACA-0643 fixed only the selected-teams install loop. These omissions are what manufactured the stray `-default` instances: without `--project`, a parameterised template silently falls back to `TEAM_DEFAULT_PROJECT` and writes a connect script for an instance that does not exist. Flags are appended only when set, since `install-team.sh` rejects them for non-parameterised templates.
-- **`bin/aiteamforge-doctor.sh` — new `--check connect`** (also part of `all`) cross-checks registered instances against `*-connect.sh` files and reports **both** directions: registered-but-scriptless, and scripts matching no registered instance. It **reports only and never deletes** — deleting a script someone still invokes is a worse failure than leaving a dead one, and the file is the only remaining record of how it got there. Removal stays a deliberate human act.
+- **`libexec/commands/aiteamforge-doctor.sh` — new `--check connect`** (also part of `all`) cross-checks the instances recorded in `.aiteamforge-config` against `*-connect.sh` files and reports **both** directions: installed-but-scriptless, and scripts matching no installed instance. It **reports only and never deletes** — deleting a script someone still invokes is a worse failure than leaving a dead one, and the file is the only remaining record of how it got there. Removal stays a deliberate human act.
 
 Verified in a `TEST_TMP_DIR` sandbox against a reconstructed pre-fix installer: the old code completes a full `finance --project personal` install successfully, writes `finance-startup.sh`/`finance-shutdown.sh`, and produces **zero** connect scripts; the fixed code produces `finance-personal-connect.sh` on socket `finance` with `DEFAULT_PROJECT="personal"` and the session order extracted from the team's own `terminal_order`. Freelance renders with `DEFAULT_GROUP="doublenode"`/`HAS_GROUP="true"` and resolves to `freelance-doublenode-starwords` with no arguments, while explicit arguments still override and the team-keyed dev-team renders still hard-error on a missing group (exit 2). Non-parametric renders (academy/ios/command) are **byte-identical** before and after. The upgrade union creates the missing script for a registered instance, creates nothing when the registry is empty, and the pre-fix version creates nothing in either case.
 
