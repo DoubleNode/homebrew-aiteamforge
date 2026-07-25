@@ -67,6 +67,52 @@ fix; the rest close the CI gaps that let the first one reach a green review.
   deliberately rather than dropped: it is the last defence if the glob is ever widened back toward
   the pre-XACA-0845 `"${TEAM_ID}"*` shape, where it would otherwise move the **live** startup and
   shutdown scripts aside on every re-install, silently, since `mv` leaves no error.
+- **XACA-0845-015 — the `.aiteamforge-config` reader ignored `client_id`, leaving `freelance`
+  uncovered, and this *narrowed* relative to the pre-fix code.** Both readers (the upgrade union in
+  `libexec/commands/aiteamforge-upgrade.sh` and `check_connect_scripts` in
+  `libexec/commands/aiteamforge-doctor.sh`) composed `"<base>-<project>"` from
+  `.team_paths.<base>.project_id` alone. `freelance` is the only template shipping
+  `TEAM_REQUIRES_CLIENT_ID="true"`, and `compute_instance_id()` emits `"<team>-<client>-<project>"`
+  for it — so a real install (`client_id=doublenode`, `project_id=starwords`) composed
+  `freelance-starwords`, which the decomposition in the very same function then **rejected**:
+  `Skipping freelance-starwords-connect.sh — cannot split 'starwords' into <client>-<project>`.
+  Nothing was created, so a live-but-scriptless freelance instance was **unhealable** — precisely the
+  bug class the union was added to fix — and every upgrade printed a spurious warning. The doctor,
+  sharing the reader, produced a **double** false positive from one install: the phantom
+  `freelance-starwords` reported missing *and* the correct on-disk `freelance-doublenode-starwords`
+  reported an orphan. Note this was a **regression**: the pre-XACA-0845-008 code took the whole
+  instance id from the `team-paths.json` key and never had to compose one. Moving the authoritative
+  signal to `.aiteamforge-config` was right (registry membership is not proof of setup) but it made
+  composition this code's job, and the client component was dropped. Both readers now mirror
+  `compute_instance_id()` exactly — `<base>` / `<base>-<project>` / `<base>-<client>-<project>`,
+  each component lowercased, client *before* project so the existing first-dash decomposition
+  reverses it — and are kept deliberately identical so doctor and upgrade cannot contradict each
+  other. New tests **T10** (composes *and* round-trips: the script only renders because the
+  decomposition split the id back into `--client`/`--project`, and its `TMUX_SOCKET` is the team base
+  `freelance`, not the instance id) and **D4** (doctor reports present, not missing-plus-orphan),
+  with negative control **NC4** re-deriving the client-ignoring reader from the live source behind a
+  pin assertion.
+- **XACA-0845-016 — `doctor --check connect` was 100% false-positive on cockpit installs.** A cockpit
+  box is a thin client whose LCARS and kanban run on a **remote** host; setup deliberately records an
+  **empty** `.teams[]` because it installs no teams locally. Cross-checking its connect scripts
+  against that empty array made every script an "orphan": a cockpit-shaped sandbox produced **8
+  warnings / 0 passes**, and under `--verbose` each carried *"If it is genuinely unused, remove it by
+  hand"* — advice that, followed, tells the user to delete the box's entire reason for existing. It
+  runs in the `all` fan-out, so every cockpit `doctor` run was noisy and actively misleading.
+  Direction-2 (orphan) reporting is now suppressed on the cockpit profile, replaced by a single
+  informative pass. Direction-1 (missing) is deliberately **not** gated: it is driven by `.teams[]`,
+  so it self-suppresses on a stock cockpit box without a special case, and keeping it live preserves
+  the actionable, non-destructive report for a cockpit box that *does* record an installed instance.
+  The profile is read from the `.install-profile` marker — the same signal
+  `libexec/lib/launchagents.sh` and `libexec/lib/validate-install.sh` already use, deliberately
+  reusing it rather than deriving a second notion of "cockpit" that could drift — with a fallback to
+  `.install_profile` in `.aiteamforge-config`, which setup writes in the same pass. The suppression is
+  **reporting-only**: no file is touched, and new structural test **S4** pins that no deletion path
+  for `*-connect.sh` / `*-disconnect.sh` exists in the doctor on any profile. New tests **D5**
+  (cockpit: no orphan warning, no deletion advice, all 8 scripts still present — asserted under
+  `--verbose`, since the advice is a `check_result` detail argument that only prints there) and **D6**
+  (a non-cockpit box still gets its orphan report, so the gate is profile-scoped and not a blanket
+  mute), with negative control **NC5** rebuilding the profile-blind check from the live source.
 
 ### Fix: XACA-0857 — two stale iOS persona mirrors and one unregistered test suite, both pre-existing on `develop`
 

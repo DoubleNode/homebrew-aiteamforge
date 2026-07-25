@@ -956,14 +956,70 @@ PYEOF
 # membership does not imply the team was ever set up — it would make this check
 # report a "missing connect script" for every catalogued team on every box. See
 # the matching rationale in aiteamforge-upgrade.sh's update_connect_scripts
-# (XACA-0845-008). Cockpit installs record an EMPTY .teams[] on purpose, so on
-# those boxes this check reports orphans only, never spurious missing entries.
+# (XACA-0845-008).
 #
-# This check REPORTS ONLY and never removes anything. An orphan is a dead
-# script; deleting one someone still invokes is a worse failure than leaving
-# it, and the file is the only remaining record of how it got there. Removal
-# stays a deliberate human act.
+# COCKPIT INSTALLS ARE EXEMPT FROM THE ORPHAN DIRECTION (XACA-0845-016).
+# They record an EMPTY .teams[] on purpose — a cockpit box is a thin client that
+# installs no teams locally — so cross-checking against it made EVERY connect
+# script an orphan: 8 warnings and 0 passes on a cockpit-shaped install, each
+# advising the user (under --verbose) to delete the files the box exists to
+# provide. An earlier revision of this comment claimed that shape was benign
+# ("reports orphans only, never spurious missing entries"); it was not — orphans
+# were the false positive. Direction 2 is now skipped entirely on that profile;
+# direction 1 stays live because .teams[] already makes it self-suppressing
+# there. See the block comment at the direction-2 loop for the full rationale.
+#
+# This check REPORTS ONLY and never removes anything, on EVERY profile. An
+# orphan is a dead script; deleting one someone still invokes is a worse failure
+# than leaving it, and the file is the only remaining record of how it got there.
+# Removal stays a deliberate human act. The cockpit gate suppresses REPORTING,
+# never files — test S4 pins that no deletion path exists here at all.
 # ─────────────────────────────────────────────────────────────────────────────
+# Resolve the install profile for a working dir. $1 = working dir.
+# Echoes "cockpit", "full", or whatever marker value was recorded.
+#
+# PRIMARY signal is the `.install-profile` marker file — the same one
+# libexec/lib/launchagents.sh (:227, :334) and libexec/lib/validate-install.sh
+# (:571) already read, and bin/aiteamforge-doctor.sh (:53) already parses.
+# Reading the same marker as every sibling is deliberate: a second, differently
+# derived notion of "is this a cockpit box" is exactly the sibling-heuristic
+# drift that makes two checks contradict each other on one machine.
+#
+# FALLBACK is `.install_profile` inside .aiteamforge-config, which
+# bin/aiteamforge-setup.sh (:1677) writes from the same variable in the same
+# pass that writes the marker (:1691). It costs one python call and closes the
+# case where the marker was lost but the config survived — on a cockpit box the
+# fallback is the difference between a clean report and a screen of advice to
+# delete files the box exists to provide.
+_connect_scripts_install_profile() {
+  local _wd="$1"
+  local _p=""
+
+  if [ -f "${_wd}/.install-profile" ] && [ -r "${_wd}/.install-profile" ]; then
+    _p="$(tr -d '[:space:]' < "${_wd}/.install-profile" 2>/dev/null || true)"
+  fi
+
+  if [ -z "$_p" ] && command -v python3 >/dev/null 2>&1; then
+    # NOTE FOR EDITORS: no apostrophes in the here-doc body (bash 3.2 does not
+    # treat a here-doc nested inside $( ) as opaque). See XACA-0845.
+    _p="$(python3 - "${_wd}/.aiteamforge-config" <<'PYEOF' 2>/dev/null || true
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+    val = cfg.get("install_profile")
+    if val:
+        print(str(val).strip())
+except Exception:
+    pass
+PYEOF
+)"
+  fi
+
+  [ -n "$_p" ] || _p="full"
+  printf '%s\n' "$_p"
+}
+
 check_connect_scripts() {
   print_section "Checking Cockpit Connect Scripts"
 
@@ -983,6 +1039,17 @@ check_connect_scripts() {
   _installed="$(python3 - "$_install_config" <<'PYEOF' 2>/dev/null || true
 import json, sys
 
+# Compose the instance id EXACTLY as install-team.sh compute_instance_id() does:
+#   no project -> "<base>"; project only -> "<base>-<project>";
+#   project + client -> "<base>-<client>-<project>". Components are lowercased.
+#
+# XACA-0845-015: client_id was ignored here, so a freelance box (the only
+# TEAM_REQUIRES_CLIENT_ID template that ships) produced a DOUBLE false positive
+# from one install: the composed-but-wrong "freelance-<project>" was reported
+# missing, while the correct on-disk "freelance-<client>-<project>" script was
+# reported an orphan. This reader must stay byte-for-byte equivalent to the one
+# in aiteamforge-upgrade.sh update_connect_scripts — they answer the same
+# question and a divergence makes doctor and upgrade contradict each other.
 out = []
 try:
     with open(sys.argv[1]) as fh:
@@ -990,8 +1057,17 @@ try:
     paths = cfg.get("team_paths", {}) or {}
     for base in cfg.get("teams", []) or []:
         base = str(base)
-        pid = (paths.get(base) or {}).get("project_id")
-        out.append("%s-%s" % (base, str(pid).lower()) if pid else base)
+        entry = paths.get(base) or {}
+        pid = entry.get("project_id")
+        cid = entry.get("client_id")
+        if pid:
+            pid = str(pid).lower()
+            if cid:
+                out.append("%s-%s-%s" % (base, str(cid).lower(), pid))
+            else:
+                out.append("%s-%s" % (base, pid))
+        else:
+            out.append(base)
 except Exception:
     pass
 
@@ -1000,12 +1076,16 @@ for i in sorted(set(x for x in out if x)):
 PYEOF
 )"
 
-  local _on_disk="" _cs _inst _missing=0 _orphans=0
+  local _on_disk="" _cs _inst _missing=0 _orphans=0 _on_disk_count=0
   for _cs in "${_working_dir}"/*-connect.sh; do
     [ -f "$_cs" ] || continue
     _inst="$(basename "$_cs")"
     _on_disk="${_on_disk}${_inst%-connect.sh}"$'\n'
+    _on_disk_count=$((_on_disk_count + 1))
   done
+
+  local _profile
+  _profile="$(_connect_scripts_install_profile "$_working_dir")"
 
   if [ -z "$_installed" ] && [ -z "$_on_disk" ]; then
     check_result pass "No installed team instances to cross-check"
@@ -1025,16 +1105,47 @@ PYEOF
   done <<< "$_installed"
 
   # Direction 2: script with no installed instance — reported, never removed.
-  while IFS= read -r _inst; do
-    [ -n "$_inst" ] || continue
-    if ! printf '%s\n' "$_installed" | grep -qx -- "$_inst"; then
-      _orphans=$((_orphans + 1))
-      check_result warn "Connect script '${_inst}-connect.sh' matches no installed instance" \
-        "Left in place deliberately. If it is genuinely unused, remove it by hand."
+  #
+  # SUPPRESSED ENTIRELY ON COCKPIT INSTALLS (XACA-0845-016).
+  # ───────────────────────────────────────────────────────
+  # A cockpit box is a thin client: LCARS and kanban run on a REMOTE host, and
+  # setup deliberately records an EMPTY `.teams[]` because this box installs no
+  # teams locally. Its connect scripts are therefore not evidence of a problem —
+  # they are the entire reason the box exists. Cross-checking them against an
+  # array that is empty BY DESIGN makes every single script an "orphan": the
+  # check returned 8 warnings and 0 passes on a cockpit-shaped install, and
+  # under --verbose attached "If it is genuinely unused, remove it by hand" to
+  # each one. That advice, followed, would tell a user to delete their whole
+  # cockpit. A check that is 100% false-positive on a supported profile is worse
+  # than no check: it trains people to ignore doctor output, and this one runs in
+  # the `all` fan-out, so it fired on every cockpit doctor run.
+  #
+  # Direction 1 is deliberately NOT gated. It is driven by `.teams[]`, which is
+  # empty on a stock cockpit box, so it self-suppresses there without a special
+  # case — it emits nothing rather than something wrong. Keeping it live means a
+  # cockpit box that DOES record an installed instance (a profile changed after
+  # the fact, a hand-edited config) still gets the actionable, non-destructive
+  # "run aiteamforge upgrade" report. Gating direction 1 on the profile would buy
+  # nothing and would blind the one case where it still has something true to say.
+  #
+  # The suppression is REPORTING-ONLY, consistent with the rest of this check:
+  # no file is touched, and no deletion path exists on any profile.
+  if [ "$_profile" = "cockpit" ]; then
+    if [ "$_on_disk_count" -gt 0 ]; then
+      check_result pass "Cockpit install — ${_on_disk_count} connect script(s) present; orphan cross-check skipped (a cockpit box installs no local teams by design)"
     fi
-  done <<< "$_on_disk"
+  else
+    while IFS= read -r _inst; do
+      [ -n "$_inst" ] || continue
+      if ! printf '%s\n' "$_installed" | grep -qx -- "$_inst"; then
+        _orphans=$((_orphans + 1))
+        check_result warn "Connect script '${_inst}-connect.sh' matches no installed instance" \
+          "Left in place deliberately. If it is genuinely unused, remove it by hand."
+      fi
+    done <<< "$_on_disk"
+  fi
 
-  if [ "$_missing" -eq 0 ] && [ "$_orphans" -eq 0 ]; then
+  if [ "$_missing" -eq 0 ] && [ "$_orphans" -eq 0 ] && [ "$_profile" != "cockpit" ]; then
     check_result pass "Connect scripts match installed instances exactly"
   fi
 }

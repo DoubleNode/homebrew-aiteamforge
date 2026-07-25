@@ -1003,18 +1003,52 @@ import json, sys
 out = []
 
 # .aiteamforge-config: .teams[] holds BASE ids; .team_paths.<base>.project_id
-# carries the project for parameterised installs. Compose the instance id the
-# same way get_team_instance_id() in config.sh does (lowercased). This is the
-# only source that both covers custom project-scoped installs AND is written
-# exclusively by the installer, after the team was actually installed.
+# carries the project, and .team_paths.<base>.client_id the client, for
+# parameterised installs. Compose the instance id EXACTLY the way
+# compute_instance_id() in install-team.sh does, lowercasing each component:
+#
+#     no project                  -> "<base>"
+#     project, no client          -> "<base>-<project>"
+#     project + client            -> "<base>-<client>-<project>"
+#
+# XACA-0845-015: the client component was missing here, and its absence was a
+# REGRESSION relative to the pre-XACA-0845-008 code. That version took the whole
+# instance id straight from the team-paths.json KEY, so it never had to compose
+# anything and never lost a component. Moving the authoritative signal to
+# .aiteamforge-config was correct (registry membership is not proof of setup)
+# but it made composition this code paragraph responsibility, and the client was
+# dropped. freelance is the only TEAM_REQUIRES_CLIENT_ID template that ships, so
+# a freelance box composed "freelance-<project>", which the decomposition below
+# then rejected outright with "cannot split <project> into <client>-<project>".
+# Net effect: nothing was created, so a live-but-scriptless freelance instance
+# was UNHEALABLE — the exact bug class this union exists to fix — and every
+# upgrade printed a spurious warning about it.
+#
+# Ordering is load-bearing: client comes BEFORE project, matching
+# compute_instance_id() and therefore matching the decomposition below, which
+# splits the remainder on the FIRST dash into <client>-<project>.
+#
+# setup writes client_id only when BOTH a client and a project are present
+# (bin/aiteamforge-setup.sh team_paths writer), so a client without a project is
+# not a shape this file can emit; treat it as project-less and fall through to
+# the bare base rather than inventing a component.
 try:
     with open(sys.argv[1]) as fh:
         cfg = json.load(fh)
     paths = cfg.get("team_paths", {}) or {}
     for base in cfg.get("teams", []) or []:
         base = str(base)
-        pid = (paths.get(base) or {}).get("project_id")
-        out.append("%s-%s" % (base, str(pid).lower()) if pid else base)
+        entry = paths.get(base) or {}
+        pid = entry.get("project_id")
+        cid = entry.get("client_id")
+        if pid:
+            pid = str(pid).lower()
+            if cid:
+                out.append("%s-%s-%s" % (base, str(cid).lower(), pid))
+            else:
+                out.append("%s-%s" % (base, pid))
+        else:
+            out.append(base)
 except Exception:
     pass
 

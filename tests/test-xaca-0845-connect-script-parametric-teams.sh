@@ -635,30 +635,51 @@ PYEOF
 
 # Build an INSTALL config (.aiteamforge-config) — the installer-written record
 # of what this box actually set up, and the union's only non-filesystem source
-# since XACA-0845-008. $1 = output path, remaining args = "<base>" or
-# "<base>:<project_id>", matching bin/aiteamforge-setup.sh's shape: `.teams[]`
-# holds BASE ids, `.team_paths.<base>.project_id` carries the project for
-# parameterised installs.
+# since XACA-0845-008. $1 = output path, then:
+#
+#   --profile <p>            optional; writes .install_profile (default "full")
+#   "<base>"                 non-parametric install
+#   "<base>:<project>"       TEAM_HAS_PROJECTS, no client (finance/legal/medical)
+#   "<base>:<client>:<proj>" TEAM_REQUIRES_CLIENT_ID (freelance) — XACA-0845-015
+#
+# This mirrors bin/aiteamforge-setup.sh's writer exactly: `.teams[]` holds BASE
+# ids, and `.team_paths.<base>` carries `project_id`, plus `client_id` when BOTH
+# a client and a project are present (setup emits client_id only in that case).
 _write_install_config() {
     local out="$1"; shift
+    local profile="full"
+    if [ "${1:-}" = "--profile" ]; then
+        profile="$2"; shift 2
+    fi
     mkdir -p "$(dirname "$out")"
-    python3 - "$out" "$@" <<'PYEOF'
+    python3 - "$out" "$profile" "$@" <<'PYEOF'
 import json, sys
 out = sys.argv[1]
+profile = sys.argv[2]
 teams = []
 paths = {}
-for spec in sys.argv[2:]:
-    if ":" in spec:
-        base, pid = spec.split(":", 1)
-        paths[base] = {"working_dir": "/nonexistent/" + base, "project_id": pid}
-    else:
-        base = spec
-        paths[base] = {"working_dir": "/nonexistent/" + base}
+for spec in sys.argv[3:]:
+    parts = spec.split(":")
+    base = parts[0]
+    entry = {"working_dir": "/nonexistent/" + base}
+    if len(parts) == 2:
+        entry["project_id"] = parts[1]
+    elif len(parts) >= 3:
+        entry["client_id"] = parts[1]
+        entry["project_id"] = parts[2]
+    paths[base] = entry
     teams.append(base)
-data = {"version": "test", "teams": teams, "team_paths": paths}
+data = {"version": "test", "teams": teams, "team_paths": paths,
+        "install_profile": profile}
 with open(out, "w") as f:
     json.dump(data, f)
 PYEOF
+}
+
+# Write the `.install-profile` marker exactly as bin/aiteamforge-setup.sh does
+# (:1691) — the PRIMARY profile signal the doctor reads.
+_write_install_profile_marker() {
+    printf '%s\n' "$2" > "$1/.install-profile"
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1168,6 +1189,315 @@ if [ "$D3_OK" = true ]; then
     test_pass
 else
     test_fail "'aiteamforge doctor --check connect' must reach check_connect_scripts via the real CLI dispatch and report the missing (finance-personal), present (academy) and orphaned (legal-default) instances; output: $(cat "$D3_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# XACA-0845-015 — freelance (TEAM_REQUIRES_CLIENT_ID) coverage.
+#
+# The union and the doctor both read .aiteamforge-config but ignored
+# `client_id`. freelance is the ONLY template shipping
+# TEAM_REQUIRES_CLIENT_ID="true", and compute_instance_id() emits
+# "<team>-<client>-<project>" for it. Composing only "<team>-<project>" produced
+# an id the decomposition below then REJECTED ("cannot split ... into
+# <client>-<project>"), so nothing was created and a live-but-scriptless
+# freelance instance was unhealable — while the doctor simultaneously reported
+# the phantom id missing AND the real on-disk script an orphan.
+#
+# This NARROWED relative to the pre-XACA-0845-008 code, which read the whole
+# instance id from the team-paths.json key and so never had to compose.
+#
+# SAFETY: freelance.conf ships NON-EMPTY TEAM_BREW_DEPS (swiftlint, xcodegen,
+# gradle, kotlin, node, firebase-cli) and TEAM_BREW_CASK_DEPS (xcode,
+# android-studio) — unlike finance/academy, which S0 pins as empty. A FULL
+# install of freelance in a sandbox could therefore invoke real `brew install`.
+# Every freelance case below drives ONLY the upgrade/--connect-only path, which
+# hits install-team.sh CONNECT-ONLY EARLY EXIT (`exit 0`, ~line 703) — textually
+# and unconditionally ABOVE the brew-install section (~line 826). No freelance
+# case may ever be converted to a full install without re-doing that analysis.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T10 [XACA-0845-015]: upgrade composes freelance-<client>-<project> and renders it end-to-end"
+T10_SBX="$(_new_install_sandbox)"
+T10_REGISTRY="$T10_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T10_REGISTRY"
+_write_install_config "$T10_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
+_write_install_profile_marker "$T10_SBX/aiteamforge" "full"
+_install_print_stubs
+HOME="$T10_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T10_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T10_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T10_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t10-upgrade.log" 2>&1
+T10_CONNECT="$T10_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh"
+T10_DISCONNECT="$T10_SBX/aiteamforge/freelance-doublenode-starwords-disconnect.sh"
+T10_OK=true
+# Composition landed on the id compute_instance_id() would have produced...
+[ -s "$T10_CONNECT" ] || T10_OK=false
+[ -s "$T10_DISCONNECT" ] || T10_OK=false
+# ...and it round-tripped: the file only exists because the SAME decomposition
+# the upgrade path uses split the remainder back into client + project and fed
+# them to install-team.sh as --client/--project. A composition the decomposition
+# could not reverse would have been skipped instead.
+grep -qF 'TMUX_SOCKET="freelance"' "$T10_CONNECT" 2>/dev/null || T10_OK=false
+# The pre-fix symptoms must be gone.
+grep -qi "cannot split" "$_STUB_LOG" && T10_OK=false
+grep -qF "freelance-starwords-connect.sh" "$_STUB_LOG" && T10_OK=false
+# No doubly-qualified or client-less twin.
+[ -e "$T10_SBX/aiteamforge/freelance-starwords-connect.sh" ] && T10_OK=false
+if [ "$T10_OK" = true ]; then
+    test_pass
+else
+    test_fail "expected freelance-doublenode-starwords-connect/disconnect.sh with TMUX_SOCKET=\"freelance\" and no 'cannot split' warning; on_disk=$(ls -1 "$T10_SBX/aiteamforge" 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ── NC4 [MANDATORY negative control for T10] ────────────────────────────────
+# Proves T10 can FAIL: re-derive the PRE-FIX reader from the live source by
+# reverting exactly the client-composing block, then drive the identical
+# sandbox. The patch is pinned by a marker assertion first (house convention),
+# so if the composition is ever restructured this control fails loudly rather
+# than silently testing nothing.
+test_start "NC4 [negative control, XACA-0845-015]: the client-ignoring reader composes 'freelance-starwords' and creates NOTHING"
+NC4_SRC="$WORK_DIR/update_connect_scripts.prefix015.sh"
+NC4_PATCH_OK=true
+python3 - "$UPD_FN_SRC" "$NC4_SRC" <<'PYEOF' || NC4_PATCH_OK=false
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+
+# Pin: the fixed composition must be present, or this control is testing nothing.
+if 'cid = entry.get("client_id")' not in text:
+    sys.exit("PIN FAILED: client-composing block not found in extracted source")
+
+fixed = '''        entry = paths.get(base) or {}
+        pid = entry.get("project_id")
+        cid = entry.get("client_id")
+        if pid:
+            pid = str(pid).lower()
+            if cid:
+                out.append("%s-%s-%s" % (base, str(cid).lower(), pid))
+            else:
+                out.append("%s-%s" % (base, pid))
+        else:
+            out.append(base)
+'''
+prefix = '''        pid = (paths.get(base) or {}).get("project_id")
+        out.append("%s-%s" % (base, str(pid).lower()) if pid else base)
+'''
+if fixed not in text:
+    sys.exit("PIN FAILED: exact fixed composition block not matched")
+text = text.replace(fixed, prefix)
+text = text.replace("update_connect_scripts() {", "update_connect_scripts_prefix015() {", 1)
+open(dst, "w").write(text)
+PYEOF
+if [ "$NC4_PATCH_OK" != true ] || [ ! -s "$NC4_SRC" ]; then
+    test_fail "could not build the pre-fix fixture (pin check failed) — the negative control is not testing anything"
+else
+    # shellcheck disable=SC1090
+    . "$NC4_SRC"
+    NC4_SBX="$(_new_install_sandbox)"
+    NC4_REGISTRY="$NC4_SBX/home/.aiteamforge/team-paths.json"
+    _write_registry "$NC4_REGISTRY"
+    _write_install_config "$NC4_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
+    _install_print_stubs
+    HOME="$NC4_SBX/home" \
+    AITEAMFORGE_ORG_CONFIG="$NC4_SBX/home/.aiteamforge/organization.yaml" \
+    FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$NC4_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+    AITEAMFORGE_CONFIG="$NC4_REGISTRY" \
+        update_connect_scripts_prefix015 >"$WORK_DIR/nc4-upgrade.log" 2>&1
+    # The defect, reproduced: the wrong id is composed, the decomposition
+    # rejects it, and no script is created.
+    if [ ! -e "$NC4_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh" ] \
+        && grep -qi "cannot split" "$_STUB_LOG" \
+        && grep -qF "freelance-starwords" "$_STUB_LOG"; then
+        test_pass
+    else
+        test_fail "pre-fix reader should have composed 'freelance-starwords', warned 'cannot split' and created nothing; on_disk=$(ls -1 "$NC4_SBX/aiteamforge" 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Doctor coverage: XACA-0845-015 (double false positive) and -016 (cockpit).
+# Positive cases run the REAL CLI end-to-end, like D3.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "D4 [XACA-0845-015]: doctor reports a freelance install as PRESENT, not missing-plus-orphan"
+D4_SBX="$(_new_install_sandbox)"
+_write_install_config "$D4_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
+_write_install_profile_marker "$D4_SBX/aiteamforge" "full"
+# The script install-team.sh really renders for this install.
+printf '#!/bin/zsh\necho stub\n' > "$D4_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh"
+D4_LOG="$WORK_DIR/d4-doctor.log"
+HOME="$D4_SBX/home" \
+AITEAMFORGE_HOME="$TAP_ROOT" \
+AITEAMFORGE_DIR="$D4_SBX/aiteamforge" \
+AITEAMFORGE_CONFIG="$D4_SBX/home/.aiteamforge/team-paths.json" \
+    bash "$CLI_SH" doctor --check connect --verbose >"$D4_LOG" 2>&1 || true
+D4_OK=true
+grep -qF "Connect script present for freelance-doublenode-starwords" "$D4_LOG" || D4_OK=false
+# Neither half of the double false positive may appear.
+grep -qF "freelance-starwords" "$D4_LOG" && D4_OK=false
+grep -qi "matches no installed instance" "$D4_LOG" && D4_OK=false
+grep -qi "has no connect script" "$D4_LOG" && D4_OK=false
+if [ "$D4_OK" = true ]; then
+    test_pass
+else
+    test_fail "doctor must report freelance-doublenode-starwords present and emit neither a 'missing' nor an 'orphan' verdict; output: $(cat "$D4_LOG")"
+fi
+
+test_start "D5 [XACA-0845-016]: cockpit profile emits NO orphan warnings and NO remove-by-hand advice"
+D5_SBX="$(_new_install_sandbox)"
+# A cockpit install: EMPTY .teams[] by design, profile marker "cockpit",
+# and the connect scripts that are the entire point of the box.
+_write_install_config "$D5_SBX/aiteamforge/.aiteamforge-config" --profile cockpit
+_write_install_profile_marker "$D5_SBX/aiteamforge" "cockpit"
+for _t in academy ios android firebase command dns finance-personal legal-coparenting; do
+    printf '#!/bin/zsh\necho stub\n' > "$D5_SBX/aiteamforge/${_t}-connect.sh"
+done
+D5_LOG="$WORK_DIR/d5-doctor.log"
+HOME="$D5_SBX/home" \
+AITEAMFORGE_HOME="$TAP_ROOT" \
+AITEAMFORGE_DIR="$D5_SBX/aiteamforge" \
+AITEAMFORGE_CONFIG="$D5_SBX/home/.aiteamforge/team-paths.json" \
+    bash "$CLI_SH" doctor --check connect --verbose >"$D5_LOG" 2>&1 || true
+D5_OK=true
+# --verbose is deliberate: the destructive advice is the `detail` argument to
+# check_result, which prints ONLY under VERBOSE. A non-verbose assertion would
+# pass even if the advice were still being generated.
+grep -qi "remove it by hand" "$D5_LOG" && D5_OK=false
+grep -qi "matches no installed instance" "$D5_LOG" && D5_OK=false
+# It must still say something useful rather than going silent.
+grep -qi "Cockpit install" "$D5_LOG" || D5_OK=false
+# And all 8 scripts must survive — this check never deletes.
+D5_REMAINING="$(ls -1 "$D5_SBX/aiteamforge"/*-connect.sh 2>/dev/null | wc -l | tr -d '[:space:]')"
+[ "$D5_REMAINING" = "8" ] || D5_OK=false
+if [ "$D5_OK" = true ]; then
+    test_pass
+else
+    test_fail "cockpit doctor run must emit no orphan warning and no deletion advice, still report the cockpit state, and leave all 8 scripts in place (remaining=$D5_REMAINING); output: $(cat "$D5_LOG")"
+fi
+
+test_start "D6 [XACA-0845-016]: a NON-cockpit box still gets its orphan report (the gate is profile-scoped, not a blanket mute)"
+D6_SBX="$(_new_install_sandbox)"
+_write_install_config "$D6_SBX/aiteamforge/.aiteamforge-config" "academy"
+_write_install_profile_marker "$D6_SBX/aiteamforge" "full"
+printf '#!/bin/zsh\necho stub\n' > "$D6_SBX/aiteamforge/academy-connect.sh"
+printf '#!/bin/zsh\necho stub\n' > "$D6_SBX/aiteamforge/legal-default-connect.sh"
+D6_LOG="$WORK_DIR/d6-doctor.log"
+HOME="$D6_SBX/home" \
+AITEAMFORGE_HOME="$TAP_ROOT" \
+AITEAMFORGE_DIR="$D6_SBX/aiteamforge" \
+AITEAMFORGE_CONFIG="$D6_SBX/home/.aiteamforge/team-paths.json" \
+    bash "$CLI_SH" doctor --check connect --verbose >"$D6_LOG" 2>&1 || true
+if grep -qF "legal-default-connect.sh' matches no installed instance" "$D6_LOG" \
+    && grep -qF "Connect script present for academy" "$D6_LOG"; then
+    test_pass
+else
+    test_fail "a full-profile box must still report legal-default as an orphan and academy as present; output: $(cat "$D6_LOG")"
+fi
+
+# ── NC5 [MANDATORY negative control for D5] ─────────────────────────────────
+# Proves D5 can FAIL: rebuild the profile-BLIND direction-2 from the live
+# source by deleting the cockpit gate, then run it against the same
+# cockpit-shaped sandbox. Pinned by a marker assertion.
+test_start "NC5 [negative control, XACA-0845-016]: the profile-blind check warns on all 8 cockpit scripts and advises deleting them"
+NC5_FNS="$WORK_DIR/doctor-connect.prefix016.sh"
+NC5_PATCH_OK=true
+python3 - "$DOCTOR_CMD" "$NC5_FNS" <<'PYEOF' || NC5_PATCH_OK=false
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+
+def extract(name, body):
+    m = re.search(r"^%s\(\) \{\n(.*?)^\}\n" % re.escape(name), body, re.S | re.M)
+    if not m:
+        sys.exit("PIN FAILED: could not extract %s" % name)
+    return m.group(0)
+
+profile_fn = extract("_connect_scripts_install_profile", text)
+check_fn = extract("check_connect_scripts", text)
+
+# Pin: the cockpit gate must exist, or this control is testing nothing.
+if 'if [ "$_profile" = "cockpit" ]; then' not in check_fn:
+    sys.exit("PIN FAILED: cockpit gate not present in check_connect_scripts")
+
+# Revert to the profile-blind form: run direction 2 unconditionally.
+# Match the real block textually rather than reconstructing it.
+m = re.search(r'  if \[ "\$_profile" = "cockpit" \]; then\n.*?\n  fi\n', check_fn, re.S)
+if not m:
+    sys.exit("PIN FAILED: could not locate the cockpit-gated direction-2 block")
+blind = '''  while IFS= read -r _inst; do
+    [ -n "$_inst" ] || continue
+    if ! printf '%s\\n' "$_installed" | grep -qx -- "$_inst"; then
+      _orphans=$((_orphans + 1))
+      check_result warn "Connect script '${_inst}-connect.sh' matches no installed instance" \\
+        "Left in place deliberately. If it is genuinely unused, remove it by hand."
+    fi
+  done <<< "$_on_disk"
+'''
+check_fn = check_fn.replace(m.group(0), blind)
+check_fn = check_fn.replace('&& [ "$_profile" != "cockpit" ]', "")
+open(dst, "w").write(profile_fn + "\n" + check_fn)
+PYEOF
+if [ "$NC5_PATCH_OK" != true ] || [ ! -s "$NC5_FNS" ]; then
+    test_fail "could not build the profile-blind fixture (pin check failed) — the negative control is not testing anything"
+else
+    # Run in a generated script so the doctor stubs never leak into the
+    # upgrade tests sharing this shell.
+    NC5_RUNNER="$WORK_DIR/nc5-runner.sh"
+    cat > "$NC5_RUNNER" <<'RUNEOF'
+#!/bin/bash
+WD="$1"; FNS="$2"
+VERBOSE=true
+TOTAL_CHECKS=0; PASSED_CHECKS=0; WARNING_CHECKS=0; FAILED_CHECKS=0
+print_section() { printf 'SECTION %s\n' "$*"; }
+print_success() { printf 'PASS %s\n' "$*"; }
+print_warning() { printf 'WARN %s\n' "$*"; }
+print_error()   { printf 'ERR %s\n' "$*"; }
+check_result() {
+  status="$1"; message="$2"; detail="${3:-}"
+  case "$status" in
+    pass) print_success "$message" ;;
+    warn) print_warning "$message" ;;
+    fail) print_error "$message" ;;
+  esac
+  if [ -n "$detail" ]; then printf 'ADVICE %s\n' "$detail"; fi
+  return 0
+}
+get_working_dir() { printf '%s\n' "$WD"; }
+. "$FNS"
+check_connect_scripts
+RUNEOF
+    NC5_SBX="$(_new_install_sandbox)"
+    _write_install_config "$NC5_SBX/aiteamforge/.aiteamforge-config" --profile cockpit
+    _write_install_profile_marker "$NC5_SBX/aiteamforge" "cockpit"
+    for _t in academy ios android firebase command dns finance-personal legal-coparenting; do
+        printf '#!/bin/zsh\necho stub\n' > "$NC5_SBX/aiteamforge/${_t}-connect.sh"
+    done
+    NC5_LOG="$WORK_DIR/nc5.log"
+    bash "$NC5_RUNNER" "$NC5_SBX/aiteamforge" "$NC5_FNS" >"$NC5_LOG" 2>&1 || true
+    NC5_WARNS="$(grep -c "matches no installed instance" "$NC5_LOG" | tr -d '[:space:]')"
+    NC5_ADVICE="$(grep -c "remove it by hand" "$NC5_LOG" | tr -d '[:space:]')"
+    if [ "$NC5_WARNS" = "8" ] && [ "$NC5_ADVICE" = "8" ]; then
+        test_pass
+    else
+        test_fail "profile-blind check should have produced 8 orphan warnings and 8 deletion-advice lines on a cockpit box (got warns=$NC5_WARNS advice=$NC5_ADVICE); output: $(cat "$NC5_LOG")"
+    fi
+fi
+
+test_start "S4 [XACA-0845-016]: the cockpit gate suppresses REPORTING only — no deletion path exists on any profile"
+# Companion to S2 (which covers install-team.sh + upgrade). The doctor is now
+# the only other file that reasons about connect scripts, and the -016 fix must
+# not have introduced a "clean up the orphans" shortcut on any profile.
+S4_SRC="$(cat "$DOCTOR_CMD")"
+S4_OK=true
+if printf '%s\n' "$S4_SRC" | grep -nE '\b(rm|unlink|shred)\b[^|]*-(connect|disconnect)\.sh' >/dev/null 2>&1; then
+    S4_OK=false
+fi
+if printf '%s\n' "$S4_SRC" | grep -nE 'find[^|]*-(connect|disconnect)\.sh[^|]*-delete' >/dev/null 2>&1; then
+    S4_OK=false
+fi
+if [ "$S4_OK" = true ]; then
+    test_pass
+else
+    test_fail "aiteamforge-doctor.sh must contain no deletion path for *-connect.sh / *-disconnect.sh: $(printf '%s\n' "$S4_SRC" | grep -nE '\b(rm|unlink|shred|find)\b.*-(connect|disconnect)\.sh')"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────
