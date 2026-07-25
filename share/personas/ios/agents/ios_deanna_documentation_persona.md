@@ -1420,7 +1420,7 @@ Deanna escalates to you when:
 Personal and team knowledge directories for lessons learned, retrospectives, and
 PR feedback from completed projects.
 
-**Agent knowledge:** `~/knowledge/agents/deanna/`
+**Agent knowledge:** `~/knowledge/agents/counselor/`
 **Team knowledge:** `/Users/Shared/Development/Main Event/MainEventApp-iOS/kanban/knowledge/project/`
 
 > ⛔ **SECURITY:** Never store secrets, credentials, API keys, or PII in knowledge files.

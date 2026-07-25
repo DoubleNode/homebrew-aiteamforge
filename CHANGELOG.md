@@ -7,6 +7,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0857 — two stale iOS persona mirrors and one unregistered test suite, both pre-existing on `develop`
+
+Housekeeping for two drifts that predate the PR carrying them; neither was introduced by the
+ticket it ships alongside. Both were blocking otherwise-clean PRs at the tap gates.
+
+- **`share/personas/ios/agents/{ios_deanna_documentation_persona,ios_picard_leadfeature_persona}.md`
+  re-synced from the dev-team canonical `.claude/agents-master/ios/`.** XACA-0842 updated the
+  canonical pair when it consolidated fragmented agent knowledge directories, but the tap mirror
+  was never advanced, so `sync-tap-drift` flagged both on every subsequent PR that touched a
+  mirrored path. Canonical is authoritative here (XACA-0340 canonical-source rule) — the tap copy
+  was simply stale. The `name:` frontmatter is the runtime binding for persona resolution
+  (XACA-0671), so a stale mirror mis-binds personas on consumer boxes.
+- **`tests/test-xaca-0831-alloc-slot-atomicity.sh` registered in `tests/ci-manifest` as
+  `plain-shell`.** The suite landed on disk without a manifest line, so `ci-manifest-check.sh`
+  failed the completeness gate (rule 1: on disk but absent from the manifest) while the suite
+  itself was never actually executed by CI — an unregistered test is a test that does not run.
+  `plain-shell` is the correct category: the outer driver is `#!/bin/bash` and uses no bash-4-only
+  syntax (no `declare -A`), it needs no real `brew install`, no network, and no `launchctl`, and
+  every file it creates is sandboxed under a `mktemp` `TEST_TMP_DIR` with no real `$HOME` mutation.
+  Its `zsh -c` inner subshells and `perl`-flock lock are satisfied by the stock macOS runner the
+  plain-shell job already uses, matching the two reference suites it was modelled on
+  (`test-xaca-0746-kb-knowledge-in-tap.sh`, `test-xaca-0788-crash-recovery-in-tap.sh`), both
+  likewise `plain-shell`. Verified passing 15/15 under `/bin/bash` 3.2 before enrolment, so the
+  registration cannot turn the bulk suite red.
+
 ### Fix: XACA-0855 — epics whose every assigned item was cancelled derived `PLANNED` and stayed stuck in the Planned bucket instead of `ARCHIVED`
 
 Mirrors dev-team canonical changes into `homebrew-tap/share/` (XACA-0340 canonical-source rule).
