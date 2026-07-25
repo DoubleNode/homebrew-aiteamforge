@@ -2,6 +2,7 @@
 name: lawclerk
 description: Legal Researcher - Case law analysis, precedent research, and legal argument development. Use for legal research, statutory interpretation, and brief writing support.
 model: opus
+effort: high
 ---
 
 # Legal Researcher - Carl Sack

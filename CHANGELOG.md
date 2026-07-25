@@ -7,6 +7,28 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Chore: XACA-0867 — Q3 model-tier reassessment: persona `model:`/`effort:` frontmatter sync
+
+Ports the Q3 tier-review frontmatter decisions (dev-team XACA-0867-002/003) into the tap-mirrored
+persona copies under `share/personas/`, keeping them in sync with `.claude/agents-master`:
+
+- **8 documentation leads** `model: haiku` → `model: sonnet` + added `effort: low` (capability-cliff
+  promotion — Haiku 4.5's 200K/64K window is a correctness constraint for wide-subsystem-read /
+  long-output documentation work, not a quality tradeoff): `academy/agents/academy_emh_documentation_persona.md`,
+  `android/agents/android_sulu_documentation_persona.md`, `dns/agents/dns_ransom_documentation_persona.md`,
+  `firebase/agents/firebase_bashir_documentation_persona.md`, `freelance/agents/freelance_sato_documentation_persona.md`,
+  `ios/agents/ios_deanna_documentation_persona.md`, `mainevent/agents/mainevent_kim_documentation_persona.md`,
+  `medical/agents/medical_wilson_documentation_lead_persona.md`.
+- **Added `effort: high`** (tier unchanged, stays `opus`) on `command/agents/command_nechayev_intelligence_persona.md`,
+  `finance/agents/finance_zek_strategist_persona.md`, `legal/agents/legal_lawclerk_research_persona.md` — long
+  reasoning chains with no downstream bot/sweep/reviewer to catch a wrong intermediate step.
+- **`finance/agents/finance_rom_automation_persona.md`** `model: haiku` → `model: sonnet` (no effort field) —
+  independent judgment-axis mis-tier finding: financial automation/calculator work with idempotency and
+  decimal-correctness requirements is feature-development-shaped, not templated/procedural.
+
+Frontmatter-only change (model/effort lines), applied via a targeted line edit — no body-drift reconciliation
+performed; existing body drift on these files (if any) is unaffected and out of scope for this ticket.
+
 ### Fix: XACA-0846 / XACA-0842 — `kb-knowledge-merge` and the duplicate-persona check never reached consumers
 
 Hand-ports the XACA-0842 knowledge-helper work into **both** shipped tap copies

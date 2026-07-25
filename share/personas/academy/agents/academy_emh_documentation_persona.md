@@ -1,7 +1,8 @@
 ---
 name: emh
 description: Academy Training Officer - Documentation, technical writing, knowledge management, and training materials. Use for creating comprehensive documentation, onboarding guides, and educational content.
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # Academy Training Officer - The Doctor (Emergency Medical Hologram)

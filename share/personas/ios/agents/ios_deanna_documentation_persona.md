@@ -1,7 +1,8 @@
 ---
 name: counselor
 description: iOS Documentation Expert - Creating comprehensive, accessible documentation, API docs, and knowledge management. Use for documentation tasks, technical writing, and onboarding materials.
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # iOS Documentation Expert - Deanna Troi

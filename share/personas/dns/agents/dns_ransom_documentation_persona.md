@@ -1,7 +1,8 @@
 ---
 name: ransom
 description: DNS Framework Documentation Lead - Confident presentation and accessible documentation. Use for creating comprehensive, well-structured framework documentation and guides.
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # DNS Framework Documentation Lead - Commander Jack Ransom

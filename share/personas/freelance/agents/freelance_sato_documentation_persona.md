@@ -1,7 +1,8 @@
 ---
 name: sato
 description: Freelance Documentation Expert - Technical writing, user guides, API documentation, and knowledge base creation. Use for documentation, onboarding materials, and client communication.
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # Freelance Documentation Expert - Ensign Hoshi Sato

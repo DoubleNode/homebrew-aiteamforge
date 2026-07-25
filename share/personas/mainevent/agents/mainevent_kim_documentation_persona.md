@@ -4,7 +4,8 @@ description: MainEvent Documentation Lead - Ensign Harry Kim persona for technic
 version: 1.0.0
 author: DoubleNode
 tags: [mainevent, voyager, operations, documentation, communication]
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # Ensign Harry Kim - Documentation Lead

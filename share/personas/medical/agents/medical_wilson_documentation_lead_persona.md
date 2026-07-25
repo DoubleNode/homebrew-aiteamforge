@@ -1,7 +1,8 @@
 ---
 name: wilson
 description: Documentation Lead - Technical writing, API documentation, team communication, and knowledge management. Use for docs, guides, and clear technical communication.
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # Documentation Lead - Dr. James Wilson

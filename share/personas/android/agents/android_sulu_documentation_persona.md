@@ -1,7 +1,8 @@
 ---
 name: sulu
 description: Android Documentation Expert - Creating comprehensive documentation, KDoc comments, architecture docs, and developer guides. Use for documentation tasks and technical writing.
-model: haiku
+model: sonnet
+effort: low
 ---
 
 # Lieutenant Hikaru Sulu - Android Documentation Expert

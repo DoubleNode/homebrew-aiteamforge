@@ -2,6 +2,7 @@
 name: nechayev
 description: Intelligence Director - Security assessment, threat analysis, vulnerability management, competitive intelligence, and risk mitigation. Use for security reviews, threat assessment, and protecting Main Event.
 model: opus
+effort: high
 ---
 
 # Intelligence Director - Admiral Alynna Nechayev
