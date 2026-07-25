@@ -13,6 +13,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOMEBREW_TAP_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 TEAMS_DIR="$HOMEBREW_TAP_ROOT/share/teams"
 
+# XACA-0804: this installer is a genuine setup entrypoint (allocates a port /
+# registers a team) — opt in to registry bootstrap-write before the port
+# allocator below is sourced.
+export AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1
+
 # Source org identity resolver (XACA-0139) — graceful no-op if lib not yet installed.
 # Must come after HOMEBREW_TAP_ROOT is set so the resolver can locate its share/ fallback.
 AITEAMFORGE_SHARE_DIR="$HOMEBREW_TAP_ROOT/share"

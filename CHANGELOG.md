@@ -7,6 +7,25 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0804 — read-only commands no longer materialize the team-paths registry
+
+Gates the registry bootstrap-write behind an explicit opt-in env var so a read-only
+invocation never creates `~/.aiteamforge/team-paths.json` as a side effect.
+
+- `libexec/lib/aiteamforge-paths.sh` — `_aiteamforge_get_field` now writes the default
+  registry on a MISSING config only when `AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1` (exact string);
+  otherwise it silently falls back to the built-in shell default table. Replaces the inverted
+  `[ -t 0 ]` inference — non-interactive is overwhelmingly the read-only case (hooks, CI, the
+  LCARS server). Shares the env-var contract with the Python canonical, which survives the
+  shell→python3 heredoc handoff.
+- `bin/aiteamforge-setup.sh` and `libexec/installers/install-team.sh` — genuine setup
+  entrypoints now export the opt-in so first-time provisioning still bootstraps the registry.
+- `share/scripts/teams/{finance,freelance,legal,medical}-startup.sh` — mirrored startup scripts
+  export the opt-in (startup is setup intent).
+- Mirrors the dev-team canonical changes into `share/kanban-hooks/aiteamforge_paths.py`,
+  `share/scripts/aiteamforge-paths`, and `share/scripts/kb-init-team` (corrupt-config self-heal
+  is unchanged — only the MISSING path is gated).
+
 ### Chore: XACA-0867 — Project Planner grounding rule ported to the tap skill mirror
 
 Ports the "Count it, don't assert it" rule (dev-team XACA-0867) into the tap-mirrored

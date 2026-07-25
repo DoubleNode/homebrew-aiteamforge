@@ -7,6 +7,9 @@
 
 source "$HOME/dev-team/scripts/lcars-launch-helpers.sh" || { echo "fatal: scripts/lcars-launch-helpers.sh missing or unreadable" >&2; exit 1; }
 source "$HOME/dev-team/scripts/kb-init-team-guard.sh" || true
+# XACA-0804: startup IS setup intent — opt in unconditionally so
+# kb_ensure_team_initialized below can bootstrap-write a missing registry.
+export AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1
 
 # ============================================================================
 # Cleanup orphaned processes from previous crashed sessions

@@ -80,6 +80,10 @@ cmd_show() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 cmd_init() {
+    # XACA-0804: this is the canonical "initialize my config" entrypoint —
+    # opt in to registry bootstrap-write so the wizard can materialize
+    # ~/.aiteamforge/team-paths.json when it's missing.
+    export AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1
     # Pass all remaining args to the Python wizard
     python3 "$WIZARD_PY" "$@"
 }

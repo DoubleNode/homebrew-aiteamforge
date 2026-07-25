@@ -341,15 +341,26 @@ PYEOF
     fi
 
     # ── Bootstrap: config missing ─────────────────────────────────────────
+    # XACA-0804: the auto-write used to fire on every non-interactive read
+    # (hooks, subagents, CI, the LCARS server are overwhelmingly non-interactive
+    # AND read-only) — a read must never mutate the registry as a side effect.
+    # The write is now opt-in only, via AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1 —
+    # the same env var + truthiness rule as the Python canonical
+    # (kanban-hooks/aiteamforge_paths.py:_bootstrap_write_allowed), since this
+    # is the shared contract that survives the shell->python3 heredoc handoff
+    # used by _aiteamforge_write_defaults below.
     if [ ! -f "$config_path" ]; then
         if _aiteamforge_is_interactive; then
             echo "[aiteamforge-paths] Config not found at ${config_path}." >&2
             echo "  Run: aiteamforge-paths init" >&2
             echo "  Falling back to built-in defaults." >&2
-        else
+        elif [ "${AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE:-}" = "1" ]; then
             echo "[aiteamforge-paths] Config missing — writing defaults to ${config_path}" >&2
             _AITEAMFORGE_DEFAULT_TEAMS_DATA | _aiteamforge_write_defaults
         fi
+        # else: non-interactive with no opt-in — silent fallback to the shell
+        # default-table lookup below, no disk write, no stderr hint (XACA-0804:
+        # read-only must not write; opt-in only).
     fi
 
     # ── Shell default fallback ────────────────────────────────────────────

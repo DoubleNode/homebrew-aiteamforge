@@ -565,6 +565,11 @@ export INSTALL_ROOT="${AITEAMFORGE_HOME}"
 INSTALLERS_DIR="${AITEAMFORGE_HOME}/libexec/installers"
 TEAMS_DIR="${AITEAMFORGE_HOME}/share/teams"
 
+# XACA-0804: this is the interactive setup wizard — opt in to registry
+# bootstrap-write here so every install-team.sh invocation below (each its
+# own child process) inherits setup intent, not just read-and-fallback.
+export AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1
+
 # Source common utilities (used by installer modules)
 source "${AITEAMFORGE_HOME}/libexec/lib/common.sh"
 

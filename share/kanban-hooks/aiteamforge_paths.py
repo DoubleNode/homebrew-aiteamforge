@@ -102,10 +102,18 @@ Key: branch_env_map (object)
 ----------------------------------------------------------------------------
 
 Bootstrap behaviour (when config is missing or corrupt):
-    - Interactive TTY  → print a human-readable "run init" message to stderr,
-      then fall back to DEFAULT_TEAMS so nothing breaks.
-    - Non-interactive  → silently write DEFAULT_TEAMS to the config file,
-      log one line to stderr.
+    - CORRUPT (file exists but is invalid/structurally broken) → ALWAYS
+      self-heals: writes DEFAULT_TEAMS to the config file, with a backup
+      snapshot of the broken file first (XACA-0457). Unconditional — does not
+      depend on TTY or the opt-in flag below. A corrupt file is an active
+      defect regardless of who is reading it.
+    - MISSING (no file at all) → auto-write is opt-in only, via
+      $AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1 (XACA-0804). Non-interactive
+      callers (hooks, subagents, CI, the LCARS server) are overwhelmingly
+      read-only, so a read must never write the registry as a side effect.
+      Without the opt-in, the missing path silently falls back to
+      DEFAULT_TEAMS in-memory — no write, no stderr noise. Interactive TTY
+      sessions still get a human-readable "run init" hint.
 
 Module-level side effects
     NONE.  All I/O happens on first function call, not at import time.
@@ -725,8 +733,45 @@ def _interactive_tty() -> bool:
         return False
 
 
-def _bootstrap(config_path: Path) -> dict:
-    """Handle missing/corrupt config.  Returns a usable config dict."""
+def _bootstrap_write_allowed() -> bool:
+    """Return True iff the caller explicitly opted in to a MISSING-config write.
+
+    XACA-0804: a MISSING config used to auto-write on every non-interactive
+    read (hooks, subagents, CI, and the LCARS server are overwhelmingly
+    non-interactive AND read-only) — a read must never mutate the registry as
+    a side effect. The write is now opt-in only, gated on this single env var.
+    It is also the shared contract with the shell canonical
+    (homebrew-tap/libexec/lib/aiteamforge-paths.sh): the shell side shells out
+    to python3 for the actual JSON write, and an env var is what survives that
+    handoff (a function argument would not). Exact-string "1" only — any other
+    value or unset means no write.
+    """
+    return os.environ.get("AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE") == "1"
+
+
+def _bootstrap(config_path: Path, corrupt: bool = False) -> dict:
+    """Handle missing/corrupt config.  Returns a usable config dict.
+
+    XACA-0804: MISSING and CORRUPT are gated differently for the disk-write
+    decision — see the "Bootstrap behaviour" section of the module docstring.
+    `corrupt=True` means config_path existed on disk but failed to parse or
+    failed the structural-integrity check (load_config() tracks this); it
+    always self-heals, unaffected by AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE.
+    `corrupt=False` (the default) means no file existed at all, and the write
+    is opt-in only (read-only must not write; opt-in only — XACA-0804).
+    """
+    if corrupt:
+        # CORRUPT: unconditional self-heal (XACA-0457), NOT gated by the
+        # opt-in flag — a broken file is an active defect regardless of who's
+        # reading it, and two existing test suites assert this stays unconditional.
+        print(
+            f"[aiteamforge-paths] Config corrupt at {config_path} — writing defaults (auto-heal)",
+            file=sys.stderr,
+        )
+        _write_defaults(config_path)
+        return _make_default_config()
+
+    # MISSING: read-only must not write; opt-in only (XACA-0804).
     if _interactive_tty():
         print(
             f"[aiteamforge-paths] Config not found at {config_path}.\n"
@@ -734,12 +779,15 @@ def _bootstrap(config_path: Path) -> dict:
             f"  Falling back to built-in defaults.",
             file=sys.stderr,
         )
-    else:
+    elif _bootstrap_write_allowed():
         print(
             f"[aiteamforge-paths] Config missing — writing defaults to {config_path}",
             file=sys.stderr,
         )
         _write_defaults(config_path)
+    # else: non-interactive with no opt-in — silent fallback to DEFAULT_TEAMS,
+    # no disk write, no stderr hint (XACA-0804: the non-interactive missing
+    # path is overwhelmingly a read-only caller; a read must never write).
 
     return _make_default_config()
 
@@ -760,9 +808,11 @@ def _available_teams_hint(config: dict) -> str:
 def load_config() -> dict:
     """Load, validate, and cache the team-paths config.
 
-    On missing config: bootstraps (see _bootstrap).
+    On missing config: bootstraps (see _bootstrap) — write is opt-in only via
+    AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE=1 (XACA-0804); read-only must not write.
     On unknown schema_version: warns but continues.
-    On corrupt JSON: bootstraps.
+    On corrupt JSON or failed structural-integrity check: bootstraps with an
+    UNCONDITIONAL self-heal write (XACA-0457), regardless of the opt-in flag.
 
     Returns a dict with at least {"schema_version": int, "teams": dict}.
     Never raises.
@@ -778,6 +828,13 @@ def load_config() -> dict:
         return _CONFIG_CACHE
 
     config: dict | None = None
+    # XACA-0804: captured ONCE, before any bootstrap/backup side effects, so the
+    # eventual `config is None` branch can tell MISSING (no file ever existed)
+    # apart from CORRUPT (a file existed but failed to parse or failed the
+    # structural-integrity check below) — the two are gated differently by
+    # _bootstrap()'s `corrupt` param (corrupt always self-heals; missing is
+    # opt-in only via AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE).
+    _path_existed_at_start = config_path.exists()
 
     if config_path.exists():
         try:
@@ -832,7 +889,10 @@ def load_config() -> dict:
             config = None
 
     if config is None:
-        config = _bootstrap(config_path)
+        # XACA-0804: corrupt (file existed, failed to load/validate) always
+        # self-heals; missing (no file ever existed) is opt-in only. See
+        # _bootstrap()'s docstring for the full rationale.
+        config = _bootstrap(config_path, corrupt=_path_existed_at_start)
 
     # Validate schema_version — v1/v2/v3 all load cleanly; warn only for
     # unknown/future versions.  Missing new fields (v1/v2 configs lacking the
