@@ -80,8 +80,18 @@ run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
 test_start "XACA-0483: install-team.sh gates parametric mode on TEAM_HAS_PROJECTS=true AND shipped source"
 # The gate must AND both conditions to avoid accidentally triggering parametric
 # mode for teams that don't ship parametric source.
-output=$(grep -c 'TEAM_HAS_PROJECTS.*true.*share/scripts/teams' "$INSTALL_TEAM")
-run_assert_pass assert_exit_success $([ "$output" -gt 0 ]; echo $?)
+# XACA-0845: this predicate moved into the shared _is_parametric_team()
+# function (defined ahead of the --connect-only early exit, so both the
+# connect-only path and the full install ask the same question). It is now
+# a two-line AND rather than a single grep-able line, so check both clauses
+# are present within the function body.
+output=$(grep -A 3 '^_is_parametric_team()' "$INSTALL_TEAM" | grep -c 'TEAM_HAS_PROJECTS.*==.*true')
+output2=$(grep -A 3 '^_is_parametric_team()' "$INSTALL_TEAM" | grep -c 'share/scripts/teams/\${TEAM_ID}-startup.sh')
+if [ "$output" -ge 1 ] && [ "$output2" -ge 1 ]; then
+    test_pass
+else
+    test_fail "Expected _is_parametric_team() to AND TEAM_HAS_PROJECTS==true with a share/scripts/teams/\${TEAM_ID}-startup.sh existence check (found has_projects=$output shipped_source=$output2)"
+fi
 
 test_start "XACA-0483: install-team.sh defines path-substitution helper"
 output=$(grep -c '_xaca0483_install_script' "$INSTALL_TEAM")
@@ -99,15 +109,27 @@ test_start "XACA-0483: install-team.sh has migration block for legacy instance-k
 output=$(grep -c 'stale-pre-XACA-0483' "$INSTALL_TEAM")
 run_assert_pass assert_exit_success $([ "$output" -ge 2 ]; echo $?)
 
-test_start "XACA-0483: parametric branch skips connect/disconnect generation"
-# Each of CONNECT_SCRIPT/DISCONNECT_SCRIPT assignment must be followed within
-# ~5 lines by a _PARAMETRIC_MODE skip guard. Use -A 5 to span the comment block.
-connect_guarded=$(grep -A 5 '^CONNECT_SCRIPT=' "$INSTALL_TEAM" | grep -c '_PARAMETRIC_MODE')
-disconnect_guarded=$(grep -A 5 '^DISCONNECT_SCRIPT=' "$INSTALL_TEAM" | grep -c '_PARAMETRIC_MODE')
-if [ "$connect_guarded" -ge 1 ] && [ "$disconnect_guarded" -ge 1 ]; then
+# XACA-0483 ORIGINALLY had the parametric branch skip connect/disconnect
+# generation entirely (CONNECT_SCRIPT/DISCONNECT_SCRIPT assignments guarded by
+# _PARAMETRIC_MODE). XACA-0845 retired that skip: it was the direct cause of
+# live parametric teams (finance/freelance/legal/medical) shipping with NO
+# connect script — being selected routed them down this refusing path AND
+# excluded them from the only pass that would have rendered one. This
+# assertion is intentionally the OPPOSITE of the original XACA-0483 test: it
+# now pins that parametric teams DO get connect/disconnect scripts, rendered
+# from the parametric (not flat) templates via the shared
+# _render_connect_disconnect()/_is_parametric_team() pair. See
+# test-xaca-0845-connect-script-parametric-teams.sh for functional coverage
+# (socket correctness, idempotency, orphan safety) of this behavior.
+test_start "XACA-0845: parametric branch DOES generate connect/disconnect scripts (XACA-0483's original skip was retired)"
+old_skip_guard=$(grep -c '^CONNECT_SCRIPT=' "$INSTALL_TEAM")
+renderer_defined=$(grep -c '^_render_connect_disconnect() {' "$INSTALL_TEAM")
+renderer_called=$(grep -cE '^[[:space:]]*_render_connect_disconnect$' "$INSTALL_TEAM")
+parametric_branch_present=$(grep -A 6 '^_render_connect_disconnect() {' "$INSTALL_TEAM" | grep -c '_is_parametric_team')
+if [ "$old_skip_guard" -eq 0 ] && [ "$renderer_defined" -ge 1 ] && [ "$renderer_called" -ge 2 ] && [ "$parametric_branch_present" -ge 1 ]; then
     test_pass
 else
-    test_fail "Expected both CONNECT_SCRIPT and DISCONNECT_SCRIPT to be guarded by _PARAMETRIC_MODE (found connect=$connect_guarded disconnect=$disconnect_guarded)"
+    test_fail "Expected the old CONNECT_SCRIPT=/_PARAMETRIC_MODE skip to be GONE (found=$old_skip_guard) and _render_connect_disconnect() defined once (found=$renderer_defined), called from both callers (found=$renderer_called, want >=2), and branching on _is_parametric_team (found=$parametric_branch_present)"
 fi
 
 test_start "XACA-0483: parametric branch skips shutdown template (already installed verbatim)"

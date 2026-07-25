@@ -182,6 +182,23 @@ trap cleanup EXIT
 WORK_DIR="$TEST_TMP_DIR/xaca0834"
 mkdir -p "$WORK_DIR"
 
+# XACA-0845 ISOLATION FIX: update_connect_scripts() now unconditionally reads
+# a registry file — "${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+# — and UNIONs its instances into the work list (this is XACA-0845's whole
+# point: a registered-but-scriptless instance must be creatable, not just a
+# refreshable on-disk one). This suite predates that change and never
+# overrode AITEAMFORGE_CONFIG or HOME, so on any machine with a REAL
+# ~/.aiteamforge/team-paths.json (any real dev/consumer box — verified
+# reproducible on this one), every T*/NC* call below silently pulled the
+# REAL machine's registered team instances into the union alongside each
+# test's sandboxed on-disk fixture, inflating "skipped" counts and, in T4's
+# case, flipping a PASS to a FAIL. Point AITEAMFORGE_CONFIG at a fixed empty
+# registry for every call so this suite's isolation matches what it always
+# assumed: only the on-disk fixture files under each test's own WORKING_DIR
+# are ever considered. See XACA-0845-004's test report for the reproduction.
+XACA0834_EMPTY_REGISTRY="$WORK_DIR/empty-team-paths.json"
+printf '{"teams": {}}\n' > "$XACA0834_EMPTY_REGISTRY"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # S1 / S2 / S3 — STRUCTURAL assertions against the real, unmodified files.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -440,7 +457,7 @@ _install_print_stubs
 T1_CALL_LOG="$WORK_DIR/t1-calls.txt"; : > "$T1_CALL_LOG"
 STUB_CALL_LOG="$T1_CALL_LOG" STUB_TEAMS_CONF_DIR="$T1_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T1_FRAMEWORK" WORKING_DIR="$T1_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 T1_AFTER="$(cat "$T1_WORKING/freelance-acme-webapp-connect.sh" 2>/dev/null)"
 if grep -qF "freelance|client=acme|project=webapp" "$T1_CALL_LOG" \
     && [[ "$T1_AFTER" == connect-rendered-for-freelance-acme-webapp-* ]] \
@@ -471,7 +488,7 @@ _install_print_stubs
 T2_CALL_LOG="$WORK_DIR/t2-calls.txt"; : > "$T2_CALL_LOG"
 STUB_CALL_LOG="$T2_CALL_LOG" STUB_TEAMS_CONF_DIR="$T2_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T2_FRAMEWORK" WORKING_DIR="$T2_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 T2_AFTER="$(cat "$T2_WORKING/finance-work-connect.sh" 2>/dev/null)"
 if grep -qF "finance|client=|project=work" "$T2_CALL_LOG" \
     && [[ "$T2_AFTER" == connect-rendered-for-finance-work-* ]] \
@@ -533,7 +550,7 @@ _install_print_stubs
 T3_CALL_LOG="$WORK_DIR/t3-calls.txt"; : > "$T3_CALL_LOG"
 STUB_CALL_LOG="$T3_CALL_LOG" STUB_TEAMS_CONF_DIR="$T3_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T3_FRAMEWORK" WORKING_DIR="$T3_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 if [ ! -s "$T3_CALL_LOG" ] \
     && ! grep -qE '^med\|' "$T3_CALL_LOG" \
     && [ ! -f "$T3_WORKING/med-connect.sh" ] \
@@ -563,7 +580,7 @@ _install_print_stubs
 T4_CALL_LOG="$WORK_DIR/t4-calls.txt"; : > "$T4_CALL_LOG"
 STUB_CALL_LOG="$T4_CALL_LOG" STUB_TEAMS_CONF_DIR="$T4_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T4_FRAMEWORK" WORKING_DIR="$T4_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 if [ ! -s "$T4_CALL_LOG" ] \
     && grep -qF "ghost-team" "$_STUB_LOG" \
     && grep -qi "no team template matches" "$_STUB_LOG" \
@@ -605,7 +622,7 @@ _install_print_stubs
 T5_CALL_LOG="$WORK_DIR/t5-calls.txt"; : > "$T5_CALL_LOG"
 STUB_CALL_LOG="$T5_CALL_LOG" STUB_TEAMS_CONF_DIR="$T5_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T5_FRAMEWORK" WORKING_DIR="$T5_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 if grep -qF "ops-west|client=|project=project1" "$T5_CALL_LOG" \
     && ! grep -qE '^ops\|' "$T5_CALL_LOG" \
     && ! grep -qi "takes no parameters" "$_STUB_LOG"; then
@@ -640,6 +657,7 @@ for T6_NULLGLOB_MODE in unset set; do
         if [ "$T6_NULLGLOB_MODE" = "set" ]; then shopt -s nullglob; fi
         STUB_CALL_LOG="$T6_CALL_LOG" STUB_TEAMS_CONF_DIR="$T6_FRAMEWORK/share/teams" STUB_FAIL=false \
         FRAMEWORK_DIR="$T6_FRAMEWORK" WORKING_DIR="$T6_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
+        AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" \
             update_connect_scripts
         echo "SURVIVED_${T6_NULLGLOB_MODE}"
     ) >"$WORK_DIR/t6-stdout-${T6_NULLGLOB_MODE}.log" 2>&1 || T6_RC=$?
@@ -675,7 +693,7 @@ _install_print_stubs
 T7_CALL_LOG="$WORK_DIR/t7-calls.txt"; : > "$T7_CALL_LOG"
 STUB_CALL_LOG="$T7_CALL_LOG" STUB_TEAMS_CONF_DIR="$T7_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T7_FRAMEWORK" WORKING_DIR="$T7_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 if [ ! -s "$T7_CALL_LOG" ] && grep -qi "contains a dash" "$_STUB_LOG"; then
     test_pass
 else
@@ -703,7 +721,7 @@ _install_print_stubs
 T8_CALL_LOG="$WORK_DIR/t8-calls.txt"; : > "$T8_CALL_LOG"
 STUB_CALL_LOG="$T8_CALL_LOG" STUB_TEAMS_CONF_DIR="$T8_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T8_FRAMEWORK" WORKING_DIR="$T8_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 if [ ! -s "$T8_CALL_LOG" ] && grep -qi "cannot split" "$_STUB_LOG"; then
     test_pass
 else
@@ -731,7 +749,7 @@ _install_print_stubs
 T9_CALL_LOG="$WORK_DIR/t9-calls.txt"; : > "$T9_CALL_LOG"
 STUB_CALL_LOG="$T9_CALL_LOG" STUB_TEAMS_CONF_DIR="$T9_FRAMEWORK/share/teams" STUB_FAIL=false \
 FRAMEWORK_DIR="$T9_FRAMEWORK" WORKING_DIR="$T9_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0834_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 if [ ! -s "$T9_CALL_LOG" ] \
     && grep -qi "empty instance id after suffix-stripping" "$_STUB_LOG" \
     && grep -qi "Skipped 1 unrecognised" "$_STUB_LOG"; then

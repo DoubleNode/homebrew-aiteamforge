@@ -96,6 +96,22 @@ trap cleanup EXIT
 WORK_DIR="$TEST_TMP_DIR/xaca0814"
 mkdir -p "$WORK_DIR"
 
+# XACA-0845 ISOLATION FIX: update_connect_scripts() now unconditionally reads
+# a registry file — "${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+# — and UNIONs its instances into the work list. This suite predates that
+# change and never overrode AITEAMFORGE_CONFIG or HOME, so on any machine
+# with a REAL ~/.aiteamforge/team-paths.json (any real dev/consumer box —
+# verified reproducible on this one), every call below silently pulled the
+# REAL machine's registered team instances into the union alongside each
+# test's sandboxed on-disk fixture, inflating "skipped" counts and flipping
+# passes to fails. Point AITEAMFORGE_CONFIG at a fixed empty registry for
+# every call so this suite's isolation matches what it always assumed: only
+# the on-disk fixture files under each test's own WORKING_DIR are ever
+# considered. See XACA-0845-004's test report for the reproduction (the same
+# gap was found and fixed in test-xaca-0834-connect-script-recovery.sh).
+XACA0814_EMPTY_REGISTRY="$WORK_DIR/empty-team-paths.json"
+printf '{"teams": {}}\n' > "$XACA0814_EMPTY_REGISTRY"
+
 # ═══════════════════════════════════════════════════════════════════════════
 # S1 / S2 / S3 — STRUCTURAL assertions against the real, unmodified file.
 # These are the assertions that would have caught the original bug: a defined-
@@ -252,7 +268,7 @@ else
     F1_CALL_LOG="$WORK_DIR/f1-calls.txt"; : > "$F1_CALL_LOG"
     STUB_CALL_LOG="$F1_CALL_LOG" STUB_INSTANCE_ID="" STUB_FAIL=false \
     FRAMEWORK_DIR="$F1_FRAMEWORK" WORKING_DIR="$F1_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-        update_connect_scripts >/dev/null 2>&1
+        AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
     F1_AFTER="$(cat "$F1_WORKING/academy-connect.sh" 2>/dev/null)"
     if grep -q "^academy$" "$F1_CALL_LOG" \
         && [ "$F1_AFTER" != "$F1_BEFORE" ] \
@@ -282,7 +298,7 @@ else
     F2_CALL_LOG="$WORK_DIR/f2-calls.txt"; : > "$F2_CALL_LOG"
     STUB_CALL_LOG="$F2_CALL_LOG" STUB_INSTANCE_ID="" STUB_FAIL=false \
     FRAMEWORK_DIR="$F2_FRAMEWORK" WORKING_DIR="$F2_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-        update_connect_scripts >/dev/null 2>&1
+        AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
     if [ ! -s "$F2_CALL_LOG" ] && [ ! -f "$F2_WORKING/ios-connect.sh" ]; then
         test_pass
     else
@@ -304,10 +320,17 @@ _install_print_stubs
 F3_CALL_LOG="$WORK_DIR/f3-calls.txt"; : > "$F3_CALL_LOG"
 STUB_CALL_LOG="$F3_CALL_LOG" STUB_INSTANCE_ID="" STUB_FAIL=false \
 FRAMEWORK_DIR="$F3_FRAMEWORK" WORKING_DIR="$F3_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=true \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 F3_AFTER="$(cat "$F3_WORKING/academy-connect.sh")"
+# XACA-0845 WORDING UPDATE: the DRY_RUN summary message changed from "Would
+# refresh ..." to "Would render ..." (see aiteamforge-upgrade.sh ~line 1123).
+# The PER-INSTANCE "(refreshing)" / "(creating missing)" detail (~line 1105)
+# is emitted via a bare `echo`, not print_info, so it lands on stdout — which
+# this call redirects to /dev/null — and is never visible in $_STUB_LOG
+# (only the print_success-based SUMMARY line is captured there). Assert on
+# the summary wording only.
 if [ ! -s "$F3_CALL_LOG" ] && [ "$F3_AFTER" = "unchanged-dry-run-content" ] \
-    && grep -qi "would refresh" "$_STUB_LOG"; then
+    && grep -qi "would render" "$_STUB_LOG"; then
     test_pass
 else
     test_fail "DRY_RUN=true must not invoke installer or change content; call_log=$(cat "$F3_CALL_LOG" 2>/dev/null); after=$F3_AFTER; stub_log=$(cat "$_STUB_LOG")"
@@ -325,7 +348,7 @@ F4_CALL_LOG="$WORK_DIR/f4-calls.txt"; : > "$F4_CALL_LOG"
 F4_RC=0
 STUB_CALL_LOG="$F4_CALL_LOG" STUB_INSTANCE_ID="" STUB_FAIL=false \
 FRAMEWORK_DIR="$F4_FRAMEWORK" WORKING_DIR="$F4_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1 || F4_RC=$?
+    AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1 || F4_RC=$?
 if [ "$F4_RC" = "0" ] && [ ! -s "$F4_CALL_LOG" ] && grep -qi "not found" "$_STUB_LOG"; then
     test_pass
 else
@@ -345,7 +368,7 @@ F5_BAD_LIBEXEC="$WORK_DIR/no-such-libexec"
 _install_print_stubs
 F5_RC=0
 FRAMEWORK_DIR="$F5_FRAMEWORK" WORKING_DIR="$F5_WORKING" LIBEXEC_DIR="$F5_BAD_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1 || F5_RC=$?
+    AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1 || F5_RC=$?
 if [ "$F5_RC" = "0" ] && grep -qi "not found" "$_STUB_LOG"; then
     test_pass
 else
@@ -391,7 +414,7 @@ _install_print_stubs
 F6_CALL_LOG="$WORK_DIR/f6-calls.txt"; : > "$F6_CALL_LOG"
 STUB_CALL_LOG="$F6_CALL_LOG" STUB_INSTANCE_ID="finance-personal" STUB_FAIL=false \
 FRAMEWORK_DIR="$F6_FRAMEWORK" WORKING_DIR="$F6_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-    update_connect_scripts >/dev/null 2>&1
+    AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts >/dev/null 2>&1
 F6_AFTER="$(cat "$F6_WORKING/finance-personal-connect.sh" 2>/dev/null)"
 if grep -q "^finance$" "$F6_CALL_LOG" \
     && [[ "$F6_AFTER" == connect-rendered-for-finance-personal-* ]]; then
@@ -418,11 +441,13 @@ F7_RC=0
     set -eo pipefail   # upgrade.sh's exact options — deliberately WITHOUT -u
     STUB_CALL_LOG="$F7_CALL_LOG" STUB_INSTANCE_ID="" STUB_FAIL=true \
     FRAMEWORK_DIR="$F7_FRAMEWORK" WORKING_DIR="$F7_WORKING" LIBEXEC_DIR="$STUB_LIBEXEC" DRY_RUN=false \
-        update_connect_scripts
+        AITEAMFORGE_CONFIG="$XACA0814_EMPTY_REGISTRY" update_connect_scripts
     echo "CALLING_SHELL_SURVIVED"
 ) >"$WORK_DIR/f7-stdout.log" 2>&1 || F7_RC=$?
+# XACA-0845 WORDING UPDATE: "Failed to refresh ..." became "Failed to render
+# ..." (aiteamforge-upgrade.sh ~line 1115).
 if [ "$F7_RC" = "0" ] && grep -q "CALLING_SHELL_SURVIVED" "$WORK_DIR/f7-stdout.log" \
-    && grep -qi "failed to refresh" "$_STUB_LOG"; then
+    && grep -qi "failed to render" "$_STUB_LOG"; then
     test_pass
 else
     test_fail "rc=$F7_RC; stdout=$(cat "$WORK_DIR/f7-stdout.log"); stub_log=$(cat "$_STUB_LOG")"

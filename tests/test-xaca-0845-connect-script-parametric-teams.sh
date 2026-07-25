@@ -1,0 +1,904 @@
+#!/bin/bash
+# test-xaca-0845-connect-script-parametric-teams.sh
+#
+# XACA-0845 (subitem -004, PROTECTED [Test] gate). Regression suite for the
+# defect: parametric teams (finance/freelance/legal/medical —
+# TEAM_HAS_PROJECTS="true" in share/teams/*.conf, note the value is QUOTED,
+# an unquoted grep finds nothing) got NO connect script on the full-install
+# path. Being SELECTED — the thing that makes an instance live — was the
+# disqualifying condition: install-team.sh's full-install path had a
+# deliberate `_PARAMETRIC_MODE == true: skip` no-op for connect/disconnect
+# rendering, and the setup wizard's separate --connect-only pass (the only
+# path that DID render them) explicitly excludes already-selected teams. A
+# live parametric instance could therefore only ever get a connect script if
+# nobody had actually set it up — the opposite of the intended guarantee.
+#
+# THE FIX (already implemented — this suite verifies, does not reimplement):
+#   - libexec/installers/install-team.sh: retires the skip. Rendering is now
+#     ONE function, _render_connect_disconnect() (~line 582), behind a shared
+#     predicate _is_parametric_team() (~line 314) defined ABOVE the
+#     --connect-only early exit, with two callers: the connect-only early
+#     exit (~line 711) and the full-install path (~line 1209). Both callers
+#     asking the SAME predicate is the structural fix — the two paths can no
+#     longer silently disagree about whether a team is parametric.
+#   - Parametric teams now render from share/templates/team-connect-parametric
+#     .sh.template / team-disconnect-parametric.sh.template, NOT the flat
+#     team-connect.sh.template. This is not cosmetic: the flat template bakes
+#     TMUX_SOCKET=<instance-id> (e.g. "finance-personal"), but parametric
+#     <team>-startup.sh scripts open tmux sessions on a socket named after the
+#     TEAM ("finance"). A flat render for a parametric team therefore
+#     produces a script that is PRESENT but attaches to a socket no startup
+#     script ever creates — non-functional, and a file-existence-only test
+#     would pass on it. Case 2 below is built specifically to catch this.
+#   - The XACA-0483 stale-migration sweep (which moves legacy instance-keyed
+#     startup/shutdown scripts aside to .stale-pre-XACA-0483 on re-install)
+#     no longer includes connect/disconnect in its glob — those are
+#     inherently instance-keyed by design now, so including them would move
+#     every freshly rendered script aside on every re-install.
+#   - libexec/commands/aiteamforge-upgrade.sh: update_connect_scripts()'s
+#     work list is now a UNION of (a) *-connect.sh files already on disk and
+#     (b) instances REGISTERED in team-paths.json / .aiteamforge-config.
+#     Source (a) alone can only ever REFRESH an existing file, never CREATE a
+#     missing one — which is exactly the state XACA-0845 found: two live
+#     registered instances with no connect script, forever un-healable by
+#     upgrade. The "never materialise for a team this box didn't set up"
+#     guarantee is preserved (strengthened, even): registry membership is
+#     affirmative proof of setup, neither source invents an instance id, and
+#     anything unrecognised is still skipped, not guessed at.
+#
+# TEST CASES (mapped to the XACA-0845-004 subitem brief):
+#   S1  STRUCTURAL: _is_parametric_team() is defined once and referenced by
+#       BOTH callers of _render_connect_disconnect().
+#   S2  STRUCTURAL (Case 4, half): no deletion path exists anywhere for
+#       *-connect.sh / *-disconnect.sh in either install-team.sh or
+#       aiteamforge-upgrade.sh.
+#   S3  STRUCTURAL (Case 5, half): the XACA-0483 stale-migration glob no
+#       longer matches connect/disconnect filenames.
+#   T1  Case 1 (HEADLINE): a live parametric instance (finance --project
+#       personal) that previously got nothing now gets
+#       finance-personal-connect.sh (+ disconnect) via the FULL install path
+#       (not --connect-only) — driven for real, sandboxed.
+#   T2  Case 2 (SUBTLE — the one that makes this suite meaningful): the
+#       rendered socket is the TEAM base ("finance"), never the instance id
+#       ("finance-personal"). A file-existence-only assertion would pass on
+#       a script that can never attach to a real tmux session.
+#   T3  Case 3: idempotency — re-running the full install refreshes in place,
+#       never creates a bare team-keyed twin (finance-connect.sh) or a
+#       doubly-qualified twin (finance-personal-personal-connect.sh).
+#   T4  Case 5: re-installing over an already-rendered parametric instance
+#       does not sweep its connect/disconnect scripts into
+#       .stale-pre-XACA-0483.
+#   T5  Case 7: non-parametric renders (academy) are byte-identical before
+#       and after the fix — proven by rendering academy's connect/disconnect
+#       through the REAL (fixed) installer AND through an embedded pre-fix
+#       fixture fed the same real template + real conf data, then diffing.
+#   T6  Case 6 (union, half): a REGISTERED-but-scriptless instance
+#       (finance-personal in team-paths.json, no file on disk) gets its
+#       connect/disconnect CREATED by `aiteamforge upgrade` — the capability
+#       source (a) alone never had.
+#   T7  Case 6 (union, half): an empty registry + empty WORKING_DIR creates
+#       NOTHING — the "never materialise for a team this box didn't set up"
+#       guarantee, preserved.
+#   T8  Case 4 (functional): an on-disk connect script for an instance NOT
+#       present in the registry is neither deleted nor made to vanish — the
+#       file exists before and after.
+#   T9  Case 8 (fleet-audit latent case): medical-general is DECLARED (a
+#       medical.conf template ships) but NOT LIVE on this box (no registry
+#       entry, no on-disk script). Asserts + explains the intended behavior:
+#       nothing is materialised for it — being catalogued is not the same as
+#       being set up, and conflating the two is the exact inversion this
+#       ticket exists to fix in the other direction.
+#   NC1 [[MANDATORY negative control, Case 1]]: an embedded pre-fix fixture,
+#       gated the OLD way (_PARAMETRIC_MODE == true -> skip), produces NO
+#       connect script for finance-personal — reproducing the headline
+#       defect.
+#   NC2 [[MANDATORY negative control, Case 2]]: the SAME embedded pre-fix
+#       fixture, called directly (bypassing the skip, as the OLD
+#       --connect-only path always did), bakes TMUX_SOCKET="finance-personal"
+#       — the wrong value — using the real, unmodified template.
+#   NC3 [[bonus negative control, Case 6]]: the pre-XACA-0845
+#       update_connect_scripts (on-disk-files-only work list, embedded
+#       verbatim from tap commit d263bbb) NEVER creates a connect script for
+#       a registered-but-scriptless instance — proving source (b) is what
+#       XACA-0845 actually added, not a restatement of source (a).
+#
+# WHY FIXTURES ARE EMBEDDED, NOT `git show`'d AT RUNTIME (house convention,
+# XACA-0799 / XACA-0834): .github/workflows/tests.yml's `actions/checkout@v4`
+# steps carry no `fetch-depth` override, which defaults to a SHALLOW
+# (fetch-depth: 1) clone. A live `git show <old-sha>:...` or `git checkout
+# <old-sha> -- ...` would fail on every CI run once that commit ages out of
+# the shallow window. Fixtures below are therefore literal text embedded in
+# this file, verified byte-identical against the real pre-fix source at
+# authoring time (commit d263bbb, 419f4ba's immediate parent) and pinned by
+# an in-file marker check before use — see "verify the revert landed" notes
+# at each NC.
+#
+# Sandboxing: every filesystem write goes under a per-case mktemp sandbox
+# with its OWN HOME and AITEAMFORGE_DIR — the real installer is driven for
+# REAL (not stubbed) because finance.conf and academy.conf's TEAM_BREW_DEPS /
+# TEAM_BREW_CASK_DEPS arrays are verified empty below (S0), so no `brew
+# install` can ever fire; --connect-only mode additionally can never reach
+# the brew-install section at all (it exits at the CONNECT-ONLY EARLY EXIT,
+# which is textually above that section in both pre- and post-fix source).
+# Real $HOME, real ~/.aiteamforge, and real ~/aiteamforge are never touched.
+#
+# Runs standalone (`bash tests/test-xaca-0845-connect-script-parametric-teams.sh`)
+# OR via test-runner.sh. Exit 0 = all pass, exit 1 = any fail.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+INSTALL_TEAM_SH="$TAP_ROOT/libexec/installers/install-team.sh"
+UPGRADE_SH="$TAP_ROOT/libexec/commands/aiteamforge-upgrade.sh"
+
+if [ ! -f "$INSTALL_TEAM_SH" ]; then
+    echo "FATAL: required file not found: $INSTALL_TEAM_SH" >&2
+    exit 1
+fi
+if [ ! -f "$UPGRADE_SH" ]; then
+    echo "FATAL: required file not found: $UPGRADE_SH" >&2
+    exit 1
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Standalone framework (works sourced by test-runner.sh OR invoked directly).
+# ─────────────────────────────────────────────────────────────────────────────
+_STANDALONE=false
+if ! type -t test_start >/dev/null 2>&1; then
+    _STANDALONE=true
+    _PASS_COUNT=0
+    _FAIL_COUNT=0
+    _CURRENT_TEST=""
+    test_start() { _CURRENT_TEST="$1"; echo "  >> $1"; }
+    test_pass()  { _PASS_COUNT=$((_PASS_COUNT + 1)); echo "     PASS: $_CURRENT_TEST"; }
+    test_fail()  { _FAIL_COUNT=$((_FAIL_COUNT + 1)); echo "     FAIL: $_CURRENT_TEST — $1" >&2; }
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Temp directory (runner-supplied or our own).
+# ─────────────────────────────────────────────────────────────────────────────
+if [ -z "${TEST_TMP_DIR:-}" ] || [ ! -d "${TEST_TMP_DIR:-}" ]; then
+    TEST_TMP_DIR="$(mktemp -d -t xaca0845-test.XXXXXX)"
+    _OWN_TMP=true
+else
+    _OWN_TMP=false
+fi
+cleanup() { if [ "${_OWN_TMP:-false}" = true ] && [ -n "${TEST_TMP_DIR:-}" ] && [ -d "${TEST_TMP_DIR:-}" ]; then find "$TEST_TMP_DIR" -depth -delete 2>/dev/null || true; fi; }
+trap cleanup EXIT
+
+WORK_DIR="$TEST_TMP_DIR/xaca0845"
+mkdir -p "$WORK_DIR"
+
+_next_sandbox() { mktemp -d "$WORK_DIR/sbx-XXXXXX"; }
+
+# Fresh sandbox with its own HOME/AITEAMFORGE_DIR. Never touches real $HOME.
+_new_install_sandbox() {
+    local sbx
+    sbx="$(_next_sandbox)"
+    mkdir -p "$sbx/home/.aiteamforge" "$sbx/aiteamforge"
+    echo "$sbx"
+}
+
+# Drive the REAL install-team.sh in a sandbox. $1=sandbox root, rest = args.
+# AITEAMFORGE_ORG_CONFIG (non-empty, need not exist) skips the interactive
+# org-identity prompt (_ensure_org_config, install-team.sh ~line 424).
+_run_install() {
+    local sbx="$1"; shift
+    HOME="$sbx/home" \
+    AITEAMFORGE_DIR="$sbx/aiteamforge" \
+    AITEAMFORGE_ORG_CONFIG="$sbx/home/.aiteamforge/organization.yaml" \
+        bash "$INSTALL_TEAM_SH" "$@" --install-dir "$sbx/aiteamforge"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S0 — SAFETY PRECONDITION (not a XACA-0845 assertion, a sandboxing guardrail):
+# finance and academy (the two real teams this suite drives through the REAL
+# installer) must ship EMPTY TEAM_BREW_DEPS / TEAM_BREW_CASK_DEPS, or a full
+# (non---connect-only) install would invoke a real `brew install` on THIS
+# machine — forbidden regardless of ticket context. If a future conf change
+# adds a dep, this test must fail loudly rather than silently start calling
+# brew.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "S0 [safety]: finance.conf and academy.conf ship empty TEAM_BREW_DEPS/TEAM_BREW_CASK_DEPS (a full install must never invoke real brew)"
+_s0_ok=true
+_s0_detail=""
+for _s0_team in finance academy; do
+    _s0_conf="$TAP_ROOT/share/teams/${_s0_team}.conf"
+    if [ ! -f "$_s0_conf" ]; then
+        _s0_ok=false; _s0_detail="${_s0_detail}${_s0_team}.conf missing; "
+        continue
+    fi
+    if [ "$_s0_team" = "academy" ]; then
+        # academy DOES ship brew deps (python@3, node, jq, gh) — this suite
+        # only ever drives academy via --connect-only, which exits at the
+        # CONNECT-ONLY EARLY EXIT strictly before the brew-install section in
+        # BOTH pre- and post-fix source (grep-verified below), so this is
+        # safe regardless of academy's deps. Skip the emptiness requirement
+        # for academy; pin the ordering guarantee instead.
+        _s0_connect_only_line=$(grep -n '^if \[\[ "\$CONNECT_ONLY" == "true" \]\]; then' "$INSTALL_TEAM_SH" | head -1 | cut -d: -f1)
+        _s0_brew_line=$(grep -n '^# INSTALL HOMEBREW DEPENDENCIES' "$INSTALL_TEAM_SH" | head -1 | cut -d: -f1)
+        if [ -z "$_s0_connect_only_line" ] || [ -z "$_s0_brew_line" ] || [ "$_s0_connect_only_line" -ge "$_s0_brew_line" ]; then
+            _s0_ok=false; _s0_detail="${_s0_detail}CONNECT_ONLY early-exit (line ${_s0_connect_only_line:-?}) is not strictly before the brew-install section (line ${_s0_brew_line:-?}); "
+        fi
+        continue
+    fi
+    if grep -qE '^TEAM_BREW_DEPS=\(\s*\)' "$_s0_conf" && grep -qE '^TEAM_BREW_CASK_DEPS=\(\s*\)' "$_s0_conf"; then
+        :
+    else
+        _s0_ok=false; _s0_detail="${_s0_detail}${_s0_team}.conf has non-empty brew deps; "
+    fi
+done
+if [ "$_s0_ok" = true ]; then
+    test_pass
+else
+    test_fail "safety precondition violated — refusing to proceed with real-installer tests: $_s0_detail"
+    echo "FATAL: S0 safety precondition failed, aborting suite to avoid a real brew install." >&2
+    if [ "$_STANDALONE" = true ]; then
+        echo "XACA-0845 connect-script tests: ${_PASS_COUNT} passed, $((_FAIL_COUNT)) failed"
+    fi
+    exit 1
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S1 — STRUCTURAL: shared predicate, both callers.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "S1: _is_parametric_team() is defined once and both callers of _render_connect_disconnect() reference it"
+_s1_predicate_defs=$(grep -c '^_is_parametric_team() {' "$INSTALL_TEAM_SH")
+_s1_renderer_defs=$(grep -c '^_render_connect_disconnect() {' "$INSTALL_TEAM_SH")
+_s1_callers=$(grep -cE '^[[:space:]]*_render_connect_disconnect$' "$INSTALL_TEAM_SH")
+_s1_branches_on_predicate=$(grep -A 6 '^_render_connect_disconnect() {' "$INSTALL_TEAM_SH" | grep -c '_is_parametric_team')
+if [ "$_s1_predicate_defs" -eq 1 ] && [ "$_s1_renderer_defs" -eq 1 ] && [ "$_s1_callers" -ge 2 ] && [ "$_s1_branches_on_predicate" -ge 1 ]; then
+    test_pass
+else
+    test_fail "expected _is_parametric_team defined once (found=$_s1_predicate_defs), _render_connect_disconnect defined once (found=$_s1_renderer_defs) with >=2 callers (found=$_s1_callers), branching on the predicate (found=$_s1_branches_on_predicate)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S2 — STRUCTURAL (Case 4, half): no deletion path for connect/disconnect
+# scripts anywhere in the two files this fix touches.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "S2: no 'rm'/'rm -f' targeting *-connect.sh or *-disconnect.sh exists in install-team.sh or aiteamforge-upgrade.sh"
+_s2_hits=$(grep -nE 'rm[[:space:]]+(-[a-zA-Z]+[[:space:]]+)*.*-(connect|disconnect)\.sh' "$INSTALL_TEAM_SH" "$UPGRADE_SH" 2>/dev/null | grep -vE '\.tmp"?$' || true)
+if [ -z "$_s2_hits" ]; then
+    test_pass
+else
+    test_fail "found a deletion path targeting connect/disconnect scripts: $_s2_hits"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# S3 — STRUCTURAL (Case 5, half): stale-migration glob excludes
+# connect/disconnect.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "S3: the XACA-0483 stale-migration glob only matches *-startup.sh / *-shutdown.sh, never *-connect.sh / *-disconnect.sh"
+# Narrow to JUST the `for _stale_glob in ... ; do` glob list itself, not the
+# surrounding comment block — the comment block legitimately DISCUSSES
+# "<team>-<project>-connect.sh" in prose (explaining why it's excluded),
+# which would false-positive a whole-block substring grep.
+_s3_glob_list=$(awk '/^[[:space:]]*for _stale_glob in/,/; do$/' "$INSTALL_TEAM_SH")
+if [ -n "$_s3_glob_list" ] \
+    && echo "$_s3_glob_list" | grep -qF -- '-startup.sh' \
+    && echo "$_s3_glob_list" | grep -qF -- '-shutdown.sh' \
+    && ! echo "$_s3_glob_list" | grep -qF -- '-connect.sh' \
+    && ! echo "$_s3_glob_list" | grep -qF -- '-disconnect.sh'; then
+    test_pass
+else
+    test_fail "expected the stale-migration glob list to contain startup/shutdown patterns only; glob list was: $_s3_glob_list"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T1 — Case 1 (HEADLINE): finance --project personal via the FULL install
+# path (not --connect-only) now produces a connect + disconnect script.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T1 [Case 1, HEADLINE]: finance --project personal (full install) creates finance-personal-connect.sh + disconnect.sh"
+T1_SBX="$(_new_install_sandbox)"
+T1_LOG="$WORK_DIR/t1-install.log"
+if _run_install "$T1_SBX" finance --project personal >"$T1_LOG" 2>&1; then
+    T1_CONNECT="$T1_SBX/aiteamforge/finance-personal-connect.sh"
+    T1_DISCONNECT="$T1_SBX/aiteamforge/finance-personal-disconnect.sh"
+    if [ -s "$T1_CONNECT" ] && [ -x "$T1_CONNECT" ] && [ -s "$T1_DISCONNECT" ] && [ -x "$T1_DISCONNECT" ]; then
+        test_pass
+    else
+        test_fail "expected non-empty, executable finance-personal-connect.sh + disconnect.sh; connect=$([ -f "$T1_CONNECT" ] && echo present || echo MISSING) disconnect=$([ -f "$T1_DISCONNECT" ] && echo present || echo MISSING); install log tail: $(tail -20 "$T1_LOG")"
+    fi
+else
+    test_fail "install-team.sh finance --project personal exited non-zero; log: $(tail -40 "$T1_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T2 — Case 2 (SUBTLE): the rendered socket is the TEAM base ("finance"),
+# never the instance id ("finance-personal"). See NC2 below for the negative
+# control proving this assertion can actually fail.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T2 [Case 2, SUBTLE]: rendered TMUX_SOCKET is the team base 'finance', never the instance id 'finance-personal'"
+T2_CONNECT="$T1_SBX/aiteamforge/finance-personal-connect.sh"
+if [ -f "$T2_CONNECT" ] \
+    && grep -qF 'TMUX_SOCKET="finance"' "$T2_CONNECT" \
+    && ! grep -qF 'TMUX_SOCKET="finance-personal"' "$T2_CONNECT"; then
+    test_pass
+else
+    test_fail "expected TMUX_SOCKET=\"finance\" present and TMUX_SOCKET=\"finance-personal\" absent; actual TMUX_SOCKET line(s): $(grep -n 'TMUX_SOCKET=' "$T2_CONNECT" 2>/dev/null | head -3)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T3 — Case 3: idempotency. Re-running the full install twice more must
+# refresh in place — no bare team-keyed twin, no doubly-qualified twin.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T3 [Case 3]: re-running finance --project personal is idempotent — no twins, socket still correct"
+T3_LOG1="$WORK_DIR/t3-install-1.log"
+T3_LOG2="$WORK_DIR/t3-install-2.log"
+_run_install "$T1_SBX" finance --project personal >"$T3_LOG1" 2>&1
+_run_install "$T1_SBX" finance --project personal >"$T3_LOG2" 2>&1
+T3_CONNECT_COUNT=$(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' | wc -l | tr -d ' ')
+T3_BARE_TWIN="$T1_SBX/aiteamforge/finance-connect.sh"
+T3_DOUBLE_TWIN="$T1_SBX/aiteamforge/finance-personal-personal-connect.sh"
+if [ "$T3_CONNECT_COUNT" -eq 2 ] \
+    && [ ! -f "$T3_BARE_TWIN" ] \
+    && [ ! -f "$T3_DOUBLE_TWIN" ] \
+    && grep -qF 'TMUX_SOCKET="finance"' "$T1_SBX/aiteamforge/finance-personal-connect.sh"; then
+    test_pass
+else
+    test_fail "expected exactly 2 *connect.sh files (connect+disconnect for finance-personal only), no bare/double twins, socket still correct; found $T3_CONNECT_COUNT files: $(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' -exec basename {} \; 2>/dev/null | tr '\n' ' ')"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T4 — Case 5: re-installing over an already-rendered parametric instance
+# does not sweep connect/disconnect into .stale-pre-XACA-0483 (T3 already
+# re-installed twice over the same sandbox above — this checks the residue).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T4 [Case 5]: re-install does not move finance-personal-connect/disconnect.sh aside to .stale-pre-XACA-0483"
+T4_STALE_COUNT=$(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect*.stale-pre-XACA-0483' -o -name '*disconnect*.stale-pre-XACA-0483' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T4_STALE_COUNT" -eq 0 ] \
+    && [ -f "$T1_SBX/aiteamforge/finance-personal-connect.sh" ] \
+    && [ -f "$T1_SBX/aiteamforge/finance-personal-disconnect.sh" ]; then
+    test_pass
+else
+    test_fail "expected 0 .stale-pre-XACA-0483 connect/disconnect files and the live scripts still present; stale_count=$T4_STALE_COUNT"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Shared helper for T5 / NC1 / NC2: load the fields _render_connect_disconnect
+# (fixed) and the pre-fix CONNECT-ONLY EARLY EXIT (embedded below) both need,
+# by sourcing a real team .conf exactly the way install-team.sh's own
+# _read_conf() does (read-only; never mutates the conf).
+# ═══════════════════════════════════════════════════════════════════════════
+_xaca0845_load_conf_vars() {
+    local conf_file="$1"
+    (
+        # shellcheck disable=SC1090
+        source "$conf_file"
+        printf 'TEAM_NAME=%q\n' "${TEAM_NAME:-}"
+        printf 'TEAM_THEME=%q\n' "${TEAM_THEME:-}"
+        printf 'TEAM_LCARS_PORT=%q\n' "${TEAM_LCARS_PORT:-8200}"
+        printf 'TEAM_TERMINAL_LIST=%q\n' "${TEAM_AGENTS[*]+"${TEAM_AGENTS[*]}"}"
+        local _cfg="" _agent _agent_key _var _val
+        for _agent in "${TEAM_AGENTS[@]+"${TEAM_AGENTS[@]}"}"; do
+            _agent_key="${_agent//-/_}"
+            _var="AGENT_WINDOWS_${_agent_key}"
+            _val="${!_var:-}"
+            if [[ -n "$_val" ]]; then
+                _cfg+="AGENT_WINDOWS_${_agent_key}=\"${_val}\""$'\n'
+            fi
+        done
+        printf 'TEAM_AGENT_WINDOWS_CONFIG=%q\n' "$_cfg"
+    )
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PRE-FIX FIXTURE: _pre_fix_render_connect_only()
+#
+# Embedded VERBATIM (renamed only; sed/python bodies byte-for-byte) from tap
+# commit d263bbb — install-team.sh's CONNECT-ONLY EARLY EXIT block, lines
+# 511-558, immediately before XACA-0845's fix (419f4ba's parent). This is the
+# rendering the OLD --connect-only path used UNCONDITIONALLY, for every team:
+# always the flat team-connect.sh.template, always
+# `{{TEAM_TMUX_SOCKET}} -> $instance_id`. Correct for non-parametric teams
+# (instance id == team id there — this is what makes T5's byte-identical
+# claim true), WRONG for parametric teams (Case 2's defect).
+#
+# "Verify the revert landed": before use, NC1/NC2 grep this function's own
+# `declare -f` output for the exact smoking-gun substitution
+# `{{TEAM_TMUX_SOCKET}}|$instance_id` — proving the embedded text is
+# genuinely the OLD always-flat behavior and not an accidental copy of the
+# NEW parametric-template path (which uses a differently-named placeholder,
+# {{TEAM_SOCKET}}, and a $_socket variable, not $instance_id).
+# ─────────────────────────────────────────────────────────────────────────────
+_pre_fix_render_connect_only() {
+    local instance_id="$1" team_name="$2" team_theme="$3" team_lcars_port="$4" \
+          team_terminal_list="$5" team_agent_windows_config="$6" \
+          homebrew_tap_root="$7" aiteamforge_dir="$8"
+
+    local CONNECT_TEMPLATE="$homebrew_tap_root/share/templates/team-connect.sh.template"
+    local CONNECT_SCRIPT="$aiteamforge_dir/${instance_id}-connect.sh"
+
+    if [[ -f "$CONNECT_TEMPLATE" ]]; then
+        sed -e "s|{{TEAM_ID}}|$instance_id|g" \
+            -e "s|{{TEAM_NAME}}|$team_name|g" \
+            -e "s|{{TEAM_THEME}}|$team_theme|g" \
+            -e "s|{{TEAM_LCARS_PORT}}|$team_lcars_port|g" \
+            -e "s|{{TEAM_TMUX_SOCKET}}|$instance_id|g" \
+            -e "s|{{TEAM_TERMINAL_LIST}}|$team_terminal_list|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$aiteamforge_dir|g" \
+            "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
+
+        python3 - "${CONNECT_SCRIPT}.tmp" "$CONNECT_SCRIPT" <<PYEOF
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+windows_config = """${team_agent_windows_config}""".rstrip('\n')
+if windows_config:
+    windows_config += '\n'
+with open(src) as f:
+    content = f.read()
+content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
+if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
+    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
+with open(dst, 'w') as f:
+    f.write(content)
+PYEOF
+        rm -f "${CONNECT_SCRIPT}.tmp"
+        chmod +x "$CONNECT_SCRIPT"
+    fi
+
+    local DISCONNECT_TEMPLATE="$homebrew_tap_root/share/templates/team-disconnect.sh.template"
+    local DISCONNECT_SCRIPT="$aiteamforge_dir/${instance_id}-disconnect.sh"
+    if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
+        sed -e "s|{{TEAM_ID}}|$instance_id|g" \
+            -e "s|{{TEAM_NAME}}|$team_name|g" \
+            -e "s|{{TEAM_LCARS_PORT}}|$team_lcars_port|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$aiteamforge_dir|g" \
+            "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
+        chmod +x "$DISCONNECT_SCRIPT"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T5 — Case 7: non-parametric renders (academy) are byte-identical pre/post
+# fix. Proven functionally: render via the REAL (fixed) installer AND via
+# the embedded pre-fix fixture, fed the SAME real conf data and the SAME
+# real templates, then diff byte-for-byte.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T5 [Case 7]: academy connect/disconnect renders are byte-identical through the fixed installer vs. the embedded pre-fix fixture"
+T5_SBX="$(_new_install_sandbox)"
+T5_POST_LOG="$WORK_DIR/t5-post.log"
+_run_install "$T5_SBX" academy --connect-only >"$T5_POST_LOG" 2>&1
+T5_POST_CONNECT="$T5_SBX/aiteamforge/academy-connect.sh"
+T5_POST_DISCONNECT="$T5_SBX/aiteamforge/academy-disconnect.sh"
+
+T5_PRE_DIR="$(_next_sandbox)"
+eval "$(_xaca0845_load_conf_vars "$TAP_ROOT/share/teams/academy.conf")"
+_pre_fix_render_connect_only "academy" "$TEAM_NAME" "$TEAM_THEME" "$TEAM_LCARS_PORT" \
+    "$TEAM_TERMINAL_LIST" "$TEAM_AGENT_WINDOWS_CONFIG" "$TAP_ROOT" "$T5_PRE_DIR"
+T5_PRE_CONNECT="$T5_PRE_DIR/academy-connect.sh"
+T5_PRE_DISCONNECT="$T5_PRE_DIR/academy-disconnect.sh"
+
+# Normalize the ONE expected difference — the {{AITEAMFORGE_DIR}} value baked
+# into both renders is the literal sandbox path, and the two renders
+# necessarily used DIFFERENT mktemp sandboxes (post-fix via _run_install's
+# "$T5_SBX/aiteamforge", pre-fix via the fixture's own "$T5_PRE_DIR"). Replace
+# each render's own path with a common placeholder before diffing, so the
+# comparison catches any REAL difference without false-failing on this
+# structural (not behavioral) path mismatch.
+T5_POST_NORM="$WORK_DIR/t5-post-connect.norm"
+T5_PRE_NORM="$WORK_DIR/t5-pre-connect.norm"
+T5_POST_DISC_NORM="$WORK_DIR/t5-post-disconnect.norm"
+T5_PRE_DISC_NORM="$WORK_DIR/t5-pre-disconnect.norm"
+sed "s|$T5_SBX/aiteamforge|__AITEAMFORGE_DIR__|g" "$T5_POST_CONNECT" > "$T5_POST_NORM" 2>/dev/null
+sed "s|$T5_PRE_DIR|__AITEAMFORGE_DIR__|g" "$T5_PRE_CONNECT" > "$T5_PRE_NORM" 2>/dev/null
+sed "s|$T5_SBX/aiteamforge|__AITEAMFORGE_DIR__|g" "$T5_POST_DISCONNECT" > "$T5_POST_DISC_NORM" 2>/dev/null
+sed "s|$T5_PRE_DIR|__AITEAMFORGE_DIR__|g" "$T5_PRE_DISCONNECT" > "$T5_PRE_DISC_NORM" 2>/dev/null
+
+if [ -f "$T5_POST_CONNECT" ] && [ -f "$T5_PRE_CONNECT" ] \
+    && [ -f "$T5_POST_DISCONNECT" ] && [ -f "$T5_PRE_DISCONNECT" ] \
+    && diff -q "$T5_POST_NORM" "$T5_PRE_NORM" >/dev/null 2>&1 \
+    && diff -q "$T5_POST_DISC_NORM" "$T5_PRE_DISC_NORM" >/dev/null 2>&1; then
+    test_pass
+else
+    test_fail "expected byte-identical academy connect/disconnect renders (after normalizing the AITEAMFORGE_DIR path); connect diff: $(diff "$T5_POST_NORM" "$T5_PRE_NORM" 2>&1 | head -10); disconnect diff: $(diff "$T5_POST_DISC_NORM" "$T5_PRE_DISC_NORM" 2>&1 | head -10)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NC1 [MANDATORY negative control, Case 1]: the OLD gating logic
+# (_PARAMETRIC_MODE == true -> skip entirely, install-team.sh d263bbb lines
+# 1036-1037) reproduces the headline defect — no connect script for a live
+# parametric instance.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "NC1 [negative control, Case 1]: pre-fix gating (_PARAMETRIC_MODE==true -> skip) produces NO connect script for finance-personal"
+# Verify the revert landed: the embedded fixture must contain the exact old
+# always-flat marker, and must NOT contain the new parametric-only markers —
+# proving this is genuinely pre-fix behavior, not an accidental copy of the
+# fixed code.
+NC1_FIXTURE_SRC="$(declare -f _pre_fix_render_connect_only)"
+NC1_MARKER_OK=true
+echo "$NC1_FIXTURE_SRC" | grep -qF '{{TEAM_TMUX_SOCKET}}|$instance_id' || NC1_MARKER_OK=false
+echo "$NC1_FIXTURE_SRC" | grep -qF '{{TEAM_SOCKET}}' && NC1_MARKER_OK=false
+echo "$NC1_FIXTURE_SRC" | grep -qF 'team-connect-parametric.sh.template' && NC1_MARKER_OK=false
+if [ "$NC1_MARKER_OK" != true ]; then
+    test_fail "embedded fixture does not encode pre-fix behavior (marker check failed) — the negative control below would prove nothing; fixture source: $NC1_FIXTURE_SRC"
+else
+    NC1_SBX="$(_next_sandbox)"
+    NC1_PARAMETRIC_MODE="true"
+    eval "$(_xaca0845_load_conf_vars "$TAP_ROOT/share/teams/finance.conf")"
+    # Reproduce install-team.sh d263bbb's exact gate: `if PARAMETRIC_MODE==true: :  (no-op) else <render>`.
+    if [[ "$NC1_PARAMETRIC_MODE" == "true" ]]; then
+        :  # No connect script for parametric teams — the pre-fix (buggy) behavior.
+    else
+        _pre_fix_render_connect_only "finance-personal" "$TEAM_NAME" "$TEAM_THEME" "$TEAM_LCARS_PORT" \
+            "$TEAM_TERMINAL_LIST" "$TEAM_AGENT_WINDOWS_CONFIG" "$TAP_ROOT" "$NC1_SBX"
+    fi
+    if [ ! -f "$NC1_SBX/finance-personal-connect.sh" ] && [ ! -f "$NC1_SBX/finance-personal-disconnect.sh" ]; then
+        test_pass
+    else
+        test_fail "expected the pre-fix gate to produce NO connect/disconnect script for finance-personal — if a file now exists, the negative control no longer discriminates from the fixed behavior in T1"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# NC2 [MANDATORY negative control, Case 2]: the OLD --connect-only path
+# ALWAYS used the flat template — even for parametric teams — baking the
+# WRONG socket (instance id, not team base).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "NC2 [negative control, Case 2]: pre-fix flat-template render bakes TMUX_SOCKET=\"finance-personal\" (wrong) — the exact bug T2 guards against"
+NC2_FIXTURE_SRC="$(declare -f _pre_fix_render_connect_only)"
+NC2_MARKER_OK=true
+echo "$NC2_FIXTURE_SRC" | grep -qF '{{TEAM_TMUX_SOCKET}}|$instance_id' || NC2_MARKER_OK=false
+if [ "$NC2_MARKER_OK" != true ]; then
+    test_fail "embedded fixture does not encode the pre-fix always-flat socket substitution — marker check failed; fixture source: $NC2_FIXTURE_SRC"
+else
+    NC2_SBX="$(_next_sandbox)"
+    eval "$(_xaca0845_load_conf_vars "$TAP_ROOT/share/teams/finance.conf")"
+    # Pre-fix --connect-only never checked parametric-ness at all — call the
+    # flat renderer directly, exactly as the old CONNECT-ONLY EARLY EXIT did.
+    _pre_fix_render_connect_only "finance-personal" "$TEAM_NAME" "$TEAM_THEME" "$TEAM_LCARS_PORT" \
+        "$TEAM_TERMINAL_LIST" "$TEAM_AGENT_WINDOWS_CONFIG" "$TAP_ROOT" "$NC2_SBX"
+    if [ -f "$NC2_SBX/finance-personal-connect.sh" ] \
+        && grep -qF 'TMUX_SOCKET="finance-personal"' "$NC2_SBX/finance-personal-connect.sh"; then
+        test_pass
+    else
+        test_fail "expected the pre-fix render to bake TMUX_SOCKET=\"finance-personal\" (the wrong value) — if it now matches the correct 'finance', the negative control no longer discriminates from T2; actual: $(grep -n 'TMUX_SOCKET=' "$NC2_SBX/finance-personal-connect.sh" 2>/dev/null)"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Extract the REAL (fixed) update_connect_scripts + _connect_script_team_flags
+# from aiteamforge-upgrade.sh — do NOT source the whole file (its main body
+# has side effects: is_configured, get_framework_dir, brew checks, the
+# upgrade itself). Mirrors test-xaca-0834-connect-script-recovery.sh's
+# extraction technique.
+# ═══════════════════════════════════════════════════════════════════════════
+_extract_fn() {
+    awk -v fn="$1" '
+      $0 ~ ("^" fn "\\(\\) \\{") { capture=1 }
+      capture { print }
+      capture && /^}$/ { exit }
+    ' "$UPGRADE_SH"
+}
+
+FLAGS_FN_SRC="$WORK_DIR/connect_script_team_flags.extracted.sh"
+UPD_FN_SRC="$WORK_DIR/update_connect_scripts.extracted.sh"
+_extract_fn _connect_script_team_flags > "$FLAGS_FN_SRC"
+_extract_fn update_connect_scripts > "$UPD_FN_SRC"
+
+if [ ! -s "$FLAGS_FN_SRC" ] || [ ! -s "$UPD_FN_SRC" ]; then
+    echo "FATAL: could not extract update_connect_scripts / _connect_script_team_flags from $UPGRADE_SH" >&2
+    if [ "$_STANDALONE" = true ]; then
+        echo "XACA-0845 connect-script tests: ${_PASS_COUNT} passed, $((_FAIL_COUNT + 1)) failed"
+    fi
+    exit 1
+fi
+
+_STUB_LOG="$WORK_DIR/upgrade-stub-output.log"
+_install_print_stubs() {
+    : > "$_STUB_LOG"
+    for _p in print_section print_info print_success print_warning print_error; do
+        eval "${_p}() { printf '%s\n' \"\$*\" >> \"\$_STUB_LOG\"; }"
+    done
+}
+_install_print_stubs
+
+# shellcheck disable=SC1090
+source "$FLAGS_FN_SRC"
+# shellcheck disable=SC1090
+source "$UPD_FN_SRC"
+declare -f _connect_script_team_flags >/dev/null || { echo "FATAL: _connect_script_team_flags not defined after extraction"; exit 1; }
+declare -f update_connect_scripts >/dev/null || { echo "FATAL: update_connect_scripts not defined after extraction"; exit 1; }
+
+# Build a team-paths.json registry file. $1 = output path, remaining args =
+# instance ids to register (each gets a minimal, valid-shaped entry).
+_write_registry() {
+    local out="$1"; shift
+    mkdir -p "$(dirname "$out")"
+    if [ "$#" -eq 0 ]; then
+        printf '{"teams": {}}\n' > "$out"
+        return 0
+    fi
+    python3 - "$out" "$@" <<'PYEOF'
+import json, sys
+out = sys.argv[1]
+instances = sys.argv[2:]
+data = {"teams": {i: {"lcars_port": 8360} for i in instances}}
+with open(out, "w") as f:
+    json.dump(data, f)
+PYEOF
+}
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6 — Case 6 (union, half): a REGISTERED-but-scriptless instance gets its
+# connect/disconnect CREATED by `aiteamforge upgrade` — driven through the
+# REAL (fixed) install-team.sh, real templates, real finance.conf.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6 [Case 6]: upgrade's union creates finance-personal-connect.sh for a registered-but-scriptless instance"
+T6_SBX="$(_new_install_sandbox)"
+T6_REGISTRY="$T6_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T6_REGISTRY" "finance-personal"
+_install_print_stubs
+HOME="$T6_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6-upgrade.log" 2>&1
+T6_CONNECT="$T6_SBX/aiteamforge/finance-personal-connect.sh"
+if [ -s "$T6_CONNECT" ] \
+    && grep -qF 'TMUX_SOCKET="finance"' "$T6_CONNECT" \
+    && grep -qi "Creating missing" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected finance-personal-connect.sh created with correct socket + a 'Creating missing' message; connect_exists=$([ -f "$T6_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG"); upgrade_log=$(tail -20 "$WORK_DIR/t6-upgrade.log")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T7 — Case 6 (union, half): empty registry + empty WORKING_DIR creates
+# NOTHING — "never materialise for a team this box didn't set up" preserved.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T7 [Case 6]: empty registry + empty WORKING_DIR creates nothing"
+T7_SBX="$(_new_install_sandbox)"
+T7_REGISTRY="$T7_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T7_REGISTRY"
+_install_print_stubs
+HOME="$T7_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T7_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T7_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T7_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t7-upgrade.log" 2>&1
+T7_FILE_COUNT=$(find "$T7_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T7_FILE_COUNT" -eq 0 ] && grep -qi "No installed team connect scripts to refresh" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected 0 files created + 'No installed team connect scripts to refresh'; file_count=$T7_FILE_COUNT; stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T8 — Case 4 (functional): an on-disk connect script for an instance NOT in
+# the registry is never deleted. (It IS refreshed — on-disk files are always
+# in the union's work list, source (a), regardless of registry state — the
+# assertion here is specifically "still exists", matching S2's structural
+# "no deletion path" pin.)
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T8 [Case 4]: an on-disk connect script for an unregistered instance is never deleted"
+T8_SBX="$(_new_install_sandbox)"
+T8_REGISTRY="$T8_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T8_REGISTRY"   # empty registry — finance-orphaned is NOT registered
+mkdir -p "$T8_SBX/aiteamforge"
+echo "#!/bin/zsh
+echo placeholder-orphan-content" > "$T8_SBX/aiteamforge/finance-orphaned-connect.sh"
+chmod +x "$T8_SBX/aiteamforge/finance-orphaned-connect.sh"
+_install_print_stubs
+HOME="$T8_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T8_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T8_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T8_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t8-upgrade.log" 2>&1
+if [ -f "$T8_SBX/aiteamforge/finance-orphaned-connect.sh" ]; then
+    test_pass
+else
+    test_fail "expected finance-orphaned-connect.sh to still exist (never deleted) even though it has no registry entry; stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T9 — Case 8: medical-general is DECLARED (medical.conf ships in the
+# catalog) but NOT LIVE on this box (no registry entry, no on-disk script).
+#
+# ASSERTED BEHAVIOR: nothing is materialised for medical-general. WHY this is
+# correct, not a gap: the union's whole purpose is "an instance this box
+# ACTUALLY set up should get a connect script even if the file is missing" —
+# proof of setup is either an on-disk artifact OR a registry entry. Being
+# merely CATALOGUED (a shipped medical.conf template exists) is neither.
+# Materialising a script for every catalogued team regardless of whether
+# anyone asked for it would be the same class of defect this ticket fixes,
+# just inverted: instead of a live instance getting nothing, a
+# never-requested instance would get something. The upgrade code's own
+# comment states this explicitly: "upgrade must never materialise cockpit
+# scripts for a team this box didn't set up."
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T9 [Case 8]: medical-general (declared in the catalog, not live on this box) gets nothing materialised"
+T9_SBX="$(_new_install_sandbox)"
+T9_REGISTRY="$T9_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T9_REGISTRY"   # empty — medical-general is not registered
+_install_print_stubs
+HOME="$T9_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T9_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T9_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T9_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t9-upgrade.log" 2>&1
+T9_MEDICAL_FILE_COUNT=$(find "$T9_SBX/aiteamforge" -maxdepth 1 -name 'medical*' 2>/dev/null | wc -l | tr -d ' ')
+if [ -f "$TAP_ROOT/share/teams/medical.conf" ] \
+    && [ "$T9_MEDICAL_FILE_COUNT" -eq 0 ] \
+    && grep -qi "No installed team connect scripts to refresh" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected medical.conf to exist in the catalog (declared) but zero medical* files materialised (not live); medical_conf_exists=$([ -f "$TAP_ROOT/share/teams/medical.conf" ] && echo yes || echo no); file_count=$T9_MEDICAL_FILE_COUNT; stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NC3 [bonus negative control, Case 6]: the pre-XACA-0845
+# update_connect_scripts (embedded verbatim, tap commit d263bbb — on-disk
+# files ONLY, no registry union) never creates a connect script for a
+# registered-but-scriptless instance. Proves source (b) — registry
+# membership — is genuinely what XACA-0845 added, not a restatement of what
+# was already there.
+# ─────────────────────────────────────────────────────────────────────────────
+_pre_xaca0845_update_connect_scripts() {
+  print_section "Updating Team Connect/Disconnect Scripts"
+
+  local teams_conf_dir="${FRAMEWORK_DIR}/share/teams"
+  local installer="${LIBEXEC_DIR}/installers/install-team.sh"
+
+  if [ ! -d "$teams_conf_dir" ]; then
+    print_warning "Team configs not found ($teams_conf_dir) — skipping connect-script refresh"
+    return 0
+  fi
+  if [ ! -f "$installer" ]; then
+    print_warning "install-team.sh not found ($installer) — skipping connect-script refresh"
+    return 0
+  fi
+
+  local updated=0
+  local failed=0
+  local skipped=0
+  local f base instance_id conf team_id best_team best_conf remainder
+  local flags has_projects requires_client client project
+  local -a install_args
+
+  # Iterate the RENDERED FILES ONLY (XACA-0834's fix) — no registry union
+  # (this is the capability XACA-0845 added; its absence here is the point).
+  for f in "${WORKING_DIR}"/*-connect.sh; do
+    [ -f "$f" ] || continue
+    base="$(basename "$f")"
+    instance_id="${base%-connect.sh}"
+    if [ -z "$instance_id" ]; then
+      print_warning "Skipping ${base} — empty instance id after suffix-stripping"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    best_team=""
+    best_conf=""
+    for conf in "$teams_conf_dir"/*.conf; do
+      [ -f "$conf" ] || continue
+      team_id="$(basename "$conf" .conf)"
+      if [ "$instance_id" = "$team_id" ] || [ "${instance_id#"${team_id}-"}" != "$instance_id" ]; then
+        if [ "${#team_id}" -gt "${#best_team}" ]; then
+          best_team="$team_id"
+          best_conf="$conf"
+        fi
+      fi
+    done
+
+    if [ -z "$best_team" ]; then
+      print_warning "Skipping ${base} — no team template matches instance '${instance_id}'"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    flags="$(_connect_script_team_flags "$best_conf")"
+    has_projects="${flags%%|*}"
+    requires_client="${flags##*|}"
+    remainder="${instance_id#"$best_team"}"
+    remainder="${remainder#-}"
+
+    client=""
+    project=""
+    if [ "$has_projects" = "true" ]; then
+      if [ -z "$remainder" ]; then
+        print_warning "Skipping ${base} — template '${best_team}' is parameterised but instance '${instance_id}' carries no project component"
+        skipped=$((skipped + 1))
+        continue
+      fi
+      if [ "$requires_client" = "true" ]; then
+        client="${remainder%%-*}"
+        project="${remainder#*-}"
+        if [ -z "$client" ] || [ -z "$project" ] || [ "$client" = "$remainder" ] || [ "$project" != "${project#*-}" ]; then
+          print_warning "Skipping ${base} — cannot split '${remainder}' into <client>-<project> for template '${best_team}'"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      else
+        project="$remainder"
+        if [ "$project" != "${project#*-}" ]; then
+          print_warning "Skipping ${base} — project component '${project}' for template '${best_team}' contains a dash"
+          skipped=$((skipped + 1))
+          continue
+        fi
+      fi
+    elif [ -n "$remainder" ]; then
+      print_warning "Skipping ${base} — template '${best_team}' takes no parameters but instance '${instance_id}' carries suffix '${remainder}'"
+      skipped=$((skipped + 1))
+      continue
+    fi
+
+    install_args=( "$best_team" )
+    if [ -n "$client" ]; then
+      install_args+=( --client "$client" )
+    fi
+    if [ -n "$project" ]; then
+      install_args+=( --project "$project" )
+    fi
+    install_args+=( --connect-only --install-dir "${WORKING_DIR}" )
+
+    if [ "$DRY_RUN" = true ]; then
+      echo "Would re-render ${instance_id} connect/disconnect scripts (template ${best_team})"
+      updated=$((updated + 1))
+      continue
+    fi
+
+    print_info "Refreshing ${instance_id} connect/disconnect scripts..."
+    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" 2>&1 | sed 's/^/    /' ); then
+      print_success "Refreshed ${instance_id} connect/disconnect scripts"
+      updated=$((updated + 1))
+    else
+      print_warning "Failed to refresh ${instance_id} connect/disconnect scripts (continuing)"
+      failed=$((failed + 1))
+    fi
+  done
+
+  if [ $((updated + failed)) -eq 0 ]; then
+    print_success "No installed team connect scripts to refresh"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would refresh ${updated} team connect/disconnect script set(s)"
+  elif [ "$failed" -gt 0 ]; then
+    print_warning "Refreshed ${updated} team connect/disconnect script set(s); ${failed} failed (non-fatal)"
+  else
+    print_success "Refreshed ${updated} team connect/disconnect script set(s)"
+  fi
+  if [ "$skipped" -gt 0 ]; then
+    print_warning "Skipped ${skipped} unrecognised *-connect.sh file(s) (non-fatal)"
+  fi
+  return 0
+}
+
+test_start "NC3 [negative control, Case 6]: pre-XACA-0845 update_connect_scripts NEVER creates a registered-but-scriptless instance's connect script"
+# Verify the revert landed: the embedded fixture must iterate ONLY on-disk
+# files (no registry/AITEAMFORGE_CONFIG reference at all) — proving it is
+# genuinely the pre-XACA-0845 algorithm.
+NC3_FIXTURE_SRC="$(declare -f _pre_xaca0845_update_connect_scripts)"
+NC3_MARKER_OK=true
+# NOTE: `declare -f` reformats the function body (e.g. puts `do` on its own
+# line), so match the on-disk-only iteration WITHOUT the trailing "; do".
+echo "$NC3_FIXTURE_SRC" | grep -qF 'for f in "${WORKING_DIR}"/*-connect.sh' || NC3_MARKER_OK=false
+echo "$NC3_FIXTURE_SRC" | grep -qF 'AITEAMFORGE_CONFIG' && NC3_MARKER_OK=false
+echo "$NC3_FIXTURE_SRC" | grep -qF '_reg_instances' && NC3_MARKER_OK=false
+if [ "$NC3_MARKER_OK" != true ]; then
+    test_fail "embedded fixture does not match the pre-XACA-0845 on-disk-only algorithm (marker check failed); fixture source: $NC3_FIXTURE_SRC"
+else
+    NC3_SBX="$(_new_install_sandbox)"
+    NC3_REGISTRY="$NC3_SBX/home/.aiteamforge/team-paths.json"
+    _write_registry "$NC3_REGISTRY" "finance-personal"
+    _install_print_stubs
+    HOME="$NC3_SBX/home" \
+    AITEAMFORGE_ORG_CONFIG="$NC3_SBX/home/.aiteamforge/organization.yaml" \
+    FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$NC3_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+    AITEAMFORGE_CONFIG="$NC3_REGISTRY" \
+        _pre_xaca0845_update_connect_scripts >"$WORK_DIR/nc3-upgrade.log" 2>&1
+    if [ ! -f "$NC3_SBX/aiteamforge/finance-personal-connect.sh" ]; then
+        test_pass
+    else
+        test_fail "expected the pre-XACA-0845 algorithm to create NOTHING for the registered-but-scriptless finance-personal — if a file now exists, the negative control no longer discriminates from T6"
+    fi
+fi
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Summary (standalone only; test-runner.sh owns totals when sourced by it).
+# ─────────────────────────────────────────────────────────────────────────────
+if [ "$_STANDALONE" = true ]; then
+    echo ""
+    echo "XACA-0845 connect-script tests: ${_PASS_COUNT} passed, ${_FAIL_COUNT} failed"
+    [ "${_FAIL_COUNT:-0}" -eq 0 ] || exit 1
+fi
+exit 0
