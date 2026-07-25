@@ -13580,9 +13580,27 @@ if [[ ":${PATH}:" != *":${AITEAMFORGE_DIR}/scripts:"* ]]; then
 fi
 
 # Sources kb-cr.sh to provide kb-cr subcommands for CR (Change Request) lifecycle.
-# Guard prevents double-sourcing; file existence guard prevents hard failure on
-# fresh installs before the file is deployed.
-if [[ -z "${_KB_CR_LOADED:-}" ]] && [[ -f "${AITEAMFORGE_DIR}/scripts/kb-cr.sh" ]]; then
+# File existence guard prevents hard failure on fresh installs before the file
+# is deployed.
+#
+# XACA-0846 (mirrors the XACA-0852 canonical fix): the old guard tested
+# `-z "${_KB_CR_LOADED:-}"` and then set `export _KB_CR_LOADED=1`. Because the
+# flag was EXPORTED, it was inherited by every child and grandchild shell — so
+# in any nested shell the guard saw it already set, skipped the source, and
+# `kb-cr` silently did not exist. The command surface vanished with no error.
+# Exporting a "did I already do this" flag makes it a claim about the whole
+# process tree rather than about this shell.
+#
+# The correct question is not "did I set a flag" but "is the function actually
+# defined HERE", which `typeset -f` answers per-shell and cannot be inherited.
+# The unset clears the poisoned flag left in the environment by any older shell
+# still carrying it.
+#
+# No `|| true` on the unset: it returns 0 for a normal or absent variable in
+# both bash and zsh, so it would never fire; and in zsh, unsetting a READONLY
+# variable is fatal in a way `|| true` does not catch. It would confer only the
+# appearance of robustness.
+unset _KB_CR_LOADED 2>/dev/null
+if ! typeset -f kb-cr >/dev/null 2>&1 && [[ -f "${AITEAMFORGE_DIR}/scripts/kb-cr.sh" ]]; then
     source "${AITEAMFORGE_DIR}/scripts/kb-cr.sh"
-    export _KB_CR_LOADED=1
 fi

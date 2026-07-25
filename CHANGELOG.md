@@ -7,6 +7,37 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0846 — consumers' `kb-cr` silently vanished in every nested shell
+
+Mirrors the XACA-0852 canonical fix into `share/templates/kanban/kanban-helpers.template.sh`, the
+one tap copy that still carried the defect (`grep -rl _KB_CR_LOADED share/` returns only this file;
+`share/templates/aliases/kanban-aliases.sh` never had the block).
+
+The old guard tested `-z "${_KB_CR_LOADED:-}"` and then set **`export _KB_CR_LOADED=1`**. Because the
+flag was exported it was inherited by every child and grandchild shell, so in any nested shell the
+guard saw it already set, skipped the source, and `kb-cr` simply did not exist — no error, no
+diagnostic, the whole CR command surface just absent. Exporting a "have I already done this" flag
+turns a statement about *this shell* into a claim about the entire process tree, and the claim is
+false everywhere below the first one.
+
+The fix asks the question that is actually load-bearing — "is the function defined **here**" —
+via `typeset -f kb-cr`, which is per-shell and cannot be inherited, and `unset`s the poisoned flag
+left in the environment by any older shell still carrying it. No `|| true` on the unset: it returns 0
+for a normal or absent variable in both shells so it would never fire, and in zsh unsetting a
+READONLY variable is fatal in a way `|| true` does not catch — it would confer only the appearance of
+robustness.
+
+**Verified against a genuinely poisoned environment rather than a synthetic one:** the authoring
+session's own shell already had `_KB_CR_LOADED=1` exported. Under the old guard a fresh `zsh -f`
+inheriting that flag never defines `kb-cr`; under the new guard it resolves and runs. The first
+attempt at this test was itself wrong — `zsh -c` loads `.zshenv`, which reset `AITEAMFORGE_DIR` to
+the dev path and sourced the real helpers, so both arms failed for the same unrelated reason and the
+control proved nothing. Re-run under `zsh -f`, the two arms separate cleanly.
+
+Note the tap copy is deliberately **not** byte-identical to canonical: it sources from
+`${AITEAMFORGE_DIR}/scripts/kb-cr.sh` where canonical uses `${HOME}/dev-team/scripts/kb-cr.sh`. Only
+the guard logic is mirrored, not the path.
+
 ### Fix: XACA-0845 (PR #723 review) — two blockers and six findings against the connect-script work
 
 Remediation of the code review on PR #723. Two of these were shipping defects in the ticket's own
