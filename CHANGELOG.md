@@ -7,6 +7,18 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0855 — epics whose every assigned item was cancelled derived `PLANNED` and stayed stuck in the Planned bucket instead of `ARCHIVED`
+
+Mirrors dev-team canonical changes into `homebrew-tap/share/` (XACA-0340 canonical-source rule).
+
+`share/lcars-ui/server.py::_derive_epic_state` computed a single `effective` set (assigned items minus cancelled) and returned `PLANNED` whenever that set was empty, collapsing two contract cases (`STATE_CONTRACT.md` §1.5) that must NOT share an outcome: Case A (zero items assigned) and Case M (every assigned ID is an orphan) correctly derive `PLANNED`, but Case B (items ARE assigned and every one is cancelled) was deriving `PLANNED` too, when the epic's work has actually concluded — it just shipped nothing — and the correct state is `ARCHIVED`.
+
+- **Fix:** split into two stages — `assigned` (ID-resolved items, orphans excluded) empty → `PLANNED` (Cases A/M, unchanged); `assigned` non-empty but `effective` (assigned minus cancelled) empty → `ARCHIVED` (Case B, now correct). Remaining precedence (all-completed → `ARCHIVED`, all-todo → `PLANNED`, otherwise → `ACTIVE`) is unchanged.
+- `_derive_epic_roadmap_state` inherits the fix automatically — it delegates its item-derived branch to `_derive_epic_state`.
+- **User-visible consequence:** an epic whose assigned items are all cancelled now migrates from the Planned bucket to the Archived bucket on the Roadmap and Epics tabs.
+- Derived state is never persisted — reopening any one item makes `effective` non-empty again and the epic re-derives normally on the next read.
+- Companion fix in the dev-team-only `kanban-helpers.sh::_kb_epic_derive_state` (jq implementation, not tap-mirrored) ships the same precedence change for the kanban CLI path.
+
 ### Fix: XACA-0845 — a parametric team was left without a cockpit connect script *because* it was selected during setup
 
 Being selected routed a projects-enabled team (`TEAM_HAS_PROJECTS=true`: finance, freelance, legal, medical) down the one install path that refused to write its connect script, and simultaneously excluded it from the pass that would have written one. Live was the disqualifying condition: on a consumer box the only connect scripts present were for conf-DEFAULT instances nobody runs, while the two genuinely live instances had none.

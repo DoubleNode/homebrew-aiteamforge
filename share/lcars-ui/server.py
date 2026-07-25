@@ -6698,16 +6698,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         """Derive epic state from a list of item dicts (already fetched for this epic).
 
         Returns 'PLANNED' | 'ACTIVE' | 'ARCHIVED'.
-        Pure: same input -> same output. See STATE_CONTRACT.md §1.5.
+        Pure: same input -> same output. See STATE_CONTRACT.md §1.5 (amended
+        2026-07-24 by XACA-0855 — assigned vs. effective split).
 
-        Effective items are those whose status != 'cancelled'.
+        `items` IS the assigned set: every caller (_get_items_for_epic, or the
+        backlog_index/itemIds resolution in the roadmap builder) resolves item
+        IDs by match against real backlog entries BEFORE calling this function,
+        so orphan IDs (present in epic.itemIds but with no matching backlog
+        entry) are never present in `items`. Resolving orphans out of the
+        assigned set is the caller's responsibility, not this function's.
+
+        Precedence (normative, do not reorder):
+          1. assigned (== items) empty            -> PLANNED   (case A: empty epic;
+                                                                  case M: orphan-only epic)
+          2. effective (assigned minus cancelled) empty
+                                                    -> ARCHIVED  (case B: every assigned
+                                                                  item is cancelled --
+                                                                  concluded, not unstarted)
+          3. every effective item completed        -> ARCHIVED  (case C/D)
+          4. every effective item todo              -> PLANNED   (case H)
+          5. otherwise                              -> ACTIVE    (in-flight and/or mixed)
+
         Blocked items count as in-flight (not todo, not completed) per §1.1.
-        Orphan IDs are not present in `items` (handled by caller via
-        _get_items_for_epic), so case M is naturally satisfied here.
         """
-        effective = [i for i in items if i.get('status') != 'cancelled']
+        assigned = items
+        if not assigned:
+            return 'PLANNED'  # case A (empty epic) / case M (orphan-only epic)
+        effective = [i for i in assigned if i.get('status') != 'cancelled']
         if not effective:
-            return 'PLANNED'  # cases A, B, M
+            return 'ARCHIVED'  # case B: every assigned item is cancelled
         if all(i.get('status') == 'completed' for i in effective):
             return 'ARCHIVED'
         if all(i.get('status') == 'todo' for i in effective):
@@ -6751,9 +6770,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         item-derived PLANNED branch effectively never fires and every planning
         epic is dumped into Active. (XACA-0636)
 
-        Precedence: a terminal status, OR an epic whose every effective item is
-        completed (done even if the status field was never flipped), is ARCHIVED;
-        then 'planning'/unset is PLANNED; everything else (active/on_hold/…) ACTIVE.
+        Precedence: a terminal status, OR an item-derived state of ARCHIVED, is
+        ARCHIVED; then 'planning'/unset is PLANNED; everything else (active/
+        on_hold/…) ACTIVE. Per _derive_epic_state's assigned/effective split
+        (STATE_CONTRACT.md §1.5, amended by XACA-0855), the item-derived
+        ARCHIVED case now covers TWO closed shapes: every assigned item
+        completed (done even if the status field was never flipped), OR every
+        assigned item cancelled (the epic's work concluded with nothing
+        shipped). Both are "nothing left to do" and both bucket ARCHIVED here
+        regardless of the epic's own status field — so a 'planning' epic whose
+        items were all cancelled now buckets ARCHIVED, not PLANNED. This is
+        intentional: an all-cancelled epic is concluded, not unstarted.
         """
         status = (epic.get('status') or 'planning').strip().lower()
         if status in ('completed', 'archived', 'cancelled', 'done'):
