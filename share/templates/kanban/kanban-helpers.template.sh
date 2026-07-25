@@ -12461,7 +12461,7 @@ _kb_epic_progress() {
         (.epics // [] | map(select(.id == $epic_id)) | .[0]) as $epic |
         if $epic then
             ($epic.itemIds // []) as $ids |
-            [.backlog[] | select(.id as $id | $ids | index($id))] as $items |
+            [(.backlog // [])[] | select(.id as $id | $ids | index($id))] as $items |
             {
                 totalItems: ($items | length),
                 completedItems: ([$items[] | select(.status == "completed")] | length),
