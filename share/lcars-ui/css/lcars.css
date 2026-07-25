@@ -10866,6 +10866,16 @@ body {
     margin-left: 8px;
 }
 
+/* XACA-0855-013: read-only derived-state line under the Edit Epic STATUS field —
+   clarifies that the rollup-derived state (e.g. ARCHIVED) can differ from the
+   raw STATUS dropdown and auto-updates rather than being a permanent/destructive change. */
+.modal-derived-state {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--lcars-muted, #666699);
+    margin-top: 4px;
+}
+
 /* Modal Loading State */
 .modal-loading {
     display: flex;
@@ -11715,8 +11725,15 @@ body {
     /* default look — no overrides; inherits --epic-color from renderEpicCard */
 }
 
+/* XACA-0855-014: full-card `opacity: 0.65` previously alpha-blended EVERY pixel
+   (including title/meta/progress text) against the black page backdrop, dropping
+   text contrast to ~4.02:1 at the lighter end of the header gradient below — below
+   WCAG 2.1 AA's 4.5:1 for normal text. `filter: saturate(0.6)` alone (kept below)
+   plus the existing solid gray header gradient + border already read as
+   de-emphasized at a glance without crushing luminance; measured contrast with
+   opacity removed is ~6.57:1 against the header's lighter (#444) gradient stop
+   and ~8.5:1 against its darker (#333) stop — both comfortably AA-compliant. */
 .epic-card.epic-state-archived {
-    opacity: 0.65;
     filter: saturate(0.6);
     border-left-color: #666 !important;
 }

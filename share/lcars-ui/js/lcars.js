@@ -12673,7 +12673,7 @@ function displayEpics(epics) {
         } else if (filter === 'archived') {
             emptyIcon = '📁';
             emptyTitle = 'No Archived Epics';
-            emptyHint = 'Epics appear here when all their items are completed.';
+            emptyHint = 'Epics appear here when all their items are completed, or all were cancelled.';
         } else {
             emptyIcon = '📚';
             emptyTitle = 'No Active Epics';
@@ -13000,6 +13000,16 @@ async function showEditEpicModal(epicId) {
         document.getElementById('edit-epic-priority').value = epic.priority || 'medium';
         document.getElementById('edit-epic-status').value = epic.status || 'planning';
 
+        // XACA-0855-013: read-only derived-state indicator, refreshed on every open —
+        // mirrors `kb-epic show`'s side-by-side Status/State display so an editor isn't
+        // misled by the raw STATUS dropdown when the rollup-derived state differs
+        // (e.g. all items cancelled → ARCHIVED while STATUS still reads "planning").
+        const derivedStateEl = document.getElementById('edit-epic-derived-state');
+        if (derivedStateEl) {
+            const derivedState = (epic.state || 'ACTIVE').toUpperCase();
+            derivedStateEl.textContent = `Derived state: ${derivedState} (auto-updates from item status)`;
+        }
+
         // XACA-0209: Pre-populate tags as comma-separated string
         const existingTags = Array.isArray(epic.tags) ? epic.tags : [];
         document.getElementById('edit-epic-tags').value = existingTags.join(', ');
@@ -13237,6 +13247,7 @@ function createEpicModals() {
                             <select id="edit-epic-status" class="modal-select">
                                 ${statusOptions}
                             </select>
+                            <div class="modal-derived-state" id="edit-epic-derived-state"></div>
                         </div>
                     </div>
                     <div class="modal-field">
