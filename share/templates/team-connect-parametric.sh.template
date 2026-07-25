@@ -1,0 +1,706 @@
+#!/usr/bin/env zsh
+# {{TEAM_NAME}} Connect Script (PARAMETRIC — projects-enabled team)
+# Rendered by scripts/render-cockpit-scripts.sh from this template (XACA-0607).
+#
+# Opens an iTerm2 window pointed at a REMOTE machine's running, PROJECT-SCOPED
+# team instance via SSH. Auto-starts the remote team over SSH if it is not
+# already running (XACA-0614); otherwise acts as a viewer. No port forwards.
+#
+# Unlike the flat (non-parametric) team-connect template, projects-enabled
+# teams (finance, freelance, legal, medical) run one LCARS server + tmux
+# session-set PER PROJECT. The instance id and the remote port therefore
+# depend on the project (and, for freelance, the group) passed on the command
+# line. Session base-names are NOT known here — they are DISCOVERED from the
+# remote tmux server after preflight (XACA-0607 §1).
+#
+# This REPLACES the flat XACA-0604 render for this team.
+
+# ============================================================================
+# Configuration (rendered)
+# ============================================================================
+# shellcheck disable=SC1083,SC2039
+TEAM_ID="{{TEAM_ID}}"
+# shellcheck disable=SC1083,SC2039
+TEAM_NAME="{{TEAM_NAME}}"
+# shellcheck disable=SC1083,SC2039
+TEAM_THEME="{{TEAM_THEME}}"
+# shellcheck disable=SC1083,SC2039
+AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
+# shellcheck disable=SC1083,SC2039
+TMUX_SOCKET="{{TEAM_SOCKET}}"
+# shellcheck disable=SC1083,SC2039
+DEFAULT_PROJECT="{{TEAM_DEFAULT_PROJECT}}"
+# XACA-0845: optional baked-in default GROUP, used only when HAS_GROUP=true.
+# EMPTY for the dev-team cockpit renders (scripts/render-cockpit-scripts.sh),
+# which produce ONE team-keyed script serving every group — there <group> stays
+# a required positional and the behaviour is unchanged. The tap installer
+# (install-team.sh) renders one INSTANCE-keyed script per live instance and
+# bakes that instance's client id here, so `freelance-acme-widgets-connect.sh
+# <host>` resolves without re-typing the group. An explicit argument always wins.
+# shellcheck disable=SC1083,SC2039
+DEFAULT_GROUP="{{TEAM_DEFAULT_GROUP}}"
+# shellcheck disable=SC1083,SC2039
+PORT_BASE="{{TEAM_LCARS_PORT_BASE}}"
+# TEAM_HAS_GROUP is "true" only for the freelance team — the sole team with a
+# group/client level above the project. Rendered literally by the renderer.
+# shellcheck disable=SC1083,SC2039
+HAS_GROUP="{{TEAM_HAS_GROUP}}"
+# XACA-0785-004: canonical remote-session ORDER — a space-separated list of
+# session-name SLUGS (the part after "<instance>-") in the order this team's
+# own <team>-startup.sh opens its tabs (its `terminal_order` array), baked in
+# at render time by scripts/render-cockpit-scripts.sh. Sessions DISCOVERED on
+# the remote in an order that has nothing to do with intent (tmux returns
+# them effectively alphabetically) are re-sorted against this list below.
+# Empty is valid (no known order — fall back to discovery order untouched).
+# shellcheck disable=SC1083,SC2039
+TEAM_SESSION_ORDER="{{TEAM_SESSION_ORDER}}"
+
+# ============================================================================
+# Usage / argument parsing (host-FIRST signature, XACA-0607)
+# ============================================================================
+# Non-group teams:  <host> [<project>]          project defaults to DEFAULT_PROJECT
+# Group team (freelance): <host> <group> [<project>]   project defaults to DEFAULT_PROJECT
+# ============================================================================
+# Capture the script's base name at top level: inside a zsh function, $0 is the
+# FUNCTION name (would print "usage <host> ..."), so resolve it before defining
+# the function.
+SCRIPT_NAME="$(basename "$0")"
+
+usage() {
+    echo ""
+    if [[ "$HAS_GROUP" == "true" ]]; then
+        if [[ -n "$DEFAULT_GROUP" ]]; then
+            echo "  Usage: ${SCRIPT_NAME} <host> [<group>] [<project>]"
+        else
+            echo "  Usage: ${SCRIPT_NAME} <host> <group> [<project>]"
+        fi
+        echo ""
+        echo "  <host>     Tailscale MagicDNS name or SSH-reachable hostname"
+        if [[ -n "$DEFAULT_GROUP" ]]; then
+            echo "  <group>    Client/group id (default: ${DEFAULT_GROUP})"
+        else
+            echo "  <group>    Client/group id (e.g. AcmeCorp)"
+        fi
+        echo "  <project>  Project id (default: ${DEFAULT_PROJECT})"
+        echo ""
+        echo "  Example: ${SCRIPT_NAME} darren-m1pro AcmeCorp WidgetTracker"
+    else
+        echo "  Usage: ${SCRIPT_NAME} <host> [<project>]"
+        echo ""
+        echo "  <host>     Tailscale MagicDNS name or SSH-reachable hostname"
+        echo "  <project>  Project id (default: ${DEFAULT_PROJECT})"
+        echo ""
+        echo "  Example: ${SCRIPT_NAME} darren-m1pro ${DEFAULT_PROJECT}"
+    fi
+    echo ""
+    echo "  Opens an iTerm2 window connected to a ${TEAM_NAME} project instance"
+    echo "  running on <host>. The instance must already be running remotely."
+    echo ""
+}
+
+if [[ $# -lt 1 ]]; then
+    usage
+    exit 2
+fi
+
+HOST="$1"
+shift
+
+if [[ "$HAS_GROUP" == "true" ]]; then
+    # XACA-0845: fall back to the baked-in DEFAULT_GROUP when no <group> is
+    # given. DEFAULT_GROUP is empty for the team-keyed dev-team renders, so
+    # this stays a hard "missing <group>" error there, exactly as before; it is
+    # non-empty only for tap instance-keyed renders, where the group is known
+    # at install time. Only shift when an argument was actually supplied —
+    # shifting an empty argv would silently consume the NEXT positional.
+    GROUP="${1:-$DEFAULT_GROUP}"
+    if [[ -z "$GROUP" ]]; then
+        echo "  ✗ Missing <group> argument."
+        usage
+        exit 2
+    fi
+    if [[ $# -ge 1 ]]; then shift; fi
+    PROJECT="${1:-$DEFAULT_PROJECT}"
+    GROUP_LOWER="$(echo "$GROUP" | tr '[:upper:]' '[:lower:]')"
+    PROJECT_LOWER="$(echo "$PROJECT" | tr '[:upper:]' '[:lower:]')"
+    INSTANCE="${TEAM_ID}-${GROUP_LOWER}-${PROJECT_LOWER}"
+else
+    PROJECT="${1:-$DEFAULT_PROJECT}"
+    PROJECT_LOWER="$(echo "$PROJECT" | tr '[:upper:]' '[:lower:]')"
+    INSTANCE="${TEAM_ID}-${PROJECT_LOWER}"
+fi
+
+# ── XACA-0614-013: validate identifiers before they reach the remote SSH ──────
+# command string. GROUP/PROJECT are user-supplied and get interpolated into a
+# `/bin/zsh -lc '…-startup.sh $GROUP $PROJECT…'` cold-start over SSH; a stray
+# shell metacharacter (quote, $, ;, backtick, space) would break the command or
+# smuggle in unintended tokens. Restrict to a safe identifier charset and abort.
+_validate_ident() {  # $1=value  $2=label
+    if [[ -n "$1" && ! "$1" =~ ^[A-Za-z0-9._-]+$ ]]; then
+        echo "  ✗ Invalid ${2} '${1}': only letters, digits, '.', '-', '_' are allowed." >&2
+        exit 2
+    fi
+}
+[[ "$HAS_GROUP" == "true" ]] && _validate_ident "$GROUP" "group"
+_validate_ident "$PROJECT" "project"
+
+ITERM_WINDOW_NAME="${INSTANCE} @ ${HOST}"
+ITERM_CONNECT_LOG="/tmp/${INSTANCE}-connect-iterm2-$(date +%Y%m%d-%H%M%S).log"
+
+# ============================================================================
+# Local pre-flight checks (mirrors the flat team-connect template §local)
+# ============================================================================
+PREFLIGHT_ERRORS=0
+
+preflight_check() {
+    local name="$1" cmd="$2" fix="$3"
+    if ! command -v "$cmd" &>/dev/null; then
+        echo "  ✗ $name not found"
+        echo "    Fix: $fix"
+        PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+    fi
+}
+
+preflight_check "python3" "python3" "brew install python@3"
+
+if [[ ! -d "/Applications/iTerm.app" ]]; then
+    echo "  ✗ iTerm2 not found"
+    echo "    Fix: brew install --cask iterm2"
+    PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+fi
+
+if [[ -d "/Applications/iTerm.app" ]]; then
+    _api=$(defaults read com.googlecode.iterm2 EnableAPIServer 2>/dev/null || true)
+    if [[ "$_api" != "1" ]]; then
+        echo "  Enabling iTerm2 Python API..."
+        defaults write com.googlecode.iterm2 EnableAPIServer -bool true
+        echo "  ⚠ iTerm2 must be restarted for Python API to activate."
+        echo "    Please quit and restart iTerm2, then run this script again."
+        exit 1
+    fi
+fi
+
+if [[ ! -f "$AITEAMFORGE_DIR/iterm2_window_manager.py" && ! -f "$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py" ]]; then
+    echo "  ✗ Window manager not found"
+    echo "    Fix: aiteamforge setup"
+    PREFLIGHT_ERRORS=$((PREFLIGHT_ERRORS + 1))
+fi
+
+if [[ $PREFLIGHT_ERRORS -gt 0 ]]; then
+    echo ""
+    echo "  $PREFLIGHT_ERRORS pre-flight check(s) failed. Aborting."
+    exit 1
+fi
+
+# Resolve window manager path
+WM="$AITEAMFORGE_DIR/iterm2_window_manager.py"
+[[ ! -f "$WM" ]] && WM="$AITEAMFORGE_DIR/scripts/iterm2_window_manager.py"
+
+# Use venv Python for iterm2 module (system Python may not have it)
+VENV_PYTHON="$HOME/.aiteamforge/venv/bin/python3"
+[[ ! -x "$VENV_PYTHON" ]] && VENV_PYTHON="$AITEAMFORGE_DIR/.venv/bin/python3"
+[[ ! -x "$VENV_PYTHON" ]] && VENV_PYTHON="python3"
+
+# ============================================================================
+# Remote port resolution + warn-on-drift (XACA-0607 §2 / XACA-0608)
+# ============================================================================
+# serving_port = the REMOTE host's actual running port (read its .port file).
+# canonical_port = best-effort from THIS cockpit's canonical registry.
+# Probe the serving_port. If both resolve and differ, warn (non-fatal).
+# ============================================================================
+SERVING_PORT="$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
+    "/bin/zsh -lc 'cat ~/aiteamforge/lcars-ports/${INSTANCE}-lcars.port 2>/dev/null || cat ~/dev-team/lcars-ports/${INSTANCE}-lcars.port 2>/dev/null'" \
+    2>/dev/null | head -1 | tr -dc '0-9')"
+
+# Canonical port from this cockpit (best-effort; helper returns non-zero if unknown).
+CANONICAL_PORT=""
+# shellcheck source=/dev/null
+if [[ -f "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh" ]]; then
+    source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh" 2>/dev/null || true
+    if typeset -f resolve_lcars_port >/dev/null 2>&1; then
+        CANONICAL_PORT="$(resolve_lcars_port "$INSTANCE" 2>/dev/null | tr -dc '0-9')"
+    fi
+fi
+
+# Build an ordered, de-duplicated list of candidate ports to probe (XACA-0626).
+# Order: remote serving port (the .port file — what the server claims to bind),
+# then canonical (registry truth), then the team port base. A STALE .port (or a
+# dead server per XACA-0618) must not strand us on one dead port when the server
+# is actually alive on canonical — so we probe ALL candidates and connect on the
+# first that responds. Drift is SURFACED loudly (below); this script never
+# mutates the remote (XACA-0607 §4) — reconcile with kb-port-reconcile there.
+CANDIDATE_PORTS=()
+for _p in "$SERVING_PORT" "$CANONICAL_PORT" "$PORT_BASE"; do
+    [[ -z "$_p" ]] && continue
+    _dup=false
+    for _q in "${CANDIDATE_PORTS[@]:-}"; do [[ "$_q" == "$_p" ]] && _dup=true && break; done
+    [[ "$_dup" == "false" ]] && CANDIDATE_PORTS+=("$_p")
+done
+
+if [[ "${#CANDIDATE_PORTS[@]}" -eq 0 ]]; then
+    echo ""
+    echo "  ✗ Could not resolve an LCARS port for ${INSTANCE} on ${HOST}."
+    echo "    No remote .port file, no canonical registry entry, and no port base."
+    echo "    SSH to ${HOST} and start it: ${TEAM_ID}-startup.sh ${HAS_GROUP:+<group> }${PROJECT}"
+    echo ""
+    exit 1
+fi
+
+# Default the display/probe port to the first candidate (preserves prior behavior
+# in error messages); the live port is selected by the probe loop below.
+#
+# XACA-0812: this script runs under `#!/usr/bin/env zsh`, where arrays are
+# 1-INDEXED — `${CANDIDATE_PORTS[0]}` is EMPTY, not the first element. That made
+# LCARS_PORT empty on every run, so the auto-start readiness poll below curled a
+# portless `http://<host>:/api/status` that can NEVER succeed: the recovery path
+# was guaranteed to fail all 15 polls even when startup worked, and the "Verify:"
+# hint printed an unrunnable command. Use the `[@]:offset:len` SLICE form, which
+# is 0-based and yields the FIRST element in BOTH zsh and bash (a bare `[1]`
+# would merely move the bug to bash, where it means the SECOND element), and is
+# safe on an empty array under `set -u` in both shells.
+LCARS_PORT="${CANDIDATE_PORTS[@]:0:1}"
+
+# ============================================================================
+# Resolve remote AITEAMFORGE_DIR (XACA-0607 §3)
+# Remote may be a tap install (~/aiteamforge) or a dev clone (~/dev-team).
+# ============================================================================
+REMOTE_ATF_DIR="$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
+    "/bin/zsh -lc 'for d in \$HOME/aiteamforge \$HOME/dev-team; do [ -d \"\$d\" ] && echo \"\$d\" && break; done'" \
+    2>/dev/null | head -1)"
+[[ -z "$REMOTE_ATF_DIR" ]] && REMOTE_ATF_DIR="\$HOME/dev-team"
+
+# XACA-0614-013: REMOTE_ATF_DIR is interpolated into single-quoted remote zsh
+# command strings (lcars-health-check.sh / cold-start). Reject characters that
+# would break that quoting or inject tokens. '$' and '/' are intentionally
+# allowed — the default is "$HOME/dev-team", expanded on the remote side.
+case "$REMOTE_ATF_DIR" in
+    *\'*|*\`*|*\;*|*'&'*|*'|'*|*$'\n'*)
+        echo "  ✗ Remote AITEAMFORGE_DIR contains unsafe characters: ${REMOTE_ATF_DIR}" >&2
+        exit 1 ;;
+esac
+
+# ============================================================================
+# Remote preflight + auto-start (XACA-0614)
+# Probes LCARS + tmux. If either fails, auto-starts the team remotely over SSH
+# rather than failing immediately. Banner updated: no longer "viewer only".
+# ============================================================================
+[[ -t 1 ]] && clear
+
+echo ""
+echo "  ${INSTANCE} @ ${HOST}"
+echo "   ${TEAM_THEME}"
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+echo "  Checking remote host: ${HOST}"
+
+_lcars_ok=false
+_tmux_ok=false
+
+# Probe 1: LCARS reachability — try each candidate port, connect on the first
+# that responds. Resilient to a stale .port / dead-server drift (XACA-0626).
+for _cand in "${CANDIDATE_PORTS[@]}"; do
+    echo "  Checking LCARS:  http://${HOST}:${_cand}/api/status ..."
+    if curl -sf --max-time 3 "http://${HOST}:${_cand}/api/status" > /dev/null 2>&1; then
+        _lcars_ok=true
+        LCARS_PORT="$_cand"
+        echo "    ✓ LCARS responding"
+        break
+    else
+        echo "    ✗ not responding on ${_cand}"
+    fi
+done
+
+# Surface drift LOUDLY: if the live port is not the canonical one, the remote's
+# .port / team-paths have drifted from canonical aiteamforge_paths (XACA-0626).
+# This script cannot fix it (non-mutating by design) — tell the user how.
+if [[ "$_lcars_ok" == "true" && -n "$CANONICAL_PORT" && "$LCARS_PORT" != "$CANONICAL_PORT" ]]; then
+    echo ""
+    echo "  ⚠ PORT DRIFT on ${HOST}: serving ${LCARS_PORT}, canonical is ${CANONICAL_PORT}"
+    echo "    The remote .port / team-paths have drifted from canonical aiteamforge_paths."
+    echo "    Self-heal on ${HOST}:  kb-port-reconcile --apply ${INSTANCE}"
+    echo "    (connection continues on the live port ${LCARS_PORT})"
+fi
+
+# Probe 2: the instance's lcars tmux session exists (the per-project sentinel)
+echo "  Checking tmux:   ${INSTANCE}-lcars on socket ${TMUX_SOCKET} ..."
+# shellcheck disable=SC2029
+if ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
+    "/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} has-session -t ${INSTANCE}-lcars'" 2>/dev/null; then
+    _tmux_ok=true
+    echo "    ✓ tmux session found"
+else
+    echo "    ✗ tmux session not found"
+fi
+
+# ── Auto-start if either probe failed ──────────────────────────────────────
+# (XACA-0614 §5): instead of hard-failing, SSH in and start the team detached.
+# Idempotency guard: if sessions exist but LCARS is down (half-up), restart
+# only the server via lcars-health-check.sh; otherwise run a full cold-start.
+if [[ "$_lcars_ok" != "true" || "$_tmux_ok" != "true" ]]; then
+    echo ""
+    echo "  ⚠ ${INSTANCE} not responding on ${HOST} — attempting remote auto-start over SSH..."
+
+    # Check for existing tmux sessions (idempotency guard)
+    _sessions_exist=false
+    if ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
+        "/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} list-sessions 2>/dev/null | grep -q \"^${INSTANCE}-\"'" 2>/dev/null; then
+        _sessions_exist=true
+    fi
+
+    _REMOTE_LOG="/tmp/${INSTANCE}-remote-startup.log"
+
+    if [[ "$_sessions_exist" == "true" ]]; then
+        # Half-up: sessions exist but server isn't answering. Restart server only.
+        echo "    Detected existing sessions — restarting LCARS server via health-check..."
+        if ssh -o ConnectTimeout=10 -o BatchMode=yes "$HOST" \
+            "/bin/zsh -lc '${REMOTE_ATF_DIR}/lcars-health-check.sh'" 2>/dev/null; then
+            echo "    Health-check restart triggered."
+        else
+            echo "    ⚠ Health-check returned non-zero (may still be restarting)."
+        fi
+    else
+        # Cold start: no sessions at all. Run the full startup detached.
+        if [[ "$HAS_GROUP" == "true" ]]; then
+            _STARTUP_CMD="nohup /bin/zsh -lc '${REMOTE_ATF_DIR}/${TEAM_ID}-startup.sh ${GROUP} ${PROJECT} >${_REMOTE_LOG} 2>&1' & disown"
+        else
+            _STARTUP_CMD="nohup /bin/zsh -lc '${REMOTE_ATF_DIR}/${TEAM_ID}-startup.sh ${PROJECT} >${_REMOTE_LOG} 2>&1' & disown"
+        fi
+        echo "    Running ${TEAM_ID}-startup.sh on ${HOST} (detached)..."
+        if ssh -o ConnectTimeout=10 -o BatchMode=yes "$HOST" \
+            "/bin/zsh -lc '${_STARTUP_CMD}'" 2>/dev/null; then
+            echo "    Startup launched."
+        else
+            echo "    ⚠ SSH returned non-zero — startup may or may not have launched."
+        fi
+    fi
+
+    # Poll both probes for up to ~45s (15 × 3s) waiting for the team to come up.
+    echo "    Waiting for ${INSTANCE} to become ready..."
+    _poll_ok=false
+    for _pi in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        if [[ $((_pi % 4)) -eq 0 ]]; then
+            echo "    ... still waiting (poll ${_pi}/15) ..."
+        fi
+        _pl=false; _pt=false
+        if curl -sf --max-time 3 "http://${HOST}:${LCARS_PORT}/api/status" > /dev/null 2>&1; then
+            _pl=true
+        fi
+        if ssh -o ConnectTimeout=3 -o BatchMode=yes "$HOST" \
+            "/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} has-session -t ${INSTANCE}-lcars'" 2>/dev/null; then
+            _pt=true
+        fi
+        if [[ "$_pl" == "true" && "$_pt" == "true" ]]; then
+            _poll_ok=true
+            break
+        fi
+        sleep 3
+    done
+
+    if [[ "$_poll_ok" == "true" ]]; then
+        echo "  ✓ ${INSTANCE} auto-started on ${HOST}"
+        _lcars_ok=true
+        _tmux_ok=true
+    else
+        echo ""
+        echo "  ✗ Could not auto-start ${INSTANCE} on ${HOST}."
+        echo "    Manual recovery — SSH to ${HOST} and run:"
+        if [[ "$HAS_GROUP" == "true" ]]; then
+            echo "      ${TEAM_ID}-startup.sh ${GROUP} ${PROJECT}"
+        else
+            echo "      ${TEAM_ID}-startup.sh ${PROJECT}"
+        fi
+        echo "    Then check: tail -n 30 ${_REMOTE_LOG}"
+        echo "    Verify:     curl http://${HOST}:${LCARS_PORT}/api/status"
+        echo ""
+        exit 1
+    fi
+fi
+
+# ============================================================================
+# Session discovery (XACA-0607 §1)
+# Session base-names differ per team and are NOT in the conf — discover the
+# live sessions from the remote tmux server and keep this instance's sessions.
+# ============================================================================
+echo ""
+echo "  Discovering remote sessions for ${INSTANCE} ..."
+# shellcheck disable=SC2029
+_all_sessions="$(ssh -o ConnectTimeout=5 -o BatchMode=yes "$HOST" \
+    "/bin/zsh -lc 'tmux -L ${TMUX_SOCKET} list-sessions -F \"#{session_name}\"'" \
+    2>/dev/null)"
+
+# Keep only sessions belonging to this instance (prefix "<instance>-"),
+# and split the lcars session out so it can be the FIRST/LCARS browser tab.
+SESSIONS=()
+LCARS_SESSION=""
+while IFS= read -r _s; do
+    [[ -z "$_s" ]] && continue
+    case "$_s" in
+        "${INSTANCE}-lcars")
+            LCARS_SESSION="$_s"
+            ;;
+        "${INSTANCE}-"*)
+            SESSIONS+=("$_s")
+            ;;
+    esac
+done <<< "$_all_sessions"
+
+# The lcars sentinel passed preflight, so even if discovery is racy, open it.
+[[ -z "$LCARS_SESSION" ]] && LCARS_SESSION="${INSTANCE}-lcars"
+
+# ============================================================================
+# Order discovered sessions by the team's canonical terminal order (XACA-0785-004)
+# tmux list-sessions has no notion of the team's intended tab order (in
+# practice it comes back effectively alphabetical), so re-sort SESSIONS
+# against TEAM_SESSION_ORDER — the slug order baked in at render time from
+# this team's own <team>-startup.sh `terminal_order` array. Any session that
+# IS discovered but ISN'T in the canonical list is appended at the end, in
+# its original discovery order, so nothing found on the remote is ever
+# silently dropped (e.g. an ad-hoc/extra session not in the canonical set).
+# ============================================================================
+if [[ -n "$TEAM_SESSION_ORDER" && ${#SESSIONS[@]} -gt 0 ]]; then
+    typeset -A _session_used
+    _ordered_sessions=()
+    for _slug in ${(s: :)TEAM_SESSION_ORDER}; do
+        _wanted="${INSTANCE}-${_slug}"
+        for _candidate in "${SESSIONS[@]}"; do
+            if [[ "$_candidate" == "$_wanted" && -z "${_session_used[$_candidate]:-}" ]]; then
+                _ordered_sessions+=("$_candidate")
+                _session_used[$_candidate]=1
+                break
+            fi
+        done
+    done
+    for _candidate in "${SESSIONS[@]}"; do
+        [[ -z "${_session_used[$_candidate]:-}" ]] && _ordered_sessions+=("$_candidate")
+    done
+    SESSIONS=("${_ordered_sessions[@]}")
+fi
+
+echo "    Found ${#SESSIONS[@]} agent session(s) + LCARS"
+
+echo ""
+echo "  Remote checks passed. Opening iTerm2 window..."
+echo ""
+
+# ============================================================================
+# Capture the current iTerm2 window BEFORE the user can switch
+# ============================================================================
+if has_iterm_gui; then
+    echo "  Capturing current window..."
+    "$VENV_PYTHON" "$WM" \
+        --action init-team-window \
+        --window-title "$ITERM_WINDOW_NAME" \
+        2>>"$ITERM_CONNECT_LOG"
+    # shellcheck disable=SC2181
+    if [[ $? -ne 0 ]]; then
+        echo "  Warning: Window capture failed (see $ITERM_CONNECT_LOG)"
+    fi
+fi
+
+# ============================================================================
+# Create iTerm2 tabs
+# ============================================================================
+echo "  Creating terminal tabs..."
+
+if has_iterm_gui; then
+
+    # ------------------------------------------------------------------
+    # LCARS tab — update the LCARS Web profile URL to the remote serving
+    # port BEFORE creating the tab so the inline browser loads the remote
+    # dashboard. (Just-in-time; multi-host races are an accepted limitation.)
+    # ------------------------------------------------------------------
+    LCARS_BROWSER_SCRIPT="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
+    if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
+        echo "  Updating LCARS profile URL to http://${HOST}:${LCARS_PORT} ..."
+        "$VENV_PYTHON" "$LCARS_BROWSER_SCRIPT" "http://${HOST}:${LCARS_PORT}" 2>/dev/null
+    fi
+
+    LCARS_OPENED=false
+    if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
+        echo "  Opening LCARS tab..."
+        _lcars_tab_err=$( "$VENV_PYTHON" "$WM" \
+            --action create-tab \
+            --window-title "$ITERM_WINDOW_NAME" \
+            --profile "LCARS Web" \
+            --tab-name "LCARS" \
+            --command "export ITERM_TAB_TITLE='LCARS' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${LCARS_SESSION}" \
+            2>&1 )
+        _lcars_tab_exit=$?
+        if [[ $_lcars_tab_exit -eq 0 ]]; then
+            LCARS_OPENED=true
+        else
+            echo "  Warning: iTerm2 LCARS tab failed (exit $_lcars_tab_exit)" >&2
+            if [[ -n "$_lcars_tab_err" ]]; then
+                echo "  Reason: $_lcars_tab_err" >&2
+            fi
+            echo "  Possible causes: 'LCARS Web' profile not in iTerm2, or Python API unavailable." >&2
+            echo "  See full log: $ITERM_CONNECT_LOG" >&2
+            echo "$_lcars_tab_err" >> "$ITERM_CONNECT_LOG"
+        fi
+    else
+        echo "  Note: LCARS browser script not found — skipping iTerm2 inline browser." >&2
+        echo "  (Expected: $LCARS_BROWSER_SCRIPT)" >&2
+    fi
+
+    if [[ "$LCARS_OPENED" != "true" ]]; then
+        echo "  Opening LCARS tab without inline browser profile..."
+        "$VENV_PYTHON" "$WM" \
+            --action create-tab \
+            --window-title "$ITERM_WINDOW_NAME" \
+            --tab-name "LCARS" \
+            --command "export ITERM_TAB_TITLE='LCARS' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${LCARS_SESSION}" \
+            2>>"$ITERM_CONNECT_LOG" || true
+    fi
+    sleep 0.3
+
+    # ------------------------------------------------------------------
+    # Agent tabs — one per DISCOVERED session.
+    # Tab name is the session suffix (after "<instance>-").
+    # Per-tab SSH failure is non-fatal: log a warning, continue.
+    # ------------------------------------------------------------------
+    for session in "${SESSIONS[@]}"; do
+        tab="${session#"${INSTANCE}"-}"
+        echo "  Opening tab: $tab"
+        "$VENV_PYTHON" "$WM" \
+            --action create-tab \
+            --window-title "$ITERM_WINDOW_NAME" \
+            --tab-name "$tab" \
+            --command "export ITERM_TAB_TITLE='${tab}' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${session}" \
+            2>>"$ITERM_CONNECT_LOG"
+        # shellcheck disable=SC2181
+        if [[ $? -ne 0 ]]; then
+            echo "    Warning: Tab creation failed for $tab (see $ITERM_CONNECT_LOG)" >&2
+        fi
+        sleep 0.3
+    done
+
+    # ------------------------------------------------------------------
+    # Agent panels (SSH-delegated to remote host).
+    # The panel reads remote-local files (kanban/tmp, board JSON) and queries
+    # remote tmux, so it runs ON the remote machine via ssh -t. The remote
+    # AITEAMFORGE_DIR was resolved above (tap install vs dev clone).
+    #
+    # XACA-0774: intentionally NOT wrapped with remote-tmux-attach.sh — this
+    # is a remote display-refresh loop (agent-panel-display.sh polling
+    # kanban/tmp state), not a tmux session attach. The reconnect helper only
+    # applies to `tmux ... attach` surfaces.
+    # ------------------------------------------------------------------
+    if [[ ${#SESSIONS[@]} -gt 0 ]]; then
+        _first_tab="${SESSIONS[1]#"${INSTANCE}"-}"
+        _api_ready=false
+        for _wait in 1 2 3 4 5; do
+            if "$VENV_PYTHON" "$WM" \
+                --action select-tab \
+                --window-title "$ITERM_WINDOW_NAME" \
+                --tab-name "$_first_tab" \
+                2>/dev/null; then
+                _api_ready=true
+                break
+            fi
+            echo "    ⏳ Waiting for iTerm2 API (attempt $_wait/5)..."
+            sleep 2
+        done
+        if [[ "$_api_ready" != "true" ]]; then
+            echo "    ⚠️  iTerm2 API not ready after 10s — agent panels may not open"
+        fi
+
+        echo ""
+        echo "  Adding agent panels..."
+        for session in "${SESSIONS[@]}"; do
+            tab="${session#"${INSTANCE}"-}"
+            _panel_ok=false
+            for _attempt in 1 2 3; do
+                "$VENV_PYTHON" "$WM" \
+                    --action split-agent-panel \
+                    --window-title "$ITERM_WINDOW_NAME" \
+                    --tab-name "$tab" \
+                    --command "ssh -t ${HOST} \"/bin/zsh -lc 'AITEAMFORGE_DIR=${REMOTE_ATF_DIR} KANBAN_DIR=${REMOTE_ATF_DIR}/kanban ${REMOTE_ATF_DIR}/scripts/agent-panel-display.sh ${session}'\"" \
+                    2>>"$ITERM_CONNECT_LOG"
+                # shellcheck disable=SC2181
+                if [[ $? -eq 0 ]]; then
+                    _panel_ok=true
+                    break
+                fi
+                echo "    ⚠️  Panel split attempt $_attempt failed for $tab, retrying..." >> "$ITERM_CONNECT_LOG"
+                sleep 1
+            done
+            if [[ "$_panel_ok" != "true" ]]; then
+                echo "    ⚠️  Failed to create agent panel: $tab (see $ITERM_CONNECT_LOG)" >&2
+            fi
+            sleep 0.3
+        done
+    fi
+
+    # ------------------------------------------------------------------
+    # Final focus: switch to LCARS tab
+    # ------------------------------------------------------------------
+    echo ""
+    echo "  Switching to LCARS tab..."
+    "$VENV_PYTHON" "$WM" \
+        --action select-tab \
+        --window-title "$ITERM_WINDOW_NAME" \
+        --tab-name "LCARS" \
+        2>>"$ITERM_CONNECT_LOG" || true
+
+else
+    # Terminal.app fallback: open SSH sessions in new tabs
+    echo "  iTerm2 not running — using Terminal.app fallback"
+    echo "  Note: LCARS inline browser not available in Terminal.app"
+    osascript <<APPLESCRIPT
+tell application "Terminal"
+    activate
+    tell application "System Events"
+        tell process "Terminal"
+            keystroke "t" using command down
+        end tell
+    end tell
+    delay 0.5
+    do script "printf '\\\\033]0;LCARS\\\\007' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${LCARS_SESSION}" in front window
+end tell
+APPLESCRIPT
+    sleep 0.5
+    for session in "${SESSIONS[@]}"; do
+        tab="${session#"${INSTANCE}"-}"
+        # shellcheck disable=SC2027,SC2086
+        osascript <<APPLESCRIPT
+tell application "Terminal"
+    activate
+    tell application "System Events"
+        tell process "Terminal"
+            keystroke "t" using command down
+        end tell
+    end tell
+    delay 0.5
+    do script "printf '\\\\033]0;${tab}\\\\007' && ${AITEAMFORGE_DIR}/scripts/remote-tmux-attach.sh ${HOST} ${TMUX_SOCKET} ${session}" in front window
+end tell
+APPLESCRIPT
+        sleep 0.5
+    done
+fi
+
+# ============================================================================
+# Summary
+# ============================================================================
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  ${INSTANCE} connected @ ${HOST}"
+echo ""
+echo "  LCARS:  http://${HOST}:${LCARS_PORT}"
+echo "  tmux:   ${TMUX_SOCKET} on ${HOST}"
+echo ""
+echo "  Sessions:"
+echo "    LCARS  tmux -L ${TMUX_SOCKET} attach -t ${LCARS_SESSION}"
+for session in "${SESSIONS[@]}"; do
+    tab="${session#"${INSTANCE}"-}"
+    echo "    ${tab}   tmux -L ${TMUX_SOCKET} attach -t ${session}"
+done
+echo ""
+echo "  Auto-starts the remote team if it is not already running; otherwise a viewer."
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+if [[ -s "$ITERM_CONNECT_LOG" ]]; then
+    echo "  iTerm2 errors logged to: $ITERM_CONNECT_LOG"
+fi
+
+echo "${INSTANCE} @ ${HOST} connected!"

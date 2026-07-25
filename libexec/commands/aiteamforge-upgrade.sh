@@ -928,11 +928,33 @@ update_connect_scripts() {
   local flags has_projects requires_client client project
   local -a install_args
 
-  # Iterate the RENDERED FILES, not the team configs (XACA-0834).
+  # ── Build the work list: a UNION of two sources (XACA-0845) ──────────────
+  #   (a) *-connect.sh files already on disk — the XACA-0834 behaviour;
+  #   (b) instances REGISTERED in team-paths.json `.teams` (and the install's
+  #       own .aiteamforge-config) — the set this box actually set up.
+  #
+  # Why (b) had to be added: (a) alone can only ever REFRESH a script that
+  # already exists. It can never CREATE a missing one, so an instance that is
+  # live but scriptless stays scriptless through every upgrade, forever, while
+  # orphaned scripts for instances nobody runs get refreshed on each pass. That
+  # is the exact state XACA-0845 found: two live parametric instances with no
+  # connect script, alongside refreshed orphans for conf-default instances.
+  #
+  # The guarantee stated below — "never materialise cockpit scripts for a team
+  # this box didn't set up" — is PRESERVED, and strengthened. Registry
+  # membership is affirmative PROOF of setup: install-team.sh writes
+  # teams[<instance>] only after provisioning that instance. A filename is mere
+  # inference. Neither source globs a team id or invents an instance; both
+  # yield concrete instance ids that are still validated against the shipped
+  # team confs below, and anything unrecognised is skipped, not guessed at.
+  local work_list=""
+  local _registry_json="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+  local _install_config="${WORKING_DIR}/.aiteamforge-config"
+  local _reg_instances=""
+
   for f in "${WORKING_DIR}"/*-connect.sh; do
     [ -f "$f" ] || continue
     base="$(basename "$f")"
-
     # Recover the instance id: the exact inverse of install-team.sh's
     # "${INSTANCE_ID}-connect.sh" filename composition.
     instance_id="${base%-connect.sh}"
@@ -941,6 +963,62 @@ update_connect_scripts() {
       skipped=$((skipped + 1))
       continue
     fi
+    work_list="${work_list}${instance_id}"$'\n'
+  done
+
+  # Registered instances. team-paths.json `.teams` is keyed BY INSTANCE ID
+  # ("finance-personal"), so its keys are usable directly. Read with python3 —
+  # a hard dependency of the installer this function drives — and fail soft:
+  # a missing or malformed registry must degrade to the on-disk-only work list
+  # (the pre-XACA-0845 behaviour), never abort an unattended nightly upgrade.
+  if command -v python3 >/dev/null 2>&1; then
+    _reg_instances="$(python3 - "$_registry_json" "$_install_config" <<'PYEOF' 2>/dev/null || true
+import json, sys
+
+out = []
+
+# (1) team-paths.json: .teams is an object keyed by instance id.
+try:
+    with open(sys.argv[1]) as fh:
+        teams = json.load(fh).get("teams", {})
+    if isinstance(teams, dict):
+        out.extend(str(k) for k in teams)
+except Exception:
+    pass
+
+# (2) .aiteamforge-config: .teams[] holds BASE ids; .team_paths.<base>.project_id
+#     carries the project for parameterised installs. Compose the instance id
+#     the same way config.sh's get_team_instance_id() does (lowercased), which
+#     is the only source covering custom project-scoped installs.
+try:
+    with open(sys.argv[2]) as fh:
+        cfg = json.load(fh)
+    paths = cfg.get("team_paths", {}) or {}
+    for base in cfg.get("teams", []) or []:
+        base = str(base)
+        pid = (paths.get(base) or {}).get("project_id")
+        out.append("%s-%s" % (base, str(pid).lower()) if pid else base)
+except Exception:
+    pass
+
+for i in out:
+    if i:
+        print(i)
+PYEOF
+)"
+  fi
+
+  if [ -n "$_reg_instances" ]; then
+    work_list="${work_list}${_reg_instances}"$'\n'
+  fi
+
+  # De-duplicate, preserving first-seen order, and drop blank lines.
+  work_list="$(printf '%s' "$work_list" | awk 'NF && !seen[$0]++')"
+
+  for instance_id in $work_list; do
+    # Message continuity with the file-driven original; also the file this
+    # iteration will create or refresh.
+    base="${instance_id}-connect.sh"
 
     # Validate the recovered instance against the shipped templates using
     # ANCHORED shapes only: "<team>" exactly, or "<team>-<rest>". Longest
@@ -1014,18 +1092,27 @@ update_connect_scripts() {
     fi
     install_args+=( --connect-only --install-dir "${WORKING_DIR}" )
 
+    # XACA-0845: distinguish create from refresh in the output, so a box
+    # recovering a missing cockpit script says so rather than silently
+    # reporting a "refresh" of a file that did not exist.
+    local _action="Refreshing" _action_done="Refreshed"
+    if [ ! -f "${WORKING_DIR}/${base}" ]; then
+      _action="Creating missing"
+      _action_done="Created missing"
+    fi
+
     if [ "$DRY_RUN" = true ]; then
-      echo "Would re-render ${instance_id} connect/disconnect scripts (template ${best_team})"
+      echo "Would render ${instance_id} connect/disconnect scripts (template ${best_team}, $(printf '%s' "$_action" | tr '[:upper:]' '[:lower:]'))"
       updated=$((updated + 1))
       continue
     fi
 
-    print_info "Refreshing ${instance_id} connect/disconnect scripts..."
+    print_info "${_action} ${instance_id} connect/disconnect scripts..."
     if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" 2>&1 | sed 's/^/    /' ); then
-      print_success "Refreshed ${instance_id} connect/disconnect scripts"
+      print_success "${_action_done} ${instance_id} connect/disconnect scripts"
       updated=$((updated + 1))
     else
-      print_warning "Failed to refresh ${instance_id} connect/disconnect scripts (continuing)"
+      print_warning "Failed to render ${instance_id} connect/disconnect scripts (continuing)"
       failed=$((failed + 1))
     fi
   done
@@ -1033,14 +1120,14 @@ update_connect_scripts() {
   if [ $((updated + failed)) -eq 0 ]; then
     print_success "No installed team connect scripts to refresh"
   elif [ "$DRY_RUN" = true ]; then
-    print_success "Would refresh ${updated} team connect/disconnect script set(s)"
+    print_success "Would render ${updated} team connect/disconnect script set(s)"
   elif [ "$failed" -gt 0 ]; then
-    print_warning "Refreshed ${updated} team connect/disconnect script set(s); ${failed} failed (non-fatal)"
+    print_warning "Rendered ${updated} team connect/disconnect script set(s); ${failed} failed (non-fatal)"
   else
-    print_success "Refreshed ${updated} team connect/disconnect script set(s)"
+    print_success "Rendered ${updated} team connect/disconnect script set(s)"
   fi
   if [ "$skipped" -gt 0 ]; then
-    print_warning "Skipped ${skipped} unrecognised *-connect.sh file(s) (non-fatal)"
+    print_warning "Skipped ${skipped} unrecognised connect-script instance(s) (non-fatal)"
   fi
   return 0
 }

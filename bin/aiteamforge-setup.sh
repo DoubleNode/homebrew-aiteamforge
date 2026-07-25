@@ -1350,10 +1350,22 @@ if [ ${#_stale_teams[@]} -gt 0 ]; then
   for _stale_team in "${_stale_teams[@]}"; do
     _wdir_var="_WORKDIR_${_stale_team}"
     _stale_wdir="${!_wdir_var:-${INSTALL_DIR}/${_stale_team}}"
+    # XACA-0845: forward project/client here too. XACA-0643 fixed only the
+    # SELECTED_TEAMS install loop above; this regeneration pass still called
+    # install-team.sh bare, so a parameterised team silently fell back to
+    # TEAM_DEFAULT_PROJECT and regenerated the WRONG instance (legal-default
+    # rather than the live legal-coparenting) — one of the ways stray
+    # "-default" instances got manufactured. Flags are appended ONLY when set,
+    # because install-team.sh REJECTS them for TEAM_HAS_PROJECTS=false teams.
+    _proj_var="_PROJECT_${_stale_team}"
+    _client_var="_CLIENT_${_stale_team}"
+    _stale_param_flags=()
+    [ -n "${!_proj_var:-}" ]   && _stale_param_flags+=(--project "${!_proj_var}")
+    [ -n "${!_client_var:-}" ] && _stale_param_flags+=(--client "${!_client_var}")
     if [ -x "${INSTALLERS_DIR}/install-team.sh" ]; then
       echo -e "  ${CYAN}Regenerating: ${_stale_team}${NC}"
       AITEAMFORGE_DIR="${INSTALL_DIR}" TEAM_WORKING_DIR="${_stale_wdir}" \
-        bash "${INSTALLERS_DIR}/install-team.sh" "$_stale_team" --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/    /' || true
+        bash "${INSTALLERS_DIR}/install-team.sh" "$_stale_team" --install-dir "${INSTALL_DIR}" ${_stale_param_flags[@]+"${_stale_param_flags[@]}"} 2>&1 | sed 's/^/    /' || true
     fi
   done
   echo ""
@@ -1391,8 +1403,20 @@ if [ "$INSTALL_PROFILE" = "full" ]; then
         echo -e "${BOLD}Rendering connect scripts for unselected teams...${NC}"
         echo ""
       fi
+      # XACA-0845: forward project/client when the wizard captured them. This
+      # pass renders connect scripts for UNSELECTED teams, so usually nothing is
+      # set and the conf default is genuinely the best available guess — but
+      # when a project IS known, defaulting anyway writes a connect script for
+      # an instance that does not exist ("legal-default") while the real one
+      # goes without. Append only when set: install-team.sh rejects these flags
+      # for TEAM_HAS_PROJECTS=false teams.
+      _post_proj_var="_PROJECT_${_pt}"
+      _post_client_var="_CLIENT_${_pt}"
+      _post_param_flags=()
+      [ -n "${!_post_proj_var:-}" ]   && _post_param_flags+=(--project "${!_post_proj_var}")
+      [ -n "${!_post_client_var:-}" ] && _post_param_flags+=(--client "${!_post_client_var}")
       if AITEAMFORGE_DIR="${INSTALL_DIR}" bash "${INSTALLERS_DIR}/install-team.sh" \
-          "$_pt" --connect-only --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/  /'; then
+          "$_pt" --connect-only --install-dir "${INSTALL_DIR}" ${_post_param_flags[@]+"${_post_param_flags[@]}"} 2>&1 | sed 's/^/  /'; then
         _post_rendered=$((_post_rendered + 1))
       else
         _post_failed=$((_post_failed + 1))
@@ -1427,8 +1451,17 @@ if [ "$INSTALL_PROFILE" = "cockpit" ]; then
     for _conf in "$_cockpit_teams_dir"/*.conf; do
       [ -f "$_conf" ] || continue
       _ct="$(basename "$_conf" .conf)"
+      # XACA-0845: forward project/client when known (same rationale as the
+      # post-selected pass above). Cockpit mode installs no teams, so these are
+      # normally unset and the conf default stands — but if the wizard did
+      # capture a project, honour it instead of rendering a phantom instance.
+      _cockpit_proj_var="_PROJECT_${_ct}"
+      _cockpit_client_var="_CLIENT_${_ct}"
+      _cockpit_param_flags=()
+      [ -n "${!_cockpit_proj_var:-}" ]   && _cockpit_param_flags+=(--project "${!_cockpit_proj_var}")
+      [ -n "${!_cockpit_client_var:-}" ] && _cockpit_param_flags+=(--client "${!_cockpit_client_var}")
       if AITEAMFORGE_DIR="${INSTALL_DIR}" bash "${INSTALLERS_DIR}/install-team.sh" \
-          "$_ct" --connect-only --install-dir "${INSTALL_DIR}" 2>&1 | sed 's/^/  /'; then
+          "$_ct" --connect-only --install-dir "${INSTALL_DIR}" ${_cockpit_param_flags[@]+"${_cockpit_param_flags[@]}"} 2>&1 | sed 's/^/  /'; then
         _cockpit_rendered=$((_cockpit_rendered + 1))
       else
         _cockpit_failed=$((_cockpit_failed + 1))

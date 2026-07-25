@@ -275,6 +275,48 @@ if [[ ! "$INSTANCE_ID" =~ ^[a-z0-9_]+(-[a-z0-9_]+){0,2}$ ]]; then
 fi
 
 # ============================================================================
+# XACA-0845: RESOLVED instance components (project / client)
+# ============================================================================
+# compute_instance_id() resolves --project/--client against the conf defaults,
+# but it runs in a command substitution, so any variable it set would die with
+# the subshell — only the composed instance id survives. The parametric connect
+# template needs the resolved COMPONENTS (it bakes them as DEFAULT_PROJECT /
+# DEFAULT_GROUP), so recover them here by decomposing the instance id.
+#
+# This is safe and unambiguous because _validate_instance_component() rejects
+# any component containing a dash (^[a-z0-9_]+$), so the dashes in INSTANCE_ID
+# are always and only the separators compute_instance_id() inserted. It is the
+# same decomposition aiteamforge-upgrade.sh performs on connect-script
+# filenames — deliberately, so the two stay reversible.
+RESOLVED_PROJECT=""
+RESOLVED_CLIENT=""
+if [[ "$TEAM_HAS_PROJECTS" == "true" ]]; then
+    _instance_remainder="${INSTANCE_ID#"${TEAM_ID}-"}"
+    if [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]]; then
+        # template-client-project (freelance): "<client>-<project>"
+        RESOLVED_CLIENT="${_instance_remainder%%-*}"
+        RESOLVED_PROJECT="${_instance_remainder#*-}"
+    else
+        # template-project (finance, legal, medical): "<project>"
+        RESOLVED_PROJECT="$_instance_remainder"
+    fi
+    unset _instance_remainder
+fi
+
+# _is_parametric_team: single source of truth for "this team installs the
+# verbatim dev-team parametric scripts rather than per-instance renders".
+# Defined HERE (before the --connect-only early exit) rather than inline at the
+# startup-script section, because BOTH the connect-only path and the full
+# install need the answer and they used to disagree: the connect-only path ran
+# before _PARAMETRIC_MODE was ever assigned, so it silently treated every team
+# as non-parametric. That disagreement is XACA-0845's core defect — one shared
+# predicate makes the two paths structurally unable to diverge again.
+_is_parametric_team() {
+    [[ "$TEAM_HAS_PROJECTS" == "true" ]] \
+        && [[ -f "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh" ]]
+}
+
+# ============================================================================
 # XACA-0463: Per-instance LCARS port allocation (team-id-contract §4.1)
 # ============================================================================
 # Call the pure allocator from aiteamforge-paths.sh (sourced above).
@@ -498,6 +540,160 @@ for _agent in "${TEAM_AGENTS[@]}"; do
 done
 
 # ============================================================================
+# XACA-0845: CONNECT / DISCONNECT RENDERING — one implementation, two callers
+# ============================================================================
+# Previously this logic existed TWICE: once in the --connect-only early exit
+# and once in the full-install path. The copies disagreed about parametric
+# teams (the early exit rendered them; the full install refused to), which is
+# precisely how a team could be live and scriptless — being SELECTED routed it
+# down the refusing path and simultaneously excluded it from the rendering one.
+# Both callers now share this function, so the two can no longer drift apart.
+#
+# Template choice is NOT cosmetic. The flat team-connect.sh.template bakes
+# TMUX_SOCKET=<instance-id>, but the parametric <team>-startup.sh scripts open
+# their sessions on a socket named after the TEAM ("finance", holding sessions
+# "finance-personal-*"). Rendering the flat template for a parametric team
+# therefore yields a script that attaches to a socket that does not exist —
+# which is why XACA-0607 replaced the XACA-0604 flat renders for these teams.
+# Parametric teams render from the parametric template; everyone else is
+# unchanged.
+
+# Canonical remote-session ORDER for a parametric team, read from the shipped
+# <team>-startup.sh `terminal_order` array — the only place that human-curated
+# tab order lives (it is NOT derivable from TEAM_AGENTS, which is alphabetical
+# for some teams). Emits the slugs after "${SESSION_PREFIX}-", space-joined,
+# with "lcars" dropped (the connect script special-cases that tab). Mirrors
+# extract_session_order() in dev-team's scripts/render-cockpit-scripts.sh.
+# An empty result is VALID and means "no known order — use discovery order".
+_extract_session_order() {
+    local startup_script="$1"
+    [[ -f "$startup_script" ]] || return 0
+    # Both greps legitimately match nothing. Under `set -euo pipefail` a bare
+    # grep would exit 1, kill the command substitution and abort the install
+    # with no message, so each is guarded to degrade to an empty string.
+    sed -n '/^terminal_order=(/,/^)/p' "$startup_script" \
+        | { grep -oE '\$\{SESSION_PREFIX\}-[A-Za-z0-9_]+' || true; } \
+        | sed -E 's/^\$\{SESSION_PREFIX\}-//' \
+        | { grep -v '^lcars$' || true; } \
+        | tr '\n' ' ' \
+        | sed -E 's/[[:space:]]+$//'
+}
+
+_render_connect_disconnect() {
+    local connect_script="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
+    local disconnect_script="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
+    local connect_template disconnect_template
+
+    if _is_parametric_team; then
+        connect_template="$HOMEBREW_TAP_ROOT/share/templates/team-connect-parametric.sh.template"
+        disconnect_template="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect-parametric.sh.template"
+
+        if [[ ! -f "$connect_template" ]]; then
+            echo "  ⚠️  Template not found: team-connect-parametric.sh.template (skipping connect script)"
+        else
+            local _socket="${TEAM_TMUX_SOCKET:-$TEAM_ID}"
+            # PORT_BASE is the last-resort candidate in the script's port probe
+            # (remote .port file → canonical → base), so the BAND base is the
+            # right value here, not this instance's allocated port.
+            local _port_base="${TEAM_LCARS_PORT_BASE:-$TEAM_LCARS_PORT}"
+            local _has_group="false"
+            [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]] && _has_group="true"
+            local _session_order
+            _session_order="$(_extract_session_order "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh")"
+
+            # {{TEAM_ID}} is the TEAM id, not the instance id: the parametric
+            # script composes INSTANCE itself from TEAM_ID plus the group and
+            # project arguments. The instance's own group/project are baked in
+            # as the DEFAULTS, so `<instance>-connect.sh <host>` resolves to
+            # exactly this instance while an explicit argument still overrides.
+            sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+                -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+                -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
+                -e "s|{{TEAM_SOCKET}}|$_socket|g" \
+                -e "s|{{TEAM_DEFAULT_PROJECT}}|$RESOLVED_PROJECT|g" \
+                -e "s|{{TEAM_DEFAULT_GROUP}}|$RESOLVED_CLIENT|g" \
+                -e "s|{{TEAM_LCARS_PORT_BASE}}|$_port_base|g" \
+                -e "s|{{TEAM_HAS_GROUP}}|$_has_group|g" \
+                -e "s|{{TEAM_SESSION_ORDER}}|$_session_order|g" \
+                -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+                "$connect_template" > "$connect_script"
+            chmod +x "$connect_script"
+            echo "  ✓ ${INSTANCE_ID}-connect.sh (parametric, XACA-0845)"
+        fi
+
+        if [[ ! -f "$disconnect_template" ]]; then
+            echo "  ⚠️  Template not found: team-disconnect-parametric.sh.template (skipping disconnect script)"
+        else
+            sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
+                -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+                -e "s|{{TEAM_LCARS_PORT_BASE}}|${TEAM_LCARS_PORT_BASE:-$TEAM_LCARS_PORT}|g" \
+                -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+                "$disconnect_template" > "$disconnect_script"
+            chmod +x "$disconnect_script"
+            echo "  ✓ ${INSTANCE_ID}-disconnect.sh (parametric, XACA-0845)"
+        fi
+        return 0
+    fi
+
+    # ---- Non-parametric teams: flat templates (unchanged behaviour) ----
+    connect_template="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
+    disconnect_template="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
+
+    if [[ -f "$connect_template" ]]; then
+        # Step 1: single-line substitutions via sed
+        # {{TEAM_ID}} → INSTANCE_ID; {{TEAM_TMUX_SOCKET}} → INSTANCE_ID (per-instance socket)
+        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
+            -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+            -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
+            -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+            -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
+            -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+            "$connect_template" > "${connect_script}.tmp"
+
+        # Step 2: multi-line substitution for per-agent window names via Python
+        # {{TEAM_AGENT_WINDOWS_CONFIG}} may contain newlines which sed cannot handle
+        python3 - "${connect_script}.tmp" "$connect_script" <<PYEOF
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+# Strip trailing newline then re-add one so the placeholder line is cleanly replaced
+windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
+if windows_config:
+    windows_config += '\n'
+with open(src) as f:
+    content = f.read()
+content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
+# Fallback: replace without trailing newline in case template line ending differs
+if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
+    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
+with open(dst, 'w') as f:
+    f.write(content)
+PYEOF
+        rm -f "${connect_script}.tmp"
+        chmod +x "$connect_script"
+        echo "  ✓ ${INSTANCE_ID}-connect.sh"
+    else
+        echo "  ⚠️  Template not found: team-connect.sh.template (skipping connect script)"
+    fi
+
+    # Disconnect script — symmetric counterpart to connect. Purely local
+    # cleanup: closes the iTerm2 connect window and resets the LCARS Web
+    # profile URL back to localhost. Simple single-pass sed substitution —
+    # no per-agent windows config needed.
+    if [[ -f "$disconnect_template" ]]; then
+        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
+            -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
+            -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
+            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
+            "$disconnect_template" > "$disconnect_script"
+        chmod +x "$disconnect_script"
+        echo "  ✓ ${INSTANCE_ID}-disconnect.sh"
+    else
+        echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping disconnect script)"
+    fi
+}
+
+# ============================================================================
 # CONNECT-ONLY EARLY EXIT
 # Renders only the connect + disconnect scripts and exits.  Used by the
 # setup wizard to generate connect scripts for ALL teams regardless of which
@@ -508,54 +704,11 @@ if [[ "$CONNECT_ONLY" == "true" ]]; then
     echo "🔗 Rendering connect scripts for $INSTANCE_ID (connect-only mode)..."
     mkdir -p "$AITEAMFORGE_DIR"
 
-    CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
-    CONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
-
-    if [[ -f "$CONNECT_TEMPLATE" ]]; then
-        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
-            -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
-            -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
-            -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-            -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
-            -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
-            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-            "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
-
-        python3 - "${CONNECT_SCRIPT}.tmp" "$CONNECT_SCRIPT" <<PYEOF
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
-if windows_config:
-    windows_config += '\n'
-with open(src) as f:
-    content = f.read()
-content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
-if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
-    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
-with open(dst, 'w') as f:
-    f.write(content)
-PYEOF
-        rm -f "${CONNECT_SCRIPT}.tmp"
-        chmod +x "$CONNECT_SCRIPT"
-        echo "  ✓ ${INSTANCE_ID}-connect.sh"
-    else
-        echo "  ⚠️  Template not found: team-connect.sh.template (skipping)"
-    fi
-
-    DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
-    DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
-
-    if [[ -f "$DISCONNECT_TEMPLATE" ]]; then
-        sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
-            -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
-            -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-            -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-            "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
-        chmod +x "$DISCONNECT_SCRIPT"
-        echo "  ✓ ${INSTANCE_ID}-disconnect.sh"
-    else
-        echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping)"
-    fi
+    # XACA-0845: delegates to the shared renderer, which picks the flat or the
+    # parametric template. Before this, the early exit inlined the flat-template
+    # render and ran BEFORE _PARAMETRIC_MODE existed, so it handed parametric
+    # teams a script wired to a non-existent tmux socket.
+    _render_connect_disconnect
 
     exit 0
 fi
@@ -810,7 +963,11 @@ echo "🚀 Creating startup/shutdown scripts..."
 # Non-parametric teams retain instance-keyed naming. Parameterized teams that
 # don't (yet) have a shipped parametric script also retain instance-keyed
 # naming via the legacy template path.
-if [[ "$TEAM_HAS_PROJECTS" == "true" ]] && [[ -f "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh" ]]; then
+# XACA-0845: the condition now lives in _is_parametric_team() (defined above the
+# --connect-only early exit) so the connect-only path and the full install ask
+# the SAME question. They previously could not: this assignment happens after
+# that early exit, so connect-only never saw it and treated every team as flat.
+if _is_parametric_team; then
     _PARAMETRIC_MODE="true"
     TEAM_STARTUP_SCRIPT="${TEAM_ID}-startup.sh"
     TEAM_SHUTDOWN_SCRIPT="${TEAM_ID}-shutdown.sh"
@@ -834,14 +991,21 @@ SHUTDOWN_SCRIPT="$AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 # Non-destructive — user can audit or restore manually.
 if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
     _XACA0483_STALE_SUFFIX=".stale-pre-XACA-0483"
+    # XACA-0845: connect/disconnect are deliberately NOT migrated any more.
+    # Only startup/shutdown became template-keyed under XACA-0483 (one script
+    # taking project args). Connect scripts are inherently INSTANCE-keyed —
+    # each live instance has its own LCARS port and session set — so
+    # "<team>-<project>-connect.sh" is now the CORRECT name, not a legacy one.
+    # Leaving them in the glob would move each freshly rendered script aside on
+    # every re-install, manufacturing a .stale-pre-XACA-0483 file per run and
+    # deleting nothing (mv, not rm) — churn that also re-created the very
+    # "live team has no connect script" state this ticket exists to fix.
     for _stale_glob in "$AITEAMFORGE_DIR/${TEAM_ID}-"*-startup.sh \
-                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-shutdown.sh \
-                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-connect.sh \
-                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-disconnect.sh; do
+                       "$AITEAMFORGE_DIR/${TEAM_ID}-"*-shutdown.sh; do
         [[ -f "$_stale_glob" ]] || continue
         # Skip the template-keyed names themselves
         case "$(basename "$_stale_glob")" in
-            "${TEAM_ID}-startup.sh"|"${TEAM_ID}-shutdown.sh"|"${TEAM_ID}-connect.sh"|"${TEAM_ID}-disconnect.sh") continue ;;
+            "${TEAM_ID}-startup.sh"|"${TEAM_ID}-shutdown.sh") continue ;;
         esac
         # Skip files already wearing the stale suffix
         [[ "$_stale_glob" == *"$_XACA0483_STALE_SUFFIX" ]] && continue
@@ -1027,72 +1191,22 @@ EOF
     echo "  ✓ $TEAM_STARTUP_SCRIPT (basic version)"
 fi
 
-CONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-connect.sh.template"
-CONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
-
-# XACA-0483: parametric teams (finance/medical/legal/freelance) don't ship a
-# connect/disconnect script in the dev-team source. Skip generation in
-# parametric mode to keep the install surface consistent with source-of-truth.
-if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
-    :  # No connect script for parametric teams
-elif [[ -f "$CONNECT_TEMPLATE" ]]; then
-    # Step 1: single-line substitutions via sed
-    # {{TEAM_ID}} → INSTANCE_ID; {{TEAM_TMUX_SOCKET}} → INSTANCE_ID (per-instance socket)
-    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
-        -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
-        -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
-        -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-        -e "s|{{TEAM_TMUX_SOCKET}}|$INSTANCE_ID|g" \
-        -e "s|{{TEAM_TERMINAL_LIST}}|$TEAM_TERMINAL_LIST|g" \
-        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        "$CONNECT_TEMPLATE" > "${CONNECT_SCRIPT}.tmp"
-
-    # Step 2: multi-line substitution for per-agent window names via Python
-    # {{TEAM_AGENT_WINDOWS_CONFIG}} may contain newlines which sed cannot handle
-    python3 - "${CONNECT_SCRIPT}.tmp" "$CONNECT_SCRIPT" <<PYEOF
-import sys
-src, dst = sys.argv[1], sys.argv[2]
-# Strip trailing newline then re-add one so the placeholder line is cleanly replaced
-windows_config = """${TEAM_AGENT_WINDOWS_CONFIG}""".rstrip('\n')
-if windows_config:
-    windows_config += '\n'
-with open(src) as f:
-    content = f.read()
-content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}\n', windows_config)
-# Fallback: replace without trailing newline in case template line ending differs
-if '{{TEAM_AGENT_WINDOWS_CONFIG}}' in content:
-    content = content.replace('{{TEAM_AGENT_WINDOWS_CONFIG}}', windows_config.rstrip('\n'))
-with open(dst, 'w') as f:
-    f.write(content)
-PYEOF
-    rm -f "${CONNECT_SCRIPT}.tmp"
-    chmod +x "$CONNECT_SCRIPT"
-    echo "  ✓ ${INSTANCE_ID}-connect.sh"
-else
-    echo "  ⚠️  Template not found: team-connect.sh.template (skipping connect script)"
-fi
-
-# Disconnect script — symmetric counterpart to connect. Purely local
-# cleanup: closes the iTerm2 connect window and resets the LCARS Web
-# profile URL back to localhost. Simple single-pass sed substitution —
-# no per-agent windows config needed.
-DISCONNECT_TEMPLATE="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect.sh.template"
-DISCONNECT_SCRIPT="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
-
-# XACA-0483: parametric teams skip disconnect generation — see connect comment above.
-if [[ "$_PARAMETRIC_MODE" == "true" ]]; then
-    :  # No disconnect script for parametric teams
-elif [[ -f "$DISCONNECT_TEMPLATE" ]]; then
-    sed -e "s|{{TEAM_ID}}|$INSTANCE_ID|g" \
-        -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
-        -e "s|{{TEAM_LCARS_PORT}}|$TEAM_LCARS_PORT|g" \
-        -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
-        "$DISCONNECT_TEMPLATE" > "$DISCONNECT_SCRIPT"
-    chmod +x "$DISCONNECT_SCRIPT"
-    echo "  ✓ ${INSTANCE_ID}-disconnect.sh"
-else
-    echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping disconnect script)"
-fi
+# XACA-0845: parametric teams now DO get connect/disconnect scripts.
+#
+# The skip this replaces was justified by "parametric teams don't ship a
+# connect/disconnect script in the dev-team source". That was true when
+# XACA-0483 wrote it and became false on 2026-06-02, when XACA-0604/0607 added
+# scripts/templates/team-{connect,disconnect}-parametric.sh.template. The
+# premise nevertheless kept reading true from inside the tap, because
+# sync-tap.sh mirrored only <team>-{startup,shutdown}.sh for these teams and
+# never the connect templates — the tap could not see the sources that had
+# invalidated its own comment. sync-tap.sh now mirrors both templates.
+#
+# Consequence of the old skip: a parametric team was scriptless *because* it
+# was selected. Selection routed it through this refusing path, and the setup
+# wizard's connect-only pass skips already-selected teams — so the only
+# instances that got a script were the ones nobody had actually set up.
+_render_connect_disconnect
 
 # XACA-0483: parametric shutdown was already installed verbatim in the parametric
 # block above. Skip the template-substitution path here.

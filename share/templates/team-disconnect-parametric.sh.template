@@ -1,0 +1,123 @@
+#!/usr/bin/env zsh
+# {{TEAM_NAME}} Disconnect Script (PARAMETRIC — projects-enabled team)
+# Rendered by scripts/render-cockpit-scripts.sh from this template (XACA-0607).
+#
+# Symmetric counterpart to {{TEAM_ID}}-connect.sh. Purely local cleanup:
+# closes the iTerm2 window(s) opened by connect for THIS team's project
+# instances and resets the local LCARS Web profile URL back to localhost.
+# Does NOT touch the remote host — the remote instances keep running.
+#
+# Connect names each window "<instance> @ <host>" where instance is
+# "{{TEAM_ID}}-<project>" (or "{{TEAM_ID}}-<group>-<project>" for freelance).
+# So all of this team's connect windows share the title prefix
+# "{{TEAM_ID}}-" and contain " @ ". We match on that pair.
+#
+# Usage:
+#   {{TEAM_ID}}-disconnect.sh              # close ALL {{TEAM_ID}}-* @ * windows
+#   {{TEAM_ID}}-disconnect.sh <host>       # close only this team's windows for <host>
+
+# shellcheck disable=SC1083,SC2039
+TEAM_ID="{{TEAM_ID}}"
+# shellcheck disable=SC1083,SC2039
+TEAM_NAME="{{TEAM_NAME}}"
+# shellcheck disable=SC1083,SC2039
+AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
+# shellcheck disable=SC1083,SC2039
+PORT_BASE="{{TEAM_LCARS_PORT_BASE}}"
+
+HOST_FILTER="${1:-}"
+
+echo ""
+if [[ -n "$HOST_FILTER" ]]; then
+    echo "  Disconnecting ${TEAM_NAME} instances @ ${HOST_FILTER}"
+else
+    echo "  Disconnecting all ${TEAM_NAME} remote connections"
+fi
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ============================================================================
+# Reset local LCARS Web profile URL back to localhost
+# ============================================================================
+# connect updates the LCARS Web profile to the remote serving port. After
+# disconnect, point it back at localhost so the next freshly-opened LCARS tab
+# doesn't try to load a stale remote host. We don't know the exact per-project
+# port here, so reset to the team's port base (best-effort, matches the flat
+# template's localhost-reset intent).
+LCARS_BROWSER_SCRIPT="$AITEAMFORGE_DIR/scripts/set-lcars-profile-browser.py"
+if [[ -f "$LCARS_BROWSER_SCRIPT" ]]; then
+    echo "  Resetting LCARS profile URL → http://localhost:${PORT_BASE}"
+    python3 "$LCARS_BROWSER_SCRIPT" "http://localhost:${PORT_BASE}" 2>/dev/null || true
+fi
+
+# ============================================================================
+# Close matching iTerm2 windows
+# ============================================================================
+# Window titles are "<instance> @ <host>" with instance prefixed "<team>-".
+# Match windows whose title starts with "${TEAM_ID}-" AND contains " @ ".
+# With a host argument, additionally require the title to end with
+# " @ ${HOST_FILTER}" so we close only that host's windows for this team.
+if [[ -d "/Applications/iTerm.app" ]] && pgrep -f "iTerm.app" > /dev/null; then
+    if [[ -n "$HOST_FILTER" ]]; then
+        _host_suffix=" @ ${HOST_FILTER}"
+    else
+        _host_suffix=""
+    fi
+    _prefix="${TEAM_ID}-"
+
+    # shellcheck disable=SC2086
+    _closed=$(osascript <<APPLESCRIPT 2>/dev/null
+tell application "iTerm"
+    set closed_count to 0
+    set title_prefix to "${_prefix}"
+    set host_suffix to "${_host_suffix}"
+    set windows_to_close to {}
+    repeat with w in windows
+        try
+            set wname to name of w
+            set is_match to false
+            if wname starts with title_prefix and wname contains " @ " then
+                if host_suffix is "" then
+                    set is_match to true
+                else
+                    if wname ends with host_suffix then
+                        set is_match to true
+                    end if
+                end if
+            end if
+            if is_match then
+                set end of windows_to_close to w
+            end if
+        end try
+    end repeat
+    repeat with w in windows_to_close
+        try
+            close w
+            set closed_count to closed_count + 1
+        end try
+    end repeat
+    return closed_count
+end tell
+APPLESCRIPT
+)
+    _closed="${_closed:-0}"
+    if [[ "$_closed" -gt 0 ]]; then
+        echo "  Closed ${_closed} iTerm2 window(s)"
+    else
+        echo "  No matching iTerm2 window found"
+        echo "    (looking for titles starting \"${_prefix}\" containing \" @ \"${_host_suffix:+ ending \"${_host_suffix}\"})"
+    fi
+else
+    echo "  iTerm2 not running — nothing to close"
+fi
+
+echo ""
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo "  ${TEAM_NAME} disconnected"
+echo ""
+echo "  Remote instances are still running. To reconnect:"
+echo "    ${TEAM_ID}-connect.sh <host> [<project>]"
+echo ""
+echo "  To shut down a remote instance, SSH to the host and run:"
+echo "    ${TEAM_ID}-shutdown.sh ..."
+echo ""
