@@ -2437,6 +2437,17 @@ _kb_pid_has_claude_descendant() {
     local -a queue=("$root_pid") next_queue
     local -i depth=0 visited=0 match
     local cur_pid child_pid comm comm_base full_args remainder
+    # XACA-0830-020 (review, FOURTH pass -- see the "(b) interpreted-
+    # wrapper" comment below this loop for the full story). Anchored
+    # regex, not a zsh glob: `^(claude|[^[:space:]]+/claude)([[:space:]]|$)`
+    # matches ONLY at the very start of `$remainder` (regex `^`, a true
+    # anchor) -- either the bare word "claude" or a slash-terminated path
+    # segment "claude" with no whitespace before the slash, followed by
+    # either a space (next argument boundary) or end-of-string. Declared
+    # once here, not inline in the loop body, matching this file's own
+    # house style for `=~`-style patterns (see `ps_re_args`/`ps_re_comm`
+    # on `_kb_tmux_live_window_ids`).
+    local claude_re='^(claude|[^[:space:]]+/claude)([[:space:]]|$)'
 
     while (( ${#queue[@]} > 0 && depth < 6 && visited < 200 )); do
         next_queue=()
@@ -2494,19 +2505,60 @@ _kb_pid_has_claude_descendant() {
             # does the text immediately following the interpreter look
             # like a path whose FINAL component is "claude", terminated
             # either by end-of-string or by a following space (the next
-            # argument boundary)? Anchoring to the START -- never scanning
-            # the whole remainder for "claude" appearing anywhere -- is
-            # what keeps this from reintroducing the original
-            # any-token-anywhere false positive: `vim claude` and `grep -rn
-            # claude .` both still fail this cleanly, because in both cases
-            # `$comm_base` is "vim"/"grep", neither of which is in the
-            # interpreter case list below, so this whole branch never runs
-            # for them regardless of anything in their argv. Verified with
-            # a live fixture at the actual 95-char space-containing node
-            # path above (classifies correctly), plus a `/bin/sh -c grep
-            # -rn claude .` adversarial case (comm IS an interpreter here,
-            # but the remainder starts with "-c", not a claude-ending path
-            # -- correctly does not match).
+            # argument boundary)?
+            #
+            # XACA-0830-020, FOURTH review pass -- the THIRD pass's match
+            # used a zsh GLOB, not a real anchor, and the comment here
+            # asserted anchoring the glob did not actually provide:
+            #   (claude|claude[[:space:]]*|*/claude|*/claude[[:space:]]*)
+            # The first two alternatives ARE anchored (no leading `*`). The
+            # last two are NOT: a leading `*` in a zsh glob matches
+            # anything, including further spaces and slashes, so
+            # `*/claude` means "ends with /claude" and
+            # `*/claude[[:space:]]*` means "contains /claude ANYWHERE" --
+            # both scan the WHOLE remainder, not just its start. In
+            # practice this collapsed rule (b) back down to "comm is an
+            # interpreter AND the command line mentions a /claude path
+            # anywhere" -- the original any-token-anywhere false-positive,
+            # reintroduced in the FALSE-BOUND direction, one glob-anchoring
+            # mistake away from the exact bug this whole rule exists to
+            # prevent. Verified live: `/bin/sh -c vim /Users/me/bin/claude`
+            # and `/bin/sh -c 'sleep 25; : /tmp/fx/bin/claude'` both matched
+            # under the old glob (comm="sh", but the /claude path is an
+            # ARGUMENT to some other command entirely, not the script being
+            # interpreted) -- and the round-3 verification never caught it
+            # because its one adversarial case (`grep -rn claude .`)
+            # happens to have no `/` immediately before "claude", the one
+            # shape the broken alternatives don't false-positive on.
+            #
+            # Fixed with a real regex anchor (`$claude_re`, declared once
+            # above this loop): `^(claude|[^[:space:]]+/claude)([[:space:]]|$)`.
+            # `^` anchors to the actual start of `$remainder` (a true
+            # regex anchor, unlike a glob's leading `*`). The alternation
+            # is "claude" alone, or a slash-terminated path segment ending
+            # in "claude" with NO whitespace between the slash and the
+            # start of remainder (`[^[:space:]]+/claude` -- deliberately
+            # NOT `.*`/`*`, which would reopen the same unanchored-scan
+            # hole this pass exists to close), followed by a space or
+            # end-of-string. TRADEOFF, deliberately accepted: a claude
+            # SCRIPT PATH containing an embedded space no longer matches
+            # (`[^[:space:]]+` forbids it) -- this is different from, and
+            # does NOT affect, the space-containing INTERPRETER path from
+            # the prior pass (this machine's real 95-char Herd node path):
+            # that value is `$comm`, stripped off the FRONT of `args`
+            # BEFORE this regex ever runs, so a space there was never
+            # visible to `$claude_re` in the first place -- re-verified
+            # live after this change, that fixture still resolves BOUND.
+            # No script-path-with-space shape has been observed in this
+            # fleet; if one appears, the fix is to loosen the character
+            # class for that one alternative, not to revert to a scan.
+            # Re-verified `vim claude` and `grep -rn claude .` both still
+            # fail this cleanly (comm_base is "vim"/"grep", neither is in
+            # the interpreter case list below, so this whole branch never
+            # runs for them regardless of anything in their argv) --
+            # unaffected by this pass, since the false-positive fix for
+            # THAT shape lives in the `case` gate below, not in
+            # `$claude_re` itself.
             #
             # XACA-0830-026 (review, re-checked against THIS mechanism,
             # third pass): does reading `$comm` from the new two-snapshot,
@@ -2538,7 +2590,7 @@ _kb_pid_has_claude_descendant() {
                     if [[ -n "$comm" && "${full_args[1,${#comm}]}" == "$comm" ]]; then
                         remainder="${full_args[${#comm}+1,-1]}"
                         remainder="${remainder# }"
-                        [[ "$remainder" == (claude|claude[[:space:]]*|*/claude|*/claude[[:space:]]*) ]] && match=1
+                        [[ "$remainder" =~ $claude_re ]] && match=1
                     fi
                     ;;
             esac

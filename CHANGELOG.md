@@ -7,6 +7,15 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0830 (round-4 re-port) — `_kb_pid_has_claude_descendant` match rule anchored for real.** The
+  round-3 rule used a zsh glob whose last two alternatives (`*/claude`, `*/claude[[:space:]]*`) were NOT
+  anchored — a leading `*` matches anything, so the rule collapsed back to "the command line mentions a
+  `/claude` path anywhere", reintroducing false-BOUND for every interpreter-comm process. Verified live:
+  `/bin/sh -c vim /Users/me/bin/claude` matched. Replaced with an anchored regex
+  `^(claude|[^[:space:]]+/claude)([[:space:]]|$)`. Tradeoff documented in-line: a claude SCRIPT path
+  containing a space no longer matches; the INTERPRETER path may still contain spaces because it is
+  stripped as `$comm` before the test (the 95-char Herd node case is unaffected, re-verified).
+
 ### Fix: XACA-0830 — tmux liveness classifier: socket-blind + process-blind false ORPHANED verdicts
 
 Ports the dev-team XACA-0830 fix for `_kb_reconcile_inprogress`'s BOUND/ORPHANED tmux-liveness
