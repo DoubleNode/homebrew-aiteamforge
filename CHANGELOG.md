@@ -7,6 +7,42 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+### Fix: XACA-0830 — tmux liveness classifier: socket-blind + process-blind false ORPHANED verdicts
+
+Ports the dev-team XACA-0830 fix for `_kb_reconcile_inprogress`'s BOUND/ORPHANED tmux-liveness
+classifier into `share/templates/kanban/kanban-helpers.template.sh` (the XACA-0788 port target),
+fixing the same two defects there that were fixed in canonical `kanban-helpers.sh`:
+
+- **Defect A (socket-blind):** a bare, unqualified `tmux list-sessions` (no `-L`/`-S`) only
+  resolves correctly from inside a live pane. Any other caller (cron, a detached subagent shell,
+  `kb-recover` run from a plain terminal) hit tmux's default socket, found nothing, and
+  misclassified every `in_progress` item as ORPHANED. Replaced with a 5-rung socket-resolution
+  ladder (explicit arg → `$TMUX_SOCKET` → socket embedded in `$TMUX` → scan every live socket in
+  tmux's socket dir for one hosting the team → bare `tmux` last resort), with rungs 2/3 treated
+  as unverified trust — a reachable-but-wrong-team socket falls through to the next rung instead
+  of being trusted. Every probe in the ladder runs under `_kb_tmux_bounded_probe` (zsh
+  `zselect`-based watchdog, no `timeout`/`gtimeout` dependency), bounded per-probe (1.5s) and,
+  for the socket-dir scan, by an overall rung deadline (6s) — a hostile or foreign listener on a
+  stray socket file can't hang the classifier.
+- **Defect B (process-blind):** window-exists was being treated as process-alive. A window that
+  merely still exists (Claude was killed by jetsam, the pane dropped to an idle shell prompt) no
+  longer counts as BOUND — liveness now requires a live Claude process among the pane's process
+  descendants, walked via a single `ps -eo pid=,ppid=,comm=,args=` snapshot (not `pgrep -P`,
+  which has a reproducible blind spot for a live child that is the calling process's own
+  ancestor — the exact shape of the classifier's most common invocation, running as a subagent
+  under the very pane it's evaluating).
+- Ports the new internal helpers `_kb_tmux_window_has_live_claude`, `_kb_pid_has_claude_descendant`,
+  and `_kb_tmux_bounded_probe`, plus the rewritten `_kb_tmux_live_window_ids` (now returns a
+  REACHABLE/UNREACHABLE tri-state via exit code, distinguishing "looked and confirmed empty" from
+  "couldn't reach anything") and the updated `_kb_reconcile_inprogress` that consumes it. Ported
+  byte-faithfully (verbatim `diff` against canonical, confirmed) — the template carried an
+  untouched pre-XACA-0830 copy of this block from the original XACA-0788 port, so this is a pure
+  block replacement, no template-placeholder adjustments needed.
+- `tests/test-xaca-0788-crash-recovery-in-tap.sh` updated: the fixture tmux session/pane now runs
+  a fake `claude` process (mirroring `tests/test-xaca-0830-tmux-liveness.sh` on the canonical
+  side) instead of a bare shell prompt, so the BOUND assertion exercises the new
+  process-liveness contract instead of the old window-exists contract it was written against.
+
 ### Fix: XACA-0804 — read-only commands no longer materialize the team-paths registry
 
 Gates the registry bootstrap-write behind an explicit opt-in env var so a read-only

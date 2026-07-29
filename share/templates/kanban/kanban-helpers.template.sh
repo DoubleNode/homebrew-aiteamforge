@@ -2218,11 +2218,25 @@ kb-pause() {
 #       "classification":  "BOUND" | "ORPHANED"
 #     }
 #
-#   BOUND    = lastKnownWindow resolved to a tmux window that is alive right now.
-#   ORPHANED = in_progress but no live tmux window backs it -- dead pointer,
-#              no pointer at all (liveness cannot be confirmed), or the whole
-#              tmux server is down (the universal post-crash case: everything
-#              is ORPHANED).
+#   BOUND    = lastKnownWindow resolved to a tmux window that (a) is alive
+#              right now on a REACHABLE socket -- see the socket-resolution
+#              ladder on _kb_tmux_live_window_ids below (XACA-0830 Defect A)
+#              -- AND (b) has a live Claude process running in at least one
+#              of its panes (XACA-0830 Defect B: a window that merely still
+#              EXISTS -- e.g. Claude was killed by jetsam and the pane
+#              dropped to an idle shell prompt -- no longer counts).
+#   ORPHANED = in_progress but no live-and-Claude-backed tmux window backs
+#              it -- dead pointer, no pointer at all, a window that exists
+#              but has no live Claude process in it (Defect B), or every
+#              socket the resolution ladder tried was genuinely UNREACHABLE
+#              (tmux missing, or truly nothing answered -- the real
+#              post-crash case, NOT merely "the caller had no ambient
+#              $TMUX", which was Defect A's actual failure mode pre-XACA-0830).
+#              UNREACHABLE and REACHABLE-but-empty are now DISTINGUISHABLE
+#              internally via _kb_tmux_live_window_ids's return code (see
+#              below) even though both still classify ORPHANED here today --
+#              conflating them silently is exactly what let Defect A hide
+#              undetected for so long.
 #
 #   lastKnownWindow resolution priority per item:
 #     1. the item/subitem's own .worktreeWindowId field (persistent -- lives
@@ -2232,36 +2246,573 @@ kb-pause() {
 #        worktreeWindowId existed).
 # ----------------------------------------------------------------------------
 
-# Internal: emit the set of LIVE tmux window keys ("terminal:window_name",
-# the XACA-0668 stable window-id) for a given team, one per line. Reverses
-# the SAME session-name convention _kb_detect_context uses to derive
+# Internal: does ANY pid in whitespace-separated pane-pid list "$1" have a
+# live Claude process among its descendants? (XACA-0830 Defect B /
+# subitem 004.) Multi-pane windows: ANY pane running Claude makes the
+# window live -- a pane layout can split a window into a Claude pane plus
+# scratch/log panes, and the window is genuinely "in use" as long as one of
+# them is Claude. That is a deliberate choice, documented here rather than
+# picked silently.
+#
+# Liveness is determined by walking each pane's process DESCENDANTS, not by
+# trusting #{pane_current_command} alone -- verified live on this machine
+# (2026-07-29): a real academy Claude pane's OWN #{pane_current_command}
+# reports a bare version string (e.g. "2.1.220"), never the literal string
+# "claude", while `ps -o comm=` on that same pane's pane_pid's CHILD process
+# shows COMM=claude. The shell in the pane (pane_pid) is the parent; Claude
+# is a child (occasionally a grandchild, behind a wrapper) of it. A plain
+# idle shell pane (verified against a real academy pane with nothing but a
+# zsh prompt running in it) has zero such descendants.
+#
+# XACA-0830-004 PERFORMANCE (reopened a second time -- measured, not
+# guessed: academy's 17 windows cost 17 `ps` forks and 17 `tmux list-panes`
+# calls before this fix, ~9.8s just for _kb_tmux_live_window_ids, blowing
+# past lcars-ui/server.py's 20s subprocess timeout on a slower run). This
+# function no longer shells out to `tmux list-panes` itself, and
+# _kb_pid_has_claude_descendant (below) no longer takes its own `ps`
+# snapshot. Both now read PRE-BUILT, dynamically-scoped state --
+# `_kb_tlwi_comm_of` / `_kb_tlwi_args_of` / `_kb_tlwi_children_map` /
+# `_kb_tlwi_assume_live` -- that _kb_tmux_live_window_ids builds EXACTLY
+# ONCE per call (one `tmux list-panes -a` for every pane on the whole
+# socket, one `ps -eo ...` snapshot for the whole process table) and leaves
+# in scope for this function and _kb_pid_has_claude_descendant via zsh's
+# dynamic `local` scoping: those four names are declared `local` in
+# _kb_tmux_live_window_ids and deliberately NEVER re-declared in this
+# function or in _kb_pid_has_claude_descendant, so the whole call chain
+# shares the SAME instances instead of re-fetching them per pane. See
+# _kb_tmux_live_window_ids for where they're built and the TIE-BREAK logic
+# (unchanged in spirit, just evaluated once per call instead of once per
+# pane): if the snapshot/enumeration tooling was unavailable or failed,
+# `_kb_tlwi_assume_live=1` and this function returns "live" immediately
+# without touching the (empty) maps.
+_kb_tmux_window_has_live_claude() {
+    local pane_pids_str="${1-}"
+    (( _kb_tlwi_assume_live )) && return 0   # tooling unavailable this call -> assume live, see TIE-BREAK on _kb_tmux_live_window_ids
+
+    local pane_pid
+    for pane_pid in ${=pane_pids_str}; do
+        [[ -n "$pane_pid" ]] || continue
+        _kb_pid_has_claude_descendant "$pane_pid" && return 0
+    done
+    return 1   # every pane in this window checked against the shared snapshot, no Claude anywhere -> genuinely dead
+}
+
+# Internal: bounded breadth-first scan of pid "$1"'s process descendants
+# (depth- and visited-count-capped -- defends against pid-recycling cycles
+# on a long-lived box) for a process that IS Claude. Checks the root pid
+# itself too (harmless, and covers the edge case where Claude runs directly
+# as the pane's foreground process with no wrapper shell in between).
+#
+# CHILD ENUMERATION -- `ps`, NOT `pgrep -P` (XACA-0830-004, reopened after
+# review). The original implementation walked the tree with `pgrep -P
+# "$pid"` per visited node. That has a reproducible ANCESTRY BLIND SPOT:
+# `pgrep -P <pid>` returns EMPTY for a live child that is the CALLING
+# process's own ancestor. Verified directly on this machine (5 consecutive
+# samples, not a race):
+#     pgrep -P 80878                       -> []            (WRONG -- misses it)
+#     ps -eo pid=,ppid= | awk '$2==80878'  -> 90295          (correct)
+#     ps -o comm=,args= -p 90295           -> claude / claude --permission-mode ...
+#     ancestry: 90295 (claude) is a direct PARENT of the very process
+#     evaluating this classifier (the classifier is running AS a Claude
+#     Code session's subagent, whose ancestry chain runs back through that
+#     same pane's Claude process).
+# The practical consequence: `kb-recover`/`kb-sweep` invoked from a user's
+# OWN pane would misclassify THAT pane's OWN, currently-alive window as
+# ORPHANED -- Defect A reintroduced in the single most common invocation
+# shape there is, and the exact failure direction to guard against (a
+# broken check returning the reassuring-looking answer). `ps -eo` has no
+# such blind spot -- confirmed it sees 90295 as 80878's child correctly.
+#
+# Fix (first pass): take ONE system-wide `ps -eo pid=,ppid=,comm=,args=`
+# snapshot per call (not one ps/pgrep invocation per visited node), parse
+# it into a ppid -> children-pid-list map plus per-pid comm/args lookups,
+# and walk that in memory. `ps` reliably keeps one process per output line
+# even when a process's own argv contains embedded newlines (verified
+# against a real Claude process carrying a multi-line --append-system-
+# prompt: `ps -eo ...` line count matched `ps -eo pid= | wc -l` exactly,
+# and the reconstructed args value's byte length matched a direct
+# single-pid `ps -o args= -p <pid>` almost exactly) -- so `${(f)$(...)}`
+# newline-splitting the snapshot is safe.
+#
+# PERFORMANCE (second pass, XACA-0830-004 reopened again): "per call" above
+# used to mean "per PANE" -- this function originally took its OWN `ps`
+# snapshot every time it ran, and it runs once per pane. Measured on
+# academy (17 windows): 17 `ps` forks, ~0.16s each, ~9.8s just for
+# _kb_tmux_live_window_ids -- on a slower run this exceeded
+# lcars-ui/server.py's 20s subprocess timeout outright, so the very
+# consumer this whole ticket exists for could no longer call it
+# successfully. The snapshot is now taken ONCE per _kb_tmux_live_window_ids
+# CALL (not per pane) and shared down the call chain via zsh dynamic
+# scoping -- see the comment on `_kb_tmux_window_has_live_claude` above and
+# `_kb_tmux_live_window_ids` below for where `_kb_tlwi_comm_of` /
+# `_kb_tlwi_args_of` / `_kb_tlwi_children_map` / `_kb_tlwi_assume_live` are
+# actually built. This function is now PURE in-memory BFS -- it makes no
+# `ps`/`pgrep`/`tmux` calls of its own at all. The snapshot is a
+# POINT-IN-TIME view taken once at the start of the call; a pane whose
+# Claude process dies mid-scan (between the snapshot and this walk) is
+# classified from that snapshot, not from live state a few milliseconds
+# later -- an acceptable, deliberate tradeoff for a read-only classifier
+# that runs on a period poll, not a hard real-time liveness guarantee.
+#
+# Match rule (unchanged from the original design -- review confirmed this
+# half is sound; the bug was purely in enumeration, not matching): `comm`
+# exactly "claude" (the observed shape of a real running Claude Code
+# process -- verified live against real academy panes: ps -o comm= reports
+# exactly "claude" for the actual CLI process, a CHILD of the pane's shell)
+# OR, scanning the full command line (`ps -o args=`), any whitespace-
+# separated token whose PATH BASENAME is exactly "claude". The second half
+# exists because `comm` alone is not reliable across every process shape:
+# (a) tmux's own #{pane_current_command} can report something else
+# entirely for a live Claude pane (observed, independently reconfirmed:
+# `pane_cmd=2.1.220` on real live Claude panes, never the literal word
+# "claude") -- this function deliberately does NOT use
+# #{pane_current_command} at all, only `ps`, for that reason; and (b) an
+# interpreted-script wrapper around the real binary execs a shell whose OWN
+# `comm` is the interpreter ("sh"/"bash"), never "claude", while the
+# script's path is only visible in that same process's argv (e.g.
+# ARGS="/bin/sh /path/to/bin/claude"). Matching on basename (not a raw
+# substring) keeps this scoped and precise: it requires a literal path
+# segment/argv token equal to "claude", not merely a command line that
+# mentions the word -- and the whole scan stays PID-scoped to this pane's
+# own descendant tree via the ppid map, never a system-wide process-name
+# search (a system-wide `pgrep -f claude` would false-positive on Claude
+# Desktop's own helper processes, unrelated `claude` CLI invocations
+# elsewhere on the box, etc. -- see real output captured during XACA-0830
+# verification).
+_kb_pid_has_claude_descendant() {
+    local root_pid="${1-}"
+    [[ -n "$root_pid" ]] || return 1
+    (( _kb_tlwi_assume_live )) && return 0   # tooling unavailable this call -> assume live, see TIE-BREAK above
+
+    # BFS over the CALLER-BUILT, dynamically-scoped
+    # `_kb_tlwi_children_map`/`_kb_tlwi_comm_of`/`_kb_tlwi_args_of` (no
+    # ps/pgrep/tmux calls in this function at all -- see the PERFORMANCE
+    # comment above). Loop-body locals declared once, before the loop.
+    local -a queue=("$root_pid") next_queue cmd_tokens
+    local -i depth=0 visited=0 match
+    local cur_pid tok child_pid
+
+    while (( ${#queue[@]} > 0 && depth < 6 && visited < 200 )); do
+        next_queue=()
+        for cur_pid in "${queue[@]}"; do
+            [[ -n "$cur_pid" ]] || continue
+            (( visited++ ))
+
+            [[ "${_kb_tlwi_comm_of[$cur_pid]-}" == "claude" ]] && return 0
+
+            match=0
+            cmd_tokens=(${=${_kb_tlwi_args_of[$cur_pid]-}})
+            for tok in "${cmd_tokens[@]}"; do
+                [[ "${tok:t}" == "claude" ]] && { match=1; break }
+            done
+            (( match )) && return 0
+
+            for child_pid in ${=${_kb_tlwi_children_map[$cur_pid]-}}; do
+                next_queue+=("$child_pid")
+            done
+        done
+        queue=("${next_queue[@]}")
+        (( depth++ ))
+    done
+    return 1
+}
+
+# Internal (XACA-0830-002): run a single tmux probe under a bounded wall-
+# clock deadline, so a socket file that accepts the connection but never
+# speaks tmux's protocol (a hostile or merely-foreign listener bound to a
+# path under tmux's socket dir) cannot hang the classifier forever. Rung 4
+# of the ladder below connects to EVERY socket file it finds -- there is no
+# guarantee any of them is actually a tmux server -- and a plain
+# `tmux -S <sock> list-sessions` against such a listener blocks
+# indefinitely: confirmed live with a Python AF_UNIX listener that binds +
+# listens but never responds (see retro). Rungs 2/3 carry the identical
+# exposure (an inherited $TMUX_SOCKET/$TMUX can point anywhere), so every
+# probe in the ladder goes through here, not just rung 4's.
+#
+# No dependency on `timeout`/`gtimeout` -- macOS ships neither by default.
+# Implemented with zsh's own `zselect` module (zsh/zselect, part of every
+# zsh 5.x used here): a sibling watchdog subshell blocks in zsh's event
+# loop via `zselect -t <centiseconds>` (no external exec) and SIGKILLs the
+# probe if it's still running when the deadline hits. Whichever side
+# finishes first wins; the loser is reaped immediately either way -- no
+# process is left resident (verified via `ps` count before/after, see
+# retro "constraint 4").
+#
+# TRI-STATE PRESERVED: a timed-out probe returns a KILLED (nonzero, 128+9)
+# exit code -- the exact same shape a real "connection refused" already
+# produces. Every call site's existing `(( $? == 0 )) || continue`
+# fall-through therefore needs no changes: a timeout degrades into "try the
+# next rung", never into "reached, and confirmed empty". Mistaking a
+# timeout for a confirmed-empty REACHABLE result would reintroduce Defect A
+# in a new costume -- see the TRI-STATE CONTRACT above
+# _kb_tmux_live_window_ids.
+#
+# Usage: _kb_tmux_bounded_probe <timeout_centiseconds> <command...>
+_kb_tmux_bounded_probe() {
+    local -i timeout_cs="${1:-0}"
+    (( timeout_cs > 0 )) || return 1
+    shift
+    (( $# > 0 )) || return 1
+
+    if [[ -z "${_KB_TLWI_ZSELECT_LOADED:-}" ]]; then
+        zmodload zsh/zselect 2>/dev/null
+        typeset -g _KB_TLWI_ZSELECT_LOADED=1
+    fi
+
+    local tmpfile
+    tmpfile=$(mktemp "${TMPDIR:-/tmp}/kb-tmux-probe.XXXXXX" 2>/dev/null) || return 1
+
+    "$@" >"$tmpfile" 2>/dev/null &
+    local -i cmd_pid=$!
+
+    ( zselect -t "$timeout_cs" 2>/dev/null; kill -KILL "$cmd_pid" 2>/dev/null ) &
+    local -i watchdog_pid=$!
+
+    wait "$cmd_pid" 2>/dev/null
+    local -i rc=$?
+
+    kill -KILL "$watchdog_pid" 2>/dev/null
+    wait "$watchdog_pid" 2>/dev/null
+
+    cat "$tmpfile" 2>/dev/null
+    rm -f "$tmpfile" 2>/dev/null
+    return $rc
+}
+
+# Internal: resolve which tmux SOCKET actually hosts <team>'s sessions, then
+# emit the set of LIVE, Claude-backed tmux window keys ("terminal:window_name",
+# the XACA-0668 stable window-id) for that team, one per line. Reverses the
+# SAME session-name convention _kb_detect_context uses to derive
 # team/terminal: session = "<team>-<terminal>" (terminal = suffix after the
 # LAST dash; team = everything before it -- correct even when team itself
 # contains dashes, e.g. "freelance-doublenode-starwords").
 #
-# Degrades to silent empty output (never an error) when: tmux isn't
-# installed, the tmux server isn't running (the universal post-crash state),
-# or no session in the running server belongs to this team. Callers must
-# treat "no lines emitted" as "nothing is live", not as failure.
+# Usage: _kb_tmux_live_window_ids <team> [explicit_socket]
+#   team             required.
+#   explicit_socket  optional -L socket NAME. A caller that already knows
+#                     which socket hosts this team can short-circuit the
+#                     whole resolution ladder below by passing it (rung 1).
+#
+# SOCKET RESOLUTION LADDER (XACA-0830 Defect A). Teams run on NAMED tmux
+# sockets, never the default one -- and parametric teams (runtime slug e.g.
+# "legal-coparenting") run on their FAMILY socket ("legal"), not a socket
+# matching the slug. A bare, unqualified `tmux` command only resolves
+# correctly from INSIDE a live pane (where $TMUX tells it which socket);
+# any other caller (cron, a detached subagent shell, kb-recover run from a
+# plain terminal) used to hit tmux's default socket, find nothing, and
+# report every in_progress item ORPHANED -- Defect A. The ladder below is
+# tried in order until one candidate BOTH connects AND hosts a session
+# matching this team's predicate:
+#   1. $explicit_socket (caller-supplied -L name)
+#   2. $TMUX_SOCKET, if set -- every team's *-startup.sh exports this
+#      before opening any tmux tab/window.
+#   3. the socket embedded in $TMUX itself (path before the first comma --
+#      $TMUX is e.g. "/private/tmp/tmux-502/academy,80261,2")
+#   4. scan every socket file in tmux's socket dir and ask each one "do you
+#      host a session for this team" (the genuinely-detached case: no tmux
+#      env at all -- launchd, cron, CI, a Claude Code hook)
+#   5. bare tmux (default socket) -- last resort / backward compat, same as
+#      the pre-XACA-0830 behavior.
+#
+# Rungs 2 and 3 are UNVERIFIED TRUST -- an inherited $TMUX_SOCKET/$TMUX can
+# point at a real, reachable socket that hosts a DIFFERENT team (e.g. a
+# subagent spawned from an academy pane, asked to classify team "ios"). If a
+# candidate socket is reachable but hosts no session matching this team's
+# predicate, we FALL THROUGH to the next rung rather than concluding
+# "nothing is live" -- trusting a set-but-wrong env var would just
+# reproduce Defect A in a new costume.
+#
+# RETURN-CODE / TRI-STATE CONTRACT:
+#   0  REACHABLE.  At least one candidate socket in the ladder was
+#      successfully queried (`tmux ... list-sessions` succeeded). Stdout is
+#      the (possibly EMPTY) set of live+Claude-backed window ids. Empty
+#      stdout + exit 0 means "I looked, and nothing is live" -- a confirmed
+#      negative, not a failure to look.
+#   1  UNREACHABLE. tmux isn't installed, OR every rung in the ladder failed
+#      to connect to a socket at all. Stdout is empty. Callers must NOT
+#      treat this the same as a confirmed-empty REACHABLE result when they
+#      care about the distinction (see _kb_reconcile_inprogress below) --
+#      conflating the two is precisely what let Defect A hide for so long.
+#      This never raises an error; it degrades quietly ($TMUX-strict-mode
+#      safe: no unset-variable references, no non-zero exit surprises for
+#      set -u callers).
 _kb_tmux_live_window_ids() {
     local team="${1-}"
-    [[ -n "$team" ]] || return 0
+    local explicit_socket="${2-}"
+    [[ -n "$team" ]] || return 1
+    command -v tmux >/dev/null 2>&1 || return 1
 
-    command -v tmux >/dev/null 2>&1 || return 0
-    tmux list-sessions >/dev/null 2>&1 || return 0
+    # Build the candidate ladder as parallel flag/value arrays (rungs 1-5,
+    # in priority order). Declared once, not inside any loop.
+    local -a cand_flags=() cand_values=()
 
-    local session sess_terminal sess_team wname
-    tmux list-sessions -F '#{session_name}' 2>/dev/null | while IFS= read -r session; do
-        [[ -n "$session" ]] || continue
-        sess_terminal="${session##*-}"
-        sess_team="${session%-*}"
-        [[ "$sess_team" == "$team" ]] || continue
+    [[ -n "$explicit_socket" ]] && { cand_flags+=("-L"); cand_values+=("$explicit_socket") }
+    [[ -n "${TMUX_SOCKET-}" ]] && { cand_flags+=("-L"); cand_values+=("$TMUX_SOCKET") }
+    if [[ -n "${TMUX-}" ]]; then
+        local tmux_sock_path="${TMUX%%,*}"
+        [[ -n "$tmux_sock_path" ]] && { cand_flags+=("-S"); cand_values+=("$tmux_sock_path") }
+    fi
 
-        tmux list-windows -t "$session" -F '#{window_name}' 2>/dev/null | while IFS= read -r wname; do
-            [[ -n "$wname" ]] || continue
-            printf '%s:%s\n' "$sess_terminal" "$wname"
+    # Rung 4: every live socket in tmux's socket dir -- the genuinely-
+    # detached case (no tmux env at all: launchd, cron, CI, a hook). Zero
+    # config, no team->family mapping, no path resolution across dev-vs-
+    # consumer installs; generalizes the existing session-name predicate
+    # instead of adding a second source of truth (see XACA-0830-007 recon:
+    # a first-dash-split family mapping is an unenforced coincidence of
+    # today's roster and was explicitly rejected as the primary mechanism).
+    #
+    # rung4_first_idx/rung4_last_idx (XACA-0830-002) bracket this rung's
+    # slice of the flattened cand_flags/cand_values arrays so the main loop
+    # below can enforce an OVERALL wall-clock deadline across the whole
+    # rung-4 scan, not just a per-socket one -- see the "Budget arithmetic"
+    # comment on that loop for why a per-probe cap alone is not enough.
+    local -i rung4_first_idx=$(( ${#cand_flags[@]} + 1 ))
+    local tmux_sockdir
+    tmux_sockdir="${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)"
+    if [[ -d "$tmux_sockdir" ]]; then
+        setopt LOCAL_OPTIONS NO_NOMATCH BARE_GLOB_QUAL
+        local -a tmux_sockfiles
+        local tmux_sockfile
+        tmux_sockfiles=("${tmux_sockdir}"/*(N))
+        for tmux_sockfile in "${tmux_sockfiles[@]}"; do
+            [[ -S "$tmux_sockfile" ]] || continue
+            cand_flags+=("-S"); cand_values+=("$tmux_sockfile")
         done
+    fi
+    local -i rung4_last_idx=${#cand_flags[@]}   # < rung4_first_idx means zero rung-4 candidates found
+
+    cand_flags+=("")   # rung 5: bare tmux, last resort / backward compat
+    cand_values+=("")
+
+    # XACA-0830-002 BUDGET ARITHMETIC (Defect A re-emergence: rung-4 hang).
+    # lcars-ui/server.py calls this whole function with a 20s subprocess
+    # timeout. Every probe below is bounded via _kb_tmux_bounded_probe (see
+    # that function's header for the mechanism) at PROBE_TIMEOUT_CS
+    # centiseconds each, and the rung-4 socket-dir scan additionally carries
+    # its own overall deadline (RUNG4_DEADLINE_S) so a directory full of
+    # hostile/foreign sockets can't multiply (per-socket cap) x (socket
+    # count) into a budget blowout on its own -- this machine currently has
+    # 16 socket files; tomorrow it could have 40.
+    #   PROBE_TIMEOUT_CS  = 150   (1.5s)  -- generous for a real tmux server
+    #                                        under load; only the
+    #                                        pathological "connected but
+    #                                        never responds" case ever pays
+    #                                        this in full (a dead socket /
+    #                                        no listener fails in ~0s, well
+    #                                        under the cap -- see
+    #                                        Verification B).
+    #   RUNG4_DEADLINE_S  = 6           -- caps the WHOLE rung-4 scan
+    #                                        regardless of socket count.
+    # Worst case: rungs 1-3 (up to 3 candidates, each capped) + rung 4
+    # (capped as a whole) + rung 5 (1 candidate, capped) + the one
+    # post-match list-panes probe (also capped) =
+    #   (3 * 1.5s) + 6s + 1.5s + 1.5s = 13.5s
+    # -- comfortably inside the 20s budget (6.5s margin for the ps snapshot,
+    # JSON serialization, and everything else _kb_reconcile_inprogress /
+    # the caller does around this call).
+    local -i _kb_tlwi_probe_timeout_cs=${KB_TMUX_PROBE_TIMEOUT_CS:-150}
+    local -i _kb_tlwi_rung4_deadline_s=${KB_TMUX_RUNG4_DEADLINE_S:-6}
+    local -i _kb_tlwi_rung4_scan_start=0
+
+    # Loop-body locals declared ONCE before the loop (zsh: re-declaring
+    # `local` inside a loop body can leak the assignment expression to
+    # stdout on some zsh versions -- see kanban-helpers.sh house style).
+    local -i reached=1   # flips to 0 the moment ANY candidate is queried successfully
+    local -i i any_session_for_team
+    local flag value session sess_terminal sess_team wname
+    local -a tmux_args sessions windows
+
+    # XACA-0830-004 PERFORMANCE (reopened a second time): once a candidate
+    # socket is confirmed to host this team (any_session_for_team=1), the
+    # OLD code called `list-windows` once per matching session and then
+    # `list-panes` once per window inside THAT -- measured on academy (5
+    # sessions, 17 windows): 5 list-windows + 17 list-panes + 17 per-pane
+    # `ps` snapshots (see _kb_pid_has_claude_descendant) = ~38 tmux
+    # invocations + 17 ps forks per call, ~9.8s, occasionally exceeding
+    # lcars-ui/server.py's 20s subprocess timeout outright. Fixed by
+    # collapsing ALL of that into: one `tmux list-panes -a` (every pane on
+    # the whole socket, in one call -- also removes the need for a separate
+    # `list-windows` call, since list-panes -a already reports each pane's
+    # session/window name) + one `ps -eo ...` snapshot, both taken once
+    # below and shared down the call chain via zsh dynamic `local` scoping
+    # (`_kb_tlwi_*` -- see _kb_tmux_window_has_live_claude /
+    # _kb_pid_has_claude_descendant above, which deliberately do NOT
+    # re-declare these names so they see this exact instance). Declared
+    # here, once, before the candidate loop -- populated only for the ONE
+    # candidate that ends up matching (this loop returns immediately after,
+    # so it can never populate them twice).
+    local -A _kb_tlwi_comm_of _kb_tlwi_args_of _kb_tlwi_children_map
+    local -i _kb_tlwi_assume_live=0
+    local -A window_panes_map
+    local -a panes_raw ps_snapshot ps_words
+    local -i panes_rc
+    local pane_line pane_combined pane_pid pane_session pane_window
+    local pane_sess_terminal pane_sess_team window_key
+    local ps_line ps_pid ps_ppid ps_comm
+
+    for (( i = 1; i <= ${#cand_flags[@]}; i++ )); do
+        # Rung-4 overall deadline (XACA-0830-002, see BUDGET ARITHMETIC
+        # above): start the clock the moment we enter rung 4's index range,
+        # and once RUNG4_DEADLINE_S has elapsed, skip straight to rung 5
+        # instead of probing any further rung-4 candidates one at a time.
+        # $SECONDS is a zsh special parameter (elapsed whole seconds since
+        # shell start) -- no fork required to read it, unlike `date`.
+        if (( rung4_last_idx >= rung4_first_idx && i == rung4_first_idx )); then
+            _kb_tlwi_rung4_scan_start=$SECONDS
+        fi
+        if (( _kb_tlwi_rung4_scan_start > 0 && i >= rung4_first_idx && i <= rung4_last_idx )); then
+            if (( SECONDS - _kb_tlwi_rung4_scan_start >= _kb_tlwi_rung4_deadline_s )); then
+                i=rung4_last_idx
+                continue
+            fi
+        fi
+
+        flag="${cand_flags[i]}"
+        value="${cand_values[i]}"
+        tmux_args=()
+        [[ -n "$flag" ]] && tmux_args=("$flag" "$value")
+
+        sessions=("${(f)$(_kb_tmux_bounded_probe "$_kb_tlwi_probe_timeout_cs" tmux "${tmux_args[@]}" list-sessions -F '#{session_name}')}")
+        (( $? == 0 )) || continue   # this candidate is unreachable (or timed out) -- try the next rung
+        reached=0
+
+        any_session_for_team=0
+        for session in "${sessions[@]}"; do
+            [[ -n "$session" ]] || continue
+            sess_team="${session%-*}"
+            [[ "$sess_team" == "$team" ]] || continue
+            any_session_for_team=1
+        done
+
+        if (( any_session_for_team )); then
+            # ONE call for every pane on this whole socket (all sessions,
+            # not just this team's -- cheap and avoids an extra per-session
+            # round trip; irrelevant panes are filtered out below by the
+            # same session-name predicate used everywhere else in this
+            # function).
+            panes_raw=("${(f)$(_kb_tmux_bounded_probe "$_kb_tlwi_probe_timeout_cs" tmux "${tmux_args[@]}" list-panes -a -F '#{session_name}:#{window_name} #{pane_pid}')}")
+            panes_rc=$?
+
+            window_panes_map=()
+            if (( panes_rc == 0 )); then
+                for pane_line in "${panes_raw[@]}"; do
+                    [[ -n "$pane_line" ]] || continue
+                    pane_combined="" pane_pid=""
+                    read -r pane_combined pane_pid <<< "$pane_line"
+                    [[ -n "$pane_combined" && -n "$pane_pid" ]] || continue
+                    pane_session="${pane_combined%%:*}"
+                    pane_window="${pane_combined#*:}"
+                    pane_sess_terminal="${pane_session##*-}"
+                    pane_sess_team="${pane_session%-*}"
+                    [[ "$pane_sess_team" == "$team" ]] || continue
+                    # NOTE (real zsh gotcha, caught in XACA-0830-004
+                    # verification): the subscript must be a BARE variable
+                    # reference here, NOT a quoted `"${a}:${b}"` expression
+                    # inline in the assignment -- `map["${a}:${b}"]=x` on
+                    # this zsh (5.9) stores the LITERAL quote characters as
+                    # part of the key (verified via `typeset -p`), so every
+                    # later lookup/iteration comes back with stray `"..."`
+                    # wrapped around the key. Compute the key into its own
+                    # variable first, then use it unquoted as the subscript.
+                    window_key="${pane_sess_terminal}:${pane_window}"
+                    window_panes_map[$window_key]+="$pane_pid "
+                done
+            fi
+
+            # Build the shared process snapshot ONCE for this call. Point-
+            # in-time: taken here, before the BFS walks below, so a pane
+            # whose Claude process dies between this snapshot and the walk
+            # is classified from the snapshot -- acceptable for a
+            # periodic-poll classifier, not a hard real-time guarantee.
+            _kb_tlwi_assume_live=0
+            _kb_tlwi_comm_of=() _kb_tlwi_args_of=() _kb_tlwi_children_map=()
+            if (( panes_rc != 0 )); then
+                _kb_tlwi_assume_live=1   # couldn't even enumerate panes -> assume live, see TIE-BREAK
+            elif ! command -v ps >/dev/null 2>&1; then
+                _kb_tlwi_assume_live=1   # tooling unavailable -> assume live, see TIE-BREAK
+            else
+                ps_snapshot=("${(f)$(ps -eo pid=,ppid=,comm=,args= 2>/dev/null)}")
+                if [[ -z "${ps_snapshot[1]-}" ]]; then
+                    _kb_tlwi_assume_live=1   # ps produced nothing usable -> assume live, see TIE-BREAK
+                else
+                    # PERFORMANCE (measured, XACA-0830-004 3rd pass): parsing
+                    # this loop with `read -r ... <<< "$ps_line"` cost ~0.26s
+                    # for a ~1150-line system-wide snapshot on this machine
+                    # -- that single loop was the dominant remaining cost
+                    # after hoisting the ps call itself (profiled: >80% of
+                    # total call time). `read` here forks/sets up a
+                    # here-string per call; zsh's own IFS word-splitting
+                    # (`${=line}` into an array) parses the identical fields
+                    # with no separate builtin invocation and measured
+                    # ~27x faster (0.01s for the same 1150 lines) -- pure
+                    # parameter expansion, no `read`. `ps_words[4,-1]`
+                    # rejoined is stored as "args"; exact original
+                    # inter-token spacing doesn't matter because
+                    # _kb_pid_has_claude_descendant re-splits it again on
+                    # lookup anyway (only a basename-equality check per
+                    # token, order/spacing-independent).
+                    for ps_line in "${ps_snapshot[@]}"; do
+                        [[ -n "$ps_line" ]] || continue
+                        ps_words=(${=ps_line})
+                        (( ${#ps_words[@]} >= 2 )) || continue
+                        ps_pid="${ps_words[1]}"
+                        ps_ppid="${ps_words[2]}"
+                        [[ "$ps_pid" == <-> && "$ps_ppid" == <-> ]] || continue   # skip anything not cleanly "pid ppid ..."
+                        ps_comm="${ps_words[3]-}"
+                        _kb_tlwi_children_map[$ps_ppid]+="$ps_pid "
+                        _kb_tlwi_comm_of[$ps_pid]="$ps_comm"
+                        if (( ${#ps_words[@]} >= 4 )); then
+                            _kb_tlwi_args_of[$ps_pid]="${(j: :)ps_words[4,-1]}"
+                        else
+                            _kb_tlwi_args_of[$ps_pid]=""
+                        fi
+                    done
+                fi
+            fi
+
+            if (( panes_rc != 0 )); then
+                # Extremely rare: list-sessions on this socket just
+                # succeeded, but the immediately-following list-panes -a
+                # failed. We still know WHICH sessions match (from the
+                # loop above) but have no pane data -- fall back to a
+                # plain per-session list-windows call, bounded to this one
+                # already-confirmed socket, purely to learn window NAMES so
+                # they can still be emitted. Liveness is "assume live" for
+                # all of them via _kb_tlwi_assume_live above, matching the
+                # pre-existing per-window tie-break for this failure shape.
+                for session in "${sessions[@]}"; do
+                    [[ -n "$session" ]] || continue
+                    sess_terminal="${session##*-}"
+                    sess_team="${session%-*}"
+                    [[ "$sess_team" == "$team" ]] || continue
+                    windows=("${(f)$(_kb_tmux_bounded_probe "$_kb_tlwi_probe_timeout_cs" tmux "${tmux_args[@]}" list-windows -t "$session" -F '#{window_name}')}")
+                    for wname in "${windows[@]}"; do
+                        [[ -n "$wname" ]] || continue
+                        printf '%s:%s\n' "$sess_terminal" "$wname"
+                    done
+                done
+            else
+                for window_key in "${(k)window_panes_map[@]}"; do
+                    _kb_tmux_window_has_live_claude "${window_panes_map[$window_key]}" || continue
+                    printf '%s\n' "$window_key"
+                done
+            fi
+        fi
+
+        # This candidate socket genuinely hosts (a) session(s) for this
+        # team -- it IS the team's socket, whether or not any window on it
+        # turned out to be live+Claude-backed. Stop the ladder here; do NOT
+        # keep trying further rungs (that would risk picking up an
+        # unrelated team's stray session on a later candidate).
+        (( any_session_for_team )) && return 0
+        # else: reachable but hosts none of this team's sessions -- fall
+        # through to the next rung rather than concluding "nothing is
+        # live" (see UNVERIFIED TRUST above).
     done
+
+    # Exhausted every rung without finding a socket that hosts this team.
+    (( reached == 0 )) && return 0   # REACHABLE somewhere, confirmed empty for this team
+    return 1                          # UNREACHABLE: nothing in the ladder ever connected
 }
 
 # Internal: resolve a plan-doc directory for an item/subitem id IF it exists
@@ -2343,11 +2894,34 @@ _kb_reconcile_inprogress() {
         return 0
     fi
 
-    # Live tmux window set for this team. Empty is a valid, expected result
-    # (tmux server down post-crash) -- NOT a fatal condition; it just means
-    # every candidate below classifies ORPHANED.
-    local live_windows
+    # Live, Claude-backed tmux window set for this team (XACA-0830: already
+    # resolved through the socket ladder and filtered by process liveness --
+    # see _kb_tmux_live_window_ids). Empty is a valid, expected result and
+    # NOT a fatal condition -- but it now has two genuinely distinct causes,
+    # DISTINGUISHABLE via the function's own return code even though this
+    # reconciler maps both to the same ORPHANED classification below today:
+    #   rc=0 (REACHABLE), empty output -- we successfully reached a tmux
+    #        socket that either belongs to this team or was the last rung
+    #        tried, and confirmed nothing is live for this team right now.
+    #        This is the real post-crash case (tmux server down, or every
+    #        Claude for this team has genuinely exited).
+    #   rc=1 (UNREACHABLE) -- nothing in the whole XACA-0830 socket-
+    #        resolution ladder could be reached at all (tmux missing, or a
+    #        deeply broken environment). Conflating this with the confirmed-
+    #        empty case above -- treating "I could not look" the same as "I
+    #        looked and it's clear" -- is EXACTLY what let Defect A hide
+    #        undetected for so long: a bare `tmux` call with no ambient
+    #        $TMUX used to silently degrade into this bucket even when a
+    #        real, reachable, team-owned socket existed. $live_reachable is
+    #        captured here so a future non-breaking consumer (e.g. an LCARS
+    #        "liveness check degraded" banner) can key off it without
+    #        touching the STABLE output contract documented above -- it is
+    #        deliberately NOT added as a JSON field on the per-item result
+    #        object in this pass.
+    local live_windows live_reachable live_rc
     live_windows=$(_kb_tmux_live_window_ids "$team")
+    live_rc=$?
+    [[ $live_rc -eq 0 ]] && live_reachable=1 || live_reachable=0
 
     # Loop-body locals declared ONCE before the loop (zsh: re-declaring
     # `local` inside a loop body can leak the assignment expression to

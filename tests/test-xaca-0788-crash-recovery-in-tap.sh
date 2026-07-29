@@ -21,6 +21,14 @@
 # never mutates the board or tmux, and emits "[]" (not an error) for a
 # missing/unreadable board.
 #
+# XACA-0830 (ported subsequently): "window alive" now REQUIRES a live Claude
+# process among the pane's descendants -- a window that merely still exists
+# (Claude killed by jetsam, pane idling at a shell prompt) no longer counts
+# as BOUND. The C0/C0b fixture below runs a fake `claude` process in the
+# pane (not a bare shell) to exercise this contract; see the fixture comment
+# near FAKE_BIN_DIR for the technique, mirrored from the canonical
+# tests/test-xaca-0830-tmux-liveness.sh.
+#
 # This suite proves the engine SHIPS and BEHAVES correctly out of the tap
 # template, using the P088 reference technique: a KB_BOARD_FILE-style scratch
 # board (passed directly as the classifier's 2nd positional arg) crossed with a
@@ -115,6 +123,24 @@ fi
 TEST_TMP_DIR="$(cd "$TEST_TMP_DIR" && pwd -P)"
 WORK_DIR="$TEST_TMP_DIR/xaca0788"
 mkdir -p "$WORK_DIR"
+
+# XACA-0830: process-liveness fixture. Since the port, a tmux window that
+# merely EXISTS no longer counts as BOUND -- the classifier now walks the
+# pane's process descendants for a live Claude process (Defect B). A
+# throwaway script literally named `claude` stands in for a live Claude
+# session's foreground process, mirroring the canonical dev-team fixture in
+# tests/test-xaca-0830-tmux-liveness.sh Case A: comm alone is not trusted
+# (a shebang-exec'd script can report its interpreter as `comm`), so the
+# match rule also scans argv tokens for a basename of "claude" -- this
+# script's own invocation path ends in "/claude", satisfying that half of
+# the rule regardless of how `comm` resolves on this OS.
+FAKE_BIN_DIR="$WORK_DIR/bin"
+mkdir -p "$FAKE_BIN_DIR"
+cat > "$FAKE_BIN_DIR/claude" <<'EOF'
+#!/bin/sh
+sleep 600
+EOF
+chmod +x "$FAKE_BIN_DIR/claude"
 
 # A throwaway team slug (contains NO dash, so the "<team>-<terminal>" split is
 # unambiguous) unique to this PID — can never collide with a real fleet session
@@ -232,13 +258,15 @@ cat > "$BOARD" <<'JSON'
 }
 JSON
 
-# Disposable tmux session for the team with a window named "main". Its stable
-# window-id key resolves to "agent:main" (session "<team>-agent" -> terminal
-# "agent"; window name "main"), matching XTST-0001's worktreeWindowId only.
+# Disposable tmux session for the team with a window named "main", running
+# the fake `claude` process (XACA-0830: a plain shell pane no longer counts
+# as live -- see the fixture comment above). Its stable window-id key
+# resolves to "agent:main" (session "<team>-agent" -> terminal "agent";
+# window name "main"), matching XTST-0001's worktreeWindowId only.
 tmux kill-session -t "$SESSION" 2>/dev/null || true
-tmux new-session -d -s "$SESSION" -n main
+tmux new-session -d -s "$SESSION" -n main -x 80 -y 24 "$FAKE_BIN_DIR/claude"
 _SESSION_UP=$(tmux has-session -t "$SESSION" 2>/dev/null && echo 1 || echo 0)
-ok "C0: disposable tmux session '$SESSION' (window 'main') created for the behavioral test" \
+ok "C0: disposable tmux session '$SESSION' (window 'main', live 'claude' process) created for the behavioral test" \
    "$_SESSION_UP" \
    "could not create ephemeral tmux session '$SESSION'"
 
