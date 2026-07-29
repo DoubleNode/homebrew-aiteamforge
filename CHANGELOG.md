@@ -7,6 +7,14 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0830 (round-5) — guard BOTH `ps` snapshots, not just the first.** The two-snapshot change tested
+  only `ps_snapshot`; `ps_snapshot_comm` was unguarded. If the second `ps` returned nothing while the first
+  succeeded, `_kb_tlwi_comm_of` stayed empty — and it is the sole source of `$comm` for both match rules —
+  so every window classified dead while `_kb_tlwi_assume_live` was never armed. Because `list-sessions`
+  had already succeeded, the caller set `live_reachable=1` and SUPPRESSED the "tmux state could not be
+  confirmed" caveat: Defect A with its own warning switched off, violating the file's TRI-STATE CONTRACT.
+  Guard now tests both arrays.
+
 - **XACA-0830 (round-4 re-port) — `_kb_pid_has_claude_descendant` match rule anchored for real.** The
   round-3 rule used a zsh glob whose last two alternatives (`*/claude`, `*/claude[[:space:]]*`) were NOT
   anchored — a leading `*` matches anything, so the rule collapsed back to "the command line mentions a

@@ -3051,7 +3051,22 @@ _kb_tmux_live_window_ids() {
                 # subprocess timeout (re-verified after this change).
                 ps_snapshot=("${(f)$(ps -eo pid=,ppid=,args= 2>/dev/null)}")
                 ps_snapshot_comm=("${(f)$(ps -eo pid=,comm= 2>/dev/null)}")
-                if [[ -z "${ps_snapshot[1]-}" ]]; then
+                # BOTH snapshots must be tested, not just the first. XACA-0830
+                # round-5: the guard originally checked only `ps_snapshot`.
+                # `_kb_tlwi_comm_of` is populated exclusively from
+                # `ps_snapshot_comm`, and it is the sole source of `$comm` for
+                # BOTH match rules -- so if the second `ps` returned nothing
+                # while the first succeeded, the comm loop iterated an empty
+                # array, every lookup missed, `_kb_tlwi_assume_live` was never
+                # armed, and EVERY window classified dead. Worse, the caller
+                # had already succeeded at `list-sessions`/`list-panes`, so
+                # `_kb_tmux_live_window_ids` returned 0 and `kb-recover` set
+                # live_reachable=1 -- SUPPRESSING the "tmux state could not be
+                # confirmed" caveat while reporting everything ORPHANED. That
+                # is Defect A with its own warning switched off, and it
+                # violates this file's TRI-STATE CONTRACT (see ~2926-2929:
+                # failed snapshot tooling must arm assume_live).
+                if [[ -z "${ps_snapshot[1]-}" || -z "${ps_snapshot_comm[1]-}" ]]; then
                     _kb_tlwi_assume_live=1   # ps produced nothing usable -> assume live, see TIE-BREAK
                 else
                     # `ps_re_args` captures: (1) pid, (2) ppid, (3) the
