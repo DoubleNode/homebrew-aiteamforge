@@ -3049,8 +3049,24 @@ _kb_tmux_live_window_ids() {
                 # setup either way. Total added latency is well inside the
                 # existing ~12-28x margin under lcars-ui/server.py's 20s
                 # subprocess timeout (re-verified after this change).
+                # Capture each `ps` EXIT STATUS, not just its output
+                # (XACA-0830-027). These were the only 2 of 7 external calls
+                # in this function whose rc was discarded. Emptiness alone is
+                # not a sufficient signal: a TRUNCATED snapshot (ps emits some
+                # lines, then fails) leaves element [1] populated, sails past
+                # the guard below, and silently drops whichever pids never got
+                # written -- including, possibly, the live claude we are
+                # looking for. That yields ORPHANED with an empty stderr: the
+                # same reassuring-wrong-answer shape this whole ticket is
+                # about. zsh preserves $? across the array assignment (the
+                # command substitution is the last thing evaluated), so
+                # capture it on the very next line -- NOT after any other
+                # command, and never through a pipe (`$?` after `cmd | tail`
+                # is tail's status).
                 ps_snapshot=("${(f)$(ps -eo pid=,ppid=,args= 2>/dev/null)}")
+                local -i ps_rc_args=$?
                 ps_snapshot_comm=("${(f)$(ps -eo pid=,comm= 2>/dev/null)}")
+                local -i ps_rc_comm=$?
                 # BOTH snapshots must be tested, not just the first. XACA-0830
                 # round-5: the guard originally checked only `ps_snapshot`.
                 # `_kb_tlwi_comm_of` is populated exclusively from
@@ -3066,8 +3082,12 @@ _kb_tmux_live_window_ids() {
                 # is Defect A with its own warning switched off, and it
                 # violates this file's TRI-STATE CONTRACT (see ~2926-2929:
                 # failed snapshot tooling must arm assume_live).
-                if [[ -z "${ps_snapshot[1]-}" || -z "${ps_snapshot_comm[1]-}" ]]; then
-                    _kb_tlwi_assume_live=1   # ps produced nothing usable -> assume live, see TIE-BREAK
+                # Guard on BOTH emptiness AND exit status, for BOTH snapshots.
+                # A non-zero rc with partial output is the truncation case
+                # described above; emptiness alone would miss it.
+                if [[ -z "${ps_snapshot[1]-}" || -z "${ps_snapshot_comm[1]-}" ]] \
+                   || (( ps_rc_args != 0 || ps_rc_comm != 0 )); then
+                    _kb_tlwi_assume_live=1   # ps produced nothing usable, or failed part-way -> assume live, see TIE-BREAK
                 else
                     # `ps_re_args` captures: (1) pid, (2) ppid, (3) the
                     # REST OF THE LINE verbatim as `args` -- group 3 starts

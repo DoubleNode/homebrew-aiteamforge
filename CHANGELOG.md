@@ -7,6 +7,12 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0830-027 — capture both `ps` exit statuses, not just their output.** The snapshot guard tested
+  emptiness only, so a TRUNCATED snapshot (ps emits some lines, then fails) left element `[1]` populated,
+  passed the guard, and silently dropped whichever pids never got written — including possibly the live
+  claude — yielding ORPHANED with an empty stderr. These were the only 2 of 7 external calls in the
+  function whose rc was discarded. Guard now tests emptiness AND rc for both snapshots.
+
 - **XACA-0830 (round-5) — guard BOTH `ps` snapshots, not just the first.** The two-snapshot change tested
   only `ps_snapshot`; `ps_snapshot_comm` was unguarded. If the second `ps` returned nothing while the first
   succeeded, `_kb_tlwi_comm_of` stayed empty — and it is the sole source of `$comm` for both match rules —
