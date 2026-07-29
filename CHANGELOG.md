@@ -88,6 +88,41 @@ canonical afterward:
   pane command, so its shebang-rewritten argv (`comm`=`sh`, `argv[1]`=the script path with
   basename `claude`) satisfies the interpreted-wrapper branch of the new rule. 16/16 passing.
 
+#### Re-port (PR #730, second review pass) — XACA-0830-020 reopened: the interpreter gate above still didn't work, for a different reason than it looked
+
+The prior re-port's `comm` basename fix was itself defective: `comm=` is a MIDDLE column in the
+`ps -eo pid=,ppid=,comm=,args=` snapshot this classifier builds, and BSD `ps` truncates a middle
+column to 16 characters. A real npm-global-style Claude Code invocation
+(`/opt/homebrew/Cellar/node/26.0.0/bin/node /path/to/bin/claude`, the standard homebrew/nvm
+shape) reports `comm="/opt/homebrew/Ce"` — cut mid-word — whose basename is `"Ce"`, never
+`"node"`. The gate never fired for any interpreter whose absolute path exceeds 16 characters
+(every homebrew/nvm interpreter observed on this fleet); only short interpreters like `/bin/sh`
+survived truncation, which is exactly the one case the prior fix's own verification exercised.
+
+- **Gate moved from `comm=` to `args=`:** the interpreter-identity check (rule (b) of the
+  Claude-descendant match rule) now reads `${cmd_tokens[1]:t}` — argv[0] as reported by `args=`,
+  the LAST column in the same `ps` snapshot, confirmed live to carry the full interpreter path
+  untruncated regardless of length. Re-verified with a real node-invoked `claude` process
+  (comm truncated to `/opt/homebrew/Ce`, args untruncated) resolving BOUND; `/bin/sh` (regression
+  check), `grep -rn claude .`/`vim claude` (must still not match), and a real live Claude pane
+  all re-verified correct.
+- **XACA-0830-026 (filed by QA, resolved as a documented gap, not fixed):** does moving to `args=`
+  also fix macOS Homebrew framework Python reporting `comm`/argv[0] as capitalized `"Python"`?
+  Checked live — no: framework Python builds re-exec themselves through an internal `Python.app`
+  launcher stub, which rewrites the process's OWN argv[0] (not just `comm`) to the launcher path,
+  basename `"Python"`, regardless of how it was invoked. `node` was checked side-by-side and does
+  NOT exhibit this. Deliberately left unfixed — no evidence anywhere in this fleet of Claude Code
+  (a Node.js CLI) ever being wrapped by a Python interpreter; the `python`/`python3` entries were
+  speculative coverage from the start, and adding case-insensitive matching to chase an unproven
+  shape would be exactly the kind of fragile matcher this review has repeatedly flagged. Documented
+  in-line, including the one-line fix (a zsh `(#i)` case-insensitive glob) to apply if a real
+  python-wrapped `claude` shape is ever observed.
+- Doc comment above `_kb_pid_has_claude_descendant` corrected to describe what the code actually
+  reads (`args=` for both argv positions, never `comm=` for the interpreter check).
+- Re-ported byte-faithfully (verbatim `diff` against canonical `kanban-helpers.sh`, confirmed —
+  including two small comment-drift corrections in `kb-recover`'s `--all-teams` and single-team
+  paths left over from the first re-port).
+
 ### Fix: XACA-0804 — read-only commands no longer materialize the team-paths registry
 
 Gates the registry bootstrap-write behind an explicit opt-in env var so a read-only

@@ -2354,26 +2354,39 @@ _kb_tmux_window_has_live_claude() {
 # later -- an acceptable, deliberate tradeoff for a read-only classifier
 # that runs on a period poll, not a hard real-time liveness guarantee.
 #
-# Match rule (XACA-0830-020 review: NARROWED a second time -- the
-# any-token-anywhere shape below was itself a false-positive source and has
-# been replaced): `comm` exactly "claude" (the observed shape of a real
-# running Claude Code process -- verified live against real academy panes:
-# ps -o comm= reports exactly "claude" for the actual CLI process, a CHILD
-# of the pane's shell) OR one of exactly two positional argv checks:
+# Match rule (XACA-0830-020 review: NARROWED, then REOPENED and fixed again
+# -- the any-token-anywhere shape below was itself a false-positive source
+# and has been replaced): `comm` exactly "claude" (the observed shape of a
+# real running Claude Code process -- verified live against real academy
+# panes: ps -o comm= reports exactly "claude" for the actual CLI process, a
+# CHILD of the pane's shell) OR one of exactly two positional argv checks,
+# BOTH READ FROM `args=` (never `comm=` -- see why below):
 #   (a) argv[0] (the executable itself) has PATH BASENAME "claude" -- the
 #       direct-binary-invocation shape, e.g. ARGS="/usr/local/bin/claude
 #       --foo".
-#   (b) `comm`'s PATH BASENAME (not the raw value) names a known
-#       shell/script interpreter (sh/bash/zsh/dash/ksh/python/python3/node/
-#       ruby/perl) AND argv[1] (the interpreter's OWN first argument -- the
-#       script path) has basename "claude" -- the interpreted-wrapper
-#       shape, e.g. ARGS="/bin/sh /path/to/bin/claude", where `comm` is the
-#       interpreter, never "claude" itself, and the real script identity
-#       only shows up as that one specific argv position. Basename matters
-#       here: verified live (macOS `ps`) that a shebang-exec'd process's
-#       comm is the FULL interpreter path as passed to execve (e.g.
-#       "/bin/sh"), not the bare name "sh" -- a raw-value comparison here
-#       never fires against real process data.
+#   (b) argv[0]'s PATH BASENAME names a known shell/script interpreter
+#       (sh/bash/zsh/dash/ksh/python/python3/node/ruby/perl) AND argv[1]
+#       (the interpreter's OWN first argument -- the script path) has
+#       basename "claude" -- the interpreted-wrapper shape, e.g.
+#       ARGS="/bin/sh /path/to/bin/claude", or the standard npm-global
+#       Claude Code shape ARGS="/opt/homebrew/.../bin/node
+#       /opt/homebrew/.../bin/claude". Both argv[0] and argv[1] here are
+#       read from `${_kb_tlwi_args_of[$cur_pid]}` (parsed from `ps`'s
+#       `args=` column, always the LAST field in this file's
+#       `pid=,ppid=,comm=,args=` snapshot), never from `_kb_tlwi_comm_of`
+#       (parsed from the same snapshot's `comm=` column, a MIDDLE field).
+#       This distinction is load-bearing, not stylistic: BSD `ps` truncates
+#       a middle column to 16 characters, and a shebang-exec'd process's
+#       `comm` is the FULL interpreter path as passed to execve (verified
+#       live: e.g. "/bin/sh", never the bare name "sh") -- so for any
+#       interpreter whose absolute path exceeds 16 characters (every
+#       homebrew/nvm interpreter observed on this fleet, e.g.
+#       "/opt/homebrew/Cellar/node/26.0.0/bin/node" truncating to
+#       "/opt/homebrew/Ce"), gating on `comm=` silently never matches --
+#       confirmed live with a real node-invoked claude process. `args=`,
+#       being the LAST column in the same `ps` call, is NOT
+#       length-truncated (confirmed: the full node path survives intact),
+#       so argv[0]/argv[1] must always be read from there.
 # What this deliberately does NOT do any more: scan every whitespace-
 # separated token in the full command line for a "claude" basename anywhere.
 # That shape false-positived on any process whose argv merely MENTIONS the
@@ -2428,19 +2441,74 @@ _kb_pid_has_claude_descendant() {
                 # (a) argv[0]: the executable itself.
                 [[ "${cmd_tokens[1]:t}" == "claude" ]] && match=1
 
-                # (b) interpreted-wrapper: comm is a known interpreter, and
-                # argv[1] (that interpreter's own first argument -- the
-                # script path) is "claude". `:t` (basename) applied to
-                # comm_of here -- verified live (macOS ps): when a shebang
-                # script execs, the recorded comm is the FULL INTERPRETER
-                # PATH as passed to execve (e.g. "/bin/sh"), not the bare
-                # interpreter name "sh" the original design assumed; a raw
-                # string-equality case match against "sh" never fires
-                # against real observed process data, which silently
-                # reintroduces the interpreted-wrapper false-negative this
-                # whole rule exists to prevent.
+                # (b) interpreted-wrapper: argv[0] (from `args=`, NOT
+                # `comm=`) is a known interpreter, and argv[1] (that
+                # interpreter's own first argument -- the script path) is
+                # "claude". XACA-0830-020 REOPENED (review, second pass):
+                # the first pass gated this on `${_kb_tlwi_comm_of[...]:t}`
+                # -- correct in principle (shebang-exec'd comm really is the
+                # full interpreter path, not a bare name, as documented
+                # above) but wrong in practice, because `comm=` is a MIDDLE
+                # column in the `ps -eo pid=,ppid=,comm=,args=` snapshot
+                # this file builds, and BSD `ps` TRUNCATES a middle column
+                # to 16 characters. Verified live: a real npm-global-style
+                # invocation (`/opt/homebrew/Cellar/node/26.0.0/bin/node
+                # /path/to/bin/claude`, the standard shape for a homebrew-
+                # or nvm-installed Claude Code) reports
+                # comm="/opt/homebrew/Ce" (exactly 16 chars, cut mid-word);
+                # `:t` of THAT is "Ce", never "node" -- the gate silently
+                # never fires for any interpreter whose absolute path
+                # exceeds 16 characters (every homebrew/nvm interpreter
+                # observed on this fleet), reintroducing Defect A (a
+                # genuinely live Claude classifying ORPHANED) for exactly
+                # the shape this rule exists to catch. Only interpreters
+                # short enough to survive truncation (e.g. /bin/sh,
+                # /bin/zsh, /bin/bash) worked, which is why this passed
+                # verification the first time -- the case that was actually
+                # tested (`/bin/sh`) is one of the few immune to the bug.
+                # Fixed by gating on `${cmd_tokens[1]:t}` instead: argv[0]
+                # as reported by `args=`, the LAST column in the same `ps`
+                # invocation -- confirmed live it is NOT truncated (full
+                # `/opt/homebrew/Cellar/node/26.0.0/bin/node` present
+                # verbatim) regardless of path length.
+                # XACA-0830-026 (review, filed against the pre-fix `comm=`
+                # gate, re-examined here): does switching to `args=` make
+                # the `python`/`python3` entries below match macOS
+                # Homebrew's FRAMEWORK Python build, whose kernel-visible
+                # process name is capitalized "Python"? Checked live and
+                # the answer is NO, but not for the reason it might look
+                # like -- this is NOT a truncation artifact this time.
+                # Framework Python builds on macOS re-exec themselves
+                # through an internal `Python.app` launcher stub as part of
+                # their own startup (an unrelated macOS/framework quirk,
+                # confirmed to affect `args=` -- the untruncated LAST
+                # column -- not just `comm=`): even invoked as plain
+                # `python3 script.py`, the process's OWN argv[0] as seen by
+                # `ps -o args=` becomes the launcher's absolute path,
+                # basename "Python" (capitalized) -- verified live,
+                # `/opt/homebrew/Cellar/python@.../Resources/Python.app/
+                # Contents/MacOS/Python`. A plain `node` invocation was
+                # checked side-by-side and does NOT exhibit this -- node's
+                # argv[0] stays exactly as invoked. So this case list, as
+                # written, structurally cannot match framework Python
+                # regardless of which `ps` column it reads from.
+                # DELIBERATELY NOT WIDENED to also match "Python"/"Python3"
+                # (case-insensitively or via extra entries): there is no
+                # evidence anywhere in this fleet of Claude Code -- a
+                # Node.js CLI -- ever being invoked through a Python
+                # interpreter wrapper. The `python`/`python3` entries here
+                # were speculative defensive coverage from the start, not
+                # evidence-based; adding case-handling to chase a shape
+                # nothing has ever produced is exactly the kind of fragile,
+                # unjustified matcher this review has repeatedly flagged
+                # elsewhere in this same function. If a real python-wrapped
+                # `claude` shape ever surfaces, the fix is a one-line
+                # case-insensitive glob (zsh `(#i)` qualifier) on this
+                # `case`, not a growing enumeration -- deferred until there
+                # is an actual shape to fix against. Closed as a documented,
+                # accepted gap, not silently dropped.
                 if (( ! match )) && (( ${#cmd_tokens[@]} >= 2 )); then
-                    case "${_kb_tlwi_comm_of[$cur_pid]:t}" in
+                    case "${cmd_tokens[1]:t}" in
                         sh|bash|zsh|dash|ksh|python|python3|node|ruby|perl)
                             [[ "${cmd_tokens[2]:t}" == "claude" ]] && match=1
                             ;;
@@ -2536,6 +2604,23 @@ _kb_tmux_bounded_probe() {
         # used for sleep_secs, it must stay a float.)
         local sleep_secs=$(( timeout_cs / 100. ))
         ( sleep "$sleep_secs" 2>/dev/null; kill -KILL "$cmd_pid" 2>/dev/null ) &
+        # KNOWN, ACCEPTED LIMITATION (review, non-blocking): the zselect
+        # path below is a zsh BUILTIN with no fork of its own, so killing
+        # $watchdog_pid terminates it immediately. `sleep`, in contrast, is
+        # a real forked/exec'd grandchild of $watchdog_pid -- SIGKILLing
+        # the parent subshell does NOT kill it, so if the real probe
+        # finishes early, this fallback leaves an orphaned `sleep` running
+        # for up to the remainder of $sleep_secs (bounded by
+        # PROBE_TIMEOUT_CS, i.e. <=1.5s at the default) before it exits on
+        # its own. It reparents to launchd/init and is reaped normally --
+        # not a zombie, not a leak, invisible to `pgrep -P $$` precisely
+        # because it's no longer this process's child by the time anything
+        # would check. Deliberately NOT chasing this down further (e.g.
+        # tracking the sleep's own pid across the subshell boundary) --
+        # this path only runs at all when zsh/zselect is unavailable, which
+        # is itself the rare case, and the cost is a single short-lived
+        # `sleep` process, not a resource leak. Not worth the added
+        # complexity for a self-terminating, sub-2-second grandchild.
     fi
     local -i watchdog_pid=$!
 
@@ -3327,7 +3412,11 @@ USAGE
             [[ -n "$t" ]] && teams_to_scan+=("$t")
         done <<< "$raw_teams"
 
-        # team → ORPHANED-only results map
+        # team → ORPHANED-only results map. XACA-0830-021/015: any
+        # tmux-unreachable team along the way already printed its own
+        # caveat to STDERR from inside _kb_reconcile_inprogress (see that
+        # function's comment) -- nothing further needed here, and nothing
+        # here touches $report / the JSON output.
         local report="{}"
         local scan_team team_results orphaned
         for scan_team in "${teams_to_scan[@]}"; do
@@ -3386,6 +3475,11 @@ USAGE
 
     local orphan_count
     orphan_count=$(printf '%s' "$orphaned" | jq 'length' 2>/dev/null || echo 0)
+
+    # XACA-0830-021/015: if tmux state could not be confirmed for this team,
+    # _kb_reconcile_inprogress already printed its own caveat to STDERR
+    # above (see that function's comment for why stderr, not a variable, is
+    # the channel) -- nothing further needed here.
 
     if [[ "$orphan_count" -eq 0 ]]; then
         echo "✓ Nothing orphaned for team '$team' -- all in_progress work is bound to a live window."
