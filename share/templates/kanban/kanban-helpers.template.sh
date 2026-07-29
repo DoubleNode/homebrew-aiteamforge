@@ -2354,31 +2354,49 @@ _kb_tmux_window_has_live_claude() {
 # later -- an acceptable, deliberate tradeoff for a read-only classifier
 # that runs on a period poll, not a hard real-time liveness guarantee.
 #
-# Match rule (unchanged from the original design -- review confirmed this
-# half is sound; the bug was purely in enumeration, not matching): `comm`
-# exactly "claude" (the observed shape of a real running Claude Code
-# process -- verified live against real academy panes: ps -o comm= reports
-# exactly "claude" for the actual CLI process, a CHILD of the pane's shell)
-# OR, scanning the full command line (`ps -o args=`), any whitespace-
-# separated token whose PATH BASENAME is exactly "claude". The second half
-# exists because `comm` alone is not reliable across every process shape:
-# (a) tmux's own #{pane_current_command} can report something else
-# entirely for a live Claude pane (observed, independently reconfirmed:
-# `pane_cmd=2.1.220` on real live Claude panes, never the literal word
-# "claude") -- this function deliberately does NOT use
-# #{pane_current_command} at all, only `ps`, for that reason; and (b) an
-# interpreted-script wrapper around the real binary execs a shell whose OWN
-# `comm` is the interpreter ("sh"/"bash"), never "claude", while the
-# script's path is only visible in that same process's argv (e.g.
-# ARGS="/bin/sh /path/to/bin/claude"). Matching on basename (not a raw
-# substring) keeps this scoped and precise: it requires a literal path
-# segment/argv token equal to "claude", not merely a command line that
-# mentions the word -- and the whole scan stays PID-scoped to this pane's
-# own descendant tree via the ppid map, never a system-wide process-name
-# search (a system-wide `pgrep -f claude` would false-positive on Claude
-# Desktop's own helper processes, unrelated `claude` CLI invocations
-# elsewhere on the box, etc. -- see real output captured during XACA-0830
-# verification).
+# Match rule (XACA-0830-020 review: NARROWED a second time -- the
+# any-token-anywhere shape below was itself a false-positive source and has
+# been replaced): `comm` exactly "claude" (the observed shape of a real
+# running Claude Code process -- verified live against real academy panes:
+# ps -o comm= reports exactly "claude" for the actual CLI process, a CHILD
+# of the pane's shell) OR one of exactly two positional argv checks:
+#   (a) argv[0] (the executable itself) has PATH BASENAME "claude" -- the
+#       direct-binary-invocation shape, e.g. ARGS="/usr/local/bin/claude
+#       --foo".
+#   (b) `comm`'s PATH BASENAME (not the raw value) names a known
+#       shell/script interpreter (sh/bash/zsh/dash/ksh/python/python3/node/
+#       ruby/perl) AND argv[1] (the interpreter's OWN first argument -- the
+#       script path) has basename "claude" -- the interpreted-wrapper
+#       shape, e.g. ARGS="/bin/sh /path/to/bin/claude", where `comm` is the
+#       interpreter, never "claude" itself, and the real script identity
+#       only shows up as that one specific argv position. Basename matters
+#       here: verified live (macOS `ps`) that a shebang-exec'd process's
+#       comm is the FULL interpreter path as passed to execve (e.g.
+#       "/bin/sh"), not the bare name "sh" -- a raw-value comparison here
+#       never fires against real process data.
+# What this deliberately does NOT do any more: scan every whitespace-
+# separated token in the full command line for a "claude" basename anywhere.
+# That shape false-positived on any process whose argv merely MENTIONS the
+# word in an unrelated position -- reviewer-verified live: `grep -rn claude
+# .` and `vim claude` both previously registered as a live Claude pane
+# (false BOUND). Restricting the check to specific argv POSITIONS (the
+# executable itself, or the interpreter's script argument) keeps both
+# legitimate shapes covered -- comm alone is unreliable because (i) tmux's
+# own #{pane_current_command} can report something else entirely for a live
+# Claude pane (observed, independently reconfirmed: `pane_cmd=2.1.220` on
+# real live Claude panes, never the literal word "claude") -- this function
+# deliberately does NOT use #{pane_current_command} at all, only `ps`, for
+# that reason -- while eliminating the "any argument, anywhere" false-positive
+# surface. Tradeoff accepted: a wrapper that inserts extra flags BEFORE the
+# script path (e.g. ARGS="/bin/sh -x /path/to/bin/claude") is not matched by
+# rule (b) as written (argv[1] would be "-x", not the script) -- no such
+# shape has been observed in this fleet; if one appears, extend (b) to scan
+# from argv[1] forward rather than reverting to a blanket token scan. The
+# whole scan stays PID-scoped to this pane's own descendant tree via the
+# ppid map, never a system-wide process-name search (a system-wide `pgrep -f
+# claude` would false-positive on Claude Desktop's own helper processes,
+# unrelated `claude` CLI invocations elsewhere on the box, etc. -- see real
+# output captured during XACA-0830 verification).
 _kb_pid_has_claude_descendant() {
     local root_pid="${1-}"
     [[ -n "$root_pid" ]] || return 1
@@ -2400,11 +2418,35 @@ _kb_pid_has_claude_descendant() {
 
             [[ "${_kb_tlwi_comm_of[$cur_pid]-}" == "claude" ]] && return 0
 
+            # XACA-0830-020: two POSITIONAL argv checks only -- see the
+            # "Match rule" comment above this function for the false-
+            # positive this replaces and the interpreted-wrapper case it
+            # still must catch.
             match=0
             cmd_tokens=(${=${_kb_tlwi_args_of[$cur_pid]-}})
-            for tok in "${cmd_tokens[@]}"; do
-                [[ "${tok:t}" == "claude" ]] && { match=1; break }
-            done
+            if (( ${#cmd_tokens[@]} > 0 )); then
+                # (a) argv[0]: the executable itself.
+                [[ "${cmd_tokens[1]:t}" == "claude" ]] && match=1
+
+                # (b) interpreted-wrapper: comm is a known interpreter, and
+                # argv[1] (that interpreter's own first argument -- the
+                # script path) is "claude". `:t` (basename) applied to
+                # comm_of here -- verified live (macOS ps): when a shebang
+                # script execs, the recorded comm is the FULL INTERPRETER
+                # PATH as passed to execve (e.g. "/bin/sh"), not the bare
+                # interpreter name "sh" the original design assumed; a raw
+                # string-equality case match against "sh" never fires
+                # against real observed process data, which silently
+                # reintroduces the interpreted-wrapper false-negative this
+                # whole rule exists to prevent.
+                if (( ! match )) && (( ${#cmd_tokens[@]} >= 2 )); then
+                    case "${_kb_tlwi_comm_of[$cur_pid]:t}" in
+                        sh|bash|zsh|dash|ksh|python|python3|node|ruby|perl)
+                            [[ "${cmd_tokens[2]:t}" == "claude" ]] && match=1
+                            ;;
+                    esac
+                fi
+            fi
             (( match )) && return 0
 
             for child_pid in ${=${_kb_tlwi_children_map[$cur_pid]-}}; do
@@ -2447,6 +2489,22 @@ _kb_pid_has_claude_descendant() {
 # in a new costume -- see the TRI-STATE CONTRACT above
 # _kb_tmux_live_window_ids.
 #
+# XACA-0830-018 (review): `zmodload zsh/zselect` CAN fail (module absent
+# from a given zsh build/install). The original code swallowed the load
+# failure and unconditionally set the "loaded" flag anyway, so every later
+# call still tried to run the bare `zselect` command -- which, missing the
+# module, is a plain "command not found" that fails IMMEDIATELY rather than
+# blocking for the deadline. That means the watchdog subshell's `kill -KILL`
+# line ran almost instantly instead of after `$timeout_cs`, SIGKILLing the
+# real probe within milliseconds of starting it -- the exact same
+# "guard reports success when it could not do its job" shape as the
+# ticket's other defects, this time producing MASS FALSE UNREACHABLE (every
+# probe looks "reached, timed out" when the real command never got a chance
+# to answer). Fixed by checking zmodload's own exit status and falling back
+# to a `sleep`-based watchdog (documented fallback, no module dependency --
+# `sleep` accepts fractional seconds on both macOS/BSD and GNU coreutils)
+# when the module genuinely isn't available.
+#
 # Usage: _kb_tmux_bounded_probe <timeout_centiseconds> <command...>
 _kb_tmux_bounded_probe() {
     local -i timeout_cs="${1:-0}"
@@ -2455,8 +2513,11 @@ _kb_tmux_bounded_probe() {
     (( $# > 0 )) || return 1
 
     if [[ -z "${_KB_TLWI_ZSELECT_LOADED:-}" ]]; then
-        zmodload zsh/zselect 2>/dev/null
-        typeset -g _KB_TLWI_ZSELECT_LOADED=1
+        if zmodload zsh/zselect 2>/dev/null; then
+            typeset -g _KB_TLWI_ZSELECT_LOADED=1
+        else
+            typeset -g _KB_TLWI_ZSELECT_LOADED=0
+        fi
     fi
 
     local tmpfile
@@ -2465,7 +2526,17 @@ _kb_tmux_bounded_probe() {
     "$@" >"$tmpfile" 2>/dev/null &
     local -i cmd_pid=$!
 
-    ( zselect -t "$timeout_cs" 2>/dev/null; kill -KILL "$cmd_pid" 2>/dev/null ) &
+    if (( _KB_TLWI_ZSELECT_LOADED )); then
+        ( zselect -t "$timeout_cs" 2>/dev/null; kill -KILL "$cmd_pid" 2>/dev/null ) &
+    else
+        # Fallback watchdog: no zsh/zselect module available. `sleep` takes
+        # a plain floating-point argument on both macOS/BSD and GNU
+        # coreutils -- timeout_cs is centiseconds, so divide by 100. (the
+        # trailing dot forces zsh floating-point division; `local -i` is NOT
+        # used for sleep_secs, it must stay a float.)
+        local sleep_secs=$(( timeout_cs / 100. ))
+        ( sleep "$sleep_secs" 2>/dev/null; kill -KILL "$cmd_pid" 2>/dev/null ) &
+    fi
     local -i watchdog_pid=$!
 
     wait "$cmd_pid" 2>/dev/null
@@ -2529,7 +2600,11 @@ _kb_tmux_bounded_probe() {
 #      stdout + exit 0 means "I looked, and nothing is live" -- a confirmed
 #      negative, not a failure to look.
 #   1  UNREACHABLE. tmux isn't installed, OR every rung in the ladder failed
-#      to connect to a socket at all. Stdout is empty. Callers must NOT
+#      to connect to a socket at all, OR (XACA-0830-022/024) the rung-4
+#      socket-directory scan was cut short by its overall deadline before
+#      every candidate could be probed -- a truncated scan cannot honestly
+#      claim "confirmed empty", even if an earlier, unrelated-team socket
+#      happened to answer along the way. Stdout is empty. Callers must NOT
 #      treat this the same as a confirmed-empty REACHABLE result when they
 #      care about the distinction (see _kb_reconcile_inprogress below) --
 #      conflating the two is precisely what let Defect A hide for so long.
@@ -2613,6 +2688,18 @@ _kb_tmux_live_window_ids() {
     local -i _kb_tlwi_probe_timeout_cs=${KB_TMUX_PROBE_TIMEOUT_CS:-150}
     local -i _kb_tlwi_rung4_deadline_s=${KB_TMUX_RUNG4_DEADLINE_S:-6}
     local -i _kb_tlwi_rung4_scan_start=0
+    # XACA-0830 BLOCKER FIX (review, PR #730): $SECONDS is a legitimate value
+    # of 0 for a shell's ENTIRE FIRST SECOND -- and lcars-ui/server.py spawns
+    # the classifier as a freshly-forked `zsh -c`, so SECONDS==0 is the
+    # COMMON case for the exact caller this deadline exists to protect, not
+    # an edge case. `_kb_tlwi_rung4_scan_start > 0` as the "clock started"
+    # sentinel is therefore ambiguous with "clock started at t=0" and never
+    # fires for that population -- verified directly: fresh `zsh -c` shell,
+    # SECONDS still 0 after sourcing this file. A dedicated armed flag
+    # (set once, independent of the clock's actual value) replaces the
+    # overloaded-zero sentinel.
+    local -i _kb_tlwi_rung4_armed=0
+    local -i _kb_tlwi_rung4_truncated=0
 
     # Loop-body locals declared ONCE before the loop (zsh: re-declaring
     # `local` inside a loop body can leak the assignment expression to
@@ -2659,9 +2746,17 @@ _kb_tmux_live_window_ids() {
         # shell start) -- no fork required to read it, unlike `date`.
         if (( rung4_last_idx >= rung4_first_idx && i == rung4_first_idx )); then
             _kb_tlwi_rung4_scan_start=$SECONDS
+            _kb_tlwi_rung4_armed=1
         fi
-        if (( _kb_tlwi_rung4_scan_start > 0 && i >= rung4_first_idx && i <= rung4_last_idx )); then
+        if (( _kb_tlwi_rung4_armed && i >= rung4_first_idx && i <= rung4_last_idx )); then
             if (( SECONDS - _kb_tlwi_rung4_scan_start >= _kb_tlwi_rung4_deadline_s )); then
+                # XACA-0830-024: the rung-4 scan is being cut short with
+                # candidates still un-probed. Record that fact so the
+                # ladder-exhausted fallback below (and, transitively,
+                # _kb_reconcile_inprogress's live_reachable) does not report
+                # a confirmed-empty REACHABLE result off an incomplete scan
+                # -- see the return-code logic after this loop.
+                _kb_tlwi_rung4_truncated=1
                 i=rung4_last_idx
                 continue
             fi
@@ -2690,15 +2785,25 @@ _kb_tmux_live_window_ids() {
             # round trip; irrelevant panes are filtered out below by the
             # same session-name predicate used everywhere else in this
             # function).
-            panes_raw=("${(f)$(_kb_tmux_bounded_probe "$_kb_tlwi_probe_timeout_cs" tmux "${tmux_args[@]}" list-panes -a -F '#{session_name}:#{window_name} #{pane_pid}')}")
+            # XACA-0830-019 (review): the format string puts the
+            # VARIABLE-LENGTH field (session:window, and window names CAN
+            # contain spaces) last, and #{pane_pid} (always exactly one
+            # numeric token) first. `read -r pane_pid pane_combined` then
+            # relies on `read`'s own last-variable behavior -- the final
+            # named variable absorbs the REST of the line verbatim (internal
+            # whitespace preserved), so a window name containing a space no
+            # longer gets truncated/misparsed the way it did with the
+            # fixed-field-first ordering. Verified against a window
+            # literally named "myte st".
+            panes_raw=("${(f)$(_kb_tmux_bounded_probe "$_kb_tlwi_probe_timeout_cs" tmux "${tmux_args[@]}" list-panes -a -F '#{pane_pid} #{session_name}:#{window_name}')}")
             panes_rc=$?
 
             window_panes_map=()
             if (( panes_rc == 0 )); then
                 for pane_line in "${panes_raw[@]}"; do
                     [[ -n "$pane_line" ]] || continue
-                    pane_combined="" pane_pid=""
-                    read -r pane_combined pane_pid <<< "$pane_line"
+                    pane_pid="" pane_combined=""
+                    read -r pane_pid pane_combined <<< "$pane_line"
                     [[ -n "$pane_combined" && -n "$pane_pid" ]] || continue
                     pane_session="${pane_combined%%:*}"
                     pane_window="${pane_combined#*:}"
@@ -2811,7 +2916,26 @@ _kb_tmux_live_window_ids() {
     done
 
     # Exhausted every rung without finding a socket that hosts this team.
-    (( reached == 0 )) && return 0   # REACHABLE somewhere, confirmed empty for this team
+    #
+    # XACA-0830-022/024 (same fix; -022's failure shape is subsumed by -024's
+    # truncation tracking): `reached` alone is not sufficient evidence of a
+    # confirmed-empty result. `reached` flips to 0 the moment ANY candidate
+    # answers -- including a rung-2/3 socket that turns out to host a
+    # DIFFERENT team (UNVERIFIED TRUST, see header comment above). If that
+    # happens and the team's OWN socket lives in rung 4 but the rung-4 scan
+    # is then cut short by the overall deadline before reaching it
+    # (_kb_tlwi_rung4_truncated), the old code still reported REACHABLE
+    # (confirmed empty) purely off the earlier wrong-team hit -- a scan that
+    # never actually checked the team's real socket masquerading as "I
+    # checked, nothing's there". Gate the confirmed-empty verdict on the
+    # scan having run to completion: a truncated rung-4 scan degrades to
+    # UNREACHABLE instead, so callers treat it as "I could not fully look"
+    # rather than "I looked and it's clear" (see TRI-STATE CONTRACT above
+    # and _kb_reconcile_inprogress's live_reachable handling).
+    if (( reached == 0 )); then
+        (( _kb_tlwi_rung4_truncated )) && return 1
+        return 0   # REACHABLE somewhere, confirmed empty for this team
+    fi
     return 1                          # UNREACHABLE: nothing in the ladder ever connected
 }
 
@@ -2839,6 +2963,26 @@ _kb_reconcile_plan_doc_path() {
 # Emits a JSON array on stdout (see contract). Emits "[]" (not an error) for
 # a missing/unreadable board file -- a team with no board has no in_progress
 # work to reconcile.
+#
+# STDOUT IS A STABLE JSON CONTRACT (three consumers: XACA-0778-002/004/005)
+# -- nothing below may print anything else to stdout. XACA-0830-021/015: the
+# tmux-reachability distinction (see the RETURN-CODE / TRI-STATE CONTRACT on
+# _kb_tmux_live_window_ids) is real, useful operator information -- "I
+# checked, nothing's orphaned" vs "I could not check tmux at all" -- but it
+# cannot be added as a field on the per-item result object without breaking
+# that contract. It is instead surfaced OUT OF BAND on STDERR (see the
+# live_reachable block below): every call site in this file captures this
+# function via `$(...)` command substitution, which forks a genuine
+# subshell -- a `typeset -g` write from inside that subshell (tried first,
+# during development of this fix) is invisible to the caller once the
+# subshell exits, since command substitution only pipes back STDOUT, not
+# process memory. STDERR, unlike a global variable, is a real file
+# descriptor shared with the parent and survives the subshell boundary
+# intact -- confirmed the only channel that actually works here without
+# restructuring every call site off `$(...)` capture. `kb-recover --json` /
+# `kb-reconcile-inprogress --json` never touch stderr for this -- they stay
+# byte-clean JSON on stdout exactly as before; the caveat line only ever
+# lands on stderr, whether or not the caller asked for --json.
 _kb_reconcile_inprogress() {
     local team="${1-}"
     local board_file="${2-}"
@@ -2918,10 +3062,24 @@ _kb_reconcile_inprogress() {
     #        touching the STABLE output contract documented above -- it is
     #        deliberately NOT added as a JSON field on the per-item result
     #        object in this pass.
+    #
+    # XACA-0830-021/015 (review): this used to be dead -- captured, never
+    # read by anything. UX separately filed that an operator running
+    # kb-recover has no way to tell "I checked, nothing orphaned" from "I
+    # could not check tmux at all" -- both render identically today. Fix
+    # both by publishing the value to STDERR (see the STDOUT-CONTRACT
+    # comment above this function for why stderr, not a global variable, is
+    # the only channel that survives the `$(...)` subshell every call site
+    # uses to capture this function). kb-recover's human-readable path
+    # relies on this line reaching the terminal/caller's stderr as-is; it
+    # does NOT re-derive or duplicate the check itself.
     local live_windows live_reachable live_rc
     live_windows=$(_kb_tmux_live_window_ids "$team")
     live_rc=$?
     [[ $live_rc -eq 0 ]] && live_reachable=1 || live_reachable=0
+    if (( ! live_reachable )); then
+        echo "kb-recover: tmux state could not be confirmed for team '$team' (socket ladder unreachable/truncated) -- ORPHANED results below may be incomplete" >&2
+    fi
 
     # Loop-body locals declared ONCE before the loop (zsh: re-declaring
     # `local` inside a loop body can leak the assignment expression to

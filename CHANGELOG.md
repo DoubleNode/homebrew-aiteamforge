@@ -43,6 +43,51 @@ fixing the same two defects there that were fixed in canonical `kanban-helpers.s
   side) instead of a bare shell prompt, so the BOUND assertion exercises the new
   process-liveness contract instead of the old window-exists contract it was written against.
 
+#### Re-port (PR #730 review remediation) — the byte-identical first port carried the same blocking defect
+
+The prior tap port (byte-identical against canonical at the time) faithfully reproduced a
+BLOCKING defect that had not yet been found: `_kb_tlwi_rung4_scan_start > 0` was used as the
+"deadline clock has started" sentinel, but `$SECONDS` is a legitimate `0` for a shell's entire
+first second — and `lcars-ui/server.py` invokes the classifier as a freshly-forked `zsh -c`
+process, making `$SECONDS==0` the *common* case for the exact caller this deadline exists to
+protect, not an edge case. The rung-4 socket-directory scan's deadline never armed for
+freshly-spawned shells, so it scaled uncapped at (socket count) × (per-probe timeout) instead
+of the intended cap (measured: 12.2s uncapped vs. 6.1s capped). Re-ported the fixed
+`_kb_tmux_window_has_live_claude` → `_kb_reconcile_inprogress` block from canonical
+(review-remediated, still uncommitted on the dev-team branch at re-port time) into
+`share/templates/kanban/kanban-helpers.template.sh`, verified byte-identical via `diff` against
+canonical afterward:
+
+- **Rung-4 deadline arming (the blocking defect):** replaced the overloaded `> 0` zero-sentinel
+  with a dedicated `_kb_tlwi_rung4_armed` flag, set once independent of `$SECONDS`'s actual
+  value. A truncated rung-4 scan is now also tracked (`_kb_tlwi_rung4_truncated`) and reported
+  as UNREACHABLE rather than a false confirmed-empty REACHABLE.
+- **`_kb_tmux_bounded_probe` watchdog fallback:** `zmodload zsh/zselect` failure is now checked
+  (not swallowed) — a missing module previously left the watchdog running a bare `zselect`
+  command that fails near-instantly with "command not found", SIGKILLing the real probe within
+  milliseconds instead of after the stated timeout. Falls back to a `sleep`-based watchdog when
+  the module genuinely isn't available.
+- **`list-panes -a` field ordering:** `#{pane_pid}` (fixed-width, always one token) now comes
+  FIRST and the variable-length `#{session_name}:#{window_name}` LAST, so `read`'s
+  last-variable-absorbs-the-rest behavior stops truncating/misparsing window names that contain
+  spaces.
+- **Claude match rule narrowed a second time:** from "any argv token anywhere has basename
+  `claude`" to two POSITIONAL checks only — argv[0] basename `claude` (direct invocation), or
+  a known-interpreter `comm` basename (sh/bash/zsh/dash/ksh/python/python3/node/ruby/perl) with
+  argv[1] basename `claude` (interpreted-wrapper invocation). The token-anywhere shape
+  false-positived on any process whose argv merely mentioned the word (e.g. `vim claude`).
+  `_kb_pid_has_claude_descendant`'s `comm_of` lookup now also compares by basename (`:t`),
+  not raw value — macOS `ps` reports a shebang-exec'd process's `comm` as the full interpreter
+  path, not the bare interpreter name.
+- **`live_reachable` surfaced on stderr:** `_kb_reconcile_inprogress` previously computed this
+  tri-state distinction and discarded it. Now printed to STDERR (not the locked stdout JSON
+  contract) so `kb-recover` can tell "checked, confirmed empty" apart from "could not check
+  tmux at all" instead of rendering both identically.
+- `tests/test-xaca-0788-crash-recovery-in-tap.sh` re-verified (not modified) against the
+  narrowed positional match rule: the fixture invokes `$FAKE_BIN_DIR/claude` directly as the
+  pane command, so its shebang-rewritten argv (`comm`=`sh`, `argv[1]`=the script path with
+  basename `claude`) satisfies the interpreted-wrapper branch of the new rule. 16/16 passing.
+
 ### Fix: XACA-0804 — read-only commands no longer materialize the team-paths registry
 
 Gates the registry bootstrap-write behind an explicit opt-in env var so a read-only
