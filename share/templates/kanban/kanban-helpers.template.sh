@@ -2354,62 +2354,77 @@ _kb_tmux_window_has_live_claude() {
 # later -- an acceptable, deliberate tradeoff for a read-only classifier
 # that runs on a period poll, not a hard real-time liveness guarantee.
 #
-# Match rule (XACA-0830-020 review: NARROWED, then REOPENED and fixed again
-# -- the any-token-anywhere shape below was itself a false-positive source
-# and has been replaced): `comm` exactly "claude" (the observed shape of a
-# real running Claude Code process -- verified live against real academy
-# panes: ps -o comm= reports exactly "claude" for the actual CLI process, a
-# CHILD of the pane's shell) OR one of exactly two positional argv checks,
-# BOTH READ FROM `args=` (never `comm=` -- see why below):
-#   (a) argv[0] (the executable itself) has PATH BASENAME "claude" -- the
-#       direct-binary-invocation shape, e.g. ARGS="/usr/local/bin/claude
-#       --foo".
-#   (b) argv[0]'s PATH BASENAME names a known shell/script interpreter
-#       (sh/bash/zsh/dash/ksh/python/python3/node/ruby/perl) AND argv[1]
-#       (the interpreter's OWN first argument -- the script path) has
-#       basename "claude" -- the interpreted-wrapper shape, e.g.
-#       ARGS="/bin/sh /path/to/bin/claude", or the standard npm-global
-#       Claude Code shape ARGS="/opt/homebrew/.../bin/node
-#       /opt/homebrew/.../bin/claude". Both argv[0] and argv[1] here are
-#       read from `${_kb_tlwi_args_of[$cur_pid]}` (parsed from `ps`'s
-#       `args=` column, always the LAST field in this file's
-#       `pid=,ppid=,comm=,args=` snapshot), never from `_kb_tlwi_comm_of`
-#       (parsed from the same snapshot's `comm=` column, a MIDDLE field).
-#       This distinction is load-bearing, not stylistic: BSD `ps` truncates
-#       a middle column to 16 characters, and a shebang-exec'd process's
-#       `comm` is the FULL interpreter path as passed to execve (verified
-#       live: e.g. "/bin/sh", never the bare name "sh") -- so for any
-#       interpreter whose absolute path exceeds 16 characters (every
-#       homebrew/nvm interpreter observed on this fleet, e.g.
-#       "/opt/homebrew/Cellar/node/26.0.0/bin/node" truncating to
-#       "/opt/homebrew/Ce"), gating on `comm=` silently never matches --
-#       confirmed live with a real node-invoked claude process. `args=`,
-#       being the LAST column in the same `ps` call, is NOT
-#       length-truncated (confirmed: the full node path survives intact),
-#       so argv[0]/argv[1] must always be read from there.
-# What this deliberately does NOT do any more: scan every whitespace-
-# separated token in the full command line for a "claude" basename anywhere.
-# That shape false-positived on any process whose argv merely MENTIONS the
-# word in an unrelated position -- reviewer-verified live: `grep -rn claude
-# .` and `vim claude` both previously registered as a live Claude pane
-# (false BOUND). Restricting the check to specific argv POSITIONS (the
-# executable itself, or the interpreter's script argument) keeps both
-# legitimate shapes covered -- comm alone is unreliable because (i) tmux's
-# own #{pane_current_command} can report something else entirely for a live
-# Claude pane (observed, independently reconfirmed: `pane_cmd=2.1.220` on
-# real live Claude panes, never the literal word "claude") -- this function
-# deliberately does NOT use #{pane_current_command} at all, only `ps`, for
-# that reason -- while eliminating the "any argument, anywhere" false-positive
-# surface. Tradeoff accepted: a wrapper that inserts extra flags BEFORE the
-# script path (e.g. ARGS="/bin/sh -x /path/to/bin/claude") is not matched by
-# rule (b) as written (argv[1] would be "-x", not the script) -- no such
-# shape has been observed in this fleet; if one appears, extend (b) to scan
-# from argv[1] forward rather than reverting to a blanket token scan. The
-# whole scan stays PID-scoped to this pane's own descendant tree via the
-# ppid map, never a system-wide process-name search (a system-wide `pgrep -f
-# claude` would false-positive on Claude Desktop's own helper processes,
-# unrelated `claude` CLI invocations elsewhere on the box, etc. -- see real
-# output captured during XACA-0830 verification).
+# Match rule (XACA-0830-020 review: NARROWED, then REOPENED and fixed twice
+# more -- the any-token-anywhere shape this replaced was itself a
+# false-positive source; the two narrower shapes that followed each broke
+# on a DIFFERENT input the previous verification pass never exercised).
+# `$comm_base` exactly "claude" (covers both a bare `claude` PATH lookup,
+# where `comm` is already just "claude", and a full-path invocation like
+# "/usr/local/bin/claude" -- both collapse to the same basename check) OR:
+# `$comm_base` names a known shell/script interpreter
+# (sh/bash/zsh/dash/ksh/python/python3/node/ruby/perl) AND the `args=`
+# string, with the known `$comm` value stripped off its front as a literal
+# (non-glob) prefix, STARTS WITH a path whose final component is "claude"
+# -- the interpreted-wrapper shape, e.g. a real invocation
+# "/bin/sh /path/to/bin/claude" or the standard npm-global Claude Code
+# shape "/opt/homebrew/.../bin/node /opt/homebrew/.../bin/claude".
+#
+# THIRD-PASS FIX (current): `$comm` and the `args=` string used above both
+# come from the two-snapshot, REST-OF-LINE-preserving parse documented on
+# `_kb_tmux_live_window_ids` (search that function for "TWO SNAPSHOTS") --
+# `comm` is read alone (`ps -eo pid=,comm=`, always the LAST column, never
+# truncated) and `args` from a separate call with `comm` omitted entirely
+# (`ps -eo pid=,ppid=,args=`, `args` again the LAST column). Neither value
+# is ever produced by word-splitting a combined line. This matters because
+# the SECOND pass's fix -- word-splitting `args=` into positional tokens
+# via `${=args}` -- still broke, on a DIFFERENT input than what exposed the
+# first pass's bug: an interpreter path containing a SPACE (verified live,
+# real fixture, not a hypothetical -- this machine's actual node binary
+# lives at "/Users/.../Library/Application Support/Herd/.../node") splits
+# mid-path, so `argv[0]` as reconstructed from tokens becomes
+# "/Users/.../Application" and the interpreter-basename check never sees
+# "node" at all. The underlying defect was the same both times: treating a
+# `ps` line (or a `ps`-derived string containing embedded spaces) as a
+# blindly-splittable token stream instead of "one opaque value that may
+# itself contain spaces". Fixed by never tokenizing `args` here either:
+# `$comm` (untruncated, exact exec path) is stripped off the FRONT of
+# `args` by CHARACTER-COUNT substring slicing (not pattern-based prefix
+# removal, which would misread glob-special characters in a real path),
+# and the remainder is pattern-matched only at its OWN START for a
+# claude-ending path -- never scanned for "claude" appearing anywhere
+# later in the line. This deliberately does NOT attempt to isolate argv[1]
+# as a single discrete token (impossible in general if argv[1] itself
+# contains a space, the exact class of bug this pass exists to close) --
+# instead it asks a narrower, sufficient question: does the text
+# immediately following the interpreter look like a path ending in
+# "claude", terminated by end-of-string or the next argument boundary? See
+# the implementation below for the exact anchoring and why it still
+# excludes `vim claude` / `grep -rn claude .` (both have a `comm` that
+# isn't in the interpreter list, so the whole branch never runs for them,
+# independent of anything after that in their argv).
+#
+# What this deliberately does NOT do: scan every whitespace-separated
+# token in the full command line for a "claude" basename anywhere (the
+# original, first-pass shape). That false-positived on any process whose
+# argv merely MENTIONS the word in an unrelated position -- reviewer-
+# verified live: `grep -rn claude .` and `vim claude` both registered as a
+# live Claude pane under that shape (false BOUND). `comm` alone is also
+# insufficient on its own: tmux's own #{pane_current_command} can report
+# something else entirely for a live Claude pane (observed, independently
+# reconfirmed: `pane_cmd=2.1.220` on real live Claude panes, never the
+# literal word "claude") -- this function deliberately does NOT use
+# #{pane_current_command} at all, only `ps`, for that reason. Tradeoff
+# accepted: a wrapper that inserts extra flags BEFORE the script path
+# (e.g. `/bin/sh -x /path/to/bin/claude`) is not matched (the remainder
+# after stripping the interpreter starts with "-x", not a claude-ending
+# path) -- no such shape has been observed in this fleet; if one appears,
+# the fix is to also skip a `-x`/flag-shaped leading token before applying
+# the anchor, not to revert to a blanket token scan. The whole scan stays
+# PID-scoped to this pane's own descendant tree via the ppid map, never a
+# system-wide process-name search (a system-wide `pgrep -f claude` would
+# false-positive on Claude Desktop's own helper processes, unrelated
+# `claude` CLI invocations elsewhere on the box, etc. -- see real output
+# captured during XACA-0830 verification).
 _kb_pid_has_claude_descendant() {
     local root_pid="${1-}"
     [[ -n "$root_pid" ]] || return 1
@@ -2419,9 +2434,9 @@ _kb_pid_has_claude_descendant() {
     # `_kb_tlwi_children_map`/`_kb_tlwi_comm_of`/`_kb_tlwi_args_of` (no
     # ps/pgrep/tmux calls in this function at all -- see the PERFORMANCE
     # comment above). Loop-body locals declared once, before the loop.
-    local -a queue=("$root_pid") next_queue cmd_tokens
+    local -a queue=("$root_pid") next_queue
     local -i depth=0 visited=0 match
-    local cur_pid tok child_pid
+    local cur_pid child_pid comm comm_base full_args remainder
 
     while (( ${#queue[@]} > 0 && depth < 6 && visited < 200 )); do
         next_queue=()
@@ -2429,92 +2444,104 @@ _kb_pid_has_claude_descendant() {
             [[ -n "$cur_pid" ]] || continue
             (( visited++ ))
 
-            [[ "${_kb_tlwi_comm_of[$cur_pid]-}" == "claude" ]] && return 0
+            comm="${_kb_tlwi_comm_of[$cur_pid]-}"
+            comm_base="${comm:t}"
 
-            # XACA-0830-020: two POSITIONAL argv checks only -- see the
-            # "Match rule" comment above this function for the false-
-            # positive this replaces and the interpreted-wrapper case it
-            # still must catch.
+            # (a) direct invocation: the exec'd path/name's own basename is
+            # "claude" -- covers a bare `claude` lookup (comm already ==
+            # "claude") and a full-path invocation like
+            # "/usr/local/bin/claude" alike. `comm` here is the value built
+            # by the two-snapshot parse above (`_kb_tlwi_comm_of`), always
+            # UNTRUNCATED (see that snapshot's BUDGET/PARSING comment) and
+            # equal to the exec path as passed to execve -- this single
+            # check is a strictly more complete replacement for the old
+            # separate "raw comm == claude" + "argv[0] basename == claude"
+            # tests, now redundant with it.
+            [[ "$comm_base" == "claude" ]] && return 0
+
+            # (b) interpreted-wrapper. XACA-0830-020, THIRD review pass.
+            # Both prior passes derived the interpreter identity and/or the
+            # script path by WORD-SPLITTING the `args=` string (first via
+            # `${_kb_tlwi_comm_of[...]:t}`, wrong because that read a
+            # middle-column-truncated `comm`; then via `${=args}` /
+            # positional-array indexing into a blind split, wrong because a
+            # space embedded INSIDE one argv element is indistinguishable
+            # from a space SEPARATING two argv elements once everything is
+            # joined onto one `ps args=` line). Verified live, the exact
+            # shape this ticket keeps rediscovering: this machine's real
+            # node lives at "/Users/.../Library/Application
+            # Support/Herd/.../node" (a space, mid-path) -- word-splitting
+            # `args` for that process put "Application" where the
+            # interpreter basename should be, never "node".
+            #
+            # Fixed by never tokenizing `args` at all. `$comm` (this
+            # iteration's untruncated interpreter path, from the SAME
+            # two-snapshot parse) already carries the interpreter's exec
+            # path verbatim, spaces included. `ps -o args=` renders
+            # argv0..argvN joined by single spaces IN ORDER, so if this
+            # process really is "$comm $argv1 $argv2 ...", `args` MUST
+            # begin with the literal `$comm` string. Strip that off as a
+            # known-LENGTH prefix via character-count substring slicing
+            # (`${full_args[1,${#comm}]}` / `${full_args[${#comm}+1,-1]}`)
+            # -- not pattern-based prefix removal (`${var#$pattern}`),
+            # which would misinterpret any glob-special character that
+            # happens to appear in a real path (e.g. "*", "["). Whatever
+            # remains after that prefix (plus exactly one separating space)
+            # is "argv1 onward" -- itself still not safely tokenizable if
+            # argv1 ALSO contains a space, so this deliberately does NOT
+            # try to isolate argv1 as a single discrete token either.
+            # Instead it pattern-matches the START of that remainder only:
+            # does the text immediately following the interpreter look
+            # like a path whose FINAL component is "claude", terminated
+            # either by end-of-string or by a following space (the next
+            # argument boundary)? Anchoring to the START -- never scanning
+            # the whole remainder for "claude" appearing anywhere -- is
+            # what keeps this from reintroducing the original
+            # any-token-anywhere false positive: `vim claude` and `grep -rn
+            # claude .` both still fail this cleanly, because in both cases
+            # `$comm_base` is "vim"/"grep", neither of which is in the
+            # interpreter case list below, so this whole branch never runs
+            # for them regardless of anything in their argv. Verified with
+            # a live fixture at the actual 95-char space-containing node
+            # path above (classifies correctly), plus a `/bin/sh -c grep
+            # -rn claude .` adversarial case (comm IS an interpreter here,
+            # but the remainder starts with "-c", not a claude-ending path
+            # -- correctly does not match).
+            #
+            # XACA-0830-026 (review, re-checked against THIS mechanism,
+            # third pass): does reading `$comm` from the new two-snapshot,
+            # untruncated parse change the outcome for macOS Homebrew
+            # FRAMEWORK Python, whose exec identity reports capitalized
+            # "Python"? Re-verified live and still NO -- `ps -eo
+            # pid=,comm=` (the exact call this loop's `$comm` now comes
+            # from) reports
+            # ".../Resources/Python.app/Contents/MacOS/Python" for a plain
+            # `python3 script.py` invocation, same capitalization as
+            # before. This was never a truncation artifact to begin with
+            # (re-confirmed in the prior pass): framework Python re-execs
+            # itself through an internal launcher stub that rewrites its
+            # OWN exec identity, independent of which `ps` column or
+            # snapshot strategy reads it. `node` re-checked side-by-side,
+            # still does not exhibit this. DELIBERATELY STILL NOT WIDENED
+            # to also match "Python"/"Python3": no evidence anywhere in
+            # this fleet of Claude Code (a Node.js CLI) ever being
+            # Python-wrapped; the python/python3 entries were speculative
+            # coverage from the start. If a real python-wrapped `claude`
+            # shape ever surfaces, the fix is a one-line case-insensitive
+            # glob (zsh `(#i)` qualifier) on this `case`, not a growing
+            # enumeration -- still deferred, documented gap, not silently
+            # dropped.
             match=0
-            cmd_tokens=(${=${_kb_tlwi_args_of[$cur_pid]-}})
-            if (( ${#cmd_tokens[@]} > 0 )); then
-                # (a) argv[0]: the executable itself.
-                [[ "${cmd_tokens[1]:t}" == "claude" ]] && match=1
-
-                # (b) interpreted-wrapper: argv[0] (from `args=`, NOT
-                # `comm=`) is a known interpreter, and argv[1] (that
-                # interpreter's own first argument -- the script path) is
-                # "claude". XACA-0830-020 REOPENED (review, second pass):
-                # the first pass gated this on `${_kb_tlwi_comm_of[...]:t}`
-                # -- correct in principle (shebang-exec'd comm really is the
-                # full interpreter path, not a bare name, as documented
-                # above) but wrong in practice, because `comm=` is a MIDDLE
-                # column in the `ps -eo pid=,ppid=,comm=,args=` snapshot
-                # this file builds, and BSD `ps` TRUNCATES a middle column
-                # to 16 characters. Verified live: a real npm-global-style
-                # invocation (`/opt/homebrew/Cellar/node/26.0.0/bin/node
-                # /path/to/bin/claude`, the standard shape for a homebrew-
-                # or nvm-installed Claude Code) reports
-                # comm="/opt/homebrew/Ce" (exactly 16 chars, cut mid-word);
-                # `:t` of THAT is "Ce", never "node" -- the gate silently
-                # never fires for any interpreter whose absolute path
-                # exceeds 16 characters (every homebrew/nvm interpreter
-                # observed on this fleet), reintroducing Defect A (a
-                # genuinely live Claude classifying ORPHANED) for exactly
-                # the shape this rule exists to catch. Only interpreters
-                # short enough to survive truncation (e.g. /bin/sh,
-                # /bin/zsh, /bin/bash) worked, which is why this passed
-                # verification the first time -- the case that was actually
-                # tested (`/bin/sh`) is one of the few immune to the bug.
-                # Fixed by gating on `${cmd_tokens[1]:t}` instead: argv[0]
-                # as reported by `args=`, the LAST column in the same `ps`
-                # invocation -- confirmed live it is NOT truncated (full
-                # `/opt/homebrew/Cellar/node/26.0.0/bin/node` present
-                # verbatim) regardless of path length.
-                # XACA-0830-026 (review, filed against the pre-fix `comm=`
-                # gate, re-examined here): does switching to `args=` make
-                # the `python`/`python3` entries below match macOS
-                # Homebrew's FRAMEWORK Python build, whose kernel-visible
-                # process name is capitalized "Python"? Checked live and
-                # the answer is NO, but not for the reason it might look
-                # like -- this is NOT a truncation artifact this time.
-                # Framework Python builds on macOS re-exec themselves
-                # through an internal `Python.app` launcher stub as part of
-                # their own startup (an unrelated macOS/framework quirk,
-                # confirmed to affect `args=` -- the untruncated LAST
-                # column -- not just `comm=`): even invoked as plain
-                # `python3 script.py`, the process's OWN argv[0] as seen by
-                # `ps -o args=` becomes the launcher's absolute path,
-                # basename "Python" (capitalized) -- verified live,
-                # `/opt/homebrew/Cellar/python@.../Resources/Python.app/
-                # Contents/MacOS/Python`. A plain `node` invocation was
-                # checked side-by-side and does NOT exhibit this -- node's
-                # argv[0] stays exactly as invoked. So this case list, as
-                # written, structurally cannot match framework Python
-                # regardless of which `ps` column it reads from.
-                # DELIBERATELY NOT WIDENED to also match "Python"/"Python3"
-                # (case-insensitively or via extra entries): there is no
-                # evidence anywhere in this fleet of Claude Code -- a
-                # Node.js CLI -- ever being invoked through a Python
-                # interpreter wrapper. The `python`/`python3` entries here
-                # were speculative defensive coverage from the start, not
-                # evidence-based; adding case-handling to chase a shape
-                # nothing has ever produced is exactly the kind of fragile,
-                # unjustified matcher this review has repeatedly flagged
-                # elsewhere in this same function. If a real python-wrapped
-                # `claude` shape ever surfaces, the fix is a one-line
-                # case-insensitive glob (zsh `(#i)` qualifier) on this
-                # `case`, not a growing enumeration -- deferred until there
-                # is an actual shape to fix against. Closed as a documented,
-                # accepted gap, not silently dropped.
-                if (( ! match )) && (( ${#cmd_tokens[@]} >= 2 )); then
-                    case "${cmd_tokens[1]:t}" in
-                        sh|bash|zsh|dash|ksh|python|python3|node|ruby|perl)
-                            [[ "${cmd_tokens[2]:t}" == "claude" ]] && match=1
-                            ;;
-                    esac
-                fi
-            fi
+            case "$comm_base" in
+                sh|bash|zsh|dash|ksh|python|python3|node|ruby|perl)
+                    full_args="${_kb_tlwi_args_of[$cur_pid]-}"
+                    if [[ -n "$comm" && "${full_args[1,${#comm}]}" == "$comm" ]]; then
+                        remainder="${full_args[${#comm}+1,-1]}"
+                        remainder="${remainder# }"
+                        [[ "$remainder" == (claude|claude[[:space:]]*|*/claude|*/claude[[:space:]]*) ]] && match=1
+                    fi
+                    ;;
+            esac
             (( match )) && return 0
 
             for child_pid in ${=${_kb_tlwi_children_map[$cur_pid]-}}; do
@@ -2816,11 +2843,18 @@ _kb_tmux_live_window_ids() {
     local -A _kb_tlwi_comm_of _kb_tlwi_args_of _kb_tlwi_children_map
     local -i _kb_tlwi_assume_live=0
     local -A window_panes_map
-    local -a panes_raw ps_snapshot ps_words
+    local -a panes_raw ps_snapshot ps_snapshot_comm
     local -i panes_rc
     local pane_line pane_combined pane_pid pane_session pane_window
     local pane_sess_terminal pane_sess_team window_key
-    local ps_line ps_pid ps_ppid ps_comm
+    local ps_line ps_pid ps_ppid
+    # XACA-0830-020 (third pass): REGEX patterns for the two-snapshot,
+    # REST-OF-LINE-preserving `ps` parse -- see the BUDGET/PARSING comment
+    # at the snapshot call site below for why these exist and are declared
+    # ONCE here rather than inline in the loop body (house style: avoid
+    # re-declaring `local` inside a loop body).
+    local ps_re_args='^[[:space:]]*([0-9]+)[[:space:]]+([0-9]+)[[:space:]]*(.*)$'
+    local ps_re_comm='^[[:space:]]*([0-9]+)[[:space:]]+(.*)$'
 
     for (( i = 1; i <= ${#cand_flags[@]}; i++ )); do
         # Rung-4 overall deadline (XACA-0830-002, see BUDGET ARITHMETIC
@@ -2921,41 +2955,105 @@ _kb_tmux_live_window_ids() {
             elif ! command -v ps >/dev/null 2>&1; then
                 _kb_tlwi_assume_live=1   # tooling unavailable -> assume live, see TIE-BREAK
             else
-                ps_snapshot=("${(f)$(ps -eo pid=,ppid=,comm=,args= 2>/dev/null)}")
+                # TWO SNAPSHOTS (XACA-0830-020, THIRD review pass). The
+                # previous single combined `ps -eo pid=,ppid=,comm=,args=`
+                # call is fundamentally unsound: `comm` and `args` can both
+                # contain spaces (a real, live example on this machine:
+                # node installed by Herd at
+                # "/Users/.../Library/Application Support/Herd/.../node"),
+                # and there is no way to reliably tell "a space that
+                # separates two ps COLUMNS" from "a space that is part of
+                # one column's own VALUE" once everything has been joined
+                # onto one line and blind-split on whitespace -- whichever
+                # column comes first eats extra tokens it shouldn't, and
+                # every column after it shifts. This bit twice: first as
+                # `comm=` truncating to 16 chars as a MIDDLE column
+                # (XACA-0830-020 second pass), now as a plain word-splitting
+                # bug even after that was fixed (`${cmd_tokens[1]}` split
+                # mid-path on the embedded space, yielding "Application"
+                # instead of the actual interpreter basename "node").
+                # BOTH bugs share one root cause: treating a `ps` line as a
+                # blindly-splittable token stream instead of "N fixed
+                # single-token fields, then the true REST OF THE LINE".
+                # Fixed structurally, not patched again: take `comm` and
+                # `args` from SEPARATE `ps` calls, each with the
+                # space-containing field placed LAST (`ps` does not
+                # truncate a LAST column, confirmed live: 16-char-truncated
+                # as a middle column vs. the same process's full path when
+                # `comm=` is the only/last field requested) and parsed via
+                # a REGEX capturing "leading numeric field(s), then
+                # everything else" -- never `${=line}` word-splitting or
+                # positional-array indexing into a blind split, for either
+                # call. Two `ps` forks instead of one; measured cost of the
+                # extra call ~0.04s on this machine (full system-wide
+                # snapshot), and the regex-based parse is not a regression
+                # either -- benchmarked at ~0.02s+0.01s for both snapshots
+                # combined on a ~1150-line system-wide table, actually
+                # *faster* than the `read -r ... <<<` approach this file
+                # deliberately moved away from in XACA-0830-004 (0.26s) and
+                # comparable to the word-splitting approach that approach
+                # replaced it with (0.01s) -- `[[ str =~ pattern ]]` is a
+                # zsh builtin regex evaluation, no per-line fork/here-string
+                # setup either way. Total added latency is well inside the
+                # existing ~12-28x margin under lcars-ui/server.py's 20s
+                # subprocess timeout (re-verified after this change).
+                ps_snapshot=("${(f)$(ps -eo pid=,ppid=,args= 2>/dev/null)}")
+                ps_snapshot_comm=("${(f)$(ps -eo pid=,comm= 2>/dev/null)}")
                 if [[ -z "${ps_snapshot[1]-}" ]]; then
                     _kb_tlwi_assume_live=1   # ps produced nothing usable -> assume live, see TIE-BREAK
                 else
-                    # PERFORMANCE (measured, XACA-0830-004 3rd pass): parsing
-                    # this loop with `read -r ... <<< "$ps_line"` cost ~0.26s
-                    # for a ~1150-line system-wide snapshot on this machine
-                    # -- that single loop was the dominant remaining cost
-                    # after hoisting the ps call itself (profiled: >80% of
-                    # total call time). `read` here forks/sets up a
-                    # here-string per call; zsh's own IFS word-splitting
-                    # (`${=line}` into an array) parses the identical fields
-                    # with no separate builtin invocation and measured
-                    # ~27x faster (0.01s for the same 1150 lines) -- pure
-                    # parameter expansion, no `read`. `ps_words[4,-1]`
-                    # rejoined is stored as "args"; exact original
-                    # inter-token spacing doesn't matter because
-                    # _kb_pid_has_claude_descendant re-splits it again on
-                    # lookup anyway (only a basename-equality check per
-                    # token, order/spacing-independent).
+                    # `ps_re_args` captures: (1) pid, (2) ppid, (3) the
+                    # REST OF THE LINE verbatim as `args` -- group 3 starts
+                    # right after the mandatory pid/ppid separator and
+                    # includes every remaining character, embedded spaces
+                    # included. `[[:space:]]*` (not `+`) before group 3
+                    # tolerates a process with genuinely empty args (no
+                    # trailing separator at all) without failing the whole
+                    # match. Assigned to a variable (declared once, above
+                    # this candidate loop -- see house style note there),
+                    # not inlined at the `=~` call site, per zsh's own
+                    # recommended idiom for patterns containing characters
+                    # `=~`'s glob-flavored inline-pattern parsing could
+                    # otherwise misinterpret.
                     for ps_line in "${ps_snapshot[@]}"; do
                         [[ -n "$ps_line" ]] || continue
-                        ps_words=(${=ps_line})
-                        (( ${#ps_words[@]} >= 2 )) || continue
-                        ps_pid="${ps_words[1]}"
-                        ps_ppid="${ps_words[2]}"
-                        [[ "$ps_pid" == <-> && "$ps_ppid" == <-> ]] || continue   # skip anything not cleanly "pid ppid ..."
-                        ps_comm="${ps_words[3]-}"
+                        [[ "$ps_line" =~ $ps_re_args ]] || continue
+                        ps_pid="${match[1]}"
+                        ps_ppid="${match[2]}"
                         _kb_tlwi_children_map[$ps_ppid]+="$ps_pid "
-                        _kb_tlwi_comm_of[$ps_pid]="$ps_comm"
-                        if (( ${#ps_words[@]} >= 4 )); then
-                            _kb_tlwi_args_of[$ps_pid]="${(j: :)ps_words[4,-1]}"
-                        else
-                            _kb_tlwi_args_of[$ps_pid]=""
-                        fi
+                        _kb_tlwi_args_of[$ps_pid]="${match[3]}"
+                    done
+                    # `ps_re_comm` captures: (1) pid, (2) the REST OF THE
+                    # LINE verbatim as `comm` -- `comm` is requested here as
+                    # the ONLY other field besides `pid`, i.e. it is always
+                    # the LAST column, which `ps` does not truncate
+                    # (confirmed live: the identical process's `comm`
+                    # truncates to 16 chars when requested as a middle
+                    # column alongside `ppid=,args=`, but comes back full
+                    # when requested alone like this).
+                    #
+                    # NOTE (real zsh gotcha, same class as the one already
+                    # documented on `window_panes_map` above, caught here
+                    # live during XACA-0830-020 third-pass verification --
+                    # every entry silently unreadable despite the map's
+                    # `${#...}` size growing correctly): the subscript MUST
+                    # be a bare variable reference, NOT a quoted
+                    # `"${match[1]}"` expression inline in the assignment --
+                    # `map["${match[1]}"]=x` on this zsh (5.9) stores the
+                    # LITERAL QUOTE CHARACTERS as part of the key (confirmed
+                    # via a targeted debug trace: the map's element COUNT
+                    # incremented on every iteration, but a subsequent
+                    # lookup by the clean, unquoted pid -- `$cur_pid` in
+                    # `_kb_pid_has_claude_descendant` -- came back empty
+                    # every time; entries existed under a mangled key, not
+                    # a missing one). Extract into its own variable first,
+                    # then use it UNQUOTED as the subscript, exactly like
+                    # the pid/ppid loop just above this one already does.
+                    for ps_line in "${ps_snapshot_comm[@]}"; do
+                        [[ -n "$ps_line" ]] || continue
+                        [[ "$ps_line" =~ $ps_re_comm ]] || continue
+                        ps_pid="${match[1]}"
+                        _kb_tlwi_comm_of[$ps_pid]="${match[2]}"
                     done
                 fi
             fi

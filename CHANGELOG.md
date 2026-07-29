@@ -123,6 +123,58 @@ survived truncation, which is exactly the one case the prior fix's own verificat
   including two small comment-drift corrections in `kb-recover`'s `--all-teams` and single-team
   paths left over from the first re-port).
 
+#### Re-port (PR #730, THIRD review pass) — the second pass's fix broke on a different input its own verification couldn't expose
+
+`${cmd_tokens[1]}` (argv[0]) came from word-splitting the `ps args=` string — which breaks the
+instant the interpreter's own PATH contains a space, since a blind split cannot distinguish a
+separator between two argv elements from a space embedded inside one element's value. Verified
+live with a real fixture (genuinely confirmed up — `pane_dead=0` — before trusting the result,
+after two earlier attempts produced a MISSED result from a silently-dead fixture): a real node
+install with an embedded space in its path (`.../Library/Application Support/Herd/.../node`)
+split mid-path, so the interpreter-basename check never saw `node` at all and a genuinely live
+Claude classified ORPHANED — a regression from the ORIGINAL any-token-anywhere rule, which would
+have matched, narrowed away by the second pass's own fix. Same root shape as the truncation bug
+one pass earlier: verified only against inputs (`/bin/sh`) that could not expose the defect.
+
+- **Fixed structurally, not patched again.** `_kb_tmux_live_window_ids`'s process snapshot now
+  takes TWO separate `ps` calls instead of one combined `pid=,ppid=,comm=,args=` call:
+  `ps -eo pid=,ppid=,args=` (full untruncated command line) and `ps -eo pid=,comm=` (untruncated
+  comm — only truncated as a MIDDLE column; alone, as the LAST column, it is complete). Both
+  parsed via a REGEX capturing "leading numeric field(s), then everything else" — never
+  word-splitting or positional-array indexing into a blind split, for either call. Benchmarked:
+  extra `ps` fork ~0.04s, regex parse ~0.02s+0.01s combined on a ~1150-line system-wide table —
+  not a regression versus the word-splitting approach it replaces (0.01s), far faster than the
+  `read -r ... <<<` approach this file moved away from previously (0.26s); end-to-end classifier
+  timing re-measured at ~0.17-0.20s, matching the pre-existing baseline.
+- **Match logic in `_kb_pid_has_claude_descendant` rewritten:** rule (a) collapses to a single
+  `${comm:t} == "claude"` check. Rule (b) (interpreted-wrapper) never tokenizes `args`: the known,
+  untruncated `$comm` is stripped off the FRONT of `args` via character-count substring slicing
+  (not pattern-based prefix removal, which would misread glob-special characters in a real path),
+  and the remainder is pattern-matched only at its OWN START for a claude-ending path — never
+  scanned for "claude" appearing anywhere later in the line. Deliberately does not try to isolate
+  argv[1] as a single token (impossible in general if the script path itself contains a space);
+  anchoring to the start of the remainder, not scanning the whole thing, is what keeps `vim claude`
+  and `grep -rn claude .` from matching.
+- **Caught and fixed one more bug while wiring this up:** the comm-snapshot assignment used a
+  QUOTED expression inline as the associative-array subscript (`map["${match[1]}"]=...`) — the
+  same class of zsh 5.9 gotcha already documented elsewhere in this file for `window_panes_map`,
+  newly triggered here. Every entry was silently unreadable by any later unquoted lookup despite
+  the map's own element count growing correctly on every insert. Fixed by extracting the key into
+  its own variable first and using it unquoted as the subscript.
+- **XACA-0830-026 re-checked against this new mechanism** (framework Python's capitalized `comm`):
+  re-verified live that `ps -eo pid=,comm=` still reports `.../Python.app/Contents/MacOS/Python`
+  for a plain `python3` invocation — confirms this was never a truncation artifact, independent of
+  which `ps` column or snapshot strategy reads it. Documented-accepted-gap outcome stands.
+- Verified with inputs that can fail: the real space-containing node path wrapping a script named
+  `claude` (launched via a wrapper `.sh` that `exec`s the real interpreter — direct tmux-command-
+  string invocation of a binary silently fails to spawn, confirmed the hard way) resolves BOUND;
+  short `/bin/sh` shape (regression check) still BOUND; `vim claude`/`grep -rn claude .` still not
+  matched; real live Claude pane still BOUND; the 4-item scratch board resolves identically across
+  in-pane, fully-detached, and wrong-socket contexts; enum timing not materially regressed.
+- Re-ported via a full block replacement (verbatim `diff` against canonical `kanban-helpers.sh`
+  confirmed byte-identical afterward) — same mechanism as the original XACA-0830 port, no template
+  placeholders in the affected region.
+
 ### Fix: XACA-0804 — read-only commands no longer materialize the team-paths registry
 
 Gates the registry bootstrap-write behind an explicit opt-in env var so a read-only
