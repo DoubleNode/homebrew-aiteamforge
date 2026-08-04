@@ -7,6 +7,31 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
 ## [Unreleased]
 
+- **XACA-0889 — LCARS health watchdog no longer kills healthy-but-busy servers.** `lcars-ui/server.py` runs a
+  single-threaded `socketserver.TCPServer`, so one slow request blocks every other request;
+  `/api/usage/current?refresh=1` can hold that sole thread for up to 5s (`subprocess.run(..., timeout=5)`).
+  `lcars-health-check.sh` probed `/api/status` with `curl --max-time 3`. Since 5 > 3, a busy server read as
+  dead and got restarted — observed as iOS 24x, Firebase 8x, Android 5x false restarts in a single log cycle,
+  with `BrokenPipeError` traceback floods in `logs/lcars-server-*.log` as the fingerprint (the watchdog's curl
+  hanging up mid-write). Three changes ship here: (1) `--max-time` raised 3 → 10 at BOTH probe sites
+  (`check_server_health`, `check_remote_server_health`), clearing the 5s worst case; (2) a new
+  `_hc_check_health_with_retry()` requires 2 consecutive failed probes (spaced `HEALTH_CHECK_RETRY_DELAY`,
+  default 3s, now input-validated so a negative or non-numeric override warns and falls back instead of
+  silently discarding the backoff) before a team is declared unhealthy — chosen as an in-run retry rather than
+  a cross-invocation persisted counter, so a genuinely dead server is still caught within seconds rather than
+  waiting a whole cron cycle, and no stale state file is introduced; (3) `LCARSQuietDisconnectMixin`, composed
+  into a concrete `LCARSServer` class that `main()` binds, collapses client-disconnect exceptions
+  (`BrokenPipeError`, `ConnectionResetError`, `ConnectionAbortedError`) to a single log line while every other
+  exception still gets its full stock traceback. Three genuine check-then-act races also fixed with locks
+  (roadmap-PDF stash cap, ccusage collector respawn, session-account-map rewrite).
+  **Known tradeoff, measured not estimated:** a failing team now costs ~23s to declare dead, so a worst-case
+  sweep with all 8 configured teams down measures 191s against the LaunchAgent's `StartInterval=120`. launchd
+  does not overlap invocations, so nothing breaks, but during a genuine multi-team outage the check cadence
+  degrades to ~191s. Accepted deliberately: the alternative was continuing to kill healthy servers.
+  The server remains **single-threaded on purpose** — the `ThreadingHTTPServer` switch is deferred to
+  XACA-0890, because concurrency would activate a pre-existing lost-update race across 12 unlocked
+  `_atomic_write_json` read-modify-write sites that must be locked in the same change.
+
 - **XACA-0830-027 — capture both `ps` exit statuses, not just their output.** The snapshot guard tested
   emptiness only, so a TRUNCATED snapshot (ps emits some lines, then fails) left element `[1]` populated,
   passed the guard, and silently dropped whichever pids never got written — including possibly the live

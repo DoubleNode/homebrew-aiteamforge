@@ -389,6 +389,14 @@ SECRETS_IMPORT_JOBS = {} # {job_id: {status, progress, message, manifest, staged
 _IMPORT_JOBS_LOCK = threading.Lock()    # guards IMPORT_JOBS
 _SECRETS_JOBS_LOCK = threading.Lock()   # guards SECRETS_EXPORT_JOBS + SECRETS_IMPORT_JOBS (shared prune loop)
 _EXPORT_JOBS_LOCK = threading.Lock()    # guards EXPORT_JOBS (XACA-0381-002)
+# XACA-0889-004: guards the read-partition-rewrite of
+# ~/.claude/.session-account-map.jsonl in handle_team_account_resume_ids.
+# That handler is read-then-modify-then-atomic-write with NO lock of any kind
+# (unlike board.json's fcntl.flock convention) — two concurrent POSTs would
+# each compute their "remaining" set from the same stale read, and the second
+# os.replace() silently reverts the first request's removal. In-process only;
+# does not protect against external processes appending to this file.
+_SESSION_ACCOUNT_MAP_LOCK = threading.Lock()
 
 EXPORT_DIR = Path("/tmp/lcars-exports")
 IMPORT_STAGING_DIR = Path("/tmp/lcars-imports")
@@ -400,6 +408,11 @@ ROADMAP_PDF_STASH = {}
 ROADMAP_PDF_STASH_TTL = 120  # seconds
 ROADMAP_PDF_MAX_BYTES = 25 * 1024 * 1024
 ROADMAP_PDF_STASH_MAX_ENTRIES = 10  # cap concurrent live entries (memory DoS guard)
+# XACA-0889-004: prune + cap-check + insert is a TOCTOU under concurrent request
+# threads (two POSTs can both pass the len()>=MAX check before either inserts,
+# defeating the memory-DoS guard). Guard the whole read-modify-write with one
+# lock; never held across the base64 decode or the response write.
+_ROADMAP_PDF_STASH_LOCK = threading.Lock()
 SECRETS_IMPORT_STAGING_DIR = Path("/tmp/lcars-secrets-imports")
 
 # Maximum wrong-password attempts before the staged zip is purged (item 6 spec).
@@ -641,6 +654,14 @@ _LCARS_TEAM_WAS_EXPLICIT: bool = bool(os.environ.get("LCARS_TEAM", "").strip())
 # Throttle: track last respawn attempt so a flapping daemon can't fork-bomb us.
 _ccusage_last_respawn_at = 0.0
 _CCUSAGE_RESPAWN_COOLDOWN_SECONDS = 30
+# XACA-0889-004: the cooldown check-then-set below is a classic "check then
+# spawn" TOCTOU — under concurrent request threads, two callers can both see
+# the cooldown as elapsed and both Popen a collector before either updates the
+# timestamp, double-firing the daemon. Guard only the compare-and-set of the
+# timestamp (mirrors _secrets_job_compare_and_set_status's CAS pattern); the
+# lock is released before the actual Popen/file-open work so it's never held
+# across subprocess spawn or I/O.
+_CCUSAGE_RESPAWN_LOCK = threading.Lock()
 
 
 def _collector_pid_alive() -> bool:
@@ -680,10 +701,13 @@ def _ensure_collector_running() -> bool:
     if _collector_pid_alive():
         return True
 
+    # Atomic compare-and-set: only the caller that wins the race gets to spawn;
+    # everyone else within the cooldown window bails out here (XACA-0889-004).
     now = time.time()
-    if now - _ccusage_last_respawn_at < _CCUSAGE_RESPAWN_COOLDOWN_SECONDS:
-        return False
-    _ccusage_last_respawn_at = now
+    with _CCUSAGE_RESPAWN_LOCK:
+        if now - _ccusage_last_respawn_at < _CCUSAGE_RESPAWN_COOLDOWN_SECONDS:
+            return False
+        _ccusage_last_respawn_at = now
 
     server_dir = str(Path(__file__).parent)
     collector = str(Path(__file__).parent / "ccusage_collector.py")
@@ -11851,59 +11875,65 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             # --- archive / clear: read, split, rewrite ---
+            # XACA-0889-004: the full read -> partition -> archive -> rewrite
+            # sequence is held under one lock so concurrent requests can't
+            # compute "remaining" from the same stale read and silently
+            # revert each other's removal (session map is small/bounded, so
+            # holding the lock across this file I/O is cheap).
             session_map_path = os.path.expanduser('~/.claude/.session-account-map.jsonl')
 
-            matched_lines = []    # raw JSON strings for affected entries
-            remaining_lines = []  # raw JSON strings for everything else
+            with _SESSION_ACCOUNT_MAP_LOCK:
+                matched_lines = []    # raw JSON strings for affected entries
+                remaining_lines = []  # raw JSON strings for everything else
 
-            if os.path.exists(session_map_path):
-                with open(session_map_path, 'r') as f:
-                    for raw in f:
-                        stripped = raw.strip()
-                        if not stripped:
-                            continue
-                        try:
-                            entry = json.loads(stripped)
-                        except json.JSONDecodeError:
-                            # Keep malformed lines so we don't silently lose them
-                            remaining_lines.append(stripped)
-                            continue
-                        if (entry.get('team') == team
-                                and entry.get('account_id') == old_account_id):
-                            matched_lines.append(stripped)
-                        else:
-                            remaining_lines.append(stripped)
+                if os.path.exists(session_map_path):
+                    with open(session_map_path, 'r') as f:
+                        for raw in f:
+                            stripped = raw.strip()
+                            if not stripped:
+                                continue
+                            try:
+                                entry = json.loads(stripped)
+                            except json.JSONDecodeError:
+                                # Keep malformed lines so we don't silently lose them
+                                remaining_lines.append(stripped)
+                                continue
+                            if (entry.get('team') == team
+                                    and entry.get('account_id') == old_account_id):
+                                matched_lines.append(stripped)
+                            else:
+                                remaining_lines.append(stripped)
 
-            affected = len(matched_lines)
+                affected = len(matched_lines)
 
-            # archive: write matched lines to a timestamped archive file first
-            archive_path = None
-            if action == 'archive' and matched_lines:
-                from datetime import datetime
-                ts = datetime.now().strftime('%Y%m%d-%H%M%S')
-                slug = self._resume_id_slugify(old_account_id)
-                archive_filename = f'.session-account-map.archive-{slug}-{ts}.jsonl'
-                archive_path = os.path.expanduser(f'~/.claude/{archive_filename}')
+                # archive: write matched lines to a timestamped archive file first
+                archive_path = None
+                if action == 'archive' and matched_lines:
+                    from datetime import datetime
+                    ts = datetime.now().strftime('%Y%m%d-%H%M%S')
+                    slug = self._resume_id_slugify(old_account_id)
+                    archive_filename = f'.session-account-map.archive-{slug}-{ts}.jsonl'
+                    archive_path = os.path.expanduser(f'~/.claude/{archive_filename}')
 
-                with open(archive_path, 'w') as af:
-                    for line in matched_lines:
-                        af.write(line + '\n')
+                    with open(archive_path, 'w') as af:
+                        for line in matched_lines:
+                            af.write(line + '\n')
 
-            # Rewrite live map (atomic) — skip if nothing changed
-            if matched_lines:
-                tmp_path = session_map_path + f'.tmp.{os.getpid()}'
-                try:
-                    with open(tmp_path, 'w') as tf:
-                        for line in remaining_lines:
-                            tf.write(line + '\n')
-                    os.replace(tmp_path, session_map_path)
-                except Exception:
-                    # Clean up tmp on failure; do not leave partial writes
+                # Rewrite live map (atomic) — skip if nothing changed
+                if matched_lines:
+                    tmp_path = session_map_path + f'.tmp.{os.getpid()}'
                     try:
-                        os.remove(tmp_path)
-                    except OSError:
-                        pass
-                    raise
+                        with open(tmp_path, 'w') as tf:
+                            for line in remaining_lines:
+                                tf.write(line + '\n')
+                        os.replace(tmp_path, session_map_path)
+                    except Exception:
+                        # Clean up tmp on failure; do not leave partial writes
+                        try:
+                            os.remove(tmp_path)
+                        except OSError:
+                            pass
+                        raise
 
             response = {
                 'success': True,
@@ -14515,20 +14545,28 @@ end tell
             if not filename.lower().endswith('.pdf'):
                 filename += '.pdf'
 
-            # Drop expired stash entries (best-effort TTL sweep).
+            # Drop expired stash entries (best-effort TTL sweep), enforce the
+            # concurrent-entry cap, and insert — all as one atomic step so
+            # concurrent requests can't both slip past the cap check (XACA-0889-004).
             now = time.time()
-            for tok in [t for t, v in ROADMAP_PDF_STASH.items() if now - v['ts'] > ROADMAP_PDF_STASH_TTL]:
-                ROADMAP_PDF_STASH.pop(tok, None)
+            with _ROADMAP_PDF_STASH_LOCK:
+                for tok in [t for t, v in ROADMAP_PDF_STASH.items() if now - v['ts'] > ROADMAP_PDF_STASH_TTL]:
+                    ROADMAP_PDF_STASH.pop(tok, None)
 
-            # Cap concurrent live entries so a burst of POSTs can't exhaust memory
-            # within the TTL window (XACA-0636-002).
-            if len(ROADMAP_PDF_STASH) >= ROADMAP_PDF_STASH_MAX_ENTRIES:
+                # Cap concurrent live entries so a burst of POSTs can't exhaust memory
+                # within the TTL window (XACA-0636-002).
+                if len(ROADMAP_PDF_STASH) >= ROADMAP_PDF_STASH_MAX_ENTRIES:
+                    over_cap = True
+                else:
+                    over_cap = False
+                    token = uuid.uuid4().hex
+                    ROADMAP_PDF_STASH[token] = {'data': data, 'filename': filename, 'ts': now}
+
+            if over_cap:
                 self._send_json_response(
                     {'error': 'Too many pending roadmap PDFs; retry shortly'}, status=429)
                 return
 
-            token = uuid.uuid4().hex
-            ROADMAP_PDF_STASH[token] = {'data': data, 'filename': filename, 'ts': now}
             self._send_json_response({'token': token, 'filename': filename})
         except Exception as e:
             self._send_json_response({'error': f'Stash failed: {e}'}, status=500)
@@ -16864,6 +16902,93 @@ def validate_lcars_team_or_die() -> None:
     sys.exit(1)
 
 
+# XACA-0889-003: the lcars-health-check.sh watchdog (and any browser/curl
+# caller that navigates away mid-response) disconnects with a short
+# --max-time. On a stdlib http.server, that surfaces as a BrokenPipeError /
+# ConnectionResetError raised from inside a do_GET/do_POST handler's
+# self.wfile.write() (or from the implicit self.wfile.flush() that
+# BaseHTTPRequestHandler.handle_one_request() runs after every do_* call).
+# That exception is NOT caught anywhere in http.server or socketserver's
+# per-request dispatch — it propagates out of the request-handler instance's
+# handle() through BaseRequestHandler.__init__(), and is only ever caught by
+# socketserver.BaseServer's own request-processing wrapper, which calls
+# self.handle_error(request, client_address) before discarding the request.
+# This holds for BOTH the single-threaded TCPServer path
+# (BaseServer._handle_request_noblock's `except Exception: self.handle_error(...)`)
+# and the threaded path (ThreadingMixIn.process_request_thread's identical
+# `except Exception: self.handle_error(...)`) — confirmed against the
+# installed stdlib (see subitem verification notes). So a SERVER-level
+# handle_error() override is sufficient on its own to quiet a disconnect
+# raised from anywhere in a handler, including its write path; no separate
+# guarding of self.wfile.write()/do_GET is needed.
+#
+# Default BaseServer.handle_error() prints a ~40-line traceback to stderr for
+# EVERY exception, including these expected, benign disconnects — that's the
+# flood XACA-0889 is about. This mixin narrows that to a single log line for
+# exactly three client-disconnect exceptions and leaves every other
+# exception's full traceback completely intact by delegating to
+# super().handle_error(), so a real server bug is never silently swallowed.
+#
+# ConnectionAbortedError is included alongside BrokenPipeError/
+# ConnectionResetError because it's the same family of "the peer went away"
+# OSError subclasses a request can raise mid-write (e.g. Windows-style abort,
+# or a client closing before reading the full response) — none of the three
+# indicate a server-side bug, and all three are silent-to-the-client by
+# nature (there is no one left to send an error response to).
+class LCARSQuietDisconnectMixin:
+    """Server-class mixin: quiet client-disconnect exceptions in handle_error().
+
+    Compose this ahead of the actual server base class so its handle_error()
+    wins the MRO, e.g.:
+
+        class LCARSServer(LCARSQuietDisconnectMixin, socketserver.TCPServer):
+            pass
+
+    XACA-0889-005 NOTE: when you swap the server class (TCPServer ->
+    ThreadingHTTPServer or similar) at the `with ...(("", port), LCARSHandler)
+    as httpd:` call site below, compose THIS mixin into whatever new class
+    you introduce (mixin first in the bases tuple) and use that class at the
+    call site instead of the bare stdlib class. Do not re-implement
+    handle_error() separately — the swallow logic must stay in exactly one
+    place so 006+ doesn't have to reconcile two copies.
+    """
+
+    _QUIET_DISCONNECT_EXCEPTIONS = (
+        BrokenPipeError,
+        ConnectionResetError,
+        ConnectionAbortedError,
+    )
+
+    def handle_error(self, request, client_address):
+        exc = sys.exc_info()[1]
+        if isinstance(exc, self._QUIET_DISCONNECT_EXCEPTIONS):
+            # One concise line instead of the ~40-line traceback flood —
+            # still enough to correlate against log volume if needed.
+            print(
+                f"[LCARS] client disconnected mid-response "
+                f"({type(exc).__name__}) from {client_address}",
+                file=sys.stderr,
+            )
+            return
+        # Anything else is a real bug: preserve stock behaviour (full
+        # traceback to stderr) unmodified.
+        super().handle_error(request, client_address)
+
+
+class LCARSServer(LCARSQuietDisconnectMixin, socketserver.TCPServer):
+    """The concrete server class main() binds.
+
+    Mixin first so LCARSQuietDisconnectMixin.handle_error() wins the MRO.
+
+    XACA-0889 NOTE: this is deliberately still SINGLE-THREADED. Swapping the
+    base to http.server.ThreadingHTTPServer (+ daemon_threads = True) is the
+    remaining half of the fix and is tracked separately, because concurrency
+    also activates a pre-existing lost-update race across ~12 unlocked
+    read-modify-write sites (see the XACA-0889 audit). Do not swap the base
+    here without landing those path locks in the same change.
+    """
+
+
 def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else DEFAULT_PORT
 
@@ -16917,7 +17042,10 @@ def main():
 
     # Allow port reuse to avoid "Address already in use" errors
     socketserver.TCPServer.allow_reuse_address = True
-    with socketserver.TCPServer(("", port), LCARSHandler) as httpd:
+    # XACA-0889-003: LCARSServer composes LCARSQuietDisconnectMixin so a client
+    # hangup (health-check curl --max-time) logs one line instead of a ~40-line
+    # BrokenPipeError traceback. Still single-threaded — see LCARSServer docstring.
+    with LCARSServer(("", port), LCARSHandler) as httpd:
         try:
             httpd.serve_forever()
         except KeyboardInterrupt:

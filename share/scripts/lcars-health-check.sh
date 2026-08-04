@@ -34,6 +34,24 @@ STATUS_ONLY=false
 DAEMON_MODE=false
 DAEMON_INTERVAL=60  # Check every 60 seconds in daemon mode
 
+# XACA-0889 mitigation: require 2 CONSECUTIVE failed probes, spaced this many
+# seconds apart, before a team is declared unhealthy / restarted. See the
+# in-run-vs-persisted-state design note above _hc_check_health_with_retry()
+# for why this is an in-run retry rather than a cross-invocation counter.
+# Overridable via env for tests (e.g. HEALTH_CHECK_RETRY_DELAY=0).
+HEALTH_CHECK_RETRY_DELAY="${HEALTH_CHECK_RETRY_DELAY:-3}"
+
+# XACA-0889-007: validate the override. Without this, a negative or non-numeric
+# value silently DISCARDS the backoff instead of failing: BSD sleep treats a
+# leading '-' as an option flag ("sleep -5" -> "illegal option -- 5") and rejects
+# non-numerics ("invalid time interval"), so the retry fires ~instantly while
+# emitting stderr noise. That is the worst outcome — the mitigation appears
+# configured but is not actually spacing the probes. Fail loudly to the default.
+if ! [[ "$HEALTH_CHECK_RETRY_DELAY" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    echo "WARNING: HEALTH_CHECK_RETRY_DELAY='$HEALTH_CHECK_RETRY_DELAY' is not a non-negative number; falling back to 3s." >&2
+    HEALTH_CHECK_RETRY_DELAY=3
+fi
+
 # Parse arguments
 for arg in "$@"; do
     case $arg in
@@ -198,7 +216,17 @@ check_tmux_session() {
 # ============================================================================
 check_server_health() {
     local port=$1
-    local timeout=3  # 3 second timeout
+    # XACA-0889 mitigation: raised 3 -> 10. server.py's single-threaded
+    # socketserver.TCPServer can block its one worker thread for up to 5s
+    # servicing /api/usage/current?refresh=1 (subprocess.run(..., timeout=5)),
+    # during which /api/status also cannot be answered on a perfectly healthy
+    # server. A 3s --max-time was shorter than that worst-case block, so a
+    # busy-not-dead server read as unhealthy and got killed (observed: iOS
+    # 24x, Firebase 8x, Android 5x false restarts in one log cycle). 10s
+    # comfortably exceeds the 5s worst case with margin for queuing. The real
+    # fix (ThreadingHTTPServer) is a separate subitem; this mitigation must
+    # stand on its own for consumers who haven't picked that up yet.
+    local timeout=10
 
     # Try to hit the status endpoint
     if curl -s --max-time $timeout "http://localhost:$port/api/status" > /dev/null 2>&1; then
@@ -214,7 +242,10 @@ check_server_health() {
 check_remote_server_health() {
     local host=$1
     local port=$2
-    local timeout=3  # 3 second timeout
+    # XACA-0889 mitigation: raised 3 -> 10, same rationale as
+    # check_server_health() above (single-threaded server.py can legitimately
+    # block up to 5s on /api/usage/current?refresh=1).
+    local timeout=10
 
     # First check if SSH tunnel is alive (via ControlMaster check)
     if ! ssh -O check "$host" 2>/dev/null; then
@@ -513,6 +544,74 @@ _hc_heal_noncanonical_port() {
 }
 
 # ============================================================================
+# Require 2 consecutive failed health probes before a team is treated as
+# unhealthy (XACA-0889 mitigation, second half — first half is the 3->10
+# timeout raise on check_server_health/check_remote_server_health above).
+# ============================================================================
+# DESIGN DECISION (in-run retry, not cross-invocation persisted state):
+#
+# Two ways to require "2 consecutive failures" were considered:
+#   1. In-run retry: on a failed probe, back off briefly and re-probe once
+#      more within THIS SAME invocation before declaring unhealthy.
+#   2. Cross-run persisted state: a per-team failure counter on disk that
+#      survives between separate invocations (cron ticks / daemon loop
+#      iterations / LaunchAgent runs), incremented on failure and reset on
+#      success, restarting only once the counter reaches 2.
+#
+# Chose (1), in-run retry. Reasoning:
+#   - The root cause is a request that blocks server.py's single worker
+#     thread for AT MOST ~5s (subprocess.run(..., timeout=5)). A second
+#     probe a few seconds later, still inside the same invocation, is on the
+#     same timescale as the stall itself and reliably distinguishes
+#     "busy" from "actually dead." Persisted state would instead wait for a
+#     second separate invocation to confirm — with this script installable
+#     either as a 5-minute cron job or a 60s daemon loop (both supported,
+#     see file header / DAEMON_INTERVAL), that means anywhere from 60s to a
+#     full 5 minutes of extra confirmation latency for a GENUINELY dead
+#     server, which is a real regression in outage-detection time that a
+#     few seconds of in-run backoff does not cause.
+#   - No stale-state failure mode. This codebase has an existing problem
+#     class of leftover per-team state/lock files needing their own sweeper
+#     (see _sweep_stale_locks in lcars-ui/server.py) — a persisted
+#     failure-counter file would be exactly that class again (needs reset-
+#     on-success, needs to tolerate a missing/corrupt file, needs to not
+#     accumulate forever across team churn). In-run retry needs none of
+#     that: nothing written to disk, nothing to go stale, nothing to sweep.
+#   - This script is invoked in three different modes (manual, cron,
+#     --daemon) and manual/status-only runs would pollute or reset a
+#     persisted counter in ways that don't reflect the daemon's own view of
+#     "consecutive," making a shared on-disk counter an awkward fit anyway.
+#
+# HEALTH_CHECK_RETRY_DELAY (default 3s, env-overridable) is the backoff
+# between the two probes. --status mode still never restarts anything —
+# this wrapper only changes what counts as "unhealthy," the STATUS_ONLY gate
+# around the actual restart call in run_health_check is untouched.
+# ============================================================================
+_hc_check_health_with_retry() {
+    local local_port=$1
+    local team=$2
+    local remote_host=$3
+
+    if [[ -n "$remote_host" ]]; then
+        if check_remote_server_health "$remote_host" "$local_port"; then
+            return 0
+        fi
+        log "  ⚠️  $team:$local_port - first health probe failed (remote: $remote_host); waiting ${HEALTH_CHECK_RETRY_DELAY}s to confirm before declaring unhealthy"
+        sleep "$HEALTH_CHECK_RETRY_DELAY"
+        check_remote_server_health "$remote_host" "$local_port"
+        return $?
+    else
+        if check_server_health "$local_port"; then
+            return 0
+        fi
+        log "  ⚠️  $team:$local_port - first health probe failed; waiting ${HEALTH_CHECK_RETRY_DELAY}s to confirm before declaring unhealthy"
+        sleep "$HEALTH_CHECK_RETRY_DELAY"
+        check_server_health "$local_port"
+        return $?
+    fi
+}
+
+# ============================================================================
 # Main health check routine
 # ============================================================================
 run_health_check() {
@@ -584,21 +683,20 @@ run_health_check() {
         # Check if this port has a remote tunnel
         local remote_host=$(get_remote_host_for_port "$local_port")
 
-        # First, check if the server is responding
-        if [[ -n "$remote_host" ]]; then
-            # Remote health check (via SSH tunnel)
-            if check_remote_server_health "$remote_host" "$local_port"; then
+        # First, check if the server is responding. XACA-0889: this now
+        # requires 2 CONSECUTIVE failed probes (see
+        # _hc_check_health_with_retry's design-decision comment above) before
+        # falling through to the unhealthy/restart path below — a lone failed
+        # probe against a server.py that's merely busy for up to ~5s no
+        # longer triggers a restart.
+        if _hc_check_health_with_retry "$local_port" "$team" "$remote_host"; then
+            if [[ -n "$remote_host" ]]; then
                 log "✅ $team:$local_port - healthy (remote: $remote_host)"
-                ((healthy++))
-                continue
-            fi
-        else
-            # Local health check (existing behavior)
-            if check_server_health "$local_port"; then
+            else
                 log "✅ $team:$local_port - healthy"
-                ((healthy++))
-                continue
             fi
+            ((healthy++))
+            continue
         fi
 
         # XACA-0626 Defect C fix: gate on configured-team membership, not on a live
