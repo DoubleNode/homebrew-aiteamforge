@@ -2775,6 +2775,35 @@ _kb_tmux_bounded_probe() {
 #      This never raises an error; it degrades quietly ($TMUX-strict-mode
 #      safe: no unset-variable references, no non-zero exit surprises for
 #      set -u callers).
+# TIE-BREAK (the label six comments in this file point at; it had no
+# definition until XACA-0830 round 6 -- the references were dangling, which
+# is its own small instance of a pointer that looks resolved and is not):
+#
+#   When the PROCESS-INSPECTION tooling itself cannot do its job -- `ps`
+#   missing, either snapshot empty, either snapshot truncated or exiting
+#   non-zero, or panes that cannot be enumerated -- `_kb_tlwi_assume_live`
+#   is set and every window in the already-enumerated set is treated as
+#   LIVE rather than dead.
+#
+#   Direction, and why: the two ways to be wrong are not symmetric.
+#     * Assume-dead on tooling failure => mass false ORPHANED. That is
+#       Defect A, the bug this whole ticket exists for, and it invites the
+#       operator to run `kb-resume`, which MUTATES board state. Wrong and
+#       destructive.
+#     * Assume-live on tooling failure => a false BOUND, but ONLY for the
+#       Defect-B subclass (the window genuinely exists; we merely could not
+#       confirm whether Claude is still in it). It CANNOT manufacture a
+#       window: the emitted set is still exactly what `list-panes -a`
+#       reported, so the post-crash "window is gone entirely" case that
+#       kb-recover primarily exists to surface is unaffected. Nothing
+#       destructive consumes an ORPHANED result -- LCARS displays it and
+#       crash-detect gates a nudge on count>0. Wrong and quiet.
+#
+#   Wrong-and-mutating is worse than wrong-and-quiet, so assume-live wins.
+#   Note this is a TIE-BREAK on TOOLING failure only -- it is NOT the same
+#   axis as the REACHABLE/UNREACHABLE tri-state above, which is about
+#   whether the tmux SOCKET could be reached. A caller can get rc=0
+#   (reachable) with assume_live set, and that combination is deliberate.
 _kb_tmux_live_window_ids() {
     local team="${1-}"
     local explicit_socket="${2-}"
