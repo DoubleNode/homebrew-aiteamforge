@@ -1517,11 +1517,15 @@
                             <select id="usage-account-selector" class="lcars-select usage-account-selector" aria-label="Filter by account" title="Filter by Anthropic account">
                                 <option value="">All accounts</option>
                             </select>
-                            <!-- Refresh button: sends ?refresh=1 which triggers a one-shot collector run (~2min) -->
+                            <!-- Refresh button (XACA-0890-005): ?refresh=1 no longer forces a collector
+                                 run — it returns the daemon's current cache immediately. The daemon
+                                 polls in the background on its own cadence; the uw-stale-badge below
+                                 (driven by the response's stale/stale_age_seconds fields) is the
+                                 honest freshness signal, not this button's label. -->
                             <button
                                 class="usage-refresh-btn"
                                 id="uw-refresh-btn"
-                                title="Force a fresh ccusage read (takes ~2 min)"
+                                title="Show latest usage snapshot — auto-updates every few minutes"
                                 aria-label="Refresh usage data"
                             >&#9655;</button>
                             <span class="usage-spinner" id="uw-spinner" aria-hidden="true" style="display:none;">...</span>
@@ -3450,9 +3454,15 @@
         }, 60000);
     }
 
-    // ── Refresh button: ?refresh=1 triggers a one-shot collector run (~2min) ─
+    // ── Refresh button (XACA-0890-005): ?refresh=1 returns the collector ─────
+    // daemon's current cache immediately — it no longer forces a synchronous
+    // collector run. Real freshness depends on the daemon's own background
+    // poll cadence (ccusage_collector.py POLL_INTERVAL_S), surfaced honestly
+    // to the user via the uw-stale-badge / stale_age_seconds fields, not by
+    // this button.
     // XACA-0280-009: when per-account filter active AND cache is fresh (<3 min),
-    // skip the collector spawn and just re-render from the cached endpoint.
+    // skip the ?refresh=1 round-trip entirely and just re-render from the
+    // already-cached endpoint.
     // NOTE: This is the ONLY place in index.html that uses ?refresh=1.
     if (refreshBtn) {
         refreshBtn.addEventListener('click', async function () {
