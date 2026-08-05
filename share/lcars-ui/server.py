@@ -663,6 +663,58 @@ _CCUSAGE_RESPAWN_COOLDOWN_SECONDS = 30
 # across subprocess spawn or I/O.
 _CCUSAGE_RESPAWN_LOCK = threading.Lock()
 
+# XACA-0890-002: path-keyed lock registry for the _atomic_write_json call
+# sites that have no other protection. board_file/cr_board_file writes already
+# serialize via a per-file fcntl.flock convention (see handle_toggle_collapsed
+# for the canonical shape) — that mechanism is cross-process and predates this
+# registry, so board/cr_board sites keep using it rather than being migrated
+# here (mixing the two lock types on the same file would give NO mutual
+# exclusion between them). This registry covers everything else: integrations
+# config, release manifests, release archives, alert archives, calendar
+# config. A single global write lock would also be correct but would
+# needlessly serialize writers touching UNRELATED files (e.g. an
+# integrations-config save blocking a calendar-sync-config save for a
+# different team). Keying per resolved path lets concurrent writers to
+# different files proceed in parallel while still serializing writers that
+# target the SAME file.
+#
+# RLock, not Lock: _save_release_manifest alone has 9 call-site pairs spread
+# across handler methods and private helpers that call each other (e.g.
+# handle_link_cr_to_release calls into manifest load/save twice in one
+# request). No same-thread nested acquisition of the same path's lock exists
+# today (audited XACA-0890-003), but that call graph is large enough that a
+# future refactor could introduce one by accident. RLock removes an entire
+# class of deadlock-by-nesting bug at zero cost for these low-contention
+# config/manifest files; Lock would serialize the RMW just as correctly today
+# but would deadlock the instant a nested call appeared.
+_PATH_LOCKS: dict = {}  # resolved-path-str -> threading.RLock
+# Guards mutation of _PATH_LOCKS itself (the get-or-create below) — NOT the
+# files those locks protect. Held only for the dict lookup/insert, never
+# across a file read/write.
+_PATH_LOCKS_REGISTRY_LOCK = threading.Lock()
+
+
+def _get_path_lock(path) -> threading.RLock:
+    """Return the process-wide RLock guarding *path*, creating it on first use.
+
+    Keys on the NORMALIZED, RESOLVED path (Path(path).resolve()) so two
+    different spellings of the same file (relative vs absolute, a symlink vs
+    its target, a '..'-containing path vs the canonical form) share one lock.
+    Keying on the raw/un-resolved path would silently defeat the whole
+    mechanism — two request threads that reach the same file via different
+    path strings would get two different lock objects and race exactly as if
+    unlocked. resolve() works fine on a path that doesn't exist yet (e.g. a
+    release manifest being written for the first time) — it normalizes
+    lexically without requiring the target to exist.
+    """
+    key = str(Path(path).resolve())
+    with _PATH_LOCKS_REGISTRY_LOCK:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
 
 def _collector_pid_alive() -> bool:
     """Return True if the PID in CCUSAGE_PID_PATH names a live process.
@@ -2326,8 +2378,12 @@ def _build_usage_response(
     Args:
         cache_path:      Path to the JSON cache file written by ccusage_collector.
         history_limit:   Maximum number of history entries to return (clamped 1-50).
-        force_refresh:   If True, attempt to spawn ccusage_collector --once first.
-                         Default (False) must NEVER spawn ccusage — endpoint stays <50ms.
+        force_refresh:   XACA-0890-005: kept for backward-compatible callers but
+                         NO LONGER spawns ccusage_collector synchronously — see
+                         the note above _ensure_collector_running() below. Both
+                         True and False now just read whatever the daemon's
+                         cache currently holds; the endpoint stays <50ms
+                         regardless of this flag.
         account_filter:  Optional account ID to scope the totals field.
                          None (default) → all-accounts aggregate (unchanged behaviour).
                          "untagged" → totals from the untagged_bucket.
@@ -2351,22 +2407,32 @@ def _build_usage_response(
     # needing a separate launchd/cron watchdog.
     _ensure_collector_running()
 
-    # Optional: attempt a single synchronous ccusage run before reading cache.
-    # Used by the dashboard "refresh" button (?refresh=1). The respawn above
-    # already restarted the daemon if it was dead; --once gives the user
-    # instant feedback while the daemon's first poll catches up.
-    if force_refresh and CCUSAGE_HEURISTICS_AVAILABLE:
-        _server_dir = str(Path(__file__).parent)
-        _collector = str(Path(__file__).parent / "ccusage_collector.py")
-        try:
-            subprocess.run(
-                [sys.executable, _collector, "--once"],
-                timeout=5,
-                capture_output=True,
-                cwd=_server_dir,
-            )
-        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            pass  # Fall through to existing cache
+    # XACA-0890-005: this used to run `ccusage_collector.py --once`
+    # SYNCHRONOUSLY here (subprocess.run(..., timeout=5)) whenever the
+    # dashboard "refresh" button set force_refresh=True, so the button could
+    # block this request for up to 5 seconds. That 5s blocking call vs. the
+    # health-check's 3s curl --max-time was the original root cause of the
+    # restart-loop behaviour XACA-0889 was written to investigate: a request
+    # in flight here could outlive the health check's patience, making a
+    # perfectly healthy-but-busy server look dead.
+    #
+    # Fix — approach (a), user-selected: do NOT synchronously refresh here at
+    # all. _ensure_collector_running() above already keeps the daemon alive
+    # (a cheap kill(pid, 0) check on the fast path, a throttled respawn only
+    # if it's actually dead); force_refresh now just means "return whatever
+    # the daemon's cache currently holds" and lets the daemon's own next poll
+    # catch up naturally. No short-poll, no sleep-and-retry loop here — this
+    # function returns immediately either way.
+    #
+    # This is a real, user-visible behavior change: the refresh button now
+    # returns instantly instead of blocking for up to 5s, and what it
+    # returns can be up to one collector poll interval old. That is not
+    # hidden from the client — evaluate(cache) below computes "ok"/"stale"
+    # from the cache's own collected_at timestamp (see _is_cache_stale /
+    # ccusage_heuristics.evaluate), so a request that lands between polls
+    # honestly reports stale=True rather than presenting old data as fresh.
+    # force_refresh is intentionally unused below; kept as a parameter for
+    # backward compatibility with existing callers/tests.
 
     # Unavailable-weekly sentinel emitted when we cannot reach evaluate_weekly.
     # Always include a "weekly" key so both UIs can unconditionally check
@@ -3491,62 +3557,70 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Load current config (team-specific)
             config_path = INTEGRATIONS_FILE
             TEAM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-            if config_path.exists():
-                with open(config_path, 'r') as f:
-                    config = json.load(f)
-            else:
-                config = {"integrations": []}
 
-            integrations = config.get('integrations', [])
+            # XACA-0890-003: hold the path lock across the whole read-modify-
+            # write. INTEGRATIONS_FILE has no other protection (unlike
+            # board_file's fcntl convention) — locking only the write below
+            # would leave the read+merge above racing against a concurrent
+            # save, which is exactly the lost-update window that made this
+            # site unsafe once the server goes multi-threaded (XACA-0890-004).
+            with _get_path_lock(config_path):
+                if config_path.exists():
+                    with open(config_path, 'r') as f:
+                        config = json.load(f)
+                else:
+                    config = {"integrations": []}
 
-            # Find existing integration
-            existing_idx = None
-            for i, integ in enumerate(integrations):
-                if integ.get('id') == integration['id']:
-                    existing_idx = i
-                    break
+                integrations = config.get('integrations', [])
 
-            if is_new and existing_idx is not None:
-                self._send_json_response({
-                    "success": False,
-                    "error": f"Integration with ID '{integration['id']}' already exists"
-                })
-                return
+                # Find existing integration
+                existing_idx = None
+                for i, integ in enumerate(integrations):
+                    if integ.get('id') == integration['id']:
+                        existing_idx = i
+                        break
 
-            # Build the integration config object
-            new_config = {
-                'id': integration['id'],
-                'type': integration.get('type', 'custom'),
-                'name': integration.get('name', integration['id']),
-                'enabled': integration.get('enabled', True),
-                'baseUrl': integration.get('baseUrl', ''),
-                'browseUrl': integration.get('browseUrl', ''),
-            }
+                if is_new and existing_idx is not None:
+                    self._send_json_response({
+                        "success": False,
+                        "error": f"Integration with ID '{integration['id']}' already exists"
+                    })
+                    return
 
-            # Optional fields
-            if integration.get('ticketPattern'):
-                new_config['ticketPattern'] = integration['ticketPattern']
-            if integration.get('defaultProjects'):
-                new_config['defaultProjects'] = integration['defaultProjects']
-            if integration.get('auth'):
-                new_config['auth'] = integration['auth']
-            if integration.get('icon'):
-                new_config['icon'] = integration['icon']
+                # Build the integration config object
+                new_config = {
+                    'id': integration['id'],
+                    'type': integration.get('type', 'custom'),
+                    'name': integration.get('name', integration['id']),
+                    'enabled': integration.get('enabled', True),
+                    'baseUrl': integration.get('baseUrl', ''),
+                    'browseUrl': integration.get('browseUrl', ''),
+                }
 
-            # Add API version for JIRA
-            if integration.get('type') == 'jira':
-                new_config['apiVersion'] = '3'
+                # Optional fields
+                if integration.get('ticketPattern'):
+                    new_config['ticketPattern'] = integration['ticketPattern']
+                if integration.get('defaultProjects'):
+                    new_config['defaultProjects'] = integration['defaultProjects']
+                if integration.get('auth'):
+                    new_config['auth'] = integration['auth']
+                if integration.get('icon'):
+                    new_config['icon'] = integration['icon']
 
-            # Update or add
-            if existing_idx is not None:
-                integrations[existing_idx] = new_config
-            else:
-                integrations.append(new_config)
+                # Add API version for JIRA
+                if integration.get('type') == 'jira':
+                    new_config['apiVersion'] = '3'
 
-            config['integrations'] = integrations
+                # Update or add
+                if existing_idx is not None:
+                    integrations[existing_idx] = new_config
+                else:
+                    integrations.append(new_config)
 
-            # Write back atomically
-            self._atomic_write_json(config_path, config)
+                config['integrations'] = integrations
+
+                # Write back atomically
+                self._atomic_write_json(config_path, config)
 
             # Reload the manager (must use reload() not load() to clear cache)
             if INTEGRATIONS_AVAILABLE:
@@ -3587,26 +3661,31 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     "error": "No integrations configured for this team"
                 })
                 return
-            with open(config_path, 'r') as f:
-                config = json.load(f)
 
-            integrations = config.get('integrations', [])
-            original_count = len(integrations)
+            # XACA-0890-003: same path lock as handle_integration_save — see
+            # that method's comment for why the whole read-modify-write (not
+            # just the write) must be inside it.
+            with _get_path_lock(config_path):
+                with open(config_path, 'r') as f:
+                    config = json.load(f)
 
-            # Remove the integration
-            integrations = [i for i in integrations if i.get('id') != integration_id]
+                integrations = config.get('integrations', [])
+                original_count = len(integrations)
 
-            if len(integrations) == original_count:
-                self._send_json_response({
-                    "success": False,
-                    "error": f"Integration '{integration_id}' not found"
-                })
-                return
+                # Remove the integration
+                integrations = [i for i in integrations if i.get('id') != integration_id]
 
-            config['integrations'] = integrations
+                if len(integrations) == original_count:
+                    self._send_json_response({
+                        "success": False,
+                        "error": f"Integration '{integration_id}' not found"
+                    })
+                    return
 
-            # Write back atomically
-            self._atomic_write_json(config_path, config)
+                config['integrations'] = integrations
+
+                # Write back atomically
+                self._atomic_write_json(config_path, config)
 
             # Reload the manager (must use reload() not load() to clear cache)
             if INTEGRATIONS_AVAILABLE:
@@ -4700,6 +4779,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         manifest['updatedAt'] = self._get_timestamp()
         self._atomic_write_json(self._get_release_manifest_path(release_id, team), manifest)
 
+    def _release_manifest_lock(self, release_id):
+        """XACA-0890-003: RLock guarding release_id's manifest.json for the
+        whole read-modify-write, not just the write inside
+        _save_release_manifest.
+
+        _load_release_manifest and _save_release_manifest are separate calls
+        (often in different methods entirely — see handle_link_cr_to_release,
+        which loads/saves two different release manifests in one request), so
+        the lock has to be acquired by the CALLER before the load and held
+        through the save. Locking only inside _save_release_manifest would
+        leave the read-then-decide gap unprotected, which is the exact
+        lost-update window this ticket exists to close.
+
+        Resolves the path the same way _save_release_manifest does (team from
+        _extract_team_from_release_id, falling back to LCARS_TEAM) so the
+        lock returned here always matches the file _save_release_manifest
+        will actually write — _load_release_manifest has extra legacy
+        fallback lookups for backward compatibility, but the write always
+        lands at this canonical path, and that's the file being protected.
+
+        Usage:
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                ...mutate...
+                self._save_release_manifest(release_id, manifest)
+        """
+        team = self._extract_team_from_release_id(release_id) or LCARS_TEAM
+        return _get_path_lock(self._get_release_manifest_path(release_id, team))
+
     @staticmethod
     def _derive_item_status(board_item):
         """Derive item status from subitems and activity signals.
@@ -5169,13 +5277,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             data['releases'].append(release)
             self._save_releases_config(data)
 
-            # Create empty manifest with team ownership
-            self._save_release_manifest(release_id, {
-                "releaseId": release_id,
-                "team": LCARS_TEAM,  # Track owning team for validation
-                "items": [],
-                "createdAt": self._get_timestamp()
-            })
+            # Create empty manifest with team ownership. XACA-0890-003: no
+            # prior read here (the manifest doesn't exist yet), but the lock
+            # still guards against a concurrent request racing an assign/sync
+            # call for this brand-new release_id before this create lands.
+            with self._release_manifest_lock(release_id):
+                self._save_release_manifest(release_id, {
+                    "releaseId": release_id,
+                    "team": LCARS_TEAM,  # Track owning team for validation
+                    "items": [],
+                    "createdAt": self._get_timestamp()
+                })
 
             self.send_response(201)
             self.send_header('Content-Type', 'application/json')
@@ -5213,48 +5325,53 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(403, f"Cross-team assignment rejected: Item team '{team}' does not match release team '{release_team}'")
                 return
 
-            # Add to manifest
-            manifest = self._load_release_manifest(release_id)
-            items = manifest.get('items', [])
+            # Add to manifest. XACA-0890-003: hold the path lock across the
+            # whole read-modify-write — the existing-item lookup below decides
+            # update-vs-append based on this read, so a concurrent assign for
+            # the same release racing between the read and the save would
+            # silently lose one of the two updates.
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                items = manifest.get('items', [])
 
-            # Check if already assigned - if so, update the platform instead of rejecting
-            existing_item = None
-            for item in items:
-                if item.get('itemId') == item_id:
-                    existing_item = item
-                    break
+                # Check if already assigned - if so, update the platform instead of rejecting
+                existing_item = None
+                for item in items:
+                    if item.get('itemId') == item_id:
+                        existing_item = item
+                        break
 
-            # Look up item title from board if team provided
-            title = post_data.get('title', item_id)
-            status = 'todo'
-            if team:
-                board_file = get_board_file(team)
-                if board_file.exists():
-                    with open(board_file, 'r') as f:
-                        board_data = json.load(f)
-                    for item in board_data.get('backlog', []):
-                        if item.get('id') == item_id:
-                            title = item.get('title', title)
-                            status = item.get('status') or self._derive_item_status(item)
-                            break
+                # Look up item title from board if team provided
+                title = post_data.get('title', item_id)
+                status = 'todo'
+                if team:
+                    board_file = get_board_file(team)
+                    if board_file.exists():
+                        with open(board_file, 'r') as f:
+                            board_data = json.load(f)
+                        for item in board_data.get('backlog', []):
+                            if item.get('id') == item_id:
+                                title = item.get('title', title)
+                                status = item.get('status') or self._derive_item_status(item)
+                                break
 
-            if existing_item:
-                # Update existing assignment (e.g., change platform)
-                existing_item['platform'] = platform
-                existing_item['updatedAt'] = self._get_timestamp()
-            else:
-                # New assignment
-                items.append({
-                    "itemId": item_id,
-                    "platform": platform,
-                    "team": team,
-                    "title": title,
-                    "status": status,
-                    "assignedAt": self._get_timestamp()
-                })
+                if existing_item:
+                    # Update existing assignment (e.g., change platform)
+                    existing_item['platform'] = platform
+                    existing_item['updatedAt'] = self._get_timestamp()
+                else:
+                    # New assignment
+                    items.append({
+                        "itemId": item_id,
+                        "platform": platform,
+                        "team": team,
+                        "title": title,
+                        "status": status,
+                        "assignedAt": self._get_timestamp()
+                    })
 
-            manifest['items'] = items
-            self._save_release_manifest(release_id, manifest)
+                manifest['items'] = items
+                self._save_release_manifest(release_id, manifest)
 
             # Update item in kanban board with releaseAssignment
             if team:
@@ -5309,45 +5426,51 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         reconciliation (/api/releases/sync-all).
         """
         try:
-            manifest = self._load_release_manifest(release_id)
-            items = manifest.get('items', [])
+            # XACA-0890-003: hold the path lock across the whole read-modify-
+            # write — this helper is called in loops over multiple releases
+            # (handle_sync_all_to_releases) from concurrent requests, so the
+            # existing-item lookup must not race a concurrent upsert for the
+            # same release.
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                items = manifest.get('items', [])
 
-            existing = None
-            for manifest_item in items:
-                if manifest_item.get('itemId') == item_id:
-                    existing = manifest_item
-                    break
+                existing = None
+                for manifest_item in items:
+                    if manifest_item.get('itemId') == item_id:
+                        existing = manifest_item
+                        break
 
-            if existing is not None:
-                if 'title' in item_data:
-                    existing['title'] = item_data['title']
-                status_val = item_data.get('status') or self._derive_item_status(item_data)
-                if status_val:
-                    existing['status'] = status_val
-                if 'priority' in item_data:
-                    existing['priority'] = item_data['priority']
-                assignment = item_data.get('releaseAssignment') or {}
-                if assignment.get('platform'):
-                    existing['platform'] = assignment['platform']
-                existing['lastSynced'] = self._get_timestamp()
-                action = 'updated'
-            else:
-                assignment = item_data.get('releaseAssignment') or {}
-                platform = assignment.get('platform') or 'other'
-                team = item_data.get('team') or manifest.get('team') or self._extract_team_from_item_id(item_id)
-                items.append({
-                    "itemId": item_id,
-                    "platform": platform,
-                    "team": team,
-                    "title": item_data.get('title', item_id),
-                    "status": item_data.get('status') or self._derive_item_status(item_data) or 'todo',
-                    "assignedAt": assignment.get('assignedAt') or self._get_timestamp(),
-                    "lastSynced": self._get_timestamp()
-                })
-                action = 'added'
+                if existing is not None:
+                    if 'title' in item_data:
+                        existing['title'] = item_data['title']
+                    status_val = item_data.get('status') or self._derive_item_status(item_data)
+                    if status_val:
+                        existing['status'] = status_val
+                    if 'priority' in item_data:
+                        existing['priority'] = item_data['priority']
+                    assignment = item_data.get('releaseAssignment') or {}
+                    if assignment.get('platform'):
+                        existing['platform'] = assignment['platform']
+                    existing['lastSynced'] = self._get_timestamp()
+                    action = 'updated'
+                else:
+                    assignment = item_data.get('releaseAssignment') or {}
+                    platform = assignment.get('platform') or 'other'
+                    team = item_data.get('team') or manifest.get('team') or self._extract_team_from_item_id(item_id)
+                    items.append({
+                        "itemId": item_id,
+                        "platform": platform,
+                        "team": team,
+                        "title": item_data.get('title', item_id),
+                        "status": item_data.get('status') or self._derive_item_status(item_data) or 'todo',
+                        "assignedAt": assignment.get('assignedAt') or self._get_timestamp(),
+                        "lastSynced": self._get_timestamp()
+                    })
+                    action = 'added'
 
-            manifest['items'] = items
-            self._save_release_manifest(release_id, manifest)
+                manifest['items'] = items
+                self._save_release_manifest(release_id, manifest)
             print(f"[LCARS] Synced item {item_id} to release {release_id} ({action})")
             return action
         except Exception as e:
@@ -5380,45 +5503,50 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return
 
             effective_team = team or release.get('team')
-            manifest = self._load_release_manifest(release_id)
-            if manifest is None:
-                # _load_release_manifest always returns a dict (creates a default when
-                # the file is absent), so None is unexpected — guard defensively.
-                manifest = {"releaseId": release_id, "team": effective_team or LCARS_TEAM, "items": [], "createdAt": self._get_timestamp()}
+            # XACA-0890-003: hold the path lock across the whole read-modify-
+            # write so a concurrent items-manifest update (e.g.
+            # handle_assign_item_to_release) can't have its write clobbered
+            # by this metadata mirror reading a stale manifest.
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                if manifest is None:
+                    # _load_release_manifest always returns a dict (creates a default when
+                    # the file is absent), so None is unexpected — guard defensively.
+                    manifest = {"releaseId": release_id, "team": effective_team or LCARS_TEAM, "items": [], "createdAt": self._get_timestamp()}
 
-            # Mirror top-level release metadata.
-            manifest['name'] = release.get('name')
-            manifest['shortTitle'] = release.get('shortTitle')
-            manifest['type'] = release.get('type')
-            manifest['status'] = release.get('status')
-            manifest['targetDate'] = release.get('targetDate')
+                # Mirror top-level release metadata.
+                manifest['name'] = release.get('name')
+                manifest['shortTitle'] = release.get('shortTitle')
+                manifest['type'] = release.get('type')
+                manifest['status'] = release.get('status')
+                manifest['targetDate'] = release.get('targetDate')
 
-            # Mirror full platforms object so multi-platform data is not lost.
-            platforms = release.get('platforms', {})
-            manifest['platforms'] = platforms
+                # Mirror full platforms object so multi-platform data is not lost.
+                platforms = release.get('platforms', {})
+                manifest['platforms'] = platforms
 
-            # Derive legacy flat scalars from a representative platform.
-            if platforms:
-                platform_keys = sorted(platforms.keys())
-                rep_key = platform_keys[0]  # deterministic: first alphabetically
-                rep = platforms[rep_key]
-                manifest['version'] = rep.get('version')
-                manifest['versionCode'] = rep.get('buildNumber')   # legacy name for buildNumber
-                manifest['currentEnvironment'] = rep.get('environment')
-            else:
-                # No platforms — clear legacy scalars so they are not stale.
-                manifest.pop('version', None)
-                manifest.pop('versionCode', None)
-                manifest.pop('currentEnvironment', None)
+                # Derive legacy flat scalars from a representative platform.
+                if platforms:
+                    platform_keys = sorted(platforms.keys())
+                    rep_key = platform_keys[0]  # deterministic: first alphabetically
+                    rep = platforms[rep_key]
+                    manifest['version'] = rep.get('version')
+                    manifest['versionCode'] = rep.get('buildNumber')   # legacy name for buildNumber
+                    manifest['currentEnvironment'] = rep.get('environment')
+                else:
+                    # No platforms — clear legacy scalars so they are not stale.
+                    manifest.pop('version', None)
+                    manifest.pop('versionCode', None)
+                    manifest.pop('currentEnvironment', None)
 
-            # Marker so readers know this file is a derived mirror.
-            manifest['_source'] = 'board.releases[] (authoritative); this manifest is a mirror — do not edit by hand'
+                # Marker so readers know this file is a derived mirror.
+                manifest['_source'] = 'board.releases[] (authoritative); this manifest is a mirror — do not edit by hand'
 
-            # Ensure team is set (backward compatibility).
-            if effective_team and 'team' not in manifest:
-                manifest['team'] = effective_team
+                # Ensure team is set (backward compatibility).
+                if effective_team and 'team' not in manifest:
+                    manifest['team'] = effective_team
 
-            self._save_release_manifest(release_id, manifest)
+                self._save_release_manifest(release_id, manifest)
             print(f"[LCARS] Synced release metadata to manifest for {release_id}")
         except Exception as e:
             print(f"[LCARS] Warning: Failed to sync release metadata to manifest: {e}")
@@ -5430,18 +5558,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         releases or unassigned entirely.
         """
         try:
-            manifest = self._load_release_manifest(release_id)
-            items = manifest.get('items', [])
+            # XACA-0890-003: hold the path lock across the whole read-modify-
+            # write (same rationale as _sync_item_to_release_manifest above).
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                items = manifest.get('items', [])
 
-            # Filter out the item being removed
-            original_count = len(items)
-            items = [item for item in items if item.get('itemId') != item_id]
+                # Filter out the item being removed
+                original_count = len(items)
+                items = [item for item in items if item.get('itemId') != item_id]
 
-            if len(items) < original_count:
-                manifest['items'] = items
-                manifest['updatedAt'] = self._get_timestamp()
-                self._save_release_manifest(release_id, manifest)
-                print(f"[LCARS] Removed item {item_id} from release {release_id}")
+                if len(items) < original_count:
+                    manifest['items'] = items
+                    manifest['updatedAt'] = self._get_timestamp()
+                    self._save_release_manifest(release_id, manifest)
+                    print(f"[LCARS] Removed item {item_id} from release {release_id}")
         except Exception as e:
             # Don't fail the main update if manifest cleanup fails
             print(f"[LCARS] Warning: Failed to remove item from release manifest: {e}")
@@ -6088,75 +6219,81 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             archive_dir = kanban_dir / "releases-archive"
             archive_file = archive_dir / f"{release_id}.json"
 
-            # Check if release is currently archived
-            if archive_file.exists():
-                # UNARCHIVE: Move from archive back to active
-                with open(archive_file, 'r') as f:
-                    release = json.load(f)
+            # XACA-0890-003: hold the path lock (keyed to archive_file) across
+            # the whole exists-check + read/write. Without it, two concurrent
+            # toggles for the same release could both observe the same
+            # exists() result and race to archive/unarchive it twice, or one
+            # could unlink the file out from under the other's read.
+            with _get_path_lock(archive_file):
+                # Check if release is currently archived
+                if archive_file.exists():
+                    # UNARCHIVE: Move from archive back to active
+                    with open(archive_file, 'r') as f:
+                        release = json.load(f)
 
-                # Restore to active status
-                release['status'] = 'active'
-                if 'archivedAt' in release:
-                    del release['archivedAt']
+                    # Restore to active status
+                    release['status'] = 'active'
+                    if 'archivedAt' in release:
+                        del release['archivedAt']
 
-                # Add back to active releases
-                data = self._load_releases_config(team)
-                data['releases'].append(release)
-                self._save_releases_config(data, team)
+                    # Add back to active releases
+                    data = self._load_releases_config(team)
+                    data['releases'].append(release)
+                    self._save_releases_config(data, team)
 
-                # Remove from archive
-                archive_file.unlink()
+                    # Remove from archive
+                    archive_file.unlink()
 
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "success": True,
-                    "archived": False,
-                    "message": "Release unarchived successfully"
-                }).encode())
-
-            else:
-                # ARCHIVE: Check if release is complete, then move to archive
-                data = self._load_releases_config(team)
-                release = self._find_release_by_id(data, release_id)
-                if not release:
-                    self.send_error(404, f"Release not found: {release_id}")
-                    return
-
-                # Check if release is complete before archiving
-                if not self.is_release_complete(release):
-                    self.send_response(400)
+                    self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
                     self.wfile.write(json.dumps({
-                        "error": "Cannot archive: release is not complete (all platforms must be at PROD)"
+                        "success": True,
+                        "archived": False,
+                        "message": "Release unarchived successfully"
                     }).encode())
-                    return
 
-                # Remove from active releases
-                data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
+                else:
+                    # ARCHIVE: Check if release is complete, then move to archive
+                    data = self._load_releases_config(team)
+                    release = self._find_release_by_id(data, release_id)
+                    if not release:
+                        self.send_error(404, f"Release not found: {release_id}")
+                        return
 
-                # Move to archive
-                release['archivedAt'] = self._get_timestamp()
-                release['status'] = 'archived'
+                    # Check if release is complete before archiving
+                    if not self.is_release_complete(release):
+                        self.send_response(400)
+                        self.send_header('Content-Type', 'application/json')
+                        self.send_header('Access-Control-Allow-Origin', '*')
+                        self.end_headers()
+                        self.wfile.write(json.dumps({
+                            "error": "Cannot archive: release is not complete (all platforms must be at PROD)"
+                        }).encode())
+                        return
 
-                archive_dir.mkdir(parents=True, exist_ok=True)
-                self._atomic_write_json(archive_file, release)
+                    # Remove from active releases
+                    data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
-                self._save_releases_config(data, team)
+                    # Move to archive
+                    release['archivedAt'] = self._get_timestamp()
+                    release['status'] = 'archived'
 
-                self.send_response(200)
-                self.send_header('Content-Type', 'application/json')
-                self.send_header('Access-Control-Allow-Origin', '*')
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "success": True,
-                    "archived": True,
-                    "message": "Release archived successfully"
-                }).encode())
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write_json(archive_file, release)
+
+                    self._save_releases_config(data, team)
+
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Access-Control-Allow-Origin', '*')
+                    self.end_headers()
+                    self.wfile.write(json.dumps({
+                        "success": True,
+                        "archived": True,
+                        "message": "Release archived successfully"
+                    }).encode())
 
         except Exception as e:
             self.send_error(500, f"Error toggling release archive: {e}")
@@ -6191,7 +6328,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             archive_dir = kanban_dir / "releases-archive"
             archive_dir.mkdir(parents=True, exist_ok=True)
             archive_file = archive_dir / f"{release_id}.json"
-            self._atomic_write_json(archive_file, release)
+            # XACA-0890-003: same archive_file lock as handle_toggle_release_archive
+            # so a concurrent PATCH .../archive on the same release can't race
+            # this DELETE for the file.
+            with _get_path_lock(archive_file):
+                self._atomic_write_json(archive_file, release)
 
             self._save_releases_config(data, effective_team)
 
@@ -6223,23 +6364,26 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_remove_item_from_release(self, release_id, item_id):
         """DELETE /api/releases/<id>/items/<itemId> - Remove item from release"""
         try:
-            manifest = self._load_release_manifest(release_id)
-            items = manifest.get('items', [])
+            # XACA-0890-003: hold the path lock across the whole read-modify-
+            # write.
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                items = manifest.get('items', [])
 
-            # Find the item to get its team before removing
-            removed_item = None
-            for item in items:
-                if item.get('itemId') == item_id:
-                    removed_item = item
-                    break
+                # Find the item to get its team before removing
+                removed_item = None
+                for item in items:
+                    if item.get('itemId') == item_id:
+                        removed_item = item
+                        break
 
-            if not removed_item:
-                self.send_error(404, f"Item not found in release: {item_id}")
-                return
+                if not removed_item:
+                    self.send_error(404, f"Item not found in release: {item_id}")
+                    return
 
-            # Remove from manifest
-            manifest['items'] = [i for i in items if i.get('itemId') != item_id]
-            self._save_release_manifest(release_id, manifest)
+                # Remove from manifest
+                manifest['items'] = [i for i in items if i.get('itemId') != item_id]
+                self._save_release_manifest(release_id, manifest)
 
             # Clear releaseAssignment from kanban item
             team = removed_item.get('team')
@@ -6434,14 +6578,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         entry for entry in old_release.get("linkedCRs", [])
                         if entry.get("crId") != cr_id
                     ]
-                # Also clean up old manifest's crIds
+                # Also clean up old manifest's crIds. XACA-0890-003: hold the
+                # path lock across the whole read-modify-write.
                 try:
-                    old_manifest = self._load_release_manifest(old_release_id)
-                    old_manifest["crIds"] = [
-                        cid for cid in old_manifest.get("crIds", [])
-                        if cid != cr_id
-                    ]
-                    self._save_release_manifest(old_release_id, old_manifest)
+                    with self._release_manifest_lock(old_release_id):
+                        old_manifest = self._load_release_manifest(old_release_id)
+                        old_manifest["crIds"] = [
+                            cid for cid in old_manifest.get("crIds", [])
+                            if cid != cr_id
+                        ]
+                        self._save_release_manifest(old_release_id, old_manifest)
                 except Exception:
                     pass  # Best-effort: don't fail link if old manifest cleanup errors
 
@@ -6458,13 +6604,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self._save_releases_config(releases_data)
 
-            # Update manifest crIds
-            manifest = self._load_release_manifest(release_id)
-            cr_ids = manifest.get("crIds", [])
-            if cr_id not in cr_ids:
-                cr_ids.append(cr_id)
-            manifest["crIds"] = cr_ids
-            self._save_release_manifest(release_id, manifest)
+            # Update manifest crIds. XACA-0890-003: hold the path lock across
+            # the whole read-modify-write.
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                cr_ids = manifest.get("crIds", [])
+                if cr_id not in cr_ids:
+                    cr_ids.append(cr_id)
+                manifest["crIds"] = cr_ids
+                self._save_release_manifest(release_id, manifest)
 
             response = {
                 "ok": True,
@@ -6563,11 +6711,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             release["updatedAt"] = self._get_timestamp()
             self._save_releases_config(releases_data)
 
-            # --- Remove from manifest crIds ---
-            manifest = self._load_release_manifest(release_id)
-            cr_ids = [cid for cid in manifest.get("crIds", []) if cid != cr_id]
-            manifest["crIds"] = cr_ids
-            self._save_release_manifest(release_id, manifest)
+            # --- Remove from manifest crIds --- (XACA-0890-003: hold the path
+            # lock across the whole read-modify-write)
+            with self._release_manifest_lock(release_id):
+                manifest = self._load_release_manifest(release_id)
+                cr_ids = [cid for cid in manifest.get("crIds", []) if cid != cr_id]
+                manifest["crIds"] = cr_ids
+                self._save_release_manifest(release_id, manifest)
 
             self._send_json_response({
                 "ok": True,
@@ -7810,7 +7960,19 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         return {'version': 1, 'team': team, 'lastUpdated': self._get_timestamp(), 'alerts': []}
 
     def _save_active_alerts(self, team: str, store: dict):
-        """Atomically write the active alerts store, creating the directory first."""
+        """Atomically write the active alerts store, creating the directory first.
+
+        XACA-0890-003 audit note: unlike the other _atomic_write_json call
+        sites this ticket converts, this one is ALREADY safe — every caller
+        (handle_create_alert, handle_delete_alert, handle_dismiss_alert) holds
+        an fcntl.flock on active.json.lock across the full load →
+        _save_active_alerts span, so the read-modify-write is already
+        protected end to end. Do not add a second lock here: mixing this
+        registry's RLock with the fcntl convention on the same file would add
+        code without adding safety (fcntl already serializes it), and it
+        would be easy to mistake for "now double-protected" when really
+        neither lock alone would help if the OTHER one were ever removed.
+        """
         path = self._alert_active_path(team)
         path.parent.mkdir(parents=True, exist_ok=True)
         store['lastUpdated'] = self._get_timestamp()
@@ -7822,25 +7984,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         If the archive file exists but is corrupt (json.JSONDecodeError) or
         unreadable (OSError), the bad file is discarded and a fresh archive is
         initialised so the caller (dismiss / evict) is never surfaced a 500.
+
+        XACA-0890-003: unlike _save_active_alerts above, this one is NOT
+        protected by the caller's active.json.lock — handle_dismiss_alert
+        deliberately calls this AFTER releasing that lock ("archive outside
+        the lock (append-only, low-contention)"), and the eviction call from
+        handle_create_alert happens while a DIFFERENT lock (active.json.lock,
+        not this archive file) is held. Two concurrent dismissals in the same
+        team+month race this function's own read-modify-write directly, so it
+        gets its own path lock here.
         """
         from datetime import datetime, timezone
         month_str = datetime.now(timezone.utc).strftime('%Y-%m')
         archive_path = self._alert_archive_path(team, month_str)
         archive_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if archive_path.exists():
-            try:
-                with open(archive_path, 'r') as f:
-                    archive = json.load(f)
-            except (json.JSONDecodeError, OSError) as exc:
-                print(f"[LCARS] WARN _append_to_archive: corrupt archive for team={team} "
-                      f"month={month_str} — reinitialising. Reason: {exc}")
+        with _get_path_lock(archive_path):
+            if archive_path.exists():
+                try:
+                    with open(archive_path, 'r') as f:
+                        archive = json.load(f)
+                except (json.JSONDecodeError, OSError) as exc:
+                    print(f"[LCARS] WARN _append_to_archive: corrupt archive for team={team} "
+                          f"month={month_str} — reinitialising. Reason: {exc}")
+                    archive = {'version': 1, 'team': team, 'month': month_str, 'alerts': []}
+            else:
                 archive = {'version': 1, 'team': team, 'month': month_str, 'alerts': []}
-        else:
-            archive = {'version': 1, 'team': team, 'month': month_str, 'alerts': []}
 
-        archive['alerts'].append(alert)
-        self._atomic_write_json(archive_path, archive)
+            archive['alerts'].append(alert)
+            self._atomic_write_json(archive_path, archive)
 
     def _parse_iso8601(self, value: str):
         """Parse an ISO-8601 UTC string. Returns datetime or raises ValueError."""
@@ -10627,46 +10799,53 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             TEAM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
             config_file = TEAM_CONFIG_DIR / "calendar-config.json"
 
-            # Mode 1: Calendar selection update
-            provider = post_data.get('provider')
-            calendar_id = post_data.get('calendarId')
-            if provider and calendar_id is not None:
-                # Read existing config
-                if config_file.exists():
-                    with open(config_file, 'r') as f:
-                        config = json.load(f)
-                else:
-                    config = {"apple": None, "google": None, "lastUpdated": None}
+            # XACA-0890-003: hold the path lock across the whole read-modify-
+            # write for BOTH modes below — calendar-config.json has no other
+            # protection, and this function can also race the connect/
+            # disconnect handlers (handle_connect_apple_calendar,
+            # handle_connect_google_calendar, handle_disconnect_calendar),
+            # which all target the same file and now share this same lock.
+            with _get_path_lock(config_file):
+                # Mode 1: Calendar selection update
+                provider = post_data.get('provider')
+                calendar_id = post_data.get('calendarId')
+                if provider and calendar_id is not None:
+                    # Read existing config
+                    if config_file.exists():
+                        with open(config_file, 'r') as f:
+                            config = json.load(f)
+                    else:
+                        config = {"apple": None, "google": None, "lastUpdated": None}
 
-                if config.get(provider) and isinstance(config[provider], dict):
-                    config[provider]['selectedCalendarId'] = calendar_id
-                    config[provider]['calendarName'] = post_data.get('calendarName') or calendar_id
-                    config['lastUpdated'] = self._get_timestamp()
-                    self._atomic_write_json(config_file, config)
+                    if config.get(provider) and isinstance(config[provider], dict):
+                        config[provider]['selectedCalendarId'] = calendar_id
+                        config[provider]['calendarName'] = post_data.get('calendarName') or calendar_id
+                        config['lastUpdated'] = self._get_timestamp()
+                        self._atomic_write_json(config_file, config)
 
-                    self._send_json_response({
-                        "success": True,
-                        "message": f"{provider} calendar selection saved",
-                        "config": config
-                    })
-                else:
-                    self._send_json_response({"success": False, "error": f"Provider {provider} not connected"}, status=400)
-                return
+                        self._send_json_response({
+                            "success": True,
+                            "message": f"{provider} calendar selection saved",
+                            "config": config
+                        })
+                    else:
+                        self._send_json_response({"success": False, "error": f"Provider {provider} not connected"}, status=400)
+                    return
 
-            # Mode 2: Full config replacement
-            config = post_data.get('config')
-            if not config:
-                self._send_json_response({"success": False, "error": "No config provided"}, status=400)
-                return
+                # Mode 2: Full config replacement
+                config = post_data.get('config')
+                if not config:
+                    self._send_json_response({"success": False, "error": "No config provided"}, status=400)
+                    return
 
-            config['lastUpdated'] = self._get_timestamp()
-            self._atomic_write_json(config_file, config)
+                config['lastUpdated'] = self._get_timestamp()
+                self._atomic_write_json(config_file, config)
 
-            self._send_json_response({
-                "success": True,
-                "message": "Calendar configuration saved",
-                "config": config
-            })
+                self._send_json_response({
+                    "success": True,
+                    "message": "Calendar configuration saved",
+                    "config": config
+                })
         except Exception as e:
             print(f"[LCARS] ERROR saving calendar config: {e}")
             self._send_json_response({"success": False, "error": str(e)}, status=500)
@@ -12042,36 +12221,42 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             team = LCARS_TEAM
             config_file = TEAM_CONFIG_DIR / "calendar-config.json"
 
-            if config_file.exists():
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            else:
-                # Initialize with canonical structure
-                config = {
-                    "apple": None,
-                    "google": None,
-                    "lastUpdated": None
+            # XACA-0890-003: hold the path lock across the read-modify-write
+            # only (not the CalDAV auth above, which doesn't touch this
+            # file) — same lock handle_save_calendar_config /
+            # handle_connect_google_calendar / handle_disconnect_calendar use
+            # for this same config_file.
+            with _get_path_lock(config_file):
+                if config_file.exists():
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                else:
+                    # Initialize with canonical structure
+                    config = {
+                        "apple": None,
+                        "google": None,
+                        "lastUpdated": None
+                    }
+
+                # Update apple section (field names must match what JS expects)
+                config['apple'] = {
+                    "connected": True,
+                    "accountName": username,
+                    "calendarName": None,  # User will select later
+                    "selectedCalendarId": None,
+                    "availableCalendars": calendars,  # List of available calendars
+                    "credentials": {
+                        "username": username,
+                        "appPassword": app_password  # Store for future sync operations
+                    }
                 }
+                config['lastUpdated'] = self._get_timestamp()
 
-            # Update apple section (field names must match what JS expects)
-            config['apple'] = {
-                "connected": True,
-                "accountName": username,
-                "calendarName": None,  # User will select later
-                "selectedCalendarId": None,
-                "availableCalendars": calendars,  # List of available calendars
-                "credentials": {
-                    "username": username,
-                    "appPassword": app_password  # Store for future sync operations
-                }
-            }
-            config['lastUpdated'] = self._get_timestamp()
+                # Ensure config directory exists
+                TEAM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
-            # Ensure config directory exists
-            TEAM_CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-            # Write updated config
-            self._atomic_write_json(config_file, config)
+                # Write updated config
+                self._atomic_write_json(config_file, config)
 
             print(f"[LCARS] Apple Calendar config saved for team: {team}")
 
@@ -12176,37 +12361,41 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             team = LCARS_TEAM
             config_file = TEAM_CONFIG_DIR / "calendar-config.json"
 
-            if config_file.exists():
-                with open(config_file, 'r') as f:
-                    config = json.load(f)
-            else:
-                # Create initial config structure
-                config = {
-                    "apple": None,
-                    "google": None,
-                    "lastUpdated": None
+            # XACA-0890-003: same config_file lock as the other three calendar
+            # config handlers — hold across the read-modify-write only (not
+            # the OAuth verification above).
+            with _get_path_lock(config_file):
+                if config_file.exists():
+                    with open(config_file, 'r') as f:
+                        config = json.load(f)
+                else:
+                    # Create initial config structure
+                    config = {
+                        "apple": None,
+                        "google": None,
+                        "lastUpdated": None
+                    }
+                    # Ensure config directory exists
+                    config_file.parent.mkdir(parents=True, exist_ok=True)
+
+                # Update google section with connection info
+                config['google'] = {
+                    "connected": True,
+                    "accountName": account_name,
+                    "calendarName": calendar_name,
+                    "calendarId": calendar_id,
+                    "credentials": {
+                        "clientId": client_id,
+                        "clientSecret": client_secret,
+                        "refreshToken": refresh_token
+                    }
                 }
-                # Ensure config directory exists
-                config_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # Update google section with connection info
-            config['google'] = {
-                "connected": True,
-                "accountName": account_name,
-                "calendarName": calendar_name,
-                "calendarId": calendar_id,
-                "credentials": {
-                    "clientId": client_id,
-                    "clientSecret": client_secret,
-                    "refreshToken": refresh_token
-                }
-            }
+                # Update lastUpdated timestamp
+                config['lastUpdated'] = self._get_timestamp()
 
-            # Update lastUpdated timestamp
-            config['lastUpdated'] = self._get_timestamp()
-
-            # Write config atomically
-            self._atomic_write_json(config_file, config)
+                # Write config atomically
+                self._atomic_write_json(config_file, config)
 
             print(f"[LCARS] Google Calendar connected successfully for team {team}")
 
@@ -12255,15 +12444,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=404)
                 return
 
-            with open(config_file, 'r') as f:
-                config = json.load(f)
+            # XACA-0890-003: same config_file lock as the other three calendar
+            # config handlers.
+            with _get_path_lock(config_file):
+                with open(config_file, 'r') as f:
+                    config = json.load(f)
 
-            # Set provider section to null in canonical format
-            config[provider] = None
-            config['lastUpdated'] = self._get_timestamp()
+                # Set provider section to null in canonical format
+                config[provider] = None
+                config['lastUpdated'] = self._get_timestamp()
 
-            # Write updated config
-            self._atomic_write_json(config_file, config)
+                # Write updated config
+                self._atomic_write_json(config_file, config)
 
             print(f"[LCARS] Disconnected {provider} calendar for team: {team}")
 
@@ -12339,72 +12531,101 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 }, status=400)
                 return
 
-            # Load team board data for items with due dates
+            # XACA-0890-003: this handler reads board_file, calls out to the
+            # (possibly slow, network-bound) calendar provider sync, then
+            # writes board_file back with the resulting calendarSync
+            # metadata — a read-modify-write with NO lock of any kind, missed
+            # by the original XACA-0890 audit because it targets board_file
+            # (which 20 OTHER call sites already protect) rather than one of
+            # the 12 non-board sites the audit enumerated. It needs the same
+            # fcntl.flock convention those 20 sites use, NOT this ticket's new
+            # path-lock registry — the two lock types don't see each other,
+            # so using the registry here would give zero mutual exclusion
+            # against a concurrent handle_toggle_collapsed/handle_update_item/
+            # etc. write to the same board_file.
+            #
+            # Trade-off, called out explicitly: this holds the board's fcntl
+            # lock across the external sync_outbound/sync_inbound calls
+            # below, so a slow CalDAV/Google round-trip blocks every other
+            # board_file writer for the duration. Accepted because (a) the
+            # alternative — reconciling the sync service's in-place
+            # board_data mutations onto a freshly re-read copy after the
+            # network calls — would require reworking sync_outbound/
+            # sync_inbound's mutation contract, which is out of scope here,
+            # and (b) this is a manually-triggered, low-frequency admin
+            # action, not a hot path.
+            import fcntl
             board_file = get_board_file(team)
+            board_lock_file = board_file.with_suffix('.json.lock')
             board_data = {}
-            if board_file.exists():
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
-
-            # Collect items for sync, matching LCARS calendar display logic:
-            # - Parent must have dueDate for itself and its subitems to be synced
-            # - When parent has no dueDate, parent AND all subitems are orphan candidates
-            # - Items already cleaned up (syncStatus: 'deleted') are skipped
-            items = []
-            for item in board_data.get('backlog', []):
-                if item.get('dueDate'):
-                    # Parent has due date — sync it and its subitems
-                    items.append(item)
-                    for subitem in item.get('subitems', []):
-                        if subitem.get('dueDate'):
-                            # Enrich subitem with parent context for better calendar event titles
-                            enriched_sub = {**subitem}
-                            if 'title' in enriched_sub and 'title' in item:
-                                enriched_sub['parentTitle'] = item.get('title', '')
-                            if 'epicId' not in enriched_sub and 'epicId' in item:
-                                enriched_sub['epicId'] = item.get('epicId')
-                            items.append(enriched_sub)
-                        elif subitem.get('calendarSync', {}).get('syncStatus') != 'deleted':
-                            # Subitem without date under dated parent — orphan candidate
-                            items.append(subitem)
-                else:
-                    # Parent has no due date — parent and ALL subitems are orphan candidates
-                    if item.get('calendarSync', {}).get('syncStatus') != 'deleted':
-                        items.append(item)
-                    for subitem in item.get('subitems', []):
-                        if subitem.get('calendarSync', {}).get('syncStatus') != 'deleted':
-                            items.append(subitem)
-            for epic in board_data.get('epics', []):
-                if epic.get('dueDate'):
-                    items.append(epic)
-                elif epic.get('calendarSync', {}).get('syncStatus') != 'deleted':
-                    # Orphan candidate epic
-                    items.append(epic)
-
-            # Perform sync using connected providers (pass calendar config)
-            result = {'itemsWithDueDates': len(items)}
-
-            if direction in ('outbound', 'both') and items:
+            with open(board_lock_file, 'w') as board_lock:
+                fcntl.flock(board_lock.fileno(), fcntl.LOCK_EX)
                 try:
-                    outbound_result = _calendar_sync_service.sync_outbound(team, items, cal_config=cal_config)
-                    result['outbound'] = outbound_result
-                except Exception as e:
-                    result['outbound'] = {'error': str(e)}
+                    if board_file.exists():
+                        with open(board_file, 'r') as f:
+                            board_data = json.load(f)
 
-            if direction in ('inbound', 'both'):
-                try:
-                    inbound_result = _calendar_sync_service.sync_inbound(board_data, cal_config=cal_config)
-                    result['inbound'] = inbound_result
-                except Exception as e:
-                    result['inbound'] = {'error': str(e)}
+                    # Collect items for sync, matching LCARS calendar display logic:
+                    # - Parent must have dueDate for itself and its subitems to be synced
+                    # - When parent has no dueDate, parent AND all subitems are orphan candidates
+                    # - Items already cleaned up (syncStatus: 'deleted') are skipped
+                    items = []
+                    for item in board_data.get('backlog', []):
+                        if item.get('dueDate'):
+                            # Parent has due date — sync it and its subitems
+                            items.append(item)
+                            for subitem in item.get('subitems', []):
+                                if subitem.get('dueDate'):
+                                    # Enrich subitem with parent context for better calendar event titles
+                                    enriched_sub = {**subitem}
+                                    if 'title' in enriched_sub and 'title' in item:
+                                        enriched_sub['parentTitle'] = item.get('title', '')
+                                    if 'epicId' not in enriched_sub and 'epicId' in item:
+                                        enriched_sub['epicId'] = item.get('epicId')
+                                    items.append(enriched_sub)
+                                elif subitem.get('calendarSync', {}).get('syncStatus') != 'deleted':
+                                    # Subitem without date under dated parent — orphan candidate
+                                    items.append(subitem)
+                        else:
+                            # Parent has no due date — parent and ALL subitems are orphan candidates
+                            if item.get('calendarSync', {}).get('syncStatus') != 'deleted':
+                                items.append(item)
+                            for subitem in item.get('subitems', []):
+                                if subitem.get('calendarSync', {}).get('syncStatus') != 'deleted':
+                                    items.append(subitem)
+                    for epic in board_data.get('epics', []):
+                        if epic.get('dueDate'):
+                            items.append(epic)
+                        elif epic.get('calendarSync', {}).get('syncStatus') != 'deleted':
+                            # Orphan candidate epic
+                            items.append(epic)
 
-            # Save board data back to persist calendarSync metadata changes
-            # (event IDs from creation, cleanup from orphan deletion, etc.)
-            if board_file.exists() and board_data:
-                try:
-                    self._atomic_write_json(board_file, board_data)
-                except Exception as e:
-                    print(f"[LCARS] WARNING: Failed to save board after sync: {e}")
+                    # Perform sync using connected providers (pass calendar config)
+                    result = {'itemsWithDueDates': len(items)}
+
+                    if direction in ('outbound', 'both') and items:
+                        try:
+                            outbound_result = _calendar_sync_service.sync_outbound(team, items, cal_config=cal_config)
+                            result['outbound'] = outbound_result
+                        except Exception as e:
+                            result['outbound'] = {'error': str(e)}
+
+                    if direction in ('inbound', 'both'):
+                        try:
+                            inbound_result = _calendar_sync_service.sync_inbound(board_data, cal_config=cal_config)
+                            result['inbound'] = inbound_result
+                        except Exception as e:
+                            result['inbound'] = {'error': str(e)}
+
+                    # Save board data back to persist calendarSync metadata changes
+                    # (event IDs from creation, cleanup from orphan deletion, etc.)
+                    if board_file.exists() and board_data:
+                        try:
+                            self._atomic_write_json(board_file, board_data)
+                        except Exception as e:
+                            print(f"[LCARS] WARNING: Failed to save board after sync: {e}")
+                finally:
+                    fcntl.flock(board_lock.fileno(), fcntl.LOCK_UN)
 
             # Build response
             status = {
@@ -15900,9 +16121,19 @@ end tell
         (XACA-0243-002).
 
         Query parameters:
-            refresh=1        Spawn ccusage_collector --once (5s timeout) before
-                             reading the cache.  Default behaviour (no param)
-                             never spawns ccusage so the endpoint stays <50ms.
+            refresh=1        XACA-0890-005: no longer spawns ccusage_collector
+                             synchronously (that 5s blocking subprocess.run
+                             was the original cause of the health-check
+                             restart loop XACA-0889 investigated). The
+                             collector daemon is kept alive via
+                             _ensure_collector_running() either way; refresh=1
+                             now just returns the daemon's latest cache
+                             immediately instead of waiting up to 5s for a
+                             synchronous --once run. The response's own
+                             "stale"/"ok" fields (derived from the cache's
+                             collected_at) tell the client honestly whether
+                             that data is fresh or is waiting on the next
+                             poll — this endpoint stays <50ms either way now.
             history_limit=N  Return at most N history entries (default 7, max 50).
             account=<id>     XACA-0280: Filter totals to a specific account ID.
                              Special value "untagged" targets the pre-isolation bucket.
@@ -16954,16 +17185,14 @@ class LCARSQuietDisconnectMixin:
     Compose this ahead of the actual server base class so its handle_error()
     wins the MRO, e.g.:
 
-        class LCARSServer(LCARSQuietDisconnectMixin, socketserver.TCPServer):
+        class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
             pass
 
-    XACA-0889-005 NOTE: when you swap the server class (TCPServer ->
-    ThreadingHTTPServer or similar) at the `with ...(("", port), LCARSHandler)
-    as httpd:` call site below, compose THIS mixin into whatever new class
-    you introduce (mixin first in the bases tuple) and use that class at the
-    call site instead of the bare stdlib class. Do not re-implement
-    handle_error() separately — the swallow logic must stay in exactly one
-    place so 006+ doesn't have to reconcile two copies.
+    XACA-0890-004: LCARSServer now composes this mixin ahead of
+    http.server.ThreadingHTTPServer (see below) — mixin stays FIRST in the
+    bases tuple so handle_error() still wins the MRO after the base swap.
+    Do not re-implement handle_error() separately — the swallow logic must
+    stay in exactly one place.
     """
 
     _QUIET_DISCONNECT_EXCEPTIONS = (
@@ -16988,25 +17217,35 @@ class LCARSQuietDisconnectMixin:
         super().handle_error(request, client_address)
 
 
-class LCARSServer(LCARSQuietDisconnectMixin, socketserver.TCPServer):
+class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
     """The concrete server class main() binds.
 
-    Mixin first so LCARSQuietDisconnectMixin.handle_error() wins the MRO.
+    Mixin first so LCARSQuietDisconnectMixin.handle_error() wins the MRO —
+    ThreadingHTTPServer/socketserver.BaseServer sits later in the MRO, so if
+    the mixin were ever moved out of first position, handle_error() would
+    resolve to the stdlib implementation instead and the BrokenPipeError
+    suppression XACA-0889 added would silently stop working (no crash, no
+    warning — the ~40-line traceback flood would just come back).
 
     XACA-0889-018: allow_reuse_address is set HERE rather than by mutating
     socketserver.TCPServer.allow_reuse_address globally. The global form
     silently changed the default for every other TCPServer subclass in the
     process — a side effect well outside what this server needs.
 
-    XACA-0889 NOTE: this is deliberately still SINGLE-THREADED. Swapping the
-    base to http.server.ThreadingHTTPServer (+ daemon_threads = True) is the
-    remaining half of the fix and is tracked separately, because concurrency
-    also activates a pre-existing lost-update race across ~12 unlocked
-    read-modify-write sites (see the XACA-0889 audit). Do not swap the base
-    here without landing those path locks in the same change.
+    XACA-0890-004: base swapped from socketserver.TCPServer to
+    http.server.ThreadingHTTPServer (qualified form, matching the
+    socketserver.TCPServer style this replaced — coordinated with the test
+    harness, which resolves the base class by name) + daemon_threads = True,
+    so one slow request no longer blocks every other client. This was
+    deliberately withheld from XACA-0889 until the ~12 unlocked
+    read-modify-write _atomic_write_json call sites it identified were fixed
+    (XACA-0890-002/003, via the _get_path_lock registry) — swapping the base
+    first would have turned a latent single-threaded-only-safe race into a
+    live lost-update bug on every one of those sites.
     """
 
     allow_reuse_address = True
+    daemon_threads = True
 
 
 def main():
@@ -17065,7 +17304,10 @@ def main():
     # rather than a global mutation of socketserver.TCPServer.
     # XACA-0889-003: LCARSServer composes LCARSQuietDisconnectMixin so a client
     # hangup (health-check curl --max-time) logs one line instead of a ~40-line
-    # BrokenPipeError traceback. Still single-threaded — see LCARSServer docstring.
+    # BrokenPipeError traceback.
+    # XACA-0890-004: LCARSServer is now http.server.ThreadingHTTPServer-based
+    # (daemon_threads = True) — concurrent requests each get their own thread
+    # instead of queueing behind whichever request is currently running.
     with LCARSServer(("", port), LCARSHandler) as httpd:
         try:
             httpd.serve_forever()
