@@ -703,8 +703,13 @@ def _ensure_collector_running() -> bool:
 
     # Atomic compare-and-set: only the caller that wins the race gets to spawn;
     # everyone else within the cooldown window bails out here (XACA-0889-004).
-    now = time.time()
+    # XACA-0889-018: read the clock INSIDE the lock. Outside, `now` could be
+    # sampled before a competing thread's spawn updated the timestamp, making
+    # the cooldown comparison use a stale reading. It happens to be safe today
+    # (an earlier `now` only shrinks the delta, so the guard errs toward NOT
+    # spawning) — but that is conservative by accident, not by construction.
     with _CCUSAGE_RESPAWN_LOCK:
+        now = time.time()
         if now - _ccusage_last_respawn_at < _CCUSAGE_RESPAWN_COOLDOWN_SECONDS:
             return False
         _ccusage_last_respawn_at = now
@@ -14574,7 +14579,15 @@ end tell
     def serve_roadmap_pdf_download(self, token):
         """GET /api/roadmap-pdf/<token> — stream a stashed PDF once, then drop it."""
         import time
-        entry = ROADMAP_PDF_STASH.pop(token, None)
+        # XACA-0889-014: the pop MUST hold the same lock as the stash-side prune
+        # loop. That loop iterates ROADMAP_PDF_STASH.items() inside
+        # _ROADMAP_PDF_STASH_LOCK; an unlocked pop here would mutate the dict
+        # mid-iteration under concurrency -> "RuntimeError: dict changed size
+        # during iteration". Harmless while the server is single-threaded, but
+        # this is a live hazard the moment XACA-0890 lands ThreadingHTTPServer.
+        # Lock covers only the pop — never the response write below.
+        with _ROADMAP_PDF_STASH_LOCK:
+            entry = ROADMAP_PDF_STASH.pop(token, None)
         if not entry or time.time() - entry['ts'] > ROADMAP_PDF_STASH_TTL:
             self._send_json_response({'error': 'PDF not found or expired'}, status=404)
             return
@@ -16980,6 +16993,11 @@ class LCARSServer(LCARSQuietDisconnectMixin, socketserver.TCPServer):
 
     Mixin first so LCARSQuietDisconnectMixin.handle_error() wins the MRO.
 
+    XACA-0889-018: allow_reuse_address is set HERE rather than by mutating
+    socketserver.TCPServer.allow_reuse_address globally. The global form
+    silently changed the default for every other TCPServer subclass in the
+    process — a side effect well outside what this server needs.
+
     XACA-0889 NOTE: this is deliberately still SINGLE-THREADED. Swapping the
     base to http.server.ThreadingHTTPServer (+ daemon_threads = True) is the
     remaining half of the fix and is tracked separately, because concurrency
@@ -16987,6 +17005,8 @@ class LCARSServer(LCARSQuietDisconnectMixin, socketserver.TCPServer):
     read-modify-write sites (see the XACA-0889 audit). Do not swap the base
     here without landing those path locks in the same change.
     """
+
+    allow_reuse_address = True
 
 
 def main():
@@ -17040,8 +17060,9 @@ def main():
     # coexisting with its canonical board — check all teams, not just LCARS_TEAM.
     check_all_dual_boards_or_die()
 
-    # Allow port reuse to avoid "Address already in use" errors
-    socketserver.TCPServer.allow_reuse_address = True
+    # Allow port reuse to avoid "Address already in use" errors.
+    # XACA-0889-018: now a class attribute on LCARSServer (see its docstring)
+    # rather than a global mutation of socketserver.TCPServer.
     # XACA-0889-003: LCARSServer composes LCARSQuietDisconnectMixin so a client
     # hangup (health-check curl --max-time) logs one line instead of a ~40-line
     # BrokenPipeError traceback. Still single-threaded — see LCARSServer docstring.

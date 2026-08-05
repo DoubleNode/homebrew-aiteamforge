@@ -47,7 +47,12 @@ HEALTH_CHECK_RETRY_DELAY="${HEALTH_CHECK_RETRY_DELAY:-3}"
 # non-numerics ("invalid time interval"), so the retry fires ~instantly while
 # emitting stderr noise. That is the worst outcome — the mitigation appears
 # configured but is not actually spacing the probes. Fail loudly to the default.
-if ! [[ "$HEALTH_CHECK_RETRY_DELAY" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+# NOTE the QUOTED regex. Under zsh, an UNQUOTED =~ right-hand side undergoes
+# quote removal before regcomp sees it, so `\.` degrades to `.` — matching ANY
+# character, which let 1x3 / 1-3 / 1@3 pass validation and then break sleep:
+# exactly the silently-discarded-backoff failure this guard exists to prevent.
+# (This is the OPPOSITE of bash, where quoting the =~ RHS forces a literal match.)
+if ! [[ "$HEALTH_CHECK_RETRY_DELAY" =~ '^[0-9]+(\.[0-9]+)?$' ]]; then
     echo "WARNING: HEALTH_CHECK_RETRY_DELAY='$HEALTH_CHECK_RETRY_DELAY' is not a non-negative number; falling back to 3s." >&2
     HEALTH_CHECK_RETRY_DELAY=3
 fi
@@ -764,8 +769,25 @@ run_daemon() {
 # ============================================================================
 # Main
 # ============================================================================
-if [[ "$DAEMON_MODE" == "true" ]]; then
-    run_daemon
-else
-    run_health_check
+# XACA-0889-017: sourced-vs-executed guard. Without this, `source
+# lcars-health-check.sh` (the only way a test harness — or any future caller
+# — can reuse _hc_check_health_with_retry/check_server_health/etc. as
+# functions) unconditionally fired a real run_health_check sweep as a side
+# effect of sourcing, including restarts when STATUS_ONLY is false. Verified:
+# sourcing this file before this guard wrote a live entry to
+# /tmp/lcars-health.log and printed the full health-check banner.
+#
+# $zsh_eval_context is zsh's stack of the contexts the currently-running code
+# is nested under; its LAST element is "toplevel" only when THIS file is the
+# outermost script being run (`./lcars-health-check.sh` or
+# `zsh lcars-health-check.sh`), and "file" when it was reached via
+# `source`/`.` from another script or an interactive shell. Functions/vars
+# defined above this guard are still fully usable after sourcing — only the
+# auto-run at the bottom is suppressed.
+if [[ "${zsh_eval_context[-1]}" == "toplevel" ]]; then
+    if [[ "$DAEMON_MODE" == "true" ]]; then
+        run_daemon
+    else
+        run_health_check
+    fi
 fi
