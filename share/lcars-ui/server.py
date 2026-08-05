@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import http.server
 import socketserver
+import contextlib
 import copy
 import json
 import mimetypes
@@ -137,6 +138,17 @@ except ImportError as e:
     AppleCalendarProvider = None
     CalendarCredentials = None
     print(f"[LCARS] Warning: Calendar sync module not available: {e}")
+
+# XACA-0890 review-gate finding (021): overall bound on how long
+# handle_trigger_calendar_sync will wait for EACH of sync_outbound/
+# sync_inbound before giving up (see _run_bounded / the call site for the
+# full rationale). 180s matches this file's existing convention for a
+# generous-but-finite external-call ceiling (ccusage_collector.py's
+# POLL_INTERVAL_S). Individual HTTP requests inside the providers are
+# already capped at 30-60s each; this bounds the AGGREGATE per-item loop,
+# which had no cap of its own. Overridable for operators who legitimately
+# sync very large boards and need more headroom.
+CALENDAR_SYNC_TIMEOUT_S = int(os.environ.get('LCARS_CALENDAR_SYNC_TIMEOUT_S', '180'))
 
 # Import ccusage heuristics (XACA-0243-003) — same directory as server.py
 try:
@@ -714,6 +726,54 @@ def _get_path_lock(path) -> threading.RLock:
             lock = threading.RLock()
             _PATH_LOCKS[key] = lock
         return lock
+
+
+# XACA-0890 review-gate finding (021): handle_trigger_calendar_sync used to
+# hold board_file's fcntl lock across the external sync_outbound/
+# sync_inbound calls with NO overall bound. Each individual HTTP request
+# those calls make IS timeout-bounded (apple_provider.py / google_provider.py
+# both pass timeout=30 or 60 to every requests.* call) — but sync_outbound
+# loops that per-item over the whole due-dated backlog with no cap on the
+# LOOP itself, so N items x up to 30-60s each is an aggregate wait with no
+# overall ceiling. Under the single-threaded server this only delayed the
+# one client waiting on the response; under ThreadingHTTPServer it holds
+# board_file's exclusive lock the whole time, so it now blocks every OTHER
+# concurrent board_file writer too — "materially worse under threading" per
+# the review gate.
+#
+# _run_bounded(fn, ..., timeout_s=N) runs fn in a background daemon thread
+# and gives up waiting after timeout_s regardless of whether fn has actually
+# finished, converting an unbounded wait into a hard ceiling on how long
+# handle_trigger_calendar_sync can hold the board lock. This does NOT cancel
+# fn — Python cannot forcibly kill a thread — it abandons the wait. See the
+# call site for why a timeout there skips the board_file write entirely
+# rather than trying to use partial results (the abandoned thread may still
+# be mutating the same in-memory item/board_data objects after we stop
+# waiting on it, so writing them out from under it risks a torn/inconsistent
+# snapshot — the exact "mutate a live dict from two threads" hazard
+# XACA-0889-014 already found and fixed elsewhere in this file).
+def _run_bounded(fn, *args, timeout_s: float, **kwargs):
+    """Run fn(*args, **kwargs) in a background daemon thread; wait at most
+    timeout_s. Returns (result, timed_out: bool). On timeout the thread is
+    left running (daemon=True, so it can't block process exit) — its
+    eventual result/exception is discarded. Re-raises any exception fn
+    itself raised, but only if it finished within the bound."""
+    box: dict = {}
+
+    def _target():
+        try:
+            box['value'] = fn(*args, **kwargs)
+        except Exception as e:  # noqa: BLE001 - propagated to the waiter below
+            box['error'] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout=timeout_s)
+    if t.is_alive():
+        return None, True
+    if 'error' in box:
+        raise box['error']
+    return box.get('value'), False
 
 
 def _collector_pid_alive() -> bool:
@@ -2748,10 +2808,24 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     _TEAM_PATHS_CACHE: dict = {'mtime_ns': None, 'data': None}
     _TEAM_PATHS_CACHE_LOCK: threading.Lock = threading.Lock()
 
-    # XACA-0387 (audit F-04-008): socket timeout protects the single-threaded
-    # TCPServer from slow-loris connections that would otherwise pin the lone
-    # server thread indefinitely. StreamRequestHandler.setup() applies this via
+    # XACA-0387 (audit F-04-008): socket timeout protects each connection's
+    # request thread from a slow-loris connection that would otherwise pin it
+    # indefinitely. StreamRequestHandler.setup() applies this via
     # self.connection.settimeout(self.timeout).
+    #
+    # XACA-0890 review-gate finding (019): this comment previously described
+    # "the single-threaded TCPServer" and "the lone server thread" —
+    # accurate when written, stale since XACA-0890-004 swapped LCARSServer to
+    # http.server.ThreadingHTTPServer. Under ThreadingHTTPServer, EVERY
+    # connection gets its OWN thread (see socketserver.ThreadingMixIn.
+    # process_request), so this timeout now bounds each of those per-
+    # connection threads individually rather than the one shared thread the
+    # single-threaded server used to run everything on. The mechanism itself
+    # (self.timeout -> StreamRequestHandler.setup() -> settimeout) is
+    # unchanged; only the "why it matters" framing needed correcting — a
+    # slow-loris client no longer pins the ENTIRE server (that was already
+    # the worse half of the old bug), it just leaks one thread until this
+    # timeout fires.
     timeout = int(os.environ.get('LCARS_SOCKET_TIMEOUT', '30'))
 
     def __init__(self, *args, **kwargs):
@@ -4393,6 +4467,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     # XACA-0736: per-team dedupe set for the PLANNED self-heal warning.
     # Keyed by team name; populated on first heal-on-read; reset never (warn once per process).
+    # XACA-0890 review-gate finding (018): unguarded shared class state under
+    # ThreadingHTTPServer, missed by the XACA-0890-004 threading-risk
+    # inventory. Deliberately left unlocked: `.add()` is a single GIL-atomic
+    # set operation, so a race produces at worst a duplicate warning line —
+    # never lost or corrupted persisted state.
     _planned_heal_warned: set = set()
 
     # Default release configuration (used when board doesn't have releaseConfig)
@@ -4424,8 +4503,97 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         }
     }
 
-    def _load_releases_config(self, team=None):
-        """Load releases from kanban board file"""
+    @contextlib.contextmanager
+    def _board_write_transaction(self, team=None):
+        """XACA-0890 review-gate fix: hold ONE continuous exclusive fcntl
+        lock across an entire load -> caller-mutation -> save span on
+        board_file, for the paired helpers below (_load_releases_config /
+        _save_releases_config, _load_board_epics / _save_board_epics).
+
+        THE BUG THIS CLOSES: _load_releases_config / _load_board_epics take
+        a SHARED lock, read, and release it in `finally` BEFORE returning.
+        The caller then mutates the returned dict with NO LOCK HELD AT ALL.
+        _save_releases_config / _save_board_epics later take their OWN
+        fresh EXCLUSIVE lock, re-read board_data, and do a WHOLESALE
+        REPLACE of one key (`releases` or `epics`) with the caller's by-then
+        POSSIBLY-STALE list — the re-read only protects OTHER board keys
+        (backlog, teamConfig, etc.), never the specific key being replaced.
+        Two concurrent request threads each doing load -> mutate -> save:
+        whichever save runs second silently discards the first thread's
+        change. Pre-existing and already reachable cross-process (kb-*,
+        background job threads); XACA-0890-004's ThreadingHTTPServer swap
+        widened it from occasional to every concurrent request pair on
+        board.json, the highest-traffic file in this server.
+
+        USAGE — all 14 read-modify-write call sites in this file follow
+        this shape:
+            with self._board_write_transaction(team):
+                data = self._load_releases_config(team, _lock_held=True)
+                ... mutate data (or a sub-object found within it) ...
+                self._save_releases_config(data, team, _lock_held=True)
+
+        REENTRANCY WARNING — fcntl.flock is NOT reentrant the way
+        threading.RLock is (see XACA-0890-002's _get_path_lock, which chose
+        RLock deliberately; this is the opposite mechanism on purpose, see
+        below). A SECOND, independently-opened file descriptor attempting
+        to flock a file another fd already holds locked BLOCKS FOREVER even
+        from the SAME thread/process — POSIX flock() locks are scoped to
+        the open file description, not the process (`man 2 flock`: "if a
+        process uses open() to obtain more than one file descriptor for the
+        same file, these file descriptors are treated independently... an
+        attempt to lock the file using one of these file descriptors may be
+        denied by a lock that the calling process has already placed via
+        another descriptor"). Concretely: do NOT call any OTHER helper that
+        independently flocks this SAME board_file (e.g.
+        _update_item_release_assignment, _update_items_release_name,
+        _clear_item_release_assignment, _clear_item_epic_assignment, or a
+        CR-team board write when that CR's team happens to equal `team`)
+        from inside this transaction's `with` block — that will self-
+        deadlock the request thread, and under ThreadingHTTPServer it will
+        NOT crash visibly, it will just hang that one connection forever.
+
+        Audited for XACA-0890's review-gate fix: 3 of the 14 call sites
+        (handle_link_cr_to_release, handle_unlink_cr_from_release,
+        handle_delete_epic) originally interleaved a second board-file lock
+        cycle between their load and save — each was restructured so the
+        OTHER lock cycle completes and fully releases BEFORE this
+        transaction opens (see the comment at each call site). Kept fcntl
+        here rather than switching board_file to the XACA-0890-002 RLock
+        registry deliberately, per review-gate direction: board_file is
+        fcntl territory (20+ other call sites already use it, including
+        cross-process callers like kb-* and the 4 background job threads
+        that an in-process-only RLock cannot see) — mixing lock types on
+        one file would give zero mutual exclusion between them.
+        """
+        board_file = self._get_board_file(team)
+        if not board_file.exists():
+            # Nothing to lock — _load_*/_save_* with _lock_held=True each
+            # independently handle the missing-board-file case (default
+            # empty result / False respectively) without touching a lock
+            # file, matching the non-transactional callers' existing
+            # behavior of never creating a stray .lock file for a team that
+            # has no board yet.
+            yield
+            return
+        import fcntl
+        lock_file = board_file.with_suffix('.json.lock')
+        with open(lock_file, 'w') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+    def _load_releases_config(self, team=None, _lock_held=False):
+        """Load releases from kanban board file.
+
+        _lock_held=True (XACA-0890 review-gate fix): the caller already holds
+        board_file's exclusive lock via `with self._board_write_transaction(team):`
+        — skip acquiring our own lock and just read. Passing True while NOT
+        actually inside that transaction is a caller bug (the read races
+        unprotected). See _board_write_transaction's docstring for the full
+        contract and why this split exists.
+        """
         import fcntl
         board_file = self._get_board_file(team)
 
@@ -4438,73 +4606,87 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "nextReleaseId": 1
             }
 
+        def _read():
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+
+            # Build releases data structure from board
+            release_config = data.get('releaseConfig', self.DEFAULT_RELEASE_CONFIG)
+            # XACA-0163: deepcopy when falling back to class-level
+            # DEFAULT_RELEASE_CONFIG. handle_update_flow_config mutates
+            # data['flowConfig'] in place, which would otherwise pollute
+            # the class default for every subsequent team that has not
+            # yet persisted its own flowConfig.
+            flow_config = release_config.get('flowConfig')
+            if flow_config is None:
+                flow_config = copy.deepcopy(self.DEFAULT_RELEASE_CONFIG['flowConfig'])
+
+            # XACA-0736: Self-heal — ensure PLANNED always leads defaultEnvironments.
+            # Boards that persisted releaseConfig without PLANNED (e.g. ios/android/firebase
+            # before this fix) caused new releases to be born at environments[0]="DEV"
+            # (active) instead of the PLANNED holding tab. Heal-on-read here: the corrected
+            # list is returned and will be persisted on the next natural _save_releases_config
+            # call (no disk write here). A structured one-time warning per team is emitted so
+            # operators can see which boards needed healing without being spammed on every read.
+            raw_envs = release_config.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments'])
+            if raw_envs and raw_envs[0] != "PLANNED":
+                # Compute the healed list once, then warn at most once per team.
+                if "PLANNED" in raw_envs:
+                    action = "reordered to front"
+                    default_environments = ["PLANNED"] + [e for e in raw_envs if e != "PLANNED"]
+                else:
+                    action = "prepended (was absent)"
+                    default_environments = ["PLANNED"] + list(raw_envs)
+                warn_key = team or LCARS_TEAM
+                if warn_key not in self.__class__._planned_heal_warned:
+                    self.__class__._planned_heal_warned.add(warn_key)
+                    print(
+                        f"[LCARS] WARNING: XACA-0736: team '{warn_key}' releaseConfig.defaultEnvironments "
+                        f"did not lead with PLANNED — auto-healed on read ({action}). "
+                        f"Original: {raw_envs}. Healed: {default_environments}. "
+                        f"Will be persisted on next config save.",
+                        file=sys.stderr,
+                    )
+            else:
+                # XACA-0736 [Review]: defensive copy — raw_envs may alias the class-level
+                # DEFAULT_RELEASE_CONFIG['defaultEnvironments'] list when the board has no
+                # defaultEnvironments key. Mirrors the XACA-0163 flowConfig deepcopy rationale.
+                default_environments = list(raw_envs)
+
+            return {
+                "version": "1.0",
+                "team": data.get('team', LCARS_TEAM),
+                "releases": data.get('releases', []),
+                "nextId": data.get('nextReleaseId', 1),
+                # Flatten config for backward compatibility
+                "defaultEnvironments": default_environments,
+                "platforms": release_config.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
+                "releaseTypes": release_config.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
+                "flowConfig": flow_config,
+                "projectEnvironments": release_config.get('projectEnvironments', {})
+            }
+
+        if _lock_held:
+            return _read()
+
         lock_file = board_file.with_suffix('.json.lock')
         with open(lock_file, 'w') as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
             try:
-                with open(board_file, 'r') as f:
-                    data = json.load(f)
-
-                # Build releases data structure from board
-                release_config = data.get('releaseConfig', self.DEFAULT_RELEASE_CONFIG)
-                # XACA-0163: deepcopy when falling back to class-level
-                # DEFAULT_RELEASE_CONFIG. handle_update_flow_config mutates
-                # data['flowConfig'] in place, which would otherwise pollute
-                # the class default for every subsequent team that has not
-                # yet persisted its own flowConfig.
-                flow_config = release_config.get('flowConfig')
-                if flow_config is None:
-                    flow_config = copy.deepcopy(self.DEFAULT_RELEASE_CONFIG['flowConfig'])
-
-                # XACA-0736: Self-heal — ensure PLANNED always leads defaultEnvironments.
-                # Boards that persisted releaseConfig without PLANNED (e.g. ios/android/firebase
-                # before this fix) caused new releases to be born at environments[0]="DEV"
-                # (active) instead of the PLANNED holding tab. Heal-on-read here: the corrected
-                # list is returned and will be persisted on the next natural _save_releases_config
-                # call (no disk write here). A structured one-time warning per team is emitted so
-                # operators can see which boards needed healing without being spammed on every read.
-                raw_envs = release_config.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments'])
-                if raw_envs and raw_envs[0] != "PLANNED":
-                    # Compute the healed list once, then warn at most once per team.
-                    if "PLANNED" in raw_envs:
-                        action = "reordered to front"
-                        default_environments = ["PLANNED"] + [e for e in raw_envs if e != "PLANNED"]
-                    else:
-                        action = "prepended (was absent)"
-                        default_environments = ["PLANNED"] + list(raw_envs)
-                    warn_key = team or LCARS_TEAM
-                    if warn_key not in self.__class__._planned_heal_warned:
-                        self.__class__._planned_heal_warned.add(warn_key)
-                        print(
-                            f"[LCARS] WARNING: XACA-0736: team '{warn_key}' releaseConfig.defaultEnvironments "
-                            f"did not lead with PLANNED — auto-healed on read ({action}). "
-                            f"Original: {raw_envs}. Healed: {default_environments}. "
-                            f"Will be persisted on next config save.",
-                            file=sys.stderr,
-                        )
-                else:
-                    # XACA-0736 [Review]: defensive copy — raw_envs may alias the class-level
-                    # DEFAULT_RELEASE_CONFIG['defaultEnvironments'] list when the board has no
-                    # defaultEnvironments key. Mirrors the XACA-0163 flowConfig deepcopy rationale.
-                    default_environments = list(raw_envs)
-
-                return {
-                    "version": "1.0",
-                    "team": data.get('team', LCARS_TEAM),
-                    "releases": data.get('releases', []),
-                    "nextId": data.get('nextReleaseId', 1),
-                    # Flatten config for backward compatibility
-                    "defaultEnvironments": default_environments,
-                    "platforms": release_config.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
-                    "releaseTypes": release_config.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
-                    "flowConfig": flow_config,
-                    "projectEnvironments": release_config.get('projectEnvironments', {})
-                }
+                return _read()
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def _save_releases_config(self, data, team=None):
-        """Save releases to kanban board file"""
+    def _save_releases_config(self, data, team=None, _lock_held=False):
+        """Save releases to kanban board file.
+
+        _lock_held=True: see _load_releases_config's docstring — identical
+        contract. Every (load, save) pair in this file that uses
+        _lock_held=True does so inside the SAME `with
+        self._board_write_transaction(team):` block, so this save's re-read
+        of board_file observes exactly what the paired load saw (no writer
+        can run between them — we hold the exclusive lock continuously).
+        """
         import fcntl
         board_file = self._get_board_file(team)
         # Debug logging to file
@@ -4515,27 +4697,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] Board file not found: {board_file}")
             return False
 
+        def _write():
+            with open(board_file, 'r') as f:
+                board_data = json.load(f)
+
+            # Update board with releases data
+            board_data['releases'] = data.get('releases', [])
+            board_data['nextReleaseId'] = data.get('nextId', 1)
+            board_data['releaseConfig'] = {
+                "defaultEnvironments": data.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments']),
+                "platforms": data.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
+                "releaseTypes": data.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
+                "flowConfig": data.get('flowConfig', self.DEFAULT_RELEASE_CONFIG['flowConfig']),
+                "projectEnvironments": data.get('projectEnvironments', {})
+            }
+            board_data['lastUpdated'] = self._get_timestamp()
+
+            self._atomic_write_json(board_file, board_data)
+            return True
+
+        if _lock_held:
+            return _write()
+
         lock_file = board_file.with_suffix('.json.lock')
         with open(lock_file, 'w') as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                with open(board_file, 'r') as f:
-                    board_data = json.load(f)
-
-                # Update board with releases data
-                board_data['releases'] = data.get('releases', [])
-                board_data['nextReleaseId'] = data.get('nextId', 1)
-                board_data['releaseConfig'] = {
-                    "defaultEnvironments": data.get('defaultEnvironments', self.DEFAULT_RELEASE_CONFIG['defaultEnvironments']),
-                    "platforms": data.get('platforms', self.DEFAULT_RELEASE_CONFIG['platforms']),
-                    "releaseTypes": data.get('releaseTypes', self.DEFAULT_RELEASE_CONFIG['releaseTypes']),
-                    "flowConfig": data.get('flowConfig', self.DEFAULT_RELEASE_CONFIG['flowConfig']),
-                    "projectEnvironments": data.get('projectEnvironments', {})
-                }
-                board_data['lastUpdated'] = self._get_timestamp()
-
-                self._atomic_write_json(board_file, board_data)
-                return True
+                return _write()
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -4792,12 +4980,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         leave the read-then-decide gap unprotected, which is the exact
         lost-update window this ticket exists to close.
 
-        Resolves the path the same way _save_release_manifest does (team from
-        _extract_team_from_release_id, falling back to LCARS_TEAM) so the
-        lock returned here always matches the file _save_release_manifest
-        will actually write — _load_release_manifest has extra legacy
-        fallback lookups for backward compatibility, but the write always
-        lands at this canonical path, and that's the file being protected.
+        XACA-0890 review-gate fix (016): corrected docstring — this does NOT
+        resolve team the same way _save_release_manifest does. This method
+        uses `_extract_team_from_release_id(release_id) or LCARS_TEAM`;
+        _save_release_manifest uses `manifest.get('team', LCARS_TEAM)` — the
+        team stamped ON the manifest dict, which this method never reads.
+        Those are two genuinely different resolution strategies.
+
+        Mutual exclusion still holds despite the mismatch, for a narrower
+        reason than "resolves the same way": `_extract_team_from_release_id`
+        is a pure function of `release_id` alone, and `LCARS_TEAM` is fixed
+        for the lifetime of a running server process — so EVERY call to
+        `_release_manifest_lock(release_id)` within one process resolves to
+        the identical team, and therefore the identical lock object, for
+        that release_id, every time. That's what actually makes every
+        caller in this process serialize against each other. It is also,
+        separately, true in practice that the two strategies land on the
+        SAME team for manifests this server creates: _generate_release_id
+        produces the legacy `REL-{year}-Q{n}-{seq}` format with no
+        team-code segment, so `_extract_team_from_release_id` always falls
+        through to `LCARS_TEAM` for them — and handle_create_release always
+        stamps `manifest['team'] = LCARS_TEAM` too. If a manifest ever
+        carried a DIFFERENT `team` value than the creating process's own
+        LCARS_TEAM (not something this codebase's single-team-per-process
+        architecture currently does), this method's lock and
+        _save_release_manifest's write target would diverge onto different
+        paths — the lock would stop protecting the file it's guarding.
 
         Usage:
             with self._release_manifest_lock(release_id):
@@ -5210,72 +5418,78 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing required field: name")
                 return
 
-            data = self._load_releases_config()
-            release_id = self._generate_release_id(data)
+            # XACA-0890 review-gate fix: hold ONE lock across load -> mutate ->
+            # save (see _board_write_transaction's docstring) instead of the
+            # two separate lock acquisitions _load_releases_config /
+            # _save_releases_config used to each take independently, which
+            # left the mutation below racing a concurrent create/update.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release_id = self._generate_release_id(data)
 
-            # Get environments (use project-specific or default)
-            project = post_data.get('project')
-            if project and project in data.get('projectEnvironments', {}):
-                environments = data['projectEnvironments'][project]
-            else:
-                environments = post_data.get('environments') or data.get('defaultEnvironments', [])
+                # Get environments (use project-specific or default)
+                project = post_data.get('project')
+                if project and project in data.get('projectEnvironments', {}):
+                    environments = data['projectEnvironments'][project]
+                else:
+                    environments = post_data.get('environments') or data.get('defaultEnvironments', [])
 
-            # Extract default version: prefer shortTitle (the user-facing
-            # version label, e.g. "v2.10.0"), fall back to name.
-            default_version = self._extract_version_from_name(
-                post_data.get('shortTitle') or name
-            )
+                # Extract default version: prefer shortTitle (the user-facing
+                # version label, e.g. "v2.10.0"), fall back to name.
+                default_version = self._extract_version_from_name(
+                    post_data.get('shortTitle') or name
+                )
 
-            # XACA-0453: Strip duplicate label prefix from name before persisting.
-            # e.g. POST {name: "REL - Sprint 5", shortTitle: "REL"} → name stored as "Sprint 5".
-            short_title = post_data.get('shortTitle')
-            if short_title:
-                name = _strip_label_prefix(name, short_title)
+                # XACA-0453: Strip duplicate label prefix from name before persisting.
+                # e.g. POST {name: "REL - Sprint 5", shortTitle: "REL"} → name stored as "Sprint 5".
+                short_title = post_data.get('shortTitle')
+                if short_title:
+                    name = _strip_label_prefix(name, short_title)
 
-            # Build platforms configuration
-            platforms_input = post_data.get('platforms', ['ios', 'android'])
-            if isinstance(platforms_input, str):
-                platforms_input = [p.strip() for p in platforms_input.split(',')]
+                # Build platforms configuration
+                platforms_input = post_data.get('platforms', ['ios', 'android'])
+                if isinstance(platforms_input, str):
+                    platforms_input = [p.strip() for p in platforms_input.split(',')]
 
-            # XACA-0729: Derive the initial holding environment defensively.
-            # DEFAULT_RELEASE_CONFIG always leads with "PLANNED", but boards whose
-            # defaultEnvironments drifted (e.g. omitting PLANNED) previously caused
-            # environments[0] to be "DEV" — making the release born ACTIVE.
-            # Rule: if "PLANNED" appears anywhere in the resolved environments list,
-            # seed every platform in "PLANNED" regardless of its list position.
-            # Fall back to environments[0] only for boards that have intentionally
-            # opted out of the PLANNED stage entirely.
-            if "PLANNED" in environments:
-                initial_environment = "PLANNED"
-            else:
-                initial_environment = environments[0] if environments else "PLANNED"
+                # XACA-0729: Derive the initial holding environment defensively.
+                # DEFAULT_RELEASE_CONFIG always leads with "PLANNED", but boards whose
+                # defaultEnvironments drifted (e.g. omitting PLANNED) previously caused
+                # environments[0] to be "DEV" — making the release born ACTIVE.
+                # Rule: if "PLANNED" appears anywhere in the resolved environments list,
+                # seed every platform in "PLANNED" regardless of its list position.
+                # Fall back to environments[0] only for boards that have intentionally
+                # opted out of the PLANNED stage entirely.
+                if "PLANNED" in environments:
+                    initial_environment = "PLANNED"
+                else:
+                    initial_environment = environments[0] if environments else "PLANNED"
 
-            platforms = {}
-            for platform in platforms_input:
-                platforms[platform] = {
-                    "version": post_data.get(f'{platform}Version', default_version),
-                    "buildNumber": post_data.get(f'{platform}Build', 1),
-                    "environment": initial_environment,
-                    "environmentHistory": []
+                platforms = {}
+                for platform in platforms_input:
+                    platforms[platform] = {
+                        "version": post_data.get(f'{platform}Version', default_version),
+                        "buildNumber": post_data.get(f'{platform}Build', 1),
+                        "environment": initial_environment,
+                        "environmentHistory": []
+                    }
+
+                release = {
+                    "id": release_id,
+                    "name": name,
+                    "shortTitle": post_data.get('shortTitle'),  # XACA-0050: Optional short display name
+                    "project": project,
+                    "type": post_data.get('type', 'feature'),
+                    "status": "in_progress",
+                    "targetDate": post_data.get('targetDate'),
+                    "createdAt": self._get_timestamp(),
+                    "environments": environments,
+                    "platforms": platforms,
+                    "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
+                    "team": LCARS_TEAM  # Track owning team for validation
                 }
 
-            release = {
-                "id": release_id,
-                "name": name,
-                "shortTitle": post_data.get('shortTitle'),  # XACA-0050: Optional short display name
-                "project": project,
-                "type": post_data.get('type', 'feature'),
-                "status": "in_progress",
-                "targetDate": post_data.get('targetDate'),
-                "createdAt": self._get_timestamp(),
-                "environments": environments,
-                "platforms": platforms,
-                "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
-                "team": LCARS_TEAM  # Track owning team for validation
-            }
-
-            data['releases'].append(release)
-            self._save_releases_config(data)
+                data['releases'].append(release)
+                self._save_releases_config(data, _lock_held=True)
 
             # Create empty manifest with team ownership. XACA-0890-003: no
             # prior read here (the manifest doesn't exist yet), but the lock
@@ -5617,66 +5831,68 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing required field: platform")
                 return
 
-            data = self._load_releases_config()
-            release = self._find_release_by_id(data, release_id)
-            if not release:
-                self.send_error(404, f"Release not found: {release_id}")
-                return
-
-            if platform not in release.get('platforms', {}):
-                self.send_error(400, f"Platform not found in release: {platform}")
-                return
-
-            platform_data = release['platforms'][platform]
-            all_environments = release.get('environments', data.get('defaultEnvironments', []))
-            current_env = platform_data.get('environment')
-
-            # Get flow config and filter to enabled stages only
-            flow_config = data.get('flowConfig', {})
-            stages = flow_config.get('stages', {})
-            environments = [env for env in all_environments if stages.get(env, {}).get('enabled', True)]
-
-            # Determine target environment
-            if target_env:
-                # Validate target is in enabled environments
-                if target_env not in environments:
-                    self.send_error(400, f"Invalid or disabled environment: {target_env}")
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    self.send_error(404, f"Release not found: {release_id}")
                     return
-                new_env = target_env
-            else:
-                # Auto-promote to next enabled environment
-                try:
-                    current_idx = environments.index(current_env)
-                    if current_idx >= len(environments) - 1:
-                        self.send_error(400, f"Already at final environment: {current_env}")
+
+                if platform not in release.get('platforms', {}):
+                    self.send_error(400, f"Platform not found in release: {platform}")
+                    return
+
+                platform_data = release['platforms'][platform]
+                all_environments = release.get('environments', data.get('defaultEnvironments', []))
+                current_env = platform_data.get('environment')
+
+                # Get flow config and filter to enabled stages only
+                flow_config = data.get('flowConfig', {})
+                stages = flow_config.get('stages', {})
+                environments = [env for env in all_environments if stages.get(env, {}).get('enabled', True)]
+
+                # Determine target environment
+                if target_env:
+                    # Validate target is in enabled environments
+                    if target_env not in environments:
+                        self.send_error(400, f"Invalid or disabled environment: {target_env}")
                         return
-                    new_env = environments[current_idx + 1]
-                except ValueError:
-                    # Current env not in enabled list, find next enabled after current
+                    new_env = target_env
+                else:
+                    # Auto-promote to next enabled environment
                     try:
-                        all_idx = all_environments.index(current_env)
-                        # Find next enabled environment
-                        for env in all_environments[all_idx + 1:]:
-                            if env in environments:
-                                new_env = env
-                                break
-                        else:
-                            new_env = environments[0] if environments else "PLANNED"
+                        current_idx = environments.index(current_env)
+                        if current_idx >= len(environments) - 1:
+                            self.send_error(400, f"Already at final environment: {current_env}")
+                            return
+                        new_env = environments[current_idx + 1]
                     except ValueError:
-                        new_env = environments[0] if environments else "PLANNED"
+                        # Current env not in enabled list, find next enabled after current
+                        try:
+                            all_idx = all_environments.index(current_env)
+                            # Find next enabled environment
+                            for env in all_environments[all_idx + 1:]:
+                                if env in environments:
+                                    new_env = env
+                                    break
+                            else:
+                                new_env = environments[0] if environments else "PLANNED"
+                        except ValueError:
+                            new_env = environments[0] if environments else "PLANNED"
 
-            # Record history and update
-            history = platform_data.get('environmentHistory', [])
-            history.append({
-                "from": current_env,
-                "to": new_env,
-                "promotedAt": self._get_timestamp()
-            })
+                # Record history and update
+                history = platform_data.get('environmentHistory', [])
+                history.append({
+                    "from": current_env,
+                    "to": new_env,
+                    "promotedAt": self._get_timestamp()
+                })
 
-            platform_data['environment'] = new_env
-            platform_data['environmentHistory'] = history
+                platform_data['environment'] = new_env
+                platform_data['environmentHistory'] = history
 
-            self._save_releases_config(data)
+                self._save_releases_config(data, _lock_held=True)
 
             # XACA-0659 (GAP B): Write-through updated environment into manifest.json
             # so the manifest mirrors the board's authoritative environment state.
@@ -5715,31 +5931,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         No request body is required (the endpoint ignores any body that is sent).
         """
         try:
-            data = self._load_releases_config()
-            release = self._find_release_by_id(data, release_id)
-            if not release:
-                self.send_error(404, f"Release not found: {release_id}")
-                return
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    self.send_error(404, f"Release not found: {release_id}")
+                    return
 
-            now = self._get_timestamp()
-            platforms = release.get('platforms', {})
+                now = self._get_timestamp()
+                platforms = release.get('platforms', {})
 
-            for plat_name, plat_data in platforms.items():
-                current_env = plat_data.get('environment')
-                history = plat_data.get('environmentHistory', [])
-                history.append({
-                    "from": current_env,
-                    "to": "PLANNED",
-                    "promotedAt": now
-                })
-                plat_data['environment'] = "PLANNED"
-                plat_data['environmentHistory'] = history
+                for plat_name, plat_data in platforms.items():
+                    current_env = plat_data.get('environment')
+                    history = plat_data.get('environmentHistory', [])
+                    history.append({
+                        "from": current_env,
+                        "to": "PLANNED",
+                        "promotedAt": now
+                    })
+                    plat_data['environment'] = "PLANNED"
+                    plat_data['environmentHistory'] = history
 
-            release['platforms'] = platforms
-            # Reset to the same status a freshly-created release carries.
-            release['status'] = "in_progress"
+                release['platforms'] = platforms
+                # Reset to the same status a freshly-created release carries.
+                release['status'] = "in_progress"
 
-            self._save_releases_config(data)
+                self._save_releases_config(data, _lock_held=True)
 
             # Write-through to manifest so it stays a faithful mirror of board state
             # (same pattern as handle_promote_release / handle_platform_gate_status).
@@ -5805,30 +6023,32 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Fall back to server timestamp if caller omitted it
                 checked_at = self._get_timestamp()
 
-            data = self._load_releases_config()
-            release = self._find_release_by_id(data, release_id)
-            if not release:
-                self._send_json_response({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
-                return
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    self._send_json_response({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
+                    return
 
-            platforms = release.get("platforms", {})
-            if platform not in platforms:
-                self._send_json_response(
-                    {"ok": False, "error": f"Platform '{platform}' not found in release '{release_id}'"},
-                    status=400
-                )
-                return
+                platforms = release.get("platforms", {})
+                if platform not in platforms:
+                    self._send_json_response(
+                        {"ok": False, "error": f"Platform '{platform}' not found in release '{release_id}'"},
+                        status=400
+                    )
+                    return
 
-            # Write gateStatus into the platform sub-object
-            platforms[platform]["gateStatus"] = {
-                "result":        result,
-                "checkedAt":     checked_at,
-                "codeVersion":   code_ver,
-                "targetVersion": target_ver,
-            }
-            release["platforms"] = platforms
+                # Write gateStatus into the platform sub-object
+                platforms[platform]["gateStatus"] = {
+                    "result":        result,
+                    "checkedAt":     checked_at,
+                    "codeVersion":   code_ver,
+                    "targetVersion": target_ver,
+                }
+                release["platforms"] = platforms
 
-            self._save_releases_config(data)
+                self._save_releases_config(data, _lock_held=True)
 
             # XACA-0658 + XACA-0659: gateStatus lives in the platforms object, which the
             # manifest mirror reflects in full — write it through so manifest.json stays a
@@ -5859,73 +6079,75 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             content_length = int(self.headers['Content-Length'])
             post_data = json.loads(self.rfile.read(content_length))
 
-            data = self._load_releases_config()
-            release = self._find_release_by_id(data, release_id)
-            if not release:
-                self.send_error(404, f"Release not found: {release_id}")
-                return
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction():
+                data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(data, release_id)
+                if not release:
+                    self.send_error(404, f"Release not found: {release_id}")
+                    return
 
-            # Update allowed fields
-            allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'project']  # XACA-0050: Added shortTitle
-            for field in allowed_fields:
-                if field in post_data:
-                    release[field] = post_data[field]
+                # Update allowed fields
+                allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'project']  # XACA-0050: Added shortTitle
+                for field in allowed_fields:
+                    if field in post_data:
+                        release[field] = post_data[field]
 
-            # XACA-0209: tags field needs type/strip validation (matches epic handlers).
-            # XACA-0209 round 3: also strip individual values so new data is clean.
-            if 'tags' in post_data:
-                release['tags'] = [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()]
+                # XACA-0209: tags field needs type/strip validation (matches epic handlers).
+                # XACA-0209 round 3: also strip individual values so new data is clean.
+                if 'tags' in post_data:
+                    release['tags'] = [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()]
 
-            # XACA-0453: Strip duplicate label prefix from name on update.
-            # Only runs when the patch includes a name.  The effective label is
-            # release['shortTitle'] at this point (already merged above from
-            # post_data or preserved from the stored record).  We write the
-            # normalized value back to both release['name'] and post_data['name']
-            # so that the _update_items_release_name call below stays consistent.
-            if 'name' in post_data:
-                effective_label = release.get('shortTitle')
-                normalized_name = _strip_label_prefix(post_data['name'], effective_label)
-                release['name'] = normalized_name
-                post_data['name'] = normalized_name
+                # XACA-0453: Strip duplicate label prefix from name on update.
+                # Only runs when the patch includes a name.  The effective label is
+                # release['shortTitle'] at this point (already merged above from
+                # post_data or preserved from the stored record).  We write the
+                # normalized value back to both release['name'] and post_data['name']
+                # so that the _update_items_release_name call below stays consistent.
+                if 'name' in post_data:
+                    effective_label = release.get('shortTitle')
+                    normalized_name = _strip_label_prefix(post_data['name'], effective_label)
+                    release['name'] = normalized_name
+                    post_data['name'] = normalized_name
 
-            # When shortTitle changes, keep platform versions in lockstep with
-            # the release version label (e.g. shortTitle "v2.10.0" → every
-            # platform.version becomes "2.10.0"). Explicit per-platform
-            # versions in the same request still win (handled below).
-            if 'shortTitle' in post_data and post_data.get('shortTitle'):
-                m = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', post_data['shortTitle'], re.IGNORECASE)
-                if m:
-                    synced_version = m.group(1)
-                    for plat in release.get('platforms', {}).values():
-                        plat['version'] = synced_version
+                # When shortTitle changes, keep platform versions in lockstep with
+                # the release version label (e.g. shortTitle "v2.10.0" → every
+                # platform.version becomes "2.10.0"). Explicit per-platform
+                # versions in the same request still win (handled below).
+                if 'shortTitle' in post_data and post_data.get('shortTitle'):
+                    m = re.search(r'v?(\d+\.\d+(?:\.\d+)?)', post_data['shortTitle'], re.IGNORECASE)
+                    if m:
+                        synced_version = m.group(1)
+                        for plat in release.get('platforms', {}).values():
+                            plat['version'] = synced_version
 
-            # Update platform versions/builds if provided
-            if 'platforms' in post_data:
-                for platform, updates in post_data['platforms'].items():
-                    if platform in release.get('platforms', {}):
-                        for key in ['version', 'buildNumber']:
-                            if key in updates:
-                                release['platforms'][platform][key] = updates[key]
+                # Update platform versions/builds if provided
+                if 'platforms' in post_data:
+                    for platform, updates in post_data['platforms'].items():
+                        if platform in release.get('platforms', {}):
+                            for key in ['version', 'buildNumber']:
+                                if key in updates:
+                                    release['platforms'][platform][key] = updates[key]
 
-            # Add new platforms if requested (cannot remove existing ones).
-            # Newly-added platforms inherit the release's current version
-            # (parsed from shortTitle, falling back to name).
-            if 'addPlatforms' in post_data:
-                existing_platforms = release.get('platforms', {})
-                release_version = self._extract_version_from_name(
-                    release.get('shortTitle') or release.get('name') or ''
-                )
-                for platform in post_data['addPlatforms']:
-                    if platform not in existing_platforms:
-                        existing_platforms[platform] = {
-                            "version": release_version,
-                            "buildNumber": 1,
-                            "environment": "PLANNED",
-                            "environmentHistory": []
-                        }
-                release['platforms'] = existing_platforms
+                # Add new platforms if requested (cannot remove existing ones).
+                # Newly-added platforms inherit the release's current version
+                # (parsed from shortTitle, falling back to name).
+                if 'addPlatforms' in post_data:
+                    existing_platforms = release.get('platforms', {})
+                    release_version = self._extract_version_from_name(
+                        release.get('shortTitle') or release.get('name') or ''
+                    )
+                    for platform in post_data['addPlatforms']:
+                        if platform not in existing_platforms:
+                            existing_platforms[platform] = {
+                                "version": release_version,
+                                "buildNumber": 1,
+                                "environment": "PLANNED",
+                                "environmentHistory": []
+                            }
+                    release['platforms'] = existing_platforms
 
-            self._save_releases_config(data)
+                self._save_releases_config(data, _lock_held=True)
 
             # XACA-0659 (GAP A): Write-through updated release metadata into manifest.json
             # so the manifest mirrors the board's authoritative values after any field update.
@@ -5976,31 +6198,33 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "PROD stage cannot be disabled")
                 return
 
-            # Load current config (use team from request if provided)
-            data = self._load_releases_config(team)
+            # Load current config (use team from request if provided).
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction(team):
+                data = self._load_releases_config(team, _lock_held=True)
 
-            # Initialize flowConfig if not exists
-            if 'flowConfig' not in data:
-                data['flowConfig'] = {
-                    'stages': {
-                        'PLANNED': {'enabled': True, 'required': True},
-                        'DEV': {'enabled': True, 'required': True},
-                        'QA': {'enabled': True, 'required': False},
-                        'ALPHA': {'enabled': True, 'required': False},
-                        'BETA': {'enabled': True, 'required': False},
-                        'GAMMA': {'enabled': True, 'required': False},
-                        'PROD': {'enabled': True, 'required': True}
+                # Initialize flowConfig if not exists
+                if 'flowConfig' not in data:
+                    data['flowConfig'] = {
+                        'stages': {
+                            'PLANNED': {'enabled': True, 'required': True},
+                            'DEV': {'enabled': True, 'required': True},
+                            'QA': {'enabled': True, 'required': False},
+                            'ALPHA': {'enabled': True, 'required': False},
+                            'BETA': {'enabled': True, 'required': False},
+                            'GAMMA': {'enabled': True, 'required': False},
+                            'PROD': {'enabled': True, 'required': True}
+                        }
                     }
-                }
 
-            # Update stages (only enabled field, preserve required)
-            for stage_name, stage_config in stages.items():
-                if stage_name in data['flowConfig']['stages']:
-                    # Only allow changing enabled for non-required stages
-                    if not data['flowConfig']['stages'][stage_name].get('required', False):
-                        data['flowConfig']['stages'][stage_name]['enabled'] = stage_config.get('enabled', True)
+                # Update stages (only enabled field, preserve required)
+                for stage_name, stage_config in stages.items():
+                    if stage_name in data['flowConfig']['stages']:
+                        # Only allow changing enabled for non-required stages
+                        if not data['flowConfig']['stages'][stage_name].get('required', False):
+                            data['flowConfig']['stages'][stage_name]['enabled'] = stage_config.get('enabled', True)
 
-            self._save_releases_config(data, team)
+                self._save_releases_config(data, team, _lock_held=True)
 
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
@@ -6236,10 +6460,17 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     if 'archivedAt' in release:
                         del release['archivedAt']
 
-                    # Add back to active releases
-                    data = self._load_releases_config(team)
-                    data['releases'].append(release)
-                    self._save_releases_config(data, team)
+                    # Add back to active releases. XACA-0890 review-gate fix:
+                    # one board_file lock across load -> mutate -> save,
+                    # nested inside the archive_file RLock above (different
+                    # lock object/mechanism — safe; see
+                    # _board_write_transaction's docstring for why fcntl and
+                    # the RLock registry never nest against EACH OTHER on
+                    # the same file, only board_file-vs-board_file matters).
+                    with self._board_write_transaction(team):
+                        data = self._load_releases_config(team, _lock_held=True)
+                        data['releases'].append(release)
+                        self._save_releases_config(data, team, _lock_held=True)
 
                     # Remove from archive
                     archive_file.unlink()
@@ -6255,35 +6486,39 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     }).encode())
 
                 else:
-                    # ARCHIVE: Check if release is complete, then move to archive
-                    data = self._load_releases_config(team)
-                    release = self._find_release_by_id(data, release_id)
-                    if not release:
-                        self.send_error(404, f"Release not found: {release_id}")
-                        return
+                    # ARCHIVE: Check if release is complete, then move to archive.
+                    # XACA-0890 review-gate fix: one board_file lock across
+                    # load -> mutate -> save, nested inside the archive_file
+                    # RLock above (different lock/file — safe).
+                    with self._board_write_transaction(team):
+                        data = self._load_releases_config(team, _lock_held=True)
+                        release = self._find_release_by_id(data, release_id)
+                        if not release:
+                            self.send_error(404, f"Release not found: {release_id}")
+                            return
 
-                    # Check if release is complete before archiving
-                    if not self.is_release_complete(release):
-                        self.send_response(400)
-                        self.send_header('Content-Type', 'application/json')
-                        self.send_header('Access-Control-Allow-Origin', '*')
-                        self.end_headers()
-                        self.wfile.write(json.dumps({
-                            "error": "Cannot archive: release is not complete (all platforms must be at PROD)"
-                        }).encode())
-                        return
+                        # Check if release is complete before archiving
+                        if not self.is_release_complete(release):
+                            self.send_response(400)
+                            self.send_header('Content-Type', 'application/json')
+                            self.send_header('Access-Control-Allow-Origin', '*')
+                            self.end_headers()
+                            self.wfile.write(json.dumps({
+                                "error": "Cannot archive: release is not complete (all platforms must be at PROD)"
+                            }).encode())
+                            return
 
-                    # Remove from active releases
-                    data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
+                        # Remove from active releases
+                        data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
-                    # Move to archive
-                    release['archivedAt'] = self._get_timestamp()
-                    release['status'] = 'archived'
+                        # Move to archive
+                        release['archivedAt'] = self._get_timestamp()
+                        release['status'] = 'archived'
 
-                    archive_dir.mkdir(parents=True, exist_ok=True)
-                    self._atomic_write_json(archive_file, release)
+                        archive_dir.mkdir(parents=True, exist_ok=True)
+                        self._atomic_write_json(archive_file, release)
 
-                    self._save_releases_config(data, team)
+                        self._save_releases_config(data, team, _lock_held=True)
 
                     self.send_response(200)
                     self.send_header('Content-Type', 'application/json')
@@ -6311,30 +6546,39 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             team = query_params.get('team', [None])[0]
             effective_team = team or LCARS_TEAM
 
-            data = self._load_releases_config(effective_team)
-            release = self._find_release_by_id(data, release_id)
-            if not release:
-                self.send_error(404, f"Release not found: {release_id}")
-                return
-
-            # Remove from active releases
-            data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
-
-            # Move to archive
-            release['archivedAt'] = self._get_timestamp()
-            release['status'] = 'archived'
-
             kanban_dir = TEAM_KANBAN_DIRS.get(effective_team, KANBAN_DIR)
             archive_dir = kanban_dir / "releases-archive"
-            archive_dir.mkdir(parents=True, exist_ok=True)
             archive_file = archive_dir / f"{release_id}.json"
-            # XACA-0890-003: same archive_file lock as handle_toggle_release_archive
-            # so a concurrent PATCH .../archive on the same release can't race
-            # this DELETE for the file.
-            with _get_path_lock(archive_file):
-                self._atomic_write_json(archive_file, release)
 
-            self._save_releases_config(data, effective_team)
+            # XACA-0890-003 + XACA-0890 review-gate fix: archive_file's RLock
+            # OUTSIDE board_file's transaction — same nesting ORDER as
+            # handle_toggle_release_archive (archive_lock, then board_lock).
+            # Reversing this order (board_lock outer, archive_lock inner, as
+            # an earlier draft of this fix did) is a classic AB-BA deadlock:
+            # a concurrent handle_toggle_release_archive on the SAME
+            # release/team would hold archive_lock waiting for board_lock
+            # while this handler held board_lock waiting for archive_lock.
+            # Keeping ONE consistent acquisition order across both handlers
+            # is what makes that impossible.
+            with _get_path_lock(archive_file):
+                with self._board_write_transaction(effective_team):
+                    data = self._load_releases_config(effective_team, _lock_held=True)
+                    release = self._find_release_by_id(data, release_id)
+                    if not release:
+                        self.send_error(404, f"Release not found: {release_id}")
+                        return
+
+                    # Remove from active releases
+                    data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
+
+                    # Move to archive
+                    release['archivedAt'] = self._get_timestamp()
+                    release['status'] = 'archived'
+
+                    archive_dir.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write_json(archive_file, release)
+
+                    self._save_releases_config(data, effective_team, _lock_held=True)
 
             # XACA-0183: Remove the on-disk manifest directory now that the
             # archive write is authoritative.  Use _get_release_manifest_path
@@ -6496,7 +6740,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"ok": False, "error": "Invalid CR-ID (path traversal)"}, status=400)
                 return
 
-            # Load releases config to validate and update release object
+            # Load releases config to validate and get a name snapshot for the
+            # CR write below. XACA-0890 review-gate fix: this INITIAL read is
+            # deliberately NOT reused for the eventual releases_config save
+            # further down — see the comment above that save's transaction
+            # for why (cr_board_file below can be THE SAME FILE as this
+            # team's board_file, so the two lock cycles must stay sequential,
+            # never nested).
             releases_data = self._load_releases_config()
             release = self._find_release_by_id(releases_data, release_id)
             if release is None:
@@ -6570,16 +6820,21 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     fcntl.flock(cr_lock.fileno(), fcntl.LOCK_UN)
 
             # --- Now update releases config (release.linkedCRs) ---
-            # If the CR was on a different release, remove it from that release's linkedCRs
+            # XACA-0890 review-gate fix: RE-LOAD releases_data fresh inside a
+            # dedicated transaction rather than reusing the object read
+            # before the cr_board_file work above. That earlier read's lock
+            # was already released, and the cr_board_file critical section
+            # can take arbitrarily long — reusing its STALE `release`/
+            # `releases_data` reference here is exactly the lost-update bug
+            # this fix removes. This transaction is also why the two lock
+            # cycles must be SEQUENTIAL rather than nested: cr_board_file may
+            # be the EXACT SAME FILE as this team's board_file (when the CR's
+            # team equals this release's team, the common case), and
+            # fcntl.flock is not reentrant — holding both at once from this
+            # thread would self-deadlock the instant they aliased.
             if old_release_id:
-                old_release = self._find_release_by_id(releases_data, old_release_id)
-                if old_release is not None:
-                    old_release["linkedCRs"] = [
-                        entry for entry in old_release.get("linkedCRs", [])
-                        if entry.get("crId") != cr_id
-                    ]
-                # Also clean up old manifest's crIds. XACA-0890-003: hold the
-                # path lock across the whole read-modify-write.
+                # Clean up old manifest's crIds — independent of releases_data,
+                # safe to do before acquiring the board transaction below.
                 try:
                     with self._release_manifest_lock(old_release_id):
                         old_manifest = self._load_release_manifest(old_release_id)
@@ -6591,18 +6846,40 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     pass  # Best-effort: don't fail link if old manifest cleanup errors
 
-            # Add to this release's linkedCRs (avoid duplicates)
-            linked_crs = release.setdefault("linkedCRs", [])
-            if not any(entry.get("crId") == cr_id for entry in linked_crs):
-                linked_crs.append({
-                    "crId": cr_id,
-                    "crTitle": cr_title_snapshot,
-                    "linkedAt": now,
-                })
-            # Parity with shell: stamp release.updatedAt (XACA-0657)
-            release["updatedAt"] = now
+            with self._board_write_transaction():
+                releases_data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(releases_data, release_id)
+                if release is None:
+                    # Release vanished between the CR write above and here
+                    # (e.g. archived/deleted concurrently). The CR record
+                    # write already landed — report that honestly rather
+                    # than crashing on a None release.
+                    self._send_json_response({
+                        "ok": False,
+                        "error": f"Release '{release_id}' no longer exists (CR record was updated)",
+                    }, status=409)
+                    return
 
-            self._save_releases_config(releases_data)
+                if old_release_id:
+                    old_release = self._find_release_by_id(releases_data, old_release_id)
+                    if old_release is not None:
+                        old_release["linkedCRs"] = [
+                            entry for entry in old_release.get("linkedCRs", [])
+                            if entry.get("crId") != cr_id
+                        ]
+
+                # Add to this release's linkedCRs (avoid duplicates)
+                linked_crs = release.setdefault("linkedCRs", [])
+                if not any(entry.get("crId") == cr_id for entry in linked_crs):
+                    linked_crs.append({
+                        "crId": cr_id,
+                        "crTitle": cr_title_snapshot,
+                        "linkedAt": now,
+                    })
+                # Parity with shell: stamp release.updatedAt (XACA-0657)
+                release["updatedAt"] = now
+
+                self._save_releases_config(releases_data, _lock_held=True)
 
             # Update manifest crIds. XACA-0890-003: hold the path lock across
             # the whole read-modify-write.
@@ -6645,7 +6922,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json_response({"ok": False, "error": f"Invalid CR-ID format: {cr_id}"}, status=400)
                 return
 
-            # Validate release exists
+            # Validate release exists. XACA-0890 review-gate fix: this
+            # INITIAL read is only an existence check — it is deliberately
+            # NOT reused for the eventual releases_config save further down.
+            # See the comment above that save's transaction for why
+            # (cr_board_file below can be THE SAME FILE as this team's
+            # board_file, so the two lock cycles must stay sequential).
             releases_data = self._load_releases_config()
             release = self._find_release_by_id(releases_data, release_id)
             if release is None:
@@ -6703,13 +6985,29 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     fcntl.flock(cr_lock.fileno(), fcntl.LOCK_UN)
 
             # --- Remove from release.linkedCRs ---
-            release["linkedCRs"] = [
-                entry for entry in release.get("linkedCRs", [])
-                if entry.get("crId") != cr_id
-            ]
-            # Parity with shell: stamp release.updatedAt on unlink (XACA-0657)
-            release["updatedAt"] = self._get_timestamp()
-            self._save_releases_config(releases_data)
+            # XACA-0890 review-gate fix: RE-LOAD releases_data fresh inside a
+            # dedicated transaction, sequential (not nested) with the
+            # cr_board_file lock cycle above — same rationale as
+            # handle_link_cr_to_release's identical restructure.
+            with self._board_write_transaction():
+                releases_data = self._load_releases_config(_lock_held=True)
+                release = self._find_release_by_id(releases_data, release_id)
+                if release is None:
+                    # Release vanished between the CR write above and here —
+                    # the CR record write already landed; report honestly.
+                    self._send_json_response({
+                        "ok": False,
+                        "error": f"Release '{release_id}' no longer exists (CR record was updated)",
+                    }, status=409)
+                    return
+
+                release["linkedCRs"] = [
+                    entry for entry in release.get("linkedCRs", [])
+                    if entry.get("crId") != cr_id
+                ]
+                # Parity with shell: stamp release.updatedAt on unlink (XACA-0657)
+                release["updatedAt"] = self._get_timestamp()
+                self._save_releases_config(releases_data, _lock_held=True)
 
             # --- Remove from manifest crIds --- (XACA-0890-003: hold the path
             # lock across the whole read-modify-write)
@@ -6811,30 +7109,45 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         team = team or LCARS_TEAM
         return get_board_file(team)
 
-    def _load_board_epics(self, team=None):
-        """Load epics from the kanban board file"""
+    def _load_board_epics(self, team=None, _lock_held=False):
+        """Load epics from the kanban board file.
+
+        _lock_held=True (XACA-0890 review-gate fix): see
+        _load_releases_config's docstring — identical contract, board_file
+        just holds a different top-level key (`epics`) here.
+        """
         import fcntl
         board_file = self._get_board_file(team)
 
         if not board_file.exists():
             return {"epics": [], "nextEpicId": 1}
 
+        def _read():
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+            return {
+                "epics": data.get('epics', []),
+                "nextEpicId": data.get('nextEpicId', 1),
+                "team": data.get('team', team or LCARS_TEAM)
+            }
+
+        if _lock_held:
+            return _read()
+
         lock_file = board_file.with_suffix('.json.lock')
         with open(lock_file, 'w') as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_SH)
             try:
-                with open(board_file, 'r') as f:
-                    data = json.load(f)
-                return {
-                    "epics": data.get('epics', []),
-                    "nextEpicId": data.get('nextEpicId', 1),
-                    "team": data.get('team', team or LCARS_TEAM)
-                }
+                return _read()
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
-    def _save_board_epics(self, epics, next_epic_id, team=None):
-        """Save epics to the kanban board file"""
+    def _save_board_epics(self, epics, next_epic_id, team=None, _lock_held=False):
+        """Save epics to the kanban board file.
+
+        _lock_held=True: see _load_releases_config's docstring — identical
+        contract.
+        """
         import fcntl
         board_file = self._get_board_file(team)
 
@@ -6842,19 +7155,25 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             print(f"[LCARS] Board file not found: {board_file}")
             return False
 
+        def _write():
+            with open(board_file, 'r') as f:
+                data = json.load(f)
+
+            data['epics'] = epics
+            data['nextEpicId'] = next_epic_id
+            data['lastUpdated'] = self._get_timestamp()
+
+            self._atomic_write_json(board_file, data)
+            return True
+
+        if _lock_held:
+            return _write()
+
         lock_file = board_file.with_suffix('.json.lock')
         with open(lock_file, 'w') as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
-                with open(board_file, 'r') as f:
-                    data = json.load(f)
-
-                data['epics'] = epics
-                data['nextEpicId'] = next_epic_id
-                data['lastUpdated'] = self._get_timestamp()
-
-                self._atomic_write_json(board_file, data)
-                return True
+                return _write()
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
@@ -9601,31 +9920,35 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(400, "Missing required field: name")
                 return
 
-            data = self._load_board_epics()
-            epic_id = self._generate_epic_id(data)
-            timestamp = self._get_timestamp()
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction():
+                data = self._load_board_epics(_lock_held=True)
+                epic_id = self._generate_epic_id(data)
+                timestamp = self._get_timestamp()
 
-            # Create epic with board-compatible structure (uses 'title' not 'name')
-            epic = {
-                "id": epic_id,
-                "title": name,  # Board uses 'title', not 'name'
-                "shortTitle": post_data.get('shortTitle'),  # XACA-0051: Optional short display name
-                "status": post_data.get('status', 'planning'),  # Default to 'planning'
-                "priority": post_data.get('priority', 'medium'),
-                "itemIds": [],
-                "addedAt": timestamp,
-                "updatedAt": timestamp,
-                "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
-                "collapsed": False,
-                "description": post_data.get('description', ''),
-                "color": post_data.get('color', 'blue'),  # Keep color for UI
-            }
+                # Create epic with board-compatible structure (uses 'title' not 'name')
+                epic = {
+                    "id": epic_id,
+                    "title": name,  # Board uses 'title', not 'name'
+                    "shortTitle": post_data.get('shortTitle'),  # XACA-0051: Optional short display name
+                    "status": post_data.get('status', 'planning'),  # Default to 'planning'
+                    "priority": post_data.get('priority', 'medium'),
+                    "itemIds": [],
+                    "addedAt": timestamp,
+                    "updatedAt": timestamp,
+                    "tags": [t.strip() for t in post_data.get('tags', []) if isinstance(t, str) and t.strip()],  # XACA-0209 round 3: strip on write so new data is clean
+                    "collapsed": False,
+                    "description": post_data.get('description', ''),
+                    "color": post_data.get('color', 'blue'),  # Keep color for UI
+                }
 
-            epics = data.get('epics', [])
-            epics.append(epic)
-            next_epic_id = data.get('nextEpicId', 1) + 1
+                epics = data.get('epics', [])
+                epics.append(epic)
+                next_epic_id = data.get('nextEpicId', 1) + 1
 
-            if self._save_board_epics(epics, next_epic_id):
+                save_ok = self._save_board_epics(epics, next_epic_id, _lock_held=True)
+
+            if save_ok:
                 # Return with 'name' for UI compatibility
                 epic['name'] = epic['title']
                 self.send_response(201)
@@ -9645,32 +9968,36 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             content_length = int(self.headers['Content-Length'])
             post_data = json.loads(self.rfile.read(content_length))
 
-            data = self._load_board_epics()
-            epic = self._find_epic_by_id(data, epic_id)
+            # XACA-0890 review-gate fix: one lock across load -> mutate -> save.
+            with self._board_write_transaction():
+                data = self._load_board_epics(_lock_held=True)
+                epic = self._find_epic_by_id(data, epic_id)
 
-            if not epic:
-                self.send_error(404, f"Epic not found: {epic_id}")
-                return
+                if not epic:
+                    self.send_error(404, f"Epic not found: {epic_id}")
+                    return
 
-            # Update allowed fields (map 'name' to 'title' for board compatibility)
-            if 'name' in post_data:
-                epic['title'] = post_data['name']
-            if 'shortTitle' in post_data:  # XACA-0051: Allow shortTitle updates
-                epic['shortTitle'] = post_data['shortTitle']
-            if 'description' in post_data:
-                epic['description'] = post_data['description']
-            if 'color' in post_data:
-                epic['color'] = post_data['color']
-            if 'status' in post_data:
-                epic['status'] = post_data['status']
-            if 'priority' in post_data:
-                epic['priority'] = post_data['priority']
-            if 'tags' in post_data:  # XACA-0209 — round 3: strip on write so new data is clean
-                epic['tags'] = [t.strip() for t in post_data['tags'] if isinstance(t, str) and t.strip()]
+                # Update allowed fields (map 'name' to 'title' for board compatibility)
+                if 'name' in post_data:
+                    epic['title'] = post_data['name']
+                if 'shortTitle' in post_data:  # XACA-0051: Allow shortTitle updates
+                    epic['shortTitle'] = post_data['shortTitle']
+                if 'description' in post_data:
+                    epic['description'] = post_data['description']
+                if 'color' in post_data:
+                    epic['color'] = post_data['color']
+                if 'status' in post_data:
+                    epic['status'] = post_data['status']
+                if 'priority' in post_data:
+                    epic['priority'] = post_data['priority']
+                if 'tags' in post_data:  # XACA-0209 — round 3: strip on write so new data is clean
+                    epic['tags'] = [t.strip() for t in post_data['tags'] if isinstance(t, str) and t.strip()]
 
-            epic['updatedAt'] = self._get_timestamp()
+                epic['updatedAt'] = self._get_timestamp()
 
-            if self._save_board_epics(data['epics'], data.get('nextEpicId', 1)):
+                save_ok = self._save_board_epics(data['epics'], data.get('nextEpicId', 1), _lock_held=True)
+
+            if save_ok:
                 # Return with 'name' for UI compatibility
                 if 'title' in epic:
                     epic['name'] = epic['title']
@@ -9688,6 +10015,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def handle_delete_epic(self, epic_id):
         """DELETE /api/epics/<id> - Delete/archive epic from kanban board"""
         try:
+            # XACA-0890 review-gate fix: this INITIAL read is only an
+            # existence check + input to the item-clearing loop below — it
+            # is deliberately NOT reused for the eventual epics save further
+            # down. _clear_item_epic_assignment (called in that loop) takes
+            # its OWN independent flock on this SAME board_file (items in
+            # this epic always belong to LCARS_TEAM, same as this epic's
+            # board — see _get_items_for_epic), so it must run to completion
+            # and fully release its lock BEFORE _board_write_transaction
+            # opens below; fcntl.flock is not reentrant, so nesting them
+            # would self-deadlock the instant that lock file collided.
             data = self._load_board_epics()
             epic = self._find_epic_by_id(data, epic_id)
 
@@ -9700,10 +10037,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             for item in items:
                 self._clear_item_epic_assignment(item['team'], item['itemId'])
 
-            # Remove from epics list
-            epics = [e for e in data['epics'] if e.get('id') != epic_id]
+            # Remove from epics list. XACA-0890 review-gate fix: RE-LOAD
+            # epics fresh inside a dedicated transaction rather than reusing
+            # `data` read above (stale by now, and the exact split-RMW
+            # pattern this fix removes) — see the comment above.
+            with self._board_write_transaction():
+                data = self._load_board_epics(_lock_held=True)
+                epics = [e for e in data['epics'] if e.get('id') != epic_id]
+                save_ok = self._save_board_epics(epics, data.get('nextEpicId', 1), _lock_held=True)
 
-            if self._save_board_epics(epics, data.get('nextEpicId', 1)):
+            if save_ok:
                 self.send_response(200)
                 self.send_header('Content-Type', 'application/json')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -12547,13 +12890,29 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Trade-off, called out explicitly: this holds the board's fcntl
             # lock across the external sync_outbound/sync_inbound calls
             # below, so a slow CalDAV/Google round-trip blocks every other
-            # board_file writer for the duration. Accepted because (a) the
-            # alternative — reconciling the sync service's in-place
-            # board_data mutations onto a freshly re-read copy after the
-            # network calls — would require reworking sync_outbound/
-            # sync_inbound's mutation contract, which is out of scope here,
-            # and (b) this is a manually-triggered, low-frequency admin
-            # action, not a hot path.
+            # board_file writer for the duration. Reconciling the sync
+            # service's in-place board_data mutations onto a freshly
+            # re-read copy after the network calls (avoiding holding the
+            # lock across them at all) would require reworking
+            # sync_outbound/sync_inbound's mutation contract — remains out
+            # of scope here (see calendar/sync_service.py: sync_inbound
+            # mutates items found by id lookup AND tracks external-only
+            # events separately; a safe delta-merge would need to model
+            # both without a live provider to integration-test against).
+            #
+            # XACA-0890 review-gate finding (021): what IS fixed here is the
+            # "materially worse under threading" half of the concern — the
+            # wait is no longer UNBOUNDED. Each call below goes through
+            # _run_bounded(..., timeout_s=CALENDAR_SYNC_TIMEOUT_S), which
+            # gives up after a generous but finite ceiling regardless of how
+            # long the provider takes, so the worst-case lock-hold time for
+            # this handler is now bounded (~2x CALENDAR_SYNC_TIMEOUT_S for
+            # direction='both') instead of unbounded. This remains a
+            # manually-triggered, low-frequency admin action, not a hot
+            # path, which is why a multi-minute worst case (vs. a fully
+            # decoupled lock-free redesign) was judged an acceptable
+            # remaining trade-off rather than something to force under time
+            # pressure against an untestable external integration.
             import fcntl
             board_file = get_board_file(team)
             board_lock_file = board_file.with_suffix('.json.lock')
@@ -12600,26 +12959,56 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                             # Orphan candidate epic
                             items.append(epic)
 
-                    # Perform sync using connected providers (pass calendar config)
+                    # Perform sync using connected providers (pass calendar config).
+                    # XACA-0890 review-gate finding (021): each call is now
+                    # wrapped in _run_bounded so a hung/slow provider can no
+                    # longer hold board_file's lock indefinitely — see that
+                    # function's comment for the full rationale. sync_timed_out
+                    # tracks whether EITHER direction gave up; on ANY timeout we
+                    # skip the board_file write below entirely rather than risk
+                    # writing board_data/items out from under a still-running
+                    # abandoned sync thread that may still be mutating them.
                     result = {'itemsWithDueDates': len(items)}
+                    sync_timed_out = False
 
                     if direction in ('outbound', 'both') and items:
                         try:
-                            outbound_result = _calendar_sync_service.sync_outbound(team, items, cal_config=cal_config)
-                            result['outbound'] = outbound_result
+                            outbound_result, timed_out = _run_bounded(
+                                _calendar_sync_service.sync_outbound, team, items,
+                                cal_config=cal_config, timeout_s=CALENDAR_SYNC_TIMEOUT_S,
+                            )
+                            if timed_out:
+                                sync_timed_out = True
+                                result['outbound'] = {
+                                    'error': f'sync_outbound exceeded {CALENDAR_SYNC_TIMEOUT_S}s '
+                                             f'— board not modified this round, retry the sync'
+                                }
+                            else:
+                                result['outbound'] = outbound_result
                         except Exception as e:
                             result['outbound'] = {'error': str(e)}
 
                     if direction in ('inbound', 'both'):
                         try:
-                            inbound_result = _calendar_sync_service.sync_inbound(board_data, cal_config=cal_config)
-                            result['inbound'] = inbound_result
+                            inbound_result, timed_out = _run_bounded(
+                                _calendar_sync_service.sync_inbound, board_data,
+                                cal_config=cal_config, timeout_s=CALENDAR_SYNC_TIMEOUT_S,
+                            )
+                            if timed_out:
+                                sync_timed_out = True
+                                result['inbound'] = {
+                                    'error': f'sync_inbound exceeded {CALENDAR_SYNC_TIMEOUT_S}s '
+                                             f'— board not modified this round, retry the sync'
+                                }
+                            else:
+                                result['inbound'] = inbound_result
                         except Exception as e:
                             result['inbound'] = {'error': str(e)}
 
                     # Save board data back to persist calendarSync metadata changes
                     # (event IDs from creation, cleanup from orphan deletion, etc.)
-                    if board_file.exists() and board_data:
+                    # — skipped on a timeout above (see comment before this block).
+                    if not sync_timed_out and board_file.exists() and board_data:
                         try:
                             self._atomic_write_json(board_file, board_data)
                         except Exception as e:
@@ -14094,6 +14483,11 @@ end tell
 
     # Simple in-memory cache for PyPI version check results.
     # Key: engine_id, Value: {"timestamp": float, "result": dict}
+    # XACA-0890 review-gate finding (018): unguarded shared class state under
+    # ThreadingHTTPServer, missed by the XACA-0890-004 threading-risk
+    # inventory. Deliberately left unlocked: dict get/set/pop are GIL-atomic,
+    # so a race produces at worst a redundant PyPI network call (perf, not
+    # correctness) — never lost or corrupted persisted state.
     _update_check_cache: dict = {}
     _UPDATE_CHECK_TTL = 300  # 5 minutes in seconds
 
@@ -14804,8 +15198,11 @@ end tell
         # loop. That loop iterates ROADMAP_PDF_STASH.items() inside
         # _ROADMAP_PDF_STASH_LOCK; an unlocked pop here would mutate the dict
         # mid-iteration under concurrency -> "RuntimeError: dict changed size
-        # during iteration". Harmless while the server is single-threaded, but
-        # this is a live hazard the moment XACA-0890 lands ThreadingHTTPServer.
+        # during iteration". XACA-0890 review-gate finding (019): this comment
+        # used to describe that race as a FUTURE hazard "the moment XACA-0890
+        # lands ThreadingHTTPServer" — XACA-0890-004 has now landed it, so the
+        # concurrency this lock guards against is live, not hypothetical; the
+        # lock below is what's actually preventing the RuntimeError today.
         # Lock covers only the pop — never the response write below.
         with _ROADMAP_PDF_STASH_LOCK:
             entry = ROADMAP_PDF_STASH.pop(token, None)
@@ -17235,13 +17632,88 @@ class LCARSServer(LCARSQuietDisconnectMixin, http.server.ThreadingHTTPServer):
     XACA-0890-004: base swapped from socketserver.TCPServer to
     http.server.ThreadingHTTPServer (qualified form, matching the
     socketserver.TCPServer style this replaced — coordinated with the test
-    harness, which resolves the base class by name) + daemon_threads = True,
-    so one slow request no longer blocks every other client. This was
-    deliberately withheld from XACA-0889 until the ~12 unlocked
-    read-modify-write _atomic_write_json call sites it identified were fixed
-    (XACA-0890-002/003, via the _get_path_lock registry) — swapping the base
-    first would have turned a latent single-threaded-only-safe race into a
-    live lost-update bug on every one of those sites.
+    harness, which resolves the base class by name), so one slow request no
+    longer blocks every other client. This was deliberately withheld from
+    XACA-0889 until the ~12 unlocked read-modify-write _atomic_write_json
+    call sites it identified were fixed (XACA-0890-002/003, via the
+    _get_path_lock registry, later widened to 14 sites and a proper
+    load-mutate-save transaction primitive by the review-gate fix — see
+    _board_write_transaction) — swapping the base first would have turned a
+    latent single-threaded-only-safe race into a live lost-update bug on
+    every one of those sites.
+
+    XACA-0890 review-gate finding (017) on `daemon_threads = True` below:
+    this line is REDUNDANT — http.server.ThreadingHTTPServer already sets
+    daemon_threads = True as its own class attribute (verified directly:
+    `http.server.ThreadingHTTPServer.__dict__['daemon_threads']` is True,
+    overriding ThreadingMixIn's own default of False). Kept explicit anyway,
+    deliberately, for readability: a reader of THIS class should not have to
+    walk the MRO to know its threads are daemons.
+
+    daemon_threads = True has a real, non-cosmetic consequence worth
+    documenting where a future reader will find it: socketserver's
+    `_Threads.append()` skips adding a thread to server_close()'s tracked
+    list the instant `thread.daemon` is True —
+        def append(self, thread):
+            self.reap()
+            if thread.daemon:
+                return          # <- never tracked, never joined
+            super().append(thread)
+    — so `server_close()`'s `self._threads.join()` waits for NOTHING.
+    Concretely: a SIGTERM/graceful shutdown that lands while a request
+    thread is mid-way through a multi-file handler (e.g.
+    handle_link_cr_to_release, which writes cr_board_file, THEN separately
+    writes board_file, THEN the release manifest) can abandon that thread
+    between writes, leaving the CR side updated but the release side not
+    yet (or vice versa) — a genuinely reachable half-applied state that the
+    old single-threaded server's shutdown() naturally avoided (it only ever
+    stops ACCEPTING new connections; the one in-flight request, on the main
+    thread, always ran to completion first).
+
+    Deliberately NOT flipped to daemon_threads = False here. Doing so would
+    make server_close() actually wait for in-flight threads — but a
+    non-daemon thread blocks process exit until it finishes, and this
+    server does not yet bound every handler's worst-case duration. The
+    known offender is handle_trigger_calendar_sync (review-gate finding
+    021, fixed in this same change — see its comment): before that fix it
+    held board_file's lock across un-timeout'd external CalDAV/Google
+    network calls, so a hung network call under daemon_threads = False
+    would have made a graceful SIGTERM hang the WHOLE PROCESS indefinitely
+    instead of merely risking one half-applied multi-file write — a worse
+    failure mode than the one being traded away. Flipping this default is a
+    reasonable follow-up once every handler's external-call worst case is
+    bounded (021 fixes the one identified instance; an exhaustive audit for
+    others is out of scope here).
+
+    XACA-0890 review-gate finding (020) — unbounded thread creation, no cap,
+    server binds all interfaces. Judged OUT OF SCOPE for this fix, with
+    reasoning (not a silent skip — see the ticket's protected [Review]
+    subitem 020 for the finding as filed):
+
+    - "Binds all interfaces": `("", port)` at the `with LCARSServer(...)`
+      call site in main() is PRE-EXISTING — the old socketserver.TCPServer
+      used the identical bind spec. Not a regression from this ticket, and
+      almost certainly intentional: this fleet runs LCARS instances across
+      multiple machines (see docs/ referencing M1Pro/M4Mini/fleet-monitor)
+      with cross-machine dashboard access as a real, used feature. Changing
+      the bind address is a product decision, not a threading-safety fix,
+      and not mine to make unilaterally here.
+    - "Unbounded thread creation per connection, no cap": this IS a real
+      consequence of XACA-0890-004's base swap — the old single-threaded
+      server had an implicit cap of 1 concurrent request; ThreadingHTTPServer
+      spawns a new OS thread per accepted connection with no ceiling, so a
+      client opening many connections rapidly can spawn proportionally many
+      threads (each costing stack memory + a file descriptor) with nothing
+      in this class stopping it. A properly-sized fix (bounded worker pool,
+      or a semaphore around process_request) needs real capacity planning —
+      how many concurrent requests this server's actual usage pattern
+      (teams x browser tabs x background collectors) needs headroom for —
+      that I do not have visibility into and should not guess at under
+      review-gate time pressure: sized too low, legitimate concurrent
+      dashboard usage starts queueing/failing, which is a worse regression
+      than the DoS exposure being fixed; sized too high, it fixes nothing.
+      Left as a follow-up requiring that capacity-planning input, not
+      bundled into this fix.
     """
 
     allow_reuse_address = True
