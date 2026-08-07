@@ -1945,6 +1945,8 @@ kb-cr() {
         draft)       _kb_cr_draft "$@" ;;
         publish)     _kb_cr_publish "$@" ;;
         _set_confluence_url) _kb_cr_set_confluence_url "$@" ;;
+        _set_publish_stamps) _kb_cr_set_publish_stamps "$@" ;;
+        _get_publish_stamps) _kb_cr_get_publish_stamps "$@" ;;
         attach)      _kb_cr_attach "$@" ;;
         detach)      _kb_cr_detach "$@" ;;
         start-dev)
@@ -3422,9 +3424,10 @@ _kb_cr_publish() {
         echo "    Mode: On-Demand"
         echo "    Scope source: local md file at ${cr_doc_path}"
         echo "    Existing Confluence URL (update hint): ${existing_confluence_url:-(none)}"
-        echo "    Expected output: Confluence URL string"
+        echo "    Expected output: Confluence URL, Version, and Title strings"
         echo "    After publish: skill must call:"
         echo "      kb-cr _set_confluence_url ${item_id} <URL>"
+        echo "      kb-cr _set_publish_stamps ${item_id} <VERSION> <TITLE>   (Guard 4, XACA-0896-001)"
         echo ""
         return 0
     fi
@@ -3453,12 +3456,21 @@ _kb_cr_publish() {
         echo "    2. Invoke the Main Event CR skill in On-Demand Mode with the doc content as scope." >&2
         echo "    3. After the Confluence page is created, run:" >&2
         echo "         kb-cr _set_confluence_url ${item_id} <confluence-url>" >&2
+        echo "         kb-cr _set_publish_stamps ${item_id} <version> <title>   (Guard 4, XACA-0896-001)" >&2
         echo ""
         return 1
     fi
 
     # Build the skill invocation prompt. Passes the local md path as the scope
     # source. The skill is expected to return a Confluence URL.
+    #
+    # Interface contract addition (XACA-0896-001, Guard 4): the skill is now
+    # ALSO asked for "Confluence Version:" and "Confluence Title:" lines,
+    # mirroring the pre-existing "Confluence URL:" contract above. These feed
+    # _kb_cr_set_publish_stamps immediately below. The skill side of this
+    # contract (actually emitting the lines) ships with the Guard 1/2/3 skill
+    # rewrite (subitem 005) — until then extraction below degrades to a
+    # non-fatal warning rather than blocking the pre-existing URL write-back.
     local skill_prompt
     skill_prompt="$(cat <<PROMPT
 /Main Event CR
@@ -3468,10 +3480,14 @@ Scope source: local markdown file at ${cr_doc_path}
 Read the file, translate content to plain business language per skill rules,
 create/update the Confluence page in DPD2 space.
 If existing Confluence URL is set (${existing_confluence_url:-none}), update that page.
-After publishing, output a line in EXACTLY this format:
+After publishing, output three lines in EXACTLY this format (one value per line,
+no extra commentary on the line itself):
   Confluence URL: <url>
+  Confluence Version: <version>
+  Confluence Title: <exact page title as published>
 Then run:
   kb-cr _set_confluence_url ${item_id} <url>
+  kb-cr _set_publish_stamps ${item_id} <version> <exact page title as published>
 PROMPT
 )"
 
@@ -3510,6 +3526,32 @@ PROMPT
 
     # Write the URL back to the board.
     _kb_cr_set_confluence_url "$item_id" "$conf_url" || return 1
+
+    # ── Guard 4 (XACA-0896-001): stamp what was actually published ───────────
+    # Only reached after cr_confluence_url has been confirmed written above —
+    # this is the "publish actually succeeded" moment, not "publish was
+    # attempted". Extraction is best-effort: until the skill rewire (subitem
+    # 005) emits the "Confluence Version:"/"Confluence Title:" lines, this
+    # warns rather than failing the publish outright — the pre-existing URL
+    # write-back must not regress because of a not-yet-shipped sibling.
+    local conf_version conf_title
+    conf_version=$(printf '%s\n' "$skill_output" | grep -oE 'Confluence Version: .+' | head -1 | sed 's/^Confluence Version: //')
+    conf_title=$(printf '%s\n' "$skill_output" | grep -oE 'Confluence Title: .+' | head -1 | sed 's/^Confluence Title: //')
+
+    if [[ -n "$conf_version" && -n "$conf_title" ]]; then
+        if _kb_cr_set_publish_stamps "$item_id" "$conf_version" "$conf_title"; then
+            echo "  Publish stamps: version=$conf_version title=\"$conf_title\""
+        else
+            echo "kb-cr publish: WARNING: cr_confluence_url was written but publish stamps failed to write." >&2
+            echo "  Run manually: kb-cr _set_publish_stamps ${item_id} \"$conf_version\" \"$conf_title\"" >&2
+        fi
+    else
+        echo "kb-cr publish: WARNING: skill output did not include 'Confluence Version:' / 'Confluence Title:' lines — publish stamps NOT written." >&2
+        echo "  Guards that compare an incoming publish against the last stamped publish cannot run until this" >&2
+        echo "  CR has a stamp. Once the skill rewire (XACA-0896 subitem 005) emits these lines, stamps populate" >&2
+        echo "  automatically. Until then, run manually if needed:" >&2
+        echo "    kb-cr _set_publish_stamps ${item_id} <version> <title>" >&2
+    fi
 
     echo "kb-cr publish: Published successfully."
     echo "  Confluence URL: $conf_url"
@@ -3588,6 +3630,175 @@ _kb_cr_set_confluence_url() {
 
     echo "cr_confluence_url set on CR [$cr_id_assigned]: $conf_url"
     return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal plumbing: _kb_cr_set_publish_stamps <item-id> <version> <title>
+# Guard 4 (XACA-0896-001, corrected XACA-0896-001-fix)
+#
+# Writes cr_published_version / cr_published_title to the CR container
+# record (.crs[]) — advisory metadata about WHAT was published. This
+# function does NOT stamp a timestamp. It originally also wrote
+# cr_published_at flat on the same record, which was wrong: every other
+# lifecycle instant in this schema lives under timestamps.* and is written
+# and STRIPPED by the shared state-transition machinery
+# (_kb_cr_state_strip_spec, which `kb-cr revert` depends on exclusively for
+# timestamps.* paths). A flat cr_published_at was structurally invisible to
+# that machinery — reverting a published CR strips timestamps.cr_published_at
+# but would leave a flat sibling untouched, so a reverted record would keep
+# asserting a publish that no longer holds. That is the exact "two fields
+# that can disagree" failure mode XACA-0896 exists to eliminate, reproduced
+# inside its own fix. cr_published_at now lives exclusively at
+# .crs[].timestamps.cr_published_at, owned and written by XACA-0895's state
+# advance — NOT by this function. Do not add it back here.
+#
+# Called by:
+#   - _kb_cr_publish, immediately after _kb_cr_set_confluence_url succeeds
+#     (same successful-publish moment, so cr_confluence_url and the publish
+#     stamps are always written together — never a version/title update
+#     with a stale or missing confluence_url, or vice versa).
+#   - kb-cr _set_publish_stamps <item-id> <version> <title>  (public CLI
+#     plumbing for skill use, mirrors _set_confluence_url)
+#
+# Field placement: on the .crs[cr_container_idx] container record — same
+# location as cr_confluence_url/cr_doc_link/cr_proper_url.
+#
+# Read back via: kb-cr _get_publish_stamps <item-id>  (see below) — which
+# reads cr_published_at from the NESTED timestamps.cr_published_at path,
+# not from this record.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_set_publish_stamps() {
+    local item_id="${1:-}"
+    local version="${2:-}"
+    local title="${3:-}"
+
+    if [[ -z "$item_id" || -z "$version" || -z "$title" ]]; then
+        echo "Usage: kb-cr _set_publish_stamps <item-id> <version> <title>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
+    _kb_cr_preamble "$item_id" || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    # Resolve the CR container for this item.
+    local cr_id_assigned cr_container_idx
+    cr_id_assigned=$(_kb_jq_read "$_cr_board" \
+        ".backlog[$_cr_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+    if [[ -z "$cr_id_assigned" ]]; then
+        cr_id_assigned=$(_kb_jq_read "$_cr_board" \
+            ".backlog[$_cr_idx].cr_id // \"\"" -r 2>/dev/null)
+    fi
+    if [[ -z "$cr_id_assigned" ]]; then
+        echo "kb-cr _set_publish_stamps: item '$item_id' has no CR assignment." >&2
+        return 1
+    fi
+
+    cr_container_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id_assigned")
+    if [[ "$cr_container_idx" == "-1" ]]; then
+        echo "kb-cr _set_publish_stamps: CR container '$cr_id_assigned' not found." >&2
+        return 1
+    fi
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+
+    # Write cr_published_version/cr_published_title on the container record
+    # (.crs[]) — advisory metadata only. ts here is the record's own
+    # updatedAt/lastUpdated bookkeeping, NOT a cr_published_at stamp: the
+    # lifecycle "when was this published" timestamp lives exclusively at
+    # .crs[].timestamps.cr_published_at, owned by XACA-0895's state-advance
+    # machinery. Writing it here would recreate the flat/nested divergence
+    # XACA-0896-001-fix removed — do not add it back.
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].cr_published_version = $version |
+        .crs[$cidx].cr_published_title   = $title   |
+        .crs[$cidx].updatedAt            = $ts      |
+        .lastUpdated                     = $ts
+    ' \
+    --argjson cidx "$cr_container_idx" \
+    --arg version "$version" \
+    --arg title "$title" \
+    --arg ts "$ts" \
+    || return 1
+
+    # Record the publish-stamp event in the activity log.
+    local event
+    event=$(_kb_cr_activity_event "cr_publish_stamped" \
+        "field=cr_published_version,cr_published_title" \
+        "new_value=${version} | ${title}" \
+        "note=Publish confirmed successful; version/title stamped on CR container record (cr_published_at is a separate lifecycle timestamp owned by XACA-0895, not written here)") || true
+    if [[ -n "$event" ]]; then
+        _kb_cr_activity_append "$_cr_board" "$cr_id_assigned" "$event" 2>/dev/null || true
+    fi
+
+    echo "publish stamps set on CR [$cr_id_assigned]: version=$version title=\"$title\" (updatedAt=$ts)"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal plumbing: _kb_cr_get_publish_stamps <item-id>
+# Guard 4 (XACA-0896-001, corrected XACA-0896-001-fix)
+#
+# Reader counterpart to _kb_cr_set_publish_stamps. Echoes a single-line JSON
+# object so Guards 1 and 3 (and anything else that needs to ask "what is
+# currently stamped on this CR?") never have to re-derive the item-id ->
+# CR-container resolution or hand-parse board JSON themselves:
+#   {"cr_published_version":"2.10.7","cr_published_title":"...","cr_published_at":"..."}
+# Any field not yet stamped (e.g. a CR that has never been published) comes
+# back as JSON null, not an empty string — callers should use `jq -e` /
+# `// empty` style checks rather than string-empty checks.
+#
+# cr_published_at is read from the NESTED .crs[].timestamps.cr_published_at
+# path (owned by XACA-0895's state-advance machinery), NOT from a flat
+# sibling field — there is no flat fallback, deliberately. Falling back to
+# a flat field when the nested one is absent would resurrect the exact
+# flat/nested divergence XACA-0896-001-fix removed: nested-or-null, never
+# nested-or-flat. Until XACA-0895 lands, this will legitimately return null
+# for cr_published_at on every CR — that is correct and safe (an absent
+# stamp is read as suspicious by every guard that consults this, never as
+# permission), not a bug to paper over here.
+#
+# Usage: kb-cr _get_publish_stamps <item-id>
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_get_publish_stamps() {
+    local item_id="${1:-}"
+
+    if [[ -z "$item_id" ]]; then
+        echo "Usage: kb-cr _get_publish_stamps <item-id>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
+    _kb_cr_preamble "$item_id" || return 1
+    [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 0; }
+
+    local cr_id_assigned cr_container_idx
+    cr_id_assigned=$(_kb_jq_read "$_cr_board" \
+        ".backlog[$_cr_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+    if [[ -z "$cr_id_assigned" ]]; then
+        cr_id_assigned=$(_kb_jq_read "$_cr_board" \
+            ".backlog[$_cr_idx].cr_id // \"\"" -r 2>/dev/null)
+    fi
+    if [[ -z "$cr_id_assigned" ]]; then
+        echo "kb-cr _get_publish_stamps: item '$item_id' has no CR assignment." >&2
+        return 1
+    fi
+
+    cr_container_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id_assigned")
+    if [[ "$cr_container_idx" == "-1" ]]; then
+        echo "kb-cr _get_publish_stamps: CR container '$cr_id_assigned' not found." >&2
+        return 1
+    fi
+
+    _kb_jq_read "$_cr_board" '
+        {
+            cr_id: $cid,
+            cr_published_version: (.crs[$cidx].cr_published_version // null),
+            cr_published_title:   (.crs[$cidx].cr_published_title   // null),
+            cr_published_at:      (.crs[$cidx].timestamps.cr_published_at // null)
+        }
+    ' --argjson cidx "$cr_container_idx" --arg cid "$cr_id_assigned" -c
 }
 
 _kb_cr_submit() {
@@ -4801,6 +5012,24 @@ _kb_cr_help() {
     echo "              Internal plumbing: write cr_confluence_url directly."
     echo "              Used by the Main Event CR skill after it publishes a page."
     echo "              Records a 'confluence_published' activity log entry."
+    echo "  _set_publish_stamps <id> <version> <title>"
+    echo "              Guard 4 (XACA-0896-001): stamp cr_published_version /"
+    echo "              cr_published_title on the .crs[] container record."
+    echo "              Does NOT write cr_published_at — that lifecycle timestamp"
+    echo "              lives at .crs[].timestamps.cr_published_at (XACA-0895's"
+    echo "              state-advance), not here (XACA-0896-001-fix). Called by"
+    echo "              kb-cr publish immediately after a successful"
+    echo "              _set_confluence_url — i.e. only when a publish has"
+    echo "              actually landed, never on a merely-attempted publish."
+    echo "              Records a 'cr_publish_stamped' activity log entry."
+    echo "  _get_publish_stamps <id>"
+    echo "              Read back the publish stamps as one-line JSON:"
+    echo "              {\"cr_id\":..,\"cr_published_version\":..,\"cr_published_title\":..,\"cr_published_at\":..}"
+    echo "              cr_published_at is read from the NESTED"
+    echo "              .crs[].timestamps.cr_published_at path — null until"
+    echo "              XACA-0895 lands and writes it; no flat fallback."
+    echo "              Unstamped fields come back as JSON null. For guards that"
+    echo "              need to compare an incoming publish against what's live."
     echo "  submit  <id>     [propagates if crAssignment present; v1 fallback if not]"
     echo "              Submit the CR for CAB review."
     echo "              In the Confluence-driven workflow, cr-submitted means a CR-Proper"
