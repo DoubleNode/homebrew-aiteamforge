@@ -706,6 +706,66 @@ _PATH_LOCKS: dict = {}  # resolved-path-str -> threading.RLock
 _PATH_LOCKS_REGISTRY_LOCK = threading.Lock()
 
 
+class _DeferredResponse(Exception):
+    """XACA-0890-022: an HTTP response decided INSIDE a lock-holding block but
+    deliberately NOT written until that lock has been released.
+
+    THE PROBLEM THIS SOLVES: _board_write_transaction holds board_file's
+    EXCLUSIVE flock for the whole `with` body. Its early-exit paths (release
+    not found, platform not found, invalid environment, epic not found, ...)
+    originally called send_error / _send_json_response and returned from
+    INSIDE that body, so the lock stayed held across a socket write to the
+    client. A slow or stalled client therefore blocked EVERY other board
+    writer — in-process request threads and cross-process kb-* callers alike —
+    for up to LCARS_SOCKET_TIMEOUT (30s by default). That is a regression in
+    shape versus the pre-XACA-0890 code, where _load_* and _save_* each
+    released their own lock before the response was written, and it points
+    the wrong way for this ticket's lineage: XACA-0889 exists because a
+    FIVE-second block was long enough to make a health watchdog kill healthy
+    servers.
+
+    WHY AN EXCEPTION rather than a captured return value: these exits sit at
+    four different nesting depths inside bodies up to ~60 lines long (one is
+    inside a nested try/except ValueError). Restructuring each into a
+    deferred-variable + else-chain would re-indent hundreds of lines of
+    working, already-reviewed mutation logic — a large diff whose main risk is
+    a silent indentation mistake in concurrency code. Raising unwinds cleanly
+    from any depth, changes two lines per site, leaves every enclosing local
+    variable in the handler's own scope (several are read AFTER the `with`),
+    and runs _board_write_transaction's existing `finally: flock(LOCK_UN)` on
+    the way out, so the lock is always released before emit() is reached.
+
+    CONTRACT: raise this ONLY inside a lock-holding block, and catch it with a
+    dedicated `except _DeferredResponse` placed ABOVE the handler's generic
+    `except Exception` (a generic clause would swallow the sentinel and turn a
+    404/400/409 into a 500). Nothing may have been written to self.wfile
+    before the raise — all current sites are pre-response validation exits.
+    """
+
+    def __init__(self, kind, payload, status):
+        super().__init__("deferred %s response (status=%s)" % (kind, status))
+        self.kind = kind        # 'error' | 'json'
+        self.payload = payload  # str message for 'error', dict body for 'json'
+        self.status = status
+
+    @classmethod
+    def error(cls, status, message):
+        """Deferred BaseHTTPRequestHandler.send_error(status, message)."""
+        return cls('error', message, status)
+
+    @classmethod
+    def json(cls, payload, status):
+        """Deferred handler._send_json_response(payload, status=status)."""
+        return cls('json', payload, status)
+
+    def emit(self, handler):
+        """Write the response. Call ONLY after the lock has been released."""
+        if self.kind == 'error':
+            handler.send_error(self.status, self.payload)
+        else:
+            handler._send_json_response(self.payload, status=self.status)
+
+
 def _get_path_lock(path) -> threading.RLock:
     """Return the process-wide RLock guarding *path*, creating it on first use.
 
@@ -4532,6 +4592,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 ... mutate data (or a sub-object found within it) ...
                 self._save_releases_config(data, team, _lock_held=True)
 
+        NEVER WRITE AN HTTP RESPONSE INSIDE THIS BLOCK (XACA-0890-022).
+        send_error, _send_json_response, send_response and wfile.write all
+        write to the client socket, and doing that while this EXCLUSIVE lock
+        is held means one slow or stalled client blocks every other board
+        writer — in-process and cross-process alike — for up to
+        LCARS_SOCKET_TIMEOUT (30s). Measured at 1.5s of simulated client
+        stall: a second writer waited the full 1.504s with the response
+        emitted inside the lock, and 0.000s with it deferred.
+
+        Early-exit paths must therefore RAISE their response out of the lock
+        rather than writing it in place, using the _DeferredResponse sentinel
+        (its .error()/.json() constructors mirror send_error and
+        _send_json_response respectively). The owning handler catches it in a
+        dedicated clause that MUST sit above that handler's generic
+        `except Exception` — a generic clause would swallow the sentinel and
+        turn a 404/400/409 into a 500 — and calls .emit(self) there. The
+        unwind runs the `finally` below, so the lock is released before emit
+        touches the socket. handle_update_epic is the smallest worked
+        example; see _DeferredResponse's own docstring for the full rationale
+        and tests/test_xaca0890_deferred_response.py, which measures the
+        difference and structurally guards against reintroduction.
+
         REENTRANCY WARNING — fcntl.flock is NOT reentrant the way
         threading.RLock is (see XACA-0890-002's _get_path_lock, which chose
         RLock deliberately; this is the opposite mechanism on purpose, see
@@ -4566,20 +4648,46 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         one file would give zero mutual exclusion between them.
         """
         board_file = self._get_board_file(team)
-        if not board_file.exists():
-            # Nothing to lock — _load_*/_save_* with _lock_held=True each
-            # independently handle the missing-board-file case (default
-            # empty result / False respectively) without touching a lock
-            # file, matching the non-transactional callers' existing
-            # behavior of never creating a stray .lock file for a team that
-            # has no board yet.
+        lock_file = board_file.with_suffix('.json.lock')
+
+        # XACA-0890-023: do NOT gate lock acquisition on board_file.exists().
+        # That precheck was a TOCTOU: it yielded with NO lock held when the
+        # board was absent, so a board.json created between the check and the
+        # caller's load/save left the whole read-modify-write unprotected.
+        # This transaction is now the single documented mutual-exclusion
+        # primitive for board_file, so it must not have a silently-unlocked
+        # branch. The lock file is opened unconditionally instead — flock is
+        # on the .lock sidecar, never on board.json itself, so locking a board
+        # that does not exist yet is well-defined and is exactly what makes
+        # the create-during-transaction race safe. _load_*/_save_* with
+        # _lock_held=True still handle the missing-board case on their own
+        # (empty default / False).
+        #
+        # Creating the sidecar for a board-less team is not a stray file:
+        # _sweep_stale_locks already enumerates '<team>-board.json.lock' for
+        # EVERY team in TEAM_KANBAN_DIRS regardless of whether that team has a
+        # board, and 20+ other board call sites create the same path.
+        #
+        # RESIDUAL, DELIBERATE: if the team's kanban DIRECTORY itself does not
+        # exist, open(...,'w') would raise FileNotFoundError and turn a
+        # previously-benign no-op into a 500. We do not mkdir here — silently
+        # provisioning another team's kanban directory as a side effect of a
+        # lock acquisition is worse than the race it would close. That single
+        # case keeps the old unlocked-yield behavior, documented rather than
+        # hidden; it is unreachable for any provisioned team.
+        import fcntl
+        if not lock_file.parent.is_dir():
             yield
             return
-        import fcntl
-        lock_file = board_file.with_suffix('.json.lock')
+
         with open(lock_file, 'w') as lock:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
             try:
+                # XACA-0890-022: a _DeferredResponse raised in here unwinds
+                # through this finally (lock released, fd closed) and is
+                # emitted by the caller's `except _DeferredResponse` clause —
+                # i.e. no HTTP response is ever written while this exclusive
+                # lock is held. See _DeferredResponse's docstring.
                 yield
             finally:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
@@ -5836,12 +5944,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
                 if not release:
-                    self.send_error(404, f"Release not found: {release_id}")
-                    return
+                    raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
                 if platform not in release.get('platforms', {}):
-                    self.send_error(400, f"Platform not found in release: {platform}")
-                    return
+                    raise _DeferredResponse.error(400, f"Platform not found in release: {platform}")
 
                 platform_data = release['platforms'][platform]
                 all_environments = release.get('environments', data.get('defaultEnvironments', []))
@@ -5856,16 +5962,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if target_env:
                     # Validate target is in enabled environments
                     if target_env not in environments:
-                        self.send_error(400, f"Invalid or disabled environment: {target_env}")
-                        return
+                        raise _DeferredResponse.error(400, f"Invalid or disabled environment: {target_env}")
                     new_env = target_env
                 else:
                     # Auto-promote to next enabled environment
                     try:
                         current_idx = environments.index(current_env)
                         if current_idx >= len(environments) - 1:
-                            self.send_error(400, f"Already at final environment: {current_env}")
-                            return
+                            raise _DeferredResponse.error(400, f"Already at final environment: {current_env}")
                         new_env = environments[current_idx + 1]
                     except ValueError:
                         # Current env not in enabled list, find next enabled after current
@@ -5912,6 +6016,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "newEnvironment": new_env
             }).encode())
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error promoting release: {e}")
 
@@ -5936,8 +6049,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
                 if not release:
-                    self.send_error(404, f"Release not found: {release_id}")
-                    return
+                    raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
                 now = self._get_timestamp()
                 platforms = release.get('platforms', {})
@@ -5977,6 +6089,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "platforms": list(platforms.keys())
             }).encode())
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error resetting release to PLANNED: {e}")
 
@@ -6028,16 +6149,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
                 if not release:
-                    self._send_json_response({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
-                    return
+                    raise _DeferredResponse.json({"ok": False, "error": f"Release not found: {release_id}"}, status=404)
 
                 platforms = release.get("platforms", {})
                 if platform not in platforms:
-                    self._send_json_response(
+                    raise _DeferredResponse.json(
                         {"ok": False, "error": f"Platform '{platform}' not found in release '{release_id}'"},
                         status=400
                     )
-                    return
 
                 # Write gateStatus into the platform sub-object
                 platforms[platform]["gateStatus"] = {
@@ -6066,6 +6185,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "gateStatus": platforms[platform]["gateStatus"],
             })
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except json.JSONDecodeError as e:
             self._send_json_response({"ok": False, "error": f"Invalid JSON body: {e}"}, status=400)
         except Exception as e:
@@ -6084,8 +6212,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 data = self._load_releases_config(_lock_held=True)
                 release = self._find_release_by_id(data, release_id)
                 if not release:
-                    self.send_error(404, f"Release not found: {release_id}")
-                    return
+                    raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
                 # Update allowed fields
                 allowed_fields = ['name', 'shortTitle', 'targetDate', 'status', 'type', 'project']  # XACA-0050: Added shortTitle
@@ -6166,6 +6293,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(release, indent=2).encode())
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error updating release: {e}")
 
@@ -6494,19 +6630,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         data = self._load_releases_config(team, _lock_held=True)
                         release = self._find_release_by_id(data, release_id)
                         if not release:
-                            self.send_error(404, f"Release not found: {release_id}")
-                            return
+                            raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
                         # Check if release is complete before archiving
                         if not self.is_release_complete(release):
-                            self.send_response(400)
-                            self.send_header('Content-Type', 'application/json')
-                            self.send_header('Access-Control-Allow-Origin', '*')
-                            self.end_headers()
-                            self.wfile.write(json.dumps({
-                                "error": "Cannot archive: release is not complete (all platforms must be at PROD)"
-                            }).encode())
-                            return
+                            # XACA-0890-022: byte-identical on the wire to the raw
+                            # send_response/send_header/end_headers/wfile.write block this
+                            # replaces - _send_json_response emits the same 400 status line,
+                            # the same Content-Type and CORS headers, and the same encoded
+                            # JSON body. Deferred so it is written only AFTER the exclusive
+                            # board lock has been released.
+                            raise _DeferredResponse.json(
+                                {"error": "Cannot archive: release is not complete (all platforms must be at PROD)"},
+                                status=400
+                            )
 
                         # Remove from active releases
                         data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
@@ -6530,6 +6667,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         "message": "Release archived successfully"
                     }).encode())
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error toggling release archive: {e}")
 
@@ -6565,8 +6711,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     data = self._load_releases_config(effective_team, _lock_held=True)
                     release = self._find_release_by_id(data, release_id)
                     if not release:
-                        self.send_error(404, f"Release not found: {release_id}")
-                        return
+                        raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
                     # Remove from active releases
                     data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
@@ -6602,6 +6747,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "archived": release_id}).encode())
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error archiving release: {e}")
 
@@ -6854,11 +7008,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     # (e.g. archived/deleted concurrently). The CR record
                     # write already landed — report that honestly rather
                     # than crashing on a None release.
-                    self._send_json_response({
+                    raise _DeferredResponse.json({
                         "ok": False,
                         "error": f"Release '{release_id}' no longer exists (CR record was updated)",
                     }, status=409)
-                    return
 
                 if old_release_id:
                     old_release = self._find_release_by_id(releases_data, old_release_id)
@@ -6904,6 +7057,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             self._send_json_response(response, status=201)
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self._send_json_response({"ok": False, "error": f"Error linking CR to release: {e}"}, status=500)
 
@@ -6995,11 +7157,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 if release is None:
                     # Release vanished between the CR write above and here —
                     # the CR record write already landed; report honestly.
-                    self._send_json_response({
+                    raise _DeferredResponse.json({
                         "ok": False,
                         "error": f"Release '{release_id}' no longer exists (CR record was updated)",
                     }, status=409)
-                    return
 
                 release["linkedCRs"] = [
                     entry for entry in release.get("linkedCRs", [])
@@ -7025,6 +7186,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 "crIds": cr_ids,
             })
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self._send_json_response({"ok": False, "error": f"Error unlinking CR from release: {e}"}, status=500)
 
@@ -9974,8 +10144,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 epic = self._find_epic_by_id(data, epic_id)
 
                 if not epic:
-                    self.send_error(404, f"Epic not found: {epic_id}")
-                    return
+                    raise _DeferredResponse.error(404, f"Epic not found: {epic_id}")
 
                 # Update allowed fields (map 'name' to 'title' for board compatibility)
                 if 'name' in post_data:
@@ -10009,6 +10178,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             else:
                 self.send_error(500, "Failed to save epic to board")
 
+        except _DeferredResponse as deferred:
+            # XACA-0890-022: emitted HERE, outside the
+            # _board_write_transaction `with` block - board_file's
+            # exclusive flock is already released, so a slow or stalled
+            # client blocks no other writer. Must stay ABOVE the generic
+            # `except Exception` below, which would otherwise swallow this
+            # sentinel and turn a 404/400/409 into a 500.
+            deferred.emit(self)
+            return
         except Exception as e:
             self.send_error(500, f"Error updating epic: {e}")
 
