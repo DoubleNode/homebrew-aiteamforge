@@ -169,6 +169,47 @@ for _e in "${_LCARS_INFRA[@]}"; do
     LCARS_SERVERS+=("${_fp}:${_lp}:${_team}:${_sock}:${_pat}")
 done
 
+# XACA-0890-025 fix: single source of truth for --team matching, called by
+# BOTH the eager validation below and the sweep filter in run_health_check
+# (search _hc_team_filter_matches there) so the two can never drift out of
+# sync with each other.
+#
+# THE BUG THIS FIXES: XACA-0890-013 originally required an EXACT string
+# match between --team's value and an _LCARS_INFRA entry's team field. The
+# parametric connect template passed --team ${INSTANCE} — a COMPOSITE id
+# (${TEAM_ID}-${PROJECT}, or ${TEAM_ID}-${GROUP}-${PROJECT} for freelance)
+# — but _LCARS_INFRA's team field is NOT consistently team-shaped: for
+# flat teams and freelance it IS the bare team id (freelance's session
+# PATTERN is a wildcard, ".*-lcars", precisely because it covers every
+# freelance instance), but for finance/legal it is already a specific
+# PROVISIONED INSTANCE id ("finance-personal", "legal-coparenting") that
+# does not necessarily match whatever project the connecting template's
+# own TEAM_DEFAULT_PROJECT happens to compute (verified: legal.conf's
+# TEAM_DEFAULT_PROJECT="default" produces INSTANCE "legal-default", which
+# never equals the registered "legal-coparenting" under exact matching --
+# only finance's "personal" happened to match by coincidence). Combined
+# with the XACA-0890-013 eager validation (correctly conservative), every
+# non-matching parametric team degraded from "restart on failure" to "warn
+# and never restart" -- strictly worse than before XACA-0890-013.
+#
+# THE FIX: the template now passes --team ${TEAM_ID} (the bare team id,
+# ALWAYS known statically from the top of the template -- no derivation,
+# no guessing at what project is actually provisioned). Matching here
+# accepts that bare id against BOTH shapes of _LCARS_INFRA entry:
+#   - EXACT match: $team == $filter (flat teams, freelance's bare entry).
+#   - PREFIX match: $team starts with "$filter-" (composite entries like
+#     finance-personal/legal-coparenting -- the bare team id is a prefix
+#     of the one instance actually registered for it).
+# Deliberately ONE DIRECTION only (filter is a prefix of team, never the
+# reverse) -- an instance-shaped filter like "legal-default" must NOT
+# match "legal-coparenting" by design; only a bare team id may.
+_hc_team_filter_matches() {
+    local team="$1" filter="$2"
+    [[ "$team" == "$filter" ]] && return 0
+    [[ "$team" == "${filter}-"* ]] && return 0
+    return 1
+}
+
 # XACA-0890-013: validate --team eagerly. Without this, a typo'd or stale
 # team name (e.g. a renamed team, or a caller passing the wrong INSTANCE
 # value) silently sweeps ZERO servers and exits 0 — indistinguishable from
@@ -176,20 +217,31 @@ done
 # instead: this is invoked automatically over SSH by the parametric
 # *-connect.sh scripts, where a silent no-op would look like a successful
 # health check that actually checked nothing.
+#
+# XACA-0890-025: also fails loudly on AMBIGUITY (--team matching MORE THAN
+# ONE _LCARS_INFRA entry), never silently restarting an arbitrarily-picked
+# one. Not reachable with today's static table (verified: no two entries
+# share a team-id prefix), but the prefix-match rule above makes it
+# reachable in principle if a second project were ever registered for the
+# same personal team (e.g. a hypothetical "legal-custody" alongside
+# "legal-coparenting") -- a silent pick in that case would risk restarting
+# the WRONG team's server, which is worse than refusing to guess.
 if [[ -n "$TEAM_FILTER" ]]; then
-    _team_filter_found=false
+    _team_filter_matches=()
     for _e in "${LCARS_SERVERS[@]}"; do
         IFS=':' read -r _ _ _e_team _ _ <<< "$_e"
-        if [[ "$_e_team" == "$TEAM_FILTER" ]]; then
-            _team_filter_found=true
-            break
+        if _hc_team_filter_matches "$_e_team" "$TEAM_FILTER"; then
+            _team_filter_matches+=("$_e_team")
         fi
     done
-    if [[ "$_team_filter_found" == "false" ]]; then
+    if [[ ${#_team_filter_matches[@]} -eq 0 ]]; then
         echo "ERROR: --team '$TEAM_FILTER' did not match any configured team in LCARS_SERVERS (checked ${#LCARS_SERVERS[@]} entries; a team missing its registry lcars_port is excluded — see the WARNING above, if any)." >&2
         exit 1
+    elif [[ ${#_team_filter_matches[@]} -gt 1 ]]; then
+        echo "ERROR: --team '$TEAM_FILTER' matched MULTIPLE configured teams (${_team_filter_matches[*]}) — ambiguous, refusing to guess which one to restart. Use a more specific --team value, or edit _LCARS_INFRA to disambiguate." >&2
+        exit 1
     fi
-    unset _team_filter_found _e _e_team
+    unset _team_filter_matches _e _e_team
 fi
 
 # ============================================================================
@@ -707,7 +759,11 @@ run_health_check() {
         # narrows the loop. Fixes the real defect behind the ~191s worst-case
         # connect-script latency: a connect attempt for team X was triggering
         # a full-fleet sweep of every OTHER team on the host, not just X.
-        if [[ -n "$TEAM_FILTER" && "$team" != "$TEAM_FILTER" ]]; then
+        # XACA-0890-025: uses the SAME _hc_team_filter_matches the eager
+        # validation above already used to decide TEAM_FILTER was valid —
+        # see that function's comment for why this is a prefix match, not
+        # an exact one.
+        if [[ -n "$TEAM_FILTER" ]] && ! _hc_team_filter_matches "$team" "$TEAM_FILTER"; then
             continue
         fi
 

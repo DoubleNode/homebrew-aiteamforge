@@ -359,16 +359,31 @@ if [[ "$_lcars_ok" != "true" || "$_tmux_ok" != "true" ]]; then
 
     if [[ "$_sessions_exist" == "true" ]]; then
         # Half-up: sessions exist but server isn't answering. Restart server only.
-        # XACA-0890-013: --team ${INSTANCE} scopes the remote health check to
-        # THIS team only. Without it, lcars-health-check.sh with no args
-        # sweeps every team configured on ${HOST} — a connect attempt for one
-        # team was triggering a full-fleet health sweep (and potential
-        # restarts) of every OTHER team sharing the host, taking up to ~191s
-        # in a multi-team-down scenario. ${INSTANCE} already matches the team
-        # identifiers lcars-health-check.sh's LCARS_SERVERS table uses.
+        # XACA-0890-013: --team scopes the remote health check to THIS team
+        # only. Without it, lcars-health-check.sh with no args sweeps every
+        # team configured on ${HOST} — a connect attempt for one team was
+        # triggering a full-fleet health sweep (and potential restarts) of
+        # every OTHER team sharing the host, taking up to ~191s in a
+        # multi-team-down scenario.
+        #
+        # XACA-0890-025 fix: pass the bare ${TEAM_ID}, NOT ${INSTANCE}.
+        # INSTANCE is project-qualified (${TEAM_ID}-${PROJECT}, or
+        # ${TEAM_ID}-${GROUP}-${PROJECT} for freelance) and only happened to
+        # match lcars-health-check.sh's _LCARS_INFRA table for finance
+        # ("finance-personal" — coincidence, not by design); for
+        # legal/medical/mainevent/freelance it produced a value that matched
+        # nothing (or matched the wrong provisioned project), and the
+        # XACA-0890-013 eager validation correctly turned every one of those
+        # into a hard failure — degrading 4 of 5 parametric teams from
+        # "restart on failure" to "warn and never restart". ${TEAM_ID} is
+        # static, always known, requires no derivation, and
+        # lcars-health-check.sh now matches a bare team id against
+        # _LCARS_INFRA entries that are themselves project-qualified via a
+        # prefix rule (see _hc_team_filter_matches there) — so this single
+        # change is correct for all five parametric teams, not just finance.
         echo "    Detected existing sessions — restarting LCARS server via health-check..."
         if ssh -o ConnectTimeout=10 -o BatchMode=yes "$HOST" \
-            "/bin/zsh -lc '${REMOTE_ATF_DIR}/lcars-health-check.sh --team ${INSTANCE}'" 2>/dev/null; then
+            "/bin/zsh -lc '${REMOTE_ATF_DIR}/lcars-health-check.sh --team ${TEAM_ID}'" 2>/dev/null; then
             echo "    Health-check restart triggered."
         else
             echo "    ⚠ Health-check returned non-zero (may still be restarting)."
