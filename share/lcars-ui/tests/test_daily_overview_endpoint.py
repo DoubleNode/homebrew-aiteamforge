@@ -536,6 +536,18 @@ class TestChangeRequests(DailyOverviewTestBase):
         cat = next(c for c in _response_json(buf)['categories'] if c['key'] == 'change_requests')
         self.assertEqual(cat['items'][0]['source_view'], 'change-req')
 
+    def test_published_cr_appears(self):
+        # XACA-0895: cr-published joins late_states — a Confluence page live but
+        # still awaiting the CR-Proper link is exactly the "needs attention"
+        # condition this heuristic exists to surface, same as cr-drafted/cr-submitted.
+        self._seed_crs([{
+            'id': 'CR-005', 'title': 'Published CR', 'crState': 'cr-published',
+        }])
+        h, buf = self._call_endpoint()
+        cat = next(c for c in _response_json(buf)['categories'] if c['key'] == 'change_requests')
+        self.assertEqual(cat['total'], 1)
+        self.assertEqual(cat['items'][0]['severity_or_priority'], 'high')
+
 
 # ---------------------------------------------------------------------------
 # Tests: backup_failures

@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """
-cr-confluence-poller.py — Periodically scans cr-drafted CRs for a team,
-detects an appended CR-Proper Confluence link at the bottom of each CR's request
-page, and transitions cr-drafted → cr-submitted with full activity logging.
+cr-confluence-poller.py — Periodically scans cr-published (preferred) and
+cr-drafted (legacy/one-stage fallback, XACA-0465) CRs for a team, detects an
+appended CR-Proper Confluence link at the bottom of each CR's request page,
+and transitions the CR to cr-submitted with full activity logging.
+
+XACA-0895 inserted cr-published between cr-drafted and cr-submitted: it means
+kb-cr publish already wrote cr_confluence_url but the CR-Proper link has not
+yet been appended to that page. Pass 1 scans cr-published CRs first (the
+two-stage path) and cr-drafted CRs second (CRs that acquired a Confluence
+page without going through kb-cr publish — see the XACA-0465 fallback below).
+Both converge on cr-submitted.
 
 Also runs a second pass (Auto 2, XACA-0294-004) that scans cr-submitted CRs for
 approval-readiness signals on their CR-Proper Confluence page, records a
@@ -397,6 +405,41 @@ def find_cr_drafted_crs(team: str) -> list[dict]:
     return drafted
 
 
+def find_cr_published_crs(team: str) -> list[dict]:
+    """
+    Read the team board and return all CR container records whose crState
+    is "cr-published" (XACA-0895).
+
+    cr-published is the preferred Pass 1 source state: kb-cr publish already
+    wrote cr_confluence_url on these records, so the poller can fetch that
+    page directly (see fetch_published_page_content) without the cr_doc_link
+    lookup the legacy cr-drafted path needs.
+
+    Each returned dict is the raw CR container object, augmented with a
+    '_board_file' key so callers don't need to re-resolve it.
+    """
+    board_path = _board_file_for_team(team)
+    if not board_path or not os.path.isfile(board_path):
+        vlog(f"[{team}] Board file not found — skipping team.")
+        return []
+
+    try:
+        board_data = json.loads(Path(board_path).read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        log(f"[{team}] Cannot read board JSON ({exc}) — skipping team.")
+        return []
+
+    crs = board_data.get("crs", [])
+    published = []
+    for cr in crs:
+        if cr.get("crState") == "cr-published":
+            cr["_board_file"] = board_path
+            published.append(cr)
+
+    vlog(f"[{team}] Found {len(published)} cr-published CR(s) out of {len(crs)} total.")
+    return published
+
+
 def find_cr_submitted_crs(team: str) -> list[dict]:
     """
     Read the team board and return all CR container records whose crState
@@ -603,6 +646,41 @@ def _fetch_confluence_html_by_url(
     except (json.JSONDecodeError, KeyError) as exc:
         log(f"{log_prefix} Unexpected Confluence response format: {exc}")
         return None
+
+
+def fetch_published_page_content(
+    team: str,
+    cr_record: dict,
+    creds_for_team: dict,
+) -> str | None:
+    """
+    Fetch the storage-format HTML body of a cr-published CR's Confluence page
+    (XACA-0895 Pass 1, preferred source state).
+
+    cr-published CRs carry cr_confluence_url — written atomically by
+    `kb-cr publish` alongside the state transition — rather than the
+    deprecated cr_doc_link field the legacy cr-drafted path uses. This is a
+    thin wrapper over _fetch_confluence_html_by_url that pulls the URL from
+    cr_record and adds cr-published-specific logging, mirroring the shape of
+    fetch_request_page_content for the cr-drafted path.
+
+    Returns the HTML string (storage format) or None on any error, including
+    the defensive case where cr_confluence_url is unexpectedly missing.
+    """
+    cr_id = cr_record.get("crId") or cr_record.get("id", "<unknown>")
+    confluence_url = (cr_record.get("cr_confluence_url") or "").strip()
+
+    if not confluence_url:
+        # A cr-published CR should always carry cr_confluence_url — kb-cr
+        # publish writes both atomically. Log loudly: this is a data-integrity
+        # issue on the board, not an expected skip.
+        log(
+            f"[{team}][{cr_id}] cr-published CR has no cr_confluence_url — "
+            "cannot fetch page. This should not happen; investigate the board record."
+        )
+        return None
+
+    return _fetch_confluence_html_by_url(confluence_url, team, creds_for_team, label=cr_id)
 
 
 def fetch_cr_proper_page_data(
@@ -1187,14 +1265,25 @@ def transition_cr(
     cr_record: dict,
     cr_proper_url: str,
     dry_run: bool,
+    source_state: str = "cr-drafted",
 ) -> bool:
     """
-    For a cr-drafted CR whose CR-Proper link has been detected:
+    For a CR (source_state is "cr-published" or, via the XACA-0465 legacy
+    one-stage fallback, "cr-drafted") whose CR-Proper link has been detected:
       1. Write cr_proper_url to the CR container record
-      2. Transition crState cr-drafted → cr-submitted via kb-cr submit
+      2. Transition crState <source_state> → cr-submitted via kb-cr submit
       3. Append a cr_proper_detected activity event
 
     All writes go through kb-cr shell subcommands for atomicity.
+
+    source_state (XACA-0895) is purely a logging/labeling concern here — it
+    does NOT gate the kb-cr submit call. `kb-cr submit` itself validates the
+    predecessor (cr-drafted | cr-published | cr-held | cr-rejected) and
+    refuses anything else; this function trusts that validation rather than
+    duplicating it. The parameter exists so operators reading the log can
+    tell whether a submitted CR came from the two-stage cr-published path or
+    the legacy one-stage cr-drafted fallback. Defaults to "cr-drafted" so
+    existing callers/tests that don't pass it keep prior log text unchanged.
 
     DECISION: `kb-cr field set` does not exist as a subcommand. Looking at
     kb-cr.sh, the pattern for writing a single field to a CR container is
@@ -1215,14 +1304,15 @@ def transition_cr(
     if dry_run:
         log(
             f"[{team}][{cr_id}] DRY-RUN: would write cr_proper_url={cr_proper_url!r}"
-            " and transition cr-drafted → cr-submitted"
+            f" and transition {source_state} → cr-submitted"
         )
         return True
 
     # Build a single bash command that:
     #   a) sources kanban-helpers (which sources kb-cr.sh)
     #   b) writes cr_proper_url atomically via _kb_jq_update
-    #   c) submits the CR (cr-drafted → cr-submitted via kb-cr submit)
+    #   c) submits the CR (<source_state> → cr-submitted via kb-cr submit,
+    #      which validates the predecessor itself)
     #   d) records the cr_proper_detected activity event
     #
     # We pass KB_CR_ACTOR=poller so activity log entries are attributed correctly.
@@ -1261,7 +1351,7 @@ echo "cr-confluence-poller: [{cr_id}] cr_proper_url written"
 _kb_detect_context() {{ echo '{team}'; }}
 export -f _kb_detect_context 2>/dev/null || true
 
-# Transition cr-drafted → cr-submitted
+# Transition {source_state} → cr-submitted (kb-cr submit validates the predecessor)
 kb-cr submit '{cr_id}'
 
 # Record activity event
@@ -1279,7 +1369,7 @@ kb-cr activity record '{cr_id}' cr_proper_detected \\
             log(f"  stderr: {stderr[:400]}")
         return False
 
-    log(f"[{team}][{cr_id}] cr-drafted → cr-submitted. cr_proper_url={cr_proper_url!r}")
+    log(f"[{team}][{cr_id}] {source_state} → cr-submitted. cr_proper_url={cr_proper_url!r}")
     if stdout:
         vlog(f"[{team}][{cr_id}] shell output: {stdout[:200]}")
     return True
@@ -1551,20 +1641,61 @@ def scan_team(
     auto_approve: bool,
 ) -> int:
     """
-    Scan one team for cr-drafted CRs with a detectable CR-Proper link (Pass 1),
-    then scan cr-submitted CRs for approval signals (Pass 2 — Auto 2).
+    Scan one team for cr-published (preferred) and cr-drafted (legacy
+    one-stage fallback, XACA-0465) CRs with a detectable CR-Proper link
+    (Pass 1), then scan cr-submitted CRs for approval signals (Pass 2 — Auto 2).
+
+    Pass 1 source states (XACA-0895), most-preferred first:
+      - cr-published: kb-cr publish already wrote cr_confluence_url. Fetch
+        that page directly (fetch_published_page_content) — no cr_doc_link
+        lookup needed.
+      - cr-drafted: legacy/one-stage fallback. Some CRs acquire a Confluence
+        page without going through kb-cr publish (dropping this state from
+        Pass 1 would strand them forever — see XACA-0465). Primary lookup is
+        cr_doc_link (deprecated); if absent, falls back to cr_confluence_url
+        the same way the cr-published path does.
+
+    Both source states converge on cr-submitted via transition_cr.
 
     Returns the total number of CRs acted on (transitions + candidate recordings).
     """
-    vlog(f"[{team}] Scanning for cr-drafted CRs...")
+    vlog(f"[{team}] Scanning for cr-published and cr-drafted CRs...")
 
-    # ── Pass 1: cr-drafted → cr-submitted ────────────────────────────────────
-    drafted = find_cr_drafted_crs(team)
     transitioned = 0
+
+    # ── Pass 1a: cr-published → cr-submitted (preferred source state) ───────
+    published = find_cr_published_crs(team)
+    if published:
+        for cr_record in published:
+            cr_id = cr_record.get("crId") or cr_record.get("id", "<unknown>")
+            vlog(f"[{team}][{cr_id}] Checking for CR-Proper link (cr-published)...")
+
+            page_html = fetch_published_page_content(team, cr_record, creds_for_team)
+            if page_html is None:
+                # Fetch failed or cr_confluence_url missing — fetch_published_page_content
+                # already logged the reason. Nothing more to do this cycle.
+                continue
+
+            cr_proper_url = extract_cr_proper_link(page_html)
+            if cr_proper_url is None:
+                vlog(f"[{team}][{cr_id}] No CR-Proper link found yet.")
+                continue
+
+            log(f"[{team}][{cr_id}] CR-Proper link detected: {cr_proper_url!r}")
+            ok = transition_cr(
+                team, cr_record, cr_proper_url, dry_run=dry_run, source_state="cr-published"
+            )
+            if ok:
+                transitioned += 1
+    else:
+        vlog(f"[{team}] No cr-published CRs found.")
+
+    # ── Pass 1b: cr-drafted → cr-submitted (legacy one-stage fallback, XACA-0465) ──
+    drafted = find_cr_drafted_crs(team)
     if drafted:
         for cr_record in drafted:
             cr_id = cr_record.get("crId") or cr_record.get("id", "<unknown>")
-            vlog(f"[{team}][{cr_id}] Checking for CR-Proper link...")
+            vlog(f"[{team}][{cr_id}] Checking for CR-Proper link (cr-drafted)...")
 
             page_html = fetch_request_page_content(team, cr_record, creds_for_team)
             if page_html is None:
@@ -1632,7 +1763,8 @@ def main() -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Confluence poller daemon — scans cr-drafted CRs for appended "
+            "Confluence poller daemon — scans cr-published (preferred) and "
+            "cr-drafted (legacy one-stage fallback) CRs for appended "
             "CR-Proper links and transitions them to cr-submitted. "
             "Also scans cr-submitted CRs for approval signals (Auto 2)."
         ),

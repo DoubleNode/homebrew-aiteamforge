@@ -14,7 +14,8 @@
       "Do NOT store cr_cycle_*_days or deploy_estimate_delta_days in any board or item.",
       "Per-item cr_* fields (crFields section) are DEPRECATED as of schema v2.0. They remain in the schema ONLY so migrate-cr-schema.py can read and transform them. Remove after all boards have been migrated.",
       "New CRs must be created as crs[] container records. crAssignment.crId on the item points to the parent CR record.",
-      "'cr-drafted' semantically means: the CR markdown has been published to Confluence as a request page. The CR-Proper page does NOT yet exist.",
+      "'cr-drafted' semantically means: a local CR markdown draft exists. Nothing has been published to Confluence yet.",
+      "'cr-published' semantically means: the CR markdown has been published to Confluence as a request page (cr_confluence_url is set). The CR-Proper (IT Connect) link has NOT yet been appended to the bottom of the page.",
       "'cr-submitted' semantically means: a CR-Proper page link has been appended to the bottom of the request page. The poller (XACA-0328-003) detects this link and writes cr_proper_url.",
       "'cr-closed' semantically means: the CR has been manually archived and is no longer active. This is a terminal state reachable from any other state via kb-cr close. It does NOT increment pushback_count — it is a neutral archive operation, not a rejection. cr-closed CRs are excluded from default list/filter views to keep dashboards clean."
     ]
@@ -22,6 +23,7 @@
 
   "crStates": [
     "cr-drafted",
+    "cr-published",
     "cr-submitted",
     "cr-approved",
     "cr-rejected",
@@ -253,6 +255,12 @@
       "type": "string",
       "format": "ISO 8601 UTC",
       "recorded_when": "crState transitions to cr-drafted (kb-cr draft)",
+      "stored_on": "crs[] container record"
+    },
+    "cr_published_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "recorded_when": "crState transitions to cr-published (kb-cr publish)",
       "stored_on": "crs[] container record"
     },
     "cr_submitted_at": {

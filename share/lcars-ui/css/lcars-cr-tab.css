@@ -459,6 +459,20 @@
     border: 1px solid rgba(255,255,255,0.15);
 }
 
+/* cr-published (XACA-0895): Confluence page is live, CR-Proper link not yet
+   appended. Sits between DRAFTED (dim neutral gray) and SUBMITTED (amber
+   #ffcc00) in the lifecycle, so it needs a hue distinct from both rather than
+   a shade of either — --lcars-orange (#ff9900) reads as warmer/more saturated
+   than drafted's gray and more red-shifted than submitted's yellow-gold,
+   staying legible as its own state at a glance. Not otherwise used for a
+   per-state badge in this file (--lcars-peach covers the unrelated EDIT
+   STATE button chrome). */
+.cr-state-published {
+    background: rgba(255, 153, 0, 0.15);
+    color: var(--lcars-orange, #ff9900);
+    border: 1px solid rgba(255, 153, 0, 0.35);
+}
+
 .cr-state-submitted {
     background: rgba(255, 204, 0, 0.15);
     color: var(--lcars-amber, #ffcc00);

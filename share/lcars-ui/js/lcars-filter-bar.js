@@ -783,17 +783,23 @@ function createFilterBar(options) {
     //
     // Active CR states that appear in the dropdown (inactive / terminal states are
     // omitted so the list stays short):
+    // XACA-0895: cr-published added — same pre-submission tier as cr-drafted,
+    // so it belongs in this "active" set for the same reason cr-drafted does.
     const CR_ACTIVE_STATES = new Set([
-        'cr-drafted', 'cr-submitted', 'cr-approved', 'implementing', 'deployed-dev',
+        'cr-drafted', 'cr-published', 'cr-submitted', 'cr-approved', 'implementing', 'deployed-dev',
     ]);
 
-    // Priority order for sorting active CRs in the dropdown (lower = higher in list)
+    // Priority order for sorting active CRs in the dropdown (lower = higher in list).
+    // cr-published (5) sits just above cr-drafted (6) — see CR_STATE_ORDER in
+    // lcars-cr-tab.js for the full rationale (this map is the same pattern,
+    // restricted to the subset of states shown in this dropdown).
     const CR_STATE_SORT_ORDER = {
         'cr-submitted': 0,
         'cr-approved':  1,
         'implementing': 2,
         'deployed-dev': 3,
-        'cr-drafted':   4,
+        'cr-published': 4,
+        'cr-drafted':   5,
     };
 
     function _syncCRStyle() {

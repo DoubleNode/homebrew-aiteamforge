@@ -162,7 +162,17 @@
         } catch (e) { /* silently ignore */ }
     }
 
-    // crState priority for default sort — active CRs float to top
+    // crState priority for default sort — active CRs float to top.
+    //
+    // XACA-0895: cr-published sits at 6, ahead of cr-drafted (7). It is a
+    // pre-submission state like cr-drafted (neither has entered the formal
+    // approval pipeline that starts at cr-submitted=0), so it stays below
+    // the submitted/approved/implementing/deployed tier rather than jumping
+    // above cr-submitted. Within that pre-submission tier it floats above a
+    // bare draft because a published-but-unlinked CR (Confluence page live,
+    // CR-Proper link still missing) is further along and more actionable —
+    // consistent with server.py's "needs attention" heuristic treating
+    // cr-published the same as cr-drafted/cr-submitted.
     const CR_STATE_ORDER = {
         'cr-submitted':       0,
         'cr-approved':        1,
@@ -170,9 +180,10 @@
         'deployed-dev':       3,
         'deployed-prod':      4,
         'emergency-deployed': 5,
-        'cr-drafted':         6,
-        'cr-rejected':        7,
-        'cr-held':            8,
+        'cr-published':       6,
+        'cr-drafted':         7,
+        'cr-rejected':        8,
+        'cr-held':            9,
     };
 
     const PRIORITY_ORDER = { critical: 0, high: 1, medium: 2, med: 2, low: 3 };
@@ -443,8 +454,11 @@
      *
      * linkedItemIds: full array of linked item ids (XACA-0310-001).
      *
-     * Timestamp mapping (XACA-0310-007 — verified against kb-cr schema):
+     * Timestamp mapping (XACA-0310-007 — verified against kb-cr schema;
+     * cr_published_at added XACA-0895-009):
      *   cr_created_at          ← timestamps.cr_created_at || cr.createdAt
+     *   cr_published_at        ← timestamps.cr_published_at (may be absent) — the
+     *                             ONLY source; no top-level cr.cr_published_at fallback
      *   cr_emergency_deployed_at ← timestamps.cr_emergency_deployed_at (may be absent)
      *   cr_completed_at        ← timestamps.cr_completed_at (may be absent)
      *   addedAt                ← cr.createdAt (fallback alias used by saved-view predicates)
@@ -470,6 +484,11 @@
             cr_proper_url:              cr.cr_proper_url || '',
             cr_summary:                 cr.summary || '',
             cr_created_at:              ts.cr_created_at || cr.createdAt || '',
+            // XACA-0895-009: nested timestamps.cr_published_at ONLY — no top-level
+            // fallback (a sibling ticket briefly wrote one there; it is being removed).
+            // Without this line item.cr_published_at was always undefined, so
+            // _STAGE_ANCHOR['cr-published'] silently fell through to cr_created_at.
+            cr_published_at:            ts.cr_published_at || '',
             cr_submitted_at:            ts.cr_submitted_at || '',
             cr_approved_at:             ts.cr_approved_at || '',
             cr_dev_started_at:          ts.cr_dev_started_at || '',
@@ -482,7 +501,13 @@
             priority:                   linkedItem ? linkedItem.priority : '',
             linkedItemIds:              linkedItemIds,
             // XACA-0294-007: Phase 4 automation badge fields (optional; absent = automation hasn't fired)
-            cr_drafted_reminder_last_at: cr.cr_drafted_reminder_last_at || '',
+            // XACA-0895: cr-lifecycle-monitor.py's REMINDER_STATE_CONFIG keeps a
+            // SEPARATE idempotency field per pre-submission state (cr_drafted_reminder_last_at,
+            // cr_published_reminder_last_at) — neither is shared/carried across the
+            // cr-drafted → cr-published transition. Both must be projected here or the
+            // published-state reminder fires server-side with no client-visible badge.
+            cr_drafted_reminder_last_at:   cr.cr_drafted_reminder_last_at || '',
+            cr_published_reminder_last_at: cr.cr_published_reminder_last_at || '',
             delay_flagged_at:            cr.delay_flagged_at || '',
             // XACA-0657: bidirectional CR↔Release link (absent when CR is not linked to a release)
             releaseAssignment:          cr.releaseAssignment || null,
@@ -623,6 +648,7 @@
 
     const CR_STATE_CLASS = {
         'cr-drafted':         'cr-state-drafted',
+        'cr-published':       'cr-state-published',
         'cr-submitted':       'cr-state-submitted',
         'cr-approved':        'cr-state-approved',
         'cr-rejected':        'cr-state-rejected',
@@ -679,6 +705,12 @@
      */
     const _STAGE_ANCHOR = {
         'cr-drafted':         item => item.cr_created_at,
+        // cr-published (XACA-0895): anchor to cr_published_at, not cr_created_at —
+        // STAGE AGE measures time-in-*current*-state, and a CR that has been
+        // published for days but drafted moments before that would otherwise
+        // read as fresh (or a long-drafted-then-just-published CR would read
+        // as stale) if it kept aging from the draft timestamp.
+        'cr-published':       item => item.cr_published_at,
         'cr-submitted':       item => item.cr_submitted_at,
         'cr-approved':        item => item.cr_approved_at,
         // cr-held: paused since submission; use cr_submitted_at as anchor.
@@ -799,21 +831,41 @@
      * Return HTML for the ⏰ DRAFTED 24h+ and/or ⚠ DELAYED automation badges.
      * Returns an empty string when neither condition is met.
      *
-     * Render conditions (XACA-0294-007):
-     *   DRAFTED 24h+: cr_drafted_reminder_last_at is set AND crState == 'cr-drafted'
+     * Render conditions (XACA-0294-007; re-scoped XACA-0895):
+     *   DRAFTED 24h+: crState IN ('cr-drafted', 'cr-published') AND that
+     *                 state's OWN idempotency field is set — cr-lifecycle-monitor.py's
+     *                 REMINDER_STATE_CONFIG keeps cr_drafted_reminder_last_at and
+     *                 cr_published_reminder_last_at SEPARATE (neither is shared or
+     *                 carried across the cr-drafted → cr-published transition; see
+     *                 docs/CR_WORKFLOW.md "Automation 1: 24-Hour Drafted Reminder").
+     *                 Badge label/copy stays "DRAFTED 24h+" per that doc regardless
+     *                 of which of the two states/fields fired it.
      *   DELAYED:      delay_flagged_at is set AND crState NOT IN _DELAY_TERMINAL
      *
      * Both badges read from normalized view-object fields that _normalizeCR
      * maps directly from the CR record. No API change — the fields are optional
      * and were committed to the schema in XACA-0294-002 (schema v2.2.0).
      */
+    const _DRAFTED_REMINDER_STATES = new Set(['cr-drafted', 'cr-published']);
+
+    // Per-state idempotency-field lookup (XACA-0895) — mirrors
+    // cr-lifecycle-monitor.py's REMINDER_STATE_CONFIG[<state>]['last_at_field'].
+    // Only cr-drafted and cr-published fire this reminder today.
+    const _REMINDER_LAST_AT_FIELD = {
+        'cr-drafted':   'cr_drafted_reminder_last_at',
+        'cr-published': 'cr_published_reminder_last_at',
+    };
+
     function _automationBadges(item) {
         const parts = [];
 
-        // DRAFTED 24h+ badge
-        if (item.cr_drafted_reminder_last_at && item.crState === 'cr-drafted') {
-            const isoReminder = escapeHtml(new Date(item.cr_drafted_reminder_last_at).toISOString());
-            const tip = escapeHtml(`This CR has been in cr-drafted for over 24 hours. Last reminder: ${isoReminder}`);
+        // DRAFTED 24h+ badge — reads whichever *_reminder_last_at field belongs
+        // to the CR's CURRENT state, not always cr_drafted_reminder_last_at.
+        const reminderField = _REMINDER_LAST_AT_FIELD[item.crState];
+        const reminderLastAt = reminderField ? item[reminderField] : '';
+        if (reminderLastAt && _DRAFTED_REMINDER_STATES.has(item.crState)) {
+            const isoReminder = escapeHtml(new Date(reminderLastAt).toISOString());
+            const tip = escapeHtml(`This CR has been in ${item.crState || 'cr-drafted'} for over 24 hours. Last reminder: ${isoReminder}`);
             parts.push(`<span class="cr-automation-badge cr-badge-drafted-24h" title="${tip}">&#9200; DRAFTED 24h+</span>`);
         }
 
@@ -1403,12 +1455,13 @@
     // ─── EDIT STATE dialog (XACA-0328-004) ────────────────────────────────────
 
     /**
-     * The 9 valid CR states and their per-state conditional field definitions.
+     * The 10 valid CR states and their per-state conditional field definitions.
      * `fields` is an ordered array of field descriptors; empty = no extra inputs.
      * required: all listed fields must be non-empty before SUBMIT enables.
      */
     const _CR_STATES = [
         'cr-drafted',
+        'cr-published',
         'cr-submitted',
         'cr-approved',
         'cr-rejected',
@@ -1422,6 +1475,15 @@
 
     const _CR_STATE_FIELDS = {
         'cr-drafted':         [],
+        // cr-published (XACA-0895): kb-cr publish stamps this automatically on a
+        // successful Confluence write, but a manual EDIT STATE transition into
+        // cr-published needs the same evidence an operator would otherwise get
+        // from the CLI — the Confluence page URL. Mirrors cr-submitted's
+        // cr_proper_url requirement one rank down the pipeline.
+        'cr-published':       [
+            { key: 'cr_confluence_url', label: 'CONFLUENCE URL', type: 'url', required: true,
+              hint: 'Must start with https://' },
+        ],
         'cr-submitted':       [
             { key: 'cr_proper_url', label: 'CR-PROPER URL', type: 'url', required: true,
               hint: 'Must start with https://' },

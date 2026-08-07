@@ -357,7 +357,8 @@ python3 "$TAP_KANBAN_TEMPLATES/migrate-cr-schema.py" --all-mobile
 ```bash
 kb-cr help                     # List all subcommands
 kb-cr draft <id> --type <t>    # Mark item as cr-drafted, write cr_created_at
-kb-cr submit <id>              # → cr-submitted, write cr_submitted_at
+kb-cr publish <id>             # cr-drafted → cr-published, write cr_published_at + cr_confluence_url (XACA-0895)
+kb-cr submit <id>              # cr-published (or cr-drafted, legacy one-stage path) → cr-submitted, write cr_submitted_at
 kb-cr approve <id> --by <l>    # → cr-approved, write cr_approved_at
 kb-cr deploy-prod <id>         # → deployed-prod, write cr_deployed_prod_at
 kb-cr emergency <id> --justification "..."   # → emergency-deployed
