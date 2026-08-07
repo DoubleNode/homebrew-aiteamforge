@@ -74,6 +74,22 @@
       "required": false,
       "description": "URL of the appended CR-Proper Confluence page link discovered at the bottom of the CR request page. Presence indicates the CR has been formally submitted (cr-submitted). Populated by the Confluence poller daemon (XACA-0328-003) when the link is detected. Manual entry via the LCARS state-change UI (XACA-0328-004) is also permitted."
     },
+    "cr_published_version": {
+      "type": "string",
+      "required": false,
+      "description": "The app/release version actually published to the live Confluence page (e.g., 2.10.10). Written by kb-cr _set_publish_stamps at the moment a publish succeeds — NOT when cr_confluence_url is merely set. Together with cr_published_title and cr_published_at, this is the guard record consulted before a subsequent publish is allowed to overwrite an approved page (XACA-0896)."
+    },
+    "cr_published_title": {
+      "type": "string",
+      "required": false,
+      "description": "The exact Confluence page title as published. Written alongside cr_published_version and cr_published_at by kb-cr _set_publish_stamps. Used to detect unexpected title drift between the approved page and a proposed republish (XACA-0896)."
+    },
+    "cr_published_at": {
+      "type": "string",
+      "format": "ISO 8601 UTC",
+      "required": false,
+      "description": "Timestamp of the publish write that produced cr_published_version/cr_published_title (e.g., 2026-08-07T18:30:00Z). Written by kb-cr _set_publish_stamps only on a confirmed successful publish, distinguishing 'we attempted to publish' from 'the live page was actually overwritten' (XACA-0896)."
+    },
     "approver": {
       "type": "object",
       "required": false,
