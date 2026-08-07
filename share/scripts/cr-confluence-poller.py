@@ -7,7 +7,12 @@ page, and transitions cr-drafted → cr-submitted with full activity logging.
 Also runs a second pass (Auto 2, XACA-0294-004) that scans cr-submitted CRs for
 approval-readiness signals on their CR-Proper Confluence page, records a
 cr_approval_candidate_detected activity event, and (if --auto-approve is set AND
-per-team auto_approve_enabled is true) advances the CR to cr-approved.
+per-team auto_approve_enabled is true) advances the CR to cr-approved. Auto 2
+dispatches per-CR through an ApprovalProvider resolved from cr_proper_url
+(XACA-0678): Confluence URLs scan as before via ConfluenceApprovalProvider;
+IT Connect URLs route to the explicitly not-implemented
+ITConnectApprovalProvider (follow-up: XACA-0899) and are silently skipped,
+requiring manual `kb-cr approve`.
 
 Per-Team LaunchAgent Scheme (XACA-0350):
     The installer creates one LaunchAgent per team in confluence-credentials.json.
@@ -105,6 +110,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from abc import ABC, abstractmethod
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -1268,6 +1274,162 @@ kb-cr activity record '{cr_id}' cr_proper_detected \\
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Approval-signal provider seam (XACA-0678-002, wired up in XACA-0678-003)
+#
+# scan_team_approval's per-CR loop needs exactly two operations from whatever
+# platform hosts the CR-Proper document: fetch the page/ticket data, then
+# detect an approval signal from that data. ApprovalProvider names that seam;
+# ConfluenceApprovalProvider is a thin, behavior-preserving wrapper around the
+# existing fetch_cr_proper_page_data / detect_approval_signal module functions
+# — it does not reimplement or alter their logic, logging, or return values.
+# ITConnectApprovalProvider is an explicit not-implemented provider (the real
+# integration is a follow-up, XACA-0899, gated on IT Connect API access);
+# resolve_approval_provider maps a cr_proper_url to the right provider by URL
+# shape.
+#
+# scan_team_approval calls provider methods, which in turn call the bare
+# module-level functions (fetch_cr_proper_page_data, detect_approval_signal)
+# by name at call time — never a reference captured at class-definition or
+# import time. Several existing bats tests monkeypatch those bare names
+# (`m.fetch_cr_proper_page_data = ...`, `m.detect_approval_signal = ...`) and
+# then call scan_team_approval directly; this ordering keeps that transparent.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class ApprovalProvider(ABC):
+    """
+    Interface for CR-Proper approval-signal detection across platforms.
+
+    Implementations supply the two operations scan_team_approval performs per
+    CR: fetching the page/ticket data for a CR, and detecting an approval
+    signal from previously-fetched data.
+    """
+
+    @abstractmethod
+    def fetch_page_data(
+        self,
+        team: str,
+        cr_record: dict,
+        creds_for_team: dict,
+    ) -> dict | None:
+        """
+        Fetch the CR-Proper page/ticket data needed for approval-signal
+        detection. Returns None on any error / skip condition (unlinked CR,
+        wrong platform, missing credentials, fetch failure, etc.) — semantics
+        are entirely up to the implementation.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def detect_approval_signal(
+        self,
+        page_data: dict,
+        team_automations: dict,
+    ) -> tuple[str, str] | None:
+        """
+        Detect an approval signal from previously-fetched page_data. Returns
+        (signal_source, approver_name) on match, or None if no signal found.
+        """
+        raise NotImplementedError
+
+
+class ConfluenceApprovalProvider(ApprovalProvider):
+    """
+    Approval-signal provider backed by Confluence CR-Proper pages.
+
+    Thin delegating wrapper: both methods call straight through to the
+    existing module-level fetch_cr_proper_page_data / detect_approval_signal
+    functions with no change in behavior, logging, or return semantics.
+    """
+
+    def fetch_page_data(
+        self,
+        team: str,
+        cr_record: dict,
+        creds_for_team: dict,
+    ) -> dict | None:
+        cr_id = cr_record.get("crId") or cr_record.get("id", "<unknown>")
+        vlog(f"[{team}][{cr_id}] Fetching CR-Proper page for approval signals...")
+        return fetch_cr_proper_page_data(team, cr_record, creds_for_team)
+
+    def detect_approval_signal(
+        self,
+        page_data: dict,
+        team_automations: dict,
+    ) -> tuple[str, str] | None:
+        return detect_approval_signal(page_data, team_automations)
+
+
+class ITConnectApprovalProvider(ApprovalProvider):
+    """
+    Approval-signal provider for IT Connect-backed CRs (one-stage CRs whose
+    cr_proper_url points at itconnect.daveandbusters.com rather than a
+    Confluence CR-Proper page).
+
+    Explicit not-implemented: approval-signal scanning over IT Connect is
+    tracked as a follow-up ticket (XACA-0899), gated on IT Connect API/CLI
+    access we do not have.
+    fetch_page_data logs the exact operator-visible skip message the prior
+    inline branch in scan_team_approval emitted and returns None so the CR
+    is silently skipped this scan — manual approval is required. Because
+    scan_team_approval stops iterating a CR as soon as fetch_page_data
+    returns None, detect_approval_signal is never reached for an IT Connect
+    CR in practice; it is implemented defensively below (returns None
+    rather than raising) so the provider still satisfies the ApprovalProvider
+    contract on its own.
+    """
+
+    def fetch_page_data(
+        self,
+        team: str,
+        cr_record: dict,
+        creds_for_team: dict,
+    ) -> dict | None:
+        cr_id = cr_record.get("crId") or cr_record.get("id", "<unknown>")
+        cr_proper_url = cr_record.get("cr_proper_url", "").strip()
+        # cr_proper_url is an IT Connect ticket (one-stage CR, separate
+        # platform from Confluence). Approval-signal scanning over IT Connect
+        # is not implemented (follow-up tracked as XACA-0899, gated on IT
+        # Connect API access). Silent-skip — manual approval required.
+        log(
+            f"[{team}][{cr_id}] cr_proper_url is an IT Connect ticket "
+            f"({cr_proper_url}) — itconnect approval-signal scan not "
+            f"implemented; manual approval required (XACA-0469 Phase 1)."
+        )
+        return None
+
+    def detect_approval_signal(
+        self,
+        page_data: dict,
+        team_automations: dict,
+    ) -> tuple[str, str] | None:
+        return None
+
+
+def resolve_approval_provider(cr_proper_url: str) -> ApprovalProvider:
+    """
+    Resolve which ApprovalProvider handles approval-signal detection for a
+    given cr_proper_url.
+
+    IT Connect ticket URLs (ITCONNECT_URL_PATTERN — one-stage CRs on
+    itconnect.daveandbusters.com) route to ITConnectApprovalProvider, an
+    explicit not-implemented provider (follow-up tracked as XACA-0899,
+    gated on IT Connect API access).
+
+    Everything else — genuine Confluence URLs, empty strings, and any URL
+    this resolver doesn't specifically recognize — routes to
+    ConfluenceApprovalProvider. This mirrors observed current behavior
+    rather than inventing a third branch: fetch_cr_proper_page_data()
+    already returns None (with its own vlog) for a URL it can't resolve a
+    Confluence page id from, so unrecognized URLs fall through to that
+    existing skip path.
+    """
+    if cr_proper_url and ITCONNECT_URL_PATTERN.match(cr_proper_url):
+        return ITConnectApprovalProvider()
+    return ConfluenceApprovalProvider()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Per-team scan orchestration
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -1286,10 +1448,16 @@ def scan_team_approval(
     Idempotency: skips CRs that already have cr_approval_candidate_at set
     (first-detection only; field persists until the CR leaves cr-submitted).
 
-    IT Connect cr_proper_url values (one-stage CRs — itconnect.daveandbusters.com)
-    are silently skipped — approval-signal scanning over IT Connect is not
-    implemented (Phase 2, gated on IT Connect API access). Manual approval required
-    for those CRs.
+    Platform dispatch (XACA-0678): rather than branching on cr_proper_url
+    inline, this loop resolves an ApprovalProvider via
+    resolve_approval_provider() and delegates fetch_page_data /
+    detect_approval_signal to it. IT Connect cr_proper_url values (one-stage
+    CRs — itconnect.daveandbusters.com) resolve to ITConnectApprovalProvider,
+    which is silently skipped — approval-signal scanning over IT Connect is
+    not implemented (tracked as XACA-0899, gated on IT Connect API access).
+    Manual approval required for those CRs. Confluence cr_proper_url values
+    resolve to ConfluenceApprovalProvider, which reproduces the pre-existing
+    scan behavior unchanged.
 
     Returns the number of CRs for which a candidate event was recorded.
     """
@@ -1324,24 +1492,12 @@ def scan_team_approval(
             )
             continue
 
-        if ITCONNECT_URL_PATTERN.match(cr_proper_url):
-            # XACA-0469 Phase 1: cr_proper_url is an IT Connect ticket
-            # (one-stage CR, separate platform from Confluence). Approval-signal
-            # scanning over IT Connect is not implemented (Phase 2, gated on
-            # IT Connect API access). Silent-skip — manual approval required.
-            log(
-                f"[{team}][{cr_id}] cr_proper_url is an IT Connect ticket "
-                f"({cr_proper_url}) — itconnect approval-signal scan not "
-                f"implemented; manual approval required (XACA-0469 Phase 1)."
-            )
-            continue
-
-        vlog(f"[{team}][{cr_id}] Fetching CR-Proper page for approval signals...")
-        page_data = fetch_cr_proper_page_data(team, cr_record, creds_for_team)
+        provider = resolve_approval_provider(cr_proper_url)
+        page_data = provider.fetch_page_data(team, cr_record, creds_for_team)
         if page_data is None:
             continue
 
-        result = detect_approval_signal(page_data, team_automations)
+        result = provider.detect_approval_signal(page_data, team_automations)
         if result is None:
             vlog(f"[{team}][{cr_id}] No approval signal found on CR-Proper page.")
             continue
