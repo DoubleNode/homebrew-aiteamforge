@@ -639,6 +639,18 @@ def fetch_cr_proper_page_data(
         )
         return None
 
+    # Defense-in-depth, NOT dead code (XACA-0678-014). In the scan_team_approval
+    # flow this is unreachable — resolve_approval_provider() routes IT Connect
+    # URLs to ITConnectApprovalProvider before ConfluenceApprovalProvider ever
+    # calls this function. It is retained because fetch_cr_proper_page_data is a
+    # module-level function reachable by direct callers that do not go through
+    # the resolver, and because it is directly covered by the bats test
+    # "XACA-0469: fetch_cr_proper_page_data returns None for itconnect URL
+    # without reaching _confluence_page_id_from_url". Removing it would drop
+    # that regression guard. If the resolver ever becomes the sole entry point,
+    # retire this and that test together — and note ITCONNECT_URL_PATTERN has a
+    # THIRD call site in extract_cr_proper_link() with the opposite intent (it
+    # SELECTS IT Connect anchors); that one must not be touched.
     if ITCONNECT_URL_PATTERN.match(cr_proper_url):
         vlog(
             f"[{team}][{cr_id}] cr_proper_url is an IT Connect ticket — "
@@ -1386,6 +1398,12 @@ class ITConnectApprovalProvider(ApprovalProvider):
         creds_for_team: dict,
     ) -> dict | None:
         cr_id = cr_record.get("crId") or cr_record.get("id", "<unknown>")
+        # Re-derived from cr_record rather than taken as a parameter
+        # (XACA-0678-015). This duplicates the strip() scan_team_approval
+        # already performed, but the ApprovalProvider contract passes
+        # cr_record — not cr_proper_url — so both providers share one
+        # signature. Adding a cr_proper_url parameter for this provider alone
+        # would break that symmetry for a value trivially recoverable here.
         cr_proper_url = cr_record.get("cr_proper_url", "").strip()
         # cr_proper_url is an IT Connect ticket (one-stage CR, separate
         # platform from Confluence). Approval-signal scanning over IT Connect
