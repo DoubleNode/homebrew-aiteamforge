@@ -789,8 +789,16 @@ start_lcars_server() {
 
             # SHORT-CIRCUIT: if another starter finished while we waited, a healthy
             # server may already be up.  Skip pkill+relaunch if so.
+            # XACA-0890-012: --max-time raised 1s -> 3s. A 1s probe against a
+            # server that just bound its port (still loading team config,
+            # kanban dirs, etc.) can false-negative and fall through to
+            # pkill+relaunch of a server that was actually fine — a genuine,
+            # narrow restart risk this guard exists to prevent in the first
+            # place. Not the same failure mode XACA-0889/XACA-0890-004 fixed
+            # (that was single-threaded blocking on a slow in-flight request);
+            # this is about a freshly-spawned process's own startup latency.
             if [[ "${_waited}" -gt 0 || "${_reclaimed}" -eq 1 ]]; then
-                if curl -s --max-time 1 "http://localhost:${port}/api/status" >/dev/null 2>&1; then
+                if curl -s --max-time 3 "http://localhost:${port}/api/status" >/dev/null 2>&1; then
                     echo "    ✅ LCARS server already up on port ${port} (started while we waited)" >&2
                     _lcars_start_lock_release
                     return 0  # ① short-circuit: concurrent starter finished cleanly

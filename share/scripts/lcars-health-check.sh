@@ -33,6 +33,11 @@ LOG_FILE="/tmp/lcars-health.log"
 STATUS_ONLY=false
 DAEMON_MODE=false
 DAEMON_INTERVAL=60  # Check every 60 seconds in daemon mode
+# XACA-0890-013: restrict run_health_check's sweep to one team when set
+# (--team <name>). Empty (default) = existing full-sweep behaviour, so the
+# cron/LaunchAgent/--daemon path is completely unaffected. See run_health_check
+# below for the filter and --team's arg-parse case just below for how it's set.
+TEAM_FILTER=""
 
 # XACA-0889 mitigation: require 2 CONSECUTIVE failed probes, spaced this many
 # seconds apart, before a team is declared unhealthy / restarted. See the
@@ -57,19 +62,42 @@ if ! [[ "$HEALTH_CHECK_RETRY_DELAY" =~ '^[0-9]+(\.[0-9]+)?$' ]]; then
     HEALTH_CHECK_RETRY_DELAY=3
 fi
 
-# Parse arguments
-for arg in "$@"; do
-    case $arg in
-        --status) STATUS_ONLY=true ;;
-        --daemon) DAEMON_MODE=true ;;
+# Parse arguments.
+# XACA-0890-013: switched from `for arg in "$@"` to a shift-based `while`
+# loop so --team can consume its following value — the for-loop form has no
+# way to do that. Matches the existing --team convention used elsewhere in
+# this repo (kb-reconcile-inprogress/kb-recover in kanban-helpers.sh,
+# kb-port-reconcile).
+while [[ $# -gt 0 ]]; do
+    case "${1-}" in
+        --status) STATUS_ONLY=true; shift ;;
+        --daemon) DAEMON_MODE=true; shift ;;
+        --team)
+            TEAM_FILTER="${2-}"
+            if [[ -z "$TEAM_FILTER" ]]; then
+                echo "ERROR: --team requires a value" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
         --help)
             echo "LCARS Health Check & Auto-Restart"
             echo ""
             echo "Usage:"
-            echo "  $0           # Check and restart unhealthy servers"
-            echo "  $0 --status  # Just show status, don't restart"
-            echo "  $0 --daemon  # Run as daemon with periodic checks"
+            echo "  $0                    # Check and restart unhealthy servers (all teams)"
+            echo "  $0 --status           # Just show status, don't restart"
+            echo "  $0 --daemon           # Run as daemon with periodic checks"
+            echo "  $0 --team <name>      # Restrict the sweep to one team (e.g. --team finance-personal)"
+            echo ""
+            echo "--team narrows run_health_check's LCARS_SERVERS sweep to the single named"
+            echo "team (matched against the team field of the infra table) instead of every"
+            echo "configured team on this host. Composable with --status/--daemon. Omit for"
+            echo "the existing full-sweep behaviour (used by cron/LaunchAgent/--daemon)."
             exit 0
+            ;;
+        *)
+            echo "WARNING: unrecognized argument '${1-}' ignored" >&2
+            shift
             ;;
     esac
 done
@@ -140,6 +168,29 @@ for _e in "${_LCARS_INFRA[@]}"; do
     fi
     LCARS_SERVERS+=("${_fp}:${_lp}:${_team}:${_sock}:${_pat}")
 done
+
+# XACA-0890-013: validate --team eagerly. Without this, a typo'd or stale
+# team name (e.g. a renamed team, or a caller passing the wrong INSTANCE
+# value) silently sweeps ZERO servers and exits 0 — indistinguishable from
+# "everything's healthy" in both --status and restart mode. Fail loudly
+# instead: this is invoked automatically over SSH by the parametric
+# *-connect.sh scripts, where a silent no-op would look like a successful
+# health check that actually checked nothing.
+if [[ -n "$TEAM_FILTER" ]]; then
+    _team_filter_found=false
+    for _e in "${LCARS_SERVERS[@]}"; do
+        IFS=':' read -r _ _ _e_team _ _ <<< "$_e"
+        if [[ "$_e_team" == "$TEAM_FILTER" ]]; then
+            _team_filter_found=true
+            break
+        fi
+    done
+    if [[ "$_team_filter_found" == "false" ]]; then
+        echo "ERROR: --team '$TEAM_FILTER' did not match any configured team in LCARS_SERVERS (checked ${#LCARS_SERVERS[@]} entries; a team missing its registry lcars_port is excluded — see the WARNING above, if any)." >&2
+        exit 1
+    fi
+    unset _team_filter_found _e _e_team
+fi
 
 # ============================================================================
 # Logging & Log Rotation
@@ -647,6 +698,18 @@ run_health_check() {
     for server_config in "${LCARS_SERVERS[@]}"; do
         # Parse config
         IFS=':' read -r funnel_port local_port team tmux_socket session_pattern <<< "$server_config"
+
+        # XACA-0890-013: --team scopes the sweep to a single team. This is an
+        # opt-in filter (TEAM_FILTER empty by default) so the daemon/cron/
+        # LaunchAgent path — which is SUPPOSED to check everything — is
+        # completely unaffected; only an explicit `--team <name>` invocation
+        # (used by the parametric *-connect.sh scripts' remote health check)
+        # narrows the loop. Fixes the real defect behind the ~191s worst-case
+        # connect-script latency: a connect attempt for team X was triggering
+        # a full-fleet sweep of every OTHER team on the host, not just X.
+        if [[ -n "$TEAM_FILTER" && "$team" != "$TEAM_FILTER" ]]; then
+            continue
+        fi
 
         # The <instance>-lcars session name = pattern minus the ".*" glob
         # (freelance uses ".*-lcars"). Used for both surgical heal and the

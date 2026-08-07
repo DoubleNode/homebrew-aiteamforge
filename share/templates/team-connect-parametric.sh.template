@@ -298,9 +298,17 @@ _tmux_ok=false
 
 # Probe 1: LCARS reachability — try each candidate port, connect on the first
 # that responds. Resilient to a stale .port / dead-server drift (XACA-0626).
+# XACA-0890-012: --max-time raised 3s -> 5s, defense-in-depth. A false
+# negative here routes into the auto-start branch below, which (for the
+# "sessions exist" / half-up case) SSHes in and re-checks via the
+# already-safe lcars-health-check.sh (10s + retry) — so a spurious trip
+# isn't destructive by itself, but it does cost the full auto-start/poll
+# detour unnecessarily. XACA-0890-013 fixes the bigger latency cost of that
+# detour (the remote health check now scopes to this one team via --team);
+# this bump is the smaller, secondary mitigation for the trigger itself.
 for _cand in "${CANDIDATE_PORTS[@]}"; do
     echo "  Checking LCARS:  http://${HOST}:${_cand}/api/status ..."
-    if curl -sf --max-time 3 "http://${HOST}:${_cand}/api/status" > /dev/null 2>&1; then
+    if curl -sf --max-time 5 "http://${HOST}:${_cand}/api/status" > /dev/null 2>&1; then
         _lcars_ok=true
         LCARS_PORT="$_cand"
         echo "    ✓ LCARS responding"
@@ -351,9 +359,16 @@ if [[ "$_lcars_ok" != "true" || "$_tmux_ok" != "true" ]]; then
 
     if [[ "$_sessions_exist" == "true" ]]; then
         # Half-up: sessions exist but server isn't answering. Restart server only.
+        # XACA-0890-013: --team ${INSTANCE} scopes the remote health check to
+        # THIS team only. Without it, lcars-health-check.sh with no args
+        # sweeps every team configured on ${HOST} — a connect attempt for one
+        # team was triggering a full-fleet health sweep (and potential
+        # restarts) of every OTHER team sharing the host, taking up to ~191s
+        # in a multi-team-down scenario. ${INSTANCE} already matches the team
+        # identifiers lcars-health-check.sh's LCARS_SERVERS table uses.
         echo "    Detected existing sessions — restarting LCARS server via health-check..."
         if ssh -o ConnectTimeout=10 -o BatchMode=yes "$HOST" \
-            "/bin/zsh -lc '${REMOTE_ATF_DIR}/lcars-health-check.sh'" 2>/dev/null; then
+            "/bin/zsh -lc '${REMOTE_ATF_DIR}/lcars-health-check.sh --team ${INSTANCE}'" 2>/dev/null; then
             echo "    Health-check restart triggered."
         else
             echo "    ⚠ Health-check returned non-zero (may still be restarting)."
