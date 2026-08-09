@@ -457,6 +457,109 @@ _kb_cr_state_strip_spec() {
     return 0
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_state_entry_ts_field — canonical state -> entry-timestamp field map
+#
+# Echoes the single timestamps.<field> key a CR stamps when it ENTERS <state>.
+# Empty output means the state stamps nothing on entry (cr-drafted — its moment
+# is recorded as cr_created_at by `kb-cr create`).
+# Non-zero exit means <state> is not a valid crState.
+#
+# This mirrors the ts_key argument each dedicated lifecycle subcommand already
+# passes to _kb_cr_lifecycle_advance, and is the single source of truth for
+# `kb-cr transition`.
+#
+# It is deliberately NOT _kb_cr_state_strip_spec. That map answers a different
+# question — what REVERT removes — and differs in two ways that matter here:
+#   * it omits terminal cr-closed (never reverted past), which transition needs;
+#   * it lists BOTH cr_started_dev_at and cr_started_test_at for `implementing`,
+#     only the first of which is stamped on entry (see _kb_cr_implement).
+# Reusing it would stamp the wrong field set. Keep the two in sync by hand when
+# a new crState is added — both cases must be extended together. (XACA-0297-005)
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_state_entry_ts_field() {
+    case "$1" in
+        cr-drafted)         ;;                              # stamped by `kb-cr create`
+        cr-submitted)       echo "cr_submitted_at"          ;;
+        cr-rejected)        echo "cr_rejected_at"           ;;
+        cr-held)            echo "cr_held_at"               ;;
+        cr-approved)        echo "cr_approved_at"           ;;
+        implementing)       echo "cr_started_dev_at"        ;;
+        deployed-dev)       echo "cr_deployed_dev_at"       ;;
+        deployed-prod)      echo "cr_deployed_prod_at"      ;;
+        emergency-deployed) echo "cr_emergency_deployed_at" ;;
+        cr-closed)          echo "cr_closed_at"             ;;
+        *)                  return 1 ;;
+    esac
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_stamp_state_entry — force-write <new_state> AND stamp its entry
+# timestamp, preserving any timestamp already present.
+#
+#   _kb_cr_stamp_state_entry <board_file> <cr_idx> <cr_id> <new_state>
+#
+# This is the SHARED implementation behind every force-write state change:
+#   * `kb-cr transition` (CLI)                     — _kb_cr_container_transition
+#   * the LCARS CR transition endpoint (XACA-0328) — lcars-ui/server.py
+#
+# Both previously wrote crState + updatedAt inline and stamped NO timestamp,
+# which is why 24 CRs reached cr-closed carrying only 3 cr_closed_at values
+# (XACA-0297). server.py's own comment claimed it called the shared helper;
+# the code had drifted to a private copy. Route new call sites through HERE
+# rather than open-coding a fourth copy.
+#
+# Delegates to _kb_cr_lifecycle_advance, so the cr_state_changed activity
+# event is emitted here — callers must NOT append their own.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_stamp_state_entry() {
+    local board_file="$1"
+    local cr_idx="$2"
+    local cr_id="$3"
+    local new_state="$4"
+
+    local ts_field
+    ts_field=$(_kb_cr_state_entry_ts_field "$new_state")
+    if [[ $? -ne 0 ]]; then
+        echo "_kb_cr_stamp_state_entry: unknown state '$new_state'." >&2
+        return 1
+    fi
+
+    local now
+    now=$(_kb_cr_timestamp)
+
+    # States that stamp nothing on entry (cr-drafted) still need the state write.
+    if [[ -z "$ts_field" ]]; then
+        _kb_jq_update "$board_file" '
+            .crs[$cidx].crState   = $state |
+            .crs[$cidx].updatedAt = $ts |
+            .lastUpdated          = $ts
+        ' \
+        --argjson cidx  "$cr_idx" \
+        --arg     state "$new_state" \
+        --arg     ts    "$now" \
+        || return 1
+        return 0
+    fi
+
+    # Preserve an existing timestamp: a force-write must not rewrite when the
+    # CR first entered this state. Preserving is recoverable via revert;
+    # overwriting destroys the original irreversibly.
+    local existing
+    existing=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_idx].timestamps[\"$ts_field\"] // \"\"" -r 2>/dev/null)
+
+    if [[ -n "$existing" ]]; then
+        _kb_cr_lifecycle_advance "$board_file" "$cr_idx" "$cr_id" \
+            "$new_state" "$ts_field" "$existing" || return 1
+    else
+        _kb_cr_lifecycle_advance "$board_file" "$cr_idx" "$cr_id" \
+            "$new_state" "$ts_field" "$now" || return 1
+    fi
+    return 0
+}
+
 # Echo every canonical state with rank > <target_rank>, ascending by rank,
 # one per line. Used by the revert driver to enumerate which states' fields
 # may need stripping when walking back to a target state.
@@ -3174,23 +3277,33 @@ _kb_cr_container_transition() {
         return 1
     fi
 
-    local old_state ts
+    local old_state ts_field before
     old_state=$(_kb_jq_read "$_cr_board" ".crs[$cr_idx].crState // \"\"" -r 2>/dev/null)
-    ts=$(_kb_cr_timestamp)
 
-    # NOTE: cr_*_at timestamp fields are NOT written here.
-    # That is subitem 004's job (lifecycle helpers).
-    _kb_jq_update "$_cr_board" '
-        .crs[$cidx].crState    = $state |
-        .crs[$cidx].updatedAt  = $ts |
-        .lastUpdated = $ts
-    ' \
-    --argjson cidx  "$cr_idx" \
-    --arg     state "$new_state" \
-    --arg     ts    "$ts" \
-    || return 1
+    # Resolve the field first, purely so the CLI can report what it did.
+    # The write itself is delegated — see _kb_cr_stamp_state_entry.
+    ts_field=$(_kb_cr_state_entry_ts_field "$new_state")
+    if [[ $? -ne 0 ]]; then
+        echo "kb-cr transition: no timestamp mapping for state '$new_state'." >&2
+        return 1
+    fi
+    if [[ -n "$ts_field" ]]; then
+        before=$(_kb_jq_read "$_cr_board" \
+            ".crs[$cr_idx].timestamps[\"$ts_field\"] // \"\"" -r 2>/dev/null)
+    fi
 
-    echo "Transitioned CR [$cr_id]: $old_state -> $new_state"
+    _kb_cr_stamp_state_entry "$_cr_board" "$cr_idx" "$cr_id" "$new_state" || return 1
+
+    if [[ -z "$ts_field" ]]; then
+        echo "Transitioned CR [$cr_id]: $old_state -> $new_state (no entry timestamp for this state)"
+    elif [[ -n "$before" ]]; then
+        echo "Transitioned CR [$cr_id]: $old_state -> $new_state (preserved existing $ts_field=$before)"
+    else
+        local written
+        written=$(_kb_jq_read "$_cr_board" \
+            ".crs[$cr_idx].timestamps[\"$ts_field\"] // \"\"" -r 2>/dev/null)
+        echo "Transitioned CR [$cr_id]: $old_state -> $new_state ($ts_field=$written)"
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

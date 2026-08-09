@@ -11139,8 +11139,6 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 )
                 return
 
-            from_state = current_cr.get("crState", "")
-
             # ── Build shell script for atomic transition + field writes ────────
             # We source kanban-helpers.sh and kb-cr.sh so we get _kb_jq_update
             # (Perl-flock locking) and all kb-cr helpers.  All writes go through
@@ -11148,13 +11146,28 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # concurrent kb-cr CLI invocation.
             #
             # Strategy:
-            #   1. Set _cr_board / _cr_enabled / _cr_team directly (bypasses
-            #      _kb_cr_board_preamble which needs tmux).
-            #   2. Call _kb_cr_container_transition directly for the state change.
+            #   1. Resolve the CR's index on the board by id.
+            #   2. Call _kb_cr_stamp_state_entry for the state change. It writes
+            #      crState, stamps the target state's cr_*_at entry timestamp,
+            #      and appends the cr_state_changed activity event.
             #   3. Build a jq update for the extra fields (approver, notes, etc.).
-            #   4. Append activity events via _kb_cr_activity_append.
+            #   4. Append cr_field_update activity events for those fields only.
             #
             # All of the above use _kb_jq_update's Perl flock — single locking path.
+            #
+            # This block is deliberately index-based rather than going through
+            # _kb_cr_container_transition: that entry point calls
+            # _kb_cr_board_preamble, which needs tmux and is unavailable inside
+            # the HTTP server process. _kb_cr_stamp_state_entry is the shared
+            # write path both it and this endpoint sit on, and takes the board
+            # file and index explicitly so no preamble is required.
+            #
+            # Until XACA-0297-006 this comment claimed step 2 delegated to
+            # _kb_cr_container_transition while the code below open-coded a
+            # _kb_jq_update that set crState + updatedAt and stamped no
+            # timestamp at all. Keep this description matched to the code: the
+            # mismatch is what kept the missing-timestamp defect invisible
+            # through three phases of review.
 
             board_file_str = str(board_file.resolve())
 
@@ -11200,10 +11213,23 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Find CR index
                 f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] | select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
                 f'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',
-                # Apply state transition (uses _kb_jq_update with flock internally)
-                f'old_state=$(_kb_jq_read "{board_file_str}" ".crs[$cr_idx].crState // empty" -r 2>/dev/null || echo "")',
-                f'ts=$(_kb_cr_timestamp)',
-                f'_kb_jq_update "{board_file_str}" \'.crs[$cidx].crState = $state | .crs[$cidx].updatedAt = $ts | .lastUpdated = $ts\' --argjson cidx "$cr_idx" --arg state "{target_state}" --arg ts "$ts"',
+                # Apply state transition + entry timestamp via the SHARED helper
+                # (XACA-0297-006).
+                #
+                # This previously inlined a _kb_jq_update writing crState +
+                # updatedAt and stamping NO cr_*_at timestamp — a private copy of
+                # logic that step 2 of the comment above already claimed to
+                # delegate to _kb_cr_container_transition. Because operators drive
+                # state changes from this endpoint rather than the CLI, that drift
+                # is the main reason 24 CRs reached cr-closed carrying only 3
+                # cr_closed_at values across the three live mobile boards.
+                #
+                # _kb_cr_stamp_state_entry resolves the entry-timestamp field for
+                # the target state, preserves any value already present (a
+                # force-write must not rewrite when the CR first entered a state),
+                # and emits the cr_state_changed activity event itself — which is
+                # why this endpoint no longer appends its own below.
+                f'_kb_cr_stamp_state_entry "{board_file_str}" "$cr_idx" {shlex.quote(cr_id)} {shlex.quote(target_state)}',
             ]
 
             # Field updates — each needs cidx, so we re-use the same _kb_jq_update
@@ -11225,12 +11251,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     f'_kb_jq_update "{board_file_str}" \'{jq_filter_combined}\' --argjson cidx "$cr_idx" --arg ts "$ts2" {field_arg_str}'
                 )
 
-            # cr_state_changed activity event
-            shell_parts += [
-                f'from_state_safe="${{old_state:-{from_state}}}"',
-                f'state_evt=$(_kb_cr_activity_event cr_state_changed from_state="$from_state_safe" to_state="{target_state}" 2>/dev/null || echo "")',
-                f'[ -n "$state_evt" ] && _kb_cr_activity_append "{board_file_str}" "{cr_id}" "$state_evt" 2>/dev/null || true',
-            ]
+            # cr_state_changed activity event — NOT emitted here (XACA-0297-006).
+            # _kb_cr_stamp_state_entry delegates to _kb_cr_lifecycle_advance,
+            # which appends the cr_state_changed event itself, reading the prior
+            # state off the board immediately before the write. Appending again
+            # here would double-log every manual transition in the activity feed,
+            # which the pushback and cycle-time readers both consume. The local
+            # from_state / shell old_state captures that fed the old inline event
+            # were removed with it — the response body re-reads the full CR
+            # record after the write, so neither had another consumer.
 
             # cr_field_update activity events (one per changed field).
             # shlex.quote each user-controlled value — fname comes from the
