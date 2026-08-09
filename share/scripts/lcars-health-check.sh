@@ -400,6 +400,56 @@ get_remote_host_for_port() {
 }
 
 # ============================================================================
+# XACA-0894-004: bounded wait for a port to actually release.
+# ============================================================================
+# SIGNATURE B (logs/lcars-server-android.log.old): "OSError: [Errno 48]
+# Address already in use" — a new server was launched before the old one's
+# socket was actually released. server.py sets allow_reuse_address=True
+# (XACA-0889-018), which avoids the classic TIME_WAIT-stuck-socket EADDRINUSE,
+# but does NOT help when the OLD process is simply still alive and still
+# holding the listening socket (SIGTERM was sent but the process hasn't
+# exited yet) — that is a real, measurable race, not a TIME_WAIT artifact.
+#
+# PROBE CHOICE — `nc -z`, NOT `lsof`, for the per-iteration check (measured,
+# XACA-0894-004): this repo's other scripts (tests/test-lcars-server-*.sh,
+# scripts/remote-*.sh) use `lsof -iTCP:<port> -sTCP:LISTEN` for one-shot
+# checks, and that idiom was the obvious first choice here too. But measured
+# directly on this dev machine, a single `lsof` call took 2.3s-6.8s wall
+# clock (it scans every open file across every process; this machine runs
+# many personas/tmux sessions/servers) — looping it `timeout` times would
+# silently inflate a "10s bounded wait" to 30-80s+, which is precisely the
+# unbounded-looking behavior this function exists to prevent. `nc -z`
+# (zero-I/O connect probe, `-G1` caps its own connection attempt at 1s)
+# answers the SAME yes/no "is anything accepting on this port" question in
+# ~0.03-0.25s measured here. `lsof` is still used, once, for the "who holds
+# it" diagnostic in the caller below — that is a single call, not a loop, so
+# its cost is acceptable there and it is the only way to get a holder PID.
+#
+# BOUND — wall-clock elapsed time, not an iteration counter: counting loop
+# iterations only bounds wall-clock time if every iteration has a known,
+# fixed cost. It doesn't here (see above) — so the bound is enforced by
+# comparing `date +%s` against the start time on every iteration instead.
+# Never busy-loops forever; returns 1 (still held) once the elapsed budget is
+# exhausted so the caller can fail loudly instead of hanging.
+# ============================================================================
+_hc_wait_for_port_release() {
+    local port=$1
+    local timeout=${2:-10}
+    local _start _now
+    _start=$(date +%s)
+    while true; do
+        if ! nc -z -G1 127.0.0.1 "${port}" 2>/dev/null; then
+            return 0  # nothing accepting connections on the port -> released
+        fi
+        _now=$(date +%s)
+        if (( _now - _start >= timeout )); then
+            return 1  # bounded wall-clock budget exhausted, still held
+        fi
+        sleep 1
+    done
+}
+
+# ============================================================================
 # Start LCARS server for a team (health-check restart path)
 # ============================================================================
 # XACA-0763 (004): this is now a THIN WRAPPER delegating to
@@ -504,6 +554,60 @@ _hc_start_lcars_server() {
     # transpose.
     start_lcars_server "$team" "$local_port" "$session_name"
     local _rc=$?
+
+    # XACA-0894-004: bounded EADDRINUSE recovery (Signature B).
+    #
+    # start_lcars_server's own pkill (XACA-0661-007, under its per-port mkdir
+    # lock) sends SIGTERM to any stale holder on this port, but does NOT wait
+    # to confirm the socket was actually released before binding the new
+    # server — if the old process is slow to die (or was itself hung), the
+    # new bind can lose that race. logs/lcars-server-android.log.old is a
+    # confirmed instance: "OSError: [Errno 48] Address already in use".
+    #
+    # We detect this from a MEASURED fact — the literal EADDRINUSE signature
+    # in the server's own stderr log — never a guess, and never duplicate
+    # start_lcars_server's own pkill/lock here (a second, unlocked pkill in
+    # this wrapper is exactly the drifted-duplicate antipattern XACA-0763-004
+    # already removed once; see this file's header comment above
+    # _hc_start_lcars_server). If the signature is present, we wait (bounded,
+    # via _hc_wait_for_port_release) for the port to actually clear, then
+    # retry the SAME locked/anchored start_lcars_server call exactly once.
+    #
+    # This addresses Signature B only. It does NOT address Signature A's
+    # "before becoming ready" SIGTERM/status-143 death by itself — that death
+    # happens before the server ever answers, and its cause (concurrent
+    # userspace re-entrancy vs. a launchd process-group reap of the whole job
+    # — the latter is what subitem 001/002's AbandonProcessGroup fix targets)
+    # is not something a userspace retry can distinguish or repair. All this
+    # retry can do for a Signature-A-shaped failure is attempt again; it will
+    # only actually help if the underlying cause was transient.
+    if [[ $_rc -ne 0 ]]; then
+        local _server_log_path="${AITEAMFORGE_DIR:-$HOME/dev-team}/logs/lcars-server-${team}.log"
+        if [[ -f "$_server_log_path" ]] && grep -q "Address already in use\|\[Errno 48\]" "$_server_log_path" 2>/dev/null; then
+            # `lsof` gives us the holder PID for the log (nc can't — it only
+            # answers yes/no), but measured on this machine a single lsof
+            # call can itself take 2-7s under load (it scans every open file
+            # across every process). Query it ONCE here and reuse the value
+            # in both log lines below rather than re-querying after the wait
+            # — a second lsof call on the give-up path would silently add
+            # several more seconds on top of the already-bounded wait, which
+            # is exactly the kind of hidden-latency drift this whole
+            # subitem exists to eliminate. The holder is not expected to
+            # change identity mid-wait (nothing else in this path signals
+            # it to), so the pre-wait reading remains accurate context for
+            # the give-up message too.
+            local _holder
+            _holder="$(lsof -ti tcp:"${local_port}" -sTCP:LISTEN 2>/dev/null | tr '\n' ' ')"
+            log "  [measured] EADDRINUSE signature found in ${_server_log_path} — port ${local_port} currently held by pid(s)=[${_holder:-none}]"
+            if _hc_wait_for_port_release "$local_port" 10; then
+                log "  [measured] port ${local_port} released — retrying start once"
+                start_lcars_server "$team" "$local_port" "$session_name"
+                _rc=$?
+            else
+                log "  [measured] port ${local_port} still held after 10s bounded wait (holder pid(s) at detection time=[${_holder:-none}]) — not retrying further"
+            fi
+        fi
+    fi
 
     # XACA-0763 (004): preserve the /tmp/lcars-<team>-<port>.log DETECTION
     # SENTINEL that scripts/lcars-restart-helpers.sh::detect_active_lcars_team
@@ -720,11 +824,280 @@ _hc_check_health_with_retry() {
 }
 
 # ============================================================================
+# XACA-0894-004: whole-invocation single-instance lock.
+# ============================================================================
+# WHAT THIS DOES AND DOES NOT ADDRESS: the actual per-team restart (pkill +
+# relaunch) is already serialized per-PORT inside start_lcars_server via its
+# own mkdir lock (XACA-0661-007), and that lock is shared by every caller
+# (this script's delegation AND team-startup.sh's direct calls), so a manual
+# startup racing a health-check restart of the SAME team was already fixed by
+# that prior work (XACA-0763-004 delegation). This lock is a DIFFERENT,
+# coarser layer on top: it prevents two *invocations of this whole script*
+# (e.g. a launchd StartInterval firing again before the previous run
+# finished, or a manual/cron run overlapping a --daemon loop) from both
+# executing run_health_check's team-by-team sweep at the same time. Two such
+# sweeps racing each other would duplicate every per-team health probe and
+# restart decision, adding load and log noise even though the per-port lock
+# would still keep any individual restart itself safe.
+#
+# WHAT THIS DELIBERATELY DOES NOT CLAIM TO FIX: analysis of the available
+# /tmp/lcars-health.log / .log.1 / .log.2 history found exactly two
+# Signature-A ("exited ... before becoming ready", status 143) events in the
+# retained history — android on 2026-08-04 08:33:43 and ios on 2026-08-05
+# 09:27:56 — a full day apart, each the only unhealthy team in its own
+# health-check run. No coincident same-run, different-team burst is visible
+# in that data. A whole-run lock like this one cannot make two DIFFERENT
+# teams' restarts (which already run sequentially within one invocation's
+# `for` loop, never concurrently with each other) fail together — if the
+# 143 death is caused by something process-group-wide (the AbandonProcessGroup
+# hypothesis subitem 001/002 are testing), this lock does not touch that
+# mechanism at all. It only closes the whole-script re-entrancy window.
+#
+# STALE-LOCK POLICY mirrors the proven pattern already in
+# scripts/lcars-launch-helpers.sh::start_lcars_server (liveness check via
+# `kill -0`, then an age fallback) rather than inventing a new one — see that
+# function's header for the fuller rationale of why mkdir + these two tests.
+# On failure to acquire (another live, recent run holds it), we SKIP this
+# entire invocation rather than block: launchd re-fires every
+# ${DAEMON_INTERVAL:-120}s regardless, so a skipped cycle costs at most one
+# more interval of detection latency, which is far cheaper than two sweeps
+# racing each other or a busy-wait piling up.
+# ============================================================================
+_HC_RUN_LOCK_DIR="/tmp/lcars-healthcheck-run-lock"
+
+# XACA-0894-004 (Review #1): OWNERSHIP-AWARE release. The old body was a bare
+# `rm -rf "${_HC_RUN_LOCK_DIR}"` — safe everywhere it used to be called (only
+# on run_health_check's own fall-through path, always AFTER a successful
+# _hc_acquire_run_lock, so ownership was implied by control flow). run_daemon's
+# INT/TERM trap now also calls this (see below) to close a wedge-free-but-slow
+# gap: the trap can fire asynchronously WHILE run_health_check is mid-sweep,
+# i.e. between a successful acquire and its own release call, in which case
+# skipping cleanup would leave the lock held until the 600s age fallback. But
+# a bare rm -rf in the trap would be unsafe in general — the trap fires in
+# EVERY invocation's process, including ones that never held the lock (skipped
+# because another run was live) or already released it, and blindly removing
+# the dir in those cases could delete a DIFFERENT invocation's live lock out
+# from under it. So this checks the pid file against our own $$ before
+# touching anything: only the process whose pid is actually recorded as
+# holder may remove the dir.
+#
+# Death-at-each-step: if THIS process dies between the `cat` read and the
+# `rm -rf`, at most a lock dir with our own (now-dead) pid in its pid file is
+# left behind — indistinguishable from any other stale-holder case, self-heals
+# via the existing kill -0 / 600s-age reclaim path in _hc_acquire_run_lock. No
+# new wedge is possible: this function only ever deletes a dir it has just
+# confirmed, by pid match, that it itself is the current holder of.
+_hc_run_lock_release() {
+    local _held_pid
+    _held_pid="$(cat "${_HC_RUN_LOCK_DIR}/pid" 2>/dev/null || true)"
+    if [[ -n "${_held_pid}" && "${_held_pid}" == "$$" ]]; then
+        rm -rf "${_HC_RUN_LOCK_DIR}" 2>/dev/null || true
+    fi
+    # else: not our lock (never acquired it, already released it, or a
+    # different invocation now legitimately holds it) — leave it alone.
+}
+
+# XACA-0894-004 (Review #2): opportunistic, age-bounded sweep of orphaned
+# "<lock>.stale.<pid>" directories left behind by _hc_acquire_run_lock's
+# atomic-mv reclaim (see that function's header for why the reclaim uses a
+# uniquely-named intermediate). The reclaim winner normally removes its own
+# "${_HC_RUN_LOCK_DIR}.stale.$$" immediately after the mv; a crash in that
+# narrow window (after the mv, before the rm -rf) leaks the directory
+# permanently — nothing ever revisits it otherwise, so these accumulate in
+# /tmp without bound over the life of the machine.
+#
+# VERIFIED (not assumed) what a pid-reuse collision actually does on this
+# platform's `mv` (BSD /bin/mv, no GNU -T/--no-target-directory): when the
+# destination name "${_HC_RUN_LOCK_DIR}.stale.$$" already exists as a
+# directory (an old orphan under a reused $$), plain `mv src dst` does NOT
+# fail with ENOTEMPTY — it moves src INSIDE dst as dst/$(basename src), which
+# succeeds, and the reclaim's own following `rm -rf "${_claim}"` then deletes
+# that whole nested tree (old orphan contents included). This is safe, not a
+# defect: a pid can only be reused after the OS has confirmed the previous
+# holder of that pid is dead (pids are never shared between two live
+# processes), so an orphan sitting at exactly our own "$$" name can never
+# belong to a still-running concurrent reclaim — absorbing and discarding it
+# is exactly correct. (A hand-rolled `mv -T`/`rename()` equivalent — which
+# WOULD ENOTEMPTY-fail here — is deliberately not used; the existing "move
+# into" form is what makes same-pid collisions self-heal for free instead of
+# needlessly skipping a cycle, so the earlier draft plan to add ENOTEMPTY
+# handling in the reclaim path is unnecessary here and was dropped.)
+#
+# So this sweep's job is pure hygiene, not correctness-for-the-reclaim: bound
+# how long a truly-abandoned "<lock>.stale.<dead-pid>" directory can persist
+# in /tmp, independent of whether a pid-reuse event ever happens to trigger
+# the self-heal above. Without it, a crash-during-reclaim leaves a permanent,
+# unbounded leak.
+#
+# SAFETY — must never remove a dir a CONCURRENT reclaim is actively using:
+# that window is a single `mv` immediately followed by a single `rm -rf` —
+# sub-millisecond in practice, no sleeps, no I/O other than one recursive
+# delete of a directory containing at most a "pid" file. AGE_SECONDS below
+# (60s) is >100x that real window, so anything old enough to sweep cannot be
+# a live in-flight reclaim.
+#
+# BOUND — must not wedge or slow the common (uncontended) path: this is a
+# single in-process glob (readdir, not a forked `find`) plus, for each match,
+# one stat + conditional rm -rf. The common case (zero stale.* dirs) costs one
+# empty glob. To keep the WORST case (many accumulated orphans, e.g. after a
+# long outage this script wasn't invoked to sweep) bounded too, at most
+# MAX_SWEEP dirs are removed per call — any remainder ages further and is
+# swept on a later invocation, so this never has to do unbounded work in one
+# pass.
+#
+# Death-at-each-step: dies mid-loop -> some already-processed orphans are
+# gone, the rest untouched; every removal target is a uniquely pid-named
+# orphan this call itself decided (by age) is abandoned, never the live
+# ${_HC_RUN_LOCK_DIR} itself (that name never matches the .stale.* glob) and
+# never a dir younger than AGE_SECONDS. No new wedge possible.
+_hc_sweep_stale_lock_orphans() {
+    local -a _stale_dirs
+    local _d _mtime _now _age
+    local _AGE_SECONDS=60
+    local _MAX_SWEEP=25
+
+    _stale_dirs=( "${_HC_RUN_LOCK_DIR}".stale.*(N) )
+    (( ${#_stale_dirs[@]} == 0 )) && return 0
+
+    _now="$(date +%s)"
+    local _n=0
+    for _d in "${_stale_dirs[@]}"; do
+        (( _n >= _MAX_SWEEP )) && break
+        [[ -d "$_d" ]] || continue
+        _mtime="$(stat -c %Y "$_d" 2>/dev/null || stat -f %m "$_d" 2>/dev/null || echo "$_now")"
+        _age=$(( _now - _mtime ))
+        if (( _age > _AGE_SECONDS )); then
+            rm -rf "$_d" 2>/dev/null || true
+            ((_n++))
+        fi
+    done
+    return 0
+}
+
+# Returns 0 if the lock is held by us (caller should proceed and MUST call
+# _hc_run_lock_release before every return path), 1 if another live run holds
+# it and this invocation should skip its sweep entirely.
+#
+# XACA-0894-004: STALE-RECLAIM ATOMICITY. The original implementation decided
+# staleness, then did `rm -rf` followed by a SEPARATE `mkdir`. Two invocations
+# racing against the same dead/aged-out lock could BOTH pass the staleness
+# check, BOTH rm -rf, and BOTH mkdir successfully — each believing it alone
+# holds the lock (reproduced 10/10 with a scripted two-process race). The fix
+# below makes the reclaim decision hinge on a single atomic `mv` (rename(2),
+# atomic on one filesystem — /tmp here) instead of the delete-then-create
+# pair: a racer that judges the lock stale attempts to rename the stale dir
+# to a name unique to its own pid. Exactly one racer's `mv` can succeed —
+# rename(2) requires the source to exist, so the loser's `mv` fails with
+# ENOENT because the winner already moved the source out from under it. No
+# mutex is held across a window (nothing is held OVER the mv at all — it's a
+# single atomic syscall), so there is no step whose failure produces a
+# permanent wedge; see the death-at-each-step analysis in the XACA-0894-004
+# plan doc / retro. Deliberately NOT using a second mkdir-based reclaim mutex
+# guarding the rm+mkdir pair: if the mutex-holder died before releasing it,
+# that mutex would itself be permanently orphaned and unreclaimable — trading
+# an intermittent under-protection bug for a total, permanent outage of the
+# health checker. Rejected for that reason.
+_hc_acquire_run_lock() {
+    # XACA-0894-004 (Review #2): sweep age-bounded orphaned .stale.<pid> dirs
+    # opportunistically on every acquire attempt, BEFORE the fast-path mkdir.
+    # Cheap on the common (no-orphans) path (see function header). This is
+    # pure hygiene (bounds /tmp accumulation) — it is not required for
+    # correctness of the reclaim below, which already self-heals a same-pid
+    # collision safely on its own (see the sweep function's header for the
+    # verified `mv` behavior and why that's safe).
+    _hc_sweep_stale_lock_orphans
+
+    if mkdir "${_HC_RUN_LOCK_DIR}" 2>/dev/null; then
+        echo "$$" > "${_HC_RUN_LOCK_DIR}/pid" 2>/dev/null || true
+        return 0
+    fi
+
+    local _holder_pid _mtime _now _age _stale=false _reason=""
+    _holder_pid="$(cat "${_HC_RUN_LOCK_DIR}/pid" 2>/dev/null || true)"
+
+    # Test 1: holder liveness — kill -0 fails → process is dead → stale lock.
+    if [[ -n "${_holder_pid}" ]] && ! kill -0 "${_holder_pid}" 2>/dev/null; then
+        _stale=true
+        _reason="stale (holder pid ${_holder_pid} is dead)"
+    else
+        # Test 2: age guard. A single sweep restarting several unhealthy teams
+        # can legitimately take a few minutes (per-team: up to ~20s lock-wait
+        # + ~15s poll + ~10s EADDRINUSE bounded wait + ~15s retry poll); 600s
+        # is generous headroom above that worst case for a holder that is
+        # still genuinely working, while still reclaiming from a truly stuck
+        # process rather than wedging forever.
+        # Portable mtime: GNU `stat -c %Y` first, BSD `stat -f %m` fallback —
+        # BSD `-f` does not error on Linux (means "filesystem" there), so
+        # GNU-first is required for the `|| echo 0` fallback to ever fire.
+        _mtime="$(stat -c %Y "${_HC_RUN_LOCK_DIR}" 2>/dev/null || stat -f %m "${_HC_RUN_LOCK_DIR}" 2>/dev/null || echo 0)"
+        _now="$(date +%s)"
+        _age=$(( _now - _mtime ))
+        if (( _age > 600 )); then
+            _stale=true
+            _reason="${_age}s old (holder pid ${_holder_pid:-?} may be stuck)"
+        fi
+    fi
+
+    if [[ "${_stale}" != "true" ]]; then
+        log "  ⏭  another health-check run (pid ${_holder_pid:-?}) is in progress — skipping this cycle to avoid an overlapping sweep"
+        return 1
+    fi
+
+    log "  ⚠️  run-lock: ${_reason} — attempting atomic reclaim"
+
+    # Atomic winner-take-all: rename the stale dir to a name unique to our
+    # own pid. At most one racing invocation's rename can succeed (see header
+    # comment). A failure here means (a) another racer's mv beat ours, or (b)
+    # the original holder finished and released the lock normally (rm -rf,
+    # not rename) in the window between our staleness check and this mv —
+    # indistinguishable from here, and both equally safe to treat the same
+    # way: back off. Skipping one cycle is cheap; launchd re-fires on its own
+    # interval regardless.
+    #
+    # NOTE on same-pid orphans: if ${_claim} already exists as a leftover
+    # directory (an earlier invocation reused this exact pid and crashed
+    # between its own mv and its own rm -rf), this `mv` does NOT fail on this
+    # platform's `mv` (verified — see _hc_sweep_stale_lock_orphans's header) —
+    # it succeeds by moving ${_HC_RUN_LOCK_DIR} INSIDE the existing ${_claim}
+    # directory, and the `rm -rf "${_claim}"` a few lines below then discards
+    # the whole nested tree, old orphan included. That is safe by
+    # construction (a reused pid can only belong to a process the OS has
+    # already confirmed is dead), so this `if` branch is never reached by a
+    # same-pid collision — only by a genuinely different racer or a
+    # concurrently-releasing original holder.
+    local _claim="${_HC_RUN_LOCK_DIR}.stale.$$"
+    if ! mv "${_HC_RUN_LOCK_DIR}" "${_claim}" 2>/dev/null; then
+        log "  ⏭  run-lock: lost the reclaim race (or holder released concurrently) — skipping this cycle"
+        return 1
+    fi
+    # Only the mv winner reaches here, and only the winner ever refers to
+    # ${_claim} (the name is unique to our own $$) — safe to remove without
+    # racing anyone else.
+    rm -rf "${_claim}" 2>/dev/null || true
+
+    if mkdir "${_HC_RUN_LOCK_DIR}" 2>/dev/null; then
+        echo "$$" > "${_HC_RUN_LOCK_DIR}/pid" 2>/dev/null || true
+        return 0
+    fi
+    # A brand-new invocation's ordinary top-level mkdir landed in the gap we
+    # opened by moving the stale dir away, and it now holds a legitimate
+    # fresh lock. Yield to it — proceeding unlocked here would recreate
+    # exactly the double-proceed defect this fix exists to close, now that we
+    # have a positive signal (failed mkdir) that a live holder exists.
+    log "  ⏭  run-lock: another invocation acquired a fresh lock during our reclaim — skipping this cycle"
+    return 1
+}
+
+# ============================================================================
 # Main health check routine
 # ============================================================================
 run_health_check() {
     # Rotate log if it's getting too large
     rotate_log_if_needed
+
+    if ! _hc_acquire_run_lock; then
+        return 0  # another live invocation is already sweeping; not an error
+    fi
 
     local healthy=0
     local unhealthy=0
@@ -865,8 +1238,10 @@ run_health_check() {
     # Return non-zero in status-only mode if any server is unhealthy or bound to
     # the wrong port (XACA-0706 — surfaces the drift to callers/monitors).
     if [[ "$STATUS_ONLY" == "true" && ( $unhealthy -gt 0 || $drifted -gt 0 ) ]]; then
+        _hc_run_lock_release
         return 1
     fi
+    _hc_run_lock_release
     return 0
 }
 
@@ -877,7 +1252,18 @@ run_daemon() {
     log "Starting LCARS health daemon (checking every ${DAEMON_INTERVAL}s)"
     log "Press Ctrl+C to stop"
 
-    trap 'log "Daemon stopped"; exit 0' INT TERM
+    # XACA-0894-004 (Review #1): release the run lock deterministically on
+    # daemon shutdown instead of relying solely on the 600s staleness
+    # backstop. _hc_run_lock_release is ownership-aware (checks the pid file
+    # against $$ before removing anything — see its header comment), so this
+    # is safe to call unconditionally even when this trap fires in an
+    # invocation that never acquired the lock, already released it, or whose
+    # acquire attempt is not the one currently holding it: in every such case
+    # it is a safe no-op. It IS a real fix in the one case that matters: the
+    # signal arriving while run_health_check is mid-sweep (between a
+    # successful _hc_acquire_run_lock and its own release call at the end),
+    # which the exit here would otherwise bypass.
+    trap 'log "Daemon stopped"; _hc_run_lock_release; exit 0' INT TERM
 
     while true; do
         run_health_check
