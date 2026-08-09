@@ -34,7 +34,7 @@
     <!-- Claude Usage Indicator widget (XACA-0243-004/005) -->
     <link rel="stylesheet" href="css/usage-indicator.css?v=1.1">
     <!-- XACA-0292-007: CHANGE REQ list view styles -->
-    <link rel="stylesheet" href="css/lcars-cr-tab.css?v=1.1">
+    <link rel="stylesheet" href="css/lcars-cr-tab.css?v=1.2">
     <!-- XACA-0334-005: Daily Overview grid + card styles -->
     <link rel="stylesheet" href="css/daily-overview.css">
     <script src="js/usage-helpers.js"></script>
@@ -540,6 +540,7 @@
                                 <div class="cr-filter-pills" id="cr-state-pills">
                                     <button class="filter-pill active" data-cr-state="all">ALL</button>
                                     <button class="filter-pill" data-cr-state="cr-drafted">DRAFTED</button>
+                                    <button class="filter-pill" data-cr-state="cr-published">PUBLISHED</button>
                                     <button class="filter-pill" data-cr-state="cr-submitted">SUBMITTED</button>
                                     <button class="filter-pill" data-cr-state="cr-approved">APPROVED</button>
                                     <button class="filter-pill" data-cr-state="implementing">IMPLEMENTING</button>
@@ -2659,7 +2660,7 @@
     <script src="js/vendor/html2canvas.min.js?v=1"></script>
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
-<script src="js/lcars-filter-bar.js"></script>
+<script src="js/lcars-filter-bar.js?v=1.1"></script>
 <script src="js/lcars.js?v=3.56"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
@@ -2669,7 +2670,7 @@
 <script src="js/lcars-cr-age-helpers.js"></script>
 <!-- XACA-0292-007: CHANGE REQ list view — must load after lcars.js (depends on boardData, escapeHtml, showPlanDocModal, switchDocTab) -->
 <!-- XACA-0657-005: adds navigateToCRLinkedRelease() global used by this tab -->
-<script src="js/lcars-cr-tab.js?v=1.2"></script>
+<script src="js/lcars-cr-tab.js?v=1.3"></script>
 <!-- XACA-0293-004: CR cycle-time segment tiles — must load after lcars-cr-metrics.js and lcars-cr-tab.js -->
 <script src="js/lcars-cr-segment-tiles.js"></script>
 <!-- XACA-0293-005: CR estimate-vs-actual tile — must load after lcars-cr-metrics.js and lcars-cr-segment-tiles.js -->
