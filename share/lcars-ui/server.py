@@ -9005,7 +9005,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
         Reads board.crs[] looking for items in states that represent
         late or blocked work:
-          - 'cr-submitted' or 'cr-drafted' → needs attention (high)
+          - 'cr-submitted', 'cr-published', or 'cr-drafted' → needs attention (high)
           - 'cr-held' → blocked (high)
           - Not yet deployed past target date (if targetDate in associated
             backlog item is past) → critical
@@ -9026,9 +9026,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             today_str = now_dt.strftime('%Y-%m-%d')
             now_iso = now_dt.strftime('%Y-%m-%dT%H:%M:%SZ')
 
-            # Late states: not yet deployed/completed but should be actioned
+            # Late states: not yet deployed/completed but should be actioned.
+            # cr-published (XACA-0895): a CR whose Confluence page is live but
+            # still awaiting the CR-Proper (IT Connect) link is exactly the kind
+            # of stalled-mid-pipeline work this heuristic exists to surface —
+            # same rationale as cr-drafted/cr-submitted, so it joins the set.
             late_states = frozenset({
-                'cr-submitted', 'cr-drafted', 'cr-held', 'implementing',
+                'cr-submitted', 'cr-published', 'cr-drafted', 'cr-held', 'implementing',
             })
             overdue_states = frozenset({
                 'cr-held',
@@ -10987,7 +10991,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # ── CR Transition endpoint (XACA-0328-005) ──────────────────────────────
     # Valid target states (mirrors crStates in cr-schema.json).
     _CR_VALID_STATES = frozenset([
-        "cr-drafted", "cr-submitted", "cr-approved", "cr-rejected",
+        "cr-drafted", "cr-published", "cr-submitted", "cr-approved", "cr-rejected",
         "cr-held", "implementing", "deployed-dev", "deployed-prod",
         "emergency-deployed", "cr-closed",
     ])
@@ -10995,8 +10999,15 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     # Required fields per target state.
     # Each entry is (field_path, description, validator_fn or None).
     # field_path uses dot notation to address nested fields (e.g. "approver.login").
+    # cr-published (XACA-0895): requires cr_confluence_url — the Confluence page
+    # URL is the evidence that distinguishes cr-published from cr-drafted (see
+    # cr-schema.json's cr-published semantic note). kb-cr publish stamps this
+    # automatically on success; a manual transition through this endpoint needs
+    # the same evidence supplied explicitly. Mirrors cr-submitted's cr_proper_url
+    # requirement one rank down the pipeline.
     _CR_REQUIRED_FIELDS = {
         "cr-drafted":         [],
+        "cr-published":       [("cr_confluence_url", "must start with https://")],
         "cr-submitted":       [("cr_proper_url", "must start with https://")],
         "cr-approved":        [("approver.login", None), ("approver.name", None)],
         "cr-rejected":        [("pushback_notes", "non-empty after trim")],
@@ -11007,6 +11018,69 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         "emergency-deployed": [("emergency_justification", None), ("deploy_estimate", "ISO 8601 date/time")],
         "cr-closed":          [],
     }
+
+    # Canonical state → entry-timestamp field (XACA-0895-018).
+    #
+    # THE DEFECT THIS FIXES: handle_cr_transition used to write only crState /
+    # updatedAt / lastUpdated plus allow-listed FLAT fields — it never touched
+    # timestamps.*. Every transition through the LCARS EDIT STATE control
+    # therefore produced a record with a crState but no corresponding
+    # timestamps.<state>_at anchor. That was survivable while it only affected
+    # cr-submitted, but XACA-0895 exposes cr-published in _CR_VALID_STATES and
+    # cr-schema-validator's check7 makes the missing anchor a hard FAIL for the
+    # whole board. Two further consequences are silent rather than loud:
+    # cr-lifecycle-monitor's Auto 1 finds no age basis and simply never reminds,
+    # and both the cr-published→cr-submitted stateDurations leg and the STAGE
+    # AGE anchor fall through to nothing.
+    #
+    # Deliberately a MAP, not a cr-published special case: the same gap exists
+    # for every sibling state, and a one-off would just queue up the next
+    # instance of this bug. Mirrors _kb_cr_state_strip_spec's `ts` rows and the
+    # jq anchor map in _kb_cr_prev_state_from_timestamps (scripts/kb-cr.sh) —
+    # keep all three in sync.
+    #
+    # Omissions are intentional:
+    #   cr-drafted — anchored by cr_created_at, written at CR creation, never
+    #                by a transition.
+    #   cr-closed  — no canonical timestamp field in cr-schema.json.
+    # `implementing` maps to cr_started_dev_at only; cr_started_test_at is a
+    # separate later event with no state change of its own (kb-cr start-test).
+    _CR_STATE_ENTRY_TIMESTAMP = {
+        "cr-published":       "cr_published_at",
+        "cr-submitted":       "cr_submitted_at",
+        "cr-rejected":        "cr_rejected_at",
+        "cr-held":            "cr_held_at",
+        "cr-approved":        "cr_approved_at",
+        "implementing":       "cr_started_dev_at",
+        "deployed-dev":       "cr_deployed_dev_at",
+        "deployed-prod":      "cr_deployed_prod_at",
+        "emergency-deployed": "cr_emergency_deployed_at",
+    }
+
+    @classmethod
+    def _cr_build_state_jq(cls, target_state):
+        """Build the jq filter for the crState write in handle_cr_transition.
+
+        Returns a filter that sets crState/updatedAt/lastUpdated and, when the
+        target state owns a canonical entry timestamp, stamps it write-once.
+        Extracted from handle_cr_transition so the stamping rule is unit
+        testable without standing up an HTTP request (XACA-0895-018) — the
+        original defect was invisible precisely because nothing exercised this
+        filter. Expects --argjson cidx, --arg state, --arg ts.
+        """
+        state_jq = (
+            '.crs[$cidx].crState = $state'
+            ' | .crs[$cidx].updatedAt = $ts'
+            ' | .lastUpdated = $ts'
+        )
+        ts_field = cls._CR_STATE_ENTRY_TIMESTAMP.get(target_state)
+        if ts_field:
+            # ts_field comes from the hardcoded map above — never user input.
+            state_jq += (
+                f' | (if (.crs[$cidx].timestamps.{ts_field} // "") == ""'
+                f' then .crs[$cidx].timestamps.{ts_field} = $ts else . end)'
+            )
+        return state_jq
 
     def _cr_get_nested(self, d, dotted_key):
         """Return value at dotted key (e.g. 'approver.login') from dict d, or None."""
@@ -11036,6 +11110,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # Extra semantic validators
             if field_path == "cr_proper_url" and not str(val).startswith("https://"):
                 return False, f"cr_proper_url must start with https:// for target {target_state}"
+            if field_path == "cr_confluence_url" and not str(val).startswith("https://"):
+                return False, f"cr_confluence_url must start with https:// for target {target_state}"
             if field_path == "deploy_estimate":
                 try:
                     from datetime import datetime
@@ -11044,6 +11120,50 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 except (ValueError, TypeError):
                     return False, f"deploy_estimate must be parseable ISO 8601 for target {target_state}"
         return True, None
+
+
+    @staticmethod
+    def _build_cr_transition_shell_parts(board_file_str, cr_id, target_state,
+                                         helpers_root=None):
+        """
+        Assemble the shell commands that perform a CR state transition.
+
+        Extracted from handle_cr_transition (XACA-0297, review round 3) for ONE
+        reason: so tests can call the real assembly instead of reproducing it.
+        A mirrored copy in a test validates the mirror — re-planting a dangling
+        `--arg ts "$ts"` in the handler left every runtime test green, and
+        swapping this function's two positional arguments would stamp the wrong
+        field in production while the suite stayed green.
+
+        helpers_root exists only so a test can source the branch under test.
+        Production must leave it None: the endpoint deliberately sources from
+        ~/dev-team (the MAIN checkout), which is what the running server has.
+
+        Returns a list of shell command strings, joined with newlines by the
+        caller and executed under `zsh -c`.
+
+        NOTE: the generated script runs WITHOUT `set -e` (the activity-append
+        lines end in `|| true` by design), so the state write below carries its
+        own explicit `|| { ...; exit 3; }` — XACA-0297-023. Without it a failed
+        board write is masked by later commands and the handler, which inspects
+        only the final returncode, answers 200 for a transition that never
+        happened.
+        """
+        root = helpers_root if helpers_root is not None else str(Path.home() / "dev-team")
+        return [
+            f"source {shlex.quote(root + '/kanban-helpers.sh')}",
+            f"source {shlex.quote(root + '/scripts/kb-cr.sh')}",
+            # Find CR index
+            f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] '
+            f'| select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
+            'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',
+            # State transition + entry timestamp via the SHARED helper. It also
+            # emits the cr_state_changed activity event, which is why this
+            # endpoint no longer appends its own.
+            f'_kb_cr_stamp_state_entry "{board_file_str}" "$cr_idx" '
+            f'{shlex.quote(cr_id)} {shlex.quote(target_state)}'
+            f' || {{ echo "state write failed for {cr_id}" >&2; exit 3; }}',
+        ]
 
     def handle_cr_transition(self, cr_id):
         """POST /api/kanban/cr/<CR-ID>/transition — Manual state-change endpoint.
@@ -11196,41 +11316,50 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                       old_approver.get("name", ""))
 
             for field_key in ("pushback_notes", "hold_reason", "emergency_justification",
-                              "cr_proper_url", "deploy_estimate"):
+                              "cr_proper_url", "cr_confluence_url", "deploy_estimate"):
                 if field_key in fields and fields[field_key] is not None:
                     _add_field_update(field_key, fields[field_key], field_key,
                                       current_cr.get(field_key, ""))
 
-            # Build the full shell script.
-            # We call _kb_cr_container_transition directly with explicit args to
-            # bypass _kb_cr_board_preamble's tmux dependency.
-            # Resolve dev-team root from the user's home dir — same pattern as
-            # cr-confluence-poller.py — so the endpoint isn't single-user-bound.
-            dev_team_root = str(Path.home() / "dev-team")
-            shell_parts = [
-                f"source {shlex.quote(dev_team_root + '/kanban-helpers.sh')}",
-                f"source {shlex.quote(dev_team_root + '/scripts/kb-cr.sh')}",
-                # Find CR index
-                f'cr_idx=$(_kb_jq_read "{board_file_str}" \'.crs | to_entries[] | select(.value.id == "{cr_id}") | .key\' -r 2>/dev/null)',
-                f'if [ -z "$cr_idx" ]; then echo "CR not found in board" >&2; exit 2; fi',
-                # Apply state transition + entry timestamp via the SHARED helper
-                # (XACA-0297-006).
-                #
-                # This previously inlined a _kb_jq_update writing crState +
-                # updatedAt and stamping NO cr_*_at timestamp — a private copy of
-                # logic that step 2 of the comment above already claimed to
-                # delegate to _kb_cr_container_transition. Because operators drive
-                # state changes from this endpoint rather than the CLI, that drift
-                # is the main reason 24 CRs reached cr-closed carrying only 3
-                # cr_closed_at values across the three live mobile boards.
-                #
-                # _kb_cr_stamp_state_entry resolves the entry-timestamp field for
-                # the target state, preserves any value already present (a
-                # force-write must not rewrite when the CR first entered a state),
-                # and emits the cr_state_changed activity event itself — which is
-                # why this endpoint no longer appends its own below.
-                f'_kb_cr_stamp_state_entry "{board_file_str}" "$cr_idx" {shlex.quote(cr_id)} {shlex.quote(target_state)}',
-            ]
+            # Build the full shell script. Assembly lives in
+            # _build_cr_transition_shell_parts (below) so tests can CALL it
+            # rather than mirror it — see XACA-0297 review round 3: a mirrored
+            # copy validated itself, and six of eight planted mutations
+            # (renamed variable, unquoted read, added argument, swapped
+            # positional args, and two comment/string decoys) sailed past a
+            # harness that rebuilt the script by hand.
+            shell_parts = self._build_cr_transition_shell_parts(
+                board_file_str, cr_id, target_state
+            )
+
+            # XACA-0895-018's own crState+entry-timestamp write USED to live here.
+            # It is deliberately not invoked any more (XACA-0297-006).
+            #
+            # Both tickets independently solved the same problem. XACA-0895-018
+            # built _cr_build_state_jq() over the Python-side
+            # _CR_STATE_ENTRY_TIMESTAMP map; XACA-0297-006 routed this endpoint
+            # through _kb_cr_stamp_state_entry, which reaches the same result via
+            # the shell-side _kb_cr_state_entry_ts_field map and additionally
+            # emits the cr_state_changed activity event. Running BOTH wrote
+            # crState, updatedAt and lastUpdated twice per request.
+            #
+            # Worse, this block referenced `$ts`, whose `ts=$(_kb_cr_timestamp)`
+            # assignment lived in the shell_parts list above and was removed by
+            # XACA-0297-006. `zsh -c` runs without `set -u`, so jq received
+            # `--arg ts ""` and BLANKED .crs[i].updatedAt and .lastUpdated while
+            # still returning 200. That silently disabled this endpoint's own
+            # optimistic-concurrency guard (`expected_updated` compares against a
+            # now-empty currentUpdatedAt) for every state with no required
+            # fields — cr-drafted, implementing and cr-closed. States carrying
+            # required fields masked it by triggering the second `updatedAt =
+            # $ts2` write below. Caught in review on PR #741 before merge.
+            #
+            # _cr_build_state_jq() and _CR_STATE_ENTRY_TIMESTAMP are LEFT IN
+            # PLACE, along with their unit tests in
+            # lcars-ui/tests/test_xaca0895_cr_transition_timestamps.py — they are
+            # correct in isolation and belong to a just-merged sibling ticket.
+            # Collapsing the two entry-timestamp maps into one source is a real
+            # cleanup but is not this PR's to make; it is filed as a follow-up.
 
             # Field updates — each needs cidx, so we re-use the same _kb_jq_update
             if field_jq_parts:
