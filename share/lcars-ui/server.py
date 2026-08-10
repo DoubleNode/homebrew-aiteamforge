@@ -11165,6 +11165,47 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             f' || {{ echo "state write failed for {cr_id}" >&2; exit 3; }}',
         ]
 
+
+    @staticmethod
+    def _build_cr_field_update_shell_parts(board_file_str, field_jq_parts, field_jq_args):
+        """
+        Assemble the optional field-update write (approver, notes, urls, …).
+
+        Extracted for the same reason as _build_cr_transition_shell_parts, and
+        after the same lesson: QA on PR #741 found this block had ZERO runtime
+        coverage because no fixture ever supplied `fields`, and that changing
+        `--arg ts "$ts2"` to `--arg ts "${ts}"` — a curly-brace read of the
+        UNASSIGNED `ts` — reintroduced the XACA-0297-006 blanking hazard with
+        the whole suite still green. Extracting it lets the harness execute
+        this branch for real instead of reasoning about it.
+
+        shlex.quote on EVERY value: they come from untrusted JSON request
+        bodies and would otherwise let shell command substitution ($(...),
+        backticks, $VAR) fire before jq ever sees them.
+        """
+        jq_filter_combined = " | ".join(
+            [".crs[$cidx].updatedAt = $ts | .lastUpdated = $ts"] + field_jq_parts
+        )
+        field_arg_str = " ".join(
+            f"--arg {shlex.quote(k)} {shlex.quote(v)}" for k, v in field_jq_args
+        )
+        return [
+            "ts2=$(_kb_cr_timestamp)",
+            # The field write must be fatal for the same reason the state write
+            # is (XACA-0297-023): `zsh -c` runs without `set -e`, so a failure
+            # here was masked by the activity-append lines that follow, and the
+            # handler — which inspects only the final returncode — answered
+            # 200 ok:true with the state written and the fields silently
+            # dropped. Proven by execution during review round 6: a stubbed
+            # failing write returned 0 with approver still None. The sibling
+            # write three lines up was guarded in round 4 and this one was not
+            # revisited; fixing one instance of a masking defect should have
+            # prompted checking the rest of the same function.
+            f'_kb_jq_update "{board_file_str}" \'{jq_filter_combined}\''
+            f' --argjson cidx "$cr_idx" --arg ts "$ts2" {field_arg_str}'
+            f' || {{ echo "field update failed" >&2; exit 4; }}',
+        ]
+
     def handle_cr_transition(self, cr_id):
         """POST /api/kanban/cr/<CR-ID>/transition — Manual state-change endpoint.
 
@@ -11363,21 +11404,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             # Field updates — each needs cidx, so we re-use the same _kb_jq_update
             if field_jq_parts:
-                jq_filter_combined = " | ".join(
-                    [".crs[$cidx].updatedAt = $ts | .lastUpdated = $ts"] + field_jq_parts
-                )
-                shell_parts.append(
-                    f'ts2=$(_kb_cr_timestamp)'
-                )
-                # Build the --arg lines. shlex.quote on EVERY value — values come
-                # from untrusted JSON request bodies and would otherwise allow shell
-                # command substitution ($(...), backticks, $VAR) to fire before jq
-                # ever sees them.
-                field_arg_str = ' '.join(
-                    f'--arg {shlex.quote(k)} {shlex.quote(v)}' for k, v in field_jq_args
-                )
-                shell_parts.append(
-                    f'_kb_jq_update "{board_file_str}" \'{jq_filter_combined}\' --argjson cidx "$cr_idx" --arg ts "$ts2" {field_arg_str}'
+                shell_parts += self._build_cr_field_update_shell_parts(
+                    board_file_str, field_jq_parts, field_jq_args
                 )
 
             # cr_state_changed activity event — NOT emitted here (XACA-0297-006).
