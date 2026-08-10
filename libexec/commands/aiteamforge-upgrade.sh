@@ -1264,12 +1264,28 @@ PYEOF
 # installs have no target on disk yet, and the sweep's default rule is "only
 # refresh what's already there" — so it needs the same materialize-when-absent
 # treatment as kb-init-team-guard.sh above, or upgraded machines never get it.
+# XACA-0775: lcars-launch-helpers.sh defines has_iterm_gui, which the rendered
+# *-connect.sh scripts now CALL (the probe used to be inlined in the template).
+# It reaches a machine three ways, and only two of them are covered without this
+# entry: aiteamforge-setup.sh copies share/scripts/* unconditionally, so both
+# `setup` call sites of `install-team.sh --connect-only` are fine. The THIRD call
+# site is update_connect_scripts() in this file (XACA-0814), reached from
+# `aiteamforge upgrade` — which does NOT run setup's copy step. Without this
+# entry the sweep's default "only refresh what's already there" rule applies, so
+# an upgrade can hand a machine a freshly-rendered connect script that depends on
+# a helper the same run declined to create. The failure is quiet rather than
+# fatal (has_iterm_gui resolves to command-not-found, the `if` takes its else
+# branch, and connect completes via the Terminal.app fallback) — it just reports
+# "iTerm2 not running" on a machine where iTerm2 is running. Materialising here
+# rather than special-casing the connect-only block also covers team-startup.sh,
+# which has hard-depended on this same file since XACA-0563.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
 kb-init-team-guard.sh
 kb-init-team
 remote-tmux-attach.sh
+lcars-launch-helpers.sh
 EOF
 }
 

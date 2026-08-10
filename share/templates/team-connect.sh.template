@@ -15,8 +15,17 @@ TEAM_NAME="{{TEAM_NAME}}"
 TEAM_THEME="{{TEAM_THEME}}"
 # shellcheck disable=SC1083,SC2039
 AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
+# XACA-0775: defines has_iterm_gui, used below. Best-effort via `|| true` — a
+# machine without it still connects, falling back to the Terminal.app branch.
+# Deliberately NOT `2>/dev/null`: the [[ -f ]] guard proves the file EXISTS, so
+# the only errors this could suppress are real ones (parse error, truncated
+# file), and swallowing those makes the failure resurface ~150 lines later as a
+# misleading "iTerm2 not running". `|| true` alone already gives best-effort.
 if [[ -f "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh" ]]; then
-    source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh" 2>/dev/null || true
+    source "$AITEAMFORGE_DIR/scripts/lcars-launch-helpers.sh" || true
+else
+    echo "  ⚠️  lcars-launch-helpers.sh not found — iTerm2 detection unavailable," >&2
+    echo "      falling back to Terminal.app. Run 'aiteamforge upgrade' to restore it." >&2
 fi
 # shellcheck disable=SC1083,SC2039
 TMUX_SOCKET="{{TEAM_TMUX_SOCKET}}"
