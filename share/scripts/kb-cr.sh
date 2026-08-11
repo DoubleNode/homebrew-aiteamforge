@@ -343,7 +343,15 @@ _kb_cr_lifecycle_advance() {
     --arg     state  "$new_state" \
     --arg     tskey  "$ts_key" \
     --arg     tsval  "$ts_value" \
-    --arg     now    "$now"
+    --arg     now    "$now" \
+    || return 1
+    # ^ XACA-0297 (review round 2): this `|| return 1` did not exist. Without
+    # it the function's exit status came from the trailing `|| true` on the
+    # activity append below, so it ALWAYS returned 0 — including when the board
+    # write failed. Every caller's `|| return 1` was therefore decorative, and
+    # the LCARS endpoint's `|| { exit 3; }` guard could never fire for any state
+    # that stamps a timestamp. Caught by mutation-testing on PR #741: a stubbed
+    # failing write still produced exit 0 and an HTTP 200.
 
     # Append activity log entry (best-effort — never block the state transition)
     local event
@@ -529,8 +537,16 @@ _kb_cr_stamp_state_entry() {
     local now
     now=$(_kb_cr_timestamp)
 
-    # States that stamp nothing on entry (cr-drafted) still need the state write.
+    # States that stamp nothing on entry (cr-drafted) still need the state write
+    # AND the activity event. XACA-0297 (review round 2): this branch previously
+    # returned early without emitting cr_state_changed. Because the LCARS
+    # endpoint had stopped appending its own event (it now relies on this
+    # helper), a transition to cr-drafted produced NO event at all — a silent
+    # hole in the activity feed the pushback and cycle-time readers consume.
     if [[ -z "$ts_field" ]]; then
+        local old_state_nots
+        old_state_nots=$(_kb_cr_container_get_state "$board_file" "$cr_idx" 2>/dev/null || echo "")
+
         _kb_jq_update "$board_file" '
             .crs[$cidx].crState   = $state |
             .crs[$cidx].updatedAt = $ts |
@@ -540,6 +556,13 @@ _kb_cr_stamp_state_entry() {
         --arg     state "$new_state" \
         --arg     ts    "$now" \
         || return 1
+
+        local evt_nots
+        evt_nots=$(_kb_cr_activity_event "cr_state_changed" \
+            "from_state=$old_state_nots" "to_state=$new_state" 2>/dev/null || echo "")
+        if [[ -n "$evt_nots" ]]; then
+            _kb_cr_activity_append "$board_file" "$cr_id" "$evt_nots" 2>/dev/null || true
+        fi
         return 0
     fi
 
