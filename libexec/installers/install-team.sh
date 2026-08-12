@@ -623,8 +623,6 @@ _resolve_parametric_defaults() {
     _DERIVED_DEFAULT_GROUP=""
     _DERIVED_MATCH_COUNT=0
 
-    [[ -f "$team_paths_json" ]] || return 0
-
     # Keys in team-paths.json's .teams map are INSTANCE ids: "<team>-<project>"
     # for non-group teams, "<team>-<client>-<project>" for group teams (each
     # component matches [a-z0-9_]+ — see _validate_instance_component above).
@@ -636,9 +634,33 @@ _resolve_parametric_defaults() {
         pattern="^${team_id}-[a-z0-9_]+\$"
     fi
 
-    matches="$(jq -r --arg pat "$pattern" \
-        '(.teams // {}) | keys[] | select(test($pat))' \
-        "$team_paths_json" 2>/dev/null || true)"
+    matches=""
+    if [[ -f "$team_paths_json" ]]; then
+        matches="$(jq -r --arg pat "$pattern" \
+            '(.teams // {}) | keys[] | select(test($pat))' \
+            "$team_paths_json" 2>/dev/null || true)"
+    fi
+
+    # XACA-0862-014 (review finding): team-paths.json is written by THIS
+    # installer only AFTER _render_connect_disconnect() runs (the XACA-0463
+    # upsert further down), and --connect-only never persists at all — so a
+    # registry-only lookup is a stale snapshot from BEFORE this install. On a
+    # SECOND install of an already-registered team with a NEW project (e.g.
+    # `finance --project business` was installed earlier, this run is
+    # `finance --project ops`), that staleness made match_count==1 point at
+    # the OLD instance ("business") as if it were still the team's only one,
+    # when post-install reality is TWO live instances. Union in the current
+    # INSTANCE_ID (global, set above at instance-id computation) so the
+    # candidate set reflects reality AFTER this install completes, not a
+    # snapshot from before it started:
+    #   - 0 registered + this install       -> 1 candidate (itself)  -> use it
+    #   - 1 registered == this install      -> 1 candidate (same key)-> use it
+    #   - 1 registered != this install      -> 2 candidates          -> AMBIGUOUS
+    #   - >1 registered (+/- this install)  -> 2+ candidates         -> AMBIGUOUS
+    # "Ambiguous" is deliberate, not a regression: once a team has two live
+    # project instances, a single team-scoped script cannot default to one
+    # without silently ignoring the other — same no-guess rule as subitem 003.
+    matches="$(printf '%s\n%s\n' "$matches" "$INSTANCE_ID" | sed '/^$/d' | sort -u)"
     match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
     _DERIVED_MATCH_COUNT="$match_count"
 
@@ -651,7 +673,12 @@ _resolve_parametric_defaults() {
             _DERIVED_DEFAULT_PROJECT="$remainder"
         fi
     fi
-    # match_count == 0 or > 1: leave both empty — caller decides the fallback.
+    # match_count > 1: leave both empty — caller warns, template requires an
+    # explicit argument. match_count can no longer be 0 (INSTANCE_ID is
+    # always unioned in), so that branch of the fallback contract above is
+    # now unreachable in practice but is kept documented and harmless in the
+    # caller for defense-in-depth (e.g. INSTANCE_ID unset would still degrade
+    # safely rather than crash).
     return 0
 }
 
