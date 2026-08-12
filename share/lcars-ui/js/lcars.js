@@ -6613,39 +6613,133 @@ function getStatusColor(status) {
 }
 
 /**
- * Copy text to clipboard and show feedback
+ * Copy text to clipboard and show feedback.
+ *
+ * XACA-0920: two-tier chain. Tier 1 (async Clipboard API) is attempted
+ * first; on EITHER absence of the API OR a rejected writeText() promise,
+ * control falls through to Tier 2 (legacy execCommand('copy')). The root
+ * cause of the original intermittent failures is UNCONFIRMED — the ticket's
+ * "unfocused document" hypothesis has not been reproduced — so this
+ * function is written to be correct whether or not that hypothesis holds,
+ * rather than assuming it either way.
+ *
  * @param {string} text - Text to copy
+ * @param {Object} [options] - Optional behavior overrides
+ * @param {string} [options.successMessage] - Toast message on confirmed
+ *   success. Defaults to `Copied: ${text}`, which echoes the text back —
+ *   pass this explicitly for large/multi-line content (e.g. release notes)
+ *   where echoing the payload into a toast would be bad UX.
+ * @returns {Promise<boolean>} Resolves true only when a copy was ACTUALLY
+ *   confirmed (writeText() resolved, or execCommand('copy') returned
+ *   true). Never rejects — existing fire-and-forget callers are unaffected;
+ *   callers that care can `await` it or chain `.then()`.
  */
-function copyToClipboard(text) {
-    if (!text) return;
+function copyToClipboard(text, options) {
+    if (!text) return Promise.resolve(false);
 
-    // Use modern clipboard API if available
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(text).then(() => {
-            console.log('[LCARS] Copied to clipboard:', text);
-            showToast(`Copied: ${text}`, 'success');
-        }).catch(err => {
-            console.error('[LCARS] Failed to copy:', err);
-            showToast('Failed to copy to clipboard', 'error');
-        });
-    } else {
-        // Fallback for older browsers
+    const successMessage = (options && options.successMessage) || `Copied: ${text}`;
+
+    // Tier 2: legacy execCommand('copy') fallback. Reachable from BOTH
+    // "API missing" and "API rejected" (XACA-0920-002).
+    function attemptExecCommandFallback() {
+        const previousActiveElement = document.activeElement;
+
+        // XACA-0920-003: avoid opacity:0 — WebKit can refuse to select text
+        // inside a fully-transparent element. Position offscreen instead.
         const textarea = document.createElement('textarea');
         textarea.value = text;
         textarea.style.position = 'fixed';
-        textarea.style.opacity = '0';
+        textarea.style.top = '0';
+        textarea.style.left = '-9999px';
+        textarea.readOnly = true; // suppress the iOS/WebKit on-screen keyboard
         document.body.appendChild(textarea);
-        textarea.select();
+
+        let succeeded = false;
+        let thrownErr = null;
         try {
-            document.execCommand('copy');
-            console.log('[LCARS] Copied to clipboard (fallback):', text);
-            showToast(`Copied: ${text}`, 'success');
+            textarea.select();
+            // select() alone is unreliable on readonly textareas under WebKit.
+            textarea.setSelectionRange(0, text.length);
+            // execCommand('copy') returns false on failure WITHOUT throwing —
+            // the return value MUST be captured, never assumed true.
+            succeeded = document.execCommand('copy');
         } catch (err) {
-            console.error('[LCARS] Failed to copy (fallback):', err);
-            showToast('Failed to copy to clipboard', 'error');
+            thrownErr = err;
+        } finally {
+            // Guarantee removal + focus restore on EVERY path, including
+            // exceptions thrown between append and remove.
+            document.body.removeChild(textarea);
+            if (previousActiveElement && typeof previousActiveElement.focus === 'function') {
+                try {
+                    previousActiveElement.focus();
+                } catch (restoreErr) {
+                    // Best-effort focus restore only — never fatal.
+                }
+            }
         }
-        document.body.removeChild(textarea);
+
+        return { succeeded, thrownErr };
     }
+
+    // Tier 1: modern async Clipboard API.
+    if (!(navigator.clipboard && navigator.clipboard.writeText)) {
+        const { succeeded, thrownErr } = attemptExecCommandFallback();
+        if (succeeded) {
+            console.log('[LCARS] Copied to clipboard (fallback, API unavailable):', text);
+            showToast(successMessage, 'success');
+        } else {
+            const reason = thrownErr ? `${thrownErr.name}: ${thrownErr.message}` : 'execCommand returned false';
+            console.error('[LCARS] Fallback copy failed (API unavailable):', reason);
+            showToast(`Failed to copy to clipboard (no Clipboard API, fallback failed: ${reason})`, 'error');
+        }
+        return Promise.resolve(succeeded);
+    }
+
+    // XACA-0920: defensive, cause-agnostic mitigation. The ticket's
+    // hypothesis is that writeText() rejects with NotAllowedError when the
+    // document isn't focused under WebKit — that is UNCONFIRMED, not
+    // established fact. Attempting focus() first can only help if the
+    // hypothesis is true; it's a harmless no-op (or throw, swallowed below)
+    // if the hypothesis is false or the host doesn't support it.
+    try {
+        window.focus();
+    } catch (focusErr) {
+        // Ignore — best-effort only.
+    }
+
+    return navigator.clipboard.writeText(text).then(() => {
+        console.log('[LCARS] Copied to clipboard:', text);
+        showToast(successMessage, 'success');
+        return true;
+    }).catch(err => {
+        // XACA-0920-001: instrumentation — surface the ACTUAL rejection
+        // reason instead of swallowing it. err.name/err.message discriminate
+        // DOMException causes (e.g. NotAllowedError); hasFocus()/
+        // visibilityState are the signals for the (still unconfirmed)
+        // "unfocused document" hypothesis at the moment of rejection.
+        const hasFocus = document.hasFocus();
+        const visibilityState = document.visibilityState;
+        console.warn('[LCARS] Clipboard API rejected, falling back to execCommand:', err && err.name, err && err.message, {
+            hasFocus: hasFocus,
+            visibilityState: visibilityState,
+            err: err
+        });
+
+        const { succeeded, thrownErr } = attemptExecCommandFallback();
+        if (succeeded) {
+            console.log('[LCARS] Copied to clipboard (fallback, API rejected):', text);
+            showToast(successMessage, 'success');
+        } else {
+            // XACA-0920-004: distinct from the "API unavailable" message above
+            // AND from a bare fallback failure — carries 001's full API-tier
+            // diagnostic payload so a screenshot alone tells us both which
+            // tier failed and (for the API tier) why.
+            const fallbackReason = thrownErr ? `${thrownErr.name}: ${thrownErr.message}` : 'execCommand returned false';
+            console.error('[LCARS] Fallback copy also failed after API rejection:', fallbackReason);
+            showToast(`Failed to copy to clipboard: API ${err && err.name}: ${err && err.message} (focus=${hasFocus}, visibility=${visibilityState}); fallback ${fallbackReason}`, 'error');
+        }
+        return succeeded;
+    });
 }
 
 /**
@@ -11944,6 +12038,13 @@ function switchRelnotesTab(tab) {
 
 /**
  * Copy release notes to clipboard
+ *
+ * XACA-0920-005: routed through the hardened copyToClipboard() two-tier
+ * helper instead of calling navigator.clipboard.writeText() directly, so
+ * this path can't retain the rejected-promise-dead-ends defect. Release
+ * notes content is a large multi-line blob, so a custom successMessage is
+ * supplied — the default `Copied: ${text}` behavior (which echoes the
+ * copied text into the toast) would be terrible UX here.
  */
 async function copyRelnotesToClipboard() {
     const activeTab = document.querySelector('.relnotes-tab.active')?.dataset.tab;
@@ -11955,13 +12056,7 @@ async function copyRelnotesToClipboard() {
         content = relnotesModalState.generatedContent;
     }
 
-    try {
-        await navigator.clipboard.writeText(content);
-        showToast('Release notes copied to clipboard', 'success');
-    } catch (error) {
-        console.error('Failed to copy to clipboard:', error);
-        showToast('Failed to copy to clipboard', 'error');
-    }
+    await copyToClipboard(content, { successMessage: 'Release notes copied to clipboard' });
 }
 
 /**
