@@ -92,8 +92,14 @@ function makeEnv(opts) {
         focus: function () { focusCalls.push('previousActiveElement'); }
     };
 
+    var consoleCalls = { log: [], warn: [], error: [] };
+
     var sandbox = {
-        console: { log: function () {}, warn: function () {}, error: function () {} },
+        console: {
+            log: function () { consoleCalls.log.push(Array.prototype.slice.call(arguments)); },
+            warn: function () { consoleCalls.warn.push(Array.prototype.slice.call(arguments)); },
+            error: function () { consoleCalls.error.push(Array.prototype.slice.call(arguments)); }
+        },
         showToast: function (message, type) {
             toastCalls.push({ message: message, type: type });
         },
@@ -163,7 +169,8 @@ function makeEnv(opts) {
         removeCalls: removeCalls,
         focusCalls: focusCalls,
         domNodes: domNodes,
-        textareaCreated: textareaCreated
+        textareaCreated: textareaCreated,
+        consoleCalls: consoleCalls
     };
 }
 
@@ -204,6 +211,10 @@ test('Tier-1 rejection -> Tier-2 returns false: resolves false, error toast, NO 
     assert.equal(result, false, 'execCommand returning false (without throwing) must not be reported as success');
     assert.equal(successToasts(env).length, 0, 'A false execCommand result must never produce a success toast');
     assert.equal(errorToasts(env).length, 1);
+    // XACA-0920-014: short toast form — discriminating signal only, full
+    // payload lives in console.error (checked in the diagnostic-payload test
+    // below).
+    assert.equal(errorToasts(env)[0].message, 'Copy failed: NotAllowedError (focus=true) — see console');
 });
 
 // ─── 4. Tier-1 rejection -> Tier-2 throws — cleanup guarantees ─────────────
@@ -219,8 +230,15 @@ test('Tier-1 rejection -> Tier-2 throws: resolves false, error toast, textarea r
 
     assert.equal(result, false);
     assert.equal(errorToasts(env).length, 1);
-    assert.ok(errorToasts(env)[0].message.indexOf('SecurityError: clipboard write blocked') !== -1,
-        'thrown error detail should surface in the toast');
+    // XACA-0920-014: the thrown-error detail ('SecurityError: clipboard
+    // write blocked') no longer surfaces in the toast — it stays in
+    // console.error so the toast can stay one short, readable line in a
+    // cockpit where a dev console may be unreachable. The toast still
+    // discriminates this case (API-rejected) via err.name + focus state.
+    assert.equal(errorToasts(env)[0].message, 'Copy failed: NotAllowedError (focus=true) — see console');
+    var lastErrorLog = env.consoleCalls.error[env.consoleCalls.error.length - 1];
+    assert.ok(lastErrorLog.join(' ').indexOf('SecurityError: clipboard write blocked') !== -1,
+        'the thrown execCommand detail must still reach console.error for field diagnosis');
 
     // Cleanup guarantees from the try/finally around append/select/execCommand:
     assert.equal(env.appendCalls.length, 1, 'textarea should have been appended exactly once');
@@ -249,13 +267,16 @@ test('API absent entirely + Tier-2 also fails: resolves false with the API-missi
     assert.equal(result, false);
     assert.equal(successToasts(env).length, 0);
     assert.equal(errorToasts(env).length, 1);
-    assert.ok(errorToasts(env)[0].message.indexOf('no Clipboard API') !== -1,
+    assert.equal(errorToasts(env)[0].message, 'Copy failed: clipboard unavailable — see console',
         'API-absent failure toast should self-identify as the no-API case');
 });
 
-// ─── 6. Toast distinctness — a screenshot alone must identify which tier failed ─
+// ─── 6. Toast distinctness — a short toast must still identify which CAUSE
+// ─── failed (API-absent vs API-rejected); the FULL breakdown (including
+// ─── whether the fallback returned false or threw) lives in console.error
+// ─── for field diagnosis (XACA-0920-014). ─────────────────────────────────
 
-test('Toast distinctness: the three observed failure messages are pairwise distinct and self-identifying', async () => {
+test('Toast distinctness: API-absent vs API-rejected failure toasts are distinct and self-identifying', async () => {
     var envApiAbsent = makeEnv({ apiAvailable: false, execCommand: 'false' });
     await envApiAbsent.copyToClipboard('hello-world');
     var msgApiAbsent = errorToasts(envApiAbsent)[0].message;
@@ -268,23 +289,44 @@ test('Toast distinctness: the three observed failure messages are pairwise disti
     await envRejectThrow.copyToClipboard('hello-world');
     var msgRejectThrow = errorToasts(envRejectThrow)[0].message;
 
-    var messages = [msgApiAbsent, msgRejectFalse, msgRejectThrow];
-    var unique = new Set(messages);
-    assert.equal(unique.size, 3, 'Expected 3 pairwise-distinct failure messages, got: ' + JSON.stringify(messages));
+    // Both API-rejected sub-cases (fallback returned false vs fallback
+    // threw) collapse to the SAME short toast shape — that distinction is
+    // now console-only, by design (XACA-0920-014's short-toast spec covers
+    // exactly two shapes: API-absent, and API-rejected).
+    assert.equal(msgRejectFalse, msgRejectThrow,
+        'the two API-rejected sub-cases must produce the same short toast; only console.error carries the returned-false-vs-threw distinction');
 
-    // Self-identifying: each message names which tier/cause failed.
-    assert.ok(msgApiAbsent.indexOf('no Clipboard API') !== -1);
-    assert.ok(msgRejectFalse.indexOf('API NotAllowedError') !== -1 && msgRejectFalse.indexOf('fallback execCommand returned false') !== -1);
-    assert.ok(msgRejectThrow.indexOf('API NotAllowedError') !== -1 && msgRejectThrow.indexOf('boom') !== -1);
+    assert.notEqual(msgApiAbsent, msgRejectFalse,
+        'API-absent and API-rejected must remain pairwise distinct toasts');
+
+    // Self-identifying: each shape names which cause failed.
+    assert.equal(msgApiAbsent, 'Copy failed: clipboard unavailable — see console');
+    assert.equal(msgRejectFalse, 'Copy failed: NotAllowedError (focus=true) — see console');
+
+    // The collapsed detail (returned false vs threw 'boom') must still be
+    // recoverable from console.error for field diagnosis.
+    var falseLog = envRejectFalse.consoleCalls.error[envRejectFalse.consoleCalls.error.length - 1].join(' ');
+    var throwLog = envRejectThrow.consoleCalls.error[envRejectThrow.consoleCalls.error.length - 1].join(' ');
+    assert.ok(falseLog.indexOf('execCommand returned false') !== -1, 'Got: ' + falseLog);
+    assert.ok(throwLog.indexOf('boom') !== -1, 'Got: ' + throwLog);
 });
 
-test('Tier-1-rejection failure toast embeds hasFocus/visibilityState diagnostic payload', async () => {
+test('Tier-1-rejection failure toast embeds focus in the short form; visibilityState stays console-only', async () => {
     var env = makeEnv({ apiAvailable: true, writeText: 'reject', execCommand: 'false', hasFocus: false, visibilityState: 'hidden' });
     await env.copyToClipboard('hello-world');
 
     var msg = errorToasts(env)[0].message;
-    assert.ok(msg.indexOf('focus=false') !== -1, 'Expected focus=false in diagnostic payload. Got: ' + msg);
-    assert.ok(msg.indexOf('visibility=hidden') !== -1, 'Expected visibility=hidden in diagnostic payload. Got: ' + msg);
+    assert.ok(msg.indexOf('focus=false') !== -1, 'Expected focus=false in the short toast. Got: ' + msg);
+    assert.equal(msg.indexOf('visibility='), -1,
+        'visibilityState is intentionally NOT in the short toast (XACA-0920-014) — it must still reach console');
+
+    // console.warn (the rejection-instrumentation log, XACA-0920-001) and
+    // console.error (the fallback-failure log) both still carry the full
+    // hasFocus/visibilityState payload for field diagnosis.
+    var warnLog = JSON.stringify(env.consoleCalls.warn);
+    var errorLog = JSON.stringify(env.consoleCalls.error);
+    assert.ok(warnLog.indexOf('hidden') !== -1, 'Expected visibilityState in console.warn. Got: ' + warnLog);
+    assert.ok(errorLog.indexOf('hidden') !== -1, 'Expected visibilityState in console.error. Got: ' + errorLog);
 });
 
 // ─── 7. Backward compatibility ──────────────────────────────────────────────
@@ -307,25 +349,74 @@ test('Custom successMessage (relnotes-style) is used instead of echoing the payl
     assert.ok(env.toastCalls[0].message.indexOf('RELEASE NOTES') === -1, 'Large payload must not be echoed into the toast');
 });
 
-// ─── 8. Empty/falsy input ───────────────────────────────────────────────────
+// ─── 8. Empty/null/undefined input — "Nothing to copy" toast (XACA-0920-013/016) ─
 
-test('Empty string input resolves false without toasting', async () => {
+test('Empty string input resolves false WITH a "Nothing to copy" info toast', async () => {
     var env = makeEnv({ apiAvailable: true, writeText: 'resolve' });
     var result = await env.copyToClipboard('');
 
     assert.equal(result, false);
-    assert.equal(env.toastCalls.length, 0);
     assert.equal(env.execCommandCalls.length, 0, 'must short-circuit before touching the clipboard API');
+    // XACA-0920-013/016: the relnotes COPY button was a silent dead click on
+    // empty content — every click must now produce visible feedback.
+    assert.equal(env.toastCalls.length, 1);
+    assert.equal(env.toastCalls[0].message, 'Nothing to copy');
+    assert.equal(env.toastCalls[0].type, 'info');
 });
 
-test('null/undefined input resolves false without toasting', async () => {
+test('null/undefined input resolves false WITH a "Nothing to copy" info toast', async () => {
     var envNull = makeEnv({ apiAvailable: true, writeText: 'resolve' });
     assert.equal(await envNull.copyToClipboard(null), false);
-    assert.equal(envNull.toastCalls.length, 0);
+    assert.equal(envNull.toastCalls.length, 1);
+    assert.equal(envNull.toastCalls[0].message, 'Nothing to copy');
+    assert.equal(envNull.toastCalls[0].type, 'info');
 
     var envUndef = makeEnv({ apiAvailable: true, writeText: 'resolve' });
     assert.equal(await envUndef.copyToClipboard(undefined), false);
-    assert.equal(envUndef.toastCalls.length, 0);
+    assert.equal(envUndef.toastCalls.length, 1);
+    assert.equal(envUndef.toastCalls[0].message, 'Nothing to copy');
+    assert.equal(envUndef.toastCalls[0].type, 'info');
+});
+
+test('The Number 0 is treated as VALID content, NOT "Nothing to copy" (XACA-0920-013/016 subtlety)', async () => {
+    // copyToClipboard(item.id || index) yields the Number 0 for an item with
+    // no id at index 0 — a bare falsy check on `text` would wrongly swallow
+    // this as "nothing to copy". Guard must be null/undefined/'' only.
+    var env = makeEnv({ apiAvailable: true, writeText: 'resolve' });
+    var result = await env.copyToClipboard(0);
+
+    assert.equal(result, true, 'the Number 0 must be copied, not rejected as empty');
+    assert.equal(env.toastCalls.length, 1);
+    assert.equal(env.toastCalls[0].type, 'success');
+    assert.notEqual(env.toastCalls[0].message, 'Nothing to copy');
+    assert.equal(env.toastCalls[0].message, 'Copied: 0');
+});
+
+// ─── 10. Non-string input coercion (XACA-0920-015 regression guard) ───────
+
+test('Non-string input (a Number) is coerced once: fallback selects the FULL coerced value', async () => {
+    // Regression guard for XACA-0920-015: textarea.setSelectionRange(0,
+    // text.length) previously used the raw Number, whose .length is
+    // `undefined` — collapsing the selection to (0,0) and copying nothing.
+    var env = makeEnv({ apiAvailable: false, execCommand: 'true' });
+    var result = await env.copyToClipboard(12345);
+
+    assert.equal(result, true);
+    assert.equal(env.textareaCreated.length, 1);
+    assert.equal(env.textareaCreated[0].value, '12345', 'textarea.value must be the coerced string, not the raw Number');
+    assert.deepEqual(env.textareaCreated[0]._range, [0, 5],
+        'setSelectionRange must span the full coerced string length (5), not undefined/NaN');
+    assert.equal(successToasts(env).length, 1);
+    assert.equal(successToasts(env)[0].message, 'Copied: 12345', 'default successMessage must use the coerced string too');
+});
+
+test('Non-string input (a Number) via Tier-1 rejection -> Tier-2: same coercion guarantee', async () => {
+    var env = makeEnv({ apiAvailable: true, writeText: 'reject', execCommand: 'true' });
+    var result = await env.copyToClipboard(42);
+
+    assert.equal(result, true);
+    assert.equal(env.textareaCreated[0].value, '42');
+    assert.deepEqual(env.textareaCreated[0]._range, [0, 2]);
 });
 
 // ─── 9. window.focus() best-effort — must never abort the copy ────────────

@@ -6623,7 +6623,9 @@ function getStatusColor(status) {
  * function is written to be correct whether or not that hypothesis holds,
  * rather than assuming it either way.
  *
- * @param {string} text - Text to copy
+ * @param {string|number} text - Text to copy. Non-string values (e.g. a
+ *   Number, such as `item.id || index` when `item.id` is falsy) are coerced
+ *   to a string once, up front — see XACA-0920-015.
  * @param {Object} [options] - Optional behavior overrides
  * @param {string} [options.successMessage] - Toast message on confirmed
  *   success. Defaults to `Copied: ${text}`, which echoes the text back —
@@ -6633,11 +6635,30 @@ function getStatusColor(status) {
  *   confirmed (writeText() resolved, or execCommand('copy') returned
  *   true). Never rejects — existing fire-and-forget callers are unaffected;
  *   callers that care can `await` it or chain `.then()`.
+ *
+ * XACA-0920-013/016: `text` is checked against null/undefined/'' ONLY — NOT
+ * a bare falsy check. `copyToClipboard(item.id || index)` yields the Number
+ * `0` for an item with no id at index 0, and `0` is valid, copyable content.
+ * A falsy guard would silently swallow that legitimate case as "nothing to
+ * copy".
  */
 function copyToClipboard(text, options) {
-    if (!text) return Promise.resolve(false);
+    if (text === null || text === undefined || text === '') {
+        // XACA-0920-013/016: previously a silent `Promise.resolve(false)` —
+        // clicking COPY on an empty editor/generated relnotes tab produced
+        // zero user-visible feedback. Every click of the COPY button must
+        // now produce a toast.
+        showToast('Nothing to copy', 'info');
+        return Promise.resolve(false);
+    }
 
-    const successMessage = (options && options.successMessage) || `Copied: ${text}`;
+    // XACA-0920-015: coerce ONCE, up front, so every downstream use (toast
+    // text, textarea.value, and — critically — textarea.setSelectionRange's
+    // .length operand) operates on a real string. `text.length` on a raw
+    // Number is `undefined`, which collapses the fallback's selection to
+    // (0,0) and copies nothing.
+    const value = String(text);
+    const successMessage = (options && options.successMessage) || `Copied: ${value}`;
 
     // Tier 2: legacy execCommand('copy') fallback. Reachable from BOTH
     // "API missing" and "API rejected" (XACA-0920-002).
@@ -6647,7 +6668,7 @@ function copyToClipboard(text, options) {
         // XACA-0920-003: avoid opacity:0 — WebKit can refuse to select text
         // inside a fully-transparent element. Position offscreen instead.
         const textarea = document.createElement('textarea');
-        textarea.value = text;
+        textarea.value = value;
         textarea.style.position = 'fixed';
         textarea.style.top = '0';
         textarea.style.left = '-9999px';
@@ -6659,7 +6680,7 @@ function copyToClipboard(text, options) {
         try {
             textarea.select();
             // select() alone is unreliable on readonly textareas under WebKit.
-            textarea.setSelectionRange(0, text.length);
+            textarea.setSelectionRange(0, value.length);
             // execCommand('copy') returns false on failure WITHOUT throwing —
             // the return value MUST be captured, never assumed true.
             succeeded = document.execCommand('copy');
@@ -6685,12 +6706,17 @@ function copyToClipboard(text, options) {
     if (!(navigator.clipboard && navigator.clipboard.writeText)) {
         const { succeeded, thrownErr } = attemptExecCommandFallback();
         if (succeeded) {
-            console.log('[LCARS] Copied to clipboard (fallback, API unavailable):', text);
+            console.log('[LCARS] Copied to clipboard (fallback, API unavailable):', value);
             showToast(successMessage, 'success');
         } else {
             const reason = thrownErr ? `${thrownErr.name}: ${thrownErr.message}` : 'execCommand returned false';
+            // XACA-0920-014: short, discriminating toast for a cockpit
+            // (iTerm2 WKWebView) where a dev console may be unreachable —
+            // the FULL diagnostic payload stays in console.error below,
+            // which remains the mechanism for field-diagnosing this bug's
+            // still-unconfirmed root cause.
             console.error('[LCARS] Fallback copy failed (API unavailable):', reason);
-            showToast(`Failed to copy to clipboard (no Clipboard API, fallback failed: ${reason})`, 'error');
+            showToast('Copy failed: clipboard unavailable — see console', 'error');
         }
         return Promise.resolve(succeeded);
     }
@@ -6707,8 +6733,8 @@ function copyToClipboard(text, options) {
         // Ignore — best-effort only.
     }
 
-    return navigator.clipboard.writeText(text).then(() => {
-        console.log('[LCARS] Copied to clipboard:', text);
+    return navigator.clipboard.writeText(value).then(() => {
+        console.log('[LCARS] Copied to clipboard:', value);
         showToast(successMessage, 'success');
         return true;
     }).catch(err => {
@@ -6727,16 +6753,24 @@ function copyToClipboard(text, options) {
 
         const { succeeded, thrownErr } = attemptExecCommandFallback();
         if (succeeded) {
-            console.log('[LCARS] Copied to clipboard (fallback, API rejected):', text);
+            console.log('[LCARS] Copied to clipboard (fallback, API rejected):', value);
             showToast(successMessage, 'success');
         } else {
-            // XACA-0920-004: distinct from the "API unavailable" message above
-            // AND from a bare fallback failure — carries 001's full API-tier
-            // diagnostic payload so a screenshot alone tells us both which
-            // tier failed and (for the API tier) why.
+            // XACA-0920-004/014: distinct from the "API unavailable" message
+            // above AND from a bare fallback failure — carries 001's full
+            // API-tier diagnostic payload (err name/message, focus,
+            // visibility, and the fallback's own failure reason) into
+            // console.error so a field report still tells us both which
+            // tier failed and why, even though the toast itself stays short
+            // (a WKWebView cockpit console may not be reachable).
             const fallbackReason = thrownErr ? `${thrownErr.name}: ${thrownErr.message}` : 'execCommand returned false';
-            console.error('[LCARS] Fallback copy also failed after API rejection:', fallbackReason);
-            showToast(`Failed to copy to clipboard: API ${err && err.name}: ${err && err.message} (focus=${hasFocus}, visibility=${visibilityState}); fallback ${fallbackReason}`, 'error');
+            console.error('[LCARS] Fallback copy also failed after API rejection:', fallbackReason, {
+                apiErrName: err && err.name,
+                apiErrMessage: err && err.message,
+                hasFocus: hasFocus,
+                visibilityState: visibilityState
+            });
+            showToast(`Copy failed: ${err && err.name} (focus=${hasFocus}) — see console`, 'error');
         }
         return succeeded;
     });
