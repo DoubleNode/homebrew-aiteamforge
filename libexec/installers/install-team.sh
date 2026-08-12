@@ -584,14 +584,115 @@ _extract_session_order() {
         | sed -E 's/[[:space:]]+$//'
 }
 
+# _resolve_parametric_defaults: XACA-0862. Derives DEFAULT_PROJECT (and, for
+# group teams, DEFAULT_GROUP) for the parametric connect template from the
+# team's REGISTERED instance(s) in team-paths.json — never from a static
+# conf literal. A literal baked from TEAM_DEFAULT_PROJECT cannot track which
+# instance a user actually registers: `legal` baked "default" while the only
+# live instance was "legal-coparenting", so `legal-connect.sh <host>` (no
+# args) silently targeted a nonexistent "legal-default" instance.
+#
+# Sets (bash globals, since this runs in the calling shell, not a subshell):
+#   _DERIVED_DEFAULT_PROJECT, _DERIVED_DEFAULT_GROUP, _DERIVED_MATCH_COUNT
+#
+# Fallback contract (deliberate — XACA-0862 subitem 003):
+#   0 registered instances  -> caller falls back to RESOLVED_PROJECT /
+#                              RESOLVED_CLIENT (the instance being installed
+#                              RIGHT NOW). team-paths.json is written by this
+#                              installer only AFTER this render (see the
+#                              XACA-0463 upsert further down), so on a team's
+#                              first-ever install nothing is registered yet —
+#                              the instance being installed is about to become
+#                              the team's only one.
+#   1 registered instance   -> use it. This is the common, settled case (and
+#                              exactly what fixes the legal-coparenting bug).
+#   >1 registered instances -> AMBIGUOUS. Do not guess: leave both empty so
+#                              the rendered script has no baked default and
+#                              the template (XACA-0862) requires an explicit
+#                              <project>/<group> argument instead. A missing
+#                              default fails loudly, immediately, at the
+#                              command line; a wrong guessed default fails
+#                              later and silently against a live but
+#                              unintended instance — see feedback_objectivity.
+_resolve_parametric_defaults() {
+    local team_id="$1" has_group="$2"
+    local team_paths_json="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    local pattern matches match_count remainder
+
+    _DERIVED_DEFAULT_PROJECT=""
+    _DERIVED_DEFAULT_GROUP=""
+    _DERIVED_MATCH_COUNT=0
+
+    [[ -f "$team_paths_json" ]] || return 0
+
+    # Keys in team-paths.json's .teams map are INSTANCE ids: "<team>-<project>"
+    # for non-group teams, "<team>-<client>-<project>" for group teams (each
+    # component matches [a-z0-9_]+ — see _validate_instance_component above).
+    # Anchor the component COUNT, not just the prefix, so e.g. a stray
+    # 2-component key never matches a non-group team's 1-component pattern.
+    if [[ "$has_group" == "true" ]]; then
+        pattern="^${team_id}-[a-z0-9_]+-[a-z0-9_]+\$"
+    else
+        pattern="^${team_id}-[a-z0-9_]+\$"
+    fi
+
+    matches="$(jq -r --arg pat "$pattern" \
+        '(.teams // {}) | keys[] | select(test($pat))' \
+        "$team_paths_json" 2>/dev/null || true)"
+    match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
+    _DERIVED_MATCH_COUNT="$match_count"
+
+    if [[ "$match_count" -eq 1 ]]; then
+        remainder="${matches#"${team_id}-"}"
+        if [[ "$has_group" == "true" ]]; then
+            _DERIVED_DEFAULT_GROUP="${remainder%%-*}"
+            _DERIVED_DEFAULT_PROJECT="${remainder#*-}"
+        else
+            _DERIVED_DEFAULT_PROJECT="$remainder"
+        fi
+    fi
+    # match_count == 0 or > 1: leave both empty — caller decides the fallback.
+    return 0
+}
+
 _render_connect_disconnect() {
-    local connect_script="$AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
-    local disconnect_script="$AITEAMFORGE_DIR/${INSTANCE_ID}-disconnect.sh"
+    # XACA-0862: TEAM-scoped filenames — one connect/disconnect pair per
+    # TEAM, not per instance. Rendering `finance --project personal` vs
+    # `finance --project business` substitutes only TEAM-level placeholders
+    # and produced byte-identical scripts under the old ${INSTANCE_ID}-*
+    # naming; only the filename pretended otherwise. This function is called
+    # exactly ONCE per install-team.sh invocation (no internal loop over
+    # teams/instances — see the two call sites, the --connect-only early
+    # exit and the main install flow, both single-shot). Installing a SECOND
+    # instance of an already-installed parametric team re-runs install-team.sh
+    # and so re-runs this function, which re-renders and OVERWRITES the same
+    # ${TEAM_ID}-connect.sh — the desired outcome (one file, not N), and safe
+    # because _resolve_parametric_defaults() re-derives the default from
+    # team-paths.json fresh each time rather than baking in whichever
+    # instance happened to trigger the render.
+    local connect_script="$AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
+    local disconnect_script="$AITEAMFORGE_DIR/${TEAM_ID}-disconnect.sh"
     local connect_template disconnect_template
 
     if _is_parametric_team; then
         connect_template="$HOMEBREW_TAP_ROOT/share/templates/team-connect-parametric.sh.template"
         disconnect_template="$HOMEBREW_TAP_ROOT/share/templates/team-disconnect-parametric.sh.template"
+
+        local _has_group="false"
+        [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]] && _has_group="true"
+
+        # XACA-0862: derive the default from team-paths.json; fall back to
+        # the instance being installed right now only when NOTHING is
+        # registered yet (see the fallback contract on the function above).
+        _resolve_parametric_defaults "$TEAM_ID" "$_has_group"
+        local _default_project="$_DERIVED_DEFAULT_PROJECT"
+        local _default_group="$_DERIVED_DEFAULT_GROUP"
+        if [[ "$_DERIVED_MATCH_COUNT" -eq 0 ]]; then
+            _default_project="$RESOLVED_PROJECT"
+            _default_group="$RESOLVED_CLIENT"
+        elif [[ "$_DERIVED_MATCH_COUNT" -gt 1 ]]; then
+            echo "  ⚠️  XACA-0862: ${_DERIVED_MATCH_COUNT} registered instances for team '${TEAM_ID}' — ${TEAM_ID}-connect.sh ships with NO default project (and group, if applicable); pass it explicitly."
+        fi
 
         if [[ ! -f "$connect_template" ]]; then
             echo "  ⚠️  Template not found: team-connect-parametric.sh.template (skipping connect script)"
@@ -601,29 +702,22 @@ _render_connect_disconnect() {
             # (remote .port file → canonical → base), so the BAND base is the
             # right value here, not this instance's allocated port.
             local _port_base="${TEAM_LCARS_PORT_BASE:-$TEAM_LCARS_PORT}"
-            local _has_group="false"
-            [[ "$TEAM_REQUIRES_CLIENT_ID" == "true" ]] && _has_group="true"
             local _session_order
             _session_order="$(_extract_session_order "$HOMEBREW_TAP_ROOT/share/scripts/teams/${TEAM_ID}-startup.sh")"
 
-            # {{TEAM_ID}} is the TEAM id, not the instance id: the parametric
-            # script composes INSTANCE itself from TEAM_ID plus the group and
-            # project arguments. The instance's own group/project are baked in
-            # as the DEFAULTS, so `<instance>-connect.sh <host>` resolves to
-            # exactly this instance while an explicit argument still overrides.
             sed -e "s|{{TEAM_ID}}|$TEAM_ID|g" \
                 -e "s|{{TEAM_NAME}}|$TEAM_NAME|g" \
                 -e "s|{{TEAM_THEME}}|$TEAM_THEME|g" \
                 -e "s|{{TEAM_SOCKET}}|$_socket|g" \
-                -e "s|{{TEAM_DEFAULT_PROJECT}}|$RESOLVED_PROJECT|g" \
-                -e "s|{{TEAM_DEFAULT_GROUP}}|$RESOLVED_CLIENT|g" \
+                -e "s|{{TEAM_DEFAULT_PROJECT}}|$_default_project|g" \
+                -e "s|{{TEAM_DEFAULT_GROUP}}|$_default_group|g" \
                 -e "s|{{TEAM_LCARS_PORT_BASE}}|$_port_base|g" \
                 -e "s|{{TEAM_HAS_GROUP}}|$_has_group|g" \
                 -e "s|{{TEAM_SESSION_ORDER}}|$_session_order|g" \
                 -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
                 "$connect_template" > "$connect_script"
             chmod +x "$connect_script"
-            echo "  ✓ ${INSTANCE_ID}-connect.sh (parametric, XACA-0845)"
+            echo "  ✓ ${TEAM_ID}-connect.sh (parametric, team-scoped, XACA-0862)"
         fi
 
         if [[ ! -f "$disconnect_template" ]]; then
@@ -635,7 +729,7 @@ _render_connect_disconnect() {
                 -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
                 "$disconnect_template" > "$disconnect_script"
             chmod +x "$disconnect_script"
-            echo "  ✓ ${INSTANCE_ID}-disconnect.sh (parametric, XACA-0845)"
+            echo "  ✓ ${TEAM_ID}-disconnect.sh (parametric, team-scoped, XACA-0862)"
         fi
         return 0
     fi

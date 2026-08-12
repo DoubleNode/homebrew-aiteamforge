@@ -1,6 +1,8 @@
 #!/usr/bin/env zsh
 # {{TEAM_NAME}} Disconnect Script (PARAMETRIC — projects-enabled team)
-# Rendered by scripts/render-cockpit-scripts.sh from this template (XACA-0607).
+# Rendered by scripts/render-cockpit-scripts.sh (dev-team cockpit) or by
+# homebrew-tap/libexec/installers/install-team.sh (tap consumers) from this
+# template (XACA-0607; XACA-0862 made both renderers team-scoped).
 #
 # Symmetric counterpart to {{TEAM_ID}}-connect.sh. Purely local cleanup:
 # closes the iTerm2 window(s) opened by connect for THIS team's project
@@ -15,6 +17,12 @@
 # Usage:
 #   {{TEAM_ID}}-disconnect.sh              # close ALL {{TEAM_ID}}-* @ * windows
 #   {{TEAM_ID}}-disconnect.sh <host>       # close only this team's windows for <host>
+#
+# XACA-0862: this script is TEAM-scoped — there is one {{TEAM_ID}}-disconnect.sh
+# per team, not one per project instance. Its behaviour was already team-scoped
+# (it matches on the "{{TEAM_ID}}-" window-title prefix shared by every project
+# instance of this team); only the RENDERED FILENAME changes, from the old
+# per-instance form to this team-scoped one.
 
 # shellcheck disable=SC1083,SC2039
 TEAM_ID="{{TEAM_ID}}"

@@ -1,6 +1,8 @@
 #!/usr/bin/env zsh
 # {{TEAM_NAME}} Connect Script (PARAMETRIC — projects-enabled team)
-# Rendered by scripts/render-cockpit-scripts.sh from this template (XACA-0607).
+# Rendered by scripts/render-cockpit-scripts.sh (dev-team cockpit) or by
+# homebrew-tap/libexec/installers/install-team.sh (tap consumers) from this
+# template (XACA-0607; XACA-0862 made both renderers team-scoped).
 #
 # Opens an iTerm2 window pointed at a REMOTE machine's running, PROJECT-SCOPED
 # team instance via SSH. Auto-starts the remote team over SSH if it is not
@@ -14,6 +16,13 @@
 # remote tmux server after preflight (XACA-0607 §1).
 #
 # This REPLACES the flat XACA-0604 render for this team.
+#
+# XACA-0862: this script is TEAM-scoped, not instance-scoped — there is one
+# `<team>-connect.sh` per team regardless of how many project instances that
+# team has registered. `<host>` is always required; `[<project>]` (and, for
+# freelance, `[<group>]`) defaults from the team's registered instance when
+# unambiguous, and is otherwise a required positional (see DEFAULT_GROUP /
+# DEFAULT_PROJECT below).
 
 # ============================================================================
 # Configuration (rendered)
@@ -30,13 +39,27 @@ AITEAMFORGE_DIR="{{AITEAMFORGE_DIR}}"
 TMUX_SOCKET="{{TEAM_SOCKET}}"
 # shellcheck disable=SC1083,SC2039
 DEFAULT_PROJECT="{{TEAM_DEFAULT_PROJECT}}"
-# XACA-0845: optional baked-in default GROUP, used only when HAS_GROUP=true.
-# EMPTY for the dev-team cockpit renders (scripts/render-cockpit-scripts.sh),
-# which produce ONE team-keyed script serving every group — there <group> stays
-# a required positional and the behaviour is unchanged. The tap installer
-# (install-team.sh) renders one INSTANCE-keyed script per live instance and
-# bakes that instance's client id here, so `freelance-acme-widgets-connect.sh
-# <host>` resolves without re-typing the group. An explicit argument always wins.
+# XACA-0862: TEAM-SCOPED contract. Both the dev-team cockpit renderer
+# (scripts/render-cockpit-scripts.sh) and the tap installer
+# (install-team.sh) now render exactly ONE script per TEAM —
+# `<team>-connect.sh`, never a per-instance `<team>-<project>-connect.sh` —
+# because the template only ever substitutes TEAM-level placeholders;
+# rendering `finance --project personal` vs `finance --project business`
+# produced byte-identical scripts under the old instance-keyed naming.
+# Project (and, for freelance, group) selection belongs in the ARGUMENT,
+# which this script already parses below.
+#
+# DEFAULT_GROUP (used only when HAS_GROUP=true) and DEFAULT_PROJECT are
+# DERIVED, not baked from a static conf literal: the tap installer resolves
+# them at render time from the team's REGISTERED instance(s) in
+# ~/.aiteamforge/team-paths.json (see _resolve_parametric_defaults() in
+# install-team.sh). A static literal cannot track which instance a user
+# actually registers — `legal` baked "default" while the only live instance
+# was "legal-coparenting", so `legal-connect.sh <host>` silently targeted a
+# nonexistent instance. Both may be EMPTY: with zero or MULTIPLE registered
+# instances there is no unambiguous default, so <group>/<project> become
+# required positionals (enforced below) rather than a guessed default. An
+# explicit argument always wins over whatever default is baked in.
 # shellcheck disable=SC1083,SC2039
 DEFAULT_GROUP="{{TEAM_DEFAULT_GROUP}}"
 # shellcheck disable=SC1083,SC2039
@@ -68,29 +91,51 @@ SCRIPT_NAME="$(basename "$0")"
 
 usage() {
     echo ""
+    # XACA-0862: DEFAULT_GROUP/DEFAULT_PROJECT are DERIVED and may be empty
+    # (zero or multiple registered instances) — bracket the positional as
+    # optional only when a default actually exists, else show it as required.
     if [[ "$HAS_GROUP" == "true" ]]; then
         if [[ -n "$DEFAULT_GROUP" ]]; then
-            echo "  Usage: ${SCRIPT_NAME} <host> [<group>] [<project>]"
+            _group_usage="[<group>]"
         else
-            echo "  Usage: ${SCRIPT_NAME} <host> <group> [<project>]"
+            _group_usage="<group>"
         fi
+        if [[ -n "$DEFAULT_PROJECT" ]]; then
+            _project_usage="[<project>]"
+        else
+            _project_usage="<project>"
+        fi
+        echo "  Usage: ${SCRIPT_NAME} <host> ${_group_usage} ${_project_usage}"
         echo ""
         echo "  <host>     Tailscale MagicDNS name or SSH-reachable hostname"
         if [[ -n "$DEFAULT_GROUP" ]]; then
             echo "  <group>    Client/group id (default: ${DEFAULT_GROUP})"
         else
-            echo "  <group>    Client/group id (e.g. AcmeCorp)"
+            echo "  <group>    Client/group id (e.g. AcmeCorp) — required, no default"
         fi
-        echo "  <project>  Project id (default: ${DEFAULT_PROJECT})"
+        if [[ -n "$DEFAULT_PROJECT" ]]; then
+            echo "  <project>  Project id (default: ${DEFAULT_PROJECT})"
+        else
+            echo "  <project>  Project id — required, no default"
+        fi
         echo ""
         echo "  Example: ${SCRIPT_NAME} darren-m1pro AcmeCorp WidgetTracker"
     else
-        echo "  Usage: ${SCRIPT_NAME} <host> [<project>]"
+        if [[ -n "$DEFAULT_PROJECT" ]]; then
+            _project_usage="[<project>]"
+        else
+            _project_usage="<project>"
+        fi
+        echo "  Usage: ${SCRIPT_NAME} <host> ${_project_usage}"
         echo ""
         echo "  <host>     Tailscale MagicDNS name or SSH-reachable hostname"
-        echo "  <project>  Project id (default: ${DEFAULT_PROJECT})"
+        if [[ -n "$DEFAULT_PROJECT" ]]; then
+            echo "  <project>  Project id (default: ${DEFAULT_PROJECT})"
+        else
+            echo "  <project>  Project id — required, no default"
+        fi
         echo ""
-        echo "  Example: ${SCRIPT_NAME} darren-m1pro ${DEFAULT_PROJECT}"
+        echo "  Example: ${SCRIPT_NAME} darren-m1pro ${DEFAULT_PROJECT:-<project>}"
     fi
     echo ""
     echo "  Opens an iTerm2 window connected to a ${TEAM_NAME} project instance"
@@ -107,25 +152,40 @@ HOST="$1"
 shift
 
 if [[ "$HAS_GROUP" == "true" ]]; then
-    # XACA-0845: fall back to the baked-in DEFAULT_GROUP when no <group> is
-    # given. DEFAULT_GROUP is empty for the team-keyed dev-team renders, so
-    # this stays a hard "missing <group>" error there, exactly as before; it is
-    # non-empty only for tap instance-keyed renders, where the group is known
-    # at install time. Only shift when an argument was actually supplied —
-    # shifting an empty argv would silently consume the NEXT positional.
+    # XACA-0845/XACA-0862: fall back to the baked-in DEFAULT_GROUP when no
+    # <group> is given. DEFAULT_GROUP is DERIVED at render time (see the
+    # comment on DEFAULT_GROUP above) and is empty whenever the team has zero
+    # or more than one registered instance — in both cases <group> is a hard
+    # required positional here, same as before XACA-0862. Only shift when an
+    # argument was actually supplied — shifting an empty argv would silently
+    # consume the NEXT positional.
     GROUP="${1:-$DEFAULT_GROUP}"
     if [[ -z "$GROUP" ]]; then
-        echo "  ✗ Missing <group> argument."
+        echo "  ✗ Missing <group> argument (no unambiguous default for this team)."
         usage
         exit 2
     fi
     if [[ $# -ge 1 ]]; then shift; fi
     PROJECT="${1:-$DEFAULT_PROJECT}"
+    if [[ -z "$PROJECT" ]]; then
+        echo "  ✗ Missing <project> argument (no unambiguous default for this team)."
+        usage
+        exit 2
+    fi
     GROUP_LOWER="$(echo "$GROUP" | tr '[:upper:]' '[:lower:]')"
     PROJECT_LOWER="$(echo "$PROJECT" | tr '[:upper:]' '[:lower:]')"
     INSTANCE="${TEAM_ID}-${GROUP_LOWER}-${PROJECT_LOWER}"
 else
+    # XACA-0862: DEFAULT_PROJECT is DERIVED (see comment above) and empty
+    # whenever the team has zero or more than one registered instance —
+    # <project> is then a hard required positional rather than a guessed
+    # default.
     PROJECT="${1:-$DEFAULT_PROJECT}"
+    if [[ -z "$PROJECT" ]]; then
+        echo "  ✗ Missing <project> argument (no unambiguous default for this team)."
+        usage
+        exit 2
+    fi
     PROJECT_LOWER="$(echo "$PROJECT" | tr '[:upper:]' '[:lower:]')"
     INSTANCE="${TEAM_ID}-${PROJECT_LOWER}"
 fi
