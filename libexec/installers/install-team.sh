@@ -585,27 +585,41 @@ _extract_session_order() {
 }
 
 # _resolve_parametric_defaults: XACA-0862. Derives DEFAULT_PROJECT (and, for
-# group teams, DEFAULT_GROUP) for the parametric connect template from the
-# team's REGISTERED instance(s) in team-paths.json — never from a static
-# conf literal. A literal baked from TEAM_DEFAULT_PROJECT cannot track which
-# instance a user actually registers: `legal` baked "default" while the only
-# live instance was "legal-coparenting", so `legal-connect.sh <host>` (no
-# args) silently targeted a nonexistent "legal-default" instance.
+# group teams, DEFAULT_GROUP) for the parametric connect template — never
+# from the static TEAM_DEFAULT_PROJECT conf literal, which cannot track
+# which instance a user actually registers: `legal` baked "default" while
+# the only live instance was "legal-coparenting", so `legal-connect.sh
+# <host>` (no args) silently targeted a nonexistent "legal-default" instance.
 #
 # Sets (bash globals, since this runs in the calling shell, not a subshell):
 #   _DERIVED_DEFAULT_PROJECT, _DERIVED_DEFAULT_GROUP, _DERIVED_MATCH_COUNT
 #
-# Fallback contract (deliberate — XACA-0862 subitem 003):
+# Two-tier resolution, in order:
+#
+# TIER 1 — EXPLICIT ARGUMENT ALWAYS WINS (XACA-0862-014). If the caller
+# passed --project (and, for group teams, --client) on THIS invocation,
+# that is a genuine, deliberate (re)install of that specific instance and
+# it becomes the default outright — no registry lookup, no ambiguity check.
+# ARG_PROJECT/ARG_CLIENT (globals set only from the CLI flags, never from a
+# conf fallback) are the signal; RESOLVED_PROJECT/RESOLVED_CLIENT already
+# decompose to exactly this instance (computed above by compute_instance_id).
+# This is what makes `finance --project business` then later `finance
+# --project ops` correctly flip the team-scoped default to "ops" — an
+# explicit re-install of a different project is intentional, not
+# ambiguous, even though "business" remains a separate live instance.
+#
+# TIER 2 — no explicit --project (a `--connect-only` regen/re-render, e.g.
+# from `aiteamforge upgrade` or the setup wizard's connect-only pass, which
+# never know which project to ask for): RESOLVED_PROJECT in this branch came
+# from the team's static TEAM_DEFAULT_PROJECT conf literal — exactly the
+# untrustworthy value this ticket replaces — so derive from what's actually
+# REGISTERED in team-paths.json instead:
 #   0 registered instances  -> caller falls back to RESOLVED_PROJECT /
-#                              RESOLVED_CLIENT (the instance being installed
-#                              RIGHT NOW). team-paths.json is written by this
-#                              installer only AFTER this render (see the
-#                              XACA-0463 upsert further down), so on a team's
-#                              first-ever install nothing is registered yet —
-#                              the instance being installed is about to become
-#                              the team's only one.
-#   1 registered instance   -> use it. This is the common, settled case (and
-#                              exactly what fixes the legal-coparenting bug).
+#                              RESOLVED_CLIENT (the conf-literal-derived
+#                              value; better than nothing when the registry
+#                              is empty and there is no explicit argument).
+#   1 registered instance   -> use it (fixes the legal-coparenting bug for
+#                              the common no-argument re-render/regen path).
 #   >1 registered instances -> AMBIGUOUS. Do not guess: leave both empty so
 #                              the rendered script has no baked default and
 #                              the template (XACA-0862) requires an explicit
@@ -623,11 +637,22 @@ _resolve_parametric_defaults() {
     _DERIVED_DEFAULT_GROUP=""
     _DERIVED_MATCH_COUNT=0
 
-    # Keys in team-paths.json's .teams map are INSTANCE ids: "<team>-<project>"
-    # for non-group teams, "<team>-<client>-<project>" for group teams (each
-    # component matches [a-z0-9_]+ — see _validate_instance_component above).
-    # Anchor the component COUNT, not just the prefix, so e.g. a stray
-    # 2-component key never matches a non-group team's 1-component pattern.
+    # TIER 1: explicit --project (and --client, for group teams) wins outright.
+    if [[ -n "$ARG_PROJECT" ]] && { [[ "$has_group" != "true" ]] || [[ -n "$ARG_CLIENT" ]]; }; then
+        _DERIVED_DEFAULT_PROJECT="$RESOLVED_PROJECT"
+        _DERIVED_DEFAULT_GROUP="$RESOLVED_CLIENT"
+        _DERIVED_MATCH_COUNT=1
+        return 0
+    fi
+
+    # TIER 2: no explicit argument (or, for a group team, --project without
+    # --client, e.g. an interactive client prompt) — derive from the
+    # registry. Keys in team-paths.json's .teams map are INSTANCE ids:
+    # "<team>-<project>" for non-group teams, "<team>-<client>-<project>"
+    # for group teams (each component matches [a-z0-9_]+ — see
+    # _validate_instance_component above). Anchor the component COUNT, not
+    # just the prefix, so e.g. a stray 2-component key never matches a
+    # non-group team's 1-component pattern.
     if [[ "$has_group" == "true" ]]; then
         pattern="^${team_id}-[a-z0-9_]+-[a-z0-9_]+\$"
     else
@@ -640,27 +665,6 @@ _resolve_parametric_defaults() {
             '(.teams // {}) | keys[] | select(test($pat))' \
             "$team_paths_json" 2>/dev/null || true)"
     fi
-
-    # XACA-0862-014 (review finding): team-paths.json is written by THIS
-    # installer only AFTER _render_connect_disconnect() runs (the XACA-0463
-    # upsert further down), and --connect-only never persists at all — so a
-    # registry-only lookup is a stale snapshot from BEFORE this install. On a
-    # SECOND install of an already-registered team with a NEW project (e.g.
-    # `finance --project business` was installed earlier, this run is
-    # `finance --project ops`), that staleness made match_count==1 point at
-    # the OLD instance ("business") as if it were still the team's only one,
-    # when post-install reality is TWO live instances. Union in the current
-    # INSTANCE_ID (global, set above at instance-id computation) so the
-    # candidate set reflects reality AFTER this install completes, not a
-    # snapshot from before it started:
-    #   - 0 registered + this install       -> 1 candidate (itself)  -> use it
-    #   - 1 registered == this install      -> 1 candidate (same key)-> use it
-    #   - 1 registered != this install      -> 2 candidates          -> AMBIGUOUS
-    #   - >1 registered (+/- this install)  -> 2+ candidates         -> AMBIGUOUS
-    # "Ambiguous" is deliberate, not a regression: once a team has two live
-    # project instances, a single team-scoped script cannot default to one
-    # without silently ignoring the other — same no-guess rule as subitem 003.
-    matches="$(printf '%s\n%s\n' "$matches" "$INSTANCE_ID" | sed '/^$/d' | sort -u)"
     match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
     _DERIVED_MATCH_COUNT="$match_count"
 
@@ -673,12 +677,8 @@ _resolve_parametric_defaults() {
             _DERIVED_DEFAULT_PROJECT="$remainder"
         fi
     fi
-    # match_count > 1: leave both empty — caller warns, template requires an
-    # explicit argument. match_count can no longer be 0 (INSTANCE_ID is
-    # always unioned in), so that branch of the fallback contract above is
-    # now unreachable in practice but is kept documented and harmless in the
-    # caller for defense-in-depth (e.g. INSTANCE_ID unset would still degrade
-    # safely rather than crash).
+    # match_count == 0 or > 1: leave both empty — caller decides the fallback
+    # (0 -> RESOLVED_PROJECT/RESOLVED_CLIENT; >1 -> warn, stay empty).
     return 0
 }
 
