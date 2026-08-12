@@ -460,17 +460,33 @@
 }
 
 /* cr-published (XACA-0895): Confluence page is live, CR-Proper link not yet
-   appended. Sits between DRAFTED (dim neutral gray) and SUBMITTED (amber
-   #ffcc00) in the lifecycle, so it needs a hue distinct from both rather than
-   a shade of either — --lcars-orange (#ff9900) reads as warmer/more saturated
-   than drafted's gray and more red-shifted than submitted's yellow-gold,
-   staying legible as its own state at a glance. Not otherwise used for a
-   per-state badge in this file (--lcars-peach covers the unrelated EDIT
-   STATE button chrome). */
+   appended.
+
+   XACA-0895-015 — was --lcars-orange (#ff9900). That failed the one comparison
+   that matters: PUBLISHED and SUBMITTED are consecutive pre-CAB states that
+   appear side by side in the same scan, and orange sat only 12° of hue from
+   submitted's amber (#ffcc00) at 1.42:1 against each other — a known
+   red-green-confusion pair, effectively one colour to a large minority of
+   viewers. Replaced with --lcars-violet (#aa77dd), measured:
+
+     vs SUBMITTED (the adjacent state):  138° hue,  2.17:1   [was 12°, 1.42:1]
+     nearest other state badge:           30° hue (held, deployed-dev)
+     against panel background #1a1a2e:   5.19:1  — clears WCAG AA
+
+   Every warmer token (yellow/peach/tan) collides with submitted all over again
+   (12-18° hue); lavender is 0° from deployed-dev; rose is 2° from emergency;
+   purple is 30° from held but only 1.06:1 against it. Violet is the only
+   palette token that clears the submitted collision while holding >=30° from
+   every other state badge.
+
+   NOTE for future editors: --lcars-violet is also the accent for the .cr-type-
+   pills row (~L61-74) in this same tab. That is control chrome in a separate
+   region, not a state badge, so the state column still maps colour->state
+   one-to-one — but do not treat violet as unclaimed. */
 .cr-state-published {
-    background: rgba(255, 153, 0, 0.15);
-    color: var(--lcars-orange, #ff9900);
-    border: 1px solid rgba(255, 153, 0, 0.35);
+    background: rgba(170, 119, 221, 0.15);
+    color: var(--lcars-violet, #aa77dd);
+    border: 1px solid rgba(170, 119, 221, 0.35);
 }
 
 .cr-state-submitted {

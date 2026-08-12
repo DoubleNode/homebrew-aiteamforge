@@ -181,7 +181,7 @@ test('sanity: STAGE AGE for cr-drafted still anchors on cr_created_at (unaffecte
 // hand-built view-object with the reminder field already present would pass
 // even if _normalizeCR forgot to project it, which is exactly half of Defect 2.
 
-test('XACA-0895-009 regression: DRAFTED 24h+ badge reads cr_published_reminder_last_at for a cr-published CR', () => {
+test('XACA-0895-009 regression: 24h+ badge reads cr_published_reminder_last_at for a cr-published CR', () => {
     var cr = {
         id: 'CR-TEST-0004',
         crState: 'cr-published',
@@ -190,8 +190,41 @@ test('XACA-0895-009 regression: DRAFTED 24h+ badge reads cr_published_reminder_l
     };
     var view = _normalizeCR(cr, {});
     var html = _automationBadges(view);
-    assert.ok(html.indexOf('DRAFTED 24h+') !== -1,
+    assert.ok(html.indexOf('24h+') !== -1,
         'Expected the 24h+ badge for a cr-published CR whose OWN reminder field is set. Got: ' + JSON.stringify(html));
+});
+
+// XACA-0895-016: the badge used to read the literal 'DRAFTED 24h+' for BOTH
+// pre-submission states, so a cr-published row rendered a DRAFTED badge next to
+// its own PUBLISHED state badge. The label is now per-state. These tests assert
+// the contradiction specifically — asserting only that "some 24h+ badge
+// rendered" would have passed against the defect.
+test('XACA-0895-016: cr-published row does NOT render the contradicting DRAFTED label', () => {
+    var cr = {
+        id: 'CR-TEST-0004B',
+        crState: 'cr-published',
+        cr_published_reminder_last_at: new Date().toISOString(),
+        itemIds: [],
+    };
+    var html = _automationBadges(_normalizeCR(cr, {}));
+    assert.ok(html.indexOf('DRAFTED') === -1,
+        'A cr-published row must not claim DRAFTED — it contradicts the row\'s own state badge. Got: ' + JSON.stringify(html));
+    assert.ok(html.indexOf('PUBLISHED 24h+') !== -1,
+        'Expected the state-aware PUBLISHED 24h+ label. Got: ' + JSON.stringify(html));
+});
+
+test('XACA-0895-016: badge label matches the row state for every reminder-firing state', () => {
+    var cases = [
+        { state: 'cr-drafted',   field: 'cr_drafted_reminder_last_at',   label: 'DRAFTED 24h+' },
+        { state: 'cr-published', field: 'cr_published_reminder_last_at', label: 'PUBLISHED 24h+' },
+    ];
+    cases.forEach(function (c) {
+        var cr = { id: 'CR-TEST-LBL', crState: c.state, itemIds: [] };
+        cr[c.field] = new Date().toISOString();
+        var html = _automationBadges(_normalizeCR(cr, {}));
+        assert.ok(html.indexOf(c.label) !== -1,
+            'Expected ' + c.label + ' for ' + c.state + '. Got: ' + JSON.stringify(html));
+    });
 });
 
 test('XACA-0895-009 regression: badge does NOT fire for cr-published off a foreign cr_drafted_reminder_last_at', () => {

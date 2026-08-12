@@ -838,8 +838,11 @@
      *                 cr_published_reminder_last_at SEPARATE (neither is shared or
      *                 carried across the cr-drafted → cr-published transition; see
      *                 docs/CR_WORKFLOW.md "Automation 1: 24-Hour Drafted Reminder").
-     *                 Badge label/copy stays "DRAFTED 24h+" per that doc regardless
-     *                 of which of the two states/fields fired it.
+     *                 XACA-0895-016: the LABEL is per-state. It previously read the
+     *                 literal "DRAFTED 24h+" for both, so a cr-published row carried
+     *                 a badge contradicting its own PUBLISHED state badge two columns
+     *                 over. Only the rendered copy is state-aware — the separate
+     *                 idempotency fields and the firing conditions are unchanged.
      *   DELAYED:      delay_flagged_at is set AND crState NOT IN _DELAY_TERMINAL
      *
      * Both badges read from normalized view-object fields that _normalizeCR
@@ -856,6 +859,16 @@
         'cr-published': 'cr_published_reminder_last_at',
     };
 
+    // Per-state badge copy (XACA-0895-016). Keyed by the same states as
+    // _REMINDER_LAST_AT_FIELD above — a state that can fire the reminder must
+    // have a label here. The fallback exists only so an unmapped state degrades
+    // to neutral copy rather than asserting a state the row contradicts.
+    const _REMINDER_BADGE_LABEL = {
+        'cr-drafted':   'DRAFTED 24h+',
+        'cr-published': 'PUBLISHED 24h+',
+    };
+    const _REMINDER_BADGE_LABEL_FALLBACK = 'PRE-SUBMISSION 24h+';
+
     function _automationBadges(item) {
         const parts = [];
 
@@ -866,7 +879,12 @@
         if (reminderLastAt && _DRAFTED_REMINDER_STATES.has(item.crState)) {
             const isoReminder = escapeHtml(new Date(reminderLastAt).toISOString());
             const tip = escapeHtml(`This CR has been in ${item.crState || 'cr-drafted'} for over 24 hours. Last reminder: ${isoReminder}`);
-            parts.push(`<span class="cr-automation-badge cr-badge-drafted-24h" title="${tip}">&#9200; DRAFTED 24h+</span>`);
+            // Label tracks the row's own state; class stays cr-badge-drafted-24h
+            // so both states keep the identical amber "stalled" styling.
+            const label = escapeHtml(
+                _REMINDER_BADGE_LABEL[item.crState] || _REMINDER_BADGE_LABEL_FALLBACK
+            );
+            parts.push(`<span class="cr-automation-badge cr-badge-drafted-24h" title="${tip}">&#9200; ${label}</span>`);
         }
 
         // DELAYED badge

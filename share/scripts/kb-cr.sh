@@ -413,9 +413,24 @@ _kb_cr_container_get_state() {
 #   }
 #
 # Canonical state ranking (used to determine "earlier than"):
-#     cr-drafted=0, cr-submitted=10, cr-rejected=11, cr-held=12,
+#     cr-drafted=0, cr-published=5, cr-submitted=10, cr-rejected=11, cr-held=12,
 #     cr-approved=20, implementing=30, deployed-dev=40, deployed-prod=50,
 #     emergency-deployed=60.
+# cr-published sits at rank 5 (between cr-drafted and cr-submitted) because the
+# existing ranks are sparse, so a new state slots into a gap with no renumbering.
+#
+# Correction (XACA-0895-017 review): an earlier version of this comment claimed
+# renumbering "would invalidate every persisted revert_history[] entry". That is
+# false. Ranks are computed at runtime by _kb_cr_state_rank and are NEVER
+# persisted — revert_history[] entries store state NAMES (from_state, to_state,
+# stripped_states), so no stored record would be affected by a renumber.
+# The real reasons to keep the gaps:
+#   * A renumber would be a coordinated edit across _kb_cr_state_rank and every
+#     comparison site, for zero functional gain — all comparisons are rank-vs-rank
+#     and relative, so absolute values carry no meaning.
+#   * A few sentinel conventions ARE absolute and would have to be re-verified:
+#     rank 0 means cr-drafted / "no predecessor" (see the `<= 0` guard in
+#     _kb_cr_prev_state_from_timestamps) and a negative rank means unknown state.
 # cr-rejected and cr-held are positioned between cr-submitted and cr-approved
 # because both are ENTERED from cr-submitted (cr-held may also be entered from
 # cr-approved, which is handled by the evidence-based strip — cr-approved's
@@ -426,6 +441,7 @@ _kb_cr_container_get_state() {
 _kb_cr_state_rank() {
     case "$1" in
         cr-drafted)         echo 0  ;;
+        cr-published)       echo 5  ;;
         cr-submitted)       echo 10 ;;
         cr-rejected)        echo 11 ;;
         cr-held)            echo 12 ;;
@@ -452,6 +468,10 @@ _kb_cr_state_rank() {
 _kb_cr_state_strip_spec() {
     case "$1" in
         cr-drafted)         ;;
+        # cr-published owns exactly one strippable field today. XACA-0896
+        # (Guard 4) adds cr_published_version / cr_published_title at this
+        # same transition — extend this spec line there, don't pre-build now.
+        cr-published)       printf 'ts\ttimestamps.cr_published_at\n' ;;
         cr-submitted)       printf 'ts\ttimestamps.cr_submitted_at\n' ;;
         cr-rejected)        printf 'ts\ttimestamps.cr_rejected_at\n' ;;
         cr-held)            printf 'ts\ttimestamps.cr_held_at\n' ;;
@@ -488,6 +508,7 @@ _kb_cr_state_strip_spec() {
 _kb_cr_state_entry_ts_field() {
     case "$1" in
         cr-drafted)         ;;                              # stamped by `kb-cr create`
+        cr-published)       echo "cr_published_at"          ;;
         cr-submitted)       echo "cr_submitted_at"          ;;
         cr-rejected)        echo "cr_rejected_at"           ;;
         cr-held)            echo "cr_held_at"               ;;
@@ -589,7 +610,7 @@ _kb_cr_stamp_state_entry() {
 _kb_cr_states_above_rank() {
     local target_rank="$1"
     local s r
-    for s in cr-drafted cr-submitted cr-rejected cr-held cr-approved implementing deployed-dev deployed-prod emergency-deployed; do
+    for s in cr-drafted cr-published cr-submitted cr-rejected cr-held cr-approved implementing deployed-dev deployed-prod emergency-deployed; do
         r=$(_kb_cr_state_rank "$s")
         if (( r > target_rank )); then
             echo "$s"
@@ -884,7 +905,8 @@ _kb_cr_activity_resolve_board() {
 # ─────────────────────────────────────────────────────────────────────────────
 
 # kb-cr submit <CR-ID>
-# Predecessor states: cr-drafted, cr-held (re-submit after hold), cr-rejected (re-submit after rework)
+# Predecessor states: cr-drafted (one-stage legacy path, XACA-0465), cr-published (two-stage path,
+# XACA-0895), cr-held (re-submit after hold), cr-rejected (re-submit after rework)
 # Semantics: "submitted" means a CR-Proper Confluence page link has been appended to the bottom of the
 # CR request page and cr_proper_url has been written (by the poller or manually via the LCARS UI).
 # This command advances the state manually for back-compat; the poller (XACA-0328-003) is the
@@ -911,18 +933,18 @@ _kb_cr_container_submit() {
     current_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_idx")
 
     case "$current_state" in
-        cr-drafted|cr-held|cr-rejected) ;;
+        cr-drafted|cr-published|cr-held|cr-rejected) ;;
         cr-submitted)
             echo "kb-cr submit: CR '$cr_id' is already in state 'cr-submitted'." >&2
             return 1
             ;;
         cr-approved|implementing|deployed-dev|deployed-prod|emergency-deployed)
             echo "kb-cr submit: CR '$cr_id' is in state '$current_state'; cannot re-submit from this state." >&2
-            echo "  Expected one of: cr-drafted, cr-held, cr-rejected" >&2
+            echo "  Expected one of: cr-drafted, cr-published, cr-held, cr-rejected" >&2
             return 1
             ;;
         *)
-            echo "kb-cr submit: CR '$cr_id' is in unexpected state '$current_state'; expected one of: cr-drafted, cr-held, cr-rejected" >&2
+            echo "kb-cr submit: CR '$cr_id' is in unexpected state '$current_state'; expected one of: cr-drafted, cr-published, cr-held, cr-rejected" >&2
             return 1
             ;;
     esac
@@ -1564,8 +1586,8 @@ _kb_cr_container_revert() {
     target_rank=$(_kb_cr_state_rank "$target_state")
     if (( target_rank < 0 )); then
         echo "kb-cr $operation: target state '$target_state' is not a known crState." >&2
-        echo "  Valid: cr-drafted, cr-submitted, cr-rejected, cr-held, cr-approved," >&2
-        echo "         implementing, deployed-dev, deployed-prod, emergency-deployed" >&2
+        echo "  Valid: cr-drafted, cr-published, cr-submitted, cr-rejected, cr-held," >&2
+        echo "         cr-approved, implementing, deployed-dev, deployed-prod, emergency-deployed" >&2
         return 1
     fi
 
@@ -1701,6 +1723,7 @@ _kb_cr_revert_compute_predecessor() {
     lines=$(_kb_jq_read "$board_file" '
         .crs[($cidx | tonumber)] as $c |
         {
+            "cr-published":       $c.timestamps.cr_published_at,
             "cr-submitted":       $c.timestamps.cr_submitted_at,
             "cr-rejected":        $c.timestamps.cr_rejected_at,
             "cr-held":            $c.timestamps.cr_held_at,
@@ -3048,10 +3071,11 @@ _kb_cr_container_show() {
     # ── Lifecycle progress arrow ─────────────────────────────────────────────
     # Canonical main-path phases (in display order). Off-path states handled below.
     local -a _lc_phases
-    _lc_phases=(drafted submitted approved implementing "deployed-dev" "deployed-prod")
+    _lc_phases=(drafted published submitted approved implementing "deployed-dev" "deployed-prod")
     local _lc_state_label
     case "$cr_state" in
         cr-drafted)         _lc_state_label="drafted"       ;;
+        cr-published)       _lc_state_label="published"     ;;
         cr-submitted)       _lc_state_label="submitted"     ;;
         cr-approved)        _lc_state_label="approved"      ;;
         implementing)       _lc_state_label="implementing"  ;;
@@ -3206,9 +3230,9 @@ _kb_cr_container_list() {
             --help|-h)
                 echo "Usage: kb-cr list [--state <state>] [--platform <name>]"
                 echo ""
-                echo "Valid states: cr-drafted, cr-submitted, cr-approved, cr-rejected,"
-                echo "              cr-held, implementing, deployed-dev, deployed-prod,"
-                echo "              emergency-deployed"
+                echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved,"
+                echo "              cr-rejected, cr-held, implementing, deployed-dev,"
+                echo "              deployed-prod, emergency-deployed"
                 return 0
                 ;;
             *) shift ;;
@@ -3270,21 +3294,21 @@ _kb_cr_container_transition() {
 
     if [[ -z "$cr_id" || -z "$new_state" ]]; then
         echo "Usage: kb-cr transition <CR-ID> <new-state>" >&2
-        echo "Valid states: cr-drafted, cr-submitted, cr-approved, cr-rejected," >&2
-        echo "              cr-held, implementing, deployed-dev, deployed-prod," >&2
-        echo "              emergency-deployed, cr-closed" >&2
+        echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved," >&2
+        echo "              cr-rejected, cr-held, implementing, deployed-dev," >&2
+        echo "              deployed-prod, emergency-deployed, cr-closed" >&2
         return 1
     fi
 
     # Validate the new state against the schema's crStates list
     case "$new_state" in
-        cr-drafted|cr-submitted|cr-approved|cr-rejected|cr-held|\
+        cr-drafted|cr-published|cr-submitted|cr-approved|cr-rejected|cr-held|\
         implementing|deployed-dev|deployed-prod|emergency-deployed|cr-closed) ;;
         *)
             echo "kb-cr transition: invalid state '$new_state'." >&2
-            echo "Valid states: cr-drafted, cr-submitted, cr-approved, cr-rejected," >&2
-            echo "              cr-held, implementing, deployed-dev, deployed-prod," >&2
-            echo "              emergency-deployed, cr-closed" >&2
+            echo "Valid states: cr-drafted, cr-published, cr-submitted, cr-approved," >&2
+            echo "              cr-rejected, cr-held, implementing, deployed-dev," >&2
+            echo "              deployed-prod, emergency-deployed, cr-closed" >&2
             return 1
             ;;
     esac
@@ -3491,6 +3515,16 @@ _kb_cr_draft() {
 #
 # Idempotent: if the local md doesn't exist, error clearly and suggest
 # running kb-cr draft first.
+#
+# State advance (XACA-0895): a successful cr_confluence_url write advances the
+# container cr-drafted -> cr-published, stamping cr_published_at. The advance
+# itself lives in _kb_cr_set_confluence_url (the single place the URL is
+# actually written, whether reached via this skill-invocation path or via the
+# direct `kb-cr _set_confluence_url` plumbing call the skill is instructed to
+# make itself). It is rank-guarded there: a container already at cr-published
+# or beyond is never re-stamped or dragged backward. KB_CR_PUBLISH_DRY_RUN=1
+# returns before this function ever calls _kb_cr_set_confluence_url, so
+# dry-run never advances state.
 # ─────────────────────────────────────────────────────────────────────────────
 _kb_cr_publish() {
     local item_id="${1:-}"
@@ -3762,6 +3796,27 @@ _kb_cr_set_confluence_url() {
         "note=Published to Confluence; URL written to CR container record") || true
     if [[ -n "$event" ]]; then
         _kb_cr_activity_append "$_cr_board" "$cr_id_assigned" "$event" 2>/dev/null || true
+    fi
+
+    # ── Advance cr-drafted → cr-published on a successful URL write (XACA-0895) ─
+    # This is the ONLY place cr_confluence_url is actually written to the board
+    # (both the `publish` skill path and the direct `kb-cr _set_confluence_url`
+    # plumbing call in here), so it is the correct place to gate the state
+    # advance rather than in _kb_cr_publish itself.
+    #
+    # Guard on RANK, not on a literal "cr-drafted" match: a CR already at
+    # cr-published (idempotent re-publish / URL update) or anywhere at or past
+    # cr-submitted must never be dragged backward or have cr_published_at
+    # re-stamped. Only a container strictly below cr-published's rank (i.e.
+    # cr-drafted, rank 0) advances. Unknown/empty state (_kb_cr_state_rank
+    # returns -1) is deliberately left alone rather than guessed forward.
+    local _cur_state _cur_rank _pub_rank
+    _cur_state=$(_kb_cr_container_get_state "$_cr_board" "$cr_container_idx" 2>/dev/null || echo "")
+    _cur_rank=$(_kb_cr_state_rank "$_cur_state")
+    _pub_rank=$(_kb_cr_state_rank "cr-published")
+    if [[ "$_cur_rank" -ge 0 ]] && [[ "$_cur_rank" -lt "$_pub_rank" ]]; then
+        _kb_cr_lifecycle_advance "$_cr_board" "$cr_container_idx" "$cr_id_assigned" "cr-published" "cr_published_at" "$ts" || return 1
+        echo "kb-cr publish: [$cr_id_assigned] $_cur_state -> cr-published (cr_published_at=$ts)"
     fi
 
     echo "cr_confluence_url set on CR [$cr_id_assigned]: $conf_url"
@@ -5023,9 +5078,9 @@ _kb_cr_help() {
     echo "              List all CRs on the board (filterable)."
     echo "  transition <CR-ID> <new-state>"
     echo "              Update crState. Does NOT write cr_*_at timestamps."
-    echo "              Valid states: cr-drafted, cr-submitted, cr-approved,"
-    echo "              cr-rejected, cr-held, implementing, deployed-dev,"
-    echo "              deployed-prod, emergency-deployed"
+    echo "              Valid states: cr-drafted, cr-published, cr-submitted,"
+    echo "              cr-approved, cr-rejected, cr-held, implementing,"
+    echo "              deployed-dev, deployed-prod, emergency-deployed"
     echo "  reschedule <CR-ID> <date>"
     echo "              Post-hoc setter for deploy_window_planned (UTC-normalized)."
     echo "              Valid at any crState — no state transition occurs."
@@ -5051,7 +5106,7 @@ _kb_cr_help() {
     echo "        or fall through to the v1 per-item helper if not."
     echo ""
     echo "  submit  <CR-ID>"
-    echo "              cr-drafted|cr-held|cr-rejected → cr-submitted"
+    echo "              cr-drafted|cr-published|cr-held|cr-rejected → cr-submitted"
     echo "              Writes timestamps.cr_submitted_at."
     echo "              'cr-submitted' means a CR-Proper Confluence page link has been"
     echo "              appended to the bottom of the CR request page (cr_proper_url set)."
@@ -5141,14 +5196,22 @@ _kb_cr_help() {
     echo "              invokes Main Event CR skill (On-Demand Mode) to create/update"
     echo "              the Confluence page in DPD2 space, then writes the resulting URL"
     echo "              to cr_confluence_url on the .crs[] container record."
+    echo "              [XACA-0895] A successful URL write also advances"
+    echo "              cr-drafted → cr-published, stamping timestamps.cr_published_at."
+    echo "              Re-publishing a CR already at cr-published (or later) only"
+    echo "              updates the URL — it never re-stamps or reverts the state."
     echo "              Errors clearly if local doc is missing — run kb-cr draft first."
-    echo "              Set KB_CR_PUBLISH_DRY_RUN=1 to stop before skill invocation."
+    echo "              Set KB_CR_PUBLISH_DRY_RUN=1 to stop before skill invocation (and"
+    echo "              before any state advance)."
     echo "              Re-run updates the existing Confluence page (URL unchanged)."
     echo "              Honors crSupport.enabled gate."
     echo "  _set_confluence_url <id> <url>"
     echo "              Internal plumbing: write cr_confluence_url directly."
     echo "              Used by the Main Event CR skill after it publishes a page."
     echo "              Records a 'confluence_published' activity log entry."
+    echo "              [XACA-0895] Also performs the cr-drafted → cr-published advance"
+    echo "              described under 'publish' above — this is the single write path"
+    echo "              both 'publish' and direct skill calls go through."
     echo "  _set_publish_stamps <id> <version> <title>"
     echo "              Guard 4 (XACA-0896-001): stamp cr_published_version /"
     echo "              cr_published_title on the .crs[] container record."
@@ -5171,6 +5234,8 @@ _kb_cr_help() {
     echo "              Submit the CR for CAB review."
     echo "              In the Confluence-driven workflow, cr-submitted means a CR-Proper"
     echo "              page link is appended to the request page (cr_proper_url populated)."
+    echo "              Accepted predecessor states: cr-drafted, cr-published, cr-held,"
+    echo "              cr-rejected."
     echo "  approve <id> [--by <login>] [--name <display>]  [propagates; v1 fallback]"
     echo "              Mark CR as approved."
     echo "  reject  <id>     [propagates; v1 fallback]"
