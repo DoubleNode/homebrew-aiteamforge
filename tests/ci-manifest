@@ -96,4 +96,5 @@ test-xaca-0814-upgrade-connect-scripts.sh       plain-shell
 test-xaca-0831-alloc-slot-atomicity.sh          plain-shell
 test-xaca-0834-connect-script-recovery.sh       plain-shell
 test-xaca-0845-connect-script-parametric-teams.sh plain-shell
+test-xaca-0862-006-retire-legacy-connect.sh     plain-shell
 test-xaca-0862-team-scoped-connect.sh           plain-shell

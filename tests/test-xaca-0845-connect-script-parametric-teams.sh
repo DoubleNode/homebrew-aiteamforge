@@ -1195,9 +1195,13 @@ fi
 
 test_start "D3 [Blocker 2, END-TO-END]: 'aiteamforge doctor --check connect' through bin/aiteamforge-cli.sh actually runs the check"
 D3_SBX="$(_new_install_sandbox)"
-# One installed parametric instance with NO script (must be reported missing),
-# one installed non-parametric instance WITH a script (must be reported
-# present), and one orphan script (must be reported as matching nothing).
+# One installed PARAMETRIC team with NO script (must be reported missing
+# under its bare TEAM id "finance", XACA-0862 team-scoping — not the
+# pre-XACA-0862 instance id "finance-personal"; finance ships
+# TEAM_HAS_PROJECTS="true" plus a real share/scripts/teams/finance-startup.sh
+# in this TAP_ROOT, so check_connect_scripts classifies it parametric), one
+# installed non-parametric instance WITH a script (must be reported present),
+# and one orphan script (must be reported as matching nothing).
 _write_install_config "$D3_SBX/aiteamforge/.aiteamforge-config" "finance:personal" "academy"
 printf '#!/bin/zsh\necho stub\n' > "$D3_SBX/aiteamforge/academy-connect.sh"
 printf '#!/bin/zsh\necho stub\n' > "$D3_SBX/aiteamforge/legal-default-connect.sh"
@@ -1213,13 +1217,13 @@ D3_OK=true
 grep -qi "Unknown component" "$D3_LOG" && D3_OK=false
 # The check must actually have run and produced all three verdicts.
 grep -qi "Connect Scripts" "$D3_LOG" || D3_OK=false
-grep -qF "finance-personal" "$D3_LOG" || D3_OK=false
-grep -qF "academy" "$D3_LOG" || D3_OK=false
+grep -qF "Installed instance 'finance' has no connect script" "$D3_LOG" || D3_OK=false
+grep -qF "Connect script present for academy" "$D3_LOG" || D3_OK=false
 grep -qF "legal-default" "$D3_LOG" || D3_OK=false
 if [ "$D3_OK" = true ]; then
     test_pass
 else
-    test_fail "'aiteamforge doctor --check connect' must reach check_connect_scripts via the real CLI dispatch and report the missing (finance-personal), present (academy) and orphaned (legal-default) instances; output: $(cat "$D3_LOG")"
+    test_fail "'aiteamforge doctor --check connect' must reach check_connect_scripts via the real CLI dispatch and report the missing (finance, team-scoped XACA-0862), present (academy) and orphaned (legal-default) instances; output: $(cat "$D3_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1354,12 +1358,19 @@ fi
 # Doctor coverage: XACA-0845-015 (double false positive) and -016 (cockpit).
 # Positive cases run the REAL CLI end-to-end, like D3.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "D4 [XACA-0845-015]: doctor reports a freelance install as PRESENT, not missing-plus-orphan"
+test_start "D4 [XACA-0845-015 / XACA-0862]: doctor reports a freelance install as PRESENT via its team-scoped script, not missing-plus-orphan"
 D4_SBX="$(_new_install_sandbox)"
 _write_install_config "$D4_SBX/aiteamforge/.aiteamforge-config" "freelance:doublenode:starwords"
 _write_install_profile_marker "$D4_SBX/aiteamforge" "full"
-# The script install-team.sh really renders for this install.
-printf '#!/bin/zsh\necho stub\n' > "$D4_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh"
+# XACA-0862: freelance is parametric (TEAM_REQUIRES_CLIENT_ID="true" AND
+# TEAM_HAS_PROJECTS="true"), so the real install-team.sh renders exactly ONE
+# team-scoped freelance-connect.sh regardless of client/project — never a
+# per-instance freelance-doublenode-starwords-connect.sh. The client_id
+# composition bug XACA-0845-015 originally guarded against (composing
+# "freelance-starwords" instead of "freelance-doublenode-starwords") is now
+# structurally unreachable for THIS check: client_id/project_id are never
+# read at all for a parametric base, which collapses straight to "freelance".
+printf '#!/bin/zsh\necho stub\n' > "$D4_SBX/aiteamforge/freelance-connect.sh"
 D4_LOG="$WORK_DIR/d4-doctor.log"
 HOME="$D4_SBX/home" \
 AITEAMFORGE_HOME="$TAP_ROOT" \
@@ -1367,15 +1378,16 @@ AITEAMFORGE_DIR="$D4_SBX/aiteamforge" \
 AITEAMFORGE_CONFIG="$D4_SBX/home/.aiteamforge/team-paths.json" \
     bash "$CLI_SH" doctor --check connect --verbose >"$D4_LOG" 2>&1 || true
 D4_OK=true
-grep -qF "Connect script present for freelance-doublenode-starwords" "$D4_LOG" || D4_OK=false
-# Neither half of the double false positive may appear.
+grep -qF "Connect script present for freelance" "$D4_LOG" || D4_OK=false
+# Neither half of the pre-XACA-0862 double false positive may appear.
 grep -qF "freelance-starwords" "$D4_LOG" && D4_OK=false
+grep -qF "freelance-doublenode-starwords" "$D4_LOG" && D4_OK=false
 grep -qi "matches no installed instance" "$D4_LOG" && D4_OK=false
 grep -qi "has no connect script" "$D4_LOG" && D4_OK=false
 if [ "$D4_OK" = true ]; then
     test_pass
 else
-    test_fail "doctor must report freelance-doublenode-starwords present and emit neither a 'missing' nor an 'orphan' verdict; output: $(cat "$D4_LOG")"
+    test_fail "doctor must report freelance present via its team-scoped script and emit neither a 'missing' nor an 'orphan' verdict; output: $(cat "$D4_LOG")"
 fi
 
 test_start "D5 [XACA-0845-016]: cockpit profile emits NO orphan warnings and NO remove-by-hand advice"

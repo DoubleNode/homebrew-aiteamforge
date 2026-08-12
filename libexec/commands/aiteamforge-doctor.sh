@@ -935,7 +935,7 @@ PYEOF
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Check: cockpit connect scripts (XACA-0845)
+# Check: cockpit connect scripts (XACA-0845, naming updated for XACA-0862)
 #
 # Cross-checks the instances this box INSTALLED against the *-connect.sh files
 # actually on disk, and reports BOTH directions:
@@ -947,7 +947,24 @@ PYEOF
 #             one.
 #   orphan  — a connect script matching no installed instance, typically a
 #             conf-default instance ("legal-default") written by a pass that did
-#             not know the real project, or a pre-0.11.5 bare-team name.
+#             not know the real project, a pre-0.11.5 bare-team name, or (since
+#             XACA-0862) a pre-team-scoping per-instance file — e.g.
+#             "finance-personal-connect.sh" — left behind after this box
+#             re-installed/upgraded to the team-scoped "finance-connect.sh".
+#             That last shape is retired, non-destructively, by
+#             `aiteamforge migrate --retire-legacy-connect-scripts`, NOT by
+#             this check (see below).
+#
+# XACA-0862: PARAMETRIC teams (finance/legal/medical/freelance —
+# TEAM_HAS_PROJECTS="true" AND a shipped parametric startup script, the same
+# predicate install-team.sh's _is_parametric_team() uses) now render exactly
+# ONE team-scoped connect script per team ("<base>-connect.sh") instead of one
+# per registered project instance. This check's "installed" identifier for a
+# parametric base collapses to the bare team id accordingly — see the
+# parametric-bases discovery and the python composition below. A box that
+# has not re-installed/upgraded since XACA-0862 may still have the OLD
+# instance-keyed files on disk; those now correctly fall into the orphan
+# direction below.
 #
 # SOURCE OF TRUTH is ${WORKING_DIR}/.aiteamforge-config `.teams[]`, NOT
 # ~/.aiteamforge/team-paths.json. The registry is written by
@@ -1023,8 +1040,9 @@ PYEOF
 check_connect_scripts() {
   print_section "Checking Cockpit Connect Scripts"
 
-  local _working_dir
+  local _working_dir _framework_dir
   _working_dir="$(get_working_dir)"
+  _framework_dir="$(get_framework_dir)"
   local _install_config="${_working_dir}/.aiteamforge-config"
 
   if ! command -v python3 >/dev/null 2>&1; then
@@ -1032,24 +1050,59 @@ check_connect_scripts() {
     return
   fi
 
+  # XACA-0862: a PARAMETRIC team (TEAM_HAS_PROJECTS="true" in
+  # share/teams/<base>.conf, quoted — an unquoted grep finds nothing — AND a
+  # shipped share/scripts/teams/<base>-startup.sh) now renders exactly ONE
+  # team-scoped connect script, "<base>-connect.sh", regardless of how many
+  # project instances are registered for it. Before XACA-0862 the render was
+  # INSTANCE-keyed ("finance-personal-connect.sh", one file per registered
+  # project). Determine "which bases are parametric" using the SAME predicate
+  # install-team.sh's _is_parametric_team() uses, so this check and the
+  # renderer can never silently disagree about whose name is team-scoped vs
+  # instance-scoped. A box that has not yet re-installed/upgraded since
+  # XACA-0862 may still carry the old instance-keyed files on disk — those are
+  # now legitimately orphaned (see the "orphan" case below) and are retired,
+  # non-destructively, by `aiteamforge migrate --retire-legacy-connect-scripts`
+  # (never by this check — it stays report-only, see the block comment above
+  # _connect_scripts_install_profile).
+  local _parametric_bases=() _pb_conf _pb_base
+  for _pb_conf in "${_framework_dir}"/share/teams/*.conf; do
+    [ -f "$_pb_conf" ] || continue
+    _pb_base="$(basename "$_pb_conf" .conf)"
+    if grep -qE '^TEAM_HAS_PROJECTS="true"' "$_pb_conf" \
+        && [ -f "${_framework_dir}/share/scripts/teams/${_pb_base}-startup.sh" ]; then
+      _parametric_bases+=("$_pb_base")
+    fi
+  done
+
   # NOTE FOR EDITORS: no apostrophes anywhere in the here-doc body below. Under
   # bash 3.2 a here-doc nested inside $( ) is NOT opaque, so one stray single
   # quote unterminates the whole file. See XACA-0845.
   local _installed
-  _installed="$(python3 - "$_install_config" <<'PYEOF' 2>/dev/null || true
+  _installed="$(python3 - "$_install_config" "${_parametric_bases[@]}" <<'PYEOF' 2>/dev/null || true
 import json, sys
 
-# Compose the instance id EXACTLY as install-team.sh compute_instance_id() does:
-#   no project -> "<base>"; project only -> "<base>-<project>";
-#   project + client -> "<base>-<client>-<project>". Components are lowercased.
+# Compose the expected identifier EXACTLY as the install-team.sh renderer now
+# produces filenames (XACA-0862):
+#   parametric base (argv[2:])         -> "<base>"                (team-scoped)
+#   everything else, no project        -> "<base>"
+#   everything else, project only      -> "<base>-<project>"
+#   everything else, project + client  -> "<base>-<client>-<project>"
+# Components are lowercased. Non-parametric bases still expand per registered
+# project/client the way instance-keyed installs always have — XACA-0862 only
+# changed the four TEAM_HAS_PROJECTS templates (finance/legal/medical/
+# freelance) to a single shared script per team; a base outside that set never
+# had a project/client-composed connect script to begin with, and .team_paths
+# entries for it (if any) are not connect-relevant here.
 #
 # XACA-0845-015: client_id was ignored here, so a freelance box (the only
 # TEAM_REQUIRES_CLIENT_ID template that ships) produced a DOUBLE false positive
 # from one install: the composed-but-wrong "freelance-<project>" was reported
 # missing, while the correct on-disk "freelance-<client>-<project>" script was
-# reported an orphan. This reader must stay byte-for-byte equivalent to the one
-# in aiteamforge-upgrade.sh update_connect_scripts — they answer the same
-# question and a divergence makes doctor and upgrade contradict each other.
+# reported an orphan. That composition is now used ONLY for non-parametric
+# bases; freelance itself is parametric and collapses to "freelance" below,
+# same as finance/legal/medical.
+parametric = set(sys.argv[2:])
 out = []
 try:
     with open(sys.argv[1]) as fh:
@@ -1057,6 +1110,9 @@ try:
     paths = cfg.get("team_paths", {}) or {}
     for base in cfg.get("teams", []) or []:
         base = str(base)
+        if base in parametric:
+            out.append(base)
+            continue
         entry = paths.get(base) or {}
         pid = entry.get("project_id")
         cid = entry.get("client_id")
@@ -1139,8 +1195,26 @@ PYEOF
       [ -n "$_inst" ] || continue
       if ! printf '%s\n' "$_installed" | grep -qx -- "$_inst"; then
         _orphans=$((_orphans + 1))
+        # XACA-0862: give a more specific, actionable hint when this orphan is
+        # a LEGACY per-instance file for a team that has since moved to a
+        # team-scoped script — "<base>-<suffix>-connect.sh" where <base> is a
+        # known parametric team AND "<base>-connect.sh" already exists (the
+        # replacement has landed, so the old file is genuinely superseded, not
+        # just unrecognised). Anchored on the known base list — never a bare
+        # prefix match — so a short id cannot swallow a longer one.
+        local _co_hint="Left in place deliberately. If it is genuinely unused, remove it by hand."
+        local _co_base
+        for _co_base in "${_parametric_bases[@]}"; do
+          case "$_inst" in
+            "${_co_base}-"*)
+              if [ -f "${_working_dir}/${_co_base}-connect.sh" ]; then
+                _co_hint="Superseded by team-scoped ${_co_base}-connect.sh (XACA-0862). Run: aiteamforge migrate --retire-legacy-connect-scripts (moves it to a timestamped backup, never deletes)."
+              fi
+              ;;
+          esac
+        done
         check_result warn "Connect script '${_inst}-connect.sh' matches no installed instance" \
-          "Left in place deliberately. If it is genuinely unused, remove it by hand."
+          "$_co_hint"
       fi
     done <<< "$_on_disk"
   fi

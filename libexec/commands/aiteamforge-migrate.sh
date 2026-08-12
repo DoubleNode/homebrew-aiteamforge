@@ -44,6 +44,7 @@ SKIP_VALIDATION=false
 FORCE=false
 ROLLBACK_MODE=false
 ROLLBACK_FROM=""
+RETIRE_CONNECT_MODE=false
 
 # Migration state
 MIGRATION_STATE_FILE="${HOME}/.aiteamforge/migration-state.json"
@@ -66,6 +67,16 @@ Options:
   --rollback-from <dir>  Rollback from specific backup directory
   --old-dir <path>       Path to existing installation (default: ~/aiteamforge)
   --new-dir <path>       Path for user data (default: ~/.aiteamforge)
+  --retire-legacy-connect-scripts
+                         XACA-0862: one-shot, opt-in retirement of legacy
+                         PER-INSTANCE connect/disconnect scripts (e.g.
+                         finance-personal-connect.sh) for parametric teams
+                         that have since moved to a team-scoped script
+                         (finance-connect.sh). Never deletes — moves each
+                         retired file into a timestamped backup directory
+                         under ~/aiteamforge-backups/. Combine with --dry-run
+                         to preview. Independent of the manual-install
+                         migration flow above (no --old-dir required).
   -v, --version          Show version
   -h, --help             Show this help
 
@@ -74,6 +85,10 @@ Examples:
   aiteamforge migrate --dry-run          # Preview without changes
   aiteamforge migrate --rollback         # Undo migration
   aiteamforge migrate --old-dir ~/old    # Migrate from custom path
+  aiteamforge migrate --retire-legacy-connect-scripts --dry-run
+                                          # Preview legacy connect-script retirement
+  aiteamforge migrate --retire-legacy-connect-scripts
+                                          # Retire legacy per-instance connect scripts
 
 Exit Codes:
   0    Migration successful
@@ -118,6 +133,10 @@ while [[ $# -gt 0 ]]; do
     --new-dir)
       NEW_DATA_DIR="$2"
       shift 2
+      ;;
+    --retire-legacy-connect-scripts)
+      RETIRE_CONNECT_MODE=true
+      shift
       ;;
     -v|--version)
       echo "v${VERSION}"
@@ -824,10 +843,158 @@ validate_migration() {
 }
 
 #-----------------------------------------------------------------------------
+# Legacy Connect/Disconnect Script Retirement (XACA-0862, subitem 006)
+#-----------------------------------------------------------------------------
+#
+# XACA-0862 changed PARAMETRIC-team (finance/legal/medical/freelance —
+# TEAM_HAS_PROJECTS="true" in share/teams/<base>.conf, quoted, AND a shipped
+# share/scripts/teams/<base>-startup.sh; the same predicate install-team.sh's
+# _is_parametric_team() uses) connect/disconnect scripts from PER-INSTANCE
+# names (finance-personal-connect.sh, freelance-acme-widgets-disconnect.sh) to
+# TEAM-SCOPED names (finance-connect.sh, taking <host> [project] as runtime
+# arguments — one script per team, not one per registered project). Machines
+# that installed before this change carry the old per-instance files on disk.
+# Once a fresh install or `aiteamforge upgrade` renders the new team-scoped
+# script, the old ones are dead weight: `aiteamforge doctor --check connect`
+# reports them as orphans (see check_connect_scripts in
+# aiteamforge-doctor.sh), but never removes anything itself — that check is
+# report-only by design (XACA-0845-016 / test S4 pins no deletion path there).
+# This function is the deliberate, opt-in counterpart that actually retires
+# them.
+#
+# THE TRAP THIS DELIBERATELY AVOIDS. The obvious fix is to widen the
+# XACA-0483 stale-migration glob inside install-team.sh — the one that moves
+# legacy instance-keyed *-startup.sh / *-shutdown.sh aside to
+# .stale-pre-XACA-0483 on every re-install — to also sweep connect/disconnect.
+# XACA-0845 deliberately NARROWED that exact glob to STOP doing that: at the
+# time, connect/disconnect scripts were THEMSELVES instance-keyed by design,
+# so sweeping them on every install would move each freshly-rendered script
+# aside on every single re-install, manufacturing a fresh .stale-pre-XACA-0483
+# file per run and putting the team right back into the "live but scriptless"
+# state XACA-0845 exists to fix (see install-team.sh's XACA-0845 comment,
+# ~line 1120: "Leaving them in the glob would move each freshly rendered
+# script aside on every re-install ... churn that also re-created the very
+# 'live team has no connect script' state this ticket exists to fix").
+# Re-widening that glob would NOT be safe just because the target filename
+# shape changed again under XACA-0862 (team-scoped "<base>-connect.sh" does
+# not match the "<base>-*-connect.sh" legacy glob shape, so it wouldn't sweep
+# itself — verified empirically under bash 3.2, the same reasoning
+# install-team.sh's VESTIGIAL guard documents, XACA-0845-013) — it would still
+# reintroduce a RECURRING, install-time sweep as the retirement mechanism,
+# coupling a one-time cleanup to every future install/upgrade run forever, in
+# a file this ticket's file-ownership split does not own. This function is a
+# ONE-SHOT alternative instead: invoked explicitly (never automatically from
+# install or upgrade), it moves aside exactly the known-orphaned shape and
+# naturally never re-matches a file it already moved — mv empties the source,
+# so a second run is a no-op with no stale marker or state file required.
+#
+# SAFETY:
+#   - Never deletes. Every retired file is `mv`d (not `rm`d) into a
+#     timestamped backup directory under ~/aiteamforge-backups/, mirroring the
+#     "never delete without a prior backup" rule and this script's own
+#     migration-backup convention for OLD_INSTALL_DIR above.
+#   - Only retires a legacy file when its REPLACEMENT team-scoped script
+#     already exists (<base>-connect.sh / <base>-disconnect.sh present). A
+#     team whose team-scoped script has not been rendered yet on this box
+#     keeps its old file — retiring it first would strand a still-live team
+#     with NO connect script at all.
+#   - Anchored per known team id read from share/teams/*.conf — never a bare
+#     substring/prefix match, so a short id can never swallow a longer one
+#     (e.g. a hypothetical "med" matching "medical-general-connect.sh").
+#   - Glob is "<base>-*-<connect|disconnect>.sh", which requires TWO dashes
+#     after the base id and therefore cannot match the team-scoped file
+#     itself ("<base>-connect.sh", one dash) — the same shape check is
+#     guarded explicitly below as belt-and-suspenders.
+#   - Idempotent: run it twice and the second run finds nothing to move.
+retire_legacy_connect_scripts() {
+  section "Retiring Legacy Per-Instance Connect/Disconnect Scripts (XACA-0862)"
+
+  local working_dir framework_dir
+  working_dir="$(get_working_dir)"
+  framework_dir="$(get_framework_dir)"
+
+  if [[ ! -d "${working_dir}" ]]; then
+    warning "Working directory not found: ${working_dir} — nothing to retire"
+    return 0
+  fi
+
+  # Discover parametric team bases the SAME way install-team.sh's
+  # _is_parametric_team() does.
+  local -a parametric_bases=()
+  local conf cbase
+  for conf in "${framework_dir}"/share/teams/*.conf; do
+    [[ -f "${conf}" ]] || continue
+    cbase="$(basename "${conf}" .conf)"
+    if grep -qE '^TEAM_HAS_PROJECTS="true"' "${conf}" \
+        && [[ -f "${framework_dir}/share/scripts/teams/${cbase}-startup.sh" ]]; then
+      parametric_bases+=("${cbase}")
+    fi
+  done
+
+  if [[ "${#parametric_bases[@]}" -eq 0 ]]; then
+    success "No parametric teams found — nothing to retire"
+    return 0
+  fi
+
+  local backup_dir="${HOME}/aiteamforge-backups/xaca-0862-connect-migration-$(date +%Y-%m-%d_%H%M%S)"
+  local retired=0
+  local base kind f dest
+
+  for base in "${parametric_bases[@]}"; do
+    for kind in connect disconnect; do
+      # Only retire legacy files if the team-scoped replacement already
+      # exists — otherwise this team would be left with NO script at all.
+      if [[ ! -f "${working_dir}/${base}-${kind}.sh" ]]; then
+        continue
+      fi
+      for f in "${working_dir}/${base}-"*"-${kind}.sh"; do
+        [[ -f "${f}" ]] || continue
+        # Belt-and-suspenders: the glob above requires two dashes after the
+        # base id, so it cannot match "<base>-<kind>.sh" itself (one dash) —
+        # but guard it explicitly anyway.
+        case "$(basename "${f}")" in
+          "${base}-${kind}.sh") continue ;;
+        esac
+        retired=$((retired + 1))
+        if [[ "${DRY_RUN}" == "true" ]]; then
+          echo "[DRY RUN] Would retire: $(basename "${f}") -> ${backup_dir}/$(basename "${f}")"
+          continue
+        fi
+        mkdir -p "${backup_dir}"
+        dest="${backup_dir}/$(basename "${f}")"
+        mv "${f}" "${dest}"
+        log "Retired legacy connect script: $(basename "${f}") -> ${dest}"
+      done
+    done
+  done
+
+  if [[ "${retired}" -eq 0 ]]; then
+    success "No legacy per-instance connect/disconnect scripts found — already clean"
+  elif [[ "${DRY_RUN}" == "true" ]]; then
+    success "Would retire ${retired} legacy script(s)"
+  else
+    success "Retired ${retired} legacy script(s) -> ${backup_dir}"
+  fi
+
+  echo ""
+  return 0
+}
+
+#-----------------------------------------------------------------------------
 # Main Migration Flow
 #-----------------------------------------------------------------------------
 
 main() {
+  # XACA-0862 subitem 006: one-shot, opt-in retirement of legacy per-instance
+  # connect/disconnect scripts. Dispatched before anything else in main() —
+  # independent of the manual-install migration flow below (no
+  # OLD_INSTALL_DIR requirement, no rollback/backup-of-the-whole-install
+  # semantics; it has its own backup-per-retired-file mechanism above).
+  if [[ "${RETIRE_CONNECT_MODE}" == "true" ]]; then
+    retire_legacy_connect_scripts
+    exit $?
+  fi
+
   # Handle rollback mode
   if [[ "${ROLLBACK_MODE}" == "true" ]]; then
     rollback_migration
