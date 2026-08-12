@@ -259,7 +259,15 @@ test_start "S1: _is_parametric_team() is defined once and both callers of _rende
 _s1_predicate_defs=$(grep -c '^_is_parametric_team() {' "$INSTALL_TEAM_SH")
 _s1_renderer_defs=$(grep -c '^_render_connect_disconnect() {' "$INSTALL_TEAM_SH")
 _s1_callers=$(grep -cE '^[[:space:]]*_render_connect_disconnect$' "$INSTALL_TEAM_SH")
-_s1_branches_on_predicate=$(grep -A 6 '^_render_connect_disconnect() {' "$INSTALL_TEAM_SH" | grep -c '_is_parametric_team')
+# XACA-0862: scan the FULL function body (awk, bounded by the next top-level
+# "}"), not a fixed `-A 6` line slice. The fixed line count was coupled to
+# the function's exact pre-XACA-0862 shape; XACA-0862 prefixed the predicate
+# branch with an explanatory comment block (team-scoped-naming rationale),
+# which alone pushed the `_is_parametric_team` call past line 6 with no
+# change to the branching logic itself — a false failure this awk-bounded
+# scan does not reproduce.
+_s1_body=$(awk '/^_render_connect_disconnect\(\) \{/{f=1} f{print} f && /^}$/{exit}' "$INSTALL_TEAM_SH")
+_s1_branches_on_predicate=$(printf '%s\n' "$_s1_body" | grep -c '_is_parametric_team')
 if [ "$_s1_predicate_defs" -eq 1 ] && [ "$_s1_renderer_defs" -eq 1 ] && [ "$_s1_callers" -ge 2 ] && [ "$_s1_branches_on_predicate" -ge 1 ]; then
     test_pass
 else
@@ -301,17 +309,25 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # T1 — Case 1 (HEADLINE): finance --project personal via the FULL install
 # path (not --connect-only) now produces a connect + disconnect script.
+#
+# XACA-0862 UPDATE: the settled contract (kanban/plans/XACA-0862) supersedes
+# the instance-scoped filename this case originally asserted
+# (finance-personal-connect.sh). Output is now TEAM-SCOPED
+# (finance-connect.sh) — see test-xaca-0862-team-scoped-connect.sh Case 1 for
+# the dedicated regression suite (naming + derived DEFAULT_PROJECT +
+# consumer-layout coverage). This case is updated in place, not duplicated,
+# so it never asserts a filename contract XACA-0862 retired.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T1 [Case 1, HEADLINE]: finance --project personal (full install) creates finance-personal-connect.sh + disconnect.sh"
+test_start "T1 [Case 1, HEADLINE]: finance --project personal (full install) creates finance-connect.sh + disconnect.sh (team-scoped, XACA-0862)"
 T1_SBX="$(_new_install_sandbox)"
 T1_LOG="$WORK_DIR/t1-install.log"
 if _run_install "$T1_SBX" finance --project personal >"$T1_LOG" 2>&1; then
-    T1_CONNECT="$T1_SBX/aiteamforge/finance-personal-connect.sh"
-    T1_DISCONNECT="$T1_SBX/aiteamforge/finance-personal-disconnect.sh"
+    T1_CONNECT="$T1_SBX/aiteamforge/finance-connect.sh"
+    T1_DISCONNECT="$T1_SBX/aiteamforge/finance-disconnect.sh"
     if [ -s "$T1_CONNECT" ] && [ -x "$T1_CONNECT" ] && [ -s "$T1_DISCONNECT" ] && [ -x "$T1_DISCONNECT" ]; then
         test_pass
     else
-        test_fail "expected non-empty, executable finance-personal-connect.sh + disconnect.sh; connect=$([ -f "$T1_CONNECT" ] && echo present || echo MISSING) disconnect=$([ -f "$T1_DISCONNECT" ] && echo present || echo MISSING); install log tail: $(tail -20 "$T1_LOG")"
+        test_fail "expected non-empty, executable finance-connect.sh + disconnect.sh (team-scoped); connect=$([ -f "$T1_CONNECT" ] && echo present || echo MISSING) disconnect=$([ -f "$T1_DISCONNECT" ] && echo present || echo MISSING); install log tail: $(tail -20 "$T1_LOG")"
     fi
 else
     test_fail "install-team.sh finance --project personal exited non-zero; log: $(tail -40 "$T1_LOG")"
@@ -323,7 +339,7 @@ fi
 # control proving this assertion can actually fail.
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "T2 [Case 2, SUBTLE]: rendered TMUX_SOCKET is the team base 'finance', never the instance id 'finance-personal'"
-T2_CONNECT="$T1_SBX/aiteamforge/finance-personal-connect.sh"
+T2_CONNECT="$T1_SBX/aiteamforge/finance-connect.sh"
 if [ -f "$T2_CONNECT" ] \
     && grep -qF 'TMUX_SOCKET="finance"' "$T2_CONNECT" \
     && ! grep -qF 'TMUX_SOCKET="finance-personal"' "$T2_CONNECT"; then
@@ -334,38 +350,45 @@ fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # T3 — Case 3: idempotency. Re-running the full install twice more must
-# refresh in place — no bare team-keyed twin, no doubly-qualified twin.
+# refresh in place.
+#
+# XACA-0862 UPDATE: under team-scoped naming, "finance-connect.sh" IS the
+# correct primary output (not a "bare twin" to avoid, as it was pre-XACA-0862
+# when the instance-scoped name was the contract). The twin this case now
+# guards against is the RETIRED instance-scoped name reappearing
+# (finance-personal-connect.sh) alongside the team-scoped one.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T3 [Case 3]: re-running finance --project personal is idempotent — no twins, socket still correct"
+test_start "T3 [Case 3]: re-running finance --project personal is idempotent — no instance-scoped twin, socket still correct (team-scoped, XACA-0862)"
 T3_LOG1="$WORK_DIR/t3-install-1.log"
 T3_LOG2="$WORK_DIR/t3-install-2.log"
 _run_install "$T1_SBX" finance --project personal >"$T3_LOG1" 2>&1
 _run_install "$T1_SBX" finance --project personal >"$T3_LOG2" 2>&1
 T3_CONNECT_COUNT=$(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' | wc -l | tr -d ' ')
-T3_BARE_TWIN="$T1_SBX/aiteamforge/finance-connect.sh"
+T3_RETIRED_INSTANCE_TWIN="$T1_SBX/aiteamforge/finance-personal-connect.sh"
 T3_DOUBLE_TWIN="$T1_SBX/aiteamforge/finance-personal-personal-connect.sh"
 if [ "$T3_CONNECT_COUNT" -eq 2 ] \
-    && [ ! -f "$T3_BARE_TWIN" ] \
+    && [ ! -f "$T3_RETIRED_INSTANCE_TWIN" ] \
     && [ ! -f "$T3_DOUBLE_TWIN" ] \
-    && grep -qF 'TMUX_SOCKET="finance"' "$T1_SBX/aiteamforge/finance-personal-connect.sh"; then
+    && grep -qF 'TMUX_SOCKET="finance"' "$T1_SBX/aiteamforge/finance-connect.sh"; then
     test_pass
 else
-    test_fail "expected exactly 2 *connect.sh files (connect+disconnect for finance-personal only), no bare/double twins, socket still correct; found $T3_CONNECT_COUNT files: $(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' -exec basename {} \; 2>/dev/null | tr '\n' ' ')"
+    test_fail "expected exactly 2 *connect.sh files (team-scoped connect+disconnect for finance only), no retired-instance-scoped/double twins, socket still correct; found $T3_CONNECT_COUNT files: $(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect.sh' -exec basename {} \; 2>/dev/null | tr '\n' ' ')"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
 # T4 — Case 5: re-installing over an already-rendered parametric instance
 # does not sweep connect/disconnect into .stale-pre-XACA-0483 (T3 already
 # re-installed twice over the same sandbox above — this checks the residue).
+# XACA-0862 UPDATE: checks the team-scoped filenames (finance-connect.sh).
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T4 [Case 5]: re-install does not move finance-personal-connect/disconnect.sh aside to .stale-pre-XACA-0483"
+test_start "T4 [Case 5]: re-install does not move finance-connect/disconnect.sh aside to .stale-pre-XACA-0483 (team-scoped, XACA-0862)"
 T4_STALE_COUNT=$(find "$T1_SBX/aiteamforge" -maxdepth 1 -name '*connect*.stale-pre-XACA-0483' -o -name '*disconnect*.stale-pre-XACA-0483' 2>/dev/null | wc -l | tr -d ' ')
 if [ "$T4_STALE_COUNT" -eq 0 ] \
-    && [ -f "$T1_SBX/aiteamforge/finance-personal-connect.sh" ] \
-    && [ -f "$T1_SBX/aiteamforge/finance-personal-disconnect.sh" ]; then
+    && [ -f "$T1_SBX/aiteamforge/finance-connect.sh" ] \
+    && [ -f "$T1_SBX/aiteamforge/finance-disconnect.sh" ]; then
     test_pass
 else
-    test_fail "expected 0 .stale-pre-XACA-0483 connect/disconnect files and the live scripts still present; stale_count=$T4_STALE_COUNT"
+    test_fail "expected 0 .stale-pre-XACA-0483 connect/disconnect files and the live team-scoped scripts still present; stale_count=$T4_STALE_COUNT"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -693,8 +716,16 @@ _write_install_profile_marker() {
 # records an install. The behaviour under test (a live-but-scriptless instance
 # gets its connect script CREATED, with the correct team-base tmux socket) is
 # unchanged; only the proof-of-setup signal driving it is corrected.
+#
+# XACA-0862 UPDATE: `update_connect_scripts` (aiteamforge-upgrade.sh) renders
+# by re-invoking install-team.sh, so the OUTPUT filename it produces is
+# transitively team-scoped once install-team.sh's fix lands, even though this
+# ticket's Files-to-Modify list does not touch aiteamforge-upgrade.sh itself.
+# This case's expected path is updated to match; the "installed-but-scriptless
+# gets created" behaviour under test is otherwise unchanged. Full upgrade-path
+# regeneration coverage (subitem XACA-0862-005) is out of scope here.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T6 [Case 6]: upgrade's union creates finance-personal-connect.sh for an installed-but-scriptless instance"
+test_start "T6 [Case 6]: upgrade's union creates finance-connect.sh for an installed-but-scriptless instance (team-scoped, XACA-0862)"
 T6_SBX="$(_new_install_sandbox)"
 T6_REGISTRY="$T6_SBX/home/.aiteamforge/team-paths.json"
 _write_registry "$T6_REGISTRY"
@@ -705,13 +736,13 @@ AITEAMFORGE_ORG_CONFIG="$T6_SBX/home/.aiteamforge/organization.yaml" \
 FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
 AITEAMFORGE_CONFIG="$T6_REGISTRY" \
     update_connect_scripts >"$WORK_DIR/t6-upgrade.log" 2>&1
-T6_CONNECT="$T6_SBX/aiteamforge/finance-personal-connect.sh"
+T6_CONNECT="$T6_SBX/aiteamforge/finance-connect.sh"
 if [ -s "$T6_CONNECT" ] \
     && grep -qF 'TMUX_SOCKET="finance"' "$T6_CONNECT" \
     && grep -qi "Creating missing" "$_STUB_LOG"; then
     test_pass
 else
-    test_fail "expected finance-personal-connect.sh created with correct socket + a 'Creating missing' message; connect_exists=$([ -f "$T6_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG"); upgrade_log=$(tail -20 "$WORK_DIR/t6-upgrade.log")"
+    test_fail "expected finance-connect.sh created with correct socket + a 'Creating missing' message; connect_exists=$([ -f "$T6_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG"); upgrade_log=$(tail -20 "$WORK_DIR/t6-upgrade.log")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -1215,7 +1246,7 @@ fi
 # and unconditionally ABOVE the brew-install section (~line 826). No freelance
 # case may ever be converted to a full install without re-doing that analysis.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T10 [XACA-0845-015]: upgrade composes freelance-<client>-<project> and renders it end-to-end"
+test_start "T10 [XACA-0845-015]: upgrade composes freelance-<client>-<project> and renders it end-to-end (output team-scoped, XACA-0862)"
 T10_SBX="$(_new_install_sandbox)"
 T10_REGISTRY="$T10_SBX/home/.aiteamforge/team-paths.json"
 _write_registry "$T10_REGISTRY"
@@ -1227,26 +1258,31 @@ AITEAMFORGE_ORG_CONFIG="$T10_SBX/home/.aiteamforge/organization.yaml" \
 FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T10_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
 AITEAMFORGE_CONFIG="$T10_REGISTRY" \
     update_connect_scripts >"$WORK_DIR/t10-upgrade.log" 2>&1
-T10_CONNECT="$T10_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh"
-T10_DISCONNECT="$T10_SBX/aiteamforge/freelance-doublenode-starwords-disconnect.sh"
+# XACA-0862: the internal composition (upgrade -> install-team.sh --client
+# doublenode --project starwords) is unchanged; only install-team.sh's OUTPUT
+# filename changed, from the composed instance id to the team-scoped id.
+T10_CONNECT="$T10_SBX/aiteamforge/freelance-connect.sh"
+T10_DISCONNECT="$T10_SBX/aiteamforge/freelance-disconnect.sh"
 T10_OK=true
-# Composition landed on the id compute_instance_id() would have produced...
 [ -s "$T10_CONNECT" ] || T10_OK=false
 [ -s "$T10_DISCONNECT" ] || T10_OK=false
-# ...and it round-tripped: the file only exists because the SAME decomposition
-# the upgrade path uses split the remainder back into client + project and fed
-# them to install-team.sh as --client/--project. A composition the decomposition
-# could not reverse would have been skipped instead.
+# The upgrade path still had to round-trip the SAME decomposition (split the
+# .aiteamforge-config remainder back into client + project and feed them to
+# install-team.sh as --client/--project) to reach the render at all — a
+# composition the decomposition could not reverse would still be skipped
+# before ever calling the renderer, so this remains a meaningful check even
+# though the renderer's own output filename is no longer client/project-qualified.
 grep -qF 'TMUX_SOCKET="freelance"' "$T10_CONNECT" 2>/dev/null || T10_OK=false
-# The pre-fix symptoms must be gone.
+# The pre-XACA-0845-015 symptoms must be gone.
 grep -qi "cannot split" "$_STUB_LOG" && T10_OK=false
 grep -qF "freelance-starwords-connect.sh" "$_STUB_LOG" && T10_OK=false
-# No doubly-qualified or client-less twin.
+# No retired instance-scoped (doubly-qualified or client-less) twin.
+[ -e "$T10_SBX/aiteamforge/freelance-doublenode-starwords-connect.sh" ] && T10_OK=false
 [ -e "$T10_SBX/aiteamforge/freelance-starwords-connect.sh" ] && T10_OK=false
 if [ "$T10_OK" = true ]; then
     test_pass
 else
-    test_fail "expected freelance-doublenode-starwords-connect/disconnect.sh with TMUX_SOCKET=\"freelance\" and no 'cannot split' warning; on_disk=$(ls -1 "$T10_SBX/aiteamforge" 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
+    test_fail "expected team-scoped freelance-connect/disconnect.sh with TMUX_SOCKET=\"freelance\" and no 'cannot split' warning, no instance-scoped twin; on_disk=$(ls -1 "$T10_SBX/aiteamforge" 2>/dev/null | tr '\n' ' '); stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ── NC4 [MANDATORY negative control for T10] ────────────────────────────────
