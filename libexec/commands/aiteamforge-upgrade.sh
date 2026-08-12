@@ -906,6 +906,18 @@ _connect_script_team_flags() {
 #     install-team.sh's own exit status through the pipe.
 #   • DRY_RUN-aware: prints what would be refreshed without invoking the
 #     installer.
+#   • XACA-0862 subitem 005: a THIRD work-list source was added — team-paths.json
+#     registry entries whose recorded working_dir exists on disk. Sources (a)
+#     and (b) both had a common blind spot: an instance registered on this box
+#     AFTER its one .aiteamforge-config-writing setup run (e.g. a second
+#     parametric project added later via install-team.sh directly) is visible
+#     to neither, so its connect script — even though a template for it ships —
+#     never gets created, ever. See the "Source (c)" comment block inside the
+#     function for the full contract and why this differs from the team-paths.json
+#     membership approach XACA-0845-008 already tried and reverted. dns and
+#     mainevent remain deliberately unmaterialised (see that comment and the
+#     XACA-0862 plan doc's "Cause B" section) — not an oversight, a scoped-out
+#     decision pending real DNS-team agent/session data this ticket doesn't have.
 update_connect_scripts() {
   print_section "Updating Team Connect/Disconnect Scripts"
 
@@ -1061,6 +1073,87 @@ PYEOF
 
   if [ -n "$_reg_instances" ]; then
     work_list="${work_list}${_reg_instances}"$'\n'
+  fi
+
+  # ── Source (c): team-paths.json REGISTRY entries whose recorded working_dir
+  # exists on disk (XACA-0862 subitem 005) ──────────────────────────────────
+  #
+  # THE GAP THIS CLOSES. Source (b) can only see instances that were part of
+  # THIS box's ONE bin/aiteamforge-setup.sh run (.aiteamforge-config `.teams[]`
+  # is written once, from that run's SELECTED_TEAMS, and never updated again).
+  # A parametric instance added to a box AFTER initial setup — a second
+  # project registered by re-running install-team.sh directly, or via the
+  # team-paths wizard — reaches team-paths.json (install-team.sh's XACA-0463
+  # persist step runs on every full install) but never touches
+  # .aiteamforge-config. Neither (a) nor (b) can ever see it, so its connect
+  # script stays missing through every future upgrade, forever. This was the
+  # live XACA-0862 field gap on M4 Mini: legal-coparenting and medical-general
+  # were both registered, both had shipped confs, both had a real working_dir
+  # on disk — and both were permanently invisible to this function before this
+  # source existed.
+  #
+  # WHY THIS IS NOT THE REJECTED XACA-0845-008 APPROACH (see the comment
+  # above source (b)). That attempt trusted bare KEY PRESENCE in
+  # team-paths.json as proof of setup and was reverted specifically because
+  # aiteamforge-team-paths-wizard.py can write an entry for a team NEVER
+  # installed: interactively, its "'<path>' does not exist on disk — Use this
+  # path anyway?" prompt defaults YES; under --accept-defaults it writes
+  # DEFAULT_TEAMS verbatim with no existence check at all. Bare membership is
+  # still not proof. This source adds a DIFFERENT, narrower gate: the
+  # instance's recorded working_dir must exist as a real directory on THIS
+  # box. install-team.sh's own team-paths.json persist step runs only on full
+  # installs, after mkdir -p'ing the working/kanban dir — so a genuinely
+  # installed instance's working_dir is guaranteed present, while a
+  # wizard-catalogued-but-never-installed entry (or a stale entry surviving a
+  # manual directory removal) is not. mainevent needs no special case: its
+  # registry entry, on the rare box where one exists, carries the literal
+  # sentinel string "null" as working_dir (XACA-0727 — mainevent is
+  # deliberately board-less), which fails the directory test the same as any
+  # other absent path.
+  #
+  # Like (a) and (b), this yields concrete instance ids only — never a glob —
+  # and every id is still validated below against the shipped team confs
+  # using the same ANCHORED shapes, so an unrecognised or malformed id is
+  # skipped, not guessed at. dns and mainevent are exactly this case: dns has
+  # a real working_dir but ships no share/teams/dns.conf (it isn't even in
+  # share/teams/registry.json's installable catalog — a separate, deliberate
+  # gap this ticket does NOT close; see XACA-0862 plan doc "Cause B" and the
+  # note atop this function). A dns entry surfaced by this source is
+  # therefore skipped downstream with a "no team template matches" warning,
+  # exactly like any other id this box has no template for — never silently
+  # dropped, never guessed at.
+  local _tp_reg_file="${AITEAMFORGE_CONFIG:-${HOME}/.aiteamforge/team-paths.json}"
+  local _tp_instances=""
+  if [ -f "$_tp_reg_file" ] && command -v python3 >/dev/null 2>&1; then
+    _tp_instances="$(python3 - "$_tp_reg_file" <<'PYEOF' 2>/dev/null || true
+import json, os, sys
+
+out = []
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+    teams = cfg.get("teams", {}) or {}
+    if isinstance(teams, dict):
+        for instance_id, entry in teams.items():
+            if not isinstance(entry, dict):
+                continue
+            wd = entry.get("working_dir")
+            if not wd or not isinstance(wd, str):
+                continue
+            if os.path.isdir(wd):
+                out.append(str(instance_id))
+except Exception:
+    pass
+
+for i in out:
+    if i:
+        print(i)
+PYEOF
+)"
+  fi
+
+  if [ -n "$_tp_instances" ]; then
+    work_list="${work_list}${_tp_instances}"$'\n'
   fi
 
   # De-duplicate, preserving first-seen order, and drop blank lines.

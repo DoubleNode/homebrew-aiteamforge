@@ -797,7 +797,12 @@ with open(dst, 'w') as f:
 PYEOF
         rm -f "${connect_script}.tmp"
         chmod +x "$connect_script"
-        echo "  ✓ ${INSTANCE_ID}-connect.sh"
+        # XACA-0862 cleanup: report the file actually written ($connect_script,
+        # composed from TEAM_ID at line ~700), not INSTANCE_ID — the two only
+        # coincide for non-parametric teams (which is all this branch handles),
+        # but a stale INSTANCE_ID-shaped message here was a leftover from the
+        # pre-team-scoping naming and had drifted from what the code writes.
+        echo "  ✓ ${TEAM_ID}-connect.sh"
     else
         echo "  ⚠️  Template not found: team-connect.sh.template (skipping connect script)"
     fi
@@ -813,7 +818,8 @@ PYEOF
             -e "s|{{AITEAMFORGE_DIR}}|$AITEAMFORGE_DIR|g" \
             "$disconnect_template" > "$disconnect_script"
         chmod +x "$disconnect_script"
-        echo "  ✓ ${INSTANCE_ID}-disconnect.sh"
+        # XACA-0862 cleanup: see the matching note on the connect-script echo above.
+        echo "  ✓ ${TEAM_ID}-disconnect.sh"
     else
         echo "  ⚠️  Template not found: team-disconnect.sh.template (skipping disconnect script)"
     fi
@@ -3395,7 +3401,12 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 echo "Team directory: $TEAM_DIR"
 echo "Startup script: $AITEAMFORGE_DIR/$TEAM_STARTUP_SCRIPT"
-echo "Connect script: $AITEAMFORGE_DIR/${INSTANCE_ID}-connect.sh"
+# XACA-0862 cleanup: connect/disconnect scripts are TEAM-scoped
+# ($AITEAMFORGE_DIR/${TEAM_ID}-connect.sh, see _render_connect_disconnect),
+# not instance-scoped — this summary line printed a nonexistent
+# ${INSTANCE_ID}-connect.sh path for every parametric instance whose id differs
+# from its team id (finance-personal, legal-coparenting, etc).
+echo "Connect script: $AITEAMFORGE_DIR/${TEAM_ID}-connect.sh"
 echo "Shutdown script: $AITEAMFORGE_DIR/$TEAM_SHUTDOWN_SCRIPT"
 echo "Kanban board: $TEAM_BOARD"
 echo ""

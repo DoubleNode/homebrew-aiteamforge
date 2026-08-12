@@ -638,7 +638,13 @@ declare -f _connect_script_team_flags >/dev/null || { echo "FATAL: _connect_scri
 declare -f update_connect_scripts >/dev/null || { echo "FATAL: update_connect_scripts not defined after extraction"; exit 1; }
 
 # Build a team-paths.json registry file. $1 = output path, remaining args =
-# instance ids to register (each gets a minimal, valid-shaped entry).
+# instance ids to register. Each arg is either a bare instance id (gets a
+# minimal entry with NO working_dir — the T6A/B/C shape, unaffected by the
+# XACA-0862 source (c) filesystem gate) or "<instance_id>::<working_dir>"
+# (XACA-0862 subitem 005: gives the entry a working_dir, which source (c)
+# in update_connect_scripts treats as a candidate ONLY if that path exists
+# on disk — the caller is responsible for actually creating it beforehand
+# when the test wants source (c) to fire).
 _write_registry() {
     local out="$1"; shift
     mkdir -p "$(dirname "$out")"
@@ -649,8 +655,15 @@ _write_registry() {
     python3 - "$out" "$@" <<'PYEOF'
 import json, sys
 out = sys.argv[1]
-instances = sys.argv[2:]
-data = {"teams": {i: {"lcars_port": 8360} for i in instances}}
+specs = sys.argv[2:]
+teams = {}
+for spec in specs:
+    if "::" in spec:
+        instance_id, working_dir = spec.split("::", 1)
+        teams[instance_id] = {"lcars_port": 8360, "working_dir": working_dir}
+    else:
+        teams[spec] = {"lcars_port": 8360}
+data = {"teams": teams}
 with open(out, "w") as f:
     json.dump(data, f)
 PYEOF
@@ -850,32 +863,135 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-# T6D [XACA-0845-008, STRUCTURAL]: update_connect_scripts no longer reads the
-# registry at all.
+# T6D [XACA-0845-008 -> XACA-0862-005, STRUCTURAL, CONTRACT REVISED]:
+# update_connect_scripts MAY read team-paths.json/AITEAMFORGE_CONFIG again —
+# but ONLY behind a real filesystem existence gate, never as bare membership.
 #
-# T6B/T6C are behavioural and would still pass if someone re-added the
-# registry read behind a condition that happens to be false in the sandbox.
-# This pins the absence of the signal itself in the extracted function source.
+# XACA-0862 subitem 005 found a live field gap this blanket ban could not
+# close: legal-coparenting and medical-general were both genuinely installed
+# (registered in team-paths.json, a real working_dir on disk, a shipped conf)
+# but invisible to (a) [on-disk *-connect.sh files] and (b)
+# [.aiteamforge-config `.teams[]`, which is written ONCE at initial setup and
+# never updated for an instance added later]. Re-reading the registry was
+# unavoidable to close that gap. What changed from the original -008 finding
+# is HOW it's read: a candidate is only added to the work list if its
+# RECORDED working_dir exists as a real directory on disk (source (c), the
+# comment block above update_connect_scripts has the full contract) — which
+# T6A/T6B/T6C's fixtures (bare instance ids, no working_dir field at all)
+# still correctly prove contributes NOTHING, since a missing field can never
+# satisfy an isdir() check. Those three tests are unmodified and still pass.
 #
-# COMMENT LINES ARE STRIPPED FIRST, and that is load-bearing: the function
-# carries a long "WHY NOT team-paths.json" rationale that names both rejected
-# identifiers verbatim. A raw substring scan matches that prose and fails on
-# correct code — which is exactly what happened when this test was first
-# written. Assert against EXECUTABLE lines only.
+# This test now asserts the REVISED contract: the registry MAY be referenced,
+# but every such reference must be paired with a directory-existence check
+# (os.path.isdir / os.path.exists) in the same block — proving the read is
+# gated, not a bare-membership regression of the exact defect -008 fixed.
+# T6E below is the behavioural counterpart: a registry entry whose working_dir
+# genuinely exists gets materialised; T6B/T6C (unchanged) prove one that
+# doesn't, does not.
+#
+# COMMENT LINES ARE STRIPPED FIRST — the function carries prose that names
+# both identifiers verbatim in its own explanation. Assert against EXECUTABLE
+# lines only, as before.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T6D [XACA-0845-008]: update_connect_scripts references neither team-paths.json nor AITEAMFORGE_CONFIG in code"
+test_start "T6D [XACA-0862-005]: any team-paths.json/AITEAMFORGE_CONFIG read in update_connect_scripts is gated by a directory-existence check, never bare membership"
 T6D_SRC="$(grep -v '^[[:space:]]*#' "$UPD_FN_SRC" || true)"
 T6D_OK=true
-case "$T6D_SRC" in *team-paths.json*) T6D_OK=false ;; esac
-case "$T6D_SRC" in *AITEAMFORGE_CONFIG*) T6D_OK=false ;; esac
+# .aiteamforge-config (source b) must still be present — that source is untouched.
 case "$T6D_SRC" in *.aiteamforge-config*) : ;; *) T6D_OK=false ;; esac
+# The registry signal (source c) must be present now...
+case "$T6D_SRC" in *team-paths.json*) : ;; *) T6D_OK=false ;; esac
+# ...and wherever it is, the same source must contain a directory-existence
+# gate — the specific thing bare membership (the -008 defect) never had.
+case "$T6D_SRC" in *isdir*) : ;; *) T6D_OK=false ;; esac
 # Negative control: the stripped source must still be real code, not empty —
-# otherwise the two "must not contain" assertions above would pass vacuously.
+# otherwise the "must contain" assertions above would pass vacuously.
 case "$T6D_SRC" in *update_connect_scripts*) : ;; *) T6D_OK=false ;; esac
 if [ "$T6D_OK" = true ]; then
     test_pass
 else
-    test_fail "update_connect_scripts must read .aiteamforge-config and must NOT read team-paths.json/AITEAMFORGE_CONFIG (registry membership is not proof of setup, XACA-0845-008); extracted source: $UPD_FN_SRC"
+    test_fail "update_connect_scripts must read .aiteamforge-config (source b) AND may read team-paths.json (source c) ONLY paired with a directory-existence check (isdir); extracted source: $UPD_FN_SRC"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6E [XACA-0862-005, HEADLINE]: a team-paths.json entry with NO
+# .aiteamforge-config record, whose recorded working_dir genuinely EXISTS on
+# disk, gets its connect script CREATED. This is the actual field gap XACA-0862
+# subitem 005 exists to close (M4 Mini: legal-coparenting, medical-general —
+# registered, real working_dir, shipped conf, connect script never rendered,
+# and neither (a) nor (b) could ever see it on any future upgrade).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6E [XACA-0862-005]: registry entry not in .aiteamforge-config, with a REAL working_dir on disk, gets legal-connect.sh created (Cause A)"
+T6E_SBX="$(_new_install_sandbox)"
+T6E_REGISTRY="$T6E_SBX/home/.aiteamforge/team-paths.json"
+T6E_WORKDIR="$T6E_SBX/home/legal/coparenting"
+mkdir -p "$T6E_WORKDIR"
+_write_registry "$T6E_REGISTRY" "legal-coparenting::$T6E_WORKDIR"
+# Deliberately NO .aiteamforge-config entry — simulates a parametric instance
+# registered AFTER the box's one setup run, exactly the Cause-A scenario.
+_install_print_stubs
+HOME="$T6E_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6E_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6E_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6E_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6e-upgrade.log" 2>&1
+T6E_CONNECT="$T6E_SBX/aiteamforge/legal-connect.sh"
+if [ -s "$T6E_CONNECT" ] && grep -qi "Creating missing" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected legal-connect.sh created from a registry entry whose working_dir exists on disk (Cause A); connect_exists=$([ -f "$T6E_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG"); upgrade_log=$(tail -20 "$WORK_DIR/t6e-upgrade.log")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6F [XACA-0862-005, Cause B / mainevent]: a registry entry whose working_dir
+# is the literal "null" sentinel (XACA-0727 — mainevent is deliberately
+# board-less) contributes NOTHING, with no special-case code required — the
+# same directory-existence gate that excludes never-installed teams also
+# excludes mainevent's sentinel, since "null" is never a real directory.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6F [XACA-0862-005]: mainevent's working_dir=\"null\" sentinel materialises nothing (no special case needed)"
+T6F_SBX="$(_new_install_sandbox)"
+T6F_REGISTRY="$T6F_SBX/home/.aiteamforge/team-paths.json"
+_write_registry "$T6F_REGISTRY" "mainevent::null"
+_install_print_stubs
+HOME="$T6F_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6F_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6F_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6F_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6f-upgrade.log" 2>&1
+T6F_COUNT=$(find "$T6F_SBX/aiteamforge" -maxdepth 1 -name '*-connect.sh' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T6F_COUNT" -eq 0 ]; then
+    test_pass
+else
+    test_fail "expected mainevent's null-sentinel entry to materialise nothing; found $T6F_COUNT connect script(s)"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6G [XACA-0862-005, Cause B / dns]: a registry entry for "dns", with a real
+# working_dir on disk, is recovered as a work-list candidate by source (c) —
+# but skipped downstream (non-fatal) because share/teams/ ships no dns.conf.
+# XACA-0862 deliberately does NOT close this gap (see the plan doc's "Cause B"
+# section): dns is not even in share/teams/registry.json's installable
+# catalog, and authoring a conf requires real DNS-team agent/session data
+# (TEAM_AGENTS, AGENT_WINDOWS_*) this ticket does not have. This test pins
+# "skipped, not silently dropped, not guessed at" as the current behaviour.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6G [XACA-0862-005]: dns registry entry (real working_dir, no shipped conf) is skipped, not silently dropped"
+T6G_SBX="$(_new_install_sandbox)"
+T6G_REGISTRY="$T6G_SBX/home/.aiteamforge/team-paths.json"
+T6G_WORKDIR="$T6G_SBX/home/dns-framework"
+mkdir -p "$T6G_WORKDIR"
+_write_registry "$T6G_REGISTRY" "dns::$T6G_WORKDIR"
+_install_print_stubs
+HOME="$T6G_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6G_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6G_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6G_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6g-upgrade.log" 2>&1
+T6G_COUNT=$(find "$T6G_SBX/aiteamforge" -maxdepth 1 -name '*-connect.sh' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T6G_COUNT" -eq 0 ] && grep -qi "no team template matches instance 'dns'" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected dns to be recovered then skipped with a 'no team template matches' warning (not silently dropped, not fatal); connect_count=$T6G_COUNT; stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
