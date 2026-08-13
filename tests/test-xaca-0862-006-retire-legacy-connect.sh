@@ -154,8 +154,19 @@ R3_OUT="$(_run_retire "$R3_SBX" --dry-run)"
 R3_AFTER="$(ls "$R3_SBX/aiteamforge" | sort)"
 R3_OK=true
 [ "$R3_BEFORE" = "$R3_AFTER" ] || R3_OK=false
-echo "$R3_OUT" | grep -qF "[DRY RUN] Would retire: finance-personal-connect.sh" || R3_OK=false
-echo "$R3_OUT" | grep -qF "[DRY RUN] Would retire: finance-personal-disconnect.sh" || R3_OK=false
+# Native bash substring match instead of `echo ... | grep -qF` — grep -q exits
+# as soon as it finds its match, which can SIGPIPE the echo mid-write and
+# print a cosmetic "write error: Broken pipe" that has nothing to do with the
+# assertion's actual pass/fail result. No subprocess/pipe needed for a plain
+# substring check against an already-captured variable.
+case "$R3_OUT" in
+    *"[DRY RUN] Would retire: finance-personal-connect.sh"*) ;;
+    *) R3_OK=false ;;
+esac
+case "$R3_OUT" in
+    *"[DRY RUN] Would retire: finance-personal-disconnect.sh"*) ;;
+    *) R3_OK=false ;;
+esac
 if [ "$R3_OK" = true ]; then test_pass; else test_fail "dry-run must preview only, no filesystem change; before='$R3_BEFORE' after='$R3_AFTER' out=$R3_OUT"; fi
 
 # ═══════════════════════════════════════════════════════════════════════════
