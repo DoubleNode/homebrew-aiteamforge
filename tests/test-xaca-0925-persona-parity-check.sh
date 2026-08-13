@@ -31,6 +31,24 @@
 #   T7  QUIET-SUPPRESSES-OUTPUT: --quiet produces no stdout even when drift exists, but the exit code still reflects it.
 #   T8  MULTI-TEAM-ANY-DRIFT-EXITS-1: one clean team + one dirty team among several configured -> exit 1 overall.
 #
+# ROUND-3 ADDITIONS (T9-T11, XACA-0925-021 — the highest-priority of the 4
+# round-3 findings): get_configured_teams() (lib/config.sh) swallows jq's
+# own exit status via `2>/dev/null` and reports the PIPELINE's exit status
+# (always `tr`'s, never jq's), so an unreadable OR malformed
+# .aiteamforge-config comes back indistinguishable from a legitimately empty
+# one — "no teams to check", exit 0, silent even under --quiet. That is a
+# fail-OPEN masquerade inside the durability guard this ticket built to
+# catch exactly this defect class.
+#   T9  CONFIG-UNREADABLE-FAILS-CLOSED-EVEN-UNDER-QUIET: chmod 000 on an
+#       otherwise-valid .aiteamforge-config -> non-zero exit AND a non-empty
+#       diagnostic even with --quiet passed.
+#   T10 CONFIG-MALFORMED-JSON-FAILS-CLOSED: syntactically invalid JSON ->
+#       non-zero exit and a diagnostic (jq's own failure checked explicitly,
+#       never inferred from tr's exit status).
+#   T11 CONFIG-VALID-ZERO-TEAMS-STILL-EXITS-0-QUIETLY: a well-formed config
+#       with "teams": [] is the LEGITIMATE empty case and must not regress
+#       into a false alarm -> exit 0, no output under --quiet.
+#
 # All filesystem activity is sandboxed under TEST_TMP_DIR, including a
 # synthetic FRAMEWORK_DIR/WORKING_DIR pair per test and .aiteamforge-config.
 # NEVER touches the real $HOME/aiteamforge or the real share/personas/ tree —
@@ -275,6 +293,67 @@ else
         test_pass
     else
         test_fail "expected exit 1 with ios flagged and academy NOT flagged; rc=$_rc; output: $_out"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T9 — CONFIG-UNREADABLE-FAILS-CLOSED-EVEN-UNDER-QUIET (XACA-0925-021)
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T9: an unreadable .aiteamforge-config exits non-zero and prints a diagnostic EVEN under --quiet"
+T9_FW="$(_next_sandbox)"; T9_WD="$(_next_sandbox)"
+_seed_framework_team "$T9_FW" academy a.md "CONTENT-A"
+_seed_config "$T9_WD" academy
+chmod 000 "$T9_WD/.aiteamforge-config"
+
+if [ -r "$T9_WD/.aiteamforge-config" ]; then
+    chmod 644 "$T9_WD/.aiteamforge-config" 2>/dev/null || true
+    test_fail "PRECONDITION FAILED: could not make .aiteamforge-config unreadable — test would be vacuous (running as root?)"
+else
+    _out="$(_run_parity "$T9_FW" "$T9_WD" --quiet 2>&1)"; _rc=$?
+    chmod 644 "$T9_WD/.aiteamforge-config" 2>/dev/null || true
+    if [ "$_rc" != "0" ] && [ -n "$_out" ]; then
+        test_pass
+    else
+        test_fail "expected non-zero exit AND a non-empty diagnostic even under --quiet (an unreadable config must never read as 'nothing to check'); rc=$_rc; output: '$_out'"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T10 — CONFIG-MALFORMED-JSON-FAILS-CLOSED (XACA-0925-021)
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T10: a syntactically invalid .aiteamforge-config exits non-zero with a diagnostic, never silently 'nothing to check'"
+T10_FW="$(_next_sandbox)"; T10_WD="$(_next_sandbox)"
+_seed_framework_team "$T10_FW" academy a.md "CONTENT-A"
+mkdir -p "$T10_WD"
+printf '{ this is not valid json,,, ' > "$T10_WD/.aiteamforge-config"
+
+if command -v jq >/dev/null 2>&1 && jq empty "$T10_WD/.aiteamforge-config" >/dev/null 2>&1; then
+    test_fail "PRECONDITION FAILED: fixture .aiteamforge-config unexpectedly parses as valid JSON — test would be vacuous"
+else
+    _out="$(_run_parity "$T10_FW" "$T10_WD" 2>&1)"; _rc=$?
+    if [ "$_rc" != "0" ] && [ -n "$_out" ]; then
+        test_pass
+    else
+        test_fail "expected non-zero exit and a diagnostic for malformed .aiteamforge-config (jq's parse failure must be checked explicitly, not inferred from tr's exit status); rc=$_rc; output: '$_out'"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T11 — CONFIG-VALID-ZERO-TEAMS-STILL-EXITS-0-QUIETLY (XACA-0925-021 regression guard)
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T11: a well-formed config with zero configured teams is the LEGITIMATE empty case -> exit 0, no output under --quiet"
+T11_FW="$(_next_sandbox)"; T11_WD="$(_next_sandbox)"
+_seed_framework_team "$T11_FW" academy a.md "CONTENT-A"
+_seed_config "$T11_WD"   # no team args -> "teams": []
+
+if [ ! -f "$T11_WD/.aiteamforge-config" ] || ! grep -q '"teams": \[\]' "$T11_WD/.aiteamforge-config"; then
+    test_fail "PRECONDITION FAILED: expected a valid config fixture with an empty teams array; got: $(cat "$T11_WD/.aiteamforge-config" 2>/dev/null || echo '<missing>')"
+else
+    _out="$(_run_parity "$T11_FW" "$T11_WD" --quiet 2>&1)"; _rc=$?
+    if [ "$_rc" = "0" ] && [ -z "$_out" ]; then
+        test_pass
+    else
+        test_fail "expected exit 0 and empty output for a valid config with zero configured teams (must not regress into a false alarm); rc=$_rc; output: '$_out'"
     fi
 fi
 

@@ -104,10 +104,67 @@ FRAMEWORK_DIR="${_ARG_FRAMEWORK_DIR:-$(get_framework_dir)}"
 export AITEAMFORGE_DIR="$WORKING_DIR"
 
 _log() { [ "$QUIET" = true ] || printf '%s\n' "$*"; }
+# Diagnostics that MUST surface even under --quiet — reserved for the
+# "config is broken" error class (XACA-0925-021), never for routine findings.
+# Routine findings (DRIFT lines, "nothing to check") stay on _log/stdout so
+# --quiet keeps its existing, tested behavior (T7).
+_err_always() { printf '%s\n' "$*" >&2; }
+
+# XACA-0925-021: get_configured_teams() (lib/config.sh) reads
+# .aiteamforge-config via `jq -r '.teams[]? // empty' "$config_file"
+# 2>/dev/null | tr '\n' ' '` — jq's own exit status is discarded by
+# `2>/dev/null`, and the pipeline's reported exit status is `tr`'s (always
+# 0), never jq's. So an UNREADABLE or MALFORMED config comes back exactly
+# the same as a genuinely empty one: an empty string. That collapse is the
+# correct fail-soft contract for the FIXER (update_team_personas() in
+# aiteamforge-upgrade.sh, which wraps every call `|| true` by deliberate
+# design — see its own "Fail-soft" header) but it is precisely the fail-open
+# masquerade THIS detector exists to catch: a machine whose config went
+# unreadable would report "nothing to check" and exit 0 — silently, even
+# under --quiet — which is permanently GREEN on exactly the machine that
+# most needs to be flagged (per this file's own "SUGGESTED INTEGRATION"
+# note above: a fleet cron alerting on exit 1 would never fire for it).
+#
+# Rather than change get_configured_teams()'s return-code contract (shared
+# by aiteamforge-status.sh, aiteamforge-doctor.sh, aiteamforge-start.sh, and
+# aiteamforge-upgrade.sh, all of which already treat any nonzero as
+# fail-soft "nothing configured" — a contract this ticket has no reason to
+# touch), this script validates the config file itself, explicitly, BEFORE
+# calling get_configured_teams() for extraction. That keeps the
+# unreadable/malformed-vs-legitimately-empty distinction intact for the
+# DETECTOR without changing the FIXER's (or any other caller's) contract.
+CONFIG_FILE="$(get_config_file)"
+
+if [ ! -f "$CONFIG_FILE" ]; then
+    _log "No .aiteamforge-config found at ${CONFIG_FILE} — nothing configured yet, nothing to check."
+    exit 0
+fi
+
+if [ ! -r "$CONFIG_FILE" ]; then
+    _err_always "ERROR: ${CONFIG_FILE} exists but is not readable (permission denied) — cannot determine configured teams. Treating as a check FAILURE, not \"nothing to check\"."
+    exit 1
+fi
+
+if command -v jq &>/dev/null; then
+    # Check jq's OWN exit status explicitly here — never rely on a
+    # pipeline's last-command status the way get_configured_teams() does
+    # internally (that is exactly the bug: `jq ... 2>/dev/null | tr '\n' ' '`
+    # reports `tr`'s exit code, and `tr` always succeeds even when jq failed
+    # to parse malformed JSON upstream). `jq -e` treats a `false`/`null`
+    # result as failure too, so this also catches ".teams" existing but not
+    # being an array (e.g. a hand-edited config with `"teams": "academy"`).
+    if ! jq -e '(.teams? // []) | type == "array"' "$CONFIG_FILE" >/dev/null 2>&1; then
+        _err_always "ERROR: ${CONFIG_FILE} exists but could not be parsed as valid JSON (or its \"teams\" key is not an array) — cannot determine configured teams. Treating as a check FAILURE, not \"nothing to check\"."
+        exit 1
+    fi
+fi
+# No-jq environments fall through to get_configured_teams()'s existing
+# grep/sed fallback below, unchanged — that fallback's own malformed-input
+# behavior is pre-existing and out of this ticket's scope.
 
 TEAMS="$(get_configured_teams || true)"
 if [ -z "${TEAMS// /}" ]; then
-    _log "No configured teams found in ${WORKING_DIR}/.aiteamforge-config — nothing to check."
+    _log "No configured teams found in ${CONFIG_FILE} — nothing to check."
     exit 0
 fi
 

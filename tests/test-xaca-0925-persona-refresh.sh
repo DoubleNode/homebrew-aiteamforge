@@ -65,6 +65,27 @@
 #    15. A team id containing characters outside [A-Za-z0-9_-] is skipped
 #        with a warning and never interpolated into a path (XACA-0925-017,
 #        T18).
+#    16. An unreadable dest aborts BEFORE the `ls -A` backup gate, not after
+#        — the gate cannot distinguish permission-denied from empty
+#        (XACA-0925-018, T19).
+#
+# ROUND-3 CONTRACT (T20-T22, added resolving the 4 merge-gating findings
+# filed by the review bot's deliberate hunt for further instances of the
+# SAME defect class — XACA-0925-019/020/021/022 — a precondition check that
+# silently degrades to "proceed"/"all clear" instead of "abort"):
+#    17. The src readability guard (T16/#13 above) checks BOTH -r and -x —
+#        a source dir at mode 0600 (readable, not traversable) must log the
+#        same distinguishable warning as a fully-unreadable one, never the
+#        generic empty-set message (XACA-0925-019, T20).
+#    18. The dest readability/accessibility guard (T19/#16 above) runs
+#        BEFORE the DRY_RUN early return, not after — `--dry-run` against an
+#        unreadable dest must report the same ABORT a real run would, never
+#        a false "Would update N persona file(s)" preview (XACA-0925-020,
+#        T21).
+#    19. A backup that fails partway (mkdir succeeds, cp -R fails) does not
+#        leave a phantom EMPTY timestamped backup directory behind — it must
+#        be cleaned up so it never silently consumes a retention keep-count
+#        slot (XACA-0925-022, T22).
 #
 # EXPECTED RESULT AS WRITTEN (before XACA-0925-001 lands): every functional
 # test (T1-T8) and every structural test (T9-T12) FAILS, because
@@ -73,10 +94,11 @@
 # libexec/commands/aiteamforge-upgrade.sh` returned nothing). That failure
 # IS this suite's negative control — see the retrospective doc alongside this
 # file's PR for the captured pre-fix run. Once XACA-0925-001 lands, re-running
-# this file with no code changes should flip every case to PASS. T13-T18 were
-# added later against the already-landed implementation, resolving the 5
-# merge-gating subitems above — see each test's header for its own before/
-# after evidence (captured in the PR discussion, not repeated here).
+# this file with no code changes should flip every case to PASS. T13-T19 were
+# added later against the already-landed implementation, resolving the 6
+# merge-gating subitems above from rounds 2 and 3 — see each test's header
+# for its own before/after evidence (captured in the PR discussion / this
+# subitem's resolution notes, not repeated here).
 #
 # Non-vacuous precondition guards throughout (feedback_parity_test_wrong_
 # shell_passes_vacuously / feedback_negctrl_seed_placement_and_self_satisfying_
@@ -861,6 +883,121 @@ else
             test_pass
         else
             test_fail "expected non-zero return, preserved dest content, NO backup dir, and no success message; rc=$_RC content=$(cat "$T19_WD/academy/personas/agents/a.md" 2>/dev/null); backup_dir_exists=$([ -d "$T19_HOME/aiteamforge-backups/personas/academy" ] && echo yes || echo no); stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t19.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T20 — SOURCE-READABLE-BUT-NOT-TRAVERSABLE-LOGS-DISTINGUISHABLY (XACA-0925-019).
+# T16 covers -r missing (mode 000, unreadable AND non-traversable). This
+# covers -x missing SPECIFICALLY: mode 0600 (readable, NOT traversable)
+# passed the old -r-only guard, and the glob below then failed `[ -f "$f" ]`
+# for every entry — stat()/open() on a path INSIDE a directory needs the
+# SEARCH (execute) bit on that directory, readdir()'s read bit is not
+# enough — falling through to the generic empty-set message. Reproduces the
+# exact masquerade XACA-0925-014/T16 exists to prevent, through a different
+# bit of the same directory.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T20: a readable-but-not-traversable (mode 0600) source dir logs DISTINGUISHABLY from a genuinely empty one"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T20_FW="$(_next_sandbox)"; T20_WD="$(_next_sandbox)"; T20_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T20_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    chmod 0600 "$T20_FW/share/personas/academy/agents"
+
+    if [ ! -r "$T20_FW/share/personas/academy/agents" ] || [ -x "$T20_FW/share/personas/academy/agents" ]; then
+        chmod 755 "$T20_FW/share/personas/academy/agents" 2>/dev/null || true
+        test_fail "PRECONDITION FAILED: could not set source dir to readable-but-not-traversable (mode 0600) — test would be vacuous (running as root?)"
+    else
+        _run_refresh_direct "$T20_HOME" "$T20_FW" "$T20_WD" academy false "$WORK_DIR/t20.log"
+        chmod 755 "$T20_FW/share/personas/academy/agents" 2>/dev/null || true
+        if grep -qi "not readable" "$_STUB_LOG" && ! grep -qi "No \.md persona files shipped" "$_STUB_LOG"; then
+            test_pass
+        else
+            test_fail "expected a distinguishable 'not readable/accessible' warning, not the generic empty-set message; stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t20.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T21 — DRY-RUN-AGAINST-UNREADABLE-DEST-REPORTS-THE-ABORT-NOT-A-FALSE-PREVIEW
+# (XACA-0925-020). The dest readability guard (T19) used to sit AFTER the
+# DRY_RUN early return, so `--dry-run` against an unreadable dest printed
+# "Would update N persona file(s)" (a success preview) while a REAL run on
+# the identical fixture aborts with rc=1 (T19). A preview that contradicts
+# what it previews is worse than no preview. The guard must fire identically
+# whether DRY_RUN is true or false — same fixture as T19, DRY_RUN=true.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T21: --dry-run against an unreadable dest reports the ABORT, not a false 'Would update N' preview — still no write, no backup"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T21_FW="$(_next_sandbox)"; T21_WD="$(_next_sandbox)"; T21_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T21_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    mkdir -p "$T21_WD/academy/personas/agents"
+    printf 'OLD-STALE-CONTENT-A\n' > "$T21_WD/academy/personas/agents/a.md"
+    chmod 0300 "$T21_WD/academy/personas/agents"
+
+    if [ -r "$T21_WD/academy/personas/agents" ]; then
+        chmod 755 "$T21_WD/academy/personas/agents" 2>/dev/null || true
+        test_fail "PRECONDITION FAILED: could not make dest dir unreadable — test would be vacuous (running as root?)"
+    else
+        _run_refresh_direct "$T21_HOME" "$T21_FW" "$T21_WD" academy true "$WORK_DIR/t21.log"
+        _RC=$?
+        # Restore readability BEFORE asserting, so the assertions can inspect.
+        chmod 755 "$T21_WD/academy/personas/agents" 2>/dev/null || true
+        if [ "$_RC" -ne 0 ] \
+            && ! grep -qi "would update" "$_STUB_LOG" \
+            && grep -qi "not readable" "$_STUB_LOG" \
+            && grep -q 'OLD-STALE-CONTENT-A' "$T21_WD/academy/personas/agents/a.md" \
+            && [ ! -d "$T21_HOME/aiteamforge-backups/personas/academy" ]; then
+            test_pass
+        else
+            test_fail "expected non-zero return, an ABORT warning (never 'Would update'), preserved dest content, and no backup dir under --dry-run; rc=$_RC content=$(cat "$T21_WD/academy/personas/agents/a.md" 2>/dev/null); backup_dir_exists=$([ -d "$T21_HOME/aiteamforge-backups/personas/academy" ] && echo yes || echo no); stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t21.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T22 — FAILED-BACKUP-LEAVES-NO-PHANTOM-EMPTY-DIRECTORY (XACA-0925-022). The
+# dest DIRECTORY itself is fully accessible (0755) but its one file is
+# individually unreadable (mode 000) — `ls -A` on dest still reports it as
+# non-empty (readdir() doesn't need per-file read perms), so the backup IS
+# attempted: `mkdir -p "$backup_dir"` succeeds, then `cp -R` fails to copy
+# that one file and returns non-zero — reproduced by hand: this left an
+# EMPTY backup_dir/agents behind pre-fix. That empty timestamped dir is
+# indistinguishable from a genuine (if coincidentally empty) backup and
+# would consume one of _xaca0925_prune_persona_backups's keep=10 retention
+# slots. It must not survive the failed call.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T22: a backup that fails partway (cp -R error) leaves NO phantom empty timestamped backup directory behind"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T22_FW="$(_next_sandbox)"; T22_WD="$(_next_sandbox)"; T22_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T22_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    mkdir -p "$T22_WD/academy/personas/agents"
+    printf 'OLD-STALE-CONTENT-A\n' > "$T22_WD/academy/personas/agents/a.md"
+    chmod 000 "$T22_WD/academy/personas/agents/a.md"
+
+    if [ -r "$T22_WD/academy/personas/agents/a.md" ]; then
+        chmod 644 "$T22_WD/academy/personas/agents/a.md" 2>/dev/null || true
+        test_fail "PRECONDITION FAILED: could not make a.md individually unreadable — test would be vacuous (running as root?)"
+    else
+        _run_refresh_direct "$T22_HOME" "$T22_FW" "$T22_WD" academy false "$WORK_DIR/t22.log"
+        _RC=$?
+        chmod 644 "$T22_WD/academy/personas/agents/a.md" 2>/dev/null || true
+
+        _backup_team_root="$T22_HOME/aiteamforge-backups/personas/academy"
+        _leftover_dirs="$(find "$_backup_team_root" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)"
+
+        if [ "$_RC" -ne 0 ] \
+            && [ -z "$_leftover_dirs" ] \
+            && grep -qi "failed partway" "$_STUB_LOG"; then
+            test_pass
+        else
+            test_fail "expected non-zero return and NO leftover timestamped backup directory under ${_backup_team_root}; rc=$_RC leftover_dirs=[$_leftover_dirs] stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t22.log")"
         fi
     fi
 fi

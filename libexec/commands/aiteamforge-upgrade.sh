@@ -1705,6 +1705,40 @@ _xaca0925_valid_team_id() {
   esac
 }
 
+# ── Failed-backup cleanup (XACA-0925-022) ───────────────────────────────────
+# A backup that fails partway (mkdir succeeds but cp -R fails, or mkdir
+# itself fails after creating some ancestor dirs) can leave behind the
+# timestamped backup_dir with zero files in it — indistinguishable, by a
+# directory listing alone, from a genuine (if coincidentally empty) backup.
+# Left in place, it consumes one of _xaca0925_prune_persona_backups's
+# keep=10 slots exactly like a real one, so a persistently failing nightly
+# run fills the retention window with empties and the next successful prune
+# can evict real restore points to make room. Same defect CLASS as 014/018/
+# 019/020: an error state must never be left looking like a legitimate one.
+#
+# Deliberately conservative: removes ONLY the exact $backup_dir path the
+# caller just constructed for THIS invocation (never a glob, never anything
+# pre-existing), and ONLY when it is confirmed to contain no regular files
+# anywhere within it. A backup that partially succeeded (some files copied
+# before the failure) is left in place rather than guessed at — a partial
+# backup might still be useful for manual recovery, and this ticket's
+# principle throughout is "don't silently discard evidence of what actually
+# happened."
+_xaca0925_cleanup_failed_backup_if_empty() {
+  local dir="$1"
+  [ -n "$dir" ] || return 0
+  [ -d "$dir" ] || return 0
+  # Same class as 018/021, applied to code that runs `rm -rf`: if we cannot
+  # INSPECT the directory, `find` emits nothing and its failure is swallowed by
+  # 2>/dev/null — which would read as "empty" and delete it. An uninspectable
+  # directory is an error to leave alone, never an empty set to act on. Leaving
+  # a stray empty dir behind is strictly cheaper than deleting on bad evidence.
+  [ -r "$dir" ] || return 0
+  if [ -z "$(find "$dir" -type f -print -quit 2>/dev/null)" ]; then
+    rm -rf "$dir"
+  fi
+}
+
 # ── Backup retention (XACA-0925-016) ────────────────────────────────────────
 # ~/aiteamforge-backups/personas/<team>/<ts>/ had no pruning: a box whose
 # personas legitimately diverge every night accumulates one new timestamped
@@ -1799,12 +1833,20 @@ _xaca0925_refresh_team_personas() {
     return 0
   fi
 
-  # XACA-0925-014: an unreadable source dir must NOT log identically to a
-  # genuinely empty one — a permissions fault silently masquerading as "no
-  # personas shipped" is a real fault hidden behind an intentional-looking
-  # message.
-  if [ ! -r "$src" ]; then
-    print_warning "[${team}] Shipped persona source directory exists but is not readable (permission denied) — skipping"
+  # XACA-0925-014/019: an unreadable OR non-traversable source dir must NOT
+  # log identically to a genuinely empty one — a permissions fault silently
+  # masquerading as "no personas shipped" is a real fault hidden behind an
+  # intentional-looking message. -r alone is not enough: a dir at mode 0600
+  # (readable, not searchable) passes `-r`, but the glob below (`"$src"/*.md`)
+  # then has `[ -f "$f" ]` fail for every entry because stat()/open() on a
+  # path INSIDE a directory needs the SEARCH (execute) bit on that directory,
+  # not the read bit — read only permits listing names via readdir(), not
+  # resolving them. Reproduced: mode 0600 fell through both guards straight
+  # to the generic "No .md persona files shipped" empty-set message, which is
+  # verbatim the masquerade this guard exists to prevent, reached through a
+  # different bit. Check both.
+  if [ ! -r "$src" ] || [ ! -x "$src" ]; then
+    print_warning "[${team}] Shipped persona source directory exists but is not readable/accessible (permission denied) — skipping"
     return 0
   fi
 
@@ -1847,12 +1889,6 @@ _xaca0925_refresh_team_personas() {
     return 0   # idempotent no-op: content already current, no backup, no write
   fi
 
-  if [ "$DRY_RUN" = true ]; then
-    print_info "Would update ${#src_files[@]} persona file(s) for ${team}"
-    _XACA0925_TEAM_UPDATED=${#src_files[@]}
-    return 0
-  fi
-
   # XACA-0925-018: an UNREADABLE dest must abort before the gate below, not
   # fall through it. `ls -A` on a permission-denied directory emits nothing and
   # fails silently (stderr suppressed), so it is indistinguishable from a
@@ -1861,11 +1897,44 @@ _xaca0925_refresh_team_personas() {
   # "Updated N persona file(s)" success message. That defeats the 013/015 guard
   # below before it can ever fire: the backup does not FAIL, it is never
   # ATTEMPTED. Reproduced at mode 0300. Symmetric with the src-side readability
-  # check (XACA-0925-014) — an unreadable directory is an error to report, never
-  # an empty set to proceed past.
-  if [ -d "$dest" ] && [ ! -r "$dest" ]; then
-    print_warning "[${team}] Destination ${dest} exists but is not readable — cannot inspect or back up the existing personas; refusing to overwrite without a successful backup; skipping this team"
+  # check (XACA-0925-014/019) — an unreadable directory is an error to report,
+  # never an empty set to proceed past.
+  #
+  # XACA-0925-019 follow-up — does dest need an -x (search) check too, the way
+  # src does? Investigated empirically (macOS/BSD `ls`, `cp -R`): unlike a
+  # fully unreadable dest (mode 0300, no read bit), a dest that is readable
+  # but not searchable (mode 0600) does NOT fool the `ls -A` non-empty gate
+  # below — `ls -A` on 0600 still emits the entry names on stdout (readdir()
+  # only needs the read bit; it errors on the *stat* pass, after already
+  # having printed the names, so `$(ls -A "$dest" 2>/dev/null)` is non-empty).
+  # So execution correctly proceeds to attempt the backup rather than skipping
+  # it outright — the specific "reads as empty, backup never attempted"
+  # masquerade this guard exists for does NOT reproduce for a missing -x bit.
+  # What DOES happen instead: `cp -R "$dest" "${backup_dir}/agents"` fails
+  # (it needs the search bit on dest to open() each entry by name), which the
+  # existing 013/015 `if ! cp -R ...; then return 1` guard below already
+  # catches and fails closed on. So a missing -x bit on dest is NOT the same
+  # silent-masquerade defect as 018 — but checking it explicitly here, before
+  # ever calling mkdir/cp, gives a precise diagnostic instead of a generic
+  # "Backup ... failed partway", and avoids creating a doomed backup_dir in
+  # the first place (see XACA-0925-022 below for why a doomed/failed backup
+  # dir is itself a problem). Included for that reason, and for symmetry with
+  # the src-side check.
+  if [ -d "$dest" ] && { [ ! -r "$dest" ] || [ ! -x "$dest" ]; }; then
+    print_warning "[${team}] Destination ${dest} exists but is not readable/accessible — cannot inspect or back up the existing personas; refusing to overwrite without a successful backup; skipping this team"
     return 1
+  fi
+
+  # XACA-0925-020: this guard must run BEFORE the DRY_RUN early return below,
+  # not after. A `--dry-run` invocation against an unreadable/non-searchable
+  # dest used to sail past this check (it was below the DRY_RUN return) and
+  # print "Would update N persona file(s)" — a preview claiming success for
+  # exactly the case where a real run aborts with rc=1. A preview that
+  # contradicts what it previews is worse than no preview at all.
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would update ${#src_files[@]} persona file(s) for ${team}"
+    _XACA0925_TEAM_UPDATED=${#src_files[@]}
+    return 0
   fi
 
   # Backup BEFORE the first write, only if there is something to preserve.
@@ -1878,10 +1947,12 @@ _xaca0925_refresh_team_personas() {
     backup_dir="${HOME}/aiteamforge-backups/personas/${team}/$(date +%Y%m%d-%H%M%S)"
     if ! mkdir -p "$backup_dir"; then
       print_warning "[${team}] Could not create backup directory ${backup_dir} — refusing to overwrite personas without a successful backup; skipping this team"
+      _xaca0925_cleanup_failed_backup_if_empty "$backup_dir"
       return 1
     fi
     if ! cp -R "$dest" "${backup_dir}/agents"; then
       print_warning "[${team}] Backup to ${backup_dir}/agents failed partway — refusing to overwrite personas without a successful backup; skipping this team"
+      _xaca0925_cleanup_failed_backup_if_empty "$backup_dir"
       return 1
     fi
     print_info "[${team}] Backed up existing personas to ${backup_dir}/agents"
