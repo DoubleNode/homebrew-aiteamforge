@@ -20,6 +20,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WORKTREE_ROOT="$(cd "$TAP_ROOT/.." && pwd)"
 
+# Cases 7/8 below assert against files that live in the OUTER dev-team
+# monorepo (sync-tap.sh, scripts/vendor/iterm2/imgcat,
+# scripts/tests/test-agent-panel-display.sh) — none of which are part of the
+# homebrew-tap repo itself. On a developer's machine WORKTREE_ROOT is the
+# dev-team checkout that has homebrew-tap nested inside it, so these exist.
+# In tap-only CI (this repo checked out standalone — no outer dev-team repo
+# present at all), WORKTREE_ROOT just resolves to the Actions workspace root
+# and none of these paths exist; PRE-EXISTING, not caused by any tap commit —
+# the gap is structural (repo layout), not code. Detect via two sentinels
+# (sync-tap.sh + kanban-helpers.sh, mirroring the canonical-source pairing
+# CONTRIBUTING.md documents) and SKIP with a visible reason rather than
+# failing, matching the established idiom already used for the sibling-drift
+# guard in test-xaca-0632-kb-variance.sh Case 7.
+_IN_DEV_MONOREPO=false
+if [[ -f "$WORKTREE_ROOT/sync-tap.sh" && -f "$WORKTREE_ROOT/kanban-helpers.sh" ]]; then
+    _IN_DEV_MONOREPO=true
+fi
+
 VERBOSE=false
 [[ "${1:-}" == "--verbose" || "${1:-}" == "-v" ]] && VERBOSE=true
 
@@ -385,6 +403,17 @@ echo ""
 echo "--- Case 7: sync-tap drift check ---"
 # ─────────────────────────────────────────────────────────────────────────────
 
+if ! $_IN_DEV_MONOREPO; then
+    test_start "Sync-tap: script exists at worktree root"
+    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout — sync-tap.sh lives outside this repo)"
+    test_pass
+    test_start "Sync-tap: vendored imgcat is byte-identical in scripts/vendor and tap/share"
+    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
+    test_pass
+    test_start "Sync-tap: iterm2/imgcat section shows no drift (XACA-0611 targets clean)"
+    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
+    test_pass
+else
 SYNC_TAP="$WORKTREE_ROOT/sync-tap.sh"
 
 test_start "Sync-tap: script exists at worktree root"
@@ -416,12 +445,21 @@ if echo "$ITERM2_SECTION" | grep -qiE "^DRIFT|^MISSING"; then
 else
     test_pass
 fi
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 echo ""
 echo "--- Case 8: Existing panel tests pass (no regression) ---"
 # ─────────────────────────────────────────────────────────────────────────────
 
+if ! $_IN_DEV_MONOREPO; then
+    test_start "Panel tests: test-agent-panel-display.sh exists"
+    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout — scripts/tests/ lives outside this repo)"
+    test_pass
+    test_start "Panel tests: no NEW failures introduced by XACA-0611 (pre-existing baseline: 1 known fail)"
+    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
+    test_pass
+else
 PANEL_TEST="$WORKTREE_ROOT/scripts/tests/test-agent-panel-display.sh"
 
 test_start "Panel tests: test-agent-panel-display.sh exists"
@@ -445,6 +483,7 @@ elif [[ "${#FAIL_LINES}" -gt 0 && "$EXTRA_FAIL_COUNT" -ne 1 ]]; then
     test_fail "Unexpected failure count (expected only 1 pre-existing): $FAIL_LINES"
 else
     test_pass
+fi
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -788,8 +788,24 @@ check_board_resolution() {
     if [ ! -f "$team_paths_overlay" ]; then
       check_result fail "Org identity is the unconfigured placeholder (slug='example-org') and no team-paths overlay exists — board resolution would return a TEMPLATE stub" \
         "Run: aiteamforge setup  (provisions org identity + a real team board; otherwise the placeholder template can mask/collide with a real team board)"
-      [ "$FIX" = true ] && attempt_remediation setup
-      return
+      # PRE-EXISTING BUG (surfaced by the tap-CI manifest-drain fix, XACA-0862):
+      # a bare `[ "$FIX" = true ] && attempt_remediation setup` followed by a
+      # bare `return` makes this function's return status inherit the FALSE
+      # branch's exit code (1) whenever FIX=false — the common, no-`--fix` case.
+      # check_board_resolution is called as an unguarded statement under this
+      # script's `set -eo pipefail` (line 6), so that spurious nonzero return
+      # silently aborted the ENTIRE doctor run right here: no Summary section,
+      # no later checks (services/launchagents/network/disk), and — the
+      # observable symptom this fixes — no "run with --fix" suggestion, since
+      # the script never reached the code that prints it. Explicit if/fi +
+      # explicit `return 0` makes the function's own completion status
+      # independent of whether remediation ran; check_result already tracks
+      # the fail via FAILED_CHECKS, which is what the Summary/exit-code logic
+      # is supposed to key off, not this function's incidental return value.
+      if [ "$FIX" = true ]; then
+        attempt_remediation setup
+      fi
+      return 0
     fi
     # Placeholder org but an overlay exists — proceed but note it in verbose.
     if [ "$VERBOSE" = true ]; then

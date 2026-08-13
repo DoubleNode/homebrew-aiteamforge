@@ -522,6 +522,24 @@ fi
 #   mutated (unanchored): `${instance_id#"${team_id}"}`  — false match, calls
 #                           installer with team=med --client ical --project
 #                           general (a real, wrong, materialised call)
+#
+# XACA-0862 tap-CI-surfaced regression: this fixture's "no team template
+# matches" assertion previously required the warning to name the on-disk
+# FILE ("medical-general-connect.sh"). XACA-0862-016 deliberately changed
+# that diagnostic to name the recovered INSTANCE ("instance
+# 'medical-general'") instead, and this suite's expectation was stale
+# against that change (it predates XACA-0862 and was never re-verified
+# because a since-fixed CI manifest bug was silently skipping this test).
+# Verified this is the CORRECT direction, not a weakening: post-XACA-0862,
+# connect scripts are rendered TEAM-scoped ("<best_team>-connect.sh"), and
+# at the point this warning fires `best_team` is still empty — there is no
+# resolved template, so for a registry-only instance (XACA-0845 union with
+# no on-disk file at all) there is no real filename to name; guessing one
+# would be actively wrong. The instance-id message stays fully actionable:
+# `instance_id` is always the exact inverse of `base` wherever a file DOES
+# exist (`instance_id="${base%-connect.sh}"`, line ~1025), so an operator
+# recovers the filename by appending "-connect.sh" — the same transform the
+# code itself uses. See aiteamforge-upgrade.sh lines ~1244-1256.
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "T3 [SYNTHETIC]: med-only template never cross-matches medical-general; med is never invoked or materialised"
 T3_FRAMEWORK="$(_next_sandbox)"
@@ -556,10 +574,10 @@ if [ ! -s "$T3_CALL_LOG" ] \
     && [ ! -f "$T3_WORKING/med-connect.sh" ] \
     && ! find "$T3_WORKING" -maxdepth 1 -name 'med-*-connect.sh' -print -quit | grep -q . \
     && grep -qi "no team template matches" "$_STUB_LOG" \
-    && grep -qF "medical-general-connect.sh" "$_STUB_LOG"; then
+    && grep -qF "instance 'medical-general'" "$_STUB_LOG"; then
     test_pass
 else
-    test_fail "expected NO installer call at all (med never matches medical-general even unanchored-adjacent), no med*-connect.sh materialised, 'no team template matches' warning naming medical-general-connect.sh; call_log=$(cat "$T3_CALL_LOG"); stub_log=$(cat "$_STUB_LOG")"
+    test_fail "expected NO installer call at all (med never matches medical-general even unanchored-adjacent), no med*-connect.sh materialised, 'no team template matches' warning naming instance 'medical-general'; call_log=$(cat "$T3_CALL_LOG"); stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

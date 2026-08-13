@@ -165,11 +165,28 @@ test_pass
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 6: kb-help advertises kb-variance
+#
+# PRE-EXISTING TEST BUG surfaced by the tap-CI manifest-drain fix (XACA-0862):
+# kanban-aliases.sh is a zsh-only template (shebang #!/bin/zsh — see Case 7's
+# comment two blocks down, which already gets this right for kb-variance
+# itself). It contains zsh-only glob-qualifier syntax earlier in the file
+# (a `(/DN)` glob qualifier) that bash's parser rejects outright, aborting
+# `source` partway through. kb-variance (defined above the break point)
+# still ends up defined under bash by accident; kb-help (defined further
+# down, after the break point) never does — so sourcing this file under
+# `bash -c` here always yielded an undefined kb-help and an empty $_KBHELP,
+# on every commit, not just this branch. Use zsh, exactly like the sibling-
+# drift guard in Case 7 below, to actually exercise the real runtime shell
+# instead of one the file was never written to support.
 # ─────────────────────────────────────────────────────────────────────────────
 test_start "kb-help lists kb-variance under Reporting / Analytics"
-_KBHELP=$(bash -c "source '$ALIASES_PATH' >/dev/null 2>&1; kb-help" 2>/dev/null)
-assert_contains "$_KBHELP" "kb-variance"
-test_pass
+if ! command -v zsh >/dev/null 2>&1; then
+    printf "  SKIP: zsh not available — kanban-aliases.sh is a zsh-only template\n"
+else
+    _KBHELP=$(zsh -c "source '$ALIASES_PATH' >/dev/null 2>&1; kb-help" 2>/dev/null)
+    assert_contains "$_KBHELP" "kb-variance"
+    test_pass
+fi
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Case 7 (conditional): sibling-drift guard vs the dev canonical.

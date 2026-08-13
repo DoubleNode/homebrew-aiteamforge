@@ -258,8 +258,15 @@ jobs:
         # bash 4+ is required for `declare -A` in test-multi-team.sh.
         # macOS-latest ships /bin/bash 3.2 only — brew bash is invoked
         # explicitly in the multi-team step below (XACA-0504).
+        # tmux (XACA-0862): test-xaca-0788-crash-recovery-in-tap.sh hard-fails
+        # (deliberately, by design — see its own header comment) when tmux is
+        # missing, rather than skipping into a vacuous pass, because tmux
+        # liveness IS the behavior under test. macos-latest runners do not
+        # ship tmux; this was invisible until the tap-CI manifest-drain fix
+        # (same commit) made the plain-shell loop actually execute all 67
+        # entries instead of silently stopping partway through at 23.
         run: |
-          brew install jq bash
+          brew install jq bash tmux
 
       - name: Make test scripts executable
         run: |

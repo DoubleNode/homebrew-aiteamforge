@@ -57,10 +57,36 @@ build_fake_tap() {
   # symlink's parent, so HOMEBREW_TAP_ROOT still becomes FAKE_TAP. Good.
   ln -sf "$REAL_INSTALLER" "$FAKE_INSTALLER"
 
+  # PRE-EXISTING FIXTURE BUG surfaced by the tap-CI manifest-drain fix
+  # (XACA-0862; the bug itself predates XACA-0862 — verified byte-identical
+  # against the pre-XACA-0862 baseline). install-team.sh unconditionally
+  # `source`s "${SCRIPT_DIR}/../lib/aiteamforge-paths.sh" (line ~33, no
+  # `|| true` guard, unlike the org-paths source two lines above it) under
+  # this script's own `set -euo pipefail`. This fixture only ever symlinked
+  # share/ subdirectories — never libexec/lib/ — so every invocation of the
+  # fake installer died on that missing source at the very top of the
+  # script, before it ever reached the persona-copy block Section 1/3 are
+  # actually testing. That produced the exact symptom this file's cases
+  # report: an empty/absent TEAM_DIR/personas/ after "install," which reads
+  # like a regression in the persona-copy guard but was really the installer
+  # never running past line 33. Symlink the whole libexec/lib/ dir, same
+  # pattern already used for share/ subdirs below, so the fake installer can
+  # actually reach the code this test exists to exercise.
+  mkdir -p "$FAKE_TAP/libexec"
+  ln -sf "$TAP_ROOT/libexec/lib" "$FAKE_TAP/libexec/lib"
+
   # Patched command.conf: everything else from the real conf, but
   # TEAM_WORKING_DIR points at the fake monorepo instead of $HOME/dev-team.
   sed "s|^TEAM_WORKING_DIR=.*|TEAM_WORKING_DIR=\"$FAKE_MONOREPO\"|" \
       "$TAP_ROOT/share/teams/command.conf" > "$FAKE_TAP/share/teams/command.conf"
+
+  # Same PRE-EXISTING fixture gap as the libexec/lib/ symlink above: the
+  # installer also unconditionally requires share/teams/registry.json
+  # (branding lookup, ~line 400) and `exit 1`s outright if it's missing —
+  # also present, byte-identical, on the pre-XACA-0862 baseline. Real
+  # (unpatched) content is fine here; the branding lookup is keyed by
+  # TEAM_ID and unrelated to what this test exercises.
+  ln -sf "$TAP_ROOT/share/teams/registry.json" "$FAKE_TAP/share/teams/registry.json"
 
   # Symlink supporting share/ subdirs the installer reads so it can get past
   # the persona-copy stage without exploding on missing templates.
@@ -76,8 +102,21 @@ build_fake_tap() {
 # non-zero exit codes because the installer does more work after the persona
 # block (template rendering, etc.) that is out of scope for this test and
 # may fail harmlessly in the minimal fake-tap fixture.
+#
+# PRE-EXISTING FIXTURE GAP (same class as the libexec/lib/ and registry.json
+# fixes above): _ensure_org_config() unconditionally requires either a
+# pre-existing ~/.aiteamforge/organization.yaml, an interactive /dev/tty, or
+# AITEAMFORGE_ORG_CONFIG set — and hard-exits otherwise. This test never ran
+# with a controlling TTY (test-runner.sh, CI) and never set the override, so
+# every run died here, before the persona-copy block. AITEAMFORGE_ORG_CONFIG
+# short-circuits unconditionally without validating the path — test-org-
+# config.sh's own "Env override short-circuits" scenario pins exactly this
+# (a nonexistent path, rc=0, no organization.yaml written, no prompts) — so a
+# placeholder path here is side-effect-free and irrelevant to what this test
+# actually exercises (the persona/personas-directory placement guard).
 run_install() {
   AITEAMFORGE_DIR="$FAKE_MONOREPO" \
+    AITEAMFORGE_ORG_CONFIG="$FAKE_ROOT/unused-org-config-override.yaml" \
     bash "$FAKE_INSTALLER" command \
       --install-dir "$FAKE_MONOREPO" \
       2>&1 || true

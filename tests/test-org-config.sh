@@ -14,11 +14,22 @@ TAP_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 INSTALL_TEAM_SH="$TAP_ROOT/libexec/installers/install-team.sh"
 
 # ─── Extract _ensure_org_config function body from install-team.sh ──────────
-# Lines 152-262 contain the complete function definition. Extract to a temp file
-# so we can source it without triggering _ensure_org_config's auto-call at
-# line 264 or any of the surrounding main() logic.
+# PRE-EXISTING BUG surfaced by the tap-CI manifest-drain fix (XACA-0862): this
+# used to be a HARDCODED `sed -n '152,262p'` line range. That range was already
+# wrong before XACA-0862 ever touched this file (verified against the
+# pre-XACA-0862 baseline: the function lived at lines 419-530 there, not
+# 152-262 — the hardcoding had drifted independent of this ticket) and drifted
+# further as install-team.sh grew (XACA-0862 alone added net +238 lines to
+# it). Extract by MARKER instead, mirroring the awk-based `_extract_fn`
+# pattern in test-xaca-0834-connect-script-recovery.sh — the extraction stays
+# correct across any future reflow of the file instead of needing a manual
+# line-number update every time.
 FUNC_TMPFILE="$TEST_TMP_DIR/ensure_org_config_fn.sh"
-sed -n '152,262p' "$INSTALL_TEAM_SH" > "$FUNC_TMPFILE"
+awk '
+  /^_ensure_org_config\(\) \{/ { capture=1 }
+  capture { print }
+  capture && /^}$/ { exit }
+' "$INSTALL_TEAM_SH" > "$FUNC_TMPFILE"
 
 # Sanity check: bail early if extraction failed (line numbers drifted)
 if ! bash -c "source '$FUNC_TMPFILE'" 2>/dev/null; then
