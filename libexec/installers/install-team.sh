@@ -728,7 +728,15 @@ _resolve_parametric_defaults() {
         matches="$(jq -r --arg pat "$pattern" \
             '(.teams // {}) | to_entries[] | select(.key | test($pat)) | "\(.key)\t\(.value.working_dir // "")\t\(.value.kanban_dir // "")"' \
             "$team_paths_json" 2>/dev/null | while IFS=$'\t' read -r _cand_key _cand_wd _cand_kd; do
-                [[ -n "$_cand_wd" && -d "$_cand_wd" && -n "$_cand_kd" && -d "$_cand_kd" ]] && printf '%s\n' "$_cand_key"
+                # XACA-0862: `[[ cond ]] && printf` as the LAST statement of this
+                # loop body returns non-zero when the condition is false, which
+                # under `set -euo pipefail` fails the enclosing $( ) and kills the
+                # script — precisely on the stale-registry-entry case this gate
+                # exists to filter GRACEFULLY. Must stay an if/fi block.
+                # See memory: feedback_set_e_last_line_short_circuit.md
+                if [[ -n "$_cand_wd" && -d "$_cand_wd" && -n "$_cand_kd" && -d "$_cand_kd" ]]; then
+                    printf '%s\n' "$_cand_key"
+                fi
             done)"
     fi
     match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
