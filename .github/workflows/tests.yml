@@ -290,7 +290,25 @@ jobs:
         run: |
           set -euo pipefail
           FAILED=0
+          # XACA-0862: COUNT what we actually consumed, and assert it against the
+          # manifest. A test that reads stdin inherits this loop's stdin — the
+          # `< <(awk ...)` process substitution — drains the remaining entries,
+          # and the loop simply ENDS EARLY while reporting success for everything
+          # it did run. Observed in the field: 23 of 73 entries executed, with
+          # entries 58-73 (including every XACA-0845/0862/0925 suite) silently
+          # never run across three consecutive pushes. The XACA-0707 completeness
+          # guard could not catch it because it verifies ENROLLMENT, not
+          # EXECUTION. `< /dev/null` on the runner stops the drain; the
+          # EXECUTED == EXPECTED assertion below is what makes a future drain
+          # (from any cause) FAIL LOUDLY instead of passing quietly.
+          EXPECTED="$(awk '!/^#/ && NF>=2 && $2=="plain-shell" {print $1}' tests/ci-manifest | wc -l | tr -d ' ')"
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "ERROR: manifest lists 0 plain-shell tests — a loop that iterates nothing must not read as a clean pass."
+            exit 1
+          fi
+          EXECUTED=0
           while IFS= read -r testfile; do
+            EXECUTED=$((EXECUTED + 1))
             # Skip the runner-exit-propagation meta-test here — it runs first in
             # the dedicated step above so its runner-integrity gate fires before
             # the bulk suite is trusted. It stays enrolled in ci-manifest as
@@ -300,13 +318,21 @@ jobs:
               continue
             fi
             echo "─── Running: tests/${testfile} ───"
-            if bash tests/test-runner.sh "tests/${testfile}"; then
+            if bash tests/test-runner.sh "tests/${testfile}" < /dev/null; then
               echo "PASS: ${testfile}"
             else
               echo "FAIL: ${testfile}"
               FAILED=$((FAILED + 1))
             fi
           done < <(awk '!/^#/ && NF>=2 && $2=="plain-shell" {print $1}' tests/ci-manifest)
+          echo "plain-shell manifest entries executed: ${EXECUTED} of ${EXPECTED}"
+          if [ "$EXECUTED" -ne "$EXPECTED" ]; then
+            echo ""
+            echo "ERROR: manifest drain — executed ${EXECUTED} of ${EXPECTED} plain-shell entries."
+            echo "       The loop ended early; entries after #${EXECUTED} never ran."
+            echo "       Usual cause: a test consuming this loop's stdin. Add '< /dev/null'."
+            exit 1
+          fi
           if [ "$FAILED" -gt 0 ]; then
             echo ""
             echo "ERROR: ${FAILED} plain-shell test(s) failed."
@@ -321,15 +347,33 @@ jobs:
         run: |
           set -euo pipefail
           FAILED=0
+          # XACA-0862: same stdin-drain hazard as the plain-shell loop above —
+          # see the rationale there. Fixed identically so the two loops cannot
+          # diverge on this property.
+          EXPECTED="$(awk '!/^#/ && NF>=2 && $2=="brew-bash" {print $1}' tests/ci-manifest | wc -l | tr -d ' ')"
+          if [ "$EXPECTED" -eq 0 ]; then
+            echo "ERROR: manifest lists 0 brew-bash tests — a loop that iterates nothing must not read as a clean pass."
+            exit 1
+          fi
+          EXECUTED=0
           while IFS= read -r testfile; do
+            EXECUTED=$((EXECUTED + 1))
             echo "─── Running (brew-bash): tests/${testfile} ───"
-            if "$(brew --prefix)/bin/bash" tests/test-runner.sh "tests/${testfile}"; then
+            if "$(brew --prefix)/bin/bash" tests/test-runner.sh "tests/${testfile}" < /dev/null; then
               echo "PASS: ${testfile}"
             else
               echo "FAIL: ${testfile}"
               FAILED=$((FAILED + 1))
             fi
           done < <(awk '!/^#/ && NF>=2 && $2=="brew-bash" {print $1}' tests/ci-manifest)
+          echo "brew-bash manifest entries executed: ${EXECUTED} of ${EXPECTED}"
+          if [ "$EXECUTED" -ne "$EXPECTED" ]; then
+            echo ""
+            echo "ERROR: manifest drain — executed ${EXECUTED} of ${EXPECTED} brew-bash entries."
+            echo "       The loop ended early; entries after #${EXECUTED} never ran."
+            echo "       Usual cause: a test consuming this loop's stdin. Add '< /dev/null'."
+            exit 1
+          fi
           if [ "$FAILED" -gt 0 ]; then
             echo ""
             echo "ERROR: ${FAILED} brew-bash test(s) failed."
