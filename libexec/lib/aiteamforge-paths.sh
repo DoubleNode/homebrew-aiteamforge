@@ -186,41 +186,81 @@ _AITEAMFORGE_DEFAULT_TEAMS_DATA() {
     # (DNSFramework, Liquidstyle) — these never carry the org name.
     local _shared_prefix="${_shared_dev}"
 
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "academy"      "${HOME}/dev-team/kanban"                                    "${HOME}/dev-team"                                          "8203"  "8200" "10"  "ACA"
-    # xaca-0139:allowed — MainEventApp-* are stable per-project repo directory names (not org branding); resolved via _org_prefix
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "ios"           "${_org_prefix}/MainEventApp-iOS/kanban"                    "${_org_prefix}/MainEventApp-iOS"                           "8260"  "8260" "10"  "IOS"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "android"       "${_org_prefix}/MainEventApp-Android/kanban"                "${_org_prefix}/MainEventApp-Android"                       "8280"  "8280" "10"  "AND" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "firebase"      "${_org_prefix}/MainEventApp-Functions/kanban"              "${_org_prefix}/MainEventApp-Functions"                     "8240"  "8240" "10"  "FIR" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "command"       "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8234"  "8230" "10"  "CMD"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "dns"           "${_shared_prefix}/DNSFramework/kanban"                     "${_shared_prefix}/DNSFramework"                            "8180"  "8180" "10"  "DNS"
-    # ── Freelance — per-client/project entries (overlay-only, XACA-0628) ──
-    # The 9 per-CLIENT/PROJECT freelance slugs (DoubleNode/Liquidstyle/Bandwear)
-    # were removed from this registry in XACA-0628 and now live solely in the
-    # per-machine overlay (~/.aiteamforge/team-paths.json). Overlay team_codes
-    # MERGE on top of these defaults, so the overlay entries
-    # (FSW/FAP/FWS/FLB/VAN/FAS/FLA/FLI/BWA/BWD) supply routing on machines that
-    # actually host those client repos. The generic `freelance` (FRE) entry below
-    # STAYS here as the universal fallback. Mirrors aiteamforge_paths.py DEFAULT_TEAMS.
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "legal-coparenting"  "${HOME}/legal/coparenting/kanban"                     "${HOME}/legal/coparenting"          "8320" "8320" "10"  "LCP"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical-general"    "${HOME}/medical/general/kanban"                       "${HOME}/medical/general"            "null" "8340" "10"  "MED"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "finance-personal"   "${HOME}/finance/personal/kanban"                      "${HOME}/finance/personal"           "8360" "8360" "10"  "FIN"
-    # Legacy alias kept for backward compatibility with pre-XACA-0139 installs.
-    # The "mainevent" team ID was used before the org plugin system existed; # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
-    # new installs use the "command" team or enable the primary org plugin.
-    # xaca-0139:allowed — "mainevent" is a registered legacy team slug (backward-compat alias, not user-facing org branding)
-    # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve collision with command (band 8230–8239).
-    # XACA-0727: mainevent is BOARD-LESS — kanban_dir/working_dir are the "null"
-    # sentinel (NOT empty: empty whitespace-delimited fields collapse under the
-    # IFS=$'\t' read parser and shift the port into the kanban_dir slot). "null"
-    # is the established absent-field sentinel here (see ports on lines above) and
-    # is treated as absent by the jq path. mainevent previously duplicated
-    # command's dev-team/kanban dir, so kb-* ops resolving team 'mainevent'
-    # derived a phantom mainevent-board.json and failed. 'command' is the
-    # operative kanban identity; mainevent persists only as a crew-launcher/port
-    # alias (LCARS 8400, team_code MEV).
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "mainevent"     "null"                                                      "null"                                                      "8400"  "8400" "10"  "MEV"
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical"        "${HOME}/medical/general/kanban"                           "${HOME}/medical/general"            "null" "8340" "10"  ""
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance"      "${HOME}/dev-team/kanban"                                  "${HOME}/dev-team"                                          "8505"  "8500" "100" "FRE"
+    # XACA-0862: every caller of this function reads it through either a
+    # literal pipe (`_AITEAMFORGE_DEFAULT_TEAMS_DATA | _aiteamforge_write_defaults`,
+    # `| cut -f1`) or a `while read ... done < <(_AITEAMFORGE_DEFAULT_TEAMS_DATA)`
+    # loop that `break`s as soon as it finds the team it wants (e.g. the
+    # lcars_port_base prefix scan in aiteamforge_compute_instance_port). Both
+    # are legitimate, expected consumption patterns for a static lookup table
+    # — but they mean the reader can close its end of the pipe before every
+    # row below has been written. A `printf` writing into an already-closed
+    # pipe fails with EPIPE ("write error: Broken pipe") and a non-zero exit;
+    # under the `set -euo pipefail` every caller here inherits, that failure
+    # would otherwise abort the CALLER's script — for data that is 100%
+    # static and can never legitimately fail. Confirmed on Linux CI
+    # (tap-connect-disconnect-parity, XACA-0862): install-team.sh finance
+    # --project personal --connect-only aborted non-zero with exactly this
+    # broken-pipe printf trace once the reader (the port-base prefix scan)
+    # matched "finance-personal" and stopped reading, mid-table, before the
+    # trailing rows were written. Reproduced locally by forcing an
+    # early-closing reader (`$(_AITEAMFORGE_DEFAULT_TEAMS_DATA | grep -m1 ...)`)
+    # which raises the identical SIGPIPE/EPIPE abort under set -e.
+    #
+    # Wrapping the whole emission as the LHS of `|| true` suspends errexit for
+    # every command inside the group (verified: a deliberate `false` mid-block
+    # does not abort under this construct — bash defers the -e check to the
+    # group's own exit status, which `|| true` then absorbs), and 2>/dev/null
+    # silences the write-error message so a legitimately early-closing reader
+    # (which already got everything it needed) produces no noise. This does
+    # NOT weaken any real failure detection: this block only ever emits a
+    # fixed literal table, so there is no genuine error condition here to mask.
+    #
+    # `trap '' PIPE` is required too, not optional: when SIGPIPE has its
+    # default disposition, the kernel can terminate this process on the write
+    # syscall itself (confirmed locally: a >64KB write into a reader that
+    # already closed kills the process outright with no message and no
+    # command-completion for `|| true` to even run against — exit 128+13=141,
+    # unrecoverable from inside the function). Ignoring SIGPIPE converts that
+    # syscall failure into an ordinary EPIPE return from `printf`, which the
+    # `{ ... } || true` group above can then actually catch.
+    trap '' PIPE
+    {
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "academy"      "${HOME}/dev-team/kanban"                                    "${HOME}/dev-team"                                          "8203"  "8200" "10"  "ACA"
+        # xaca-0139:allowed — MainEventApp-* are stable per-project repo directory names (not org branding); resolved via _org_prefix
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "ios"           "${_org_prefix}/MainEventApp-iOS/kanban"                    "${_org_prefix}/MainEventApp-iOS"                           "8260"  "8260" "10"  "IOS"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "android"       "${_org_prefix}/MainEventApp-Android/kanban"                "${_org_prefix}/MainEventApp-Android"                       "8280"  "8280" "10"  "AND" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "firebase"      "${_org_prefix}/MainEventApp-Functions/kanban"              "${_org_prefix}/MainEventApp-Functions"                     "8240"  "8240" "10"  "FIR" # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "command"       "${_org_prefix}/dev-team/kanban"                            "${_org_prefix}/dev-team"                                   "8234"  "8230" "10"  "CMD"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "dns"           "${_shared_prefix}/DNSFramework/kanban"                     "${_shared_prefix}/DNSFramework"                            "8180"  "8180" "10"  "DNS"
+        # ── Freelance — per-client/project entries (overlay-only, XACA-0628) ──
+        # The 9 per-CLIENT/PROJECT freelance slugs (DoubleNode/Liquidstyle/Bandwear)
+        # were removed from this registry in XACA-0628 and now live solely in the
+        # per-machine overlay (~/.aiteamforge/team-paths.json). Overlay team_codes
+        # MERGE on top of these defaults, so the overlay entries
+        # (FSW/FAP/FWS/FLB/VAN/FAS/FLA/FLI/BWA/BWD) supply routing on machines that
+        # actually host those client repos. The generic `freelance` (FRE) entry below
+        # STAYS here as the universal fallback. Mirrors aiteamforge_paths.py DEFAULT_TEAMS.
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "legal-coparenting"  "${HOME}/legal/coparenting/kanban"                     "${HOME}/legal/coparenting"          "8320" "8320" "10"  "LCP"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical-general"    "${HOME}/medical/general/kanban"                       "${HOME}/medical/general"            "null" "8340" "10"  "MED"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "finance-personal"   "${HOME}/finance/personal/kanban"                      "${HOME}/finance/personal"           "8360" "8360" "10"  "FIN"
+        # Legacy alias kept for backward compatibility with pre-XACA-0139 installs.
+        # The "mainevent" team ID was used before the org plugin system existed; # xaca-0139:allowed — justified survivor (backward-compat default, overridden by org resolver)
+        # new installs use the "command" team or enable the primary org plugin.
+        # xaca-0139:allowed — "mainevent" is a registered legacy team slug (backward-compat alias, not user-facing org branding)
+        # NOTE (XACA-0463): mainevent moves from 8234 → 8400 to resolve collision with command (band 8230–8239).
+        # XACA-0727: mainevent is BOARD-LESS — kanban_dir/working_dir are the "null"
+        # sentinel (NOT empty: empty whitespace-delimited fields collapse under the
+        # IFS=$'\t' read parser and shift the port into the kanban_dir slot). "null"
+        # is the established absent-field sentinel here (see ports on lines above) and
+        # is treated as absent by the jq path. mainevent previously duplicated
+        # command's dev-team/kanban dir, so kb-* ops resolving team 'mainevent'
+        # derived a phantom mainevent-board.json and failed. 'command' is the
+        # operative kanban identity; mainevent persists only as a crew-launcher/port
+        # alias (LCARS 8400, team_code MEV).
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "mainevent"     "null"                                                      "null"                                                      "8400"  "8400" "10"  "MEV"
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "medical"        "${HOME}/medical/general/kanban"                           "${HOME}/medical/general"            "null" "8340" "10"  ""
+        printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "freelance"      "${HOME}/dev-team/kanban"                                  "${HOME}/dev-team"                                          "8505"  "8500" "100" "FRE"
+    } 2>/dev/null || true
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
