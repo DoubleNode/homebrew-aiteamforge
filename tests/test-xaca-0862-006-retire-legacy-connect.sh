@@ -205,12 +205,24 @@ test_start "R5 [SAFETY]: a legacy pair is untouched when its team-scoped replace
 R5_SBX="$(_new_sandbox)"
 _stub_script "$R5_SBX/aiteamforge/legal-coparenting-connect.sh"
 _stub_script "$R5_SBX/aiteamforge/legal-coparenting-disconnect.sh"
-_run_retire "$R5_SBX" >/dev/null 2>&1
+# Capture the exit status directly off the command itself (`$?` here reflects
+# `_run_retire`, NOT a `| tail`/`| grep` sitting downstream of it — there is
+# no pipe in this call at all, but capture-first is kept as the house pattern
+# regardless: assign, THEN inspect, never inspect after any intervening
+# command touches `$?`). Output captured to a sandbox-scoped file (never real
+# /tmp) so a failure message can show it without a second, status-clobbering
+# command substitution.
+R5_OUT_FILE="$WORK_DIR/r5-retire-out.$$"
+_run_retire "$R5_SBX" >"$R5_OUT_FILE" 2>&1
+R5_EXIT=$?
 R5_REMAINING="$(ls "$R5_SBX/aiteamforge" | sort)"
-if [ "$R5_REMAINING" = "$(printf 'legal-coparenting-connect.sh\nlegal-coparenting-disconnect.sh')" ]; then
+R5_OK=true
+[ "$R5_EXIT" -eq 0 ] || R5_OK=false
+[ "$R5_REMAINING" = "$(printf 'legal-coparenting-connect.sh\nlegal-coparenting-disconnect.sh')" ] || R5_OK=false
+if [ "$R5_OK" = true ]; then
     test_pass
 else
-    test_fail "legacy pair with no replacement must be left in place; remaining='$R5_REMAINING'"
+    test_fail "legacy pair with no replacement must be left in place AND retirement must exit 0; exit=$R5_EXIT remaining='$R5_REMAINING' output=$(cat "$R5_OUT_FILE" 2>/dev/null)"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -236,7 +248,18 @@ if [ "$R6_OK" = true ]; then test_pass; else test_fail "second run must exit 0 a
 # ═══════════════════════════════════════════════════════════════════════════
 test_start "R7 [SAFETY]: retire_legacy_connect_scripts() contains no rm/unlink/shred/find-delete path"
 R7_FUNC_BODY="$(awk '/^retire_legacy_connect_scripts\(\)/,/^}/' "$MIGRATE_SH")"
-if echo "$R7_FUNC_BODY" | grep -qE '(^|[^_a-zA-Z])(rm|unlink|shred)[[:space:]]|find[^\n]*-delete'; then
+# POSITIVE CONTROL (XACA-0862-017): an absence-assertion below is only
+# meaningful once presence is established here. Without this, the extraction
+# yields an EMPTY string whenever the function is missing/renamed — the
+# absence-grep then finds nothing and PASSES, silently stopping protection
+# on the exact defect it exists to catch. Require the body to be non-empty
+# AND to actually contain the `mv` this function uses to relocate legacy
+# files (proof we captured the real function, not a false-empty extraction).
+if [ -z "$R7_FUNC_BODY" ]; then
+    test_fail "retire_legacy_connect_scripts() not found in $MIGRATE_SH — awk extraction returned empty (function missing/renamed); the delete-safety check below would vacuously pass on this, so treat an empty extraction as failure, not success"
+elif ! echo "$R7_FUNC_BODY" | grep -qE '(^|[^_a-zA-Z])mv[[:space:]]'; then
+    test_fail "retire_legacy_connect_scripts() body found but contains no 'mv' — positive control failed, extraction may not be the real function body: $R7_FUNC_BODY"
+elif echo "$R7_FUNC_BODY" | grep -qE '(^|[^_a-zA-Z])(rm|unlink|shred)[[:space:]]|find[^\n]*-delete'; then
     test_fail "a destructive command was found inside retire_legacy_connect_scripts(): $(echo "$R7_FUNC_BODY" | grep -nE '(^|[^_a-zA-Z])(rm|unlink|shred)[[:space:]]|find[^\n]*-delete')"
 else
     test_pass
