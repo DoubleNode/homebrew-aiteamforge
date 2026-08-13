@@ -918,6 +918,39 @@ _connect_script_team_flags() {
 #     mainevent remain deliberately unmaterialised (see that comment and the
 #     XACA-0862 plan doc's "Cause B" section) — not an oversight, a scoped-out
 #     decision pending real DNS-team agent/session data this ticket doesn't have.
+#
+# XACA-0862-020: ids that are PERMANENTLY, INTENTIONALLY scoped out (no
+# shipped team template exists and none is planned — see the comment above
+# and the XACA-0862 plan doc's "Cause B" section). Such an id still ships a
+# real working_dir, so source (c) still legitimately recovers it as a
+# work-list candidate — that recovery is correct and must not change — but it
+# can never resolve to a template, so it is skipped downstream on EVERY
+# unattended nightly upgrade, forever. A recurring print_warning for a defect
+# that will never be fixed (because there is nothing to fix) trains operators
+# to tune out the exact channel that also reports a genuinely broken or
+# unrecognised instance. Downgrade the message to print_info (still visible,
+# just not counted as a warning) and exclude it from the `skipped` tally that
+# drives the final "Skipped N unrecognised..." summary line. Add an id here
+# ONLY for a similarly permanent, deliberate exclusion — never for an
+# instance that might legitimately be missing a template by mistake; an
+# unrecognised id NOT on this list still warns and counts exactly as before.
+_xaca0862_020_known_scoped_out_ids() {
+  cat <<'EOF'
+dns
+EOF
+}
+
+_xaca0862_020_is_known_scoped_out() {
+  local id="$1" known
+  while IFS= read -r known; do
+    [ -z "$known" ] && continue
+    [ "$id" = "$known" ] && return 0
+  done <<EOF
+$(_xaca0862_020_known_scoped_out_ids)
+EOF
+  return 1
+}
+
 update_connect_scripts() {
   print_section "Updating Team Connect/Disconnect Scripts"
 
@@ -1099,9 +1132,9 @@ PYEOF
   # installed: interactively, its "'<path>' does not exist on disk — Use this
   # path anyway?" prompt defaults YES; under --accept-defaults it writes
   # DEFAULT_TEAMS verbatim with no existence check at all. Bare membership is
-  # still not proof. This source adds a DIFFERENT, narrower gate: the
-  # instance's recorded working_dir must exist as a real directory on THIS
-  # box. install-team.sh's own team-paths.json persist step runs only on full
+  # still not proof. This source adds a narrower gate: the instance's
+  # recorded working_dir must exist as a real directory on THIS box.
+  # install-team.sh's own team-paths.json persist step runs only on full
   # installs, after mkdir -p'ing the working/kanban dir — so a genuinely
   # installed instance's working_dir is guaranteed present, while a
   # wizard-catalogued-but-never-installed entry (or a stale entry surviving a
@@ -1110,6 +1143,26 @@ PYEOF
   # sentinel string "null" as working_dir (XACA-0727 — mainevent is
   # deliberately board-less), which fails the directory test the same as any
   # other absent path.
+  #
+  # XACA-0862-021: working_dir isdir() ALONE is still not airtight.
+  # --accept-defaults (see above) writes every DEFAULT_TEAMS working_dir
+  # VERBATIM with no existence check at all — so a never-installed team whose
+  # CATALOG-DEFAULT path merely happens to already exist on this box (e.g. a
+  # directory created for an unrelated reason, or one surviving a manual
+  # uninstall) satisfies isdir(working_dir) and would be wrongly materialised
+  # — the XACA-0845-008 failure mode in reduced form, just narrower. Require
+  # kanban_dir to ALSO exist as a real directory. install-team.sh's persist
+  # step writes kanban_dir ONLY as part of a genuine install, and that same
+  # install unconditionally `mkdir -p`s it before team-paths.json is ever
+  # written — a bare pre-existing/coincidental working_dir will essentially
+  # never also happen to already contain a "kanban" subdirectory. This is
+  # deliberately a directory check, not a check for the exact
+  # "<instance_id>-board.json" filename: install-team.sh may skip writing
+  # that specific file when a profile-scoped canonical board already exists
+  # elsewhere (see its "Skipping stub: profile-scoped canonical board already
+  # exists" path), but it always creates kanban_dir itself first, so that
+  # directory's existence is the reliable genuine-install signal, not the
+  # board file's.
   #
   # Like (a) and (b), this yields concrete instance ids only — never a glob —
   # and every id is still validated below against the shipped team confs
@@ -1140,8 +1193,21 @@ try:
             wd = entry.get("working_dir")
             if not wd or not isinstance(wd, str):
                 continue
-            if os.path.isdir(wd):
-                out.append(str(instance_id))
+            if not os.path.isdir(wd):
+                continue
+            # XACA-0862-021: working_dir isdir() alone is satisfiable by a
+            # never-installed team whose CATALOG-DEFAULT path coincidentally
+            # exists (see the comment block above this source) — require
+            # kanban_dir to ALSO exist as a real directory. A genuine install
+            # always mkdir -p s it before team-paths.json is ever written; a
+            # bare coincidental working_dir essentially never already
+            # contains one.
+            kd = entry.get("kanban_dir")
+            if not kd or not isinstance(kd, str):
+                continue
+            if not os.path.isdir(kd):
+                continue
+            out.append(str(instance_id))
 except Exception:
     pass
 
@@ -1170,14 +1236,24 @@ PYEOF
     # `<<<` on an empty work_list still yields one empty line.
     [ -n "$instance_id" ] || continue
 
-    # Message continuity with the file-driven original; also the file this
-    # iteration will create or refresh.
-    base="${instance_id}-connect.sh"
-
     # Validate the recovered instance against the shipped templates using
     # ANCHORED shapes only: "<team>" exactly, or "<team>-<rest>". Longest
     # match wins, so a dash-bearing template id beats a shorter template that
     # shares its first component.
+    #
+    # XACA-0862-016: `base` (the on-disk connect-script filename) cannot be
+    # computed from `instance_id` alone — since XACA-0862 the rendered file
+    # is TEAM-scoped ("<best_team>-connect.sh"), not instance-scoped, so for
+    # any parameterised instance (e.g. "legal-coparenting") the old
+    # `"${instance_id}-connect.sh"` named a file ("legal-coparenting-connect.sh")
+    # that is never written. That stale name fed both the skip warnings below
+    # (naming a nonexistent file) AND the existence check further down, which
+    # therefore NEVER found the real team-scoped file and permanently reported
+    # "Creating missing" for every parametric instance, even a pure refresh.
+    # The skip messages below (before best_team is known) now name the
+    # recovered `instance_id` directly instead of guessing a filename; `base`
+    # itself is computed AFTER best_team is resolved, from best_team — the
+    # only value that actually determines the rendered filename.
     best_team=""
     best_conf=""
     for conf in "$teams_conf_dir"/*.conf; do
@@ -1192,10 +1268,20 @@ PYEOF
     done
 
     if [ -z "$best_team" ]; then
-      print_warning "Skipping ${base} — no team template matches instance '${instance_id}'"
-      skipped=$((skipped + 1))
+      if _xaca0862_020_is_known_scoped_out "$instance_id"; then
+        print_info "Skipping — no team template matches instance '${instance_id}' (known scoped-out id, not counted as a warning)"
+      else
+        print_warning "Skipping — no team template matches instance '${instance_id}'"
+        skipped=$((skipped + 1))
+      fi
       continue
     fi
+
+    # Team-scoped filename (XACA-0862): the installer renders exactly one
+    # "<best_team>-connect.sh" per team, never a per-instance file. Compute it
+    # from best_team, not instance_id, so both the remaining skip messages and
+    # the existence check below name/check the file that will actually exist.
+    base="${best_team}-connect.sh"
 
     # Split the remainder into client/project according to the template's own
     # parameterisation, mirroring compute_instance_id(). Components never
@@ -1210,7 +1296,7 @@ PYEOF
     project=""
     if [ "$has_projects" = "true" ]; then
       if [ -z "$remainder" ]; then
-        print_warning "Skipping ${base} — template '${best_team}' is parameterised but instance '${instance_id}' carries no project component"
+        print_warning "Skipping instance '${instance_id}' — template '${best_team}' is parameterised but instance carries no project component"
         skipped=$((skipped + 1))
         continue
       fi
@@ -1218,20 +1304,20 @@ PYEOF
         client="${remainder%%-*}"
         project="${remainder#*-}"
         if [ -z "$client" ] || [ -z "$project" ] || [ "$client" = "$remainder" ] || [ "$project" != "${project#*-}" ]; then
-          print_warning "Skipping ${base} — cannot split '${remainder}' into <client>-<project> for template '${best_team}'"
+          print_warning "Skipping instance '${instance_id}' — cannot split '${remainder}' into <client>-<project> for template '${best_team}'"
           skipped=$((skipped + 1))
           continue
         fi
       else
         project="$remainder"
         if [ "$project" != "${project#*-}" ]; then
-          print_warning "Skipping ${base} — project component '${project}' for template '${best_team}' contains a dash"
+          print_warning "Skipping instance '${instance_id}' — project component '${project}' for template '${best_team}' contains a dash"
           skipped=$((skipped + 1))
           continue
         fi
       fi
     elif [ -n "$remainder" ]; then
-      print_warning "Skipping ${base} — template '${best_team}' takes no parameters but instance '${instance_id}' carries suffix '${remainder}'"
+      print_warning "Skipping instance '${instance_id}' — template '${best_team}' takes no parameters but instance carries suffix '${remainder}'"
       skipped=$((skipped + 1))
       continue
     fi

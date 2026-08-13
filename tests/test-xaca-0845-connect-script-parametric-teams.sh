@@ -638,13 +638,23 @@ declare -f _connect_script_team_flags >/dev/null || { echo "FATAL: _connect_scri
 declare -f update_connect_scripts >/dev/null || { echo "FATAL: update_connect_scripts not defined after extraction"; exit 1; }
 
 # Build a team-paths.json registry file. $1 = output path, remaining args =
-# instance ids to register. Each arg is either a bare instance id (gets a
-# minimal entry with NO working_dir — the T6A/B/C shape, unaffected by the
-# XACA-0862 source (c) filesystem gate) or "<instance_id>::<working_dir>"
-# (XACA-0862 subitem 005: gives the entry a working_dir, which source (c)
-# in update_connect_scripts treats as a candidate ONLY if that path exists
-# on disk — the caller is responsible for actually creating it beforehand
-# when the test wants source (c) to fire).
+# instance ids to register. Each arg is one of:
+#   "<instance_id>"                                 bare — minimal entry with
+#       NO working_dir at all (the T6A/B/C shape, unaffected by the XACA-0862
+#       source (c) filesystem gate).
+#   "<instance_id>::<working_dir>"                  (XACA-0862 subitem 005)
+#       gives the entry a working_dir only, NO kanban_dir. source (c) treats
+#       this as a candidate ONLY if working_dir exists on disk AND (XACA-0862
+#       subitem 021) kanban_dir ALSO exists — since this shape carries no
+#       kanban_dir field at all, it can never satisfy the strengthened gate
+#       even when working_dir is created on disk. Use this shape to model a
+#       catalog-default entry whose path merely happens to exist but was
+#       never genuinely installed.
+#   "<instance_id>::<working_dir>::<kanban_dir>"    (XACA-0862 subitem 021)
+#       gives the entry BOTH fields, mirroring what install-team.sh's real
+#       persist step writes for a genuine install. The caller is responsible
+#       for actually creating both directories on disk beforehand when the
+#       test wants source (c) to fire.
 _write_registry() {
     local out="$1"; shift
     mkdir -p "$(dirname "$out")"
@@ -659,8 +669,14 @@ specs = sys.argv[2:]
 teams = {}
 for spec in specs:
     if "::" in spec:
-        instance_id, working_dir = spec.split("::", 1)
-        teams[instance_id] = {"lcars_port": 8360, "working_dir": working_dir}
+        parts = spec.split("::")
+        instance_id = parts[0]
+        working_dir = parts[1] if len(parts) > 1 else ""
+        kanban_dir = parts[2] if len(parts) > 2 else ""
+        entry = {"lcars_port": 8360, "working_dir": working_dir}
+        if kanban_dir:
+            entry["kanban_dir"] = kanban_dir
+        teams[instance_id] = entry
     else:
         teams[spec] = {"lcars_port": 8360}
 data = {"teams": teams}
@@ -863,9 +879,10 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
-# T6D [XACA-0845-008 -> XACA-0862-005, STRUCTURAL, CONTRACT REVISED]:
-# update_connect_scripts MAY read team-paths.json/AITEAMFORGE_CONFIG again —
-# but ONLY behind a real filesystem existence gate, never as bare membership.
+# T6D [XACA-0845-008 -> XACA-0862-005 -> XACA-0862-018, STRUCTURAL, CONTRACT
+# TIGHTENED]: update_connect_scripts MAY read team-paths.json/
+# AITEAMFORGE_CONFIG again — but ONLY behind a real filesystem existence
+# gate, CO-LOCATED with the read, never as bare membership.
 #
 # XACA-0862 subitem 005 found a live field gap this blanket ban could not
 # close: legal-coparenting and medical-general were both genuinely installed
@@ -875,41 +892,98 @@ fi
 # never updated for an instance added later]. Re-reading the registry was
 # unavoidable to close that gap. What changed from the original -008 finding
 # is HOW it's read: a candidate is only added to the work list if its
-# RECORDED working_dir exists as a real directory on disk (source (c), the
-# comment block above update_connect_scripts has the full contract) — which
-# T6A/T6B/T6C's fixtures (bare instance ids, no working_dir field at all)
-# still correctly prove contributes NOTHING, since a missing field can never
-# satisfy an isdir() check. Those three tests are unmodified and still pass.
+# RECORDED working_dir (and, since subitem 021, kanban_dir) exists as a real
+# directory on disk (source (c), the comment block above update_connect_scripts
+# has the full contract) — which T6A/T6B/T6C's fixtures (bare instance ids, no
+# working_dir field at all) still correctly prove contributes NOTHING, since a
+# missing field can never satisfy an isdir() check. Those three tests are
+# unmodified and still pass.
 #
-# This test now asserts the REVISED contract: the registry MAY be referenced,
-# but every such reference must be paired with a directory-existence check
-# (os.path.isdir / os.path.exists) in the same block — proving the read is
-# gated, not a bare-membership regression of the exact defect -008 fixed.
-# T6E below is the behavioural counterpart: a registry entry whose working_dir
-# genuinely exists gets materialised; T6B/T6C (unchanged) prove one that
-# doesn't, does not.
+# XACA-0862-018 REVISION: the original version of this test asserted only
+# that "team-paths.json" and "isdir" both appear SOMEWHERE in the stripped
+# source — a whole-file substring check. That is weaker than its own comment
+# claimed: a SECOND, ungated bare-membership read of team-paths.json added
+# anywhere else in the function would still have passed, because source (c)'s
+# own isdir call kept the "isdir" substring present for the file as a whole.
+# This revision instead asserts CO-LOCATION: every executable line
+# referencing "team-paths.json" must have an "isdir" call within a bounded
+# line window AFTER it (the same source-(c) block, not merely the same
+# function). NC5 below proves this revised check can actually fail — i.e.
+# that it is not itself vacuous in the same way the version it replaces was.
+#
+# T6E/T6H below are the behavioural counterparts: a registry entry with a
+# genuinely existing working_dir + kanban_dir gets materialised; T6B/T6C
+# (unchanged) and T6H (new, subitem 021) prove ones that don't, don't.
 #
 # COMMENT LINES ARE STRIPPED FIRST — the function carries prose that names
 # both identifiers verbatim in its own explanation. Assert against EXECUTABLE
 # lines only, as before.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T6D [XACA-0862-005]: any team-paths.json/AITEAMFORGE_CONFIG read in update_connect_scripts is gated by a directory-existence check, never bare membership"
-T6D_SRC="$(grep -v '^[[:space:]]*#' "$UPD_FN_SRC" || true)"
+
+# ── T6D/NC5 shared helper (XACA-0862-018) ───────────────────────────────────
+# Returns success (0) iff EVERY executable "team-paths.json" reference in the
+# given source file has an "isdir" occurrence within $2 (default 40) lines
+# after it, in the comment-stripped text. Returns failure (1) if there is no
+# team-paths.json reference at all (source (c) must still exist), or if any
+# reference lacks a nearby gate. Factored out so NC5 can reuse the exact same
+# check against a deliberately-broken fixture and prove it can fail.
+_t6d_colocation_ok() {
+    local src="$1" window="${2:-40}"
+    local stripped total ref_lines ref wend gated found_any=false
+    stripped="$(grep -v '^[[:space:]]*#' "$src" || true)"
+    [ -z "$stripped" ] && return 1
+    total=$(printf '%s\n' "$stripped" | wc -l | tr -d ' ')
+    ref_lines="$(printf '%s\n' "$stripped" | grep -n 'team-paths\.json' | cut -d: -f1 || true)"
+    [ -z "$ref_lines" ] && return 1
+    while IFS= read -r ref; do
+        [ -z "$ref" ] && continue
+        found_any=true
+        wend=$((ref + window))
+        [ "$wend" -gt "$total" ] && wend="$total"
+        gated=$(printf '%s\n' "$stripped" | sed -n "${ref},${wend}p" | grep -ci 'isdir')
+        if [ "${gated:-0}" -eq 0 ]; then
+            return 1
+        fi
+    done <<EOF
+$ref_lines
+EOF
+    [ "$found_any" = true ] || return 1
+    return 0
+}
+
+test_start "T6D [XACA-0862-018]: the team-paths.json read in update_connect_scripts is CO-LOCATED with its directory-existence gate, not merely present somewhere in the function"
 T6D_OK=true
 # .aiteamforge-config (source b) must still be present — that source is untouched.
-case "$T6D_SRC" in *.aiteamforge-config*) : ;; *) T6D_OK=false ;; esac
-# The registry signal (source c) must be present now...
-case "$T6D_SRC" in *team-paths.json*) : ;; *) T6D_OK=false ;; esac
-# ...and wherever it is, the same source must contain a directory-existence
-# gate — the specific thing bare membership (the -008 defect) never had.
-case "$T6D_SRC" in *isdir*) : ;; *) T6D_OK=false ;; esac
-# Negative control: the stripped source must still be real code, not empty —
-# otherwise the "must contain" assertions above would pass vacuously.
-case "$T6D_SRC" in *update_connect_scripts*) : ;; *) T6D_OK=false ;; esac
+grep -qF '.aiteamforge-config' "$UPD_FN_SRC" || T6D_OK=false
+# Negative control: the extracted source must still be real code, not empty —
+# otherwise the checks below would pass vacuously.
+grep -qF 'update_connect_scripts' "$UPD_FN_SRC" || T6D_OK=false
+# The registry signal (source c) must be present, AND co-located with its gate.
+_t6d_colocation_ok "$UPD_FN_SRC" 40 || T6D_OK=false
 if [ "$T6D_OK" = true ]; then
     test_pass
 else
-    test_fail "update_connect_scripts must read .aiteamforge-config (source b) AND may read team-paths.json (source c) ONLY paired with a directory-existence check (isdir); extracted source: $UPD_FN_SRC"
+    test_fail "update_connect_scripts must read .aiteamforge-config (source b) AND every team-paths.json reference (source c) must have an isdir gate CO-LOCATED within 40 lines — not merely present anywhere in the function; extracted source: $UPD_FN_SRC"
+fi
+
+# ── T6D-NC [MANDATORY negative control for T6D, XACA-0862-018] ─────────────
+# Proves T6D can FAIL: builds a copy of the real extracted source with one
+# EXTRA, deliberately ungated "team-paths.json" reference inserted at the top
+# of the function — far (in line-number terms) from source (c)'s isdir gate
+# near the bottom — and asserts the SAME co-location helper rejects it. This
+# is the exact defect class T6D-original could not catch (see the revision
+# note above): a second bare-membership read, added elsewhere, that the old
+# whole-file substring check would have let straight through.
+test_start "T6D-NC [negative control, XACA-0862-018]: an extra ungated team-paths.json reference makes the co-location check FAIL (proves T6D is not vacuous)"
+NC5_SRC="$WORK_DIR/update_connect_scripts.ungated-extra-read.sh"
+awk '
+  NR==1 { print; print "  local _xaca0862_018_probe=\"team-paths.json\"  # ungated bare-membership read, added far from any directory-existence check"; next }
+  { print }
+' "$UPD_FN_SRC" > "$NC5_SRC"
+if [ -s "$NC5_SRC" ] && ! _t6d_colocation_ok "$NC5_SRC" 40; then
+    test_pass
+else
+    test_fail "expected the co-location check to REJECT a fixture with an ungated team-paths.json reference; it accepted it instead — T6D would be testing nothing"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -920,12 +994,16 @@ fi
 # registered, real working_dir, shipped conf, connect script never rendered,
 # and neither (a) nor (b) could ever see it on any future upgrade).
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T6E [XACA-0862-005]: registry entry not in .aiteamforge-config, with a REAL working_dir on disk, gets legal-connect.sh created (Cause A)"
+test_start "T6E [XACA-0862-005]: registry entry not in .aiteamforge-config, with a REAL working_dir + kanban_dir on disk, gets legal-connect.sh created (Cause A)"
 T6E_SBX="$(_new_install_sandbox)"
 T6E_REGISTRY="$T6E_SBX/home/.aiteamforge/team-paths.json"
 T6E_WORKDIR="$T6E_SBX/home/legal/coparenting"
-mkdir -p "$T6E_WORKDIR"
-_write_registry "$T6E_REGISTRY" "legal-coparenting::$T6E_WORKDIR"
+T6E_KANBANDIR="$T6E_WORKDIR/kanban"
+mkdir -p "$T6E_KANBANDIR"
+# XACA-0862-021: source (c) now also requires kanban_dir to exist (see T6H) —
+# supply it here so T6E keeps modelling a GENUINE install, matching what
+# install-team.sh's real persist step writes.
+_write_registry "$T6E_REGISTRY" "legal-coparenting::$T6E_WORKDIR::$T6E_KANBANDIR"
 # Deliberately NO .aiteamforge-config entry — simulates a parametric instance
 # registered AFTER the box's one setup run, exactly the Cause-A scenario.
 _install_print_stubs
@@ -975,12 +1053,16 @@ fi
 # (TEAM_AGENTS, AGENT_WINDOWS_*) this ticket does not have. This test pins
 # "skipped, not silently dropped, not guessed at" as the current behaviour.
 # ═══════════════════════════════════════════════════════════════════════════
-test_start "T6G [XACA-0862-005]: dns registry entry (real working_dir, no shipped conf) is skipped, not silently dropped"
+test_start "T6G [XACA-0862-005]: dns registry entry (real working_dir + kanban_dir, no shipped conf) is skipped, not silently dropped"
 T6G_SBX="$(_new_install_sandbox)"
 T6G_REGISTRY="$T6G_SBX/home/.aiteamforge/team-paths.json"
 T6G_WORKDIR="$T6G_SBX/home/dns-framework"
-mkdir -p "$T6G_WORKDIR"
-_write_registry "$T6G_REGISTRY" "dns::$T6G_WORKDIR"
+T6G_KANBANDIR="$T6G_WORKDIR/kanban"
+mkdir -p "$T6G_KANBANDIR"
+# XACA-0862-021: source (c) now also requires kanban_dir to exist — supply it
+# so dns keeps modelling a GENUINE install (real setup, just no shipped
+# template), not the coincidental-path case T6H exists to reject.
+_write_registry "$T6G_REGISTRY" "dns::$T6G_WORKDIR::$T6G_KANBANDIR"
 _install_print_stubs
 HOME="$T6G_SBX/home" \
 AITEAMFORGE_ORG_CONFIG="$T6G_SBX/home/.aiteamforge/organization.yaml" \
@@ -992,6 +1074,68 @@ if [ "$T6G_COUNT" -eq 0 ] && grep -qi "no team template matches instance 'dns'" 
     test_pass
 else
     test_fail "expected dns to be recovered then skipped with a 'no team template matches' warning (not silently dropped, not fatal); connect_count=$T6G_COUNT; stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6H [XACA-0862-021, HEADLINE]: a team-paths.json entry whose working_dir
+# EXISTS on disk but carries NO kanban_dir materialises NOTHING.
+#
+# This is exactly the shape aiteamforge-team-paths-wizard.py --accept-defaults
+# writes verbatim, with NO existence check at all (see the comment above
+# source (c) in update_connect_scripts). Before subitem 021, working_dir
+# isdir() alone was the entire gate, so a never-installed team whose
+# CATALOG-DEFAULT path merely happened to already exist on this box (e.g. a
+# directory created for an unrelated reason, or one surviving a manual
+# uninstall) would satisfy it and get wrongly materialised — the XACA-0845-008
+# failure mode in reduced form. T6B/T6C never covered this: their fixtures
+# have NO working_dir field at all, a coarser shape a missing field trivially
+# fails regardless of gate strength. T6H is the narrower "path exists but was
+# never installed" case those two do not reach.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6H [XACA-0862-021]: registry entry with an existing working_dir but NO kanban_dir (coincidental path, never installed) materialises NOTHING"
+T6H_SBX="$(_new_install_sandbox)"
+T6H_REGISTRY="$T6H_SBX/home/.aiteamforge/team-paths.json"
+T6H_WORKDIR="$T6H_SBX/home/finance/personal"
+mkdir -p "$T6H_WORKDIR"
+# Deliberately NO kanban_dir — working_dir merely happens to exist (e.g. a
+# directory created for an unrelated reason); this team was never installed.
+_write_registry "$T6H_REGISTRY" "finance-personal::$T6H_WORKDIR"
+_install_print_stubs
+HOME="$T6H_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6H_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6H_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6H_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6h-upgrade.log" 2>&1
+T6H_COUNT=$(find "$T6H_SBX/aiteamforge" -maxdepth 1 -name '*-connect.sh' 2>/dev/null | wc -l | tr -d ' ')
+if [ "$T6H_COUNT" -eq 0 ] && grep -qi "No installed team connect scripts to refresh" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected ZERO scripts materialised from a working_dir-only (no kanban_dir) registry entry — a coincidentally-existing path is not proof of install; connect_count=$T6H_COUNT; stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# T6I [XACA-0862-021, MANDATORY negative control for T6H]: the IDENTICAL
+# fixture, but with kanban_dir also created, DOES materialise — proving the
+# gate genuinely discriminates on kanban_dir's presence (not some unrelated
+# difference between the two sandboxes, and not a gate that rejects
+# everything regardless of input).
+test_start "T6I [XACA-0862-021, negative control]: identical fixture WITH kanban_dir present DOES materialise (proves T6H is not vacuous)"
+T6I_SBX="$(_new_install_sandbox)"
+T6I_REGISTRY="$T6I_SBX/home/.aiteamforge/team-paths.json"
+T6I_WORKDIR="$T6I_SBX/home/finance/personal"
+T6I_KANBANDIR="$T6I_WORKDIR/kanban"
+mkdir -p "$T6I_KANBANDIR"
+_write_registry "$T6I_REGISTRY" "finance-personal::$T6I_WORKDIR::$T6I_KANBANDIR"
+_install_print_stubs
+HOME="$T6I_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6I_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6I_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6I_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6i-upgrade.log" 2>&1
+T6I_CONNECT="$T6I_SBX/aiteamforge/finance-connect.sh"
+if [ -s "$T6I_CONNECT" ] && grep -qi "Creating missing" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected finance-connect.sh created once kanban_dir also exists (negative control for T6H); connect_exists=$([ -f "$T6I_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

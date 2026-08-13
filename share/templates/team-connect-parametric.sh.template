@@ -79,6 +79,106 @@ HAS_GROUP="{{TEAM_HAS_GROUP}}"
 TEAM_SESSION_ORDER="{{TEAM_SESSION_ORDER}}"
 
 # ============================================================================
+# XACA-0862 architectural fix: RUNTIME resolution of an empty DEFAULT_PROJECT
+# ============================================================================
+# DEFAULT_PROJECT (above) is baked at RENDER time only when the renderer had
+# a genuine, unambiguous single instance to derive it from — and is EMPTY
+# otherwise, DELIBERATELY, in two different situations that used to be
+# treated identically ("no default, <project> is a hard required
+# positional"):
+#   (1) a real ambiguity (zero or multiple registered instances) — <project>
+#       genuinely SHOULD be required, no default exists to guess.
+#   (2) every commit of THIS FILE's rendered output in dev-team's own
+#       cockpit is deliberately baked empty regardless of the local
+#       machine's registry (render-cockpit-scripts.sh never reads it, so a
+#       stateless CI checkout — which has no ~/.aiteamforge/ at all —
+#       reproduces the identical empty bake; see that script's
+#       "HERMETIC-CI CONTRACT" comment) — even on a real machine with
+#       exactly one live, unambiguous instance.
+#   (2) was the actual field defect: `finance-connect <host>` / `legal-
+#       connect <host>` with no arguments failed with a required-positional
+#       usage error on a box that plainly only has ONE finance/legal
+#       instance running.
+#
+# This resolves DEFAULT_PROJECT INSTEAD at RUNTIME, on the machine the
+# script actually runs on, the first time it is needed — i.e. only when
+# nothing more specific (an explicit CLI argument) already supplies it. It
+# intentionally duplicates, rather than shells out to, the filesystem-proof
+# gate used elsewhere in XACA-0862 (working_dir AND kanban_dir must both
+# exist as real directories — see aiteamforge-upgrade.sh's
+# update_connect_scripts source (c), subitem 021, and render-cockpit-
+# scripts.sh's _resolve_cockpit_default_project()): this script is a
+# STANDALONE, already-rendered artifact with no framework libraries to
+# source, so the check is re-implemented inline rather than imported.
+#
+# Contract (identical to the render-time contract it replaces, just
+# evaluated later):
+#   exactly 1 filesystem-verified match for this team (+ group, if
+#     applicable) -> use it.
+#   0 or >1 matches -> leave DEFAULT_PROJECT empty; the existing
+#     required-positional / usage-error path below is UNCHANGED — this never
+#     guesses.
+# Degrades gracefully: no python3, no registry file, an unreadable or
+# malformed registry, or any other failure -> 0 matches, NEVER a crash —
+# this function must never be the reason a connect script dies before doing
+# its actual job.
+#
+# This does NOT reintroduce render-time baking: the substitution above is
+# unconditionally empty for every parametric team's committed cockpit
+# script (render-cockpit-scripts.sh's hermetic contract is untouched), and
+# render-cockpit-scripts.sh --check keeps comparing that same empty bake —
+# no drift. Resolution now happens live, per invocation, never baked into
+# the file on disk.
+#
+# $1 = dot-separated prefix to match instance ids against, e.g. "finance-"
+# for a non-group team or "freelance-acme-" for a group team (GROUP already
+# resolved by the time this is called). Prints the resolved project on
+# stdout, or nothing.
+_xaca0862_resolve_default_project() {
+    local prefix="$1"
+    local registry="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    [[ -f "$registry" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$registry" "$prefix" 2>/dev/null <<'PYEOF'
+import json, os, sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+except Exception:
+    sys.exit(0)
+
+prefix = sys.argv[2]
+teams = cfg.get("teams", {}) if isinstance(cfg, dict) else {}
+if not isinstance(teams, dict):
+    sys.exit(0)
+
+matches = []
+for instance_id, entry in teams.items():
+    if not isinstance(instance_id, str) or not instance_id.startswith(prefix):
+        continue
+    if not isinstance(entry, dict):
+        continue
+    wd = entry.get("working_dir")
+    kd = entry.get("kanban_dir")
+    if not wd or not isinstance(wd, str) or not os.path.isdir(wd):
+        continue
+    if not kd or not isinstance(kd, str) or not os.path.isdir(kd):
+        continue
+    remainder = instance_id[len(prefix):]
+    # A project component never contains a dash (mirrors the decomposition
+    # rules used elsewhere in this ticket) — a remainder that does belongs
+    # to a DIFFERENT, more specific instance, not a candidate here.
+    if not remainder or "-" in remainder:
+        continue
+    matches.append(remainder)
+
+if len(matches) == 1:
+    print(matches[0])
+PYEOF
+}
+
+# ============================================================================
 # Usage / argument parsing (host-FIRST signature, XACA-0607)
 # ============================================================================
 # Non-group teams:  <host> [<project>]          project defaults to DEFAULT_PROJECT
@@ -166,13 +266,23 @@ if [[ "$HAS_GROUP" == "true" ]]; then
         exit 2
     fi
     if [[ $# -ge 1 ]]; then shift; fi
+    GROUP_LOWER="$(echo "$GROUP" | tr '[:upper:]' '[:lower:]')"
+    # XACA-0862 architectural fix: DEFAULT_PROJECT may be empty because it
+    # was never baked (see the comment above _xaca0862_resolve_default_project)
+    # rather than because it is genuinely ambiguous — resolve it live, on
+    # this machine, only when no <project> was already given on the command
+    # line (an explicit argument always wins outright — this never overrides
+    # one).
+    if [[ -z "$DEFAULT_PROJECT" && $# -lt 1 ]]; then
+        _xaca0862_rt_project="$(_xaca0862_resolve_default_project "${TEAM_ID}-${GROUP_LOWER}-")"
+        [[ -n "$_xaca0862_rt_project" ]] && DEFAULT_PROJECT="$_xaca0862_rt_project"
+    fi
     PROJECT="${1:-$DEFAULT_PROJECT}"
     if [[ -z "$PROJECT" ]]; then
         echo "  ✗ Missing <project> argument (no unambiguous default for this team)."
         usage
         exit 2
     fi
-    GROUP_LOWER="$(echo "$GROUP" | tr '[:upper:]' '[:lower:]')"
     PROJECT_LOWER="$(echo "$PROJECT" | tr '[:upper:]' '[:lower:]')"
     INSTANCE="${TEAM_ID}-${GROUP_LOWER}-${PROJECT_LOWER}"
 else
@@ -180,6 +290,16 @@ else
     # whenever the team has zero or more than one registered instance —
     # <project> is then a hard required positional rather than a guessed
     # default.
+    #
+    # XACA-0862 architectural fix: an empty DEFAULT_PROJECT here does not
+    # necessarily mean genuine ambiguity — it may simply never have been
+    # baked (see the comment above _xaca0862_resolve_default_project).
+    # Resolve it live, on this machine, only when no <project> was already
+    # given on the command line.
+    if [[ -z "$DEFAULT_PROJECT" && $# -lt 1 ]]; then
+        _xaca0862_rt_project="$(_xaca0862_resolve_default_project "${TEAM_ID}-")"
+        [[ -n "$_xaca0862_rt_project" ]] && DEFAULT_PROJECT="$_xaca0862_rt_project"
+    fi
     PROJECT="${1:-$DEFAULT_PROJECT}"
     if [[ -z "$PROJECT" ]]; then
         echo "  ✗ Missing <project> argument (no unambiguous default for this team)."

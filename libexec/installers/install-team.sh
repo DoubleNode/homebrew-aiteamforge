@@ -596,17 +596,39 @@ _extract_session_order() {
 #
 # Two-tier resolution, in order:
 #
-# TIER 1 — EXPLICIT ARGUMENT ALWAYS WINS (XACA-0862-014). If the caller
-# passed --project (and, for group teams, --client) on THIS invocation,
-# that is a genuine, deliberate (re)install of that specific instance and
-# it becomes the default outright — no registry lookup, no ambiguity check.
-# ARG_PROJECT/ARG_CLIENT (globals set only from the CLI flags, never from a
-# conf fallback) are the signal; RESOLVED_PROJECT/RESOLVED_CLIENT already
-# decompose to exactly this instance (computed above by compute_instance_id).
-# This is what makes `finance --project business` then later `finance
-# --project ops` correctly flip the team-scoped default to "ops" — an
-# explicit re-install of a different project is intentional, not
-# ambiguous, even though "business" remains a separate live instance.
+# TIER 1 — EXPLICIT ARGUMENT ALWAYS WINS, BUT ONLY ON A GENUINE (RE)INSTALL
+# (XACA-0862-014, narrowed by XACA-0862-019). If the caller passed --project
+# (and, for group teams, --client) on THIS invocation AND this is NOT a
+# `--connect-only` run, that is a genuine, deliberate (re)install of that
+# specific instance and it becomes the default outright — no registry
+# lookup, no ambiguity check. ARG_PROJECT/ARG_CLIENT (globals set only from
+# the CLI flags, never from a conf fallback) are the signal;
+# RESOLVED_PROJECT/RESOLVED_CLIENT already decompose to exactly this
+# instance (computed above by compute_instance_id). This is what makes
+# `finance --project business` then later `finance --project ops` correctly
+# flip the team-scoped default to "ops" — an explicit re-install of a
+# different project is intentional, not ambiguous, even though "business"
+# remains a separate live instance.
+#
+# XACA-0862-019: the CONNECT_ONLY exclusion above is load-bearing, not
+# decorative. aiteamforge-upgrade.sh's update_connect_scripts (the nightly
+# unattended refresh sweep) calls this installer with --connect-only AND an
+# explicit --project on EVERY iteration, for EVERY registered instance of a
+# team it is refreshing — it HAS to, to correctly resolve THAT iteration's
+# own working_dir/kanban_dir. That --project is a real, valid instance id,
+# but it answers a completely different question than TIER 1 was designed to
+# answer: "which instance is THIS iteration re-rendering" is not "which
+# project should this TEAM's connect script default to when nobody names
+# one". Before this exclusion, a 2-instance team's connect-only sweep (e.g.
+# finance-personal then finance-business) tripped TIER 1 on EVERY iteration,
+# and each iteration's render OVERWROTE the shared team-scoped connect
+# script — so the team-scoped default silently became "whichever instance
+# the work list happened to process LAST", not the intended "ambiguous,
+# leave empty, let the runtime resolver in the template — or an explicit
+# argument — decide" (TIER 2, below). A genuine, standalone
+# `install-team.sh finance --project X` (no --connect-only) is UNCHANGED by
+# this: CONNECT_ONLY is false there, so TIER 1 still applies exactly as
+# before and Case 1/1b's "explicit re-install wins outright" contract holds.
 #
 # TIER 2 — no explicit --project (a `--connect-only` regen/re-render, e.g.
 # from `aiteamforge upgrade` or the setup wizard's connect-only pass, which
@@ -637,8 +659,12 @@ _resolve_parametric_defaults() {
     _DERIVED_DEFAULT_GROUP=""
     _DERIVED_MATCH_COUNT=0
 
-    # TIER 1: explicit --project (and --client, for group teams) wins outright.
-    if [[ -n "$ARG_PROJECT" ]] && { [[ "$has_group" != "true" ]] || [[ -n "$ARG_CLIENT" ]]; }; then
+    # TIER 1: explicit --project (and --client, for group teams) wins
+    # outright — but ONLY on a genuine (re)install, never a --connect-only
+    # refresh sweep (XACA-0862-019; see the block comment above).
+    if [[ "$CONNECT_ONLY" != "true" ]] \
+        && [[ -n "$ARG_PROJECT" ]] \
+        && { [[ "$has_group" != "true" ]] || [[ -n "$ARG_CLIENT" ]]; }; then
         _DERIVED_DEFAULT_PROJECT="$RESOLVED_PROJECT"
         _DERIVED_DEFAULT_GROUP="$RESOLVED_CLIENT"
         _DERIVED_MATCH_COUNT=1
