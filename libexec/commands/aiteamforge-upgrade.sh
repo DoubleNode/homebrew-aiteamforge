@@ -1353,7 +1353,14 @@ PYEOF
     # would swallow the remaining instance ids — install-team.sh can prompt
     # (_ensure_org_config) before its --connect-only early exit, so one
     # unattended upgrade could silently process only the first instance.
-    if ( AITEAMFORGE_DIR="${WORKING_DIR}" bash "$installer" "${install_args[@]}" </dev/null 2>&1 | sed 's/^/    /' ); then
+    #
+    # AITEAMFORGE_CONNECT_REFRESH_SWEEP=true (XACA-0862-024): the DIRECT signal
+    # that this --project value was synthesized by this sweep to identify
+    # which instance THIS iteration is re-rendering, not a deliberate user
+    # choice — replaces the old CONNECT_ONLY proxy install-team.sh's TIER 1
+    # used to key off. --connect-only itself stays, unchanged, for its own
+    # independent purpose (render scripts only, skip the rest of install).
+    if ( AITEAMFORGE_DIR="${WORKING_DIR}" AITEAMFORGE_CONNECT_REFRESH_SWEEP=true bash "$installer" "${install_args[@]}" </dev/null 2>&1 | sed 's/^/    /' ); then
       print_success "${_action_done} ${instance_id} connect/disconnect scripts"
       updated=$((updated + 1))
     else

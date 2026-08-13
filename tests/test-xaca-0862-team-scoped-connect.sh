@@ -106,6 +106,21 @@ _run_install() {
         bash "$INSTALL_TEAM_SH" "$@" --install-dir "$sbx/aiteamforge"
 }
 
+# Like _run_install, but sets AITEAMFORGE_CONNECT_REFRESH_SWEEP=true — the exact
+# env var aiteamforge-upgrade.sh's update_connect_scripts sets on every
+# iteration of its nightly unattended refresh sweep (XACA-0862-024). Use this
+# to simulate that sweep's call shape; use plain _run_install to simulate a
+# genuine, hand-typed invocation (including a hand-typed `--connect-only`).
+_run_install_sweep() {
+    local sbx="$1"; shift
+    HOME="$sbx/home" \
+    AITEAMFORGE_DIR="$sbx/aiteamforge" \
+    AITEAMFORGE_CONFIG="$sbx/home/.aiteamforge/team-paths.json" \
+    AITEAMFORGE_ORG_CONFIG="$sbx/home/.aiteamforge/organization.yaml" \
+    AITEAMFORGE_CONNECT_REFRESH_SWEEP=true \
+        bash "$INSTALL_TEAM_SH" "$@" --install-dir "$sbx/aiteamforge"
+}
+
 # Like _run_install but through a SYMLINKED tap-consumer-shaped layout
 # instead of the real $TAP_ROOT (Case 3). $1=sandbox root, rest = args.
 _run_install_consumer() {
@@ -398,6 +413,80 @@ if _run_install_consumer "$C3B_SBX" legal --project chambers >"$C3B_REG_LOG" 2>&
     fi
 else
     test_fail "consumer-layout install-team.sh legal --project chambers exited non-zero; log: $(tail -40 "$C3B_REG_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CASE 4 [XACA-0862-024, HEADLINE regression]: the EXACT shape of the
+# subitem-019 defect — a 2-INSTANCE team, refreshed via --connect-only for
+# BOTH instances in sequence (mirroring aiteamforge-upgrade.sh's
+# update_connect_scripts iterating its work list) — must leave the final
+# rendered DEFAULT_PROJECT EMPTY, not "whichever instance was processed
+# last". Case 2 (above) only ever covers the 1-instance shape, which cannot
+# discriminate TIER 1 from TIER 2 (a 1-instance team's TIER-2-derived default
+# and a wrongly-TIER-1'd default are the same value). This is what actually
+# proves the AITEAMFORGE_CONNECT_REFRESH_SWEEP signal (not CONNECT_ONLY)
+# is doing the excluding.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "Case 4 [XACA-0862-024]: sweep-mode --connect-only refresh of a 2-instance team leaves DEFAULT_PROJECT empty, not last-processed"
+C4_SBX="$(_new_install_sandbox)"
+C4_LOG1="$WORK_DIR/c4-install-alpha.log"
+C4_LOG2="$WORK_DIR/c4-install-beta.log"
+C4_SWEEP1="$WORK_DIR/c4-sweep-alpha.log"
+C4_SWEEP2="$WORK_DIR/c4-sweep-beta.log"
+if _run_install "$C4_SBX" finance --project alpha >"$C4_LOG1" 2>&1 \
+    && _run_install "$C4_SBX" finance --project beta >"$C4_LOG2" 2>&1; then
+    # Simulate the sweep processing BOTH registered instances in sequence,
+    # exactly as update_connect_scripts' work-list loop does — each call
+    # passes an explicit --project (to identify which instance THIS
+    # iteration renders) AND the sweep signal.
+    if _run_install_sweep "$C4_SBX" finance --project alpha --connect-only >"$C4_SWEEP1" 2>&1 \
+        && _run_install_sweep "$C4_SBX" finance --project beta --connect-only >"$C4_SWEEP2" 2>&1; then
+        C4_FINAL_PROJECT="$(_rendered_default_project "$C4_SBX/aiteamforge/finance-connect.sh")"
+        if [ -z "$C4_FINAL_PROJECT" ] && grep -qi "2 registered instances" "$C4_SWEEP2"; then
+            test_pass
+        else
+            test_fail "expected empty DEFAULT_PROJECT after a 2-instance sweep refresh (ambiguity warning expected too); got DEFAULT_PROJECT='${C4_FINAL_PROJECT:-<absent>}'; sweep2 log: $(tail -20 "$C4_SWEEP2")"
+        fi
+    else
+        test_fail "sweep-mode --connect-only refresh exited non-zero; alpha log: $(tail -20 "$C4_SWEEP1"); beta log: $(tail -20 "$C4_SWEEP2")"
+    fi
+else
+    test_fail "registering finance --project alpha / beta exited non-zero; alpha log: $(tail -20 "$C4_LOG1"); beta log: $(tail -20 "$C4_LOG2")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# CASE 4b [XACA-0862-024, contrast]: the SAME 2-instance --connect-only
+# refresh, WITHOUT the sweep signal (i.e. a genuine hand-typed
+# `install-team.sh finance --project X --connect-only`, exactly as a real
+# interactive user could type it) correctly DOES win TIER 1 each time — this
+# is the deliberate-choice case REFRESH_SWEEP must never suppress. Proves
+# the exclusion is keyed to the direct signal, not to --connect-only itself
+# (CONNECT_ONLY would have wrongly excluded this too — the defect XACA-0862-024
+# exists to fix).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "Case 4b [XACA-0862-024, contrast]: the identical 2-instance --connect-only refresh WITHOUT the sweep signal still wins TIER 1 (last-processed wins, deliberately)"
+C4B_SBX="$(_new_install_sandbox)"
+C4B_LOG1="$WORK_DIR/c4b-install-alpha.log"
+C4B_LOG2="$WORK_DIR/c4b-install-beta.log"
+C4B_REFRESH1="$WORK_DIR/c4b-refresh-alpha.log"
+C4B_REFRESH2="$WORK_DIR/c4b-refresh-beta.log"
+if _run_install "$C4B_SBX" finance --project alpha >"$C4B_LOG1" 2>&1 \
+    && _run_install "$C4B_SBX" finance --project beta >"$C4B_LOG2" 2>&1; then
+    # Hand-typed --connect-only refreshes, NO sweep signal — TIER 1 must
+    # still win outright each time (RESOLVED_PROJECT for THIS invocation).
+    if _run_install "$C4B_SBX" finance --project alpha --connect-only >"$C4B_REFRESH1" 2>&1 \
+        && _run_install "$C4B_SBX" finance --project beta --connect-only >"$C4B_REFRESH2" 2>&1; then
+        C4B_FINAL_PROJECT="$(_rendered_default_project "$C4B_SBX/aiteamforge/finance-connect.sh")"
+        if [ "$C4B_FINAL_PROJECT" = "beta" ]; then
+            test_pass
+        else
+            test_fail "expected DEFAULT_PROJECT='beta' (TIER 1, last hand-typed refresh wins, no sweep signal); got '${C4B_FINAL_PROJECT:-<absent>}'"
+        fi
+    else
+        test_fail "hand-typed --connect-only refresh exited non-zero; alpha log: $(tail -20 "$C4B_REFRESH1"); beta log: $(tail -20 "$C4B_REFRESH2")"
+    fi
+else
+    test_fail "registering finance --project alpha / beta exited non-zero; alpha log: $(tail -20 "$C4B_LOG1"); beta log: $(tail -20 "$C4B_LOG2")"
 fi
 
 # ─────────────────────────────────────────────────────────────────────────────

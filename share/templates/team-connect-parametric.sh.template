@@ -140,7 +140,7 @@ _xaca0862_resolve_default_project() {
     [[ -f "$registry" ]] || return 0
     command -v python3 >/dev/null 2>&1 || return 0
     python3 - "$registry" "$prefix" 2>/dev/null <<'PYEOF'
-import json, os, sys
+import json, os, re, sys
 
 try:
     with open(sys.argv[1]) as fh:
@@ -166,15 +166,86 @@ for instance_id, entry in teams.items():
     if not kd or not isinstance(kd, str) or not os.path.isdir(kd):
         continue
     remainder = instance_id[len(prefix):]
-    # A project component never contains a dash (mirrors the decomposition
-    # rules used elsewhere in this ticket) — a remainder that does belongs
-    # to a DIFFERENT, more specific instance, not a candidate here.
-    if not remainder or "-" in remainder:
+    # XACA-0862-023: a project component matches [a-z0-9_]+ exactly — the
+    # same anchored charset install-team.sh's _resolve_parametric_defaults()
+    # and render-cockpit-scripts.sh's _resolve_cockpit_default_project()
+    # both enforce via their jq `test($pat)` regex. The old "no dash" check
+    # was weaker: it let a remainder with any other metacharacter (a space,
+    # an uppercase letter, a stray ';') count as a candidate here while the
+    # other two resolvers would have rejected the same key outright — three
+    # resolvers disagreeing about what counts as "one match" for the
+    # identical registry state is the same drift class this ticket exists to
+    # end (see check-resolve-cochange-guard.sh's header). A metachar can only
+    # reach team-paths.json via a hand-edited/corrupted file in the first
+    # place — install-time writes are already validated against this same
+    # charset (_validate_instance_component) — so this is defense in depth,
+    # not a behavior change for any legitimately-written registry.
+    if not remainder or not re.match(r'^[a-z0-9_]+$', remainder):
         continue
     matches.append(remainder)
 
 if len(matches) == 1:
     print(matches[0])
+PYEOF
+}
+
+# $1 = dot-separated prefix to match instance ids against, e.g. "freelance-"
+# (always the bare team id — GROUP is not yet known, this resolves it).
+# Prints the resolved group on stdout, or nothing.
+#
+# XACA-0862-026: DEFAULT_GROUP was never resolved at runtime — only
+# DEFAULT_PROJECT was. A group team (freelance today) with exactly one
+# unambiguous registered instance still hard-failed on the required <group>
+# positional, the identical symptom this ticket fixed for <project>, one
+# level up. Contract mirrors _xaca0862_resolve_default_project() above:
+# exactly 1 filesystem-verified match -> use it; 0 or >1 -> leave empty,
+# never guess. "Match" here is evaluated at the GROUP level, not the
+# instance level: a client with TWO registered projects (e.g.
+# freelance-acme-widget and freelance-acme-gadget) still has an unambiguous
+# GROUP ("acme") even though PROJECT stays genuinely ambiguous between them —
+# _xaca0862_resolve_default_project() (called separately, once GROUP is
+# known) correctly keeps refusing to guess the project in that case.
+_xaca0862_resolve_default_group() {
+    local prefix="$1"
+    local registry="${AITEAMFORGE_CONFIG:-$HOME/.aiteamforge/team-paths.json}"
+    [[ -f "$registry" ]] || return 0
+    command -v python3 >/dev/null 2>&1 || return 0
+    python3 - "$registry" "$prefix" 2>/dev/null <<'PYEOF'
+import json, os, re, sys
+
+try:
+    with open(sys.argv[1]) as fh:
+        cfg = json.load(fh)
+except Exception:
+    sys.exit(0)
+
+prefix = sys.argv[2]
+teams = cfg.get("teams", {}) if isinstance(cfg, dict) else {}
+if not isinstance(teams, dict):
+    sys.exit(0)
+
+groups = set()
+for instance_id, entry in teams.items():
+    if not isinstance(instance_id, str) or not instance_id.startswith(prefix):
+        continue
+    if not isinstance(entry, dict):
+        continue
+    wd = entry.get("working_dir")
+    kd = entry.get("kanban_dir")
+    if not wd or not isinstance(wd, str) or not os.path.isdir(wd):
+        continue
+    if not kd or not isinstance(kd, str) or not os.path.isdir(kd):
+        continue
+    remainder = instance_id[len(prefix):]
+    # A group-team instance is exactly "<group>-<project>" — two components,
+    # both [a-z0-9_]+ (same anchored charset as the project resolver above).
+    m = re.match(r'^([a-z0-9_]+)-([a-z0-9_]+)$', remainder)
+    if not m:
+        continue
+    groups.add(m.group(1))
+
+if len(groups) == 1:
+    print(next(iter(groups)))
 PYEOF
 }
 
@@ -259,6 +330,16 @@ if [[ "$HAS_GROUP" == "true" ]]; then
     # required positional here, same as before XACA-0862. Only shift when an
     # argument was actually supplied — shifting an empty argv would silently
     # consume the NEXT positional.
+    #
+    # XACA-0862-026 architectural fix: an empty DEFAULT_GROUP here does not
+    # necessarily mean genuine ambiguity either — same reasoning as
+    # DEFAULT_PROJECT below, it may simply never have been baked. Resolve it
+    # live, on this machine, only when no <group> was already given on the
+    # command line.
+    if [[ -z "$DEFAULT_GROUP" && $# -lt 1 ]]; then
+        _xaca0862_rt_group="$(_xaca0862_resolve_default_group "${TEAM_ID}-")"
+        [[ -n "$_xaca0862_rt_group" ]] && DEFAULT_GROUP="$_xaca0862_rt_group"
+    fi
     GROUP="${1:-$DEFAULT_GROUP}"
     if [[ -z "$GROUP" ]]; then
         echo "  ✗ Missing <group> argument (no unambiguous default for this team)."

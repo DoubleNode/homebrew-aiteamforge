@@ -610,11 +610,22 @@ _extract_fn() {
 
 FLAGS_FN_SRC="$WORK_DIR/connect_script_team_flags.extracted.sh"
 UPD_FN_SRC="$WORK_DIR/update_connect_scripts.extracted.sh"
+# XACA-0862-020: update_connect_scripts calls these two top-level helpers
+# (the known-scoped-out allowlist) — they are NOT nested inside
+# update_connect_scripts itself, so they must be extracted+sourced
+# separately or every call silently no-ops as "command not found" (bash
+# treats an undefined function name in `if fn; then` as a false condition,
+# exit 127 — the allowlist branch would never be taken and T6K would fail
+# for the wrong reason, not because the fix is broken).
+SCOPED_OUT_IDS_FN_SRC="$WORK_DIR/xaca0862_020_known_scoped_out_ids.extracted.sh"
+SCOPED_OUT_CHECK_FN_SRC="$WORK_DIR/xaca0862_020_is_known_scoped_out.extracted.sh"
 _extract_fn _connect_script_team_flags > "$FLAGS_FN_SRC"
 _extract_fn update_connect_scripts > "$UPD_FN_SRC"
+_extract_fn _xaca0862_020_known_scoped_out_ids > "$SCOPED_OUT_IDS_FN_SRC"
+_extract_fn _xaca0862_020_is_known_scoped_out > "$SCOPED_OUT_CHECK_FN_SRC"
 
-if [ ! -s "$FLAGS_FN_SRC" ] || [ ! -s "$UPD_FN_SRC" ]; then
-    echo "FATAL: could not extract update_connect_scripts / _connect_script_team_flags from $UPGRADE_SH" >&2
+if [ ! -s "$FLAGS_FN_SRC" ] || [ ! -s "$UPD_FN_SRC" ] || [ ! -s "$SCOPED_OUT_IDS_FN_SRC" ] || [ ! -s "$SCOPED_OUT_CHECK_FN_SRC" ]; then
+    echo "FATAL: could not extract update_connect_scripts / _connect_script_team_flags / XACA-0862-020 allowlist helpers from $UPGRADE_SH" >&2
     if [ "$_STANDALONE" = true ]; then
         echo "XACA-0845 connect-script tests: ${_PASS_COUNT} passed, $((_FAIL_COUNT + 1)) failed"
     fi
@@ -633,9 +644,14 @@ _install_print_stubs
 # shellcheck disable=SC1090
 source "$FLAGS_FN_SRC"
 # shellcheck disable=SC1090
+source "$SCOPED_OUT_IDS_FN_SRC"
+# shellcheck disable=SC1090
+source "$SCOPED_OUT_CHECK_FN_SRC"
+# shellcheck disable=SC1090
 source "$UPD_FN_SRC"
 declare -f _connect_script_team_flags >/dev/null || { echo "FATAL: _connect_script_team_flags not defined after extraction"; exit 1; }
 declare -f update_connect_scripts >/dev/null || { echo "FATAL: update_connect_scripts not defined after extraction"; exit 1; }
+declare -f _xaca0862_020_is_known_scoped_out >/dev/null || { echo "FATAL: _xaca0862_020_is_known_scoped_out not defined after extraction"; exit 1; }
 
 # Build a team-paths.json registry file. $1 = output path, remaining args =
 # instance ids to register. Each arg is one of:
@@ -1136,6 +1152,93 @@ if [ -s "$T6I_CONNECT" ] && grep -qi "Creating missing" "$_STUB_LOG"; then
     test_pass
 else
     test_fail "expected finance-connect.sh created once kanban_dir also exists (negative control for T6H); connect_exists=$([ -f "$T6I_CONNECT" ] && echo yes || echo no); stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6J [XACA-0862-016, HEADLINE regression]: a SECOND update_connect_scripts
+# run against an already-created team-scoped connect script reports
+# "Refreshing", never "Creating missing" again.
+#
+# Pre-016-fix, `base` (the existence-check filename) was computed from
+# instance_id ("finance-personal-connect.sh") — a file that, post-XACA-0862
+# team-scoping, is NEVER what gets written (the installer always writes the
+# team-scoped "finance-connect.sh"). `[ ! -f "${WORKING_DIR}/${base}" ]` was
+# therefore permanently true no matter how many times the sweep ran, so the
+# "Creating missing" label — and the diagnostic file-existence check driving
+# it — was stuck on forever, misreporting every refresh as if the script did
+# not already exist. This test proves the SECOND run, not just the first,
+# reports the correct label — T6/T6E/T6I above all only ever assert
+# "Creating missing" on a single run and would not have caught this.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6J [XACA-0862-016]: a second refresh of an already-created team-scoped connect script reports 'Refreshing', not 'Creating missing'"
+T6J_SBX="$(_new_install_sandbox)"
+T6J_REGISTRY="$T6J_SBX/home/.aiteamforge/team-paths.json"
+T6J_WORKDIR="$T6J_SBX/home/finance/personal"
+T6J_KANBANDIR="$T6J_WORKDIR/kanban"
+mkdir -p "$T6J_KANBANDIR"
+_write_registry "$T6J_REGISTRY" "finance-personal::$T6J_WORKDIR::$T6J_KANBANDIR"
+_install_print_stubs
+HOME="$T6J_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6J_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6J_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6J_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6j-first-upgrade.log" 2>&1
+T6J_FIRST_OK=false
+[ -s "$T6J_SBX/aiteamforge/finance-connect.sh" ] && grep -qi "Creating missing" "$_STUB_LOG" && T6J_FIRST_OK=true
+# Second run: fresh stub log, IDENTICAL environment, connect script now
+# already exists on disk.
+_install_print_stubs
+HOME="$T6J_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6J_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6J_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6J_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6j-second-upgrade.log" 2>&1
+if [ "$T6J_FIRST_OK" = true ] \
+    && grep -qi "Refreshing" "$_STUB_LOG" \
+    && ! grep -qi "Creating missing" "$_STUB_LOG"; then
+    test_pass
+else
+    test_fail "expected first run='Creating missing' (got first_ok=$T6J_FIRST_OK) then second run='Refreshing' only; second-run stub_log=$(cat "$_STUB_LOG")"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T6K [XACA-0862-020, HEADLINE regression]: the known-scoped-out allowlist
+# downgrades 'dns' to print_info and does NOT inflate the 'skipped' tally —
+# while a genuinely unrecognised id is COMPLETELY UNAFFECTED: it still
+# print_warning's and still counts. An allowlist that silences real unknowns
+# along with the intentional exclusion would be worse than the noise it
+# removes — this asserts both halves of that contract in one run so neither
+# can regress without the other being exercised.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T6K [XACA-0862-020]: dns is downgraded + excluded from the skipped tally, but a genuine unknown still warns and counts"
+T6K_SBX="$(_new_install_sandbox)"
+T6K_REGISTRY="$T6K_SBX/home/.aiteamforge/team-paths.json"
+T6K_DNS_WORKDIR="$T6K_SBX/home/dns-framework"
+T6K_DNS_KANBANDIR="$T6K_DNS_WORKDIR/kanban"
+T6K_UNKNOWN_WORKDIR="$T6K_SBX/home/ferengi-latinum"
+T6K_UNKNOWN_KANBANDIR="$T6K_UNKNOWN_WORKDIR/kanban"
+mkdir -p "$T6K_DNS_KANBANDIR" "$T6K_UNKNOWN_KANBANDIR"
+_write_registry "$T6K_REGISTRY" \
+    "dns::$T6K_DNS_WORKDIR::$T6K_DNS_KANBANDIR" \
+    "ferengi-latinum::$T6K_UNKNOWN_WORKDIR::$T6K_UNKNOWN_KANBANDIR"
+_install_print_stubs
+HOME="$T6K_SBX/home" \
+AITEAMFORGE_ORG_CONFIG="$T6K_SBX/home/.aiteamforge/organization.yaml" \
+FRAMEWORK_DIR="$TAP_ROOT" WORKING_DIR="$T6K_SBX/aiteamforge" LIBEXEC_DIR="$TAP_ROOT/libexec" DRY_RUN=false \
+AITEAMFORGE_CONFIG="$T6K_REGISTRY" \
+    update_connect_scripts >"$WORK_DIR/t6k-upgrade.log" 2>&1
+T6K_OK=true
+# dns: downgraded to print_info, its "known scoped-out id" marker present.
+grep -qi "no team template matches instance 'dns' (known scoped-out id" "$_STUB_LOG" || T6K_OK=false
+# genuine unknown: still a print_warning, no "known scoped-out" marker.
+grep -qi "no team template matches instance 'ferengi-latinum'" "$_STUB_LOG" || T6K_OK=false
+grep -qi "'ferengi-latinum' (known scoped-out id" "$_STUB_LOG" && T6K_OK=false
+# Final tally line: exactly 1 skipped (the unknown only — dns excluded).
+grep -qi "Skipped 1 unrecognised connect-script instance(s)" "$_STUB_LOG" || T6K_OK=false
+if [ "$T6K_OK" = true ]; then
+    test_pass
+else
+    test_fail "expected dns downgraded+uncounted and ferengi-latinum still warned+counted (skipped=1 total); stub_log=$(cat "$_STUB_LOG")"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════

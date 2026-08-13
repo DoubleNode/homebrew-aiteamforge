@@ -43,6 +43,20 @@ TEAM_ID=""
 CONNECT_ONLY=false
 ARG_PROJECT=""
 ARG_CLIENT=""
+# XACA-0862-024: direct "caller synthesized this --project/--client argument"
+# signal, read from an env var (an internal contract between this installer
+# and its own automated callers, not a user-facing flag — matches the
+# AITEAMFORGE_ALLOW_BOOTSTRAP_WRITE convention already used above). Replaces
+# CONNECT_ONLY as the TIER 1 exclusion below: CONNECT_ONLY answers "render
+# connect/disconnect only, skip the rest of install" (a real, independent
+# question a genuine interactive user can also answer "yes" to, e.g. typing
+# `install-team.sh finance --project business --connect-only` by hand to
+# refresh one team's scripts) — it was never actually the same question as
+# "did a human deliberately choose this project, or did an unattended sweep
+# pass it mechanically to identify which instance it's re-rendering". Using
+# CONNECT_ONLY as that proxy meant a genuine hand-typed
+# `--project X --connect-only` would have been wrongly excluded from TIER 1.
+REFRESH_SWEEP="${AITEAMFORGE_CONNECT_REFRESH_SWEEP:-false}"
 while [[ $# -gt 0 ]]; do
     case $1 in
         --install-dir|--aiteamforge-dir)
@@ -597,9 +611,10 @@ _extract_session_order() {
 # Two-tier resolution, in order:
 #
 # TIER 1 — EXPLICIT ARGUMENT ALWAYS WINS, BUT ONLY ON A GENUINE (RE)INSTALL
-# (XACA-0862-014, narrowed by XACA-0862-019). If the caller passed --project
-# (and, for group teams, --client) on THIS invocation AND this is NOT a
-# `--connect-only` run, that is a genuine, deliberate (re)install of that
+# (XACA-0862-014, narrowed by XACA-0862-019, re-based onto a direct signal by
+# XACA-0862-024). If the caller passed --project (and, for group teams,
+# --client) on THIS invocation AND this call was NOT synthesized by an
+# automated refresh sweep, that is a genuine, deliberate (re)install of that
 # specific instance and it becomes the default outright — no registry
 # lookup, no ambiguity check. ARG_PROJECT/ARG_CLIENT (globals set only from
 # the CLI flags, never from a conf fallback) are the signal;
@@ -610,25 +625,39 @@ _extract_session_order() {
 # different project is intentional, not ambiguous, even though "business"
 # remains a separate live instance.
 #
-# XACA-0862-019: the CONNECT_ONLY exclusion above is load-bearing, not
-# decorative. aiteamforge-upgrade.sh's update_connect_scripts (the nightly
-# unattended refresh sweep) calls this installer with --connect-only AND an
-# explicit --project on EVERY iteration, for EVERY registered instance of a
-# team it is refreshing — it HAS to, to correctly resolve THAT iteration's
-# own working_dir/kanban_dir. That --project is a real, valid instance id,
-# but it answers a completely different question than TIER 1 was designed to
-# answer: "which instance is THIS iteration re-rendering" is not "which
-# project should this TEAM's connect script default to when nobody names
-# one". Before this exclusion, a 2-instance team's connect-only sweep (e.g.
+# XACA-0862-019 / XACA-0862-024: the REFRESH_SWEEP exclusion above is
+# load-bearing, not decorative. aiteamforge-upgrade.sh's
+# update_connect_scripts (the nightly unattended refresh sweep) calls this
+# installer with AITEAMFORGE_CONNECT_REFRESH_SWEEP=1 (plus --connect-only)
+# AND an explicit --project on EVERY iteration, for EVERY registered
+# instance of a team it is refreshing — it HAS to, to correctly resolve THAT
+# iteration's own working_dir/kanban_dir. That --project is a real, valid
+# instance id, but it answers a completely different question than TIER 1
+# was designed to answer: "which instance is THIS iteration re-rendering" is
+# not "which project should this TEAM's connect script default to when
+# nobody names one". Before this exclusion existed (originally gated on
+# CONNECT_ONLY, XACA-0862-019), a 2-instance team's connect-only sweep (e.g.
 # finance-personal then finance-business) tripped TIER 1 on EVERY iteration,
 # and each iteration's render OVERWROTE the shared team-scoped connect
 # script — so the team-scoped default silently became "whichever instance
 # the work list happened to process LAST", not the intended "ambiguous,
 # leave empty, let the runtime resolver in the template — or an explicit
-# argument — decide" (TIER 2, below). A genuine, standalone
-# `install-team.sh finance --project X` (no --connect-only) is UNCHANGED by
-# this: CONNECT_ONLY is false there, so TIER 1 still applies exactly as
-# before and Case 1/1b's "explicit re-install wins outright" contract holds.
+# argument — decide" (TIER 2, below).
+#
+# XACA-0862-024: REFRESH_SWEEP is a DIRECT signal (an env var only the
+# automated sweep sets), not CONNECT_ONLY. CONNECT_ONLY answers a genuinely
+# different, independent question — "render connect/disconnect only, skip
+# the rest of install" — that a real interactive user can also answer "yes"
+# to by hand-typing `install-team.sh finance --project business
+# --connect-only` to refresh one team's scripts; gating TIER 1 on
+# CONNECT_ONLY would have wrongly excluded that deliberate, explicit choice
+# too, even though only ONE known caller (the upgrade sweep) exists today.
+# A genuine, standalone `install-team.sh finance --project X` (no
+# --connect-only, no REFRESH_SWEEP) is unaffected either way: REFRESH_SWEEP
+# is false there, so TIER 1 still applies exactly as before and Case 1/1b's
+# "explicit re-install wins outright" contract holds. So does a hand-typed
+# `install-team.sh finance --project X --connect-only` — REFRESH_SWEEP is
+# still false, so TIER 1 correctly wins for that deliberate refresh too.
 #
 # TIER 2 — no explicit --project (a `--connect-only` regen/re-render, e.g.
 # from `aiteamforge upgrade` or the setup wizard's connect-only pass, which
@@ -660,9 +689,9 @@ _resolve_parametric_defaults() {
     _DERIVED_MATCH_COUNT=0
 
     # TIER 1: explicit --project (and --client, for group teams) wins
-    # outright — but ONLY on a genuine (re)install, never a --connect-only
-    # refresh sweep (XACA-0862-019; see the block comment above).
-    if [[ "$CONNECT_ONLY" != "true" ]] \
+    # outright — but ONLY on a genuine (re)install, never a synthesized
+    # refresh-sweep call (XACA-0862-019/024; see the block comment above).
+    if [[ "$REFRESH_SWEEP" != "true" ]] \
         && [[ -n "$ARG_PROJECT" ]] \
         && { [[ "$has_group" != "true" ]] || [[ -n "$ARG_CLIENT" ]]; }; then
         _DERIVED_DEFAULT_PROJECT="$RESOLVED_PROJECT"
@@ -685,11 +714,22 @@ _resolve_parametric_defaults() {
         pattern="^${team_id}-[a-z0-9_]+\$"
     fi
 
+    # XACA-0862-023: filesystem-proof gate, unified with
+    # render-cockpit-scripts.sh's _resolve_cockpit_default_project() and the
+    # template's _xaca0862_resolve_default_project() — a key matching the
+    # pattern is not enough; both working_dir AND kanban_dir must exist as
+    # real directories on THIS machine, or the "instance" is a stale/never-
+    # completed registry entry, not a live one (same class of bug as the
+    # XACA-0862-021 isdir gate on aiteamforge-upgrade.sh's discovery sweep —
+    # see check-resolve-cochange-guard.sh's header for why all three
+    # resolvers must agree on this contract).
     matches=""
     if [[ -f "$team_paths_json" ]]; then
         matches="$(jq -r --arg pat "$pattern" \
-            '(.teams // {}) | keys[] | select(test($pat))' \
-            "$team_paths_json" 2>/dev/null || true)"
+            '(.teams // {}) | to_entries[] | select(.key | test($pat)) | "\(.key)\t\(.value.working_dir // "")\t\(.value.kanban_dir // "")"' \
+            "$team_paths_json" 2>/dev/null | while IFS=$'\t' read -r _cand_key _cand_wd _cand_kd; do
+                [[ -n "$_cand_wd" && -d "$_cand_wd" && -n "$_cand_kd" && -d "$_cand_kd" ]] && printf '%s\n' "$_cand_key"
+            done)"
     fi
     match_count="$(printf '%s\n' "$matches" | grep -c . || true)"
     _DERIVED_MATCH_COUNT="$match_count"
