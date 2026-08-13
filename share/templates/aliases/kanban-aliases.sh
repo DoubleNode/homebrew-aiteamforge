@@ -1297,11 +1297,36 @@ HELP
     esac
 
     # ── Resolve canonical path ────────────────────────────────────────────────
-    local canonical_path
-    canonical_path=$(_kb_get_board_file "$team" 2>/dev/null) || {
-        echo "kb-quarantine-stub: could not resolve canonical board path for team '$team'." >&2
-        return 1
-    }
+    # XACA-0862: _kb_get_board_file is EXISTENCE-GATED — it errors out (return 1)
+    # whenever the team's kanban directory does not exist yet, instead of
+    # returning the path a fresh setup would create. For a genuinely-not-yet-
+    # provisioned team (exactly the "no canonical board exists" scenario
+    # --force-no-canonical exists to handle) that collapsed the intended
+    # "Refusing to quarantine: no canonical board found" message below into a
+    # generic "could not resolve" error instead. Fix: compute canonical_path
+    # directly from the same deterministic per-team directories used for
+    # stub_path above, for the 3 unambiguous personal-org teams this function
+    # already knows about. This never requires the directory to pre-exist, so
+    # the existence check just below is what decides "no canonical board".
+    # Ported from kanban-helpers.sh (canonical); see that file for full detail.
+    local canonical_path=""
+    case "$team" in
+        legal-coparenting)
+            canonical_path="${HOME}/legal/coparenting/kanban/legal-coparenting-board.json"
+            ;;
+        medical-general)
+            canonical_path="${HOME}/medical/general/kanban/medical-general-board.json"
+            ;;
+        finance-personal)
+            canonical_path="${HOME}/finance/personal/kanban/finance-personal-board.json"
+            ;;
+        *)
+            canonical_path=$(_kb_get_board_file "$team" 2>/dev/null) || {
+                echo "kb-quarantine-stub: could not resolve canonical board path for team '$team'." >&2
+                return 1
+            }
+            ;;
+    esac
 
     # ── Safety: canonical must exist (or --force-no-canonical) ───────────────
     if [ ! -f "$canonical_path" ]; then

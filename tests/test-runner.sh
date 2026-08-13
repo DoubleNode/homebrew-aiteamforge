@@ -27,6 +27,15 @@ VERBOSE=false
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
+# XACA-0862-031: a genuine SKIP (host/environment precondition not met — e.g.
+# the outer dev-team monorepo not reachable) must never be tallied as a PASS.
+# Prior to this counter, test files recorded a skip by calling test_pass(),
+# so a suite that skipped everything reported a fully-covered, all-green run
+# — exactly the "reassuring but wrong" defect class this ticket exists to
+# eliminate. SKIPPED_TESTS is counted separately and never folds into
+# PASSED_TESTS, so PASSED_TESTS < TOTAL_TESTS whenever anything skipped —
+# a suite can no longer look fully covered by skipping.
+SKIPPED_TESTS=0
 CURRENT_TEST_FILE=""
 CURRENT_TEST_NAME=""
 TEST_FAILED=false
@@ -114,6 +123,25 @@ test_pass() {
     print_success "$CURRENT_TEST_NAME"
   else
     echo -n "."
+  fi
+}
+
+# Mark test as SKIPPED — distinct from test_pass(). Use when a test's
+# precondition (host tool, outer monorepo, platform) is not met in the
+# current environment. NEVER call test_pass() to represent a skip: that
+# was the XACA-0862-031 defect (a run that skipped everything read as a
+# fully-covered pass).
+test_skip() {
+  local message="${1:-}"
+  SKIPPED_TESTS=$((SKIPPED_TESTS + 1))
+  # Write to results file for parent process
+  if [ -n "$TEST_RESULTS_FILE" ]; then
+    echo "SKIP:$message" >> "$TEST_RESULTS_FILE"
+  fi
+  if [ "$VERBOSE" = true ]; then
+    print_warning "SKIP: $CURRENT_TEST_NAME${message:+ ($message)}"
+  else
+    echo -n "s"
   fi
 }
 
@@ -425,7 +453,7 @@ run_test_file() {
 
   # Export variables and test framework functions
   export VERBOSE
-  export -f test_start test_pass test_fail
+  export -f test_start test_pass test_fail test_skip
   export -f assert_equal assert_not_equal assert_contains assert_not_contains
   export -f assert_file_exists assert_file_not_exists assert_dir_exists assert_dir_not_exists
   export -f assert_exit_success assert_exit_failure assert_exit_code
@@ -439,24 +467,30 @@ run_test_file() {
 
   # Aggregate results from results file
   if [ -f "$TEST_RESULTS_FILE" ]; then
-    local starts passes fails
+    local starts passes fails skips
     starts=$(grep -c "^START" "$TEST_RESULTS_FILE" 2>/dev/null || echo "0")
     passes=$(grep -c "^PASS" "$TEST_RESULTS_FILE" 2>/dev/null || echo "0")
     fails=$(grep -c "^FAIL:" "$TEST_RESULTS_FILE" 2>/dev/null || echo "0")
+    # XACA-0862-031: SKIP is its own marker line (written by test_skip()),
+    # counted separately so it can never inflate `passes`.
+    skips=$(grep -c "^SKIP:" "$TEST_RESULTS_FILE" 2>/dev/null || echo "0")
 
     # Ensure values are numeric (strip whitespace, default to 0)
     starts=$(echo "$starts" | tr -d ' ')
     passes=$(echo "$passes" | tr -d ' ')
     fails=$(echo "$fails" | tr -d ' ')
+    skips=$(echo "$skips" | tr -d ' ')
 
     # Validate and default to 0 if not numeric
     [[ "$starts" =~ ^[0-9]+$ ]] || starts=0
     [[ "$passes" =~ ^[0-9]+$ ]] || passes=0
     [[ "$fails" =~ ^[0-9]+$ ]] || fails=0
+    [[ "$skips" =~ ^[0-9]+$ ]] || skips=0
 
     TOTAL_TESTS=$((TOTAL_TESTS + starts))
     PASSED_TESTS=$((PASSED_TESTS + passes))
     FAILED_TESTS=$((FAILED_TESTS + fails))
+    SKIPPED_TESTS=$((SKIPPED_TESTS + skips))
 
     if [ "$fails" -eq 0 ] && [ "$test_exit_code" -eq 0 ]; then
       print_success "Completed: $CURRENT_TEST_FILE"
@@ -603,6 +637,13 @@ main() {
     echo -e "  ${RED}Failed:       $FAILED_TESTS${NC}"
   else
     echo -e "  Failed:       $FAILED_TESTS"
+  fi
+
+  # XACA-0862-031: skips are surfaced distinctly, never folded into Passed.
+  # A skip is not evidence the guarded behavior was verified — see the
+  # counter's own comment above (SKIPPED_TESTS) for why this line exists.
+  if [ "$SKIPPED_TESTS" -gt 0 ]; then
+    echo -e "  ${YELLOW}Skipped:      $SKIPPED_TESTS${NC}"
   fi
 
   echo ""

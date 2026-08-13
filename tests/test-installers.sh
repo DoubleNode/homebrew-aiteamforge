@@ -214,23 +214,54 @@ run_assert_pass assert_empty "$ng_match"
 
 # ─── kb-quarantine-stub command (kanban-helpers.sh) ─────────────────────────
 
+# XACA-0862-032: the skip-stub names below used to be a HARDCODED literal list,
+# duplicating the `test_start "XACA-0212: ..."` names in the real (else) block
+# further down. A test added to the real block with no matching edit here
+# silently got no skip stub in tap-only CI — the two lists could drift with no
+# gate. Derive the names instead: grep THIS FILE for every `test_start
+# "XACA-0212:` line between the `else` that opens the real block and the `fi #
+# _IN_DEV_MONOREPO` that closes it. This makes the skip block structurally
+# incapable of drifting from the real block — there is only one list now, not
+# two kept in sync by hand.
+#
+# Anchors, not naive `/^else$/` / `/^fi$/` matching: every individual test
+# below is itself wrapped in its own `if ... else ... fi` with keywords at
+# column 0 (this file's style), so a bare `else`/`fi` pattern would match
+# dozens of unrelated lines. The state machine instead arms on the literal
+# `unset _skip_name` line (written once, right above), captures from the very
+# next bare `else`, and stops at the uniquely-commented closing `fi #
+# _IN_DEV_MONOREPO (kb-quarantine-stub block)` marker.
+_xaca0212_real_test_names() {
+  awk '
+    /unset _skip_name$/ { seen_unset=1; next }
+    seen_unset && /^else$/ && !capturing { capturing=1; seen_unset=0; next }
+    /^fi # _IN_DEV_MONOREPO/ { capturing=0 }
+    capturing && /^test_start "XACA-0212:/ {
+      match($0, /"[^"]*"/)
+      print substr($0, RSTART + 1, RLENGTH - 2)
+    }
+  ' "${BASH_SOURCE[0]}"
+}
+
 if ! $_IN_DEV_MONOREPO; then
-  for _skip_name in \
-    "XACA-0212: kanban-helpers.sh exists at expected path" \
-    "XACA-0212: kb-quarantine-stub is defined in kanban-helpers.sh" \
-    "XACA-0212: kb-quarantine-stub --help prints usage" \
-    "XACA-0212: kb-quarantine-stub --dry-run is non-destructive" \
-    "XACA-0212: kb-quarantine-stub --yes moves stub and writes meta sidecar" \
-    "XACA-0212: kb-quarantine-stub refuses when no canonical board exists" \
-    "XACA-0212: kb-quarantine-stub refuses non-empty stub without --force" \
-    "XACA-0212: kb-quarantine-stub --force --yes moves non-empty stub" \
-    "XACA-0212: kb-quarantine-stub --force-no-canonical --yes moves stub when canonical absent" \
-    "XACA-0212: kb-quarantine-stub legal-coparenting handles second stub path"; do
+  _xaca0212_skip_count=0
+  while IFS= read -r _skip_name; do
+    [ -n "$_skip_name" ] || continue
+    _xaca0212_skip_count=$((_xaca0212_skip_count + 1))
     test_start "$_skip_name"
-    echo "  SKIP: kanban-helpers.sh (outer dev-team monorepo) not reachable at $KANBAN_HELPERS_PATH — consumer/standalone tap checkout"
-    test_pass
-  done
+    test_skip "kanban-helpers.sh (outer dev-team monorepo) not reachable at $KANBAN_HELPERS_PATH — consumer/standalone tap checkout"
+  done < <(_xaca0212_real_test_names)
   unset _skip_name
+  # XACA-0862-030/032 positive-count guard: a derivation that silently matches
+  # nothing (a future edit to this file's markers/format breaks the awk state
+  # machine) must not read as "zero tests needed skipping" — that is the same
+  # vacuous-pass shape the derivation exists to prevent. 10 is the count as of
+  # this fix; growth is fine, a collapse to 0 is not.
+  if [ "$_xaca0212_skip_count" -eq 0 ]; then
+    test_start "XACA-0212: skip-name derivation found at least one real test to stub"
+    test_fail "_xaca0212_real_test_names() returned 0 names — the awk state machine did not match the real (else) block below. Skip coverage silently collapsed to nothing."
+  fi
+  unset _xaca0212_skip_count
 else
 
 test_start "XACA-0212: kanban-helpers.sh exists at expected path"

@@ -52,6 +52,11 @@ NC='\033[0m'
 TOTAL_TESTS=0
 PASSED_TESTS=0
 FAILED_TESTS=0
+# XACA-0862-031: a genuine SKIP (Cases 7/8 preconditions — outer dev-team
+# monorepo not reachable in a standalone tap checkout) must never be tallied
+# as a PASS. Counted separately so PASSED_TESTS < TOTAL_TESTS whenever
+# anything skipped — matches the test-runner.sh fix for the same defect.
+SKIPPED_TESTS=0
 CURRENT_TEST_NAME=""
 
 # Master sandbox — cleaned at exit
@@ -82,6 +87,18 @@ test_fail() {
         printf "F"
         echo ""
         echo -e "  ${RED}FAILED${NC}: $CURRENT_TEST_NAME${msg:+: $msg}"
+    fi
+}
+
+# XACA-0862-031: distinct from test_pass() — a skipped precondition is not
+# verified coverage. Do not call test_pass() to represent a skip.
+test_skip() {
+    local msg="${1:-}"
+    SKIPPED_TESTS=$(( SKIPPED_TESTS + 1 ))
+    if $VERBOSE; then
+        echo -e "${YELLOW}  SKIP${NC} $CURRENT_TEST_NAME${msg:+: $msg}"
+    else
+        printf "s"
     fi
 }
 
@@ -405,14 +422,11 @@ echo "--- Case 7: sync-tap drift check ---"
 
 if ! $_IN_DEV_MONOREPO; then
     test_start "Sync-tap: script exists at worktree root"
-    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout — sync-tap.sh lives outside this repo)"
-    test_pass
+    test_skip "outer dev-team monorepo not reachable (consumer/standalone tap checkout — sync-tap.sh lives outside this repo)"
     test_start "Sync-tap: vendored imgcat is byte-identical in scripts/vendor and tap/share"
-    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
-    test_pass
+    test_skip "outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
     test_start "Sync-tap: iterm2/imgcat section shows no drift (XACA-0611 targets clean)"
-    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
-    test_pass
+    test_skip "outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
 else
 SYNC_TAP="$WORKTREE_ROOT/sync-tap.sh"
 
@@ -454,11 +468,9 @@ echo "--- Case 8: Existing panel tests pass (no regression) ---"
 
 if ! $_IN_DEV_MONOREPO; then
     test_start "Panel tests: test-agent-panel-display.sh exists"
-    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout — scripts/tests/ lives outside this repo)"
-    test_pass
+    test_skip "outer dev-team monorepo not reachable (consumer/standalone tap checkout — scripts/tests/ lives outside this repo)"
     test_start "Panel tests: no NEW failures introduced by XACA-0611 (pre-existing baseline: 1 known fail)"
-    echo "  SKIP: outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
-    test_pass
+    test_skip "outer dev-team monorepo not reachable (consumer/standalone tap checkout)"
 else
 PANEL_TEST="$WORKTREE_ROOT/scripts/tests/test-agent-panel-display.sh"
 
@@ -498,6 +510,9 @@ if [[ $FAILED_TESTS -gt 0 ]]; then
     echo -e "  ${RED}Failed:  $FAILED_TESTS${NC}"
 else
     echo    "  Failed:  $FAILED_TESTS"
+fi
+if [[ $SKIPPED_TESTS -gt 0 ]]; then
+    echo -e "  ${YELLOW}Skipped: $SKIPPED_TESTS${NC}"
 fi
 echo ""
 if [[ $FAILED_TESTS -eq 0 ]]; then
