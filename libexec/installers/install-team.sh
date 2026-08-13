@@ -628,7 +628,7 @@ _extract_session_order() {
 # XACA-0862-019 / XACA-0862-024: the REFRESH_SWEEP exclusion above is
 # load-bearing, not decorative. aiteamforge-upgrade.sh's
 # update_connect_scripts (the nightly unattended refresh sweep) calls this
-# installer with AITEAMFORGE_CONNECT_REFRESH_SWEEP=1 (plus --connect-only)
+# installer with AITEAMFORGE_CONNECT_REFRESH_SWEEP=true (plus --connect-only)
 # AND an explicit --project on EVERY iteration, for EVERY registered
 # instance of a team it is refreshing — it HAS to, to correctly resolve THAT
 # iteration's own working_dir/kanban_dir. That --project is a real, valid
