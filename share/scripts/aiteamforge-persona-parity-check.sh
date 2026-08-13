@@ -178,6 +178,22 @@ for team in $TEAMS; do
     # (e.g. a team whose personas are entirely repo-tracked, XACA-0285 style).
     [ -d "$src_dir" ] || continue
 
+    # XACA-0925-023: existence is NOT enough. A shipped source dir that exists
+    # but is unreadable (0300/0000) or non-searchable (0600) makes the glob
+    # below yield zero iterations, so every team silently contributes no
+    # comparisons and the script reports "parity check passed" — a POSITIVE
+    # FALSE CLAIM of parity, with real drift sitting right there unexamined.
+    # That is strictly worse than the 021 masquerade it mirrors: 021 said
+    # "nothing to check", this says "everything matches". Same class as 014/019,
+    # which were fixed in the FIXER (aiteamforge-upgrade.sh) but never mirrored
+    # into the DETECTOR. A detector that cannot inspect its input must report a
+    # check FAILURE, never a silent skip and never a pass.
+    if [ ! -r "$src_dir" ] || [ ! -x "$src_dir" ]; then
+        _err_always "ERROR [${team}]: shipped persona directory ${src_dir} exists but is not readable/searchable — cannot compare against the working dir. Treating as a check FAILURE, not \"nothing to check\"."
+        DRIFT_FOUND=true
+        continue
+    fi
+
     if [ ! -d "$dst_dir" ]; then
         _log "DRIFT [${team}]: no working-dir persona directory at ${dst_dir} (never refreshed since install, or upgrade hasn't run since XACA-0925 shipped)"
         DRIFT_FOUND=true

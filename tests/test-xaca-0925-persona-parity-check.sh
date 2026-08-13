@@ -341,6 +341,35 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════
 # T11 — CONFIG-VALID-ZERO-TEAMS-STILL-EXITS-0-QUIETLY (XACA-0925-021 regression guard)
 # ═══════════════════════════════════════════════════════════════════════════
+test_start "T12: an unreadable/non-searchable shipped source dir is a check FAILURE, never a silent pass with drift present"
+T12_FW="$(_next_sandbox)"; T12_WD="$(_next_sandbox)"
+_seed_framework_team "$T12_FW" academy a.md "CELLAR-CONTENT-A-v2"
+_seed_config "$T12_WD" academy
+# Plant REAL drift, then make the shipped source dir non-searchable (0600).
+# Pre-fix, `[ -d "$src_dir" ] || continue` passed, the *.md glob yielded zero
+# iterations, and the script printed "parity check passed" + exit 0 — a
+# POSITIVE FALSE CLAIM of parity over drift it never looked at. Worse than
+# T9/T10's "nothing to check" masquerade.
+mkdir -p "$T12_WD/academy/personas/agents"
+printf 'OLD-STALE-CONTENT-A\n' > "$T12_WD/academy/personas/agents/a.md"
+chmod 0600 "$T12_FW/share/personas/academy/agents"
+
+if [ -x "$T12_FW/share/personas/academy/agents" ]; then
+    chmod 755 "$T12_FW/share/personas/academy/agents" 2>/dev/null || true
+    test_fail "PRECONDITION FAILED: could not make source dir non-searchable — test would be vacuous (running as root?)"
+else
+    _out="$(_run_parity "$T12_FW" "$T12_WD" --quiet 2>&1)"; _rc=$?
+    chmod 755 "$T12_FW/share/personas/academy/agents" 2>/dev/null || true
+    if [ "$_rc" != "0" ] && [ -n "$_out" ] && ! printf '%s' "$_out" | grep -qi 'parity check passed'; then
+        test_pass
+    else
+        test_fail "expected a check FAILURE (non-zero + diagnostic even under --quiet) and NEVER a 'parity check passed' claim over an uninspectable source dir; rc=$_rc; output: '$_out'"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T11 — LEGITIMATE-EMPTY-CONFIG (XACA-0925-021 over-correction guard)
+# ═══════════════════════════════════════════════════════════════════════════
 test_start "T11: a well-formed config with zero configured teams is the LEGITIMATE empty case -> exit 0, no output under --quiet"
 T11_FW="$(_next_sandbox)"; T11_WD="$(_next_sandbox)"
 _seed_framework_team "$T11_FW" academy a.md "CONTENT-A"
