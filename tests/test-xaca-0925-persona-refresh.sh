@@ -42,6 +42,30 @@
 #     9. Is CALLED in the run sequence after update_runtime_helpers, before
 #        update_claude_hooks.
 #
+# ADDITIONAL CONTRACT (T13-T18, added resolving the 5 merge-gating findings
+# filed against PR #745 by the test/review bots — XACA-0925-013/014/015/016/
+# 017):
+#    10. A failed backup MUST block the write — the destination is left
+#        exactly as it was, never partially or fully overwritten
+#        (XACA-0925-013/015, T13).
+#    11. A failed per-file cp does not abort the whole team's write: other
+#        files that CAN be written still are; the reported count is the
+#        TRUE (not attempted) count; no success message is printed on
+#        partial failure (XACA-0925-013/015, T14).
+#    12. The caller's `if ! _xaca0925_refresh_team_personas; then` fail-soft
+#        branch is a LIVE code path (it was dead code before this fix, since
+#        the helper always returned 0): one team's failure warns and does
+#        not stop remaining teams from refreshing (XACA-0925-013/015, T15).
+#    13. An unreadable (permission-denied) shipped persona source dir logs
+#        DISTINGUISHABLY from a genuinely empty one — never the same message
+#        (XACA-0925-014, T16).
+#    14. ~/aiteamforge-backups/personas/<team>/ backups are pruned to a
+#        bounded keep-count, per team, never touching another team's backups
+#        (XACA-0925-016, T17).
+#    15. A team id containing characters outside [A-Za-z0-9_-] is skipped
+#        with a warning and never interpolated into a path (XACA-0925-017,
+#        T18).
+#
 # EXPECTED RESULT AS WRITTEN (before XACA-0925-001 lands): every functional
 # test (T1-T8) and every structural test (T9-T12) FAILS, because
 # update_team_personas() does not exist yet in aiteamforge-upgrade.sh at the
@@ -49,7 +73,10 @@
 # libexec/commands/aiteamforge-upgrade.sh` returned nothing). That failure
 # IS this suite's negative control — see the retrospective doc alongside this
 # file's PR for the captured pre-fix run. Once XACA-0925-001 lands, re-running
-# this file with no code changes should flip every case to PASS.
+# this file with no code changes should flip every case to PASS. T13-T18 were
+# added later against the already-landed implementation, resolving the 5
+# merge-gating subitems above — see each test's header for its own before/
+# after evidence (captured in the PR discussion, not repeated here).
 #
 # Non-vacuous precondition guards throughout (feedback_parity_test_wrong_
 # shell_passes_vacuously / feedback_negctrl_seed_placement_and_self_satisfying_
@@ -237,6 +264,57 @@ _run_utp() {
         HOME="$home" AITEAMFORGE_DIR="$wd" FRAMEWORK_DIR="$fw" WORKING_DIR="$wd" \
         DRY_RUN="$dry" FORCE=false \
         update_team_personas
+    ) >"$logfile" 2>&1
+}
+
+# Invoke the private helper _xaca0925_refresh_team_personas() DIRECTLY (not
+# through update_team_personas()/get_configured_teams()) so T13/T14/T16/T18
+# below can assert on its exact return code and on the true post-write
+# filesystem state for exactly one team, without needing a .aiteamforge-
+# config fixture. _XACA0925_PERSONAS_SOURCE_ROOT is normally a `local` set by
+# update_team_personas(); bash's dynamic scoping only makes a caller's local
+# visible to callees it invokes, so calling the helper directly requires
+# setting it explicitly here.
+#
+# CRITICAL: the call MUST be wrapped in `if ! ...; then` here, exactly as
+# the real call site (update_team_personas()) wraps it. Confirmed under this
+# repo's target /bin/bash 3.2: when a function call is the direct condition
+# of `if !`, `set -e` is suppressed for that function's ENTIRE body (not
+# just the top-level call) for as long as the call is running — see the
+# "Fail-soft" header comment in aiteamforge-upgrade.sh above
+# _xaca0925_refresh_team_personas(). A bare (unwrapped) call under `set -e`
+# aborts the function at its FIRST failing command instead of continuing
+# past it — which silently produces a different, more-forgiving failure
+# shape than production ever sees, and would make T13/T14 pass against the
+# OLD pre-fix code for the wrong reason (an early `set -e` abort, not the
+# real "unconditional overwrite" / "loop keeps going after one cp fails"
+# bug this suite exists to catch). Verified by hand: the unwrapped form let
+# T13 false-pass against pre-fix code before this fix was written.
+_run_refresh_direct() {
+    local home="$1" fw="$2" wd="$3" team="$4" dry="$5" logfile="$6"
+    _install_print_stubs
+    (
+        set -eo pipefail
+        HOME="$home"
+        WORKING_DIR="$wd"
+        DRY_RUN="$dry"
+        FORCE=false
+        _XACA0925_PERSONAS_SOURCE_ROOT="${fw}/share/personas"
+        if ! _xaca0925_refresh_team_personas "$team"; then
+            exit 1
+        fi
+        exit 0
+    ) >"$logfile" 2>&1
+}
+
+# Invoke the private helper _xaca0925_prune_persona_backups() directly for T17.
+_run_prune_direct() {
+    local home="$1" team="$2" logfile="$3"
+    _install_print_stubs
+    (
+        set -eo pipefail
+        HOME="$home" \
+        _xaca0925_prune_persona_backups "$team"
     ) >"$logfile" 2>&1
 }
 
@@ -535,6 +613,214 @@ else
         test_pass
     else
         test_fail "expected the extracted source to call cmp and to never use a -nt mtime comparison; extracted names: $_EXTRACTED_NAMES; body: $_COMBINED_SRC"
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T13 — BACKUP-FAILURE-BLOCKS-OVERWRITE (XACA-0925-013/015, the critical one).
+# The backup IS the safety property the unconditional-clobber design rests
+# on. If it fails, the destination must be left exactly as it was — no
+# partial or full overwrite — and the helper must report failure, not a
+# false "Updated N persona file(s)" success.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T13: a failed backup does NOT overwrite — dest content unchanged, helper returns non-zero, no success message"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T13_FW="$(_next_sandbox)"; T13_WD="$(_next_sandbox)"; T13_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T13_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    mkdir -p "$T13_WD/academy/personas/agents"
+    printf 'OLD-STALE-CONTENT-A\n' > "$T13_WD/academy/personas/agents/a.md"
+    # Force the backup mkdir to fail: seed ~/aiteamforge-backups as a PLAIN
+    # FILE so `mkdir -p .../personas/academy/<ts>` cannot create it as a dir.
+    printf 'not a directory\n' > "$T13_HOME/aiteamforge-backups"
+
+    if [ ! -f "$T13_HOME/aiteamforge-backups" ]; then
+        test_fail "PRECONDITION FAILED: could not seed aiteamforge-backups as a blocking file"
+    elif cmp -s "$T13_WD/academy/personas/agents/a.md" "$T13_FW/share/personas/academy/agents/a.md"; then
+        test_fail "PRECONDITION FAILED: a.md already matches Cellar content — test would be vacuous"
+    else
+        _run_refresh_direct "$T13_HOME" "$T13_FW" "$T13_WD" academy false "$WORK_DIR/t13.log"
+        _RC=$?
+        if [ "$_RC" -ne 0 ] \
+            && grep -q 'OLD-STALE-CONTENT-A' "$T13_WD/academy/personas/agents/a.md" \
+            && ! cmp -s "$T13_WD/academy/personas/agents/a.md" "$T13_FW/share/personas/academy/agents/a.md" \
+            && ! grep -qi "updated.*persona file" "$_STUB_LOG"; then
+            test_pass
+        else
+            test_fail "expected non-zero return, unchanged dest content, and no success message; rc=$_RC content=$(cat "$T13_WD/academy/personas/agents/a.md" 2>/dev/null); stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t13.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T14 — PARTIAL-WRITE-FAILURE-TRUE-COUNT (XACA-0925-013/015). Reproduces the
+# reviewer's own repro: one dest file is not writable (mode 444). The helper
+# must return non-zero, print no success message, still write the OTHER
+# file that CAN be written, and report the true (not attempted) count.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T14: a failed per-file cp returns non-zero, prints no success message, and reports the TRUE written count"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T14_FW="$(_next_sandbox)"; T14_WD="$(_next_sandbox)"; T14_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T14_FW" academy a.md "CELLAR-CONTENT-A-v2" b.md "CELLAR-CONTENT-B-v1"
+    mkdir -p "$T14_WD/academy/personas/agents"
+    printf 'OLD-STALE-CONTENT-A\n' > "$T14_WD/academy/personas/agents/a.md"
+    chmod 444 "$T14_WD/academy/personas/agents/a.md"
+    # b.md deliberately absent at dest — its write must still succeed.
+
+    if [ -w "$T14_WD/academy/personas/agents/a.md" ]; then
+        test_fail "PRECONDITION FAILED: could not make a.md read-only — test would be vacuous (running as root?)"
+    else
+        _run_refresh_direct "$T14_HOME" "$T14_FW" "$T14_WD" academy false "$WORK_DIR/t14.log"
+        _RC=$?
+        chmod 644 "$T14_WD/academy/personas/agents/a.md" 2>/dev/null || true
+        if [ "$_RC" -ne 0 ] \
+            && ! grep -qi "^\[academy\] Updated" "$_STUB_LOG" \
+            && grep -q "1/2 file(s) actually written" "$_STUB_LOG" \
+            && cmp -s "$T14_WD/academy/personas/agents/b.md" "$T14_FW/share/personas/academy/agents/b.md" \
+            && grep -q "OLD-STALE-CONTENT-A" "$T14_WD/academy/personas/agents/a.md"; then
+            test_pass
+        else
+            test_fail "expected non-zero return, no success message, '1/2' reported, b.md written, a.md left stale; rc=$_RC stub log: $(cat "$_STUB_LOG"); a.md: $(cat "$T14_WD/academy/personas/agents/a.md" 2>/dev/null); log: $(cat "$WORK_DIR/t14.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T15 — CALLER-FAIL-SOFT-BRANCH-LIVE (XACA-0925-013/015). The caller's
+# `if ! _xaca0925_refresh_team_personas; then print_warning ...` branch was
+# dead code before this fix (the helper always returned 0). One team failing
+# must warn and NOT stop the remaining teams from refreshing.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T15: caller's fail-soft branch is reachable — one team's write failure warns and does not stop remaining teams from refreshing"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T15_FW="$(_next_sandbox)"; T15_WD="$(_next_sandbox)"; T15_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T15_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    _seed_framework_team "$T15_FW" iota c.md "CELLAR-CONTENT-C-v1"
+    _seed_config "$T15_WD" academy iota
+    mkdir -p "$T15_WD/academy/personas/agents" "$T15_WD/iota/personas/agents"
+    printf 'OLD-STALE-CONTENT-A\n' > "$T15_WD/academy/personas/agents/a.md"
+    chmod 444 "$T15_WD/academy/personas/agents/a.md"   # forces academy's write to fail
+    printf 'OLD-STALE-CONTENT-C\n' > "$T15_WD/iota/personas/agents/c.md"   # iota should still refresh
+
+    if [ -w "$T15_WD/academy/personas/agents/a.md" ]; then
+        test_fail "PRECONDITION FAILED: could not make academy/a.md read-only — test would be vacuous"
+    else
+        _run_utp "$T15_HOME" "$T15_FW" "$T15_WD" false "$WORK_DIR/t15.log"
+        _RC=$?
+        chmod 644 "$T15_WD/academy/personas/agents/a.md" 2>/dev/null || true
+        if [ "$_RC" -eq 0 ] \
+            && grep -qi "\[academy\].*did not complete cleanly" "$_STUB_LOG" \
+            && cmp -s "$T15_WD/iota/personas/agents/c.md" "$T15_FW/share/personas/iota/agents/c.md"; then
+            test_pass
+        else
+            test_fail "expected update_team_personas to return 0 (fail-soft), warn for academy, and STILL refresh iota; rc=$_RC stub log: $(cat "$_STUB_LOG"); iota c.md: $(cat "$T15_WD/iota/personas/agents/c.md" 2>/dev/null); log: $(cat "$WORK_DIR/t15.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T16 — UNREADABLE-SOURCE-LOGS-DISTINGUISHABLY (XACA-0925-014). A permission-
+# denied shipped persona source dir must NOT log identically to a genuinely
+# empty one.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T16: an unreadable (permission-denied) source dir logs DISTINGUISHABLY from a genuinely empty one"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T16_FW="$(_next_sandbox)"; T16_WD="$(_next_sandbox)"; T16_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T16_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    chmod 000 "$T16_FW/share/personas/academy/agents"
+
+    if [ -r "$T16_FW/share/personas/academy/agents" ]; then
+        test_fail "PRECONDITION FAILED: could not make source dir unreadable — test would be vacuous (running as root?)"
+    else
+        _run_refresh_direct "$T16_HOME" "$T16_FW" "$T16_WD" academy false "$WORK_DIR/t16.log"
+        chmod 755 "$T16_FW/share/personas/academy/agents" 2>/dev/null || true
+        if grep -qi "not readable" "$_STUB_LOG" && ! grep -qi "No \.md persona files shipped" "$_STUB_LOG"; then
+            test_pass
+        else
+            test_fail "expected a distinguishable 'not readable' warning, not the generic empty-set message; stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t16.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T17 — RETENTION-PRUNES-BEYOND-KEEP-COUNT (XACA-0925-016). 15 timestamped
+# backups seeded for one team (5 more than the keep=10 constant); the 5
+# OLDEST must be pruned, the 10 NEWEST must survive, and a second team's
+# backups must be completely untouched.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T17: backup retention prunes beyond the keep-count for one team and never touches another team's backups"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T17_HOME="$(_next_sandbox)"
+    mkdir -p "$T17_HOME/aiteamforge-backups/personas/academy" "$T17_HOME/aiteamforge-backups/personas/otherteam"
+    _i=1
+    while [ $_i -le 15 ]; do
+        _ts=$(printf '20260101-%06d' "$_i")
+        mkdir -p "$T17_HOME/aiteamforge-backups/personas/academy/${_ts}/agents"
+        printf 'backup-%d\n' "$_i" > "$T17_HOME/aiteamforge-backups/personas/academy/${_ts}/agents/a.md"
+        _i=$((_i + 1))
+    done
+    _j=1
+    while [ $_j -le 3 ]; do
+        _ts=$(printf '20260101-%06d' "$_j")
+        mkdir -p "$T17_HOME/aiteamforge-backups/personas/otherteam/${_ts}/agents"
+        _j=$((_j + 1))
+    done
+
+    _academy_before="$(find "$T17_HOME/aiteamforge-backups/personas/academy" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+    _other_before="$(find "$T17_HOME/aiteamforge-backups/personas/otherteam" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+    if [ "$_academy_before" != "15" ] || [ "$_other_before" != "3" ]; then
+        test_fail "PRECONDITION FAILED: expected 15 academy dirs and 3 otherteam dirs, got $_academy_before / $_other_before"
+    else
+        _run_prune_direct "$T17_HOME" academy "$WORK_DIR/t17.log"
+        _academy_after="$(find "$T17_HOME/aiteamforge-backups/personas/academy" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+        _other_after="$(find "$T17_HOME/aiteamforge-backups/personas/otherteam" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+        _oldest_survives="no"
+        [ -d "$T17_HOME/aiteamforge-backups/personas/academy/20260101-000001" ] && _oldest_survives="yes"
+        _newest_survives="no"
+        [ -d "$T17_HOME/aiteamforge-backups/personas/academy/20260101-000015" ] && _newest_survives="yes"
+        if [ "$_academy_after" = "10" ] && [ "$_other_after" = "3" ] \
+            && [ "$_oldest_survives" = "no" ] && [ "$_newest_survives" = "yes" ]; then
+            test_pass
+        else
+            test_fail "expected 10 academy dirs (newest kept, oldest pruned) and 3 untouched otherteam dirs; academy_after=$_academy_after other_after=$_other_after oldest_survives=$_oldest_survives newest_survives=$_newest_survives; log: $(cat "$WORK_DIR/t17.log")"
+        fi
+    fi
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════
+# T18 — MALFORMED-TEAM-ID-SKIPPED (XACA-0925-017). A team id containing
+# characters outside [A-Za-z0-9_-] must be skipped with a warning, and must
+# NEVER be interpolated into a path (path-traversal defense-in-depth).
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T18: a malformed team id is skipped with a warning and never used to construct a path"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T18_FW="$(_next_sandbox)"; T18_WD="$(_next_sandbox)"; T18_HOME="$(_next_sandbox)"
+    _BAD_TEAM='../evil'
+    mkdir -p "$T18_FW/share/personas"
+    # Deliberately NOT seeding a source dir for the malformed id — the
+    # validation guard must fire before any -d/-r check on a path built from it.
+
+    _run_refresh_direct "$T18_HOME" "$T18_FW" "$T18_WD" "$_BAD_TEAM" false "$WORK_DIR/t18.log"
+    _RC=$?
+    _escaped_dir_created="no"
+    [ -e "$(dirname "$T18_WD")/evil" ] && _escaped_dir_created="yes"
+    if [ "$_RC" -eq 0 ] \
+        && grep -qi "path-safety guard" "$_STUB_LOG" \
+        && [ "$_escaped_dir_created" = "no" ]; then
+        test_pass
+    else
+        test_fail "expected return 0 (deliberate skip), a path-safety warning, and no directory created via the malformed id; rc=$_RC stub log: $(cat "$_STUB_LOG"); escaped_dir_created=$_escaped_dir_created; log: $(cat "$WORK_DIR/t18.log")"
     fi
 fi
 

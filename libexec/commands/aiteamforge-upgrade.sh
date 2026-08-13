@@ -1687,22 +1687,117 @@ update_runtime_helpers() {
 # kill the parent upgrade script; the caller catches the non-zero return and
 # continues to the next team.
 
+# Validate a team id before it is interpolated into any src/dest/backup path
+# (XACA-0925-017). Deliberately a `case` glob, not `[[ =~ ]]`, for consistency
+# with this file's other team-id handling.
+_xaca0925_valid_team_id() {
+  case "$1" in
+    '') return 1 ;;
+    *[!A-Za-z0-9_-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+# ── Backup retention (XACA-0925-016) ────────────────────────────────────────
+# ~/aiteamforge-backups/personas/<team>/<ts>/ had no pruning: a box whose
+# personas legitimately diverge every night accumulates one new timestamped
+# directory per team per run, unbounded. kanban-backup.py (prune_backups())
+# already solves an analogous problem with tiered hourly/daily/weekly/monthly
+# retention — but that shape is sized for a much higher-frequency backup
+# stream. This function's backups are taken at most once per team per
+# DIFFERING upgrade run, not on a fixed clock, so a single "keep the N most
+# recent" tier is simpler and sufficient; N is a local constant below rather
+# than reinventing kanban-backup.py's tiering for a cardinality this low.
+# Must be a no-op (not an error) when the team's backup root doesn't exist
+# yet, and must NEVER touch anything outside that one team's backup root.
+_xaca0925_prune_persona_backups() {
+  local team="$1"
+  local keep=10   # keep the 10 most recent timestamped backups per team
+  local team_backup_root="${HOME}/aiteamforge-backups/personas/${team}"
+
+  [ -d "$team_backup_root" ] || return 0
+
+  local -a ts_dirs=()
+  local d
+  for d in "$team_backup_root"/*/; do
+    [ -d "$d" ] || continue
+    ts_dirs+=("${d%/}")
+  done
+
+  local n=${#ts_dirs[@]}
+  [ "$n" -le "$keep" ] && return 0
+
+  # YYYYMMDD-HHMMSS names sort lexically == chronologically; oldest first.
+  local -a sorted=()
+  while IFS= read -r d; do
+    sorted+=("$d")
+  done < <(printf '%s\n' "${ts_dirs[@]}" | sort)
+
+  local to_remove=$((n - keep))
+  local i=0 victim
+  while [ $i -lt $to_remove ]; do
+    victim="${sorted[$i]}"
+    # Never touch anything outside this team's own backup root, even on an
+    # unexpected sort/glob result.
+    case "$victim" in
+      "${team_backup_root}"/*) rm -rf "$victim" ;;
+      *) print_warning "[${team}] Retention pruning skipped a path outside ${team_backup_root}: ${victim}" ;;
+    esac
+    i=$((i + 1))
+  done
+}
+
 # Refresh one team's persona-agent content. Sets the caller-visible globals
-# _XACA0925_TEAM_UPDATED (count of files (re)written this run) and
-# _XACA0925_TEAM_ORPHANS (count of working-dir .md files with no shipped
-# counterpart) before returning. Always returns 0 — there is no failure mode
-# here that should abort the run; the fail-soft `if !` wrapper at the call
-# site is defense-in-depth for an unforeseen error, not the normal path.
+# _XACA0925_TEAM_UPDATED (count of files ACTUALLY (re)written this run — not
+# the attempted count, see XACA-0925-015) and _XACA0925_TEAM_ORPHANS (count
+# of working-dir .md files with no shipped counterpart) before returning.
+#
+# Return value (XACA-0925-013/015 — this changed from "always 0"): returns 1
+# when this team's refresh did not complete cleanly — a malformed team id is
+# NOT one of these cases (that's a deliberate skip, see XACA-0925-017, and
+# still returns 0), but a failed backup, a failed mkdir, or any failed
+# per-file cp all are. The original "always returns 0" contract silently
+# reported success while a partially-written or entirely-unwritten team
+# looked identical to a fully-refreshed one in the log — the exact failure
+# shape this ticket exists to fix, reproduced one level down inside its own
+# fix (confirmed by reproduction: chmod 444 one dest file, the old code
+# printed "Updated N persona file(s)" and returned 0 while that file stayed
+# stale). The fail-soft `if !` wrapper at the call site is what turns this
+# into a LIVE per-team skip instead of an abort of the whole upgrade — see
+# "Fail-soft" above.
 _xaca0925_refresh_team_personas() {
   local team="$1"
-  local src="${_XACA0925_PERSONAS_SOURCE_ROOT}/${team}/agents"
-  local dest="${WORKING_DIR}/${team}/personas/agents"
 
   _XACA0925_TEAM_UPDATED=0
   _XACA0925_TEAM_ORPHANS=0
 
+  # XACA-0925-017: defense-in-depth path-safety guard. Team ids come from
+  # .aiteamforge-config and are interpolated into src/dest/backup paths
+  # below without prior validation. Traversal is heavily mitigated already
+  # (would also need a matching share/personas/<id>/agents source dir AND
+  # $HOME write access), so this is defense-in-depth, not a closed exploit —
+  # but a corrupted/hand-edited config value should never reach a path
+  # construction unchecked. A non-conforming id is a deliberate SKIP (return
+  # 0), not a failure.
+  if ! _xaca0925_valid_team_id "$team"; then
+    print_warning "[${team}] Team id contains characters outside [A-Za-z0-9_-] — skipping persona refresh (path-safety guard)"
+    return 0
+  fi
+
+  local src="${_XACA0925_PERSONAS_SOURCE_ROOT}/${team}/agents"
+  local dest="${WORKING_DIR}/${team}/personas/agents"
+
   if [ ! -d "$src" ]; then
     print_info "[${team}] No shipped personas for this team — skipping"
+    return 0
+  fi
+
+  # XACA-0925-014: an unreadable source dir must NOT log identically to a
+  # genuinely empty one — a permissions fault silently masquerading as "no
+  # personas shipped" is a real fault hidden behind an intentional-looking
+  # message.
+  if [ ! -r "$src" ]; then
+    print_warning "[${team}] Shipped persona source directory exists but is not readable (permission denied) — skipping"
     return 0
   fi
 
@@ -1752,21 +1847,52 @@ _xaca0925_refresh_team_personas() {
   fi
 
   # Backup BEFORE the first write, only if there is something to preserve.
+  # XACA-0925-013/015: the backup IS the safety property the unconditional-
+  # clobber design (see header comment above) rests on. If it fails, do NOT
+  # proceed to overwrite — on an unattended nightly run that would be
+  # unrecoverable data loss with no way back.
   if [ -d "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
     local backup_dir
     backup_dir="${HOME}/aiteamforge-backups/personas/${team}/$(date +%Y%m%d-%H%M%S)"
-    mkdir -p "$backup_dir"
-    cp -R "$dest" "${backup_dir}/agents"
+    if ! mkdir -p "$backup_dir"; then
+      print_warning "[${team}] Could not create backup directory ${backup_dir} — refusing to overwrite personas without a successful backup; skipping this team"
+      return 1
+    fi
+    if ! cp -R "$dest" "${backup_dir}/agents"; then
+      print_warning "[${team}] Backup to ${backup_dir}/agents failed partway — refusing to overwrite personas without a successful backup; skipping this team"
+      return 1
+    fi
     print_info "[${team}] Backed up existing personas to ${backup_dir}/agents"
+    _xaca0925_prune_persona_backups "$team"
   fi
 
-  mkdir -p "$dest"
-  for f in "${src_files[@]}"; do
-    cp "$f" "${dest}/$(basename "$f")"
-  done
-  print_success "[${team}] Updated ${#src_files[@]} persona file(s)"
-  _XACA0925_TEAM_UPDATED=${#src_files[@]}
+  if ! mkdir -p "$dest"; then
+    print_warning "[${team}] Could not create destination directory ${dest} — persona refresh failed for this team"
+    return 1
+  fi
 
+  # XACA-0925-013/015: check every write, count only ACTUAL successes (never
+  # the attempted count), and never print a success message when a write
+  # failed.
+  local written=0
+  local any_write_failed=false
+  for f in "${src_files[@]}"; do
+    name="$(basename "$f")"
+    if cp "$f" "${dest}/${name}"; then
+      written=$((written + 1))
+    else
+      any_write_failed=true
+      print_warning "[${team}] Failed to write ${name} to ${dest}"
+    fi
+  done
+  _XACA0925_TEAM_UPDATED=${written}
+
+  if [ "$any_write_failed" = true ]; then
+    print_warning "[${team}] Persona refresh incomplete for this team — ${written}/${#src_files[@]} file(s) actually written"
+    return 1
+  fi
+
+  print_success "[${team}] Updated ${written} persona file(s)"
   return 0
 }
 
@@ -1799,9 +1925,16 @@ update_team_personas() {
   local team
 
   for team in "${teams[@]}"; do
+    # XACA-0925-013/015: this branch is now LIVE — the helper can return 1
+    # (failed backup, failed mkdir, or any failed per-file cp). One team's
+    # failure must not abort the unattended nightly upgrade, so we warn and
+    # move on to the next team rather than returning/exiting. Do NOT `continue`
+    # here: _XACA0925_TEAM_UPDATED already reflects the true (possibly
+    # partial) write count set by the helper regardless of its return value,
+    # so folding it into total_updated on both paths keeps the end-of-run
+    # total honest instead of hiding partial writes from a failed team.
     if ! _xaca0925_refresh_team_personas "$team"; then
-      print_warning "[${team}] Persona refresh encountered an error — skipping this team (fail-soft; upgrade continues)"
-      continue
+      print_warning "[${team}] Persona refresh did not complete cleanly — continuing with remaining teams (fail-soft; see warning above for detail)"
     fi
     total_updated=$((total_updated + _XACA0925_TEAM_UPDATED))
     if [ "${_XACA0925_TEAM_ORPHANS:-0}" -gt 0 ]; then
