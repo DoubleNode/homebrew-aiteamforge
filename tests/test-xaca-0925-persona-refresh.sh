@@ -824,6 +824,47 @@ else
     fi
 fi
 
+# ═══════════════════════════════════════════════════════════════════════════
+# T19 — UNREADABLE-DEST-MUST-NOT-BYPASS-THE-BACKUP-GATE (XACA-0925-018).
+# The 013/015 guard aborts when the backup FAILS. This case is nastier: on an
+# unreadable dest the backup is never ATTEMPTED at all, because the gate
+# `[ -n "$(ls -A "$dest" 2>/dev/null)" ]` cannot tell permission-denied from
+# empty — so the whole backup block is skipped and execution falls straight
+# through to the write. Reviewer reproduced it at mode 0300: content clobbered,
+# NO backup, and a "Updated 1 persona file(s)" success message. The guard is
+# defeated before it can fire. Mode 0300 keeps the execute bit so the test can
+# still read a known path to prove the content survived, while `ls` cannot.
+# ═══════════════════════════════════════════════════════════════════════════
+test_start "T19: an unreadable dest aborts BEFORE the backup gate — content preserved, no backup, non-zero return, no success message"
+if [ "$FN_MISSING" = true ]; then
+    test_fail "update_team_personas() not implemented yet (expected pre-fix negative control)"
+else
+    T19_FW="$(_next_sandbox)"; T19_WD="$(_next_sandbox)"; T19_HOME="$(_next_sandbox)"
+    _seed_framework_team "$T19_FW" academy a.md "CELLAR-CONTENT-A-v2"
+    mkdir -p "$T19_WD/academy/personas/agents"
+    printf 'OLD-STALE-CONTENT-A\n' > "$T19_WD/academy/personas/agents/a.md"
+    chmod 0300 "$T19_WD/academy/personas/agents"
+
+    if [ -r "$T19_WD/academy/personas/agents" ]; then
+        chmod 755 "$T19_WD/academy/personas/agents" 2>/dev/null || true
+        test_fail "PRECONDITION FAILED: could not make dest dir unreadable — test would be vacuous (running as root?)"
+    else
+        _run_refresh_direct "$T19_HOME" "$T19_FW" "$T19_WD" academy false "$WORK_DIR/t19.log"
+        _RC=$?
+        # Restore readability BEFORE asserting, so the assertions can inspect.
+        chmod 755 "$T19_WD/academy/personas/agents" 2>/dev/null || true
+        if [ "$_RC" -ne 0 ] \
+            && grep -q 'OLD-STALE-CONTENT-A' "$T19_WD/academy/personas/agents/a.md" \
+            && ! cmp -s "$T19_WD/academy/personas/agents/a.md" "$T19_FW/share/personas/academy/agents/a.md" \
+            && [ ! -d "$T19_HOME/aiteamforge-backups/personas/academy" ] \
+            && ! grep -qi "updated.*persona file" "$_STUB_LOG"; then
+            test_pass
+        else
+            test_fail "expected non-zero return, preserved dest content, NO backup dir, and no success message; rc=$_RC content=$(cat "$T19_WD/academy/personas/agents/a.md" 2>/dev/null); backup_dir_exists=$([ -d "$T19_HOME/aiteamforge-backups/personas/academy" ] && echo yes || echo no); stub log: $(cat "$_STUB_LOG"); log: $(cat "$WORK_DIR/t19.log")"
+        fi
+    fi
+fi
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Summary (standalone only).
 # ─────────────────────────────────────────────────────────────────────────────

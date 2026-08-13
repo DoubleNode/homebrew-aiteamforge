@@ -1846,6 +1846,21 @@ _xaca0925_refresh_team_personas() {
     return 0
   fi
 
+  # XACA-0925-018: an UNREADABLE dest must abort before the gate below, not
+  # fall through it. `ls -A` on a permission-denied directory emits nothing and
+  # fails silently (stderr suppressed), so it is indistinguishable from a
+  # genuinely empty dir — the whole backup block is then SKIPPED and execution
+  # reaches the write anyway, clobbering user content with no backup and a
+  # "Updated N persona file(s)" success message. That defeats the 013/015 guard
+  # below before it can ever fire: the backup does not FAIL, it is never
+  # ATTEMPTED. Reproduced at mode 0300. Symmetric with the src-side readability
+  # check (XACA-0925-014) — an unreadable directory is an error to report, never
+  # an empty set to proceed past.
+  if [ -d "$dest" ] && [ ! -r "$dest" ]; then
+    print_warning "[${team}] Destination ${dest} exists but is not readable — cannot inspect or back up the existing personas; refusing to overwrite without a successful backup; skipping this team"
+    return 1
+  fi
+
   # Backup BEFORE the first write, only if there is something to preserve.
   # XACA-0925-013/015: the backup IS the safety property the unconditional-
   # clobber design (see header comment above) rests on. If it fails, do NOT
