@@ -98,3 +98,5 @@ test-xaca-0834-connect-script-recovery.sh       plain-shell
 test-xaca-0845-connect-script-parametric-teams.sh plain-shell
 test-xaca-0862-006-retire-legacy-connect.sh     plain-shell
 test-xaca-0862-team-scoped-connect.sh           plain-shell
+test-xaca-0925-persona-refresh.sh               plain-shell
+test-xaca-0925-persona-parity-check.sh          plain-shell

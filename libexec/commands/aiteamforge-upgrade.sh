@@ -1579,6 +1579,245 @@ update_runtime_helpers() {
   fi
 }
 
+# XACA-0925: Persona-content refresh on the UPGRADE path.
+#
+# `aiteamforge upgrade` had NO function that ever refreshed persona CONTENT —
+# same bug class as XACA-0558/0608/0673/0751/0761/0771 documented throughout
+# this file: install-time provisioning the upgrade path never learned about.
+# install-team.sh copies share/personas/<team>/agents/*.md into the working
+# dir at INSTALL time only; nothing in the 20+ update_* run sequence ever
+# touched it again. Measured on darren-m4-mini after 0.17.8 -> 0.18.0: 9 of 11
+# teams stale, 54 files — 48 of them the XACA-0671 realignment (tap commit
+# 514b543) that shipped in a release but never reached a single already-
+# installed consumer box. update_claude_hooks (below) deliberately does NOT
+# call install_claude_config() for the same reason a full persona re-install
+# is wrong here — that would also touch settings.json/skills/tmux.conf/etc.
+# This function's job is ONLY persona-agent content.
+#
+# ── Why cmp, never mtime (read before "simplifying" this to `-nt`) ──────────
+# kb-sync-personas re-stamps its copies with TODAY'S date every time it syncs
+# (see ~/dev-team/scripts/kb-sync-personas's .synced-from-master marker /
+# re-copy path) — recency is therefore not evidence of freshness, it is
+# evidence of "something touched this file recently," which is poisoned
+# information for exactly the boxes this function exists to fix. This file
+# already reached the identical conclusion for a DIFFERENT class of rewritten
+# file at update_team_scripts' comment (see ~695-697 above): "the on-disk copy
+# diverges from source by design ... an mtime/-nt guard would either always
+# trip or never trip depending on clock skew." `cmp -s` compares byte content,
+# which is the only signal that cannot be fooled by a re-stamp. This will look
+# like over-caution to a future reader reaching for `-nt` — it is not; mtime
+# is actively poisoned in this exact code path.
+#
+# ── Design (deliberately UNCONDITIONAL, no modification detection) ─────────
+#   • The 54 stale files DIFFER from the Cellar version — that difference IS
+#     the staleness this ticket fixes. Any "skip if the working-dir copy was
+#     modified" rule classifies every one of the 54 as user-modified (a byte
+#     difference from Cellar is exactly what "modified" would test for) and
+#     skips every one — an inert fix that reports success while changing
+#     nothing. bin/aiteamforge-setup.sh:1266 already clobbers these same files
+#     unconditionally on `setup --upgrade`; this closes the sibling-drift gap
+#     on the `aiteamforge upgrade` path, it does not introduce new behavior.
+#   • `cmp -s` is used ONLY to decide (a) whether a given team's persona set
+#     has ANY work to do, and (b) whether to back up before writing — NEVER to
+#     selectively skip an individual file within a team that IS being
+#     refreshed. Once any file in a team's set differs, the whole team's
+#     *.md set is re-copied together (matching install-team.sh's own
+#     `cp -R .../* $TEAM_DIR/personas/` whole-directory semantics) rather than
+#     a file-by-file selective sync that could drift the set out of lockstep.
+#   • Backup is OUT OF TREE, at ~/aiteamforge-backups/personas/<team>/<ts>/ —
+#     never a sidecar inside personas/agents/ itself, because install-team.sh
+#     (:882/:906 and its own re-invocations) programmatically enumerates that
+#     directory's contents; a stray backup file inside it would be picked up
+#     as if it were a real persona. Only taken when there is something to
+#     preserve (dest already exists and is non-empty) and only once per team
+#     per run, before that team's first write.
+#   • Never deletes. A working-dir file with no shipped counterpart survives,
+#     reported as one summary warning per team (orphan reaping is deliberately
+#     deferred to a follow-up ticket).
+#   • Teams with NO working-dir persona dir at all (dns, mainevent — container-
+#     layout teams whose persona dir was never materialized) are CREATED, not
+#     skipped: a missing destination file always registers as "differs" in the
+#     cmp gate above, which routes through the same write path that creates
+#     the directory. This mirrors the _xaca0673_mandatory_materialize_basenames
+#     precedent above (update_runtime_helpers) — materialize even when absent,
+#     for a set the box is actually entitled to, rather than the
+#     update_aux_scripts/update_team_scripts convention of "refresh only what
+#     already exists."
+#   • Team enumeration is get_configured_teams() (libexec/lib/config.sh),
+#     which reads `.teams[]` from ${WORKING_DIR}/.aiteamforge-config — the
+#     SAME source bin/aiteamforge-setup.sh's upgrade-hydration block (~line
+#     616) treats as authoritative for "teams this box actually installed."
+#     Deliberately NOT a glob over share/personas/*/ — that would materialize
+#     persona trees for teams the user never installed.
+#
+# ── Destination (verified, not assumed) ─────────────────────────────────────
+# install-team.sh writes personas to TWO places: unconditionally to
+# $AITEAMFORGE_DIR/$TEAM_ID/personas/ (:882) and, only when it would not
+# pollute a git work tree or duplicate a nested path, to
+# $TEAM_WORKING_DIR/personas/ (:906, guarded at :899). This function refreshes
+# ONLY the first, unconditional destination: ${WORKING_DIR}/<team>/personas/
+# agents/. get_working_dir() (libexec/lib/config.sh) resolves to the exact
+# same value install-team.sh's $AITEAMFORGE_DIR does
+# (`${AITEAMFORGE_DIR:-$HOME/aiteamforge}`), and it is the path
+# share/scripts/deploy-worktree-personas.sh:516 actually reads
+# (`${AITEAMFORGE_DIR:-$HOME/aiteamforge}/<team>/personas/agents` — the
+# primary source deploy-worktree-personas.sh looks for before falling back to
+# the dev-machine kb-sync-personas path). The second, TEAM_WORKING_DIR
+# destination is intentionally NOT refreshed here: reaching it correctly
+# requires sourcing each team's conf for TEAM_WORKING_DIR and re-deriving the
+# identical/nested-path/git-work-tree guard at install-team.sh:899 (the guard
+# that stops the installer from clobbering a dev checkout) — meaningful
+# additional scope this ticket's contract explicitly scoped out ("at minimum"
+# the deploy-worktree-personas.sh-read path). Left for a follow-up if that
+# second destination is later found to matter in practice.
+#
+# ── Ordering ─────────────────────────────────────────────────────────────
+# Runs AFTER update_aux_scripts, which owns deploy-worktree-personas.sh — the
+# primary CONSUMER of the directory this function refreshes. Refreshing
+# persona content before its deployer script is current would push new
+# content through an old deployer. Runs AFTER update_runtime_helpers and
+# BEFORE update_claude_hooks in the run sequence below.
+#
+# ── Fail-soft ────────────────────────────────────────────────────────────
+# This runs unattended via the nightly auto-upgrade LaunchAgent. One team's
+# failure must not abort the upgrade. _xaca0925_refresh_team_personas is
+# invoked as the direct condition of `if !`, which — verified under this
+# repo's target /bin/bash 3.2 — suppresses `set -e` for the ENTIRE function
+# body (not just the top-level call), so an internal mkdir/cp failure cannot
+# kill the parent upgrade script; the caller catches the non-zero return and
+# continues to the next team.
+
+# Refresh one team's persona-agent content. Sets the caller-visible globals
+# _XACA0925_TEAM_UPDATED (count of files (re)written this run) and
+# _XACA0925_TEAM_ORPHANS (count of working-dir .md files with no shipped
+# counterpart) before returning. Always returns 0 — there is no failure mode
+# here that should abort the run; the fail-soft `if !` wrapper at the call
+# site is defense-in-depth for an unforeseen error, not the normal path.
+_xaca0925_refresh_team_personas() {
+  local team="$1"
+  local src="${_XACA0925_PERSONAS_SOURCE_ROOT}/${team}/agents"
+  local dest="${WORKING_DIR}/${team}/personas/agents"
+
+  _XACA0925_TEAM_UPDATED=0
+  _XACA0925_TEAM_ORPHANS=0
+
+  if [ ! -d "$src" ]; then
+    print_info "[${team}] No shipped personas for this team — skipping"
+    return 0
+  fi
+
+  local -a src_files=()
+  local f name
+  for f in "$src"/*.md; do
+    [ -f "$f" ] || continue
+    src_files+=("$f")
+  done
+
+  if [ ${#src_files[@]} -eq 0 ]; then
+    print_info "[${team}] No .md persona files shipped for this team — skipping"
+    return 0
+  fi
+
+  # Orphan detection (report-only; never deletes; safe to compute under
+  # --dry-run since nothing here writes).
+  if [ -d "$dest" ]; then
+    local dfile dname
+    for dfile in "$dest"/*.md; do
+      [ -f "$dfile" ] || continue
+      dname="$(basename "$dfile")"
+      [ -f "${src}/${dname}" ] || _XACA0925_TEAM_ORPHANS=$((_XACA0925_TEAM_ORPHANS + 1))
+    done
+  fi
+
+  # Diff gate: cmp -s ONLY (never mtime — see header comment above). Decides
+  # ONLY whether this team's set has any work to do / needs a backup first —
+  # never used to selectively skip an individual file below.
+  local any_diff=false
+  for f in "${src_files[@]}"; do
+    name="$(basename "$f")"
+    if [ ! -f "${dest}/${name}" ] || ! cmp -s "$f" "${dest}/${name}"; then
+      any_diff=true
+      break
+    fi
+  done
+
+  if [ "$any_diff" = false ]; then
+    return 0   # idempotent no-op: content already current, no backup, no write
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    print_info "Would update ${#src_files[@]} persona file(s) for ${team}"
+    _XACA0925_TEAM_UPDATED=${#src_files[@]}
+    return 0
+  fi
+
+  # Backup BEFORE the first write, only if there is something to preserve.
+  if [ -d "$dest" ] && [ -n "$(ls -A "$dest" 2>/dev/null)" ]; then
+    local backup_dir
+    backup_dir="${HOME}/aiteamforge-backups/personas/${team}/$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$backup_dir"
+    cp -R "$dest" "${backup_dir}/agents"
+    print_info "[${team}] Backed up existing personas to ${backup_dir}/agents"
+  fi
+
+  mkdir -p "$dest"
+  for f in "${src_files[@]}"; do
+    cp "$f" "${dest}/$(basename "$f")"
+  done
+  print_success "[${team}] Updated ${#src_files[@]} persona file(s)"
+  _XACA0925_TEAM_UPDATED=${#src_files[@]}
+
+  return 0
+}
+
+update_team_personas() {
+  print_section "Updating Team Personas"
+
+  local _XACA0925_PERSONAS_SOURCE_ROOT="${FRAMEWORK_DIR}/share/personas"
+  if [ ! -d "$_XACA0925_PERSONAS_SOURCE_ROOT" ]; then
+    print_warning "Framework share/personas not found — skipping persona refresh"
+    return 0
+  fi
+
+  # get_configured_teams (config.sh) can `return 1` under set -e when
+  # .aiteamforge-config is missing/unreadable; `|| true` matches the house
+  # convention at aiteamforge-start.sh:364 / aiteamforge-doctor.sh:805.
+  local teams_str=""
+  teams_str=$(get_configured_teams 2>/dev/null) || true
+
+  local -a teams=()
+  if [ -n "$teams_str" ]; then
+    read -ra teams <<< "$teams_str"
+  fi
+
+  if [ ${#teams[@]} -eq 0 ]; then
+    print_warning "No configured teams found in .aiteamforge-config — skipping persona refresh"
+    return 0
+  fi
+
+  local total_updated=0
+  local team
+
+  for team in "${teams[@]}"; do
+    if ! _xaca0925_refresh_team_personas "$team"; then
+      print_warning "[${team}] Persona refresh encountered an error — skipping this team (fail-soft; upgrade continues)"
+      continue
+    fi
+    total_updated=$((total_updated + _XACA0925_TEAM_UPDATED))
+    if [ "${_XACA0925_TEAM_ORPHANS:-0}" -gt 0 ]; then
+      print_warning "[${team}] ${_XACA0925_TEAM_ORPHANS} orphan persona file(s) in working dir with no Cellar counterpart (left in place, not deleted)"
+    fi
+  done
+
+  if [ $total_updated -eq 0 ]; then
+    print_success "All team personas up to date"
+  elif [ "$DRY_RUN" = true ]; then
+    print_success "Would update ${total_updated} persona file(s) across configured teams"
+  else
+    print_success "Updated ${total_updated} persona file(s) across configured teams"
+  fi
+}
+
 # XACA-0771: Mandatory shared alias files. install_aliases() (install-shell.sh)
 # lays down all three of these unconditionally on every fresh install — there
 # is no "optional alias file" today. Kept as its own function (mirrors the
@@ -2206,6 +2445,7 @@ update_connect_scripts
 update_runtime_helpers
 update_imgcat
 update_shell_helpers
+update_team_personas
 update_claude_hooks
 update_skills
 update_launchagents
