@@ -277,8 +277,7 @@ def _compute_plan_with_new_ports(data: dict) -> dict:
     for group in plan["collisions"]:
         renumber_with_ports = []
         for iid in group["renumber"]:
-            template = _split_template(iid)
-            new_port = compute_instance_port(template, working_data)
+            new_port = compute_instance_port(iid, working_data)
             # Mark allocated so next call sees it as used
             working_teams[iid]["lcars_port"] = new_port
             renumber_with_ports.append({"instance_id": iid, "new_port": new_port})
@@ -290,8 +289,7 @@ def _compute_plan_with_new_ports(data: dict) -> dict:
 
     null_with_ports = []
     for iid in plan["null_ports"]:
-        template = _split_template(iid)
-        new_port = compute_instance_port(template, working_data)
+        new_port = compute_instance_port(iid, working_data)
         working_teams[iid]["lcars_port"] = new_port
         null_with_ports.append({"instance_id": iid, "new_port": new_port})
 

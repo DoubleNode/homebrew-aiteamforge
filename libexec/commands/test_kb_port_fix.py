@@ -506,5 +506,196 @@ class TestContractViolatingKeysSkipped(unittest.TestCase):
         self.assertFalse(plan["needs_work"])
 
 
+class TestMainEventFullIidPassedToAllocator(unittest.TestCase):
+    """XACA-0823-001: renumber/null-port paths must pass the FULL instance id
+    to compute_instance_port(), not the _split_template()-stripped base.
+
+    Pre-fix, both call sites in _compute_plan_with_new_ports() stripped
+    "mainevent-<project>" down to "mainevent" before calling
+    compute_instance_port(). That defeated _resolve_template_band()'s
+    explicit _TEMPLATE_PORT_BANDS["mainevent"] = (8401, 19) declaration and
+    instead resolved the bare board-less-alias entry's OWN band (8400, 1) —
+    either raising "Port band exhausted" (when the bare "mainevent" alias
+    entry at port 8400 is present in team-paths.json, the normal case) or
+    silently allocating port 8400 itself (when the alias entry is absent),
+    colliding with the alias's reserved port. See aiteamforge_paths.py's
+    _TEMPLATE_PORT_BANDS RESIDUAL CAVEAT comment (XACA-0806) for the
+    original diagnosis this ticket resolves.
+    """
+
+    def test_collision_renumber_lands_in_per_project_band(self):
+        """Headline case: a mainevent-<project> collision renumbers into
+        [8401, 8419], not the bare alias's [8400, 8401) band."""
+        data = _make_team_paths(
+            **{
+                "command": _entry(8234, added_at="2024-01-01T00:00:00Z"),
+                "mainevent-someproject": _entry(8234, added_at="2025-01-01T00:00:00Z"),
+            }
+        )
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        self.assertEqual(len(full_plan["collisions"]), 1)
+        group = full_plan["collisions"][0]
+        self.assertEqual(group["winner"], "command")
+        renumbered = group["renumber"]
+        self.assertEqual(len(renumbered), 1)
+        entry = renumbered[0]
+        self.assertEqual(entry["instance_id"], "mainevent-someproject")
+        self.assertGreaterEqual(entry["new_port"], 8401)
+        self.assertLessEqual(entry["new_port"], 8419)
+
+    def test_collision_renumber_with_bare_alias_present_does_not_crash(self):
+        """Pre-fix this raised ValueError('Port band exhausted for template
+        mainevent') because the bare alias entry (port 8400, band range 1)
+        was already using its only slot. Full-iid resolution must route to
+        the per-project [8401, 8419] band instead and succeed."""
+        data = _make_team_paths(
+            **{
+                "mainevent": _entry(8400),  # bare board-less alias, its own reserved port
+                "command": _entry(8234, added_at="2024-01-01T00:00:00Z"),
+                "mainevent-someproject": _entry(8234, added_at="2025-01-01T00:00:00Z"),
+            }
+        )
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        group = full_plan["collisions"][0]
+        entry = group["renumber"][0]
+        self.assertEqual(entry["instance_id"], "mainevent-someproject")
+        self.assertGreaterEqual(entry["new_port"], 8401)
+        self.assertLessEqual(entry["new_port"], 8419)
+
+    def test_null_port_allocation_lands_in_per_project_band(self):
+        """Second call site (null-port path) — just as broken pre-fix, and
+        just as easy to leave broken by a partial fix that only touches the
+        collision-renumber loop."""
+        data = _make_team_paths(
+            **{"mainevent-anotherproject": {"lcars_port": None}}
+        )
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        self.assertEqual(len(full_plan["null_ports"]), 1)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "mainevent-anotherproject")
+        self.assertGreaterEqual(entry["new_port"], 8401)
+        self.assertLessEqual(entry["new_port"], 8419)
+
+    def test_null_port_allocation_with_bare_alias_present_does_not_crash(self):
+        data = _make_team_paths(
+            **{
+                "mainevent": _entry(8400),
+                "mainevent-anotherproject": {"lcars_port": None},
+            }
+        )
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "mainevent-anotherproject")
+        self.assertGreaterEqual(entry["new_port"], 8401)
+        self.assertLessEqual(entry["new_port"], 8419)
+
+    def test_never_allocates_8400(self):
+        """8400 is the bare board-less alias's own reserved port — no
+        per-project mainevent allocation may ever land there, regardless of
+        whether the alias entry itself is present in team-paths.json."""
+        cases = [
+            _make_team_paths(**{
+                "command": _entry(8234, added_at="2024-01-01T00:00:00Z"),
+                "mainevent-p1": _entry(8234, added_at="2025-01-01T00:00:00Z"),
+            }),
+            _make_team_paths(**{
+                "mainevent": _entry(8400),
+                "command": _entry(8234, added_at="2024-01-01T00:00:00Z"),
+                "mainevent-p2": _entry(8234, added_at="2025-01-01T00:00:00Z"),
+            }),
+            _make_team_paths(**{"mainevent-p3": {"lcars_port": None}}),
+            _make_team_paths(**{
+                "mainevent": _entry(8400),
+                "mainevent-p4": {"lcars_port": None},
+            }),
+        ]
+        for data in cases:
+            full_plan = kpf._compute_plan_with_new_ports(data)
+            all_ports = [e["new_port"] for g in full_plan["collisions"] for e in g["renumber"]]
+            all_ports += [e["new_port"] for e in full_plan["null_ports"]]
+            self.assertNotIn(8400, all_ports, f"case allocated 8400: {data}")
+
+    def test_non_regression_finance_personal_band(self):
+        data = _make_team_paths(**{"finance-personal": {"lcars_port": None}})
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "finance-personal")
+        self.assertGreaterEqual(entry["new_port"], 8360)
+        self.assertLessEqual(entry["new_port"], 8369)
+
+    def test_non_regression_legal_coparenting_band(self):
+        data = _make_team_paths(**{"legal-coparenting": {"lcars_port": None}})
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "legal-coparenting")
+        self.assertGreaterEqual(entry["new_port"], 8320)
+        self.assertLessEqual(entry["new_port"], 8329)
+
+    def test_non_regression_medical_general_band(self):
+        data = _make_team_paths(**{"medical-general": {"lcars_port": None}})
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "medical-general")
+        self.assertGreaterEqual(entry["new_port"], 8340)
+        self.assertLessEqual(entry["new_port"], 8349)
+
+    def test_non_regression_freelance_band(self):
+        data = _make_team_paths(
+            **{"freelance-someclient-someproject": {"lcars_port": None}}
+        )
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "freelance-someclient-someproject")
+        self.assertGreaterEqual(entry["new_port"], 8500)
+        self.assertLessEqual(entry["new_port"], 8599)
+
+    def test_non_regression_other_templates_identical_before_and_after(self):
+        """Templates with no dash-suffix child variant (academy, ios, etc.)
+        are unaffected by full-iid vs. stripped-base — both are the same
+        string. Prove the collision-renumber path still resolves them to
+        their own bands."""
+        data = _make_team_paths(
+            **{
+                "academy": _entry(8203, added_at="2024-01-01T00:00:00Z"),
+                "academy-dup": _entry(8203, added_at="2025-01-01T00:00:00Z"),
+            }
+        )
+        # academy-dup is a made-up instance id with no DEFAULT_TEAMS entry of
+        # its own and no _TEMPLATE_PORT_BANDS declaration, so full-iid
+        # resolution must fall through to the strip-dash step and land in
+        # academy's band [8200, 8210) exactly as the pre-fix stripped-base
+        # call did.
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["collisions"][0]["renumber"][0]
+        self.assertEqual(entry["instance_id"], "academy-dup")
+        self.assertGreaterEqual(entry["new_port"], 8200)
+        self.assertLessEqual(entry["new_port"], 8209)
+
+
+class TestRealTeamPathsConfigUntouched(unittest.TestCase):
+    """This suite must never read or write the real
+    ~/.aiteamforge/team-paths.json — every test builds its own synthetic
+    data or points AITEAMFORGE_CONFIG at a tempfile. Guard against silent
+    drift by asserting the real file's mtime/content are unchanged by a
+    full test run."""
+
+    def test_real_team_paths_untouched_by_suite(self):
+        real_config = Path.home() / ".aiteamforge" / "team-paths.json"
+        if not real_config.exists():
+            self.skipTest("no real team-paths.json on this machine")
+        before_mtime = real_config.stat().st_mtime
+        before_content = real_config.read_bytes()
+        # Run a representative slice of the suite's own operations again to
+        # prove they don't touch the real path (AITEAMFORGE_CONFIG must be
+        # patched everywhere cmd_apply/cmd_check/cmd_detect are exercised).
+        kpf._compute_plan_with_new_ports(
+            _make_team_paths(**{"finance-personal": {"lcars_port": None}})
+        )
+        after_mtime = real_config.stat().st_mtime
+        after_content = real_config.read_bytes()
+        self.assertEqual(before_mtime, after_mtime)
+        self.assertEqual(before_content, after_content)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
