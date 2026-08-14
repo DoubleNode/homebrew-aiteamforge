@@ -1465,6 +1465,21 @@ PYEOF
 # "iTerm2 not running" on a machine where iTerm2 is running. Materialising here
 # rather than special-casing the connect-only block also covers team-startup.sh,
 # which has hard-depended on this same file since XACA-0563.
+# XACA-0395: kb-api-key is a BRAND-NEW extensionless file — the exact case the
+# XACA-0774 comment above predicted for a future addition. It ships to fresh
+# installs via install-shell.sh::install_helper_scripts(), but that function is
+# only ever called from aiteamforge-setup.sh, never from this upgrade command
+# (verified: install_helper_scripts/install_shell_environment do not appear in
+# this file). Without this entry, an existing machine that upgrades across the
+# XACA-0395 release gets the new auth-gate code (server.py / auth-middleware.js
+# refresh through their own sweeps) but never gets the tool needed to provision
+# the key that gate checks — kanban-helpers.sh resolves
+# ${AITEAMFORGE_DIR}/scripts/kb-api-key as its PRIMARY path, so the gap is not
+# cosmetic: an upgraded, un-provisioned machine simply cannot enable auth via
+# any supported path. It also needs the glob-sweep entry above (extensionless,
+# same reason kb-init-team needed one) — this entry alone is not sufficient,
+# since a mandatory-materialize basename that never reaches the sweep loop is
+# never evaluated in the first place.
 _xaca0673_mandatory_materialize_basenames() {
   cat <<'EOF'
 iterm2_venv_bootstrap.py
@@ -1472,6 +1487,7 @@ kb-init-team-guard.sh
 kb-init-team
 remote-tmux-attach.sh
 lcars-launch-helpers.sh
+kb-api-key
 EOF
 }
 
@@ -1497,9 +1513,10 @@ update_runtime_helpers() {
 
   local updated=0
   local src name target
-  # Sweep shipped helpers. The kb-init-team provisioner is extensionless, so it is
-  # listed explicitly alongside the *.sh / *.py globs.
-  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team; do
+  # Sweep shipped helpers. kb-init-team and kb-api-key are extensionless, so
+  # each is listed explicitly alongside the *.sh / *.py globs (XACA-0395: same
+  # gap class as kb-init-team — the glob cannot match an extensionless name).
+  for src in "$scripts_source"/*.sh "$scripts_source"/*.py "$scripts_source"/kb-init-team "$scripts_source"/kb-api-key; do
     [ -f "$src" ] || continue
     name="$(basename "$src")"
     target="${scripts_dest}/${name}"
