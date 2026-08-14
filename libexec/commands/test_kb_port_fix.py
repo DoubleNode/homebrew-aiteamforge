@@ -672,6 +672,91 @@ class TestMainEventFullIidPassedToAllocator(unittest.TestCase):
         self.assertLessEqual(entry["new_port"], 8209)
 
 
+class TestMainEventAllocatorEdgeCases(unittest.TestCase):
+    """XACA-0823-002/003/004: coverage gaps found by the PR #746 test gate.
+
+    All three were manually verified as behaving correctly at review time;
+    these tests exist so a future regression cannot silently reintroduce
+    them. They are regression guards, not bug reproductions.
+    """
+
+    def test_per_project_band_exhaustion_raises(self):
+        """XACA-0823-002: all 19 slots of [8401, 8419] occupied.
+
+        Must fail loudly (ValueError from the canonical allocator), never
+        wrap around into the bare alias's 8400 or silently reuse a port.
+        The pre-fix code reached a *different* exhaustion — band [8400,8401)
+        — so this case also pins that the fix routes to the correct band
+        before exhausting it.
+        """
+        teams = {f"mainevent-filler{i}": _entry(port)
+                 for i, port in enumerate(range(8401, 8420))}
+        teams["mainevent"] = _entry(8400)
+        teams["command"] = _entry(8234, added_at="2024-01-01T00:00:00Z")
+        teams["mainevent-overflow"] = _entry(8234, added_at="2025-01-01T00:00:00Z")
+        data = _make_team_paths(**teams)
+
+        with self.assertRaises(ValueError) as ctx:
+            kpf._compute_plan_with_new_ports(data)
+        msg = str(ctx.exception)
+        self.assertIn("exhausted", msg.lower())
+        # Pin that it exhausted the PER-PROJECT band, not the alias band.
+        # NB: a bare assertIn("8401", msg) would NOT discriminate — the
+        # pre-fix message reads "band [8400, 8401), 1 of 1 used" and also
+        # contains "8401". Anchor on the band's OPENING bound instead.
+        self.assertIn("[8401,", msg)
+        self.assertNotIn("[8400,", msg)
+
+    def test_multi_dash_instance_id_resolves_to_per_project_band(self):
+        """XACA-0823-003: an id with 3+ dash components.
+
+        _resolve_template_band() derives the base template via
+        split("-")[0], so "mainevent-foo-bar" must land in [8401, 8419]
+        exactly as a two-component id does. Guards against a future
+        "improvement" that switches to rsplit or a two-component
+        assumption.
+        """
+        data = _make_team_paths(**{"mainevent-foo-bar": {"lcars_port": None}})
+        full_plan = kpf._compute_plan_with_new_ports(data)
+        entry = full_plan["null_ports"][0]
+        self.assertEqual(entry["instance_id"], "mainevent-foo-bar")
+        self.assertGreaterEqual(entry["new_port"], 8401)
+        self.assertLessEqual(entry["new_port"], 8419)
+        self.assertNotEqual(entry["new_port"], 8400)
+
+    def test_collision_and_null_port_in_one_run_do_not_collide(self):
+        """XACA-0823-004: both loops active in a single invocation.
+
+        The two call sites allocate against a SHARED working_data copy, so
+        a regression that failed to mark one loop's allocation as used
+        would hand the same port to both. Asserts both land in band AND
+        are distinct from each other and from every pre-existing port.
+        """
+        data = _make_team_paths(
+            **{
+                "mainevent": _entry(8400),
+                "command": _entry(8234, added_at="2024-01-01T00:00:00Z"),
+                "mainevent-collider": _entry(8234, added_at="2025-01-01T00:00:00Z"),
+                "mainevent-nullport": {"lcars_port": None},
+            }
+        )
+        full_plan = kpf._compute_plan_with_new_ports(data)
+
+        renumbered = full_plan["collisions"][0]["renumber"][0]
+        nulled = full_plan["null_ports"][0]
+        self.assertEqual(renumbered["instance_id"], "mainevent-collider")
+        self.assertEqual(nulled["instance_id"], "mainevent-nullport")
+
+        for entry in (renumbered, nulled):
+            self.assertGreaterEqual(entry["new_port"], 8401)
+            self.assertLessEqual(entry["new_port"], 8419)
+
+        # The whole point: no double-allocation across the two loops.
+        self.assertNotEqual(renumbered["new_port"], nulled["new_port"])
+        self.assertNotIn(renumbered["new_port"], (8400, 8234))
+        self.assertNotIn(nulled["new_port"], (8400, 8234))
+
+
 class TestRealTeamPathsConfigUntouched(unittest.TestCase):
     """This suite must never read or write the real
     ~/.aiteamforge/team-paths.json — every test builds its own synthetic
