@@ -21,12 +21,16 @@
  *
  * Nothing here touches AMB (dev.agentbadges.com). This is our own internal relay.
  *
- * AUTH: Bearer-token gate on every route. When the server has FLEET_AUTH_TOKEN
- * set, a request MUST carry `Authorization: Bearer <token>` matching it or gets
- * 401. When FLEET_AUTH_TOKEN is unset the gate is open — matching the existing
- * (unauthenticated) posture of the fleet push endpoints in dev/test. Auth gates
- * who may RELAY; sealing gates who may READ. Both are required; neither alone is
- * sufficient.
+ * AUTH: gated by the shared checkApiKey() guard from ./auth-middleware
+ * (XACA-0395-004 — converged off this module's former private requireBearer).
+ * When the server has FLEET_AUTH_TOKEN set, a request MUST carry
+ * `Authorization: Bearer <token>` (or `X-API-Key: <token>`) matching it or
+ * gets 401. When FLEET_AUTH_TOKEN is unset the gate is open — matching the
+ * existing (unauthenticated) posture of the fleet push endpoints in dev/test.
+ * Auth gates who may RELAY; sealing gates who may READ. Both are required;
+ * neither alone is sufficient. All three routes are gated, including the GET
+ * — it returns per-machine sealed envelopes and is deliberately NOT on the
+ * public-route allowlist (auth contract §6).
  *
  * Test isolation: the message store resolves its file path from FLEET_MSG_FILE
  * at module-load time (additive seam, like FLEET_VAULT_FILE). Tests point it at
@@ -37,6 +41,7 @@ const fs   = require('fs');
 const path = require('path');
 
 const { ensureReady, isValidSealedBox } = require('./vault-crypto');
+const { checkApiKey } = require('./auth-middleware');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -119,24 +124,6 @@ function validateEnvelope(body) {
 }
 
 // ---------------------------------------------------------------------------
-// Auth
-// ---------------------------------------------------------------------------
-
-/**
- * Bearer-token gate. Returns true if authorized (or auth is disabled because no
- * server token is configured); otherwise writes a 401 and returns false.
- */
-function requireBearer(req, res) {
-    const expected = process.env.FLEET_AUTH_TOKEN;
-    if (!expected) return true;  // open posture when no server token configured
-    const header = req.get ? req.get('authorization') : (req.headers && req.headers.authorization);
-    const presented = (header || '').replace(/^Bearer\s+/i, '');
-    if (presented && presented === expected) return true;
-    res.status(401).json({ error: 'Unauthorized', code: 'missing_or_bad_bearer' });
-    return false;
-}
-
-// ---------------------------------------------------------------------------
 // Route registration
 // ---------------------------------------------------------------------------
 
@@ -154,7 +141,7 @@ function registerMsgRelayRoutes(app) {
      * 201 on store; 400 on validation failure; 401 without valid bearer.
      */
     app.post('/api/msg', async (req, res) => {
-        if (!requireBearer(req, res)) return;
+        if (!checkApiKey(req, res)) return;
         try {
             await ensureReady();  // isValidSealedBox needs sodium initialized
 
@@ -210,7 +197,7 @@ function registerMsgRelayRoutes(app) {
      * 400 without machine; 401 without valid bearer.
      */
     app.get('/api/msg', (req, res) => {
-        if (!requireBearer(req, res)) return;
+        if (!checkApiKey(req, res)) return;
         try {
             const { machine } = req.query;
             if (!machine || !SLUG_RE.test(String(machine))) {
@@ -232,7 +219,7 @@ function registerMsgRelayRoutes(app) {
      * 400 on bad body; 401 without valid bearer.
      */
     app.post('/api/msg/ack', (req, res) => {
-        if (!requireBearer(req, res)) return;
+        if (!checkApiKey(req, res)) return;
         try {
             const { machine, ids } = req.body || {};
             if (!machine || !SLUG_RE.test(String(machine))) {
@@ -262,7 +249,6 @@ module.exports = {
     // exported for tests
     MSG_FILE,
     validateEnvelope,
-    requireBearer,
     readStore,
     writeStore,
 };

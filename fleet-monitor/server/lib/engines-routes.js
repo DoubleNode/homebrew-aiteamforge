@@ -20,6 +20,13 @@
  * engines.json. DELETE .../accounts/:accountSlug enforces referential integrity
  * with the vault (blocks/cascades vault secrets).
  *
+ * Auth (XACA-0395-005): EPIC-0019 transport auth has now landed. The 3
+ * mutating routes below (POST accounts, PUT account, DELETE account) are
+ * gated with the shared requireApiKey middleware from ./auth-middleware —
+ * additive only, no signature or contract change. The GET routes stay
+ * UNGATED (out of this ticket's mutating-verb scope, contract §6) — they
+ * return only account metadata, never a key value.
+ *
  * Wiring: this module requires the same store singletons as server.js
  * (engines-store, vault-store). Those stores resolve their file paths from
  * FLEET_ENGINES_FILE / FLEET_VAULT_FILE at module-load time, so the
@@ -29,6 +36,7 @@
 
 const enginesStore = require('./engines-store');
 const vaultStore = require('./vault-store');
+const { requireApiKey } = require('./auth-middleware');
 
 /**
  * Validation helpers for engines routes.
@@ -163,7 +171,7 @@ function registerEnginesRoutes(app) {
      * Returns 201 + new account on success.
      * Returns 404 if engineSlug unknown, 409 on slug collision, 400 on validation failure.
      */
-    app.post('/api/engines/:engineSlug/accounts', (req, res) => {
+    app.post('/api/engines/:engineSlug/accounts', requireApiKey, (req, res) => {
         try {
             const { engineSlug } = req.params;
             const registry = enginesStore.readEngines();
@@ -217,7 +225,7 @@ function registerEnginesRoutes(app) {
      * Update an existing account (account_id, nickname, env_var_name are mutable; slug is immutable).
      * Returns the updated account; 404 if engine or account missing; 400 on validation failure.
      */
-    app.put('/api/engines/:engineSlug/accounts/:accountSlug', (req, res) => {
+    app.put('/api/engines/:engineSlug/accounts/:accountSlug', requireApiKey, (req, res) => {
         try {
             const { engineSlug, accountSlug } = req.params;
             const registry = enginesStore.readEngines();
@@ -285,7 +293,7 @@ function registerEnginesRoutes(app) {
      * removed (cascade delete) before the account is deleted from engines.json.
      * Accounts WITHOUT vault secrets: behavior is unchanged (backward compatible).
      */
-    app.delete('/api/engines/:engineSlug/accounts/:accountSlug', (req, res) => {
+    app.delete('/api/engines/:engineSlug/accounts/:accountSlug', requireApiKey, (req, res) => {
         try {
             const { engineSlug, accountSlug } = req.params;
             const { confirm } = req.query;

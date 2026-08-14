@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# kb-api-key — Shared API-key store + generation/rotation helper for AITeamForge.
+#
+# XACA-0395 subitem 002. Implements the LCARS `AITEAMFORGE_API_KEY` key file per the
+# ratified auth contract: kanban/plans/XACA-0395/XACA-0395_auth_contract.md § 2.
+#
+# This tool is the ONLY thing that should create or rotate that key file. The
+# server-side gates (subitem 003: LCARS `server.py`, subitem 004: fleet-monitor
+# `auth-middleware.js`) only ever READ it, once, at process startup — they never
+# write it. Consumer scripts (subitem 006: kanban-helpers.sh, fleet-reporter.sh, …)
+# call `kb-api-key show` to obtain the effective key for their Authorization header.
+#
+# Usage:
+#   kb-api-key generate [--force]     Create a new key. Refuses to clobber an
+#                                      existing key file unless --force is given.
+#   kb-api-key rotate                 Replace the key unconditionally (implies
+#                                      --force). Prints the restart-required warning
+#                                      — both servers cache the key at startup.
+#   kb-api-key show [--fingerprint]   Print the EFFECTIVE key, resolved with the
+#                                      same env-over-file precedence the servers use
+#                                      (see § "Precedence" below). This is the one
+#                                      legitimate place this tool prints the raw
+#                                      value — it is the provisioning / consumer
+#                                      path. --fingerprint prints a truncated
+#                                      SHA-256 digest instead; prefer that form in
+#                                      any diagnostic output.
+#   kb-api-key path                   Print the resolved key FILE path. Never reads
+#                                      or prints the key value.
+#
+# Key file: ~/.aiteamforge/api-key, mode 0600, single line UTF-8, one trailing
+# newline permitted and stripped. Parent dir ~/.aiteamforge/, mode 0700 — but see
+# the note in _ensure_dir() below: an *already-existing* ~/.aiteamforge is left
+# alone, because that directory is shared by many unrelated tools (team-paths.json,
+# vault files, …) at looser permissions for legitimate reasons. Contract § 2 says
+# "create if absent" — it does not license this tool to retroactively tighten a
+# shared directory out from under every other consumer. The file's own 0600 mode
+# is the operative protection: directory traversal without file-read permission
+# does not expose the contents.
+#
+# Precedence (mirrors contract § 2 exactly — this is what `show` resolves, and it
+# is the same rule subitems 003/004 implement server-side):
+#   resolved_key =
+#       env AITEAMFORGE_API_KEY, if set AND non-empty after stripping ASCII
+#           whitespace (an env var set to "" or whitespace-only is treated as
+#           UNSET and falls through — `export AITEAMFORGE_API_KEY=` must not
+#           silently disable a provisioned gate)
+#       else contents of the key file, if it loads cleanly via the secure-read
+#           path below
+#       else UNSET (`show` exits 1 with no output on stdout)
+#
+# Secure read — mirrors claude-hooks/damage-control/_kanban_auth.py's TOCTOU
+# defenses: open with O_NOFOLLOW (refuse symlinks), fstat the descriptor (must be
+# a regular file owned by the current euid, no group/other permission bits), and
+# any failure resolves to "no key" rather than raising.
+#
+# Test-isolation seam (mirrors the fleet-monitor precedent named in contract § 2 —
+# FLEET_MSG_FILE / FLEET_VAULT_FILE): set AITEAMFORGE_API_KEY_FILE to point this
+# tool (and only this tool) at a throwaway path instead of the real
+# ~/.aiteamforge/api-key. Tests use this so they never touch the real key file.
+#
+# XACA-0395
+
+set -euo pipefail
+
+# ── Colour / message helpers ───────────────────────────────────────────────
+
+if [[ -t 2 ]]; then
+    RED='\033[0;31m'; YELLOW='\033[0;33m'; GREEN='\033[0;32m'; NC='\033[0m'
+else
+    RED=''; YELLOW=''; GREEN=''; NC=''
+fi
+_err()  { echo -e "${RED}[ERROR]${NC} $*" >&2; }
+_warn() { echo -e "${YELLOW}[WARN]${NC} $*" >&2; }
+_ok()   { echo -e "${GREEN}[OK]${NC} $*"; }
+
+# ── Path resolution ─────────────────────────────────────────────────────────
+
+# Resolve the key file path. AITEAMFORGE_API_KEY_FILE is a test-isolation seam
+# only — normal operation always resolves to ~/.aiteamforge/api-key.
+_key_path() {
+    printf '%s' "${AITEAMFORGE_API_KEY_FILE:-${HOME}/.aiteamforge/api-key}"
+}
+
+# ── Directory setup ──────────────────────────────────────────────────────────
+
+# Create the key file's parent directory at mode 0700 if it does not already
+# exist. Deliberately does NOT chmod an already-existing directory — see the
+# header comment. mkdir -m sets the literal mode; it is not weakened by umask
+# (verified: umask 022, mkdir -m 0700 still yields 0700).
+#
+# Single-level `mkdir -m` (no -p) is used for the normal case, since $dir's own
+# parent always exists in practice ($HOME, or the test sandbox the caller
+# already mktemp -d'd). -p is combined with -m only in the fallback branch,
+# where SC2174 applies (-m only binds the deepest created level under -p) — so
+# the fallback re-asserts 0700 on the leaf explicitly rather than trusting -m.
+_ensure_dir() {
+    local path dir
+    path="$(_key_path)"
+    dir="$(dirname -- "$path")"
+    if [[ ! -d "$dir" ]]; then
+        mkdir -m 0700 -- "$dir" 2>/dev/null || {
+            mkdir -p -- "$dir"
+            [[ -d "$dir" ]] && chmod 0700 -- "$dir"
+        }
+    fi
+}
+
+# ── Key generation ───────────────────────────────────────────────────────────
+
+# Emit a fresh key on stdout. secrets.token_urlsafe(32) yields ~43 chars drawn
+# from [A-Za-z0-9_-] only (base64url, no padding) — a strict subset of the
+# credential-shape charset the servers accept (§ 3.3:
+# ^[A-Za-z0-9._~+/=-]{16,512}$), and well within the 16..512 length bound.
+_generate_key() {
+    python3 -c 'import secrets; print(secrets.token_urlsafe(32), end="")'
+}
+
+# ── Secure atomic write ──────────────────────────────────────────────────────
+
+# Write a key (read from stdin — never passed as an argv, so it never shows up
+# in `ps`) to $1 atomically at mode 0600. Writes to a temp file in the same
+# directory then os.replace()s it into place: rename(2) unlinks whatever was at
+# the destination path (including a symlink placed there by an attacker) rather
+# than following it, so this is safe even if $1 is currently a dangling or
+# malicious symlink.
+#
+# NOTE: the python source is loaded into a variable and run via `python3 -c`,
+# NOT `python3 - <<PYEOF`. The latter would make the heredoc BE the process's
+# stdin (that's how `python3 -` gets its source), leaving nothing for the
+# script's own `sys.stdin.read()` to consume — every write would silently
+# write an empty key. `-c` keeps stdin free for the actual key data piped in
+# by the caller.
+_KB_API_KEY_WRITE_PY=$(cat <<'PYEOF'
+import os
+import sys
+import tempfile
+
+path = sys.argv[1]
+key = sys.stdin.read()
+if key.endswith("\n"):
+    key = key[:-1]
+if not key:
+    print("ERR: refusing to write an empty key", file=sys.stderr)
+    sys.exit(1)
+data = (key + "\n").encode("utf-8")
+
+parent = os.path.dirname(path) or "."
+fd, tmp = tempfile.mkstemp(dir=parent, prefix=".api-key.")
+try:
+    os.write(fd, data)
+    os.fchmod(fd, 0o600)
+    os.close(fd)
+    fd = -1
+    os.replace(tmp, path)
+except BaseException:
+    if fd != -1:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    raise
+PYEOF
+)
+
+_write_key() {
+    local path="$1"
+    python3 -c "$_KB_API_KEY_WRITE_PY" "$path"
+}
+
+# ── Secure read ───────────────────────────────────────────────────────────────
+
+# Print the key file's contents on stdout if (and only if) it passes the
+# secure-read checks from contract § 2: O_NOFOLLOW open, fstat must show a
+# regular file owned by the current euid with no group/other permission bits.
+# On any failure, print nothing and exit non-zero — this function must never
+# raise into the caller, and never echoes the failure reason to stdout (only
+# to stderr, and never with the key).
+_secure_read_key() {
+    local path="$1"
+    python3 - "$path" <<'PYEOF'
+import os
+import stat
+import sys
+
+path = sys.argv[1]
+try:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+except OSError as exc:
+    print(f"cannot open {path}: {exc}", file=sys.stderr)
+    sys.exit(2)
+
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        print(f"{path} is not a regular file", file=sys.stderr)
+        sys.exit(3)
+    if st.st_uid != os.getuid():
+        print(f"{path} is not owned by the current user", file=sys.stderr)
+        sys.exit(4)
+    if st.st_mode & 0o077:
+        print(f"{path} has group/other permission bits set (must be 0600)", file=sys.stderr)
+        sys.exit(5)
+    chunks = []
+    while True:
+        chunk = os.read(fd, 65536)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    data = b"".join(chunks)
+finally:
+    os.close(fd)
+
+try:
+    text = data.decode("utf-8")
+except UnicodeDecodeError:
+    print(f"{path} is not valid UTF-8", file=sys.stderr)
+    sys.exit(6)
+
+if text.endswith("\n"):
+    text = text[:-1]
+if not text:
+    print(f"{path} is empty", file=sys.stderr)
+    sys.exit(7)
+
+sys.stdout.write(text)
+PYEOF
+}
+
+# ── ASCII-whitespace strip (for the env-var precedence check) ───────────────
+
+_ascii_strip() {
+    local s="$1"
+    s="${s#"${s%%[![:space:]]*}"}"
+    s="${s%"${s##*[![:space:]]}"}"
+    printf '%s' "$s"
+}
+
+# ── Precedence resolution (mirrors contract § 2 exactly) ────────────────────
+
+# Print the resolved key on stdout. Exit 0 if a key resolved, 1 if not (env
+# unset/whitespace-only AND the file is absent/unreadable/wrong-mode — same
+# "gate is OPEN" condition the servers use). Never prints anything but the key
+# itself on stdout; diagnostics go to stderr.
+_resolve_key() {
+    local env_raw stripped path
+    env_raw="${AITEAMFORGE_API_KEY-}"
+    stripped="$(_ascii_strip "$env_raw")"
+    if [[ -n "$stripped" ]]; then
+        printf '%s' "$stripped"
+        return 0
+    fi
+
+    path="$(_key_path)"
+    if [[ ! -e "$path" && ! -L "$path" ]]; then
+        return 1
+    fi
+    _secure_read_key "$path"
+}
+
+# ── Fingerprint (diagnostic-safe stand-in for the raw key) ───────────────────
+
+_sha256_hex() {
+    if command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 | awk '{print $1}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk '{print $1}'
+    else
+        python3 -c 'import sys, hashlib; sys.stdout.write(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'
+    fi
+}
+
+# Truncated SHA-256 of the key, 16 hex chars (64 bits) — enough to tell two
+# keys apart in a log line without reconstructing or narrowing the secret.
+_fingerprint() {
+    local key="$1"
+    printf '%s' "$key" | _sha256_hex | cut -c1-16
+}
+
+# ── Subcommands ───────────────────────────────────────────────────────────────
+
+cmd_generate() {
+    local force=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=1; shift ;;
+            *) _err "generate: unknown option '$1'"; exit 2 ;;
+        esac
+    done
+
+    _ensure_dir
+    local path; path="$(_key_path)"
+
+    if { [[ -e "$path" ]] || [[ -L "$path" ]]; } && [[ "$force" -ne 1 ]]; then
+        _err "A key already exists at $path — refusing to overwrite."
+        _err "Use 'kb-api-key generate --force' to replace it, or 'kb-api-key rotate'."
+        exit 1
+    fi
+
+    _generate_key | _write_key "$path"
+    _ok "Generated new API key at $path (mode 0600)."
+    echo "If a server is already reading this key, restart it — the key is resolved" >&2
+    echo "once at process startup and cached; it is never re-read per request." >&2
+}
+
+cmd_rotate() {
+    if [[ $# -gt 0 ]]; then
+        _err "rotate: unknown argument(s): $*"
+        exit 2
+    fi
+
+    _ensure_dir
+    local path; path="$(_key_path)"
+    local existed=0
+    { [[ -e "$path" ]] || [[ -L "$path" ]]; } && existed=1
+
+    _generate_key | _write_key "$path"
+
+    if [[ "$existed" -eq 1 ]]; then
+        _ok "Rotated API key at $path (mode 0600)."
+    else
+        _ok "No prior key found — generated a new key at $path (mode 0600)."
+    fi
+    echo "" >&2
+    _warn "Both LCARS and fleet-monitor resolve this key ONCE at process startup and"
+    _warn "cache it in memory for the life of the process (contract § 2 — no per-request"
+    _warn "re-read, no TOCTOU surface). Rotation does NOT take effect until every server"
+    _warn "process that reads this key is RESTARTED."
+}
+
+cmd_show() {
+    local fingerprint=0
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --fingerprint) fingerprint=1; shift ;;
+            *) _err "show: unknown option '$1'"; exit 2 ;;
+        esac
+    done
+
+    local key
+    if ! key="$(_resolve_key)"; then
+        _err "No key resolved: AITEAMFORGE_API_KEY is unset/empty and $(_key_path) is absent, unreadable, or wrong-mode."
+        _err "This is the 'gate OPEN' condition (contract § 7) — run 'kb-api-key generate' to provision one."
+        exit 1
+    fi
+
+    if [[ "$fingerprint" -eq 1 ]]; then
+        _fingerprint "$key"
+        echo ""
+    else
+        printf '%s\n' "$key"
+    fi
+}
+
+cmd_path() {
+    if [[ $# -gt 0 ]]; then
+        _err "path: unknown argument(s): $*"
+        exit 2
+    fi
+    _key_path
+    echo ""
+}
+
+usage() {
+    sed -n '2,60p' "${BASH_SOURCE[0]}" | grep '^#' | sed 's/^# \{0,1\}//'
+}
+
+main() {
+    local sub="${1:-}"
+    [[ $# -gt 0 ]] && shift || true
+
+    case "$sub" in
+        generate) cmd_generate "$@" ;;
+        rotate)   cmd_rotate "$@" ;;
+        show)     cmd_show "$@" ;;
+        path)     cmd_path "$@" ;;
+        -h|--help|help|"") usage; [[ "$sub" == "" ]] && exit 2 || exit 0 ;;
+        *) _err "Unknown subcommand: '$sub'"; usage >&2; exit 2 ;;
+    esac
+}
+
+main "$@"

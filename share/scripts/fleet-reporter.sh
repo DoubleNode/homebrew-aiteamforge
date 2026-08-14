@@ -640,9 +640,17 @@ send_status() {
     echo "Endpoints: ${#API_ENDPOINTS[@]}"
 
     for endpoint in "${API_ENDPOINTS[@]}"; do
-        # Use auth token for central endpoints only
+        # XACA-0395: send the token to every endpoint, not just non-localhost
+        # ones. fleet-monitor's auth gate (FLEET_AUTH_TOKEN) is per-server-
+        # process, not per-deployment-topology — a local fleet-monitor instance
+        # started with FLEET_AUTH_TOKEN set gates its mutating routes exactly
+        # like the fly.dev instance does, so skipping the header for "localhost"
+        # endpoints would 401 against a locally-gated server. Matches the
+        # sibling reporters (kanban-reporter.sh, knowledge-reporter.sh), which
+        # never special-case the endpoint host. Graceful degradation is
+        # unaffected: an empty CENTRAL_AUTH_TOKEN still sends no header.
         local auth=""
-        if [[ "$endpoint" != *"localhost"* ]] && [ -n "$CENTRAL_AUTH_TOKEN" ]; then
+        if [ -n "$CENTRAL_AUTH_TOKEN" ]; then
             auth="$CENTRAL_AUTH_TOKEN"
         fi
 

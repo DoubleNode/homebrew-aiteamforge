@@ -434,7 +434,7 @@
         if (testBtn) testBtn.disabled = true;
 
         try {
-            var resp = await fetch(_apiUrl('/api/team-config/account/test-connection'), {
+            var resp = await apiFetch(_apiUrl('/api/team-config/account/test-connection'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ env_var_name: envVarName })
@@ -702,7 +702,7 @@
         if (applyBtn) applyBtn.disabled = true;
 
         try {
-            var resp = await fetch(_apiUrl('/api/team-config/account/resume-ids'), {
+            var resp = await apiFetch(_apiUrl('/api/team-config/account/resume-ids'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -743,7 +743,7 @@
     // ─────────────────────────────────────────────────────────────
     async function _doAssign(teamSlug, engineSlug, accountSlug, oldAccountId, selectEl) {
         try {
-            var resp = await fetch(_apiUrl('/api/team-config/account/assign'), {
+            var resp = await apiFetch(_apiUrl('/api/team-config/account/assign'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -793,7 +793,7 @@
         }
 
         try {
-            var resp = await fetch(_apiUrl('/api/team-config/account/save'), {
+            var resp = await apiFetch(_apiUrl('/api/team-config/account/save'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)

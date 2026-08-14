@@ -33,12 +33,15 @@ import http.server
 import socketserver
 import contextlib
 import copy
+import hashlib
+import hmac
 import json
 import mimetypes
 import os
 import re
 import shlex
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -444,6 +447,277 @@ MAIN_ZIP_SKIP_CHANNELS = frozenset({"secrets_export", "icloud_excluded"})
 # DoS). 50 MiB covers the largest legitimate POST (base64 roadmap-PDF stash + team/
 # board export bundles). Override via env for special cases.
 MAX_POST_BODY_BYTES = int(os.environ.get('LCARS_MAX_POST_BODY_BYTES', str(50 * 1024 * 1024)))
+
+
+# ---------------------------------------------------------------------------
+# XACA-0395: API-key auth gate for state-mutating routes.
+#
+# This block is CONTRACT-BOUND. Do not change header names, the 401 body
+# bytes, the comparison primitive, or the open-when-unset posture without
+# first amending kanban/plans/XACA-0395/XACA-0395_auth_contract.md and
+# getting reviewer sign-off — see that document's §6 on allowlist growth for
+# why. The gate itself lives on LCARSHandler (below); this section holds the
+# process-wide, resolve-once pieces it depends on.
+# ---------------------------------------------------------------------------
+
+AITEAMFORGE_API_KEY_FILE = Path.home() / '.aiteamforge' / 'api-key'
+
+# Contract §3.3 — credential shape validation. Applied to whichever credential
+# was extracted (Bearer or X-API-Key) BEFORE it ever reaches a comparison.
+_AUTH_CREDENTIAL_SHAPE_RE = re.compile(r'^[A-Za-z0-9._~+/=-]{16,512}$')
+
+# Contract §3.1 — case-insensitive scheme, at least one space/tab separator.
+_AUTH_BEARER_RE = re.compile(r'^[Bb][Ee][Aa][Rr][Ee][Rr][ \t]+(.+)$')
+
+# Contract §4 — byte-exact 401 body. Compact separators, this key order, no
+# trailing newline. Do NOT build this via json.dumps(); a future change to
+# json's default separators must not silently change these bytes.
+_AUTH_401_BODY = b'{"error":"Unauthorized","code":"unauthorized"}'
+
+# XACA-0395-007 (P0 correction, post-review) — GET /api/auth-key's cross-origin
+# refusal body. Deliberately its own constant, not _AUTH_401_BODY: this is a
+# 403 ("you may not even ASK for the key from this origin"), a different
+# status and a different failure class than the mutating-route 401 ("you
+# asked correctly and were still rejected"). See serve_auth_key() for why
+# this endpoint needs an origin check that the mutating gate does not.
+_AUTH_KEY_CROSS_ORIGIN_403_BODY = b'{"error":"Forbidden","code":"cross_origin_denied"}'
+
+# Contract §6 — public-route allowlist for MUTATING verbs only (the routes
+# dispatched through do_POST/do_PUT/do_PATCH/do_DELETE). Deliberately empty:
+# none of the contract's initial allowlist entries apply here — entry A
+# (OPTIONS) is handled entirely by do_OPTIONS, which this gate is never
+# wired into; entries B/C (GET /api/status, all other GET/HEAD) are out of
+# scope by construction because do_GET/do_HEAD are untouched by this ticket;
+# entry D is fleet-monitor's, not LCARS's. Kept as a real, checked data
+# structure (not just a comment) so a future genuinely-public mutating route
+# has one disciplined place to be added — contract §6: "An allowlist entry
+# added only in code is a contract violation," so adding here requires
+# amending the contract doc first.
+_PUBLIC_MUTATING_ROUTES: frozenset = frozenset()
+
+# Sentinel distinguishing "not yet resolved" from "resolved to None" (i.e.
+# genuinely unset -> open posture). Never leaks outside this module.
+_AUTH_KEY_UNRESOLVED = object()
+
+# Sentinel returned by _extract_presented_credential() when both headers
+# presented valid-shape but DIFFERING credentials (contract §3.4 — 401
+# unconditionally; never "try one then the other").
+_AUTH_CREDENTIAL_CONFLICT = object()
+
+# Process-wide cache for the resolved expected key. Populated exactly once
+# (contract §2: "resolved once at process start ... not re-read per
+# request"). resolve_api_key_or_die() populates it eagerly at startup (and
+# logs the required posture line); _get_resolved_api_key() is the lazy
+# fallback so the gate still works correctly for any caller (e.g. a test)
+# that exercises a handler without going through main() first. Either path
+# resolves the cache at most once.
+_resolved_api_key_state = {'key': _AUTH_KEY_UNRESOLVED, 'rejected_for_mode': False}
+_resolved_api_key_lock = threading.Lock()
+
+
+def _auth_safe_equal(presented: str, expected: str) -> bool:
+    """Constant-time credential equality (contract §5).
+
+    Both sides are hashed to a fixed-length digest BEFORE comparison. Hashing
+    first — not hmac.compare_digest alone — is what removes the length
+    oracle: compare_digest() does not raise on unequal-length bytes, but it
+    does leak length via its comparison, and (given non-ASCII str input) can
+    raise TypeError. Hashing first makes both digests unconditionally 32
+    bytes, so neither problem is reachable. Mirrors the Node safeEqual()
+    used by subitem 004's fleet-monitor middleware exactly.
+    """
+    a = hashlib.sha256(presented.encode('utf-8')).digest()
+    b = hashlib.sha256(expected.encode('utf-8')).digest()
+    return hmac.compare_digest(a, b)
+
+
+def _load_api_key_from_file():
+    """Securely load the LCARS API key from ~/.aiteamforge/api-key.
+
+    Mirrors claude-hooks/damage-control/_kanban_auth.py's secure-load
+    pattern (contract §2): refuse symlinks, require a regular owner-owned
+    file, refuse any group/other permission bit, and never let a load
+    failure raise into the request path — every failure resolves to
+    (None, ...).
+
+    Returns (key_or_None, rejected_for_mode). rejected_for_mode is True only
+    when the file EXISTS in some form but was refused for shape, ownership,
+    or mode — distinct from "no file at all", which is the ordinary
+    open-posture (unset) case and must not log the "key file rejected"
+    warning.
+    """
+    fd = None
+    try:
+        try:
+            fd = os.open(str(AITEAMFORGE_API_KEY_FILE), os.O_RDONLY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return None, False
+        except OSError:
+            # ELOOP (symlink), EACCES, etc. — something exists at this path
+            # but could not be opened safely. Reject, don't silently skip.
+            return None, True
+
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            return None, True
+        if st.st_uid != os.geteuid():
+            return None, True
+        if st.st_mode & 0o077:
+            # Any group or other permission bit set — refuse to load.
+            return None, True
+
+        with os.fdopen(fd, 'r', encoding='utf-8') as f:
+            fd = None  # fdopen() now owns the descriptor; avoid double-close below
+            raw = f.read()
+
+        key = raw.strip()
+        if not key:
+            return None, False
+        return key, False
+    except Exception:
+        # Any exception during load (bad encoding, race on the file, etc.)
+        # resolves to UNSET, per contract §2 step 4. The loader must not be
+        # able to raise into the request path.
+        return None, False
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _resolve_api_key():
+    """Resolve the expected AITEAMFORGE_API_KEY: env wins over file (contract
+    §2). An env var set to empty or whitespace-only is treated as unset and
+    falls through to the file, so `export AITEAMFORGE_API_KEY=` cannot
+    silently disable a provisioned file-based key.
+
+    Returns (key_or_None, rejected_for_mode) — see _load_api_key_from_file().
+    """
+    env_val = os.environ.get('AITEAMFORGE_API_KEY', '')
+    env_val = env_val.strip()
+    if env_val:
+        try:
+            # Guard against a malformed (e.g. surrogate-escaped non-UTF-8)
+            # value reaching _auth_safe_equal()'s .encode('utf-8') later and
+            # raising into the request path. Never observed in practice, but
+            # the contract's fault-injection test (§8 L3) covers exactly
+            # this shape of input.
+            env_val.encode('utf-8')
+        except UnicodeEncodeError:
+            pass
+        else:
+            return env_val, False
+    return _load_api_key_from_file()
+
+
+def _get_resolved_api_key():
+    """Return (key_or_None, rejected_for_mode), resolving+caching on first
+    call. Thread-safe double-checked lock; resolves at most once per process
+    regardless of how many threads call it concurrently at startup."""
+    if _resolved_api_key_state['key'] is _AUTH_KEY_UNRESOLVED:
+        with _resolved_api_key_lock:
+            if _resolved_api_key_state['key'] is _AUTH_KEY_UNRESOLVED:
+                key, rejected = _resolve_api_key()
+                _resolved_api_key_state['key'] = key
+                _resolved_api_key_state['rejected_for_mode'] = rejected
+    return _resolved_api_key_state['key'], _resolved_api_key_state['rejected_for_mode']
+
+
+def _reset_resolved_api_key_cache_for_tests():
+    """Test-only: force re-resolution on the next _get_resolved_api_key()
+    call. Production code has no legitimate reason to call this — the whole
+    point of the cache is that rotation requires a restart (contract §2)."""
+    _resolved_api_key_state['key'] = _AUTH_KEY_UNRESOLVED
+    _resolved_api_key_state['rejected_for_mode'] = False
+
+
+def resolve_api_key_or_die() -> None:
+    """XACA-0395: resolve the LCARS API key once, before accepting any
+    connections, and log the single required startup posture line (contract
+    §7 — "never silently open"). Neither logged line contains the key, its
+    length, or any prefix of it.
+
+    If AITEAMFORGE_REQUIRE_AUTH=1 and no usable key resolves, refuse to
+    start (non-zero exit) rather than run and 401 every request — "a server
+    that answers is a server someone will assume is healthy" (contract §7).
+    Default is unset in this ticket; flipping the default fleet-wide is a
+    separate, later, user decision — not something this function does.
+    """
+    key, rejected_for_mode = _get_resolved_api_key()
+
+    if key:
+        print("[LCARS] AUTH: gate ACTIVE")
+        return
+
+    if rejected_for_mode:
+        posture_line = (
+            "AUTH: gate OPEN — key file rejected (must be a regular "
+            f"owner-owned file, mode 0600): {AITEAMFORGE_API_KEY_FILE}"
+        )
+    else:
+        posture_line = (
+            "AUTH: gate OPEN — no API key configured; state-mutating "
+            "routes are UNAUTHENTICATED"
+        )
+
+    require_auth = os.environ.get('AITEAMFORGE_REQUIRE_AUTH', '') == '1'
+    if require_auth:
+        print(
+            "\n"
+            "================================================================================" + "\n"
+            "FATAL: AITEAMFORGE_REQUIRE_AUTH=1 but no usable API key resolved" + "\n"
+            "================================================================================" + "\n"
+            f"  {posture_line}" + "\n"
+            "\n"
+            "  Refusing to start — AITEAMFORGE_REQUIRE_AUTH=1 means a server that\n"
+            "  answers requests must never run with state-mutating routes\n"
+            "  unauthenticated.\n"
+            "\n"
+            "  To resolve:\n"
+            "    1. Provision a key: kb-api-key generate\n"
+            f"    2. Verify {AITEAMFORGE_API_KEY_FILE} is mode 0600 and owner-owned\n"
+            "    3. Restart this server\n"
+            "================================================================================",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    print(f"[LCARS] {posture_line}", file=sys.stderr)
+
+
+def _origin_matches_host(origin_header: str, host_header: str) -> bool:
+    """XACA-0395-007 (P0 correction) — best-effort same-origin check for
+    GET /api/auth-key. Compares only the `Origin` header's host[:port]
+    component against the request's `Host` header; scheme is deliberately
+    NOT compared, because this plain http.server backend has no reliable
+    view of its own *external* scheme — it always speaks HTTP locally even
+    when reached through an HTTPS-terminating proxy (the Tailscale funnel
+    path-prefix routes in PATH_PREFIXES are exactly that case: the funnel
+    forwards over HTTP with the original Host preserved).
+
+    Callers pass `''`/`None` for a missing header; both compare unequal to
+    everything, so a missing Host header (should never happen — it's
+    mandatory in HTTP/1.1) fails closed rather than open.
+
+    This is a defense-in-depth check, not the primary protection. The
+    primary protection is that serve_auth_key() sends no
+    Access-Control-Allow-Origin header at all, so a browser enforces the
+    ordinary same-origin policy on the response body regardless of what
+    this function decides — a non-browser caller (curl, another server)
+    can already reach this same-machine port and is not the threat model
+    this check exists for; it exists so a victim's BROWSER, tricked into
+    running a foreign page's JS, cannot use that JS to read the key on the
+    victim's behalf.
+    """
+    if not origin_header or not host_header:
+        return False
+    try:
+        origin_netloc = urlparse(origin_header).netloc
+    except Exception:
+        return False
+    return bool(origin_netloc) and origin_netloc.strip().lower() == host_header.strip().lower()
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -2891,8 +3165,147 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(UI_DIR), **kwargs)
 
+    # -----------------------------------------------------------------
+    # XACA-0395: API-key auth gate. See the contract-bound module-level
+    # block above (AITEAMFORGE_API_KEY_FILE et al.) for the resolve/cache
+    # machinery this depends on. Deliberately NOT wired into do_OPTIONS,
+    # do_GET, or do_HEAD — a gated preflight breaks every cross-origin
+    # mutation in the browser UI, and GET/HEAD auth is out of scope for
+    # this ticket (contract §6, entries A/B/C).
+    # -----------------------------------------------------------------
+
+    def _extract_bearer_credential(self, header_value):
+        """Contract §3.1. Returns the stripped, shape-valid credential from
+        an `Authorization: Bearer <key>` header value, or None if the header
+        is absent, the scheme isn't Bearer, or the credential fails shape
+        validation (contract §3.3). A non-Bearer scheme (e.g. Basic) is
+        deliberately NOT a 401 here — it falls through so an X-API-Key
+        caller behind a proxy that injects Basic isn't broken."""
+        if header_value is None:
+            return None
+        match = _AUTH_BEARER_RE.match(header_value)
+        if not match:
+            return None
+        credential = match.group(1).strip()
+        if not _AUTH_CREDENTIAL_SHAPE_RE.match(credential):
+            return None
+        return credential
+
+    def _extract_api_key_header_credential(self, header_value):
+        """Contract §3.2. Returns the stripped, shape-valid credential from
+        an `X-API-Key` header value, or None."""
+        if header_value is None:
+            return None
+        credential = header_value.strip()
+        if not _AUTH_CREDENTIAL_SHAPE_RE.match(credential):
+            return None
+        return credential
+
+    def _extract_presented_credential(self):
+        """Contract §3.4 — resolve the single presented credential from
+        whichever of Authorization/X-API-Key yielded a valid-shape value.
+
+        Header NAMES are matched case-insensitively by self.headers.get()
+        (an email.message.Message subclass) by construction — no manual
+        lowercasing needed.
+
+        Returns the credential string, None (neither header yielded a
+        valid-shape credential), or _AUTH_CREDENTIAL_CONFLICT (both yielded
+        credentials and they disagree — caller must 401 unconditionally,
+        never "try one then the other").
+        """
+        bearer_cred = self._extract_bearer_credential(self.headers.get('Authorization'))
+        api_key_cred = self._extract_api_key_header_credential(self.headers.get('X-API-Key'))
+
+        if bearer_cred is not None and api_key_cred is not None:
+            # The equality check between the two PRESENTED values must
+            # itself be constant-time (contract §3.4) — comparing with `==`
+            # would reintroduce a timing oracle on the agreement path.
+            if _auth_safe_equal(bearer_cred, api_key_cred):
+                return bearer_cred
+            return _AUTH_CREDENTIAL_CONFLICT
+
+        return bearer_cred if bearer_cred is not None else api_key_cred
+
+    def _send_auth_401(self):
+        """Contract §4 — byte-exact 401. Deliberately does NOT reuse
+        _send_json_response(): that helper emits `Content-Type: application/
+        json` with no charset and uses json.dumps()'s default (non-compact)
+        separators, so its bytes would not match the fleet-monitor side's
+        res.json() output. The body here is a fixed constant regardless of
+        rejection reason (absent / wrong / malformed / disagreeing headers)
+        — that is the non-leak requirement, and it's what makes the 401
+        byte-identical across all rejection paths testable."""
+        body = _AUTH_401_BODY
+        self.send_response(401)
+        self.send_header('Content-Type', 'application/json; charset=utf-8')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('WWW-Authenticate', 'Bearer')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _auth_gate(self) -> bool:
+        """XACA-0395 central auth gate. Call as the FIRST statement of every
+        state-mutating dispatcher (do_POST/do_PUT/do_PATCH/do_DELETE) —
+        before reading any request body (contract: reject unauthenticated
+        callers before an unbounded rfile.read()).
+
+        Returns True if the request may proceed. Returns False if a 401 has
+        already been written to the wire; the caller MUST return
+        immediately and do nothing else.
+        """
+        try:
+            parsed_path = urlparse(self.path).path
+        except Exception:
+            parsed_path = self.path
+        if (self.command, parsed_path) in _PUBLIC_MUTATING_ROUTES:
+            return True
+
+        expected_key, _rejected_for_mode = _get_resolved_api_key()
+        if not expected_key:
+            # Open posture (contract §7): no key configured on this
+            # machine. Every request proceeds exactly as it does today.
+            return True
+
+        presented = self._extract_presented_credential()
+        if presented is None or presented is _AUTH_CREDENTIAL_CONFLICT:
+            self._send_auth_401()
+            return False
+
+        if not _auth_safe_equal(presented, expected_key):
+            self._send_auth_401()
+            return False
+
+        return True
+
     def do_OPTIONS(self):
-        """Handle CORS preflight requests"""
+        """Handle CORS preflight requests.
+
+        XACA-0395-007 P1 CORRECTION (post-review): subitem 003 widened this to
+        'Content-Type, Authorization, X-API-Key' per plan D7, reasoning it was
+        harmless preventive hygiene since zero legitimate cross-origin mutating
+        callers existed at the time. That reasoning missed a second-order
+        effect: this handler is the SINGLE, path-independent preflight
+        responder for every cross-origin request reaching this server,
+        including a mutating one — so widening it here is what allows a
+        foreign origin's preflighted POST/PUT/PATCH/DELETE carrying
+        `Authorization`/`X-API-Key` to pass, which is a necessary step in the
+        cross-origin key-theft-then-mutate chain that motivated the
+        GET /api/auth-key origin check above. Re-verified before reverting
+        (not merely re-asserting D7's now-stale finding): a repo-wide sweep
+        for cross-port fetches in lcars-ui/ still finds exactly the same two
+        hits D7 found (redirect.html:164, agent-panel-router.html:97 — both
+        GET /api/status, both already allowlisted, neither mutating), and
+        fleet-monitor's own bundled /lcars dashboard (server.js `app.use('/lcars',
+        express.static(...))`) is a static copy served from fleet-monitor's OWN
+        origin with zero fetch() calls back to a live per-team LCARS instance
+        on another port — it is not a cross-origin proxy for this API. No
+        legitimate cross-origin authenticated caller exists. Reverted to
+        'Content-Type' only (pre-ticket value) — same-origin requests never
+        trigger a CORS preflight regardless of what this header allows, so the
+        86 in-page mutating fetches are unaffected either way.
+        """
         self.send_response(200)
         self.send_header('Access-Control-Allow-Origin', '*')
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, PUT, PATCH, DELETE, OPTIONS')
@@ -2901,6 +3314,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_POST(self):
         """Handle POST requests"""
+        # XACA-0395: reject unauthenticated callers before reading (or even
+        # bounds-checking) any request body — this MUST stay the first
+        # statement in do_POST.
+        if not self._auth_gate():
+            return
+
         # XACA-0387 (audit F-04-008): cap the declared body size before dispatch so a
         # forged/oversized Content-Length cannot drive an unbounded rfile.read().
         cl_header = self.headers.get('Content-Length')
@@ -3091,6 +3510,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_PUT(self):
         """Handle PUT requests"""
+        # XACA-0395: central auth gate — must stay the first statement.
+        if not self._auth_gate():
+            return
+
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -3116,6 +3539,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_PATCH(self):
         """Handle PATCH requests"""
+        # XACA-0395: central auth gate — must stay the first statement.
+        if not self._auth_gate():
+            return
+
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -3134,6 +3561,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
     def do_DELETE(self):
         """Handle DELETE requests"""
+        # XACA-0395: central auth gate — must stay the first statement.
+        if not self._auth_gate():
+            return
+
         parsed = urlparse(self.path)
         path = parsed.path
 
@@ -13558,6 +13989,8 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.serve_status()
         elif path == '/api/team':
             self.serve_team()
+        elif path == '/api/auth-key':
+            self.serve_auth_key()
         elif path == '/api/backup-status':
             self.serve_backup_status()
         elif path == '/api/integrations':
@@ -14139,6 +14572,87 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Origin', '*')
         self.end_headers()
         self.wfile.write(json.dumps(payload, indent=2).encode())
+
+    def serve_auth_key(self):
+        """GET /api/auth-key — XACA-0395-007 key delivery to the browser client.
+
+        Minimal, deliberate design (contract §7 + plan D5): the browser's central
+        `apiFetch()` wrapper (lcars-ui/js/api-auth.js) calls this once per page
+        load to learn the key it should attach to mutating requests, then caches
+        it in memory for the life of the page.
+
+        Honest limitation, stated once here and not overclaimed elsewhere: a key
+        served to a browser from the SAME origin it will present the key back to
+        is not a secret from that browser's user — anyone who can read the page
+        can read this response too. It authenticates the deployment (stops an
+        off-origin/off-host caller), not the person. Real per-user auth is
+        XACA-0082, a separate ticket.
+
+        This is deliberately a GET and deliberately NOT run through `_auth_gate()`:
+        `_auth_gate()` only wraps the four mutating dispatchers (do_POST/PUT/
+        PATCH/DELETE) by design (contract §6 entry C — GET/HEAD are out of scope
+        for this ticket), and gating the one GET a not-yet-authenticated page
+        needs in order to *learn* the key would be circular. Returns null when no
+        key is configured on this machine (open posture — nothing to inject; the
+        server will accept the request unauthenticated either way).
+
+        XACA-0395-007 P0 CORRECTION (post-review): the first cut of this
+        handler sent `Access-Control-Allow-Origin: *`. That is a DIFFERENT
+        claim than "not a secret from this page's user" — it means "readable
+        by JavaScript running on ANY origin the user's browser happens to
+        visit". A hostile/compromised page could `fetch()` this endpoint
+        cross-origin, read the key out of the response body (ACAO: * is
+        exactly what authorizes a foreign origin to read a response body),
+        and then present it back as `Authorization: Bearer <key>` on a
+        mutating request — fully defeating the auth gate this ticket exists
+        to add. Fixed two ways, deliberately redundant (belt and braces —
+        do not rely on only one of these holding):
+
+          1. No `Access-Control-Allow-Origin` header is sent at all. A
+             same-origin `fetch()` (the only caller this endpoint is for)
+             never needs CORS headers to read its own origin's response.
+             Omitting ACAO means a cross-origin `fetch()` still completes at
+             the network level (this is a bare GET — no preflight — so the
+             request itself cannot be blocked client-side), but the
+             browser refuses to expose the response BODY to the calling
+             page's JavaScript, which is what actually matters here.
+          2. `Origin` is checked server-side against `Host` regardless of
+             what the browser would have done, via `_origin_matches_host()`.
+             A present, mismatched `Origin` gets a 403 with NO key material
+             in the body, never a 200 with a null-ed-out or truncated key —
+             the response shape for "wrong origin" must not itself leak
+             information about whether a key is configured. A same-origin
+             call (or a call with no `Origin` header at all — non-browser
+             callers, and some same-origin browser requests, omit it) still
+             gets the normal 200 response.
+
+        `Vary: Origin` is sent on both paths so nothing between this server
+        and the browser caches a decision made for one Origin and serves it
+        to another.
+        """
+        origin = self.headers.get('Origin')
+        host = self.headers.get('Host', '')
+
+        if origin and not _origin_matches_host(origin, host):
+            body = _AUTH_KEY_CROSS_ORIGIN_403_BODY
+            self.send_response(403)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Vary', 'Origin')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+
+        key, _rejected_for_mode = _get_resolved_api_key()
+        payload = {"apiKey": key}
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Cache-Control', 'no-store')
+        self.send_header('Vary', 'Origin')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def handle_terminal_activate(self):
         """POST /api/terminal/activate - Switch tmux window and iTerm2 tab
@@ -16930,6 +17444,11 @@ end tell
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        # XACA-0395-007 P1 correction: reverted to 'Content-Type' only (see
+        # do_OPTIONS for the full rationale) — no legitimate cross-origin
+        # caller of this GET-only endpoint needs Authorization/X-API-Key in
+        # preflight, and widening it serves no consumer while enlarging the
+        # cross-origin attack surface for no benefit.
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -16955,6 +17474,11 @@ end tell
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
+        # XACA-0395-007 P1 correction: reverted to 'Content-Type' only (see
+        # do_OPTIONS for the full rationale) — no legitimate cross-origin
+        # caller of this GET-only endpoint needs Authorization/X-API-Key in
+        # preflight, and widening it serves no consumer while enlarging the
+        # cross-origin attack surface for no benefit.
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -18134,6 +18658,11 @@ def main():
     # XACA-0460-010 / XACA-0180: refuse to start if ANY team has a legacy stub
     # coexisting with its canonical board — check all teams, not just LCARS_TEAM.
     check_all_dual_boards_or_die()
+
+    # XACA-0395: resolve the API-key auth gate once, before accepting any
+    # connections, and log the single required posture line. Aborts (non-
+    # zero exit) instead if AITEAMFORGE_REQUIRE_AUTH=1 and no key resolves.
+    resolve_api_key_or_die()
 
     # Allow port reuse to avoid "Address already in use" errors.
     # XACA-0889-018: now a class attribute on LCARSServer (see its docstring)

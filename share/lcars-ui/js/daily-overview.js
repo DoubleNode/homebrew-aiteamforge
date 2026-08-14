@@ -217,7 +217,7 @@ function _handleDismiss(btn, card, itemId) {
 
     const url = apiUrl('/api/alerts/' + encodeURIComponent(itemId) + '/dismiss');
 
-    fetch(url, {
+    apiFetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ team: team }),
@@ -272,7 +272,7 @@ function _handleComplete(btn, card, itemId) {
 
     const url = apiUrl('/api/todos');
 
-    fetch(url, {
+    apiFetch(url, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ team: team, id: itemId, updates: { status: 'completed' } }),

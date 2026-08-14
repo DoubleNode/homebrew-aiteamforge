@@ -192,7 +192,7 @@ install_helper_scripts() {
     for helper in agent-panel-display.sh display-agent-avatar.sh iterm2_window_manager.py \
                   set-lcars-profile-browser.py create-lcars-profile.py lcars-tmp-dir.sh \
                   kanban-backup.py fleet-reporter.sh init-agent-panel-json.py \
-                  msg-client.sh; do
+                  msg-client.sh kb-api-key; do
         if [ -f "$scripts_src/$helper" ]; then
             cp "$scripts_src/$helper" "$scripts_dest/$helper"
             chmod +x "$scripts_dest/$helper"

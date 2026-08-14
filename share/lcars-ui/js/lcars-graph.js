@@ -312,7 +312,7 @@ async function loadGraphData(engineId, query, limit) {
 
     try {
         const url = apiUrl('/api/graph/data');
-        const resp = await fetch(url, {
+        const resp = await apiFetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
@@ -585,7 +585,7 @@ function _renderNodeProperties(container, props) {
 async function _fetchAndEnrichNodeDetails(nodeId, content, relSection) {
     const engineId = currentGraphEngine || 'demo';
     try {
-        const resp = await fetch(apiUrl('/api/graph/node'), {
+        const resp = await apiFetch(apiUrl('/api/graph/node'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId, nodeId }),
@@ -824,7 +824,7 @@ async function searchGraph(query) {
     }
 
     try {
-        const resp = await fetch(apiUrl('/api/graph/query'), {
+        const resp = await apiFetch(apiUrl('/api/graph/query'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({

@@ -39,6 +39,14 @@ const { ensureReady: vaultEnsureReady } = require('./lib/vault-crypto');
 const { registerVaultRoutes } = require('./lib/vault-routes');
 const { registerMsgRelayRoutes } = require('./lib/msg-relay-routes');
 
+// XACA-0395-005: shared API-key auth gate (kanban/plans/XACA-0395/
+// XACA-0395_auth_contract.md). requireApiKey is mounted as the second
+// positional argument on every mutating route below — additive only, no
+// handler signature changes (contract §9). logAuthStartupNotice() is called
+// once at process start, just before app.listen(), so the ABSENT/BLANK/SET
+// posture always reaches an operator's logs (never silently open).
+const { requireApiKey, logAuthStartupNotice } = require('./lib/auth-middleware');
+
 // ============================================================================
 // CONFIGURATION
 // ============================================================================
@@ -881,7 +889,7 @@ function formatUptime(seconds) {
  * POST /api/status
  * Receive status update from client machine
  */
-app.post('/api/status', (req, res) => {
+app.post('/api/status', requireApiKey, (req, res) => {
     try {
         const { machine, sessions, backup_status } = req.body;
 
@@ -985,7 +993,7 @@ app.get('/api/fleet', (req, res) => {
  * PUT /api/machine/:machineId/nickname
  * Set or clear a machine's nickname
  */
-app.put('/api/machine/:machineId/nickname', (req, res) => {
+app.put('/api/machine/:machineId/nickname', requireApiKey, (req, res) => {
     try {
         const { machineId } = req.params;
         const { nickname } = req.body;
@@ -1061,7 +1069,7 @@ app.get('/api/health', (req, res) => {
  * Teams POST their config when they start up or when board data changes
  * Body: { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals }
  */
-app.post('/api/team-register', (req, res) => {
+app.post('/api/team-register', requireApiKey, (req, res) => {
     try {
         const { team, teamName, subtitle, ship, series, organization, orgColor, kanbanDir, fleetMonitorUrl, terminals } = req.body;
 
@@ -1128,7 +1136,7 @@ app.post('/api/team-register', (req, res) => {
  * Receive full kanban board data from a client team
  * Body: { team, ...boardData } — team field identifies the source team
  */
-app.post('/api/kanban-push', (req, res) => {
+app.post('/api/kanban-push', requireApiKey, (req, res) => {
     try {
         const body = req.body;
 
@@ -1168,7 +1176,7 @@ app.post('/api/kanban-push', (req, res) => {
  * Receive knowledge base stats from a client team
  * Body: { team: "academy", knowledge: { totalEntries, agents, categories, tags, ... } }
  */
-app.post('/api/knowledge-push', (req, res) => {
+app.post('/api/knowledge-push', requireApiKey, (req, res) => {
     try {
         const body = req.body;
 
@@ -1506,7 +1514,7 @@ function execCredentialCli(command, integrationId = null, inputData = null) {
  * Body: { type: "jira", endpoint: "...", user: "...", token: "..." }
  * NEVER returns credential values
  */
-app.post('/api/credentials/:integration', async (req, res) => {
+app.post('/api/credentials/:integration', requireApiKey, async (req, res) => {
     try {
         const { integration } = req.params;
         const credData = req.body;
@@ -1541,7 +1549,7 @@ app.post('/api/credentials/:integration', async (req, res) => {
  * DELETE /api/credentials/:integration
  * Delete credential for an integration
  */
-app.delete('/api/credentials/:integration', async (req, res) => {
+app.delete('/api/credentials/:integration', requireApiKey, async (req, res) => {
     try {
         const { integration } = req.params;
 
@@ -1710,7 +1718,7 @@ app.get('/api/dashboards', (req, res) => {
  * Reorder dashboards by providing an array of IDs in the desired order
  * NOTE: This route MUST be defined before /api/dashboards/:id to avoid matching "reorder" as an ID
  */
-app.put('/api/dashboards/reorder', (req, res) => {
+app.put('/api/dashboards/reorder', requireApiKey, (req, res) => {
     try {
         const { order } = req.body;
 
@@ -1780,7 +1788,7 @@ app.get('/api/dashboards/:id', (req, res) => {
  * POST /api/dashboards
  * Create a new dashboard configuration
  */
-app.post('/api/dashboards', (req, res) => {
+app.post('/api/dashboards', requireApiKey, (req, res) => {
     try {
         const { name, title, subtitle, description, divisions, machines, org_color } = req.body;
 
@@ -1843,7 +1851,7 @@ app.post('/api/dashboards', (req, res) => {
  * PUT /api/dashboards/:id
  * Update an existing dashboard configuration
  */
-app.put('/api/dashboards/:id', (req, res) => {
+app.put('/api/dashboards/:id', requireApiKey, (req, res) => {
     try {
         const { id } = req.params;
         const { name, title, subtitle, description, divisions, machines, org_color, sort_order, show_all_fleet_on, visible_dashboards } = req.body;
@@ -1886,7 +1894,7 @@ app.put('/api/dashboards/:id', (req, res) => {
  * DELETE /api/dashboards/:id
  * Delete a dashboard configuration (system dashboards cannot be deleted)
  */
-app.delete('/api/dashboards/:id', (req, res) => {
+app.delete('/api/dashboards/:id', requireApiKey, (req, res) => {
     try {
         const { id } = req.params;
         const config = loadDashboardConfig();
@@ -2512,7 +2520,7 @@ app.get('/api/epics/:team', (req, res) => {
  * POST /api/epics/:team
  * Create a new Epic for a team
  */
-app.post('/api/epics/:team', (req, res) => {
+app.post('/api/epics/:team', requireApiKey, (req, res) => {
     const { team } = req.params;
     const { title, description, priority, category, dueDate } = req.body;
     const boardPath = findBoardPath(team);
@@ -2574,7 +2582,7 @@ app.post('/api/epics/:team', (req, res) => {
  * PUT /api/epics/:team/:epicId
  * Update an existing Epic
  */
-app.put('/api/epics/:team/:epicId', (req, res) => {
+app.put('/api/epics/:team/:epicId', requireApiKey, (req, res) => {
     const { team, epicId } = req.params;
     const updates = req.body;
     const boardPath = findBoardPath(team);
@@ -2617,7 +2625,7 @@ app.put('/api/epics/:team/:epicId', (req, res) => {
  * DELETE /api/epics/:team/:epicId
  * Delete an Epic
  */
-app.delete('/api/epics/:team/:epicId', (req, res) => {
+app.delete('/api/epics/:team/:epicId', requireApiKey, (req, res) => {
     const { team, epicId } = req.params;
     const boardPath = findBoardPath(team);
 
@@ -2764,6 +2772,46 @@ setInterval(() => {
 setInterval(() => {
     savePushedKnowledge();
 }, SAVE_INTERVAL_MS);
+
+// ============================================================================
+// AUTH GATE STARTUP NOTICE (XACA-0395-005)
+// ============================================================================
+// Closes wiring gap 1 from kanban/plans/XACA-0395/XACA-0395_api_key_auth_
+// mutating_routes.md § "Wiring gaps found during Waves 2": logAuthStartupNotice
+// was previously called only from its own test file — dead code that passed
+// its own tests. Calling it here, once, before the server starts accepting
+// connections, is what makes the ABSENT/BLANK/SET posture actually reach an
+// operator's logs (contract §7 — "never silently open").
+//
+// FLEET_REQUIRE_AUTH (contract §7 "path to fail-closed", wiring gap 2):
+// fleet-monitor previously had only doc-comment references to this switch —
+// no implementation, no abort path — while lcars-ui/server.py already
+// implements the LCARS-side equivalent (AITEAMFORGE_REQUIRE_AUTH,
+// resolve_api_key_or_die() at server.py:628, refuse-to-start at :657-675,
+// wired into main() just before serve_forever()). This block gives
+// fleet-monitor parity, in the same shape: log the posture, then — if
+// FLEET_REQUIRE_AUTH=1 and no usable key resolved — refuse to start (non-
+// zero exit) rather than run and answer every request with a 401 ("a server
+// that answers is a server someone will assume is healthy" — contract §7).
+// Default is unset in this ticket; this does not change posture for any
+// existing deployment. auth-middleware.js is intentionally NOT modified for
+// this — its own doc comment states the startup call site belongs in
+// server.js, not in the shared module.
+const _authStartupState = logAuthStartupNotice();
+if (_authStartupState !== 'set' && String(process.env.FLEET_REQUIRE_AUTH || '') === '1') {
+    console.error('');
+    console.error('================================================================================');
+    console.error('FATAL: FLEET_REQUIRE_AUTH=1 but no usable API key resolved');
+    console.error('================================================================================');
+    console.error('  Refusing to start — FLEET_REQUIRE_AUTH=1 means a server that answers');
+    console.error('  requests must never run with state-mutating routes unauthenticated.');
+    console.error('');
+    console.error('  To resolve:');
+    console.error('    1. Set FLEET_AUTH_TOKEN to a real credential (a Fly.io secret in production)');
+    console.error('    2. Restart this server');
+    console.error('================================================================================');
+    process.exit(1);
+}
 
 // ============================================================================
 // START SERVER

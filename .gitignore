@@ -32,3 +32,9 @@ venv/
 # Temporary files
 *.tmp
 *.log
+
+# Runtime state — dev-team's copy is gitignored there too (.gitignore:212);
+# sync-tap.sh's fleet-monitor/server/ sync_dir has no exclusion for it, so a
+# `--commit` run's `git add -A` would otherwise sweep this local runtime blob
+# into a tap commit (found during XACA-0395 tap-sync assessment).
+fleet-monitor/server/data/pushed-knowledge.json

@@ -2415,7 +2415,7 @@ function makeClickableTerminal(el, win) {
  */
 async function activateTerminal(terminal, windowIndex) {
     try {
-        const response = await fetch(apiUrl('/api/terminal/activate'), {
+        const response = await apiFetch(apiUrl('/api/terminal/activate'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ terminal, window: windowIndex })
@@ -4412,7 +4412,7 @@ async function persistCollapsedState(item, collapsed) {
     console.log('Persisting collapsed state:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/toggle-collapsed'), {
+        const response = await apiFetch(apiUrl('/api/toggle-collapsed'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -4506,7 +4506,7 @@ async function updateItemPriority(item, newPriority, element) {
     console.log('Updating priority:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -4628,7 +4628,7 @@ async function updateItemCategory(item, newCategory, element) {
     console.log('Updating category:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -4756,7 +4756,7 @@ async function updateItemOS(item, newOS, element) {
     console.log('Updating OS:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -4950,7 +4950,7 @@ async function updateItemDueDate(item, newDueDate, element) {
     console.log('Updating due date:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -5139,7 +5139,7 @@ async function updateItemPoints(item, newPoints, element) {
     console.log('Updating points:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(payload)
@@ -5511,7 +5511,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
         resultsContainer.style.display = 'block';
 
         try {
-            const response = await fetch(apiUrl('/api/integrations/search'), {
+            const response = await apiFetch(apiUrl('/api/integrations/search'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ query })
@@ -5636,7 +5636,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
         input.disabled = true;
 
         try {
-            const response = await fetch(apiUrl('/api/integrations/verify'), {
+            const response = await apiFetch(apiUrl('/api/integrations/verify'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -5751,7 +5751,7 @@ function showJiraEditor(element, item, index, isSubitem = false, parentIndex = n
 
         try {
             // Call create item API
-            const response = await fetch(apiUrl('/api/integrations/create-item'), {
+            const response = await apiFetch(apiUrl('/api/integrations/create-item'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -5975,7 +5975,7 @@ async function updateItemJira(item, newJira, element) {
     console.log('Updating Jira ID:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -6052,7 +6052,7 @@ async function updateSubitemJira(subitem, newJira, element, parentIndex, subInde
     console.log('Updating subitem Jira ID:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-subitem'), {
+        const response = await apiFetch(apiUrl('/api/update-subitem'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -6257,7 +6257,7 @@ async function updateSubitemOS(subitem, parentIndex, subIndex, newOS, element) {
     console.log('Updating subitem OS:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-subitem'), {
+        const response = await apiFetch(apiUrl('/api/update-subitem'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -6447,7 +6447,7 @@ async function updateSubitemField(subitem, parentIndex, subIndex, field, value, 
     console.log('Updating subitem field:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-subitem'), {
+        const response = await apiFetch(apiUrl('/api/update-subitem'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -6504,7 +6504,7 @@ async function updateSubitemDueDate(subitem, parentIndex, subIndex, newDueDate, 
     console.log('Updating subitem due date:', payload);
 
     try {
-        const response = await fetch(apiUrl('/api/update-subitem'), {
+        const response = await apiFetch(apiUrl('/api/update-subitem'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -7888,7 +7888,7 @@ async function manualSyncCalendar() {
 
     try {
         // Trigger server-side sync (push kanban items to calendar, pull external events)
-        const response = await fetch(apiUrl('/api/calendar/sync/trigger'), {
+        const response = await apiFetch(apiUrl('/api/calendar/sync/trigger'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ direction: 'both' })
@@ -8124,7 +8124,7 @@ function renderConflictItem(conflict, index) {
  */
 async function resolveConflict(itemId, resolution, mergeData = null) {
     try {
-        const response = await fetch(apiUrl('/api/calendar/conflicts/resolve'), {
+        const response = await apiFetch(apiUrl('/api/calendar/conflicts/resolve'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -8961,7 +8961,7 @@ async function saveCalendarSelection(provider, calendarId) {
     const calendarName = selectEl ? selectEl.options[selectEl.selectedIndex]?.text : null;
 
     try {
-        const response = await fetch(apiUrl('/api/calendar/config'), {
+        const response = await apiFetch(apiUrl('/api/calendar/config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ provider, calendarId, calendarName })
@@ -9000,7 +9000,7 @@ async function connectAppleCalendar() {
 
     try {
         // Send credentials to server
-        const response = await fetch(apiUrl('/api/calendar/connect/apple'), {
+        const response = await apiFetch(apiUrl('/api/calendar/connect/apple'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -9040,7 +9040,7 @@ async function disconnectAppleCalendar() {
     const team = CONFIG.team || 'academy';
 
     try {
-        const response = await fetch(apiUrl('/api/calendar/disconnect/apple'), {
+        const response = await apiFetch(apiUrl('/api/calendar/disconnect/apple'), {
             method: 'POST'
         });
 
@@ -9075,7 +9075,7 @@ async function connectGoogleCalendar() {
 
     try {
         // Send credentials to server
-        const response = await fetch(apiUrl('/api/calendar/connect/google'), {
+        const response = await apiFetch(apiUrl('/api/calendar/connect/google'), {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
@@ -9117,7 +9117,7 @@ async function disconnectGoogleCalendar() {
     const team = CONFIG.team || 'academy';
 
     try {
-        const response = await fetch(apiUrl('/api/calendar/disconnect/google'), {
+        const response = await apiFetch(apiUrl('/api/calendar/disconnect/google'), {
             method: 'POST'
         });
 
@@ -11150,7 +11150,7 @@ async function removeItemFromRelease(releaseId, itemId) {
     if (!confirm('Remove this item from the release?')) return;
 
     try {
-        const response = await fetch(apiUrl(`/api/releases/${releaseId}/items/${itemId}`), {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/items/${itemId}`), {
             method: 'DELETE'
         });
 
@@ -11696,7 +11696,7 @@ async function executePromotion() {
         progressBar.style.width = `${((i + 0.5) / selected.length) * 100}%`;
 
         try {
-            const response = await fetch(apiUrl(`/api/releases/${releaseId}/promote`), {
+            const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/promote`), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ platform: platform })
@@ -12138,7 +12138,7 @@ async function deleteRelease(releaseId, releaseName) {
     }
 
     try {
-        const response = await fetch(apiUrl(`/api/releases/${releaseId}`), {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}`), {
             method: 'DELETE',
             headers: {
                 'Content-Type': 'application/json'
@@ -12173,7 +12173,7 @@ async function deleteRelease(releaseId, releaseName) {
 async function toggleReleaseArchive(releaseId) {
     try {
         const team = CONFIG.team || '';
-        const response = await fetch(apiUrl(`/api/releases/${releaseId}/archive?team=${encodeURIComponent(team)}`), {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/archive?team=${encodeURIComponent(team)}`), {
             method: 'PATCH',
             headers: {
                 'Content-Type': 'application/json'
@@ -12450,7 +12450,7 @@ async function submitReleaseAssignment() {
     try {
         // If currently assigned to a different release, unassign first
         if (currentAssignment && currentAssignment.releaseId && currentAssignment.releaseId !== releaseId) {
-            const unassignResponse = await fetch(apiUrl(`/api/releases/${currentAssignment.releaseId}/items/${releaseAssignModalState.itemId}`), {
+            const unassignResponse = await apiFetch(apiUrl(`/api/releases/${currentAssignment.releaseId}/items/${releaseAssignModalState.itemId}`), {
                 method: 'DELETE'
             });
             if (!unassignResponse.ok) {
@@ -12458,7 +12458,7 @@ async function submitReleaseAssignment() {
             }
         }
 
-        const response = await fetch(apiUrl(`/api/releases/${releaseId}/items`), {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}/items`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -12529,7 +12529,7 @@ async function submitReleaseUnassignment() {
     }
 
     try {
-        const response = await fetch(apiUrl(`/api/releases/${currentAssignment.releaseId}/items/${releaseAssignModalState.itemId}`), {
+        const response = await apiFetch(apiUrl(`/api/releases/${currentAssignment.releaseId}/items/${releaseAssignModalState.itemId}`), {
             method: 'DELETE'
         });
 
@@ -12986,7 +12986,7 @@ async function removeItemFromEpic(epicId, itemId) {
     if (!confirm('Remove this item from the epic?')) return;
 
     try {
-        const response = await fetch(apiUrl(`/api/epics/${epicId}/items/${itemId}`), {
+        const response = await apiFetch(apiUrl(`/api/epics/${epicId}/items/${itemId}`), {
             method: 'DELETE'
         });
 
@@ -13083,7 +13083,7 @@ async function createEpic() {
         const tagsRaw = document.getElementById('new-epic-tags')?.value || '';
         epicData.tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t.length > 0);
 
-        const response = await fetch(apiUrl('/api/epics'), {
+        const response = await apiFetch(apiUrl('/api/epics'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(epicData)
@@ -13191,7 +13191,7 @@ async function updateEpic() {
         const tagsRaw = document.getElementById('edit-epic-tags')?.value || '';
         epicData.tags = tagsRaw.split(',').map(t => t.trim()).filter(t => t.length > 0);
 
-        const response = await fetch(apiUrl(`/api/epics/${epicId}`), {
+        const response = await apiFetch(apiUrl(`/api/epics/${epicId}`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(epicData)
@@ -13225,7 +13225,7 @@ async function confirmDeleteEpic(epicId) {
     if (!confirm(`Delete epic "${epicName}"? All items will be unassigned from this epic.`)) return;
 
     try {
-        const response = await fetch(apiUrl(`/api/epics/${epicId}`), {
+        const response = await apiFetch(apiUrl(`/api/epics/${epicId}`), {
             method: 'DELETE'
         });
 
@@ -13531,7 +13531,7 @@ async function selectEpicForItem(epicId, epicName) {
     const team = modal.dataset.team;
 
     try {
-        const response = await fetch(apiUrl(`/api/epics/${epicId}/items`), {
+        const response = await apiFetch(apiUrl(`/api/epics/${epicId}/items`), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ itemId, team })
@@ -13574,7 +13574,7 @@ async function removeEpicFromItem() {
     }
 
     try {
-        const response = await fetch(apiUrl(`/api/epics/${currentEpicId}/items/${itemId}`), {
+        const response = await apiFetch(apiUrl(`/api/epics/${currentEpicId}/items/${itemId}`), {
             method: 'DELETE'
         });
 
@@ -14090,7 +14090,7 @@ async function saveFlowConfig() {
     };
 
     try {
-        const response = await fetch(apiUrl('/api/releases/flow-config'), {
+        const response = await apiFetch(apiUrl('/api/releases/flow-config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ stages, team: CONFIG.team })
@@ -14263,7 +14263,7 @@ async function submitCreateRelease() {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/releases'), {
+        const response = await apiFetch(apiUrl('/api/releases'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(releaseData)
@@ -14452,7 +14452,7 @@ async function submitEditRelease() {
     }
 
     try {
-        const response = await fetch(apiUrl(`/api/releases/${releaseId}`), {
+        const response = await apiFetch(apiUrl(`/api/releases/${releaseId}`), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(updateData)
@@ -15061,7 +15061,7 @@ async function testIntegration(integrationId) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/integrations/test'), {
+        const response = await apiFetch(apiUrl('/api/integrations/test'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ integrationId })
@@ -15370,7 +15370,7 @@ async function checkAllRAGEngineUpdates() {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/check-updates'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/check-updates'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({})
@@ -15505,7 +15505,7 @@ async function updateRAGEngine(engineId) {
     }, 2000);
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/update'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/update'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15589,7 +15589,7 @@ async function installRAGEngine(engineId) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/install'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/install'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15654,7 +15654,7 @@ async function uninstallRAGEngine(engineId) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/uninstall'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/uninstall'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15711,7 +15711,7 @@ async function startRAGEngine(engineId) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/start'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/start'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15768,7 +15768,7 @@ async function stopRAGEngine(engineId) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/stop'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/stop'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15818,7 +15818,7 @@ async function healthCheckRAGEngine(engineId) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/health'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/health'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15876,7 +15876,7 @@ function editRAGEngine(engineId) {
  */
 async function healthCheckRAGEngineSilent(engineId) {
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/health'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/health'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engineId })
@@ -15952,7 +15952,7 @@ function startRAGEnginesHealthPolling(hasRunning) {
 
         // Every Nth poll, also check PyPI for available updates and patch cards in place
         if (healthPollCount % UPDATE_CHECK_EVERY_N_POLLS === 0) {
-            fetch(apiUrl('/api/rag-engines/check-updates'), {
+            apiFetch(apiUrl('/api/rag-engines/check-updates'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({})
@@ -16261,7 +16261,7 @@ async function saveRAGEngineConfig() {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/rag-engines/save'), {
+        const response = await apiFetch(apiUrl('/api/rag-engines/save'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ engine: engineData })
@@ -16484,7 +16484,7 @@ async function saveIntegration(event) {
     };
 
     try {
-        const response = await fetch(apiUrl('/api/integrations/save'), {
+        const response = await apiFetch(apiUrl('/api/integrations/save'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ integration, isNew: !id })
@@ -16517,7 +16517,7 @@ async function deleteIntegration() {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/integrations/delete'), {
+        const response = await apiFetch(apiUrl('/api/integrations/delete'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ integrationId: id })
@@ -16548,7 +16548,7 @@ async function testIntegrationFromModal() {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/integrations/test'), {
+        const response = await apiFetch(apiUrl('/api/integrations/test'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ integrationId: id })
@@ -16992,7 +16992,7 @@ async function changeItemStatus(item, newStatus) {
             requestBody.clearFields = ['completedAt'];
         }
 
-        const response = await fetch(apiUrl('/api/update-item'), {
+        const response = await apiFetch(apiUrl('/api/update-item'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestBody)
@@ -17072,7 +17072,7 @@ async function changeSubitemStatus(subitem, newStatus, parentItem, parentIndex, 
             requestBody.clearFields = ['completedAt'];
         }
 
-        const response = await fetch(apiUrl('/api/update-subitem'), {
+        const response = await apiFetch(apiUrl('/api/update-subitem'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(requestBody)
@@ -17157,7 +17157,7 @@ async function fetchImportPreview() {
     if (confirmBtn) confirmBtn.disabled = true;
 
     try {
-        const response = await fetch(apiUrl('/api/import/fetch'), {
+        const response = await apiFetch(apiUrl('/api/import/fetch'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ ticketId: ticketId })
@@ -17395,7 +17395,7 @@ async function executeImport() {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/import/execute'), {
+        const response = await apiFetch(apiUrl('/api/import/execute'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -17870,7 +17870,7 @@ async function startTeamExport() {
     updateExportProgress(0, 'EXPORTING...', 'Initializing...');
 
     try {
-        const response = await fetch('/api/export/create', { method: 'POST' });
+        const response = await apiFetch('/api/export/create', { method: 'POST' });
         const result = await readJsonResponse(response);
         if (!result.ok || result.parseError) {
             if (statusEl) statusEl.textContent = 'ERROR';
@@ -18021,7 +18021,7 @@ async function startSecretsExport() {
     let pw = password;
 
     try {
-        const response = await fetch('/api/export/secrets/create', {
+        const response = await apiFetch('/api/export/secrets/create', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body)
@@ -18226,7 +18226,7 @@ async function uploadImportFile(file) {
     formData.append('file', file);
 
     try {
-        const response = await fetch('/api/import/upload', {
+        const response = await apiFetch('/api/import/upload', {
             method: 'POST',
             body: formData,
         });
@@ -18576,7 +18576,7 @@ async function applyTeamImport() {
 
         let secretsJobId;
         try {
-            const uploadResp = await fetch('/api/import/secrets/upload', {
+            const uploadResp = await apiFetch('/api/import/secrets/upload', {
                 method: 'POST',
                 body: secretsFormData,
             });
@@ -18597,7 +18597,7 @@ async function applyTeamImport() {
         const secretsPwInput = document.getElementById('import-secrets-password-input');
         const password = secretsPwInput ? secretsPwInput.value : '';
         try {
-            const preflightResp = await fetch(`/api/import/secrets/preflight/${secretsJobId}`, {
+            const preflightResp = await apiFetch(`/api/import/secrets/preflight/${secretsJobId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ password }),
@@ -18630,7 +18630,7 @@ async function applyTeamImport() {
         // Step 3: POST main apply with paired secrets job ID
         updateImportProgress(25, 'IMPORTING...', 'Applying import...');
         try {
-            const applyResp = await fetch(`/api/import/apply/${currentImportJobId}`, {
+            const applyResp = await apiFetch(`/api/import/apply/${currentImportJobId}`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -18678,7 +18678,7 @@ async function applyTeamImport() {
 
     // ── NO SECRETS PATH (original behavior) ──
     try {
-        const response = await fetch(`/api/import/apply/${currentImportJobId}`, {
+        const response = await apiFetch(`/api/import/apply/${currentImportJobId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ acknowledgePreflightDeltas: _acknowledgePreflightDeltas }),
@@ -18801,7 +18801,7 @@ async function _applyPairedSecretsImport(secretsJobId, password, mainImportData)
     updateImportProgress(50, 'EXTRACTING SECRETS...', 'Applying paired secrets...');
 
     try {
-        const applyResp = await fetch(`/api/import/secrets/apply/${secretsJobId}`, {
+        const applyResp = await apiFetch(`/api/import/secrets/apply/${secretsJobId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password }),
@@ -18957,7 +18957,7 @@ async function uploadSecretsImportFile(file) {
     formData.append('team', team);
 
     try {
-        const response = await fetch('/api/import/secrets/upload', {
+        const response = await apiFetch('/api/import/secrets/upload', {
             method: 'POST',
             body: formData,
         });
@@ -19006,7 +19006,7 @@ async function verifySecretsImportPassword() {
     if (errEl) errEl.style.display = 'none';
 
     try {
-        const response = await fetch(`/api/import/secrets/preflight/${currentSecretsImportJobId}`, {
+        const response = await apiFetch(`/api/import/secrets/preflight/${currentSecretsImportJobId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password }),
@@ -19122,7 +19122,7 @@ async function applySecretsImport() {
     updateSecretsImportProgress(0, 'EXTRACTING...', 'Starting...');
 
     try {
-        const response = await fetch(`/api/import/secrets/apply/${currentSecretsImportJobId}`, {
+        const response = await apiFetch(`/api/import/secrets/apply/${currentSecretsImportJobId}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ password }),
@@ -19707,14 +19707,14 @@ async function saveTodo() {
         let response;
         if (editId) {
             // Update existing — server expects { team, id, updates: {...} }
-            response = await fetch(apiUrl('/api/todos'), {
+            response = await apiFetch(apiUrl('/api/todos'), {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ team, id: editId, updates: { text, priority, requiredBy } })
             });
         } else {
             // Create new
-            response = await fetch(apiUrl('/api/todos'), {
+            response = await apiFetch(apiUrl('/api/todos'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(payload)
@@ -19747,7 +19747,7 @@ async function deleteTodo() {
     const team = CONFIG.team || 'freelance';
 
     try {
-        const response = await fetch(apiUrl('/api/todos'), {
+        const response = await apiFetch(apiUrl('/api/todos'), {
             method: 'DELETE',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ team, id: editId })
@@ -19778,7 +19778,7 @@ async function toggleTodo(todoId) {
     const team = CONFIG.team || 'freelance';
 
     try {
-        const response = await fetch(apiUrl('/api/todos'), {
+        const response = await apiFetch(apiUrl('/api/todos'), {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ team, id: todoId, updates: { status: newStatus } })
@@ -19964,7 +19964,7 @@ async function saveTeamConfigCopyright() {
     _setCopyrightStatus(statusEl, 'saving', 'Saving...');
 
     try {
-        const response = await fetch(apiUrl('/api/team-config'), {
+        const response = await apiFetch(apiUrl('/api/team-config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -20044,7 +20044,7 @@ async function saveTeamConfigCRSupport(checkbox, statusEl) {
     }
 
     try {
-        const response = await fetch(apiUrl('/api/team-config'), {
+        const response = await apiFetch(apiUrl('/api/team-config'), {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -20371,7 +20371,7 @@ async function exportRoadmapPdf() {
         let served = false;
         try {
             const dataUri = doc.output('datauristring');  // "data:application/pdf;base64,…"
-            const resp = await fetch(apiUrl('/api/roadmap-pdf'), {
+            const resp = await apiFetch(apiUrl('/api/roadmap-pdf'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ pdf: dataUri, filename })

@@ -38,6 +38,13 @@
     <!-- XACA-0334-005: Daily Overview grid + card styles -->
     <link rel="stylesheet" href="css/daily-overview.css">
     <script src="js/usage-helpers.js"></script>
+    <!-- XACA-0395-007: Central fetch wrapper injecting the API-key auth header on
+         mutating requests. No dependencies (does not touch the DOM or any other
+         LCARS global at load time) — loaded first, deliberately ahead of every
+         script below with a mutating fetch() call site (lcars-graph.js loads
+         next and calls apiFetch() from inside its own functions, so it must
+         already be defined as window.apiFetch by then). -->
+    <script src="js/api-auth.js?v=1.0"></script>
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <!-- LCARS Chart Theming Module -->
@@ -3307,7 +3314,7 @@
         weeklyEditorMsg.textContent = '';
         weeklyEditorMsg.className = 'uw-weekly-editor-msg';
         try {
-            const resp = await fetch('/api/weekly-anchor', {
+            const resp = await apiFetch('/api/weekly-anchor', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({hours: h, minutes: m})
@@ -3333,7 +3340,7 @@
     weeklyClearBtn.addEventListener('click', async function () {
         weeklyClearBtn.disabled = true;
         try {
-            const resp = await fetch('/api/weekly-anchor', {method: 'DELETE'});
+            const resp = await apiFetch('/api/weekly-anchor', {method: 'DELETE'});
             if (resp.ok) {
                 closeWeeklyEditor();
                 if (usageTimeout !== null) { clearTimeout(usageTimeout); usageTimeout = null; }

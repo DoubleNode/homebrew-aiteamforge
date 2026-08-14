@@ -18,9 +18,17 @@
  * machine with the matching private key can open it. Routes validate shape and
  * length of ciphertext — they intentionally cannot verify content.
  *
- * Auth caveat: none of these routes are authenticated in A.4.1 (Non-Goals §1,
- * Residual Risk R1). EPIC-0019 layers transport auth on top. Routes are shaped
- * so auth middleware can wrap them without reshaping the contracts.
+ * Auth (XACA-0395-005): EPIC-0019 transport auth has now landed. The 6
+ * mutating routes below (POST/PUT/DELETE machines, POST/PUT/DELETE secrets)
+ * are gated with the shared requireApiKey middleware from ./auth-middleware —
+ * additive only, no signature or contract change (contract §9; the "shaped so
+ * auth middleware can wrap them" claim above was verified accurate). The
+ * remaining GET routes, INCLUDING `GET /api/vault/secrets/:engineSlug/
+ * :accountSlug/ciphertext` (returns ciphertext, fails the public-route
+ * allowlist's R2), stay UNGATED — they are outside this ticket's mutating-verb
+ * scope (contract §6) and are a known, accepted gap carried to XACA-0398, not
+ * a handled one. Do not read "vault routes are now gated" as "all vault
+ * routes are now gated."
  *
  * Wiring: this module requires the same store singletons as server.js
  * (vault-store, vault-crypto, engines-store). Those stores resolve their file
@@ -32,6 +40,7 @@
 const vaultStore = require('./vault-store');
 const { ensureReady: vaultEnsureReady } = require('./vault-crypto');
 const enginesStore = require('./engines-store');
+const { requireApiKey } = require('./auth-middleware');
 
 /**
  * Register all /api/vault/* routes on the given Express app (or router).
@@ -104,7 +113,7 @@ function registerVaultRoutes(app) {
      * Returns 201 + new machine on success; 409 if id already exists.
      * Requires await ensureReady() before base64/crypto validation.
      */
-    app.post('/api/vault/machines', async (req, res) => {
+    app.post('/api/vault/machines', requireApiKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -140,7 +149,7 @@ function registerVaultRoutes(app) {
      * Body: { label?, public_key? } — merges with existing fields for validation.
      * Returns 404 if machine not found.
      */
-    app.put('/api/vault/machines/:id', async (req, res) => {
+    app.put('/api/vault/machines/:id', requireApiKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -184,7 +193,7 @@ function registerVaultRoutes(app) {
      * With ?confirm=true: removes the machine. Existing ciphertext copies are NOT
      * cascade-deleted (design doc §4.4).
      */
-    app.delete('/api/vault/machines/:id', (req, res) => {
+    app.delete('/api/vault/machines/:id', requireApiKey, (req, res) => {
         try {
             const { id }      = req.params;
             const { confirm } = req.query;
@@ -343,7 +352,7 @@ function registerVaultRoutes(app) {
      * 409 if (engine_slug, account_slug) already exists — use PUT to replace.
      * 201 on creation.
      */
-    app.post('/api/vault/secrets', async (req, res) => {
+    app.post('/api/vault/secrets', requireApiKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -412,7 +421,7 @@ function registerVaultRoutes(app) {
      * Bumps updated_at; preserves created_at.
      * 404 if the secret does not exist.
      */
-    app.put('/api/vault/secrets/:engineSlug/:accountSlug', async (req, res) => {
+    app.put('/api/vault/secrets/:engineSlug/:accountSlug', requireApiKey, async (req, res) => {
         try {
             await vaultEnsureReady();
 
@@ -481,7 +490,7 @@ function registerVaultRoutes(app) {
      * With ?confirm=true: executes deletion.
      * 404 if not found.
      */
-    app.delete('/api/vault/secrets/:engineSlug/:accountSlug', (req, res) => {
+    app.delete('/api/vault/secrets/:engineSlug/:accountSlug', requireApiKey, (req, res) => {
         try {
             const { engineSlug, accountSlug } = req.params;
             const { confirm }                 = req.query;

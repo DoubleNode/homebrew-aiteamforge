@@ -201,6 +201,33 @@ class TestCORSOptions(unittest.TestCase):
         self.assertIn("Access-Control-Allow-Methods", header_names)
         self.assertIn("Access-Control-Allow-Headers", header_names)
 
+    def test_cors_allow_headers_excludes_auth_headers(self):
+        # XACA-0395-007 P1 correction (post-review, supersedes the original
+        # contract §3.5 / subitem 003 widening): do_OPTIONS is the single,
+        # path-independent preflight responder for EVERY cross-origin
+        # request this server receives, including mutating ones. Allowing
+        # Authorization/X-API-Key through preflight here is what lets a
+        # foreign origin's preflighted POST/PUT/PATCH/DELETE carrying a
+        # stolen key pass CORS and reach _auth_gate() with a valid
+        # credential. A repo-wide sweep found ZERO legitimate cross-origin
+        # authenticated callers (the only cross-port fetches in lcars-ui/
+        # are two already-allowlisted, non-mutating GET /api/status calls;
+        # fleet-monitor's /lcars dashboard is a same-origin static bundle,
+        # not a live cross-port proxy to this API) — so there is no
+        # consumer this header value protects, only an attack surface it
+        # opens. This assertion is the guard against silently re-widening
+        # it "to fix CORS" later without re-deriving that finding.
+        handler, buf = _make_handler(path="/api/status", method="OPTIONS")
+        handler.do_OPTIONS()
+
+        allow_headers = next(
+            (v for k, v in handler._headers_buffer if k == "Access-Control-Allow-Headers"),
+            None,
+        )
+        self.assertEqual(allow_headers, "Content-Type")
+        self.assertNotIn("Authorization", allow_headers)
+        self.assertNotIn("X-API-Key", allow_headers)
+
     def test_cors_origin_is_wildcard(self):
         handler, buf = _make_handler(path="/api/status", method="OPTIONS")
         handler.do_OPTIONS()
