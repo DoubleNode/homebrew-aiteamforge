@@ -46,7 +46,7 @@
          already be defined as window.apiFetch by then). -->
     <!-- v1.1 — [UX] gate fix: notifier resolved at call time, not construction.
          A stale cached v1.0 would keep the permanently-silent auth-failure bug. -->
-    <script src="js/api-auth.js?v=1.1"></script>
+    <script src="js/api-auth.js?v=1.2"></script>
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <!-- LCARS Chart Theming Module -->
@@ -2670,7 +2670,7 @@
     <script src="js/vendor/jspdf.umd.min.js?v=1"></script>
 <!-- XACA-0292-005: Reusable filter-bar component — must load before lcars.js -->
 <script src="js/lcars-filter-bar.js?v=1.1"></script>
-<script src="js/lcars.js?v=3.59"></script>
+<script src="js/lcars.js?v=3.60"></script>
 <!-- XACA-0293-001: CR cycle-time compute module — must load before lcars-cr-tab.js (no DOM/network deps) -->
 <script src="js/lcars-cr-metrics.js"></script>
 <!-- XACA-0293-013: Shared poll bus — single 5s interval for all tile modules; must load after lcars-cr-metrics.js and before tile scripts -->
@@ -2694,10 +2694,10 @@
 <!-- XACA-0395: cache-buster ADDED (previously unversioned). This file gained apiFetch()
      mutating call sites; a browser serving a cached pre-auth copy would send mutations with
      no credential and get 401. Adding ?v= also busts the existing cache exactly once. -->
-<script src="js/daily-overview.js?v=1.0"></script>
+<script src="js/daily-overview.js?v=1.1"></script>
 <!-- XACA-0281-022: Per-team account picker dropdown — must load after lcars.js (needs apiUrl, showToast, CONFIG) -->
 <!-- XACA-0395: cache-buster ADDED (previously unversioned) — same reason as daily-overview.js. -->
-<script src="js/lcars-team-account.js?v=1.0"></script>
+<script src="js/lcars-team-account.js?v=1.1"></script>
 <!-- XACA-0630: Estimation Accuracy carousel panel — must load after lcars.js (depends on currentHomePanel, escapeHtml) -->
 <script src="js/lcars-estimates.js?v=1.0"></script>
 
