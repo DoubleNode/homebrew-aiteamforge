@@ -508,7 +508,7 @@ _kb_is_correct_worktree() {
 # `kb-api-key show` helper, which implements the same env-over-file precedence
 # the LCARS server itself uses.
 #
-# XACA-0395 review finding 023: the header goes through `curl --config -` on
+# XACA-0395 review finding 022: the header goes through `curl --config -` on
 # stdin rather than `-H` in argv, because argv is world-readable via `ps` and
 # would expose the key to any other local user. Callers must pipe
 # "$_KB_LCARS_AUTH_STDIN" into curl whenever the array is non-empty.
@@ -552,7 +552,7 @@ _kb_fleet_auth_args() {
     fi
     [[ -z "$_kb_token" ]] && return 0
 
-    # See finding 023 above — header via `curl --config -` on stdin, not argv.
+    # See finding 022 above — header via `curl --config -` on stdin, not argv.
     local _kb_token_escaped="${_kb_token//\\/\\\\}"
     _kb_token_escaped="${_kb_token_escaped//\"/\\\"}"
     _KB_FLEET_AUTH_ARGS=(--config -)

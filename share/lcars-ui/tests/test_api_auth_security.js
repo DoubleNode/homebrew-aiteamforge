@@ -293,3 +293,71 @@ test('021: concurrent mutations during one failed lookup share it, then recover 
     assert.equal(authHeaderOf(fake.calls[2]), 'Bearer ' + TEST_KEY);
     assert.equal(fake.authKeyCallCount(), 2);
 });
+
+
+// ---------------------------------------------------------------------------
+// XACA-0395 review finding — isSameOriginTarget() must RESOLVE, never
+// string-heuristic.
+//
+// The first cut short-circuited to `true` for anything without a scheme that
+// did not begin with '//'. That is not what a URL parser does, and the gap
+// between the heuristic and WHATWG resolution WAS the bypass. All of these
+// returned sameOrigin=true against the shipped function while actually
+// resolving to http://evil.com — found by EXECUTING the predicate, not by
+// reading it.
+//
+// Note '/evil.com/x' is included as a benign control: it really is a
+// same-origin path, so a fix that merely blacklists the substring 'evil.com'
+// (or over-rejects anything unusual) fails this test. The guard has to
+// discriminate, not just refuse.
+// ---------------------------------------------------------------------------
+
+test('[security] backslash and control-char URL forms are NOT treated as same-origin', () => {
+    var hostile = [
+        '\\\\evil.com/x',      // WHATWG normalises '\' -> '/'  =>  //evil.com/x
+        '/\\evil.com/x',       // same normalisation
+        '/\t/evil.com/x',      // TAB is stripped               =>  //evil.com/x
+        '/\n/evil.com/x',      // LF is stripped
+        '/\r/evil.com/x',      // CR is stripped
+        '//evil.com/x',        // protocol-relative
+        'https://evil.com/x'   // absolute
+    ];
+    hostile.forEach(function (u) {
+        assert.equal(isSameOriginTarget(u), false,
+            JSON.stringify(u) + ' resolves to a foreign origin and must NOT be same-origin');
+    });
+});
+
+test('[security] genuinely relative URLs are still same-origin (guard discriminates)', () => {
+    var benign = ['/api/todos', 'api/todos', '', '?x=1', '#frag', '/evil.com/x'];
+    benign.forEach(function (u) {
+        assert.equal(isSameOriginTarget(u), true,
+            JSON.stringify(u) + ' is relative/same-origin and must remain so');
+    });
+});
+
+test('[security] a hostile URL form receives NO credential from apiFetch', async () => {
+    var seen = [];
+    var fakeFetch = function (input, init) {
+        seen.push({ input: input, init: init });
+        if (String(input).indexOf('auth-key') !== -1) {
+            return Promise.resolve({
+                status: 200, ok: true,
+                json: function () { return Promise.resolve({ apiKey: TEST_KEY }); }
+            });
+        }
+        return Promise.resolve({ status: 200, ok: true, json: function () { return Promise.resolve({}); } });
+    };
+    var client = createApiAuthClient({ fetch: fakeFetch });
+
+    await client.apiFetch('\\\\evil.com/steal', { method: 'POST' });
+
+    var mutating = seen.filter(function (c) {
+        return c.init && c.init.method === 'POST';
+    });
+    assert.equal(mutating.length, 1);
+    var h = mutating[0].init.headers;
+    var authValue = h && (typeof h.get === 'function' ? h.get('Authorization') : h.Authorization);
+    assert.ok(!authValue,
+        'the key must NOT be attached to a URL that resolves off-origin; got: ' + authValue);
+});

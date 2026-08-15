@@ -501,14 +501,31 @@ class TestServeKanbanData(unittest.TestCase):
         self.assertEqual(data.get("team"), "academy")
 
     def test_returns_200_status(self):
+        # XACA-0395 [Test]-025: this test was environment-dependent. It mocks
+        # get_board_file and open(), but NOT LCARSHandler._REGISTRY_PATH — which
+        # points at homebrew-tap/share/teams/registry.json inside the repo. When
+        # the homebrew-tap submodule is UNINITIALIZED the file is absent, the
+        # branding lookup is skipped, and the test passes. When the submodule IS
+        # initialized (as it is in a worktree after `git submodule update`) the
+        # real registry loads, team 'ios' fails to resolve branding, and the
+        # handler returns 503 instead of 200.
+        #
+        # The test was therefore passing for an environmental reason rather than
+        # a behavioural one. Pinning _REGISTRY_PATH at a definitely-absent path
+        # makes it deterministic in both states. Pre-existing (XACA-0460,
+        # 2026-05-08); surfaced here because this ticket initialized the
+        # submodule in the worktree.
         board_data = {"team": "ios", "backlog": []}
         handler, buf = _make_handler()
-        with patch("server.get_board_file") as mock_gbf:
-            mock_path = MagicMock(spec=Path)
-            mock_path.exists.return_value = True
-            mock_gbf.return_value = mock_path
-            with patch("builtins.open", mock_open(read_data=json.dumps(board_data))):
-                handler.serve_kanban_data("ios")
+        absent_registry = MagicMock(spec=Path)
+        absent_registry.exists.return_value = False
+        with patch.object(type(handler), "_REGISTRY_PATH", absent_registry):
+            with patch("server.get_board_file") as mock_gbf:
+                mock_path = MagicMock(spec=Path)
+                mock_path.exists.return_value = True
+                mock_gbf.return_value = mock_path
+                with patch("builtins.open", mock_open(read_data=json.dumps(board_data))):
+                    handler.serve_kanban_data("ios")
 
         self.assertEqual(handler._response_code, 200)
 

@@ -207,18 +207,35 @@
         if (url === '') {
             return true;   // resolves to the current document
         }
-        var isProtocolRelative = url.slice(0, 2) === '//';
-        var hasScheme = /^[a-z][a-z0-9+.\-]*:/i.test(url);
-        if (!isProtocolRelative && !hasScheme) {
-            return true;   // ordinary relative URL
-        }
+        // XACA-0395 review finding — NO "looks relative" string heuristic here.
+        //
+        // The previous cut short-circuited to `true` for anything without a
+        // scheme that did not start with '//'. That is not what a URL parser
+        // does, and four hostile forms slipped through it, each verified
+        // against the shipped function to return sameOrigin=true while
+        // actually resolving to http://evil.com:
+        //
+        //     \\evil.com/x        WHATWG normalises '\' -> '/', so this is '//evil.com/x'
+        //     /\evil.com/x        same normalisation
+        //     /<TAB>/evil.com/x   tab is STRIPPED, leaving '//evil.com/x'
+        //     /<LF>/evil.com/x    newline is stripped likewise
+        //
+        // Any string test for "is this relative?" diverges from WHATWG
+        // resolution, and the divergence is the bypass. The only safe form is
+        // to RESOLVE and compare origins — let the parser decide.
         var base = baseHref ||
             ((typeof location !== 'undefined' && location && location.href) ? location.href : null);
-        if (!base || typeof URL === 'undefined') {
+        if (typeof URL === 'undefined') {
             return false;  // cannot verify -> fail closed
         }
+        // With no page context (Node tests, workers without `location`) resolve
+        // against a synthetic origin instead of failing closed: a genuinely
+        // relative URL stays same-origin, while anything that RESOLVES to
+        // another host is still correctly rejected. The comparison is
+        // base-relative, so the synthetic value never leaks into a decision.
+        var effectiveBase = base || 'http://lcars-same-origin.invalid/';
         try {
-            return new URL(url, base).origin === new URL(base).origin;
+            return new URL(url, effectiveBase).origin === new URL(effectiveBase).origin;
         } catch (e) {
             return false;
         }
