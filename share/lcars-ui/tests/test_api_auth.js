@@ -367,3 +367,101 @@ test('_resetKeyCacheForTests: forces a re-fetch of the key endpoint', async () =
     var keyCalls = fakeFetch.calls.filter(c => c.url === AUTH_KEY_ENDPOINT);
     assert.equal(keyCalls.length, 2);
 });
+
+
+// ---------------------------------------------------------------------------
+// XACA-0395 [UX] GATE REGRESSION — browser script-load-order.
+//
+// These tests exist because the original 26 tests ALL passed while the browser
+// path was completely broken. Every existing test injects `notify`, so none of
+// them ever exercised the window.showToast fallback. And under plain Node there
+// is no `window` at all — so the test precondition ("no window") differed from
+// the browser's ("window exists, showToast not yet defined") even though both
+// produced the same symptom in a narrow test.
+//
+// The real bug: the client captured `window.showToast` into a closure variable
+// at CONSTRUCTION time. index.html loads api-auth.js early (line ~47, before
+// every mutating call site) but lcars.js — which defines showToast — loads at
+// line ~2671. So the capture saw `undefined` and never re-checked, and every
+// 401 across all 86 migrated call sites degraded to console.error() for the
+// entire page session. That is the exact "silently dead button" this ticket set
+// out to prevent.
+//
+// These tests reproduce the REAL load order: construct first, define showToast
+// afterwards, then trigger a 401.
+// ---------------------------------------------------------------------------
+
+test('[UX regression] showToast defined AFTER client construction is still used on 401', async () => {
+    var priorWindow = global.window;
+    try {
+        // Real browser order: window exists, showToast NOT yet defined.
+        global.window = {};
+        var fakeFetch = makeFakeFetch({
+            mutatingResponse: jsonResponse(401, { error: 'Unauthorized', code: 'unauthorized' })
+        });
+        // Constructed BEFORE showToast exists — this is the bug's precondition.
+        var client = createApiAuthClient({ fetch: fakeFetch });
+
+        // lcars.js loads later in the document and defines showToast.
+        var toastCalls = [];
+        global.window.showToast = function (message, type, duration) {
+            toastCalls.push({ message: message, type: type, duration: duration });
+        };
+
+        await client.apiFetch('/api/items', { method: 'POST' });
+
+        assert.equal(toastCalls.length, 1,
+            'showToast defined after construction MUST still receive the 401 notice — ' +
+            'a construction-time capture makes every auth failure silent for the page session');
+        assert.equal(toastCalls[0].type, 'error');
+        assert.ok(toastCalls[0].message.length > 0, 'message must not be empty');
+        assert.ok(toastCalls[0].message.indexOf(TEST_KEY) === -1,
+            'the toast must never contain key material');
+    } finally {
+        if (priorWindow === undefined) { delete global.window; }
+        else { global.window = priorWindow; }
+    }
+});
+
+test('[UX regression] an injected notify still wins over window.showToast', async () => {
+    var priorWindow = global.window;
+    try {
+        var toastCalls = [];
+        global.window = { showToast: function () { toastCalls.push(arguments); } };
+        var fakeFetch = makeFakeFetch({
+            mutatingResponse: jsonResponse(401, { error: 'Unauthorized', code: 'unauthorized' })
+        });
+        var notify = makeNotifySpy();
+        var client = createApiAuthClient({ fetch: fakeFetch, notify: notify });
+
+        await client.apiFetch('/api/items', { method: 'POST' });
+
+        assert.equal(notify.calls.length, 1, 'injected notify must take precedence');
+        assert.equal(toastCalls.length, 0, 'window.showToast must NOT also fire (no double-notify)');
+    } finally {
+        if (priorWindow === undefined) { delete global.window; }
+        else { global.window = priorWindow; }
+    }
+});
+
+test('[UX regression] no window and no notify falls back to console.error, never silence', async () => {
+    var priorWindow = global.window;
+    var priorError = console.error;
+    try {
+        if (priorWindow !== undefined) { delete global.window; }
+        var errorCalls = [];
+        console.error = function (msg) { errorCalls.push(msg); };
+        var fakeFetch = makeFakeFetch({
+            mutatingResponse: jsonResponse(401, { error: 'Unauthorized', code: 'unauthorized' })
+        });
+        var client = createApiAuthClient({ fetch: fakeFetch });
+
+        await client.apiFetch('/api/items', { method: 'POST' });
+
+        assert.equal(errorCalls.length, 1, 'must still emit SOMETHING — silence is the failure mode');
+        assert.ok(String(errorCalls[0]).indexOf(TEST_KEY) === -1, 'must not log key material');
+    } finally {
+        console.error = priorError;
+        if (priorWindow !== undefined) { global.window = priorWindow; }
+    }
+});

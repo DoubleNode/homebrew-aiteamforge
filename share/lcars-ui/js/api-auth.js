@@ -131,8 +131,11 @@
     function createApiAuthClient(deps) {
         deps = deps || {};
         var fetchImpl = deps.fetch || (typeof fetch !== 'undefined' ? fetch : undefined);
-        var notifyImpl = deps.notify ||
-            (typeof window !== 'undefined' && typeof window.showToast === 'function' ? window.showToast : null);
+        // Injected override ONLY. The window.showToast fallback deliberately does
+        // NOT happen here — see resolveNotifier() below. Resolving it at
+        // construction captured `undefined` (lcars.js loads later) and silently
+        // disabled every auth-failure toast on the page.
+        var notifyImpl = deps.notify || null;
         var endpoint = deps.endpoint || AUTH_KEY_ENDPOINT;
         var keyPromise = null;
 
@@ -152,9 +155,44 @@
             return keyPromise;
         }
 
-        function notifyAuthFailure() {
+        /**
+         * Resolve the notifier AT CALL TIME, not at construction time.
+         *
+         * XACA-0395 [UX] gate fix — this was a real, permanent silent-failure bug,
+         * not a theoretical one. `createApiAuthClient({})` runs when this file is
+         * parsed (index.html loads it early, deliberately, so it is defined before
+         * every mutating call site). But `showToast` is defined by lcars.js, which
+         * loads ~2600 lines LATER in the same document. Capturing
+         * `window.showToast` into a closure variable at construction therefore
+         * captured `undefined` and never re-checked it — so every 401 across all
+         * 86 migrated call sites degraded to console.error() for the WHOLE page
+         * session. That is precisely the "silently dead button" this ticket set
+         * out to prevent.
+         *
+         * A property lookup here (rather than a captured value) turns what looked
+         * like a transient load-order race into a non-issue: by the time a user
+         * can trigger a mutation, lcars.js has long since loaded.
+         *
+         * An injected `deps.notify` still wins — that is what the unit tests use,
+         * and it is why they passed while the browser path was broken: Node has no
+         * `window` at all, so the test's precondition ("no window") differs from
+         * the browser's ("window exists, showToast not yet defined") even though
+         * both produced the same symptom in a narrow test.
+         */
+        function resolveNotifier() {
             if (typeof notifyImpl === 'function') {
-                notifyImpl(AUTH_FAILURE_MESSAGE, 'error', 8000);
+                return notifyImpl;
+            }
+            if (typeof window !== 'undefined' && typeof window.showToast === 'function') {
+                return window.showToast;
+            }
+            return null;
+        }
+
+        function notifyAuthFailure() {
+            var notifier = resolveNotifier();
+            if (notifier) {
+                notifier(AUTH_FAILURE_MESSAGE, 'error', 8000);
                 return;
             }
             if (typeof console !== 'undefined' && console.error) {

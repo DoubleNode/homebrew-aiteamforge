@@ -489,6 +489,57 @@ _kb_is_correct_worktree() {
     return 1
 }
 
+# ============================================================================
+# XACA-0395 — consumer auth-header helpers
+# ============================================================================
+# Two independent secrets. Never cross them:
+#   LCARS mutating calls         -> AITEAMFORGE_API_KEY (via installed `kb-api-key show`)
+#   fleet-monitor mutating calls -> FLEET_AUTH_TOKEN (env, else fleet-config.json)
+# Graceful degradation: when no key/token resolves, the server-side gate is
+# OPEN, so sending no header is correct — these helpers populate an empty
+# array rather than failing, and callers must not hard-fail on it.
+# Ported from dev-team's kanban-helpers.sh (subitem 006) into this template's
+# own conventions — this file is hand-maintained, not a `sync_file` mirror of
+# the canonical source, so the port adapts rather than copies verbatim.
+
+# Populate the global array _KB_LCARS_AUTH_ARGS with curl -H args carrying the
+# LCARS Authorization header, or leave it empty if no key resolves. Resolves
+# via the installed `kb-api-key show` helper, which implements the same
+# env-over-file precedence the LCARS server itself uses.
+_kb_lcars_auth_args() {
+    _KB_LCARS_AUTH_ARGS=()
+    local _kb_api_key_bin="${AITEAMFORGE_DIR}/scripts/kb-api-key"
+    [[ -x "$_kb_api_key_bin" ]] || return 0
+
+    local _kb_key
+    _kb_key=$(bash "$_kb_api_key_bin" show 2>/dev/null) || return 0
+    [[ -z "$_kb_key" ]] && return 0
+    _KB_LCARS_AUTH_ARGS=(-H "Authorization: Bearer ${_kb_key}")
+}
+
+# Populate the global array _KB_FLEET_AUTH_ARGS with curl -H args carrying the
+# fleet-monitor Authorization header, or leave it empty if no token resolves.
+# Precedence mirrors the existing client precedent in this same tap
+# (fleet-reporter.sh, msg-client.js): env FLEET_AUTH_TOKEN wins, else
+# fleet-config.json .centralServer.authToken.
+_kb_fleet_auth_args() {
+    _KB_FLEET_AUTH_ARGS=()
+    local _kb_token="${FLEET_AUTH_TOKEN:-}"
+    if [[ -z "$_kb_token" ]]; then
+        local _kb_fleet_cfg=""
+        if [[ -f "${HOME}/.aiteamforge/fleet-config.json" ]]; then
+            _kb_fleet_cfg="${HOME}/.aiteamforge/fleet-config.json"
+        elif [[ -f "${HOME}/.dev-team/fleet-config.json" ]]; then
+            _kb_fleet_cfg="${HOME}/.dev-team/fleet-config.json"
+        fi
+        if [[ -n "$_kb_fleet_cfg" ]] && command -v jq >/dev/null 2>&1; then
+            _kb_token=$(jq -r '.centralServer.authToken // empty' "$_kb_fleet_cfg" 2>/dev/null)
+        fi
+    fi
+    [[ -z "$_kb_token" ]] && return 0
+    _KB_FLEET_AUTH_ARGS=(-H "Authorization: Bearer ${_kb_token}")
+}
+
 # Sync an item to release manifests via LCARS server
 # Usage: _kb_release_sync <item_id>
 # Returns 0 (success) even if server is down - this is a best-effort sync
@@ -515,10 +566,13 @@ _kb_release_sync() {
     # Try to sync with LCARS server (2 second timeout)
     # Silent by default - only warn on unexpected errors
     local response http_code
+    local _KB_LCARS_AUTH_ARGS=()
+    _kb_lcars_auth_args
     response=$(curl -s -w "\n%{http_code}" \
         --max-time 2 \
         -X POST \
         -H "Content-Type: application/json" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
         -d "{\"itemId\": \"$item_id\"}" \
         "http://localhost:${_lcars_port}/api/releases/sync-item" 2>/dev/null)
 
@@ -14180,10 +14234,13 @@ kb-release-create() {
 
     # Call LCARS server to create the release
     local response http_code body
+    local _KB_LCARS_AUTH_ARGS=()
+    _kb_lcars_auth_args
     response=$(curl -s -w "\n%{http_code}" \
         --max-time 5 \
         -X POST \
         -H "Content-Type: application/json" \
+        "${_KB_LCARS_AUTH_ARGS[@]}" \
         -d "$json_payload" \
         "http://localhost:${_lcars_port}/api/releases" 2>/dev/null)
 
@@ -15095,9 +15152,12 @@ _kb_register_team() {
     # "[N] + exit 7" background job notifications when Fleet Monitor is offline.
     # NOTE: "disown" detaches the job from zsh's job table so it won't print
     # "[N] + done" notifications when the background curl completes.
+    local _KB_FLEET_AUTH_ARGS=()
+    _kb_fleet_auth_args
     (
         curl -s -m 5 -X POST \
             -H "Content-Type: application/json" \
+            "${_KB_FLEET_AUTH_ARGS[@]}" \
             -d "$team_metadata" \
             "${fleet_url}/api/team-register" \
             >/dev/null 2>&1 || true
@@ -15133,11 +15193,14 @@ _kb_push_board() {
     # "[N] + exit 7" background job notifications when Fleet Monitor is offline.
     # NOTE: "disown" detaches the job from zsh's job table so it won't print
     # "[N] + done" notifications when the background curl completes.
+    local _KB_FLEET_AUTH_ARGS=()
+    _kb_fleet_auth_args
     (
         curl -s -X POST \
             -H "Content-Type: application/json" \
             --connect-timeout 5 \
             --max-time 10 \
+            "${_KB_FLEET_AUTH_ARGS[@]}" \
             -d @"${board_file}" \
             "${fleet_url}/api/kanban-push" \
             >/dev/null 2>&1 || true
