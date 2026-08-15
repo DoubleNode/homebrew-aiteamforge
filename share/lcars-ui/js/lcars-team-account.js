@@ -715,7 +715,12 @@
             var data = await resp.json();
 
             if (!resp.ok || !data.success) {
-                throw new Error(data.error || ('HTTP ' + resp.status));
+                // XACA-0395 [UX-16]: carry status onto the Error so the catch below
+                // can defer to api-auth.js's central 401 notifier instead of
+                // double-toasting.
+                var raErr = new Error(data.error || ('HTTP ' + resp.status));
+                raErr.status = resp.status;
+                throw raErr;
             }
 
             var msg;
@@ -730,7 +735,13 @@
             _showToast(msg, action === 'clear' ? 'warning' : 'success');
         } catch (err) {
             console.error('[team-account] resume-ids action failed:', err);
-            _showToast('Failed to apply resume-IDs action: ' + err.message, 'error');
+            // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+            // auth-failure toast already told the user what happened.
+            // XACA-0395-015: same skip on a network-level failure (isNetworkFailure) —
+            // apiFetch() already showed its own distinct central toast for that case.
+            if (!err || (err.status !== 401 && !err.isNetworkFailure)) {
+                _showToast('Failed to apply resume-IDs action: ' + err.message, 'error');
+            }
         } finally {
             if (applyBtn) applyBtn.disabled = false;
         }
@@ -756,7 +767,12 @@
             var data = await resp.json();
 
             if (!resp.ok || !data.success) {
-                throw new Error(data.error || ('HTTP ' + resp.status));
+                // XACA-0395 [UX-16]: carry status onto the Error so the catch below
+                // can defer to api-auth.js's central 401 notifier instead of
+                // double-toasting.
+                var assignErr = new Error(data.error || ('HTTP ' + resp.status));
+                assignErr.status = resp.status;
+                throw assignErr;
             }
 
             // Refresh the row to reflect new state (nickname, account_id, status dot).
@@ -774,7 +790,13 @@
             await _checkResumeIds(teamSlug, oldAccountId);
         } catch (err) {
             console.error('[team-account] assign failed:', err);
-            _showToast('Failed to assign account for ' + teamSlug + ': ' + err.message, 'error');
+            // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+            // auth-failure toast already told the user what happened.
+            // XACA-0395-015: same skip on a network-level failure (isNetworkFailure) —
+            // apiFetch() already showed its own distinct central toast for that case.
+            if (!err || (err.status !== 401 && !err.isNetworkFailure)) {
+                _showToast('Failed to assign account for ' + teamSlug + ': ' + err.message, 'error');
+            }
             // Re-render the row to restore the picker to its current persisted value.
             _refreshTeamRow(teamSlug).catch(function () {});
         }

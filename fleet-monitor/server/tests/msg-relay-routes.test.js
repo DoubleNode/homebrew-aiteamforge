@@ -318,12 +318,41 @@ test('with FLEET_AUTH_TOKEN set, a request without a bearer is rejected (401)', 
     }
 });
 
-test('with FLEET_AUTH_TOKEN set, a wrong bearer is rejected (401)', async () => {
+test('with FLEET_AUTH_TOKEN set, a wrong bearer that fails SHAPE validation is rejected (401, shape path)', async () => {
+    // 'wrong-token' is 11 chars — below auth-middleware.js's CREDENTIAL_SHAPE_RE
+    // 16-char floor (contract §3.3). It is rejected by hasValidShape() before
+    // isAuthorized() ever calls safeEqual(), so this case covers shape
+    // rejection ONLY — it does not exercise the constant-time comparison path.
+    // Kept deliberately (it is legitimate coverage of the shape gate); see the
+    // next test for a credential that clears shape and reaches safeEqual().
     process.env.FLEET_AUTH_TOKEN = 'sekret-relay-token';
     try {
         const { envelope } = await sealedEnvelope();
         const res = await request(app).post('/api/msg')
             .set('Authorization', 'Bearer wrong-token')
+            .send(envelope);
+        assert.equal(res.status, 401);
+    } finally {
+        delete process.env.FLEET_AUTH_TOKEN;
+    }
+});
+
+test('with FLEET_AUTH_TOKEN set, a wrong bearer that PASSES shape validation is rejected (401, safeEqual path)', async () => {
+    // 'wrong-but-valid-shape-token' is 27 chars, all within auth-middleware.js's
+    // CREDENTIAL_SHAPE_RE charset ([A-Za-z0-9._~+/=-], 16-512 len) — it clears
+    // hasValidShape() and reaches safeEqual(credential, expected) for real,
+    // exercising the constant-time comparison itself (not just the shape gate
+    // ahead of it, which the 11-char case above already covers).
+    process.env.FLEET_AUTH_TOKEN = 'sekret-relay-token';
+    try {
+        const wrongButValidShape = 'wrong-but-valid-shape-token';
+        assert.ok(
+            wrongButValidShape.length >= 16 && wrongButValidShape.length <= 512,
+            'sanity: credential must clear the 16-512 char shape floor to reach safeEqual'
+        );
+        const { envelope } = await sealedEnvelope();
+        const res = await request(app).post('/api/msg')
+            .set('Authorization', `Bearer ${wrongButValidShape}`)
             .send(envelope);
         assert.equal(res.status, 401);
     } finally {

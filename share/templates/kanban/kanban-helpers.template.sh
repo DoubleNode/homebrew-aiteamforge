@@ -502,19 +502,32 @@ _kb_is_correct_worktree() {
 # own conventions — this file is hand-maintained, not a `sync_file` mirror of
 # the canonical source, so the port adapts rather than copies verbatim.
 
-# Populate the global array _KB_LCARS_AUTH_ARGS with curl -H args carrying the
-# LCARS Authorization header, or leave it empty if no key resolves. Resolves
-# via the installed `kb-api-key show` helper, which implements the same
-# env-over-file precedence the LCARS server itself uses.
+# Populate _KB_LCARS_AUTH_ARGS (curl flags) and _KB_LCARS_AUTH_STDIN (the curl
+# config-file text to feed on stdin) carrying the LCARS Authorization header,
+# or leave BOTH empty if no key resolves. Resolves via the installed
+# `kb-api-key show` helper, which implements the same env-over-file precedence
+# the LCARS server itself uses.
+#
+# XACA-0395 review finding 023: the header goes through `curl --config -` on
+# stdin rather than `-H` in argv, because argv is world-readable via `ps` and
+# would expose the key to any other local user. Callers must pipe
+# "$_KB_LCARS_AUTH_STDIN" into curl whenever the array is non-empty.
 _kb_lcars_auth_args() {
     _KB_LCARS_AUTH_ARGS=()
+    _KB_LCARS_AUTH_STDIN=""
     local _kb_api_key_bin="${AITEAMFORGE_DIR}/scripts/kb-api-key"
     [[ -x "$_kb_api_key_bin" ]] || return 0
 
     local _kb_key
     _kb_key=$(bash "$_kb_api_key_bin" show 2>/dev/null) || return 0
     [[ -z "$_kb_key" ]] && return 0
-    _KB_LCARS_AUTH_ARGS=(-H "Authorization: Bearer ${_kb_key}")
+
+    # curl config-file syntax quotes the value; escape backslash then quote so
+    # a key containing either cannot break parsing.
+    local _kb_key_escaped="${_kb_key//\\/\\\\}"
+    _kb_key_escaped="${_kb_key_escaped//\"/\\\"}"
+    _KB_LCARS_AUTH_ARGS=(--config -)
+    _KB_LCARS_AUTH_STDIN=$(printf 'header = "Authorization: Bearer %s"\n' "$_kb_key_escaped")
 }
 
 # Populate the global array _KB_FLEET_AUTH_ARGS with curl -H args carrying the
@@ -524,6 +537,7 @@ _kb_lcars_auth_args() {
 # fleet-config.json .centralServer.authToken.
 _kb_fleet_auth_args() {
     _KB_FLEET_AUTH_ARGS=()
+    _KB_FLEET_AUTH_STDIN=""
     local _kb_token="${FLEET_AUTH_TOKEN:-}"
     if [[ -z "$_kb_token" ]]; then
         local _kb_fleet_cfg=""
@@ -537,7 +551,12 @@ _kb_fleet_auth_args() {
         fi
     fi
     [[ -z "$_kb_token" ]] && return 0
-    _KB_FLEET_AUTH_ARGS=(-H "Authorization: Bearer ${_kb_token}")
+
+    # See finding 023 above — header via `curl --config -` on stdin, not argv.
+    local _kb_token_escaped="${_kb_token//\\/\\\\}"
+    _kb_token_escaped="${_kb_token_escaped//\"/\\\"}"
+    _KB_FLEET_AUTH_ARGS=(--config -)
+    _KB_FLEET_AUTH_STDIN=$(printf 'header = "Authorization: Bearer %s"\n' "$_kb_token_escaped")
 }
 
 # Sync an item to release manifests via LCARS server
@@ -566,9 +585,9 @@ _kb_release_sync() {
     # Try to sync with LCARS server (2 second timeout)
     # Silent by default - only warn on unexpected errors
     local response http_code
-    local _KB_LCARS_AUTH_ARGS=()
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
     _kb_lcars_auth_args
-    response=$(curl -s -w "\n%{http_code}" \
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
         --max-time 2 \
         -X POST \
         -H "Content-Type: application/json" \
@@ -14234,9 +14253,9 @@ kb-release-create() {
 
     # Call LCARS server to create the release
     local response http_code body
-    local _KB_LCARS_AUTH_ARGS=()
+    local _KB_LCARS_AUTH_ARGS=() _KB_LCARS_AUTH_STDIN=""
     _kb_lcars_auth_args
-    response=$(curl -s -w "\n%{http_code}" \
+    response=$(printf '%s' "$_KB_LCARS_AUTH_STDIN" | curl -s -w "\n%{http_code}" \
         --max-time 5 \
         -X POST \
         -H "Content-Type: application/json" \
@@ -15152,10 +15171,10 @@ _kb_register_team() {
     # "[N] + exit 7" background job notifications when Fleet Monitor is offline.
     # NOTE: "disown" detaches the job from zsh's job table so it won't print
     # "[N] + done" notifications when the background curl completes.
-    local _KB_FLEET_AUTH_ARGS=()
+    local _KB_FLEET_AUTH_ARGS=() _KB_FLEET_AUTH_STDIN=""
     _kb_fleet_auth_args
     (
-        curl -s -m 5 -X POST \
+        printf '%s' "$_KB_FLEET_AUTH_STDIN" | curl -s -m 5 -X POST \
             -H "Content-Type: application/json" \
             "${_KB_FLEET_AUTH_ARGS[@]}" \
             -d "$team_metadata" \
@@ -15193,10 +15212,10 @@ _kb_push_board() {
     # "[N] + exit 7" background job notifications when Fleet Monitor is offline.
     # NOTE: "disown" detaches the job from zsh's job table so it won't print
     # "[N] + done" notifications when the background curl completes.
-    local _KB_FLEET_AUTH_ARGS=()
+    local _KB_FLEET_AUTH_ARGS=() _KB_FLEET_AUTH_STDIN=""
     _kb_fleet_auth_args
     (
-        curl -s -X POST \
+        printf '%s' "$_KB_FLEET_AUTH_STDIN" | curl -s -X POST \
             -H "Content-Type: application/json" \
             --connect-timeout 5 \
             --max-time 10 \

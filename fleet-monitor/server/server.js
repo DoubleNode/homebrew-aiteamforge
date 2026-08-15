@@ -592,7 +592,28 @@ setInterval(purgeOldHistory, HISTORY_PURGE_INTERVAL_MS);
 const app = express();
 
 // Middleware
-app.use(cors());
+//
+// XACA-0395 review finding 019 — allowedHeaders is pinned to Content-Type.
+// Bare `cors()` REFLECTS whatever the browser asks for in
+// Access-Control-Request-Headers, so a cross-origin preflight asking for
+// `Authorization` gets approved, and a hostile page could then send a
+// credentialed cross-origin mutation to this server. That is the exact twin
+// of the LCARS-side do_OPTIONS widening reverted earlier in this ticket, and
+// it is pinned here for parity.
+//
+// Verified before pinning: nothing legitimate sends `Authorization`
+// cross-origin to fleet-monitor.
+//   * Every Authorization sender is a CLI: fleet-reporter.sh,
+//     kanban-reporter.sh, knowledge-reporter.sh, vault-fetch.sh (curl) and
+//     client/msg-client.js (Node). CORS is a browser policy — curl and Node
+//     never preflight and are entirely unaffected by this option.
+//   * The only browser clients are the LCARS pages this server itself serves
+//     out of public/, which are SAME-origin (no preflight at all), and none
+//     of them send an Authorization header — `grep -rn Authorization
+//     fleet-monitor/server/public/` returns nothing.
+// So the set of requests this change can break is empty, while the set it
+// refuses is exactly the credentialed cross-origin preflight.
+app.use(cors({ allowedHeaders: ['Content-Type'] }));
 app.use(express.json({ limit: '10mb' }));
 
 /**

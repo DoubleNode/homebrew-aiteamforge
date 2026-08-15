@@ -52,6 +52,7 @@ var isMutatingMethod    = apiAuth.isMutatingMethod;
 var normalizeMethod     = apiAuth.normalizeMethod;
 var mergeAuthHeader     = apiAuth.mergeAuthHeader;
 var AUTH_FAILURE_MESSAGE = apiAuth.AUTH_FAILURE_MESSAGE;
+var NETWORK_FAILURE_MESSAGE = apiAuth.NETWORK_FAILURE_MESSAGE;
 var AUTH_KEY_ENDPOINT   = apiAuth.AUTH_KEY_ENDPOINT;
 
 var TEST_KEY = 'test-api-key-not-a-real-secret';
@@ -79,12 +80,20 @@ function makeFakeFetch(opts) {
         ? opts.keyResponse
         : jsonResponse(200, { apiKey: TEST_KEY });
     var mutatingResponse = opts.mutatingResponse || jsonResponse(200, { ok: true });
+    // XACA-0395-015: when set, the mutating call's fetch() REJECTS with this
+    // error instead of resolving — simulates a network-level failure (server
+    // unreachable, DNS failure, connection refused), distinct from a 401
+    // (which is a resolved response with a non-2xx status).
+    var mutatingRejects = opts.mutatingRejects || null;
     var calls = [];
 
     function fakeFetch(url, init) {
         calls.push({ url: url, init: init });
         if (url === endpoint) {
             return Promise.resolve(keyResponse);
+        }
+        if (mutatingRejects) {
+            return Promise.reject(mutatingRejects);
         }
         return Promise.resolve(mutatingResponse);
     }
@@ -301,6 +310,113 @@ test('apiFetch: falls back to console.error when no notify is available (never t
     } finally {
         console.error = originalConsoleError;
     }
+});
+
+// ─── apiFetch: network-level failure (XACA-0395-015) ───────────────────────
+// fetch() itself REJECTS (server unreachable, DNS failure, connection
+// refused) — no response, no status code, distinct from the 401 case above.
+
+test('apiFetch: a network-level failure on a mutating call invokes notify() AND still rejects the promise', async () => {
+    var networkErr = new TypeError('Failed to fetch');
+    var fakeFetch = makeFakeFetch({ mutatingRejects: networkErr });
+    var notify = makeNotifySpy();
+    var client = createApiAuthClient({ fetch: fakeFetch, notify: notify });
+
+    await assert.rejects(
+        () => client.apiFetch('/api/items', { method: 'POST' }),
+        function (err) { return err === networkErr; },
+        'apiFetch must not swallow the error — the promise still rejects with the original error'
+    );
+
+    assert.equal(notify.calls.length, 1, 'notify() must be called exactly once on a network-level failure');
+    assert.equal(notify.calls[0].type, 'error');
+    assert.ok(notify.calls[0].message.length > 0, 'error message must not be empty/silent');
+});
+
+test('apiFetch: network-level failure message is DISTINCT from the 401 auth-failure message', async () => {
+    var fakeFetch = makeFakeFetch({ mutatingRejects: new TypeError('Failed to fetch') });
+    var notify = makeNotifySpy();
+    var client = createApiAuthClient({ fetch: fakeFetch, notify: notify });
+
+    await client.apiFetch('/api/items', { method: 'POST' }).catch(function () {});
+
+    assert.notEqual(notify.calls[0].message, AUTH_FAILURE_MESSAGE,
+        'a down server is not a rejected key — reusing the auth-failure copy would misdirect the user');
+    assert.equal(notify.calls[0].message, NETWORK_FAILURE_MESSAGE);
+});
+
+test('apiFetch: network-level failure tags the rethrown error isNetworkFailure = true (lets a call site defer, same as err.status === 401)', async () => {
+    var fakeFetch = makeFakeFetch({ mutatingRejects: new TypeError('Failed to fetch') });
+    var client = createApiAuthClient({ fetch: fakeFetch, notify: makeNotifySpy() });
+
+    var caught = null;
+    try {
+        await client.apiFetch('/api/items', { method: 'POST' });
+    } catch (err) {
+        caught = err;
+    }
+
+    assert.ok(caught, 'expected apiFetch to reject');
+    assert.equal(caught.isNetworkFailure, true);
+});
+
+test('apiFetch: a network-level failure on a GET does NOT invoke notify() (only mutating calls trigger the failure UX here) and still rejects', async () => {
+    var networkErr = new TypeError('Failed to fetch');
+    var fakeFetch = function () { return Promise.reject(networkErr); };
+    var notify = makeNotifySpy();
+    var client = createApiAuthClient({ fetch: fakeFetch, notify: notify });
+
+    await assert.rejects(() => client.apiFetch('/api/status', { method: 'GET' }), function (err) {
+        return err === networkErr;
+    });
+
+    assert.equal(notify.calls.length, 0);
+});
+
+test('apiFetch: a successful mutating call does NOT invoke the network-failure notify()', async () => {
+    var fakeFetch = makeFakeFetch(); // default mutatingResponse is 200, no rejection
+    var notify = makeNotifySpy();
+    var client = createApiAuthClient({ fetch: fakeFetch, notify: notify });
+
+    await client.apiFetch('/api/items', { method: 'POST' });
+
+    assert.equal(notify.calls.length, 0, 'a successful call must not surface an error toast');
+});
+
+test('apiFetch: network-level failure falls back to console.error when no notify is available (never throws from the notify path itself)', async () => {
+    var fakeFetch = makeFakeFetch({ mutatingRejects: new TypeError('Failed to fetch') });
+    var client = createApiAuthClient({ fetch: fakeFetch }); // no notify injected, no window.showToast in Node
+
+    var originalConsoleError = console.error;
+    var captured = [];
+    console.error = function (msg) { captured.push(msg); };
+    try {
+        await assert.rejects(() => client.apiFetch('/api/items', { method: 'POST' }));
+        assert.equal(captured.length, 1, 'console.error fallback must fire exactly once');
+    } finally {
+        console.error = originalConsoleError;
+    }
+});
+
+test('NETWORK_FAILURE_MESSAGE: fixed constant does not contain the resolved key, its length as a number, or any prefix', () => {
+    assert.equal(typeof NETWORK_FAILURE_MESSAGE, 'string');
+    assert.ok(NETWORK_FAILURE_MESSAGE.length > 0);
+    assert.ok(!NETWORK_FAILURE_MESSAGE.includes(TEST_KEY));
+    assert.equal(apiAuth.NETWORK_FAILURE_MESSAGE, NETWORK_FAILURE_MESSAGE);
+});
+
+test('apiFetch: network-failure notify() message never contains the configured key (checked with a real key present)', async () => {
+    var fakeFetch = makeFakeFetch({ mutatingRejects: new TypeError('Failed to fetch') });
+    var notify = makeNotifySpy();
+    var client = createApiAuthClient({ fetch: fakeFetch, notify: notify });
+
+    // Prime the key cache with a real (test) key BEFORE the mutating call —
+    // same discipline as the 401 message test above.
+    await client.resolveKey();
+    await client.apiFetch('/api/items', { method: 'POST' }).catch(function () {});
+
+    assert.equal(notify.calls.length, 1);
+    assert.ok(!notify.calls[0].message.includes(TEST_KEY), 'notify message must never contain the key');
 });
 
 // ─── No key value ever appears in the failure-facing surface ──────────────

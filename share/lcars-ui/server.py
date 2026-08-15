@@ -35,6 +35,7 @@ import contextlib
 import copy
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -482,6 +483,17 @@ _AUTH_401_BODY = b'{"error":"Unauthorized","code":"unauthorized"}'
 # this endpoint needs an origin check that the mutating gate does not.
 _AUTH_KEY_CROSS_ORIGIN_403_BODY = b'{"error":"Forbidden","code":"cross_origin_denied"}'
 
+# XACA-0395 review finding 023 (DNS rebinding) — GET /api/auth-key's refusal
+# body for a request whose `Host` is not a recognised local identity for THIS
+# machine. Deliberately a distinct code from the cross-origin refusal above:
+# `cross_origin_denied` means "your Origin isn't this server", while
+# `host_not_allowed` means "the name you used to reach this server isn't one
+# of its own names" — an operator debugging a legitimately-refused funnel
+# hostname needs to be able to tell those two apart from the response alone.
+# Neither body contains key material, and neither reveals whether a key is
+# configured. See serve_auth_key() for the threat model.
+_AUTH_KEY_BAD_HOST_403_BODY = b'{"error":"Forbidden","code":"host_not_allowed"}'
+
 # Contract §6 — public-route allowlist for MUTATING verbs only (the routes
 # dispatched through do_POST/do_PUT/do_PATCH/do_DELETE). Deliberately empty:
 # none of the contract's initial allowlist entries apply here — entry A
@@ -540,11 +552,22 @@ def _load_api_key_from_file():
     failure raise into the request path — every failure resolves to
     (None, ...).
 
-    Returns (key_or_None, rejected_for_mode). rejected_for_mode is True only
-    when the file EXISTS in some form but was refused for shape, ownership,
-    or mode — distinct from "no file at all", which is the ordinary
-    open-posture (unset) case and must not log the "key file rejected"
-    warning.
+    Returns (key_or_None, rejected_for_mode). rejected_for_mode is True
+    whenever the file EXISTS in some form but could not be turned into a
+    usable key — refused for shape, ownership, or mode, OR unreadable/corrupt
+    (see the catch-all below). It is False only for the two cases that mean
+    "this machine genuinely has no key on purpose": no file at all, and a
+    file the operator has deliberately blanked.
+
+    XACA-0395 review finding 020: the catch-all used to return
+    (None, False) — i.e. an unreadable or corrupt key file was reported at
+    startup as "no API key configured". Both postures are open, so nothing
+    about the gate changed; what changed is what the operator is TOLD. "No
+    API key configured" reads as a deployment that was never keyed, and the
+    correct response to it is "go generate a key". "Key file rejected" reads
+    as a deployment that WAS keyed and is now failing, and the correct
+    response is "go look at the file". Reporting the second as the first is
+    how an operator concludes everything is fine while the gate stands open.
     """
     fd = None
     try:
@@ -572,13 +595,22 @@ def _load_api_key_from_file():
 
         key = raw.strip()
         if not key:
+            # An empty/whitespace-only file is the one "exists but no key"
+            # case left deliberately on the UNSET side: blanking the file is
+            # a plausible way for an operator to intentionally disable the
+            # key, and there is nothing to repair. Anything that FAILED
+            # (below) is not intentional and must not read as "unconfigured".
             return None, False
         return key, False
     except Exception:
-        # Any exception during load (bad encoding, race on the file, etc.)
-        # resolves to UNSET, per contract §2 step 4. The loader must not be
-        # able to raise into the request path.
-        return None, False
+        # Any exception during load (bad encoding, corrupt bytes, a race on
+        # the file, etc.) still resolves the KEY to None, per contract §2
+        # step 4 — the loader must never raise into the request path. But it
+        # resolves as REJECTED, not unset: os.open() above already succeeded,
+        # so a file exists at this path and simply could not be read as a
+        # key. See the docstring (review finding 020) for why the distinction
+        # matters even though the posture is identical.
+        return None, True
     finally:
         if fd is not None:
             try:
@@ -654,7 +686,8 @@ def resolve_api_key_or_die() -> None:
     if rejected_for_mode:
         posture_line = (
             "AUTH: gate OPEN — key file rejected (must be a regular "
-            f"owner-owned file, mode 0600): {AITEAMFORGE_API_KEY_FILE}"
+            "owner-owned file, mode 0600, holding readable UTF-8 text): "
+            f"{AITEAMFORGE_API_KEY_FILE}"
         )
     else:
         posture_line = (
@@ -701,15 +734,39 @@ def _origin_matches_host(origin_header: str, host_header: str) -> bool:
     everything, so a missing Host header (should never happen — it's
     mandatory in HTTP/1.1) fails closed rather than open.
 
-    This is a defense-in-depth check, not the primary protection. The
-    primary protection is that serve_auth_key() sends no
-    Access-Control-Allow-Origin header at all, so a browser enforces the
-    ordinary same-origin policy on the response body regardless of what
-    this function decides — a non-browser caller (curl, another server)
-    can already reach this same-machine port and is not the threat model
-    this check exists for; it exists so a victim's BROWSER, tricked into
-    running a foreign page's JS, cannot use that JS to read the key on the
-    victim's behalf.
+    COMPLEMENTARY TO — NOT REDUNDANT WITH — the absent
+    Access-Control-Allow-Origin on serve_auth_key()'s response. An earlier
+    revision of this comment called the Origin check "defense-in-depth, not
+    the primary protection", with the missing ACAO named as the real
+    protection. That framing is wrong and it is dangerous, because it
+    invites a future maintainer to conclude one of the two is spare and
+    re-add `ACAO: *` "to fix CORS". Neither subsumes the other; they cover
+    DIFFERENT REQUESTS:
+
+      * A browser does NOT always send `Origin` on a cross-origin GET.
+        `fetch(url, {mode: 'no-cors'})`, `<script src>`, `<img src>`, a
+        stylesheet load, a form submission and a plain navigation all reach
+        this endpoint with no `Origin` header whatsoever. This function
+        cannot see any of them and lets them through. What protects the key
+        in exactly those cases is that the response is OPAQUE: with no ACAO
+        the browser never exposes the body to the foreign page's JS, and for
+        `<script>`/`<img>` the JSON body was never script-readable anyway.
+      * A `fetch()`/XHR in the default CORS mode DOES send `Origin`. There
+        this function refuses the request outright, so the key is never
+        written to the socket at all — rather than written and then withheld
+        by the browser's own good behaviour. That is the case that still
+        holds when the caller is not a well-behaved browser, and the case
+        that survives a future change (or an intermediary proxy)
+        re-introducing a permissive ACAO.
+
+    Remove either one and a real, reachable gap opens. Keep both.
+
+    BOTH are downstream of the Host allowlist that serve_auth_key() applies
+    FIRST — see _host_is_local_identity(). This function compares Origin to
+    Host, and `Host` is attacker-controllable, so a DNS-rebinding request
+    where Origin and Host match EACH OTHER while naming neither this machine
+    nor this server sails straight through here. The allowlist is what stops
+    that; do not read this function as covering it.
     """
     if not origin_header or not host_header:
         return False
@@ -718,6 +775,232 @@ def _origin_matches_host(origin_header: str, host_header: str) -> bool:
     except Exception:
         return False
     return bool(origin_netloc) and origin_netloc.strip().lower() == host_header.strip().lower()
+
+
+# ---------------------------------------------------------------------------
+# XACA-0395 review finding 023 — Host allowlist for GET /api/auth-key.
+#
+# THE HOLE THIS CLOSES. _origin_matches_host() compares `Origin` against
+# `Host`, and BOTH sides of that comparison come from the attacker. Register
+# evil.com, point its A record at 127.0.0.1, get a victim to load
+# http://evil.com:8203/ — the browser sends `Host: evil.com:8203` and
+# `Origin: http://evil.com:8203`, they match perfectly, and the pre-fix
+# handler hands over the key. That is classic DNS rebinding, and no
+# Origin-vs-Host comparison can ever detect it.
+#
+# THE FIX. Require that `Host` name THIS machine before the key is served at
+# all. The rule is deliberately generous about IP literals and strict about
+# names, because rebinding needs a DNS indirection to subvert:
+#
+#   * IP literal, v4 or v6, ANY address -> ALLOWED. There is no DNS step in
+#     the path. For a matching Origin to exist, the page must genuinely have
+#     been loaded from that address:port — i.e. from this server. An attacker
+#     cannot make a victim's browser send `Host: 192.168.1.50:8203` with a
+#     matching Origin unless the page really did come from there.
+#   * `localhost` / `*.localhost` -> ALLOWED, same argument: browsers pin
+#     these names to loopback (RFC 6761), so `Origin: http://localhost:8203`
+#     means the page came from this port.
+#   * Any other NAME -> allowed only when it is one of this machine's own
+#     names: the system hostname, its short label, `<label>.local`, and the
+#     Tailscale MagicDNS/funnel name. A name is precisely where the DNS
+#     indirection lives, so names get an allowlist, never a shape check.
+#
+# LEGITIMATE ACCESS PATHS, ALL PRESERVED:
+#   * iTerm2 cockpit / local browser at http://localhost:PORT or
+#     http://127.0.0.1:PORT  -> localhost + IP-literal rules.
+#   * Tailscale funnel, INCLUDING the PATH_PREFIXES routes: the funnel
+#     terminates TLS and proxies to http://localhost:PORT while PRESERVING
+#     the original Host (Tailscale's serve proxy does `r.Out.Host = r.In.Host`),
+#     so this server sees `Host: <machine>.<tailnet>.ts.net`, or
+#     `<machine>.<tailnet>.ts.net:8443` for the per-team dedicated funnel
+#     ports in tailscale-funnel-restore.sh. Detected from
+#     `tailscale status --json` -> Self.DNSName.
+#   * Another tailnet machine browsing http://<machine>:PORT over MagicDNS
+#     -> the short label of that same DNSName.
+#   * Anything unforeseen -> AITEAMFORGE_LCARS_ALLOWED_HOSTS, a
+#     comma-separated escape hatch. A refusal logs the exact Host that was
+#     refused, so an operator whose deployment we did not anticipate can see
+#     what to add instead of guessing at a blank 403.
+#
+# NOTE ON SCOPE: this allowlist guards GET /api/auth-key only — the endpoint
+# that HANDS OUT the credential. The mutating gate itself is not Host-bound,
+# by design: it authenticates the credential presented, and a rebinding page
+# that cannot obtain the credential has nothing to present.
+# ---------------------------------------------------------------------------
+
+# Tailscale ships in several places on macOS depending on install method
+# (brew, standalone pkg, Mac App Store bundle). Tried in order; first one
+# that answers wins. Bare 'tailscale' last so a PATH install still works.
+_TAILSCALE_BINARY_CANDIDATES = (
+    '/opt/homebrew/bin/tailscale',
+    '/usr/local/bin/tailscale',
+    '/Applications/Tailscale.app/Contents/MacOS/Tailscale',
+    'tailscale',
+)
+
+# Resolved once per process (same posture as the API key itself: identity
+# changes require a restart). 'tailscale_unknown' records whether detection
+# actually ran successfully — see _host_is_local_identity() for why that
+# distinction is load-bearing rather than merely informational.
+_local_host_identity_state = {'names': None, 'tailscale_unknown': True}
+_local_host_identity_lock = threading.Lock()
+_local_host_identity_warned = set()
+
+
+def _normalize_host_header(host_header) -> str:
+    """Reduce a `Host` header (or an allowlist entry) to a bare lowercase
+    host with no port, no brackets and no trailing dot.
+
+    Handles the three shapes that appear in the wild: `name:port`,
+    `[v6addr]:port` / `[v6addr]`, and a bare v6 address with no brackets
+    (illegal in a Host header, but tolerated here so a stray one fails on
+    the allowlist rather than on parsing). Returns '' for anything
+    unusable — every caller treats '' as "not allowed".
+    """
+    if not host_header:
+        return ''
+    host = str(host_header).strip().lower()
+    if host.startswith('['):
+        end = host.find(']')
+        if end == -1:
+            return ''
+        host = host[1:end]
+    elif host.count(':') == 1:
+        # Exactly one colon -> name:port. A bare IPv6 literal has several,
+        # so this never truncates one.
+        host = host.split(':', 1)[0]
+    return host.strip().rstrip('.')
+
+
+def _host_name_variants(name: str) -> set:
+    """All the ways this machine's own name legitimately reaches us:
+    the full name, its first label (MagicDNS short name / bare hostname),
+    and `<label>.local` (mDNS)."""
+    variants = set()
+    normalized = _normalize_host_header(name)
+    if not normalized:
+        return variants
+    variants.add(normalized)
+    label = normalized.split('.', 1)[0]
+    if label:
+        variants.add(label)
+        variants.add(label + '.local')
+    return variants
+
+
+def _detect_tailscale_dns_name():
+    """This node's Tailscale DNS name (e.g. 'm3pro.tail1234.ts.net'), or
+    None when Tailscale is not installed, not running, or unqueryable.
+
+    Never raises, and never blocks a request thread for long: a 3s timeout
+    per candidate binary bounds the worst case, and the result is cached by
+    _local_host_identities() so this runs at most once per process.
+    """
+    for binary in _TAILSCALE_BINARY_CANDIDATES:
+        try:
+            proc = subprocess.run(
+                [binary, 'status', '--json'],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0 or not proc.stdout:
+            continue
+        try:
+            data = json.loads(proc.stdout)
+        except (ValueError, TypeError):
+            continue
+        self_node = (data or {}).get('Self') or {}
+        dns_name = _normalize_host_header(self_node.get('DNSName') or '')
+        if dns_name:
+            return dns_name
+    return None
+
+
+def _local_host_identities():
+    """Return (frozenset_of_allowed_names, tailscale_detection_failed).
+
+    Resolved once per process under a lock, like the API key.
+    """
+    if _local_host_identity_state['names'] is None:
+        with _local_host_identity_lock:
+            if _local_host_identity_state['names'] is None:
+                names = set()
+
+                # Operator escape hatch first — it must work even if every
+                # detection below fails.
+                for raw in os.environ.get('AITEAMFORGE_LCARS_ALLOWED_HOSTS', '').split(','):
+                    entry = _normalize_host_header(raw)
+                    if entry:
+                        names.add(entry)
+
+                try:
+                    system_hostname = socket.gethostname()
+                except OSError:
+                    system_hostname = ''
+                names |= _host_name_variants(system_hostname)
+
+                tailscale_name = _detect_tailscale_dns_name()
+                if tailscale_name:
+                    names |= _host_name_variants(tailscale_name)
+
+                _local_host_identity_state['tailscale_unknown'] = tailscale_name is None
+                _local_host_identity_state['names'] = frozenset(names)
+    return _local_host_identity_state['names'], _local_host_identity_state['tailscale_unknown']
+
+
+def _reset_local_host_identity_cache_for_tests():
+    """Test-only: force re-detection on the next _local_host_identities()."""
+    _local_host_identity_state['names'] = None
+    _local_host_identity_state['tailscale_unknown'] = True
+    _local_host_identity_warned.clear()
+
+
+def _host_is_local_identity(host_header) -> bool:
+    """True when `Host` names THIS machine — see the block comment above for
+    the rebinding threat model and the IP-literal-vs-name asymmetry."""
+    host = _normalize_host_header(host_header)
+    if not host:
+        # Missing/garbage Host fails closed. Host is mandatory in HTTP/1.1.
+        return False
+
+    try:
+        ipaddress.ip_address(host)
+        return True  # IP literal — no DNS indirection to rebind.
+    except ValueError:
+        pass
+
+    if host == 'localhost' or host.endswith('.localhost'):
+        return True
+
+    names, tailscale_unknown = _local_host_identities()
+    if host in names:
+        return True
+
+    if tailscale_unknown and host.endswith('.ts.net'):
+        # Narrow, explicitly-conditional fallback: we could not ask
+        # Tailscale for this node's name (binary missing, daemon down,
+        # sandboxed subprocess), so we cannot verify a funnel hostname —
+        # and silently breaking remote LCARS access on every such machine is
+        # a worse outcome than accepting the `.ts.net` suffix. `.ts.net` is
+        # Tailscale-operated: an attacker can create names in their OWN
+        # tailnet, but cannot make those names resolve to the victim's
+        # loopback, which is what rebinding requires. This branch is dead the
+        # moment detection succeeds.
+        if 'ts-fallback' not in _local_host_identity_warned:
+            _local_host_identity_warned.add('ts-fallback')
+            print(
+                "[LCARS] AUTH: could not determine this node's Tailscale name; "
+                "accepting *.ts.net Host values for GET /api/auth-key. Set "
+                "AITEAMFORGE_LCARS_ALLOWED_HOSTS to pin this explicitly.",
+                file=sys.stderr,
+            )
+        return True
+
+    return False
 
 
 def _ensure_private_dir(path: Path) -> None:
@@ -14605,8 +14888,10 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         exactly what authorizes a foreign origin to read a response body),
         and then present it back as `Authorization: Bearer <key>` on a
         mutating request — fully defeating the auth gate this ticket exists
-        to add. Fixed two ways, deliberately redundant (belt and braces —
-        do not rely on only one of these holding):
+        to add. Fixed three ways. These are COMPLEMENTARY, NOT REDUNDANT —
+        each one covers requests the others cannot see, and removing any one
+        of them opens a real, reachable gap. Read all three before deciding
+        any of them is spare:
 
           1. No `Access-Control-Allow-Origin` header is sent at all. A
              same-origin `fetch()` (the only caller this endpoint is for)
@@ -14615,7 +14900,11 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
              the network level (this is a bare GET — no preflight — so the
              request itself cannot be blocked client-side), but the
              browser refuses to expose the response BODY to the calling
-             page's JavaScript, which is what actually matters here.
+             page's JavaScript. THIS IS THE ONLY PROTECTION that covers the
+             large class of cross-origin requests that carry NO `Origin`
+             header at all: `fetch(..., {mode:'no-cors'})`, `<script src>`,
+             `<img src>`, stylesheet loads, form posts, navigations.
+             Check 2 is blind to every one of those.
           2. `Origin` is checked server-side against `Host` regardless of
              what the browser would have done, via `_origin_matches_host()`.
              A present, mismatched `Origin` gets a 403 with NO key material
@@ -14624,14 +14913,57 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
              information about whether a key is configured. A same-origin
              call (or a call with no `Origin` header at all — non-browser
              callers, and some same-origin browser requests, omit it) still
-             gets the normal 200 response.
+             gets the normal 200 response. THIS IS THE ONLY PROTECTION that
+             refuses before the key reaches the socket, i.e. the only one
+             that still holds if the caller is not a well-behaved browser or
+             if a future change re-introduces a permissive ACAO. Check 1 is
+             a promise the BROWSER keeps; check 2 is one WE keep.
+          3. `Host` must name this machine — `_host_is_local_identity()`,
+             added for review finding 023. Checks 1 and 2 are both blind to
+             DNS rebinding: with `evil.com` resolving to 127.0.0.1 the
+             victim's browser sends `Host: evil.com` AND
+             `Origin: http://evil.com`, which MATCH, so check 2 passes them,
+             and the page is same-origin by the browser's own reckoning, so
+             check 1 does not apply either. Only an allowlist of this
+             machine's real identities refuses that request. See the block
+             comment above `_normalize_host_header()` for exactly which Host
+             values are accepted (IP literals and localhost unconditionally;
+             other names only when they are ours) and why the funnel and
+             MagicDNS paths keep working.
 
-        `Vary: Origin` is sent on both paths so nothing between this server
+        Order matters: the Host allowlist runs FIRST, so a rebinding request
+        is refused on the strongest available ground rather than sneaking
+        through the weaker Origin comparison it is specifically built to
+        satisfy.
+
+        `Vary: Origin` is sent on every path so nothing between this server
         and the browser caches a decision made for one Origin and serves it
         to another.
         """
         origin = self.headers.get('Origin')
         host = self.headers.get('Host', '')
+
+        # Check 3 — DNS-rebinding guard. Deliberately BEFORE the Origin
+        # comparison, which a rebinding request satisfies by construction.
+        if not _host_is_local_identity(host):
+            body = _AUTH_KEY_BAD_HOST_403_BODY
+            # Log the refused Host (never key material) — an operator whose
+            # legitimate hostname we failed to detect needs to see what to
+            # put in AITEAMFORGE_LCARS_ALLOWED_HOSTS, not a blank 403.
+            print(
+                "[LCARS] AUTH: refused GET /api/auth-key — Host "
+                f"{host!r} is not a local identity for this machine. If this "
+                "is a legitimate way to reach LCARS, add it to "
+                "AITEAMFORGE_LCARS_ALLOWED_HOSTS.",
+                file=sys.stderr,
+            )
+            self.send_response(403)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Vary', 'Origin')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
 
         if origin and not _origin_matches_host(origin, host):
             body = _AUTH_KEY_CROSS_ORIGIN_403_BODY

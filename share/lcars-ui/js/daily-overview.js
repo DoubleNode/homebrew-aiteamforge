@@ -227,7 +227,12 @@ function _handleDismiss(btn, card, itemId) {
                 return res.json().catch(function () {
                     return { error: 'HTTP ' + res.status };
                 }).then(function (body) {
-                    throw new Error(body.error || 'HTTP ' + res.status);
+                    // XACA-0395 [UX-16]: carry the status onto the Error so the
+                    // catch below can tell a 401 (already announced by api-auth.js's
+                    // central notifier) apart from any other failure.
+                    const e = new Error(body.error || 'HTTP ' + res.status);
+                    e.status = res.status;
+                    throw e;
                 });
             }
             return res.json();
@@ -241,6 +246,14 @@ function _handleDismiss(btn, card, itemId) {
         .catch(function (err) {
             console.error('[daily-overview] dismiss failed:', err);
             btn.disabled = false;
+            // XACA-0395 [UX-16]: on 401, api-auth.js's apiFetch() has already shown
+            // the actionable central auth-failure toast — a second, less useful
+            // "Dismiss failed: Unauthorized" toast here would just bury it. Defer to
+            // the central message; every other status still gets its local toast.
+            // XACA-0395-015: same deferral for a network-level failure (fetch()
+            // itself rejected — apiFetch() already showed its own distinct central
+            // toast and tagged the error isNetworkFailure).
+            if (err && (err.status === 401 || err.isNetworkFailure)) return;
             showToast('Dismiss failed: ' + (err.message || 'unknown error'), 'error', 5000);
         });
 }
@@ -282,7 +295,11 @@ function _handleComplete(btn, card, itemId) {
                 return res.json().catch(function () {
                     return { error: 'HTTP ' + res.status };
                 }).then(function (body) {
-                    throw new Error(body.error || 'HTTP ' + res.status);
+                    // XACA-0395 [UX-16]: see _handleDismiss above — carry status onto
+                    // the Error so the catch can defer to the central 401 notifier.
+                    const e = new Error(body.error || 'HTTP ' + res.status);
+                    e.status = res.status;
+                    throw e;
                 });
             }
             return res.json();
@@ -296,6 +313,10 @@ function _handleComplete(btn, card, itemId) {
         .catch(function (err) {
             console.error('[daily-overview] complete failed:', err);
             btn.disabled = false;
+            // XACA-0395 [UX-16]: defer to api-auth.js's central auth-failure toast on
+            // 401 — see the matching comment in _handleDismiss for the full rationale.
+            // XACA-0395-015: same deferral on a network-level failure (isNetworkFailure).
+            if (err && (err.status === 401 || err.isNetworkFailure)) return;
             showToast('Complete failed: ' + (err.message || 'unknown error'), 'error', 5000);
         });
 }

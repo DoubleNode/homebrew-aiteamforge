@@ -63,6 +63,84 @@ const net = require('net');
 const TEST_TOKEN = 'test-api-key-not-a-real-secret';
 
 // ---------------------------------------------------------------------------
+// Source-derived route inventory (XACA-0395 PR #748 review [17]).
+//
+// The count assertions below used to compare a hardcoded MUTATING_ROUTES
+// array against a hardcoded number (`assert.equal(MUTATING_ROUTES.length, 14)`)
+// — self-satisfying: it passes forever regardless of what server.js actually
+// declares, including if a future UNGATED mutating route is added and nobody
+// updates this file. These helpers instead re-derive the mutating-route
+// inventory from the real source text at test time, so:
+//   1. A route added to source with no matching MUTATING_ROUTES entry fails
+//      the count/coverage assertion below (it would otherwise get ZERO
+//      401 coverage from the per-route tests, which only iterate the array).
+//   2. A route removed from source with a stale MUTATING_ROUTES entry left
+//      behind also fails (count mismatch), rather than the array silently
+//      testing a path that no longer exists.
+// This is a static-analysis approximation (regex over source text, matching
+// the header-comment's documented grep) — not a JS parser — but that is
+// sufficient to catch additions/removals of `app.METHOD('/path', ...)`
+// declarations, which is the failure mode this subitem is closing.
+// ---------------------------------------------------------------------------
+
+const MUTATING_VERBS = ['post', 'put', 'patch', 'delete'];
+
+function deriveMutatingRoutesFromSource(sourceText) {
+    const re = /app\.(get|post|put|patch|delete)\(\s*['"]([^'"]+)['"]/g;
+    const routes = [];
+    let m;
+    while ((m = re.exec(sourceText)) !== null) {
+        const method = m[1];
+        if (MUTATING_VERBS.includes(method)) {
+            routes.push({ method: method.toUpperCase(), path: m[2] });
+        }
+    }
+    return routes;
+}
+
+/** Convert an Express route pattern ('/api/x/:id') into a RegExp that matches
+ *  a concrete request path with a dummy value substituted for each :param
+ *  segment ('/api/x/dummy-id'). */
+function expressPathToRegex(expressPath) {
+    const escaped = expressPath
+        .split('/')
+        .map((seg) => (seg.startsWith(':') ? '[^/]+' : seg.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+        .join('/');
+    return new RegExp(`^${escaped}$`);
+}
+
+/**
+ * Assert that a test file's hardcoded MUTATING_ROUTES array is a faithful,
+ * up-to-date mirror of the mutating routes actually declared in `sourceText`.
+ * Fails if the counts disagree, OR if any source-declared route has no
+ * matching array entry (method + path pattern) — the case that matters most,
+ * because an entry missing from MUTATING_ROUTES gets NO per-route 401
+ * coverage from the tests below.
+ */
+function assertRouteInventoryMatchesSource(sourceText, mutatingRoutesArray, label) {
+    const derived = deriveMutatingRoutesFromSource(sourceText);
+    assert.equal(
+        derived.length,
+        mutatingRoutesArray.length,
+        `${label}: source declares ${derived.length} mutating route(s) ` +
+        `(${derived.map((r) => `${r.method} ${r.path}`).join(', ')}) but this test's ` +
+        `MUTATING_ROUTES array has ${mutatingRoutesArray.length} entries — update the array ` +
+        `(and confirm any new route is gated with requireApiKey) before this can pass`
+    );
+    for (const route of derived) {
+        const covered = mutatingRoutesArray.some(
+            ({ method, path: testPath }) =>
+                method.toUpperCase() === route.method && expressPathToRegex(route.path).test(testPath)
+        );
+        assert.ok(
+            covered,
+            `${label}: ${route.method} ${route.path} is declared in source but has no matching ` +
+            `MUTATING_ROUTES entry in this test — it is receiving NO 401 coverage; add it`
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Section 1 + 2: vault + engines — isolate BEFORE requiring the stores.
 // ---------------------------------------------------------------------------
 
@@ -112,8 +190,9 @@ describe('vault-routes.js — requireApiKey actually mounted (not just imported)
         { method: 'delete', path: '/api/vault/secrets/dummy-engine/dummy-account' },
     ];
 
-    test('re-derived count matches this test list (6 mutating routes)', () => {
-        assert.equal(MUTATING_ROUTES.length, 6);
+    test('MUTATING_ROUTES mirrors the mutating routes actually declared in vault-routes.js (source-derived)', () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'vault-routes.js'), 'utf8');
+        assertRouteInventoryMatchesSource(src, MUTATING_ROUTES, 'lib/vault-routes.js');
     });
 
     for (const { method, path: routePath } of MUTATING_ROUTES) {
@@ -162,8 +241,9 @@ describe('engines-routes.js — requireApiKey actually mounted (not just importe
         { method: 'delete', path: '/api/engines/dummy-engine/accounts/dummy-account' },
     ];
 
-    test('re-derived count matches this test list (3 mutating routes)', () => {
-        assert.equal(MUTATING_ROUTES.length, 3);
+    test('MUTATING_ROUTES mirrors the mutating routes actually declared in engines-routes.js (source-derived)', () => {
+        const src = fs.readFileSync(path.join(__dirname, '..', 'lib', 'engines-routes.js'), 'utf8');
+        assertRouteInventoryMatchesSource(src, MUTATING_ROUTES, 'lib/engines-routes.js');
     });
 
     for (const { method, path: routePath } of MUTATING_ROUTES) {
@@ -262,8 +342,12 @@ describe('server.js — requireApiKey actually mounted on all 14 mutating routes
         { method: 'DELETE', path: '/api/epics/academy/dummy-epic' },
     ];
 
-    test('re-derived count matches this test list (14 mutating routes: 7 post, 4 put, 3 delete)', () => {
-        assert.equal(MUTATING_ROUTES.length, 14);
+    test('MUTATING_ROUTES mirrors the mutating routes actually declared in server.js (source-derived)', () => {
+        const src = fs.readFileSync(path.join(SERVER_DIR, 'server.js'), 'utf8');
+        assertRouteInventoryMatchesSource(src, MUTATING_ROUTES, 'server.js');
+        // Secondary, informational only — the assertion above is what makes this
+        // suite fail on drift; this just documents the expected verb split for a
+        // human skimming test output.
         assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'POST').length, 7);
         assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'PUT').length, 4);
         assert.equal(MUTATING_ROUTES.filter((r) => r.method === 'DELETE').length, 3);

@@ -372,6 +372,18 @@ function showToast(message, type = 'info', duration = null) {
     const toast = document.createElement('div');
     toast.className = `toast toast-${type}`;
 
+    // XACA-0395 [UX-14]: make toasts audible to assistive tech. error/warning use
+    // role="alert" (implicit aria-live="assertive" + aria-atomic="true") so a failed
+    // action — including a security-relevant auth failure — is announced immediately,
+    // interrupting whatever the screen reader was doing, matching the visual urgency
+    // (6s dwell above) and the fact the user's action did not happen. success/info use
+    // role="status" (implicit aria-live="polite" + aria-atomic="true") so routine
+    // confirmations are announced without interrupting the user's current task — a
+    // barrage of polite status toasts should never cut off in-progress speech the way
+    // an alert does. Both roles are applied before the element is appended to the DOM,
+    // which is the pattern screen readers expect for dynamically-inserted live regions.
+    toast.setAttribute('role', (type === 'error' || type === 'warning') ? 'alert' : 'status');
+
     // Icon based on type
     const icons = {
         success: '✓',
@@ -7897,7 +7909,11 @@ async function manualSyncCalendar() {
         const syncData = await response.json().catch(() => ({}));
 
         if (!response.ok) {
-            throw new Error(syncData.error || 'Sync failed');
+            // XACA-0395 [UX-16]: carry status onto the Error so the catch below can
+            // defer to api-auth.js's central 401 notifier instead of double-toasting.
+            const syncErr = new Error(syncData.error || 'Sync failed');
+            syncErr.status = response.status;
+            throw syncErr;
         }
 
         // Reload external events and re-render
@@ -7921,7 +7937,12 @@ async function manualSyncCalendar() {
         console.error('Calendar sync failed:', error);
         calendarState.syncStatus = 'error';
         calendarState.syncError = error.message;
-        showToast(`Calendar sync failed: ${error.message}`, 'error');
+        // XACA-0395 [UX-16]: on 401, api-auth.js already surfaced the actionable
+        // central auth-failure toast — skip the redundant local one.
+        // XACA-0395-015: same skip on a network-level failure (isNetworkFailure).
+        if (!error || (error.status !== 401 && !error.isNetworkFailure)) {
+            showToast(`Calendar sync failed: ${error.message}`, 'error');
+        }
     } finally {
         calendarState.isSyncing = false;
         updateSyncStatusIndicator();
@@ -8968,7 +8989,11 @@ async function saveCalendarSelection(provider, calendarId) {
         });
 
         if (!response.ok) {
-            throw new Error(`Failed to save calendar selection: ${response.statusText}`);
+            // XACA-0395 [UX-16]: carry status onto the Error so the catch below can
+            // defer to api-auth.js's central 401 notifier instead of double-toasting.
+            const saveErr = new Error(`Failed to save calendar selection: ${response.statusText}`);
+            saveErr.status = response.status;
+            throw saveErr;
         }
 
         // Reload config to update UI
@@ -8978,7 +9003,12 @@ async function saveCalendarSelection(provider, calendarId) {
         showToast(`${provider === 'apple' ? 'Apple' : 'Google'} Calendar selection saved`, 'success');
     } catch (error) {
         console.error('Failed to save calendar selection:', error);
-        showToast('Failed to save calendar selection', 'error');
+        // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+        // auth-failure toast already told the user what happened.
+        // XACA-0395-015: same skip on a network-level failure (isNetworkFailure).
+        if (!error || (error.status !== 401 && !error.isNetworkFailure)) {
+            showToast('Failed to save calendar selection', 'error');
+        }
     }
 }
 
@@ -9013,7 +9043,11 @@ async function connectAppleCalendar() {
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Failed to connect Apple Calendar: ${response.statusText}`);
+            // XACA-0395 [UX-16]: carry status onto the Error so the catch below can
+            // defer to api-auth.js's central 401 notifier instead of double-toasting.
+            const connErr = new Error(errorData.error || `Failed to connect Apple Calendar: ${response.statusText}`);
+            connErr.status = response.status;
+            throw connErr;
         }
 
         // Clear input fields
@@ -9025,7 +9059,12 @@ async function connectAppleCalendar() {
         showToast('Apple Calendar connected successfully', 'success');
     } catch (error) {
         console.error('Failed to connect Apple Calendar:', error);
-        showToast(error.message || 'Failed to connect Apple Calendar', 'error');
+        // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+        // auth-failure toast already told the user what happened.
+        // XACA-0395-015: same skip on a network-level failure (isNetworkFailure).
+        if (!error || (error.status !== 401 && !error.isNetworkFailure)) {
+            showToast(error.message || 'Failed to connect Apple Calendar', 'error');
+        }
     }
 }
 
@@ -9045,14 +9084,23 @@ async function disconnectAppleCalendar() {
         });
 
         if (!response.ok) {
-            throw new Error(`Failed to disconnect Apple Calendar: ${response.statusText}`);
+            // XACA-0395 [UX-16]: carry status onto the Error so the catch below can
+            // defer to api-auth.js's central 401 notifier instead of double-toasting.
+            const discErr = new Error(`Failed to disconnect Apple Calendar: ${response.statusText}`);
+            discErr.status = response.status;
+            throw discErr;
         }
 
         await loadCalendarConfig();
         showToast('Apple Calendar disconnected', 'success');
     } catch (error) {
         console.error('Failed to disconnect Apple Calendar:', error);
-        showToast('Failed to disconnect Apple Calendar', 'error');
+        // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+        // auth-failure toast already told the user what happened.
+        // XACA-0395-015: same skip on a network-level failure (isNetworkFailure).
+        if (!error || (error.status !== 401 && !error.isNetworkFailure)) {
+            showToast('Failed to disconnect Apple Calendar', 'error');
+        }
     }
 }
 
@@ -9089,7 +9137,11 @@ async function connectGoogleCalendar() {
 
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
-            throw new Error(errorData.error || `Failed to connect Google Calendar: ${response.statusText}`);
+            // XACA-0395 [UX-16]: carry status onto the Error so the catch below can
+            // defer to api-auth.js's central 401 notifier instead of double-toasting.
+            const connErr = new Error(errorData.error || `Failed to connect Google Calendar: ${response.statusText}`);
+            connErr.status = response.status;
+            throw connErr;
         }
 
         // Clear input fields
@@ -9102,7 +9154,12 @@ async function connectGoogleCalendar() {
         showToast('Google Calendar connected successfully', 'success');
     } catch (error) {
         console.error('Failed to connect Google Calendar:', error);
-        showToast(error.message || 'Failed to connect Google Calendar', 'error');
+        // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+        // auth-failure toast already told the user what happened.
+        // XACA-0395-015: same skip on a network-level failure (isNetworkFailure).
+        if (!error || (error.status !== 401 && !error.isNetworkFailure)) {
+            showToast(error.message || 'Failed to connect Google Calendar', 'error');
+        }
     }
 }
 
@@ -9122,14 +9179,23 @@ async function disconnectGoogleCalendar() {
         });
 
         if (!response.ok) {
-            throw new Error(`Failed to disconnect Google Calendar: ${response.statusText}`);
+            // XACA-0395 [UX-16]: carry status onto the Error so the catch below can
+            // defer to api-auth.js's central 401 notifier instead of double-toasting.
+            const discErr = new Error(`Failed to disconnect Google Calendar: ${response.statusText}`);
+            discErr.status = response.status;
+            throw discErr;
         }
 
         await loadCalendarConfig();
         showToast('Google Calendar disconnected', 'success');
     } catch (error) {
         console.error('Failed to disconnect Google Calendar:', error);
-        showToast('Failed to disconnect Google Calendar', 'error');
+        // XACA-0395 [UX-16]: skip the redundant local toast on 401 — the central
+        // auth-failure toast already told the user what happened.
+        // XACA-0395-015: same skip on a network-level failure (isNetworkFailure).
+        if (!error || (error.status !== 401 && !error.isNetworkFailure)) {
+            showToast('Failed to disconnect Google Calendar', 'error');
+        }
     }
 }
 
