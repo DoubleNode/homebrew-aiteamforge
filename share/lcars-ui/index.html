@@ -44,7 +44,9 @@
          script below with a mutating fetch() call site (lcars-graph.js loads
          next and calls apiFetch() from inside its own functions, so it must
          already be defined as window.apiFetch by then). -->
-    <script src="js/api-auth.js?v=1.0"></script>
+    <!-- v1.1 — [UX] gate fix: notifier resolved at call time, not construction.
+         A stale cached v1.0 would keep the permanently-silent auth-failure bug. -->
+    <script src="js/api-auth.js?v=1.1"></script>
     <!-- Chart.js: Data visualization library -->
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
     <!-- LCARS Chart Theming Module -->
