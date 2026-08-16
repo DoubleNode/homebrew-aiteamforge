@@ -181,19 +181,35 @@
     /**
      * True when `input` targets this page's own origin — review finding 018.
      *
-     * Three cases, in the order they are decided:
-     *   1. A relative URL ('/api/todos', 'foo/bar', '?x=1', '#frag', '') is
-     *      same-origin by construction. No resolution needed, and this is
-     *      what every current call site passes.
-     *   2. A protocol-relative ('//host/path') or absolute ('https://host/x')
-     *      URL is resolved against the page and its origin compared. Note
-     *      '//host/path' MUST NOT be treated as relative: it keeps the
-     *      scheme but replaces the host, which is exactly the leak this
-     *      guard exists to stop.
-     *   3. No base URL and no `URL` constructor available (a non-browser
-     *      host that also injected no baseHref) -> unverifiable -> false.
-     *      Withholding a credential can only cause a 401, which is visible
-     *      and recoverable; sending one to the wrong host is not.
+     * CONTRACT: ALWAYS RESOLVE. Never classify by inspecting the string.
+     *
+     * An earlier version documented (and implemented) a three-case shortcut in
+     * which "a relative URL is same-origin by construction, no resolution
+     * needed". That was wrong, and the docstring itself was load-bearing —
+     * it described the very shortcut that produced four bypasses, so anyone
+     * restoring "the documented behaviour" would restore the hole. What counts
+     * as relative is decided by the URL parser, not by how a string looks:
+     *
+     *     \\evil.com/x        WHATWG normalises '\' -> '/'  =>  //evil.com/x
+     *     /\evil.com/x        same normalisation
+     *     /<TAB>/evil.com/x   TAB is stripped               =>  //evil.com/x
+     *     /<LF>/evil.com/x    LF likewise
+     *
+     * Each of those "looks relative" and resolves off-origin. So: resolve via
+     * `new URL()` and compare origins. That is the whole rule.
+     *
+     * Two deliberate details:
+     *   - No page context (Node tests, workers without `location`): resolve
+     *     against a synthetic `.invalid` base rather than failing closed.
+     *     Relative URLs still classify correctly, anything resolving to another
+     *     host is still rejected, and there is no real origin to leak to. The
+     *     sentinel is RFC 6761-reserved and can never resolve.
+     *   - Opaque origins serialise to the literal string "null", and two opaque
+     *     origins are NOT the same origin. A naive string compare would return
+     *     true for them, so they are rejected explicitly.
+     *
+     * Withholding a credential can only cause a 401 — visible and recoverable.
+     * Sending one to the wrong host is not.
      *
      * @param {*} input - fetch()'s first argument
      * @param {string} [baseHref] - page URL to resolve against (tests inject this)
@@ -235,7 +251,18 @@
         // base-relative, so the synthetic value never leaks into a decision.
         var effectiveBase = base || 'http://lcars-same-origin.invalid/';
         try {
-            return new URL(url, effectiveBase).origin === new URL(effectiveBase).origin;
+            var targetOrigin = new URL(url, effectiveBase).origin;
+            var baseOrigin   = new URL(effectiveBase).origin;
+            // An OPAQUE origin serialises to the literal string "null", and two
+            // opaque origins are NOT the same origin. Under a file:// base, both
+            // the base and '//evil.com/x' serialise to "null", so a plain string
+            // compare returns true and the guard hands over the credential.
+            // Latent today (LCARS is served over http), but the guard's contract
+            // is to fail closed on anything it cannot positively verify.
+            if (targetOrigin === 'null' || baseOrigin === 'null') {
+                return false;
+            }
+            return targetOrigin === baseOrigin;
         } catch (e) {
             return false;
         }

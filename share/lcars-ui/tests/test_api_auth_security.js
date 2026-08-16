@@ -361,3 +361,30 @@ test('[security] a hostile URL form receives NO credential from apiFetch', async
     assert.ok(!authValue,
         'the key must NOT be attached to a URL that resolves off-origin; got: ' + authValue);
 });
+
+
+// ---------------------------------------------------------------------------
+// XACA-0395 review round 3 — opaque origins must not compare equal.
+//
+// An opaque origin serialises to the literal string "null". Under a file://
+// base, BOTH the base and '//evil.com/x' serialise to "null", so a plain
+// string comparison returns true and the guard would hand over the credential.
+// Latent in production (LCARS is served over http) but the guard's contract is
+// to fail closed on anything it cannot positively verify — and "null === null"
+// is not verification, it is two unknowns matching.
+// ---------------------------------------------------------------------------
+
+test('[security] opaque (file://) origins never compare same-origin', () => {
+    var opaqueBase = 'file:///Users/someone/index.html';
+    assert.equal(isSameOriginTarget('//evil.com/x', opaqueBase), false,
+        'two opaque origins both serialise to "null" and must NOT match');
+    assert.equal(isSameOriginTarget('/api/todos', opaqueBase), false,
+        'under an opaque base nothing is verifiable — fail closed');
+});
+
+test('[security] a normal http base is unaffected by the opaque-origin guard', () => {
+    var httpBase = 'http://localhost:8203/';
+    assert.equal(isSameOriginTarget('/api/todos', httpBase), true);
+    assert.equal(isSameOriginTarget('//evil.com/x', httpBase), false);
+    assert.equal(isSameOriginTarget('http://localhost:8203/api/x', httpBase), true);
+});
