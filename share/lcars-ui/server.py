@@ -5556,6 +5556,107 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 return release
         return None
 
+    def _cascade_clear_release_assignments(self, team, release_id, _lock_held=False):
+        """XACA-0694-003: referential-integrity cascade for release archive.
+
+        XACA-0692 found 154 orphaned `releaseAssignment` records across 5
+        boards, root-caused to handle_archive_release / (the archive branch
+        of) handle_toggle_release_archive removing a release from
+        `.releases[]` without ever touching `.backlog[].releaseAssignment`
+        on the items that pointed at it. This closes that gap: warn +
+        cascade-clear, logged (chosen behavior — blocking the archive would
+        be a breaking change to an endpoint the LCARS UI already calls, and
+        the assignment is dangling either way once the release is gone).
+
+        Clears the `releaseAssignment` key ENTIRELY (ABSENT, not null) —
+        same convention as `_clear_item_release_assignment` and
+        `handle_unlink_cr_from_release` (see the contract comment above
+        handle_link_cr_to_release).
+
+        Per-board only (XACA-0692 hard design constraint): release IDs are
+        namespaced per board — the same ID string can denote unrelated
+        releases in different boards (verified collisions: REL-2026-Q2-006
+        in academy/firebase/freelance-bandwear). This method only ever
+        reads/writes `team`'s own board_file via `self._get_board_file
+        (team)` — it must NEVER be extended to scan or touch another
+        board's items, even on an exact releaseId string match. See
+        k651-per-board-namespaced-ids-collide-across-boards in the EMH
+        knowledge base.
+
+        _lock_held=True: caller already holds board_file's exclusive lock
+        via `with self._board_write_transaction(team):`. Per that
+        transaction's REENTRANCY WARNING, we must NOT independently flock
+        board_file from inside it — doing so (e.g. by calling the existing
+        `_clear_item_release_assignment`, which opens its own fcntl lock on
+        the same file) would self-deadlock the request thread forever under
+        ThreadingHTTPServer. This is therefore a fresh raw read/mutate/write
+        cycle, not a call to that helper, mirroring how
+        `_load_releases_config`/`_save_releases_config` do their own
+        `_lock_held`-gated raw I/O inside the same transaction.
+
+        Returns the list of cleared item IDs (possibly empty — the common
+        case where the release had no assigned items).
+
+        LOGGING IS NOT DONE HERE, BY DESIGN (XACA-0694-008, [Review] PR #749).
+        Both callers log_activity() the cleared ids AFTER the transaction has
+        exited and the HTTP response has been written — never inside it.
+        Two reasons, in order of severity:
+
+          1. log_activity() -> _resolve_agent_from_tmux() can spawn a `tmux
+             display-message` subprocess with a 2s timeout PER CALL. Looping
+             that inside `_board_write_transaction` holds board_file's
+             EXCLUSIVE lock for up to 2s x len(cleared_ids) — a release with
+             29 assigned items would block every other LCARS board writer for
+             ~a minute. XACA-0890-022 already established, with a timing test
+             in tests/test_xaca0890_deferred_response.py, that a 1.5s in-lock
+             stall is unacceptable in this file. This was 40x that.
+          2. It also removes a board_lock -> activity_lock nesting that would
+             otherwise be this file's only one. That nesting was in fact safe
+             (the activity path is a strict leaf: it locks only its own
+             `activity/<id>.json` and never touches a board file, so nothing
+             can take activity_lock and then wait on board_lock) — but not
+             depending on that property at all is strictly better than
+             depending on it and documenting why.
+
+        If you are tempted to move the logging back inside the transaction to
+        make it "atomic" with the clear: don't. The clear is already durable
+        on disk before the response is sent; the log is an audit record, and a
+        lost log entry is a far cheaper failure than a minute-long global
+        board-write stall.
+        """
+        board_file = self._get_board_file(team)
+        if not board_file.exists():
+            return []
+
+        def _do():
+            with open(board_file, 'r') as f:
+                board_data = json.load(f)
+
+            cleared_ids = []
+            for item in board_data.get('backlog', []):
+                assignment = item.get('releaseAssignment')
+                if assignment and assignment.get('releaseId') == release_id:
+                    cleared_ids.append(item.get('id'))
+                    del item['releaseAssignment']
+
+            if cleared_ids:
+                board_data['lastUpdated'] = self._get_timestamp()
+                self._atomic_write_json(board_file, board_data)
+
+            return cleared_ids
+
+        if _lock_held:
+            return _do()
+
+        import fcntl
+        lock_file = board_file.with_suffix('.json.lock')
+        with open(lock_file, 'w') as lock:
+            fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+            try:
+                return _do()
+            finally:
+                fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
     def _load_archived_releases(self, team=None):
         """Load all archived releases from the releases-archive directory.
 
@@ -7298,6 +7399,12 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # toggles for the same release could both observe the same
             # exists() result and race to archive/unarchive it twice, or one
             # could unlink the file out from under the other's read.
+            # XACA-0694-019 ([Review], PR #749): initialised BEFORE the archive
+            # lock so the cascade log loop can run after the lock is released.
+            # The unarchive branch never assigns it, so it must have a value on
+            # every path out of the block below.
+            cleared_ids = []
+
             with _get_path_lock(archive_file):
                 # Check if release is currently archived
                 if archive_file.exists():
@@ -7359,12 +7466,50 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                                 status=400
                             )
 
+                        # XACA-0694-003: cascade-clear releaseAssignment on any
+                        # backlog items still pointing at this release BEFORE
+                        # it is removed from data['releases'] below, so no
+                        # orphaned pointer can survive the archive (XACA-0692:
+                        # this branch was the source of orphans in this exact
+                        # shape). Raw read/mutate/write on board_file inside
+                        # this SAME transaction — see
+                        # _cascade_clear_release_assignments's docstring for
+                        # why it does not call _clear_item_release_assignment
+                        # (that would self-deadlock on board_file's lock).
+                        cleared_ids = self._cascade_clear_release_assignments(
+                            team, release_id, _lock_held=True
+                        )
+                        if cleared_ids:
+                            print(
+                                f"[LCARS] WARNING: XACA-0694-003: archiving release "
+                                f"{release_id} cleared releaseAssignment on "
+                                f"{len(cleared_ids)} item(s): {cleared_ids}"
+                            )
+                            # XACA-0694-008 ([Review], PR #749): the log_activity
+                            # loop is DELIBERATELY NOT here. See the block after
+                            # the response write below.
+
                         # Remove from active releases
                         data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
                         # Move to archive
                         release['archivedAt'] = self._get_timestamp()
                         release['status'] = 'archived'
+                        if cleared_ids:
+                            # XACA-0694-003: preserve the trail so a future
+                            # unarchive/restore at least knows which items lost
+                            # their assignment here. NOTE (asymmetry, by
+                            # design): the unarchive branch above only
+                            # re-appends `release` to data['releases'] — it
+                            # does NOT re-read this field and restore
+                            # releaseAssignment on the listed items. That is
+                            # an accepted consequence of "warn + cascade-clear"
+                            # over "block the archive"; do not file this as a
+                            # bug without re-reading this comment.
+                            release['clearedAssignments'] = [
+                                {"itemId": _cid, "clearedAt": release['archivedAt']}
+                                for _cid in cleared_ids
+                            ]
 
                         archive_dir.mkdir(parents=True, exist_ok=True)
                         self._atomic_write_json(archive_file, release)
@@ -7380,6 +7525,41 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         "archived": True,
                         "message": "Release archived successfully"
                     }).encode())
+
+            # XACA-0694-008/019 ([Review], PR #749): log the cascade OUTSIDE the
+            # board transaction AND outside the archive-file path lock, after the
+            # response is written. log_activity() -> _resolve_agent_from_tmux() can
+            # spawn a `tmux display-message` subprocess with a 2s timeout PER CALL.
+            # Looping that inside `_board_write_transaction` held board_file's
+            # EXCLUSIVE lock for up to 2s x len(cleared_ids) -- a release with 29
+            # assigned items could block every other LCARS board writer for ~a
+            # minute. XACA-0890-022 already established (with a timing test in
+            # tests/test_xaca0890_deferred_response.py) that a 1.5s in-lock stall is
+            # unacceptable in this file; this was 40x that. Placing it after
+            # wfile.write() also stops the client waiting on the tmux calls.
+            #
+            # 019: it sits out here rather than inside the `with _get_path_lock(
+            # archive_file):` block so this handler matches handle_archive_release
+            # exactly. archive_lock is narrower than board_lock (per release/team,
+            # not fleet-wide board writes), so holding it across the tmux calls was
+            # not the same severity -- but two copies of one cascade that stall
+            # under different locks is precisely how the next person "fixes" one and
+            # leaves the other.
+            #
+            # Bonus: this RETIRES the board_lock -> activity_lock nesting entirely,
+            # so the cascade's safety no longer rests on the activity path staying a
+            # leaf (see _cascade_clear_release_assignments' docstring).
+            #
+            # cleared_ids is initialised to [] before the archive lock, so the
+            # unarchive branch (which never assigns it) is a clean no-op here.
+            for _cleared_id in cleared_ids:
+                log_activity(
+                    "release_assignment_cleared", _cleared_id, "item",
+                    field="releaseAssignment",
+                    old_value=release_id,
+                    new_value=None,
+                    context=f"Cascade-cleared on archive of release {release_id}"
+                )
 
         except _DeferredResponse as deferred:
             # XACA-0890-022: emitted HERE, outside the
@@ -7427,12 +7607,48 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     if not release:
                         raise _DeferredResponse.error(404, f"Release not found: {release_id}")
 
+                    # XACA-0694-003: cascade-clear releaseAssignment on any
+                    # backlog items still pointing at this release BEFORE it
+                    # is removed from data['releases'] below — this DELETE
+                    # path (not just the toggle-archive one) was the other
+                    # confirmed source of XACA-0692's 154 orphans. Raw
+                    # read/mutate/write on board_file inside this SAME
+                    # transaction — see
+                    # _cascade_clear_release_assignments's docstring for why
+                    # it does not call _clear_item_release_assignment (that
+                    # would self-deadlock on board_file's lock, per
+                    # _board_write_transaction's REENTRANCY WARNING).
+                    cleared_ids = self._cascade_clear_release_assignments(
+                        effective_team, release_id, _lock_held=True
+                    )
+                    if cleared_ids:
+                        print(
+                            f"[LCARS] WARNING: XACA-0694-003: archiving release "
+                            f"{release_id} cleared releaseAssignment on "
+                            f"{len(cleared_ids)} item(s): {cleared_ids}"
+                        )
+                        # XACA-0694-008 ([Review], PR #749): log_activity loop is
+                        # DELIBERATELY NOT here — see after the response write.
+
                     # Remove from active releases
                     data['releases'] = [r for r in data['releases'] if r['id'] != release_id]
 
                     # Move to archive
                     release['archivedAt'] = self._get_timestamp()
                     release['status'] = 'archived'
+                    if cleared_ids:
+                        # XACA-0694-003: preserve the trail — see the identical
+                        # comment + asymmetry note in
+                        # handle_toggle_release_archive's archive branch.
+                        # handle_archive_release has no unarchive counterpart
+                        # at all (DELETE is one-way from the caller's
+                        # perspective; restoring means re-toggling via
+                        # handle_toggle_release_archive), so this field is the
+                        # only surviving record of what was cleared here.
+                        release['clearedAssignments'] = [
+                            {"itemId": _cid, "clearedAt": release['archivedAt']}
+                            for _cid in cleared_ids
+                        ]
 
                     archive_dir.mkdir(parents=True, exist_ok=True)
                     self._atomic_write_json(archive_file, release)
@@ -7460,6 +7676,22 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             self.send_header('Access-Control-Allow-Origin', '*')
             self.end_headers()
             self.wfile.write(json.dumps({"success": True, "archived": release_id}).encode())
+
+            # XACA-0694-008 ([Review], PR #749): cascade logging happens HERE —
+            # outside _board_write_transaction and after the response write.
+            # log_activity() -> _resolve_agent_from_tmux() can spawn a `tmux
+            # display-message` subprocess with a 2s timeout PER CALL; looping it
+            # inside the transaction held board_file's EXCLUSIVE lock for up to
+            # 2s x len(cleared_ids), blocking every other LCARS board writer.
+            # See the fuller note in handle_toggle_release_archive.
+            for _cleared_id in cleared_ids:
+                log_activity(
+                    "release_assignment_cleared", _cleared_id, "item",
+                    field="releaseAssignment",
+                    old_value=release_id,
+                    new_value=None,
+                    context=f"Cascade-cleared on archive of release {release_id}"
+                )
 
         except _DeferredResponse as deferred:
             # XACA-0890-022: emitted HERE, outside the
