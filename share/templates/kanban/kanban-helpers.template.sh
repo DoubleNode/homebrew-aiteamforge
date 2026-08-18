@@ -265,6 +265,121 @@ _kb_lock_file() {
     echo "${board_file}.lock"
 }
 
+# Run an argv command (no shell) under an exclusive flock, capturing its
+# stdout to tmp_file and atomically renaming it onto target_file on success.
+# Usage: _kb_jq_atomic_write <lock_file> <tmp_file> <target_file> <error_label> <argv...>
+#   <argv...>       the command to run (e.g. jq --arg x "$v" -f filter board)
+#   <error_label>   text appended after "ERROR: " to stderr on failure
+# Returns 0 on success (target_file now holds the new content), 1 on failure
+# (tmp_file removed, nothing written to target_file).
+#
+# XACA-0935: the code this replaced built a shell command STRING via zsh's
+# `printf '%q'` and ran it through a freshly spawned `sh -c "..."`. Any
+# --arg/--argjson VALUE containing embedded newlines makes zsh's `printf '%q'`
+# emit bash/zsh-only `$'...'` ANSI-C quoting; macOS's default /bin/sh (bash in
+# posix mode) tolerates that, but Linux's dash /bin/sh does not understand
+# `$'...'` and silently mis-parses the argument boundary, corrupting the JSON
+# payload before jq ever sees it. This primitive hands argv straight to
+# Perl's system(LIST) form (the same technique the sibling _kb_jq_read already
+# used), which execs via execvp with NO shell involved at all, so no argument,
+# however it's shaped, is ever re-parsed or re-quoted.
+_kb_jq_atomic_write() {
+    local lock_file="$1"
+    local tmp_file="$2"
+    local target_file="$3"
+    local error_label="$4"
+    shift 4
+    local cmd_argv=("$@")
+
+    # Create lock file if it doesn't exist
+    touch "$lock_file" 2>/dev/null
+
+    # Use Perl's flock for exclusive locking (available on macOS by default)
+    # Note: bash flock syntax (200>"$file") doesn't work in zsh, so we use perl
+    perl -e '
+        use Fcntl qw(:flock);
+        my $lock_file   = shift @ARGV;
+        my $tmp_file    = shift @ARGV;
+        my $target_file = shift @ARGV;
+
+        # Structural guarantee, not just an incidental fact: this primitive
+        # must never be able to degenerate into system()'"'"'s single-scalar
+        # shell-metacharacter-check form, which (unlike the execvp() LIST
+        # form) re-parses the argv through a shell. Both real callers here
+        # always pass jq with well over a dozen argv elements.
+        die "_kb_jq_atomic_write: refusing to run with fewer than 2 argv elements (got " . scalar(@ARGV) . ") -- this primitive must never shell out\n"
+            if scalar(@ARGV) < 2;
+
+        # A die() between here and the successful rename() below must not
+        # leave $tmp_file behind. An END block fires on every exit path,
+        # die()s included, so cleanup can never be skipped. $cleanup_tmp is
+        # cleared only after a successful rename, where $tmp_file no longer
+        # exists anyway.
+        my $cleanup_tmp = 1;
+        END { unlink($tmp_file) if $cleanup_tmp && defined($tmp_file) && -e $tmp_file; }
+
+        open(my $fh, ">", $lock_file) or die "Cannot open lock file: $!";
+        flock($fh, LOCK_EX) or die "Cannot lock: $!";
+
+        # Capture the child'"'"'s stdout to tmp_file by redirecting our own
+        # STDOUT fd before exec (system() children inherit it) -- no shell
+        # redirection operator needed.
+        open(my $out, ">", $tmp_file) or die "Cannot open tmp file: $!";
+        open(my $saved_stdout, ">&STDOUT") or die "Cannot save stdout: $!";
+        open(STDOUT, ">&", $out) or die "Cannot redirect stdout: $!";
+        # Indirect-object form forces execvp() LIST-form dispatch
+        # unconditionally, regardless of how many elements @ARGV has --
+        # unlike plain system(@ARGV), this can never degenerate into the
+        # single-scalar shell path even if the die guard above were bypassed.
+        my $status = system { $ARGV[0] } @ARGV;  # zsh-index-ok: Perl, 0-indexed by design
+        open(STDOUT, ">&", $saved_stdout) or die "Cannot restore stdout: $!";
+        close($saved_stdout);
+        close($out);
+
+        # SAFETY: gate on the FULL $status, never `$status >> 8` alone. A
+        # child killed by a signal (SIGTERM/SIGINT/...) sets the low 7 bits
+        # of $status and leaves the high byte (the shifted "exit code") at 0
+        # -- `>> 8` alone reads that as a clean exit(0) and would rename a
+        # partially-flushed tmp file over the target. Only a literal
+        # $status == 0 (no signal, exit code 0) counts as success.
+        if ($status == 0 && -s $tmp_file) {
+            rename($tmp_file, $target_file) or die "Cannot rename tmp file: $!";
+            $cleanup_tmp = 0;
+            close($fh);
+            exit(0);
+        }
+
+        # Failure path: report a specific reason instead of letting the
+        # caller'"'"'s generic $error_label stand in for every cause -- a
+        # signal kill, a nonzero jq exit, and a genuine empty-output guard
+        # trip are different failure classes. Callers that want silence
+        # (e.g. _kb_log_activity, deliberately best-effort) already wrap this
+        # whole invocation in 2>/dev/null.
+        my $exit_code;
+        if ($status == -1) {
+            print STDERR "_kb_jq_atomic_write: failed to execute command: $!\n";
+            $exit_code = 1;
+        } elsif ($status & 127) {
+            my $sig = $status & 127;
+            print STDERR "_kb_jq_atomic_write: command killed by signal $sig\n";
+            $exit_code = 128 + $sig;
+        } elsif ($status != 0) {
+            my $rc = $status >> 8;
+            print STDERR "_kb_jq_atomic_write: command exited with status $rc\n";
+            $exit_code = $rc;
+        } else {
+            print STDERR "_kb_jq_atomic_write: command produced empty output\n";
+            $exit_code = 1;
+        }
+        close($fh);
+        exit($exit_code);
+    ' "$lock_file" "$tmp_file" "$target_file" "${cmd_argv[@]}"
+
+    local result=$?
+    [[ $result -ne 0 ]] && echo "ERROR: ${error_label}" >&2
+    return $result
+}
+
 # Execute a jq operation with exclusive file locking
 # Usage: _kb_jq_update "board_file" "jq_filter" [jq_args...]
 _kb_jq_update() {
@@ -277,29 +392,20 @@ _kb_jq_update() {
     local tmp_file="${board_file}.tmp"
 
     # Write jq filter to a temp file to avoid zsh printf '%q' escaping issues.
-    # zsh's printf '%q' escapes '!' to '\!' which survives through sh -c to jq,
-    # breaking any filter containing '!=' operators. Using jq -f bypasses this.
+    # zsh's printf '%q' escapes '!' to '\!' -- this used to matter because the
+    # filter round-tripped through `sh -c`; that round-trip is gone (XACA-0935,
+    # see _kb_jq_atomic_write above), but the temp-file/`-f` approach is kept
+    # anyway since it keeps long/multi-line filter bodies out of argv, and
+    # test-kb-jq-bang-hist.sh asserts on this exact invariant.
     local filter_file
     filter_file=$(mktemp "${TMPDIR:-/tmp}/kb-jq-filter.XXXXXX")
     printf '%s' "$jq_filter" > "$filter_file"
 
-    # Create lock file if it doesn't exist
-    touch "$lock_file" 2>/dev/null
-
-    # Use Perl's flock for exclusive locking (available on macOS by default)
-    # Note: bash flock syntax (200>"$file") doesn't work in zsh, so we use perl
-    # SAFETY: Validate tmp file is not empty before moving (prevents 0-byte corruption)
-    perl -e '
-        use Fcntl qw(:flock);
-        my $lock_file = $ARGV[0];
-        open(my $fh, ">", $lock_file) or die "Cannot open lock file: $!";
-        flock($fh, LOCK_EX) or die "Cannot lock: $!";
-        my $exit_code = system(@ARGV[1..$#ARGV]);
-        close($fh);
-        exit($exit_code >> 8);
-    ' "$lock_file" sh -c "jq $(printf '%q ' "${jq_args[@]}") -f $(printf '%q' "$filter_file") $(printf '%q' "$board_file") > $(printf '%q' "$tmp_file") && [ -s $(printf '%q' "$tmp_file") ] && mv $(printf '%q' "$tmp_file") $(printf '%q' "$board_file") || { rm -f $(printf '%q' "$tmp_file"); echo 'ERROR: jq produced empty output, aborting write' >&2; exit 1; }"
-
+    _kb_jq_atomic_write "$lock_file" "$tmp_file" "$board_file" \
+        "jq produced empty output, aborting write" \
+        jq "${jq_args[@]}" -f "$filter_file" "$board_file"
     local result=$?
+
     rm "$filter_file" 2>/dev/null
 
     # After successful board update, trigger team re-registration and board push (background, non-blocking)
@@ -1960,8 +2066,23 @@ _kb_log_activity() {
             end
         ' > "$filter_file"
 
+        # XACA-0935 (BLOCKING finding): the tmp file MUST be minted in the
+        # SAME directory as $activity_file, not under $TMPDIR.
+        # _kb_jq_atomic_write's success path uses rename(), which is atomic
+        # but -- unlike the `mv` this used to shell out to, which falls back
+        # to copy+unlink across devices -- cannot cross a filesystem
+        # boundary. $TMPDIR is tmpfs on most Linux hosts/containers
+        # (invisible on macOS, where /tmp and the repo are typically the same
+        # device), so a tmp file minted there and an activity_file living
+        # under the kanban dir's activity/ subdirectory can land on different
+        # devices there and rename() fails EXDEV -- silently, since this
+        # whole call is 2>/dev/null'd below, destroying the audit entry with
+        # no visible error. $activity_dir is guaranteed to exist by this
+        # point (_kb_get_activity_dir mkdir -p's it above), so minting the
+        # tmp file inside it keeps the rename same-device -- the same pattern
+        # _kb_jq_update uses for the board file ("${board_file}.tmp").
         local tmp_file
-        tmp_file=$(mktemp "${TMPDIR:-/tmp}/kb-activity.XXXXXX") || {
+        tmp_file=$(mktemp "${activity_dir}/.${parent_item_id}.json.XXXXXX") || {
             rm -f "$filter_file"
             echo "Warning: _kb_log_activity: mktemp for tmp_file failed" >&2
             exit 0
@@ -1973,28 +2094,23 @@ _kb_log_activity() {
         fi
         touch "$lock_file" 2>/dev/null
 
-        # --- Exclusive flock write (same Perl pattern as _kb_jq_update) ---
-        perl -e '
-            use Fcntl qw(:flock);
-            my $lock_file = $ARGV[0];
-            open(my $fh, ">", $lock_file) or die "Cannot open lock file: $!";
-            flock($fh, LOCK_EX) or die "Cannot lock: $!";
-            my $exit_code = system(@ARGV[1..$#ARGV]);
-            close($fh);
-            exit($exit_code >> 8);
-        ' "$lock_file" \
-          sh -c "$(printf 'jq --argjson new_entry %q --arg ts %q --arg item_id %q -f %q %q > %q && [ -s %q ] && mv %q %q || { rm -f %q; echo "Warning: _kb_log_activity: write failed" >&2; exit 1; }' \
-              "$entry" \
-              "$timestamp" \
-              "$parent_item_id" \
-              "$filter_file" \
-              "$activity_file" \
-              "$tmp_file" \
-              "$tmp_file" \
-              "$tmp_file" \
-              "$activity_file" \
-              "$tmp_file" \
-          )" 2>/dev/null || \
+        # --- Exclusive flock write (shared atomic-write primitive, XACA-0935) ---
+        # Same underlying mechanism as _kb_jq_update (see _kb_jq_atomic_write
+        # above): jq's argv -- including the --argjson new_entry payload,
+        # which is UNCONDITIONALLY multi-line (the entry is built by `jq -n`
+        # without -c at the call site above) -- is passed as a literal Perl
+        # system(LIST), never through a shell, so the dash-mangles-$'...'
+        # quoting defect this replaces cannot recur here either. Failure
+        # remains non-fatal/best-effort: this whole function already runs in
+        # a backgrounded subshell that always exit 0s, and the 2>/dev/null
+        # below keeps the primitive's own "ERROR: ..." line invisible
+        # exactly as the old script's "Warning: ..." line was -- only the
+        # explicit warning on the next line is ever surfaced.
+        _kb_jq_atomic_write "$lock_file" "$tmp_file" "$activity_file" \
+            "_kb_log_activity: write failed" \
+            jq --argjson new_entry "$entry" --arg ts "$timestamp" --arg item_id "$parent_item_id" \
+            -f "$filter_file" "$activity_file" \
+            2>/dev/null || \
             echo "Warning: _kb_log_activity: flock write failed for '$activity_file'" >&2
 
         rm -f "$filter_file" "$tmp_file" 2>/dev/null
