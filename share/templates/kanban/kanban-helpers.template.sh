@@ -371,6 +371,18 @@ _kb_jq_atomic_write() {
             print STDERR "_kb_jq_atomic_write: command produced empty output\n";
             $exit_code = 1;
         }
+
+        # XACA-0935: unlink $tmp_file HERE, while the flock is still held,
+        # instead of leaving it to the END block. $tmp_file is a fixed,
+        # non-unique name (${board_file}.tmp) shared by every writer racing
+        # for this lock -- an END-only unlink runs AFTER close($fh) below
+        # releases the lock, so a slow failing process could delete the tmp
+        # file a different, already-relocked writer just created. Cleaning
+        # up in-lock, before close($fh), removes that window; END remains a
+        # safety net for `die` exits, all of which (once $tmp_file exists)
+        # happen before $fh is closed, so it still always fires in-lock.
+        unlink($tmp_file) if defined($tmp_file) && -e $tmp_file;
+        $cleanup_tmp = 0;
         close($fh);
         exit($exit_code);
     ' "$lock_file" "$tmp_file" "$target_file" "${cmd_argv[@]}"
