@@ -28,7 +28,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch, mock_open, call
+from unittest.mock import MagicMock, patch, mock_open, call, create_autospec
 
 # ---------------------------------------------------------------------------
 # Ensure server.py can be imported even when optional dependencies (calendar
@@ -131,6 +131,46 @@ def _response_json(buf):
     buf.seek(0)
     raw = buf.read()
     return json.loads(raw)
+
+
+def _fake_releases_config_pair(handler, release_id, name=None, status="complete"):
+    """Autospec'd stand-ins for handler._load_releases_config / _save_releases_config.
+
+    XACA-0890 (commit 227f3b41) added a mandatory ``_lock_held`` keyword to the
+    real ``_load_releases_config`` / ``_save_releases_config`` so
+    ``handle_archive_release`` can hold one continuous exclusive lock across
+    load-mutate-save. The ORIGINAL hand-rolled fakes lacked it and TypeError'd
+    when the real call site started passing it — that rejection is exactly
+    what surfaced the interface drift; it was the mock working correctly,
+    not a defect in the mock. A ``**kwargs`` catch-all here would make that
+    detector permanently agreeable: it would silently absorb any future kwarg
+    production starts passing, even one whose value the fake needs to
+    actually honor, and the test would stay green while behavior diverges.
+
+    So these are built with ``unittest.mock.create_autospec`` against
+    ``handler``'s real, not-yet-overridden ``_load_releases_config`` /
+    ``_save_releases_config`` bound methods (captured via the ``handler``
+    argument before the caller overwrites those attributes). The spec is
+    pulled from the LIVE method signature at test run time, so any future
+    signature change (renamed/added/removed param) fails loudly and
+    specifically here on its own — without this factory needing a matching
+    manual update, and without a chance to silently swallow an unrecognized
+    argument. The behavioral bodies below still only understand
+    ``team``/``_lock_held`` explicitly: if a future kwarg needs to be
+    *honored* (not just accepted), a human still has to teach these impls
+    what to do with it. That's the point — fail and say why, don't pretend.
+    """
+    resolved_name = name or f"Test {release_id}"
+
+    def _load_impl(team=None, _lock_held=False):
+        return {"releases": [{"id": release_id, "name": resolved_name, "status": status}]}
+
+    def _save_impl(data, team=None, _lock_held=False):
+        pass  # no-op; we only care about the filesystem side-effects
+
+    fake_load_releases_config = create_autospec(handler._load_releases_config, side_effect=_load_impl)
+    fake_save_releases_config = create_autospec(handler._save_releases_config, side_effect=_save_impl)
+    return fake_load_releases_config, fake_save_releases_config
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +348,22 @@ class TestExtractTeamFromItemId(unittest.TestCase):
         self.assertEqual(self._extract("XDNS-0001"), "dns")
 
     def test_freelance_doublenode_workstats(self):
+        # Freelance per-client/project teams (e.g. "freelance-doublenode-workstats",
+        # prefix XFWS) are registered only in this machine's live, mutable
+        # overlay (~/.aiteamforge/team-paths.json), populated by kb-freelance —
+        # never in a tracked/default config (XACA-0628). Asserting against
+        # that live overlay makes this test's pass/fail a function of which
+        # machine/point-in-time it runs on rather than of the lookup logic
+        # under test (e.g. it fails here once freelance teams are migrated
+        # off this machine per the fleet plan, even though nothing in the
+        # lookup code changed). Stub a fixed prefix->team fixture on the
+        # handler instance instead, so the test exercises
+        # _extract_team_from_item_id's merge/lookup logic against a known,
+        # deterministic input and passes identically on any machine and in CI.
+        self.handler.ITEM_PREFIX_TO_TEAM = {
+            **self.handler.ITEM_PREFIX_TO_TEAM,
+            "XFWS": "freelance-doublenode-workstats",
+        }
         self.assertEqual(self._extract("XFWS-0003"), "freelance-doublenode-workstats")
 
     def test_legal_coparenting(self):
@@ -1040,10 +1096,16 @@ class TestGetTimestamp(unittest.TestCase):
 class TestModuleLevelConfig(unittest.TestCase):
     """Verify that module-level globals are set from env vars correctly."""
 
-    def test_lcars_team_defaults_to_freelance(self):
-        # The env var may already be set in the test environment, so we just
-        # confirm the value matches what the env var says (or the default).
-        expected = os.environ.get("LCARS_TEAM", "freelance")
+    def test_lcars_team_defaults_to_empty_string(self):
+        # XACA-0460 (commit a0a543560) intentionally dropped the old
+        # contract-violating 'freelance' fallback: 'freelance' is a
+        # parameterized template id requiring client+project params, so
+        # defaulting to it silently masked validate_lcars_team_or_die's
+        # startup check. An unset LCARS_TEAM now resolves to '' so that
+        # check can fail loudly instead. The env var may already be set in
+        # the test environment, so we just confirm the value matches what
+        # the env var says (or the current empty-string default).
+        expected = os.environ.get("LCARS_TEAM", "").strip()
         self.assertEqual(server.LCARS_TEAM, expected)
 
     def test_session_name_defaults_to_lcars(self):
@@ -1071,14 +1133,27 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
     Both assertions hold whether or not the manifest directory existed up front.
     """
 
-    def _run_archive(self, release_id, kanban_dir, team=None):
+    def _run_archive(self, release_id, kanban_dir, team=None, default_kanban_dir=None):
         """
         Wire up a minimal handler and invoke handle_archive_release.
 
-        kanban_dir:  a real (temp) directory that acts as the team's kanban root.
-        team:        if provided, appended as a ?team= query param.
+        kanban_dir:          a real (temp) directory that acts as the team's kanban root.
+        team:                if provided, appended as a ?team= query param.
+        default_kanban_dir:  XACA-0135-053: the directory patched onto
+                              server.KANBAN_DIR (the fallback used by
+                              TEAM_KANBAN_DIRS.get(effective_team, KANBAN_DIR)
+                              in production). Defaults to kanban_dir, matching
+                              the original behaviour where both the team dir
+                              and the default dir are the SAME temp directory
+                              — that's correct for the two tests that don't
+                              care about default-vs-team routing. Pass a
+                              DIFFERENT directory here to make a fallback-to-
+                              KANBAN_DIR bug observable (see
+                              test_team_query_param_routes_to_correct_directory).
         Returns the handler after the call completes.
         """
+        if default_kanban_dir is None:
+            default_kanban_dir = kanban_dir
         path = f"/api/releases/{release_id}"
         if team:
             path += f"?team={team}"
@@ -1087,22 +1162,10 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
         # Patch TEAM_KANBAN_DIRS so our temp dir is used for the effective team
         effective_team = team or server.LCARS_TEAM
 
-        # Build a minimal releases config with our release in it
-        releases_data = {
-            "releases": [
-                {"id": release_id, "name": f"Test {release_id}", "status": "complete"}
-            ]
-        }
-
-        def fake_load_releases_config(t=None):
-            return {
-                "releases": [
-                    {"id": release_id, "name": f"Test {release_id}", "status": "complete"}
-                ]
-            }
-
-        def fake_save_releases_config(data, t=None):
-            pass  # no-op; we only care about the filesystem side-effects
+        # Shared, autospec'd fakes for _load_releases_config / _save_releases_config
+        # (see _fake_releases_config_pair for why these use create_autospec
+        # instead of a hand-typed signature or a **kwargs catch-all).
+        fake_load_releases_config, fake_save_releases_config = _fake_releases_config_pair(handler, release_id)
 
         def fake_get_timestamp():
             return "2026-01-01T00:00:00Z"
@@ -1136,10 +1199,29 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
         handler._get_release_manifest_path = fake_get_release_manifest_path
 
         with patch.dict(server.TEAM_KANBAN_DIRS, {effective_team: kanban_dir}), \
-             patch.object(server, "KANBAN_DIR", kanban_dir):
+             patch.object(server, "KANBAN_DIR", default_kanban_dir):
             handler.handle_archive_release(release_id)
 
         return handler
+
+    def _assert_archived_ok(self, handler, msg="Expected HTTP 200 from handle_archive_release"):
+        """assertEqual(handler._response_code, 200) with the real cause folded in.
+
+        handle_archive_release wraps its body in a generic ``except Exception``
+        that converts any failure (e.g. a TypeError from an autospec'd fake
+        correctly rejecting a signature it no longer matches) into a mocked
+        ``send_error(500, ...)`` call — and the mocked send_error never sets
+        ``_response_code``, so a bare ``assertEqual(_response_code, 200)``
+        failure reads only "None != 200" with no hint why. send_error is a
+        MagicMock here, so its call args (which carry the real exception
+        text) are still inspectable after the fact; fold them into the
+        assertion message so a signature-drift failure names its own cause
+        test-side, without restructuring handle_archive_release itself.
+        """
+        detail = ""
+        if handler._response_code != 200 and handler.send_error.call_args is not None:
+            detail = f" — send_error was called with: {handler.send_error.call_args}"
+        self.assertEqual(handler._response_code, 200, msg + detail)
 
     def test_archive_json_written_and_manifest_dir_removed(self):
         """Core contract: archive file exists, manifest directory is gone."""
@@ -1148,8 +1230,7 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
             kanban_dir = Path(tmp)
             handler = self._run_archive(release_id, kanban_dir)
 
-            self.assertEqual(handler._response_code, 200,
-                             "Expected HTTP 200 from handle_archive_release")
+            self._assert_archived_ok(handler)
 
             archive_file = kanban_dir / "releases-archive" / f"{release_id}.json"
             self.assertTrue(archive_file.exists(),
@@ -1171,11 +1252,9 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
 
             effective_team = server.LCARS_TEAM
 
-            def fake_load_releases_config(t=None):
-                return {"releases": [{"id": release_id, "name": "Ghost", "status": "complete"}]}
-
-            def fake_save_releases_config(data, t=None):
-                pass
+            fake_load_releases_config, fake_save_releases_config = _fake_releases_config_pair(
+                handler, release_id, name="Ghost"
+            )
 
             def fake_get_timestamp():
                 return "2026-01-01T00:00:00Z"
@@ -1199,27 +1278,54 @@ class TestHandleArchiveReleaseCleanup(unittest.TestCase):
                  patch.object(server, "KANBAN_DIR", kanban_dir):
                 handler.handle_archive_release(release_id)
 
-            self.assertEqual(handler._response_code, 200,
-                             "Archive should succeed even when manifest dir is absent")
+            self._assert_archived_ok(handler, "Archive should succeed even when manifest dir is absent")
 
             archive_file = kanban_dir / "releases-archive" / f"{release_id}.json"
             self.assertTrue(archive_file.exists(),
                             "Archive JSON must be written regardless of manifest dir presence")
 
     def test_team_query_param_routes_to_correct_directory(self):
-        """?team=academy routes cleanup to the academy kanban directory."""
-        release_id = "REL-2026-TEST-003"
-        with tempfile.TemporaryDirectory() as tmp:
-            kanban_dir = Path(tmp)
-            handler = self._run_archive(release_id, kanban_dir, team="academy")
+        """?team=academy routes cleanup to the academy kanban directory.
 
-            self.assertEqual(handler._response_code, 200)
+        XACA-0135-053: previously kanban_dir was patched onto BOTH
+        TEAM_KANBAN_DIRS[effective_team] AND KANBAN_DIR, so a mutant that
+        made handle_archive_release ignore ?team= entirely (always falling
+        back to KANBAN_DIR via TEAM_KANBAN_DIRS.get(effective_team,
+        KANBAN_DIR)) wrote to the exact same directory as the correct code
+        path — the two were indistinguishable and this test stayed green
+        under that mutation. Using TWO distinct temp directories here makes
+        the fallback observable: the positive assertion checks the archive
+        landed in the TEAM dir, and the negative assertion checks nothing
+        was written into the DEFAULT dir — that negative half is what
+        actually catches the fallback bug.
+        """
+        release_id = "REL-2026-TEST-003"
+        with tempfile.TemporaryDirectory() as team_tmp, \
+             tempfile.TemporaryDirectory() as default_tmp:
+            kanban_dir = Path(team_tmp)
+            default_kanban_dir = Path(default_tmp)
+            handler = self._run_archive(
+                release_id, kanban_dir, team="academy",
+                default_kanban_dir=default_kanban_dir,
+            )
+
+            self._assert_archived_ok(handler)
 
             archive_file = kanban_dir / "releases-archive" / f"{release_id}.json"
             self.assertTrue(archive_file.exists(), "Archive JSON should be in team's kanban dir")
 
             manifest_dir = kanban_dir / "releases" / release_id
             self.assertFalse(manifest_dir.exists(), "Manifest dir should be gone after archive")
+
+            # Negative assertion: the DEFAULT (non-team) kanban dir must be
+            # untouched. If routing silently fell back to KANBAN_DIR instead
+            # of honouring ?team=academy, the archive would land here instead.
+            default_archive_file = default_kanban_dir / "releases-archive" / f"{release_id}.json"
+            self.assertFalse(
+                default_archive_file.exists(),
+                "Archive JSON must NOT be written to the default KANBAN_DIR "
+                "when ?team= is provided — this indicates ?team= was ignored"
+            )
 
 
 
