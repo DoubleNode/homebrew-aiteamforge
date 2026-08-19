@@ -8435,6 +8435,37 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             'cancelled': cancelled,
         }
 
+    @staticmethod
+    def _assigned_backlog_items(epic, backlog):
+        """Resolve an epic's ASSIGNED set per STATE_CONTRACT.md §1.1.
+
+        THE single Python implementation of "which backlog items belong to this
+        epic": items in `backlog` whose id appears in `epic.itemIds` (forward
+        resolution). Returns the RAW backlog dicts, in `.backlog` order.
+
+        Semantically identical to the jq engine's expression in
+        `_kb_epic_derive_state` (kanban-helpers.sh):
+            [(.backlog // [])[] | select(.id as $id | $ids | index($id) != null)]
+
+        Filtering `backlog` (rather than iterating `itemIds`) is deliberate and
+        load-bearing on two counts: orphan ids — present in `itemIds` with no
+        matching backlog entry — drop out for free per §1.1, and `.backlog`
+        ordering is preserved, which is what the Epics tab renders. An
+        `itemIds`-ordered implementation would silently reshuffle every epic's
+        item list.
+
+        Extracted in XACA-0859 (PR #751 review) so the Epics tab and the
+        Calendar view cannot drift apart again: two hand-maintained copies of
+        one contract rule is the exact defect this ticket converged away.
+        `epic` may be None (no such epic) -> empty list.
+        """
+        if not epic:
+            return []
+        ids = set(epic.get('itemIds') or [])
+        if not ids:
+            return []
+        return [i for i in (backlog or []) if i.get('id') in ids]
+
     def _get_items_for_epic(self, epic_id, board_data=None):
         """Get kanban items assigned to an epic from the current team's board only.
 
@@ -8471,22 +8502,20 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             if candidate.get('id') == epic_id:
                 epic = candidate
                 break
-        if epic is None:
-            return items
 
-        ids = set(epic.get('itemIds') or [])
-
-        for item in board_data.get('backlog', []):
-            if item.get('id') in ids:
-                items.append({
-                    "itemId": item.get('id'),
-                    "title": item.get('title', ''),
-                    "status": item.get('status', 'todo'),
-                    "priority": item.get('priority', 'medium'),
-                    "team": LCARS_TEAM,
-                    "tags": item.get('tags', []),
-                    "subRepo": item.get('subRepo', '')
-                })
+        # LCARSHandler._... not self._... — this method is called with self=None
+        # from the test suite's board_data-supplied path (and self is genuinely
+        # unused on that path), so an instance attribute lookup would raise.
+        for item in LCARSHandler._assigned_backlog_items(epic, board_data.get('backlog', [])):
+            items.append({
+                "itemId": item.get('id'),
+                "title": item.get('title', ''),
+                "status": item.get('status', 'todo'),
+                "priority": item.get('priority', 'medium'),
+                "team": LCARS_TEAM,
+                "tags": item.get('tags', []),
+                "subRepo": item.get('subRepo', '')
+            })
 
         return items
 
@@ -11027,8 +11056,7 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Epics tab, missed on first pass and caught in PR #751 review.
                 # Orphan ids (in itemIds, no matching .backlog entry) drop out
                 # for free because we filter .backlog rather than iterate itemIds.
-                _epic_item_ids = set(epic.get('itemIds') or [])
-                epic_items = [i for i in board_data.get('backlog', []) if i.get('id') in _epic_item_ids]
+                epic_items = LCARSHandler._assigned_backlog_items(epic, board_data.get('backlog', []))
                 active_items = [i for i in epic_items if i.get('status') != 'cancelled']
                 item_count = len(active_items)
                 cancelled_count = len(epic_items) - item_count
@@ -11360,7 +11388,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 # Keep each epic's itemIds list in sync with item.epicId.
                 # Remove from any other epic that still lists it, then add to the target.
                 for epic in data.get('epics', []):
-                    ids = epic.get('itemIds', [])
+                    # 'or []' not get(..., []) — an explicit itemIds: null
+                    # returns None here and raises on `in`/iteration. In
+                    # _clear_item_epic_assignment this runs inside
+                    # handle_delete_epic's cleanup loop AFTER earlier items are
+                    # already written, so a null would leave a partially
+                    # unassigned board AND an undeletable epic on every retry —
+                    # a permanent denial-of-delete (PR #751 review).
+                    ids = epic.get('itemIds') or []
                     if epic.get('id') == epic_id:
                         if item_id not in ids:
                             ids.append(item_id)
@@ -11396,7 +11431,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         break
 
                 for epic in data.get('epics', []):
-                    ids = epic.get('itemIds', [])
+                    # 'or []' not get(..., []) — an explicit itemIds: null
+                    # returns None here and raises on `in`/iteration. In
+                    # _clear_item_epic_assignment this runs inside
+                    # handle_delete_epic's cleanup loop AFTER earlier items are
+                    # already written, so a null would leave a partially
+                    # unassigned board AND an undeletable epic on every retry —
+                    # a permanent denial-of-delete (PR #751 review).
+                    ids = epic.get('itemIds') or []
                     if item_id in ids:
                         epic['itemIds'] = [i for i in ids if i != item_id]
 
