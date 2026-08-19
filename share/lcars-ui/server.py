@@ -8783,7 +8783,9 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
 
             for epic in raw_epics:
                 epic_id = epic.get('id', '')
-                item_ids = epic.get('itemIds', [])
+                # 'or []' not get(..., []) — an explicit itemIds: null would
+                # otherwise return None and raise on iteration (PR #751 review).
+                item_ids = epic.get('itemIds') or []
 
                 # Build a slim item list for _derive_epic_state / _build_epic_item_counts.
                 # These helpers need only 'status'; we include the full raw slice so
@@ -11208,6 +11210,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # is not reentrant) and reuse it for both halves of the union:
             # forward-resolved items first, then any back-ref-only
             # stragglers in .backlog order, deduped by item id.
+            #
+            # FAIL CLOSED on a failed read (XACA-0859 PR #751 review finding).
+            # If this read raises, we cannot enumerate the stragglers. Deleting
+            # the epic anyway would strand every one of them — precisely the
+            # outcome this sweep exists to prevent — and the failure would be
+            # asymmetric and invisible: passing board_data=None into
+            # _get_items_for_epic makes it re-read on its own, so the FORWARD
+            # half would silently recover while the straggler half quietly
+            # cleaned nothing. Abort instead. Delete is destructive and there is
+            # a human on the other end of this request who can retry, so
+            # surfacing the error is strictly better than a partial cleanup that
+            # reports success.
             board_data_for_sweep = None
             sweep_board_file = get_board_file(LCARS_TEAM)
             if sweep_board_file.exists():
@@ -11216,6 +11230,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                         board_data_for_sweep = json.load(f)
                 except Exception as e:
                     print(f"[LCARS] Error reading {sweep_board_file}: {e}")
+                    self.send_error(
+                        500,
+                        f"Cannot delete epic {epic_id}: board read failed, so items "
+                        f"assigned to it cannot be reliably unassigned ({e}). "
+                        f"No changes were made; retry."
+                    )
+                    return
 
             items = self._get_items_for_epic(epic_id, board_data=board_data_for_sweep)
             seen_item_ids = {item['itemId'] for item in items}
