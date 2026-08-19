@@ -11,7 +11,21 @@
 #
 # Exit codes:
 #   0  — success (including branch-not-mapped no-op, no-active-release no-op)
-#   1  — hard block (version gate fail at PROD, promote API error, bad args)
+#   1  — hard block (version gate fail, CR-divergence halt, promote API error, bad args)
+#
+# CR-divergence halt (XACA-0897 Guard 5):
+#   kb-release-version-gate exits 3 (distinct from its ordinary 0/1 contract) when the
+#   release's platforms.<plat>.version has diverged from the linked CR's
+#   cr_submitted_version — i.e. the release was renumbered after CAB approved it. This
+#   script MUST NOT attempt --auto-bump against that class: auto-bump exists to
+#   reconcile CODE to the release TARGET, and running it here would perform the exact
+#   renumber the halt exists to stop. On gate exit 3 this script hard-blocks the
+#   platform immediately (no bump attempt) and reports the overall exit as 1 with a
+#   halt-specific message distinct from an ordinary gate failure. It is NOT
+#   agent-clearable from here — this script never forwards any override; the human-only
+#   override lives entirely in kb-release-version-gate --override-cr-divergence (a live
+#   TTY + typed confirmation, unusable from an automated/non-interactive caller like
+#   this script or kb-git-push). See docs/ "CR-Divergence Halt (Guard 5)".
 #
 # Design notes:
 #   - No ~/dev-team/ hardcodes — siblings resolved via $AITEAMFORGE_DIR /
@@ -587,8 +601,28 @@ while IFS= read -r _plan_line; do
                     set -e
                 fi
 
-                if [ "$_gate_rc" -ne 0 ]; then
-                    # Gate failed — try auto-bump if requested
+                if [ "$_gate_rc" -eq 3 ]; then
+                    # ── CR-DIVERGENCE HALT (XACA-0897 Guard 5) ───────────────
+                    # Distinct exit code from an ordinary gate failure (1).
+                    # NEVER attempt --auto-bump here, even if OPT_AUTO_BUMP is
+                    # set: auto-bump exists to reconcile code to the release
+                    # target, and applying it to THIS class would perform the
+                    # very renumber the halt exists to prevent. This script
+                    # never forwards an override — the only way to clear a
+                    # CR-divergence halt is a human running
+                    # `kb-release-version-gate ... --override-cr-divergence`
+                    # directly, interactively, which this automated,
+                    # non-interactive caller structurally cannot do.
+                    echo "[kb-release-push-promote] CR-DIVERGENCE HALT for ${_platform} → ${_target_env} (kb-release-version-gate exit 3)." >&2
+                    echo "  This is NOT an ordinary version-gate failure — the release's version has diverged" >&2
+                    echo "  from the CAB-approved CR version. --auto-bump will NOT be attempted against this" >&2
+                    echo "  halt class under any flag combination." >&2
+                    echo "  Hard block: promotion cancelled for this platform. Resolution requires an explicit" >&2
+                    echo "  human decision — see docs/ 'CR-Divergence Halt (Guard 5)'." >&2
+                    _OVERALL_EXIT=1
+                    continue
+                elif [ "$_gate_rc" -ne 0 ]; then
+                    # Ordinary gate failure (exit 1) — try auto-bump if requested
                     if [ "$OPT_AUTO_BUMP" -eq 1 ] && [ -n "$_BUMP_SCRIPT" ]; then
                         echo "[kb-release-push-promote] gate failed — attempting auto-bump for ${_platform}..." >&2
                         set +e
@@ -607,7 +641,16 @@ while IFS= read -r _plan_line; do
                     fi
                 fi
 
-                if [ "$_gate_rc" -ne 0 ]; then
+                if [ "$_gate_rc" -eq 3 ]; then
+                    # A retry above (there isn't one on this path today, but
+                    # guard defensively) must still never be treated as an
+                    # ordinary failure/auto-bump candidate.
+                    echo "[kb-release-push-promote] CR-DIVERGENCE HALT for ${_platform} → ${_target_env} (kb-release-version-gate exit 3)." >&2
+                    echo "  Hard block: promotion cancelled for this platform. Resolution requires an explicit" >&2
+                    echo "  human decision — see docs/ 'CR-Divergence Halt (Guard 5)'." >&2
+                    _OVERALL_EXIT=1
+                    continue
+                elif [ "$_gate_rc" -ne 0 ]; then
                     echo "[kb-release-push-promote] ERROR: version gate FAILED for ${_platform} → ${_target_env}." >&2
                     echo "  Hard block: promotion cancelled for this platform." >&2
                     _OVERALL_EXIT=1

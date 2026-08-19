@@ -8,6 +8,16 @@
 # Exit codes:
 #   0 — PASS (versions match) or SKIP (no target version set for non-PROD env, or no version_sources)
 #   1 — FAIL (version mismatch) or PROD-no-target (PROD requires a target version)
+#   3 — CR-DIVERGENCE HALT (XACA-0897 Guard 5): the release's platforms.<plat>.version
+#       has diverged from the linked CR's cr_submitted_version, OR the check could not
+#       be resolved (unresolvable board, dangling CR link, missing cr_submitted_version,
+#       ambiguous multiple linked CRs, no release version set) — fail-closed, never a
+#       skip. Distinct from exit 1 on purpose: kb-release-push-promote must NEVER
+#       attempt --auto-bump against this class, and it is not agent-clearable. See
+#       "Step 0: CR-divergence halt" below and docs/ "CR-Divergence Halt (Guard 5)".
+#       Override (human-only, not usable by an agent): kb-release-version-gate ...
+#       --override-cr-divergence — requires a live interactive TTY, refuses outright
+#       in any detected AI-agent shell, and requires typed confirmation + a reason.
 #
 # The gate writes gateStatus to the release via the LCARS API (POST /api/releases/<id>/platform-gate-status).
 # If LCARS is down the status write is non-fatal; the exit code is still correct.
@@ -48,6 +58,7 @@ _platform=""
 _env=""
 _team_override=""
 _quiet=0
+_cr_div_override_requested=0
 
 while [[ $# -gt 0 ]]; do
     case "${1-}" in
@@ -59,6 +70,13 @@ while [[ $# -gt 0 ]]; do
             _team_override="${2-}"; shift 2 ;;
         --quiet|-q)
             _quiet=1; shift ;;
+        --override-cr-divergence)
+            # Human-only (XACA-0897-005). Merely passing this flag does
+            # NOTHING by itself — it only makes the interactive confirmation
+            # AVAILABLE if a genuine CR-divergence is found. See "Step 0"
+            # below: it still requires a live TTY and refuses outright in
+            # any detected AI-agent shell (CLAUDECODE/AI_AGENT env).
+            _cr_div_override_requested=1; shift ;;
         --help|-h)
             grep '^#' "$0" | head -20 | sed 's/^# \{0,1\}//'
             exit 0 ;;
@@ -199,6 +217,425 @@ print(json.dumps({
     fi
     return 0
 }
+
+# ---------------------------------------------------------------------------
+# Step 0: CR-divergence halt (XACA-0897 Guard 5)
+#
+# A NEW, independent axis from Steps 1-4 below. Steps 1-4 compare the CODE
+# version (read from a source file via version_sources) to the release
+# TARGET version -- "does the built code match the release target?" This
+# step compares the release's platforms.<plat>.version (the SAME field
+# Step 1 reads via LCARS -- see plan doc finding F1) against the linked CR's
+# cr_submitted_version -- "has the release been renumbered since CAB
+# approved it?" Different question, same field on the left, a different
+# field entirely on the right.
+#
+# DELIBERATELY placed BEFORE Step 1's LCARS fetch -- including before that
+# fetch's own early bail-out -- and reads the board file directly from disk
+# rather than via the LCARS API, so this step does not sit behind ANY of the
+# seven downstream "no verdict, proceed anyway" branches in Steps 1-4 (LCARS
+# unreachable, platform absent at non-PROD, no target version at non-PROD, no
+# version_sources configured, version_source missing file/match_pattern,
+# working_dir unresolvable, version file not found -- see plan doc finding
+# F6; grep the literal phrase those branches print, in lowercase, to re-count
+# them independently of this comment). This step runs first, unconditionally,
+# on every invocation, and only ever resolves to HALT or falls through to
+# Steps 1-4 -- it has no such branch of its own. "Could not determine"
+# (unresolvable board, release not found, dangling CR reference, missing
+# cr_submitted_version, ambiguous multiple linked CRs, no release version
+# set) resolves to HALT, never to skip -- per the user's 2026-08-07 decision
+# recorded in the plan doc (Risks): absence of data is never read as
+# permission. See plan doc Design Decisions -> "Fail closed, unlike the
+# existing gate".
+#
+# Exit code 3 is reserved EXCLUSIVELY for this halt class -- distinct from
+# the existing 0 (pass/skip) / 1 (fail) contract below -- so
+# kb-release-push-promote can tell "ordinary code/target mismatch"
+# (auto-bumpable) apart from "CR-governance halt" (never auto-bumpable,
+# never agent-clearable). The "CR-DIVERGENCE HALT:" marker string is the
+# human-readable identifier; the EXIT CODE is the authoritative
+# machine-readable contract -- callers MUST key off $? == 3, never a
+# substring grep (a bare-substring grep on this class of marker has
+# false-matched a subitem TITLE that merely quoted the phrase before --
+# see feedback_skip_heuristic_exact_marker.md).
+# ---------------------------------------------------------------------------
+
+# Returns 0 (true) if this shell is an AI-agent context, per env vars this
+# fleet's own infrastructure sets for that purpose. This is a SECOND,
+# independent layer under _cr_div_interactive_override_confirm, on top of
+# the TTY check there -- even a hypothetical agent shell with a real pty
+# attached is still refused.
+_cr_div_agent_context_detected() {
+    [[ -n "${CLAUDECODE:-}" || -n "${AI_AGENT:-}" || -n "${CLAUDE_CODE_ENTRYPOINT:-}" || -n "${CLAUDE_AGENT_HANDLE:-}" ]]
+}
+
+# Derives <kanban_dir>/releases from the board file path we already resolved
+# (_cr_div_board_file), rather than calling _kb_get_releases_dir directly.
+#
+# WHY: kanban-helpers.sh contains a zsh-only construct around line ~3755
+# (pre-existing, unrelated to XACA-0897, NOT this ticket's file to fix) that a
+# real `/bin/bash` `source` cannot parse. Because kanban-helpers.sh is sourced
+# with stderr silenced (`source ... 2>/dev/null || true`, by design — see the
+# file's own "Self-location" preamble), that parse failure is swallowed
+# silently and truncates sourcing at that point: every function defined AFTER
+# line ~3755 — including _kb_get_releases_dir (~line 18155) — is simply
+# UNDEFINED for the rest of the script when run under bash, even though
+# `declare -f` guards make the failure non-fatal. _kb_get_board_file
+# (~line 1778) and _kb_get_kanban_dir (~line 205) are both defined BEFORE the
+# break and load reliably under bash, which is why this function derives the
+# releases dir from the board file's own directory (the exact same
+# `<kanban_dir>/releases` relationship _kb_get_releases_dir itself implements)
+# instead of depending on the helper that bash silently loses.
+_cr_div_releases_dir_from_board() {
+    [[ -z "${_cr_div_board_file:-}" ]] && return 1
+    echo "$(dirname "$_cr_div_board_file")/releases"
+}
+
+# Path to the (per release+platform) single-use override sentinel.
+_cr_div_override_sentinel_path() {
+    local rel="$1" plat="$2"
+    local rdir
+    rdir=$(_cr_div_releases_dir_from_board) || return 1
+    [[ -z "$rdir" ]] && return 1
+    echo "${rdir}/${rel}/cr-divergence-override-${plat}.json"
+}
+
+# Checks for a pre-existing override sentinel whose recorded fields EXACTLY
+# match the divergence being evaluated right now. On an exact match it
+# CONSUMES (deletes) the sentinel and returns 0 -- single-use, and scoped
+# tightly enough that a later, different renumber cannot silently ride on an
+# old approval. It never CREATES a sentinel -- only
+# _cr_div_interactive_override_confirm does that, and only after a live
+# human confirms interactively.
+_cr_div_check_override_sentinel() {
+    local rel="$1" plat="$2" crid="$3" cr_ver="$4" rel_ver="$5"
+    local path
+    path=$(_cr_div_override_sentinel_path "$rel" "$plat") || return 1
+    [[ -z "$path" || ! -f "$path" ]] && return 1
+
+    local match
+    match=$(python3 -c "
+import json, sys
+try:
+    with open(sys.argv[1]) as fh:
+        d = json.load(fh)
+except Exception:
+    print('no'); sys.exit(0)
+ok = (d.get('releaseId') == sys.argv[2] and d.get('platform') == sys.argv[3] and
+      d.get('crId') == sys.argv[4] and d.get('crSubmittedVersion') == sys.argv[5] and
+      d.get('releaseVersionAtOverride') == sys.argv[6])
+print('yes' if ok else 'no')
+" "$path" "$rel" "$plat" "$crid" "$cr_ver" "$rel_ver" 2>/dev/null) || match="no"
+
+    if [[ "$match" == "yes" ]]; then
+        echo "CR-DIVERGENCE OVERRIDE HONORED: a matching human-confirmed override was found and is being consumed (single-use)." >&2
+        python3 -c "
+import json, sys
+with open(sys.argv[1]) as fh:
+    d = json.load(fh)
+sys.stderr.write('  Overridden by: %s\n' % d.get('overriddenBy', '?'))
+sys.stderr.write('  Overridden at: %s\n' % d.get('overriddenAt', '?'))
+sys.stderr.write('  Reason:        %s\n' % d.get('reason', '?'))
+" "$path" 2>&1 1>&2 || true
+        rm -f "$path" 2>/dev/null || true
+        return 0
+    fi
+    return 1
+}
+
+# Interactive-ONLY human confirmation. Refuses outright (returns 1) unless:
+#   (a) no known agent-context env var is set (CLAUDECODE/AI_AGENT/etc), AND
+#   (b) stdin is a real TTY, AND
+#   (c) the human types the release id back exactly, AND
+#   (d) the human supplies a non-empty reason.
+# On success it WRITES the single-use sentinel; it does NOT itself clear the
+# halt for this run -- the caller re-checks the sentinel immediately after,
+# the same code path a later non-interactive run (e.g. kb-release-push-promote
+# calling this gate automatically) will also take.
+_cr_div_interactive_override_confirm() {
+    local rel="$1" plat="$2" crid="$3" cr_ver="$4" rel_ver="$5"
+
+    if _cr_div_agent_context_detected; then
+        echo "CR-DIVERGENCE OVERRIDE REFUSED: this shell is an AI-agent context (CLAUDECODE/AI_AGENT env detected)." >&2
+        echo "  --override-cr-divergence is human-only by design and cannot be exercised from an agent shell." >&2
+        return 1
+    fi
+    if [[ ! -t 0 ]]; then
+        echo "CR-DIVERGENCE OVERRIDE REFUSED: --override-cr-divergence requires an interactive terminal (stdin is not a TTY)." >&2
+        echo "  Deliberate: this is what makes the override structurally unreachable by an automated agent" >&2
+        echo "  or CI job, neither of which has a live TTY attached to answer the confirmation prompts." >&2
+        return 1
+    fi
+
+    {
+        echo ""
+        echo "======================================================================"
+        echo " CR-DIVERGENCE OVERRIDE -- HUMAN CONFIRMATION REQUIRED"
+        echo "======================================================================"
+        echo " Release:              ${rel}"
+        echo " Platform:             ${plat}"
+        echo " CR-submitted version: ${cr_ver}"
+        echo " Release version now:  ${rel_ver}"
+        echo " Linked CR:            ${crid}"
+        echo ""
+        echo " Overriding certifies you personally reviewed this renumber and it is"
+        echo " intentional -- WITHOUT a fresh CAB review cycle for the new version."
+        echo ""
+    } >&2
+
+    local _typed _reason
+    read -r -p " Type the release id EXACTLY as shown above to confirm: " _typed
+    if [[ "$_typed" != "$rel" ]]; then
+        echo "CR-DIVERGENCE OVERRIDE REFUSED: typed confirmation did not match '${rel}'." >&2
+        return 1
+    fi
+    read -r -p " Reason for override (required, recorded in the audit log): " _reason
+    if [[ -z "$_reason" ]]; then
+        echo "CR-DIVERGENCE OVERRIDE REFUSED: a reason is required." >&2
+        return 1
+    fi
+
+    local path ts who
+    path=$(_cr_div_override_sentinel_path "$rel" "$plat") || {
+        echo "CR-DIVERGENCE OVERRIDE REFUSED: could not resolve releases dir to record the override." >&2
+        return 1
+    }
+    ts=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    who="${USER:-$(whoami 2>/dev/null)}"
+    mkdir -p "$(dirname "$path")" 2>/dev/null || true
+    python3 -c "
+import json, sys
+d = {
+    'releaseId': sys.argv[2], 'platform': sys.argv[3], 'crId': sys.argv[4],
+    'crSubmittedVersion': sys.argv[5], 'releaseVersionAtOverride': sys.argv[6],
+    'overriddenBy': sys.argv[7], 'overriddenAt': sys.argv[8], 'reason': sys.argv[9],
+}
+with open(sys.argv[1], 'w') as fh:
+    json.dump(d, fh, indent=2)
+" "$path" "$rel" "$plat" "$crid" "$cr_ver" "$rel_ver" "$who" "$ts" "$_reason" || {
+        echo "CR-DIVERGENCE OVERRIDE REFUSED: could not write override record to ${path}." >&2
+        return 1
+    }
+    echo "CR-DIVERGENCE OVERRIDE RECORDED: ${path}" >&2
+    return 0
+}
+
+_cr_div_board_file=""
+if declare -f _kb_get_board_file >/dev/null 2>&1; then
+    _cr_div_board_file=$(_kb_get_board_file "$_team" 2>/dev/null) || _cr_div_board_file=""
+fi
+
+_cr_div_release_obj=""
+if [[ -n "$_cr_div_board_file" && -f "$_cr_div_board_file" ]]; then
+    _cr_div_release_obj=$(jq -c --arg id "$_release_id" '.releases[]? | select(.id == $id)' "$_cr_div_board_file" 2>/dev/null) || _cr_div_release_obj=""
+fi
+
+if [[ -z "$_cr_div_release_obj" ]]; then
+    # -------------------------------------------------------------------
+    # Board-unresolvable / release-not-on-board fallback (Reno follow-up,
+    # XACA-0897 subitems 004/005). We land here for either of two reasons:
+    # the board file itself could not be resolved or read at all
+    # (_cr_div_board_file is empty -- unknown/board-less team, e.g. the
+    # live-fleet 'mainevent' alias), or it WAS resolved/read but this
+    # release simply isn't in it (dangling/nonexistent release id, or a
+    # resolvable-but-stale kanban_dir, e.g. the live-fleet 'command' entry
+    # pointing at a leftover pytest temp dir). Either way we cannot read
+    # this release's own platforms.<plat>.version or linkedCRs[] from the
+    # board, so the full version-divergence comparison in the "else"
+    # branch below is not possible here.
+    #
+    # Before this fix, BOTH reasons hard-halted unconditionally -- the bug
+    # (XACA-0897 Guard-5 regression): a release cut for a team whose board
+    # cannot be resolved hard-halted regardless of whether the release
+    # carried any CR governance claim at all. Verified against the live
+    # fleet: 'mainevent' resolves to an empty board path (board-less alias,
+    # XACA-0727/XACA-0794) and 'command' resolves to a stale pytest temp
+    # dir -- neither has anything to do with whether THIS release is
+    # CAB-governed.
+    #
+    # Fall back to the release manifest's crIds[] cache -- the SAME
+    # secondary source the "else" branch below already reads when a
+    # resolved release has no linkedCRs[] -- to establish only WHETHER a CR
+    # governance claim exists, which is the minimum needed to choose
+    # between HALT (a claim exists but can't be version-verified without
+    # the board -> unsafe) and fall-through (no readable claim -> the same
+    # "not applicable" policy the on-board path already uses below,
+    # unchanged). A manifest file that is simply ABSENT is treated the same
+    # way the on-board path already treats it (see its comment below): a
+    # POSITIVELY KNOWN absence of a cached claim, not an unresolved one --
+    # this fallback would otherwise re-introduce the exact bug it fixes,
+    # just one layer down, for every team/release with no release-cut
+    # manifest ever written. Only a manifest that EXISTS but fails to
+    # parse -- a genuinely broken record we cannot read -- reaches the
+    # "could not determine" HALT, per the 2026-08-07 decision recorded in
+    # the plan doc: absence of data is never read as permission, but
+    # absence of a RECORD is not the same as a broken one.
+    _cr_div_fallback_reason="could not resolve board file for team '${_team}'"
+    if [[ -n "$_cr_div_board_file" && -f "$_cr_div_board_file" ]]; then
+        _cr_div_fallback_reason="release '${_release_id}' not found on board for team '${_team}'"
+    elif [[ -n "$_cr_div_board_file" ]]; then
+        _cr_div_fallback_reason="board file for team '${_team}' does not exist at the resolved path (${_cr_div_board_file})"
+    fi
+
+    # _cr_div_releases_dir_from_board only needs _cr_div_board_file to be a
+    # non-empty STRING (dirname of it) -- it does not require the file to
+    # exist -- so this already covers the "board resolved but board.json
+    # missing" and "release not on board" cases. It naturally returns
+    # non-zero (empty) when _cr_div_board_file itself is empty, which is
+    # exactly the signal that no releases dir can be determined at all.
+    _cr_div_fallback_releases_dir=$(_cr_div_releases_dir_from_board 2>/dev/null) || _cr_div_fallback_releases_dir=""
+
+    _cr_div_fallback_manifest_exists=0
+    _cr_div_fallback_manifest_parse_rc=0
+    _cr_div_linked_ids=""
+    if [[ -n "$_cr_div_fallback_releases_dir" ]]; then
+        _cr_div_fallback_manifest="${_cr_div_fallback_releases_dir}/${_release_id}/manifest.json"
+        if [[ -f "$_cr_div_fallback_manifest" ]]; then
+            _cr_div_fallback_manifest_exists=1
+            _cr_div_linked_ids=$(jq -r '[(.crIds // [])[]] | unique | .[]' "$_cr_div_fallback_manifest" 2>/dev/null) || _cr_div_fallback_manifest_parse_rc=$?
+        fi
+    fi
+
+    if [[ $_cr_div_fallback_manifest_exists -eq 1 && $_cr_div_fallback_manifest_parse_rc -ne 0 ]]; then
+        # The manifest EXISTS but could not be parsed -- a genuinely broken
+        # record, not a confirmed absence. This is the "could not
+        # determine" case: fail-closed.
+        echo "CR-DIVERGENCE HALT: ${_cr_div_fallback_reason}, and the release manifest at ${_cr_div_fallback_manifest} could not be parsed -- cannot verify CR governance for release '${_release_id}'." >&2
+        echo "  Fail-closed: a manifest that exists but cannot be read is treated as UNSAFE, never skipped." >&2
+        _write_gate_status "cr_divergence_halt" "" "" 2>/dev/null || true
+        exit 3
+    fi
+
+    if [[ -n "$_cr_div_linked_ids" ]]; then
+        # Manifest readable and shows one or more CR links: a governance
+        # claim EXISTS but its version cannot be verified without the
+        # board. Unlike a confirmed absence of any claim, this is not a
+        # positively-known-safe state -- HALT.
+        echo "CR-DIVERGENCE HALT: ${_cr_div_fallback_reason}, but the release manifest shows linked CR(s) -- cannot verify the release version against CAB governance without the board." >&2
+        echo "  Linked CR(s) per manifest cache: $(echo "$_cr_div_linked_ids" | tr '\n' ' ' | sed 's/[[:space:]]*$//')" >&2
+        echo "  Fail-closed: a confirmed CR-governance claim that cannot be version-verified is treated as UNSAFE." >&2
+        _write_gate_status "cr_divergence_halt" "" "" 2>/dev/null || true
+        exit 3
+    fi
+
+    # Either the manifest was read and positively shows NO CR claim, or no
+    # manifest exists at all for this release -- both are the SAME
+    # "positively known, not unresolved" fact the on-board path below
+    # already treats as not applicable. Falls through to Steps 1-4.
+    [[ $_quiet -eq 0 ]] && echo "CR-divergence check: ${_cr_div_fallback_reason}, and its release manifest shows no CR linked -- not applicable." >&2
+else
+    # Board resolved AND release found on it: full version-divergence path,
+    # unchanged from the original XACA-0897 implementation.
+    # Resolve linked CR id(s): prefer release.linkedCRs[] (F5 schema), fall back
+    # to the release manifest's crIds[] cache if linkedCRs is empty/absent.
+    # Uses _cr_div_releases_dir_from_board (see its comment above) rather than
+    # _kb_get_releases_dir directly -- the latter is unreliable under a real
+    # bash `source` of kanban-helpers.sh.
+    _cr_div_linked_ids=$(echo "$_cr_div_release_obj" | jq -r '[(.linkedCRs // [])[].crId] | unique | .[]' 2>/dev/null) || _cr_div_linked_ids=""
+    if [[ -z "$_cr_div_linked_ids" ]]; then
+        _cr_div_releases_dir=$(_cr_div_releases_dir_from_board 2>/dev/null) || _cr_div_releases_dir=""
+        _cr_div_manifest="${_cr_div_releases_dir}/${_release_id}/manifest.json"
+        if [[ -n "$_cr_div_releases_dir" && -f "$_cr_div_manifest" ]]; then
+            _cr_div_linked_ids=$(jq -r '[(.crIds // [])[]] | unique | .[]' "$_cr_div_manifest" 2>/dev/null) || _cr_div_linked_ids=""
+        fi
+    fi
+
+    if [[ -z "$_cr_div_linked_ids" ]]; then
+        # No CR governance claim exists on this release at all -- a POSITIVELY
+        # KNOWN fact, not an unresolved one, so this is NOT the "could not
+        # determine" case the fail-closed policy targets. Falls through to
+        # Steps 1-4 below unchanged.
+        [[ $_quiet -eq 0 ]] && echo "CR-divergence check: no CR linked to release '${_release_id}' -- not applicable." >&2
+    else
+        # Release's own version for this platform -- the SAME field Step 1 reads
+        # (platforms.<plat>.version, per F1) -- read here from the local board
+        # copy so this check does not depend on LCARS reachability.
+        _cr_div_release_version=$(echo "$_cr_div_release_obj" | jq -r --arg p "$_platform" '(.platforms[$p].version // "") | tostring' 2>/dev/null) || _cr_div_release_version=""
+
+        _cr_div_halt=0
+        _cr_div_seen_version=""
+        _cr_div_seen_cr=""
+
+        while IFS= read -r _cr_div_id; do
+            [[ -z "$_cr_div_id" ]] && continue
+            _cr_div_cr_obj=$(jq -c --arg id "$_cr_div_id" '.crs[]? | select(.id == $id)' "$_cr_div_board_file" 2>/dev/null) || _cr_div_cr_obj=""
+            if [[ -z "$_cr_div_cr_obj" ]]; then
+                echo "CR-DIVERGENCE HALT: release '${_release_id}' links CR '${_cr_div_id}' which does not exist on board '${_team}' -- cannot verify CR governance." >&2
+                _cr_div_halt=1
+                break
+            fi
+            _cr_div_submitted=$(echo "$_cr_div_cr_obj" | jq -r '(.cr_submitted_version // "") | tostring' 2>/dev/null) || _cr_div_submitted=""
+            if [[ -z "$_cr_div_submitted" ]]; then
+                echo "CR-DIVERGENCE HALT: CR '${_cr_div_id}' linked to release '${_release_id}' has no cr_submitted_version stamped." >&2
+                echo "  A missing stamp is treated as UNSAFE, not permission to proceed (2026-08-07 decision)." >&2
+                echo "  If this is a legacy CR pre-dating XACA-0897, run the cr_submitted_version backfill tool, then retry." >&2
+                _cr_div_halt=1
+                break
+            fi
+            if [[ -z "$_cr_div_seen_version" ]]; then
+                _cr_div_seen_version="$_cr_div_submitted"
+                _cr_div_seen_cr="$_cr_div_id"
+            elif [[ "$_cr_div_submitted" != "$_cr_div_seen_version" ]]; then
+                echo "CR-DIVERGENCE HALT: release '${_release_id}' has multiple linked CRs asserting DIFFERENT submitted versions -- ambiguous governance state." >&2
+                echo "  CR '${_cr_div_seen_cr}': cr_submitted_version='${_cr_div_seen_version}'" >&2
+                echo "  CR '${_cr_div_id}': cr_submitted_version='${_cr_div_submitted}'" >&2
+                _cr_div_halt=1
+                break
+            fi
+        done <<< "$_cr_div_linked_ids"
+
+        if [[ $_cr_div_halt -eq 0 ]]; then
+            if [[ -z "$_cr_div_release_version" ]]; then
+                echo "CR-DIVERGENCE HALT: release '${_release_id}' platform '${_platform}' has no version set, but linked CR '${_cr_div_seen_cr}' was submitted at version '${_cr_div_seen_version}'." >&2
+                echo "  Cannot confirm the release has not drifted from what CAB approved. Fail-closed: absence is not permission." >&2
+                _cr_div_halt=1
+            elif [[ "$_cr_div_release_version" != "$_cr_div_seen_version" ]]; then
+                if _cr_div_check_override_sentinel "$_release_id" "$_platform" "$_cr_div_seen_cr" "$_cr_div_seen_version" "$_cr_div_release_version"; then
+                    [[ $_quiet -eq 0 ]] && echo "CR-DIVERGENCE CHECK PASS (OVERRIDDEN, pre-recorded): release '${_release_id}' platform '${_platform}' proceeding on a consumed human override."
+                elif [[ "${_cr_div_override_requested:-0}" -eq 1 ]] \
+                    && _cr_div_interactive_override_confirm "$_release_id" "$_platform" "$_cr_div_seen_cr" "$_cr_div_seen_version" "$_cr_div_release_version"; then
+                    # Sentinel just WRITTEN by the interactive confirmation above.
+                    # Deliberately NOT self-consumed in this same run: this
+                    # manual, standalone invocation only exists to RECORD the
+                    # human's decision. Consuming it here too would burn the
+                    # single use on a run that never actually drives a release
+                    # cut, leaving nothing for the automated caller that DOES
+                    # (kb-release-push-promote's own, separate, non-interactive
+                    # re-run of this gate) — which is the entire point of
+                    # persisting it to disk rather than just returning 0 in
+                    # memory. That next matching invocation — automated or not —
+                    # is what calls _cr_div_check_override_sentinel and consumes
+                    # it. This run stops here, cleanly, without touching Steps
+                    # 1-4 below (there is nothing further for a bare recording
+                    # action to check).
+                    echo "CR-DIVERGENCE OVERRIDE RECORDED — this run performed no further action." >&2
+                    echo "  The override is a SINGLE-USE grant scoped to this exact divergence. The next" >&2
+                    echo "  gate check for release '${_release_id}' platform '${_platform}' (e.g. an automated" >&2
+                    echo "  release-cut re-run by kb-release-push-promote) will find, consume, and honor it." >&2
+                    exit 0
+                else
+                    echo "CR-DIVERGENCE HALT: release '${_release_id}' platform '${_platform}' version has diverged from the CAB-approved CR version." >&2
+                    echo "  Release manifest version (platforms.${_platform}.version): ${_cr_div_release_version}" >&2
+                    echo "  CR-submitted version    (cr_submitted_version):            ${_cr_div_seen_version}" >&2
+                    echo "  Linked CR:                                                 ${_cr_div_seen_cr}" >&2
+                    echo "  This release was renumbered after the CR was submitted/approved. Creating a" >&2
+                    echo "  new CR page triggers a new CAB review -- do not rename/re-submit casually." >&2
+                    echo "  This halt cannot be cleared by --auto-bump or by any agent. Resolution requires" >&2
+                    echo "  an explicit human decision. See docs/ for the 'CR-Divergence Halt (Guard 5)'" >&2
+                    echo "  resolution procedure." >&2
+                    _cr_div_halt=1
+                fi
+            else
+                [[ $_quiet -eq 0 ]] && echo "CR-DIVERGENCE CHECK PASS: release '${_release_id}' platform '${_platform}' version '${_cr_div_release_version}' matches CR '${_cr_div_seen_cr}' cr_submitted_version."
+            fi
+        fi
+
+        if [[ $_cr_div_halt -ne 0 ]]; then
+            _write_gate_status "cr_divergence_halt" "${_cr_div_release_version:-}" "${_cr_div_seen_version:-}" 2>/dev/null || true
+            exit 3
+        fi
+    fi
+fi
 
 # ---------------------------------------------------------------------------
 # Step 1: Load release.platforms.<platform>.version from LCARS API

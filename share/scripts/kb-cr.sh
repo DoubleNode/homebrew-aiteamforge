@@ -953,6 +953,17 @@ _kb_cr_container_submit() {
     ts=$(_kb_cr_timestamp)
     _kb_cr_lifecycle_advance "$_cr_board" "$cr_idx" "$cr_id" "cr-submitted" "cr_submitted_at" "$ts" || return 1
     echo "kb-cr submit: [$cr_id] $current_state -> cr-submitted (cr_submitted_at=$ts)"
+
+    # Guard 5 (XACA-0897-002/003): stamp cr_submitted_version. Reached by
+    # BOTH the manual `kb-cr submit <CR-ID>` CLI call AND the Confluence
+    # poller (cr-confluence-poller.py transition_cr() shells out to
+    # `kb-cr submit '<cr_id>'` with a CR-prefixed id, which routes here, not
+    # to the v1-legacy _kb_cr_submit below). Non-fatal by design — a stamp
+    # failure (e.g. no release linked yet) must not block the CAB submission
+    # itself; the release-cut gate is what halts on a missing stamp.
+    _kb_cr_set_submit_stamps "$cr_id" || {
+        echo "kb-cr submit: WARNING: cr_submitted_version was not stamped (see message above). The release-cut gate will halt on this CR's release until it is — resolve with: kb-cr _set_submit_stamps ${cr_id}" >&2
+    }
 }
 
 # kb-cr approve <CR-ID> [--approver <login>] [--approver-name "<name>"]
@@ -2096,6 +2107,8 @@ kb-cr() {
         _set_confluence_url) _kb_cr_set_confluence_url "$@" ;;
         _set_publish_stamps) _kb_cr_set_publish_stamps "$@" ;;
         _get_publish_stamps) _kb_cr_get_publish_stamps "$@" ;;
+        _set_submit_stamps) _kb_cr_set_submit_stamps "$@" ;;
+        _get_submit_stamps) _kb_cr_get_submit_stamps "$@" ;;
         attach)      _kb_cr_attach "$@" ;;
         detach)      _kb_cr_detach "$@" ;;
         start-dev)
@@ -3992,6 +4005,295 @@ _kb_cr_get_publish_stamps() {
     ' --argjson cidx "$cr_container_idx" --arg cid "$cr_id_assigned" -c
 }
 
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_resolve_container_for_submit_stamp <id-or-cr-id>
+#
+# Shared resolver for _kb_cr_set_submit_stamps / _kb_cr_get_submit_stamps.
+# Accepts EITHER a v2.0 CR-ID ("CR-...") or a v1 item-id, mirroring the same
+# CR-*/else routing convention already used throughout kb-cr.sh's dispatcher
+# (submit/approve/reject/... at the top of this file). Container-level call
+# sites (_kb_cr_container_submit) already have a cr_id in hand; the legacy
+# v1 call site (_kb_cr_submit) only has an item_id and must resolve via
+# crAssignment.crId, exactly like _kb_cr_set_publish_stamps does.
+#
+# On success, sets (caller-scoped, must be `local` in the caller):
+#   _cr_team _cr_board _cr_enabled cr_id_assigned cr_container_idx
+# Returns 1 (with a message on stderr) if the id can't be resolved to a
+# container — this is EXPECTED and non-fatal for v1-legacy items that were
+# never linked to a CR container at all (_kb_cr_dispatch_item_lifecycle only
+# falls back to the v1 path when no crAssignment.crId exists), so callers
+# must treat a resolver failure as "nothing to stamp here", not as an error
+# that should abort the submit itself.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_resolve_container_for_submit_stamp() {
+    local id_or_cr="${1:-}"
+    local caller="${2:-kb-cr _set_submit_stamps}"
+
+    case "$id_or_cr" in
+        CR-*)
+            _kb_cr_board_preamble || return 1
+            # Exit code 2 = "CR support disabled for this team" — a benign
+            # no-op, NOT a fail-closed failure. Distinct from 1 (real lookup
+            # failure) so callers can mirror _kb_cr_set_publish_stamps's
+            # convention of returning 0 (success/no-op) in this case, rather
+            # than surfacing it as a stamp-write failure warning.
+            [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 2; }
+            cr_id_assigned="$id_or_cr"
+            ;;
+        *)
+            _kb_cr_preamble "$id_or_cr" || return 1
+            [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 2; }
+            cr_id_assigned=$(_kb_jq_read "$_cr_board" \
+                ".backlog[$_cr_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+            if [[ -z "$cr_id_assigned" ]]; then
+                cr_id_assigned=$(_kb_jq_read "$_cr_board" \
+                    ".backlog[$_cr_idx].cr_id // \"\"" -r 2>/dev/null)
+            fi
+            if [[ -z "$cr_id_assigned" ]]; then
+                echo "${caller}: item '$id_or_cr' has no CR assignment — no .crs[] container to stamp (v1-legacy CR, out of Guard 5's release-linkage scope)." >&2
+                return 1
+            fi
+            ;;
+    esac
+
+    cr_container_idx=$(_kb_cr_find_container "$_cr_board" "$cr_id_assigned")
+    if [[ "$cr_container_idx" == "-1" ]]; then
+        echo "${caller}: CR container '$cr_id_assigned' not found." >&2
+        return 1
+    fi
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal plumbing: _kb_cr_set_submit_stamps <item-id-or-CR-id>
+# Guard 5 (XACA-0897-002/003)
+#
+# Stamps cr_submitted_version on the CR container record (.crs[]) at the
+# moment a CR transitions into cr-submitted — the version the CR was
+# submitted/re-submitted under, for later comparison against the release
+# manifest at cut time (kb-release-version-gate, subitem 004).
+#
+# Mirrors _kb_cr_set_publish_stamps (Guard 4, XACA-0896-001) exactly:
+#   - same record: .crs[cr_container_idx]
+#   - same activity-log event shape (_kb_cr_activity_event/_append)
+#   - same reader-returns-JSON-null-for-unstamped convention
+#   - does NOT write a timestamp field here; cr_submitted_at already lives at
+#     .crs[].timestamps.cr_submitted_at, owned by _kb_cr_lifecycle_advance /
+#     _kb_cr_write_state — writing a second copy here would reproduce the
+#     exact flat/nested divergence XACA-0896-001-fix removed. Do not add it.
+#
+# UNLIKE _kb_cr_set_publish_stamps, this function takes NO version argument.
+# The version is not supplied by the caller (there is no Confluence skill in
+# the loop here) — it is resolved INTERNALLY (XACA-0897-003) via:
+#     .crs[cidx].releaseAssignment.releaseId  (F5, XACA-0657)
+#       -> .releases[] entry with that id, on the SAME board file
+#          -> .platforms[<.crs[cidx].platform>].version
+# This is deliberately the SAME field kb-release-version-gate already reads
+# (platforms.<plat>.version, not top-level .version, not shortTitle) — see
+# plan doc F1/F5 and the "third version location" risk. Consistency here is
+# load-bearing: Guard 5's release-cut comparison is only meaningful if both
+# sides of the comparison were read from the same field.
+#
+# FAIL CLOSED (XACA-0897-003, non-negotiable). None of the following ever
+# write an empty string, a placeholder, or JSON null AS IF it were a real
+# stamp — they leave cr_submitted_version genuinely untouched and return 1
+# with a clear stderr message, so a downstream reader sees "never stamped"
+# (JSON null) rather than a value that looks real:
+#   (a) no releaseAssignment / no releaseId on the CR container
+#   (b) the release record cannot be found in .releases[] on this board
+#   (c) the CR's .platform is empty or "crossplatform" (does not name a
+#       single platforms.<key> to read — resolving one would be a guess)
+#   (d) the release has no platforms.<plat>.version for the resolved platform
+# Absence of data must never be readable as permission — that substitution
+# is the literal root cause of the 2026-08-05 incident this ticket exists to
+# prevent (see plan doc "Risks"). Callers (see call sites in
+# _kb_cr_container_submit / _kb_cr_submit) MUST treat a non-zero return here
+# as "stamp not written, submit proceeds anyway" — never as a reason to
+# abort the CAB submission itself. The halt this protects lives at the
+# release-cut gate (subitem 004/005), not at CR-submit time.
+#
+# Called by:
+#   - _kb_cr_container_submit, immediately after _kb_cr_lifecycle_advance
+#     succeeds for the cr-submitted transition (manual `kb-cr submit
+#     <CR-ID>` AND the Confluence poller, which shells out to
+#     `kb-cr submit '<cr_id>'` with a CR-prefixed id and therefore lands
+#     HERE, not in the v1 _kb_cr_submit path — verified against
+#     cr-confluence-poller.py's transition_cr()).
+#   - _kb_cr_submit (v1-legacy per-item path), immediately after
+#     _kb_cr_write_state succeeds for the cr-submitted transition. Covered
+#     for completeness even though v1-legacy items (no crAssignment.crId)
+#     structurally have no .crs[] container and no releaseAssignment link —
+#     the resolver above fails closed and non-fatally for exactly that
+#     reason, which is correct: such CRs are outside Guard 5's linkage model
+#     (F5) and the release-cut gate never looks at them either.
+#   - kb-cr _set_submit_stamps <id>  (public CLI plumbing, mirrors
+#     _set_publish_stamps; also the entry point the one-time backfill tool
+#     uses, scripts/kb-cr-backfill-submit-version)
+#
+# Usage: kb-cr _set_submit_stamps <item-id-or-CR-id>
+# ─────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_resolve_submit_version <board_file> <cr_container_idx> <cr_id> <caller>
+#
+# READ-ONLY resolver: the fail-closed version-resolution logic shared by
+# _kb_cr_set_submit_stamps (the write path) AND
+# scripts/kb-cr-backfill-submit-version (the one-time backfill's dry-run
+# preview AND its actual write, which shells out to `kb-cr _set_submit_stamps`
+# rather than re-implementing this). Extracted so there is exactly ONE place
+# that decides "what version would Guard 5 stamp here" — a backfill dry-run
+# that computed this independently could silently drift from what the real
+# write path does, which is exactly the kind of two-implementations-disagree
+# bug this whole ticket is about eliminating.
+#
+# On success: echoes "version|release_id|platform" (pipe-delimited, single
+# line) to stdout and returns 0. Writes NOTHING to the board.
+# On failure: prints the SAME fail-closed messages _kb_cr_set_submit_stamps
+# has always printed (message text is a contract other tooling may grep for)
+# to stderr and returns 1. Never echoes a version on failure.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_resolve_submit_version() {
+    local board_file="$1"
+    local cr_container_idx="$2"
+    local cr_id_assigned="$3"
+    local caller="${4:-kb-cr _set_submit_stamps}"
+
+    # ── Resolve the release link (F5) ───────────────────────────────────────
+    local release_id
+    release_id=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_container_idx].releaseAssignment.releaseId // \"\"" -r 2>/dev/null)
+    if [[ -z "$release_id" ]]; then
+        echo "${caller}: CR '$cr_id_assigned' has no releaseAssignment.releaseId — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        echo "  This is expected if the CR hasn't been linked to a release yet (kb-cr assign-release). The release-cut gate will halt on the missing stamp until it is." >&2
+        return 1
+    fi
+
+    # ── Resolve the platform (must name exactly one platforms.<key>) ───────
+    local platform
+    platform=$(_kb_jq_read "$board_file" \
+        ".crs[$cr_container_idx].platform // \"\"" -r 2>/dev/null)
+    if [[ -z "$platform" || "$platform" == "crossplatform" ]]; then
+        echo "${caller}: CR '$cr_id_assigned' has platform='${platform:-<empty>}' — does not name a single platforms.<key> to read — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        echo "  A crossplatform/empty-platform CR cannot be auto-resolved to one platforms.<key>.version." >&2
+        return 1
+    fi
+
+    # ── Resolve the release record + platforms.<plat>.version (F1: same ────
+    #    field kb-release-version-gate already reads — NOT top-level
+    #    .version, NOT .shortTitle) ────────────────────────────────────────
+    local release_found
+    release_found=$(_kb_jq_read "$board_file" \
+        "(.releases // [] | any(.id == \$rid))" \
+        --arg rid "$release_id" -r 2>/dev/null)
+    if [[ "$release_found" != "true" ]]; then
+        echo "${caller}: CR '$cr_id_assigned' links to release '$release_id', which was not found in .releases[] on this board — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        return 1
+    fi
+
+    local target_version
+    target_version=$(_kb_jq_read "$board_file" \
+        "(.releases // [] | map(select(.id == \$rid)) | first | .platforms[\$plat].version) // \"\"" \
+        --arg rid "$release_id" --arg plat "$platform" -r 2>/dev/null)
+    if [[ -z "$target_version" || "$target_version" == "null" ]]; then
+        echo "${caller}: release '$release_id' has no platforms.${platform}.version set — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        echo "  Set it with: kb-release edit ${release_id} --platform-version ${platform}=<ver>, then re-run." >&2
+        return 1
+    fi
+
+    printf '%s|%s|%s\n' "$target_version" "$release_id" "$platform"
+    return 0
+}
+
+_kb_cr_set_submit_stamps() {
+    local id_or_cr="${1:-}"
+
+    if [[ -z "$id_or_cr" ]]; then
+        echo "Usage: kb-cr _set_submit_stamps <item-id-or-CR-id>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
+    local cr_id_assigned="" cr_container_idx="" _resolve_rc=0
+    _kb_cr_resolve_container_for_submit_stamp "$id_or_cr" "kb-cr _set_submit_stamps"
+    _resolve_rc=$?
+    [[ $_resolve_rc -eq 2 ]] && return 0   # CR support disabled — benign no-op
+    [[ $_resolve_rc -ne 0 ]] && return 1
+
+    local resolved release_id platform target_version
+    resolved=$(_kb_cr_resolve_submit_version "$_cr_board" "$cr_container_idx" "$cr_id_assigned" "kb-cr _set_submit_stamps") || return 1
+    target_version="${resolved%%|*}"
+    local _rest="${resolved#*|}"
+    release_id="${_rest%%|*}"
+    platform="${_rest#*|}"
+
+    local ts
+    ts=$(_kb_cr_timestamp)
+
+    _kb_jq_update "$_cr_board" '
+        .crs[$cidx].cr_submitted_version = $version |
+        .crs[$cidx].updatedAt            = $ts      |
+        .lastUpdated                     = $ts
+    ' \
+    --argjson cidx "$cr_container_idx" \
+    --arg version "$target_version" \
+    --arg ts "$ts" \
+    || return 1
+
+    local event
+    event=$(_kb_cr_activity_event "cr_submit_stamped" \
+        "field=cr_submitted_version" \
+        "new_value=${target_version}" \
+        "note=Submitted to CAB review; resolved from release ${release_id} platforms.${platform}.version for Guard 5 release-cut divergence check (XACA-0897-002/003)") || true
+    if [[ -n "$event" ]]; then
+        _kb_cr_activity_append "$_cr_board" "$cr_id_assigned" "$event" 2>/dev/null || true
+    fi
+
+    echo "submit stamp set on CR [$cr_id_assigned]: cr_submitted_version=$target_version (from release ${release_id} platforms.${platform}.version, updatedAt=$ts)"
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Internal plumbing: _kb_cr_get_submit_stamps <item-id-or-CR-id>
+# Guard 5 (XACA-0897-002/003)
+#
+# Reader counterpart to _kb_cr_set_submit_stamps, mirroring
+# _kb_cr_get_publish_stamps. Echoes a single-line JSON object:
+#   {"cr_id":"...","cr_submitted_version":"2.10.7","cr_submitted_at":"..."}
+# cr_submitted_version comes back as JSON null (never empty string) when
+# never stamped — callers (including the release-cut gate, subitem 004)
+# must treat null as "unresolved/unstamped", which is the fail-closed signal
+# this whole ticket exists to make reliable — not as an empty-but-real value.
+#
+# cr_submitted_at is read from the NESTED .crs[].timestamps.cr_submitted_at
+# path (owned by _kb_cr_lifecycle_advance / _kb_cr_write_state), matching
+# the nested-or-null convention _kb_cr_get_publish_stamps uses for
+# cr_published_at — no flat fallback, deliberately.
+#
+# Usage: kb-cr _get_submit_stamps <item-id-or-CR-id>
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_get_submit_stamps() {
+    local id_or_cr="${1:-}"
+
+    if [[ -z "$id_or_cr" ]]; then
+        echo "Usage: kb-cr _get_submit_stamps <item-id-or-CR-id>" >&2
+        return 1
+    fi
+
+    local _cr_team _cr_board _cr_enabled _cr_item_id _cr_idx
+    local cr_id_assigned="" cr_container_idx="" _resolve_rc=0
+    _kb_cr_resolve_container_for_submit_stamp "$id_or_cr" "kb-cr _get_submit_stamps"
+    _resolve_rc=$?
+    [[ $_resolve_rc -eq 2 ]] && return 0   # CR support disabled — benign no-op
+    [[ $_resolve_rc -ne 0 ]] && return 1
+
+    _kb_jq_read "$_cr_board" '
+        {
+            cr_id: $cid,
+            cr_submitted_version: (.crs[$cidx].cr_submitted_version // null),
+            cr_submitted_at:      (.crs[$cidx].timestamps.cr_submitted_at // null)
+        }
+    ' --argjson cidx "$cr_container_idx" --arg cid "$cr_id_assigned" -c
+}
+
 _kb_cr_submit() {
     local item_id="${1:-}"
     if [[ -z "$item_id" ]]; then
@@ -4006,8 +4308,25 @@ _kb_cr_submit() {
     local ts
     ts=$(_kb_cr_timestamp)
 
-    _kb_cr_write_state "$_cr_board" "$_cr_idx" "cr-submitted" "cr_submitted_at" "$ts" \
-    && echo "kb-cr: [$item_id] submitted — crState=cr-submitted, cr_submitted_at=$ts"
+    _kb_cr_write_state "$_cr_board" "$_cr_idx" "cr-submitted" "cr_submitted_at" "$ts"
+    local write_rc=$?
+    if [[ $write_rc -eq 0 ]]; then
+        echo "kb-cr: [$item_id] submitted — crState=cr-submitted, cr_submitted_at=$ts"
+
+        # Guard 5 (XACA-0897-002/003): stamp cr_submitted_version. This is
+        # the v1-legacy per-item path — _kb_cr_dispatch_item_lifecycle only
+        # falls back here when the item has NO crAssignment.crId, meaning
+        # such items structurally have no .crs[] container and no
+        # releaseAssignment link. _kb_cr_set_submit_stamps therefore fails
+        # closed and non-fatally for exactly that reason (see its header
+        # comment) — called here for F4 coverage/completeness, expected to
+        # be a no-op in the common v1-legacy case. Must not affect this
+        # function's own return code (preserved via write_rc below).
+        _kb_cr_set_submit_stamps "$item_id" || {
+            echo "kb-cr submit: WARNING: cr_submitted_version was not stamped (see message above)." >&2
+        }
+    fi
+    return $write_rc
 }
 
 _kb_cr_approve() {
@@ -5230,6 +5549,31 @@ _kb_cr_help() {
     echo "              XACA-0895 lands and writes it; no flat fallback."
     echo "              Unstamped fields come back as JSON null. For guards that"
     echo "              need to compare an incoming publish against what's live."
+    echo "  _set_submit_stamps <item-id-or-CR-id>"
+    echo "              Guard 5 (XACA-0897-002/003): resolve and stamp"
+    echo "              cr_submitted_version on the .crs[] container record —"
+    echo "              the version the CR was submitted under, for comparison"
+    echo "              against the release manifest at release-cut time."
+    echo "              Version is resolved internally via"
+    echo "              releaseAssignment.releaseId -> platforms.<plat>.version"
+    echo "              (the SAME field kb-release-version-gate already reads —"
+    echo "              never top-level .version, never .shortTitle)."
+    echo "              FAIL CLOSED: no releaseAssignment, an unresolvable"
+    echo "              release record, an empty/crossplatform .platform, or a"
+    echo "              missing platforms.<plat>.version all leave"
+    echo "              cr_submitted_version genuinely UNSTAMPED (never an"
+    echo "              empty string or a guessed value) and return non-zero"
+    echo "              with a clear message. Called automatically from both"
+    echo "              cr-submitted write paths (kb-cr submit, container AND"
+    echo "              v1-legacy); a non-zero return there is non-fatal to"
+    echo "              the submit itself — the release-cut gate is what halts"
+    echo "              on a missing stamp, not this call."
+    echo "              Records a 'cr_submit_stamped' activity log entry."
+    echo "  _get_submit_stamps <item-id-or-CR-id>"
+    echo "              Read back the submit stamp as one-line JSON:"
+    echo "              {\"cr_id\":..,\"cr_submitted_version\":..,\"cr_submitted_at\":..}"
+    echo "              cr_submitted_version comes back as JSON null when"
+    echo "              never stamped — treat null as unresolved, not empty."
     echo "  submit  <id>     [propagates if crAssignment present; v1 fallback if not]"
     echo "              Submit the CR for CAB review."
     echo "              In the Confluence-driven workflow, cr-submitted means a CR-Proper"
