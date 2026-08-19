@@ -11017,7 +11017,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                     continue
 
                 # Count items in this epic, excluding cancelled (XACA-0206 parity).
-                epic_items = [i for i in board_data.get('backlog', []) if i.get('epicId') == epic.get('id')]
+                # XACA-0859: resolve the assigned set FORWARD via epic.itemIds
+                # (STATE_CONTRACT.md §1.1), matching _get_items_for_epic, the jq
+                # engine, and the roadmap builder. This site previously
+                # reverse-scanned .backlog for item.epicId == epic.id — the same
+                # second-source-of-truth defect this ticket converged on the
+                # Epics tab, missed on first pass and caught in PR #751 review.
+                # Orphan ids (in itemIds, no matching .backlog entry) drop out
+                # for free because we filter .backlog rather than iterate itemIds.
+                _epic_item_ids = set(epic.get('itemIds') or [])
+                epic_items = [i for i in board_data.get('backlog', []) if i.get('id') in _epic_item_ids]
                 active_items = [i for i in epic_items if i.get('status') != 'cancelled']
                 item_count = len(active_items)
                 cancelled_count = len(epic_items) - item_count
