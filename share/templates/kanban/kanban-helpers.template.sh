@@ -5599,6 +5599,232 @@ kb-backlog() {
             echo "✓ Stopped working on [$item_id]: $current_title"
             ;;
 
+        demote|todo)
+            local selector="$1"
+            shift 2>/dev/null
+
+            if [[ -z "$selector" ]]; then
+                echo "Usage: kb-backlog demote <id> [--reason \"<text>\"] [--clear-worktree] [--force]"
+                echo "       (alias: kb-backlog todo <id>)"
+                echo ""
+                echo "Moves a top-level item from in_progress (or blocked) back to todo."
+                echo ""
+                echo "Unlike \`unpick\`, this DOES set status, and PRESERVES worktree recovery"
+                echo "metadata by default. Unlike \`sub todo\`, it does NOT flush the active work"
+                echo "span into timeWorkedMs -- an open workStartedAt on a demoted item is"
+                echo "discarded, never credited (XACA-0552 freeze precedent)."
+                echo ""
+                echo "  --reason \"<text>\"   Record why, into pausedReason (+ pausedAt,"
+                echo "                      pausedPreviousStatus). Optional but recommended."
+                echo "  --clear-worktree    ALSO clear worktree/worktreeBranch/worktreeWindowId."
+                echo "                      Use only when the pointers are verified stale."
+                echo "  --force             Permit demoting a completed or cancelled item."
+                return 1
+            fi
+
+            # Item-level only (XACA-0884) -- refuse subitem ids with a pointer
+            # to the verb that already handles them.
+            if _kb_is_subitem_id "$selector"; then
+                echo "Error: '$selector' is a subitem. Use: kb-backlog sub todo <parent-idx> <sub-idx>" >&2
+                return 1
+            fi
+
+            # Parse remaining flags. Id is positional-FIRST, deliberately not
+            # mirroring kb-pause's reason-first signature.
+            local demote_reason="" demote_clear_worktree=false demote_force=false
+            while [[ $# -gt 0 ]]; do
+                case "$1" in
+                    --reason)
+                        demote_reason="$2"
+                        shift 2 2>/dev/null || shift
+                        ;;
+                    --clear-worktree)
+                        demote_clear_worktree=true
+                        shift
+                        ;;
+                    --force)
+                        demote_force=true
+                        shift
+                        ;;
+                    *)
+                        echo "Error: unknown option '$1'" >&2
+                        echo "Usage: kb-backlog demote <id> [--reason \"<text>\"] [--clear-worktree] [--force]" >&2
+                        return 2
+                        ;;
+                esac
+            done
+
+            # Resolve selector to index (id, numeric index, or partial-title match)
+            local index
+            index=$(_kb_resolve_selector "$board_file" "$selector")
+
+            if [[ "$index" == "-1" ]]; then
+                echo "Error: Item not found: $selector"
+                return 1
+            fi
+
+            local current_title item_id
+            current_title=$(_kb_jq_read "$board_file" ".backlog[$index].title // empty" -r)
+            item_id=$(_kb_jq_read "$board_file" ".backlog[$index].id // empty" -r)
+
+            if [[ -z "$current_title" ]]; then
+                echo "Error: Item not found: $selector"
+                return 1
+            fi
+
+            # XACA-0884: some boards carry items with NO status key at all --
+            # absent means todo. This MUST default via // "todo", never // empty --
+            # a bare // empty would misclassify those items as "unknown status".
+            local demote_current_status
+            demote_current_status=$(_kb_jq_read "$board_file" ".backlog[$index].status // \"todo\"" -r)
+
+            case "$demote_current_status" in
+                completed)
+                    if [[ "$demote_force" != "true" ]]; then
+                        echo "Error: [$item_id] is completed -- refusing to demote." >&2
+                        echo "  Demoting a completed item discards its completion record from the board's" >&2
+                        echo "  work-state view while leaving completedAt in place." >&2
+                        echo "  To demote anyway:                                  kb-backlog demote $item_id --force" >&2
+                        return 1
+                    fi
+                    echo "⚠️  Force-demoting a completed item. completedAt/cancelledAt/cancelledReason are PRESERVED and will now coexist with status=todo." >&2
+                    ;;
+                cancelled)
+                    if [[ "$demote_force" != "true" ]]; then
+                        echo "Error: [$item_id] is cancelled -- refusing to demote." >&2
+                        echo "  Cancelled items carry a cancelledReason that demoting does not clear." >&2
+                        echo "  To return this work to the backlog anyway:  kb-backlog demote $item_id --force" >&2
+                        return 1
+                    fi
+                    echo "⚠️  Force-demoting a cancelled item. completedAt/cancelledAt/cancelledReason are PRESERVED and will now coexist with status=todo." >&2
+                    ;;
+                todo)
+                    echo "[$item_id] is already todo -- nothing to do."
+                    return 0
+                    ;;
+                in_progress|blocked)
+                    # The primary cases -- proceed below.
+                    ;;
+                *)
+                    # Unknown/unexpected status value -- proceed like an active item
+                    # rather than silently no-op'ing or crashing; demote's job is to
+                    # land the item in a known-good "todo" state regardless.
+                    ;;
+            esac
+
+            local demote_timestamp
+            demote_timestamp=$(_kb_get_timestamp)
+
+            # XACA-0884/XACA-0552 -- DELIBERATE INVERSION of `sub todo` above.
+            # Do NOT call _kb_flush_work_time here, and do NOT add one. This
+            # template has no _kb_flush_work_time function at all (verified: grep
+            # this file), which today makes the freeze trivially correct -- but
+            # that is NOT luck to be "fixed" by a future sync toward canonical.
+            # A demoted item's open workStartedAt is DISCARDED, never credited
+            # into timeWorkedMs -- items not actively being worked keep their
+            # persisted timeWorkedMs verbatim. Precedent: a stale workStartedAt
+            # left open for ~4 months would have been booked as ~4 months of
+            # phantom work by a naive flush-on-demote. If canonical's
+            # _kb_flush_work_time ever gets ported into this template, demote
+            # must still NOT call it.
+            local demote_jq_filter='
+                .backlog[$idx].status = "todo" |
+                .backlog[$idx].updatedAt = $ts |
+                .backlog[$idx].previousStatus = $prev |
+                del(.backlog[$idx].activelyWorking) |
+                del(.backlog[$idx].workStartedAt) |'
+
+            if [[ -n "$demote_reason" ]]; then
+                demote_jq_filter+='
+                .backlog[$idx].pausedReason = $reason |
+                .backlog[$idx].pausedAt = $ts |
+                .backlog[$idx].pausedPreviousStatus = $prev |'
+            else
+                # No --reason: clear any paused* fields so a stale reason from a
+                # PRIOR pause cannot survive and misdescribe this demotion.
+                demote_jq_filter+='
+                del(.backlog[$idx].pausedReason) |
+                del(.backlog[$idx].pausedAt) |
+                del(.backlog[$idx].pausedPreviousStatus) |'
+            fi
+
+            if [[ "$demote_clear_worktree" == "true" ]]; then
+                demote_jq_filter+='
+                del(.backlog[$idx].worktree) |
+                del(.backlog[$idx].worktreeBranch) |
+                del(.backlog[$idx].worktreeWindowId) |
+                del(.backlog[$idx].worktreeLinkedAt) |'
+            fi
+            # NOTE: worktree/worktreeBranch/worktreeWindowId/worktreeLinkedAt are
+            # deliberately absent from the filter otherwise -- preserved by
+            # default. timeWorkedMs is likewise absent above -- frozen, never
+            # recomputed.
+
+            demote_jq_filter+='
+                .lastUpdated = $ts'
+
+            _kb_jq_update "$board_file" "$demote_jq_filter" \
+               --argjson idx "$index" \
+               --arg ts "$demote_timestamp" \
+               --arg prev "$demote_current_status" \
+               --arg reason "$demote_reason"
+
+            # Activity log
+            _kb_log_activity "item_status_change" "$item_id" "item" "status" "$demote_current_status" "todo" "${demote_reason:-}"
+
+            # XACA-0884: clear the CURRENT window's workingOnId only if it
+            # equals the demoted item's id -- never steal another task's binding.
+            # Skip entirely (best-effort) if context detection fails, e.g. a
+            # non-tmux subagent shell without KB_TEAM set -- the board mutation
+            # above is the actual contract.
+            local demote_context
+            demote_context=$(_kb_detect_context)
+            if [[ "$demote_context" != ERROR:* ]]; then
+                local demote_wo_team demote_wo_rest demote_wo_terminal demote_wo_window_name demote_wo_board_file demote_wo_window_id
+                demote_wo_team="${demote_context%%:*}"
+                demote_wo_rest="${demote_context#*:}"
+                demote_wo_terminal="${demote_wo_rest%%:*}"
+                demote_wo_rest="${demote_wo_rest#*:}"
+                demote_wo_window_name="${demote_wo_rest#*:}"
+                demote_wo_board_file=$(_kb_get_board_file "$demote_wo_team")
+                demote_wo_window_id=$(_kb_get_window_id "$demote_wo_terminal" "$demote_wo_window_name")
+
+                local demote_current_working_id
+                demote_current_working_id=$(_kb_jq_read "$demote_wo_board_file" \
+                    '(.activeWindows[] | select(.id == $wid) | .workingOnId) // ""' \
+                    --arg wid "$demote_wo_window_id" -r 2>/dev/null || echo "")
+
+                if [[ -n "$demote_current_working_id" ]] && [[ "$demote_current_working_id" == "$item_id" ]]; then
+                    _kb_clear_working_on
+                fi
+            fi
+
+            echo "✓ Demoted [$item_id]: $current_title"
+            echo "  Status: $demote_current_status → todo"
+
+            if [[ "$demote_current_status" == "blocked" ]]; then
+                local demote_blocker_count
+                demote_blocker_count=$(_kb_jq_read "$board_file" ".backlog[$index].blockedBy // [] | length" -r)
+                echo "  Note: blockedBy preserved ($demote_blocker_count blocker(s)) -- item remains gated."
+            fi
+
+            if [[ "$demote_clear_worktree" == "true" ]]; then
+                echo "  Cleared: worktree, worktreeBranch, worktreeWindowId, worktreeLinkedAt"
+            else
+                local demote_has_worktree
+                demote_has_worktree=$(_kb_jq_read "$board_file" \
+                    "if (.backlog[$index].worktree // null) != null or (.backlog[$index].worktreeWindowId // null) != null then \"yes\" else \"no\" end" -r)
+                if [[ "$demote_has_worktree" == "yes" ]]; then
+                    echo "  Preserved: worktree, worktreeBranch, worktreeWindowId, worktreeLinkedAt"
+                    echo "  Note: kb-recover only lists in_progress work, so this item will NOT"
+                    echo "        appear in the resume manifest. Re-pick it with: kb-pick $item_id"
+                    echo "  Note: kb-backlog cleanup-all clears worktree pointers for windows that"
+                    echo "        are no longer live, and does not check status -- it may drop these"
+                    echo "        preserved fields. Use --clear-worktree to drop them now, deliberately."
+                fi
+            fi
+            ;;
+
         sub|subitem)
             local subcmd="$1"
             shift 2>/dev/null
@@ -6983,6 +7209,7 @@ else:
             echo "  due <i> [YYYY-MM-DD]               Set/view/clear due date"
             echo "  remove <index>                     Remove item by index"
             echo "  unpick <index>                     Clear actively working flag"
+            echo "  demote <id> [--reason \"..\"]        Move item back to todo (alias: todo)"
             echo "  cleanup                            Clear orphaned items for current window"
             echo "  cleanup-all                        Clear ALL orphaned items"
             echo "  sub <cmd> [args...]                Manage subitems"
@@ -15776,6 +16003,7 @@ kb-help() {
     echo "  kb-backlog remove <id>                  Remove item"
     echo "  kb-backlog toggle <id>                  Toggle collapsed state"
     echo "  kb-backlog unpick <id>                  Clear activelyWorking flag"
+    echo "  kb-backlog demote <id> [--reason \"..\"]  Move item back to todo (alias: todo)"
     echo "  kb-backlog desc <id> \"text\"             Set description"
     echo "  kb-backlog jira <id> [ticket|-]         Set/clear JIRA link"
     echo "  kb-backlog github <id> [issue|-]        Set/clear GitHub issue"
