@@ -14,6 +14,8 @@ Versioning: [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 
   Beyond the drift repairs, this mirror also carries a closed coverage hole found by mutation testing: `test_team_query_param_routes_to_correct_directory` could not fail for the reason its name advertises, because the shared `_run_archive()` helper patched `TEAM_KANBAN_DIRS[effective_team]` and `KANBAN_DIR` to the same temp directory — so a server ignoring `?team=` and falling back to the default dir stayed green. The helper now accepts a distinct `default_kanban_dir`, and the test asserts both that the archive lands in the team directory and that nothing lands in the default one. The fakes use `create_autospec` bound to the live method rather than permissive `**kwargs`, so a future signature change fails loudly instead of being silently absorbed.
 
+  Also hardens the remaining 7 `_load_releases_config`/`_save_releases_config` fake pairs in the same file (XACA-0135-059, PR #752 `[Review]` gate) onto the same `create_autospec` pattern, so the whole file gets signature-drift enforcement rather than just the three tests that happened to break. Enforcement proven live: injecting a mandatory `checksum` kwarg into the real method makes the autospec raise `TypeError: missing a required argument: 'checksum'` under production's actual call shape. No test assertion changed — only the fake construction mechanism.
+
   Suite result after the change: 179 passed, 0 failed. Mirror is byte-identical to the canonical source (`sync-tap.sh --check` reports 890 files checked, 0 drifted).
 
 ## [0.20.0] - 2026-08-18

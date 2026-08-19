@@ -1531,8 +1531,8 @@ class TestHandleCreateReleaseTagsValidation(unittest.TestCase):
             headers={"Content-Length": str(len(body))},
         )
         fake_data = {"releases": [], "projectEnvironments": {}, "defaultEnvironments": ["DEV"]}
-        handler._load_releases_config = MagicMock(return_value=fake_data)
-        handler._save_releases_config = MagicMock(return_value=True)
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
+        handler._save_releases_config = create_autospec(handler._save_releases_config, return_value=True)
         handler._save_release_manifest = MagicMock(return_value=True)
         handler._generate_release_id = MagicMock(return_value="REL-001")
         handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
@@ -1579,8 +1579,8 @@ class TestHandleUpdateReleaseTagsValidation(unittest.TestCase):
             "platforms": {},
         }
         fake_data = {"releases": [existing_release]}
-        handler._load_releases_config = MagicMock(return_value=fake_data)
-        handler._save_releases_config = MagicMock(return_value=True)
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
+        handler._save_releases_config = create_autospec(handler._save_releases_config, return_value=True)
         handler._find_release_by_id = MagicMock(return_value=existing_release)
         handler._update_items_release_name = MagicMock()
         handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
@@ -1735,8 +1735,8 @@ class TestHandlePromoteRelease(unittest.TestCase):
             },
         }
 
-        handler._load_releases_config = MagicMock(return_value=fake_data)
-        handler._save_releases_config = MagicMock()
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
+        handler._save_releases_config = create_autospec(handler._save_releases_config)
         handler._find_release_by_id = MagicMock(return_value=release)
         handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
 
@@ -1804,9 +1804,9 @@ class TestHandlePromoteRelease(unittest.TestCase):
             "defaultEnvironments": environments,
             "flowConfig": {"stages": {env: {"enabled": True} for env in environments}},
         }
-        handler._load_releases_config = MagicMock(return_value=fake_data)
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
         handler._find_release_by_id = MagicMock(return_value=release)
-        handler._save_releases_config = MagicMock()
+        handler._save_releases_config = create_autospec(handler._save_releases_config)
         handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
 
         handler.handle_promote_release("REL-001")
@@ -1841,8 +1841,8 @@ class TestHandleCreateReleaseDefaultEnvironment(unittest.TestCase):
             "projectEnvironments": {},
             "defaultEnvironments": default_environments,
         }
-        handler._load_releases_config = MagicMock(return_value=fake_data)
-        handler._save_releases_config = MagicMock(return_value=True)
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
+        handler._save_releases_config = create_autospec(handler._save_releases_config, return_value=True)
         handler._save_release_manifest = MagicMock(return_value=True)
         handler._generate_release_id = MagicMock(return_value="REL-002")
         handler._get_timestamp = MagicMock(return_value="2026-04-25T00:00:00Z")
@@ -2236,8 +2236,8 @@ class TestHandleCreateReleaseStripLabelPrefix(unittest.TestCase):
             headers={"Content-Length": str(len(body))},
         )
         fake_data = {"releases": [], "projectEnvironments": {}, "defaultEnvironments": ["DEV"]}
-        handler._load_releases_config = MagicMock(return_value=fake_data)
-        handler._save_releases_config = MagicMock(return_value=True)
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
+        handler._save_releases_config = create_autospec(handler._save_releases_config, return_value=True)
         handler._save_release_manifest = MagicMock(return_value=True)
         handler._generate_release_id = MagicMock(return_value="REL-001")
         handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
@@ -2282,8 +2282,8 @@ class TestHandleUpdateReleaseStripLabelPrefix(unittest.TestCase):
             headers={"Content-Length": str(len(body))},
         )
         fake_data = {"releases": [existing_release]}
-        handler._load_releases_config = MagicMock(return_value=fake_data)
-        handler._save_releases_config = MagicMock(return_value=True)
+        handler._load_releases_config = create_autospec(handler._load_releases_config, return_value=fake_data)
+        handler._save_releases_config = create_autospec(handler._save_releases_config, return_value=True)
         handler._find_release_by_id = MagicMock(return_value=existing_release)
         handler._update_items_release_name = MagicMock()
         handler._get_timestamp = MagicMock(return_value="2026-04-22T00:00:00Z")
