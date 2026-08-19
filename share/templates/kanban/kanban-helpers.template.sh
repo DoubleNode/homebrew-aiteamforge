@@ -5635,7 +5635,7 @@ kb-backlog() {
             while [[ $# -gt 0 ]]; do
                 case "$1" in
                     --reason)
-                        demote_reason="$2"
+                        demote_reason="${2-}"
                         shift 2 2>/dev/null || shift
                         ;;
                     --clear-worktree)
@@ -5818,9 +5818,11 @@ kb-backlog() {
                     echo "  Preserved: worktree, worktreeBranch, worktreeWindowId, worktreeLinkedAt"
                     echo "  Note: kb-recover only lists in_progress work, so this item will NOT"
                     echo "        appear in the resume manifest. Re-pick it with: kb-pick $item_id"
-                    echo "  Note: kb-backlog cleanup-all clears worktree pointers for windows that"
-                    echo "        are no longer live, and does not check status -- it may drop these"
-                    echo "        preserved fields. Use --clear-worktree to drop them now, deliberately."
+                    echo "  Note: kb-backlog cleanup and cleanup-all both clear worktree pointers"
+                    echo "        for windows that are no longer live, and neither checks status --"
+                    echo "        either may drop these preserved fields. Neither runs automatically;"
+                    echo "        both are operator-invoked. Use --clear-worktree to drop them now,"
+                    echo "        deliberately."
                 fi
             fi
             ;;
