@@ -485,6 +485,35 @@ if [[ -z "$_cr_div_release_obj" ]]; then
     # exactly the signal that no releases dir can be determined at all.
     _cr_div_fallback_releases_dir=$(_cr_div_releases_dir_from_board 2>/dev/null) || _cr_div_fallback_releases_dir=""
 
+    if [[ -z "$_cr_div_board_file" ]]; then
+        # XACA-0897-016: the board file resolved to an EMPTY STRING, not merely
+        # a missing/stale path -- this is a genuinely board-less team (e.g. the
+        # live-fleet 'mainevent' alias, XACA-0727/XACA-0794), which by design
+        # also has no kanban_dir in team-paths.json (verified: team-paths.json
+        # carries kanban_dir: null for it, and _kb_get_kanban_dir refuses
+        # outright for board-less aliases). _cr_div_releases_dir_from_board
+        # cannot derive <board_dir>/releases from an empty board path, so
+        # UNLIKE the "board resolved but this release/manifest is missing"
+        # cases below, there is no releases dir to even ATTEMPT a manifest
+        # lookup against -- no CR-governance check of any kind was possible.
+        #
+        # Judgment call (XACA-0897-016 review finding, documented rather than
+        # engineered around): a board-less team has no kanban_dir and
+        # therefore no releases[] of its own -- there is nothing under this
+        # team name for a release to be cut FROM in the first place, so
+        # practical exposure is believed nil. Deliberately NOT reaching into
+        # team-paths.json for some other directory to search -- that field is
+        # ALSO null by design for these teams, so it would find nothing and
+        # would just be machinery for a case believed unreachable. If that
+        # belief is ever wrong, this falls through UNCHECKED, same as before
+        # this fix -- the change here is honesty, not new coverage: the
+        # message below no longer claims a manifest was read (XACA-0897-017)
+        # when none could exist to read. See docs/CR_WORKFLOW.md Guard 5 §
+        # "Board-less teams have no releases to govern".
+        [[ $_quiet -eq 0 ]] && echo "CR-divergence check: ${_cr_div_fallback_reason} -- team '${_team}' has no kanban_dir at all, so no releases directory exists and NO manifest lookup was possible (this is NOT the same as a manifest being checked and found empty). Not applicable: board-less teams have no releases[] of their own to govern. See docs/CR_WORKFLOW.md Guard 5." >&2
+        # Falls through to Steps 1-4, same disposition as the confirmed-absence
+        # cases below, but via a distinct, honest message.
+    else
     _cr_div_fallback_manifest_exists=0
     _cr_div_fallback_manifest_parse_rc=0
     _cr_div_linked_ids=""
@@ -518,11 +547,16 @@ if [[ -z "$_cr_div_release_obj" ]]; then
         exit 3
     fi
 
-    # Either the manifest was read and positively shows NO CR claim, or no
-    # manifest exists at all for this release -- both are the SAME
-    # "positively known, not unresolved" fact the on-board path below
-    # already treats as not applicable. Falls through to Steps 1-4.
-    [[ $_quiet -eq 0 ]] && echo "CR-divergence check: ${_cr_div_fallback_reason}, and its release manifest shows no CR linked -- not applicable." >&2
+    # XACA-0897-017: distinguish "we read the manifest and it positively shows
+    # no CR link" from "no manifest file exists at all" -- both fall through
+    # to the same disposition (not applicable), but the message must not
+    # claim more than what actually happened.
+    if [[ $_cr_div_fallback_manifest_exists -eq 1 ]]; then
+        [[ $_quiet -eq 0 ]] && echo "CR-divergence check: ${_cr_div_fallback_reason}. Release manifest was read (${_cr_div_fallback_manifest}) and shows no linked CR -- not applicable." >&2
+    else
+        [[ $_quiet -eq 0 ]] && echo "CR-divergence check: ${_cr_div_fallback_reason}. No release manifest exists at ${_cr_div_fallback_releases_dir}/${_release_id}/manifest.json -- confirmed absence of any CR-governance record -- not applicable." >&2
+    fi
+    fi
 else
     # Board resolved AND release found on it: full version-divergence path,
     # unchanged from the original XACA-0897 implementation.
@@ -531,7 +565,13 @@ else
     # Uses _cr_div_releases_dir_from_board (see its comment above) rather than
     # _kb_get_releases_dir directly -- the latter is unreliable under a real
     # bash `source` of kanban-helpers.sh.
-    _cr_div_linked_ids=$(echo "$_cr_div_release_obj" | jq -r '[(.linkedCRs // [])[].crId] | unique | .[]' 2>/dev/null) || _cr_div_linked_ids=""
+    # XACA-0897-022: herestring, not `echo "$var" | jq` -- the house rule this
+    # repo forbids that pattern for (a echo can mangle literal control chars).
+    # Provably moot here too -- $_cr_div_release_obj is itself `jq -c` output,
+    # and JSON strings always escape control chars (\n etc.) rather than
+    # embedding them raw -- but the herestring sidesteps the forbidden pattern
+    # outright rather than relying on that argument holding forever.
+    _cr_div_linked_ids=$(jq -r '[(.linkedCRs // [])[].crId] | unique | .[]' <<< "$_cr_div_release_obj" 2>/dev/null) || _cr_div_linked_ids=""
     if [[ -z "$_cr_div_linked_ids" ]]; then
         _cr_div_releases_dir=$(_cr_div_releases_dir_from_board 2>/dev/null) || _cr_div_releases_dir=""
         _cr_div_manifest="${_cr_div_releases_dir}/${_release_id}/manifest.json"
@@ -550,7 +590,8 @@ else
         # Release's own version for this platform -- the SAME field Step 1 reads
         # (platforms.<plat>.version, per F1) -- read here from the local board
         # copy so this check does not depend on LCARS reachability.
-        _cr_div_release_version=$(echo "$_cr_div_release_obj" | jq -r --arg p "$_platform" '(.platforms[$p].version // "") | tostring' 2>/dev/null) || _cr_div_release_version=""
+        # XACA-0897-022: herestring, not `echo | jq` -- see comment above.
+        _cr_div_release_version=$(jq -r --arg p "$_platform" '(.platforms[$p].version // "") | tostring' <<< "$_cr_div_release_obj" 2>/dev/null) || _cr_div_release_version=""
 
         _cr_div_halt=0
         _cr_div_seen_version=""
@@ -564,7 +605,8 @@ else
                 _cr_div_halt=1
                 break
             fi
-            _cr_div_submitted=$(echo "$_cr_div_cr_obj" | jq -r '(.cr_submitted_version // "") | tostring' 2>/dev/null) || _cr_div_submitted=""
+            # XACA-0897-022: herestring, not `echo | jq` -- see comment above.
+            _cr_div_submitted=$(jq -r '(.cr_submitted_version // "") | tostring' <<< "$_cr_div_cr_obj" 2>/dev/null) || _cr_div_submitted=""
             if [[ -z "$_cr_div_submitted" ]]; then
                 echo "CR-DIVERGENCE HALT: CR '${_cr_div_id}' linked to release '${_release_id}' has no cr_submitted_version stamped." >&2
                 echo "  A missing stamp is treated as UNSAFE, not permission to proceed (2026-08-07 decision)." >&2

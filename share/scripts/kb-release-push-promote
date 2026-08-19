@@ -587,8 +587,22 @@ while IFS= read -r _plan_line; do
             echo "[kb-release-push-promote] processing: ${_release_id} ${_platform} → ${_target_env}"
 
             # ── Step 4a: Version gate ────────────────────────────────────────
+            # XACA-0897-021: this used to be a WARNING-only skip that fell
+            # straight through into Step 4b (promote), i.e. an unresolvable
+            # gate script silently promoted with NO version check at all --
+            # fail-OPEN, directly contradicting Guard 5's own fail-closed
+            # contract a few lines below (gate exit 3 hard-blocks). A missing
+            # gate script means "we could not verify" -- the exact class this
+            # whole ticket exists to stop treating as "proceed anyway". Hard
+            # block: no promotion without a gate check, ever.
             if [ -z "$_GATE_SCRIPT" ]; then
-                echo "[kb-release-push-promote] WARNING: kb-release-version-gate not found — gate skipped." >&2
+                echo "[kb-release-push-promote] ERROR: kb-release-version-gate not found — cannot verify version before promoting." >&2
+                echo "  Hard block: promotion cancelled for this platform. A missing gate script is treated as" >&2
+                echo "  an unverifiable state, not permission to skip verification (same fail-closed policy as" >&2
+                echo "  the CR-divergence halt below). Fix: ensure scripts/kb-release-version-gate is present" >&2
+                echo "  at \$AITEAMFORGE_DIR/scripts/ or alongside this script." >&2
+                _OVERALL_EXIT=1
+                continue
             else
                 _gate_args=("$_release_id" "--platform" "$_platform" "--env" "$_target_env" "--team" "$_TEAM")
                 if [ "$OPT_DRY_RUN" -eq 1 ]; then

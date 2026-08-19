@@ -4044,10 +4044,12 @@ _kb_cr_resolve_container_for_submit_stamp() {
             _kb_cr_preamble "$id_or_cr" || return 1
             [[ "$_cr_enabled" != "true" ]] && { _kb_cr_disabled_exit "$_cr_team"; return 2; }
             cr_id_assigned=$(_kb_jq_read "$_cr_board" \
-                ".backlog[$_cr_idx].crAssignment.crId // \"\"" -r 2>/dev/null)
+                '.backlog[$idx].crAssignment.crId // ""' \
+                --argjson idx "$_cr_idx" -r 2>/dev/null)
             if [[ -z "$cr_id_assigned" ]]; then
                 cr_id_assigned=$(_kb_jq_read "$_cr_board" \
-                    ".backlog[$_cr_idx].cr_id // \"\"" -r 2>/dev/null)
+                    '.backlog[$idx].cr_id // ""' \
+                    --argjson idx "$_cr_idx" -r 2>/dev/null)
             fi
             if [[ -z "$cr_id_assigned" ]]; then
                 echo "${caller}: item '$id_or_cr' has no CR assignment — no .crs[] container to stamp (v1-legacy CR, out of Guard 5's release-linkage scope)." >&2
@@ -4061,6 +4063,79 @@ _kb_cr_resolve_container_for_submit_stamp() {
         echo "${caller}: CR container '$cr_id_assigned' not found." >&2
         return 1
     fi
+    return 0
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# _kb_cr_resolve_submit_version <board_file> <cr_container_idx> <cr_id> <caller>
+#
+# READ-ONLY resolver: the fail-closed version-resolution logic shared by
+# _kb_cr_set_submit_stamps (the write path) AND
+# scripts/kb-cr-backfill-submit-version (the one-time backfill's dry-run
+# preview AND its actual write, which shells out to `kb-cr _set_submit_stamps`
+# rather than re-implementing this). Extracted so there is exactly ONE place
+# that decides "what version would Guard 5 stamp here" — a backfill dry-run
+# that computed this independently could silently drift from what the real
+# write path does, which is exactly the kind of two-implementations-disagree
+# bug this whole ticket is about eliminating.
+#
+# On success: echoes "version|release_id|platform" (pipe-delimited, single
+# line) to stdout and returns 0. Writes NOTHING to the board.
+# On failure: prints the SAME fail-closed messages _kb_cr_set_submit_stamps
+# has always printed (message text is a contract other tooling may grep for)
+# to stderr and returns 1. Never echoes a version on failure.
+# ─────────────────────────────────────────────────────────────────────────────
+_kb_cr_resolve_submit_version() {
+    local board_file="$1"
+    local cr_container_idx="$2"
+    local cr_id_assigned="$3"
+    local caller="${4:-kb-cr _set_submit_stamps}"
+
+    # ── Resolve the release link (F5) ───────────────────────────────────────
+    local release_id
+    release_id=$(_kb_jq_read "$board_file" \
+        '.crs[$cidx].releaseAssignment.releaseId // ""' \
+        --argjson cidx "$cr_container_idx" -r 2>/dev/null)
+    if [[ -z "$release_id" ]]; then
+        echo "${caller}: CR '$cr_id_assigned' has no releaseAssignment.releaseId — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        echo "  This is expected if the CR hasn't been linked to a release yet (kb-cr assign-release). The release-cut gate will halt on the missing stamp until it is." >&2
+        return 1
+    fi
+
+    # ── Resolve the platform (must name exactly one platforms.<key>) ───────
+    local platform
+    platform=$(_kb_jq_read "$board_file" \
+        '.crs[$cidx].platform // ""' \
+        --argjson cidx "$cr_container_idx" -r 2>/dev/null)
+    if [[ -z "$platform" || "$platform" == "crossplatform" ]]; then
+        echo "${caller}: CR '$cr_id_assigned' has platform='${platform:-<empty>}' — does not name a single platforms.<key> to read — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        echo "  A crossplatform/empty-platform CR cannot be auto-resolved to one platforms.<key>.version." >&2
+        return 1
+    fi
+
+    # ── Resolve the release record + platforms.<plat>.version (F1: same ────
+    #    field kb-release-version-gate already reads — NOT top-level
+    #    .version, NOT .shortTitle) ────────────────────────────────────────
+    local release_found
+    release_found=$(_kb_jq_read "$board_file" \
+        "(.releases // [] | any(.id == \$rid))" \
+        --arg rid "$release_id" -r 2>/dev/null)
+    if [[ "$release_found" != "true" ]]; then
+        echo "${caller}: CR '$cr_id_assigned' links to release '$release_id', which was not found in .releases[] on this board — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        return 1
+    fi
+
+    local target_version
+    target_version=$(_kb_jq_read "$board_file" \
+        "(.releases // [] | map(select(.id == \$rid)) | first | .platforms[\$plat].version) // \"\"" \
+        --arg rid "$release_id" --arg plat "$platform" -r 2>/dev/null)
+    if [[ -z "$target_version" || "$target_version" == "null" ]]; then
+        echo "${caller}: release '$release_id' has no platforms.${platform}.version set — cr_submitted_version left UNSTAMPED (fail closed)." >&2
+        echo "  Set it with: kb-release edit ${release_id} --platform-version ${platform}=<ver>, then re-run." >&2
+        return 1
+    fi
+
+    printf '%s|%s|%s\n' "$target_version" "$release_id" "$platform"
     return 0
 }
 
@@ -4132,77 +4207,6 @@ _kb_cr_resolve_container_for_submit_stamp() {
 #
 # Usage: kb-cr _set_submit_stamps <item-id-or-CR-id>
 # ─────────────────────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────────────────────
-# _kb_cr_resolve_submit_version <board_file> <cr_container_idx> <cr_id> <caller>
-#
-# READ-ONLY resolver: the fail-closed version-resolution logic shared by
-# _kb_cr_set_submit_stamps (the write path) AND
-# scripts/kb-cr-backfill-submit-version (the one-time backfill's dry-run
-# preview AND its actual write, which shells out to `kb-cr _set_submit_stamps`
-# rather than re-implementing this). Extracted so there is exactly ONE place
-# that decides "what version would Guard 5 stamp here" — a backfill dry-run
-# that computed this independently could silently drift from what the real
-# write path does, which is exactly the kind of two-implementations-disagree
-# bug this whole ticket is about eliminating.
-#
-# On success: echoes "version|release_id|platform" (pipe-delimited, single
-# line) to stdout and returns 0. Writes NOTHING to the board.
-# On failure: prints the SAME fail-closed messages _kb_cr_set_submit_stamps
-# has always printed (message text is a contract other tooling may grep for)
-# to stderr and returns 1. Never echoes a version on failure.
-# ─────────────────────────────────────────────────────────────────────────────
-_kb_cr_resolve_submit_version() {
-    local board_file="$1"
-    local cr_container_idx="$2"
-    local cr_id_assigned="$3"
-    local caller="${4:-kb-cr _set_submit_stamps}"
-
-    # ── Resolve the release link (F5) ───────────────────────────────────────
-    local release_id
-    release_id=$(_kb_jq_read "$board_file" \
-        ".crs[$cr_container_idx].releaseAssignment.releaseId // \"\"" -r 2>/dev/null)
-    if [[ -z "$release_id" ]]; then
-        echo "${caller}: CR '$cr_id_assigned' has no releaseAssignment.releaseId — cr_submitted_version left UNSTAMPED (fail closed)." >&2
-        echo "  This is expected if the CR hasn't been linked to a release yet (kb-cr assign-release). The release-cut gate will halt on the missing stamp until it is." >&2
-        return 1
-    fi
-
-    # ── Resolve the platform (must name exactly one platforms.<key>) ───────
-    local platform
-    platform=$(_kb_jq_read "$board_file" \
-        ".crs[$cr_container_idx].platform // \"\"" -r 2>/dev/null)
-    if [[ -z "$platform" || "$platform" == "crossplatform" ]]; then
-        echo "${caller}: CR '$cr_id_assigned' has platform='${platform:-<empty>}' — does not name a single platforms.<key> to read — cr_submitted_version left UNSTAMPED (fail closed)." >&2
-        echo "  A crossplatform/empty-platform CR cannot be auto-resolved to one platforms.<key>.version." >&2
-        return 1
-    fi
-
-    # ── Resolve the release record + platforms.<plat>.version (F1: same ────
-    #    field kb-release-version-gate already reads — NOT top-level
-    #    .version, NOT .shortTitle) ────────────────────────────────────────
-    local release_found
-    release_found=$(_kb_jq_read "$board_file" \
-        "(.releases // [] | any(.id == \$rid))" \
-        --arg rid "$release_id" -r 2>/dev/null)
-    if [[ "$release_found" != "true" ]]; then
-        echo "${caller}: CR '$cr_id_assigned' links to release '$release_id', which was not found in .releases[] on this board — cr_submitted_version left UNSTAMPED (fail closed)." >&2
-        return 1
-    fi
-
-    local target_version
-    target_version=$(_kb_jq_read "$board_file" \
-        "(.releases // [] | map(select(.id == \$rid)) | first | .platforms[\$plat].version) // \"\"" \
-        --arg rid "$release_id" --arg plat "$platform" -r 2>/dev/null)
-    if [[ -z "$target_version" || "$target_version" == "null" ]]; then
-        echo "${caller}: release '$release_id' has no platforms.${platform}.version set — cr_submitted_version left UNSTAMPED (fail closed)." >&2
-        echo "  Set it with: kb-release edit ${release_id} --platform-version ${platform}=<ver>, then re-run." >&2
-        return 1
-    fi
-
-    printf '%s|%s|%s\n' "$target_version" "$release_id" "$platform"
-    return 0
-}
-
 _kb_cr_set_submit_stamps() {
     local id_or_cr="${1:-}"
 
