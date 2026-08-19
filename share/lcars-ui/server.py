@@ -8315,12 +8315,13 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
         Pure: same input -> same output. See STATE_CONTRACT.md §1.5 (amended
         2026-07-24 by XACA-0855 — assigned vs. effective split).
 
-        `items` IS the assigned set: every caller (_get_items_for_epic, or the
-        backlog_index/itemIds resolution in the roadmap builder) resolves item
-        IDs by match against real backlog entries BEFORE calling this function,
-        so orphan IDs (present in epic.itemIds but with no matching backlog
-        entry) are never present in `items`. Resolving orphans out of the
-        assigned set is the caller's responsibility, not this function's.
+        `items` IS the assigned set: both callers (`_get_items_for_epic` and
+        the `backlog_index`/`itemIds` resolution in the roadmap builder)
+        forward-resolve against `epic.itemIds` per STATE_CONTRACT.md §1.1 —
+        matching `.backlog` ids against the id set — BEFORE calling this
+        function, so orphan IDs (present in epic.itemIds but with no matching
+        backlog entry) are never present in `items`. Resolving orphans out of
+        the assigned set is the caller's responsibility, not this function's.
 
         Precedence (normative, do not reorder):
           1. assigned (== items) empty            -> PLANNED   (case A: empty epic;
@@ -8437,6 +8438,16 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
     def _get_items_for_epic(self, epic_id, board_data=None):
         """Get kanban items assigned to an epic from the current team's board only.
 
+        Forward-resolves the assigned set per STATE_CONTRACT.md §1.1: an item
+        is assigned to `epic_id` iff its `.backlog` id appears in that epic's
+        `itemIds`. Orphan ids (present in `itemIds` but with no matching
+        `.backlog` entry) are excluded — the contract puts orphan resolution
+        on the id-set intersection, not on the item record. Results are
+        returned in `.backlog` order (NOT `itemIds` order) — this matches the
+        jq engine (`_kb_epic_derive_state` in kanban-helpers.sh) and preserves
+        the item ordering the Epics tab has always shown. An `epic_id` with no
+        matching entry in `.epics` yields an empty list.
+
         NO cross-team data - epics and items are scoped to the current team.
 
         Pass `board_data` to skip the file read — useful when iterating epics
@@ -8455,8 +8466,18 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 print(f"[LCARS] Error reading {board_file}: {e}")
                 return items
 
+        epic = None
+        for candidate in board_data.get('epics', []):
+            if candidate.get('id') == epic_id:
+                epic = candidate
+                break
+        if epic is None:
+            return items
+
+        ids = set(epic.get('itemIds') or [])
+
         for item in board_data.get('backlog', []):
-            if item.get('epicId') == epic_id:
+            if item.get('id') in ids:
                 items.append({
                     "itemId": item.get('id'),
                     "title": item.get('title', ''),
@@ -11147,12 +11168,14 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
             # existence check + input to the item-clearing loop below — it
             # is deliberately NOT reused for the eventual epics save further
             # down. _clear_item_epic_assignment (called in that loop) takes
-            # its OWN independent flock on this SAME board_file (items in
-            # this epic always belong to LCARS_TEAM, same as this epic's
-            # board — see _get_items_for_epic), so it must run to completion
-            # and fully release its lock BEFORE _board_write_transaction
-            # opens below; fcntl.flock is not reentrant, so nesting them
-            # would self-deadlock the instant that lock file collided.
+            # its OWN independent flock on this SAME board_file (every item
+            # cleared below — whether forward-resolved via
+            # _get_items_for_epic or a back-ref-only straggler found by the
+            # union sweep — always belongs to LCARS_TEAM, same as this
+            # epic's board), so it must run to completion and fully release
+            # its lock BEFORE _board_write_transaction opens below;
+            # fcntl.flock is not reentrant, so nesting them would
+            # self-deadlock the instant that lock file collided.
             data = self._load_board_epics()
             epic = self._find_epic_by_id(data, epic_id)
 
@@ -11160,8 +11183,39 @@ class LCARSHandler(http.server.SimpleHTTPRequestHandler):
                 self.send_error(404, f"Epic not found: {epic_id}")
                 return
 
-            # Clear epicId from all assigned items
-            items = self._get_items_for_epic(epic_id)
+            # XACA-0859-003: clear the UNION of forward-resolved items and
+            # back-ref-carrying items, not just the forward-resolved set.
+            # _get_items_for_epic now forward-resolves via epic.itemIds
+            # (STATE_CONTRACT §1.1) — but an item can still carry
+            # epicId == epic_id while being absent from that epic's
+            # itemIds (fleet-audit precedent: Firebase XFIR-0070 pointing
+            # at nonexistent EFIR-0007, XACA-0859 plan D4). Clearing only
+            # the forward-resolved set here would leave such an item
+            # permanently dangling once this epic is deleted — silent
+            # data-integrity regression, invisible in the UI. Do ONE
+            # unlocked read of the team board (mirrors _get_items_for_epic's
+            # own board_data=None path — no new flock, so no risk of
+            # nesting inside the _load_board_epics lock above; fcntl.flock
+            # is not reentrant) and reuse it for both halves of the union:
+            # forward-resolved items first, then any back-ref-only
+            # stragglers in .backlog order, deduped by item id.
+            board_data_for_sweep = None
+            sweep_board_file = get_board_file(LCARS_TEAM)
+            if sweep_board_file.exists():
+                try:
+                    with open(sweep_board_file, 'r') as f:
+                        board_data_for_sweep = json.load(f)
+                except Exception as e:
+                    print(f"[LCARS] Error reading {sweep_board_file}: {e}")
+
+            items = self._get_items_for_epic(epic_id, board_data=board_data_for_sweep)
+            seen_item_ids = {item['itemId'] for item in items}
+            for backlog_item in (board_data_for_sweep or {}).get('backlog', []):
+                straggler_id = backlog_item.get('id')
+                if backlog_item.get('epicId') == epic_id and straggler_id not in seen_item_ids:
+                    seen_item_ids.add(straggler_id)
+                    items.append({"itemId": straggler_id, "team": LCARS_TEAM})
+
             for item in items:
                 self._clear_item_epic_assignment(item['team'], item['itemId'])
 

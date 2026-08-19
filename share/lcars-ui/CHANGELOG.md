@@ -11,6 +11,12 @@ All notable changes to the LCARS Kanban Workflow Monitor will be documented in t
 
 ## [Unreleased]
 
+- **XACA-0859: Epics tab now resolves an epic's items via `epic.itemIds` (forward), not the `item.epicId` back-reference.** `LCARSHandler._get_items_for_epic` was the last derived-state read path still reverse-scanning `.backlog` for `item.epicId == epic_id`, while STATE_CONTRACT.md §1.1 defines the assigned set as `.backlog` items whose id appears in `epic.itemIds` — the resolution the jq engine (`_kb_epic_derive_state`) and the Roadmap builder (`serve_roadmap`) already used. Two sources of truth for one relationship, held together only by `kb-epic add-item` writing both fields in a single jq expression. Dormant until XACA-0855 made empty-effective derive `ARCHIVED` instead of `PLANNED`, at which point any disagreement would render as LCARS showing ARCHIVED while the CLI showed PLANNED for the same epic.
+  - The function now finds the epic in `.epics`, builds an id set from its `itemIds`, and filters `.backlog` by membership — matching jq's expression exactly. Signature and returned item shape (`itemId`, `title`, `status`, `priority`, `team`, `tags`, `subRepo`) are unchanged, so `serve_epics_list`, `serve_epic_detail`, and `serve_epic_items` all inherit the fix untouched. **Item order is unchanged**: iteration stays over `.backlog`, not `itemIds`, so the Epics tab lists items in the same order it always has; iterating `itemIds` would have reordered every epic's item list to insertion order. Orphan ids (in `itemIds`, no matching `.backlog` entry) are excluded, as §1.1 requires.
+  - **User-visible impact: none, verified before shipping.** An audit across 15 live boards / 97 epics found exactly 2 divergent records fleet-wide, both of a class that renders identically either way (one `epicId` pointing at a nonexistent epic; one `itemIds` entry with no backlog item). No epic gains or loses items on the Epics tab, and no epic's derived state changes.
+  - Deleting an epic still clears `epicId` from **every** item that carries it, including items absent from the epic's `itemIds` — `handle_delete_epic` sweeps the union of both resolutions. Converging that write path too would have stranded such items pointing at a deleted epic.
+  - Kanban-tab epic badges and epic filtering in `js/lcars.js` are unchanged — that code answers "which epic owns this card", not "what is this epic's assigned set", and derives no state.
+
 <!-- XACA-0855: Fixed — epics with all-cancelled assigned items derived PLANNED instead of ARCHIVED -->
 
 ### Fixed
