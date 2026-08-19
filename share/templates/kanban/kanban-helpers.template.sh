@@ -5600,7 +5600,7 @@ kb-backlog() {
             ;;
 
         demote|todo)
-            local selector="$1"
+            local selector="${1-}"
             shift 2>/dev/null
 
             if [[ -z "$selector" ]]; then
